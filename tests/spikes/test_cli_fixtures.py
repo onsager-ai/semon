@@ -5,11 +5,90 @@ from pathlib import Path
 import unittest
 import importlib.util
 import tempfile
+import subprocess
+import sys
 
 ROOT = Path(__file__).resolve().parents[1] / 'fixtures/compatibility'
 
 
 class CompatibilityFixtures(unittest.TestCase):
+    def test_codex_native_fork_owns_only_its_new_turn_and_fresh_usage(self):
+        directory = ROOT / 'codex-0.159.0-alpha.3/fork'
+        manifest = json.loads((directory / 'manifest.json').read_text())
+        fixtures = {}
+        for entry in manifest['fixtures']:
+            data = (directory / entry['path']).read_bytes()
+            self.assertEqual(hashlib.sha256(data).hexdigest(), entry['fixture_sha256'])
+            self.assertNotIn(b'/workspace/', data)
+            fixtures[entry['path']] = data
+        parent = fixtures['initial-rollout.jsonl']
+        fork = fixtures['forked-rollout.jsonl']
+        child = fixtures['child-turn-rollout.jsonl']
+        self.assertTrue(child.startswith(fork))
+        rows = list(map(json.loads, child.splitlines()))
+        meta = rows[0]['payload']
+        self.assertEqual(meta['id'], 'native-codex-fork-child')
+        self.assertEqual(meta['forked_from_id'], 'native-codex-fork-parent')
+        self.assertEqual(meta['forked_from_ordinal_exclusive'], 13)
+        self.assertEqual(meta['history_base']['end_byte_offset'], len(parent))
+        self.assertEqual(len(fork.splitlines()), 2)
+        self.assertNotIn(b'token_usage_record', fork)
+        usage = [r['payload'] for r in rows if r['type'] == 'token_usage_record']
+        self.assertEqual(len(usage), 1)
+        self.assertEqual((usage[0]['usage']['input_tokens'],
+                          usage[0]['usage']['output_tokens']), (5, 3))
+        self.assertEqual((usage[0]['thread_token_usage']['input_tokens'],
+                          usage[0]['thread_token_usage']['output_tokens']), (10, 6))
+        self.assertIn(b'SEMON_SYNTHETIC_FORK_CHILD', child)
+        self.assertNotIn(b'SEMON_SYNTHETIC_FORK_PARENT', child)
+        probe = Path(__file__).with_name('codex-fork.py').read_bytes()
+        self.assertEqual(hashlib.sha256(probe).hexdigest(),
+                         manifest['source_reference']['probe_sha256'])
+
+    def test_claude_native_tools_model_switch_and_shared_api_ids(self):
+        directory = ROOT / 'claude-2.1.288' / 'tools'
+        manifest = json.loads((directory / 'manifest.json').read_text())
+        probe = Path(__file__).with_name('claude-tools.py').read_bytes()
+        self.assertEqual(hashlib.sha256(probe).hexdigest(), manifest['source_reference']['probe_sha256'])
+        self.assertEqual(hashlib.sha1(b'blob ' + str(len(probe)).encode() + b'\0' + probe).hexdigest(),
+                         manifest['source_reference']['probe_git_blob'])
+        snapshots = {}
+        for entry in manifest['fixtures']:
+            data = (directory / entry['path']).read_bytes()
+            self.assertEqual(hashlib.sha256(data).hexdigest(), entry['fixture_sha256'])
+            self.assertNotIn(b'/workspace/', data)
+            snapshots[entry['path']] = (data, list(map(json.loads, data.splitlines())))
+        initial, rows = snapshots['initial-transcript.jsonl']
+        resumed, resumed_rows = snapshots['resumed-transcript.jsonl']
+        self.assertTrue(resumed.startswith(initial))
+        call_entries = [(row, block) for row in rows if row['type'] == 'assistant'
+                        for block in row.get('message', {}).get('content', [])
+                        if isinstance(block, dict) and block.get('type') == 'tool_use']
+        result_entries = [block for row in rows if row['type'] == 'user'
+                          for block in row.get('message', {}).get('content', [])
+                          if isinstance(block, dict) and block.get('type') == 'tool_result']
+        self.assertEqual(len(call_entries), 4, 'duplicate calls must not collapse into the ID map')
+        self.assertEqual(len(result_entries), 4, 'duplicate results must not collapse into the ID map')
+        calls = {block['id']: (row, block) for row, block in call_entries}
+        results = {block['tool_use_id']: block for block in result_entries}
+        expected = {'fixture-read', 'fixture-bash-one', 'fixture-bash-two', 'fixture-edit'}
+        self.assertEqual(set(calls), expected)
+        self.assertEqual(set(results), expected)
+        self.assertEqual({key for key, block in results.items() if block.get('is_error')}, {'fixture-bash-two'})
+        bash = [calls[key] for key in ('fixture-bash-one', 'fixture-bash-two')]
+        self.assertEqual([block['name'] for row, block in bash], ['Bash', 'Bash'])
+        streamed = [calls[key][0] for key in ('fixture-read', 'fixture-bash-one', 'fixture-bash-two')]
+        self.assertEqual(len({row['uuid'] for row in streamed}), 3)
+        self.assertEqual({row['message']['id'] for row in streamed}, {'fixture-msg-1'})
+        self.assertEqual({row['message']['model'] for row in resumed_rows if row['type'] == 'assistant'},
+                         {'claude-sonnet-4-6', 'claude-haiku-4-5'})
+        fork_rows = snapshots['forked-transcript.jsonl'][1]
+        parent_messages = [row for row in resumed_rows if row['type'] in ('user', 'assistant')]
+        child_messages = [row for row in fork_rows if row['type'] in ('user', 'assistant')]
+        self.assertEqual([row['uuid'] for row in child_messages[:12]], [row['uuid'] for row in parent_messages])
+        self.assertEqual({row['sessionId'] for row in parent_messages}, {'native-claude-tools-parent'})
+        self.assertEqual({row['sessionId'] for row in child_messages}, {'native-claude-tools-child'})
+
     def test_runtime_environment_does_not_forward_ambient_secrets(self):
         script = Path(__file__).with_name('copilot-offline.py')
         spec = importlib.util.spec_from_file_location('copilot_probe', script)
@@ -28,6 +107,193 @@ class CompatibilityFixtures(unittest.TestCase):
             self.assertEqual(environment['COPILOT_HOME'], str(output / 'home'))
             self.assertEqual(environment['TMPDIR'], str(output / 'tmp'))
             self.assertEqual(ambient, original, 'parent settings must remain intact')
+
+    def test_copilot_exact_subagent_edges_and_inclusive_mock_usage(self):
+        for version in ('1.0.90', '1.0.91'):
+            with self.subTest(version=version):
+                directory = ROOT / f'copilot-{version}' / 'subagent'
+                manifest = json.loads((directory / 'manifest.json').read_text())
+                data = (directory / manifest['fixture_path']).read_bytes()
+                self.assertEqual(hashlib.sha256(data).hexdigest(), manifest['fixture_sha256'])
+                self.assertNotIn(b'/workspace/', data)
+                self.assertRegex(manifest['binary_sha256'], r'^[a-f0-9]{64}$')
+                rows = list(map(json.loads, data.splitlines()))
+                starts = [r['data'] for r in rows if r['type'] == 'subagent.started']
+                completed = [r['data'] for r in rows if r['type'] == 'subagent.completed']
+                self.assertEqual(len(starts), 1)
+                self.assertEqual(len(completed), 1)
+                call = starts[0]['toolCallId']
+                self.assertEqual(call, completed[0]['toolCallId'])
+                requests = [c for r in rows if r['type'] == 'assistant.message'
+                            for c in r['data'].get('toolRequests', [])]
+                self.assertEqual([c['toolCallId'] for c in requests], [call])
+                results = [r['data'] for r in rows if r['type'] == 'tool.execution_complete']
+                self.assertEqual([r['toolCallId'] for r in results], [call])
+                child = [r['data'] for r in rows if r['type'] == 'assistant.message'
+                         and r['data'].get('parentToolCallId') == call]
+                self.assertEqual(len(child), 1)
+                users = {r['data']['messageId']: r['data'] for r in rows if r['type'] == 'user.message'}
+                origin = users[child[0]['originatingMessageId']]
+                root_origins = {r['data']['originatingMessageId'] for r in rows
+                                if r['type'] == 'assistant.message'
+                                and not r['data'].get('parentToolCallId')}
+                self.assertNotIn(origin['messageId'], root_origins)
+                self.assertTrue(origin['source'].startswith('agent-'))
+                self.assertEqual(origin['interactionId'], child[0]['interactionId'])
+                self.assertEqual(origin['turnId'], child[0]['turnId'])
+                # These native records have no agentId: do not manufacture one.
+                for record in (starts[0], completed[0], child[0], origin):
+                    self.assertNotIn('agentId', record)
+                self.assertEqual(starts[0]['agentName'], completed[0]['agentName'])
+                self.assertEqual(starts[0]['agentDisplayName'], completed[0]['agentDisplayName'])
+                self.assertEqual(manifest['source_reference']['semon_commit'],
+                                 'c6287dbbd09afc05cc7bdff44a7e456c17148214')
+                self.assertRegex(manifest['source_reference']['probe_sha256'], r'^[a-f0-9]{64}$')
+                metrics = [r['data']['modelMetrics']['gpt-4'] for r in rows
+                           if r['type'] == 'session.shutdown']
+                self.assertEqual(len(metrics), 1)
+                self.assertEqual(metrics[0]['requests']['count'], 3)
+                self.assertEqual((metrics[0]['usage']['inputTokens'],
+                                  metrics[0]['usage']['outputTokens'],
+                                  metrics[0]['usage']['cacheReadTokens']), (33, 9, 6))
+                self.assertEqual(completed[0]['totalTokens'], 14)
+                self.assertEqual(completed[0]['totalToolCalls'], 0)
+                for r in rows:
+                    if r['type'] == 'session.start':
+                        self.assertEqual(r['data']['copilotVersion'], version)
+                    if r['type'] == 'system.message':
+                        self.assertEqual(r['data'], {'content': '[fixture: native system prompt removed]'})
+
+    def test_lifecycle_validation_survives_python_optimization(self):
+        # Only a disposable fake executable is launched, never a native harness.
+        script = Path(__file__).with_name('copilot-lifecycle.py')
+        for failure in ('changed-prefix', 'executed-denial'):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                fake = root / 'fake-copilot'
+                fake.write_text('#!' + sys.executable + '\n' + """
+import os, pathlib, sys
+if '--version' in sys.argv:
+    print('GitHub Copilot CLI 1.0.91.')
+    sys.exit(0)
+root = pathlib.Path.cwd()
+state = pathlib.Path(os.environ['COPILOT_HOME']) / 'session-state'
+initial = state / 'synthetic-session' / 'events.jsonl'
+initial.parent.mkdir(parents=True, exist_ok=True)
+if any(arg.startswith('--resume=') for arg in sys.argv):
+    initial.write_bytes(b'changed\\n' if FAILURE == 'changed-prefix' else b'{}\\n{}\\n')
+elif '--deny-tool=shell' in sys.argv:
+    denied = state / 'synthetic-denied' / 'events.jsonl'
+    denied.parent.mkdir(parents=True)
+    denied.write_bytes(b'{}\\n')
+    (root / 'SHOULD-NOT-EXIST').touch()
+else:
+    initial.write_bytes(b'{}\\n')
+""".replace('FAILURE', repr(failure)))
+                fake.chmod(0o700)
+                output = root / 'probe'
+                result = subprocess.run([sys.executable, '-O', str(script), '--copilot',
+                                         str(fake), '--output', str(output)],
+                                        capture_output=True, text=True, timeout=15)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn('RuntimeError: Probe validation failed:', result.stderr)
+                self.assertFalse((output / 'report.json').exists())
+
+    def test_copilot_persisted_boundaries_and_separate_compaction_usage(self):
+        for version in ('1.0.90', '1.0.91'):
+            with self.subTest(version=version):
+                directory = ROOT / f'copilot-{version}' / 'boundaries'
+                manifest = json.loads((directory / 'manifest.json').read_text())
+                fixtures = {}
+                for entry in manifest['fixtures']:
+                    data = (directory / entry['path']).read_bytes()
+                    self.assertEqual(hashlib.sha256(data).hexdigest(), entry['fixture_sha256'])
+                    self.assertNotIn(b'/workspace/', data)
+                    fixtures[entry['path']] = data
+                    for row in map(json.loads, data.splitlines()):
+                        if row['type'] == 'session.start':
+                            self.assertEqual(row['data']['copilotVersion'], version)
+                        if row['type'] == 'system.message':
+                            self.assertEqual(row['data'], {'content': '[fixture: native system prompt removed]'})
+                        def check_nested_prompts(value):
+                            if isinstance(value, dict):
+                                for key, nested in value.items():
+                                    if key == 'requestMessages':
+                                        self.assertEqual(nested, '[fixture: native prompt-rich request messages removed]')
+                                    check_nested_prompts(nested)
+                            elif isinstance(value, list):
+                                for nested in value:
+                                    check_nested_prompts(nested)
+                        check_nested_prompts(row)
+                        if row['type'] in ('model.message', 'model.messages_snapshot'):
+                            self.assertEqual(row['data']['fixture_removed'], 'native prompt-rich model payload')
+                cancellation = list(map(json.loads, fixtures['cancel.events.jsonl'].splitlines()))
+                starts = [r['data'] for r in cancellation if r['type'] == 'tool.execution_start']
+                requested = [c for r in cancellation if r['type'] == 'assistant.message'
+                             for c in r['data'].get('toolRequests', [])]
+                self.assertEqual(len(starts), 1)
+                self.assertEqual(len(requested), 1)
+                self.assertEqual(starts[0]['toolCallId'], requested[0]['toolCallId'])
+                self.assertEqual(starts[0]['arguments'], requested[0]['arguments'])
+                aborts = [r['data'] for r in cancellation if r['type'] == 'abort']
+                self.assertEqual(len(aborts), 1)
+                self.assertIn(aborts[0]['reason'], ('user_initiated', 'user_abort'))
+                self.assertNotIn('toolCallId', aborts[0])
+                self.assertFalse(any(r['type'] == 'tool.execution_complete' for r in cancellation))
+                interactive = list(map(json.loads, fixtures['interactive.events.jsonl'].splitlines()))
+                self.assertTrue(any(r['type'] == 'assistant.message' and
+                                    r['data'].get('content') == 'SYNTHETIC_COPILOT_LIFECYCLE_ACK'
+                                    for r in interactive))
+                self.assertTrue(fixtures['compaction.events.jsonl'].startswith(fixtures['before-compaction.events.jsonl']))
+                rows = list(map(json.loads, fixtures['compaction.events.jsonl'].splitlines()))
+                compacted = [r['data'] for r in rows if r['type'] == 'session.compaction_complete']
+                self.assertEqual(len(compacted), 1)
+                self.assertIs(compacted[0]['success'], True)
+                self.assertEqual(compacted[0]['trigger'], 'manual')
+                self.assertEqual(compacted[0]['summaryContent'], 'SYNTHETIC_COPILOT_LIFECYCLE_ACK')
+                self.assertTrue(compacted[0]['checkpointPath'].startswith('/fixture/copilot-compaction/'))
+                usage = compacted[0]['compactionTokensUsed']
+                self.assertEqual((usage['inputTokens'], usage['outputTokens'], usage['cacheReadTokens']), (11, 3, 2))
+                shutdown = [r['data']['modelMetrics']['gpt-4'] for r in rows if r['type'] == 'session.shutdown']
+                self.assertEqual(len(shutdown), 1)
+                self.assertEqual(shutdown[0]['requests']['count'], 1)
+                self.assertEqual(shutdown[0]['usage']['inputTokens'], 11)
+                self.assertTrue(any(r['type'] == 'session.usage_checkpoint' for r in rows))
+                source = manifest['source_reference']
+                self.assertEqual(hashlib.sha256(Path(__file__).with_name('copilot-boundaries.py').read_bytes()).hexdigest(), source['probe_sha256'])
+
+    def test_claude_native_resume_and_copied_fork_context(self):
+        directory = ROOT / 'claude-2.1.288/lifecycle'
+        manifest = json.loads((directory / 'manifest.json').read_text())
+        fixtures = {}
+        for entry in manifest['fixtures']:
+            data = (directory / entry['path']).read_bytes()
+            self.assertEqual(hashlib.sha256(data).hexdigest(), entry['fixture_sha256'])
+            self.assertNotIn(b'/workspace/', data)
+            fixtures[entry['path']] = data
+        self.assertTrue(fixtures['resumed-transcript.jsonl'].startswith(fixtures['initial-transcript.jsonl']))
+        parent = list(map(json.loads, fixtures['resumed-transcript.jsonl'].splitlines()))
+        child = list(map(json.loads, fixtures['forked-transcript.jsonl'].splitlines()))
+        messages = lambda rows: [r for r in rows if r['type'] in ('user', 'assistant')]
+        parent_messages = messages(parent)
+        child_messages = messages(child)
+        self.assertEqual(len(parent_messages), 4)
+        self.assertEqual(len(child_messages), 6)
+        for original, inherited in zip(parent_messages, child_messages):
+            self.assertEqual(original['uuid'], inherited['uuid'])
+            self.assertEqual(original['parentUuid'], inherited['parentUuid'])
+            self.assertEqual(original['message'], inherited['message'])
+            self.assertNotEqual(original['sessionId'], inherited['sessionId'])
+        for rows, expected in ((parent, (10, 6)), (child, (15, 9))):
+            costs = [r for r in rows if r['type'] == 'cost-state']
+            usage = costs[-1]['modelUsage']['claude-sonnet-4-6']
+            self.assertEqual((usage['inputTokens'], usage['outputTokens']), expected)
+            for row in rows:
+                if row['type'] == 'attachment':
+                    self.assertEqual(row['attachment']['fixture_removed'], 'native harness attachment payload')
+                self.assertNotIn('parentSessionId', row)
+        source = manifest['source_reference']
+        self.assertEqual(hashlib.sha256(Path(__file__).with_name('claude-lifecycle.py').read_bytes()).hexdigest(), source['probe_sha256'])
 
     def test_native_baseline_provenance_and_hashes(self):
         for fixture in ('claude-2.1.288', 'codex-0.159.0-alpha.3'):
@@ -56,6 +322,54 @@ class CompatibilityFixtures(unittest.TestCase):
                         skills = row.get('payload', {}).get('state', {}).get('host_skills', {})
                         if isinstance(skills, dict) and 'body' in skills:
                             self.assertEqual(skills['body'], '[fixture: native host skill instructions removed]')
+
+    def test_copilot_resume_denial_and_cumulative_mock_usage(self):
+        for version in ('1.0.90', '1.0.91'):
+            directory = ROOT / f'copilot-{version}' / 'lifecycle'
+            manifest = json.loads((directory / 'manifest.json').read_text())
+            self.assertEqual(manifest['harness_version'], version)
+            self.assertEqual(manifest['evidence_origin'],
+                             'native CLI persistence with deterministic mock model')
+            fixtures = {}
+            for entry in manifest['fixtures']:
+                data = (directory / entry['path']).read_bytes()
+                self.assertEqual(hashlib.sha256(data).hexdigest(), entry['fixture_sha256'])
+                self.assertNotEqual(entry['original_source_sha256'], entry['fixture_sha256'])
+                self.assertNotIn(b'/workspace/scratch/', data)
+                fixtures[entry['path']] = data
+                for row in map(json.loads, data.splitlines()):
+                    if row['type'] == 'session.start':
+                        self.assertEqual(row['data']['copilotVersion'], version)
+                        self.assertEqual(row['data']['version'], 1)
+                    if row['type'] == 'system.message':
+                        self.assertEqual(row['data'], {'content': '[fixture: native system prompt removed]'})
+            initial = fixtures['initial.events.jsonl']
+            resumed = fixtures['resumed.events.jsonl']
+            self.assertTrue(resumed.startswith(initial))
+            records = list(map(json.loads, resumed.splitlines()))
+            self.assertEqual(sum(row['type'] == 'session.resume' for row in records), 1)
+            snapshots = [row['data']['modelMetrics']['gpt-4'] for row in records
+                         if row['type'] == 'session.shutdown']
+            self.assertEqual([(row['usage']['inputTokens'], row['usage']['outputTokens'],
+                               row['usage']['cacheReadTokens']) for row in snapshots],
+                             [(11, 3, 2), (22, 6, 4)])
+            self.assertEqual([row['requests']['count'] for row in snapshots], [1, 2])
+            denial = list(map(json.loads, fixtures['denied.events.jsonl'].splitlines()))
+            starts = [row['data'] for row in denial if row['type'] == 'tool.execution_start']
+            results = [row['data'] for row in denial if row['type'] == 'tool.execution_complete']
+            requested = [call for row in denial if row['type'] == 'assistant.message'
+                         for call in row['data'].get('toolRequests', [])]
+            self.assertEqual(len(starts), 1)
+            self.assertEqual(len(results), 1)
+            self.assertEqual(len(requested), 1)
+            self.assertEqual(starts[0]['toolCallId'], results[0]['toolCallId'])
+            self.assertEqual(starts[0]['toolCallId'], requested[0]['toolCallId'])
+            self.assertEqual(starts[0]['arguments'], requested[0]['arguments'])
+            self.assertFalse(results[0]['success'])
+            self.assertEqual(results[0]['error']['code'], 'denied')
+            self.assertNotIn('shellExecution', results[0])
+            self.assertFalse(any('approval' in row['type'] for row in denial),
+                             'no explicit approval record is established by this probe')
 
     def test_source_shaped_hashes_and_explicit_unknown_version(self):
         manifest = json.loads((ROOT / 'v1/manifest.json').read_text())

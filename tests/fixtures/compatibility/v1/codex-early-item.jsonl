@@ -1,0 +1,3 @@
+{"type":"session_meta","timestamp":"2026-10-03T00:00:00Z","payload":{"session_id":"early-item","cwd":"/fixture/repo"}}
+{"type":"response_item","timestamp":"2026-10-03T00:00:01Z","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"source-shaped actual request"}]}}
+{"type":"event_msg","timestamp":"2026-10-03T00:00:02Z","payload":{"type":"item_completed","item":{"type":"UserMessage","id":"source-shaped-item","content":[{"type":"text","text":"source-shaped actual request"}]}}}

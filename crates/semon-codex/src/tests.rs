@@ -20,6 +20,197 @@ static TEST_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 #[test]
 fn compatibility_legacy_cold_restart_and_retained_raw_parity() {
     let source = include_bytes!("../../../tests/fixtures/compatibility/v1/codex-legacy.jsonl");
+    compatibility_capture_parity(source, "compat", 2);
+}
+
+#[test]
+fn compatibility_early_item_cold_restart_and_retained_raw_parity() {
+    let source = include_bytes!("../../../tests/fixtures/compatibility/v1/codex-early-item.jsonl");
+    compatibility_capture_parity(source, "early-item", 1);
+}
+
+#[test]
+fn native_codex_fork_snapshots_have_cold_restart_and_retained_raw_parity() {
+    compatibility_capture_parity(
+        include_bytes!(
+            "../../../tests/fixtures/compatibility/codex-0.159.0-alpha.3/fork/initial-rollout.jsonl"
+        ),
+        "native-codex-fork-parent",
+        3,
+    );
+    compatibility_capture_parity(
+        include_bytes!(
+            "../../../tests/fixtures/compatibility/codex-0.159.0-alpha.3/fork/forked-rollout.jsonl"
+        ),
+        "native-codex-fork-child",
+        0,
+    );
+    compatibility_capture_parity(
+        include_bytes!(
+            "../../../tests/fixtures/compatibility/codex-0.159.0-alpha.3/fork/child-turn-rollout.jsonl"
+        ),
+        "native-codex-fork-child",
+        3,
+    );
+}
+
+#[test]
+fn compatibility_native_codex_paginated_cold_restart_and_retained_raw_parity() {
+    let source = include_bytes!(
+        "../../../tests/fixtures/compatibility/codex-0.159.0-alpha.3/initial-rollout.jsonl"
+    );
+    compatibility_capture_parity(source, "native-codex-compat", 3);
+}
+
+#[test]
+fn retained_custody_rebuilds_restored_source_without_guessing_raw_order() {
+    let root = TestDir::new();
+    let path = root.path().join("native-codex-compat.jsonl");
+    let cursor = root.path().join("cursor.json");
+    let history = root.path().join("history.jsonl");
+    let database = root.path().join("custody.sqlite");
+    let original = include_bytes!(
+        "../../../tests/fixtures/compatibility/codex-0.159.0-alpha.3/initial-rollout.jsonl"
+    );
+    let replacement = String::from_utf8(original.to_vec())
+        .unwrap()
+        .replace("SYNTHETIC_ACK", "SYNTHETIC_CHANGED_ACK")
+        .into_bytes();
+    for source in [
+        original.as_slice(),
+        replacement.as_slice(),
+        original.as_slice(),
+    ] {
+        fs::write(&path, source).unwrap();
+        let mut store = TraceStore::open(&database).unwrap();
+        let mut state = load_state(&cursor).unwrap();
+        process_file(&path, &mut state, &mut store, &options(&cursor, &history)).unwrap();
+    }
+    let store = TraceStore::open(&database).unwrap();
+    let key = path.canonicalize().unwrap().to_string_lossy().into_owned();
+    let retained = store
+        .fetch_current_capture_source_raw(CARRIER, &key)
+        .unwrap()
+        .unwrap();
+    assert_eq!(retained, original);
+    assert!(
+        store
+            .fetch_raw_carrier_records_for_occurrences(OccurrenceSelector::Session(
+                "native-codex-compat"
+            ))
+            .unwrap()
+            .len()
+            > original.split_inclusive(|byte| *byte == b'\n').count()
+    );
+    fs::write(&path, retained).unwrap();
+    let mut rebuilt = TraceStore::open_in_memory().unwrap();
+    process_file(
+        &path,
+        &mut CursorState::default(),
+        &mut rebuilt,
+        &options(&cursor, &history),
+    )
+    .unwrap();
+    assert_eq!(
+        store.log(&LogFilter::default()).unwrap(),
+        rebuilt.log(&LogFilter::default()).unwrap()
+    );
+    // A lost cursor must re-establish the recorded source revision.
+    fs::remove_file(&cursor).unwrap();
+    fs::write(&path, &replacement).unwrap();
+    let mut warm = TraceStore::open(&database).unwrap();
+    process_file(
+        &path,
+        &mut CursorState::default(),
+        &mut warm,
+        &options(&cursor, &history),
+    )
+    .unwrap();
+    let mut cold = TraceStore::open_in_memory().unwrap();
+    process_file(
+        &path,
+        &mut CursorState::default(),
+        &mut cold,
+        &options(&cursor, &history),
+    )
+    .unwrap();
+    assert_eq!(
+        warm.log(&LogFilter::default()).unwrap(),
+        cold.log(&LogFilter::default()).unwrap()
+    );
+    assert_eq!(
+        warm.fetch_current_capture_source_raw(CARRIER, &key)
+            .unwrap()
+            .unwrap(),
+        replacement
+    );
+}
+
+#[test]
+fn lost_legacy_cursor_reconciles_fewer_records_using_recorded_custody() {
+    let root = TestDir::new();
+    let path = root.path().join("rollout-legacy.jsonl");
+    let cursor = root.path().join("cursor.json");
+    let history = root.path().join("history.jsonl");
+    let database = root.path().join("legacy.sqlite");
+    let original = include_bytes!("../../../tests/fixtures/compatibility/v1/codex-legacy.jsonl");
+    fs::write(&path, original).unwrap();
+    {
+        let mut store = TraceStore::open(&database).unwrap();
+        process_file(
+            &path,
+            &mut CursorState::default(),
+            &mut store,
+            &options(&cursor, &history),
+        )
+        .unwrap();
+    }
+    fs::remove_file(&cursor).unwrap();
+    let shorter: Vec<u8> = original
+        .split_inclusive(|byte| *byte == b'\n')
+        .take(2)
+        .flatten()
+        .copied()
+        .collect();
+    fs::write(&path, &shorter).unwrap();
+    let mut warm = TraceStore::open(&database).unwrap();
+    process_file(
+        &path,
+        &mut CursorState::default(),
+        &mut warm,
+        &options(&cursor, &history),
+    )
+    .unwrap();
+    let mut cold = TraceStore::open_in_memory().unwrap();
+    process_file(
+        &path,
+        &mut CursorState::default(),
+        &mut cold,
+        &options(&cursor, &history),
+    )
+    .unwrap();
+    assert_eq!(
+        warm.log(&LogFilter::default()).unwrap(),
+        cold.log(&LogFilter::default()).unwrap()
+    );
+    let key = path.canonicalize().unwrap().to_string_lossy().into_owned();
+    assert_eq!(
+        warm.fetch_current_capture_source_raw(CARRIER, &key)
+            .unwrap()
+            .unwrap(),
+        shorter
+    );
+    assert_eq!(
+        warm.fetch_raw_carrier_records_for_occurrences(OccurrenceSelector::Session("compat"))
+            .unwrap()
+            .iter()
+            .map(|row| row.bytes().len())
+            .sum::<usize>(),
+        original.len()
+    );
+}
+
+fn compatibility_capture_parity(source: &[u8], session: &str, expected_occurrences: usize) {
     let root = TestDir::new();
     let path = root.path().join("rollout-compat.jsonl");
     let history = root.path().join("history.jsonl");
@@ -34,9 +225,10 @@ fn compatibility_legacy_cold_restart_and_retained_raw_parity() {
         &options(&cursor, &history),
     )
     .unwrap();
-    assert!(
-        !cold.log(&LogFilter::default()).unwrap().is_empty(),
-        "the fixture must project occurrences"
+    assert_eq!(
+        cold.log(&LogFilter::default()).unwrap().len(),
+        expected_occurrences,
+        "known messages must project"
     );
     fs::remove_file(&cursor).unwrap();
     let mut end = 0;
@@ -55,7 +247,7 @@ fn compatibility_legacy_cold_restart_and_retained_raw_parity() {
         incremental.log(&LogFilter::default()).unwrap()
     );
     let raw = incremental
-        .fetch_raw_carrier_records_for_occurrences(OccurrenceSelector::Session("compat"))
+        .fetch_raw_carrier_records_for_occurrences(OccurrenceSelector::Session(session))
         .unwrap();
     let retained: Vec<u8> = raw
         .iter()
@@ -331,6 +523,68 @@ fn old_subagent_cursor_upgrades_before_resuming() {
             .any(|row| row.0 == "parent/agent-sub-a"
                 && row.1 == 3
                 && row.4.as_deref() == Some("/root/a"))
+    );
+}
+
+#[test]
+fn repair_preserves_source_custody_and_replacement_ownership() {
+    let root = TestDir::new();
+    let files = subagent_fixture(root.path());
+    let history = root.path().join("history.jsonl");
+    let cursor = root.path().join("cursor.json");
+    let mut state = CursorState::default();
+    let mut store = TraceStore::open_in_memory().unwrap();
+    for file in &files {
+        process_file(file, &mut state, &mut store, &options(&cursor, &history)).unwrap();
+    }
+    let before = store.log(&LogFilter::default()).unwrap();
+    let dry = repair_subagent_keys(&state, &mut store, &history, "", true).unwrap();
+    assert_eq!(dry.groups_repaired, 1);
+    assert_eq!(before, store.log(&LogFilter::default()).unwrap());
+    repair_subagent_keys(&state, &mut store, &history, "", false).unwrap();
+    for file in &files {
+        let key = file.canonicalize().unwrap().to_string_lossy().into_owned();
+        assert_eq!(
+            store
+                .fetch_current_capture_source_raw(CARRIER, &key)
+                .unwrap(),
+            Some(fs::read(file).unwrap())
+        );
+    }
+    assert_eq!(before, store.log(&LogFilter::default()).unwrap());
+    fs::write(&files[1], b"{}\n").unwrap();
+    process_file(
+        &files[1],
+        &mut state,
+        &mut store,
+        &options(&cursor, &history),
+    )
+    .unwrap();
+    let mut cold = TraceStore::open_in_memory().unwrap();
+    let mut cold_state = CursorState::default();
+    for file in &files {
+        process_file(
+            file,
+            &mut cold_state,
+            &mut cold,
+            &options(&cursor, &history),
+        )
+        .unwrap();
+    }
+    assert_eq!(
+        store.log(&LogFilter::default()).unwrap(),
+        cold.log(&LogFilter::default()).unwrap()
+    );
+    let key = files[1]
+        .canonicalize()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    assert_eq!(
+        store
+            .fetch_current_capture_source_raw(CARRIER, &key)
+            .unwrap(),
+        Some(b"{}\n".to_vec())
     );
 }
 
@@ -1766,4 +2020,112 @@ fn replacement_retires_obsolete_source_projection_but_retains_raw() {
             );
         }
     }
+}
+
+#[test]
+fn an_unterminated_item_does_not_retire_the_complete_legacy_prefix() {
+    let source = include_bytes!("../../../tests/fixtures/compatibility/v1/codex-early-item.jsonl");
+    let root = TestDir::new();
+    let path = root.path().join("early.jsonl");
+    let cursor = root.path().join("cursor.json");
+    let history = root.path().join("history.jsonl");
+    let database = root.path().join("capture.sqlite3");
+    let prefix: Vec<u8> = source
+        .split_inclusive(|byte| *byte == b'\n')
+        .take(2)
+        .flatten()
+        .copied()
+        .collect();
+    fs::write(&path, &prefix).unwrap();
+    {
+        let mut store = TraceStore::open(&database).unwrap();
+        process_file(
+            &path,
+            &mut CursorState::default(),
+            &mut store,
+            &options(&cursor, &history),
+        )
+        .unwrap();
+    }
+    let previous_cursor = fs::read(&cursor).unwrap();
+    fs::write(&path, &source[..source.len() - 1]).unwrap();
+    {
+        let mut state = load_state(&cursor).unwrap();
+        let mut store = TraceStore::open(&database).unwrap();
+        assert_eq!(
+            process_file(&path, &mut state, &mut store, &options(&cursor, &history)).unwrap(),
+            0
+        );
+        assert_eq!(fs::read(&cursor).unwrap(), previous_cursor);
+        let log = store.log(&LogFilter::default()).unwrap();
+        assert_eq!(log.len(), 1);
+        assert_eq!(log[0].sequence(), 1);
+    }
+    fs::write(&path, source).unwrap();
+    let mut state = load_state(&cursor).unwrap();
+    let mut store = TraceStore::open(&database).unwrap();
+    process_file(&path, &mut state, &mut store, &options(&cursor, &history)).unwrap();
+    let log = store.log(&LogFilter::default()).unwrap();
+    assert_eq!(log.len(), 1);
+    assert_eq!(log[0].sequence(), 2);
+    assert_eq!(log[0].parent_sequence(), None);
+}
+
+#[test]
+fn a_missing_cursor_still_retires_the_owned_early_mirror() {
+    let source = include_bytes!("../../../tests/fixtures/compatibility/v1/codex-early-item.jsonl");
+    let root = TestDir::new();
+    let path = root.path().join("early.jsonl");
+    let cursor = root.path().join("cursor.json");
+    let history = root.path().join("history.jsonl");
+    let database = root.path().join("capture.sqlite3");
+    let prefix: Vec<u8> = source
+        .split_inclusive(|byte| *byte == b'\n')
+        .take(2)
+        .flatten()
+        .copied()
+        .collect();
+    fs::write(&path, &prefix).unwrap();
+    {
+        let mut store = TraceStore::open(&database).unwrap();
+        process_file(
+            &path,
+            &mut CursorState::default(),
+            &mut store,
+            &options(&cursor, &history),
+        )
+        .unwrap();
+    }
+    fs::remove_file(&cursor).unwrap();
+    fs::write(&path, source).unwrap();
+    let mut store = TraceStore::open(&database).unwrap();
+    process_file(
+        &path,
+        &mut load_state(&cursor).unwrap(),
+        &mut store,
+        &options(&cursor, &history),
+    )
+    .unwrap();
+    let mut cold = TraceStore::open_in_memory().unwrap();
+    process_file(
+        &path,
+        &mut CursorState::default(),
+        &mut cold,
+        &options(&cursor, &history),
+    )
+    .unwrap();
+    assert_eq!(
+        store.log(&LogFilter::default()).unwrap(),
+        cold.log(&LogFilter::default()).unwrap()
+    );
+    let raw = store
+        .fetch_raw_carrier_records_for_occurrences(OccurrenceSelector::Session("early-item"))
+        .unwrap();
+    assert_eq!(
+        raw.iter()
+            .flat_map(|row| row.bytes())
+            .copied()
+            .collect::<Vec<_>>(),
+        source
+    );
 }

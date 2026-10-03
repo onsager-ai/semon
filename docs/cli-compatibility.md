@@ -45,8 +45,7 @@ unknown complete lines. The fixtures cover reversed results for overlapping
 same-name calls; this structural-store oracle does not establish full viewer
 transcript or usage correctness.
 
-The remaining acceptance corpus must cover item-stream arrival after early
-legacy mirror ingestion, replacement/interior rewrites, archived discovery,
+The remaining acceptance corpus must cover archived discovery,
 continuation/fork/copied prefixes, compaction, denial/cancellation, concurrent
 sessions and machine namespaces. Existing truncation tests compare surviving
 occurrences only; they do not establish final-generation deletion semantics.
@@ -63,12 +62,14 @@ The home also contains workspace YAML and a SQLite session store with WAL/SHM.
 Do not copy live database/WAL files into mirrors.
 
 The headless stdout stream contains ephemeral model/delta/idle events absent
-from the saved events. The saved file includes `session.shutdown` and per-model
-metrics, but this single no-token mock response cannot establish native usage
-accounting. This is native CLI persistence with a mock model, not a paid/native
-model validation. Interactive, prior releases, concurrent tools, resume/fork,
-approvals, compaction and mutation behavior remain unverified. #238 is not yet
-accepted and the adapter implementation gate remains open.
+from saved events. Pinned 1.0.90 and 1.0.91 probes now cover concurrent tool
+completion, same-session resume and explicit shell denial. Saved shutdown
+metrics accumulate across resume under synthetic mock usage; their native billing
+units remain unknown. See [the detailed probe](copilot-probe.md) for fixture
+provenance, interactive persistence, cancellation, manual compaction and the
+bounded go/no-go capability contract. Logical forks, persisted approval IDs,
+native mutation/retention and billing remain unknown. #238 is not yet accepted;
+production adapter work still depends on acceptance of #237 and #238.
 
 ## Versioned Claude and Codex native baselines
 
@@ -82,8 +83,8 @@ usage counts do not establish billing correctness or stable-version support.
 Claude's baseline passes the full cold/restarted/retained-byte occurrence oracle.
 Its attachment and prompt-state content is removed while retaining record types
 and structural relationships. Codex's baseline establishes native paginated
-history and mixed legacy/item records. It is a provenance/schema fixture only:
-the early legacy-to-item transition still requires reconciliation under #237.
+history and mixed legacy/item records. It now passes the same full occurrence
+and retained-byte oracle, including early mirror ingestion before item arrival.
 Neither recording establishes tools, approvals, cancellation, compaction or
 fork semantics. The offline Python validator checks provenance and file hashes;
 CI does not launch either harness or access personal native homes.
@@ -101,18 +102,18 @@ record is deleted.
 This deliberately reads the consumed prefix on each capture invocation, including
 idle invocations. It prioritizes verified replacement handling over the former
 size-only shortcut; an idle-read optimization needs equally strong source-change
-evidence. It does not establish rebuild selection across retained generations or early
-legacy-to-item reconciliation. Those remain #237 work, so this bounded repair
-does not establish the complete historical/incremental/retained-evidence oracle.
+evidence. Current source selection from retained evidence is described below. Legacy
+records without explicit custody remain unknown; prefix verification alone
+does not identify an older retained generation.
 
 Capture records local source ownership of projected occurrence rows alongside
 its raw/semantic transaction. When verified source bytes change, it retires that
 source's occurrence projection before replay; another recorded owner keeps its
 shared rows. This reconciles metadata/malformed replacement, fewer Claude blocks,
 truncation tails and changed Codex session identity without deleting canonical
-traces, raw records or raw-to-trace links. Source keys are resolved local paths;
-they are excluded from transferable identity and ordinary trace/log results.
-The version-6 store migration adds only this structural ownership index.
+traces, raw records or raw-to-trace links. Source keys derive from resolved local paths and are excluded from transferable
+identity and ordinary trace/log results. Version 6 introduced this structural
+ownership index; version 7 hashes recorded keys and adds private capture custody.
 
 Pre-upgrade occurrence rows have no reliable file ownership. They remain observed
 memory until independently attributable; the migration never guesses ownership
@@ -120,6 +121,15 @@ from session name, timing or text. A replay claims only rows actually projected
 by that source. Full parity for arbitrary pre-upgrade stale rows and generation
 selection when rebuilding from all retained raw bytes remain unresolved release
 gates, not a native support claim.
+
+When the first complete Codex `item_completed` record arrives after an earlier
+legacy `response_item` message was captured, dispatch now resets that source's
+owned projection and replays with the item stream selected for the whole file.
+An incomplete item frame does not switch dispatch. The source-shaped early-item
+fixture and native paginated alpha fixture both pass full cold/restarted/rebuilt
+occurrence comparisons and exact retention at every half-frame and complete-line
+boundary. This does not retire unowned pre-upgrade observations or establish
+native billing, tools, approval or fork support for the alpha release.
 
 The sessions viewer ledger also verifies the complete consumed prefix when file
 stat changes, replacing its former two-window shortcut. Its versioned, text-free
@@ -130,3 +140,145 @@ but does not reparse unchanged history. Explicit native tool IDs and byte-offset
 metadata are rebuilt from the source after an interior mutation. A writer that
 preserves the entire file stat while mutating bytes is outside this shortcut's
 change-detection contract.
+
+## Native home overrides
+
+Capture CLI defaults and session discovery honor nonempty `CODEX_HOME` and
+`CLAUDE_CONFIG_DIR`. Explicit input flags still take precedence. Codex sessions
+and history live beneath its configured root. Claude projects live beneath its
+configured root, and custom-root settings use `<CLAUDE_CONFIG_DIR>/.claude.json`,
+as observed in the isolated 2.1.288 probe; default settings remain
+`~/.claude.json`. Empty overrides retain the ordinary home defaults.
+
+Fixture-backed discovery tests resolve only disposable roots and verify native
+transcripts and settings remain byte-identical after collection. These native
+roots do not relocate Semon's own state or derived cache.
+
+## Claude resume and copied fork context
+
+The pinned 2.1.288 lifecycle probe retains initial, resumed and forked native
+transcript snapshots under a disposable `CLAUDE_CONFIG_DIR`. Parent resume
+preserves its consumed bytes. The fork rewrites `sessionId` while copying the
+four existing user/assistant UUIDs, parent UUIDs and API message identities.
+These exact identities establish inherited context; no explicit logical
+parent-session field was observed, so they do not establish that lineage.
+
+The localhost mock supplies five input and three output tokens per request.
+Cost-state model usage accumulates 5/3, 10/6 and 15/9; the fork includes inherited
+context. These are native snapshots of synthetic accounting, not invoices or
+newly attributable child consumption. Canonical message occurrences preserve
+the physical session namespace. Fixture tests compare cold, restarted and
+retained-raw replay for each complete snapshot. Current-source revision
+selection after replacement is described below; unowned legacy custody remains
+unknown.
+
+### Native Claude tools and model switch
+
+`claude-2.1.288/tools` exercises Read, Edit, successful Bash and Bash exit 1
+against disposable files with localhost synthetic model replies. Tool request
+IDs join exact persisted result IDs. Three streamed assistant blocks share one
+API message ID but retain distinct record UUIDs. They must all remain visible;
+an API message ID alone is not a block identity.
+
+The batch executes serially in this native run. Overlapping/reversed same-name
+call decoding remains covered by the separately labeled source-shaped fixture.
+The initial run uses `permission-mode default` with an explicit fixture tool
+allowlist; resume and fork use native default `auto` and perform no new tools.
+The allowlist does not establish a persisted approval ID.
+Resume appends under the same physical session and switches Sonnet to Haiku;
+fork copies these records into a distinct physical session without an explicit
+logical parent edge. The cold/restart/raw oracle compares six, eight and ten
+semantic occurrences respectively. Tool results remain in the forensic region
+under the existing Claude projection contract. Usage is mock evidence, and
+shared streamed API message IDs must not be summed as independent requests.
+
+Reproduce with `tests/spikes/claude-tools.py` using the pinned binary and a new
+private output directory. The manifest pins script content, binary and original
+source hashes, transformations, and unsupported scenarios.
+
+## Source-backed Codex archive discovery
+
+Codex `0.159.0-alpha.3` source at commit
+`3b01b36fa5eb96ba82a776bd3c2fc57f8969181f` defines `archived_sessions` and
+archives owned rollout files by moving them there. The source hashes and the
+simulated-move fixture limitations are recorded in
+`codex-0.159.0-alpha.3/archive-manifest.json`. This is source-backed evidence;
+the native archive command has not been executed in the test.
+
+Semon discovers plain JSONL in both `CODEX_HOME/sessions` and
+`CODEX_HOME/archived_sessions` for session lists, model building, transcript
+lookup and refresh. These archived files are part of the existing explicit
+viewing-input allowlist. Input copies with recorded machine facts preserve
+model and transcript parity. Optional recorded facts carry a content-free
+current Codex source inventory, so active/archive transitions select the
+current paths while retaining older mirrored bytes. End-to-end push tests cover
+both directions with deliberate redaction. An absent inventory in older facts
+remains unknown; an explicit empty inventory selects no current sources.
+Received archive roots behind symbolic links are refused, and native source
+bytes remain read-only.
+
+Compressed native rollouts are outside this supported subset. To capture a
+plain archived tree explicitly, select it with `semon-codex --sessions PATH`;
+this fixture does not establish native archive lifecycle or logical lineage.
+
+## Retained source revision selection
+
+Complete raw history can contain several byte variants at the same source line.
+Schema v7 therefore retains private collector custody for each observed capture
+revision. Current-source forensic replay selects those recorded ordered bindings
+and validates their complete-prefix checksum. A→B→A tests for both native Claude
+and native paginated Codex compare full current occurrence rows against replay,
+while retaining both raw variants and all canonical/raw links. A lost legacy
+Codex cursor also retires only the explicitly owned projection before replay.
+
+Custody is local source provenance, not a native generation, logical parent or
+transferable trace identity. Explicit raw forgetting leaves replay unavailable;
+idle capture and legacy adoption do not recreate those bytes. Unowned historical
+rows are preserved because their source cannot be established retrospectively.
+
+## Codex native fork boundaries and child usage
+
+The pinned `0.159.0-alpha.3` probe executes a parent against a synthetic localhost
+provider, forks through native app-server `thread/fork` with `excludeTurns=true`,
+and completes a child-owned turn. Its three hash-addressed snapshots preserve
+native logical `forked_from_id` and exclusive ordinal separately from physical
+`history_base`. The fresh fork references the parent prefix without copying its
+messages into the child JSONL. Pinned source comments allow logical and physical
+bases to diverge after revert; this probe does not execute that scenario.
+
+The fork itself makes no model request and has no child usage observation.
+After its own turn, `token_usage_record.usage` reports fresh mock usage of 5 input
+and 3 output tokens, while `thread_token_usage` and the cumulative `token_count`
+report 10/6 including inherited parent context. These are distinct observations,
+not billing evidence. Live mock-provider checks that inherited context was sent
+are recorded separately from persisted facts. Capture tests compare cold,
+restart and retained-raw replay for the parent, empty child and completed child.
+The corpus supplies the native evidence for the viewer interpretation described
+below; the probe itself does not claim decoder support.
+
+The viewer now exposes machine-scoped native root, logical fork and physical
+prefix fields separately as optional `codex_history` metadata. A physical base
+alone does not invent a logical parent, and forks do not become spawned-agent
+edges or merge their child-owned turns with the parent. Missing fields stay
+absent, including exclusive ordinals; an observed zero remains zero.
+
+For the pinned native per-response format, exact thread/session/turn/response
+identities select fresh usage independently of the cumulative `token_count`
+channel. Repeated exact reports count once, and the selected accounting survives
+index restart. A fork's cumulative-only or incomplete report is insufficient
+for fresh usage and produces no model-usage row. Legacy non-fork files retain
+existing cumulative-delta behavior. Complete per-response observations take
+precedence over legacy counters; mixed-format histories without complete native
+reports are not claimed as an accepted usage baseline. This remains usage
+telemetry, not an invoice. The rebuildable viewer index moves to schema 2/parser
+20 while preserving separately retained reported-run snapshots; native source
+logs and canonical/raw trace storage are unchanged.
+
+The CLI session tree and encrypted relay summaries use the same complete native
+per-response decoder as the viewer. Their private structural summaries deduplicate
+exact request identities and keep cumulative fork context out of fresh request
+counts. Local tree index version 4 and encrypted summary index version 2 rebuild
+older cached accounting from the retained source records/frames; no transcript
+text is added to those caches. This extends the fresh-usage correction to those
+read surfaces without changing canonical/raw storage or adding logical spawn
+edges from physical inherited history.

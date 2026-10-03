@@ -6,7 +6,7 @@
 //! DIR is only read: never written, and no symbolic link is followed out of
 //! a machine's directory. A machine directory that is a link is ignored, and
 //! so is a home whose root (`claude/`, `claude/projects/`,
-//! `claude/sessions/`, `codex/`, `codex/sessions/`) is one. Below the roots,
+//! `claude/sessions/`, `codex/`, `codex/sessions/`, `codex/archived_sessions/`) is one. Below the roots,
 //! the builder lists regular files and directories only, never links.
 //!
 //! A machine's directory is named as [`is_machine_name`] says; any other
@@ -151,7 +151,9 @@ impl ReceivedMachines {
                 claude: !is_link(&claude)
                     && !is_link(&claude.join("projects"))
                     && !is_link(&claude.join("sessions")),
-                codex: !is_link(&codex) && !is_link(&codex.join("sessions")),
+                codex: !is_link(&codex)
+                    && !is_link(&codex.join("sessions"))
+                    && !is_link(&codex.join("archived_sessions")),
                 facts: match facts {
                     Err(_) => FactsSeen::Missing,
                     Ok(metadata) if !metadata.is_file() => FactsSeen::NotFile,

@@ -136,3 +136,38 @@ fn decoded_records_cannot_bypass_checked_mutations() {
     assert_eq!(s.desired(), Desired::Active);
     assert!(ThreadId::new("../auth.json").is_err());
 }
+
+#[test]
+fn identifiers_reject_special_path_components_in_construction_and_decode() {
+    for invalid in ["", ".", "..", "../auth.json", "a/b", "a\\b"] {
+        assert!(SessionId::new(invalid).is_err());
+        assert!(CredentialId::new(invalid).is_err());
+        let encoded = serde_json::to_string(invalid).unwrap();
+        assert!(serde_json::from_str::<RuntimeId>(&encoded).is_err());
+        assert!(serde_json::from_str::<OperationId>(&encoded).is_err());
+    }
+    for valid in ["session-1", "codex.thread_2", ".hidden", "a..b"] {
+        assert!(SessionId::new(valid).is_ok());
+    }
+}
+
+#[test]
+fn diagnostics_redact_durable_input_without_removing_recovery_data() {
+    let mut s = session();
+    let sensitive = "private task containing a credential-like value";
+    s.prepare_launch(
+        &owner(),
+        0,
+        OperationId::new("launch").unwrap(),
+        sensitive.into(),
+    )
+    .unwrap();
+    assert!(!format!("{s:?}").contains(sensitive));
+    assert!(!format!("{:?}", s.operations()[0]).contains(sensitive));
+    assert!(format!("{s:?}").contains("[REDACTED]"));
+    let decoded: Session = serde_json::from_slice(&serde_json::to_vec(&s).unwrap()).unwrap();
+    assert_eq!(
+        decoded.operations()[0].launch_input.as_deref(),
+        Some(sensitive)
+    );
+}

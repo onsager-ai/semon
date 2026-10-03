@@ -2,7 +2,7 @@ import { build, transform } from 'esbuild';
 import { readFile, writeFile } from 'node:fs/promises';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { resolve } from 'node:path';
+import { resolve, basename } from 'node:path';
 import ts from 'typescript';
 import { gzipSync } from 'node:zlib';
 import { checkSource, checkSources } from './security-check.mjs';
@@ -12,101 +12,268 @@ const output = '../crates/semon-sessions/src/viewer.generated.js';
 const shellOutput = '../crates/semon-sessions/src/shell.generated.js';
 const sharedOutput = '../crates/semon-sessions/src/shared.generated.js';
 const bridgeExports = {
-  preact: ['Component','Fragment','h','render','options','createElement','cloneElement','createContext','createRef','hydrate','isValidElement','toChildArray'],
-  'preact/hooks': ['useState','useEffect','useLayoutEffect','useReducer','useRef','useMemo','useCallback','useContext','useDebugValue','useErrorBoundary','useId','useImperativeHandle'],
-  'preact/jsx-runtime': ['Fragment','jsx','jsxs','jsxDEV','jsxAttr','jsxEscape','jsxTemplate'],
+  preact: [
+    'Component',
+    'Fragment',
+    'h',
+    'render',
+    'options',
+    'createElement',
+    'cloneElement',
+    'createContext',
+    'createRef',
+    'hydrate',
+    'isValidElement',
+    'toChildArray',
+  ],
+  'preact/hooks': [
+    'useState',
+    'useEffect',
+    'useLayoutEffect',
+    'useReducer',
+    'useRef',
+    'useMemo',
+    'useCallback',
+    'useContext',
+    'useDebugValue',
+    'useErrorBoundary',
+    'useId',
+    'useImperativeHandle',
+  ],
+  'preact/jsx-runtime': [
+    'Fragment',
+    'jsx',
+    'jsxs',
+    'jsxDEV',
+    'jsxAttr',
+    'jsxEscape',
+    'jsxTemplate',
+  ],
 };
-const sharedBridge = { name: 'shared-preact', setup(build) {
-  build.onResolve({ filter: /^\.\/select$/ }, args => args.importer.endsWith('/lib/index.ts') ? ({ path: 'select', namespace: 'shared-select' }) : null);
-  build.onLoad({ filter: /.*/, namespace: 'shared-select' }, () => ({ contents: ['createSelect','enhanceSelect','installSelect'].map(name => `export const ${name} = globalThis.__semonUIShared.${name};`).join('\n'), loader: 'js' }));
-  build.onResolve({ filter: /^preact(?:\/hooks|\/jsx-runtime)?$/ }, args => ({ path: args.path, namespace: 'shared-preact' }));
-  build.onLoad({ filter: /.*/, namespace: 'shared-preact' }, args => ({ contents: bridgeExports[args.path].map(name => `export const ${name} = globalThis.__semonUIShared.${args.path === 'preact' ? 'preact' : args.path.endsWith('hooks') ? 'hooks' : 'jsxRuntime'}.${name};`).join('\n'), loader: 'js' }));
-} };
+const sharedBridge = {
+  name: 'shared-preact',
+  setup(build) {
+    build.onResolve({ filter: /^\.\/select$/ }, (args) =>
+      args.importer.endsWith('/lib/index.ts')
+        ? { path: 'select', namespace: 'shared-select' }
+        : null,
+    );
+    build.onLoad({ filter: /.*/, namespace: 'shared-select' }, () => ({
+      contents: ['createSelect', 'enhanceSelect', 'installSelect']
+        .map((name) => `export const ${name} = globalThis.__semonUIShared.${name};`)
+        .join('\n'),
+      loader: 'js',
+    }));
+    build.onResolve({ filter: /^preact(?:\/hooks|\/jsx-runtime)?$/ }, (args) => ({
+      path: args.path,
+      namespace: 'shared-preact',
+    }));
+    build.onLoad({ filter: /.*/, namespace: 'shared-preact' }, (args) => ({
+      contents: bridgeExports[args.path]
+        .map(
+          (name) =>
+            `export const ${name} = globalThis.__semonUIShared.${args.path === 'preact' ? 'preact' : args.path.endsWith('hooks') ? 'hooks' : 'jsxRuntime'}.${name};`,
+        )
+        .join('\n'),
+      loader: 'js',
+    }));
+  },
+};
 export async function buildShared(minify = false) {
-  const result = await build({ absWorkingDir: dir, entryPoints: ['src/shared.ts'], bundle: true, write: false, format: 'iife', globalName: '__semonUIShared', banner: { js: `/*! Preact 10.29.8\n${license}\n*/` }, platform: 'browser', target: 'es2022', tsconfig: 'tsconfig.json', minify, metafile: true, define: { 'process.env.NODE_ENV': '"production"' }, legalComments: 'inline' });
-  result.outputFiles[0].contents = Buffer.from('if (!globalThis.__semonUIShared) {\n' + result.outputFiles[0].text + '\nglobalThis.__semonUIShared = __semonUIShared;\n}\n');
+  const result = await build({
+    absWorkingDir: dir,
+    entryPoints: ['src/shared.ts'],
+    bundle: true,
+    write: false,
+    format: 'iife',
+    globalName: '__semonUIShared',
+    banner: { js: `/*! Preact 10.29.8\n${license}\n*/` },
+    platform: 'browser',
+    target: 'es2022',
+    tsconfig: 'tsconfig.json',
+    minify,
+    metafile: true,
+    define: { 'process.env.NODE_ENV': '"production"' },
+    legalComments: 'inline',
+  });
+  result.outputFiles[0].contents = Buffer.from(
+    'if (!globalThis.__semonUIShared) {\n' +
+      result.outputFiles[0].text +
+      '\nglobalThis.__semonUIShared = __semonUIShared;\n}\n',
+  );
   return result;
 }
 function combine(shared, tail) {
-  tail.outputFiles[0].contents = Buffer.concat([shared.outputFiles[0].contents, tail.outputFiles[0].contents]);
+  tail.outputFiles[0].contents = Buffer.concat([
+    shared.outputFiles[0].contents,
+    tail.outputFiles[0].contents,
+  ]);
   tail.metafile.inputs = { ...shared.metafile.inputs, ...tail.metafile.inputs };
   return tail;
 }
 export async function buildViewer(minify = false, entryPoints = ['src/viewer.ts']) {
   const shared = await buildShared(minify);
-  const tail = await build({ absWorkingDir: dir, entryPoints, bundle: true, write: false, format: 'iife', platform: 'browser', target: 'es2022', tsconfig: 'tsconfig.json', minify, metafile: true, plugins: [sharedBridge], define: { 'process.env.NODE_ENV': '"production"' }, legalComments: 'inline', banner: { js: '// Generated by ui/build.mjs; edit sources and run npm --prefix ui run build.' } });
+  const tail = await build({
+    absWorkingDir: dir,
+    entryPoints,
+    bundle: true,
+    write: false,
+    format: 'iife',
+    platform: 'browser',
+    target: 'es2022',
+    tsconfig: 'tsconfig.json',
+    minify,
+    metafile: true,
+    plugins: [sharedBridge],
+    define: { 'process.env.NODE_ENV': '"production"' },
+    legalComments: 'inline',
+    banner: { js: '// Generated by ui/build.mjs; edit sources and run npm --prefix ui run build.' },
+  });
   return combine(shared, tail);
 }
 export async function buildNativeShell() {
-  return build({ absWorkingDir: dir, entryPoints: ['src/native-shell.ts'], bundle: true, write: false, format: 'iife', platform: 'browser', target: 'es2022', tsconfig: 'tsconfig.json', banner: { js: '// Generated by ui/build.mjs; edit ui/src/app/native-shell.ts.' } });
+  return build({
+    absWorkingDir: dir,
+    entryPoints: ['src/native-shell.ts'],
+    bundle: true,
+    write: false,
+    format: 'iife',
+    platform: 'browser',
+    target: 'es2022',
+    tsconfig: 'tsconfig.json',
+    banner: { js: '// Generated by ui/build.mjs; edit ui/src/app/native-shell.ts.' },
+  });
 }
 export async function assertFresh(bytes, url) {
-  if (!Buffer.from(bytes).equals(await readFile(url))) throw new Error('Stale viewer.generated.js: run npm --prefix ui run build');
+  if (!Buffer.from(bytes).equals(await readFile(url)))
+    throw new Error(
+      `Stale ${basename(url instanceof URL ? fileURLToPath(url) : url)}: run npm --prefix ui run build`,
+    );
 }
 /** Consumers use this pinned compiler/bundler and the library's sole Preact installation. */
 export async function buildConsumer(entry, outputPath, check = false) {
-  const entryPath = resolve(entry), destination = resolve(outputPath);
-  if (!/\.tsx?$/.test(entryPath) || entryPath === destination) throw new Error('Consumer requires a typed entry and separate output');
+  const entryPath = resolve(entry),
+    destination = resolve(outputPath);
+  if (!/\.tsx?$/.test(entryPath) || entryPath === destination)
+    throw new Error('Consumer requires a typed entry and separate output');
   await checkSources();
   const config = ts.readConfigFile(resolve(dir, 'tsconfig.lib.json'), ts.sys.readFile);
   const parsed = ts.parseJsonConfigFileContent(config.config, ts.sys, dir);
-  const program = ts.createProgram([entryPath], { ...parsed.options, allowImportingTsExtensions: true, paths: { 'preact': [resolve(dir, 'node_modules/preact')], 'preact/*': [resolve(dir, 'node_modules/preact/*')] } });
+  const program = ts.createProgram([entryPath], {
+    ...parsed.options,
+    allowImportingTsExtensions: true,
+    paths: {
+      preact: [resolve(dir, 'node_modules/preact')],
+      'preact/*': [resolve(dir, 'node_modules/preact/*')],
+    },
+  });
   const errors = ts.getPreEmitDiagnostics(program);
-  if (errors.length) throw new Error(ts.formatDiagnosticsWithColorAndContext(errors, { getCanonicalFileName: name => name, getCurrentDirectory: () => dir, getNewLine: () => '\n' }));
+  if (errors.length)
+    throw new Error(
+      ts.formatDiagnosticsWithColorAndContext(errors, {
+        getCanonicalFileName: (name) => name,
+        getCurrentDirectory: () => dir,
+        getNewLine: () => '\n',
+      }),
+    );
   const shared = await buildShared();
-  const result = combine(shared, await build({
-    absWorkingDir: dir, plugins: [sharedBridge], entryPoints: [entryPath], bundle: true, write: false, format: 'iife',
-    platform: 'browser', target: 'es2022', tsconfig: 'tsconfig.json', metafile: true,
-    alias: { preact: resolve(dir, 'node_modules/preact') },
-    define: { 'process.env.NODE_ENV': '"production"' }, legalComments: 'inline',
-    banner: { js: '// Generated by Semon ui/build.mjs --entry; edit the typed source.' },
-  }));
+  const result = combine(
+    shared,
+    await build({
+      absWorkingDir: dir,
+      plugins: [sharedBridge],
+      entryPoints: [entryPath],
+      bundle: true,
+      write: false,
+      format: 'iife',
+      platform: 'browser',
+      target: 'es2022',
+      tsconfig: 'tsconfig.json',
+      metafile: true,
+      alias: { preact: resolve(dir, 'node_modules/preact') },
+      define: { 'process.env.NODE_ENV': '"production"' },
+      legalComments: 'inline',
+      banner: { js: '// Generated by Semon ui/build.mjs --entry; edit the typed source.' },
+    }),
+  );
   for (const input of Object.keys(result.metafile.inputs)) {
-    if (!input.includes('node_modules/') && /\.tsx?$/.test(input)) checkSource(await readFile(resolve(dir, input), 'utf8'), input);
+    if (!input.includes('node_modules/') && /\.tsx?$/.test(input))
+      checkSource(await readFile(resolve(dir, input), 'utf8'), input);
   }
-  const runtimes = Object.keys(result.metafile.inputs).filter(input => /preact\/dist\/preact\.module\.js$/.test(input));
+  const runtimes = Object.keys(result.metafile.inputs).filter((input) =>
+    /preact\/dist\/preact\.module\.js$/.test(input),
+  );
   if (runtimes.length !== 1) throw new Error('Consumer must contain exactly one Preact runtime');
   const bytes = result.outputFiles[0].contents;
-  if (check) { if (!Buffer.from(bytes).equals(await readFile(destination))) throw new Error('Stale consumer output: rebuild with the pinned Semon toolchain'); }
-  else await writeFile(destination, bytes);
+  if (check) {
+    if (!Buffer.from(bytes).equals(await readFile(destination)))
+      throw new Error('Stale consumer output: rebuild with the pinned Semon toolchain');
+  } else await writeFile(destination, bytes);
   return result;
 }
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
-  const entryIndex = process.argv.indexOf('--entry'), outputIndex = process.argv.indexOf('--output');
+  const entryIndex = process.argv.indexOf('--entry'),
+    outputIndex = process.argv.indexOf('--output');
   if (entryIndex !== -1 || outputIndex !== -1) {
-    if (!process.argv[entryIndex + 1] || entryIndex === -1 || !process.argv[outputIndex + 1] || outputIndex === -1) throw new Error('--entry and --output are required together');
-    await buildConsumer(process.argv[entryIndex + 1], process.argv[outputIndex + 1], process.argv.includes('--check'));
-    console.log(process.argv.includes('--check') ? 'Consumer asset is fresh' : 'Consumer asset built');
+    if (
+      !process.argv[entryIndex + 1] ||
+      entryIndex === -1 ||
+      !process.argv[outputIndex + 1] ||
+      outputIndex === -1
+    )
+      throw new Error('--entry and --output are required together');
+    await buildConsumer(
+      process.argv[entryIndex + 1],
+      process.argv[outputIndex + 1],
+      process.argv.includes('--check'),
+    );
+    console.log(
+      process.argv.includes('--check') ? 'Consumer asset is fresh' : 'Consumer asset built',
+    );
   } else {
-  await checkSources();
-  const shared = await buildShared();
-  if (process.argv.includes('--check')) { await assertFresh(shared.outputFiles[0].contents, new URL(sharedOutput, import.meta.url)); }
-  else if (!process.argv.includes('--sizes')) await writeFile(new URL(sharedOutput, import.meta.url), shared.outputFiles[0].contents);
-  const shell = await buildNativeShell();
-  if (process.argv.includes('--check')) await assertFresh(shell.outputFiles[0].contents, new URL(shellOutput, import.meta.url));
-  else if (!process.argv.includes('--sizes')) await writeFile(new URL(shellOutput, import.meta.url), shell.outputFiles[0].contents);
-  const result = await buildViewer();
-  const bytes = result.outputFiles[0].contents;
-  const url = new URL(output, import.meta.url);
-  if (process.argv.includes('--check')) {
-    await assertFresh(bytes, url);
-    console.log('viewer.generated.js is fresh');
-  } else if (!process.argv.includes('--sizes')) await writeFile(url, bytes);
-  if (process.argv.includes('--sizes')) {
-    const prefix = '';
-    const report = async (name, tail) => {
-      const served = Buffer.concat([Buffer.from(prefix), Buffer.from(tail)]);
-      const min = Buffer.from((await transform(served.toString(), { minify: true, target: 'es2022', legalComments: 'inline' })).code);
-      console.log(`${name}: served raw ${served.length}, raw gzip-9 ${gzipSync(served, { level: 9 }).length}, minified ${min.length}, minified gzip-9 ${gzipSync(min, { level: 9 }).length} bytes`);
-    };
-    await report('production', bytes);
-    const baselineArg = process.argv.indexOf('--baseline');
-    if (baselineArg !== -1) {
-      const path = process.argv[baselineArg + 1];
-      if (!path) throw new Error('--baseline needs an absolute viewer.js path');
-      await report('baseline original served', await readFile(path));
+    await checkSources();
+    const shared = await buildShared();
+    if (process.argv.includes('--check')) {
+      await assertFresh(shared.outputFiles[0].contents, new URL(sharedOutput, import.meta.url));
+    } else if (!process.argv.includes('--sizes'))
+      await writeFile(new URL(sharedOutput, import.meta.url), shared.outputFiles[0].contents);
+    const shell = await buildNativeShell();
+    if (process.argv.includes('--check'))
+      await assertFresh(shell.outputFiles[0].contents, new URL(shellOutput, import.meta.url));
+    else if (!process.argv.includes('--sizes'))
+      await writeFile(new URL(shellOutput, import.meta.url), shell.outputFiles[0].contents);
+    const result = await buildViewer();
+    const bytes = result.outputFiles[0].contents;
+    const url = new URL(output, import.meta.url);
+    if (process.argv.includes('--check')) {
+      await assertFresh(bytes, url);
+      console.log('viewer.generated.js is fresh');
+    } else if (!process.argv.includes('--sizes')) await writeFile(url, bytes);
+    if (process.argv.includes('--sizes')) {
+      const prefix = '';
+      const report = async (name, tail) => {
+        const served = Buffer.concat([Buffer.from(prefix), Buffer.from(tail)]);
+        const min = Buffer.from(
+          (
+            await transform(served.toString(), {
+              minify: true,
+              target: 'es2022',
+              legalComments: 'inline',
+            })
+          ).code,
+        );
+        console.log(
+          `${name}: served raw ${served.length}, raw gzip-9 ${gzipSync(served, { level: 9 }).length}, minified ${min.length}, minified gzip-9 ${gzipSync(min, { level: 9 }).length} bytes`,
+        );
+      };
+      await report('production', bytes);
+      const baselineArg = process.argv.indexOf('--baseline');
+      if (baselineArg !== -1) {
+        const path = process.argv[baselineArg + 1];
+        if (!path) throw new Error('--baseline needs an absolute viewer.js path');
+        await report('baseline original served', await readFile(path));
+      }
+      console.log(JSON.stringify(result.metafile.outputs, null, 2));
     }
-    console.log(JSON.stringify(result.metafile.outputs, null, 2));
-  }
   }
 }

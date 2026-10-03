@@ -303,6 +303,49 @@ pub fn process_file(
     })
 }
 
+fn retained_prefix_lines(
+    path: &Path,
+    offset: u64,
+    history_path: &Path,
+    state: &CursorState,
+    repo_override: &str,
+    has_item_stream: bool,
+) -> Result<Vec<RawBackfillLine>, AdapterError> {
+    let history_source = same_path(path, history_path)?;
+    let mut context = NormalizeContext {
+        has_item_stream,
+        ..NormalizeContext::default()
+    };
+    let mut reader = BufReader::new(File::open(path)?.take(offset));
+    let mut lines = Vec::new();
+    let mut consumed = 0u64;
+    while consumed < offset {
+        let mut bytes = Vec::new();
+        let count = reader.read_until(b'\n', &mut bytes)?;
+        if count == 0 || !bytes.ends_with(b"\n") {
+            return Err(AdapterError::State(
+                "legacy cursor is not on a complete frame".into(),
+            ));
+        }
+        consumed += count as u64;
+        let derived = derive_line(
+            &bytes,
+            lines.len() as u64,
+            &mut context,
+            history_source,
+            state.session_repos(),
+            repo_override,
+        );
+        lines.push(RawBackfillLine {
+            bytes,
+            session: derived.session,
+            sequence: derived.sequence,
+            timestamp: derived.timestamp,
+        });
+    }
+    Ok(lines)
+}
+
 fn process_file_until(
     path: &Path,
     state: &mut CursorState,
@@ -329,7 +372,25 @@ fn process_file_until(
     let prefix_matches = saved.offset == 0
         || saved.prefix_sha256.as_deref()
             == Some(format!("{:x}", prefix.clone().finalize()).as_str());
-    if saved.offset > size || !prefix_matches {
+    let prefix_digest = format!("{:x}", prefix.clone().finalize());
+    if saved.offset > 0
+        && saved.offset <= size
+        && prefix_matches
+        && !store.has_capture_source_custody(CARRIER, &key)?
+    {
+        let lines = retained_prefix_lines(
+            path,
+            saved.offset,
+            options.history_path,
+            state,
+            options.repo_override,
+            saved.context().has_item_stream,
+        )?;
+        store.adopt_retained_capture_prefix(CARRIER, &key, &lines, saved.offset, &prefix_digest)?;
+    }
+    let custody_matches =
+        store.capture_source_cursor_matches(CARRIER, &key, saved.offset, &prefix_digest)?;
+    if saved.offset > size || !prefix_matches || !custody_matches {
         store.reset_capture_source(CARRIER, &key)?;
         saved = state::FileCursor::default();
         prefix = Sha256::new();
@@ -340,6 +401,40 @@ fn process_file_until(
     }
     let mut context = saved.context();
     let history_source = same_path(path, options.history_path)?;
+    // Whether this file carries the `item_completed` item stream decides
+    // whether the legacy `response_item`/`message` mirror still projects
+    // (see `NormalizeContext::has_item_stream`). That decision has to be
+    // known for the *whole* file before any of its lines are normalized:
+    // Codex writes a harness-injected mirror message (role `user`, no item
+    // stream counterpart at all, e.g. `<recommended_plugins>`) before the
+    // first `item_completed` line of the same session, so a flag latched
+    // only once that first line is reached would miss it. A history file
+    // never carries this stream and is skipped; once latched true the flag
+    // is never rechecked, and once a file is fully consumed there is no new
+    // line left for the flag to change the outcome of, so neither case pays
+    // for a rescan.
+    if !history_source
+        && !context.has_item_stream
+        && saved.offset < size
+        && file_uses_item_stream_prefix(path, size)?
+    {
+        // A lost cursor can coexist with a previously captured source. Its
+        // explicit ownership is still authoritative even when offset is zero.
+        store.reset_capture_source(CARRIER, &key)?;
+        if saved.offset > 0 {
+            // The earlier mirror was projected before the native item stream
+            // existed. Reconcile only this source's projection and replay the
+            // complete file using the now-authoritative item dispatch.
+            saved = state::FileCursor::default();
+            context = saved.context();
+            prefix = Sha256::new();
+            if persist_state {
+                state.put_file(key.clone(), saved.clone());
+                save_state(options.state_path, state)?;
+            }
+        }
+        context.has_item_stream = true;
+    }
     if saved.offset > 0 && !history_source && context.parent_session_id.is_none() {
         let mut first = Vec::new();
         BufReader::new(File::open(path)?).read_until(b'\n', &mut first)?;
@@ -372,21 +467,6 @@ fn process_file_until(
     let mut next_line_ordinal = saved.next_line_ordinal;
     let mut last_projected_sequence = saved.last_projected_sequence.clone();
     let mut consumed = 0;
-    // Whether this file carries the `item_completed` item stream decides
-    // whether the legacy `response_item`/`message` mirror still projects
-    // (see `NormalizeContext::has_item_stream`). That decision has to be
-    // known for the *whole* file before any of its lines are normalized:
-    // Codex writes a harness-injected mirror message (role `user`, no item
-    // stream counterpart at all, e.g. `<recommended_plugins>`) before the
-    // first `item_completed` line of the same session, so a flag latched
-    // only once that first line is reached would miss it. A history file
-    // never carries this stream and is skipped; once latched true the flag
-    // is never rechecked, and once a file is fully consumed there is no new
-    // line left for the flag to change the outcome of, so neither case pays
-    // for a rescan.
-    if !history_source && !context.has_item_stream && saved.offset < size {
-        context.has_item_stream = file_uses_item_stream_prefix(path, size)?;
-    }
     let mut reader = BufReader::new(File::open(path)?);
     reader.seek(io::SeekFrom::Start(saved.offset))?;
 
@@ -493,6 +573,12 @@ fn process_file_until(
         if !context.session_id().is_empty() && !context.repo().is_empty() {
             state.remember_repo(context.session_id(), context.repo(), context.repo_source());
         }
+        store.checkpoint_capture_source(
+            CARRIER,
+            &key,
+            saved.offset,
+            &format!("{:x}", prefix.clone().finalize()),
+        )?;
         state.put_file(key.clone(), saved.clone());
         if persist_state {
             save_state(options.state_path, state)?;
@@ -500,6 +586,12 @@ fn process_file_until(
         consumed += batch_count;
     }
 
+    store.checkpoint_capture_source(
+        CARRIER,
+        &key,
+        saved.offset,
+        &format!("{:x}", prefix.clone().finalize()),
+    )?;
     state.put_file(key, saved);
     Ok(consumed)
 }
@@ -638,7 +730,7 @@ fn file_uses_item_stream_prefix(path: &Path, limit: u64) -> Result<bool, Adapter
     let mut line = Vec::new();
     loop {
         line.clear();
-        if reader.read_until(b'\n', &mut line)? == 0 {
+        if reader.read_until(b'\n', &mut line)? == 0 || !line.ends_with(b"\n") {
             return Ok(false);
         }
         let Ok(record) = serde_json::from_slice::<Value>(&line) else {

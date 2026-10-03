@@ -671,18 +671,30 @@ var __semonUIShared = (() => {
       previous?.(vnode);
       if (typeof vnode.type === "string") {
         for (const key of Object.keys(vnode.props)) {
-          if (["dangerouslySetInnerHTML", "style", "title"].includes(key)) throw new Error(`Forbidden DOM prop: ${key}`);
+          if (["dangerouslySetInnerHTML", "style", "title"].includes(key))
+            throw new Error(`Forbidden DOM prop: ${key}`);
           const value = vnode.props[key];
           const externalLink = key === "href" && vnode.type === "a" && externalUrl(value) && vnode.props.target === "_blank" && vnode.props.rel === "noopener noreferrer";
-          if (["href", "src", "action"].includes(key) && value != null && !safePath(value) && !externalLink) throw new Error(`Unsafe DOM path: ${key}`);
-          if (/^on/i.test(key) && typeof value === "string") throw new Error(`Inline DOM handler: ${key}`);
+          if (["href", "src", "action"].includes(key) && value != null && !safePath(value) && !externalLink)
+            throw new Error(`Unsafe DOM path: ${key}`);
+          if (/^on/i.test(key) && typeof value === "string")
+            throw new Error(`Inline DOM handler: ${key}`);
         }
       }
     };
   }
 
   // src/lib/layout.ts
-  var properties = ["width", "height", "left", "top", "margin-left", "min-width", "max-height", "max-width"];
+  var properties = [
+    "width",
+    "height",
+    "left",
+    "top",
+    "margin-left",
+    "min-width",
+    "max-height",
+    "max-width"
+  ];
   var serial = 0;
   function createMeasuredLayout() {
     const sheet2 = new CSSStyleSheet(), prefix = "semon-geometry-" + ++serial + "-";
@@ -697,11 +709,15 @@ var __semonUIShared = (() => {
       },
       className(property, value, unit) {
         if (disposed) throw new Error("Measured layout is destroyed");
-        if (!properties.includes(property) || !Number.isFinite(value) || Math.abs(value) > 1e8 || !["px", "%"].includes(unit)) throw new Error("Invalid measured geometry");
+        if (!properties.includes(property) || !Number.isFinite(value) || Math.abs(value) > 1e8 || !["px", "%"].includes(unit))
+          throw new Error("Invalid measured geometry");
         const key = property + ":" + value + unit, existing = rules.get(key);
         if (existing) return existing;
         const name = prefix + rules.size;
-        sheet2.insertRule("." + name + "{" + property + ":" + value + unit + "}", sheet2.cssRules.length);
+        sheet2.insertRule(
+          "." + name + "{" + property + ":" + value + unit + "}",
+          sheet2.cssRules.length
+        );
         rules.set(key, name);
         return name;
       },
@@ -716,9 +732,27 @@ var __semonUIShared = (() => {
   }
 
   // src/lib/select.tsx
-  var ICON = { chevron: "M6 9l6 6 6-6", check: "M5 12.5l4.5 4.5L19 7", search: "M11 18a7 7 0 1 1 0-14 7 7 0 0 1 0 14zM20 20l-4-4", close: "M6 6l12 12M18 6L6 18" };
+  var ICON = {
+    chevron: "M6 9l6 6 6-6",
+    check: "M5 12.5l4.5 4.5L19 7",
+    search: "M11 18a7 7 0 1 1 0-14 7 7 0 0 1 0 14zM20 20l-4-4",
+    close: "M6 6l12 12M18 6L6 18"
+  };
   function Icon({ path, className }) {
-    return /* @__PURE__ */ u3("svg", { class: className, viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", "stroke-width": "2", "stroke-linecap": "round", "stroke-linejoin": "round", "aria-hidden": "true", children: /* @__PURE__ */ u3("path", { d: path }) });
+    return /* @__PURE__ */ u3(
+      "svg",
+      {
+        class: className,
+        viewBox: "0 0 24 24",
+        fill: "none",
+        stroke: "currentColor",
+        "stroke-width": "2",
+        "stroke-linecap": "round",
+        "stroke-linejoin": "round",
+        "aria-hidden": "true",
+        children: /* @__PURE__ */ u3("path", { d: path })
+      }
+    );
   }
   var serial2 = 0;
   var sheet = null;
@@ -744,7 +778,8 @@ var __semonUIShared = (() => {
       return;
     }
     const room = sheetList.scrollHeight - sheetList.clientHeight, delta = event instanceof WheelEvent ? event.deltaY : event instanceof TouchEvent ? touchY - (event.touches[0]?.clientY ?? touchY) : 0;
-    if (room <= 1 || delta > 0 && sheetList.scrollTop >= room - 1 || delta < 0 && sheetList.scrollTop <= 0) event.preventDefault();
+    if (room <= 1 || delta > 0 && sheetList.scrollTop >= room - 1 || delta < 0 && sheetList.scrollTop <= 0)
+      event.preventDefault();
   }
   function lock(list) {
     sheetList = list;
@@ -778,61 +813,141 @@ var __semonUIShared = (() => {
     const descendant = () => active === null ? void 0 : listId + "-" + options.findIndex((o4) => o4.value === active);
     function paintTrigger() {
       const text = options.find((o4) => o4.value === value)?.label ?? "";
-      R(/* @__PURE__ */ u3("button", { class: "sh-select-trigger", type: "button", role: "combobox", "aria-haspopup": "listbox", "aria-expanded": !!opened, "aria-controls": listId, "aria-labelledby": (label ? labelId + " " : "") + valueId, "aria-activedescendant": owner() === trigger ? descendant() : void 0, ref: (node) => {
-        trigger = node;
-      }, onClick: (event) => {
-        if (event.currentTarget.isConnected && !disposed) {
-          if (opened) close();
-          else openList();
-        }
-      }, onKeyDown: onKey, onKeyUp: (event) => {
-        if (event.key === " ") event.preventDefault();
-      }, children: [
-        /* @__PURE__ */ u3("span", { class: "sh-select-text", "data-tip-clipped": "", "data-tip": (label ? label + ": " : "") + text, children: [
-          /* @__PURE__ */ u3("span", { id: labelId, class: "sh-select-label", children: label ? label + ":" : "" }),
-          label ? " " : "",
-          /* @__PURE__ */ u3("span", { id: valueId, class: "sh-select-value", children: text })
-        ] }),
-        /* @__PURE__ */ u3(Icon, { path: ICON.chevron, className: "sh-select-chevron" })
-      ] }), triggerRoot);
+      R(
+        /* @__PURE__ */ u3(
+          "button",
+          {
+            class: "sh-select-trigger",
+            type: "button",
+            role: "combobox",
+            "aria-haspopup": "listbox",
+            "aria-expanded": !!opened,
+            "aria-controls": listId,
+            "aria-labelledby": (label ? labelId + " " : "") + valueId,
+            "aria-activedescendant": owner() === trigger ? descendant() : void 0,
+            ref: (node) => {
+              trigger = node;
+            },
+            onClick: (event) => {
+              if (event.currentTarget.isConnected && !disposed) {
+                if (opened) close();
+                else openList();
+              }
+            },
+            onKeyDown: onKey,
+            onKeyUp: (event) => {
+              if (event.key === " ") event.preventDefault();
+            },
+            children: [
+              /* @__PURE__ */ u3(
+                "span",
+                {
+                  class: "sh-select-text",
+                  "data-tip-clipped": "",
+                  "data-tip": (label ? label + ": " : "") + text,
+                  children: [
+                    /* @__PURE__ */ u3("span", { id: labelId, class: "sh-select-label", children: label ? label + ":" : "" }),
+                    label ? " " : "",
+                    /* @__PURE__ */ u3("span", { id: valueId, class: "sh-select-value", children: text })
+                  ]
+                }
+              ),
+              /* @__PURE__ */ u3(Icon, { path: ICON.chevron, className: "sh-select-chevron" })
+            ]
+          }
+        ),
+        triggerRoot
+      );
     }
     function paintList() {
       const items = shown();
-      R(/* @__PURE__ */ u3(S, { children: [
-        /* @__PURE__ */ u3("div", { class: "sh-select-search", hidden: !opened?.search, children: [
-          /* @__PURE__ */ u3(Icon, { path: ICON.search }),
-          /* @__PURE__ */ u3("input", { type: "search", autoComplete: "off", spellcheck: false, placeholder: "Search", "aria-label": "Search " + (label || "options"), role: "combobox", "aria-autocomplete": "list", "aria-expanded": "true", "aria-controls": listId, "aria-activedescendant": owner() === search ? descendant() : void 0, value: query, ref: (node) => {
-            search = node;
-          }, onKeyDown: onKey, onInput: (event) => {
-            if (!event.currentTarget.isConnected || disposed) return;
-            query = event.currentTarget.value;
-            paintList();
-            settle();
-            position();
-          } })
+      R(
+        /* @__PURE__ */ u3(S, { children: [
+          /* @__PURE__ */ u3("div", { class: "sh-select-search", hidden: !opened?.search, children: [
+            /* @__PURE__ */ u3(Icon, { path: ICON.search }),
+            /* @__PURE__ */ u3(
+              "input",
+              {
+                type: "search",
+                autoComplete: "off",
+                spellcheck: false,
+                placeholder: "Search",
+                "aria-label": "Search " + (label || "options"),
+                role: "combobox",
+                "aria-autocomplete": "list",
+                "aria-expanded": "true",
+                "aria-controls": listId,
+                "aria-activedescendant": owner() === search ? descendant() : void 0,
+                value: query,
+                ref: (node) => {
+                  search = node;
+                },
+                onKeyDown: onKey,
+                onInput: (event) => {
+                  if (!event.currentTarget.isConnected || disposed) return;
+                  query = event.currentTarget.value;
+                  paintList();
+                  settle();
+                  position();
+                }
+              }
+            )
+          ] }),
+          /* @__PURE__ */ u3(
+            "div",
+            {
+              class: "sh-select-list",
+              id: listId,
+              role: "listbox",
+              "aria-label": label || void 0,
+              tabIndex: -1,
+              "aria-activedescendant": owner() === list ? descendant() : void 0,
+              ref: (node) => {
+                list = node;
+              },
+              onKeyDown: onKey,
+              children: items.map((option) => /* @__PURE__ */ u3(
+                "div",
+                {
+                  class: "sh-select-option" + (option.value === active ? " sh-active" : ""),
+                  id: listId + "-" + options.indexOf(option),
+                  "data-value": option.value,
+                  role: "option",
+                  "aria-selected": option.value === value,
+                  onPointerDown: (event) => event.preventDefault(),
+                  onPointerMove: (event) => {
+                    if (event.currentTarget.isConnected && option.value !== active)
+                      setActive(option.value, false);
+                  },
+                  onClick: (event) => {
+                    if (event.currentTarget.isConnected && !disposed) choose(option.value);
+                  },
+                  children: [
+                    /* @__PURE__ */ u3(Icon, { path: ICON.check, className: "sh-select-check" }),
+                    /* @__PURE__ */ u3("span", { class: "sh-select-option-text", children: option.label })
+                  ]
+                },
+                option.value
+              ))
+            }
+          ),
+          /* @__PURE__ */ u3("div", { class: "sh-select-empty", role: "status", hidden: items.length > 0, children: "No matches" })
         ] }),
-        /* @__PURE__ */ u3("div", { class: "sh-select-list", id: listId, role: "listbox", "aria-label": label || void 0, tabIndex: -1, "aria-activedescendant": owner() === list ? descendant() : void 0, ref: (node) => {
-          list = node;
-        }, onKeyDown: onKey, children: items.map((option) => /* @__PURE__ */ u3("div", { class: "sh-select-option" + (option.value === active ? " sh-active" : ""), id: listId + "-" + options.indexOf(option), "data-value": option.value, role: "option", "aria-selected": option.value === value, onPointerDown: (event) => event.preventDefault(), onPointerMove: (event) => {
-          if (event.currentTarget.isConnected && option.value !== active) setActive(option.value, false);
-        }, onClick: (event) => {
-          if (event.currentTarget.isConnected && !disposed) choose(option.value);
-        }, children: [
-          /* @__PURE__ */ u3(Icon, { path: ICON.check, className: "sh-select-check" }),
-          /* @__PURE__ */ u3("span", { class: "sh-select-option-text", children: option.label })
-        ] }, option.value)) }),
-        /* @__PURE__ */ u3("div", { class: "sh-select-empty", role: "status", hidden: items.length > 0, children: "No matches" })
-      ] }), parts);
+        parts
+      );
     }
     function setActive(next, scroll = true) {
       active = next;
       paintList();
       paintTrigger();
-      if (scroll && active !== null) document.getElementById(descendant())?.scrollIntoView({ block: "nearest" });
+      if (scroll && active !== null)
+        document.getElementById(descendant())?.scrollIntoView({ block: "nearest" });
     }
     function settle() {
       const items = shown();
-      setActive(items.some((o4) => o4.value === active) ? active : items.some((o4) => o4.value === value) ? value : items[0]?.value ?? null);
+      setActive(
+        items.some((o4) => o4.value === active) ? active : items.some((o4) => o4.value === value) ? value : items[0]?.value ?? null
+      );
     }
     function move(to) {
       const items = shown();
@@ -842,7 +957,12 @@ var __semonUIShared = (() => {
     }
     function geometry(left, top, min, max) {
       layout.reset();
-      popClass = [layout.className("left", left, "px"), layout.className("top", top, "px"), layout.className("min-width", min, "px"), ...max === void 0 ? [] : [layout.className("max-height", max, "px")]].join(" ");
+      popClass = [
+        layout.className("left", left, "px"),
+        layout.className("top", top, "px"),
+        layout.className("min-width", min, "px"),
+        ...max === void 0 ? [] : [layout.className("max-height", max, "px")]
+      ].join(" ");
       pop.className = "sh-select-pop " + popClass;
     }
     function position() {
@@ -851,7 +971,12 @@ var __semonUIShared = (() => {
       geometry(0, 0, min);
       const bar = document.getElementById("topbar"), floor = Math.max(margin, bar ? bar.getBoundingClientRect().bottom + gap : 0), width = Math.min(pop.offsetWidth, vw - 2 * margin), height = pop.offsetHeight, below = vh - r3.bottom - gap - margin, above = r3.top - gap - floor;
       const up = height > below && above > below, room = Math.max(48, Math.min(up ? above : below, 360));
-      geometry(Math.max(margin, Math.min(r3.left, vw - width - margin)), Math.max(floor, up ? r3.top - gap - Math.min(height, room) : r3.bottom + gap), min, room);
+      geometry(
+        Math.max(margin, Math.min(r3.left, vw - width - margin)),
+        Math.max(floor, up ? r3.top - gap - Math.min(height, room) : r3.bottom + gap),
+        min,
+        room
+      );
       pop.dataset.side = up ? "top" : "bottom";
     }
     const outside = (event) => {
@@ -873,10 +998,13 @@ var __semonUIShared = (() => {
         dialog.setAttribute("aria-label", label || "Options");
         const head = document.createElement("div");
         head.className = "sh-select-sheet-h";
-        R(/* @__PURE__ */ u3(S, { children: [
-          /* @__PURE__ */ u3("span", { class: "sh-select-sheet-title", children: label }),
-          /* @__PURE__ */ u3("button", { class: "sh-select-close", type: "button", "aria-label": "Close", onClick: () => close(), children: /* @__PURE__ */ u3(Icon, { path: ICON.close }) })
-        ] }), head);
+        R(
+          /* @__PURE__ */ u3(S, { children: [
+            /* @__PURE__ */ u3("span", { class: "sh-select-sheet-title", children: label }),
+            /* @__PURE__ */ u3("button", { class: "sh-select-close", type: "button", "aria-label": "Close", onClick: () => close(), children: /* @__PURE__ */ u3(Icon, { path: ICON.close }) })
+          ] }),
+          head
+        );
         dialog.append(head, parts);
         root.append(dialog);
         dialog.addEventListener("click", (event) => {
@@ -891,10 +1019,12 @@ var __semonUIShared = (() => {
           history.pushState({ ...history.state, shSelect: n3 }, "");
           swallow = 0;
           opened.entry = true;
-          sheet = { popped() {
-            if (opened) opened.entry = false;
-            close();
-          } };
+          sheet = {
+            popped() {
+              if (opened) opened.entry = false;
+              close();
+            }
+          };
         } catch {
         }
         settle();
@@ -956,7 +1086,9 @@ var __semonUIShared = (() => {
       typed = now - typedAt > 500 ? ch : typed + ch;
       typedAt = now;
       const items = shown(), at = items.findIndex((o4) => o4.value === active), cycle = [...typed].every((c4) => c4 === typed[0]), key = cycle ? typed[0] : typed, from = cycle ? at + 1 : Math.max(0, at);
-      const hit = [...items.slice(from), ...items.slice(0, from)].find((o4) => o4.label.toLowerCase().startsWith(key));
+      const hit = [...items.slice(from), ...items.slice(0, from)].find(
+        (o4) => o4.label.toLowerCase().startsWith(key)
+      );
       if (hit) setActive(hit.value);
     }
     function toSearch(text) {
@@ -968,7 +1100,8 @@ var __semonUIShared = (() => {
       position();
     }
     function onKey(event) {
-      if (disposed || !(event.currentTarget instanceof HTMLElement) || !event.currentTarget.isConnected) return;
+      if (disposed || !(event.currentTarget instanceof HTMLElement) || !event.currentTarget.isConnected)
+        return;
       const key = event.key, inField = event.target === search, printable = key.length === 1 && !event.ctrlKey && !event.metaKey && !event.altKey;
       if (!opened) {
         if (["ArrowDown", "ArrowUp", "Enter", " "].includes(key)) {
@@ -1032,40 +1165,55 @@ var __semonUIShared = (() => {
       if (event.target !== search) event.preventDefault();
     });
     root.addEventListener("focusout", (event) => {
-      if (opened && !opened.sheet && (!(event.relatedTarget instanceof Node) || !root.contains(event.relatedTarget))) close(false);
+      if (opened && !opened.sheet && (!(event.relatedTarget instanceof Node) || !root.contains(event.relatedTarget)))
+        close(false);
     });
-    const api = { el: root, get value() {
-      return value;
-    }, get options() {
-      return options.map((option) => ({ ...option }));
-    }, get isOpen() {
-      return !!opened;
-    }, setOptions(next) {
-      if (disposed) return;
-      options = next.map((option) => ({ value: String(option.value), label: String(option.label ?? option.value) }));
-      paintTrigger();
-      if (opened) {
-        paintList();
-        settle();
-        position();
+    const api = {
+      el: root,
+      get value() {
+        return value;
+      },
+      get options() {
+        return options.map((option) => ({ ...option }));
+      },
+      get isOpen() {
+        return !!opened;
+      },
+      setOptions(next) {
+        if (disposed) return;
+        options = next.map((option) => ({
+          value: String(option.value),
+          label: String(option.label ?? option.value)
+        }));
+        paintTrigger();
+        if (opened) {
+          paintList();
+          settle();
+          position();
+        }
+      },
+      setValue(next) {
+        if (disposed) return;
+        value = String(next ?? "");
+        paintTrigger();
+        if (opened) paintList();
+      },
+      open: openList,
+      close,
+      focus() {
+        trigger?.focus();
+      },
+      destroy() {
+        if (disposed) return;
+        close(false);
+        disposed = true;
+        if (sizing !== null) cancelAnimationFrame(sizing);
+        R(null, triggerRoot);
+        R(null, parts);
+        layout.destroy();
+        root.remove();
       }
-    }, setValue(next) {
-      if (disposed) return;
-      value = String(next ?? "");
-      paintTrigger();
-      if (opened) paintList();
-    }, open: openList, close, focus() {
-      trigger?.focus();
-    }, destroy() {
-      if (disposed) return;
-      close(false);
-      disposed = true;
-      if (sizing !== null) cancelAnimationFrame(sizing);
-      R(null, triggerRoot);
-      R(null, parts);
-      layout.destroy();
-      root.remove();
-    } };
+    };
     root.semonSelect = api;
     api.setOptions(config.options ?? []);
     paintList();
@@ -1073,10 +1221,18 @@ var __semonUIShared = (() => {
   }
   function enhanceSelect(native) {
     if (native.dataset.selectReady !== void 0) return null;
-    const api = createSelect({ label: native.dataset.label ?? native.getAttribute("aria-label") ?? "", value: native.value, options: [...native.options].map((option) => ({ value: option.value, label: option.textContent?.trim() ?? "" })), onChange(value) {
-      native.value = value;
-      native.dispatchEvent(new Event("change", { bubbles: true }));
-    } });
+    const api = createSelect({
+      label: native.dataset.label ?? native.getAttribute("aria-label") ?? "",
+      value: native.value,
+      options: [...native.options].map((option) => ({
+        value: option.value,
+        label: option.textContent?.trim() ?? ""
+      })),
+      onChange(value) {
+        native.value = value;
+        native.dispatchEvent(new Event("change", { bubbles: true }));
+      }
+    });
     native.dataset.selectReady = "";
     native.hidden = true;
     native.after(api.el);
@@ -1155,8 +1311,17 @@ var __semonUIShared = (() => {
       const size = tip.getBoundingClientRect(), need = size.height + GAP + MARGIN, room = { top: box.top, bottom: height - box.bottom };
       const side = room.top >= need ? "top" : room.bottom >= need ? "bottom" : room.top >= room.bottom ? "top" : "bottom";
       const top = side === "top" ? box.top - size.height - GAP : box.bottom + GAP;
-      const left = Math.min(Math.max(box.left + box.width / 2 - size.width / 2, MARGIN), Math.max(MARGIN, width - MARGIN - size.width));
-      tip.className = "tip " + maxWidth + " " + layout.className("left", Math.round(left), "px") + " " + layout.className("top", Math.round(Math.min(Math.max(top, MARGIN), Math.max(MARGIN, height - MARGIN - size.height))), "px");
+      const left = Math.min(
+        Math.max(box.left + box.width / 2 - size.width / 2, MARGIN),
+        Math.max(MARGIN, width - MARGIN - size.width)
+      );
+      tip.className = "tip " + maxWidth + " " + layout.className("left", Math.round(left), "px") + " " + layout.className(
+        "top",
+        Math.round(
+          Math.min(Math.max(top, MARGIN), Math.max(MARGIN, height - MARGIN - size.height))
+        ),
+        "px"
+      );
       tip.dataset.side = side;
     }
     function link(node, text) {
@@ -1200,7 +1365,12 @@ var __semonUIShared = (() => {
           place(target);
         }
       });
-      watcher.observe(document.documentElement, { childList: true, subtree: true, attributes: true, attributeFilter: ["data-tip", "hidden"] });
+      watcher.observe(document.documentElement, {
+        childList: true,
+        subtree: true,
+        attributes: true,
+        attributeFilter: ["data-tip", "hidden"]
+      });
     }
     function unwatch() {
       watcher?.disconnect();
@@ -1254,10 +1424,11 @@ var __semonUIShared = (() => {
     function schedule(node) {
       target = node;
       if (performance.now() - closedAt < SKIP_WINDOW) show(node, true);
-      else timer = window.setTimeout(() => {
-        const now = shown(node) ? node : successor();
-        if (now) show(now, false);
-      }, SHOW_DELAY);
+      else
+        timer = window.setTimeout(() => {
+          const now = shown(node) ? node : successor();
+          if (now) show(now, false);
+        }, SHOW_DELAY);
     }
     document.addEventListener("pointerover", (event) => {
       pointerType = event.pointerType || "mouse";
@@ -1271,25 +1442,33 @@ var __semonUIShared = (() => {
       hide(true);
       if (node) schedule(node);
     });
-    document.addEventListener("pointermove", (event) => {
-      if (event.pointerType === "touch") return;
-      const over = dismissed ? tipOf(event.target) : null;
-      if (over && dismissed && isDismissed(over)) {
-        dismissed.node = over;
-        dismissed.x = event.clientX;
-        dismissed.y = event.clientY;
-      }
-      pointer = { x: event.clientX, y: event.clientY };
-    }, { capture: true, passive: true });
+    document.addEventListener(
+      "pointermove",
+      (event) => {
+        if (event.pointerType === "touch") return;
+        const over = dismissed ? tipOf(event.target) : null;
+        if (over && dismissed && isDismissed(over)) {
+          dismissed.node = over;
+          dismissed.x = event.clientX;
+          dismissed.y = event.clientY;
+        }
+        pointer = { x: event.clientX, y: event.clientY };
+      },
+      { capture: true, passive: true }
+    );
     document.addEventListener("pointerout", (event) => {
       if (!event.relatedTarget && event.pointerType !== "touch") hide(true);
     });
-    document.addEventListener("pointerdown", (event) => {
-      pointerType = event.pointerType || "mouse";
-      if (event.pointerType === "touch") return;
-      dismiss();
-      hide();
-    }, true);
+    document.addEventListener(
+      "pointerdown",
+      (event) => {
+        pointerType = event.pointerType || "mouse";
+        if (event.pointerType === "touch") return;
+        dismiss();
+        hide();
+      },
+      true
+    );
     document.addEventListener("focusin", (event) => {
       const focused = event.target, node = tipOf(focused);
       if (!node || !focusVisible(focused)) return;
@@ -1303,30 +1482,43 @@ var __semonUIShared = (() => {
     document.addEventListener("focusout", (event) => {
       if (target && tipOf(event.target) === target) hide(true);
     });
-    document.addEventListener("keydown", (event) => {
-      if (event.key !== "Escape" || !target) return;
-      const inDialog = opened && !!target.closest?.("dialog[open]");
-      dismiss();
-      hide();
-      if (inDialog) {
-        event.preventDefault();
-        event.stopPropagation();
-      }
-    }, true);
-    document.addEventListener("click", (event) => {
-      if (pointerType !== "touch") return;
-      const node = tipOf(event.target), wasOpen = opened && target === node;
-      hide();
-      if (!node || wasOpen || event.target instanceof Element && event.target.closest(INTERACTIVE) || node.closest(INTERACTIVE)) return;
-      target = node;
-      origin = "touch";
-      show(node, true);
-    }, true);
-    window.addEventListener("scroll", () => {
-      if (!opened || !target || !anchor) return;
-      const box = target.getBoundingClientRect();
-      if (Math.abs(box.top - anchor.top) > 0.5 || Math.abs(box.left - anchor.left) > 0.5) hide();
-    }, { capture: true, passive: true });
+    document.addEventListener(
+      "keydown",
+      (event) => {
+        if (event.key !== "Escape" || !target) return;
+        const inDialog = opened && !!target.closest?.("dialog[open]");
+        dismiss();
+        hide();
+        if (inDialog) {
+          event.preventDefault();
+          event.stopPropagation();
+        }
+      },
+      true
+    );
+    document.addEventListener(
+      "click",
+      (event) => {
+        if (pointerType !== "touch") return;
+        const node = tipOf(event.target), wasOpen = opened && target === node;
+        hide();
+        if (!node || wasOpen || event.target instanceof Element && event.target.closest(INTERACTIVE) || node.closest(INTERACTIVE))
+          return;
+        target = node;
+        origin = "touch";
+        show(node, true);
+      },
+      true
+    );
+    window.addEventListener(
+      "scroll",
+      () => {
+        if (!opened || !target || !anchor) return;
+        const box = target.getBoundingClientRect();
+        if (Math.abs(box.top - anchor.top) > 0.5 || Math.abs(box.left - anchor.left) > 0.5) hide();
+      },
+      { capture: true, passive: true }
+    );
     window.addEventListener("resize", () => hide());
     window.addEventListener("blur", () => hide());
     document.addEventListener("visibilitychange", () => {
@@ -1350,291 +1542,6 @@ globalThis.__semonUIShared = __semonUIShared;
 // Generated by ui/build.mjs; edit sources and run npm --prefix ui run build.
 "use strict";
 (() => {
-  // src/domain/format.ts
-  var clock = (t, NOW) => {
-    const d = new Date(t), n = new Date(NOW);
-    const hm = String(d.getHours()).padStart(2, "0") + ":" + String(d.getMinutes()).padStart(2, "0");
-    return d.toDateString() === n.toDateString() ? hm : d.toLocaleDateString(void 0, { weekday: "short" }) + " " + hm;
-  };
-  var ago = (t, NOW) => {
-    const d = Math.floor((NOW - t) / 6e4);
-    return d < 1 ? "now" : d < 60 ? d + "m" : d < 2880 ? Math.floor(d / 60) + "h" : Math.floor(d / 1440) + "d";
-  };
-  var dur = (a, b, NOW) => {
-    const d = Math.max(0, Math.floor(((b ?? NOW) - a) / 6e4));
-    return d >= 1440 ? Math.floor(d / 1440) + "d " + Math.floor(d % 1440 / 60) + "h" : d >= 60 ? Math.floor(d / 60) + "h " + d % 60 + "m" : d + "m";
-  };
-  var tok = (m) => m >= 1 ? m.toFixed(1) + "M" : Math.round(m * 1e3) + "k";
-  var shortName = (name) => {
-    const h2 = String(name).split(".")[0];
-    return h2.length > 14 ? h2.slice(0, 14) + "\u2026" : h2;
-  };
-  var machineShorts = (names) => {
-    const forms = (id, full) => {
-      const first = String(full).split(".")[0];
-      return [shortName(first), first.length > 14 ? first.slice(0, 6) + "\u2026" + first.slice(-7) : first, first, id];
-    };
-    const opts = new Map([...names].map(([id, full]) => [id, forms(id, full)])), level = new Map([...opts.keys()].map((id) => [id, 0]));
-    for (let step = 0; step < 3; step++) {
-      const groups = /* @__PURE__ */ new Map();
-      for (const [id, o] of opts) {
-        const l = o[level.get(id)];
-        if (!groups.has(l)) groups.set(l, []);
-        groups.get(l).push(id);
-      }
-      let clash = false;
-      for (const ids of groups.values()) if (ids.length > 1) {
-        clash = true;
-        for (const id of ids) level.set(id, level.get(id) + 1);
-      }
-      if (!clash) break;
-    }
-    return new Map([...opts].map(([id, o]) => [id, o[level.get(id)]]));
-  };
-  var shortModel = (model2) => String(model2 ?? "Unknown model").replace(/^gpt-(\d+\.\d+)-(.+)$/i, "$2 $1").replace(/^gpt-\d+-/i, "").replace(/^claude-/i, "").replace(/^(opus|sonnet|haiku)-(\d+)-(\d+)$/i, "$1 $2.$3").replace(/^(opus|sonnet|haiku)-(\d+)\.(\d+)$/i, "$1 $2.$3").replace(/^(opus|sonnet|haiku)-(\d+)$/i, "$1 $2");
-  var clean = (t) => t.replace(/[`*]/g, "");
-  var liveUrl = (u) => {
-    try {
-      return /^https?:$/.test(new URL(u).protocol) && /^https?:\/\//i.test(u) ? u : null;
-    } catch {
-      return null;
-    }
-  };
-  var preview = (t) => t.split("\n").map((l) => l.replace(/^\s*(#{1,6}\s+|>\s?|[-*]\s+|\d{1,3}[.)]\s+)/, "").trim()).filter((l) => l && !/^\s*\|?\s*:?-{2,}/.test(l)).join(" ");
-  var compactCount = (n) => {
-    if (n < 1e3) return String(n);
-    if (n < 1e4) return +(n / 1e3).toFixed(1) + "k";
-    const k = Math.round(n / 1e3);
-    return k < 1e3 ? k + "k" : +(n / 1e6).toFixed(1) + "M";
-  };
-  var niceStep = (max) => [0.25, 0.5, 1, 2, 5, 10, 20, 50, 100, 200, 500].find((x) => x * 3 >= max) ?? 1e3;
-  function timeText(ms) {
-    const mins = Math.max(0, Math.round(ms / 6e4)), days = Math.floor(mins / 1440), hours = Math.floor(mins % 1440 / 60), rem = mins % 60;
-    return days ? days + "d " + hours + "h" : hours ? hours + "h " + rem + "m" : mins + "m";
-  }
-  var countText = (n) => Math.round(n).toLocaleString();
-  var hLabel = (n) => n ? +n.toFixed(2) + " h" : "0";
-
-  // src/domain/calculations.ts
-  function createDomain(state2, now, SEEN_RESULTS) {
-    const { sessions: SESS, machines: MACHINE, handoffs: H, turns: TURNS, turn: TURN, starts: STARTS, holds: HOLDS, handoff: HID, transcriptMeta: TXM } = state2;
-    const clock2 = (at) => clock(at, now());
-    const nameOf = (id) => id === "you" ? "You" : SESS[id].name;
-    const hcls = (id) => id === "you" ? "h-you" : "h-" + SESS[id].harness;
-    const where = (s) => s.repo ? s.repo + (s.branch && s.branch !== "main" && s.branch !== s.name ? " \xB7 " + s.branch : "") : "No repo";
-    const hostOf = (s) => s.host ?? MACHINE[s.machine] ?? s.machine ?? "Unknown machine";
-    const machineLabels = (scope = Object.values(SESS)) => {
-      const names = /* @__PURE__ */ new Map();
-      for (const x of scope) {
-        const s = typeof x === "string" ? SESS[x] : x;
-        if (s?.machine != null && !names.has(s.machine)) names.set(s.machine, s.host ?? MACHINE[s.machine] ?? s.machine);
-      }
-      return names.size > 1 ? machineShorts([...names]) : /* @__PURE__ */ new Map();
-    };
-    const machineLabel = (s, scope) => s ? machineLabels(scope).get(s.machine) ?? "" : "";
-    const branchOf = (s) => s.worktree ?? s.branch ?? "No branch";
-    const shortHost = (s) => s.host == null && MACHINE[s.machine] == null && s.machine == null ? hostOf(s) : shortName(hostOf(s));
-    const parentOf = (sid) => SESS[sid]?.parent ?? H.find((h2) => h2.kind === "spawn" && h2.to === sid)?.from;
-    const originHandoff = (sid) => H.find((h2) => (h2.kind === "spawn" || h2.kind === "relay") && h2.to === sid && h2.from !== sid && (h2.kind === "spawn" || SESS[sid]?.kind === "Relayed" || !SESS[sid]?.lane));
-    const RANK = { wait: 0, work: 1, err: 2, done: 3 };
-    const isResult = (h2) => h2.kind === "toyou" && h2.ask === "result";
-    const inbox = () => {
-      const entries = H.filter((h2) => h2.kind === "toyou" && (h2.status === "wait" || isResult(h2) && !SEEN_RESULTS.has(h2.id)));
-      const waiting = new Set(entries.filter((h2) => h2.status === "wait").map((h2) => h2.from));
-      for (const s of Object.values(SESS)) if (s.state === "wait" && !waiting.has(s.id)) entries.push({ id: "wait:" + s.id, kind: "toyou", from: s.id, to: "you", ask: "decision", status: "wait", at: s.waiting_since ?? s.last, brief: s.waiting_for ?? "Waiting for your input or permission" });
-      return entries.sort((a, b) => b.at - a.at);
-    };
-    const working = () => Object.values(SESS).filter((s) => s.state === "work");
-    const answersOf = (h2) => h2.kind === "toyou" && h2.ask !== "result" && h2.status === "done" ? (Array.isArray(h2.answers) ? h2.answers.map((a) => (a.values ?? []).join(", ")) : Array.isArray(h2.answer) ? h2.answer : h2.answer != null ? [h2.answer] : []).map((a) => String(a).trim()).filter(Boolean) : null;
-    const statWord = (h2) => isResult(h2) ? SEEN_RESULTS.has(h2.id) ? "read" : "new" : { new: void 0, work: "working", wait: "waiting on you", err: "failed", done: h2.kind === "toyou" ? "answered" : h2.result ? "returned" : "delivered" }[h2.status];
-    const hasTurn = (t) => !!t.end || !!(t.start || t.u) || t.entries.some((e) => e.k === "a" || e.k === "tool" || e.k === "h");
-    const oneLine = (s) => clean(s).replace(/\s+/g, " ").trim();
-    const TOYOU = { question: "Asked you", result: "Sent you a result", decision: "Needs your decision" };
-    function turnEnd2(t) {
-      if (!hasTurn(t)) return null;
-      if (!t.end) {
-        if (t.last && SESS[t.sid]?.state === "wait") return { st: "wait", text: "Waiting on permission or input" };
-        if (t.last && SESS[t.sid]?.state === "work") return { st: "work", text: "Still working" };
-        const ty = t.out.filter((h3) => h3.kind === "toyou").at(-1);
-        if (ty) return { st: ty.status === "wait" ? "wait" : "done", text: (TOYOU[ty.kind === "toyou" ? ty.ask : ""] ?? "Sent you a message") + " \xB7 " + statWord(ty) + " \xB7 " + clock2(ty.at) };
-        const entries = t.entries.filter((e) => e.k === "a" || e.k === "tool" || e.k === "h" && t.out.includes(HID.get(e.id)));
-        const last = entries.at(-1), h2 = last?.k === "h" ? HID.get(last.id) : null;
-        if (t.start?.status === "err") return { st: "err", text: "Failed" + (t.start.done ? " \xB7 " + clock2(t.start.done) : "") };
-        if (last?.k === "tool" && last.ok === false && !last.live) return { st: "err", text: last.unfinished ? "Stopped on a step with no result" : "Stopped on a failed step" };
-        if (h2?.status === "err") return { st: "err", text: "Handoff to " + nameOf(h2.to) + " failed" };
-        if (t.start?.kind === "spawn" && t.start.status === "done") return { st: "done", text: "Returned to " + nameOf(t.start.from) + (t.start.done ? " \xB7 " + clock2(t.start.done) : "") };
-        if (entries.some((e) => e.k === "a")) return { st: "done", text: "Replied" };
-        return { st: "idle", text: "No reply in these logs" };
-      }
-      const { st, why } = t.end, mh = t.end.h ? HID.get(t.end.h) : null;
-      if (why === "input") return { st: "wait", text: "Waiting for your input" };
-      if (why === "permission" || why === "waiting" || why === "waiting_permission") return { st: "wait", text: "Waiting on permission" };
-      if (why === "working") return { st: "work", text: "Still working" };
-      if (why === "toyou" && mh) return { st: mh.status === "wait" ? "wait" : "done", text: (TOYOU[mh.kind === "toyou" ? mh.ask : ""] ?? "Sent you a message") + " \xB7 " + statWord(mh) + " \xB7 " + clock2(mh.at) };
-      if (why === "failed") return { st: "err", text: "Failed" + (t.start?.done ? " \xB7 " + clock2(t.start.done) : "") };
-      if (why === "unfinished_step") return { st: "err", text: "Stopped on a step with no result" };
-      if (why === "failed_step") return { st: "err", text: "Stopped on a failed step" };
-      if (why === "handoff_failed" && mh) return { st: "err", text: "Handoff to " + nameOf(mh.to) + " failed" };
-      if (why === "returned" && t.start) return { st: "done", text: "Returned to " + nameOf(t.start.from) + (t.start.done ? " \xB7 " + clock2(t.start.done) : "") };
-      if (why === "replied") return { st: "done", text: "Replied" };
-      return { st: st ?? "idle", text: "No reply in these logs" };
-    }
-    function traceRoot(t) {
-      const seen = /* @__PURE__ */ new Set();
-      while (!seen.has(t.id)) {
-        seen.add(t.id);
-        const up = t.start && t.start.from !== "you" ? HOLDS.get(t.start.id) : null;
-        if (!up) break;
-        t = up;
-      }
-      return t;
-    }
-    const countOf = (s, key) => {
-      const m = TXM[s.id];
-      return (m && m.to >= m.total ? m[key] : void 0) ?? s[key] ?? m?.[key] ?? null;
-    };
-    const callsText = (calls) => (calls == null ? "\u2014" : calls) + (calls === 1 ? " tool call" : " tool calls");
-    let childrenCache = null;
-    const invalidate = () => {
-      childrenCache = null;
-    };
-    const sessionChildren = () => {
-      if (childrenCache) return childrenCache;
-      const children = /* @__PURE__ */ new Map();
-      for (const session of Object.values(SESS)) {
-        const parent = parentOf(session.id);
-        if (parent && SESS[parent]) {
-          const rows = children.get(parent) ?? [];
-          rows.push(session);
-          children.set(parent, rows);
-        }
-      }
-      for (const rows of children.values()) rows.sort((a, b) => b.last - a.last);
-      return childrenCache = children;
-    };
-    const childSessions = (sid) => [...sessionChildren().get(sid) ?? []].sort((a, b) => (originHandoff(a.id)?.at ?? a.last) - (originHandoff(b.id)?.at ?? b.last));
-    const descendantsOf = (sid, children, out = [], seen = /* @__PURE__ */ new Set([sid])) => {
-      for (const child of children.get(sid) ?? []) if (!seen.has(child.id)) {
-        seen.add(child.id);
-        out.push(child);
-        descendantsOf(child.id, children, out, seen);
-      }
-      return out;
-    };
-    const TOTAL_TOKEN_KINDS = ["input", "output", "cache_write", "cache_read"];
-    const TOKEN_KINDS = [["input", "Input"], ["output", "Output"], ["cache_read", "Cache read"], ["cache_write_5m", "Cache write \xB7 5m"], ["cache_write_1h", "Cache write \xB7 1h"], ["web_search", "Web search"]];
-    const asMoney = (usd) => "$" + usd.toFixed(2), shortMoney = (usd) => "$" + usd.toFixed(1);
-    const usageTotal = (s) => Object.values(s.tokens_by_model ?? {}).reduce((sum, usage2) => sum + TOTAL_TOKEN_KINDS.reduce((n, key) => n + (Number(usage2[key]) || 0), 0), 0);
-    function costForSessions(sessions) {
-      const total = { usd: 0, unpriced_models: [], split_unknown_messages: 0, by_model: {}, by_day: {} }, unpriced = /* @__PURE__ */ new Set();
-      let allPriced = true;
-      for (const s of sessions) {
-        const cost2 = s.cost ?? {};
-        if (cost2.usd == null) allPriced = false;
-        else total.usd = (total.usd ?? 0) + (Number(cost2.usd) || 0);
-        for (const model2 of cost2.unpriced_models ?? []) unpriced.add(model2);
-        total.split_unknown_messages += Number(cost2.split_unknown_messages) || 0;
-        for (const [day2, amount] of Object.entries(cost2.by_day ?? {})) total.by_day[day2] = (total.by_day[day2] ?? 0) + (Number(amount) || 0);
-        for (const [modelId, model2] of Object.entries(cost2.by_model ?? {})) {
-          const current = Object.assign({ tokens: {}, usd_by_kind: {} }, total.by_model[modelId] ?? { usd: 0, tokens: {}, usd_by_kind: {} });
-          if (model2.usd == null) current.usd = null;
-          else if (current.usd != null) current.usd += Number(model2.usd) || 0;
-          for (const [key, amount] of Object.entries(model2.tokens ?? {})) current.tokens[key] = (current.tokens[key] ?? 0) + (Number(amount) || 0);
-          for (const [key, amount] of Object.entries(model2.usd_by_kind ?? {})) current.usd_by_kind[key] = (current.usd_by_kind[key] ?? 0) + (Number(amount) || 0);
-          total.by_model[modelId] = current;
-        }
-      }
-      total.unpriced_models = [...unpriced].sort();
-      if (!allPriced || unpriced.size) total.usd = null;
-      return total;
-    }
-    const costForSession = (sid, includeRuns = false) => costForSessions(SESS[sid] ? [SESS[sid], ...includeRuns ? descendantsOf(sid, sessionChildren()) : []] : []);
-    const costText = (cost2) => cost2.usd == null || cost2.unpriced_models?.length ? "\u2014" : asMoney(cost2.usd);
-    const costMissing = (cost2) => cost2.unpriced_models ?? [];
-    const TREE_RANK = { wait: 0, work: 1, err: 2, idle: 3, done: 4 };
-    const urgentDescendant = (sid, children) => descendantsOf(sid, children).filter((s) => s.state in TREE_RANK).sort((a, b) => TREE_RANK[a.state] - TREE_RANK[b.state] || b.last - a.last)[0]?.state;
-    const childParts = (all) => {
-      const n = (state3) => all.filter((x) => x.state === state3).length, wait = n("wait"), work = n("work"), err = n("err");
-      return [all.length + (all.length === 1 ? " run" : " runs"), wait && wait + " needs you", work && work + " working", err && err + " failed"].filter(Boolean);
-    };
-    const defaultTreeOpen = (sid, children) => descendantsOf(sid, children).some((s) => s.state === "wait" || s.state === "work");
-    function kidRank(c, children) {
-      let rank = c.state === "wait" ? 0 : c.state === "work" ? 1 : 2;
-      if (rank) for (const d of descendantsOf(c.id, children)) {
-        if (d.state === "wait") return 0;
-        if (d.state === "work") rank = 1;
-      }
-      return rank;
-    }
-    function lineageOf(sid) {
-      const path = [], seen = /* @__PURE__ */ new Set();
-      let id = sid;
-      while (id && SESS[id] && !seen.has(id)) {
-        seen.add(id);
-        path.push(SESS[id]);
-        id = parentOf(id);
-      }
-      return path.reverse();
-    }
-    const byState = (a, b) => (RANK[a.state] ?? 3) - (RANK[b.state] ?? 3) || b.last - a.last;
-    const onMachine = (m) => Object.values(SESS).filter((s) => s.machine === m).sort(byState);
-    const movedOff = (m) => Object.values(SESS).filter((s) => s.movedFrom === m);
-    const movesOf = (m) => H.filter((h2) => h2.kind === "move" && (h2.fromMachine === m || h2.toMachine === m)).sort((a, b) => b.at - a.at);
-    return { invalidate, nameOf, hcls, where, hostOf, machineLabels, machineLabel, branchOf, shortHost, parentOf, originHandoff, RANK, isResult, inbox, working, answersOf, statWord, hasTurn, oneLine, TOYOU, turnEnd: turnEnd2, traceRoot, countOf, callsText, sessionChildren, childSessions, descendantsOf, TOTAL_TOKEN_KINDS, TOKEN_KINDS, asMoney, usageTotal, costForSessions, costForSession, costText, costMissing, TREE_RANK, urgentDescendant, childParts, defaultTreeOpen, kidRank, lineageOf, byState, onMachine, movedOff, movesOf, shortMoney };
-  }
-
-  // src/domain/validate.ts
-  function object(value) {
-    if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Invalid object");
-    return Object.fromEntries(Object.entries(value));
-  }
-  function text(value) {
-    if (typeof value !== "string") throw new Error("Invalid string");
-    return value;
-  }
-  function number(value) {
-    if (typeof value !== "number" || !Number.isFinite(value)) throw new Error("Invalid number");
-    return value;
-  }
-  function boolean(value) {
-    if (typeof value !== "boolean") throw new Error("Invalid boolean");
-    return value;
-  }
-  function optional(value, parse) {
-    return value == null ? void 0 : parse(value);
-  }
-  function array(value, parse) {
-    if (!Array.isArray(value)) throw new Error("Invalid array");
-    return value.map(parse);
-  }
-  function dictionary(value, parse) {
-    return Object.fromEntries(Object.entries(object(value)).map(([id, row]) => [id, parse(row)]));
-  }
-  function state(value) {
-    switch (value) {
-      case "work":
-      case "wait":
-      case "idle":
-      case "done":
-      case "err":
-        return value;
-      default:
-        throw new Error("Invalid session state");
-    }
-  }
-  function status(value) {
-    switch (value) {
-      case "work":
-      case "wait":
-      case "done":
-      case "err":
-      case "new":
-        return value;
-      default:
-        throw new Error("Invalid handoff status");
-    }
-  }
-
   // shared-preact:preact
   var Component = globalThis.__semonUIShared.preact.Component;
   var Fragment = globalThis.__semonUIShared.preact.Fragment;
@@ -1673,20 +1580,44 @@ globalThis.__semonUIShared = __semonUIShared;
         login: source.login,
         initials: source.initials,
         avatar_href: source.avatar_href ?? null,
-        workspaces: list2(source.workspaces, 50, (w) => ({ name: w.name, role: w.role, current: w.current, switch_href: w.switch_href })),
-        links: list2(source.links, 12, (a) => ({ label: a.label, href: a.href, method: a.method, danger: a.danger }))
+        workspaces: list2(source.workspaces, 50, (w) => ({
+          name: w.name,
+          role: w.role,
+          current: w.current,
+          switch_href: w.switch_href
+        })),
+        links: list2(source.links, 12, (a) => ({
+          label: a.label,
+          href: a.href,
+          method: a.method,
+          danger: a.danger
+        }))
       };
     } catch {
       return null;
     }
-    if (!textField(value.name, 1, 80) || !value.name.trim() || !textField(value.login, 0, 80) || !textField(value.initials, 1, 3) || !value.initials.trim()) return null;
+    if (!textField(value.name, 1, 80) || !value.name.trim() || !textField(value.login, 0, 80) || !textField(value.initials, 1, 3) || !value.initials.trim())
+      return null;
     if (value.avatar_href !== null && !safePath(value.avatar_href)) return null;
     if (!value.workspaces || !value.links) return null;
     const workspaces = value.workspaces;
     const links = value.links;
-    if (workspaces.some((w) => !w || !textField(w.name, 1, 80) || !w.name.trim() || !textField(w.role, 0, 80) || typeof w.current !== "boolean" || !safePath(w.switch_href))) return null;
-    if (links.some((a) => !a || !textField(a.label, 1, 80) || !a.label.trim() || !safePath(a.href) || a.method !== "get" && a.method !== "post" || typeof a.danger !== "boolean")) return null;
-    return { name: value.name, login: value.login, initials: value.initials, avatar_href: value.avatar_href, workspaces, links };
+    if (workspaces.some(
+      (w) => !w || !textField(w.name, 1, 80) || !w.name.trim() || !textField(w.role, 0, 80) || typeof w.current !== "boolean" || !safePath(w.switch_href)
+    ))
+      return null;
+    if (links.some(
+      (a) => !a || !textField(a.label, 1, 80) || !a.label.trim() || !safePath(a.href) || a.method !== "get" && a.method !== "post" || typeof a.danger !== "boolean"
+    ))
+      return null;
+    return {
+      name: value.name,
+      login: value.login,
+      initials: value.initials,
+      avatar_href: value.avatar_href,
+      workspaces,
+      links
+    };
   }
 
   // shared-preact:preact/jsx-runtime
@@ -1718,12 +1649,21 @@ globalThis.__semonUIShared = __semonUIShared;
       if (match.index > last) nodes.push(text2.slice(last, match.index));
       let token = match[0];
       if (token[0] === "`") nodes.push(/* @__PURE__ */ jsx("code", { children: token.slice(1, -1) }));
-      else if (token.startsWith("**")) nodes.push(/* @__PURE__ */ jsx("strong", { children: /* @__PURE__ */ jsx(Inline, { text: token.endsWith("**") ? token.slice(2, -2) : token.slice(2) }) }));
-      else if (token.startsWith("~~")) nodes.push(/* @__PURE__ */ jsx("del", { children: /* @__PURE__ */ jsx(Inline, { text: token.slice(2, -2) }) }));
+      else if (token.startsWith("**"))
+        nodes.push(
+          /* @__PURE__ */ jsx("strong", { children: /* @__PURE__ */ jsx(Inline, { text: token.endsWith("**") ? token.slice(2, -2) : token.slice(2) }) })
+        );
+      else if (token.startsWith("~~"))
+        nodes.push(
+          /* @__PURE__ */ jsx("del", { children: /* @__PURE__ */ jsx(Inline, { text: token.slice(2, -2) }) })
+        );
       else if (token[0] === "[") {
         const k = token.indexOf("](");
         nodes.push(/* @__PURE__ */ jsx(Link, { text: token.slice(1, k), url: token.slice(k + 2, -1) }));
-      } else if (token[0] === "*") nodes.push(/* @__PURE__ */ jsx("em", { children: /* @__PURE__ */ jsx(Inline, { text: token.slice(1, -1) }) }));
+      } else if (token[0] === "*")
+        nodes.push(
+          /* @__PURE__ */ jsx("em", { children: /* @__PURE__ */ jsx(Inline, { text: token.slice(1, -1) }) })
+        );
       else {
         token = token.replace(/[.,;:!?'"…]+$/, "");
         nodes.push(/* @__PURE__ */ jsx(Link, { text: token, url: token }));
@@ -1744,7 +1684,8 @@ globalThis.__semonUIShared = __semonUIShared;
       if (fence) {
         lists = [];
         const code = [];
-        for (i++; i < lines.length && !lines[i].trimStart().startsWith(fence[1]); i++) code.push(lines[i]);
+        for (i++; i < lines.length && !lines[i].trimStart().startsWith(fence[1]); i++)
+          code.push(lines[i]);
         output.push({ kind: "code", text: code.join("\n"), language: fence[2] });
         continue;
       }
@@ -1764,10 +1705,16 @@ globalThis.__semonUIShared = __semonUIShared;
       const item2 = /^(\s*)([-*]|\d{1,3}[.)])\s+(.*)$/.exec(line);
       if (item2) {
         const indent = item2[1].replace(/\t/g, "    ").length, ordered = /\d/.test(item2[2]);
-        while (lists.length && (indent < lists.at(-1).indent || indent === lists.at(-1).indent && lists.at(-1).block.ordered !== ordered)) lists.pop();
+        while (lists.length && (indent < lists.at(-1).indent || indent === lists.at(-1).indent && lists.at(-1).block.ordered !== ordered))
+          lists.pop();
         let top = lists.at(-1);
         if (!top || indent > top.indent) {
-          const block = { kind: "list", ordered, start: ordered ? parseInt(item2[2], 10) : 1, items: [] };
+          const block = {
+            kind: "list",
+            ordered,
+            start: ordered ? parseInt(item2[2], 10) : 1,
+            items: []
+          };
           const parent = top?.block.items.at(-1);
           (parent ? parent.children : output).push(block);
           lists.push(top = { indent, block });
@@ -1787,7 +1734,8 @@ globalThis.__semonUIShared = __semonUIShared;
       }
       if (/^\s*>/.test(line)) {
         const quote = [];
-        for (; i < lines.length && /^\s*>/.test(lines[i]); i++) quote.push(lines[i].replace(/^\s*>\s?/, ""));
+        for (; i < lines.length && /^\s*>/.test(lines[i]); i++)
+          quote.push(lines[i].replace(/^\s*>\s?/, ""));
         output.push({ kind: "quote", lines: quote });
         i--;
         continue;
@@ -1802,11 +1750,30 @@ globalThis.__semonUIShared = __semonUIShared;
         case "paragraph":
           return /* @__PURE__ */ jsx("p", { children: /* @__PURE__ */ jsx(Inline, { text: block.text }) }, i);
         case "heading":
-          return /* @__PURE__ */ jsx("p", { class: "mh mh" + Math.min(block.level ?? 1, 3), role: "heading", "aria-level": Math.min(6, (block.level ?? 1) + 2), children: /* @__PURE__ */ jsx(Inline, { text: block.text }) }, i);
+          return /* @__PURE__ */ jsx(
+            "p",
+            {
+              class: "mh mh" + Math.min(block.level ?? 1, 3),
+              role: "heading",
+              "aria-level": Math.min(6, (block.level ?? 1) + 2),
+              children: /* @__PURE__ */ jsx(Inline, { text: block.text })
+            },
+            i
+          );
         case "rule":
           return /* @__PURE__ */ jsx("hr", {}, i);
         case "code":
-          return /* @__PURE__ */ jsx("div", { class: "codeblock", tabIndex: 0, role: "region", "aria-label": (block.language ? block.language + " " : "") + "code", children: /* @__PURE__ */ jsx("pre", { children: block.text }) }, i);
+          return /* @__PURE__ */ jsx(
+            "div",
+            {
+              class: "codeblock",
+              tabIndex: 0,
+              role: "region",
+              "aria-label": (block.language ? block.language + " " : "") + "code",
+              children: /* @__PURE__ */ jsx("pre", { children: block.text })
+            },
+            i
+          );
         case "table":
           return /* @__PURE__ */ jsx("div", { class: "tbl", tabIndex: 0, role: "region", "aria-label": "Table", children: /* @__PURE__ */ jsxs("table", { children: [
             /* @__PURE__ */ jsx("thead", { children: /* @__PURE__ */ jsx("tr", { children: block.head.map((cell, j) => /* @__PURE__ */ jsx("th", { children: /* @__PURE__ */ jsx(Inline, { text: cell }) }, j)) }) }),
@@ -1844,11 +1811,14 @@ globalThis.__semonUIShared = __semonUIShared;
       previous?.(vnode);
       if (typeof vnode.type === "string") {
         for (const key of Object.keys(vnode.props)) {
-          if (["dangerouslySetInnerHTML", "style", "title"].includes(key)) throw new Error(`Forbidden DOM prop: ${key}`);
+          if (["dangerouslySetInnerHTML", "style", "title"].includes(key))
+            throw new Error(`Forbidden DOM prop: ${key}`);
           const value = vnode.props[key];
           const externalLink = key === "href" && vnode.type === "a" && externalUrl(value) && vnode.props.target === "_blank" && vnode.props.rel === "noopener noreferrer";
-          if (["href", "src", "action"].includes(key) && value != null && !safePath(value) && !externalLink) throw new Error(`Unsafe DOM path: ${key}`);
-          if (/^on/i.test(key) && typeof value === "string") throw new Error(`Inline DOM handler: ${key}`);
+          if (["href", "src", "action"].includes(key) && value != null && !safePath(value) && !externalLink)
+            throw new Error(`Unsafe DOM path: ${key}`);
+          if (/^on/i.test(key) && typeof value === "string")
+            throw new Error(`Inline DOM handler: ${key}`);
         }
       }
     };
@@ -1866,13 +1836,30 @@ globalThis.__semonUIShared = __semonUIShared;
     }
   };
   function Workspace({ workspace }) {
-    return /* @__PURE__ */ jsx("form", { class: "account-menu-form account-workspace-form", method: "post", action: workspace.switch_href, children: /* @__PURE__ */ jsxs("button", { class: "account-menu-row", type: "submit", role: "menuitem", "aria-current": workspace.current ? "page" : void 0, children: [
-      /* @__PURE__ */ jsxs("span", { class: "account-row-main", children: [
-        /* @__PURE__ */ jsx("span", { class: "account-workspace-name", children: workspace.name }),
-        /* @__PURE__ */ jsx("span", { class: "account-role", children: workspace.role })
-      ] }),
-      workspace.current && /* @__PURE__ */ jsx("span", { class: "account-check", children: "\u2713" })
-    ] }) });
+    return /* @__PURE__ */ jsx(
+      "form",
+      {
+        class: "account-menu-form account-workspace-form",
+        method: "post",
+        action: workspace.switch_href,
+        children: /* @__PURE__ */ jsxs(
+          "button",
+          {
+            class: "account-menu-row",
+            type: "submit",
+            role: "menuitem",
+            "aria-current": workspace.current ? "page" : void 0,
+            children: [
+              /* @__PURE__ */ jsxs("span", { class: "account-row-main", children: [
+                /* @__PURE__ */ jsx("span", { class: "account-workspace-name", children: workspace.name }),
+                /* @__PURE__ */ jsx("span", { class: "account-role", children: workspace.role })
+              ] }),
+              workspace.current && /* @__PURE__ */ jsx("span", { class: "account-check", children: "\u2713" })
+            ]
+          }
+        )
+      }
+    );
   }
   function AccountLink({ link }) {
     const cls = "account-menu-row" + (link.danger ? " danger" : "");
@@ -1893,17 +1880,35 @@ globalThis.__semonUIShared = __semonUIShared;
       ] }),
       !compact && /* @__PURE__ */ jsxs("section", { class: "account-section account-display", children: [
         /* @__PURE__ */ jsx("div", { class: "account-heading", children: "Display" }),
-        /* @__PURE__ */ jsxs("button", { class: "account-menu-row account-switch-row", type: "button", role: "menuitemcheckbox", "aria-checked": wide, "data-pref": "wide", onClick: (event) => {
-          event.stopPropagation();
-          onWideChange();
-        }, children: [
-          /* @__PURE__ */ jsx("span", { class: "account-row-main", children: "Wide reading mode" }),
-          /* @__PURE__ */ jsx("span", { class: "switch", "aria-hidden": "true", children: /* @__PURE__ */ jsx("span", { class: "switch-knob" }) })
-        ] })
+        /* @__PURE__ */ jsxs(
+          "button",
+          {
+            class: "account-menu-row account-switch-row",
+            type: "button",
+            role: "menuitemcheckbox",
+            "aria-checked": wide,
+            "data-pref": "wide",
+            onClick: (event) => {
+              event.stopPropagation();
+              onWideChange();
+            },
+            children: [
+              /* @__PURE__ */ jsx("span", { class: "account-row-main", children: "Wide reading mode" }),
+              /* @__PURE__ */ jsx("span", { class: "switch", "aria-hidden": "true", children: /* @__PURE__ */ jsx("span", { class: "switch-knob" }) })
+            ]
+          }
+        )
       ] }),
       [false, true].map((danger) => {
         const links = account.links.filter((link) => link.danger === danger);
-        return links.length ? /* @__PURE__ */ jsx("section", { class: "account-section account-links" + (danger ? " account-danger" : ""), children: links.map((link, i) => /* @__PURE__ */ jsx(AccountLink, { link }, `${link.method}:${link.href}:${i}`)) }, String(danger)) : null;
+        return links.length ? /* @__PURE__ */ jsx(
+          "section",
+          {
+            class: "account-section account-links" + (danger ? " account-danger" : ""),
+            children: links.map((link, i) => /* @__PURE__ */ jsx(AccountLink, { link }, `${link.method}:${link.href}:${i}`))
+          },
+          String(danger)
+        ) : null;
       })
     ] });
   }
@@ -1914,59 +1919,81 @@ globalThis.__semonUIShared = __semonUIShared;
     let active = null;
     let destroyed = false;
     const initialFocus = { focusVisible: false };
-    const returnFocus = { focusVisible: false, preventScroll: true };
+    const returnFocus = {
+      focusVisible: false,
+      preventScroll: true
+    };
     const triggerOf = (widget) => widget.root.querySelector(".account-trigger");
     function commit(widget) {
       const { root, props } = widget;
       const { account, compact, wide, onWideChange } = props;
       const current = account.workspaces.find((workspace) => workspace.current);
       const expanded = active === widget;
-      render(/* @__PURE__ */ jsxs(Fragment2, { children: [
-        expanded && compact && /* @__PURE__ */ jsx("div", { class: "account-backdrop", onClick: (event) => {
-          event.stopPropagation();
-          close();
-        } }, "backdrop"),
-        /* @__PURE__ */ jsxs(
-          "button",
-          {
-            class: "account-trigger" + (compact ? "" : " account-avatar-button"),
-            type: "button",
-            "aria-haspopup": "menu",
-            "aria-expanded": expanded,
-            "aria-label": compact ? account.name + ", " + (current?.name ?? account.login) : account.name + " account menu",
-            onClick: (event) => {
-              event.stopPropagation();
-              toggle(widget);
+      render(
+        /* @__PURE__ */ jsxs(Fragment2, { children: [
+          expanded && compact && /* @__PURE__ */ jsx(
+            "div",
+            {
+              class: "account-backdrop",
+              onClick: (event) => {
+                event.stopPropagation();
+                close();
+              }
             },
-            children: [
-              /* @__PURE__ */ jsx(AccountAvatar, { account }),
-              compact && /* @__PURE__ */ jsxs("span", { class: "account-summary", children: [
-                /* @__PURE__ */ jsx("span", { class: "account-summary-name", children: account.name }),
-                /* @__PURE__ */ jsx("span", { class: "account-summary-workspace", children: current?.name ?? account.login })
-              ] })
-            ]
-          },
-          "trigger"
-        ),
-        expanded && /* @__PURE__ */ jsx(
-          "div",
-          {
-            class: "menu account-popover",
-            role: "menu",
-            "aria-label": "Account",
-            onClick: (event) => {
-              const target = event.target;
-              const link = target instanceof Element ? target.closest("a[href]") : null;
-              if (compact && link && host2.navigate(link.href)) event.preventDefault();
+            "backdrop"
+          ),
+          /* @__PURE__ */ jsxs(
+            "button",
+            {
+              class: "account-trigger" + (compact ? "" : " account-avatar-button"),
+              type: "button",
+              "aria-haspopup": "menu",
+              "aria-expanded": expanded,
+              "aria-label": compact ? account.name + ", " + (current?.name ?? account.login) : account.name + " account menu",
+              onClick: (event) => {
+                event.stopPropagation();
+                toggle(widget);
+              },
+              children: [
+                /* @__PURE__ */ jsx(AccountAvatar, { account }),
+                compact && /* @__PURE__ */ jsxs("span", { class: "account-summary", children: [
+                  /* @__PURE__ */ jsx("span", { class: "account-summary-name", children: account.name }),
+                  /* @__PURE__ */ jsx("span", { class: "account-summary-workspace", children: current?.name ?? account.login })
+                ] })
+              ]
             },
-            onSubmit: (event) => {
-              if (compact && event.target instanceof HTMLFormElement && host2.submit(event.target)) event.preventDefault();
+            "trigger"
+          ),
+          expanded && /* @__PURE__ */ jsx(
+            "div",
+            {
+              class: "menu account-popover",
+              role: "menu",
+              "aria-label": "Account",
+              onClick: (event) => {
+                const target = event.target;
+                const link = target instanceof Element ? target.closest("a[href]") : null;
+                if (compact && link && host2.navigate(link.href)) event.preventDefault();
+              },
+              onSubmit: (event) => {
+                if (compact && event.target instanceof HTMLFormElement && host2.submit(event.target))
+                  event.preventDefault();
+              },
+              children: /* @__PURE__ */ jsx(
+                AccountMenu,
+                {
+                  account,
+                  compact,
+                  wide,
+                  onWideChange
+                }
+              )
             },
-            children: /* @__PURE__ */ jsx(AccountMenu, { account, compact, wide, onWideChange })
-          },
-          "menu"
-        )
-      ] }), root);
+            "menu"
+          )
+        ] }),
+        root
+      );
     }
     function close(options2 = {}) {
       const widget = active;
@@ -2061,40 +2088,67 @@ globalThis.__semonUIShared = __semonUIShared;
   }
   function svg(path, stroke = "1.8") {
     const node = document.createElementNS(NS, "svg");
-    for (const [key, value] of Object.entries({ viewBox: "0 0 24 24", "aria-hidden": "true", fill: "none", stroke: "currentColor", "stroke-width": stroke, "stroke-linecap": "round", "stroke-linejoin": "round" })) node.setAttribute(key, value);
+    for (const [key, value] of Object.entries({
+      viewBox: "0 0 24 24",
+      "aria-hidden": "true",
+      fill: "none",
+      stroke: "currentColor",
+      "stroke-width": stroke,
+      "stroke-linecap": "round",
+      "stroke-linejoin": "round"
+    }))
+      node.setAttribute(key, value);
     const p = document.createElementNS(NS, "path");
     p.setAttribute("d", path);
     node.append(p);
     return node;
   }
   function Icon({ path }) {
-    return /* @__PURE__ */ jsx("svg", { class: "icon", viewBox: "0 0 24 24", "aria-hidden": "true", fill: "none", stroke: "currentColor", "stroke-width": "1.8", "stroke-linecap": "round", "stroke-linejoin": "round", children: /* @__PURE__ */ jsx("path", { d: path }) });
+    return /* @__PURE__ */ jsx(
+      "svg",
+      {
+        class: "icon",
+        viewBox: "0 0 24 24",
+        "aria-hidden": "true",
+        fill: "none",
+        stroke: "currentColor",
+        "stroke-width": "1.8",
+        "stroke-linecap": "round",
+        "stroke-linejoin": "round",
+        children: /* @__PURE__ */ jsx("path", { d: path })
+      }
+    );
   }
   function renderShellNavigation(nav, destinations, navigate) {
     const keys = /* @__PURE__ */ new Set();
     for (const destination of destinations) {
-      if (!destination.key || keys.has(destination.key) || !safePath(destination.href)) throw new Error("Invalid shell destination");
+      if (!destination.key || keys.has(destination.key) || !safePath(destination.href))
+        throw new Error("Invalid shell destination");
       keys.add(destination.key);
     }
-    render(/* @__PURE__ */ jsx(Fragment2, { children: destinations.map((destination) => /* @__PURE__ */ jsxs(
-      "a",
-      {
-        class: "nav-item",
-        "data-go": destination.key,
-        href: destination.href,
-        "aria-current": destination.current ? "page" : void 0,
-        onClick: (event) => {
-          if (!event.currentTarget.isConnected || !nav.contains(event.currentTarget) || event.defaultPrevented || event.button !== 0 || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
-          if (navigate(destination)) event.preventDefault();
+    render(
+      /* @__PURE__ */ jsx(Fragment2, { children: destinations.map((destination) => /* @__PURE__ */ jsxs(
+        "a",
+        {
+          class: "nav-item",
+          "data-go": destination.key,
+          href: destination.href,
+          "aria-current": destination.current ? "page" : void 0,
+          onClick: (event) => {
+            if (!event.currentTarget.isConnected || !nav.contains(event.currentTarget) || event.defaultPrevented || event.button !== 0 || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey)
+              return;
+            if (navigate(destination)) event.preventDefault();
+          },
+          children: [
+            /* @__PURE__ */ jsx(Icon, { path: destination.icon }),
+            /* @__PURE__ */ jsx("span", { children: destination.label }),
+            !!destination.count && /* @__PURE__ */ jsx("span", { class: "cnt" + (destination.hot ? " hot" : ""), children: destination.count })
+          ]
         },
-        children: [
-          /* @__PURE__ */ jsx(Icon, { path: destination.icon }),
-          /* @__PURE__ */ jsx("span", { children: destination.label }),
-          !!destination.count && /* @__PURE__ */ jsx("span", { class: "cnt" + (destination.hot ? " hot" : ""), children: destination.count })
-        ]
-      },
-      destination.key
-    )) }), nav);
+        destination.key
+      )) }),
+      nav
+    );
   }
   function createShellChrome(host2) {
     const account = createAccountChrome(host2.account);
@@ -2128,18 +2182,68 @@ globalThis.__semonUIShared = __semonUIShared;
     }
     function paintHead() {
       const label = rail ? "Expand sidebar" : "Collapse sidebar";
-      render(/* @__PURE__ */ jsxs(Fragment2, { children: [
-        /* @__PURE__ */ jsxs("div", { class: "brandrow", children: [
-          /* @__PURE__ */ jsx("span", { class: "mark", "aria-hidden": "true" }),
-          /* @__PURE__ */ jsx("span", { class: "brandname", children: "Semon" }),
-          /* @__PURE__ */ jsx("button", { class: "ibtn close", id: "drawer-close", type: "button", "aria-label": "Close menu", onClick: (event) => {
-            if (event.currentTarget.isConnected && head.contains(event.currentTarget)) closeDrawer();
-          }, children: /* @__PURE__ */ jsx("svg", { viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", "stroke-width": "1.9", "stroke-linecap": "round", "aria-hidden": "true", children: /* @__PURE__ */ jsx("path", { d: "M6 6l12 12M18 6L6 18" }) }) })
+      render(
+        /* @__PURE__ */ jsxs(Fragment2, { children: [
+          /* @__PURE__ */ jsxs("div", { class: "brandrow", children: [
+            /* @__PURE__ */ jsx("span", { class: "mark", "aria-hidden": "true" }),
+            /* @__PURE__ */ jsx("span", { class: "brandname", children: "Semon" }),
+            /* @__PURE__ */ jsx(
+              "button",
+              {
+                class: "ibtn close",
+                id: "drawer-close",
+                type: "button",
+                "aria-label": "Close menu",
+                onClick: (event) => {
+                  if (event.currentTarget.isConnected && head.contains(event.currentTarget))
+                    closeDrawer();
+                },
+                children: /* @__PURE__ */ jsx(
+                  "svg",
+                  {
+                    viewBox: "0 0 24 24",
+                    fill: "none",
+                    stroke: "currentColor",
+                    "stroke-width": "1.9",
+                    "stroke-linecap": "round",
+                    "aria-hidden": "true",
+                    children: /* @__PURE__ */ jsx("path", { d: "M6 6l12 12M18 6L6 18" })
+                  }
+                )
+              }
+            )
+          ] }),
+          /* @__PURE__ */ jsx(
+            "button",
+            {
+              class: "ibtn rail-toggle",
+              id: "rail-toggle",
+              type: "button",
+              "aria-label": label,
+              "aria-expanded": !rail,
+              "data-tip": label,
+              onClick: (event) => {
+                if (app?.isConnected && !destroyed && event.currentTarget.isConnected && head.contains(event.currentTarget))
+                  host2.railChanged();
+              },
+              children: /* @__PURE__ */ jsx(
+                "svg",
+                {
+                  viewBox: "0 0 24 24",
+                  fill: "none",
+                  stroke: "currentColor",
+                  "stroke-width": "1.8",
+                  "stroke-linecap": "round",
+                  "stroke-linejoin": "round",
+                  "aria-hidden": "true",
+                  children: /* @__PURE__ */ jsx("path", { d: "M4 5h16v14H4zM9 5v14" })
+                }
+              )
+            }
+          )
         ] }),
-        /* @__PURE__ */ jsx("button", { class: "ibtn rail-toggle", id: "rail-toggle", type: "button", "aria-label": label, "aria-expanded": !rail, "data-tip": label, onClick: (event) => {
-          if (app?.isConnected && !destroyed && event.currentTarget.isConnected && head.contains(event.currentTarget)) host2.railChanged();
-        }, children: /* @__PURE__ */ jsx("svg", { viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", "stroke-width": "1.8", "stroke-linecap": "round", "stroke-linejoin": "round", "aria-hidden": "true", children: /* @__PURE__ */ jsx("path", { d: "M4 5h16v14H4zM9 5v14" }) }) })
-      ] }), head);
+        head
+      );
     }
     function dropDesktop() {
       if (desktopAccount) {
@@ -2223,25 +2327,41 @@ globalThis.__semonUIShared = __semonUIShared;
         app = container;
         paintHead();
         listen(scrim, "click", () => closeDrawer());
-        listen(sidebar, "touchstart", (event) => {
-          sx = event.touches[0]?.clientX ?? null;
-        }, { passive: true });
-        listen(sidebar, "touchmove", (event) => {
-          if (sx !== null && event.touches[0] && event.touches[0].clientX - sx < -50) {
+        listen(
+          sidebar,
+          "touchstart",
+          (event) => {
+            sx = event.touches[0]?.clientX ?? null;
+          },
+          { passive: true }
+        );
+        listen(
+          sidebar,
+          "touchmove",
+          (event) => {
+            if (sx !== null && event.touches[0] && event.touches[0].clientX - sx < -50) {
+              sx = null;
+              closeDrawer();
+            }
+          },
+          { passive: true }
+        );
+        listen(
+          sidebar,
+          "touchend",
+          () => {
             sx = null;
-            closeDrawer();
-          }
-        }, { passive: true });
-        listen(sidebar, "touchend", () => {
-          sx = null;
-        }, { passive: true });
+          },
+          { passive: true }
+        );
         phone.addEventListener("change", resized);
       },
       update(next, collapsed) {
         ready();
         const keys = /* @__PURE__ */ new Set();
         destinations = next.map((destination) => {
-          if (!destination.key || keys.has(destination.key) || !safePath(destination.href)) throw new Error("Invalid shell destination");
+          if (!destination.key || keys.has(destination.key) || !safePath(destination.href))
+            throw new Error("Invalid shell destination");
           keys.add(destination.key);
           return { ...destination };
         });
@@ -2263,7 +2383,10 @@ globalThis.__semonUIShared = __semonUIShared;
           button.id = "lead-btn";
           button.setAttribute("aria-label", props.lead.label);
           button.setAttribute("aria-controls", "sidebar");
-          button.setAttribute("aria-expanded", String(document.body.classList.contains("drawer-open")));
+          button.setAttribute(
+            "aria-expanded",
+            String(document.body.classList.contains("drawer-open"))
+          );
           button.append(svg(props.lead.icon));
           const back = props.lead.back;
           button.addEventListener("click", () => {
@@ -2320,7 +2443,20 @@ globalThis.__semonUIShared = __semonUIShared;
   // src/lib/recent.tsx
   var CHEVRON = "M9 6l6 6-6 6";
   function Icon2({ path }) {
-    return /* @__PURE__ */ jsx("svg", { class: "icon", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", "stroke-width": "1.8", "stroke-linecap": "round", "stroke-linejoin": "round", "aria-hidden": "true", children: /* @__PURE__ */ jsx("path", { d: path }) });
+    return /* @__PURE__ */ jsx(
+      "svg",
+      {
+        class: "icon",
+        viewBox: "0 0 24 24",
+        fill: "none",
+        stroke: "currentColor",
+        "stroke-width": "1.8",
+        "stroke-linecap": "round",
+        "stroke-linejoin": "round",
+        "aria-hidden": "true",
+        children: /* @__PURE__ */ jsx("path", { d: path })
+      }
+    );
   }
   function createRecentRenderer(root, host2) {
     let destroyed = false, frame = 0;
@@ -2330,7 +2466,8 @@ globalThis.__semonUIShared = __semonUIShared;
       for (const meta of root.querySelectorAll(".session-row-meta")) {
         if (!meta.isConnected || !meta.clientWidth) continue;
         const values = [...meta.querySelectorAll("[data-drop]")];
-        for (const value of values) value.hidden = meta.clientWidth < 280 && value.classList.contains("row-duration");
+        for (const value of values)
+          value.hidden = meta.clientWidth < 280 && value.classList.contains("row-duration");
         for (const value of values.sort((a, b) => Number(b.dataset.drop) - Number(a.dataset.drop))) {
           if (meta.scrollWidth <= meta.clientWidth + 1) break;
           value.hidden = true;
@@ -2352,7 +2489,8 @@ globalThis.__semonUIShared = __semonUIShared;
           onKeyDown: (event) => {
             if (!active(event.currentTarget)) return;
             const target = event.target;
-            if (target !== event.currentTarget && target !== event.currentTarget.querySelector(":scope > .tree-row .srow") && target !== event.currentTarget.querySelector(":scope > .tree-row .tree-toggle")) return;
+            if (target !== event.currentTarget && target !== event.currentTarget.querySelector(":scope > .tree-row .srow") && target !== event.currentTarget.querySelector(":scope > .tree-row .tree-toggle"))
+              return;
             if (expandable && (event.key === "ArrowLeft" || event.key === "ArrowRight")) {
               const open = event.key === "ArrowRight";
               if (open !== item2.open) {
@@ -2381,22 +2519,84 @@ globalThis.__semonUIShared = __semonUIShared;
                   },
                   children: [
                     /* @__PURE__ */ jsxs("span", { class: "session-row-main srow-main", children: [
-                      /* @__PURE__ */ jsx("span", { class: "dot " + item2.state, role: "img", "aria-label": item2.stateLabel, "data-tip": item2.rail ? void 0 : item2.stateLabel }),
+                      /* @__PURE__ */ jsx(
+                        "span",
+                        {
+                          class: "dot " + item2.state,
+                          role: "img",
+                          "aria-label": item2.stateLabel,
+                          "data-tip": item2.rail ? void 0 : item2.stateLabel
+                        }
+                      ),
                       /* @__PURE__ */ jsx("span", { class: "nm", "data-tip": item2.name, "data-tip-clipped": "", children: item2.name }),
-                      item2.flag && /* @__PURE__ */ jsx("span", { class: "kid-flag " + item2.flag.state, "data-tip": item2.flag.tip, "aria-hidden": "true" }),
+                      item2.flag && /* @__PURE__ */ jsx(
+                        "span",
+                        {
+                          class: "kid-flag " + item2.flag.state,
+                          "data-tip": item2.flag.tip,
+                          "aria-hidden": "true"
+                        }
+                      ),
                       /* @__PURE__ */ jsx("span", { class: "ag", children: item2.age }),
-                      item2.childState && /* @__PURE__ */ jsx("span", { class: "dot " + item2.childState + " child-dot", role: "img", "aria-label": item2.childState, "aria-hidden": "true" })
+                      item2.childState && /* @__PURE__ */ jsx(
+                        "span",
+                        {
+                          class: "dot " + item2.childState + " child-dot",
+                          role: "img",
+                          "aria-label": item2.childState,
+                          "aria-hidden": "true"
+                        }
+                      )
                     ] }),
                     /* @__PURE__ */ jsxs("span", { class: "session-row-meta srow-meta for", children: [
-                      harness && /* @__PURE__ */ jsx("span", { class: "hicon hi-sidebar", "data-harness": harness.id, role: "img", "aria-label": harness.name, "data-tip": harness.name, children: harness.light === harness.dark ? /* @__PURE__ */ jsx("img", { src: harness.light, alt: "", draggable: false, decoding: "async" }) : /* @__PURE__ */ jsxs(Fragment2, { children: [
-                        /* @__PURE__ */ jsx("img", { class: "hi-light", loading: harness.darkTheme ? "lazy" : void 0, src: harness.light, alt: "", draggable: false, decoding: "async" }),
-                        /* @__PURE__ */ jsx("img", { class: "hi-dark", loading: harness.darkTheme ? void 0 : "lazy", src: harness.dark, alt: "", draggable: false, decoding: "async" })
-                      ] }) }),
+                      harness && /* @__PURE__ */ jsx(
+                        "span",
+                        {
+                          class: "hicon hi-sidebar",
+                          "data-harness": harness.id,
+                          role: "img",
+                          "aria-label": harness.name,
+                          "data-tip": harness.name,
+                          children: harness.light === harness.dark ? /* @__PURE__ */ jsx("img", { src: harness.light, alt: "", draggable: false, decoding: "async" }) : /* @__PURE__ */ jsxs(Fragment2, { children: [
+                            /* @__PURE__ */ jsx(
+                              "img",
+                              {
+                                class: "hi-light",
+                                loading: harness.darkTheme ? "lazy" : void 0,
+                                src: harness.light,
+                                alt: "",
+                                draggable: false,
+                                decoding: "async"
+                              }
+                            ),
+                            /* @__PURE__ */ jsx(
+                              "img",
+                              {
+                                class: "hi-dark",
+                                loading: harness.darkTheme ? void 0 : "lazy",
+                                src: harness.dark,
+                                alt: "",
+                                draggable: false,
+                                decoding: "async"
+                              }
+                            )
+                          ] })
+                        }
+                      ),
                       /* @__PURE__ */ jsx("span", { class: "row-model", "data-tip": item2.modelTip, children: item2.model }),
-                      item2.fields.map((field) => /* @__PURE__ */ jsxs("span", { class: field.className + " row-field", "data-drop": field.priority, "data-tip": field.tip, children: [
-                        /* @__PURE__ */ jsx(Icon2, { path: field.icon }),
-                        /* @__PURE__ */ jsx("span", { class: "field-value", children: field.text })
-                      ] }, field.priority))
+                      item2.fields.map((field) => /* @__PURE__ */ jsxs(
+                        "span",
+                        {
+                          class: field.className + " row-field",
+                          "data-drop": field.priority,
+                          "data-tip": field.tip,
+                          children: [
+                            /* @__PURE__ */ jsx(Icon2, { path: field.icon }),
+                            /* @__PURE__ */ jsx("span", { class: "field-value", children: field.text })
+                          ]
+                        },
+                        field.priority
+                      ))
                     ] })
                   ]
                 }
@@ -2433,28 +2633,37 @@ globalThis.__semonUIShared = __semonUIShared;
                 }
               )
             ] }),
-            expandable && /* @__PURE__ */ jsxs("div", { class: "tree-group", "data-depth": Math.min(item2.depth + 1, 4), role: "group", "aria-label": "Sessions spawned by " + item2.name, children: [
-              kids.map((child) => /* @__PURE__ */ jsx(Item, { item: child }, child.id)),
-              item2.all !== void 0 && /* @__PURE__ */ jsxs(
-                "button",
-                {
-                  class: "tree-all",
-                  type: "button",
-                  "data-id": item2.id,
-                  role: "treeitem",
-                  "aria-haspopup": window.matchMedia("(max-width: 760px)").matches ? "dialog" : void 0,
-                  "aria-label": "All " + item2.all + " sessions under " + item2.name,
-                  onClick: (event) => {
-                    event.stopPropagation();
-                    if (active(event.currentTarget)) host2.all(item2.id, event.currentTarget);
-                  },
-                  children: [
-                    /* @__PURE__ */ jsx("span", { children: "All " + item2.all }),
-                    /* @__PURE__ */ jsx(Icon2, { path: CHEVRON })
-                  ]
-                }
-              )
-            ] })
+            expandable && /* @__PURE__ */ jsxs(
+              "div",
+              {
+                class: "tree-group",
+                "data-depth": Math.min(item2.depth + 1, 4),
+                role: "group",
+                "aria-label": "Sessions spawned by " + item2.name,
+                children: [
+                  kids.map((child) => /* @__PURE__ */ jsx(Item, { item: child }, child.id)),
+                  item2.all !== void 0 && /* @__PURE__ */ jsxs(
+                    "button",
+                    {
+                      class: "tree-all",
+                      type: "button",
+                      "data-id": item2.id,
+                      role: "treeitem",
+                      "aria-haspopup": window.matchMedia("(max-width: 760px)").matches ? "dialog" : void 0,
+                      "aria-label": "All " + item2.all + " sessions under " + item2.name,
+                      onClick: (event) => {
+                        event.stopPropagation();
+                        if (active(event.currentTarget)) host2.all(item2.id, event.currentTarget);
+                      },
+                      children: [
+                        /* @__PURE__ */ jsx("span", { children: "All " + item2.all }),
+                        /* @__PURE__ */ jsx(Icon2, { path: CHEVRON })
+                      ]
+                    }
+                  )
+                ]
+              }
+            )
           ]
         }
       );
@@ -2468,15 +2677,19 @@ globalThis.__semonUIShared = __semonUIShared;
           for (const item2 of items) {
             if (!item2.id || ids.has(item2.id)) throw new Error("Invalid Recent identity");
             ids.add(item2.id);
-            if (item2.harness && (!safePath(item2.harness.light) || !safePath(item2.harness.dark))) throw new Error("Invalid Recent harness path");
+            if (item2.harness && (!safePath(item2.harness.light) || !safePath(item2.harness.dark)))
+              throw new Error("Invalid Recent harness path");
             if (item2.children) validate(item2.children);
           }
         }
         validate(snapshot.items);
-        render(/* @__PURE__ */ jsxs(Fragment2, { children: [
-          snapshot.items.map((item2) => /* @__PURE__ */ jsx(Item, { item: item2 }, item2.id)),
-          snapshot.empty && /* @__PURE__ */ jsx("p", { class: "ghead", role: "none", children: "No sessions match" })
-        ] }), root);
+        render(
+          /* @__PURE__ */ jsxs(Fragment2, { children: [
+            snapshot.items.map((item2) => /* @__PURE__ */ jsx(Item, { item: item2 }, item2.id)),
+            snapshot.empty && /* @__PURE__ */ jsx("p", { class: "ghead", role: "none", children: "No sessions match" })
+          ] }),
+          root
+        );
         cancelAnimationFrame(frame);
         frame = requestAnimationFrame(fit);
       },
@@ -2497,7 +2710,19 @@ globalThis.__semonUIShared = __semonUIShared;
     return /* @__PURE__ */ jsxs(Fragment2, { children: [
       /* @__PURE__ */ jsx("div", { class: "panel-t", children: spaced(heading) }),
       sub && /* @__PURE__ */ jsx("div", { class: "panel-sub", children: spaced(sub) }),
-      /* @__PURE__ */ jsx("button", { class: "ibtn", type: "button", "aria-label": "Close", onClick: close, children: /* @__PURE__ */ jsx("svg", { viewBox: "0 0 24 24", "aria-hidden": "true", fill: "none", stroke: "currentColor", "stroke-width": "1.8", "stroke-linecap": "round", "stroke-linejoin": "round", children: /* @__PURE__ */ jsx("path", { d: "M6 6l12 12M18 6L6 18" }) }) })
+      /* @__PURE__ */ jsx("button", { class: "ibtn", type: "button", "aria-label": "Close", onClick: close, children: /* @__PURE__ */ jsx(
+        "svg",
+        {
+          viewBox: "0 0 24 24",
+          "aria-hidden": "true",
+          fill: "none",
+          stroke: "currentColor",
+          "stroke-width": "1.8",
+          "stroke-linecap": "round",
+          "stroke-linejoin": "round",
+          children: /* @__PURE__ */ jsx("path", { d: "M6 6l12 12M18 6L6 18" })
+        }
+      ) })
     ] });
   }
   function createPanelChrome(options2, host2) {
@@ -2522,7 +2747,8 @@ globalThis.__semonUIShared = __semonUIShared;
         return;
       }
       if (!dialog.open) return;
-      if (!(event.target instanceof Node) || !body.contains(event.target) || body.scrollHeight <= body.clientHeight + 1) event.preventDefault();
+      if (!(event.target instanceof Node) || !body.contains(event.target) || body.scrollHeight <= body.clientHeight + 1)
+        event.preventDefault();
     };
     const backdrop = (event) => {
       if (event.target === dialog) close();
@@ -2532,7 +2758,8 @@ globalThis.__semonUIShared = __semonUIShared;
       disposed = true;
       dialog.removeEventListener("click", backdrop);
       dialog.removeEventListener("close", destroy);
-      for (const type of ["wheel", "touchmove"]) document.removeEventListener(type, hold, { capture: true });
+      for (const type of ["wheel", "touchmove"])
+        document.removeEventListener(type, hold, { capture: true });
       if (dialog.open) dialog.close();
       render(null, header);
       dialog.remove();
@@ -2548,7 +2775,8 @@ globalThis.__semonUIShared = __semonUIShared;
         if (disposed || shown || !dialog.isConnected) return;
         dialog.showModal();
         shown = true;
-        for (const type of ["wheel", "touchmove"]) document.addEventListener(type, hold, { capture: true, passive: false });
+        for (const type of ["wheel", "touchmove"])
+          document.addEventListener(type, hold, { capture: true, passive: false });
         body.focus({ preventScroll: true });
         host2.opened();
       }
@@ -2558,7 +2786,19 @@ globalThis.__semonUIShared = __semonUIShared;
   // src/lib/facets.tsx
   var X = "M6 6l12 12M18 6L6 18";
   function Icon3({ path }) {
-    return /* @__PURE__ */ jsx("svg", { viewBox: "0 0 24 24", "aria-hidden": "true", fill: "none", stroke: "currentColor", "stroke-width": "1.8", "stroke-linecap": "round", "stroke-linejoin": "round", children: /* @__PURE__ */ jsx("path", { d: path }) });
+    return /* @__PURE__ */ jsx(
+      "svg",
+      {
+        viewBox: "0 0 24 24",
+        "aria-hidden": "true",
+        fill: "none",
+        stroke: "currentColor",
+        "stroke-width": "1.8",
+        "stroke-linecap": "round",
+        "stroke-linejoin": "round",
+        children: /* @__PURE__ */ jsx("path", { d: path })
+      }
+    );
   }
   function createFacetChrome(host2) {
     const element2 = document.createElement("div");
@@ -2569,7 +2809,8 @@ globalThis.__semonUIShared = __semonUIShared;
     const selects = /* @__PURE__ */ new Map();
     let trigger = null, disposed = false, opened = false;
     function release() {
-      for (const type of ["wheel", "touchmove"]) document.removeEventListener(type, hold, { capture: true });
+      for (const type of ["wheel", "touchmove"])
+        document.removeEventListener(type, hold, { capture: true });
     }
     function hold(event) {
       if (!dialog?.isConnected || !dialog.open) {
@@ -2581,7 +2822,8 @@ globalThis.__semonUIShared = __semonUIShared;
         return;
       }
       const target = event.target;
-      if (target instanceof Element && (target.closest(".sh-select-list") || body && body.contains(target) && body.scrollHeight > body.clientHeight + 1)) return;
+      if (target instanceof Element && (target.closest(".sh-select-list") || body && body.contains(target) && body.scrollHeight > body.clientHeight + 1))
+        return;
       event.preventDefault();
     }
     function open() {
@@ -2589,7 +2831,8 @@ globalThis.__semonUIShared = __semonUIShared;
       host2.opened(dialog);
       opened = true;
       dialog.showModal();
-      for (const type of ["wheel", "touchmove"]) document.addEventListener(type, hold, { capture: true, passive: false });
+      for (const type of ["wheel", "touchmove"])
+        document.addEventListener(type, hold, { capture: true, passive: false });
       selects.values().next().value?.focus();
     }
     function close() {
@@ -2608,7 +2851,11 @@ globalThis.__semonUIShared = __semonUIShared;
     function tab(event) {
       if (event.key !== "Tab" || event.defaultPrevented) return;
       if (!dialog) return;
-      const controls = [...dialog.querySelectorAll("button:not(:disabled), input:not(:disabled), [tabindex]:not([tabindex='-1'])")].filter((node) => node.getClientRects().length && !node.closest("[hidden]"));
+      const controls = [
+        ...dialog.querySelectorAll(
+          "button:not(:disabled), input:not(:disabled), [tabindex]:not([tabindex='-1'])"
+        )
+      ].filter((node) => node.getClientRects().length && !node.closest("[hidden]"));
       const first = controls[0], last = controls.at(-1);
       if (event.shiftKey && document.activeElement === first) {
         event.preventDefault();
@@ -2634,42 +2881,94 @@ globalThis.__semonUIShared = __semonUIShared;
           select.setValue(field.value);
         }
         const active = fields.filter((field) => field.value !== "").length;
-        render(/* @__PURE__ */ jsxs(Fragment2, { children: [
-          /* @__PURE__ */ jsxs("button", { class: "facet-btn", type: "button", "aria-haspopup": "dialog", "aria-label": active ? "Filter, " + active + " active" : "Filter", ref: (node) => {
-            trigger = node;
-          }, onClick: open, children: [
-            /* @__PURE__ */ jsx(Icon3, { path: "M4 6h16M7 12h10M10 18h4" }),
-            /* @__PURE__ */ jsx("span", { children: "Filter" }),
-            /* @__PURE__ */ jsx("span", { class: "facet-n", hidden: !active, children: active || "" })
+        render(
+          /* @__PURE__ */ jsxs(Fragment2, { children: [
+            /* @__PURE__ */ jsxs(
+              "button",
+              {
+                class: "facet-btn",
+                type: "button",
+                "aria-haspopup": "dialog",
+                "aria-label": active ? "Filter, " + active + " active" : "Filter",
+                ref: (node) => {
+                  trigger = node;
+                },
+                onClick: open,
+                children: [
+                  /* @__PURE__ */ jsx(Icon3, { path: "M4 6h16M7 12h10M10 18h4" }),
+                  /* @__PURE__ */ jsx("span", { children: "Filter" }),
+                  /* @__PURE__ */ jsx("span", { class: "facet-n", hidden: !active, children: active || "" })
+                ]
+              }
+            ),
+            fields.map((field) => /* @__PURE__ */ jsxs(
+              "button",
+              {
+                class: "facet-chip",
+                type: "button",
+                hidden: field.value === "",
+                "data-facet": field.key,
+                "aria-label": field.value ? "Remove " + field.label + ": " + field.display : void 0,
+                onClick: () => {
+                  if (disposed) return;
+                  host2.cleared(field.key);
+                  trigger?.focus({ preventScroll: true });
+                },
+                children: [
+                  /* @__PURE__ */ jsx("span", { class: "txt", children: field.value ? field.label + ": " + field.display : "" }),
+                  /* @__PURE__ */ jsx(Icon3, { path: X })
+                ]
+              },
+              field.key
+            )),
+            /* @__PURE__ */ jsxs(
+              "dialog",
+              {
+                class: "viewer filters-sheet",
+                "aria-label": "Filter",
+                ref: (node) => {
+                  dialog = node;
+                },
+                onClose: closed,
+                onClick: backdrop,
+                onKeyDown: tab,
+                children: [
+                  /* @__PURE__ */ jsxs("div", { class: "vh", children: [
+                    /* @__PURE__ */ jsx("div", { class: "vt", children: /* @__PURE__ */ jsx("span", { children: "Filter" }) }),
+                    /* @__PURE__ */ jsx("button", { class: "vclose", type: "button", "aria-label": "Close filters", onClick: close, children: /* @__PURE__ */ jsx(Icon3, { path: X }) })
+                  ] }),
+                  /* @__PURE__ */ jsx(
+                    "div",
+                    {
+                      class: "vb",
+                      ref: (node) => {
+                        body = node;
+                      }
+                    }
+                  ),
+                  /* @__PURE__ */ jsxs("div", { class: "vf", children: [
+                    /* @__PURE__ */ jsx(
+                      "button",
+                      {
+                        class: "fclear",
+                        type: "button",
+                        onClick: () => {
+                          host2.clear();
+                          close();
+                        },
+                        children: "Clear all"
+                      }
+                    ),
+                    /* @__PURE__ */ jsx("button", { class: "fdone", type: "button", onClick: close, children: "Done" })
+                  ] })
+                ]
+              }
+            )
           ] }),
-          fields.map((field) => /* @__PURE__ */ jsxs("button", { class: "facet-chip", type: "button", hidden: field.value === "", "data-facet": field.key, "aria-label": field.value ? "Remove " + field.label + ": " + field.display : void 0, onClick: () => {
-            if (disposed) return;
-            host2.cleared(field.key);
-            trigger?.focus({ preventScroll: true });
-          }, children: [
-            /* @__PURE__ */ jsx("span", { class: "txt", children: field.value ? field.label + ": " + field.display : "" }),
-            /* @__PURE__ */ jsx(Icon3, { path: X })
-          ] }, field.key)),
-          /* @__PURE__ */ jsxs("dialog", { class: "viewer filters-sheet", "aria-label": "Filter", ref: (node) => {
-            dialog = node;
-          }, onClose: closed, onClick: backdrop, onKeyDown: tab, children: [
-            /* @__PURE__ */ jsxs("div", { class: "vh", children: [
-              /* @__PURE__ */ jsx("div", { class: "vt", children: /* @__PURE__ */ jsx("span", { children: "Filter" }) }),
-              /* @__PURE__ */ jsx("button", { class: "vclose", type: "button", "aria-label": "Close filters", onClick: close, children: /* @__PURE__ */ jsx(Icon3, { path: X }) })
-            ] }),
-            /* @__PURE__ */ jsx("div", { class: "vb", ref: (node) => {
-              body = node;
-            } }),
-            /* @__PURE__ */ jsxs("div", { class: "vf", children: [
-              /* @__PURE__ */ jsx("button", { class: "fclear", type: "button", onClick: () => {
-                host2.clear();
-                close();
-              }, children: "Clear all" }),
-              /* @__PURE__ */ jsx("button", { class: "fdone", type: "button", onClick: close, children: "Done" })
-            ] })
-          ] })
-        ] }), element2);
-        for (const select of selects.values()) if (body && select.el.parentElement !== body) body.append(select.el);
+          element2
+        );
+        for (const select of selects.values())
+          if (body && select.el.parentElement !== body) body.append(select.el);
       },
       destroy() {
         if (disposed) return;
@@ -2688,6 +2987,14 @@ globalThis.__semonUIShared = __semonUIShared;
         element2.remove();
       }
     };
+  }
+
+  // src/lib/application-view.tsx
+  function ApplicationView({ children }) {
+    return /* @__PURE__ */ jsx(Fragment2, { children });
+  }
+  function commitApplicationView(root, view) {
+    render(/* @__PURE__ */ jsx(ApplicationView, { children: view }), root);
   }
 
   // src/lib/screens.tsx
@@ -2716,8 +3023,11 @@ globalThis.__semonUIShared = __semonUIShared;
     if (owned.delete(root)) render(null, root);
   }
   var screenText = (text2) => text2.replace(/ · /g, "\u2009 \xB7 \u2009").replace(/^· /, "\xB7\u2009 ");
-  function renderMachinesScreen(root, snapshot, host2) {
-    render(/* @__PURE__ */ jsxs(Fragment2, { children: [
+  function MachinesView({
+    snapshot,
+    host: host2
+  }) {
+    return /* @__PURE__ */ jsxs(Fragment2, { children: [
       /* @__PURE__ */ jsxs("div", { class: "ph", children: [
         /* @__PURE__ */ jsx("h1", { children: "Machines" }),
         /* @__PURE__ */ jsxs("div", { class: "sub", children: [
@@ -2732,31 +3042,105 @@ globalThis.__semonUIShared = __semonUIShared;
         ] })
       ] }),
       /* @__PURE__ */ jsxs("div", { class: "list", children: [
-        snapshot.rows.map((row) => /* @__PURE__ */ jsxs("button", { class: "nrow", type: "button", "data-m": row.id, onClick: (event) => {
-          if (event.currentTarget.isConnected) host2.machine(row.id);
-        }, children: [
-          /* @__PURE__ */ jsx("span", { class: "dot " + row.state, role: "img", "aria-label": row.stateLabel, "data-tip": row.stateLabel }),
-          /* @__PURE__ */ jsx("span", { class: "nm", children: screenText(row.name) }),
-          /* @__PURE__ */ jsx("span", { class: "ag", children: row.status }),
-          /* @__PURE__ */ jsx("span", { class: "for", children: screenText(row.detail) })
-        ] }, row.id)),
-        snapshot.admin && /* @__PURE__ */ jsx("button", { class: "more", type: "button", onClick: (event) => {
-          if (event.currentTarget.isConnected) host2.admin(snapshot.admin.href);
-        }, children: screenText(snapshot.admin.label) })
+        snapshot.rows.map((row) => /* @__PURE__ */ jsxs(
+          "button",
+          {
+            class: "nrow",
+            type: "button",
+            "data-m": row.id,
+            onClick: (event) => {
+              if (event.currentTarget.isConnected) host2.machine(row.id);
+            },
+            children: [
+              /* @__PURE__ */ jsx(
+                "span",
+                {
+                  class: "dot " + row.state,
+                  role: "img",
+                  "aria-label": row.stateLabel,
+                  "data-tip": row.stateLabel
+                }
+              ),
+              /* @__PURE__ */ jsx("span", { class: "nm", children: screenText(row.name) }),
+              /* @__PURE__ */ jsx("span", { class: "ag", children: row.status }),
+              /* @__PURE__ */ jsx("span", { class: "for", children: screenText(row.detail) })
+            ]
+          },
+          row.id
+        )),
+        snapshot.admin && /* @__PURE__ */ jsx(
+          "button",
+          {
+            class: "more",
+            type: "button",
+            onClick: (event) => {
+              if (event.currentTarget.isConnected) host2.admin(snapshot.admin.href);
+            },
+            children: screenText(snapshot.admin.label)
+          }
+        )
       ] })
-    ] }), root);
+    ] });
+  }
+  function renderMachinesScreen(root, snapshot, host2) {
+    commitApplicationView(root, /* @__PURE__ */ jsx(MachinesView, { snapshot, host: host2 }));
     owned.add(root);
     kinds.set(root, "machines");
     host2.committed();
   }
   function Glyph({ path, className = "icon" }) {
-    return /* @__PURE__ */ jsx("svg", { class: className, viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", "stroke-width": "1.8", "stroke-linecap": "round", "stroke-linejoin": "round", "aria-hidden": "true", children: /* @__PURE__ */ jsx("path", { d: path }) });
+    return /* @__PURE__ */ jsx(
+      "svg",
+      {
+        class: className,
+        viewBox: "0 0 24 24",
+        fill: "none",
+        stroke: "currentColor",
+        "stroke-width": "1.8",
+        "stroke-linecap": "round",
+        "stroke-linejoin": "round",
+        "aria-hidden": "true",
+        children: /* @__PURE__ */ jsx("path", { d: path })
+      }
+    );
   }
-  function Harness({ mark, size = 14, lead = true }) {
-    return /* @__PURE__ */ jsx("span", { class: "hicon " + (size === 16 ? "hi-screen-16" : "hi-screen") + (lead ? " hi-lead" : ""), "data-harness": mark.id, "aria-hidden": "true", children: mark.light === mark.dark ? /* @__PURE__ */ jsx("img", { src: mark.light, alt: "", draggable: false, decoding: "async" }) : /* @__PURE__ */ jsxs(Fragment2, { children: [
-      /* @__PURE__ */ jsx("img", { class: "hi-light", loading: mark.darkTheme ? "lazy" : void 0, src: mark.light, alt: "", draggable: false, decoding: "async" }),
-      /* @__PURE__ */ jsx("img", { class: "hi-dark", loading: mark.darkTheme ? void 0 : "lazy", src: mark.dark, alt: "", draggable: false, decoding: "async" })
-    ] }) });
+  function Harness({
+    mark,
+    size = 14,
+    lead = true
+  }) {
+    return /* @__PURE__ */ jsx(
+      "span",
+      {
+        class: "hicon " + (size === 16 ? "hi-screen-16" : "hi-screen") + (lead ? " hi-lead" : ""),
+        "data-harness": mark.id,
+        "aria-hidden": "true",
+        children: mark.light === mark.dark ? /* @__PURE__ */ jsx("img", { src: mark.light, alt: "", draggable: false, decoding: "async" }) : /* @__PURE__ */ jsxs(Fragment2, { children: [
+          /* @__PURE__ */ jsx(
+            "img",
+            {
+              class: "hi-light",
+              loading: mark.darkTheme ? "lazy" : void 0,
+              src: mark.light,
+              alt: "",
+              draggable: false,
+              decoding: "async"
+            }
+          ),
+          /* @__PURE__ */ jsx(
+            "img",
+            {
+              class: "hi-dark",
+              loading: mark.darkTheme ? void 0 : "lazy",
+              src: mark.dark,
+              alt: "",
+              draggable: false,
+              decoding: "async"
+            }
+          )
+        ] })
+      }
+    );
   }
   function Section({ heading, count }) {
     return /* @__PURE__ */ jsxs("div", { class: "sec-h", children: [
@@ -2765,59 +3149,97 @@ globalThis.__semonUIShared = __semonUIShared;
     ] });
   }
   function Live({ row, host: host2 }) {
-    return /* @__PURE__ */ jsxs("button", { class: "nrow", type: "button", "data-id": row.id, onClick: (event) => {
-      if (event.currentTarget.isConnected) host2.session(row.id);
-    }, children: [
-      /* @__PURE__ */ jsx("span", { class: "dot " + row.state, role: "img", "aria-label": row.stateLabel, "data-tip": row.stateLabel }),
-      /* @__PURE__ */ jsx("span", { class: "nm", children: screenText(row.name) }),
-      /* @__PURE__ */ jsxs("span", { class: "ag", children: [
-        row.harness && /* @__PURE__ */ jsx(Harness, { mark: row.harness }),
-        screenText(row.status)
-      ] }),
-      /* @__PURE__ */ jsx("span", { class: "for", children: screenText(row.detail) }),
-      row.activity && /* @__PURE__ */ jsxs("span", { class: "act", children: [
-        /* @__PURE__ */ jsx("span", { class: "spin" }),
-        /* @__PURE__ */ jsx("span", { children: screenText(row.activity[0]) }),
-        /* @__PURE__ */ jsx("code", { children: row.activity[1] }),
-        /* @__PURE__ */ jsx("span", { class: "el", children: Math.max(0, row.activity[2]) + "s" })
-      ] })
-    ] });
+    return /* @__PURE__ */ jsxs(
+      "button",
+      {
+        class: "nrow",
+        type: "button",
+        "data-id": row.id,
+        onClick: (event) => {
+          if (event.currentTarget.isConnected) host2.session(row.id);
+        },
+        children: [
+          /* @__PURE__ */ jsx(
+            "span",
+            {
+              class: "dot " + row.state,
+              role: "img",
+              "aria-label": row.stateLabel,
+              "data-tip": row.stateLabel
+            }
+          ),
+          /* @__PURE__ */ jsx("span", { class: "nm", children: screenText(row.name) }),
+          /* @__PURE__ */ jsxs("span", { class: "ag", children: [
+            row.harness && /* @__PURE__ */ jsx(Harness, { mark: row.harness }),
+            screenText(row.status)
+          ] }),
+          /* @__PURE__ */ jsx("span", { class: "for", children: screenText(row.detail) }),
+          row.activity && /* @__PURE__ */ jsxs("span", { class: "act", children: [
+            /* @__PURE__ */ jsx("span", { class: "spin" }),
+            /* @__PURE__ */ jsx("span", { children: screenText(row.activity[0]) }),
+            /* @__PURE__ */ jsx("code", { children: row.activity[1] }),
+            /* @__PURE__ */ jsx("span", { class: "el", children: Math.max(0, row.activity[2]) + "s" })
+          ] })
+        ]
+      }
+    );
   }
   function Inbox({ row, host: host2 }) {
-    return /* @__PURE__ */ jsxs("div", { class: "ib" + (row.quiet ? " quiet" : ""), tabIndex: 0, role: "link", "data-h": row.id, onClick: (event) => {
-      if (event.currentTarget.isConnected && getSelection()?.isCollapsed) host2.inbox(row.id);
-    }, onKeyDown: (event) => {
-      if (event.currentTarget.isConnected && event.target === event.currentTarget && (event.key === "Enter" || event.key === " ")) {
-        event.preventDefault();
-        host2.inbox(row.id);
+    return /* @__PURE__ */ jsxs(
+      "div",
+      {
+        class: "ib" + (row.quiet ? " quiet" : ""),
+        tabIndex: 0,
+        role: "link",
+        "data-h": row.id,
+        onClick: (event) => {
+          if (event.currentTarget.isConnected && getSelection()?.isCollapsed) host2.inbox(row.id);
+        },
+        onKeyDown: (event) => {
+          if (event.currentTarget.isConnected && event.target === event.currentTarget && (event.key === "Enter" || event.key === " ")) {
+            event.preventDefault();
+            host2.inbox(row.id);
+          }
+        },
+        children: [
+          /* @__PURE__ */ jsx(Glyph, { path: row.icon }),
+          /* @__PURE__ */ jsx("span", { class: "ln", children: row.parts.map((part, i) => /* @__PURE__ */ jsx("span", { class: part.className, "data-tip": part.tip, children: screenText(part.text) }, i)) }),
+          /* @__PURE__ */ jsx("span", { class: "tm", children: row.age }),
+          /* @__PURE__ */ jsx("span", { class: "q", children: /* @__PURE__ */ jsx(Inline, { text: row.preview }) }),
+          row.answer !== void 0 && /* @__PURE__ */ jsx("span", { class: "ans", children: screenText(row.answer) }),
+          row.origin && /* @__PURE__ */ jsx("span", { class: "org", children: row.origin.message ? /* @__PURE__ */ jsxs(Fragment2, { children: [
+            "From your message:",
+            " ",
+            /* @__PURE__ */ jsx("span", { class: "oq", children: "\u201C" + screenText(row.origin.message) + "\u201D" })
+          ] }) : screenText(row.origin.text ?? "") }),
+          /* @__PURE__ */ jsxs("span", { class: "ctx", children: [
+            /* @__PURE__ */ jsxs("span", { children: [
+              row.harness && /* @__PURE__ */ jsx(Harness, { mark: row.harness }),
+              screenText(row.context)
+            ] }),
+            row.trace && /* @__PURE__ */ jsxs(
+              "button",
+              {
+                class: "tracebtn",
+                type: "button",
+                "aria-label": "Trace what this turn set off",
+                onClick: (event) => {
+                  event.stopPropagation();
+                  if (event.currentTarget.isConnected) host2.trace(row.trace);
+                },
+                children: [
+                  /* @__PURE__ */ jsx(Glyph, { path: "M6 4v10a4 4 0 0 0 4 4h8M6 10h12M15 7l3 3-3 3M15 15l3 3-3 3" }),
+                  /* @__PURE__ */ jsx("span", { children: "Trace" })
+                ]
+              }
+            )
+          ] })
+        ]
       }
-    }, children: [
-      /* @__PURE__ */ jsx(Glyph, { path: row.icon }),
-      /* @__PURE__ */ jsx("span", { class: "ln", children: row.parts.map((part, i) => /* @__PURE__ */ jsx("span", { class: part.className, "data-tip": part.tip, children: screenText(part.text) }, i)) }),
-      /* @__PURE__ */ jsx("span", { class: "tm", children: row.age }),
-      /* @__PURE__ */ jsx("span", { class: "q", children: /* @__PURE__ */ jsx(Inline, { text: row.preview }) }),
-      row.answer !== void 0 && /* @__PURE__ */ jsx("span", { class: "ans", children: screenText(row.answer) }),
-      row.origin && /* @__PURE__ */ jsx("span", { class: "org", children: row.origin.message ? /* @__PURE__ */ jsxs(Fragment2, { children: [
-        "From your message: ",
-        /* @__PURE__ */ jsx("span", { class: "oq", children: "\u201C" + screenText(row.origin.message) + "\u201D" })
-      ] }) : screenText(row.origin.text ?? "") }),
-      /* @__PURE__ */ jsxs("span", { class: "ctx", children: [
-        /* @__PURE__ */ jsxs("span", { children: [
-          row.harness && /* @__PURE__ */ jsx(Harness, { mark: row.harness }),
-          screenText(row.context)
-        ] }),
-        row.trace && /* @__PURE__ */ jsxs("button", { class: "tracebtn", type: "button", "aria-label": "Trace what this turn set off", onClick: (event) => {
-          event.stopPropagation();
-          if (event.currentTarget.isConnected) host2.trace(row.trace);
-        }, children: [
-          /* @__PURE__ */ jsx(Glyph, { path: "M6 4v10a4 4 0 0 0 4 4h8M6 10h12M15 7l3 3-3 3M15 15l3 3-3 3" }),
-          /* @__PURE__ */ jsx("span", { children: "Trace" })
-        ] })
-      ] })
-    ] });
+    );
   }
-  function renderHomeScreen(root, snapshot, host2) {
-    render(/* @__PURE__ */ jsxs(Fragment2, { children: [
+  function HomeView({ snapshot, host: host2 }) {
+    return /* @__PURE__ */ jsxs(Fragment2, { children: [
       /* @__PURE__ */ jsxs("div", { class: "ph", children: [
         /* @__PURE__ */ jsx("h1", { children: "Home" }),
         /* @__PURE__ */ jsxs("div", { class: "sub", children: [
@@ -2849,18 +3271,29 @@ globalThis.__semonUIShared = __semonUIShared;
         /* @__PURE__ */ jsx(Section, { heading: "Answered", count: snapshot.totalAnswered }),
         /* @__PURE__ */ jsxs("div", { class: "list", children: [
           snapshot.answered.map((row) => /* @__PURE__ */ jsx(Inbox, { row, host: host2 }, row.id)),
-          !snapshot.allAnswered && snapshot.totalAnswered > 3 && /* @__PURE__ */ jsx("button", { class: "more", type: "button", onClick: (event) => {
-            if (event.currentTarget.isConnected) host2.answered();
-          }, children: "Show all " + snapshot.totalAnswered + " answered" })
+          !snapshot.allAnswered && snapshot.totalAnswered > 3 && /* @__PURE__ */ jsx(
+            "button",
+            {
+              class: "more",
+              type: "button",
+              onClick: (event) => {
+                if (event.currentTarget.isConnected) host2.answered();
+              },
+              children: "Show all " + snapshot.totalAnswered + " answered"
+            }
+          )
         ] })
       ] })
-    ] }), root);
+    ] });
+  }
+  function renderHomeScreen(root, snapshot, host2) {
+    commitApplicationView(root, /* @__PURE__ */ jsx(HomeView, { snapshot, host: host2 }));
     owned.add(root);
     kinds.set(root, "home");
     host2.committed();
   }
-  function renderMachineScreen(root, snapshot, host2) {
-    render(/* @__PURE__ */ jsxs(Fragment2, { children: [
+  function MachineView({ snapshot, host: host2 }) {
+    return /* @__PURE__ */ jsxs(Fragment2, { children: [
       /* @__PURE__ */ jsx("div", { class: "ph sr", children: /* @__PURE__ */ jsx("h1", { children: screenText(snapshot.name) }) }),
       snapshot.totalSessions > 0 && /* @__PURE__ */ jsxs(Fragment2, { children: [
         /* @__PURE__ */ jsx(Section, { heading: "Sessions", count: snapshot.totalSessions }),
@@ -2875,7 +3308,10 @@ globalThis.__semonUIShared = __semonUIShared;
         /* @__PURE__ */ jsx("div", { class: "list", children: snapshot.moves.map((row) => /* @__PURE__ */ jsx(Inbox, { row, host: host2 }, row.id)) })
       ] }),
       !snapshot.totalSessions && !snapshot.off.length && /* @__PURE__ */ jsx("p", { class: "empty", children: "No sessions have run here." })
-    ] }), root);
+    ] });
+  }
+  function renderMachineScreen(root, snapshot, host2) {
+    commitApplicationView(root, /* @__PURE__ */ jsx(MachineView, { snapshot, host: host2 }));
     owned.add(root);
     kinds.set(root, "machine");
     host2.committed();
@@ -2892,27 +3328,98 @@ globalThis.__semonUIShared = __semonUIShared;
     }
   }
   function Session({ row, host: host2 }) {
-    return /* @__PURE__ */ jsxs("button", { class: "nrow", type: "button", "data-id": row.id, "data-session-row": "list", onClick: (event) => {
-      if (event.currentTarget.isConnected) host2.session(row.id);
-    }, children: [
-      /* @__PURE__ */ jsxs("span", { class: "session-row-main srow-main", children: [
-        /* @__PURE__ */ jsx("span", { class: "dot " + row.state, role: "img", "aria-label": row.stateLabel, "data-tip": row.stateLabel }),
-        /* @__PURE__ */ jsx("span", { class: "nm", "data-tip": row.name, "data-tip-clipped": "", children: screenText(row.name) }),
-        /* @__PURE__ */ jsx("span", { class: "ag", children: row.age })
-      ] }),
-      /* @__PURE__ */ jsxs("span", { class: "session-row-meta srow-meta for", children: [
-        row.harness && /* @__PURE__ */ jsx("span", { class: "hicon hi-screen", "data-harness": row.harness.id, role: "img", "aria-label": row.harness.name, "data-tip": row.harness.name, children: row.harness.light === row.harness.dark ? /* @__PURE__ */ jsx("img", { src: row.harness.light, alt: "", draggable: false, decoding: "async" }) : /* @__PURE__ */ jsxs(Fragment2, { children: [
-          /* @__PURE__ */ jsx("img", { class: "hi-light", loading: row.harness.darkTheme ? "lazy" : void 0, src: row.harness.light, alt: "", draggable: false, decoding: "async" }),
-          /* @__PURE__ */ jsx("img", { class: "hi-dark", loading: row.harness.darkTheme ? void 0 : "lazy", src: row.harness.dark, alt: "", draggable: false, decoding: "async" })
-        ] }) }),
-        /* @__PURE__ */ jsx("span", { class: "row-model", "data-tip": row.modelTip, children: screenText(row.model) }),
-        row.delegation && /* @__PURE__ */ jsx("svg", { class: "icon row-delegation", "data-tip": "Delegated session", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", "stroke-width": "1.8", "stroke-linecap": "round", "stroke-linejoin": "round", "aria-hidden": "true", children: /* @__PURE__ */ jsx("path", { d: row.delegation }) }),
-        row.fields.map((field) => /* @__PURE__ */ jsx("span", { class: field.className + (field.icon ? " row-field" : ""), "data-drop": field.priority, "data-tip": field.tip, children: field.icon ? /* @__PURE__ */ jsxs(Fragment2, { children: [
-          /* @__PURE__ */ jsx(Glyph, { path: field.icon }),
-          /* @__PURE__ */ jsx("span", { class: "field-value", children: screenText(field.text) })
-        ] }) : screenText(field.text) }, field.priority))
-      ] })
-    ] });
+    return /* @__PURE__ */ jsxs(
+      "button",
+      {
+        class: "nrow",
+        type: "button",
+        "data-id": row.id,
+        "data-session-row": "list",
+        onClick: (event) => {
+          if (event.currentTarget.isConnected) host2.session(row.id);
+        },
+        children: [
+          /* @__PURE__ */ jsxs("span", { class: "session-row-main srow-main", children: [
+            /* @__PURE__ */ jsx(
+              "span",
+              {
+                class: "dot " + row.state,
+                role: "img",
+                "aria-label": row.stateLabel,
+                "data-tip": row.stateLabel
+              }
+            ),
+            /* @__PURE__ */ jsx("span", { class: "nm", "data-tip": row.name, "data-tip-clipped": "", children: screenText(row.name) }),
+            /* @__PURE__ */ jsx("span", { class: "ag", children: row.age })
+          ] }),
+          /* @__PURE__ */ jsxs("span", { class: "session-row-meta srow-meta for", children: [
+            row.harness && /* @__PURE__ */ jsx(
+              "span",
+              {
+                class: "hicon hi-screen",
+                "data-harness": row.harness.id,
+                role: "img",
+                "aria-label": row.harness.name,
+                "data-tip": row.harness.name,
+                children: row.harness.light === row.harness.dark ? /* @__PURE__ */ jsx("img", { src: row.harness.light, alt: "", draggable: false, decoding: "async" }) : /* @__PURE__ */ jsxs(Fragment2, { children: [
+                  /* @__PURE__ */ jsx(
+                    "img",
+                    {
+                      class: "hi-light",
+                      loading: row.harness.darkTheme ? "lazy" : void 0,
+                      src: row.harness.light,
+                      alt: "",
+                      draggable: false,
+                      decoding: "async"
+                    }
+                  ),
+                  /* @__PURE__ */ jsx(
+                    "img",
+                    {
+                      class: "hi-dark",
+                      loading: row.harness.darkTheme ? void 0 : "lazy",
+                      src: row.harness.dark,
+                      alt: "",
+                      draggable: false,
+                      decoding: "async"
+                    }
+                  )
+                ] })
+              }
+            ),
+            /* @__PURE__ */ jsx("span", { class: "row-model", "data-tip": row.modelTip, children: screenText(row.model) }),
+            row.delegation && /* @__PURE__ */ jsx(
+              "svg",
+              {
+                class: "icon row-delegation",
+                "data-tip": "Delegated session",
+                viewBox: "0 0 24 24",
+                fill: "none",
+                stroke: "currentColor",
+                "stroke-width": "1.8",
+                "stroke-linecap": "round",
+                "stroke-linejoin": "round",
+                "aria-hidden": "true",
+                children: /* @__PURE__ */ jsx("path", { d: row.delegation })
+              }
+            ),
+            row.fields.map((field) => /* @__PURE__ */ jsx(
+              "span",
+              {
+                class: field.className + (field.icon ? " row-field" : ""),
+                "data-drop": field.priority,
+                "data-tip": field.tip,
+                children: field.icon ? /* @__PURE__ */ jsxs(Fragment2, { children: [
+                  /* @__PURE__ */ jsx(Glyph, { path: field.icon }),
+                  /* @__PURE__ */ jsx("span", { class: "field-value", children: screenText(field.text) })
+                ] }) : screenText(field.text)
+              },
+              field.priority
+            ))
+          ] })
+        ]
+      }
+    );
   }
   var sessionsState = /* @__PURE__ */ new WeakMap();
   function renderSessionsScreen(root, snapshot, host2, focusSearch = false) {
@@ -2925,53 +3432,97 @@ globalThis.__semonUIShared = __semonUIShared;
     const current = state2;
     const fieldValue = current.input?.value.trim() === snapshot.query ? current.input.value : snapshot.query;
     const facet = host2.facets();
-    render(/* @__PURE__ */ jsxs(Fragment2, { children: [
-      /* @__PURE__ */ jsxs("div", { class: "ph", children: [
-        /* @__PURE__ */ jsx("h1", { children: "Sessions" }),
-        /* @__PURE__ */ jsxs("div", { class: "sub", children: [
-          /* @__PURE__ */ jsxs("span", { children: [
-            /* @__PURE__ */ jsx("b", { children: snapshot.total }),
-            snapshot.total === 1 ? "session" : "sessions"
-          ] }),
-          /* @__PURE__ */ jsxs("span", { children: [
-            /* @__PURE__ */ jsx("b", { children: snapshot.working }),
-            "working"
-          ] }),
-          /* @__PURE__ */ jsxs("span", { children: [
-            /* @__PURE__ */ jsx("b", { children: snapshot.waiting }),
-            "waiting on you"
+    commitApplicationView(
+      root,
+      /* @__PURE__ */ jsxs(Fragment2, { children: [
+        /* @__PURE__ */ jsxs("div", { class: "ph", children: [
+          /* @__PURE__ */ jsx("h1", { children: "Sessions" }),
+          /* @__PURE__ */ jsxs("div", { class: "sub", children: [
+            /* @__PURE__ */ jsxs("span", { children: [
+              /* @__PURE__ */ jsx("b", { children: snapshot.total }),
+              snapshot.total === 1 ? "session" : "sessions"
+            ] }),
+            /* @__PURE__ */ jsxs("span", { children: [
+              /* @__PURE__ */ jsx("b", { children: snapshot.working }),
+              "working"
+            ] }),
+            /* @__PURE__ */ jsxs("span", { children: [
+              /* @__PURE__ */ jsx("b", { children: snapshot.waiting }),
+              "waiting on you"
+            ] })
           ] })
+        ] }),
+        /* @__PURE__ */ jsx(
+          "div",
+          {
+            class: "session-facet-slot",
+            ref: (node) => {
+              if (node && facet.parentElement !== node) node.append(facet);
+            }
+          }
+        ),
+        /* @__PURE__ */ jsxs("label", { class: "find", children: [
+          /* @__PURE__ */ jsx(Glyph, { path: "M11 18a7 7 0 1 1 0-14 7 7 0 0 1 0 14zM20 20l-4-4" }),
+          /* @__PURE__ */ jsx(
+            "input",
+            {
+              id: "sq",
+              type: "search",
+              placeholder: "Search sessions",
+              "aria-label": "Search sessions",
+              value: fieldValue,
+              ref: (node) => {
+                current.input = node;
+              },
+              onInput: (event) => {
+                if (event.currentTarget.isConnected) host2.search(event.currentTarget.value);
+              }
+            }
+          )
+        ] }),
+        /* @__PURE__ */ jsx("div", { class: "groupby", role: "group", "aria-label": "Group by", children: [
+          ["recent", "Recent"],
+          ["project", "Project"],
+          ["machine", "Machine"],
+          ["harness", "Harness"]
+        ].map(([key, label]) => /* @__PURE__ */ jsx(
+          "button",
+          {
+            type: "button",
+            "data-g": key,
+            "aria-pressed": snapshot.groupBy === key,
+            onClick: (event) => {
+              if (event.currentTarget.isConnected) host2.group(key);
+            },
+            children: label
+          },
+          key
+        )) }),
+        snapshot.showReviews && /* @__PURE__ */ jsx("div", { class: "groupby", role: "group", "aria-label": "Session visibility", children: /* @__PURE__ */ jsx(
+          "button",
+          {
+            type: "button",
+            "data-show-approval-reviews": "",
+            "aria-pressed": snapshot.reviews,
+            onClick: (event) => {
+              if (event.currentTarget.isConnected) host2.reviews();
+            },
+            children: "Show approval reviews"
+          }
+        ) }),
+        /* @__PURE__ */ jsxs("div", { class: "sess session-groups", children: [
+          snapshot.groups.map((group) => /* @__PURE__ */ jsxs("div", { class: "session-group", children: [
+            group.title && /* @__PURE__ */ jsxs("div", { class: "sec-h", children: [
+              screenText(group.title),
+              /* @__PURE__ */ jsx("span", { class: "n", children: group.total }),
+              group.harness && /* @__PURE__ */ jsx(Harness, { mark: group.harness, lead: false })
+            ] }),
+            /* @__PURE__ */ jsx("div", { class: "list", children: group.rows.map((row) => /* @__PURE__ */ jsx(Session, { row, host: host2 }, row.id)) })
+          ] }, group.title)),
+          !snapshot.matches && /* @__PURE__ */ jsx("p", { class: "empty", children: "No sessions match \u201C" + screenText(snapshot.query) + "\u201D." })
         ] })
-      ] }),
-      /* @__PURE__ */ jsx("div", { class: "session-facet-slot", ref: (node) => {
-        if (node && facet.parentElement !== node) node.append(facet);
-      } }),
-      /* @__PURE__ */ jsxs("label", { class: "find", children: [
-        /* @__PURE__ */ jsx(Glyph, { path: "M11 18a7 7 0 1 1 0-14 7 7 0 0 1 0 14zM20 20l-4-4" }),
-        /* @__PURE__ */ jsx("input", { id: "sq", type: "search", placeholder: "Search sessions", "aria-label": "Search sessions", value: fieldValue, ref: (node) => {
-          current.input = node;
-        }, onInput: (event) => {
-          if (event.currentTarget.isConnected) host2.search(event.currentTarget.value);
-        } })
-      ] }),
-      /* @__PURE__ */ jsx("div", { class: "groupby", role: "group", "aria-label": "Group by", children: [["recent", "Recent"], ["project", "Project"], ["machine", "Machine"], ["harness", "Harness"]].map(([key, label]) => /* @__PURE__ */ jsx("button", { type: "button", "data-g": key, "aria-pressed": snapshot.groupBy === key, onClick: (event) => {
-        if (event.currentTarget.isConnected) host2.group(key);
-      }, children: label }, key)) }),
-      snapshot.showReviews && /* @__PURE__ */ jsx("div", { class: "groupby", role: "group", "aria-label": "Session visibility", children: /* @__PURE__ */ jsx("button", { type: "button", "data-show-approval-reviews": "", "aria-pressed": snapshot.reviews, onClick: (event) => {
-        if (event.currentTarget.isConnected) host2.reviews();
-      }, children: "Show approval reviews" }) }),
-      /* @__PURE__ */ jsxs("div", { class: "sess session-groups", children: [
-        snapshot.groups.map((group) => /* @__PURE__ */ jsxs("div", { class: "session-group", children: [
-          group.title && /* @__PURE__ */ jsxs("div", { class: "sec-h", children: [
-            screenText(group.title),
-            /* @__PURE__ */ jsx("span", { class: "n", children: group.total }),
-            group.harness && /* @__PURE__ */ jsx(Harness, { mark: group.harness, lead: false })
-          ] }),
-          /* @__PURE__ */ jsx("div", { class: "list", children: group.rows.map((row) => /* @__PURE__ */ jsx(Session, { row, host: host2 }, row.id)) })
-        ] }, group.title)),
-        !snapshot.matches && /* @__PURE__ */ jsx("p", { class: "empty", children: "No sessions match \u201C" + screenText(snapshot.query) + "\u201D." })
       ] })
-    ] }), root);
+    );
     owned.add(root);
     kinds.set(root, "sessions");
     host2.committed();
@@ -2997,36 +3548,76 @@ globalThis.__semonUIShared = __semonUIShared;
       if (shown) host2.closed(dialog);
     }
     function backdrop(event) {
-      if (event.target === dialog || event.target instanceof Element && event.target.classList.contains("vb")) dialog.close();
+      if (event.target === dialog || event.target instanceof Element && event.target.classList.contains("vb"))
+        dialog.close();
     }
     function paint2() {
       if (disposed) return;
-      render(/* @__PURE__ */ jsxs(Fragment2, { children: [
-        /* @__PURE__ */ jsxs("div", { class: "vh", children: [
-          /* @__PURE__ */ jsx("div", { class: "vt", children: /* @__PURE__ */ jsx("span", { children: label }) }),
-          /* @__PURE__ */ jsx("button", { class: "vclose", type: "button", "aria-label": "Close", ref: (node) => {
-            close = node;
-          }, onClick: () => {
-            if (!disposed) dialog.close();
-          }, children: /* @__PURE__ */ jsx("svg", { class: "icon", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", "stroke-width": "1.8", "stroke-linecap": "round", "stroke-linejoin": "round", "aria-hidden": "true", children: /* @__PURE__ */ jsx("path", { d: "M6 6l12 12M18 6L6 18" }) }) })
+      render(
+        /* @__PURE__ */ jsxs(Fragment2, { children: [
+          /* @__PURE__ */ jsxs("div", { class: "vh", children: [
+            /* @__PURE__ */ jsx("div", { class: "vt", children: /* @__PURE__ */ jsx("span", { children: label }) }),
+            /* @__PURE__ */ jsx(
+              "button",
+              {
+                class: "vclose",
+                type: "button",
+                "aria-label": "Close",
+                ref: (node) => {
+                  close = node;
+                },
+                onClick: () => {
+                  if (!disposed) dialog.close();
+                },
+                children: /* @__PURE__ */ jsx(
+                  "svg",
+                  {
+                    class: "icon",
+                    viewBox: "0 0 24 24",
+                    fill: "none",
+                    stroke: "currentColor",
+                    "stroke-width": "1.8",
+                    "stroke-linecap": "round",
+                    "stroke-linejoin": "round",
+                    "aria-hidden": "true",
+                    children: /* @__PURE__ */ jsx("path", { d: "M6 6l12 12M18 6L6 18" })
+                  }
+                )
+              }
+            )
+          ] }),
+          /* @__PURE__ */ jsx("div", { class: "vb", children: failed ? /* @__PURE__ */ jsx("p", { class: "vnote", children: "Image not available." }) : /* @__PURE__ */ jsx(
+            "img",
+            {
+              class: "attach-full",
+              alt: label,
+              decoding: "async",
+              src: url,
+              onError: () => {
+                failed = true;
+                paint2();
+              }
+            }
+          ) })
         ] }),
-        /* @__PURE__ */ jsx("div", { class: "vb", children: failed ? /* @__PURE__ */ jsx("p", { class: "vnote", children: "Image not available." }) : /* @__PURE__ */ jsx("img", { class: "attach-full", alt: label, decoding: "async", src: url, onError: () => {
-          failed = true;
-          paint2();
-        } }) })
-      ] }), dialog);
+        dialog
+      );
     }
     paint2();
     dialog.addEventListener("close", finish);
     dialog.addEventListener("click", backdrop);
-    return { dialog, show() {
-      if (shown || disposed) return;
-      shown = true;
-      document.body.append(dialog);
-      dialog.showModal();
-      close?.focus();
-      host2.opened(dialog);
-    }, destroy: finish };
+    return {
+      dialog,
+      show() {
+        if (shown || disposed) return;
+        shown = true;
+        document.body.append(dialog);
+        dialog.showModal();
+        close?.focus();
+        host2.opened(dialog);
+      },
+      destroy: finish
+    };
   }
 
   // shared-preact:preact/hooks
@@ -3048,26 +3639,55 @@ globalThis.__semonUIShared = __semonUIShared;
   var gapText = (gap) => (gap.unit === "tokens" ? "About " : "") + (gap.unit === "lines" && gap.of != null ? gap.n.toLocaleString("en-US") + " of " + gap.of.toLocaleString("en-US") + " lines" : gap.n.toLocaleString("en-US") + " " + (gap.unit === "chars" ? "characters" : gap.unit)) + " cut here by Codex";
   var cutNoteText = (cut2) => "Codex cut this output before the model saw it" + (cut2.original_tokens ? " (about " + cut2.original_tokens.toLocaleString("en-US") + " tokens in all)" : "") + ".";
   function Icon4({ path }) {
-    return /* @__PURE__ */ jsx("svg", { class: "icon", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", "stroke-width": "1.8", "stroke-linecap": "round", "stroke-linejoin": "round", "aria-hidden": "true", children: /* @__PURE__ */ jsx("path", { d: path }) });
+    return /* @__PURE__ */ jsx(
+      "svg",
+      {
+        class: "icon",
+        viewBox: "0 0 24 24",
+        fill: "none",
+        stroke: "currentColor",
+        "stroke-width": "1.8",
+        "stroke-linecap": "round",
+        "stroke-linejoin": "round",
+        "aria-hidden": "true",
+        children: /* @__PURE__ */ jsx("path", { d: path })
+      }
+    );
   }
   var COPY = "M9 9h11v11H9zM5 15H4V4h11v1";
   var EXPAND = "M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7";
   function Copy({ text: text2 }) {
     const [label, setLabel] = useState("Copy");
-    return /* @__PURE__ */ jsxs("button", { class: "link copy", type: "button", "aria-label": "Copy", onClick: (event) => {
-      const button = event.currentTarget;
-      if (!button.isConnected) return;
-      navigator.clipboard?.writeText(text2).then(() => {
-        if (button.isConnected) setLabel("Copied");
-      }, () => {
-        if (button.isConnected) setLabel("Copy failed");
-      });
-    }, children: [
-      /* @__PURE__ */ jsx(Icon4, { path: COPY }),
-      /* @__PURE__ */ jsx("span", { children: label })
-    ] });
+    return /* @__PURE__ */ jsxs(
+      "button",
+      {
+        class: "link copy",
+        type: "button",
+        "aria-label": "Copy",
+        onClick: (event) => {
+          const button = event.currentTarget;
+          if (!button.isConnected) return;
+          navigator.clipboard?.writeText(text2).then(
+            () => {
+              if (button.isConnected) setLabel("Copied");
+            },
+            () => {
+              if (button.isConnected) setLabel("Copy failed");
+            }
+          );
+        },
+        children: [
+          /* @__PURE__ */ jsx(Icon4, { path: COPY }),
+          /* @__PURE__ */ jsx("span", { children: label })
+        ]
+      }
+    );
   }
-  function Header({ label, text: text2, className = "io" }) {
+  function Header({
+    label,
+    text: text2,
+    className = "io"
+  }) {
     return /* @__PURE__ */ jsxs("div", { class: className, children: [
       /* @__PURE__ */ jsx("span", { children: screenText(label) }),
       text2 && /* @__PURE__ */ jsx(Copy, { text: text2 })
@@ -3077,17 +3697,31 @@ globalThis.__semonUIShared = __semonUIShared;
     return /* @__PURE__ */ jsx("div", { class: "diff", children: rows.map(([cls, text2], i) => /* @__PURE__ */ jsx("div", { class: cls, children: screenText(text2) }, i)) });
   }
   function Output({ data }) {
-    return data.cut?.parts?.length ? /* @__PURE__ */ jsx("div", { class: "cutout", children: data.cut.parts.map((part, i) => part.gap ? /* @__PURE__ */ jsx("div", { class: "cutgap", children: screenText(gapText(part.gap)) }, i) : /* @__PURE__ */ jsx("pre", { children: part.text }, i)) }) : /* @__PURE__ */ jsx("pre", { children: data.out });
+    return data.cut?.parts?.length ? /* @__PURE__ */ jsx("div", { class: "cutout", children: data.cut.parts.map(
+      (part, i) => part.gap ? /* @__PURE__ */ jsx("div", { class: "cutgap", children: screenText(gapText(part.gap)) }, i) : /* @__PURE__ */ jsx("pre", { children: part.text }, i)
+    ) }) : /* @__PURE__ */ jsx("pre", { children: data.out });
   }
   function ViewAll({ label, action }) {
-    return /* @__PURE__ */ jsxs("button", { class: "viewall", type: "button", onClick: (event) => {
-      if (event.currentTarget.isConnected) action();
-    }, children: [
-      /* @__PURE__ */ jsx(Icon4, { path: EXPAND }),
-      /* @__PURE__ */ jsx("span", { children: label })
-    ] });
+    return /* @__PURE__ */ jsxs(
+      "button",
+      {
+        class: "viewall",
+        type: "button",
+        onClick: (event) => {
+          if (event.currentTarget.isConnected) action();
+        },
+        children: [
+          /* @__PURE__ */ jsx(Icon4, { path: EXPAND }),
+          /* @__PURE__ */ jsx("span", { children: label })
+        ]
+      }
+    );
   }
-  function ToolPreview({ data, waiting, host: host2 }) {
+  function ToolPreview({
+    data,
+    waiting,
+    host: host2
+  }) {
     const command = data.in ?? (isCommand(data.name) ? data.arg : null), inCut = typeof command === "string" && command.split("\n").length > 12;
     const inputLabel = command && isCommand(data.name) ? "Command" : "Input";
     const lines = (data.out ?? "").split("\n"), cut2 = lines.length > 12, tail = data.ok === false, parts = !!data.cut?.parts?.length, more = !!data.more?.length;
@@ -3099,13 +3733,24 @@ globalThis.__semonUIShared = __semonUIShared;
         /* @__PURE__ */ jsx(Header, { label: inputLabel, text: command }),
         /* @__PURE__ */ jsx("pre", { class: "in" + (inCut ? " clip clipped" : ""), children: command })
       ] }) : !changed && /* @__PURE__ */ jsxs(Fragment2, { children: [
-        /* @__PURE__ */ jsx(Header, { label: /^(Read|Grep|Glob)$/.test(data.name) ? data.name === "Read" ? "File" : "Pattern" : "Input" }),
+        /* @__PURE__ */ jsx(
+          Header,
+          {
+            label: /^(Read|Grep|Glob)$/.test(data.name) ? data.name === "Read" ? "File" : "Pattern" : "Input"
+          }
+        ),
         /* @__PURE__ */ jsx("pre", { class: "in", children: data.arg })
       ] }),
       data.cwd && data.cwd !== "." && /* @__PURE__ */ jsx(Header, { label: "Working directory \xB7 " + data.cwd }),
       data.changes ? /* @__PURE__ */ jsxs(Fragment2, { children: [
         data.changes.map((change, i) => /* @__PURE__ */ jsxs(Fragment2, { children: [
-          /* @__PURE__ */ jsx(Header, { label: "Change \xB7 " + change.path + (change.move ? " \u2192 " + change.move : "") }, "head" + i),
+          /* @__PURE__ */ jsx(
+            Header,
+            {
+              label: "Change \xB7 " + change.path + (change.move ? " \u2192 " + change.move : "")
+            },
+            "head" + i
+          ),
           change.diff?.length ? /* @__PURE__ */ jsx(Diff, { rows: change.diff }, "diff" + i) : /* @__PURE__ */ jsx("div", { class: "noout", children: "No diff recorded" })
         ] })),
         !data.changes.length && /* @__PURE__ */ jsx("div", { class: "noout", children: "No changes recorded" })
@@ -3114,19 +3759,40 @@ globalThis.__semonUIShared = __semonUIShared;
         /* @__PURE__ */ jsx(Diff, { rows: data.diff })
       ] }) : !data.out ? /* @__PURE__ */ jsxs(Fragment2, { children: [
         /* @__PURE__ */ jsx(Header, { label: "Output" }),
-        /* @__PURE__ */ jsx("div", { class: "noout", children: screenText(data.live ? waiting ? "Waiting for your input or permission \xB7 no output yet" : "Running \xB7 no output yet" : data.unfinished ? "No result recorded: the machine stopped responding while this ran." : "No output") })
+        /* @__PURE__ */ jsx("div", { class: "noout", children: screenText(
+          data.live ? waiting ? "Waiting for your input or permission \xB7 no output yet" : "Running \xB7 no output yet" : data.unfinished ? "No result recorded: the machine stopped responding while this ran." : "No output"
+        ) })
       ] }) : /* @__PURE__ */ jsxs(Fragment2, { children: [
-        /* @__PURE__ */ jsx(Header, { label: parts || !cut2 ? "Output" : (tail ? "Output \xB7 last " : "Output \xB7 first ") + "12" + (more ? "" : " of " + lines.length) + " lines" }),
+        /* @__PURE__ */ jsx(
+          Header,
+          {
+            label: parts || !cut2 ? "Output" : (tail ? "Output \xB7 last " : "Output \xB7 first ") + "12" + (more ? "" : " of " + lines.length) + " lines"
+          }
+        ),
         parts ? /* @__PURE__ */ jsx(Output, { data }) : /* @__PURE__ */ jsx("pre", { children: shown.join("\n") }),
         data.cut ? /* @__PURE__ */ jsx("div", { class: "cutnote", children: screenText(cutNoteText(data.cut)) }) : [data.in, data.out].some((text2) => /…(\(truncated\))?\s*$/.test(text2 ?? "")) && /* @__PURE__ */ jsx("div", { class: "cutnote", children: "Cut short in this copy of the logs" })
       ] }),
-      (inCut || !changed && !!data.out && (cut2 && !parts || more)) && /* @__PURE__ */ jsx(ViewAll, { label: changed || more || parts || inCut ? "View all" : "View all " + lines.length + " lines", action: all }),
-      data.script != null && /* @__PURE__ */ jsxs("button", { class: "viewall viewscript", type: "button", onClick: (event) => {
-        if (event.currentTarget.isConnected) host2.script();
-      }, children: [
-        /* @__PURE__ */ jsx(Icon4, { path: EXPAND }),
-        /* @__PURE__ */ jsx("span", { children: "View script" })
-      ] }),
+      (inCut || !changed && !!data.out && (cut2 && !parts || more)) && /* @__PURE__ */ jsx(
+        ViewAll,
+        {
+          label: changed || more || parts || inCut ? "View all" : "View all " + lines.length + " lines",
+          action: all
+        }
+      ),
+      data.script != null && /* @__PURE__ */ jsxs(
+        "button",
+        {
+          class: "viewall viewscript",
+          type: "button",
+          onClick: (event) => {
+            if (event.currentTarget.isConnected) host2.script();
+          },
+          children: [
+            /* @__PURE__ */ jsx(Icon4, { path: EXPAND }),
+            /* @__PURE__ */ jsx("span", { children: "View script" })
+          ]
+        }
+      ),
       data.bg?.summary && /* @__PURE__ */ jsxs(Fragment2, { children: [
         /* @__PURE__ */ jsx("div", { class: "io", children: "Finished" }),
         /* @__PURE__ */ jsx("pre", { class: "finished", children: data.bg.summary })
@@ -3137,66 +3803,105 @@ globalThis.__semonUIShared = __semonUIShared;
     return data.cut ? /* @__PURE__ */ jsx("p", { class: "vnote", children: screenText(cutNoteText(data.cut)) }) : !data.fullFailed && /…(\(truncated\))?\s*$/.test(text2 ?? "") ? /* @__PURE__ */ jsx("p", { class: "vnote", children: "Cut short in this copy of the logs." }) : null;
   }
   function renderFullTool(root, data, inputLabel, waiting) {
-    render(/* @__PURE__ */ jsxs(Fragment2, { children: [
-      data.scriptText !== void 0 ? /* @__PURE__ */ jsxs(Fragment2, { children: [
-        /* @__PURE__ */ jsx(Header, { className: "vs", label: "Script", text: data.scriptText }),
-        /* @__PURE__ */ jsx("pre", { class: "script", children: data.scriptText }),
-        data.scriptTruncated && /* @__PURE__ */ jsx("p", { class: "vnote", children: "Cut at 8 MB: the rest isn't shown." })
-      ] }) : data.scriptFailed ? /* @__PURE__ */ jsx("p", { class: "vnote", children: "Couldn't load the script from these logs." }) : /* @__PURE__ */ jsxs(Fragment2, { children: [
-        data.in && /* @__PURE__ */ jsxs(Fragment2, { children: [
-          /* @__PURE__ */ jsx(Header, { className: "vs", label: inputLabel, text: data.in }),
-          /* @__PURE__ */ jsx("pre", { class: "in", children: data.in }),
-          /* @__PURE__ */ jsx(Note, { data, text: data.in })
+    render(
+      /* @__PURE__ */ jsxs(Fragment2, { children: [
+        data.scriptText !== void 0 ? /* @__PURE__ */ jsxs(Fragment2, { children: [
+          /* @__PURE__ */ jsx(Header, { className: "vs", label: "Script", text: data.scriptText }),
+          /* @__PURE__ */ jsx("pre", { class: "script", children: data.scriptText }),
+          data.scriptTruncated && /* @__PURE__ */ jsx("p", { class: "vnote", children: "Cut at 8 MB: the rest isn't shown." })
+        ] }) : data.scriptFailed ? /* @__PURE__ */ jsx("p", { class: "vnote", children: "Couldn't load the script from these logs." }) : /* @__PURE__ */ jsxs(Fragment2, { children: [
+          data.in && /* @__PURE__ */ jsxs(Fragment2, { children: [
+            /* @__PURE__ */ jsx(Header, { className: "vs", label: inputLabel, text: data.in }),
+            /* @__PURE__ */ jsx("pre", { class: "in", children: data.in }),
+            /* @__PURE__ */ jsx(Note, { data, text: data.in })
+          ] }),
+          data.changes ? /* @__PURE__ */ jsxs(Fragment2, { children: [
+            data.changes.map((change, i) => /* @__PURE__ */ jsxs(Fragment2, { children: [
+              /* @__PURE__ */ jsx(
+                Header,
+                {
+                  className: "vs",
+                  label: "Change \xB7 " + change.path + (change.move ? " \u2192 " + change.move : "")
+                },
+                i
+              ),
+              /* @__PURE__ */ jsx(Diff, { rows: change.diff ?? [] })
+            ] })),
+            !data.changes.length && /* @__PURE__ */ jsx("p", { class: "vnote", children: "No changes recorded." })
+          ] }) : data.diff ? /* @__PURE__ */ jsxs(Fragment2, { children: [
+            /* @__PURE__ */ jsx(Header, { className: "vs", label: "Change" }),
+            /* @__PURE__ */ jsx(Diff, { rows: data.diff })
+          ] }) : /* @__PURE__ */ jsxs(Fragment2, { children: [
+            /* @__PURE__ */ jsx(Header, { className: "vs", label: "Output", text: data.out }),
+            data.out ? /* @__PURE__ */ jsxs(Fragment2, { children: [
+              /* @__PURE__ */ jsx(Output, { data }),
+              /* @__PURE__ */ jsx(Note, { data, text: data.out })
+            ] }) : /* @__PURE__ */ jsx("p", { class: "vnote", children: screenText(
+              data.live ? waiting ? "Waiting for your input or permission \xB7 no output yet" : "Running \xB7 no output yet" : data.unfinished ? "No result recorded." : "No output."
+            ) })
+          ] })
         ] }),
-        data.changes ? /* @__PURE__ */ jsxs(Fragment2, { children: [
-          data.changes.map((change, i) => /* @__PURE__ */ jsxs(Fragment2, { children: [
-            /* @__PURE__ */ jsx(Header, { className: "vs", label: "Change \xB7 " + change.path + (change.move ? " \u2192 " + change.move : "") }, i),
-            /* @__PURE__ */ jsx(Diff, { rows: change.diff ?? [] })
-          ] })),
-          !data.changes.length && /* @__PURE__ */ jsx("p", { class: "vnote", children: "No changes recorded." })
-        ] }) : data.diff ? /* @__PURE__ */ jsxs(Fragment2, { children: [
-          /* @__PURE__ */ jsx(Header, { className: "vs", label: "Change" }),
-          /* @__PURE__ */ jsx(Diff, { rows: data.diff })
-        ] }) : /* @__PURE__ */ jsxs(Fragment2, { children: [
-          /* @__PURE__ */ jsx(Header, { className: "vs", label: "Output", text: data.out }),
-          data.out ? /* @__PURE__ */ jsxs(Fragment2, { children: [
-            /* @__PURE__ */ jsx(Output, { data }),
-            /* @__PURE__ */ jsx(Note, { data, text: data.out })
-          ] }) : /* @__PURE__ */ jsx("p", { class: "vnote", children: screenText(data.live ? waiting ? "Waiting for your input or permission \xB7 no output yet" : "Running \xB7 no output yet" : data.unfinished ? "No result recorded." : "No output.") })
-        ] })
+        data.bg?.summary && /* @__PURE__ */ jsxs(Fragment2, { children: [
+          /* @__PURE__ */ jsx(Header, { className: "vs", label: "Finished", text: data.bg.summary }),
+          /* @__PURE__ */ jsx("pre", { children: data.bg.summary })
+        ] }),
+        data.fullFailed && /* @__PURE__ */ jsx("p", { class: "vnote", children: "Couldn't load the full text: this is the preview." }),
+        !!data.fullCut?.length && /* @__PURE__ */ jsx("p", { class: "vnote", children: "Cut at 8 MB: the rest isn't shown." })
       ] }),
-      data.bg?.summary && /* @__PURE__ */ jsxs(Fragment2, { children: [
-        /* @__PURE__ */ jsx(Header, { className: "vs", label: "Finished", text: data.bg.summary }),
-        /* @__PURE__ */ jsx("pre", { children: data.bg.summary })
-      ] }),
-      data.fullFailed && /* @__PURE__ */ jsx("p", { class: "vnote", children: "Couldn't load the full text: this is the preview." }),
-      !!data.fullCut?.length && /* @__PURE__ */ jsx("p", { class: "vnote", children: "Cut at 8 MB: the rest isn't shown." })
-    ] }), root);
+      root
+    );
   }
 
   // src/lib/tool-step.tsx
-  function ToolStepContents({ snapshot, expanded, mounted: mounted2, toggle, host: host2 }) {
+  function ToolStepContents({
+    snapshot,
+    expanded,
+    mounted: mounted2,
+    toggle,
+    host: host2
+  }) {
     function icon(path, cls) {
-      return /* @__PURE__ */ jsx("svg", { class: cls, viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", "stroke-width": "1.8", "stroke-linecap": "round", "stroke-linejoin": "round", "aria-hidden": "true", children: /* @__PURE__ */ jsx("path", { d: path }) });
+      return /* @__PURE__ */ jsx(
+        "svg",
+        {
+          class: cls,
+          viewBox: "0 0 24 24",
+          fill: "none",
+          stroke: "currentColor",
+          "stroke-width": "1.8",
+          "stroke-linecap": "round",
+          "stroke-linejoin": "round",
+          "aria-hidden": "true",
+          children: /* @__PURE__ */ jsx("path", { d: path })
+        }
+      );
     }
     return /* @__PURE__ */ jsxs(Fragment2, { children: [
-      /* @__PURE__ */ jsxs("button", { type: "button", "aria-expanded": expanded, onClick: (event) => {
-        if (event.currentTarget.isConnected) toggle();
-      }, children: [
-        snapshot.named && /* @__PURE__ */ jsx("span", { class: "sr-only", children: screenText(snapshot.prefix ?? "") }),
-        snapshot.running ? /* @__PURE__ */ jsx("span", { class: "spin" }) : icon(snapshot.icon, "icon"),
-        snapshot.background && /* @__PURE__ */ jsx("span", { class: "bgmark", role: "img", "aria-label": "background" }),
-        !snapshot.named && /* @__PURE__ */ jsx("span", { class: "sv", children: screenText(snapshot.verb ?? "") }),
-        snapshot.named ? /* @__PURE__ */ jsx("span", { class: "sa st", "data-tip": snapshot.tip, children: screenText(snapshot.label) }) : /* @__PURE__ */ jsx("code", { class: "sa", children: snapshot.label }),
-        /* @__PURE__ */ jsxs("span", { class: "sd" + (snapshot.running ? " tick" : ""), children: [
-          screenText(snapshot.status ?? ""),
-          snapshot.background && /* @__PURE__ */ jsxs(Fragment2, { children: [
-            /* @__PURE__ */ jsx("span", { class: "bgw", children: "background\u2009 \xB7 \u2009" }),
-            /* @__PURE__ */ jsx("span", { class: "bgo", children: screenText(snapshot.backgroundStatus ?? "") })
-          ] })
-        ] }),
-        icon(snapshot.chevron, "chev")
-      ] }),
+      /* @__PURE__ */ jsxs(
+        "button",
+        {
+          type: "button",
+          "aria-expanded": expanded,
+          onClick: (event) => {
+            if (event.currentTarget.isConnected) toggle();
+          },
+          children: [
+            snapshot.named && /* @__PURE__ */ jsx("span", { class: "sr-only", children: screenText(snapshot.prefix ?? "") }),
+            snapshot.running ? /* @__PURE__ */ jsx("span", { class: "spin" }) : icon(snapshot.icon, "icon"),
+            snapshot.background && /* @__PURE__ */ jsx("span", { class: "bgmark", role: "img", "aria-label": "background" }),
+            !snapshot.named && /* @__PURE__ */ jsx("span", { class: "sv", children: screenText(snapshot.verb ?? "") }),
+            snapshot.named ? /* @__PURE__ */ jsx("span", { class: "sa st", "data-tip": snapshot.tip, children: screenText(snapshot.label) }) : /* @__PURE__ */ jsx("code", { class: "sa", children: snapshot.label }),
+            /* @__PURE__ */ jsxs("span", { class: "sd" + (snapshot.running ? " tick" : ""), children: [
+              screenText(snapshot.status ?? ""),
+              snapshot.background && /* @__PURE__ */ jsxs(Fragment2, { children: [
+                /* @__PURE__ */ jsx("span", { class: "bgw", children: "background\u2009 \xB7 \u2009" }),
+                /* @__PURE__ */ jsx("span", { class: "bgo", children: screenText(snapshot.backgroundStatus ?? "") })
+              ] })
+            ] }),
+            icon(snapshot.chevron, "chev")
+          ]
+        }
+      ),
       mounted2 && /* @__PURE__ */ jsx("div", { class: "out", hidden: !expanded, children: /* @__PURE__ */ jsx(ToolPreview, { data: snapshot.data, waiting: snapshot.waiting, host: host2 }) })
     ] });
   }
@@ -3215,107 +3920,185 @@ globalThis.__semonUIShared = __semonUIShared;
       ] })) });
     }
     function paint2() {
-      render(/* @__PURE__ */ jsxs(Fragment2, { children: [
-        snapshot.path.length > 1 && /* @__PURE__ */ jsxs(Fragment2, { children: [
-          /* @__PURE__ */ jsxs("div", { class: "menu-status", role: "presentation", children: [
-            /* @__PURE__ */ jsx("span", { class: "dot " + snapshot.state, role: "img", "aria-label": snapshot.stateLabel, "aria-hidden": "true" }),
-            /* @__PURE__ */ jsx("span", { children: screenText(snapshot.status) })
+      render(
+        /* @__PURE__ */ jsxs(Fragment2, { children: [
+          snapshot.path.length > 1 && /* @__PURE__ */ jsxs(Fragment2, { children: [
+            /* @__PURE__ */ jsxs("div", { class: "menu-status", role: "presentation", children: [
+              /* @__PURE__ */ jsx(
+                "span",
+                {
+                  class: "dot " + snapshot.state,
+                  role: "img",
+                  "aria-label": snapshot.stateLabel,
+                  "aria-hidden": "true"
+                }
+              ),
+              /* @__PURE__ */ jsx("span", { children: screenText(snapshot.status) })
+            ] }),
+            /* @__PURE__ */ jsx("div", { class: "menu-list menu-path-menu", role: "menu", children: /* @__PURE__ */ jsxs("div", { class: "menu-path-group", role: "group", "aria-labelledby": "menu-path-heading", children: [
+              /* @__PURE__ */ jsx("div", { class: "menu-section-heading", id: "menu-path-heading", children: "Session path" }),
+              snapshot.path.slice(0, -1).map((ancestor, i) => /* @__PURE__ */ jsxs(
+                "button",
+                {
+                  class: "menu-item menu-path-item",
+                  type: "button",
+                  role: "menuitem",
+                  "aria-label": i === snapshot.path.length - 2 ? "Up to " + ancestor.name : void 0,
+                  onClick: () => {
+                    if (live()) host2.session(ancestor.id);
+                  },
+                  children: [
+                    /* @__PURE__ */ jsx(
+                      "span",
+                      {
+                        class: "menu-path-chevron" + (i === snapshot.path.length - 2 ? "" : " blank"),
+                        "aria-hidden": i === snapshot.path.length - 2 ? void 0 : true
+                      }
+                    ),
+                    /* @__PURE__ */ jsx("span", { class: "menu-path-name", children: screenText(ancestor.name) }),
+                    /* @__PURE__ */ jsx("span", { class: "hname h-" + ancestor.harness, children: screenText(ancestor.harnessName) })
+                  ]
+                },
+                ancestor.id
+              ))
+            ] }) }),
+            /* @__PURE__ */ jsx("div", { class: "menu-separator", role: "separator" })
           ] }),
-          /* @__PURE__ */ jsx("div", { class: "menu-list menu-path-menu", role: "menu", children: /* @__PURE__ */ jsxs("div", { class: "menu-path-group", role: "group", "aria-labelledby": "menu-path-heading", children: [
-            /* @__PURE__ */ jsx("div", { class: "menu-section-heading", id: "menu-path-heading", children: "Session path" }),
-            snapshot.path.slice(0, -1).map((ancestor, i) => /* @__PURE__ */ jsxs("button", { class: "menu-item menu-path-item", type: "button", role: "menuitem", "aria-label": i === snapshot.path.length - 2 ? "Up to " + ancestor.name : void 0, onClick: () => {
-              if (live()) host2.session(ancestor.id);
-            }, children: [
-              /* @__PURE__ */ jsx("span", { class: "menu-path-chevron" + (i === snapshot.path.length - 2 ? "" : " blank"), "aria-hidden": i === snapshot.path.length - 2 ? void 0 : true }),
-              /* @__PURE__ */ jsx("span", { class: "menu-path-name", children: screenText(ancestor.name) }),
-              /* @__PURE__ */ jsx("span", { class: "hname h-" + ancestor.harness, children: screenText(ancestor.harnessName) })
-            ] }, ancestor.id))
-          ] }) }),
-          /* @__PURE__ */ jsx("div", { class: "menu-separator", role: "separator" })
-        ] }),
-        /* @__PURE__ */ jsx("section", { class: "panel-sec", children: /* @__PURE__ */ jsx("div", { class: "menu-list", role: "menu", children: snapshot.actions.map((action) => /* @__PURE__ */ jsxs("button", { class: "menu-item" + (action.className ? " " + action.className : ""), type: "button", role: action.checked === void 0 ? "menuitem" : "menuitemcheckbox", "aria-checked": action.checked === void 0 ? void 0 : wide, onClick: () => {
-          if (!live()) return;
-          if (action.key === "copy") {
-            navigator.clipboard?.writeText(snapshot.command).then(() => {
-              if (live()) {
-                copyLabel = "Copied";
-                paint2();
+          /* @__PURE__ */ jsx("section", { class: "panel-sec", children: /* @__PURE__ */ jsx("div", { class: "menu-list", role: "menu", children: snapshot.actions.map((action) => /* @__PURE__ */ jsxs(
+            "button",
+            {
+              class: "menu-item" + (action.className ? " " + action.className : ""),
+              type: "button",
+              role: action.checked === void 0 ? "menuitem" : "menuitemcheckbox",
+              "aria-checked": action.checked === void 0 ? void 0 : wide,
+              onClick: () => {
+                if (!live()) return;
+                if (action.key === "copy") {
+                  navigator.clipboard?.writeText(snapshot.command).then(
+                    () => {
+                      if (live()) {
+                        copyLabel = "Copied";
+                        paint2();
+                      }
+                    },
+                    () => {
+                      if (live()) {
+                        copyLabel = snapshot.command;
+                        paint2();
+                      }
+                    }
+                  );
+                } else {
+                  host2.action(action.key);
+                  if (action.key === "wide") {
+                    wide = host2.wide();
+                    paint2();
+                  }
+                }
+              },
+              children: [
+                action.icon && /* @__PURE__ */ jsx(Glyph, { path: action.icon }),
+                action.dot && /* @__PURE__ */ jsx("span", { class: "dot " + action.dot, "aria-hidden": "true" }),
+                /* @__PURE__ */ jsx("span", { children: screenText(action.key === "copy" ? copyLabel : action.text) }),
+                action.checked !== void 0 && /* @__PURE__ */ jsx("span", { class: "switch" }),
+                action.note && /* @__PURE__ */ jsx("span", { class: "menu-note", children: action.note })
+              ]
+            },
+            action.key
+          )) }) }),
+          /* @__PURE__ */ jsxs("section", { class: "panel-sec", children: [
+            /* @__PURE__ */ jsx("h3", { children: "Details" }),
+            details(snapshot.details)
+          ] }),
+          /* @__PURE__ */ jsxs("section", { class: "panel-sec cost", children: [
+            /* @__PURE__ */ jsx("h3", { children: "Cost" }),
+            /* @__PURE__ */ jsxs("div", { class: "cost-fig", children: [
+              /* @__PURE__ */ jsx("span", { class: "cost-big", children: snapshot.cost.figure }),
+              /* @__PURE__ */ jsx("span", { class: "cost-cap", children: snapshot.cost.caption })
+            ] }),
+            /* @__PURE__ */ jsx("p", { class: "cost-note", children: screenText(snapshot.cost.note) }),
+            snapshot.cost.details.length > 0 && details(snapshot.cost.details),
+            snapshot.cost.mismatch && /* @__PURE__ */ jsx("p", { class: "cost-note", children: snapshot.cost.mismatch }),
+            snapshot.cost.runs.length > 0 && /* @__PURE__ */ jsxs("div", { class: "runs", "aria-label": "Runs and their cost", children: [
+              snapshot.cost.runs.map((run, i) => /* @__PURE__ */ jsxs(
+                "button",
+                {
+                  class: "run-row depth" + Math.min(run.depth, 1),
+                  type: "button",
+                  hidden: !allRuns && i >= 5,
+                  "aria-label": run.label,
+                  onClick: () => {
+                    if (live()) host2.session(run.id);
+                  },
+                  children: [
+                    /* @__PURE__ */ jsx(
+                      "span",
+                      {
+                        class: "dot " + run.state,
+                        role: "img",
+                        "aria-label": run.stateLabel,
+                        "data-tip": run.stateLabel
+                      }
+                    ),
+                    /* @__PURE__ */ jsxs("span", { class: "nm", children: [
+                      screenText(run.name),
+                      /* @__PURE__ */ jsx("span", { class: "kind", children: screenText("\xB7 " + run.kind) })
+                    ] }),
+                    /* @__PURE__ */ jsx("span", { class: "v", children: run.cost }),
+                    /* @__PURE__ */ jsx(Glyph, { path: snapshot.icons.chevron, className: "chev" })
+                  ]
+                },
+                run.id
+              )),
+              !allRuns && snapshot.cost.runs.length > 5 && /* @__PURE__ */ jsx(
+                "button",
+                {
+                  class: "link",
+                  type: "button",
+                  onClick: () => {
+                    if (live()) {
+                      allRuns = true;
+                      paint2();
+                    }
+                  },
+                  children: "Show " + (snapshot.cost.runs.length - 5) + " more"
+                }
+              )
+            ] }),
+            /* @__PURE__ */ jsxs(
+              "button",
+              {
+                class: "disclose",
+                type: "button",
+                "aria-expanded": tokens2,
+                onClick: () => {
+                  if (live()) {
+                    tokens2 = !tokens2;
+                    paint2();
+                  }
+                },
+                children: [
+                  /* @__PURE__ */ jsx("span", { children: screenText("Tokens by model" + (snapshot.cost.includesRuns ? " \xB7 incl. runs" : "")) }),
+                  /* @__PURE__ */ jsx(Glyph, { path: snapshot.icons.chevron, className: "chev" })
+                ]
               }
-            }, () => {
-              if (live()) {
-                copyLabel = snapshot.command;
-                paint2();
-              }
-            });
-          } else {
-            host2.action(action.key);
-            if (action.key === "wide") {
-              wide = host2.wide();
-              paint2();
-            }
-          }
-        }, children: [
-          action.icon && /* @__PURE__ */ jsx(Glyph, { path: action.icon }),
-          action.dot && /* @__PURE__ */ jsx("span", { class: "dot " + action.dot, "aria-hidden": "true" }),
-          /* @__PURE__ */ jsx("span", { children: screenText(action.key === "copy" ? copyLabel : action.text) }),
-          action.checked !== void 0 && /* @__PURE__ */ jsx("span", { class: "switch" }),
-          action.note && /* @__PURE__ */ jsx("span", { class: "menu-note", children: action.note })
-        ] }, action.key)) }) }),
-        /* @__PURE__ */ jsxs("section", { class: "panel-sec", children: [
-          /* @__PURE__ */ jsx("h3", { children: "Details" }),
-          details(snapshot.details)
+            ),
+            /* @__PURE__ */ jsx("div", { class: "tokens", hidden: !tokens2, children: snapshot.cost.models.map((model2) => /* @__PURE__ */ jsxs(Fragment2, { children: [
+              /* @__PURE__ */ jsx("div", { class: "tok-model", children: screenText(model2.id) }, model2.id),
+              model2.rows.map((row) => /* @__PURE__ */ jsxs("div", { class: "tok-line", children: [
+                /* @__PURE__ */ jsx("span", { children: row.label }),
+                /* @__PURE__ */ jsxs("span", { "data-tip": row.exact ? row.exact + " tokens" : void 0, children: [
+                  row.count,
+                  row.exact && /* @__PURE__ */ jsx("span", { class: "sr-only", children: " (" + row.exact + ")" })
+                ] }),
+                /* @__PURE__ */ jsx("span", { children: row.cost })
+              ] }, model2.id + row.label))
+            ] })) })
+          ] }),
+          /* @__PURE__ */ jsx("p", { class: "third-party", children: snapshot.notice })
         ] }),
-        /* @__PURE__ */ jsxs("section", { class: "panel-sec cost", children: [
-          /* @__PURE__ */ jsx("h3", { children: "Cost" }),
-          /* @__PURE__ */ jsxs("div", { class: "cost-fig", children: [
-            /* @__PURE__ */ jsx("span", { class: "cost-big", children: snapshot.cost.figure }),
-            /* @__PURE__ */ jsx("span", { class: "cost-cap", children: snapshot.cost.caption })
-          ] }),
-          /* @__PURE__ */ jsx("p", { class: "cost-note", children: screenText(snapshot.cost.note) }),
-          snapshot.cost.details.length > 0 && details(snapshot.cost.details),
-          snapshot.cost.mismatch && /* @__PURE__ */ jsx("p", { class: "cost-note", children: snapshot.cost.mismatch }),
-          snapshot.cost.runs.length > 0 && /* @__PURE__ */ jsxs("div", { class: "runs", "aria-label": "Runs and their cost", children: [
-            snapshot.cost.runs.map((run, i) => /* @__PURE__ */ jsxs("button", { class: "run-row depth" + Math.min(run.depth, 1), type: "button", hidden: !allRuns && i >= 5, "aria-label": run.label, onClick: () => {
-              if (live()) host2.session(run.id);
-            }, children: [
-              /* @__PURE__ */ jsx("span", { class: "dot " + run.state, role: "img", "aria-label": run.stateLabel, "data-tip": run.stateLabel }),
-              /* @__PURE__ */ jsxs("span", { class: "nm", children: [
-                screenText(run.name),
-                /* @__PURE__ */ jsx("span", { class: "kind", children: screenText("\xB7 " + run.kind) })
-              ] }),
-              /* @__PURE__ */ jsx("span", { class: "v", children: run.cost }),
-              /* @__PURE__ */ jsx(Glyph, { path: snapshot.icons.chevron, className: "chev" })
-            ] }, run.id)),
-            !allRuns && snapshot.cost.runs.length > 5 && /* @__PURE__ */ jsx("button", { class: "link", type: "button", onClick: () => {
-              if (live()) {
-                allRuns = true;
-                paint2();
-              }
-            }, children: "Show " + (snapshot.cost.runs.length - 5) + " more" })
-          ] }),
-          /* @__PURE__ */ jsxs("button", { class: "disclose", type: "button", "aria-expanded": tokens2, onClick: () => {
-            if (live()) {
-              tokens2 = !tokens2;
-              paint2();
-            }
-          }, children: [
-            /* @__PURE__ */ jsx("span", { children: screenText("Tokens by model" + (snapshot.cost.includesRuns ? " \xB7 incl. runs" : "")) }),
-            /* @__PURE__ */ jsx(Glyph, { path: snapshot.icons.chevron, className: "chev" })
-          ] }),
-          /* @__PURE__ */ jsx("div", { class: "tokens", hidden: !tokens2, children: snapshot.cost.models.map((model2) => /* @__PURE__ */ jsxs(Fragment2, { children: [
-            /* @__PURE__ */ jsx("div", { class: "tok-model", children: screenText(model2.id) }, model2.id),
-            model2.rows.map((row) => /* @__PURE__ */ jsxs("div", { class: "tok-line", children: [
-              /* @__PURE__ */ jsx("span", { children: row.label }),
-              /* @__PURE__ */ jsxs("span", { "data-tip": row.exact ? row.exact + " tokens" : void 0, children: [
-                row.count,
-                row.exact && /* @__PURE__ */ jsx("span", { class: "sr-only", children: " (" + row.exact + ")" })
-              ] }),
-              /* @__PURE__ */ jsx("span", { children: row.cost })
-            ] }, model2.id + row.label))
-          ] })) })
-        ] }),
-        /* @__PURE__ */ jsx("p", { class: "third-party", children: snapshot.notice })
-      ] }), root);
+        root
+      );
     }
     paint2();
   }
@@ -3341,66 +4124,135 @@ globalThis.__semonUIShared = __semonUIShared;
     function backdrop(event) {
       if (event.target === dialog) dialog.close();
     }
-    render(/* @__PURE__ */ jsxs(Fragment2, { children: [
-      /* @__PURE__ */ jsxs("div", { class: "vh", children: [
-        /* @__PURE__ */ jsx("div", { class: "vt", children: /* @__PURE__ */ jsx("span", { children: screenText(options2.heading) }) }),
-        options2.caption && /* @__PURE__ */ jsx("div", { class: "vm", children: screenText(options2.caption) }),
-        /* @__PURE__ */ jsx("button", { class: "vclose", type: "button", "aria-label": options2.closeLabel, ref: (node) => {
-          close = node;
-        }, onClick: () => {
-          if (!disposed) dialog.close();
-        }, children: /* @__PURE__ */ jsx(Glyph, { path: "M6 6l12 12M18 6L6 18", className: "" }) })
+    render(
+      /* @__PURE__ */ jsxs(Fragment2, { children: [
+        /* @__PURE__ */ jsxs("div", { class: "vh", children: [
+          /* @__PURE__ */ jsx("div", { class: "vt", children: /* @__PURE__ */ jsx("span", { children: screenText(options2.heading) }) }),
+          options2.caption && /* @__PURE__ */ jsx("div", { class: "vm", children: screenText(options2.caption) }),
+          /* @__PURE__ */ jsx(
+            "button",
+            {
+              class: "vclose",
+              type: "button",
+              "aria-label": options2.closeLabel,
+              ref: (node) => {
+                close = node;
+              },
+              onClick: () => {
+                if (!disposed) dialog.close();
+              },
+              children: /* @__PURE__ */ jsx(Glyph, { path: "M6 6l12 12M18 6L6 18", className: "" })
+            }
+          )
+        ] }),
+        options2.search && /* @__PURE__ */ jsxs("label", { class: "kids-search", children: [
+          /* @__PURE__ */ jsx(Glyph, { path: "M11 18a7 7 0 1 1 0-14 7 7 0 0 1 0 14zM20 20l-4-4", className: "" }),
+          /* @__PURE__ */ jsx(
+            "input",
+            {
+              type: "search",
+              placeholder: options2.search.placeholder,
+              "aria-label": options2.search.label,
+              onInput: (event) => {
+                if (!disposed) options2.search?.change(event.currentTarget.value);
+              }
+            }
+          )
+        ] }),
+        /* @__PURE__ */ jsx(
+          "div",
+          {
+            class: "vb",
+            ref: (node) => {
+              body = node;
+            }
+          }
+        )
       ] }),
-      options2.search && /* @__PURE__ */ jsxs("label", { class: "kids-search", children: [
-        /* @__PURE__ */ jsx(Glyph, { path: "M11 18a7 7 0 1 1 0-14 7 7 0 0 1 0 14zM20 20l-4-4", className: "" }),
-        /* @__PURE__ */ jsx("input", { type: "search", placeholder: options2.search.placeholder, "aria-label": options2.search.label, onInput: (event) => {
-          if (!disposed) options2.search?.change(event.currentTarget.value);
-        } })
-      ] }),
-      /* @__PURE__ */ jsx("div", { class: "vb", ref: (node) => {
-        body = node;
-      } })
-    ] }), dialog);
+      dialog
+    );
     const slot = body;
     if (!slot) throw new Error("Missing sheet content slot");
     dialog.addEventListener("close", finish);
     dialog.addEventListener("click", backdrop);
-    return { dialog, body: slot, cleanup(callback) {
-      cleanups2.push(callback);
-    }, show() {
-      if (shown || disposed) return;
-      shown = true;
-      document.body.append(dialog);
-      dialog.showModal();
-      close?.focus({ focusVisible: false });
-      host2.opened(dialog);
-    }, destroy: finish };
+    return {
+      dialog,
+      body: slot,
+      cleanup(callback) {
+        cleanups2.push(callback);
+      },
+      show() {
+        if (shown || disposed) return;
+        shown = true;
+        document.body.append(dialog);
+        dialog.showModal();
+        close?.focus({ focusVisible: false });
+        host2.opened(dialog);
+      },
+      destroy: finish
+    };
   }
   function createKidsSheet(name, rows, host2) {
     let query = "";
-    const sheet2 = createNativeSheet({ className: "kids-sheet", label: "All sessions under " + name, heading: name, caption: rows.length + (rows.length === 1 ? " session" : " sessions"), closeLabel: "Close", search: { placeholder: "Search these sessions", label: "Search these sessions", change(value) {
-      query = value.trim();
-      paint2();
-    } } }, host2);
+    const sheet2 = createNativeSheet(
+      {
+        className: "kids-sheet",
+        label: "All sessions under " + name,
+        heading: name,
+        caption: rows.length + (rows.length === 1 ? " session" : " sessions"),
+        closeLabel: "Close",
+        search: {
+          placeholder: "Search these sessions",
+          label: "Search these sessions",
+          change(value) {
+            query = value.trim();
+            paint2();
+          }
+        }
+      },
+      host2
+    );
     function paint2() {
       const filtered = rows.filter((row) => host2.matches(row.id, query));
-      render(/* @__PURE__ */ jsxs("div", { class: "kids-list", children: [
-        !filtered.length && /* @__PURE__ */ jsx("p", { class: "empty", children: "No sessions match \u201C" + screenText(query) + "\u201D." }),
-        ["Waiting for you", "Running", "Finished"].map((label, i) => {
-          const items = filtered.filter((row) => row.bucket === i);
-          return items.length > 0 && /* @__PURE__ */ jsxs("section", { class: "kids-sec", children: [
-            /* @__PURE__ */ jsx("h3", { class: "kids-h", children: label + " (" + items.length + ")" }),
-            items.map((row) => /* @__PURE__ */ jsxs("button", { class: "kids-row", type: "button", "data-id": row.id, "aria-label": row.name + ", " + row.stateLabel, onClick: (event) => {
-              if (event.currentTarget.isConnected) host2.select(row.id);
-            }, children: [
-              /* @__PURE__ */ jsx("span", { class: "dot " + row.state, role: "img", "aria-label": row.stateLabel, "data-tip": row.stateLabel }),
-              /* @__PURE__ */ jsx("span", { class: "nm", children: screenText(row.name) }),
-              row.under && /* @__PURE__ */ jsx("span", { class: "under", children: "under " + screenText(row.under) }),
-              /* @__PURE__ */ jsx("span", { class: "ag", children: row.age })
-            ] }, row.id))
-          ] }, i);
-        })
-      ] }), sheet2.body);
+      render(
+        /* @__PURE__ */ jsxs("div", { class: "kids-list", children: [
+          !filtered.length && /* @__PURE__ */ jsx("p", { class: "empty", children: "No sessions match \u201C" + screenText(query) + "\u201D." }),
+          ["Waiting for you", "Running", "Finished"].map((label, i) => {
+            const items = filtered.filter((row) => row.bucket === i);
+            return items.length > 0 && /* @__PURE__ */ jsxs("section", { class: "kids-sec", children: [
+              /* @__PURE__ */ jsx("h3", { class: "kids-h", children: label + " (" + items.length + ")" }),
+              items.map((row) => /* @__PURE__ */ jsxs(
+                "button",
+                {
+                  class: "kids-row",
+                  type: "button",
+                  "data-id": row.id,
+                  "aria-label": row.name + ", " + row.stateLabel,
+                  onClick: (event) => {
+                    if (event.currentTarget.isConnected) host2.select(row.id);
+                  },
+                  children: [
+                    /* @__PURE__ */ jsx(
+                      "span",
+                      {
+                        class: "dot " + row.state,
+                        role: "img",
+                        "aria-label": row.stateLabel,
+                        "data-tip": row.stateLabel
+                      }
+                    ),
+                    /* @__PURE__ */ jsx("span", { class: "nm", children: screenText(row.name) }),
+                    row.under && /* @__PURE__ */ jsx("span", { class: "under", children: "under " + screenText(row.under) }),
+                    /* @__PURE__ */ jsx("span", { class: "ag", children: row.age })
+                  ]
+                },
+                row.id
+              ))
+            ] }, i);
+          })
+        ] }),
+        sheet2.body
+      );
     }
     paint2();
     sheet2.cleanup(() => render(null, sheet2.body));
@@ -3408,7 +4260,16 @@ globalThis.__semonUIShared = __semonUIShared;
   }
 
   // src/lib/layout.ts
-  var properties = ["width", "height", "left", "top", "margin-left", "min-width", "max-height", "max-width"];
+  var properties = [
+    "width",
+    "height",
+    "left",
+    "top",
+    "margin-left",
+    "min-width",
+    "max-height",
+    "max-width"
+  ];
   var serial = 0;
   function createMeasuredLayout() {
     const sheet2 = new CSSStyleSheet(), prefix = "semon-geometry-" + ++serial + "-";
@@ -3423,11 +4284,15 @@ globalThis.__semonUIShared = __semonUIShared;
       },
       className(property, value, unit) {
         if (disposed) throw new Error("Measured layout is destroyed");
-        if (!properties.includes(property) || !Number.isFinite(value) || Math.abs(value) > 1e8 || !["px", "%"].includes(unit)) throw new Error("Invalid measured geometry");
+        if (!properties.includes(property) || !Number.isFinite(value) || Math.abs(value) > 1e8 || !["px", "%"].includes(unit))
+          throw new Error("Invalid measured geometry");
         const key = property + ":" + value + unit, existing = rules.get(key);
         if (existing) return existing;
         const name = prefix + rules.size;
-        sheet2.insertRule("." + name + "{" + property + ":" + value + unit + "}", sheet2.cssRules.length);
+        sheet2.insertRule(
+          "." + name + "{" + property + ":" + value + unit + "}",
+          sheet2.cssRules.length
+        );
         rules.set(key, name);
         return name;
       },
@@ -3459,11 +4324,20 @@ globalThis.__semonUIShared = __semonUIShared;
       row.missing && /* @__PURE__ */ jsx("span", { class: "no-price", children: screenText(row.missing) })
     ] });
     const cls = (row.className ?? "analytics-session") + (row.rank === void 0 ? "" : " ranked" + (/^[\w-]+$/.test(row.harness) ? " h-" + row.harness : ""));
-    return row.href ? row.rank !== void 0 ? /* @__PURE__ */ jsx("a", { class: cls, href: row.href, onClick: (event) => {
-      if (event.defaultPrevented || event.button || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey || !event.currentTarget.isConnected) return;
-      event.preventDefault();
-      open();
-    }, children: content }) : /* @__PURE__ */ jsx("button", { class: cls, type: "button", onClick: open, children: content }) : /* @__PURE__ */ jsx("div", { class: cls, children: content });
+    return row.href ? row.rank !== void 0 ? /* @__PURE__ */ jsx(
+      "a",
+      {
+        class: cls,
+        href: row.href,
+        onClick: (event) => {
+          if (event.defaultPrevented || event.button || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey || !event.currentTarget.isConnected)
+            return;
+          event.preventDefault();
+          open();
+        },
+        children: content
+      }
+    ) : /* @__PURE__ */ jsx("button", { class: cls, type: "button", onClick: open, children: content }) : /* @__PURE__ */ jsx("div", { class: cls, children: content });
   }
   function renderAnalyticsScreen(root, snapshot, host2) {
     let layout = states.get(root);
@@ -3482,176 +4356,386 @@ globalThis.__semonUIShared = __semonUIShared;
     const active = (action) => {
       if (root.isConnected) action();
     };
-    render(/* @__PURE__ */ jsxs(Fragment2, { children: [
-      /* @__PURE__ */ jsxs("div", { class: "ph", children: [
-        /* @__PURE__ */ jsx("h1", { children: "Analytics" }),
-        /* @__PURE__ */ jsx("div", { class: "sub", children: screenText(snapshot.heading) })
-      ] }),
-      /* @__PURE__ */ jsx("div", { class: "session-facet-slot", ref: (node) => {
-        if (node && facets.parentElement !== node) node.append(facets);
-      } }),
-      snapshot.error && /* @__PURE__ */ jsx("p", { class: "empty", role: "status", children: screenText(snapshot.error) }),
-      snapshot.ready && /* @__PURE__ */ jsxs(Fragment2, { children: [
-        /* @__PURE__ */ jsx("div", { class: "analytics-metrics", "data-analytics-ready": "", "data-query": snapshot.query, children: snapshot.metrics.map((metric) => /* @__PURE__ */ jsxs("div", { class: "analytics-metric", "data-more": metric.explanation ? "" : void 0, "data-tip": metric.explanation, tabIndex: metric.explanation ? 0 : void 0, "aria-describedby": metric.explanation ? metric.id : void 0, children: [
-          metric.explanation && /* @__PURE__ */ jsx("span", { hidden: true, id: metric.id, children: metric.explanation }),
-          /* @__PURE__ */ jsxs("div", { class: "label", children: [
-            /* @__PURE__ */ jsx("span", { children: metric.label }),
-            metric.info && /* @__PURE__ */ jsx(Info, { text: metric.info })
-          ] }),
-          /* @__PURE__ */ jsx("div", { class: "value", children: screenText(metric.value) }),
-          /* @__PURE__ */ jsxs("div", { class: "note", children: [
-            metric.note.lead ? /* @__PURE__ */ jsx("span", { class: metric.note.tone, children: screenText(metric.note.lead) }) : null,
-            screenText(metric.note.text),
-            metric.note.tail
-          ] })
-        ] }, metric.id)) }),
-        snapshot.charts.map((chart) => /* @__PURE__ */ jsxs("section", { class: "analytics-panel", children: [
-          /* @__PURE__ */ jsxs("h2", { children: [
-            chart.heading,
-            chart.info && /* @__PURE__ */ jsx(Info, { text: chart.info })
-          ] }),
-          chart.empty ? /* @__PURE__ */ jsx("p", { class: "empty", children: chart.empty }) : /* @__PURE__ */ jsxs(Fragment2, { children: [
-            chart.sub && /* @__PURE__ */ jsx("div", { class: "panel-sub", children: screenText(chart.sub) }),
-            /* @__PURE__ */ jsx("div", { class: "analytics-chart", children: /* @__PURE__ */ jsxs("svg", { viewBox: "0 0 " + chart.width + " 190", role: chart.role, "aria-label": chart.label, children: [
-              chart.grid.map((line, i) => /* @__PURE__ */ jsxs(Fragment2, { children: [
-                /* @__PURE__ */ jsx("line", { x1: chart.left, x2: chart.right, y1: line.y, y2: line.y, class: "gridline" }, "line" + i),
-                /* @__PURE__ */ jsx("text", { x: 0, y: line.y + 4, class: "axis-label", children: line.label }, "label" + i)
-              ] })),
-              chart.bins.map((bin) => /* @__PURE__ */ jsxs(Fragment2, { children: [
-                bin.claude > 0 && /* @__PURE__ */ jsx("rect", { x: bin.barX, y: 151 - bin.claude, width: bin.barWidth, height: bin.claude, class: "cost-claude" }, "claude" + bin.key),
-                bin.codex > 0 && /* @__PURE__ */ jsx("rect", { x: bin.barX, y: 151 - bin.claude - bin.codex, width: bin.barWidth, height: bin.codex, class: "cost-codex" }, "codex" + bin.key),
-                /* @__PURE__ */ jsx("rect", { x: bin.x, y: 12, width: bin.width, height: 139, class: "chart-hit", "data-tip": bin.tip, role: bin.active ? "button" : void 0, tabIndex: bin.active ? 0 : void 0, "aria-label": bin.active ? bin.label : void 0, onClick: () => {
-                  if (bin.active) active(() => host2.slice(bin.key));
-                }, onKeyDown: (event) => {
-                  if (event.key === "Enter" || event.key === " ") {
-                    event.preventDefault();
-                    if (bin.active) active(() => host2.slice(bin.key));
-                  }
-                } }, "hit" + bin.key)
-              ] })),
-              /* @__PURE__ */ jsx("text", { x: chart.left, y: 178, class: "axis-label", children: chart.ago }),
-              /* @__PURE__ */ jsx("text", { x: chart.right, y: 178, "text-anchor": "end", class: "axis-label", children: "Now" })
-            ] }) }),
-            /* @__PURE__ */ jsx("div", { class: "analytics-legend", children: chart.legend.map((item2) => /* @__PURE__ */ jsxs("span", { children: [
-              /* @__PURE__ */ jsx("i", { class: "legend-" + item2.id }),
-              item2.mark && /* @__PURE__ */ jsx(Harness, { mark: item2.mark, lead: false }),
-              item2.label
-            ] }, item2.id)) }),
-            chart.bins.some((bin) => bin.active) && /* @__PURE__ */ jsxs("details", { class: "chart-slices", children: [
-              /* @__PURE__ */ jsx("summary", { children: "Explore time slices" }),
-              /* @__PURE__ */ jsx("div", { class: "chart-slice-list", children: chart.bins.filter((bin) => bin.active).map((bin) => /* @__PURE__ */ jsxs("button", { class: "chart-slice", type: "button", onClick: () => active(() => host2.slice(bin.key)), children: [
-                /* @__PURE__ */ jsx("span", { children: bin.when }),
-                /* @__PURE__ */ jsx("span", { children: bin.value })
-              ] }, bin.key)) })
+    commitApplicationView(
+      root,
+      /* @__PURE__ */ jsxs(Fragment2, { children: [
+        /* @__PURE__ */ jsxs("div", { class: "ph", children: [
+          /* @__PURE__ */ jsx("h1", { children: "Analytics" }),
+          /* @__PURE__ */ jsx("div", { class: "sub", children: screenText(snapshot.heading) })
+        ] }),
+        /* @__PURE__ */ jsx(
+          "div",
+          {
+            class: "session-facet-slot",
+            ref: (node) => {
+              if (node && facets.parentElement !== node) node.append(facets);
+            }
+          }
+        ),
+        snapshot.error && /* @__PURE__ */ jsx("p", { class: "empty", role: "status", children: screenText(snapshot.error) }),
+        snapshot.ready && /* @__PURE__ */ jsxs(Fragment2, { children: [
+          /* @__PURE__ */ jsx("div", { class: "analytics-metrics", "data-analytics-ready": "", "data-query": snapshot.query, children: snapshot.metrics.map((metric) => /* @__PURE__ */ jsxs(
+            "div",
+            {
+              class: "analytics-metric",
+              "data-more": metric.explanation ? "" : void 0,
+              "data-tip": metric.explanation,
+              tabIndex: metric.explanation ? 0 : void 0,
+              "aria-describedby": metric.explanation ? metric.id : void 0,
+              children: [
+                metric.explanation && /* @__PURE__ */ jsx("span", { hidden: true, id: metric.id, children: metric.explanation }),
+                /* @__PURE__ */ jsxs("div", { class: "label", children: [
+                  /* @__PURE__ */ jsx("span", { children: metric.label }),
+                  metric.info && /* @__PURE__ */ jsx(Info, { text: metric.info })
+                ] }),
+                /* @__PURE__ */ jsx("div", { class: "value", children: screenText(metric.value) }),
+                /* @__PURE__ */ jsxs("div", { class: "note", children: [
+                  metric.note.lead ? /* @__PURE__ */ jsx("span", { class: metric.note.tone, children: screenText(metric.note.lead) }) : null,
+                  screenText(metric.note.text),
+                  metric.note.tail
+                ] })
+              ]
+            },
+            metric.id
+          )) }),
+          snapshot.charts.map((chart) => /* @__PURE__ */ jsxs("section", { class: "analytics-panel", children: [
+            /* @__PURE__ */ jsxs("h2", { children: [
+              chart.heading,
+              chart.info && /* @__PURE__ */ jsx(Info, { text: chart.info })
             ] }),
-            chart.missing && /* @__PURE__ */ jsx("div", { class: "no-price", children: screenText(chart.missing) })
-          ] })
-        ] }, chart.key)),
-        /* @__PURE__ */ jsxs("div", { class: "analytics-breakdown", children: [
-          /* @__PURE__ */ jsxs("div", { class: "analytics-bd-head", children: [
-            /* @__PURE__ */ jsx("h2", { children: "Breakdown" }),
-            /* @__PURE__ */ jsx("div", { class: "panel-sub", children: "Agent-hours and API-equivalent cost; bars follow the toggle" })
-          ] }),
-          /* @__PURE__ */ jsx("div", { class: "analytics-bd-bar", children: /* @__PURE__ */ jsx("div", { class: "analytics-measure", role: "group", "aria-label": "Breakdown bar measure", children: [["hours", "Agent-hours"], ["cost", "API-equivalent cost"]].map(([key, label]) => /* @__PURE__ */ jsx("button", { type: "button", "data-measure": key, "aria-pressed": snapshot.measure === key, onClick: () => active(() => host2.measure(key)), children: label }, key)) }) }),
-          /* @__PURE__ */ jsx("div", { class: "analytics-breakdowns", children: snapshot.breakdowns.map((group) => /* @__PURE__ */ jsxs("section", { class: "analytics-panel", children: [
-            /* @__PURE__ */ jsx("h3", { children: group.heading }),
-            /* @__PURE__ */ jsxs("div", { class: "analytics-list", children: [
-              group.rows.map((row) => /* @__PURE__ */ jsxs("button", { class: "analytics-row", type: "button", "data-breakdown": group.key, "data-key": row.key, onClick: () => active(() => host2.breakdown(group.key, row.key)), children: [
-                /* @__PURE__ */ jsx("span", { class: "row-title", children: screenText(row.name) }),
-                /* @__PURE__ */ jsx("span", { class: "row-count", children: row.count }),
-                /* @__PURE__ */ jsx("span", { class: "row-track", children: /* @__PURE__ */ jsx("i", { class: "row-bar " + width(row.width) + (row.color ? " bar-" + row.color : "") }) }),
-                /* @__PURE__ */ jsx("span", { class: "row-hours" + (snapshot.measure === "hours" ? " on" : ""), children: row.hours }),
-                /* @__PURE__ */ jsx("span", { class: "row-cost" + (snapshot.measure === "cost" ? " on" : ""), children: row.cost }),
-                row.missing && /* @__PURE__ */ jsx("span", { class: "no-price", children: screenText(row.missing) })
-              ] }, row.key)),
-              !group.rows.length && /* @__PURE__ */ jsx("p", { class: "empty", children: "No activity in this range." })
+            chart.empty ? /* @__PURE__ */ jsx("p", { class: "empty", children: chart.empty }) : /* @__PURE__ */ jsxs(Fragment2, { children: [
+              chart.sub && /* @__PURE__ */ jsx("div", { class: "panel-sub", children: screenText(chart.sub) }),
+              /* @__PURE__ */ jsx("div", { class: "analytics-chart", children: /* @__PURE__ */ jsxs(
+                "svg",
+                {
+                  viewBox: "0 0 " + chart.width + " 190",
+                  role: chart.role,
+                  "aria-label": chart.label,
+                  children: [
+                    chart.grid.map((line, i) => /* @__PURE__ */ jsxs(Fragment2, { children: [
+                      /* @__PURE__ */ jsx(
+                        "line",
+                        {
+                          x1: chart.left,
+                          x2: chart.right,
+                          y1: line.y,
+                          y2: line.y,
+                          class: "gridline"
+                        },
+                        "line" + i
+                      ),
+                      /* @__PURE__ */ jsx("text", { x: 0, y: line.y + 4, class: "axis-label", children: line.label }, "label" + i)
+                    ] })),
+                    chart.bins.map((bin) => /* @__PURE__ */ jsxs(Fragment2, { children: [
+                      bin.claude > 0 && /* @__PURE__ */ jsx(
+                        "rect",
+                        {
+                          x: bin.barX,
+                          y: 151 - bin.claude,
+                          width: bin.barWidth,
+                          height: bin.claude,
+                          class: "cost-claude"
+                        },
+                        "claude" + bin.key
+                      ),
+                      bin.codex > 0 && /* @__PURE__ */ jsx(
+                        "rect",
+                        {
+                          x: bin.barX,
+                          y: 151 - bin.claude - bin.codex,
+                          width: bin.barWidth,
+                          height: bin.codex,
+                          class: "cost-codex"
+                        },
+                        "codex" + bin.key
+                      ),
+                      /* @__PURE__ */ jsx(
+                        "rect",
+                        {
+                          x: bin.x,
+                          y: 12,
+                          width: bin.width,
+                          height: 139,
+                          class: "chart-hit",
+                          "data-tip": bin.tip,
+                          role: bin.active ? "button" : void 0,
+                          tabIndex: bin.active ? 0 : void 0,
+                          "aria-label": bin.active ? bin.label : void 0,
+                          onClick: () => {
+                            if (bin.active) active(() => host2.slice(bin.key));
+                          },
+                          onKeyDown: (event) => {
+                            if (event.key === "Enter" || event.key === " ") {
+                              event.preventDefault();
+                              if (bin.active) active(() => host2.slice(bin.key));
+                            }
+                          }
+                        },
+                        "hit" + bin.key
+                      )
+                    ] })),
+                    /* @__PURE__ */ jsx("text", { x: chart.left, y: 178, class: "axis-label", children: chart.ago }),
+                    /* @__PURE__ */ jsx("text", { x: chart.right, y: 178, "text-anchor": "end", class: "axis-label", children: "Now" })
+                  ]
+                }
+              ) }),
+              /* @__PURE__ */ jsx("div", { class: "analytics-legend", children: chart.legend.map((item2) => /* @__PURE__ */ jsxs("span", { children: [
+                /* @__PURE__ */ jsx("i", { class: "legend-" + item2.id }),
+                item2.mark && /* @__PURE__ */ jsx(Harness, { mark: item2.mark, lead: false }),
+                item2.label
+              ] }, item2.id)) }),
+              chart.bins.some((bin) => bin.active) && /* @__PURE__ */ jsxs("details", { class: "chart-slices", children: [
+                /* @__PURE__ */ jsx("summary", { children: "Explore time slices" }),
+                /* @__PURE__ */ jsx("div", { class: "chart-slice-list", children: chart.bins.filter((bin) => bin.active).map((bin) => /* @__PURE__ */ jsxs(
+                  "button",
+                  {
+                    class: "chart-slice",
+                    type: "button",
+                    onClick: () => active(() => host2.slice(bin.key)),
+                    children: [
+                      /* @__PURE__ */ jsx("span", { children: bin.when }),
+                      /* @__PURE__ */ jsx("span", { children: bin.value })
+                    ]
+                  },
+                  bin.key
+                )) })
+              ] }),
+              chart.missing && /* @__PURE__ */ jsx("div", { class: "no-price", children: screenText(chart.missing) })
             ] })
-          ] }, group.key)) })
-        ] }),
-        /* @__PURE__ */ jsx("div", { class: "analytics-split", children: snapshot.lists.map((list2) => /* @__PURE__ */ jsxs("section", { class: "analytics-panel", children: [
-          /* @__PURE__ */ jsx("h2", { children: screenText(list2.heading) }),
-          /* @__PURE__ */ jsxs("div", { class: "analytics-list", children: [
-            list2.rows.map((row) => /* @__PURE__ */ jsx(Row, { row, widthClass: width(row.rank ?? 0), open: () => active(() => host2.session(row.id)) }, row.id)),
-            !list2.rows.length && /* @__PURE__ */ jsx("p", { class: "empty", children: "No sessions in this range." })
+          ] }, chart.key)),
+          /* @__PURE__ */ jsxs("div", { class: "analytics-breakdown", children: [
+            /* @__PURE__ */ jsxs("div", { class: "analytics-bd-head", children: [
+              /* @__PURE__ */ jsx("h2", { children: "Breakdown" }),
+              /* @__PURE__ */ jsx("div", { class: "panel-sub", children: "Agent-hours and API-equivalent cost; bars follow the toggle" })
+            ] }),
+            /* @__PURE__ */ jsx("div", { class: "analytics-bd-bar", children: /* @__PURE__ */ jsx("div", { class: "analytics-measure", role: "group", "aria-label": "Breakdown bar measure", children: [
+              ["hours", "Agent-hours"],
+              ["cost", "API-equivalent cost"]
+            ].map(([key, label]) => /* @__PURE__ */ jsx(
+              "button",
+              {
+                type: "button",
+                "data-measure": key,
+                "aria-pressed": snapshot.measure === key,
+                onClick: () => active(() => host2.measure(key)),
+                children: label
+              },
+              key
+            )) }) }),
+            /* @__PURE__ */ jsx("div", { class: "analytics-breakdowns", children: snapshot.breakdowns.map((group) => /* @__PURE__ */ jsxs("section", { class: "analytics-panel", children: [
+              /* @__PURE__ */ jsx("h3", { children: group.heading }),
+              /* @__PURE__ */ jsxs("div", { class: "analytics-list", children: [
+                group.rows.map((row) => /* @__PURE__ */ jsxs(
+                  "button",
+                  {
+                    class: "analytics-row",
+                    type: "button",
+                    "data-breakdown": group.key,
+                    "data-key": row.key,
+                    onClick: () => active(() => host2.breakdown(group.key, row.key)),
+                    children: [
+                      /* @__PURE__ */ jsx("span", { class: "row-title", children: screenText(row.name) }),
+                      /* @__PURE__ */ jsx("span", { class: "row-count", children: row.count }),
+                      /* @__PURE__ */ jsx("span", { class: "row-track", children: /* @__PURE__ */ jsx(
+                        "i",
+                        {
+                          class: "row-bar " + width(row.width) + (row.color ? " bar-" + row.color : "")
+                        }
+                      ) }),
+                      /* @__PURE__ */ jsx("span", { class: "row-hours" + (snapshot.measure === "hours" ? " on" : ""), children: row.hours }),
+                      /* @__PURE__ */ jsx("span", { class: "row-cost" + (snapshot.measure === "cost" ? " on" : ""), children: row.cost }),
+                      row.missing && /* @__PURE__ */ jsx("span", { class: "no-price", children: screenText(row.missing) })
+                    ]
+                  },
+                  row.key
+                )),
+                !group.rows.length && /* @__PURE__ */ jsx("p", { class: "empty", children: "No activity in this range." })
+              ] })
+            ] }, group.key)) })
+          ] }),
+          /* @__PURE__ */ jsx("div", { class: "analytics-split", children: snapshot.lists.map((list2) => /* @__PURE__ */ jsxs("section", { class: "analytics-panel", children: [
+            /* @__PURE__ */ jsx("h2", { children: screenText(list2.heading) }),
+            /* @__PURE__ */ jsxs("div", { class: "analytics-list", children: [
+              list2.rows.map((row) => /* @__PURE__ */ jsx(
+                Row,
+                {
+                  row,
+                  widthClass: width(row.rank ?? 0),
+                  open: () => active(() => host2.session(row.id))
+                },
+                row.id
+              )),
+              !list2.rows.length && /* @__PURE__ */ jsx("p", { class: "empty", children: "No sessions in this range." })
+            ] })
+          ] }, list2.heading)) }),
+          snapshot.models && /* @__PURE__ */ jsxs("section", { class: "analytics-panel models-panel", children: [
+            /* @__PURE__ */ jsx("h2", { children: "Models" }),
+            /* @__PURE__ */ jsx("p", { class: "panel-sub", children: "Your launched work, compared within each difficulty band. Every measure shows its own sample count; unknown values are not estimated." }),
+            !snapshot.models.length && /* @__PURE__ */ jsx("p", { class: "empty", children: "No launched work with recorded per-message models in this range." }),
+            snapshot.models.map((band) => /* @__PURE__ */ jsxs(Fragment2, { children: [
+              /* @__PURE__ */ jsx("h3", { children: band.heading }, "heading" + band.key),
+              /* @__PURE__ */ jsx(
+                "div",
+                {
+                  class: "model-table-scroll",
+                  tabIndex: 0,
+                  role: "region",
+                  "aria-label": band.key + " model comparison",
+                  children: /* @__PURE__ */ jsxs("table", { class: "model-table", children: [
+                    /* @__PURE__ */ jsx("thead", { children: /* @__PURE__ */ jsx("tr", { children: snapshot.modelHeaders.map((heading) => /* @__PURE__ */ jsx("th", { scope: "col", children: screenText(heading) }, heading)) }) }),
+                    /* @__PURE__ */ jsx("tbody", { children: band.rows.map((row) => /* @__PURE__ */ jsxs("tr", { children: [
+                      /* @__PURE__ */ jsx("td", { children: /* @__PURE__ */ jsx(
+                        "button",
+                        {
+                          class: "model-comparison-open",
+                          type: "button",
+                          "data-tip": row.tip,
+                          onClick: () => active(() => host2.model(row.key)),
+                          children: screenText(row.name)
+                        }
+                      ) }),
+                      /* @__PURE__ */ jsx("td", { children: screenText(row.count) }),
+                      row.cells.map((cell, i) => /* @__PURE__ */ jsxs("td", { "data-tip": cell.tip, children: [
+                        /* @__PURE__ */ jsx("span", { children: cell.text }),
+                        /* @__PURE__ */ jsx("span", { class: "model-n", children: "n=" + cell.n })
+                      ] }, i))
+                    ] }, row.key)) })
+                  ] })
+                },
+                "table" + band.key
+              ),
+              band.points.length ? /* @__PURE__ */ jsx("div", { class: "analytics-chart", children: /* @__PURE__ */ jsxs(
+                "svg",
+                {
+                  viewBox: "0 0 " + band.width + " 190",
+                  role: "img",
+                  "aria-label": "API cost against first-pass acceptance for " + band.key + " work",
+                  children: [
+                    /* @__PURE__ */ jsx("line", { x1: 42, x2: band.width - 12, y1: 150, y2: 150, class: "gridline" }),
+                    /* @__PURE__ */ jsx("line", { x1: 42, x2: 42, y1: 12, y2: 150, class: "gridline" }),
+                    band.points.map((point, i) => /* @__PURE__ */ jsxs(Fragment2, { children: [
+                      /* @__PURE__ */ jsx(
+                        "circle",
+                        {
+                          cx: point.x,
+                          cy: point.y,
+                          r: 5,
+                          class: "model-point",
+                          "data-tip": point.tip,
+                          "aria-label": point.tip
+                        },
+                        "point" + i
+                      ),
+                      /* @__PURE__ */ jsx(
+                        "text",
+                        {
+                          x: Math.max(42, Math.min(band.width - 90, point.x + 8)),
+                          y: Math.max(20, point.y - 8),
+                          class: "axis-label",
+                          children: point.label
+                        },
+                        "point-label" + i
+                      )
+                    ] })),
+                    /* @__PURE__ */ jsx("text", { x: 42, y: 178, class: "axis-label", children: "Median API cost \u2192" }),
+                    /* @__PURE__ */ jsx("text", { x: 2, y: 16, class: "axis-label", children: "100%" }),
+                    /* @__PURE__ */ jsx("text", { x: 8, y: 151, class: "axis-label", children: "0%" })
+                  ]
+                }
+              ) }, "plot" + band.key) : /* @__PURE__ */ jsx("p", { class: "panel-sub", children: "Cost / acceptance plot needs both recorded measures." }, "empty" + band.key)
+            ] }))
+          ] }),
+          snapshot.allowance && /* @__PURE__ */ jsxs("section", { class: "analytics-panel", children: [
+            /* @__PURE__ */ jsx("h2", { children: "Codex allowance" }),
+            /* @__PURE__ */ jsx("div", { class: "panel-sub", children: screenText("Latest recorded rate limits \xB7 " + snapshot.allowance.when) }),
+            /* @__PURE__ */ jsx("div", { class: "allowance-grid", children: snapshot.allowance.windows.map((window2) => /* @__PURE__ */ jsxs("div", { class: "allowance-window", children: [
+              /* @__PURE__ */ jsx("div", { class: "window-name", children: window2.label }),
+              /* @__PURE__ */ jsx("div", { class: "window-used", children: window2.used }),
+              /* @__PURE__ */ jsx("div", { class: "window-reset", children: window2.reset })
+            ] }, window2.label)) })
           ] })
-        ] }, list2.heading)) }),
-        snapshot.models && /* @__PURE__ */ jsxs("section", { class: "analytics-panel models-panel", children: [
-          /* @__PURE__ */ jsx("h2", { children: "Models" }),
-          /* @__PURE__ */ jsx("p", { class: "panel-sub", children: "Your launched work, compared within each difficulty band. Every measure shows its own sample count; unknown values are not estimated." }),
-          !snapshot.models.length && /* @__PURE__ */ jsx("p", { class: "empty", children: "No launched work with recorded per-message models in this range." }),
-          snapshot.models.map((band) => /* @__PURE__ */ jsxs(Fragment2, { children: [
-            /* @__PURE__ */ jsx("h3", { children: band.heading }, "heading" + band.key),
-            /* @__PURE__ */ jsx("div", { class: "model-table-scroll", tabIndex: 0, role: "region", "aria-label": band.key + " model comparison", children: /* @__PURE__ */ jsxs("table", { class: "model-table", children: [
-              /* @__PURE__ */ jsx("thead", { children: /* @__PURE__ */ jsx("tr", { children: snapshot.modelHeaders.map((heading) => /* @__PURE__ */ jsx("th", { scope: "col", children: screenText(heading) }, heading)) }) }),
-              /* @__PURE__ */ jsx("tbody", { children: band.rows.map((row) => /* @__PURE__ */ jsxs("tr", { children: [
-                /* @__PURE__ */ jsx("td", { children: /* @__PURE__ */ jsx("button", { class: "model-comparison-open", type: "button", "data-tip": row.tip, onClick: () => active(() => host2.model(row.key)), children: screenText(row.name) }) }),
-                /* @__PURE__ */ jsx("td", { children: screenText(row.count) }),
-                row.cells.map((cell, i) => /* @__PURE__ */ jsxs("td", { "data-tip": cell.tip, children: [
-                  /* @__PURE__ */ jsx("span", { children: cell.text }),
-                  /* @__PURE__ */ jsx("span", { class: "model-n", children: "n=" + cell.n })
-                ] }, i))
-              ] }, row.key)) })
-            ] }) }, "table" + band.key),
-            band.points.length ? /* @__PURE__ */ jsx("div", { class: "analytics-chart", children: /* @__PURE__ */ jsxs("svg", { viewBox: "0 0 " + band.width + " 190", role: "img", "aria-label": "API cost against first-pass acceptance for " + band.key + " work", children: [
-              /* @__PURE__ */ jsx("line", { x1: 42, x2: band.width - 12, y1: 150, y2: 150, class: "gridline" }),
-              /* @__PURE__ */ jsx("line", { x1: 42, x2: 42, y1: 12, y2: 150, class: "gridline" }),
-              band.points.map((point, i) => /* @__PURE__ */ jsxs(Fragment2, { children: [
-                /* @__PURE__ */ jsx("circle", { cx: point.x, cy: point.y, r: 5, class: "model-point", "data-tip": point.tip, "aria-label": point.tip }, "point" + i),
-                /* @__PURE__ */ jsx("text", { x: Math.max(42, Math.min(band.width - 90, point.x + 8)), y: Math.max(20, point.y - 8), class: "axis-label", children: point.label }, "point-label" + i)
-              ] })),
-              /* @__PURE__ */ jsx("text", { x: 42, y: 178, class: "axis-label", children: "Median API cost \u2192" }),
-              /* @__PURE__ */ jsx("text", { x: 2, y: 16, class: "axis-label", children: "100%" }),
-              /* @__PURE__ */ jsx("text", { x: 8, y: 151, class: "axis-label", children: "0%" })
-            ] }) }, "plot" + band.key) : /* @__PURE__ */ jsx("p", { class: "panel-sub", children: "Cost / acceptance plot needs both recorded measures." }, "empty" + band.key)
-          ] }))
-        ] }),
-        snapshot.allowance && /* @__PURE__ */ jsxs("section", { class: "analytics-panel", children: [
-          /* @__PURE__ */ jsx("h2", { children: "Codex allowance" }),
-          /* @__PURE__ */ jsx("div", { class: "panel-sub", children: screenText("Latest recorded rate limits \xB7 " + snapshot.allowance.when) }),
-          /* @__PURE__ */ jsx("div", { class: "allowance-grid", children: snapshot.allowance.windows.map((window2) => /* @__PURE__ */ jsxs("div", { class: "allowance-window", children: [
-            /* @__PURE__ */ jsx("div", { class: "window-name", children: window2.label }),
-            /* @__PURE__ */ jsx("div", { class: "window-used", children: window2.used }),
-            /* @__PURE__ */ jsx("div", { class: "window-reset", children: window2.reset })
-          ] }, window2.label)) })
         ] })
       ] })
-    ] }), root);
+    );
     host2.committed();
   }
   function renderSliceBody(root, rows, more, empty, open) {
-    render(/* @__PURE__ */ jsx(Fragment2, { children: !rows.length ? /* @__PURE__ */ jsx("p", { class: "empty", children: empty }) : /* @__PURE__ */ jsxs("div", { class: "analytics-list", children: [
-      rows.map((row) => /* @__PURE__ */ jsx(Row, { row, widthClass: "", open: () => {
-        if (root.isConnected) open(row.id);
-      } }, row.id)),
-      more > 0 && /* @__PURE__ */ jsx("p", { class: "empty", children: "and " + more + " more" })
-    ] }) }), root);
+    commitApplicationView(
+      root,
+      /* @__PURE__ */ jsx(Fragment2, { children: !rows.length ? /* @__PURE__ */ jsx("p", { class: "empty", children: empty }) : /* @__PURE__ */ jsxs("div", { class: "analytics-list", children: [
+        rows.map((row) => /* @__PURE__ */ jsx(
+          Row,
+          {
+            row,
+            widthClass: "",
+            open: () => {
+              if (root.isConnected) open(row.id);
+            }
+          },
+          row.id
+        )),
+        more > 0 && /* @__PURE__ */ jsx("p", { class: "empty", children: "and " + more + " more" })
+      ] }) })
+    );
   }
   function renderModelItems(root, count, items, more, host2) {
-    render(/* @__PURE__ */ jsxs(Fragment2, { children: [
-      /* @__PURE__ */ jsx("p", { class: "panel-sub", children: screenText(count) }),
-      items.map((item2, i) => /* @__PURE__ */ jsxs("div", { class: "model-item", children: [
-        item2.name ? /* @__PURE__ */ jsx("button", { class: "model-item-session", type: "button", onClick: (event) => {
-          if (event.currentTarget.isConnected) host2.session(item2.id);
-        }, children: screenText(item2.name) }) : /* @__PURE__ */ jsx("span", { children: screenText(item2.id + " \xB7 outside the session window") }),
-        /* @__PURE__ */ jsx("span", { class: "panel-sub", children: screenText(item2.description) }),
-        item2.trace && /* @__PURE__ */ jsx("button", { class: "model-item-trace", type: "button", onClick: (event) => {
-          if (event.currentTarget.isConnected) host2.trace(item2.trace);
-        }, children: "Trace" }),
-        item2.url && /* @__PURE__ */ jsx("a", { href: item2.url, target: "_blank", rel: "noopener noreferrer", children: "Open pull request" })
-      ] }, i)),
-      more && /* @__PURE__ */ jsx("p", { class: "panel-sub", children: more })
-    ] }), root);
+    commitApplicationView(
+      root,
+      /* @__PURE__ */ jsxs(Fragment2, { children: [
+        /* @__PURE__ */ jsx("p", { class: "panel-sub", children: screenText(count) }),
+        items.map((item2, i) => /* @__PURE__ */ jsxs("div", { class: "model-item", children: [
+          item2.name ? /* @__PURE__ */ jsx(
+            "button",
+            {
+              class: "model-item-session",
+              type: "button",
+              onClick: (event) => {
+                if (event.currentTarget.isConnected) host2.session(item2.id);
+              },
+              children: screenText(item2.name)
+            }
+          ) : /* @__PURE__ */ jsx("span", { children: screenText(item2.id + " \xB7 outside the session window") }),
+          /* @__PURE__ */ jsx("span", { class: "panel-sub", children: screenText(item2.description) }),
+          item2.trace && /* @__PURE__ */ jsx(
+            "button",
+            {
+              class: "model-item-trace",
+              type: "button",
+              onClick: (event) => {
+                if (event.currentTarget.isConnected) host2.trace(item2.trace);
+              },
+              children: "Trace"
+            }
+          ),
+          item2.url && /* @__PURE__ */ jsx("a", { href: item2.url, target: "_blank", rel: "noopener noreferrer", children: "Open pull request" })
+        ] }, i)),
+        more && /* @__PURE__ */ jsx("p", { class: "panel-sub", children: more })
+      ] })
+    );
   }
 
   // src/lib/sentence.tsx
   function Sentence({ parts, host: host2 }) {
-    return /* @__PURE__ */ jsx(Fragment2, { children: parts.map((part, i) => part.action ? /* @__PURE__ */ jsx("button", { class: part.className, type: "button", "aria-label": part.label, "data-tip": part.tip, onClick: (event) => {
-      event.stopPropagation();
-      if (!event.currentTarget.isConnected || !part.action) return;
-      if (part.action.kind === "session") host2.session(part.action.id, part.action.turn);
-      else if (part.action.kind === "machine") host2.machine(part.action.id);
-      else host2.sender(part.action.id);
-    }, children: screenText(part.text) }, i) : /* @__PURE__ */ jsx("span", { class: part.className, "data-tip": part.tip, children: screenText(part.text) }, i)) });
+    return /* @__PURE__ */ jsx(Fragment2, { children: parts.map(
+      (part, i) => part.action ? /* @__PURE__ */ jsx(
+        "button",
+        {
+          class: part.className,
+          type: "button",
+          "aria-label": part.label,
+          "data-tip": part.tip,
+          onClick: (event) => {
+            event.stopPropagation();
+            if (!event.currentTarget.isConnected || !part.action) return;
+            if (part.action.kind === "session") host2.session(part.action.id, part.action.turn);
+            else if (part.action.kind === "machine") host2.machine(part.action.id);
+            else host2.sender(part.action.id);
+          },
+          children: screenText(part.text)
+        },
+        i
+      ) : /* @__PURE__ */ jsx("span", { class: part.className, "data-tip": part.tip, children: screenText(part.text) }, i)
+    ) });
   }
 
   // src/lib/trace.tsx
@@ -3659,9 +4743,24 @@ globalThis.__semonUIShared = __semonUIShared;
   function renderTraceScreen(root, snapshot, host2) {
     let state2 = states2.get(root);
     if (!state2) {
-      state2 = { layout: createMeasuredLayout(), frame: 0, disposed: false, briefs: /* @__PURE__ */ new Map(), open: /* @__PURE__ */ new Set(), clipped: /* @__PURE__ */ new Set(), chart: null, axis: null, edges: null, paths: [], hot: null, paint() {
-      }, measure() {
-      }, observer: new ResizeObserver(() => state2?.measure()) };
+      state2 = {
+        layout: createMeasuredLayout(),
+        frame: 0,
+        disposed: false,
+        briefs: /* @__PURE__ */ new Map(),
+        open: /* @__PURE__ */ new Set(),
+        clipped: /* @__PURE__ */ new Set(),
+        chart: null,
+        axis: null,
+        edges: null,
+        paths: [],
+        hot: null,
+        paint() {
+        },
+        measure() {
+        },
+        observer: new ResizeObserver(() => state2?.measure())
+      };
       states2.set(root, state2);
       const owner2 = state2;
       claimScreen(root, "trace", () => {
@@ -3685,7 +4784,19 @@ globalThis.__semonUIShared = __semonUIShared;
     };
     function paintEdges() {
       if (!owner.edges || owner.disposed) return;
-      render(/* @__PURE__ */ jsx(Fragment2, { children: owner.paths.map((edge, i) => /* @__PURE__ */ jsx("path", { "data-parent": edge.parent, "data-child": edge.child, class: edge.className + (owner.hot === edge.parent || owner.hot === edge.child ? " hot" : ""), d: edge.path }, i)) }), owner.edges);
+      render(
+        /* @__PURE__ */ jsx(Fragment2, { children: owner.paths.map((edge, i) => /* @__PURE__ */ jsx(
+          "path",
+          {
+            "data-parent": edge.parent,
+            "data-child": edge.child,
+            class: edge.className + (owner.hot === edge.parent || owner.hot === edge.child ? " hot" : ""),
+            d: edge.path
+          },
+          i
+        )) }),
+        owner.edges
+      );
     }
     function hot(id) {
       owner.hot = id;
@@ -3722,7 +4833,12 @@ globalThis.__semonUIShared = __semonUIShared;
       owner.edges.setAttribute("viewBox", "0 0 " + rect.width + " " + rect.height);
       owner.paths = [];
       if (window.matchMedia("(min-width: 761px)").matches && rect.width && rect.height) {
-        const rows = new Map([...chart.querySelectorAll("[data-agent-id]")].map((row) => [row.dataset.agentId, row]));
+        const rows = new Map(
+          [...chart.querySelectorAll("[data-agent-id]")].map((row) => [
+            row.dataset.agentId,
+            row
+          ])
+        );
         for (const row of snapshot.agents?.rows ?? []) {
           if (!row.edge) continue;
           const parent = rows.get(row.edge.parent), child = rows.get(row.id);
@@ -3737,7 +4853,10 @@ globalThis.__semonUIShared = __semonUIShared;
           add("M " + at + " " + (yp - 4) + " V " + (yp + 4));
           if (row.edge.returned) {
             add("M " + done + " " + yc + " V " + (yp + 4));
-            add("M " + (done - 3) + " " + (yp + 4) + " L " + done + " " + yp + " L " + (done + 3) + " " + (yp + 4), "agent-edge-arrow" + (row.critical ? " critical" : ""));
+            add(
+              "M " + (done - 3) + " " + (yp + 4) + " L " + done + " " + yp + " L " + (done + 3) + " " + (yp + 4),
+              "agent-edge-arrow" + (row.critical ? " critical" : "")
+            );
           }
         }
       }
@@ -3750,114 +4869,274 @@ globalThis.__semonUIShared = __semonUIShared;
       owner.layout.reset();
       const left = (value) => owner.layout.className("left", value, "%"), width = (value) => owner.layout.className("width", value, "%"), indent = (depth) => owner.layout.className("width", Math.min(3, depth) * 12, "px");
       const agents = snapshot.agents;
-      render(/* @__PURE__ */ jsxs(Fragment2, { children: [
-        snapshot.summary && /* @__PURE__ */ jsx("p", { class: "trace-summary", children: screenText(snapshot.summary) }),
-        /* @__PURE__ */ jsx("div", { class: "ph sr", children: /* @__PURE__ */ jsx("h1", { children: "Trace" }) }),
-        snapshot.empty ? /* @__PURE__ */ jsx("p", { class: "empty", children: "This turn isn't in the logs on this machine." }) : /* @__PURE__ */ jsxs(Fragment2, { children: [
-          agents && /* @__PURE__ */ jsxs("section", { class: "agents-panel", "aria-label": "Agents", children: [
-            /* @__PURE__ */ jsx("h2", { class: "agents-title", children: "Agents" }),
-            /* @__PURE__ */ jsx("div", { class: "agents-summary", children: agents.summary.map((item2, i) => /* @__PURE__ */ jsx("span", { children: screenText(item2) }, i)) }),
-            /* @__PURE__ */ jsx("div", { class: "agents-axis", children: /* @__PURE__ */ jsxs("div", { class: "agent-axis-track", ref: (node) => {
-              owner.axis = node;
-            }, children: [
-              /* @__PURE__ */ jsx("span", { class: "agent-axis-time start", children: agents.start }),
-              /* @__PURE__ */ jsx("span", { class: "agent-axis-time end", children: agents.end }),
-              agents.ticks.map((tick, i) => /* @__PURE__ */ jsx("span", { class: "agent-axis-tick" + (tick.nearEnd ? " near-end" : "") + " " + left(tick.left), children: /* @__PURE__ */ jsx("span", { children: tick.label }) }, i))
-            ] }) }),
-            /* @__PURE__ */ jsxs("div", { class: "agents-legend", children: [
-              /* @__PURE__ */ jsx("span", { class: "agents-legend-swatch" }),
-              /* @__PURE__ */ jsx("span", { children: agents.legend }),
-              agents.incomplete && /* @__PURE__ */ jsx("span", { children: screenText("\xB7 Wait history incomplete") })
+      commitApplicationView(
+        root,
+        /* @__PURE__ */ jsxs(Fragment2, { children: [
+          snapshot.summary && /* @__PURE__ */ jsx("p", { class: "trace-summary", children: screenText(snapshot.summary) }),
+          /* @__PURE__ */ jsx("div", { class: "ph sr", children: /* @__PURE__ */ jsx("h1", { children: "Trace" }) }),
+          snapshot.empty ? /* @__PURE__ */ jsx("p", { class: "empty", children: "This turn isn't in the logs on this machine." }) : /* @__PURE__ */ jsxs(Fragment2, { children: [
+            agents && /* @__PURE__ */ jsxs("section", { class: "agents-panel", "aria-label": "Agents", children: [
+              /* @__PURE__ */ jsx("h2", { class: "agents-title", children: "Agents" }),
+              /* @__PURE__ */ jsx("div", { class: "agents-summary", children: agents.summary.map((item2, i) => /* @__PURE__ */ jsx("span", { children: screenText(item2) }, i)) }),
+              /* @__PURE__ */ jsx("div", { class: "agents-axis", children: /* @__PURE__ */ jsxs(
+                "div",
+                {
+                  class: "agent-axis-track",
+                  ref: (node) => {
+                    owner.axis = node;
+                  },
+                  children: [
+                    /* @__PURE__ */ jsx("span", { class: "agent-axis-time start", children: agents.start }),
+                    /* @__PURE__ */ jsx("span", { class: "agent-axis-time end", children: agents.end }),
+                    agents.ticks.map((tick, i) => /* @__PURE__ */ jsx(
+                      "span",
+                      {
+                        class: "agent-axis-tick" + (tick.nearEnd ? " near-end" : "") + " " + left(tick.left),
+                        children: /* @__PURE__ */ jsx("span", { children: tick.label })
+                      },
+                      i
+                    ))
+                  ]
+                }
+              ) }),
+              /* @__PURE__ */ jsxs("div", { class: "agents-legend", children: [
+                /* @__PURE__ */ jsx("span", { class: "agents-legend-swatch" }),
+                /* @__PURE__ */ jsx("span", { children: agents.legend }),
+                agents.incomplete && /* @__PURE__ */ jsx("span", { children: screenText("\xB7 Wait history incomplete") })
+              ] }),
+              /* @__PURE__ */ jsxs(
+                "div",
+                {
+                  class: "agents-chart",
+                  ref: (node) => {
+                    owner.chart = node;
+                  },
+                  children: [
+                    agents.rows.map(
+                      (row) => row.kind === "heading" ? /* @__PURE__ */ jsx("div", { class: "agent-relayed-heading", children: "Relayed to" }, row.id) : row.kind === "more" ? /* @__PURE__ */ jsxs(
+                        "button",
+                        {
+                          class: "agent-row agent-more",
+                          type: "button",
+                          "data-depth": Math.min(3, row.depth),
+                          "aria-label": row.label,
+                          onClick: () => active(() => host2.fold(row.fold ?? row.id)),
+                          children: [
+                            /* @__PURE__ */ jsx("span", { class: "agent-label", children: /* @__PURE__ */ jsxs("span", { class: "agent-identity", children: [
+                              /* @__PURE__ */ jsx("span", { class: "agent-indent " + indent(row.depth) }),
+                              /* @__PURE__ */ jsx("span", { class: "agent-name", children: row.name })
+                            ] }) }),
+                            /* @__PURE__ */ jsx("span", { class: "agent-duration" }),
+                            /* @__PURE__ */ jsx("span", { class: "agent-cost", "data-tip": row.costTip, children: row.cost }),
+                            /* @__PURE__ */ jsx("span", { class: "agent-track" })
+                          ]
+                        },
+                        row.id
+                      ) : /* @__PURE__ */ jsxs(
+                        "button",
+                        {
+                          class: "agent-row",
+                          type: "button",
+                          "data-agent-id": row.id,
+                          "data-depth": Math.min(3, row.depth),
+                          "data-critical": String(!!row.critical),
+                          "aria-label": row.label,
+                          onClick: () => active(() => host2.session(row.id, row.turn)),
+                          onPointerEnter: () => hot(row.id),
+                          onPointerLeave: () => hot(null),
+                          onFocus: () => hot(row.id),
+                          onBlur: () => hot(null),
+                          children: [
+                            /* @__PURE__ */ jsxs("span", { class: "agent-label", children: [
+                              /* @__PURE__ */ jsxs("span", { class: "agent-identity", children: [
+                                /* @__PURE__ */ jsx("span", { class: "agent-indent " + indent(row.depth) }),
+                                /* @__PURE__ */ jsx(
+                                  "span",
+                                  {
+                                    class: "agent-harness-dot " + row.harnessClass,
+                                    "aria-hidden": "true"
+                                  }
+                                ),
+                                row.relay && /* @__PURE__ */ jsx(Glyph, { path: "M4 7h13l-3-3M20 17H7l3 3", className: "agent-relay-icon" }),
+                                /* @__PURE__ */ jsx("span", { class: "agent-name", children: screenText(row.name) })
+                              ] }),
+                              /* @__PURE__ */ jsxs("span", { class: "agent-meta", children: [
+                                /* @__PURE__ */ jsx("span", { class: "agent-model", children: screenText(row.model ?? "") }),
+                                /* @__PURE__ */ jsx(
+                                  "span",
+                                  {
+                                    class: "agent-status stat " + row.state,
+                                    "data-tip": row.stateLabel,
+                                    children: /* @__PURE__ */ jsx(
+                                      "span",
+                                      {
+                                        class: "dot " + row.state,
+                                        role: "img",
+                                        "aria-label": row.stateLabel,
+                                        "data-tip": row.stateLabel
+                                      }
+                                    )
+                                  }
+                                ),
+                                /* @__PURE__ */ jsx(
+                                  "span",
+                                  {
+                                    class: "agent-tokens",
+                                    "data-tip": "Session totals, including this row's spawned agents",
+                                    children: row.tokens
+                                  }
+                                )
+                              ] })
+                            ] }),
+                            /* @__PURE__ */ jsx("span", { class: "agent-duration", children: row.duration }),
+                            /* @__PURE__ */ jsx("span", { class: "agent-cost", "data-tip": row.costTip, children: row.cost }),
+                            /* @__PURE__ */ jsxs("span", { class: "agent-track", "aria-hidden": "true", children: [
+                              agents.ticks.map((tick, i) => /* @__PURE__ */ jsx(
+                                "span",
+                                {
+                                  class: "agent-gridline " + left(tick.left),
+                                  "aria-hidden": "true"
+                                },
+                                "grid" + i
+                              )),
+                              row.segments?.map((segment, i) => /* @__PURE__ */ jsx(
+                                "span",
+                                {
+                                  class: "agent-segment " + segment.kind + " " + left(segment.left) + " " + width(segment.width)
+                                },
+                                "segment" + i
+                              )),
+                              row.spawns?.map((position, i) => /* @__PURE__ */ jsx(
+                                "span",
+                                {
+                                  class: "agent-spawn-tick " + left(position),
+                                  "aria-hidden": "true"
+                                },
+                                "spawn" + i
+                              )),
+                              row.waits?.map((wait, i) => /* @__PURE__ */ jsx(
+                                "span",
+                                {
+                                  class: "agent-wait " + left(wait.left) + " " + width(wait.width),
+                                  "data-tip": wait.tip
+                                },
+                                "wait" + i
+                              ))
+                            ] })
+                          ]
+                        },
+                        row.id
+                      )
+                    ),
+                    /* @__PURE__ */ jsx(
+                      "svg",
+                      {
+                        class: "agent-edges",
+                        "aria-hidden": "true",
+                        preserveAspectRatio: "none",
+                        ref: (node) => {
+                          owner.edges = node;
+                        }
+                      }
+                    )
+                  ]
+                }
+              )
             ] }),
-            /* @__PURE__ */ jsxs("div", { class: "agents-chart", ref: (node) => {
-              owner.chart = node;
-            }, children: [
-              agents.rows.map((row) => row.kind === "heading" ? /* @__PURE__ */ jsx("div", { class: "agent-relayed-heading", children: "Relayed to" }, row.id) : row.kind === "more" ? /* @__PURE__ */ jsxs("button", { class: "agent-row agent-more", type: "button", "data-depth": Math.min(3, row.depth), "aria-label": row.label, onClick: () => active(() => host2.fold(row.fold ?? row.id)), children: [
-                /* @__PURE__ */ jsx("span", { class: "agent-label", children: /* @__PURE__ */ jsxs("span", { class: "agent-identity", children: [
-                  /* @__PURE__ */ jsx("span", { class: "agent-indent " + indent(row.depth) }),
-                  /* @__PURE__ */ jsx("span", { class: "agent-name", children: row.name })
-                ] }) }),
-                /* @__PURE__ */ jsx("span", { class: "agent-duration" }),
-                /* @__PURE__ */ jsx("span", { class: "agent-cost", "data-tip": row.costTip, children: row.cost }),
-                /* @__PURE__ */ jsx("span", { class: "agent-track" })
-              ] }, row.id) : /* @__PURE__ */ jsxs("button", { class: "agent-row", type: "button", "data-agent-id": row.id, "data-depth": Math.min(3, row.depth), "data-critical": String(!!row.critical), "aria-label": row.label, onClick: () => active(() => host2.session(row.id, row.turn)), onPointerEnter: () => hot(row.id), onPointerLeave: () => hot(null), onFocus: () => hot(row.id), onBlur: () => hot(null), children: [
-                /* @__PURE__ */ jsxs("span", { class: "agent-label", children: [
-                  /* @__PURE__ */ jsxs("span", { class: "agent-identity", children: [
-                    /* @__PURE__ */ jsx("span", { class: "agent-indent " + indent(row.depth) }),
-                    /* @__PURE__ */ jsx("span", { class: "agent-harness-dot " + row.harnessClass, "aria-hidden": "true" }),
-                    row.relay && /* @__PURE__ */ jsx(Glyph, { path: "M4 7h13l-3-3M20 17H7l3 3", className: "agent-relay-icon" }),
-                    /* @__PURE__ */ jsx("span", { class: "agent-name", children: screenText(row.name) })
-                  ] }),
-                  /* @__PURE__ */ jsxs("span", { class: "agent-meta", children: [
-                    /* @__PURE__ */ jsx("span", { class: "agent-model", children: screenText(row.model ?? "") }),
-                    /* @__PURE__ */ jsx("span", { class: "agent-status stat " + row.state, "data-tip": row.stateLabel, children: /* @__PURE__ */ jsx("span", { class: "dot " + row.state, role: "img", "aria-label": row.stateLabel, "data-tip": row.stateLabel }) }),
-                    /* @__PURE__ */ jsx("span", { class: "agent-tokens", "data-tip": "Session totals, including this row's spawned agents", children: row.tokens })
+            /* @__PURE__ */ jsx("div", { class: "flow", children: snapshot.hops.map((hop) => /* @__PURE__ */ jsxs(
+              "div",
+              {
+                class: "hop " + hop.className,
+                "data-h": hop.handoff,
+                "data-turn": hop.turn,
+                children: [
+                  /* @__PURE__ */ jsx("div", { class: "node " + hop.nodeClass, children: /* @__PURE__ */ jsx(Glyph, { path: hop.icon, className: "" }) }),
+                  /* @__PURE__ */ jsxs("div", { class: "body", children: [
+                    /* @__PURE__ */ jsxs("div", { class: "sent", children: [
+                      /* @__PURE__ */ jsx(Sentence, { parts: hop.parts, host: host2 }),
+                      hop.time && /* @__PURE__ */ jsx("span", { class: "tm", children: hop.time })
+                    ] }),
+                    hop.brief && /* @__PURE__ */ jsxs(Fragment2, { children: [
+                      /* @__PURE__ */ jsx(
+                        "div",
+                        {
+                          class: "brief md" + (owner.open.has(hop.key) ? " open" : owner.clipped.has(hop.key) ? " clipped" : ""),
+                          ref: (node) => {
+                            if (node) {
+                              const more = owner.briefs.get(hop.key)?.more;
+                              if (more) owner.briefs.set(hop.key, { node, more });
+                            }
+                          },
+                          children: /* @__PURE__ */ jsx(MarkdownContent, { text: hop.brief })
+                        }
+                      ),
+                      /* @__PURE__ */ jsx(
+                        "button",
+                        {
+                          class: "more",
+                          type: "button",
+                          hidden: !owner.clipped.has(hop.key) && !owner.open.has(hop.key),
+                          "aria-expanded": owner.open.has(hop.key),
+                          ref: (node) => {
+                            const brief = node?.previousElementSibling;
+                            if (node && brief instanceof HTMLElement)
+                              owner.briefs.set(hop.key, { node: brief, more: node });
+                          },
+                          onClick: () => active(() => {
+                            if (owner.open.has(hop.key)) owner.open.delete(hop.key);
+                            else owner.open.add(hop.key);
+                            owner.paint();
+                          }),
+                          children: owner.open.has(hop.key) ? "Show less" : "Show more"
+                        }
+                      )
+                    ] }),
+                    hop.answers && /* @__PURE__ */ jsx("div", { class: "result answer" + (hop.answers.length ? "" : " none"), children: !hop.answers.length ? /* @__PURE__ */ jsxs(Fragment2, { children: [
+                      /* @__PURE__ */ jsx("b", { children: "Answered" }),
+                      " \xB7 reply not in these logs"
+                    ] }) : /* @__PURE__ */ jsxs(Fragment2, { children: [
+                      /* @__PURE__ */ jsx("b", { children: hop.answers.length === 1 ? "You answered: " : "You answered:" }),
+                      hop.answers.length === 1 ? hop.answers[0] : /* @__PURE__ */ jsx("ol", { children: hop.answers.map((answer2, i) => /* @__PURE__ */ jsx("li", { children: screenText(answer2) }, i)) })
+                    ] }) }),
+                    hop.result && /* @__PURE__ */ jsxs("div", { class: "result", children: [
+                      /* @__PURE__ */ jsx("span", { class: "rl", children: "Result:" }),
+                      /* @__PURE__ */ jsx("span", { children: /* @__PURE__ */ jsx(Inline, { text: hop.result }) })
+                    ] }),
+                    hop.meta && /* @__PURE__ */ jsxs("div", { class: "meta", children: [
+                      /* @__PURE__ */ jsxs("span", { class: "stat " + hop.meta.state, children: [
+                        hop.meta.state === "work" ? /* @__PURE__ */ jsx("span", { class: "spin" }) : /* @__PURE__ */ jsx(
+                          "span",
+                          {
+                            class: "dot " + hop.meta.state,
+                            role: "img",
+                            "aria-label": hop.meta.stateLabel
+                          }
+                        ),
+                        hop.meta.text
+                      ] }),
+                      hop.meta.chip && /* @__PURE__ */ jsxs("span", { class: "chip-h " + hop.meta.chipClass, "data-tip": hop.meta.tip, children: [
+                        hop.meta.harness && /* @__PURE__ */ jsx(Harness, { mark: hop.meta.harness, lead: false }),
+                        screenText(hop.meta.chip)
+                      ] }),
+                      hop.meta.note && /* @__PURE__ */ jsx("span", { class: "gone", children: screenText(hop.meta.note) }),
+                      hop.meta.session && /* @__PURE__ */ jsx(
+                        "button",
+                        {
+                          class: "open",
+                          type: "button",
+                          onClick: () => active(() => host2.session(hop.meta.session, hop.meta.turn)),
+                          children: screenText("Open in " + hop.meta.name + " \u203A")
+                        }
+                      )
+                    ] })
                   ] })
-                ] }),
-                /* @__PURE__ */ jsx("span", { class: "agent-duration", children: row.duration }),
-                /* @__PURE__ */ jsx("span", { class: "agent-cost", "data-tip": row.costTip, children: row.cost }),
-                /* @__PURE__ */ jsxs("span", { class: "agent-track", "aria-hidden": "true", children: [
-                  agents.ticks.map((tick, i) => /* @__PURE__ */ jsx("span", { class: "agent-gridline " + left(tick.left), "aria-hidden": "true" }, "grid" + i)),
-                  row.segments?.map((segment, i) => /* @__PURE__ */ jsx("span", { class: "agent-segment " + segment.kind + " " + left(segment.left) + " " + width(segment.width) }, "segment" + i)),
-                  row.spawns?.map((position, i) => /* @__PURE__ */ jsx("span", { class: "agent-spawn-tick " + left(position), "aria-hidden": "true" }, "spawn" + i)),
-                  row.waits?.map((wait, i) => /* @__PURE__ */ jsx("span", { class: "agent-wait " + left(wait.left) + " " + width(wait.width), "data-tip": wait.tip }, "wait" + i))
-                ] })
-              ] }, row.id)),
-              /* @__PURE__ */ jsx("svg", { class: "agent-edges", "aria-hidden": "true", preserveAspectRatio: "none", ref: (node) => {
-                owner.edges = node;
-              } })
-            ] })
-          ] }),
-          /* @__PURE__ */ jsx("div", { class: "flow", children: snapshot.hops.map((hop) => /* @__PURE__ */ jsxs("div", { class: "hop " + hop.className, "data-h": hop.handoff, "data-turn": hop.turn, children: [
-            /* @__PURE__ */ jsx("div", { class: "node " + hop.nodeClass, children: /* @__PURE__ */ jsx(Glyph, { path: hop.icon, className: "" }) }),
-            /* @__PURE__ */ jsxs("div", { class: "body", children: [
-              /* @__PURE__ */ jsxs("div", { class: "sent", children: [
-                /* @__PURE__ */ jsx(Sentence, { parts: hop.parts, host: host2 }),
-                hop.time && /* @__PURE__ */ jsx("span", { class: "tm", children: hop.time })
-              ] }),
-              hop.brief && /* @__PURE__ */ jsxs(Fragment2, { children: [
-                /* @__PURE__ */ jsx("div", { class: "brief md" + (owner.open.has(hop.key) ? " open" : owner.clipped.has(hop.key) ? " clipped" : ""), ref: (node) => {
-                  if (node) {
-                    const more = owner.briefs.get(hop.key)?.more;
-                    if (more) owner.briefs.set(hop.key, { node, more });
-                  }
-                }, children: /* @__PURE__ */ jsx(MarkdownContent, { text: hop.brief }) }),
-                /* @__PURE__ */ jsx("button", { class: "more", type: "button", hidden: !owner.clipped.has(hop.key) && !owner.open.has(hop.key), "aria-expanded": owner.open.has(hop.key), ref: (node) => {
-                  const brief = node?.previousElementSibling;
-                  if (node && brief instanceof HTMLElement) owner.briefs.set(hop.key, { node: brief, more: node });
-                }, onClick: () => active(() => {
-                  if (owner.open.has(hop.key)) owner.open.delete(hop.key);
-                  else owner.open.add(hop.key);
-                  owner.paint();
-                }), children: owner.open.has(hop.key) ? "Show less" : "Show more" })
-              ] }),
-              hop.answers && /* @__PURE__ */ jsx("div", { class: "result answer" + (hop.answers.length ? "" : " none"), children: !hop.answers.length ? /* @__PURE__ */ jsxs(Fragment2, { children: [
-                /* @__PURE__ */ jsx("b", { children: "Answered" }),
-                " \xB7 reply not in these logs"
-              ] }) : /* @__PURE__ */ jsxs(Fragment2, { children: [
-                /* @__PURE__ */ jsx("b", { children: hop.answers.length === 1 ? "You answered: " : "You answered:" }),
-                hop.answers.length === 1 ? hop.answers[0] : /* @__PURE__ */ jsx("ol", { children: hop.answers.map((answer2, i) => /* @__PURE__ */ jsx("li", { children: screenText(answer2) }, i)) })
-              ] }) }),
-              hop.result && /* @__PURE__ */ jsxs("div", { class: "result", children: [
-                /* @__PURE__ */ jsx("span", { class: "rl", children: "Result:" }),
-                /* @__PURE__ */ jsx("span", { children: /* @__PURE__ */ jsx(Inline, { text: hop.result }) })
-              ] }),
-              hop.meta && /* @__PURE__ */ jsxs("div", { class: "meta", children: [
-                /* @__PURE__ */ jsxs("span", { class: "stat " + hop.meta.state, children: [
-                  hop.meta.state === "work" ? /* @__PURE__ */ jsx("span", { class: "spin" }) : /* @__PURE__ */ jsx("span", { class: "dot " + hop.meta.state, role: "img", "aria-label": hop.meta.stateLabel }),
-                  hop.meta.text
-                ] }),
-                hop.meta.chip && /* @__PURE__ */ jsxs("span", { class: "chip-h " + hop.meta.chipClass, "data-tip": hop.meta.tip, children: [
-                  hop.meta.harness && /* @__PURE__ */ jsx(Harness, { mark: hop.meta.harness, lead: false }),
-                  screenText(hop.meta.chip)
-                ] }),
-                hop.meta.note && /* @__PURE__ */ jsx("span", { class: "gone", children: screenText(hop.meta.note) }),
-                hop.meta.session && /* @__PURE__ */ jsx("button", { class: "open", type: "button", onClick: () => active(() => host2.session(hop.meta.session, hop.meta.turn)), children: screenText("Open in " + hop.meta.name + " \u203A") })
-              ] })
-            ] })
-          ] }, hop.key)) })
+                ]
+              },
+              hop.key
+            )) })
+          ] })
         ] })
-      ] }), root);
+      );
       if (owner.chart) owner.observer.observe(owner.chart);
       for (const pair of owner.briefs.values()) owner.observer.observe(pair.node);
       cancelAnimationFrame(owner.frame);
@@ -3894,113 +5173,266 @@ globalThis.__semonUIShared = __semonUIShared;
     };
     switch (entry.kind) {
       case "message":
-        return /* @__PURE__ */ jsxs("div", { class: entry.flavor === "incoming" ? "bubble in" : "msg " + entry.flavor, "data-e": entry.key, "data-entry-key": entry.entryKey, "data-h": entry.handoff, children: [
-          entry.images?.length ? /* @__PURE__ */ jsx("div", { class: "attach-row", children: entry.images.map((image2, i) => image2.unavailable || owner.failedImages.has(key + ":" + image2.url) ? /* @__PURE__ */ jsx("span", { class: "attach-na", children: "Image not available" }, i) : /* @__PURE__ */ jsx("button", { class: "attach", type: "button", "aria-haspopup": "dialog", onClick: (event) => {
-            if (event.currentTarget.isConnected) active(() => owner.host.image(image2.url, image2.label, event.currentTarget));
-          }, children: /* @__PURE__ */ jsx("img", { class: "attach-img" + (image2.width ? "" : " unsized"), alt: image2.label, loading: "lazy", decoding: "async", width: image2.width, height: image2.height, src: image2.url, onError: () => active(() => {
-            owner.failedImages.add(key + ":" + image2.url);
-            owner.change(key);
-          }) }) }, i)) }) : null,
-          (!entry.images?.length || entry.text) && /* @__PURE__ */ jsx(Markdown, { text: entry.text })
-        ] });
+        return /* @__PURE__ */ jsxs(
+          "div",
+          {
+            class: entry.flavor === "incoming" ? "bubble in" : "msg " + entry.flavor,
+            "data-e": entry.key,
+            "data-entry-key": entry.entryKey,
+            "data-h": entry.handoff,
+            children: [
+              entry.images?.length ? /* @__PURE__ */ jsx("div", { class: "attach-row", children: entry.images.map(
+                (image2, i) => image2.unavailable || owner.failedImages.has(key + ":" + image2.url) ? /* @__PURE__ */ jsx("span", { class: "attach-na", children: "Image not available" }, i) : /* @__PURE__ */ jsx(
+                  "button",
+                  {
+                    class: "attach",
+                    type: "button",
+                    "aria-haspopup": "dialog",
+                    onClick: (event) => {
+                      if (event.currentTarget.isConnected)
+                        active(() => owner.host.image(image2.url, image2.label, event.currentTarget));
+                    },
+                    children: /* @__PURE__ */ jsx(
+                      "img",
+                      {
+                        class: "attach-img" + (image2.width ? "" : " unsized"),
+                        alt: image2.label,
+                        loading: "lazy",
+                        decoding: "async",
+                        width: image2.width,
+                        height: image2.height,
+                        src: image2.url,
+                        onError: () => active(() => {
+                          owner.failedImages.add(key + ":" + image2.url);
+                          owner.change(key);
+                        })
+                      }
+                    )
+                  },
+                  i
+                )
+              ) }) : null,
+              (!entry.images?.length || entry.text) && /* @__PURE__ */ jsx(Markdown, { text: entry.text })
+            ]
+          }
+        );
       case "thought":
         return entry.mode === "pending" ? /* @__PURE__ */ jsxs("div", { class: "think-pending", "data-e": entry.key, "data-entry-key": entry.entryKey, children: [
           /* @__PURE__ */ jsx("span", { class: "spin" }),
           /* @__PURE__ */ jsx("span", { children: "Thinking\u2026" })
-        ] }) : /* @__PURE__ */ jsxs("div", { class: "thought" + (entry.mode === "masked" ? " masked" : ""), "data-e": entry.key, "data-entry-key": entry.entryKey, children: [
-          /* @__PURE__ */ jsx("div", { class: "think-label", children: screenText(entry.label ?? "") }),
-          entry.mode === "readable" && /* @__PURE__ */ jsx(Markdown, { text: entry.text ?? "", className: "think-text" })
-        ] });
+        ] }) : /* @__PURE__ */ jsxs(
+          "div",
+          {
+            class: "thought" + (entry.mode === "masked" ? " masked" : ""),
+            "data-e": entry.key,
+            "data-entry-key": entry.entryKey,
+            children: [
+              /* @__PURE__ */ jsx("div", { class: "think-label", children: screenText(entry.label ?? "") }),
+              entry.mode === "readable" && /* @__PURE__ */ jsx(Markdown, { text: entry.text ?? "", className: "think-text" })
+            ]
+          }
+        );
       case "label":
         return /* @__PURE__ */ jsx("div", { class: entry.className, "data-e": entry.key, "data-entry-key": entry.entryKey, children: screenText(entry.text) });
       case "tool":
-        return /* @__PURE__ */ jsx("div", { class: entry.step.className, "data-e": entry.key, "data-entry-key": entry.entryKey, "data-tid": entry.step.tid, "data-live": entry.step.sid, "data-since": entry.step.since, children: /* @__PURE__ */ jsx(ToolStepContents, { snapshot: entry.step, expanded: open, mounted: owner.mounted.has(key), toggle: () => active(() => {
-          owner.mounted.add(key);
-          if (open) owner.open.delete(key);
-          else owner.open.add(key);
-          owner.change(key);
-        }), host: { all(label) {
-          owner.host.toolAll(key, label);
-        }, script() {
-          owner.host.script(key);
-        } } }) });
+        return /* @__PURE__ */ jsx(
+          "div",
+          {
+            class: entry.step.className,
+            "data-e": entry.key,
+            "data-entry-key": entry.entryKey,
+            "data-tid": entry.step.tid,
+            "data-live": entry.step.sid,
+            "data-since": entry.step.since,
+            children: /* @__PURE__ */ jsx(
+              ToolStepContents,
+              {
+                snapshot: entry.step,
+                expanded: open,
+                mounted: owner.mounted.has(key),
+                toggle: () => active(() => {
+                  owner.mounted.add(key);
+                  if (open) owner.open.delete(key);
+                  else owner.open.add(key);
+                  owner.change(key);
+                }),
+                host: {
+                  all(label) {
+                    owner.host.toolAll(key, label);
+                  },
+                  script() {
+                    owner.host.script(key);
+                  }
+                }
+              }
+            )
+          }
+        );
       case "background": {
         const content = /* @__PURE__ */ jsxs(Fragment2, { children: [
           /* @__PURE__ */ jsx(Glyph, { path: "M4 17l5-5-5-5M12 19h8", className: "" }),
           /* @__PURE__ */ jsx("span", { class: "bg-label", children: screenText(entry.label) })
         ] });
-        return /* @__PURE__ */ jsx("div", { class: "step bgend" + (entry.failed ? " err" : ""), "data-e": entry.key, "data-entry-key": entry.entryKey, children: entry.loaded ? /* @__PURE__ */ jsx("button", { class: "bg-line", type: "button", onClick: (event) => {
-          if (event.currentTarget.isConnected) owner.host.background(entry.call, event.currentTarget);
-        }, children: content }) : /* @__PURE__ */ jsx("div", { class: "bg-line", children: content }) });
+        return /* @__PURE__ */ jsx(
+          "div",
+          {
+            class: "step bgend" + (entry.failed ? " err" : ""),
+            "data-e": entry.key,
+            "data-entry-key": entry.entryKey,
+            children: entry.loaded ? /* @__PURE__ */ jsx(
+              "button",
+              {
+                class: "bg-line",
+                type: "button",
+                onClick: (event) => {
+                  if (event.currentTarget.isConnected)
+                    owner.host.background(entry.call, event.currentTarget);
+                },
+                children: content
+              }
+            ) : /* @__PURE__ */ jsx("div", { class: "bg-line", children: content })
+          }
+        );
       }
       case "group": {
-        const steps = /* @__PURE__ */ jsx("div", { class: "steps" + (entry.lone ? " lone" : ""), hidden: entry.summary.length > 0 && !open, children: entry.entries.map((item2, i) => /* @__PURE__ */ jsx(Entry, { entry: item2, owner }, identity(item2) || i)) });
+        const steps = /* @__PURE__ */ jsx(
+          "div",
+          {
+            class: "steps" + (entry.lone ? " lone" : ""),
+            hidden: entry.summary.length > 0 && !open,
+            children: entry.entries.map((item2, i) => /* @__PURE__ */ jsx(Entry, { entry: item2, owner }, identity(item2) || i))
+          }
+        );
         return !entry.summary.length ? steps : /* @__PURE__ */ jsxs("div", { class: "tgroup", "data-e": entry.key, "data-entry-key": entry.entryKey, children: [
-          /* @__PURE__ */ jsxs("button", { class: "tsum", type: "button", "aria-expanded": open, onClick: (event) => {
-            if (!event.currentTarget.isConnected) return;
-            if (open) owner.open.delete(key);
-            else owner.open.add(key);
-            owner.change(key);
-          }, children: [
-            entry.running ? /* @__PURE__ */ jsx("span", { class: "spin" }) : /* @__PURE__ */ jsx(Glyph, { path: entry.stack, className: "" }),
-            /* @__PURE__ */ jsx("span", { class: "tt" + (entry.background ? " bgsum" : ""), children: entry.summary.map((part, i) => part.className ? /* @__PURE__ */ jsx("span", { class: part.className, children: screenText(part.text) }, i) : part.text) }),
-            entry.failed > 0 && /* @__PURE__ */ jsx("span", { class: "tf", children: screenText("\xB7 " + entry.failed + " failed") }),
-            entry.running && /* @__PURE__ */ jsx("span", { class: "tl tick", children: entry.clockTick ? "\xB7 running " + entry.running : screenText("\xB7 running " + entry.running) }),
-            /* @__PURE__ */ jsx(Glyph, { path: entry.chevron, className: "chev" })
-          ] }),
+          /* @__PURE__ */ jsxs(
+            "button",
+            {
+              class: "tsum",
+              type: "button",
+              "aria-expanded": open,
+              onClick: (event) => {
+                if (!event.currentTarget.isConnected) return;
+                if (open) owner.open.delete(key);
+                else owner.open.add(key);
+                owner.change(key);
+              },
+              children: [
+                entry.running ? /* @__PURE__ */ jsx("span", { class: "spin" }) : /* @__PURE__ */ jsx(Glyph, { path: entry.stack, className: "" }),
+                /* @__PURE__ */ jsx("span", { class: "tt" + (entry.background ? " bgsum" : ""), children: entry.summary.map(
+                  (part, i) => part.className ? /* @__PURE__ */ jsx("span", { class: part.className, children: screenText(part.text) }, i) : part.text
+                ) }),
+                entry.failed > 0 && /* @__PURE__ */ jsx("span", { class: "tf", children: screenText("\xB7 " + entry.failed + " failed") }),
+                entry.running && /* @__PURE__ */ jsx("span", { class: "tl tick", children: entry.clockTick ? "\xB7 running " + entry.running : screenText("\xB7 running " + entry.running) }),
+                /* @__PURE__ */ jsx(Glyph, { path: entry.chevron, className: "chev" })
+              ]
+            }
+          ),
           steps
         ] });
       }
       case "child":
-        return /* @__PURE__ */ jsxs("div", { class: "child-card", "data-e": entry.key, "data-entry-key": entry.entryKey, "data-h": entry.handoff, children: [
-          /* @__PURE__ */ jsxs("span", { class: "cc-head", children: [
-            /* @__PURE__ */ jsx("button", { class: "cc-name who-link", type: "button", "aria-label": "Open " + entry.name, onClick: (event) => {
-              if (event.currentTarget.isConnected) owner.host.session(entry.id, entry.turn);
-            }, children: screenText(entry.name) }),
-            /* @__PURE__ */ jsx(State, { state: entry.state, label: entry.stateLabel, text: entry.stateLabel }),
-            /* @__PURE__ */ jsx(Glyph, { path: entry.chevron, className: "chev" })
-          ] }),
-          /* @__PURE__ */ jsxs("span", { class: "cc-meta", children: [
-            entry.mark && /* @__PURE__ */ jsx(Harness, { mark: entry.mark }),
-            screenText(entry.meta)
-          ] }),
-          /* @__PURE__ */ jsx("span", { class: "cc-brief", children: /* @__PURE__ */ jsx(Inline, { text: entry.brief }) }),
-          entry.result ? /* @__PURE__ */ jsxs("span", { class: "cc-result" + (entry.failed ? " err" : ""), children: [
-            /* @__PURE__ */ jsx("span", { class: "rl", children: entry.failed ? "Result: " : "Returned: " }),
-            /* @__PURE__ */ jsx(Inline, { text: entry.result })
-          ] }) : entry.activity && /* @__PURE__ */ jsxs("span", { class: "cc-now", children: [
-            /* @__PURE__ */ jsx("span", { class: "spin" }),
-            /* @__PURE__ */ jsx("span", { children: screenText(entry.activity[0]) }),
-            /* @__PURE__ */ jsx("code", { children: entry.activity[1] })
-          ] }),
-          entry.trace && /* @__PURE__ */ jsx("button", { class: "link cc-run", type: "button", "aria-label": entry.traceLabel, onClick: (event) => {
-            if (event.currentTarget.isConnected) owner.host.trace(entry.trace);
-          }, children: "Run view" })
-        ] });
+        return /* @__PURE__ */ jsxs(
+          "div",
+          {
+            class: "child-card",
+            "data-e": entry.key,
+            "data-entry-key": entry.entryKey,
+            "data-h": entry.handoff,
+            children: [
+              /* @__PURE__ */ jsxs("span", { class: "cc-head", children: [
+                /* @__PURE__ */ jsx(
+                  "button",
+                  {
+                    class: "cc-name who-link",
+                    type: "button",
+                    "aria-label": "Open " + entry.name,
+                    onClick: (event) => {
+                      if (event.currentTarget.isConnected) owner.host.session(entry.id, entry.turn);
+                    },
+                    children: screenText(entry.name)
+                  }
+                ),
+                /* @__PURE__ */ jsx(State, { state: entry.state, label: entry.stateLabel, text: entry.stateLabel }),
+                /* @__PURE__ */ jsx(Glyph, { path: entry.chevron, className: "chev" })
+              ] }),
+              /* @__PURE__ */ jsxs("span", { class: "cc-meta", children: [
+                entry.mark && /* @__PURE__ */ jsx(Harness, { mark: entry.mark }),
+                screenText(entry.meta)
+              ] }),
+              /* @__PURE__ */ jsx("span", { class: "cc-brief", children: /* @__PURE__ */ jsx(Inline, { text: entry.brief }) }),
+              entry.result ? /* @__PURE__ */ jsxs("span", { class: "cc-result" + (entry.failed ? " err" : ""), children: [
+                /* @__PURE__ */ jsx("span", { class: "rl", children: entry.failed ? "Result: " : "Returned: " }),
+                /* @__PURE__ */ jsx(Inline, { text: entry.result })
+              ] }) : entry.activity && /* @__PURE__ */ jsxs("span", { class: "cc-now", children: [
+                /* @__PURE__ */ jsx("span", { class: "spin" }),
+                /* @__PURE__ */ jsx("span", { children: screenText(entry.activity[0]) }),
+                /* @__PURE__ */ jsx("code", { children: entry.activity[1] })
+              ] }),
+              entry.trace && /* @__PURE__ */ jsx(
+                "button",
+                {
+                  class: "link cc-run",
+                  type: "button",
+                  "aria-label": entry.traceLabel,
+                  onClick: (event) => {
+                    if (event.currentTarget.isConnected) owner.host.trace(entry.trace);
+                  },
+                  children: "Run view"
+                }
+              )
+            ]
+          }
+        );
       case "event":
-        return /* @__PURE__ */ jsxs("div", { class: entry.className, "data-e": entry.key, "data-entry-key": entry.entryKey, "data-h": entry.handoff, children: [
-          /* @__PURE__ */ jsxs("div", { class: "ev-head", children: [
-            /* @__PURE__ */ jsx(Glyph, { path: entry.icon, className: "" }),
-            /* @__PURE__ */ jsx("span", { class: "ln", children: /* @__PURE__ */ jsx(Sentence, { parts: entry.parts, host: owner.host }) }),
-            /* @__PURE__ */ jsx("span", { class: "tm", children: entry.time })
-          ] }),
-          /* @__PURE__ */ jsx("div", { class: "ev-text" + (open ? " open" : owner.clipped.has(key) ? " clipped" : ""), ref: (node) => {
-            if (node) owner.clamps.set(key, node);
-          }, children: /* @__PURE__ */ jsx(Inline, { text: entry.brief }) }),
-          /* @__PURE__ */ jsx("button", { class: "link ev-more", type: "button", hidden: !owner.clipped.has(key) && !open, "aria-expanded": open, onClick: (event) => {
-            event.stopPropagation();
-            if (!event.currentTarget.isConnected) return;
-            if (open) owner.open.delete(key);
-            else owner.open.add(key);
-            owner.change(key);
-          }, children: open ? "Show less" : "Show more" }),
-          entry.result && /* @__PURE__ */ jsxs("div", { class: "ev-result", children: [
-            /* @__PURE__ */ jsx("span", { class: "rl", children: entry.resultLabel }),
-            /* @__PURE__ */ jsx(Inline, { text: entry.result })
-          ] }),
-          entry.answers && /* @__PURE__ */ jsx("div", { class: "ev-result answer" + (entry.answers.length ? "" : " none"), children: /* @__PURE__ */ jsx(Answer, { values: entry.answers }) }),
-          entry.waiting && /* @__PURE__ */ jsx(State, { state: "wait", label: entry.stateLabel, text: "Waiting on you" })
-        ] });
+        return /* @__PURE__ */ jsxs(
+          "div",
+          {
+            class: entry.className,
+            "data-e": entry.key,
+            "data-entry-key": entry.entryKey,
+            "data-h": entry.handoff,
+            children: [
+              /* @__PURE__ */ jsxs("div", { class: "ev-head", children: [
+                /* @__PURE__ */ jsx(Glyph, { path: entry.icon, className: "" }),
+                /* @__PURE__ */ jsx("span", { class: "ln", children: /* @__PURE__ */ jsx(Sentence, { parts: entry.parts, host: owner.host }) }),
+                /* @__PURE__ */ jsx("span", { class: "tm", children: entry.time })
+              ] }),
+              /* @__PURE__ */ jsx(
+                "div",
+                {
+                  class: "ev-text" + (open ? " open" : owner.clipped.has(key) ? " clipped" : ""),
+                  ref: (node) => {
+                    if (node) owner.clamps.set(key, node);
+                  },
+                  children: /* @__PURE__ */ jsx(Inline, { text: entry.brief })
+                }
+              ),
+              /* @__PURE__ */ jsx(
+                "button",
+                {
+                  class: "link ev-more",
+                  type: "button",
+                  hidden: !owner.clipped.has(key) && !open,
+                  "aria-expanded": open,
+                  onClick: (event) => {
+                    event.stopPropagation();
+                    if (!event.currentTarget.isConnected) return;
+                    if (open) owner.open.delete(key);
+                    else owner.open.add(key);
+                    owner.change(key);
+                  },
+                  children: open ? "Show less" : "Show more"
+                }
+              ),
+              entry.result && /* @__PURE__ */ jsxs("div", { class: "ev-result", children: [
+                /* @__PURE__ */ jsx("span", { class: "rl", children: entry.resultLabel }),
+                /* @__PURE__ */ jsx(Inline, { text: entry.result })
+              ] }),
+              entry.answers && /* @__PURE__ */ jsx("div", { class: "ev-result answer" + (entry.answers.length ? "" : " none"), children: /* @__PURE__ */ jsx(Answer, { values: entry.answers }) }),
+              entry.waiting && /* @__PURE__ */ jsx(State, { state: "wait", label: entry.stateLabel, text: "Waiting on you" })
+            ]
+          }
+        );
     }
   }
   var Turn = class extends Component {
@@ -4018,19 +5450,32 @@ globalThis.__semonUIShared = __semonUIShared;
         !view.bare && /* @__PURE__ */ jsx("div", { class: "tx", children: view.entries.map((entry, i) => /* @__PURE__ */ jsx(Entry, { entry, owner }, identity(entry) || i)) }),
         (view.error || view.trace) && /* @__PURE__ */ jsxs("div", { class: "turn-end", children: [
           view.error && /* @__PURE__ */ jsx(State, { state: "err", label: view.stateLabel, text: view.error }),
-          view.trace && /* @__PURE__ */ jsxs("button", { class: "link", type: "button", "aria-label": "Trace what this turn set off", onClick: (event) => {
-            if (event.currentTarget.isConnected) owner.host.trace(view.trace);
-          }, children: [
-            /* @__PURE__ */ jsx(Glyph, { path: view.traceIcon, className: "" }),
-            /* @__PURE__ */ jsx("span", { children: "Trace" })
-          ] })
+          view.trace && /* @__PURE__ */ jsxs(
+            "button",
+            {
+              class: "link",
+              type: "button",
+              "aria-label": "Trace what this turn set off",
+              onClick: (event) => {
+                if (event.currentTarget.isConnected) owner.host.trace(view.trace);
+              },
+              children: [
+                /* @__PURE__ */ jsx(Glyph, { path: view.traceIcon, className: "" }),
+                /* @__PURE__ */ jsx("span", { children: "Trace" })
+              ]
+            }
+          )
         ] })
       ] });
     }
   };
   function mergeBlocks(previous, snapshot) {
     if (!snapshot.dirty) return snapshot.blocks;
-    const blocks2 = [...previous], changed = new Map(snapshot.blocks.filter((block) => block.kind === "turn").map((block) => [block.turn.id, block]));
+    const blocks2 = [...previous], changed = new Map(
+      snapshot.blocks.filter(
+        (block) => block.kind === "turn"
+      ).map((block) => [block.turn.id, block])
+    );
     for (const id of snapshot.order) {
       if (!snapshot.dirty.has(id)) continue;
       const at = blocks2.findIndex((block) => block.kind === "turn" && block.turn.id === id), next = changed.get(id);
@@ -4048,12 +5493,26 @@ globalThis.__semonUIShared = __semonUIShared;
   function paintJump(owner) {
     if (!owner.jump || owner.disposed) return;
     owner.jump.hidden = !owner.jumpVisible;
-    render(/* @__PURE__ */ jsxs("button", { class: "jump", type: "button", id: "jump-bottom", "aria-label": owner.jumpCount ? "Jump to bottom; " + owner.jumpCount + " new entries" : "Jump to bottom of transcript", disabled: owner.jumpBusy, onClick: (event) => {
-      if (event.currentTarget.isConnected) owner.host.jump();
-    }, children: [
-      owner.jumpCount > 0 && /* @__PURE__ */ jsx("span", { class: "new-count", children: owner.jumpCount + " new" }),
-      /* @__PURE__ */ jsx(Glyph, { path: "M12 4v15M5 12l7 7 7-7", className: "" })
-    ] }), owner.jump);
+    render(
+      /* @__PURE__ */ jsxs(
+        "button",
+        {
+          class: "jump",
+          type: "button",
+          id: "jump-bottom",
+          "aria-label": owner.jumpCount ? "Jump to bottom; " + owner.jumpCount + " new entries" : "Jump to bottom of transcript",
+          disabled: owner.jumpBusy,
+          onClick: (event) => {
+            if (event.currentTarget.isConnected) owner.host.jump();
+          },
+          children: [
+            owner.jumpCount > 0 && /* @__PURE__ */ jsx("span", { class: "new-count", children: owner.jumpCount + " new" }),
+            /* @__PURE__ */ jsx(Glyph, { path: "M12 4v15M5 12l7 7 7-7", className: "" })
+          ]
+        }
+      ),
+      owner.jump
+    );
   }
   function updateSessionJump(root, visible, count, busy2 = false) {
     const owner = owners.get(root);
@@ -4070,11 +5529,31 @@ globalThis.__semonUIShared = __semonUIShared;
       owner = void 0;
     }
     if (!owner) {
-      const state3 = { snapshot, host: host2, disposed: false, blocks: snapshot.blocks, open: /* @__PURE__ */ new Set(), mounted: /* @__PURE__ */ new Set(), failedImages: /* @__PURE__ */ new Set(), revisions: /* @__PURE__ */ new Map(), clipped: /* @__PURE__ */ new Set(), clamps: /* @__PURE__ */ new Map(), frame: 0, jump: null, jumpVisible: false, jumpCount: 0, jumpBusy: false, paint() {
-      }, measure() {
-      }, change() {
-      }, observer: new ResizeObserver(() => {
-      }) };
+      const state3 = {
+        snapshot,
+        host: host2,
+        disposed: false,
+        blocks: snapshot.blocks,
+        open: /* @__PURE__ */ new Set(),
+        mounted: /* @__PURE__ */ new Set(),
+        failedImages: /* @__PURE__ */ new Set(),
+        revisions: /* @__PURE__ */ new Map(),
+        clipped: /* @__PURE__ */ new Set(),
+        clamps: /* @__PURE__ */ new Map(),
+        frame: 0,
+        jump: null,
+        jumpVisible: false,
+        jumpCount: 0,
+        jumpBusy: false,
+        paint() {
+        },
+        measure() {
+        },
+        change() {
+        },
+        observer: new ResizeObserver(() => {
+        })
+      };
       owner = state3;
       owners.set(root, state3);
       state3.measure = () => {
@@ -4087,7 +5566,9 @@ globalThis.__semonUIShared = __semonUIShared;
             if (clipped) state3.clipped.add(key);
             else state3.clipped.delete(key);
             changed = true;
-            for (const block of state3.blocks) if (block.kind === "turn" && block.turn.entries.some((entry) => identity(entry) === key)) state3.revisions.set(block.turn.id, (state3.revisions.get(block.turn.id) ?? 0) + 1);
+            for (const block of state3.blocks)
+              if (block.kind === "turn" && block.turn.entries.some((entry) => identity(entry) === key))
+                state3.revisions.set(block.turn.id, (state3.revisions.get(block.turn.id) ?? 0) + 1);
           }
         }
         if (changed) state3.paint();
@@ -4107,55 +5588,118 @@ globalThis.__semonUIShared = __semonUIShared;
     state2.blocks = mergeBlocks(state2.blocks, snapshot);
     state2.snapshot = snapshot;
     state2.change = (key) => {
-      for (const block of state2.blocks) if (block.kind === "turn" && block.turn.entries.some((entry) => identity(entry) === key || entry.kind === "group" && entry.entries.some((item2) => identity(item2) === key))) state2.revisions.set(block.turn.id, (state2.revisions.get(block.turn.id) ?? 0) + 1);
+      for (const block of state2.blocks)
+        if (block.kind === "turn" && block.turn.entries.some(
+          (entry) => identity(entry) === key || entry.kind === "group" && entry.entries.some((item2) => identity(item2) === key)
+        ))
+          state2.revisions.set(block.turn.id, (state2.revisions.get(block.turn.id) ?? 0) + 1);
       state2.paint();
     };
     function pager(view) {
-      return /* @__PURE__ */ jsx("div", { class: "list", children: /* @__PURE__ */ jsxs("button", { class: "more", type: "button", "data-load-earlier": view.where === "before" ? "" : void 0, "data-pager-sid": view.sid, "data-pager-where": view.where, disabled: view.disabled, "aria-busy": view.busy || void 0, onClick: (event) => {
-        if (event.currentTarget.isConnected) state2.host.pager(event.currentTarget);
-      }, children: [
-        view.busy && /* @__PURE__ */ jsx("span", { class: "spin", "aria-hidden": "true" }),
-        /* @__PURE__ */ jsx("span", { class: "pager-label", "aria-live": "polite", children: screenText(view.text) })
-      ] }) }, view.where);
+      return /* @__PURE__ */ jsx("div", { class: "list", children: /* @__PURE__ */ jsxs(
+        "button",
+        {
+          class: "more",
+          type: "button",
+          "data-load-earlier": view.where === "before" ? "" : void 0,
+          "data-pager-sid": view.sid,
+          "data-pager-where": view.where,
+          disabled: view.disabled,
+          "aria-busy": view.busy || void 0,
+          onClick: (event) => {
+            if (event.currentTarget.isConnected) state2.host.pager(event.currentTarget);
+          },
+          children: [
+            view.busy && /* @__PURE__ */ jsx("span", { class: "spin", "aria-hidden": "true" }),
+            /* @__PURE__ */ jsx("span", { class: "pager-label", "aria-live": "polite", children: screenText(view.text) })
+          ]
+        }
+      ) }, view.where);
     }
     state2.paint = () => {
       if (state2.disposed) return;
       const held = document.activeElement instanceof HTMLElement && document.activeElement.closest(".session-foot") ? document.activeElement : null, heldKind = held?.dataset.foot;
       const view = state2.snapshot;
-      render(/* @__PURE__ */ jsxs(Fragment2, { children: [
-        /* @__PURE__ */ jsx("div", { class: "ph sr", children: /* @__PURE__ */ jsx("h1", { children: screenText(view.name) }) }),
-        /* @__PURE__ */ jsxs("section", { class: "transcript", "aria-label": "Transcript", children: [
-          /* @__PURE__ */ jsxs("div", { class: "turns", children: [
-            view.before ? pager(view.before) : view.started && /* @__PURE__ */ jsx("div", { class: "divider started", children: /* @__PURE__ */ jsxs("span", { class: "dv-text", children: [
-              /* @__PURE__ */ jsx("span", { class: "dv-lead", children: view.started.lead }),
-              /* @__PURE__ */ jsx("span", { class: "dv-machine", "data-tip": view.started.machine, "data-tip-clipped": "", children: screenText(view.started.machine) })
-            ] }) }),
-            state2.blocks.map((block) => block.kind === "turn" ? /* @__PURE__ */ jsx(Turn, { view: block.turn, owner: state2, revision: state2.revisions.get(block.turn.id) ?? 0 }, block.turn.id) : /* @__PURE__ */ jsx(Fragment, { children: block.entries.map((entry, i) => /* @__PURE__ */ jsx(Entry, { entry, owner: state2 }, identity(entry) || block.key + i)) }, block.key)),
-            view.after && pager(view.after),
-            view.empty && /* @__PURE__ */ jsx("p", { class: "empty", children: screenText(view.empty) })
+      commitApplicationView(
+        root,
+        /* @__PURE__ */ jsxs(Fragment2, { children: [
+          /* @__PURE__ */ jsx("div", { class: "ph sr", children: /* @__PURE__ */ jsx("h1", { children: screenText(view.name) }) }),
+          /* @__PURE__ */ jsxs("section", { class: "transcript", "aria-label": "Transcript", children: [
+            /* @__PURE__ */ jsxs("div", { class: "turns", children: [
+              view.before ? pager(view.before) : view.started && /* @__PURE__ */ jsx("div", { class: "divider started", children: /* @__PURE__ */ jsxs("span", { class: "dv-text", children: [
+                /* @__PURE__ */ jsx("span", { class: "dv-lead", children: view.started.lead }),
+                /* @__PURE__ */ jsx("span", { class: "dv-machine", "data-tip": view.started.machine, "data-tip-clipped": "", children: screenText(view.started.machine) })
+              ] }) }),
+              state2.blocks.map(
+                (block) => block.kind === "turn" ? /* @__PURE__ */ jsx(
+                  Turn,
+                  {
+                    view: block.turn,
+                    owner: state2,
+                    revision: state2.revisions.get(block.turn.id) ?? 0
+                  },
+                  block.turn.id
+                ) : /* @__PURE__ */ jsx(Fragment, { children: block.entries.map((entry, i) => /* @__PURE__ */ jsx(Entry, { entry, owner: state2 }, identity(entry) || block.key + i)) }, block.key)
+              ),
+              view.after && pager(view.after),
+              view.empty && /* @__PURE__ */ jsx("p", { class: "empty", children: screenText(view.empty) })
+            ] }),
+            /* @__PURE__ */ jsx(
+              "div",
+              {
+                class: "jump-wrap",
+                ref: (node) => {
+                  state2.jump = node;
+                  paintJump(state2);
+                }
+              }
+            )
           ] }),
-          /* @__PURE__ */ jsx("div", { class: "jump-wrap", ref: (node) => {
-            state2.jump = node;
-            paintJump(state2);
-          } })
-        ] }),
-        view.footer && /* @__PURE__ */ jsxs("div", { class: "session-foot", children: [
-          /* @__PURE__ */ jsxs("span", { class: "stat " + view.footer.state, children: [
-            view.footer.state === "work" ? /* @__PURE__ */ jsx("span", { class: "spin" }) : /* @__PURE__ */ jsx("span", { class: "dot " + view.footer.state, role: "img", "aria-label": view.footer.stateLabel }),
-            /* @__PURE__ */ jsxs("span", { children: [
-              screenText(view.footer.text),
-              view.footer.items.map((item2) => /* @__PURE__ */ jsxs(Fragment, { children: [
-                screenText(" \xB7 "),
-                /* @__PURE__ */ jsx("span", { class: "cr-item", "data-foot": item2.kind, "data-tip": item2.tip || void 0, tabIndex: item2.tip ? 0 : void 0, children: screenText(item2.text) }, item2.kind)
-              ] }, item2.kind))
-            ] })
-          ] }),
-          view.footer.parent && /* @__PURE__ */ jsx("button", { type: "button", "data-foot": "open", onClick: (event) => {
-            if (event.currentTarget.isConnected) state2.host.session(view.footer.parent.id, view.footer.parent.turn);
-          }, children: screenText("Open in " + view.footer.parent.name) })
+          view.footer && /* @__PURE__ */ jsxs("div", { class: "session-foot", children: [
+            /* @__PURE__ */ jsxs("span", { class: "stat " + view.footer.state, children: [
+              view.footer.state === "work" ? /* @__PURE__ */ jsx("span", { class: "spin" }) : /* @__PURE__ */ jsx(
+                "span",
+                {
+                  class: "dot " + view.footer.state,
+                  role: "img",
+                  "aria-label": view.footer.stateLabel
+                }
+              ),
+              /* @__PURE__ */ jsxs("span", { children: [
+                screenText(view.footer.text),
+                view.footer.items.map((item2) => /* @__PURE__ */ jsxs(Fragment, { children: [
+                  screenText(" \xB7 "),
+                  /* @__PURE__ */ jsx(
+                    "span",
+                    {
+                      class: "cr-item",
+                      "data-foot": item2.kind,
+                      "data-tip": item2.tip || void 0,
+                      tabIndex: item2.tip ? 0 : void 0,
+                      children: screenText(item2.text)
+                    },
+                    item2.kind
+                  )
+                ] }, item2.kind))
+              ] })
+            ] }),
+            view.footer.parent && /* @__PURE__ */ jsx(
+              "button",
+              {
+                type: "button",
+                "data-foot": "open",
+                onClick: (event) => {
+                  if (event.currentTarget.isConnected)
+                    state2.host.session(view.footer.parent.id, view.footer.parent.turn);
+                },
+                children: screenText("Open in " + view.footer.parent.name)
+              }
+            )
+          ] })
         ] })
-      ] }), root);
-      if (heldKind && held && !held.isConnected) (root.querySelector('[data-foot="' + CSS.escape(heldKind) + '"]') ?? root.querySelector('[data-foot="time"]'))?.focus({ preventScroll: true });
+      );
+      if (heldKind && held && !held.isConnected)
+        (root.querySelector('[data-foot="' + CSS.escape(heldKind) + '"]') ?? root.querySelector('[data-foot="time"]'))?.focus({ preventScroll: true });
       for (const [key, node] of state2.clamps) {
         if (node.isConnected) state2.observer.observe(node);
         else {
@@ -4189,7 +5733,9 @@ globalThis.__semonUIShared = __semonUIShared;
         return status2 === step.status && backgroundStatus === step.backgroundStatus ? entry : { ...entry, step: { ...step, status: status2, backgroundStatus } };
       }
       if (entry.kind === "group") {
-        const entries = entry.entries.map((item2) => update(item2)), since = entries.filter((item2) => item2.kind === "tool" && item2.step.running && !!item2.step.sid).map((item2) => item2.step.since ?? starts[item2.step.sid]).filter((value) => value !== void 0 && Number.isFinite(value));
+        const entries = entry.entries.map((item2) => update(item2)), since = entries.filter(
+          (item2) => item2.kind === "tool" && item2.step.running && !!item2.step.sid
+        ).map((item2) => item2.step.since ?? starts[item2.step.sid]).filter((value) => value !== void 0 && Number.isFinite(value));
         const running = since.length ? elapsed(Math.min(...since)) : entry.running;
         return running === entry.running && entries.every((item2, i) => item2 === entry.entries[i]) ? entry : { ...entry, entries, running, clockTick: true };
       }
@@ -4223,77 +5769,242 @@ globalThis.__semonUIShared = __semonUIShared;
       const icon = (name) => /* @__PURE__ */ jsx(Glyph, { path: view.icons[name], className: "" });
       const state2 = (value, label) => /* @__PURE__ */ jsx("span", { class: "dot " + value, role: "img", "aria-label": label });
       if (query.toLowerCase() !== view.query) query = view.query;
-      render(view.mode === "normal" ? /* @__PURE__ */ jsxs(Fragment2, { children: [
-        /* @__PURE__ */ jsxs("div", { class: "l1", children: [
-          view.ancestors.map((item2) => /* @__PURE__ */ jsxs("span", { class: "viewer-crumb", children: [
-            /* @__PURE__ */ jsx("button", { class: "crumb", type: "button", "aria-label": "Open " + item2.name, onClick: (event) => active(event.currentTarget, () => host2.ancestor(item2.id)), children: screenText(item2.name) }),
-            /* @__PURE__ */ jsx("span", { class: "crumb-sep", children: "\u203A" })
-          ] }, item2.id)),
-          view.crumb && /* @__PURE__ */ jsxs(Fragment2, { children: [
-            /* @__PURE__ */ jsx("button", { class: "crumb", type: "button", "aria-label": "Back to " + view.crumb, onClick: (event) => active(event.currentTarget, host2.crumb), children: screenText(view.crumb) }),
-            /* @__PURE__ */ jsx("span", { class: "crumb-sep", children: "\u203A" })
+      render(
+        view.mode === "normal" ? /* @__PURE__ */ jsxs(Fragment2, { children: [
+          /* @__PURE__ */ jsxs("div", { class: "l1", children: [
+            view.ancestors.map((item2) => /* @__PURE__ */ jsxs("span", { class: "viewer-crumb", children: [
+              /* @__PURE__ */ jsx(
+                "button",
+                {
+                  class: "crumb",
+                  type: "button",
+                  "aria-label": "Open " + item2.name,
+                  onClick: (event) => active(event.currentTarget, () => host2.ancestor(item2.id)),
+                  children: screenText(item2.name)
+                }
+              ),
+              /* @__PURE__ */ jsx("span", { class: "crumb-sep", children: "\u203A" })
+            ] }, item2.id)),
+            view.crumb && /* @__PURE__ */ jsxs(Fragment2, { children: [
+              /* @__PURE__ */ jsx(
+                "button",
+                {
+                  class: "crumb",
+                  type: "button",
+                  "aria-label": "Back to " + view.crumb,
+                  onClick: (event) => active(event.currentTarget, host2.crumb),
+                  children: screenText(view.crumb)
+                }
+              ),
+              /* @__PURE__ */ jsx("span", { class: "crumb-sep", children: "\u203A" })
+            ] }),
+            view.showState && view.state && /* @__PURE__ */ jsx("span", { class: "l1-state", "data-tip": view.stateTip, children: state2(view.state, view.stateLabel ?? view.state) }),
+            /* @__PURE__ */ jsx("span", { class: "t", "data-tip": view.name, "data-tip-clipped": "", children: screenText(view.name) })
           ] }),
-          view.showState && view.state && /* @__PURE__ */ jsx("span", { class: "l1-state", "data-tip": view.stateTip, children: state2(view.state, view.stateLabel ?? view.state) }),
-          /* @__PURE__ */ jsx("span", { class: "t", "data-tip": view.name, "data-tip-clipped": "", children: screenText(view.name) })
-        ] }),
-        view.labels.length > 0 && /* @__PURE__ */ jsx("div", { class: "meta-line", children: view.labels.map((label) => {
-          const contents = /* @__PURE__ */ jsxs(Fragment2, { children: [
-            label.state && state2(label.state, label.stateLabel ?? label.state),
-            label.state ? /* @__PURE__ */ jsx("span", { children: screenText(label.text) }) : screenText(label.text),
-            label.effort && /* @__PURE__ */ jsxs("span", { class: "meta-effort", children: [
-              /* @__PURE__ */ jsx("span", { class: "meta-sep", children: "\xB7" }),
-              label.effort
-            ] })
-          ] });
-          const cls = "lab" + (label.action ? " lab-btn" : "") + (label.className ? " " + label.className : "");
-          return label.action ? /* @__PURE__ */ jsx("button", { class: cls, type: "button", "data-drop": label.drop, "data-tip": label.tip, "aria-label": label.tip, onClick: (event) => active(event.currentTarget, () => label.action === "errors" ? host2.errors() : host2.menu(document.querySelector("#more-btn") ?? event.currentTarget, true)), children: contents }, label.key) : /* @__PURE__ */ jsx("span", { class: cls, "data-drop": label.drop, "data-tip": label.tip, children: contents }, label.key);
-        }) })
-      ] }) : null, title);
-      render(view.mode === "normal" ? view.analytics ? /* @__PURE__ */ jsx("div", { class: "analytics-range", role: "group", "aria-label": "Analytics range", children: [[1, "24 h"], [7, "7 d"], [30, "30 d"]].map(([days, label]) => /* @__PURE__ */ jsx("button", { type: "button", "data-e": "analytics-range:" + days, "aria-pressed": view.days === days, onClick: (event) => active(event.currentTarget, () => host2.range(Number(days))), children: label }, days)) }) : view.session ? /* @__PURE__ */ jsxs(Fragment2, { children: [
-        !view.trace && /* @__PURE__ */ jsx("button", { class: "ibtn", type: "button", id: "find-btn", "aria-label": "Find and filter", onClick: (event) => active(event.currentTarget, host2.find), children: icon("search") }, "find:" + view.session),
-        /* @__PURE__ */ jsx("button", { class: "ibtn", type: "button", id: "more-btn", "aria-label": "Session menu: details, cost and actions", "aria-haspopup": "dialog", "aria-expanded": "false", onClick: (event) => active(event.currentTarget, () => host2.menu(event.currentTarget)), children: icon("more") }, "more:" + view.session)
-      ] }) : null : null, actions);
-      render(view.mode === "find" ? /* @__PURE__ */ jsxs(Fragment2, { children: [
-        /* @__PURE__ */ jsxs("div", { class: "find-row", ref: (node) => {
-          findRow = node;
-        }, children: [
-          /* @__PURE__ */ jsx("button", { class: "ibtn", type: "button", "aria-label": "Close find", onClick: (event) => active(event.currentTarget, host2.closeFind), children: icon("back") }),
-          /* @__PURE__ */ jsxs("label", { class: "search", children: [
-            icon("search"),
-            /* @__PURE__ */ jsx("input", { id: "find", type: "search", placeholder: "Find in " + view.name, "aria-label": "Find in transcript", value: query, onInput: (event) => {
-              query = event.currentTarget.value;
-              active(event.currentTarget, () => host2.query(query));
-            }, onKeyDown: (event) => {
-              if (event.key === "Escape") {
-                event.stopPropagation();
-                active(event.currentTarget, host2.closeFind);
-              }
-            } })
-          ] }),
-          /* @__PURE__ */ jsx("span", { class: "fcount", "aria-live": "polite", children: view.count })
-        ] }),
-        /* @__PURE__ */ jsx("div", { class: "find-chips", role: "group", "aria-label": "Show", children: [["all", "All", void 0], ["messages", "Messages", void 0], ["steps", "Steps", void 0], ...view.failed ? [["failures", "Failed steps", view.failed]] : [], ...view.signals ? [["signals", "Signals", view.signals]] : []].map(([key, label, count]) => /* @__PURE__ */ jsxs("button", { class: "chip", type: "button", "data-filter": key, "aria-pressed": view.filter === key, onClick: (event) => active(event.currentTarget, () => host2.filter(String(key))), children: [
-          /* @__PURE__ */ jsx("span", { children: label }),
-          count !== void 0 && /* @__PURE__ */ jsx("span", { class: "n", children: count })
-        ] }, key)) })
-      ] }) : view.mode === "errors" ? /* @__PURE__ */ jsxs("div", { class: "errnav-bar", role: "group", "aria-label": view.errorMode === "signals" ? "Session signals" : "Failed steps", children: [
-        /* @__PURE__ */ jsx("button", { class: "ibtn", type: "button", id: "err-close", "aria-label": "Close " + view.errorMode, onClick: (event) => active(event.currentTarget, host2.closeErrors), children: icon("x") }),
-        /* @__PURE__ */ jsxs("div", { class: "find errnav", children: [
-          /* @__PURE__ */ jsx("span", { class: "errs-dot", "aria-hidden": "true" }),
-          /* @__PURE__ */ jsx("span", { class: "errnav-count", children: view.errorText })
-        ] }),
-        [-1, 1].map((direction) => /* @__PURE__ */ jsx("button", { class: "ibtn errnav-btn", type: "button", id: direction < 0 ? "err-prev" : "err-next", "aria-label": (direction < 0 ? "Previous " : "Next ") + (view.errorMode === "signals" ? "signal" : "error"), disabled: view.errorDisabled, onClick: (event) => active(event.currentTarget, () => host2.step(direction)), children: icon(direction < 0 ? "up" : "dn") }, direction))
-      ] }) : null, mode);
-      return { titleSlot: title, actions, mode, accountTarget: view.mode === "find" ? findRow ?? void 0 : void 0 };
+          view.labels.length > 0 && /* @__PURE__ */ jsx("div", { class: "meta-line", children: view.labels.map((label) => {
+            const contents = /* @__PURE__ */ jsxs(Fragment2, { children: [
+              label.state && state2(label.state, label.stateLabel ?? label.state),
+              label.state ? /* @__PURE__ */ jsx("span", { children: screenText(label.text) }) : screenText(label.text),
+              label.effort && /* @__PURE__ */ jsxs("span", { class: "meta-effort", children: [
+                /* @__PURE__ */ jsx("span", { class: "meta-sep", children: "\xB7" }),
+                label.effort
+              ] })
+            ] });
+            const cls = "lab" + (label.action ? " lab-btn" : "") + (label.className ? " " + label.className : "");
+            return label.action ? /* @__PURE__ */ jsx(
+              "button",
+              {
+                class: cls,
+                type: "button",
+                "data-drop": label.drop,
+                "data-tip": label.tip,
+                "aria-label": label.tip,
+                onClick: (event) => active(
+                  event.currentTarget,
+                  () => label.action === "errors" ? host2.errors() : host2.menu(
+                    document.querySelector("#more-btn") ?? event.currentTarget,
+                    true
+                  )
+                ),
+                children: contents
+              },
+              label.key
+            ) : /* @__PURE__ */ jsx("span", { class: cls, "data-drop": label.drop, "data-tip": label.tip, children: contents }, label.key);
+          }) })
+        ] }) : null,
+        title
+      );
+      render(
+        view.mode === "normal" ? view.analytics ? /* @__PURE__ */ jsx("div", { class: "analytics-range", role: "group", "aria-label": "Analytics range", children: [
+          [1, "24 h"],
+          [7, "7 d"],
+          [30, "30 d"]
+        ].map(([days, label]) => /* @__PURE__ */ jsx(
+          "button",
+          {
+            type: "button",
+            "data-e": "analytics-range:" + days,
+            "aria-pressed": view.days === days,
+            onClick: (event) => active(event.currentTarget, () => host2.range(Number(days))),
+            children: label
+          },
+          days
+        )) }) : view.session ? /* @__PURE__ */ jsxs(Fragment2, { children: [
+          !view.trace && /* @__PURE__ */ jsx(
+            "button",
+            {
+              class: "ibtn",
+              type: "button",
+              id: "find-btn",
+              "aria-label": "Find and filter",
+              onClick: (event) => active(event.currentTarget, host2.find),
+              children: icon("search")
+            },
+            "find:" + view.session
+          ),
+          /* @__PURE__ */ jsx(
+            "button",
+            {
+              class: "ibtn",
+              type: "button",
+              id: "more-btn",
+              "aria-label": "Session menu: details, cost and actions",
+              "aria-haspopup": "dialog",
+              "aria-expanded": "false",
+              onClick: (event) => active(event.currentTarget, () => host2.menu(event.currentTarget)),
+              children: icon("more")
+            },
+            "more:" + view.session
+          )
+        ] }) : null : null,
+        actions
+      );
+      render(
+        view.mode === "find" ? /* @__PURE__ */ jsxs(Fragment2, { children: [
+          /* @__PURE__ */ jsxs(
+            "div",
+            {
+              class: "find-row",
+              ref: (node) => {
+                findRow = node;
+              },
+              children: [
+                /* @__PURE__ */ jsx(
+                  "button",
+                  {
+                    class: "ibtn",
+                    type: "button",
+                    "aria-label": "Close find",
+                    onClick: (event) => active(event.currentTarget, host2.closeFind),
+                    children: icon("back")
+                  }
+                ),
+                /* @__PURE__ */ jsxs("label", { class: "search", children: [
+                  icon("search"),
+                  /* @__PURE__ */ jsx(
+                    "input",
+                    {
+                      id: "find",
+                      type: "search",
+                      placeholder: "Find in " + view.name,
+                      "aria-label": "Find in transcript",
+                      value: query,
+                      onInput: (event) => {
+                        query = event.currentTarget.value;
+                        active(event.currentTarget, () => host2.query(query));
+                      },
+                      onKeyDown: (event) => {
+                        if (event.key === "Escape") {
+                          event.stopPropagation();
+                          active(event.currentTarget, host2.closeFind);
+                        }
+                      }
+                    }
+                  )
+                ] }),
+                /* @__PURE__ */ jsx("span", { class: "fcount", "aria-live": "polite", children: view.count })
+              ]
+            }
+          ),
+          /* @__PURE__ */ jsx("div", { class: "find-chips", role: "group", "aria-label": "Show", children: [
+            ["all", "All", void 0],
+            ["messages", "Messages", void 0],
+            ["steps", "Steps", void 0],
+            ...view.failed ? [["failures", "Failed steps", view.failed]] : [],
+            ...view.signals ? [["signals", "Signals", view.signals]] : []
+          ].map(([key, label, count]) => /* @__PURE__ */ jsxs(
+            "button",
+            {
+              class: "chip",
+              type: "button",
+              "data-filter": key,
+              "aria-pressed": view.filter === key,
+              onClick: (event) => active(event.currentTarget, () => host2.filter(String(key))),
+              children: [
+                /* @__PURE__ */ jsx("span", { children: label }),
+                count !== void 0 && /* @__PURE__ */ jsx("span", { class: "n", children: count })
+              ]
+            },
+            key
+          )) })
+        ] }) : view.mode === "errors" ? /* @__PURE__ */ jsxs(
+          "div",
+          {
+            class: "errnav-bar",
+            role: "group",
+            "aria-label": view.errorMode === "signals" ? "Session signals" : "Failed steps",
+            children: [
+              /* @__PURE__ */ jsx(
+                "button",
+                {
+                  class: "ibtn",
+                  type: "button",
+                  id: "err-close",
+                  "aria-label": "Close " + view.errorMode,
+                  onClick: (event) => active(event.currentTarget, host2.closeErrors),
+                  children: icon("x")
+                }
+              ),
+              /* @__PURE__ */ jsxs("div", { class: "find errnav", children: [
+                /* @__PURE__ */ jsx("span", { class: "errs-dot", "aria-hidden": "true" }),
+                /* @__PURE__ */ jsx("span", { class: "errnav-count", children: view.errorText })
+              ] }),
+              [-1, 1].map((direction) => /* @__PURE__ */ jsx(
+                "button",
+                {
+                  class: "ibtn errnav-btn",
+                  type: "button",
+                  id: direction < 0 ? "err-prev" : "err-next",
+                  "aria-label": (direction < 0 ? "Previous " : "Next ") + (view.errorMode === "signals" ? "signal" : "error"),
+                  disabled: view.errorDisabled,
+                  onClick: (event) => active(event.currentTarget, () => host2.step(direction)),
+                  children: icon(direction < 0 ? "up" : "dn")
+                },
+                direction
+              ))
+            ]
+          }
+        ) : null,
+        mode
+      );
+      return {
+        titleSlot: title,
+        actions,
+        mode,
+        accountTarget: view.mode === "find" ? findRow ?? void 0 : void 0
+      };
     }
-    return { update, destroy() {
-      if (disposed) return;
-      disposed = true;
-      for (const root of [title, actions, mode]) {
-        render(null, root);
-        root.remove();
+    return {
+      update,
+      destroy() {
+        if (disposed) return;
+        disposed = true;
+        for (const root of [title, actions, mode]) {
+          render(null, root);
+          root.remove();
+        }
       }
-    } };
+    };
   }
   function measureViewerBar(root) {
     const line = root.querySelector(".meta-line");
@@ -4313,29 +6024,48 @@ globalThis.__semonUIShared = __semonUIShared;
   var installSelect = globalThis.__semonUIShared.installSelect;
 
   // src/lib/placeholder.tsx
-  var shapes = [[true, [1, 3, 5], true], [false, [1, 2, 4], true], [true, [2, 1, 3], false], [false, [1, 1, 5], true]];
+  var shapes = [
+    [true, [1, 3, 5], true],
+    [false, [1, 2, 4], true],
+    [true, [2, 1, 3], false],
+    [false, [1, 1, 5], true]
+  ];
   function renderPlaceholder(root, error, retry) {
     releaseScreen(root);
     claimScreen(root, "placeholder", () => {
     });
-    render(error ? /* @__PURE__ */ jsxs("div", { class: "load-error", role: "alert", children: [
-      /* @__PURE__ */ jsx("p", { class: "empty", children: screenText(error) }),
-      retry && /* @__PURE__ */ jsx("button", { class: "more", type: "button", onClick: (event) => {
-        if (event.currentTarget.isConnected) retry();
-      }, children: "Try again" })
-    ] }) : /* @__PURE__ */ jsx("div", { class: "skeleton", "aria-hidden": "true", children: Array.from({ length: 6 }, (_, i) => {
-      const [bubble, lines, step] = shapes[i % shapes.length];
-      return /* @__PURE__ */ jsxs("div", { class: "sk-turn", children: [
-        bubble && /* @__PURE__ */ jsx("span", { class: "sk-line sk-bubble sk-w3" }),
-        /* @__PURE__ */ jsx("div", { class: "sk-text", children: lines.map((width, j) => /* @__PURE__ */ jsx("span", { class: "sk-line sk-w" + width }, j)) }),
-        step && /* @__PURE__ */ jsx("span", { class: "sk-line sk-step sk-w2" })
-      ] }, i);
-    }) }), root);
+    render(
+      error ? /* @__PURE__ */ jsxs("div", { class: "load-error", role: "alert", children: [
+        /* @__PURE__ */ jsx("p", { class: "empty", children: screenText(error) }),
+        retry && /* @__PURE__ */ jsx(
+          "button",
+          {
+            class: "more",
+            type: "button",
+            onClick: (event) => {
+              if (event.currentTarget.isConnected) retry();
+            },
+            children: "Try again"
+          }
+        )
+      ] }) : /* @__PURE__ */ jsx("div", { class: "skeleton", "aria-hidden": "true", children: Array.from({ length: 6 }, (_, i) => {
+        const [bubble, lines, step] = shapes[i % shapes.length];
+        return /* @__PURE__ */ jsxs("div", { class: "sk-turn", children: [
+          bubble && /* @__PURE__ */ jsx("span", { class: "sk-line sk-bubble sk-w3" }),
+          /* @__PURE__ */ jsx("div", { class: "sk-text", children: lines.map((width, j) => /* @__PURE__ */ jsx("span", { class: "sk-line sk-w" + width }, j)) }),
+          step && /* @__PURE__ */ jsx("span", { class: "sk-line sk-step sk-w2" })
+        ] }, i);
+      }) }),
+      root
+    );
   }
   function createStatusNote(text2, className, role = "status") {
     const root = document.createElement("div");
     root.className = "viewer-status-slot";
-    render(/* @__PURE__ */ jsx("p", { class: className, role, children: screenText(text2) }), root);
+    render(
+      /* @__PURE__ */ jsx("p", { class: className, role, children: screenText(text2) }),
+      root
+    );
     return root;
   }
   function createLiveRegion() {
@@ -4347,19 +6077,29 @@ globalThis.__semonUIShared = __semonUIShared;
   }
 
   // src/lib/model.ts
-  function object2(value) {
+  function object(value) {
     return !!value && typeof value === "object" && !Array.isArray(value);
   }
   var strings = (value) => Array.isArray(value) && value.every((item2) => typeof item2 === "string");
   function machine(value) {
-    return object2(value) && typeof value.id === "string" && typeof value.name === "string" && typeof value.up === "boolean";
+    return object(value) && typeof value.id === "string" && typeof value.name === "string" && typeof value.up === "boolean";
   }
   function parseModel(value) {
-    if (!object2(value) || !Number.isFinite(value.now) || typeof value.version !== "string" || !machine(value.machine) || !object2(value.sessions) || !Array.isArray(value.handoffs) || !Array.isArray(value.turns)) throw new Error("Invalid model response");
-    if (value.machines !== void 0 && (!Array.isArray(value.machines) || !value.machines.every(machine))) throw new Error("Invalid machine response");
-    for (const session of Object.values(value.sessions)) if (!object2(session) || !["name", "harness", "state", "machine"].every((field) => typeof session[field] === "string") || !Number.isFinite(session.start) || !Number.isFinite(session.last)) throw new Error("Invalid session response");
-    for (const handoff of value.handoffs) if (!object2(handoff) || !["id", "kind", "from", "status"].every((field) => typeof handoff[field] === "string") || !Number.isFinite(handoff.at)) throw new Error("Invalid handoff response");
-    for (const turn of value.turns) if (!object2(turn) || typeof turn.id !== "string" || typeof turn.sid !== "string" || !strings(turn.sent)) throw new Error("Invalid turn response");
+    if (!object(value) || !Number.isFinite(value.now) || typeof value.version !== "string" || !machine(value.machine) || !object(value.sessions) || !Array.isArray(value.handoffs) || !Array.isArray(value.turns))
+      throw new Error("Invalid model response");
+    if (value.machines !== void 0 && (!Array.isArray(value.machines) || !value.machines.every(machine)))
+      throw new Error("Invalid machine response");
+    for (const session of Object.values(value.sessions))
+      if (!object(session) || !["name", "harness", "state", "machine"].every(
+        (field) => typeof session[field] === "string"
+      ) || !Number.isFinite(session.start) || !Number.isFinite(session.last))
+        throw new Error("Invalid session response");
+    for (const handoff of value.handoffs)
+      if (!object(handoff) || !["id", "kind", "from", "status"].every((field) => typeof handoff[field] === "string") || !Number.isFinite(handoff.at))
+        throw new Error("Invalid handoff response");
+    for (const turn of value.turns)
+      if (!object(turn) || typeof turn.id !== "string" || typeof turn.sid !== "string" || !strings(turn.sent))
+        throw new Error("Invalid turn response");
     return value;
   }
   var ModelStore = class {
@@ -4370,33 +6110,40 @@ globalThis.__semonUIShared = __semonUIShared;
       return model2;
     }
     apply(value) {
-      if (!object2(value)) throw new Error("Invalid model response");
+      if (!object(value)) throw new Error("Invalid model response");
       if (value.delta !== 1) return parseModel(value);
-      if (!this.current || value.from !== this.current.version) throw new Error("Model delta base expired");
-      if (value.set !== void 0 && !object2(value.set)) throw new Error("Invalid model delta");
-      const next = { ...this.current, ...object2(value.set) ? value.set : {} };
-      if (value.remove !== void 0 && !strings(value.remove)) throw new Error("Invalid model delta removals");
+      if (!this.current || value.from !== this.current.version)
+        throw new Error("Model delta base expired");
+      if (value.set !== void 0 && !object(value.set)) throw new Error("Invalid model delta");
+      const next = { ...this.current, ...object(value.set) ? value.set : {} };
+      if (value.remove !== void 0 && !strings(value.remove))
+        throw new Error("Invalid model delta removals");
       for (const field of value.remove ?? []) delete next[field];
-      if (value.collections !== void 0 && !object2(value.collections)) throw new Error("Invalid model delta collections");
-      for (const [field, patch] of Object.entries(object2(value.collections) ? value.collections : {})) {
-        if (!object2(patch) || patch.set !== void 0 && !object2(patch.set) || patch.remove !== void 0 && !strings(patch.remove) || patch.order !== void 0 && !strings(patch.order)) throw new Error("Invalid collection patch");
+      if (value.collections !== void 0 && !object(value.collections))
+        throw new Error("Invalid model delta collections");
+      for (const [field, patch] of Object.entries(
+        object(value.collections) ? value.collections : {}
+      )) {
+        if (!object(patch) || patch.set !== void 0 && !object(patch.set) || patch.remove !== void 0 && !strings(patch.remove) || patch.order !== void 0 && !strings(patch.order))
+          throw new Error("Invalid collection patch");
         const array2 = field === "handoffs" || field === "turns", previous = this.current[field];
         const rows = /* @__PURE__ */ new Map();
         if (array2) {
           if (!Array.isArray(previous)) throw new Error("Invalid delta base");
           for (const row of previous) {
-            if (!object2(row) || typeof row.id !== "string") throw new Error("Invalid delta row");
+            if (!object(row) || typeof row.id !== "string") throw new Error("Invalid delta row");
             rows.set(row.id, row);
           }
         } else {
-          if (previous !== void 0 && !object2(previous)) throw new Error("Invalid delta base");
-          for (const [id, row] of Object.entries(object2(previous) ? previous : {})) rows.set(id, row);
+          if (previous !== void 0 && !object(previous)) throw new Error("Invalid delta base");
+          for (const [id, row] of Object.entries(object(previous) ? previous : {})) rows.set(id, row);
         }
         for (const id of patch.remove ?? []) rows.delete(id);
-        for (const [id, row] of Object.entries(object2(patch.set) ? patch.set : {})) rows.set(id, row);
+        for (const [id, row] of Object.entries(object(patch.set) ? patch.set : {})) rows.set(id, row);
         if (array2) {
           const order = patch.order ?? [...rows.keys()];
-          if (order.length !== rows.size || new Set(order).size !== rows.size || order.some((id) => !rows.has(id))) throw new Error("Incomplete model delta");
+          if (order.length !== rows.size || new Set(order).size !== rows.size || order.some((id) => !rows.has(id)))
+            throw new Error("Incomplete model delta");
           next[field] = order.map((id) => rows.get(id));
         } else next[field] = Object.fromEntries(rows);
       }
@@ -4420,13 +6167,29 @@ globalThis.__semonUIShared = __semonUIShared;
       throw new ApiError(error instanceof Error ? error.message : "No response", 0);
     }
     if (unchanged && response.status === 304) return null;
-    if (!response.ok) throw new ApiError(response.status + " " + response.statusText, response.status);
+    if (!response.ok)
+      throw new ApiError(response.status + " " + response.statusText, response.status);
     return response.json();
   }
 
   // src/lib/live.ts
   function createLiveController(host2) {
-    const state2 = { late: null, lateTries: 0, retry: false, version: null, timer: null, due: 0, busy: false, started: -Infinity, delay: 2e3, ended: false, again: false, pending: false, fresh: 0, turns: /* @__PURE__ */ new Map() };
+    const state2 = {
+      late: null,
+      lateTries: 0,
+      retry: false,
+      version: null,
+      timer: null,
+      due: 0,
+      busy: false,
+      started: -Infinity,
+      delay: 2e3,
+      ended: false,
+      again: false,
+      pending: false,
+      fresh: 0,
+      turns: /* @__PURE__ */ new Map()
+    };
     let disposed = false;
     const visible = () => document.visibilityState === "visible", floorWait = () => Math.max(0, state2.started + 1e3 - performance.now());
     function cancel() {
@@ -4469,9 +6232,10 @@ globalThis.__semonUIShared = __semonUIShared;
         } else if (status2 === 403) host2.ended(403);
         else {
           state2.delay = Math.min(3e4, state2.delay * 2);
-          if (status2 === void 0) window.setTimeout(() => {
-            throw error;
-          });
+          if (status2 === void 0)
+            window.setTimeout(() => {
+              throw error;
+            });
         }
       } finally {
         state2.busy = false;
@@ -4484,40 +6248,59 @@ globalThis.__semonUIShared = __semonUIShared;
     }
     function visibility() {
       if (!visible()) cancel();
-      else if (state2.version && !state2.busy && !state2.timer) schedule(state2.delay > 2e3 ? state2.delay : 0);
+      else if (state2.version && !state2.busy && !state2.timer)
+        schedule(state2.delay > 2e3 ? state2.delay : 0);
     }
     document.addEventListener("visibilitychange", visibility);
     window.addEventListener("semon:refresh", refresh);
-    return { state: state2, schedule, stop() {
-      state2.ended = true;
-      cancel();
-    }, destroy() {
-      if (disposed) return;
-      disposed = true;
-      cancel();
-      document.removeEventListener("visibilitychange", visibility);
-      window.removeEventListener("semon:refresh", refresh);
-    } };
+    return {
+      state: state2,
+      schedule,
+      stop() {
+        state2.ended = true;
+        cancel();
+      },
+      destroy() {
+        if (disposed) return;
+        disposed = true;
+        cancel();
+        document.removeEventListener("visibilitychange", visibility);
+        window.removeEventListener("semon:refresh", refresh);
+      }
+    };
   }
   function createPagingStore() {
     const states3 = /* @__PURE__ */ new Map();
-    return { states: states3, get(sid, direction) {
-      let pair = states3.get(sid);
-      if (!pair) {
-        pair = { before: { busy: false, failed: false }, after: { busy: false, failed: false } };
-        states3.set(sid, pair);
+    return {
+      states: states3,
+      get(sid, direction) {
+        let pair = states3.get(sid);
+        if (!pair) {
+          pair = { before: { busy: false, failed: false }, after: { busy: false, failed: false } };
+          states3.set(sid, pair);
+        }
+        return pair[direction];
+      },
+      clear(sid) {
+        for (const state2 of Object.values(states3.get(sid) ?? {})) state2.controller?.abort();
+        states3.delete(sid);
+      },
+      destroy() {
+        for (const sid of states3.keys()) this.clear(sid);
       }
-      return pair[direction];
-    }, clear(sid) {
-      for (const state2 of Object.values(states3.get(sid) ?? {})) state2.controller?.abort();
-      states3.delete(sid);
-    }, destroy() {
-      for (const sid of states3.keys()) this.clear(sid);
-    } };
+    };
   }
 
   // src/lib/geometry.ts
-  var properties2 = { paddingBottom: "padding-bottom", scrollPaddingTop: "scroll-padding-top", barHeight: "--barh", accountLeft: "--account-left", accountWidth: "--account-width", accountBottom: "--account-bottom", intrinsicHeight: "contain-intrinsic-block-size" };
+  var properties2 = {
+    paddingBottom: "padding-bottom",
+    scrollPaddingTop: "scroll-padding-top",
+    barHeight: "--barh",
+    accountLeft: "--account-left",
+    accountWidth: "--account-width",
+    accountBottom: "--account-bottom",
+    intrinsicHeight: "contain-intrinsic-block-size"
+  };
   var sheet = null;
   var observer = null;
   var serial2 = 0;
@@ -4533,12 +6316,19 @@ globalThis.__semonUIShared = __semonUIShared;
         records.delete(node);
         continue;
       }
-      const declarations = [...record2.values].map(([slot, value]) => properties2[slot] + ":" + (slot === "intrinsicHeight" ? "auto " : "") + value + "px !important").join(";");
-      if (declarations) sheet.insertRule('[data-semon-geometry="' + record2.id + '"]{' + declarations + "}", sheet.cssRules.length);
+      const declarations = [...record2.values].map(
+        ([slot, value]) => properties2[slot] + ":" + (slot === "intrinsicHeight" ? "auto " : "") + value + "px !important"
+      ).join(";");
+      if (declarations)
+        sheet.insertRule(
+          '[data-semon-geometry="' + record2.id + '"]{' + declarations + "}",
+          sheet.cssRules.length
+        );
     }
   }
   function setGeometry(node, slot, value) {
-    if (!Object.hasOwn(properties2, slot) || value !== null && (!Number.isFinite(value) || Math.abs(value) > 1e8)) throw new Error("Invalid host geometry");
+    if (!Object.hasOwn(properties2, slot) || value !== null && (!Number.isFinite(value) || Math.abs(value) > 1e8))
+      throw new Error("Invalid host geometry");
     let record2 = records.get(node);
     if (!record2) {
       record2 = { id: ++serial2, values: /* @__PURE__ */ new Map() };
@@ -4569,7 +6359,8 @@ globalThis.__semonUIShared = __semonUIShared;
     else {
       observer?.disconnect();
       observer = null;
-      if (sheet) document.adoptedStyleSheets = document.adoptedStyleSheets.filter((value) => value !== sheet);
+      if (sheet)
+        document.adoptedStyleSheets = document.adoptedStyleSheets.filter((value) => value !== sheet);
       sheet = null;
     }
   }
@@ -4608,12 +6399,14 @@ globalThis.__semonUIShared = __semonUIShared;
     }, parts = location2.pathname.split("/").filter(Boolean).map(decode), sid = parts[2], turn = new URLSearchParams(location2.search).get("turn");
     if (parts[0] === "timeline" || parts[0] === "analytics") return { v: "analytics" };
     if (parts[0] === "sessions") return { v: "sessions" };
-    if (parts[0] === "machines") return parts[1] && model2.machine(parts[1]) ? { v: "machine", id: parts[1] } : { v: "machines" };
+    if (parts[0] === "machines")
+      return parts[1] && model2.machine(parts[1]) ? { v: "machine", id: parts[1] } : { v: "machines" };
     if (parts[0] === "s" && sid && model2.session(sid)) {
-      const candidate = model2.turn(turn ?? (decode(location2.hash.slice(1)).split("#")[0] ?? "")), target = candidate?.sid === sid ? candidate.id : null;
+      const candidate = model2.turn(turn ?? decode(location2.hash.slice(1)).split("#")[0] ?? ""), target = candidate?.sid === sid ? candidate.id : null;
       return target ? { v: "session", id: sid, turn: target } : { v: "session", id: sid };
     }
-    if (parts[0] === "trace" && sid && model2.session(sid) && parts[3] && model2.turn(parts[3])?.sid === sid) return { v: "trace", sid, turn: parts[3] };
+    if (parts[0] === "trace" && sid && model2.session(sid) && parts[3] && model2.turn(parts[3])?.sid === sid)
+      return { v: "trace", sid, turn: parts[3] };
     return { v: "home" };
   }
   var TranscriptCache = class extends Map {
@@ -4627,7 +6420,9 @@ globalThis.__semonUIShared = __semonUIShared;
     keep(sid, entries, meta) {
       this.delete(sid);
       let weight = 0;
-      for (const entry of entries) for (const value of Object.values(entry)) weight += typeof value === "string" ? value.length : value && typeof value === "object" ? JSON.stringify(value).length : 4;
+      for (const entry of entries)
+        for (const value of Object.values(entry))
+          weight += typeof value === "string" ? value.length : value && typeof value === "object" ? JSON.stringify(value).length : 4;
       const bytes = weight * 2;
       if (bytes > this.maxBytes) return;
       this.set(sid, { entries, meta, bytes });
@@ -4654,7 +6449,8 @@ globalThis.__semonUIShared = __semonUIShared;
     }
     async function load(button, manual) {
       const sid = button.dataset.pagerSid, direction = button.dataset.pagerWhere;
-      if (disposed || !sid || direction !== "before" && direction !== "after" || !button.isConnected) return;
+      if (disposed || !sid || direction !== "before" && direction !== "after" || !button.isConnected)
+        return;
       const route = host2.route(sid), state2 = host2.state(sid, direction);
       if (!route || state2.busy || !manual && (state2.failed || !host2.automatic())) return;
       if (manual) host2.beginManual();
@@ -4672,17 +6468,21 @@ globalThis.__semonUIShared = __semonUIShared;
         await host2.load(sid, direction, boundary, controller.signal, () => {
           applied = true;
         });
-        if (disposed || !applied || !host2.current(sid, direction, state2, route) || host2.range(sid) !== range) return;
+        if (disposed || !applied || !host2.current(sid, direction, state2, route) || host2.range(sid) !== range)
+          return;
         state2.failed = false;
         if (host2.route(sid) === route) host2.commit(route, direction, manual);
       } catch (error) {
-        if (!(error instanceof Error && error.name === "AbortError") && host2.current(sid, direction, state2, route)) state2.failed = true;
+        if (!(error instanceof Error && error.name === "AbortError") && host2.current(sid, direction, state2, route))
+          state2.failed = true;
       } finally {
         requests.delete(controller);
         state2.busy = false;
         state2.controller = null;
         if (!disposed && host2.current(sid, direction, state2, route)) {
-          for (const next of document.querySelectorAll("#page [data-pager-where]")) if (next.dataset.pagerSid === sid && next.dataset.pagerWhere === direction) host2.paint(next);
+          for (const next of document.querySelectorAll("#page [data-pager-where]"))
+            if (next.dataset.pagerSid === sid && next.dataset.pagerWhere === direction)
+              host2.paint(next);
           host2.queue();
         }
       }
@@ -4692,27 +6492,40 @@ globalThis.__semonUIShared = __semonUIShared;
       frame = requestAnimationFrame(() => {
         frame = null;
         disconnect();
-        if (disposed || !root.isConnected || !enabled() || typeof IntersectionObserver === "undefined") return;
+        if (disposed || !root.isConnected || !enabled() || typeof IntersectionObserver === "undefined")
+          return;
         for (const button of root.querySelectorAll("[data-pager-where]")) {
           const sid = button.dataset.pagerSid, direction = button.dataset.pagerWhere;
           if (!sid || direction !== "before" && direction !== "after") continue;
           const state2 = host2.state(sid, direction);
           if (state2.busy || state2.failed) continue;
-          const observer2 = new IntersectionObserver((entries) => {
-            if (observers.get(button) === observer2 && entries.some((entry) => entry.isIntersecting)) void load(button, false);
-          }, { root: scrollRoot, rootMargin: direction === "before" ? "800px 0px 0px 0px" : "0px 0px 800px 0px" });
+          const observer2 = new IntersectionObserver(
+            (entries) => {
+              if (observers.get(button) === observer2 && entries.some((entry) => entry.isIntersecting))
+                void load(button, false);
+            },
+            {
+              root: scrollRoot,
+              rootMargin: direction === "before" ? "800px 0px 0px 0px" : "0px 0px 800px 0px"
+            }
+          );
           observers.set(button, observer2);
           observer2.observe(button);
         }
       });
     }
-    return { load, queue, disconnect, destroy() {
-      if (disposed) return;
-      disposed = true;
-      for (const controller of requests) controller.abort();
-      requests.clear();
-      disconnect();
-    } };
+    return {
+      load,
+      queue,
+      disconnect,
+      destroy() {
+        if (disposed) return;
+        disposed = true;
+        for (const controller of requests) controller.abort();
+        requests.clear();
+        disconnect();
+      }
+    };
   }
 
   // src/lib/ordering.ts
@@ -4720,7 +6533,20 @@ globalThis.__semonUIShared = __semonUIShared;
     const scopes = /* @__PURE__ */ new Map();
     function begin(name, sig, tie, state2) {
       const previous = scopes.get(name), keep = !!previous && previous.sig === sig && previous.tie === tie;
-      const scope = { sig, tie, keep, calm: state2.inView && !state2.touched, prev: keep ? previous.lists : /* @__PURE__ */ new Map(), prevKids: keep ? previous.kids : /* @__PURE__ */ new Set(), kids: /* @__PURE__ */ new Set(), prevExp: keep ? previous.exp : null, exp: null, reseed: false, lists: /* @__PURE__ */ new Map(), n: 0 };
+      const scope = {
+        sig,
+        tie,
+        keep,
+        calm: state2.inView && !state2.touched,
+        prev: keep ? previous.lists : /* @__PURE__ */ new Map(),
+        prevKids: keep ? previous.kids : /* @__PURE__ */ new Set(),
+        kids: /* @__PURE__ */ new Set(),
+        prevExp: keep ? previous.exp : null,
+        exp: null,
+        reseed: false,
+        lists: /* @__PURE__ */ new Map(),
+        n: 0
+      };
       scopes.set(name, scope);
       return scope;
     }
@@ -4739,14 +6565,22 @@ globalThis.__semonUIShared = __semonUIShared;
     }
     return rows.length - tails.length;
   }
-  function orderRows(scope, key, items, compare, { must = null, limit = Infinity, quiet = false, seed = false } = {}) {
+  function orderRows(scope, key, items, compare, {
+    must = null,
+    limit = Infinity,
+    quiet = false,
+    seed = false
+  } = {}) {
     const sorted = [...items].sort(compare), by = new Map(items.map((row) => [row.id, row]));
     let ids = sorted.map((row) => row.id);
     if (scope.keep && !quiet && !(seed && !scope.prev.has(key))) {
       const existed = scope.prev.has(key), old = (scope.prev.get(key) ?? []).filter((id) => by.has(id)), have = new Set(old), fresh = sorted.filter((row) => !have.has(row.id)), up = fresh.filter((row) => must?.has(row.id) || scope.calm && existed);
       ids = [...up.map((row) => row.id), ...old];
       const shown = ids.slice(0, limit), inShown = new Set(shown), top = new Set(sorted.slice(0, limit).map((row) => row.id)), held = fresh.filter((row) => top.has(row.id) && !up.includes(row)).length;
-      scope.n += held + sorted.slice(0, limit).filter((row) => have.has(row.id) && !inShown.has(row.id)).length + moves(shown.map((id) => by.get(id)), compare);
+      scope.n += held + sorted.slice(0, limit).filter((row) => have.has(row.id) && !inShown.has(row.id)).length + moves(
+        shown.map((id) => by.get(id)),
+        compare
+      );
     }
     scope.lists.set(key, ids);
     return ids.map((id) => by.get(id));
@@ -4754,6 +6588,510 @@ globalThis.__semonUIShared = __semonUIShared;
 
   // src/lib/index.ts
   installPropGuard();
+
+  // src/viewer-host.ts
+  var host = null;
+  function getViewerHost() {
+    return host;
+  }
+
+  // src/app/renderTransaction.ts
+  function createRenderTransaction(host2) {
+    return {
+      begin() {
+        host2.pagingOwner.resetPagerInput();
+        host2.pagingOwner.holdProgrammaticScroll();
+        host2.accountControlsOwner.closeAccountMenu();
+        host2.viewport.stopOpeningEndPin();
+        host2.orderingControlsOwner.ordPageState = host2.orderingControlsOwner.ordState("page");
+        host2.transportOwner.tick();
+      },
+      complete(r) {
+        const lanesKept = host2.destination.lanesFor && host2.destination.lanesFor.r === r && host2.destination.lanesFor.version === host2.liveModelOwner.LIVE.version;
+        host2.destination.lanesFor = null;
+        host2.layoutOwner.syncLayoutPrefs();
+        host2.sessionChrome.syncBarLine();
+        host2.navigationViewOwner.renderNav();
+        if (!lanesKept) host2.recentNavigation.renderLanes();
+        host2.accountControlsOwner.renderDrawerAccount();
+        host2.viewport.syncJump();
+        host2.orderingControlsOwner.ordPageState = null;
+      }
+    };
+  }
+
+  // src/state/viewUpdates.ts
+  var ViewUpdates = class {
+    listeners = /* @__PURE__ */ new Set();
+    disposed = false;
+    sequence = 0;
+    modelSequence = 0;
+    get revision() {
+      return this.sequence;
+    }
+    get modelRevision() {
+      return this.modelSequence;
+    }
+    subscribe(listener, session) {
+      if (this.disposed) return () => {
+      };
+      const selected = (change) => {
+        if (session === void 0 || change.kind === "model" || change.session === session)
+          listener(change);
+      };
+      this.listeners.add(selected);
+      return () => {
+        this.listeners.delete(selected);
+      };
+    }
+    model() {
+      if (this.disposed) return;
+      this.modelSequence++;
+      this.publish({ kind: "model", revision: ++this.sequence });
+    }
+    transcript(session) {
+      if (!this.disposed) this.publish({ kind: "transcript", session, revision: ++this.sequence });
+    }
+    publish(change) {
+      for (const listener of this.listeners) listener(change);
+    }
+    destroy() {
+      this.disposed = true;
+      this.listeners.clear();
+    }
+  };
+
+  // src/app/pageRoot.ts
+  function createPageRoot() {
+    return {
+      viewer(root, kind) {
+        if (ownsScreen(root) && screenKind(root) === kind) return;
+        releaseScreen(root);
+        root.replaceChildren();
+      },
+      native(root) {
+        releaseScreen(root);
+      },
+      destroy(root) {
+        releaseScreen(root);
+      }
+    };
+  }
+
+  // src/app/routeControls.ts
+  function createRouteControls(navigation) {
+    const SLOTS = /* @__PURE__ */ new Map();
+    function slot(key, box, build) {
+      let s = SLOTS.get(key);
+      if (!s || s.route !== navigation.route || s.box !== box || !box.contains(s.el)) {
+        s?.ctx.destroy?.();
+        const ctx = { sync() {
+        }, onChange() {
+        } };
+        s = { route: navigation.route, box, ctx, el: build(ctx) };
+        SLOTS.set(key, s);
+      }
+      return s;
+    }
+    function retain(route) {
+      for (const [key, control] of SLOTS)
+        if (control.route !== route) {
+          control.ctx.destroy?.();
+          SLOTS.delete(key);
+        }
+    }
+    return {
+      slot,
+      retain,
+      destroy() {
+        retain(null);
+      }
+    };
+  }
+
+  // src/domain/format.ts
+  var clock = (t, NOW) => {
+    const d = new Date(t), n = new Date(NOW);
+    const hm = String(d.getHours()).padStart(2, "0") + ":" + String(d.getMinutes()).padStart(2, "0");
+    return d.toDateString() === n.toDateString() ? hm : d.toLocaleDateString(void 0, { weekday: "short" }) + " " + hm;
+  };
+  var ago = (t, NOW) => {
+    const d = Math.floor((NOW - t) / 6e4);
+    return d < 1 ? "now" : d < 60 ? d + "m" : d < 2880 ? Math.floor(d / 60) + "h" : Math.floor(d / 1440) + "d";
+  };
+  var dur = (a, b, NOW) => {
+    const d = Math.max(0, Math.floor(((b ?? NOW) - a) / 6e4));
+    return d >= 1440 ? Math.floor(d / 1440) + "d " + Math.floor(d % 1440 / 60) + "h" : d >= 60 ? Math.floor(d / 60) + "h " + d % 60 + "m" : d + "m";
+  };
+  var tok = (m) => m >= 1 ? m.toFixed(1) + "M" : Math.round(m * 1e3) + "k";
+  var shortName = (name) => {
+    const h2 = String(name).split(".")[0];
+    return h2.length > 14 ? h2.slice(0, 14) + "\u2026" : h2;
+  };
+  var machineShorts = (names) => {
+    const forms = (id, full) => {
+      const first = String(full).split(".")[0];
+      return [
+        shortName(first),
+        first.length > 14 ? first.slice(0, 6) + "\u2026" + first.slice(-7) : first,
+        first,
+        id
+      ];
+    };
+    const opts = new Map([...names].map(([id, full]) => [id, forms(id, full)])), level = new Map([...opts.keys()].map((id) => [id, 0]));
+    for (let step = 0; step < 3; step++) {
+      const groups = /* @__PURE__ */ new Map();
+      for (const [id, o] of opts) {
+        const l = o[level.get(id)];
+        if (!groups.has(l)) groups.set(l, []);
+        groups.get(l).push(id);
+      }
+      let clash = false;
+      for (const ids of groups.values())
+        if (ids.length > 1) {
+          clash = true;
+          for (const id of ids) level.set(id, level.get(id) + 1);
+        }
+      if (!clash) break;
+    }
+    return new Map([...opts].map(([id, o]) => [id, o[level.get(id)]]));
+  };
+  var shortModel = (model2) => String(model2 ?? "Unknown model").replace(/^gpt-(\d+\.\d+)-(.+)$/i, "$2 $1").replace(/^gpt-\d+-/i, "").replace(/^claude-/i, "").replace(/^(opus|sonnet|haiku)-(\d+)-(\d+)$/i, "$1 $2.$3").replace(/^(opus|sonnet|haiku)-(\d+)\.(\d+)$/i, "$1 $2.$3").replace(/^(opus|sonnet|haiku)-(\d+)$/i, "$1 $2");
+  var clean = (t) => t.replace(/[`*]/g, "");
+  var liveUrl = (u) => {
+    try {
+      return /^https?:$/.test(new URL(u).protocol) && /^https?:\/\//i.test(u) ? u : null;
+    } catch {
+      return null;
+    }
+  };
+  var preview = (t) => t.split("\n").map((l) => l.replace(/^\s*(#{1,6}\s+|>\s?|[-*]\s+|\d{1,3}[.)]\s+)/, "").trim()).filter((l) => l && !/^\s*\|?\s*:?-{2,}/.test(l)).join(" ");
+  var compactCount = (n) => {
+    if (n < 1e3) return String(n);
+    if (n < 1e4) return +(n / 1e3).toFixed(1) + "k";
+    const k = Math.round(n / 1e3);
+    return k < 1e3 ? k + "k" : +(n / 1e6).toFixed(1) + "M";
+  };
+  var niceStep = (max) => [0.25, 0.5, 1, 2, 5, 10, 20, 50, 100, 200, 500].find((x) => x * 3 >= max) ?? 1e3;
+  function timeText(ms) {
+    const mins = Math.max(0, Math.round(ms / 6e4)), days = Math.floor(mins / 1440), hours = Math.floor(mins % 1440 / 60), rem = mins % 60;
+    return days ? days + "d " + hours + "h" : hours ? hours + "h " + rem + "m" : mins + "m";
+  }
+  var countText = (n) => Math.round(n).toLocaleString();
+  var hLabel = (n) => n ? +n.toFixed(2) + " h" : "0";
+
+  // src/domain/calculations.ts
+  function createDomain(state2, now, SEEN_RESULTS) {
+    const {
+      sessions: SESS,
+      machines: MACHINE,
+      handoffs: H,
+      turns: TURNS,
+      turn: TURN,
+      starts: STARTS,
+      holds: HOLDS,
+      handoff: HID,
+      transcriptMeta: TXM
+    } = state2;
+    const clock2 = (at) => clock(at, now());
+    const nameOf = (id) => id === "you" ? "You" : SESS[id].name;
+    const hcls = (id) => id === "you" ? "h-you" : "h-" + SESS[id].harness;
+    const where = (s) => s.repo ? s.repo + (s.branch && s.branch !== "main" && s.branch !== s.name ? " \xB7 " + s.branch : "") : "No repo";
+    const hostOf = (s) => s.host ?? MACHINE[s.machine] ?? s.machine ?? "Unknown machine";
+    const machineLabels = (scope = Object.values(SESS)) => {
+      const names = /* @__PURE__ */ new Map();
+      for (const x of scope) {
+        const s = typeof x === "string" ? SESS[x] : x;
+        if (s?.machine != null && !names.has(s.machine))
+          names.set(s.machine, s.host ?? MACHINE[s.machine] ?? s.machine);
+      }
+      return names.size > 1 ? machineShorts([...names]) : /* @__PURE__ */ new Map();
+    };
+    const machineLabel = (s, scope) => s ? machineLabels(scope).get(s.machine) ?? "" : "";
+    const branchOf = (s) => s.worktree ?? s.branch ?? "No branch";
+    const shortHost = (s) => s.host == null && MACHINE[s.machine] == null && s.machine == null ? hostOf(s) : shortName(hostOf(s));
+    const parentOf = (sid) => SESS[sid]?.parent ?? H.find((h2) => h2.kind === "spawn" && h2.to === sid)?.from;
+    const originHandoff = (sid) => H.find(
+      (h2) => (h2.kind === "spawn" || h2.kind === "relay") && h2.to === sid && h2.from !== sid && (h2.kind === "spawn" || SESS[sid]?.kind === "Relayed" || !SESS[sid]?.lane)
+    );
+    const RANK = { wait: 0, work: 1, err: 2, done: 3 };
+    const isResult = (h2) => h2.kind === "toyou" && h2.ask === "result";
+    const inbox = () => {
+      const entries = H.filter(
+        (h2) => h2.kind === "toyou" && (h2.status === "wait" || isResult(h2) && !SEEN_RESULTS.has(h2.id))
+      );
+      const waiting = new Set(entries.filter((h2) => h2.status === "wait").map((h2) => h2.from));
+      for (const s of Object.values(SESS))
+        if (s.state === "wait" && !waiting.has(s.id))
+          entries.push({
+            id: "wait:" + s.id,
+            kind: "toyou",
+            from: s.id,
+            to: "you",
+            ask: "decision",
+            status: "wait",
+            at: s.waiting_since ?? s.last,
+            brief: s.waiting_for ?? "Waiting for your input or permission"
+          });
+      return entries.sort((a, b) => b.at - a.at);
+    };
+    const working = () => Object.values(SESS).filter((s) => s.state === "work");
+    const answersOf = (h2) => h2.kind === "toyou" && h2.ask !== "result" && h2.status === "done" ? (Array.isArray(h2.answers) ? h2.answers.map((a) => (a.values ?? []).join(", ")) : Array.isArray(h2.answer) ? h2.answer : h2.answer != null ? [h2.answer] : []).map((a) => String(a).trim()).filter(Boolean) : null;
+    const statWord = (h2) => isResult(h2) ? SEEN_RESULTS.has(h2.id) ? "read" : "new" : {
+      new: void 0,
+      work: "working",
+      wait: "waiting on you",
+      err: "failed",
+      done: h2.kind === "toyou" ? "answered" : h2.result ? "returned" : "delivered"
+    }[h2.status];
+    const hasTurn = (t) => !!t.end || !!(t.start || t.u) || t.entries.some((e) => e.k === "a" || e.k === "tool" || e.k === "h");
+    const oneLine = (s) => clean(s).replace(/\s+/g, " ").trim();
+    const TOYOU = {
+      question: "Asked you",
+      result: "Sent you a result",
+      decision: "Needs your decision"
+    };
+    function turnEnd2(t) {
+      if (!hasTurn(t)) return null;
+      if (!t.end) {
+        if (t.last && SESS[t.sid]?.state === "wait")
+          return { st: "wait", text: "Waiting on permission or input" };
+        if (t.last && SESS[t.sid]?.state === "work") return { st: "work", text: "Still working" };
+        const ty = t.out.filter((h3) => h3.kind === "toyou").at(-1);
+        if (ty)
+          return {
+            st: ty.status === "wait" ? "wait" : "done",
+            text: (TOYOU[ty.kind === "toyou" ? ty.ask : ""] ?? "Sent you a message") + " \xB7 " + statWord(ty) + " \xB7 " + clock2(ty.at)
+          };
+        const entries = t.entries.filter(
+          (e) => e.k === "a" || e.k === "tool" || e.k === "h" && t.out.includes(HID.get(e.id))
+        );
+        const last = entries.at(-1), h2 = last?.k === "h" ? HID.get(last.id) : null;
+        if (t.start?.status === "err")
+          return { st: "err", text: "Failed" + (t.start.done ? " \xB7 " + clock2(t.start.done) : "") };
+        if (last?.k === "tool" && last.ok === false && !last.live)
+          return {
+            st: "err",
+            text: last.unfinished ? "Stopped on a step with no result" : "Stopped on a failed step"
+          };
+        if (h2?.status === "err") return { st: "err", text: "Handoff to " + nameOf(h2.to) + " failed" };
+        if (t.start?.kind === "spawn" && t.start.status === "done")
+          return {
+            st: "done",
+            text: "Returned to " + nameOf(t.start.from) + (t.start.done ? " \xB7 " + clock2(t.start.done) : "")
+          };
+        if (entries.some((e) => e.k === "a")) return { st: "done", text: "Replied" };
+        return { st: "idle", text: "No reply in these logs" };
+      }
+      const { st, why } = t.end, mh = t.end.h ? HID.get(t.end.h) : null;
+      if (why === "input") return { st: "wait", text: "Waiting for your input" };
+      if (why === "permission" || why === "waiting" || why === "waiting_permission")
+        return { st: "wait", text: "Waiting on permission" };
+      if (why === "working") return { st: "work", text: "Still working" };
+      if (why === "toyou" && mh)
+        return {
+          st: mh.status === "wait" ? "wait" : "done",
+          text: (TOYOU[mh.kind === "toyou" ? mh.ask : ""] ?? "Sent you a message") + " \xB7 " + statWord(mh) + " \xB7 " + clock2(mh.at)
+        };
+      if (why === "failed")
+        return { st: "err", text: "Failed" + (t.start?.done ? " \xB7 " + clock2(t.start.done) : "") };
+      if (why === "unfinished_step") return { st: "err", text: "Stopped on a step with no result" };
+      if (why === "failed_step") return { st: "err", text: "Stopped on a failed step" };
+      if (why === "handoff_failed" && mh)
+        return { st: "err", text: "Handoff to " + nameOf(mh.to) + " failed" };
+      if (why === "returned" && t.start)
+        return {
+          st: "done",
+          text: "Returned to " + nameOf(t.start.from) + (t.start.done ? " \xB7 " + clock2(t.start.done) : "")
+        };
+      if (why === "replied") return { st: "done", text: "Replied" };
+      return { st: st ?? "idle", text: "No reply in these logs" };
+    }
+    function traceRoot(t) {
+      const seen = /* @__PURE__ */ new Set();
+      while (!seen.has(t.id)) {
+        seen.add(t.id);
+        const up = t.start && t.start.from !== "you" ? HOLDS.get(t.start.id) : null;
+        if (!up) break;
+        t = up;
+      }
+      return t;
+    }
+    const countOf = (s, key) => {
+      const m = TXM[s.id];
+      return (m && m.to >= m.total ? m[key] : void 0) ?? s[key] ?? m?.[key] ?? null;
+    };
+    const callsText = (calls) => (calls == null ? "\u2014" : calls) + (calls === 1 ? " tool call" : " tool calls");
+    let childrenCache = null;
+    const invalidate = () => {
+      childrenCache = null;
+    };
+    const sessionChildren = () => {
+      if (childrenCache) return childrenCache;
+      const children = /* @__PURE__ */ new Map();
+      for (const session of Object.values(SESS)) {
+        const parent = parentOf(session.id);
+        if (parent && SESS[parent]) {
+          const rows = children.get(parent) ?? [];
+          rows.push(session);
+          children.set(parent, rows);
+        }
+      }
+      for (const rows of children.values()) rows.sort((a, b) => b.last - a.last);
+      return childrenCache = children;
+    };
+    const childSessions = (sid) => [...sessionChildren().get(sid) ?? []].sort(
+      (a, b) => (originHandoff(a.id)?.at ?? a.last) - (originHandoff(b.id)?.at ?? b.last)
+    );
+    const descendantsOf = (sid, children, out = [], seen = /* @__PURE__ */ new Set([sid])) => {
+      for (const child of children.get(sid) ?? [])
+        if (!seen.has(child.id)) {
+          seen.add(child.id);
+          out.push(child);
+          descendantsOf(child.id, children, out, seen);
+        }
+      return out;
+    };
+    const TOTAL_TOKEN_KINDS = ["input", "output", "cache_write", "cache_read"];
+    const TOKEN_KINDS = [
+      ["input", "Input"],
+      ["output", "Output"],
+      ["cache_read", "Cache read"],
+      ["cache_write_5m", "Cache write \xB7 5m"],
+      ["cache_write_1h", "Cache write \xB7 1h"],
+      ["web_search", "Web search"]
+    ];
+    const asMoney = (usd) => "$" + usd.toFixed(2), shortMoney = (usd) => "$" + usd.toFixed(1);
+    const usageTotal = (s) => Object.values(s.tokens_by_model ?? {}).reduce(
+      (sum, usage2) => sum + TOTAL_TOKEN_KINDS.reduce((n, key) => n + (Number(usage2[key]) || 0), 0),
+      0
+    );
+    function costForSessions(sessions) {
+      const total = {
+        usd: 0,
+        unpriced_models: [],
+        split_unknown_messages: 0,
+        by_model: {},
+        by_day: {}
+      }, unpriced = /* @__PURE__ */ new Set();
+      let allPriced = true;
+      for (const s of sessions) {
+        const cost2 = s.cost ?? {};
+        if (cost2.usd == null) allPriced = false;
+        else total.usd = (total.usd ?? 0) + (Number(cost2.usd) || 0);
+        for (const model2 of cost2.unpriced_models ?? []) unpriced.add(model2);
+        total.split_unknown_messages += Number(cost2.split_unknown_messages) || 0;
+        for (const [day2, amount] of Object.entries(cost2.by_day ?? {}))
+          total.by_day[day2] = (total.by_day[day2] ?? 0) + (Number(amount) || 0);
+        for (const [modelId, model2] of Object.entries(cost2.by_model ?? {})) {
+          const current = Object.assign(
+            { tokens: {}, usd_by_kind: {} },
+            total.by_model[modelId] ?? { usd: 0, tokens: {}, usd_by_kind: {} }
+          );
+          if (model2.usd == null) current.usd = null;
+          else if (current.usd != null) current.usd += Number(model2.usd) || 0;
+          for (const [key, amount] of Object.entries(model2.tokens ?? {}))
+            current.tokens[key] = (current.tokens[key] ?? 0) + (Number(amount) || 0);
+          for (const [key, amount] of Object.entries(model2.usd_by_kind ?? {}))
+            current.usd_by_kind[key] = (current.usd_by_kind[key] ?? 0) + (Number(amount) || 0);
+          total.by_model[modelId] = current;
+        }
+      }
+      total.unpriced_models = [...unpriced].sort();
+      if (!allPriced || unpriced.size) total.usd = null;
+      return total;
+    }
+    const costForSession = (sid, includeRuns = false) => costForSessions(
+      SESS[sid] ? [SESS[sid], ...includeRuns ? descendantsOf(sid, sessionChildren()) : []] : []
+    );
+    const costText = (cost2) => cost2.usd == null || cost2.unpriced_models?.length ? "\u2014" : asMoney(cost2.usd);
+    const costMissing = (cost2) => cost2.unpriced_models ?? [];
+    const TREE_RANK = { wait: 0, work: 1, err: 2, idle: 3, done: 4 };
+    const urgentDescendant = (sid, children) => descendantsOf(sid, children).filter((s) => s.state in TREE_RANK).sort((a, b) => TREE_RANK[a.state] - TREE_RANK[b.state] || b.last - a.last)[0]?.state;
+    const childParts = (all) => {
+      const n = (state3) => all.filter((x) => x.state === state3).length, wait = n("wait"), work = n("work"), err = n("err");
+      return [
+        all.length + (all.length === 1 ? " run" : " runs"),
+        wait && wait + " needs you",
+        work && work + " working",
+        err && err + " failed"
+      ].filter(Boolean);
+    };
+    const defaultTreeOpen = (sid, children) => descendantsOf(sid, children).some((s) => s.state === "wait" || s.state === "work");
+    function kidRank(c, children) {
+      let rank = c.state === "wait" ? 0 : c.state === "work" ? 1 : 2;
+      if (rank)
+        for (const d of descendantsOf(c.id, children)) {
+          if (d.state === "wait") return 0;
+          if (d.state === "work") rank = 1;
+        }
+      return rank;
+    }
+    function lineageOf(sid) {
+      const path = [], seen = /* @__PURE__ */ new Set();
+      let id = sid;
+      while (id && SESS[id] && !seen.has(id)) {
+        seen.add(id);
+        path.push(SESS[id]);
+        id = parentOf(id);
+      }
+      return path.reverse();
+    }
+    const byState = (a, b) => (RANK[a.state] ?? 3) - (RANK[b.state] ?? 3) || b.last - a.last;
+    const onMachine = (m) => Object.values(SESS).filter((s) => s.machine === m).sort(byState);
+    const movedOff = (m) => Object.values(SESS).filter((s) => s.movedFrom === m);
+    const movesOf = (m) => H.filter((h2) => h2.kind === "move" && (h2.fromMachine === m || h2.toMachine === m)).sort(
+      (a, b) => b.at - a.at
+    );
+    return {
+      invalidate,
+      nameOf,
+      hcls,
+      where,
+      hostOf,
+      machineLabels,
+      machineLabel,
+      branchOf,
+      shortHost,
+      parentOf,
+      originHandoff,
+      RANK,
+      isResult,
+      inbox,
+      working,
+      answersOf,
+      statWord,
+      hasTurn,
+      oneLine,
+      TOYOU,
+      turnEnd: turnEnd2,
+      traceRoot,
+      countOf,
+      callsText,
+      sessionChildren,
+      childSessions,
+      descendantsOf,
+      TOTAL_TOKEN_KINDS,
+      TOKEN_KINDS,
+      asMoney,
+      usageTotal,
+      costForSessions,
+      costForSession,
+      costText,
+      costMissing,
+      TREE_RANK,
+      urgentDescendant,
+      childParts,
+      defaultTreeOpen,
+      kidRank,
+      lineageOf,
+      byState,
+      onMachine,
+      movedOff,
+      movesOf,
+      shortMoney
+    };
+  }
 
   // src/navigation/routes.ts
   var NavigationController = class {
@@ -4781,19 +7119,22 @@ globalThis.__semonUIShared = __semonUIShared;
       this.cancelNative();
       const request = new AbortController();
       this.nativePending = request;
-      this.host.loadMachines(request.signal).then((content) => {
-        if (this.disposed || request.signal.aborted || this.nativePending !== request) {
-          content.destroy();
-          return;
-        }
-        this.nativePending = null;
-        ready(content);
-      }, () => {
-        if (!this.disposed && !request.signal.aborted && this.nativePending === request) {
+      this.host.loadMachines(request.signal).then(
+        (content) => {
+          if (this.disposed || request.signal.aborted || this.nativePending !== request) {
+            content.destroy();
+            return;
+          }
           this.nativePending = null;
-          failed();
+          ready(content);
+        },
+        () => {
+          if (!this.disposed && !request.signal.aborted && this.nativePending === request) {
+            this.nativePending = null;
+            failed();
+          }
         }
-      });
+      );
     }
     replaceContent(route, next) {
       if (next) {
@@ -4811,17 +7152,21 @@ globalThis.__semonUIShared = __semonUIShared;
       this.routePending = controller;
       const loaded = request(controller.signal);
       const current = () => !this.disposed && !controller.signal.aborted && this.routePending === controller && this.route === route;
-      if (loaded) loaded.then(() => {
-        if (current()) {
-          this.routePending = null;
-          done();
-        }
-      }, (error) => {
-        if (current()) {
-          this.routePending = null;
-          failed(error);
-        }
-      });
+      if (loaded)
+        loaded.then(
+          () => {
+            if (current()) {
+              this.routePending = null;
+              done();
+            }
+          },
+          (error) => {
+            if (current()) {
+              this.routePending = null;
+              failed(error);
+            }
+          }
+        );
       else if (current()) {
         this.routePending = null;
         done();
@@ -4837,14 +7182,21 @@ globalThis.__semonUIShared = __semonUIShared;
         else if (v === "session" && "id" in value && typeof value.id === "string" && this.host.model?.session(value.id)) {
           const turn = "turn" in value && typeof value.turn === "string" ? this.host.model.turn(value.turn) : void 0;
           route = turn?.sid === value.id ? { v, id: value.id, turn: turn.id } : { v, id: value.id };
-        } else if (v === "machine" && "id" in value && typeof value.id === "string" && this.host.model?.machine(value.id)) route = { v, id: value.id };
-        else if (v === "trace" && "sid" in value && typeof value.sid === "string" && "turn" in value && typeof value.turn === "string" && this.host.model?.session(value.sid) && this.host.model.turn(value.turn)?.sid === value.sid) route = { v, sid: value.sid, turn: value.turn };
+        } else if (v === "machine" && "id" in value && typeof value.id === "string" && this.host.model?.machine(value.id))
+          route = { v, id: value.id };
+        else if (v === "trace" && "sid" in value && typeof value.sid === "string" && "turn" in value && typeof value.turn === "string" && this.host.model?.session(value.sid) && this.host.model.turn(value.turn)?.sid === value.sid)
+          route = { v, sid: value.sid, turn: value.turn };
       }
       const out = { ...route };
-      if ("scrollTop" in value && typeof value.scrollTop === "number" && Number.isFinite(value.scrollTop)) out.scrollTop = value.scrollTop;
+      if ("scrollTop" in value && typeof value.scrollTop === "number" && Number.isFinite(value.scrollTop))
+        out.scrollTop = value.scrollTop;
       if ("hostFocus" in value && value.hostFocus && typeof value.hostFocus === "object") {
         const focus = value.hostFocus;
-        out.hostFocus = { id: "id" in focus && typeof focus.id === "string" ? focus.id : void 0, row: "row" in focus && typeof focus.row === "string" ? focus.row : void 0, label: "label" in focus && typeof focus.label === "string" ? focus.label : void 0 };
+        out.hostFocus = {
+          id: "id" in focus && typeof focus.id === "string" ? focus.id : void 0,
+          row: "row" in focus && typeof focus.row === "string" ? focus.row : void 0,
+          label: "label" in focus && typeof focus.label === "string" ? focus.label : void 0
+        };
       }
       return out;
     }
@@ -4859,27 +7211,99 @@ globalThis.__semonUIShared = __semonUIShared;
     }
   };
 
+  // src/domain/validate.ts
+  function object2(value) {
+    if (!value || typeof value !== "object" || Array.isArray(value))
+      throw new Error("Invalid object");
+    return Object.fromEntries(Object.entries(value));
+  }
+  function text(value) {
+    if (typeof value !== "string") throw new Error("Invalid string");
+    return value;
+  }
+  function number(value) {
+    if (typeof value !== "number" || !Number.isFinite(value)) throw new Error("Invalid number");
+    return value;
+  }
+  function boolean(value) {
+    if (typeof value !== "boolean") throw new Error("Invalid boolean");
+    return value;
+  }
+  function optional(value, parse) {
+    return value == null ? void 0 : parse(value);
+  }
+  function array(value, parse) {
+    if (!Array.isArray(value)) throw new Error("Invalid array");
+    return value.map(parse);
+  }
+  function dictionary(value, parse) {
+    return Object.fromEntries(Object.entries(object2(value)).map(([id, row]) => [id, parse(row)]));
+  }
+  function state(value) {
+    switch (value) {
+      case "work":
+      case "wait":
+      case "idle":
+      case "done":
+      case "err":
+        return value;
+      default:
+        throw new Error("Invalid session state");
+    }
+  }
+  function status(value) {
+    switch (value) {
+      case "work":
+      case "wait":
+      case "done":
+      case "err":
+      case "new":
+        return value;
+      default:
+        throw new Error("Invalid handoff status");
+    }
+  }
+
   // src/domain/normalize.ts
   var strings2 = (v) => array(v, text);
   var numbers = (v) => dictionary(v, number);
   function usage(value) {
-    const v = object(value);
-    return { input: optional(v.input, number), output: optional(v.output, number), cache_write: optional(v.cache_write, number), cache_write_5m: optional(v.cache_write_5m, number), cache_write_1h: optional(v.cache_write_1h, number), cache_read: optional(v.cache_read, number), web_search: optional(v.web_search, number) };
+    const v = object2(value);
+    return {
+      input: optional(v.input, number),
+      output: optional(v.output, number),
+      cache_write: optional(v.cache_write, number),
+      cache_write_5m: optional(v.cache_write_5m, number),
+      cache_write_1h: optional(v.cache_write_1h, number),
+      cache_read: optional(v.cache_read, number),
+      web_search: optional(v.web_search, number)
+    };
   }
   function modelCost(value) {
-    const v = object(value);
-    return { usd: v.usd == null ? null : number(v.usd), tokens: optional(v.tokens, usage), usd_by_kind: optional(v.usd_by_kind, usage) };
+    const v = object2(value);
+    return {
+      usd: v.usd == null ? null : number(v.usd),
+      tokens: optional(v.tokens, usage),
+      usd_by_kind: optional(v.usd_by_kind, usage)
+    };
   }
   function cost(value) {
-    const v = object(value);
-    return { usd: v.usd == null ? null : number(v.usd), unpriced_models: optional(v.unpriced_models, strings2), split_unknown_messages: optional(v.split_unknown_messages, number), by_model: optional(v.by_model, (v2) => dictionary(v2, modelCost)), by_day: optional(v.by_day, numbers) };
+    const v = object2(value);
+    return {
+      usd: v.usd == null ? null : number(v.usd),
+      unpriced_models: optional(v.unpriced_models, strings2),
+      split_unknown_messages: optional(v.split_unknown_messages, number),
+      by_model: optional(v.by_model, (v2) => dictionary(v2, modelCost)),
+      by_day: optional(v.by_day, numbers)
+    };
   }
   function activity(value) {
-    if (!Array.isArray(value) || value.length < 3 || value.length > 4) throw new Error("Invalid activity");
+    if (!Array.isArray(value) || value.length < 3 || value.length > 4)
+      throw new Error("Invalid activity");
     return [text(value[0]), text(value[1]), number(value[2]), optional(value[3], number)];
   }
   function parseSession(id, value) {
-    const v = object(value);
+    const v = object2(value);
     return {
       id,
       name: text(v.name),
@@ -4895,22 +7319,46 @@ globalThis.__semonUIShared = __semonUIShared;
       sessionId: optional(v.sessionId, text),
       pid: optional(v.pid, number),
       wait_edges_truncated: optional(v.wait_edges_truncated, boolean),
-      busy: optional(v.busy, (v2) => array(v2, (v3) => {
-        if (!Array.isArray(v3) || v3.length !== 2) throw new Error("Invalid interval");
-        return [number(v3[0]), number(v3[1])];
-      })),
-      wait_edges: optional(v.wait_edges, (v2) => array(v2, (v3) => {
-        const w = object(v3);
-        return { call: text(w.call), tool: text(w.tool), targets: strings2(w.targets), start: number(w.start), end: optional(w.end, number), turn: optional(w.turn, text) };
-      })),
-      reported_runs: optional(v.reported_runs, (v2) => array(v2, (v3) => {
-        const r = object(v3);
-        return { start: number(r.start), cost_usd: optional(r.cost_usd, number) };
-      })),
-      cost_check: optional(v.cost_check, (v2) => array(v2, (v3) => {
-        const c = object(v3);
-        return { start: number(c.start), computed_usd: optional(c.computed_usd, number), reported_usd: optional(c.reported_usd, number), ok: optional(c.ok, boolean) };
-      })),
+      busy: optional(
+        v.busy,
+        (v2) => array(v2, (v3) => {
+          if (!Array.isArray(v3) || v3.length !== 2) throw new Error("Invalid interval");
+          return [number(v3[0]), number(v3[1])];
+        })
+      ),
+      wait_edges: optional(
+        v.wait_edges,
+        (v2) => array(v2, (v3) => {
+          const w = object2(v3);
+          return {
+            call: text(w.call),
+            tool: text(w.tool),
+            targets: strings2(w.targets),
+            start: number(w.start),
+            end: optional(w.end, number),
+            turn: optional(w.turn, text)
+          };
+        })
+      ),
+      reported_runs: optional(
+        v.reported_runs,
+        (v2) => array(v2, (v3) => {
+          const r = object2(v3);
+          return { start: number(r.start), cost_usd: optional(r.cost_usd, number) };
+        })
+      ),
+      cost_check: optional(
+        v.cost_check,
+        (v2) => array(v2, (v3) => {
+          const c = object2(v3);
+          return {
+            start: number(c.start),
+            computed_usd: optional(c.computed_usd, number),
+            reported_usd: optional(c.reported_usd, number),
+            ok: optional(c.ok, boolean)
+          };
+        })
+      ),
       kind: optional(v.kind, text),
       host: optional(v.host, text),
       repo: optional(v.repo, text),
@@ -4939,43 +7387,99 @@ globalThis.__semonUIShared = __semonUIShared;
     return typeof value === "string" ? value : strings2(value);
   }
   function parseHandoff(value) {
-    const v = object(value), common = { id: text(v.id), from: text(v.from), to: v.to == null ? "" : text(v.to), at: number(v.at), status: status(v.status), brief: optional(v.brief, text), done: optional(v.done, number), result: optional(v.result, text), target: optional(v.target, text), declined: optional(v.declined, boolean) };
+    const v = object2(value), common = {
+      id: text(v.id),
+      from: text(v.from),
+      to: v.to == null ? "" : text(v.to),
+      at: number(v.at),
+      status: status(v.status),
+      brief: text(v.brief),
+      done: optional(v.done, number),
+      result: optional(v.result, text),
+      target: optional(v.target, text),
+      declined: optional(v.declined, boolean)
+    };
     switch (v.kind) {
       case "ask":
       case "spawn":
       case "relay":
         return { ...common, kind: v.kind };
       case "move":
-        return { ...common, kind: "move", fromMachine: text(v.fromMachine), toMachine: text(v.toMachine) };
+        return {
+          ...common,
+          kind: "move",
+          fromMachine: text(v.fromMachine),
+          toMachine: text(v.toMachine)
+        };
       case "toyou": {
-        if (v.ask !== "question" && v.ask !== "decision" && v.ask !== "result") throw new Error("Invalid ask");
-        return { ...common, kind: "toyou", ask: v.ask, answer: optional(v.answer, answer), answers: optional(v.answers, (v2) => array(v2, (v3) => ({ values: optional(object(v3).values, strings2) }))) };
+        if (v.ask !== "question" && v.ask !== "decision" && v.ask !== "result")
+          throw new Error("Invalid ask");
+        return {
+          ...common,
+          kind: "toyou",
+          ask: v.ask,
+          answer: optional(v.answer, answer),
+          answers: optional(
+            v.answers,
+            (v2) => array(v2, (v3) => ({ values: optional(object2(v3).values, strings2) }))
+          )
+        };
       }
       default:
         throw new Error("Invalid handoff kind");
     }
   }
   function turnEnd(value) {
-    const v = object(value);
-    return { st: optional(v.st, state), why: text(v.why), h: optional(v.h, text), at: optional(v.at, number) };
+    const v = object2(value);
+    return {
+      st: optional(v.st, state),
+      why: text(v.why),
+      h: optional(v.h, text),
+      at: optional(v.at, number)
+    };
   }
   function normalizeModel(model2) {
-    const sessions = Object.fromEntries(Object.entries(model2.sessions).map(([id, v]) => [id, parseSession(id, v)]));
+    const sessions = Object.fromEntries(
+      Object.entries(model2.sessions).map(([id, v]) => [id, parseSession(id, v)])
+    );
     const handoffs = model2.handoffs.map(parseHandoff);
-    for (const h2 of handoffs) if (!h2.to) {
-      const machine2 = sessions[h2.from]?.machine ?? model2.machine.id, id = "unsent:" + (h2.target ?? "") + (model2.machines ? "@" + machine2 : "");
-      const s = sessions[id] ??= { id, name: h2.target || "unknown", harness: "claude", stub: true, machine: machine2, state: "err", model: "\u2014", tokens: [0, 0, 0], start: h2.at, last: h2.at };
-      s.start = Math.min(s.start, h2.at);
-      s.last = Math.max(s.last, h2.at);
-      h2.to = id;
-    }
+    for (const h2 of handoffs)
+      if (!h2.to) {
+        const machine2 = sessions[h2.from]?.machine ?? model2.machine.id, id = "unsent:" + (h2.target ?? "") + (model2.machines ? "@" + machine2 : "");
+        const s = sessions[id] ??= {
+          id,
+          name: h2.target || "unknown",
+          harness: "claude",
+          stub: true,
+          machine: machine2,
+          state: "err",
+          model: "\u2014",
+          tokens: [0, 0, 0],
+          start: h2.at,
+          last: h2.at
+        };
+        s.start = Math.min(s.start, h2.at);
+        s.last = Math.max(s.last, h2.at);
+        h2.to = id;
+      }
     const handoff = new Map(handoffs.map((h2) => [h2.id, h2])), turns = /* @__PURE__ */ Object.create(null), turn = /* @__PURE__ */ new Map(), starts = /* @__PURE__ */ new Map(), holds = /* @__PURE__ */ new Map();
     for (const row of model2.turns) {
-      const x = object(row), id = text(x.id), sid = text(x.sid), start = optional(x.start, text), sent = array(x.sent, text).flatMap((id2) => {
+      const x = object2(row), id = text(x.id), sid = text(x.sid), start = optional(x.start, text), sent = array(x.sent, text).flatMap((id2) => {
         const h2 = handoff.get(id2);
         return h2 ? [h2] : [];
       });
-      const t = { id, sid, start: start ? handoff.get(start) ?? null : null, at: optional(x.at, number), u: x.u ? { k: "u", text: optional(x.text, text) ?? "" } : null, entries: [], sent, out: sent.filter((h2) => h2.kind !== "move"), end: optional(x.end, turnEnd), last: optional(x.last, boolean) };
+      const t = {
+        id,
+        sid,
+        start: start ? handoff.get(start) ?? null : null,
+        at: optional(x.at, number),
+        u: x.u ? { k: "u", text: optional(x.text, text) ?? "" } : null,
+        entries: [],
+        sent,
+        out: sent.filter((h2) => h2.kind !== "move"),
+        end: optional(x.end, turnEnd),
+        last: optional(x.last, boolean)
+      };
       (turns[sid] ??= []).push(t);
       turn.set(id, t);
       if (t.start) starts.set(t.start.id, t);
@@ -4994,6 +7498,10 @@ globalThis.__semonUIShared = __semonUIShared;
     for (const [id, row] of next) target.set(id, row);
   }
   var ViewerModelStore = class {
+    constructor(updates = new ViewUpdates()) {
+      this.updates = updates;
+    }
+    updates;
     raw = new ModelStore();
     sessions = /* @__PURE__ */ Object.create(null);
     machines = /* @__PURE__ */ Object.create(null);
@@ -5008,7 +7516,7 @@ globalThis.__semonUIShared = __semonUIShared;
     apply(value) {
       return this.raw.apply(value);
     }
-    adopt(value) {
+    adopt(value, finalize) {
       const model2 = parseModel(value), normalized = normalizeModel(model2);
       const machines = model2.machines == null ? [parseModelMachine(model2.machine)] : array(model2.machines, parseModelMachine);
       this.raw.adopt(model2);
@@ -5019,94 +7527,216 @@ globalThis.__semonUIShared = __semonUIShared;
       replaceMap(this.starts, normalized.starts);
       replaceMap(this.holds, normalized.holds);
       replaceMap(this.handoff, normalized.handoff);
-      for (const table of [this.machines, this.machineUp, this.machineLast]) for (const id of Object.keys(table)) delete table[id];
+      for (const table of [this.machines, this.machineUp, this.machineLast])
+        for (const id of Object.keys(table)) delete table[id];
       for (const row of machines) {
         this.machines[row.id] = row.name;
         this.machineUp[row.id] = row.up;
         if (row.last !== void 0) this.machineLast[row.id] = row.last;
       }
+      finalize?.();
+      this.updates.model();
       return model2;
     }
     domain(transcriptMeta) {
-      return { sessions: this.sessions, machines: this.machines, handoffs: this.handoffs, turns: this.turns, turn: this.turn, starts: this.starts, holds: this.holds, handoff: this.handoff, transcriptMeta };
+      return {
+        sessions: this.sessions,
+        machines: this.machines,
+        handoffs: this.handoffs,
+        turns: this.turns,
+        turn: this.turn,
+        starts: this.starts,
+        holds: this.holds,
+        handoff: this.handoff,
+        transcriptMeta
+      };
     }
   };
   function parseModelMachine(value) {
-    const v = object(value);
+    const v = object2(value);
     return { id: text(v.id), name: text(v.name), up: boolean(v.up), last: optional(v.last, number) };
   }
 
   // src/state/transcript-wire.ts
   var strings3 = (value) => array(value, text);
   function background(value) {
-    const v = object(value), state2 = v.state;
-    if (state2 !== "running" && state2 !== "unknown" && state2 !== "failed" && state2 !== "killed" && state2 !== "done") throw new Error("Invalid background state");
-    return { state: state2, secs: optional(v.secs, (value2) => typeof value2 === "number" ? String(number(value2)) : text(value2)), since: optional(v.since, number), exit: optional(v.exit, number), summary: optional(v.summary, text) };
+    const v = object2(value), state2 = v.state;
+    if (state2 !== "running" && state2 !== "unknown" && state2 !== "failed" && state2 !== "killed" && state2 !== "done")
+      throw new Error("Invalid background state");
+    return {
+      state: state2,
+      secs: optional(
+        v.secs,
+        (value2) => typeof value2 === "number" ? String(number(value2)) : text(value2)
+      ),
+      since: optional(v.since, number),
+      exit: optional(v.exit, number),
+      summary: optional(v.summary, text)
+    };
   }
   function image(value) {
-    const v = object(value), base = { o: number(v.o), b: number(v.b), w: optional(v.w, number), h: optional(v.h, number), type: optional(v.type, text), size: optional(v.size, number) };
-    return v.na === true ? { ...base, na: true, v: optional(v.v, text) } : { ...base, na: optional(v.na, (value2) => {
-      if (value2 !== false) throw new Error("Invalid image availability");
-      return false;
-    }), v: text(v.v) };
+    const v = object2(value), base = {
+      o: number(v.o),
+      b: number(v.b),
+      w: optional(v.w, number),
+      h: optional(v.h, number),
+      type: optional(v.type, text),
+      size: optional(v.size, number)
+    };
+    return v.na === true ? { ...base, na: true, v: optional(v.v, text) } : {
+      ...base,
+      na: optional(v.na, (value2) => {
+        if (value2 !== false) throw new Error("Invalid image availability");
+        return false;
+      }),
+      v: text(v.v)
+    };
   }
   var diff = (value) => array(value, (value2) => {
     if (!Array.isArray(value2) || value2.length !== 2) throw new Error("Invalid diff");
     return [text(value2[0]), text(value2[1])];
   });
   function cut(value) {
-    const v = object(value);
-    return { original_tokens: optional(v.original_tokens, number), parts: optional(v.parts, (v2) => array(v2, (v3) => {
-      const p = object(v3);
-      return { text: optional(p.text, text), gap: optional(p.gap, (v4) => {
-        const g = object(v4);
-        return { unit: text(g.unit), n: number(g.n), of: optional(g.of, number) };
-      }) };
-    })) };
+    const v = object2(value);
+    return {
+      original_tokens: optional(v.original_tokens, number),
+      parts: optional(
+        v.parts,
+        (v2) => array(v2, (v3) => {
+          const p = object2(v3);
+          return {
+            text: optional(p.text, text),
+            gap: optional(p.gap, (v4) => {
+              const g = object2(v4);
+              return { unit: text(g.unit), n: number(g.n), of: optional(g.of, number) };
+            })
+          };
+        })
+      )
+    };
   }
   function parseEntry(value) {
-    const v = object(value), base = { img: optional(v.img, (v2) => array(v2, image)), turn: optional(v.turn, text), slot: optional(v.slot, number), live: optional(v.live, boolean), unfinished: optional(v.unfinished, boolean), tid: optional(v.tid, text), bg: optional(v.bg, background) };
+    const v = object2(value), base = {
+      img: optional(v.img, (v2) => array(v2, image)),
+      turn: optional(v.turn, text),
+      slot: optional(v.slot, number),
+      live: optional(v.live, boolean),
+      unfinished: optional(v.unfinished, boolean),
+      tid: optional(v.tid, text),
+      bg: optional(v.bg, background)
+    };
     switch (v.k) {
       case "u":
       case "a":
         return { ...base, k: v.k, text: text(v.text), img: optional(v.img, (v2) => array(v2, image)) };
       case "think":
-        return { ...base, k: "think", text: optional(v.text, text), pending: optional(v.pending, boolean), status: optional(v.status, text), secs: optional(v.secs, (v2) => typeof v2 === "string" ? v2 : number(v2)) };
+        return {
+          ...base,
+          k: "think",
+          text: optional(v.text, text),
+          pending: optional(v.pending, boolean),
+          status: optional(v.status, text),
+          secs: optional(v.secs, (v2) => typeof v2 === "string" ? v2 : number(v2))
+        };
       case "h":
         return { ...base, k: "h", id: text(v.id) };
       case "end":
-        return { ...base, k: "end", text: optional(v.text, text), ret: optional(v.ret, (v2) => {
-          const r = object(v2);
-          return { to: text(r.to), failed: optional(r.failed, boolean), at: optional(r.at, number) };
-        }) };
+        return {
+          ...base,
+          k: "end",
+          text: optional(v.text, text),
+          ret: optional(v.ret, (v2) => {
+            const r = object2(v2);
+            return {
+              to: text(r.to),
+              failed: optional(r.failed, boolean),
+              at: optional(r.at, number)
+            };
+          })
+        };
       case "harness":
         return { ...base, k: "harness", label: text(v.label) };
       case "signal":
-        return { ...base, k: "signal", signal: (() => {
-          const s = object(v.signal);
-          return { kind: text(s.kind), tag: optional(s.tag, text), tool: optional(s.tool, text), value: optional(s.value, number), previous: optional(s.previous, text) };
-        })() };
+        return {
+          ...base,
+          k: "signal",
+          signal: (() => {
+            const s = object2(v.signal);
+            return {
+              kind: text(s.kind),
+              tag: optional(s.tag, text),
+              tool: optional(s.tool, text),
+              value: optional(s.value, number),
+              previous: optional(s.previous, text)
+            };
+          })()
+        };
       case "bgend":
-        return { ...base, k: "bgend", call: text(v.call), state: text(v.state), label: optional(v.label, text) };
+        return {
+          ...base,
+          k: "bgend",
+          call: text(v.call),
+          state: text(v.state),
+          label: optional(v.label, text)
+        };
       case "tool":
-        return { ...base, k: "tool", name: text(v.name), arg: text(v.arg), title: optional(v.title, text), secs: optional(v.secs, (value2) => typeof value2 === "number" ? String(number(value2)) : text(value2)), since: optional(v.since, number), exit: optional(v.exit, number), ok: v.ok == null ? v.ok : boolean(v.ok), in: optional(v.in, text), out: optional(v.out, text), cwd: optional(v.cwd, text), diff: optional(v.diff, diff), changes: optional(v.changes, (v2) => array(v2, (v3) => {
-          const c = object(v3);
-          return { path: text(c.path), move: optional(c.move, text), diff: optional(c.diff, diff) };
-        })), more: optional(v.more, strings3), script: v.script, cut: optional(v.cut, cut) };
+        return {
+          ...base,
+          k: "tool",
+          name: text(v.name),
+          arg: text(v.arg),
+          title: optional(v.title, text),
+          secs: optional(
+            v.secs,
+            (value2) => typeof value2 === "number" ? String(number(value2)) : text(value2)
+          ),
+          since: optional(v.since, number),
+          exit: optional(v.exit, number),
+          ok: v.ok == null ? v.ok : boolean(v.ok),
+          in: optional(v.in, text),
+          out: optional(v.out, text),
+          cwd: optional(v.cwd, text),
+          diff: optional(v.diff, diff),
+          changes: optional(
+            v.changes,
+            (v2) => array(v2, (v3) => {
+              const c = object2(v3);
+              return {
+                path: text(c.path),
+                move: optional(c.move, text),
+                diff: optional(c.diff, diff)
+              };
+            })
+          ),
+          more: optional(v.more, strings3),
+          script: v.script,
+          cut: optional(v.cut, cut)
+        };
       default:
         throw new Error("Invalid transcript entry");
     }
   }
   function parseTranscriptPage(value) {
-    const v = object(value), from = number(v.from), to = number(v.to), total = number(v.total);
-    if (![from, to, total].every(Number.isInteger) || from < 0 || to < from || total < to) throw new Error("Invalid transcript range");
-    return { entries: array(v.entries, parseEntry), from, to, total, calls: optional(v.calls, number), errors: optional(v.errors, number), bg_running: optional(v.bg_running, strings3) };
+    const v = object2(value), from = number(v.from), to = number(v.to), total = number(v.total);
+    if (![from, to, total].every(Number.isInteger) || from < 0 || to < from || total < to)
+      throw new Error("Invalid transcript range");
+    return {
+      entries: array(v.entries, parseEntry),
+      from,
+      to,
+      total,
+      calls: optional(v.calls, number),
+      errors: optional(v.errors, number),
+      bg_running: optional(v.bg_running, strings3)
+    };
   }
 
   // src/state/transcript.ts
   var TranscriptStore = class {
-    constructor(host2) {
+    constructor(host2, updates) {
       this.host = host2;
+      this.ownsUpdates = updates === void 0;
+      this.updates = updates ?? new ViewUpdates();
     }
     host;
     entries = /* @__PURE__ */ Object.create(null);
@@ -5116,7 +7746,10 @@ globalThis.__semonUIShared = __semonUIShared;
     cache = new TranscriptCache();
     paging = createPagingStore();
     requests = /* @__PURE__ */ new Set();
+    replacements = /* @__PURE__ */ new Map();
     disposed = false;
+    updates;
+    ownsUpdates;
     spread(sid) {
       for (const turn2 of this.host.turns(sid)) turn2.entries = [];
       let turn, pre = 0;
@@ -5132,20 +7765,34 @@ globalThis.__semonUIShared = __semonUIShared;
       this.paging.clear(sid);
       this.host.cleared(sid);
     }
+    cancelReplacement(sid) {
+      this.replacements.get(sid)?.abort();
+      this.replacements.delete(sid);
+    }
     drop(sid) {
+      this.cancelReplacement(sid);
       this.clearPaging(sid);
       delete this.entries[sid];
       delete this.meta[sid];
+      this.updates.transcript(sid);
     }
     async fetch(sid, query = "", direction, signal, onPage) {
       if (this.disposed || signal?.aborted) return;
       const controller = new AbortController(), abort = () => controller.abort();
       signal?.addEventListener("abort", abort, { once: true });
       this.requests.add(controller);
+      if (!direction) {
+        this.cancelReplacement(sid);
+        this.replacements.set(sid, controller);
+      }
       const mark = this.marks[sid], range = this.meta[sid], boundary = direction === "before" ? range?.from : range?.to;
       try {
-        const response = await this.host.request("/api/tx?sid=" + encodeURIComponent(sid) + (query ? "&" + query : ""), controller.signal);
-        if (this.disposed || controller.signal.aborted || direction && (this.meta[sid] !== range || (direction === "before" ? this.meta[sid]?.from : this.meta[sid]?.to) !== boundary)) return;
+        const response = await this.host.request(
+          "/api/tx?sid=" + encodeURIComponent(sid) + (query ? "&" + query : ""),
+          controller.signal
+        );
+        if (this.disposed || controller.signal.aborted || direction && (this.meta[sid] !== range || (direction === "before" ? this.meta[sid]?.from : this.meta[sid]?.to) !== boundary))
+          return;
         const page = parseTranscriptPage(response), entries = page.entries.map((entry) => this.host.entry({ ...entry, sid })), meta = this.meta[sid];
         if (direction === "before" && meta) {
           this.entries[sid] = entries.concat(this.entries[sid]);
@@ -5159,42 +7806,63 @@ globalThis.__semonUIShared = __semonUIShared;
           this.meta[sid] = { from: page.from, to: page.to, total: page.total };
           this.staleBriefs.delete(sid);
         }
-        Object.assign(this.meta[sid], { total: page.total, calls: page.calls, errors: page.errors, watchTok: mark });
+        Object.assign(this.meta[sid], {
+          total: page.total,
+          calls: page.calls,
+          errors: page.errors,
+          watchTok: mark
+        });
         if (direction !== "before" && page.to >= page.total) {
           this.meta[sid].tok = mark;
           this.meta[sid].newer = 0;
         }
         this.spread(sid);
+        this.updates.transcript(sid);
         onPage?.();
+      } catch (error) {
+        if (!this.disposed && !controller.signal.aborted) throw error;
       } finally {
         this.requests.delete(controller);
         signal?.removeEventListener("abort", abort);
+        if (this.replacements.get(sid) === controller) this.replacements.delete(sid);
       }
     }
     keep(sid, entries, meta, origin) {
-      if (!entries || !meta || meta.to < meta.total || meta.tok == null || this.staleBriefs.has(sid) || meta.origin !== origin) return;
+      if (!entries || !meta || meta.to < meta.total || meta.tok == null || this.staleBriefs.has(sid) || meta.origin !== origin)
+        return;
       this.cache.keep(sid, entries, meta);
     }
     adoptCached(sid, turn) {
       const cached = this.cache.get(sid);
       if (!cached) return false;
+      this.cancelReplacement(sid);
       this.cache.delete(sid);
       this.entries[sid] = cached.entries;
       this.meta[sid] = cached.meta;
-      if (!turn) return true;
       this.spread(sid);
+      if (!turn) {
+        this.updates.transcript(sid);
+        return true;
+      }
       const target = this.host.turn(turn);
       if (target && target.sid === sid && !target.entries.length) {
         this.drop(sid);
         return false;
       }
+      this.updates.transcript(sid);
       return true;
+    }
+    /** A coherent projection borrows accepted entries; no full-transcript copies. */
+    view(sid) {
+      return { entries: this.entries[sid], range: this.meta[sid], revision: this.updates.revision };
     }
     destroy() {
       if (this.disposed) return;
       this.disposed = true;
+      if (this.ownsUpdates) this.updates.destroy();
       for (const request of this.requests) request.abort();
       this.requests.clear();
+      this.replacements.clear();
       this.paging.destroy();
       this.cache.clear();
       this.staleBriefs.clear();
@@ -5203,1117 +7871,145 @@ globalThis.__semonUIShared = __semonUIShared;
     }
   };
 
-  // src/viewer-host.ts
-  var host = null;
-  function getViewerHost() {
-    return host;
-  }
-
-  // src/state/analytics-wire.ts
-  function shape(fields) {
-    return (value) => {
-      const source = object(value), parsed = Object.fromEntries(Object.entries(fields).map(([key, parse]) => [key, parse(source[key])]));
-      return parsed;
-    };
-  }
-  var list = (parse) => (value) => array(value, parse);
-  var nullable = (parse) => (value) => value == null ? null : parse(value);
-  var optional2 = (parse) => (value) => value == null ? void 0 : parse(value);
-  var strings4 = list(text);
-  var money = shape({ usd: nullable(number), unpriced_models: strings4 });
-  var period = shape({ agent_ms: number, started: number, turns: number, tools: number, errors: number, peak: number, wait_ms: number, median_wait_ms: number, longest_wait_ms: number, cost: money });
-  var busy = shape({ sid: text, ms: number });
-  var priced = shape({ sid: text, usd: nullable(number), unpriced_models: strings4 });
-  var column = shape({ from: number, to: number, claude_ms: number, codex_ms: number, sessions: list(busy), more: number });
-  var day = shape({ from: number, to: number, claude_usd: number, codex_usd: number, sessions: list(priced), more: number });
-  var breakdown = shape({ repo: optional2(nullable(text)), machine: optional2(text), harness: optional2(text), model: optional2(text), ms: number, usd: number, sessions: number, unpriced_models: strings4 });
-  var tokens = shape({ input: optional2(number), output: optional2(number), cache_read: optional2(number), cache_write: optional2(number) });
-  var item = shape({ sid: text, models: optional2(strings4), cost_usd: nullable(number), pr_url: nullable(text) });
-  var model = shape({ model: text, band: text, n: number, small_sample: boolean, first_pass_acceptance: nullable(number), acceptance_n: number, median_review_rounds: nullable(number), review_rounds_n: number, median_red_ci_heads: nullable(number), red_ci_n: number, median_model_ms: nullable(number), model_time_n: number, median_cost_usd: nullable(number), cost_n: number, allowance_per_million_input: nullable(number), allowance_n: number, tokens, tokens_n: number, items: list(item), items_more: number });
-  var parseAnalytics = shape({ days: number, version: text, current: period, previous: period, longest_current_wait: nullable(busy), calls_unknown: number, agents: shape({ unit: text, columns: list(column) }), cost: nullable(shape({ days: list(day), unpriced_models: strings4 })), breakdown: shape({ repo: list(breakdown), machine: list(breakdown), model: list(breakdown) }), top: shape({ busy: list(busy), waited: list(busy), cost: list(priced) }), sessions: (v) => dictionary(v, shape({ name: text, harness: text })), models: optional2(shape({ groups: list(model), unknown_reasons: (v) => dictionary(v, text) })), allowance: nullable(shape({ recorded_at: number, windows: list(shape({ minutes: number, used_percent: number, resets_at: number })) })), facets: shape({ repo: list(nullable(text)), machine: strings4, harness: strings4, model: strings4 }) });
-
-  // src/app/analytics.ts
-  function createAnalytics(host2) {
-    const MIN = 6e4, HOUR = 60 * MIN, AN_EVERY = 1e4, AN_KEEP = 8;
-    const AN = { answers: /* @__PURE__ */ new Map(), inflight: null, again: false, againAsked: false, timer: void 0, error: null, failedAt: 0 };
-    function analyticsQuery() {
-      const q = ["range=" + (host2.analyticsRange === 1 ? "24h" : host2.analyticsRange + "d")];
-      if (host2.sessionFilters.repo) q.push("repo=" + (host2.sessionFilters.repo === "__none__" ? "" : host2.enc(host2.sessionFilters.repo)));
-      for (const key of ["machine", "harness", "model"]) if (host2.sessionFilters[key]) q.push(key + "=" + host2.enc(host2.sessionFilters[key]));
-      return q.join("&");
-    }
-    const analyticsData = () => AN.answers.get(analyticsQuery())?.data ?? null;
-    function fetchAnalytics(askedByUser = false) {
-      if (AN.inflight) {
-        AN.again = true;
-        AN.againAsked ||= askedByUser;
-        return AN.inflight;
-      }
-      const key = analyticsQuery(), kept = AN.answers.get(key);
-      const controller = host2.scope.request();
-      const asked = fetch("/api/analytics?" + key, { signal: controller.signal, credentials: "same-origin", headers: kept?.etag ? { "If-None-Match": kept.etag } : {} }).then((r) => {
-        if (host2.disposed) throw new DOMException("Viewer destroyed", "AbortError");
-        if (r.status === 304) {
-          const cleared = AN.error != null;
-          AN.error = null;
-          return cleared;
-        }
-        if (r.status === 403) {
-          host2.ended(403);
-          return false;
-        }
-        if (!r.ok) throw Object.assign(new Error(r.status + " " + r.statusText), { status: r.status });
-        const etag = r.headers.get("ETag");
-        return r.json().then((value) => {
-          if (host2.disposed) return false;
-          const data = parseAnalytics(value);
-          AN.answers.delete(key);
-          AN.answers.set(key, { etag, data });
-          while (AN.answers.size > AN_KEEP) AN.answers.delete(AN.answers.keys().next().value);
-          const changed = AN.error != null || kept?.etag !== etag;
-          AN.error = null;
-          return changed;
-        });
-      }).catch((e) => {
-        if (host2.disposed) return false;
-        const changed = AN.error !== e.message;
-        AN.error = e.message;
-        AN.failedAt = performance.now();
-        return changed;
-      });
-      AN.inflight = asked.then((changed) => {
-        host2.scope.releaseRequest(controller);
-        AN.inflight = null;
-        if (host2.disposed || !AN.again) return changed;
-        const askedAgain = AN.againAsked;
-        AN.again = AN.againAsked = false;
-        if (!askedAgain && backingOff()) return changed;
-        return fetchAnalytics(askedAgain).then((more) => changed || more);
-      });
-      return AN.inflight;
-    }
-    const backingOff = () => AN.error != null && performance.now() - AN.failedAt < AN_EVERY;
-    function scheduleAnalytics() {
-      clearTimeout(AN.timer);
-      AN.timer = void 0;
-      if (host2.navigation.route.v !== "analytics" || host2.LIVE.ended || !host2.visible()) return;
-      const data = analyticsData(), behind = !AN.error && data && host2.LIVE.version && data.version !== host2.LIVE.version;
-      AN.timer = host2.scope.timeout(() => {
-        AN.timer = void 0;
-        refreshAnalytics();
-      }, AN.error ? Math.max(0, AN.failedAt + AN_EVERY - performance.now()) : behind ? 1200 : AN_EVERY);
-    }
-    function refreshAnalytics(asked = false) {
-      if (host2.navigation.route.v !== "analytics") return Promise.resolve();
-      if (asked !== true && backingOff()) {
-        if (!AN.timer) scheduleAnalytics();
-        return Promise.resolve();
-      }
-      clearTimeout(AN.timer);
-      AN.timer = void 0;
-      return fetchAnalytics(asked === true).then((changed) => {
-        if (changed && host2.navigation.route.v === "analytics" && host2.navigation.rendered === host2.navigation.route) {
-          if (host2.viewerEl || host2.accountChrome.open) host2.LIVE.pending = true;
-          else {
-            const st = host2.capture();
-            host2.render();
-            host2.restore(st);
-          }
-        }
-        scheduleAnalytics();
-      });
-    }
-    if (!host2.SIDEBAR_ONLY) host2.scope.listen(document, "visibilitychange", () => {
-      if (host2.visible() && host2.navigation.route.v === "analytics") refreshAnalytics();
-      else if (!host2.visible()) {
-        clearTimeout(AN.timer);
-        AN.timer = void 0;
-      }
-    });
-    const nameOfSid = (A, sid) => host2.SESS[sid]?.name ?? A.sessions[sid]?.name ?? sid;
-    const harnessOfSid = (A, sid) => host2.SESS[sid]?.harness ?? A.sessions[sid]?.harness ?? "";
-    const sessionFacetValue = (s, key) => key === "repo" ? s.repo ?? "__none__" : key === "model" ? s.model ?? s.modelId ?? "Unknown model" : s[key] ?? "";
-    function matchesSessionFacets(s) {
-      return Object.keys(host2.sessionFilters).every((key) => !host2.sessionFilters[key] || sessionFacetValue(s, key) === host2.sessionFilters[key]);
-    }
-    const rangeFacet = (key) => host2.navigation.route.v !== "analytics" ? [] : (analyticsData()?.facets?.[key] ?? []).map((v) => v ?? "__none__");
-    const FACETS = [
-      ["repo", "Repo", "All repos", () => [.../* @__PURE__ */ new Set([...Object.values(host2.SESS).map((s) => sessionFacetValue(s, "repo")), ...rangeFacet("repo")])].sort((a, b) => a === "__none__" ? 1 : b === "__none__" ? -1 : a.localeCompare(b)), (v) => v === "__none__" ? "No repo" : v],
-      ["machine", "Machine", "All machines", () => [.../* @__PURE__ */ new Set([...Object.values(host2.SESS).map((s) => s.machine ?? ""), ...rangeFacet("machine")])].sort(), (v) => host2.MACHINE[v] ?? v],
-      ["harness", "Harness", "All harnesses", () => [.../* @__PURE__ */ new Set([...Object.values(host2.SESS).map((s) => s.harness ?? ""), ...rangeFacet("harness")])].sort(), (v) => host2.HARNESS[v] ?? v],
-      ["model", "Model", "All models", () => [.../* @__PURE__ */ new Set([...Object.values(host2.SESS).map((s) => sessionFacetValue(s, "model")), ...rangeFacet("model")])].sort(), shortModel]
-    ];
-    function renderFacetFilters(box, onChange) {
-      const s = host2.slot("facets", box, (ctx) => {
-        let before = "";
-        const control = createFacetChrome({
-          select(label, value, onChange2) {
-            return createSelect({ label, value, options: [], onChange: onChange2 });
-          },
-          change(key, value) {
-            host2.sessionFilters[key] = value;
-          },
-          cleared(key) {
-            host2.sessionFilters[key] = "";
-            ctx.sync();
-            ctx.onChange();
-          },
-          canOpen() {
-            return !host2.viewerEl;
-          },
-          opened(d) {
-            ctx.sync();
-            before = JSON.stringify(host2.sessionFilters);
-            host2.viewerEl = d;
-            try {
-              history.pushState({ ...host2.navigation.route, sheet: 1, scrollTop: host2.currentScroll() }, "");
-            } catch {
-            }
-          },
-          closed(d, reason) {
-            if (host2.disposed || reason === "destroyed") return;
-            if (host2.viewerEl === d) {
-              host2.viewerEl = null;
-              if (history.state?.sheet) {
-                host2.skipPop = true;
-                history.back();
-              }
-            }
-            if (JSON.stringify(host2.sessionFilters) !== before) {
-              host2.LIVE.pending = false;
-              ctx.onChange();
-            } else if (host2.LIVE.pending) host2.refresh();
-          },
-          clear() {
-            for (const key of Object.keys(host2.sessionFilters)) host2.sessionFilters[key] = "";
-          }
-        });
-        ctx.destroy = () => control.destroy();
-        ctx.sync = () => control.update(FACETS.map(([key, label, allLabel, valuesOf, showValue]) => {
-          const current = host2.sessionFilters[key], values = valuesOf().filter((value) => value !== ""), gone = current !== "" && !values.includes(current);
-          if (gone) values.push(current);
-          return { key, label, value: current, display: showValue(current), options: [{ value: "", label: allLabel }, ...values.map((value) => ({ value, label: showValue(value) + (gone && value === current ? " (no sessions)" : "") }))] };
-        }));
-        return control.element;
-      });
-      s.ctx.onChange = onChange;
-      s.ctx.sync();
-      return s.el;
-    }
-    const hoursText = (ms) => (ms / HOUR).toFixed(1) + " h", rangeName = () => host2.analyticsRange === 1 ? "24 h" : host2.analyticsRange + " d";
-    function chartWidth() {
-      const page = host2.$("#page"), style = getComputedStyle(page);
-      return Math.max(280, Math.round(page.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight)));
-    }
-    const rangeAgo = (A) => A.days === 1 ? "24 h ago" : A.days + " d ago";
-    function openModelItems(group) {
-      const { d, body, show: open } = host2.panel(shortModel(group.model) + " \xB7 " + group.band, { label: "Work items for " + group.model + ", " + group.band });
-      renderModelItems(body, group.n + " work items" + (group.small_sample ? " \xB7 small sample" : ""), (group.items ?? []).map((item2) => ({
-        id: item2.sid,
-        name: host2.SESS[item2.sid]?.name,
-        description: (item2.models ?? []).map(shortModel).join(" \u2192 ") + " \xB7 " + (item2.cost_usd == null ? "cost unknown" : host2.asMoney(item2.cost_usd)),
-        trace: (host2.TURNS[item2.sid] ?? []).find((t) => t.out.length)?.id,
-        url: liveUrl(item2.pr_url ?? "") ?? void 0
-      })), group.items_more ? group.items_more + " more items in the selected range" : void 0, {
-        session(id) {
-          host2.pendingSessionOpen = id;
-          d.close();
-        },
-        trace(id) {
-          host2.afterPop = () => host2.goTrace(id);
-          d.close();
-        }
-      });
-      open();
-    }
-    function openAnalyticsSlice(A, a, b, items, more, costMode = false) {
-      const when = new Date(a).toLocaleString([], { weekday: "short", hour: "numeric", minute: "2-digit" }) + "\u2013" + new Date(b).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }), heading = costMode ? "Sessions with cost" : "Sessions busy";
-      const sheet2 = createNativeSheet({ className: "analytics-slice", heading: heading + " \xB7 " + when, label: heading + " " + when, closeLabel: "Close sessions list" }, {
-        opened(d) {
-          host2.viewerEl = d;
-          document.documentElement.classList.add("viewer-open");
+  // src/app/accountControls.ts
+  function createAccountControls(host2) {
+    const accountHost = {
+      place(widget, trigger) {
+        const at = trigger.getBoundingClientRect();
+        setGeometry(widget, "accountLeft", at.left);
+        setGeometry(widget, "accountWidth", at.width);
+        setGeometry(widget, "accountBottom", Math.max(0, innerHeight - at.top + 6));
+      },
+      opened(compact) {
+        if (compact)
           try {
-            history.pushState({ ...host2.navigation.route, sheet: 1, scrollTop: host2.currentScroll() }, "");
+            history.pushState(
+              {
+                ...host2.navigation.route,
+                sheet: 1,
+                scrollTop: host2.historyScrollOwner.currentScroll()
+              },
+              ""
+            );
+            host2.accountSheet = true;
           } catch {
           }
-        },
-        closed(d) {
-          host2.dialogs.delete(d);
-          if (host2.disposed) return;
-          document.documentElement.classList.remove("viewer-open");
-          if (host2.viewerEl === d) {
-            host2.viewerEl = null;
-            if (history.state?.sheet) {
-              host2.skipPop = true;
-              history.back();
-            } else if (host2.pendingSessionOpen) {
-              const id = host2.pendingSessionOpen;
-              host2.pendingSessionOpen = null;
-              host2.goSession(id);
-            }
-          }
-        }
-      });
-      const rows = items.map((item2) => {
-        const harness = harnessOfSid(A, item2.sid);
-        return { id: item2.sid, name: nameOfSid(A, item2.sid), harness, harnessName: host2.HARNESS_SHORT[harness] ?? harness, harnessTip: host2.HARNESS[harness] && host2.HARNESS[harness] !== host2.HARNESS_SHORT[harness] ? host2.HARNESS[harness] : void 0, mark: host2.harnessSnapshot(harness), value: costMode ? host2.asMoney("usd" in item2 ? item2.usd ?? 0 : 0) : timeText("ms" in item2 ? item2.ms : 0) + " busy", href: host2.SESS[item2.sid] ? host2.urlOf({ v: "session", id: item2.sid }) : void 0, className: "analytics-session analytics-slice", missing: costMode && "unpriced_models" in item2 && item2.unpriced_models.length ? "no price for " + item2.unpriced_models.join(", ") : void 0 };
-      });
-      renderSliceBody(sheet2.body, rows, more ?? 0, costMode ? "No sessions had a recorded cost then." : "No sessions were busy then.", (id) => {
-        host2.pendingSessionOpen = id;
-        sheet2.dialog.close();
-      });
-      sheet2.cleanup(() => render(null, sheet2.body));
-      host2.dialogs.set(sheet2.dialog, sheet2);
-      sheet2.show();
-    }
-    function renderAnalytics(page) {
-      const A = analyticsData(), metrics = [], charts = [], breakdowns = [], lists = [], modelGroups = /* @__PURE__ */ new Map(), slices = /* @__PURE__ */ new Map();
-      const heading = "Measured activity \xB7 Last " + (host2.analyticsRange === 1 ? "24 hours" : host2.analyticsRange + " days");
-      let error = AN.error ? A ? "Couldn't update Analytics: " + AN.error + ". Showing the last answer." : "Couldn't load Analytics: " + AN.error : A ? void 0 : "Loading\u2026";
-      const note = (value, previous, format) => {
-        const delta = value - previous;
-        return Math.abs(delta) < 1e-9 ? { text: "No change vs previous " + rangeName() } : { lead: (delta > 0 ? "+" : "\u2212") + format(Math.abs(delta)), tone: delta > 0 ? "up" : "down", text: " vs previous " + rangeName() };
-      };
-      const metric = (label, value, delta, explanation, info) => metrics.push({ id: "metric-more-analytics-" + metrics.length, label, value, note: delta, explanation, info });
-      const widthOf = (measure, max) => Math.max(measure ? 2 : 0, measure / max * 100);
-      const makeChart = (costMode) => {
-        if (!A) throw new Error("Analytics model unavailable");
-        const key = costMode ? "cost" : "agents", W = chartWidth(), left = costMode ? 46 : 40, right = W - 4;
-        if (costMode && !A.cost) return { key, heading: "Cost over time", info: host2.COST_TIP, empty: "Cost is recorded per UTC day, so there is no hourly series. Pick 7 d or 30 d for a daily chart.", width: W, left, right, grid: [], bins: [], legend: [], role: "img", label: "", ago: rangeAgo(A) };
-        const raw = costMode ? A.cost.days.map((d) => ({ a: d.from, b: d.to, claude: d.claude_usd, codex: d.codex_usd, sessions: d.sessions, more: d.more })) : A.agents.columns.map((c) => ({ a: c.from, b: c.to, claude: c.claude_ms / HOUR, codex: c.codex_ms / HOUR, sessions: c.sessions, more: c.more }));
-        const most = Math.max(0, ...raw.map((b) => b.claude + b.codex)), stepY = niceStep(most || 1), max = costMode ? Math.max(0.01, most) : Math.max(stepY, Math.ceil(most / stepY) * stepY);
-        const grid = [];
-        if (costMode) for (let i = 0; i <= 2; i++) grid.push({ y: 151 - 139 * i / 2, label: "$" + (max * i / 2).toFixed(2) });
-        else for (let n = 0; n <= max + 1e-9; n += stepY) grid.push({ y: 151 - 139 * n / max, label: hLabel(n) });
-        const step = (right - left) / Math.max(1, raw.length), barWidth = Math.max(2, step * 0.64);
-        const bins = raw.map((bin, i) => {
-          const id = key + ":" + i, total = bin.claude + bin.codex, when = host2.clock(bin.a) + "\u2013" + host2.clock(bin.b), tip = when + ": " + hLabel(total);
-          slices.set(id, { bin, costMode });
-          return {
-            key: id,
-            x: left + i * step,
-            width: step,
-            barX: left + i * step + (step - barWidth) / 2,
-            barWidth,
-            claude: 139 * bin.claude / max,
-            codex: 139 * bin.codex / max,
-            active: costMode ? !!bin.sessions.length : total > 0,
-            tip: costMode ? void 0 : tip,
-            label: costMode ? host2.clock(bin.a) + " to " + host2.clock(bin.b) + ": " + host2.asMoney(total) : tip + ". Open the sessions busy then",
-            when,
-            value: costMode ? host2.asMoney(total) : hLabel(total) + " agent-hours"
-          };
-        });
-        return {
-          key,
-          heading: costMode ? "Cost over time" : "Agents at work",
-          info: costMode ? host2.COST_TIP : void 0,
-          sub: costMode ? "API-equivalent cost per UTC day \xB7 today so far \xB7 stacked by harness" : "Agent-hours " + A.agents.unit + " \xB7 stacked by harness",
-          width: W,
-          left,
-          right,
-          grid,
-          bins,
-          label: costMode ? "API-equivalent cost per day, stacked by harness" : "Agent-hours " + A.agents.unit + " over the selected range, stacked by harness",
-          role: costMode ? "img" : "group",
-          ago: rangeAgo(A),
-          legend: [["claude", "Claude"], ["codex", "Codex"]].map(([id, label]) => ({ id, label, mark: host2.harnessSnapshot(id) })),
-          missing: costMode && A.cost.unpriced_models.length ? "no price for " + A.cost.unpriced_models.join(", ") + "; unpriced usage is omitted from bars." : void 0
-        };
-      };
-      let models, allowance;
-      const measures = [["Acceptance", "first_pass_acceptance", "acceptance_n", "acceptance", (n) => (n * 100).toFixed(0) + "%"], ["Review rounds", "median_review_rounds", "review_rounds_n", "review_rounds", String], ["Red CI heads", "median_red_ci_heads", "red_ci_n", "ci", String], ["Model time", "median_model_ms", "model_time_n", "model_time", timeText], ["API cost", "median_cost_usd", "cost_n", "cost", host2.asMoney], ["Allowance / M input", "allowance_per_million_input", "allowance_n", "allowance", (n) => n.toFixed(2) + "%"]];
-      if (A) {
-        const now = A.current, previous = A.previous, pct = (errors, tools) => tools ? Math.round(errors / tools * 100) + "%" : "0%";
-        metric("Agent-hours", hoursText(now.agent_ms), note(now.agent_ms, previous.agent_ms, hoursText), "Busy time summed across sessions; two sessions busy for an hour count two hours.");
-        metric(A.days === 1 ? "Cost today (UTC)" : "Cost, last " + A.days + " UTC days", now.cost.usd == null ? "\u2014" : host2.asMoney(now.cost.usd), now.cost.usd == null || previous.cost.usd == null ? { text: "no price for " + [.../* @__PURE__ */ new Set([...now.cost.unpriced_models, ...previous.cost.unpriced_models])].join(", ") } : note(now.cost.usd, previous.cost.usd, host2.asMoney), A.days === 1 ? "API-equivalent cost. Cost is recorded per UTC day: this is the whole current UTC day so far, compared with the whole day before." : "API-equivalent cost. Cost is recorded per UTC day: the last " + A.days + " UTC days count, today so far, compared with the " + A.days + " whole UTC days before.", host2.COST_TIP);
-        metric("Sessions started", countText(now.started), note(now.started, previous.started, countText));
-        metric("Turns", countText(now.turns), note(now.turns, previous.turns, countText));
-        const toolNote = note(now.tools, previous.tools, countText);
-        if (A.calls_unknown) toolNote.tail = " \xB7 \u2014 for " + A.calls_unknown + (A.calls_unknown === 1 ? " session" : " sessions");
-        metric("Tool calls", countText(now.tools), toolNote, countText(now.errors) + " failed (" + pct(now.errors, now.tools) + ") \xB7 previous " + rangeName() + ": " + countText(previous.errors) + " failed (" + pct(previous.errors, previous.tools) + ")");
-        metric("Peak concurrency", countText(now.peak), note(now.peak, previous.peak, countText), "The most sessions busy at the same moment.");
-        metric("Waited on you", timeText(now.wait_ms), note(now.wait_ms, previous.wait_ms, timeText), "Median wait " + timeText(now.median_wait_ms) + " \xB7 previous " + rangeName() + ": " + timeText(previous.median_wait_ms));
-        const wait = A.longest_current_wait;
-        metric("Longest current wait", wait ? timeText(wait.ms) : "\u2014", note(wait ? wait.ms : 0, previous.longest_wait_ms, timeText), wait ? nameOfSid(A, wait.sid) + " has waited on you for " + timeText(wait.ms) : "No session is waiting on you");
-        charts.push(makeChart(false), makeChart(true));
-        for (const [key, title, groups] of [["repo", "By repo", A.breakdown.repo], ["machine", "By machine", A.breakdown.machine], ["harness", "By harness and model", A.breakdown.model]]) {
-          const keyFor = (g) => key === "repo" ? g.repo ?? "__none__" : key === "machine" ? g.machine ?? "" : g.harness + "\0" + g.model;
-          const labelFor = (id) => key === "repo" ? id === "__none__" ? "No repo (roles)" : id : key === "machine" ? host2.MACHINE[id] ?? id : (host2.HARNESS[id.split("\0")[0]] ?? id.split("\0")[0]) + " \xB7 " + shortModel(id.split("\0")[1]);
-          const selected = (g) => host2.analyticsMeasure === "cost" ? g.usd : g.ms, rows = [...groups].sort((a, b) => selected(b) - selected(a) || labelFor(keyFor(a)).localeCompare(labelFor(keyFor(b)))), max = Math.max(1, ...rows.map(selected));
-          breakdowns.push({ key, heading: title, rows: rows.map((g) => ({ key: keyFor(g), name: labelFor(keyFor(g)), count: g.sessions + (g.sessions === 1 ? " session" : " sessions"), width: widthOf(selected(g), max), color: key === "harness" ? keyFor(g).startsWith("claude") ? "claude" : "codex" : void 0, hours: hoursText(g.ms), cost: g.unpriced_models.length ? "\u2014" : host2.asMoney(g.usd), missing: g.unpriced_models.length ? "no price for " + g.unpriced_models.join(", ") : void 0 })) });
-        }
-        const topLists = [
-          ["Top sessions \xB7 busy time", A.top.busy, (x) => timeText("ms" in x ? x.ms : 0), (x) => "ms" in x ? x.ms : 0],
-          ["Top sessions \xB7 waited on", A.top.waited, (x) => timeText("ms" in x ? x.ms : 0), (x) => "ms" in x ? x.ms : 0],
-          ["Most expensive sessions \xB7 API-equivalent cost", A.top.cost, (x) => "usd" in x && x.usd != null ? host2.asMoney(x.usd) : "\u2014", (x) => "usd" in x ? x.usd ?? 0 : 0]
-        ];
-        for (const [title, items, value, measure] of topLists) {
-          const max = Math.max(1, ...items.map(measure));
-          lists.push({ heading: title, rows: items.map((item2) => {
-            const harness = harnessOfSid(A, item2.sid), missing = "unpriced_models" in item2 ? item2.unpriced_models : [];
-            return { id: item2.sid, name: nameOfSid(A, item2.sid), harness, harnessName: host2.HARNESS_SHORT[harness] ?? harness, harnessTip: host2.HARNESS[harness] && host2.HARNESS[harness] !== host2.HARNESS_SHORT[harness] ? host2.HARNESS[harness] : void 0, mark: host2.harnessSnapshot(harness), value: value(item2), href: host2.SESS[item2.sid] ? host2.urlOf({ v: "session", id: item2.sid }) : void 0, rank: widthOf(measure(item2), max), missing: missing.length ? "no price for " + missing.join(", ") : void 0 };
-          }) });
-        }
-        if (A.models) {
-          const reasons = A.models.unknown_reasons ?? {};
-          models = [];
-          for (const band of ["easy", "medium", "hard", "unknown"]) {
-            const rows = (A.models.groups ?? []).filter((g) => g.band === band);
-            if (!rows.length) continue;
-            const points = rows.filter((g) => g.first_pass_acceptance != null && g.median_cost_usd != null), W = Math.max(280, chartWidth()), maxCost = Math.max(0.01, ...points.map((g) => g.median_cost_usd ?? 0));
-            models.push({
-              key: band,
-              heading: band === "unknown" ? "Unknown difficulty" : band[0].toUpperCase() + band.slice(1),
-              width: W,
-              rows: rows.map((g) => {
-                const key = band + "\0" + g.model;
-                modelGroups.set(key, g);
-                const tokens2 = g.tokens ?? {};
-                return { key, name: shortModel(g.model), tip: g.model, count: g.n + (g.small_sample ? " \xB7 small sample" : ""), cells: [...measures.map(([, valueKey, nKey, reason, format]) => ({ text: g[valueKey] == null ? "Unknown" : format(g[valueKey]), n: g[nKey] ?? 0, tip: g[valueKey] == null ? reasons[reason] : void 0 })), { text: g.tokens_n ? [tokens2.input ?? 0, tokens2.output ?? 0, (tokens2.cache_read ?? 0) + (tokens2.cache_write ?? 0)].map(countText).join(" / ") : "Unknown", n: g.tokens_n ?? 0 }] };
-              }),
-              points: points.map((g) => ({ x: 42 + g.median_cost_usd / maxCost * (W - 58), y: 150 - g.first_pass_acceptance * 130, label: shortModel(g.model), tip: g.model + ": " + host2.asMoney(g.median_cost_usd ?? 0) + ", " + (g.first_pass_acceptance * 100).toFixed(0) + "% accepted; acceptance n=" + g.acceptance_n + ", cost n=" + g.cost_n }))
-            });
-          }
-        }
-        const limits = A.allowance;
-        if (limits?.recorded_at != null && limits.windows?.length) allowance = { when: new Date(limits.recorded_at).toLocaleString([], { hour: "numeric", minute: "2-digit" }), windows: limits.windows.map((limit) => ({ label: limit.minutes === 300 ? "5-hour window" : limit.minutes === 10080 ? "Weekly window" : limit.minutes + "-minute window", used: limit.used_percent + "% used", reset: "Resets " + new Date(limit.resets_at).toLocaleString([], { weekday: "short", hour: "numeric", minute: "2-digit" }) })) };
-      }
-      renderAnalyticsScreen(page, { heading, error, ready: !!A, query: analyticsQuery(), metrics, charts, breakdowns, lists, models, measure: host2.analyticsMeasure, allowance, modelHeaders: ["Model", "Work items", ...measures.map((m) => m[0]), "Tokens \xB7 input / output / cache"] }, {
-        committed: host2.observeTitle,
-        facets: () => renderFacetFilters(page, () => {
-          host2.render();
-          refreshAnalytics(true);
-        }),
-        session: host2.goSession,
-        measure(value) {
-          if (host2.analyticsMeasure === value) return;
-          const top = host2.currentScroll();
-          host2.analyticsMeasure = value;
-          host2.render();
-          host2.restoreScroll(top);
-        },
-        breakdown(group, key) {
-          if (group === "repo") host2.sessionFilters.repo = key;
-          else if (group === "machine") host2.sessionFilters.machine = key;
-          else {
-            const [harness, model2] = key.split("\0");
-            host2.sessionFilters.harness = harness ?? "";
-            host2.sessionFilters.model = model2 ?? "";
-          }
-          host2.query = "";
-          host2.groupBy = "recent";
-          host2.go({ v: "sessions" });
-        },
-        slice(key) {
-          const slice = slices.get(key);
-          if (!slice || !A) return;
-          const { bin, costMode } = slice;
-          openAnalyticsSlice(A, bin.a, bin.b, bin.sessions, bin.more, costMode);
-        },
-        model(key) {
-          const model2 = modelGroups.get(key);
-          if (model2) openModelItems(model2);
-        }
-      });
-    }
-    return { fetchAnalytics, scheduleAnalytics, refreshAnalytics, renderAnalytics, matchesSessionFacets, renderFacetFilters };
-  }
-
-  // src/app/destination.ts
-  function createDestination(host2) {
-    function openSessionAtEnd() {
-      if (location.hash) return;
-      host2.startOpeningEndPin();
-    }
-    const SKELETON_MS = 150;
-    let skeletonTimer;
-    let lanesFor = null;
-    function paintPending(r) {
-      const page = host2.$("#page"), hadFocus = host2.$("#sidebar").contains(document.activeElement);
-      host2.renderNav();
-      host2.renderLanes();
-      host2.drawSessionBar();
-      lanesFor = { r, version: host2.LIVE.version };
-      if (hadFocus) host2.$("#lanes .srow[data-id='" + CSS.escape(r.id) + "']")?.focus({ preventScroll: true });
-      page.setAttribute("aria-busy", "true");
-      page.inert = true;
-      page.classList.add("loading");
-      clearTimeout(skeletonTimer);
-      skeletonTimer = host2.scope.timeout(() => {
-        if (host2.navigation.route !== r || !page.classList.contains("loading")) return;
-        page.classList.remove("loading");
-        page.classList.remove("child-page");
-        setGeometry(page, "paddingBottom", null);
-        renderPlaceholder(page);
-        host2.quietTop();
-        host2.syncBarLine();
-      }, SKELETON_MS);
-    }
-    function endLoading() {
-      clearTimeout(skeletonTimer);
-      skeletonTimer = void 0;
-      const page = host2.$("#page");
-      page.removeAttribute("aria-busy");
-      page.inert = false;
-      page.classList.remove("loading");
-    }
-    function focusTitle() {
-      const a = document.activeElement;
-      if (a && a !== document.body && !host2.$("#sidebar").contains(a)) return;
-      const h2 = host2.$("#page .ph h1");
-      if (h2) {
-        h2.tabIndex = -1;
-        h2.focus({ preventScroll: true });
-      }
-    }
-    function failLoad(r, err) {
-      if (host2.navigation.route !== r || err instanceof Error && err.name === "AbortError") return;
-      endLoading();
-      const page = host2.$("#page");
-      page.classList.remove("child-page");
-      setGeometry(page, "paddingBottom", null);
-      renderPlaceholder(page, "Couldn't load this session: " + (err instanceof Error ? err.message : "no response"), () => go({ ...r }, true));
-    }
-    const isDeep = (r) => {
-      const t = r.turn ? host2.TURN.get(r.turn) : null;
-      return !!t && t.sid === r.id && !t.entries.length;
-    };
-    function go(r, fromHistory = false, prepared = false, nextContent = null) {
-      host2.navigation.cancelNative();
-      if (host2.NATIVE_PAGE) {
-        if (!fromHistory) location.assign(r.v === "machines" ? host2.NAV_MACHINES ?? host2.urlOf(r) : host2.urlOf(r));
-        return;
-      }
-      if (r.v === "machines" && host2.viewerHost && !prepared) {
-        host2.closeDrawer(true);
-        host2.closeAccountMenu(true, true);
-        host2.navigation.loadNative(r, (content) => go(r, fromHistory, true, content), () => {
-          if (host2.viewerHost) location.assign(host2.viewerHost.machinesPath);
-        });
-        return;
-      }
-      if (r.v !== "sessions" || r !== host2.focusSessionsSearchOnRender) host2.focusSessionsSearchOnRender = null;
-      if (host2.SIDEBAR_ONLY) {
-        if (!fromHistory) {
-          host2.closeDrawer(true);
-          location.assign(r.v === "machines" && host2.NAV_MACHINES ? host2.NAV_MACHINES : host2.urlOf(r));
-        }
-        return;
-      }
-      if (host2.navigation.route.v === "session") host2.clearPaging("id" in host2.navigation.route ? host2.navigation.route.id : "");
-      host2.resetPagerInput();
-      host2.stopOpeningEndPin();
-      host2.navigation.cancelRoute();
-      if (r.v === "machines" && host2.NAV_MACHINES && !host2.viewerHost) {
-        location.assign(host2.NAV_MACHINES);
-        return;
-      }
-      if (!fromHistory) host2.saveHistoryScroll();
-      host2.navigation.replaceContent(r, nextContent);
-      host2.closeAccountMenu(true, true);
-      host2.dropErrors(true);
-      if (host2.navigation.route.v === "session" && (r.v !== "session" || (r.v !== "session" || r.id !== ("id" in host2.navigation.route ? host2.navigation.route.id : ""))) && host2.TX["id" in host2.navigation.route ? host2.navigation.route.id : ""] && host2.TXM["id" in host2.navigation.route ? host2.navigation.route.id : ""]) {
-        const sid = "id" in host2.navigation.route ? host2.navigation.route.id : "", entries = host2.TX[sid], meta = { ...host2.TXM[sid], origin: !!host2.originHandoff(sid) };
-        host2.scope.frame(() => host2.scope.frame(() => host2.scope.timeout(() => host2.cacheTx(sid, entries, meta), 0)));
-      }
-      if (r.v !== "session" || (r.v !== "session" || r.id !== ("id" in host2.navigation.route ? host2.navigation.route.id : ""))) host2.show = { ...host2.SHOW_ALL };
-      if (r.v !== "sessions") host2.ORD.delete("page");
-      host2.navigation.route = r;
-      host2.find = "";
-      host2.findOpen = false;
-      host2.closeDrawer(true);
-      host2.clearNewEntries();
-      if (!fromHistory) {
-        const state2 = { ...r };
-        delete state2.scrollTop;
-        try {
-          history.pushState(state2, "", host2.urlOf(r));
-        } catch {
-        }
-      }
-      const done = () => {
-        if (host2.navigation.route !== r) return;
-        endLoading();
-        host2.render();
-        if (r.v === "session" || host2.viewerHost && r.v === "machines") focusTitle();
-        if (fromHistory && Number.isFinite(r.scrollTop)) {
-          const turns = [...host2.$("#page").querySelectorAll(".turn")];
-          for (const turn of turns) revealMeasuredTurn(turn, true);
-          const heights = turns.map((turn) => turn.getBoundingClientRect().height);
-          turns.forEach((turn, i) => {
-            setGeometry(turn, "intrinsicHeight", Math.ceil(heights[i]));
-            revealMeasuredTurn(turn, false);
-          });
-          host2.restoreScroll(r.scrollTop);
-          host2.restoreHostFocus(r.hostFocus);
-        } else if (r.v === "session" && r.turn) {
-          revealTurn(r.turn, !fromHistory);
-          if (location.hash) host2.scope.frame(() => host2.scope.frame(revealEntryHash));
-        } else if (r.v === "session" && location.hash) revealEntryHash();
-        else if (r.v === "session") openSessionAtEnd();
-        else host2.quietTop();
-        host2.syncJump();
-      };
-      if (r.v === "session" && host2.SESS[r.id]) {
-        if (host2.STALE_BRIEFS.has(r.id)) {
-          delete host2.TX[r.id];
-          delete host2.TXM[r.id];
-          host2.TXCACHE.delete(r.id);
-        }
-        const kept = !host2.TX[r.id];
-        if (kept ? host2.adoptCached(r) : !isDeep(r)) {
-          host2.TXCACHE.delete(r.id);
-          paintPending(r);
-          host2.scope.frame(() => host2.scope.timeout(() => {
-            if (host2.navigation.route !== r) return;
-            if (kept && !r.turn) host2.spread(r.id);
-            done();
-            host2.revalidate(r);
-          }, 0));
-          return;
-        }
-      }
-      if (r.v === "session") paintPending(r);
-      host2.navigation.load(r, (signal) => host2.load(r, signal), done, (error) => failLoad(r, error));
-    }
-    if (!host2.SIDEBAR_ONLY) host2.scope.listen(window, "popstate", (e) => {
-      if (host2.skipPop) {
-        host2.skipPop = false;
-        if (host2.afterPop) {
-          const leave = host2.afterPop;
-          host2.afterPop = null;
-          leave();
-          return;
-        }
-        if (host2.pendingSessionOpen) {
-          const id = host2.pendingSessionOpen;
-          host2.pendingSessionOpen = null;
-          goSession(id);
-        }
-        return;
-      }
-      if (host2.accountSheet) {
-        host2.accountSheet = false;
-        host2.closeAccountMenu(true);
-        return;
-      }
-      if (host2.viewerEl) {
-        const d = host2.viewerEl;
-        host2.viewerEl = null;
-        d.close();
-        return;
-      }
-      if (e.state?.v) go(host2.navigation.historyRoute(e.state, host2.routeOf(location)), true);
-    });
-    const goSession = (id, turn = void 0) => go(turn ? { v: "session", id, turn } : { v: "session", id });
-    const goTrace = (turn) => {
-      const found = host2.TURN.get(turn);
-      if (found) go({ v: "trace", sid: found.sid, turn });
-    };
-    const openSender = (h2) => {
-      if (host2.SESS[h2.from]) goSession(h2.from, host2.HOLDS.get(h2.id)?.id);
-    };
-    function revealTurn(id, flash) {
-      host2.resetPagerInput();
-      const b = [...document.querySelectorAll(".turn")].find((x) => x.dataset.turn === id);
-      if (!b) {
-        host2.quietTop();
-        return;
-      }
-      const place = () => {
-        if (!b.isConnected) return;
-        const gap = host2.$("#topbar").offsetHeight + 8;
-        host2.scrollProgrammatically(() => {
-          if (host2.phone.matches) window.scrollTo(0, Math.max(0, window.scrollY + b.getBoundingClientRect().top - gap));
-          else {
-            const m = host2.$("#main");
-            m.scrollTop += b.getBoundingClientRect().top - m.getBoundingClientRect().top - gap;
-          }
-        });
-        host2.syncJump();
-        host2.saveHistoryScroll();
-      };
-      place();
-      host2.scope.frame(() => host2.scope.frame(place));
-      if (flash) {
-        b.classList.add("flash");
-        host2.scope.timeout(() => b.classList.remove("flash"), 1500);
-      }
-    }
-    function revealEntryHash() {
-      host2.resetPagerInput();
-      if (!location.hash) return;
-      let key = "";
-      try {
-        key = decodeURIComponent(location.hash.slice(1));
-      } catch {
-        key = location.hash.slice(1);
-      }
-      const target = document.getElementById(key) ?? [...document.querySelectorAll("[data-e]")].find((n) => n.dataset.e === key) ?? [...document.querySelectorAll(".turn[data-turn]")].find((n) => n.dataset.turn === key);
-      if (!target) return;
-      const place = () => {
-        if (!target.isConnected) return;
-        const gap = host2.$("#topbar").offsetHeight + 8;
-        host2.scrollProgrammatically(() => {
-          if (host2.phone.matches) window.scrollTo(0, Math.max(0, window.scrollY + target.getBoundingClientRect().top - gap));
-          else {
-            const m = host2.$("#main");
-            m.scrollTop += target.getBoundingClientRect().top - m.getBoundingClientRect().top - gap;
-          }
-        });
-        host2.syncJump();
-        host2.saveHistoryScroll();
-      };
-      place();
-      host2.scope.frame(() => host2.scope.frame(place));
-    }
-    return { goSession, go, openSender, revealTurn, revealEntryHash, openSessionAtEnd, goTrace, get lanesFor() {
-      return lanesFor;
-    }, set lanesFor(value) {
-      lanesFor = value;
-    } };
-  }
-
-  // src/app/effects.ts
-  var EffectScope = class {
-    cleanups = /* @__PURE__ */ new Set();
-    requests = /* @__PURE__ */ new Map();
-    disposed = false;
-    own(cleanup) {
-      if (this.disposed) cleanup();
-      else this.cleanups.add(cleanup);
-      return cleanup;
-    }
-    listen(target, type, listener, options2) {
-      if (this.disposed) return;
-      const guarded = (event) => {
-        if (!this.disposed) listener(event);
-      };
-      target.addEventListener(type, guarded, options2);
-      this.own(() => target.removeEventListener(type, guarded, options2));
-    }
-    timeout(callback, delay = 0) {
-      if (this.disposed) return 0;
-      let cleanup;
-      const id = window.setTimeout(() => {
-        this.cleanups.delete(cleanup);
-        if (!this.disposed) callback();
-      }, delay);
-      cleanup = this.own(() => clearTimeout(id));
-      return id;
-    }
-    interval(callback, delay) {
-      if (this.disposed) return 0;
-      const id = window.setInterval(() => {
-        if (!this.disposed) callback();
-      }, delay);
-      this.own(() => clearInterval(id));
-      return id;
-    }
-    frame(callback) {
-      if (this.disposed) return 0;
-      let cleanup;
-      const id = requestAnimationFrame((time) => {
-        this.cleanups.delete(cleanup);
-        if (!this.disposed) callback(time);
-      });
-      cleanup = this.own(() => cancelAnimationFrame(id));
-      return id;
-    }
-    request() {
-      const controller = new AbortController();
-      const cleanup = this.own(() => controller.abort());
-      this.requests.set(controller, cleanup);
-      return controller;
-    }
-    releaseRequest(controller) {
-      const cleanup = this.requests.get(controller);
-      if (cleanup) this.cleanups.delete(cleanup);
-      this.requests.delete(controller);
-    }
-    destroy() {
-      if (this.disposed) return;
-      this.disposed = true;
-      for (const cleanup of this.cleanups) cleanup();
-      this.cleanups.clear();
-      this.requests.clear();
-    }
-  };
-
-  // src/app/liveUpdates.ts
-  function createLiveUpdates(host2) {
-    const applyModelDelta = (value) => host2.modelStore.apply(value);
-    function update(value) {
-      const m = applyModelDelta(value);
-      const oldH = new Map(host2.H.map((h2) => [h2.id, host2.handKey(h2)])), oldT = host2.LIVE.turns, oldCards = host2.cardKeys(), names = new Map(Object.values(host2.SESS).map((x) => [x.id, x.name]));
-      const hadOrigins = new Set([...host2.TXCACHE.keys()].filter((sid) => !!host2.originHandoff(sid)));
-      const hadOrigin = host2.navigation.route.v === "session" && !!host2.SESS["id" in host2.navigation.route ? host2.navigation.route.id : ""] && !!host2.originHandoff("id" in host2.navigation.route ? host2.navigation.route.id : "");
-      host2.adopt(m);
-      host2.remember(m);
-      for (const sid of host2.STALE_BRIEFS) if (!host2.SESS[sid]) host2.STALE_BRIEFS.delete(sid);
-      for (const sid of [...host2.TXCACHE.keys()]) if (!hadOrigins.has(sid) && host2.originHandoff(sid)) host2.TXCACHE.delete(sid);
-      if (host2.LIVE.late !== ("id" in host2.navigation.route ? host2.navigation.route.id : "")) {
-        if (host2.LIVE.late) host2.TXCACHE.delete(host2.LIVE.late);
-        host2.LIVE.late = null;
-      }
-      if (host2.navigation.route.v === "session" && !hadOrigin && !!host2.SESS["id" in host2.navigation.route ? host2.navigation.route.id : ""] && !!host2.originHandoff("id" in host2.navigation.route ? host2.navigation.route.id : "")) {
-        host2.LIVE.late = "id" in host2.navigation.route ? host2.navigation.route.id : "";
-        host2.LIVE.lateTries = 0;
-        host2.STALE_BRIEFS.add("id" in host2.navigation.route ? host2.navigation.route.id : "");
-        host2.TXCACHE.delete("id" in host2.navigation.route ? host2.navigation.route.id : "");
-      }
-      if (host2.LIVE.late && !host2.TX[host2.LIVE.late]) host2.LIVE.late = null;
-      const changedH = new Set(host2.H.filter((h2) => oldH.get(h2.id) !== host2.handKey(h2)).map((h2) => h2.id));
-      const newCards = host2.cardKeys(), changedCards = new Set([...newCards].filter(([id, k]) => oldCards.has(id) && oldCards.get(id) !== k).map(([id]) => id));
-      const view = host2.viewed(), grown = /* @__PURE__ */ new Set(), cuts = /* @__PURE__ */ new Map(), patched = /* @__PURE__ */ new Map();
-      let full = Object.values(host2.SESS).some((x) => names.has(x.id) && names.get(x.id) !== x.name);
-      for (const sid of Object.keys(host2.TX)) {
-        if (view.has(sid) && host2.SESS[sid]) host2.spread(sid);
-        else host2.dropTx(sid);
-      }
-      let chain = Promise.resolve();
-      for (const sid of view) if (host2.TX[sid] && host2.LIVE.late === sid) chain = chain.then(() => host2.soft(reloadLate(sid).then(() => {
-        grown.add(sid);
-        full = true;
-      })));
-      else if (host2.TX[sid] && host2.TXM[sid].tok != null && host2.TOK[sid] != null && host2.shrank(host2.TXM[sid].tok, host2.TOK[sid])) chain = chain.then(() => host2.soft(reload(sid).then(() => {
-        grown.add(sid);
-        full = true;
-      })));
-      else if (host2.TX[sid] && host2.TXM[sid].to >= host2.TXM[sid].total && host2.TXM[sid].tok !== host2.TOK[sid]) chain = chain.then(() => host2.soft(tail(sid).then((r) => {
-        grown.add(sid);
-        if (r.cut != null) cuts.set(sid, r.cut);
-        if (r.patched?.length) patched.set(sid, r.patched);
-        if (r.reload) full = true;
-      })));
-      for (const sid of view) if (host2.TX[sid] && host2.TXM[sid].to < host2.TXM[sid].total && host2.TXM[sid].watchTok !== host2.TOK[sid]) chain = chain.then(() => host2.soft(watchLater(sid).then((r) => {
-        if (r?.reload) full = true;
-      })));
-      return chain.then(() => {
-        host2.LIVE.version = m.version;
-        host2.refresh(full ? null : dirtyTurns(cuts, grown, changedH, oldT, changedCards, patched));
-        if (host2.navigation.route.v === "analytics") host2.refreshAnalytics();
-        const e = host2.errorsLive();
-        return e && host2.soft(e);
-      });
-    }
-    function dirtyTurns(cuts, grown, changedH, oldT, changedCards, patched) {
-      if (host2.navigation.route.v !== "session" || !host2.TX["id" in host2.navigation.route ? host2.navigation.route.id : ""]) return null;
-      const sid = "id" in host2.navigation.route ? host2.navigation.route.id : "", dirty = /* @__PURE__ */ new Set(), owner = new Map((host2.TURNS[sid] ?? []).flatMap((t) => t.entries.map((e) => [e, t.id])));
-      if (cuts.has(sid)) for (const e of host2.TX[sid].slice(cuts.get(sid))) {
-        if (host2.isGap(e)) return null;
-        if (owner.has(e)) dirty.add(owner.get(e));
-      }
-      for (const e of patched?.get(sid) ?? []) {
-        if (!owner.has(e)) return null;
-        dirty.add(owner.get(e));
-      }
-      for (const t of host2.TURNS[sid] ?? []) {
-        if (oldT.get(t.id) !== host2.LIVE.turns.get(t.id) || [t.start, ...t.sent].some((h2) => h2 && changedH.has(h2.id)) || t.entries.some((e) => e.k === "h" && changedH.has(e.id))) dirty.add(t.id);
-      }
-      for (const h2 of host2.H) if (h2.kind === "spawn" && h2.from === sid && changedCards.has(h2.id) && host2.HOLDS.get(h2.id)) dirty.add(host2.HOLDS.get(h2.id).id);
-      return dirty;
-    }
-    function watchLater(sid) {
-      const m = host2.TXM[sid], tok2 = host2.TOK[sid];
-      return host2.api("/api/tx?sid=" + host2.enc(sid) + "&after=" + m.total).then((value) => {
-        const p = parseTranscriptPage(value);
-        if (host2.TXM[sid] !== m) return;
-        if (p.total < m.total) return reload(sid);
-        m.newer = (m.newer ?? 0) + Math.max(0, p.total - m.total);
-        Object.assign(m, { total: p.total, calls: p.calls, errors: p.errors, watchTok: tok2 });
-      });
-    }
-    function tail(sid) {
-      const es = host2.TX[sid], m = host2.TXM[sid], tok2 = host2.TOK[sid];
-      let cut2 = es.findIndex((e) => e.live && e.slot != null);
-      if (cut2 < 0) cut2 = es.length;
-      for (let i = es.length - 1; i >= 0; i--) {
-        if (es[i].unfinished && es[i].slot != null) cut2 = Math.min(cut2, i);
-        if (es[i].turn) break;
-      }
-      let got = [], last = null, n = 0;
-      const page = (after) => host2.api("/api/tx?sid=" + host2.enc(sid) + "&after=" + after).then((value) => {
-        const p = parseTranscriptPage(value);
-        got = got.concat(p.entries.map((e) => host2.txEntry({ ...e, sid })));
-        last = p;
-        if (p.to < p.total && p.entries.length && ++n < 5) return page(p.to);
-      });
-      return page(cut2 < es.length ? es[cut2].slot : m.to).then(() => {
-        if (host2.TX[sid] !== es) return { cut: null };
-        if (!last) return { cut: null };
-        if (last.total < m.total || last.to < last.total || cut2 < es.length && got[0]?.slot !== es[cut2].slot) return reload(sid);
-        const ends = new Map(got.flatMap((e) => e.k === "bgend" && e.bg ? [[e.call, e.bg]] : [])), still = new Set(last.bg_running ?? []), patched = [];
-        for (const e of es.slice(0, cut2)) if (e.bg) {
-          const next = ends.get(e.tid ?? "") ?? (still.has(e.tid ?? "") ? { ...e.bg, state: "running", secs: e.bg.secs ?? "\u2014" } : e.bg.state === "running" ? { state: "unknown" } : e.bg);
-          if (JSON.stringify(next) !== JSON.stringify(e.bg)) {
-            e.bg = next;
-            patched.push(e);
-          }
-        }
-        host2.TX[sid] = es.slice(0, cut2).concat(got);
-        Object.assign(m, { to: last.to, total: last.total, calls: last.calls, errors: last.errors, tok: tok2 });
-        host2.spread(sid);
-        return { cut: cut2, patched };
-      });
-    }
-    function reload(sid) {
-      if (sid !== ("id" in host2.navigation.route ? host2.navigation.route.id : "")) {
-        host2.dropTx(sid);
-        return Promise.resolve({ cut: null, reload: true });
-      }
-      return host2.fetchTx(sid, "").then(() => ({ cut: null, reload: true }));
-    }
-    const LATE_TRIES = 4;
-    function reloadLate(sid) {
-      return reload(sid).then((r) => {
-        if (host2.LIVE.late === sid) host2.LIVE.late = null;
-        return r;
-      }, (err) => {
-        if (host2.LIVE.late === sid) {
-          if (++host2.LIVE.lateTries >= LATE_TRIES) {
-            host2.LIVE.late = null;
-            console.warn("semon: gave up reloading the transcript of " + sid + " after its origin arrived");
-          } else host2.LIVE.retry = true;
-        }
-        throw err;
-      });
-    }
-    return { reload, tail, applyModelDelta, update };
-  }
-
-  // src/app/recentNavigation.ts
-  function createRecentNavigation(host2) {
-    const isApprovalReview = (s) => s.kind === "Approval review";
-    const visibleInNavigation = (s, path = routedPath()) => host2.showApprovalReviews || !isApprovalReview(s) || s.id === path.current || path.ancestors.has(s.id);
-    const navigationTree = (path = routedPath()) => {
-      const canonical = host2.sessionChildren(), roots = [], children = /* @__PURE__ */ new Map(), visited = /* @__PURE__ */ new Set();
-      const visit = (session, parent) => {
-        if (visited.has(session.id)) return;
-        visited.add(session.id);
-        let nearest = parent;
-        if (visibleInNavigation(session, path)) {
-          if (parent) {
-            if (!children.has(parent)) children.set(parent, []);
-            children.get(parent).push(session);
-          } else roots.push(session);
-          nearest = session.id;
-        }
-        for (const child of canonical.get(session.id) ?? []) visit(child, nearest);
-      };
-      for (const root of Object.values(host2.SESS).filter((s) => s.lane && !host2.parentOf(s.id))) visit(root, null);
-      roots.sort(host2.byLast);
-      for (const kids of children.values()) kids.sort(host2.byLast);
-      return { roots, children };
-    };
-    const COST_TIP = "What these tokens would cost at API rates. Subscriptions (Claude Max, ChatGPT plans) aren't billed this way.";
-    const TREE_ACTIVE = 8, TREE_ROWS = 3;
-    function routedPath() {
-      const current = host2.navigation.route.v === "session" ? "id" in host2.navigation.route ? host2.navigation.route.id : "" : host2.navigation.route.v === "trace" ? host2.navigation.route.sid : null, ancestors = /* @__PURE__ */ new Set();
-      for (let id = current && host2.SESS[current] ? host2.parentOf(current) : null; id && host2.SESS[id] && id !== current && !ancestors.has(id); id = host2.parentOf(id)) ancestors.add(id);
-      return { current, ancestors };
-    }
-    let forcedOpen = { route: null, ids: /* @__PURE__ */ new Set() };
-    function forcedOpenIds() {
-      if (forcedOpen.route !== host2.navigation.route) forcedOpen = { route: host2.navigation.route, ids: routedPath().ancestors };
-      return forcedOpen.ids;
-    }
-    let expandedAll = null, revealedFor = null;
-    let expandedPath = /* @__PURE__ */ new Set(), expandedUnder = /* @__PURE__ */ new Set();
-    let sideOrder = null;
-    const ancestorsOf = (id) => {
-      const out = /* @__PURE__ */ new Set();
-      for (let p = id && host2.SESS[id] ? host2.parentOf(id) : null; p && host2.SESS[p] && p !== id && !out.has(p); p = host2.parentOf(p)) out.add(p);
-      return out;
-    };
-    function treeGroupSnapshot(parent, kids, children, depth, rail, open) {
-      const { current, ancestors } = routedPath(), rank = new Map(kids.map((c) => [c.id, host2.kidRank(c, children)]));
-      const byRank = (a, b) => rank.get(a.id) - rank.get(b.id) || b.last - a.last, sorted = [...kids].sort(byRank), keep = /* @__PURE__ */ new Set();
-      for (const c of sorted) if (rank.get(c.id) < 2 && keep.size < TREE_ACTIVE) keep.add(c.id);
-      for (const c of sorted) if (c.id === current || ancestors.has(c.id) || expandedPath.has(c.id)) keep.add(c.id);
-      for (const c of sorted) if (keep.size < TREE_ROWS) keep.add(c.id);
-      const listed = sorted.filter((c) => keep.has(c.id)), hidden = kids.length - listed.length;
-      if (!hidden && expandedAll === parent.id) expandedAll = null;
-      const full = hidden > 0 && !rail && (expandedAll === parent.id || expandedUnder.has(parent.id));
-      const key = (full ? "a:" : "k:") + parent.id, unseen = !!sideOrder?.keep && open && !full && !sideOrder.reseed && sideOrder.seen.has(parent.id) && !sideOrder.prev.has(key);
-      const shown = sideOrder ? host2.orderList(sideOrder, key, full ? sorted : listed, byRank, { must: /* @__PURE__ */ new Set([...current ? [current] : [], ...ancestors, ...expandedPath]), quiet: !open, seed: full || sideOrder.reseed || !sideOrder.seen.has(parent.id) }) : full ? sorted : listed;
-      const items = shown.map((child) => buildLaneSnapshot(child, depth + 1, children, rail));
-      return { items, all: kids.length === shown.length || full || unseen ? void 0 : host2.descendantsOf(parent.id, children).length, full: full && expandedAll === parent.id };
-    }
-    let recentSnapshot = { items: [], empty: false };
-    const recentRenderer = createRecentRenderer(host2.$("#lanes"), {
-      open: (id) => host2.goSession(id),
-      toggle(id, value) {
-        if (!value) forcedOpenIds().delete(id);
-        host2.saveTreePref(id, value);
-        if (!value && (expandedAll === id || expandedPath.has(id))) {
-          expandedAll = null;
-          renderLanes();
-          host2.$('#lanes .treeitem[data-id="' + CSS.escape(id) + '"] > .tree-row .tree-toggle')?.focus();
-        } else {
-          const change = (items) => items.map((item2) => ({ ...item2, open: item2.id === id ? value : item2.open, children: item2.children ? change(item2.children) : void 0 }));
-          recentSnapshot = { ...recentSnapshot, items: change(recentSnapshot.items) };
-          recentRenderer.update(recentSnapshot);
-        }
       },
-      all(id, trigger) {
-        if (!host2.SESS[id]) return;
-        if (host2.phone.matches) {
-          openKidsSheet(host2.SESS[id], trigger);
-          return;
+      closed({ keepEntry, navigating }) {
+        if (host2.disposed) return;
+        if (host2.accountSheet) {
+          host2.accountSheet = false;
+          if (!keepEntry && history.state?.sheet) {
+            host2.toolViewsOwner.skipPop = true;
+            history.back();
+          }
         }
-        expandedAll = id;
-        renderLanes();
-        host2.$('#lanes .treeitem[data-id="' + CSS.escape(id) + '"] > .tree-row .tree-fewer')?.focus();
+        if (host2.liveModelOwner.LIVE.pending && !navigating)
+          host2.scope.timeout(() => {
+            if (host2.liveModelOwner.LIVE.pending && !host2.toolViewsOwner.viewerEl && !accountChrome.open)
+              host2.applicationRefreshOwner.refresh();
+          }, 0);
       },
-      fewer(id) {
-        expandedAll = null;
-        renderLanes();
-        const row = host2.$('#lanes .srow[data-id="' + CSS.escape(id) + '"]');
-        host2.scrollProgrammatically(() => row?.scrollIntoView({ block: "nearest" }));
-        row?.focus({ preventScroll: true });
+      navigate(href) {
+        if (!host2.accountSheet) return false;
+        leaveAccountSheet(() => location.assign(href));
+        return true;
+      },
+      submit(form) {
+        if (!host2.accountSheet) return false;
+        leaveAccountSheet(() => form.submit());
+        return true;
+      }
+    };
+    const shellChrome = host2.sidebarOnly ? null : createShellChrome({
+      account: accountHost,
+      navigate(destination) {
+        host2.destination.go(host2.navigation.historyRoute({ v: destination.key }, { v: "home" }));
+        return true;
+      },
+      drawerOpened() {
+        host2.orderingControlsOwner.orderApply("side");
+      },
+      drawerClosed() {
+        host2.scope.timeout(() => {
+          if (host2.phone.matches && !document.body.classList.contains("drawer-open"))
+            host2.orderingControlsOwner.orderApply("side");
+        }, host2.orderingControlsOwner.ORD_DRAWER_MS);
+      },
+      railChanged() {
+        host2.layoutOwner.setRailMode(!host2.layoutOwner.railMode);
+        host2.navigationViewOwner.renderNav();
       }
     });
-    function openKidsSheet(parent, trigger) {
-      const all = host2.descendantsOf(parent.id, navigationTree().children), bucket = (s) => s.state === "wait" ? 0 : s.state === "work" ? 1 : 2;
-      let picked = null;
-      const rows = [...all].sort((a, b) => b.last - a.last).map((s) => {
-        const above = host2.parentOf(s.id);
-        return { id: s.id, name: s.name, state: s.state, stateLabel: host2.STATE[s.state] ?? s.state, age: host2.ago(s.last), bucket: bucket(s), under: above && above !== parent.id && host2.SESS[above] ? host2.SESS[above].name : void 0 };
-      });
-      const sheet2 = createKidsSheet(parent.name, rows, {
-        matches(id, query) {
-          return host2.sessMatch(host2.SESS[id], query);
-        },
-        select(id) {
-          picked = id;
-          host2.pendingSessionOpen = id;
-          sheet2.dialog.close();
-        },
-        opened(d) {
-          host2.viewerEl = d;
-          document.documentElement.classList.add("viewer-open");
-          if (!host2.SIDEBAR_ONLY) try {
-            history.pushState({ ...host2.navigation.route, sheet: 1, scrollTop: host2.currentScroll() }, "");
-          } catch {
-          }
-        },
-        closed(d) {
-          host2.dialogs.delete(d);
-          if (host2.disposed) return;
-          document.documentElement.classList.remove("viewer-open");
-          if (host2.viewerEl === d) {
-            host2.viewerEl = null;
-            if (!host2.SIDEBAR_ONLY && history.state?.sheet) {
-              host2.skipPop = true;
-              history.back();
-            } else if (host2.pendingSessionOpen) {
-              const id = host2.pendingSessionOpen;
-              host2.pendingSessionOpen = null;
-              host2.goSession(id);
-            }
-          }
-          if (!picked) (host2.$('#lanes .tree-all[data-id="' + CSS.escape(parent.id) + '"]') ?? trigger).focus();
-          if (host2.LIVE.pending) host2.refresh();
-        }
-      });
-      host2.dialogs.set(sheet2.dialog, sheet2);
-      sheet2.show();
+    if (shellChrome) shellChrome.mount(host2.layoutOwner.app);
+    const accountChrome = shellChrome?.account ?? createAccountChrome(accountHost);
+    function closeAccountMenu(keepEntry = void 0, navigating = void 0) {
+      accountChrome.close({ keepEntry, navigating });
     }
-    function buildLaneSnapshot(s, depth, children, rail) {
-      const kids = children.get(s.id) ?? [], allKids = host2.descendantsOf(s.id, children);
-      const { current, ancestors } = routedPath(), saved = host2.treePrefs[s.id];
-      const open = forcedOpenIds().has(s.id) || expandedPath.has(s.id) || (typeof saved?.open === "boolean" ? saved.open : host2.defaultTreeOpen(s.id, children) || expandedUnder.has(s.id));
-      const group = kids.length && !rail ? treeGroupSnapshot(s, kids, children, depth, rail, open) : null;
-      const parts = allKids.length ? host2.childParts(allKids) : [], harness = Object.hasOwn(host2.HARNESSES, s.harness) ? host2.HARNESSES[s.harness] : null;
-      const flag = kids.length && !rail ? allKids.some((x) => x.state === "wait") ? "wait" : allKids.some((x) => x.state === "err") ? "err" : null : null;
-      const fields = [{ className: "row-duration", text: host2.dur(s.start, s.state === "work" || s.state === "wait" ? null : s.last), priority: 1, tip: "Duration", icon: host2.I.duration }];
-      if (Object.keys(host2.MACHINE).length > 1) fields.push({ className: "row-machine host", text: host2.shortHost(s), priority: 2, tip: "Machine: " + host2.hostOf(s), icon: host2.I.machine });
-      if (s.repo) fields.push({ className: "repo-short", text: s.repo, priority: 3, tip: "Repo: " + s.repo, icon: host2.I.repo });
-      return {
-        id: s.id,
-        name: s.name,
-        label: [s.name, host2.STATE[s.state] ?? s.state, host2.HARNESS[s.harness] ?? s.harness, host2.shortHost(s), ...parts].join(", "),
-        state: s.state,
-        stateLabel: host2.STATE[s.state] ?? s.state,
-        age: host2.ago(s.last),
-        model: shortModel(s.model ?? s.modelId),
-        modelTip: "Model: " + host2.modelIdOf(s),
-        harness: harness ? { id: s.harness, name: harness.name, light: harness.icon.light, dark: harness.icon.dark, darkTheme: host2.darkTheme() } : void 0,
-        fields,
-        current: current === s.id ? "page" : rail && ancestors.has(s.id) ? "true" : void 0,
-        rail,
-        childState: rail && allKids.some((x) => x.state === "work" || x.state === "wait") ? host2.urgentDescendant(s.id, children) ?? "work" : void 0,
-        flag: flag ? { state: flag, tip: allKids.filter((x) => x.state === "wait").length + " needs you \xB7 " + allKids.filter((x) => x.state === "err").length + " failed" } : void 0,
-        open,
-        depth,
-        children: group?.items,
-        all: group?.all,
-        stuck: !!group?.full && open
-      };
+    function leaveAccountSheet(go) {
+      host2.accountSheet = false;
+      if (history.state?.sheet) {
+        host2.toolViewsOwner.skipPop = true;
+        host2.afterPop = go;
+        history.back();
+      } else go();
     }
-    function laneFocus() {
-      const a = document.activeElement instanceof HTMLElement ? document.activeElement : null, item2 = a?.closest(".treeitem");
-      if (!a || !host2.$("#lanes").contains(a)) return null;
-      const kind = ["srow", "tree-all", "tree-fewer", "tree-toggle"].find((c) => a.classList.contains(c)) ?? (a === item2 ? "treeitem" : null);
-      const id = kind === "tree-toggle" ? a.dataset.treeToggle : kind === "srow" || kind === "tree-all" ? a.dataset.id : item2?.dataset.id;
-      return kind && id ? { kind, id, visible: a.matches(":focus-visible") } : null;
+    function accountWidget(compact) {
+      return host2.account ? accountChrome.mount({
+        account: host2.account,
+        compact,
+        wide: host2.layoutOwner.wideMode,
+        onWideChange: () => host2.layoutOwner.setWideMode(!host2.layoutOwner.wideMode)
+      }) : null;
     }
-    function restoreLaneFocus(f) {
-      if (!f || document.activeElement !== document.body) return;
-      const q = (sel) => host2.$("#lanes " + sel), id = CSS.escape(f.id);
-      const target = f.kind === "srow" ? q('.srow[data-id="' + id + '"]') : f.kind === "tree-all" ? q('.tree-all[data-id="' + id + '"]') : f.kind === "tree-fewer" ? q('.treeitem[data-id="' + id + '"] > .tree-row .tree-fewer') : f.kind === "tree-toggle" ? q('.tree-toggle[data-tree-toggle="' + id + '"]') : q('.treeitem[data-id="' + id + '"]');
-      (target ?? q('.srow[data-id="' + id + '"]'))?.focus({ preventScroll: true, focusVisible: f.visible });
-    }
-    function renderLanes() {
-      const rail = host2.railMode && !host2.phone.matches, prevSide = host2.ORD.get("side");
-      if (rail || prevSide?.rail !== rail) host2.ORD.delete("side");
-      const sideState = host2.ordState("side"), focus = laneFocus(), path = routedPath(), { current, ancestors } = path, { roots: lanes, children: everyone } = navigationTree(path);
-      sideOrder = Object.assign(host2.orderScope("side", "", null, sideState), { seen: /* @__PURE__ */ new Set() });
-      sideOrder.rail = rail;
-      const box = host2.$("#lanes"), drawn = [...box.querySelectorAll(".treeitem")];
-      sideOrder.seen = new Set(drawn.map((r) => r.dataset.id));
-      const seeing = new Set(drawn.filter((r) => r.querySelector(":scope > .tree-row .srow")?.getClientRects().length).map((r) => r.dataset.id));
-      let children = everyone;
-      if (sideOrder.keep) {
-        const held = [...everyone.keys()].filter((p) => !sideOrder.prevKids.has(p) && seeing.has(p) && p !== current && !ancestors.has(p));
-        if (held.length) {
-          children = new Map([...everyone].filter(([p]) => !held.includes(p)));
-          sideOrder.n += held.reduce((n, p) => n + everyone.get(p).length, 0);
-        }
+    function renderDrawerAccount() {
+      if (shellChrome) {
+        shellChrome.drawerAccount(
+          host2.account ? {
+            account: host2.account,
+            compact: true,
+            wide: host2.layoutOwner.wideMode,
+            onWideChange: () => host2.layoutOwner.setWideMode(!host2.layoutOwner.wideMode)
+          } : null
+        );
+        return;
       }
-      sideOrder.kids = new Set(children.keys());
-      if (expandedAll && (host2.phone.matches || host2.railMode || !host2.SESS[expandedAll])) expandedAll = null;
-      sideOrder.exp = JSON.stringify([expandedAll, host2.railMode && !host2.phone.matches]);
-      sideOrder.reseed = sideOrder.keep && sideOrder.prevExp !== sideOrder.exp;
-      expandedPath = expandedAll ? ancestorsOf(expandedAll) : /* @__PURE__ */ new Set();
-      expandedUnder = expandedAll ? new Set(host2.descendantsOf(expandedAll, children).map((x) => x.id)) : /* @__PURE__ */ new Set();
-      recentSnapshot = { items: host2.orderList(sideOrder, "lanes", lanes, host2.byLast, { limit: 8, must: /* @__PURE__ */ new Set([...current ? [current] : [], ...ancestors]) }).slice(0, 8).map((s) => buildLaneSnapshot(s, 0, children, rail)), empty: !lanes.length };
-      recentRenderer.update(recentSnapshot);
-      if (!sideOrder.n) {
-        clearTimeout(host2.ordIdle);
-        host2.ordIdle = void 0;
-      } else if (!host2.ordIdle) host2.ordIdleArm();
-      const q = host2.$("#q");
-      if (q && document.activeElement !== q) q.value = host2.query;
-      restoreLaneFocus(focus);
-      const stuck = box.querySelector(".tree-row.stuck"), navigated = revealedFor !== host2.navigation.route;
-      revealedFor = host2.navigation.route;
-      setGeometry(host2.$("#side-list") ?? host2.$("#sidebar"), "scrollPaddingTop", stuck ? stuck.offsetHeight + 8 : null);
-      if (stuck && navigated) host2.scrollProgrammatically(() => box.querySelector('.srow[aria-current="page"]')?.scrollIntoView({ block: "nearest" }));
+      const old = host2.$("#account-drawer");
+      if (old) {
+        accountChrome.unmount(old);
+        old.remove();
+      }
+      if (!host2.account) return;
+      const widget = accountWidget(true);
+      if (!widget) return;
+      widget.id = "account-drawer";
+      host2.$("#sidebar").append(widget);
     }
-    return { recentRenderer, get expandedAll() {
-      return expandedAll;
-    }, set expandedAll(value) {
-      expandedAll = value;
-    }, renderLanes, COST_TIP, isApprovalReview };
+    return { shellChrome, accountChrome, closeAccountMenu, renderDrawerAccount };
   }
 
   // src/app/registry.ts
-  var HARNESSES = { claude: { name: "Claude Code", short: "Claude", icon: { light: "/harness/claude-code.svg", dark: "/harness/claude-code.svg" } }, codex: { name: "Codex", short: "Codex", icon: { light: "/harness/codex-black.svg", dark: "/harness/codex.svg" } }, opencode: { name: "OpenCode", short: "OpenCode", icon: { light: "/harness/opencode-light.svg", dark: "/harness/opencode-dark.svg" } } };
+  var HARNESSES = {
+    claude: {
+      name: "Claude Code",
+      short: "Claude",
+      icon: { light: "/harness/claude-code.svg", dark: "/harness/claude-code.svg" }
+    },
+    codex: {
+      name: "Codex",
+      short: "Codex",
+      icon: { light: "/harness/codex-black.svg", dark: "/harness/codex.svg" }
+    },
+    opencode: {
+      name: "OpenCode",
+      short: "OpenCode",
+      icon: { light: "/harness/opencode-light.svg", dark: "/harness/opencode-dark.svg" }
+    }
+  };
   var HARNESS = Object.fromEntries(Object.entries(HARNESSES).map(([id, h2]) => [id, h2.name]));
-  var HARNESS_SHORT = Object.fromEntries(Object.entries(HARNESSES).map(([id, h2]) => [id, h2.short]));
+  var HARNESS_SHORT = Object.fromEntries(
+    Object.entries(HARNESSES).map(([id, h2]) => [id, h2.short])
+  );
   var I = {
     menu: "M4 7h16M4 12h16M4 17h16",
     more: "M5 12h.01M12 12h.01M19 12h.01",
@@ -6362,7 +8058,2713 @@ globalThis.__semonUIShared = __semonUIShared;
     coin: "M12 3v18M17 7.5C17 6.1 14.8 5 12 5S7 6.1 7 7.5 9.2 10 12 10s5 1.1 5 2.5-2.2 2.5-5 2.5-5-1.1-5-2.5",
     relay: "M4 7h13l-3-3M20 17H7l3 3"
   };
-  var STATE = { work: "Working", wait: "Needs you", idle: "Idle", done: "Done", err: "Failed", new: "New result", read: "Read result" };
+  var STATE = {
+    work: "Working",
+    wait: "Needs you",
+    idle: "Idle",
+    done: "Done",
+    err: "Failed",
+    new: "New result",
+    read: "Read result"
+  };
+
+  // src/state/analytics-wire.ts
+  function shape(fields) {
+    return (value) => {
+      const source = object2(value), parsed = Object.fromEntries(
+        Object.entries(fields).map(([key, parse]) => [key, parse(source[key])])
+      );
+      return parsed;
+    };
+  }
+  var list = (parse) => (value) => array(value, parse);
+  var nullable = (parse) => (value) => value == null ? null : parse(value);
+  var optional2 = (parse) => (value) => value == null ? void 0 : parse(value);
+  var strings4 = list(text);
+  var money = shape({ usd: nullable(number), unpriced_models: strings4 });
+  var period = shape({
+    agent_ms: number,
+    started: number,
+    turns: number,
+    tools: number,
+    errors: number,
+    peak: number,
+    wait_ms: number,
+    median_wait_ms: number,
+    longest_wait_ms: number,
+    cost: money
+  });
+  var busy = shape({ sid: text, ms: number });
+  var priced = shape({ sid: text, usd: nullable(number), unpriced_models: strings4 });
+  var column = shape({
+    from: number,
+    to: number,
+    claude_ms: number,
+    codex_ms: number,
+    sessions: list(busy),
+    more: number
+  });
+  var day = shape({
+    from: number,
+    to: number,
+    claude_usd: number,
+    codex_usd: number,
+    sessions: list(priced),
+    more: number
+  });
+  var breakdown = shape({
+    repo: optional2(nullable(text)),
+    machine: optional2(text),
+    harness: optional2(text),
+    model: optional2(text),
+    ms: number,
+    usd: number,
+    sessions: number,
+    unpriced_models: strings4
+  });
+  var tokens = shape({
+    input: optional2(number),
+    output: optional2(number),
+    cache_read: optional2(number),
+    cache_write: optional2(number)
+  });
+  var item = shape({
+    sid: text,
+    models: optional2(strings4),
+    cost_usd: nullable(number),
+    pr_url: nullable(text)
+  });
+  var model = shape({
+    model: text,
+    band: text,
+    n: number,
+    small_sample: boolean,
+    first_pass_acceptance: nullable(number),
+    acceptance_n: number,
+    median_review_rounds: nullable(number),
+    review_rounds_n: number,
+    median_red_ci_heads: nullable(number),
+    red_ci_n: number,
+    median_model_ms: nullable(number),
+    model_time_n: number,
+    median_cost_usd: nullable(number),
+    cost_n: number,
+    allowance_per_million_input: nullable(number),
+    allowance_n: number,
+    tokens,
+    tokens_n: number,
+    items: list(item),
+    items_more: number
+  });
+  var parseAnalytics = shape({
+    days: number,
+    version: text,
+    current: period,
+    previous: period,
+    longest_current_wait: nullable(busy),
+    calls_unknown: number,
+    agents: shape({ unit: text, columns: list(column) }),
+    cost: nullable(shape({ days: list(day), unpriced_models: strings4 })),
+    breakdown: shape({ repo: list(breakdown), machine: list(breakdown), model: list(breakdown) }),
+    top: shape({ busy: list(busy), waited: list(busy), cost: list(priced) }),
+    sessions: (v) => dictionary(v, shape({ name: text, harness: text })),
+    models: optional2(
+      shape({ groups: list(model), unknown_reasons: (v) => dictionary(v, text) })
+    ),
+    allowance: nullable(
+      shape({
+        recorded_at: number,
+        windows: list(shape({ minutes: number, used_percent: number, resets_at: number }))
+      })
+    ),
+    facets: shape({ repo: list(nullable(text)), machine: strings4, harness: strings4, model: strings4 })
+  });
+
+  // src/app/analytics.ts
+  function createAnalytics(host2) {
+    const MIN = 6e4, HOUR = 60 * MIN, AN_EVERY = 1e4, AN_KEEP = 8;
+    const AN = {
+      answers: /* @__PURE__ */ new Map(),
+      inflight: null,
+      again: false,
+      againAsked: false,
+      timer: void 0,
+      error: null,
+      failedAt: 0
+    };
+    function analyticsQuery() {
+      const q = ["range=" + (host2.analyticsRange === 1 ? "24h" : host2.analyticsRange + "d")];
+      if (host2.sessionFilters.repo)
+        q.push(
+          "repo=" + (host2.sessionFilters.repo === "__none__" ? "" : host2.transportOwner.enc(host2.sessionFilters.repo))
+        );
+      for (const key of ["machine", "harness", "model"])
+        if (host2.sessionFilters[key])
+          q.push(key + "=" + host2.transportOwner.enc(host2.sessionFilters[key]));
+      return q.join("&");
+    }
+    const analyticsData = () => AN.answers.get(analyticsQuery())?.data ?? null;
+    function fetchAnalytics(askedByUser = false) {
+      if (AN.inflight) {
+        AN.again = true;
+        AN.againAsked ||= askedByUser;
+        return AN.inflight;
+      }
+      const key = analyticsQuery(), kept = AN.answers.get(key);
+      const controller = host2.scope.request();
+      const asked = fetch("/api/analytics?" + key, {
+        signal: controller.signal,
+        credentials: "same-origin",
+        headers: kept?.etag ? { "If-None-Match": kept.etag } : {}
+      }).then((r) => {
+        if (host2.disposed) throw new DOMException("Viewer destroyed", "AbortError");
+        if (r.status === 304) {
+          const cleared = AN.error != null;
+          AN.error = null;
+          return cleared;
+        }
+        if (r.status === 403) {
+          host2.liveModelOwner.ended(403);
+          return false;
+        }
+        if (!r.ok)
+          throw Object.assign(new Error(r.status + " " + r.statusText), { status: r.status });
+        const etag = r.headers.get("ETag");
+        return r.json().then((value) => {
+          if (host2.disposed) return false;
+          const data = parseAnalytics(value);
+          AN.answers.delete(key);
+          AN.answers.set(key, { etag, data });
+          while (AN.answers.size > AN_KEEP) AN.answers.delete(AN.answers.keys().next().value);
+          const changed = AN.error != null || kept?.etag !== etag;
+          AN.error = null;
+          return changed;
+        });
+      }).catch((e) => {
+        if (host2.disposed) return false;
+        const changed = AN.error !== e.message;
+        AN.error = e.message;
+        AN.failedAt = performance.now();
+        return changed;
+      });
+      AN.inflight = asked.then((changed) => {
+        host2.scope.releaseRequest(controller);
+        AN.inflight = null;
+        if (host2.disposed || !AN.again) return changed;
+        const askedAgain = AN.againAsked;
+        AN.again = AN.againAsked = false;
+        if (!askedAgain && backingOff()) return changed;
+        return fetchAnalytics(askedAgain).then((more) => changed || more);
+      });
+      return AN.inflight;
+    }
+    const backingOff = () => AN.error != null && performance.now() - AN.failedAt < AN_EVERY;
+    function scheduleAnalytics() {
+      host2.scope.clearTimeout(AN.timer);
+      AN.timer = void 0;
+      if (host2.navigation.route.v !== "analytics" || host2.liveModelOwner.LIVE.ended || !host2.liveModelOwner.visible())
+        return;
+      const data = analyticsData(), behind = !AN.error && data && host2.liveModelOwner.LIVE.version && data.version !== host2.liveModelOwner.LIVE.version;
+      AN.timer = host2.scope.timeout(
+        () => {
+          AN.timer = void 0;
+          refreshAnalytics();
+        },
+        AN.error ? Math.max(0, AN.failedAt + AN_EVERY - performance.now()) : behind ? 1200 : AN_EVERY
+      );
+    }
+    function refreshAnalytics(asked = false) {
+      if (host2.navigation.route.v !== "analytics") return Promise.resolve();
+      if (asked !== true && backingOff()) {
+        if (!AN.timer) scheduleAnalytics();
+        return Promise.resolve();
+      }
+      host2.scope.clearTimeout(AN.timer);
+      AN.timer = void 0;
+      return fetchAnalytics(asked === true).then((changed) => {
+        if (changed && host2.navigation.route.v === "analytics" && host2.navigation.rendered === host2.navigation.route) {
+          if (host2.toolViewsOwner.viewerEl || host2.accountControlsOwner.accountChrome.open)
+            host2.liveModelOwner.LIVE.pending = true;
+          else {
+            const st = host2.viewport.capture();
+            host2.documentRendererOwner.render();
+            host2.viewport.restore(st);
+          }
+        }
+        scheduleAnalytics();
+      });
+    }
+    if (!host2.sidebarOnly)
+      host2.scope.listen(document, "visibilitychange", () => {
+        if (host2.liveModelOwner.visible() && host2.navigation.route.v === "analytics")
+          refreshAnalytics();
+        else if (!host2.liveModelOwner.visible()) {
+          host2.scope.clearTimeout(AN.timer);
+          AN.timer = void 0;
+        }
+      });
+    const nameOfSid = (A, sid) => host2.modelStore.sessions[sid]?.name ?? A.sessions[sid]?.name ?? sid;
+    const harnessOfSid = (A, sid) => host2.modelStore.sessions[sid]?.harness ?? A.sessions[sid]?.harness ?? "";
+    const sessionFacetValue = (s, key) => key === "repo" ? s.repo ?? "__none__" : key === "model" ? s.model ?? s.modelId ?? "Unknown model" : s[key] ?? "";
+    function matchesSessionFacets(s) {
+      return Object.keys(host2.sessionFilters).every(
+        (key) => !host2.sessionFilters[key] || sessionFacetValue(s, key) === host2.sessionFilters[key]
+      );
+    }
+    const rangeFacet = (key) => host2.navigation.route.v !== "analytics" ? [] : (analyticsData()?.facets?.[key] ?? []).map((v) => v ?? "__none__");
+    const FACETS = [
+      [
+        "repo",
+        "Repo",
+        "All repos",
+        () => [
+          .../* @__PURE__ */ new Set([
+            ...Object.values(host2.modelStore.sessions).map((s) => sessionFacetValue(s, "repo")),
+            ...rangeFacet("repo")
+          ])
+        ].sort((a, b) => a === "__none__" ? 1 : b === "__none__" ? -1 : a.localeCompare(b)),
+        (v) => v === "__none__" ? "No repo" : v
+      ],
+      [
+        "machine",
+        "Machine",
+        "All machines",
+        () => [
+          .../* @__PURE__ */ new Set([
+            ...Object.values(host2.modelStore.sessions).map((s) => s.machine ?? ""),
+            ...rangeFacet("machine")
+          ])
+        ].sort(),
+        (v) => host2.modelStore.machines[v] ?? v
+      ],
+      [
+        "harness",
+        "Harness",
+        "All harnesses",
+        () => [
+          .../* @__PURE__ */ new Set([
+            ...Object.values(host2.modelStore.sessions).map((s) => s.harness ?? ""),
+            ...rangeFacet("harness")
+          ])
+        ].sort(),
+        (v) => HARNESS[v] ?? v
+      ],
+      [
+        "model",
+        "Model",
+        "All models",
+        () => [
+          .../* @__PURE__ */ new Set([
+            ...Object.values(host2.modelStore.sessions).map((s) => sessionFacetValue(s, "model")),
+            ...rangeFacet("model")
+          ])
+        ].sort(),
+        shortModel
+      ]
+    ];
+    function renderFacetFilters(box, onChange) {
+      const s = host2.routeControls.slot("facets", box, (ctx) => {
+        let before = "";
+        const control = createFacetChrome({
+          select(label, value, onChange2) {
+            return createSelect({ label, value, options: [], onChange: onChange2 });
+          },
+          change(key, value) {
+            host2.sessionFilters[key] = value;
+          },
+          cleared(key) {
+            host2.sessionFilters[key] = "";
+            ctx.sync();
+            ctx.onChange();
+          },
+          canOpen() {
+            return !host2.toolViewsOwner.viewerEl;
+          },
+          opened(d) {
+            ctx.sync();
+            before = JSON.stringify(host2.sessionFilters);
+            host2.toolViewsOwner.viewerEl = d;
+            try {
+              history.pushState(
+                {
+                  ...host2.navigation.route,
+                  sheet: 1,
+                  scrollTop: host2.historyScrollOwner.currentScroll()
+                },
+                ""
+              );
+            } catch {
+            }
+          },
+          closed(d, reason) {
+            if (host2.disposed || reason === "destroyed") return;
+            if (host2.toolViewsOwner.viewerEl === d) {
+              host2.toolViewsOwner.viewerEl = null;
+              if (history.state?.sheet) {
+                host2.toolViewsOwner.skipPop = true;
+                history.back();
+              }
+            }
+            if (JSON.stringify(host2.sessionFilters) !== before) {
+              host2.liveModelOwner.LIVE.pending = false;
+              ctx.onChange();
+            } else if (host2.liveModelOwner.LIVE.pending) host2.applicationRefreshOwner.refresh();
+          },
+          clear() {
+            for (const key of Object.keys(host2.sessionFilters))
+              host2.sessionFilters[key] = "";
+          }
+        });
+        ctx.destroy = () => control.destroy();
+        ctx.sync = () => control.update(
+          FACETS.map(([key, label, allLabel, valuesOf, showValue]) => {
+            const current = host2.sessionFilters[key], values = valuesOf().filter((value) => value !== ""), gone = current !== "" && !values.includes(current);
+            if (gone) values.push(current);
+            return {
+              key,
+              label,
+              value: current,
+              display: showValue(current),
+              options: [
+                { value: "", label: allLabel },
+                ...values.map((value) => ({
+                  value,
+                  label: showValue(value) + (gone && value === current ? " (no sessions)" : "")
+                }))
+              ]
+            };
+          })
+        );
+        return control.element;
+      });
+      s.ctx.onChange = onChange;
+      s.ctx.sync();
+      return s.el;
+    }
+    const hoursText = (ms) => (ms / HOUR).toFixed(1) + " h", rangeName = () => host2.analyticsRange === 1 ? "24 h" : host2.analyticsRange + " d";
+    function chartWidth() {
+      const page = host2.$("#page"), style = getComputedStyle(page);
+      return Math.max(
+        280,
+        Math.round(page.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight))
+      );
+    }
+    const rangeAgo = (A) => A.days === 1 ? "24 h ago" : A.days + " d ago";
+    function openModelItems(group) {
+      const {
+        d,
+        body,
+        show: open
+      } = host2.sessionChrome.panel(shortModel(group.model) + " \xB7 " + group.band, {
+        label: "Work items for " + group.model + ", " + group.band
+      });
+      renderModelItems(
+        body,
+        group.n + " work items" + (group.small_sample ? " \xB7 small sample" : ""),
+        (group.items ?? []).map((item2) => ({
+          id: item2.sid,
+          name: host2.modelStore.sessions[item2.sid]?.name,
+          description: (item2.models ?? []).map(shortModel).join(" \u2192 ") + " \xB7 " + (item2.cost_usd == null ? "cost unknown" : host2.domain.asMoney(item2.cost_usd)),
+          trace: (host2.modelStore.turns[item2.sid] ?? []).find((t) => t.out.length)?.id,
+          url: liveUrl(item2.pr_url ?? "") ?? void 0
+        })),
+        group.items_more ? group.items_more + " more items in the selected range" : void 0,
+        {
+          session(id) {
+            host2.pendingSessionOpen = id;
+            d.close();
+          },
+          trace(id) {
+            host2.afterPop = () => host2.destination.goTrace(id);
+            d.close();
+          }
+        }
+      );
+      open();
+    }
+    function openAnalyticsSlice(A, a, b, items, more, costMode = false) {
+      const when = new Date(a).toLocaleString([], { weekday: "short", hour: "numeric", minute: "2-digit" }) + "\u2013" + new Date(b).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }), heading = costMode ? "Sessions with cost" : "Sessions busy";
+      const sheet2 = createNativeSheet(
+        {
+          className: "analytics-slice",
+          heading: heading + " \xB7 " + when,
+          label: heading + " " + when,
+          closeLabel: "Close sessions list"
+        },
+        {
+          opened(d) {
+            host2.toolViewsOwner.viewerEl = d;
+            document.documentElement.classList.add("viewer-open");
+            try {
+              history.pushState(
+                {
+                  ...host2.navigation.route,
+                  sheet: 1,
+                  scrollTop: host2.historyScrollOwner.currentScroll()
+                },
+                ""
+              );
+            } catch {
+            }
+          },
+          closed(d) {
+            host2.dialogs.delete(d);
+            if (host2.disposed) return;
+            document.documentElement.classList.remove("viewer-open");
+            if (host2.toolViewsOwner.viewerEl === d) {
+              host2.toolViewsOwner.viewerEl = null;
+              if (history.state?.sheet) {
+                host2.toolViewsOwner.skipPop = true;
+                history.back();
+              } else if (host2.pendingSessionOpen) {
+                const id = host2.pendingSessionOpen;
+                host2.pendingSessionOpen = null;
+                host2.destination.goSession(id);
+              }
+            }
+          }
+        }
+      );
+      const rows = items.map((item2) => {
+        const harness = harnessOfSid(A, item2.sid);
+        return {
+          id: item2.sid,
+          name: nameOfSid(A, item2.sid),
+          harness,
+          harnessName: HARNESS_SHORT[harness] ?? harness,
+          harnessTip: HARNESS[harness] && HARNESS[harness] !== HARNESS_SHORT[harness] ? HARNESS[harness] : void 0,
+          mark: host2.screenViews.harnessSnapshot(harness),
+          value: costMode ? host2.domain.asMoney("usd" in item2 ? item2.usd ?? 0 : 0) : timeText("ms" in item2 ? item2.ms : 0) + " busy",
+          href: host2.modelStore.sessions[item2.sid] ? host2.bootstrapOwner.urlOf({ v: "session", id: item2.sid }) : void 0,
+          className: "analytics-session analytics-slice",
+          missing: costMode && "unpriced_models" in item2 && item2.unpriced_models.length ? "no price for " + item2.unpriced_models.join(", ") : void 0
+        };
+      });
+      renderSliceBody(
+        sheet2.body,
+        rows,
+        more ?? 0,
+        costMode ? "No sessions had a recorded cost then." : "No sessions were busy then.",
+        (id) => {
+          host2.pendingSessionOpen = id;
+          sheet2.dialog.close();
+        }
+      );
+      sheet2.cleanup(() => render(null, sheet2.body));
+      host2.dialogs.set(sheet2.dialog, sheet2);
+      sheet2.show();
+    }
+    function renderAnalytics(page) {
+      const A = analyticsData(), metrics = [], charts = [], breakdowns = [], lists = [], modelGroups = /* @__PURE__ */ new Map(), slices = /* @__PURE__ */ new Map();
+      const heading = "Measured activity \xB7 Last " + (host2.analyticsRange === 1 ? "24 hours" : host2.analyticsRange + " days");
+      let error = AN.error ? A ? "Couldn't update Analytics: " + AN.error + ". Showing the last answer." : "Couldn't load Analytics: " + AN.error : A ? void 0 : "Loading\u2026";
+      const note = (value, previous, format) => {
+        const delta = value - previous;
+        return Math.abs(delta) < 1e-9 ? { text: "No change vs previous " + rangeName() } : {
+          lead: (delta > 0 ? "+" : "\u2212") + format(Math.abs(delta)),
+          tone: delta > 0 ? "up" : "down",
+          text: " vs previous " + rangeName()
+        };
+      };
+      const metric = (label, value, delta, explanation, info) => metrics.push({
+        id: "metric-more-analytics-" + metrics.length,
+        label,
+        value,
+        note: delta,
+        explanation,
+        info
+      });
+      const widthOf = (measure, max) => Math.max(measure ? 2 : 0, measure / max * 100);
+      const makeChart = (costMode) => {
+        if (!A) throw new Error("Analytics model unavailable");
+        const key = costMode ? "cost" : "agents", W = chartWidth(), left = costMode ? 46 : 40, right = W - 4;
+        if (costMode && !A.cost)
+          return {
+            key,
+            heading: "Cost over time",
+            info: host2.recentNavigation.COST_TIP,
+            empty: "Cost is recorded per UTC day, so there is no hourly series. Pick 7 d or 30 d for a daily chart.",
+            width: W,
+            left,
+            right,
+            grid: [],
+            bins: [],
+            legend: [],
+            role: "img",
+            label: "",
+            ago: rangeAgo(A)
+          };
+        const raw = costMode ? A.cost.days.map((d) => ({
+          a: d.from,
+          b: d.to,
+          claude: d.claude_usd,
+          codex: d.codex_usd,
+          sessions: d.sessions,
+          more: d.more
+        })) : A.agents.columns.map((c) => ({
+          a: c.from,
+          b: c.to,
+          claude: c.claude_ms / HOUR,
+          codex: c.codex_ms / HOUR,
+          sessions: c.sessions,
+          more: c.more
+        }));
+        const most = Math.max(0, ...raw.map((b) => b.claude + b.codex)), stepY = niceStep(most || 1), max = costMode ? Math.max(0.01, most) : Math.max(stepY, Math.ceil(most / stepY) * stepY);
+        const grid = [];
+        if (costMode)
+          for (let i = 0; i <= 2; i++)
+            grid.push({ y: 151 - 139 * i / 2, label: "$" + (max * i / 2).toFixed(2) });
+        else
+          for (let n = 0; n <= max + 1e-9; n += stepY)
+            grid.push({ y: 151 - 139 * n / max, label: hLabel(n) });
+        const step = (right - left) / Math.max(1, raw.length), barWidth = Math.max(2, step * 0.64);
+        const bins = raw.map((bin, i) => {
+          const id = key + ":" + i, total = bin.claude + bin.codex, when = host2.clock(bin.a) + "\u2013" + host2.clock(bin.b), tip = when + ": " + hLabel(total);
+          slices.set(id, { bin, costMode });
+          return {
+            key: id,
+            x: left + i * step,
+            width: step,
+            barX: left + i * step + (step - barWidth) / 2,
+            barWidth,
+            claude: 139 * bin.claude / max,
+            codex: 139 * bin.codex / max,
+            active: costMode ? !!bin.sessions.length : total > 0,
+            tip: costMode ? void 0 : tip,
+            label: costMode ? host2.clock(bin.a) + " to " + host2.clock(bin.b) + ": " + host2.domain.asMoney(total) : tip + ". Open the sessions busy then",
+            when,
+            value: costMode ? host2.domain.asMoney(total) : hLabel(total) + " agent-hours"
+          };
+        });
+        return {
+          key,
+          heading: costMode ? "Cost over time" : "Agents at work",
+          info: costMode ? host2.recentNavigation.COST_TIP : void 0,
+          sub: costMode ? "API-equivalent cost per UTC day \xB7 today so far \xB7 stacked by harness" : "Agent-hours " + A.agents.unit + " \xB7 stacked by harness",
+          width: W,
+          left,
+          right,
+          grid,
+          bins,
+          label: costMode ? "API-equivalent cost per day, stacked by harness" : "Agent-hours " + A.agents.unit + " over the selected range, stacked by harness",
+          role: costMode ? "img" : "group",
+          ago: rangeAgo(A),
+          legend: [
+            ["claude", "Claude"],
+            ["codex", "Codex"]
+          ].map(([id, label]) => ({ id, label, mark: host2.screenViews.harnessSnapshot(id) })),
+          missing: costMode && A.cost.unpriced_models.length ? "no price for " + A.cost.unpriced_models.join(", ") + "; unpriced usage is omitted from bars." : void 0
+        };
+      };
+      let models, allowance;
+      const measures = [
+        [
+          "Acceptance",
+          "first_pass_acceptance",
+          "acceptance_n",
+          "acceptance",
+          (n) => (n * 100).toFixed(0) + "%"
+        ],
+        ["Review rounds", "median_review_rounds", "review_rounds_n", "review_rounds", String],
+        ["Red CI heads", "median_red_ci_heads", "red_ci_n", "ci", String],
+        ["Model time", "median_model_ms", "model_time_n", "model_time", timeText],
+        [
+          "API cost",
+          "median_cost_usd",
+          "cost_n",
+          "cost",
+          (...args) => host2.domain.asMoney(...args)
+        ],
+        [
+          "Allowance / M input",
+          "allowance_per_million_input",
+          "allowance_n",
+          "allowance",
+          (n) => n.toFixed(2) + "%"
+        ]
+      ];
+      if (A) {
+        const now = A.current, previous = A.previous, pct = (errors, tools) => tools ? Math.round(errors / tools * 100) + "%" : "0%";
+        metric(
+          "Agent-hours",
+          hoursText(now.agent_ms),
+          note(now.agent_ms, previous.agent_ms, hoursText),
+          "Busy time summed across sessions; two sessions busy for an hour count two hours."
+        );
+        metric(
+          A.days === 1 ? "Cost today (UTC)" : "Cost, last " + A.days + " UTC days",
+          now.cost.usd == null ? "\u2014" : host2.domain.asMoney(now.cost.usd),
+          now.cost.usd == null || previous.cost.usd == null ? {
+            text: "no price for " + [.../* @__PURE__ */ new Set([...now.cost.unpriced_models, ...previous.cost.unpriced_models])].join(
+              ", "
+            )
+          } : note(
+            now.cost.usd,
+            previous.cost.usd,
+            (...args) => host2.domain.asMoney(...args)
+          ),
+          A.days === 1 ? "API-equivalent cost. Cost is recorded per UTC day: this is the whole current UTC day so far, compared with the whole day before." : "API-equivalent cost. Cost is recorded per UTC day: the last " + A.days + " UTC days count, today so far, compared with the " + A.days + " whole UTC days before.",
+          host2.recentNavigation.COST_TIP
+        );
+        metric(
+          "Sessions started",
+          countText(now.started),
+          note(now.started, previous.started, countText)
+        );
+        metric("Turns", countText(now.turns), note(now.turns, previous.turns, countText));
+        const toolNote = note(now.tools, previous.tools, countText);
+        if (A.calls_unknown)
+          toolNote.tail = " \xB7 \u2014 for " + A.calls_unknown + (A.calls_unknown === 1 ? " session" : " sessions");
+        metric(
+          "Tool calls",
+          countText(now.tools),
+          toolNote,
+          countText(now.errors) + " failed (" + pct(now.errors, now.tools) + ") \xB7 previous " + rangeName() + ": " + countText(previous.errors) + " failed (" + pct(previous.errors, previous.tools) + ")"
+        );
+        metric(
+          "Peak concurrency",
+          countText(now.peak),
+          note(now.peak, previous.peak, countText),
+          "The most sessions busy at the same moment."
+        );
+        metric(
+          "Waited on you",
+          timeText(now.wait_ms),
+          note(now.wait_ms, previous.wait_ms, timeText),
+          "Median wait " + timeText(now.median_wait_ms) + " \xB7 previous " + rangeName() + ": " + timeText(previous.median_wait_ms)
+        );
+        const wait = A.longest_current_wait;
+        metric(
+          "Longest current wait",
+          wait ? timeText(wait.ms) : "\u2014",
+          note(wait ? wait.ms : 0, previous.longest_wait_ms, timeText),
+          wait ? nameOfSid(A, wait.sid) + " has waited on you for " + timeText(wait.ms) : "No session is waiting on you"
+        );
+        charts.push(makeChart(false), makeChart(true));
+        for (const [key, title, groups] of [
+          ["repo", "By repo", A.breakdown.repo],
+          ["machine", "By machine", A.breakdown.machine],
+          ["harness", "By harness and model", A.breakdown.model]
+        ]) {
+          const keyFor = (g) => key === "repo" ? g.repo ?? "__none__" : key === "machine" ? g.machine ?? "" : g.harness + "\0" + g.model;
+          const labelFor = (id) => key === "repo" ? id === "__none__" ? "No repo (roles)" : id : key === "machine" ? host2.modelStore.machines[id] ?? id : (HARNESS[id.split("\0")[0]] ?? id.split("\0")[0]) + " \xB7 " + shortModel(id.split("\0")[1]);
+          const selected = (g) => host2.analyticsMeasure === "cost" ? g.usd : g.ms, rows = [...groups].sort(
+            (a, b) => selected(b) - selected(a) || labelFor(keyFor(a)).localeCompare(labelFor(keyFor(b)))
+          ), max = Math.max(1, ...rows.map(selected));
+          breakdowns.push({
+            key,
+            heading: title,
+            rows: rows.map((g) => ({
+              key: keyFor(g),
+              name: labelFor(keyFor(g)),
+              count: g.sessions + (g.sessions === 1 ? " session" : " sessions"),
+              width: widthOf(selected(g), max),
+              color: key === "harness" ? keyFor(g).startsWith("claude") ? "claude" : "codex" : void 0,
+              hours: hoursText(g.ms),
+              cost: g.unpriced_models.length ? "\u2014" : host2.domain.asMoney(g.usd),
+              missing: g.unpriced_models.length ? "no price for " + g.unpriced_models.join(", ") : void 0
+            }))
+          });
+        }
+        const topLists = [
+          [
+            "Top sessions \xB7 busy time",
+            A.top.busy,
+            (x) => timeText("ms" in x ? x.ms : 0),
+            (x) => "ms" in x ? x.ms : 0
+          ],
+          [
+            "Top sessions \xB7 waited on",
+            A.top.waited,
+            (x) => timeText("ms" in x ? x.ms : 0),
+            (x) => "ms" in x ? x.ms : 0
+          ],
+          [
+            "Most expensive sessions \xB7 API-equivalent cost",
+            A.top.cost,
+            (x) => "usd" in x && x.usd != null ? host2.domain.asMoney(x.usd) : "\u2014",
+            (x) => "usd" in x ? x.usd ?? 0 : 0
+          ]
+        ];
+        for (const [title, items, value, measure] of topLists) {
+          const max = Math.max(1, ...items.map(measure));
+          lists.push({
+            heading: title,
+            rows: items.map((item2) => {
+              const harness = harnessOfSid(A, item2.sid), missing = "unpriced_models" in item2 ? item2.unpriced_models : [];
+              return {
+                id: item2.sid,
+                name: nameOfSid(A, item2.sid),
+                harness,
+                harnessName: HARNESS_SHORT[harness] ?? harness,
+                harnessTip: HARNESS[harness] && HARNESS[harness] !== HARNESS_SHORT[harness] ? HARNESS[harness] : void 0,
+                mark: host2.screenViews.harnessSnapshot(harness),
+                value: value(item2),
+                href: host2.modelStore.sessions[item2.sid] ? host2.bootstrapOwner.urlOf({ v: "session", id: item2.sid }) : void 0,
+                rank: widthOf(measure(item2), max),
+                missing: missing.length ? "no price for " + missing.join(", ") : void 0
+              };
+            })
+          });
+        }
+        if (A.models) {
+          const reasons = A.models.unknown_reasons ?? {};
+          models = [];
+          for (const band of ["easy", "medium", "hard", "unknown"]) {
+            const rows = (A.models.groups ?? []).filter((g) => g.band === band);
+            if (!rows.length) continue;
+            const points = rows.filter(
+              (g) => g.first_pass_acceptance != null && g.median_cost_usd != null
+            ), W = Math.max(280, chartWidth()), maxCost = Math.max(0.01, ...points.map((g) => g.median_cost_usd ?? 0));
+            models.push({
+              key: band,
+              heading: band === "unknown" ? "Unknown difficulty" : band[0].toUpperCase() + band.slice(1),
+              width: W,
+              rows: rows.map((g) => {
+                const key = band + "\0" + g.model;
+                modelGroups.set(key, g);
+                const tokens2 = g.tokens ?? {};
+                return {
+                  key,
+                  name: shortModel(g.model),
+                  tip: g.model,
+                  count: g.n + (g.small_sample ? " \xB7 small sample" : ""),
+                  cells: [
+                    ...measures.map(([, valueKey, nKey, reason, format]) => ({
+                      text: g[valueKey] == null ? "Unknown" : format(g[valueKey]),
+                      n: g[nKey] ?? 0,
+                      tip: g[valueKey] == null ? reasons[reason] : void 0
+                    })),
+                    {
+                      text: g.tokens_n ? [
+                        tokens2.input ?? 0,
+                        tokens2.output ?? 0,
+                        (tokens2.cache_read ?? 0) + (tokens2.cache_write ?? 0)
+                      ].map(countText).join(" / ") : "Unknown",
+                      n: g.tokens_n ?? 0
+                    }
+                  ]
+                };
+              }),
+              points: points.map((g) => ({
+                x: 42 + g.median_cost_usd / maxCost * (W - 58),
+                y: 150 - g.first_pass_acceptance * 130,
+                label: shortModel(g.model),
+                tip: g.model + ": " + host2.domain.asMoney(g.median_cost_usd ?? 0) + ", " + (g.first_pass_acceptance * 100).toFixed(0) + "% accepted; acceptance n=" + g.acceptance_n + ", cost n=" + g.cost_n
+              }))
+            });
+          }
+        }
+        const limits = A.allowance;
+        if (limits?.recorded_at != null && limits.windows?.length)
+          allowance = {
+            when: new Date(limits.recorded_at).toLocaleString([], {
+              hour: "numeric",
+              minute: "2-digit"
+            }),
+            windows: limits.windows.map((limit) => ({
+              label: limit.minutes === 300 ? "5-hour window" : limit.minutes === 10080 ? "Weekly window" : limit.minutes + "-minute window",
+              used: limit.used_percent + "% used",
+              reset: "Resets " + new Date(limit.resets_at).toLocaleString([], {
+                weekday: "short",
+                hour: "numeric",
+                minute: "2-digit"
+              })
+            }))
+          };
+      }
+      renderAnalyticsScreen(
+        page,
+        {
+          heading,
+          error,
+          ready: !!A,
+          query: analyticsQuery(),
+          metrics,
+          charts,
+          breakdowns,
+          lists,
+          models,
+          measure: host2.analyticsMeasure,
+          allowance,
+          modelHeaders: [
+            "Model",
+            "Work items",
+            ...measures.map((m) => m[0]),
+            "Tokens \xB7 input / output / cache"
+          ]
+        },
+        {
+          committed: (...args) => host2.sessionChrome.observeTitle(...args),
+          facets: () => renderFacetFilters(page, () => {
+            host2.documentRendererOwner.render();
+            refreshAnalytics(true);
+          }),
+          session: (...args) => host2.destination.goSession(...args),
+          measure(value) {
+            if (host2.analyticsMeasure === value) return;
+            const top = host2.historyScrollOwner.currentScroll();
+            host2.analyticsMeasure = value;
+            host2.documentRendererOwner.render();
+            host2.historyScrollOwner.restoreScroll(top);
+          },
+          breakdown(group, key) {
+            if (group === "repo") host2.sessionFilters.repo = key;
+            else if (group === "machine") host2.sessionFilters.machine = key;
+            else {
+              const [harness, model2] = key.split("\0");
+              host2.sessionFilters.harness = harness ?? "";
+              host2.sessionFilters.model = model2 ?? "";
+            }
+            host2.query = "";
+            host2.groupBy = "recent";
+            host2.destination.go({ v: "sessions" });
+          },
+          slice(key) {
+            const slice = slices.get(key);
+            if (!slice || !A) return;
+            const { bin, costMode } = slice;
+            openAnalyticsSlice(A, bin.a, bin.b, bin.sessions, bin.more, costMode);
+          },
+          model(key) {
+            const model2 = modelGroups.get(key);
+            if (model2) openModelItems(model2);
+          }
+        }
+      );
+    }
+    return {
+      fetchAnalytics,
+      scheduleAnalytics,
+      refreshAnalytics,
+      renderAnalytics,
+      matchesSessionFacets,
+      renderFacetFilters
+    };
+  }
+
+  // src/app/applicationRefresh.ts
+  function createApplicationRefresh(host2) {
+    function refresh(dirty = null) {
+      if (host2.disposed) return;
+      if (host2.accountControlsOwner.accountChrome.open && !host2.$(".account-popover")?.isConnected)
+        host2.accountControlsOwner.closeAccountMenu();
+      if (host2.toolViewsOwner.viewerEl || host2.accountControlsOwner.accountChrome.open) {
+        host2.liveModelOwner.LIVE.pending = true;
+        return;
+      }
+      if (host2.sidebarOnly) {
+        host2.liveModelOwner.LIVE.pending = false;
+        host2.documentRendererOwner.render();
+        return;
+      }
+      host2.liveModelOwner.LIVE.pending = false;
+      const r = host2.navigation.route;
+      if (host2.navigation.rendered !== r || r.v === "session" && !host2.modelStore.sessions[r.id] || r.v === "trace" && !host2.modelStore.sessions[r.sid] || r.v === "machine" && !host2.modelStore.machines[r.id])
+        return;
+      const st = host2.viewport.capture();
+      setGeometry(host2.$("#page"), "paddingBottom", null);
+      if (r.v !== "session") {
+        host2.documentRendererOwner.render();
+        host2.viewport.restore(st);
+        return;
+      }
+      const n = host2.viewport.patchSession(dirty);
+      host2.viewport.restore(st, st.bottom);
+      if (!st.bottom && n) host2.liveModelOwner.LIVE.fresh += n;
+      host2.viewport.syncJump();
+    }
+    return { refresh };
+  }
+
+  // src/app/bootstrap.ts
+  function createBootstrap(host2) {
+    const routeModel = {
+      session(id) {
+        return host2.modelStore.sessions[id];
+      },
+      machine(id) {
+        return !!host2.modelStore.machines[id];
+      },
+      turn(id) {
+        return host2.modelStore.turn.get(id);
+      },
+      get machinesPath() {
+        return host2.viewerHost?.machinesPath;
+      }
+    };
+    const urlOf = (r) => routeUrl(r, routeModel), routeOf = (location2) => parseRoute(location2, routeModel);
+    function boot() {
+      host2.transportOwner.api("/api/model?delta=1").then(
+        (m) => {
+          const adopted = host2.transportOwner.adopt(m);
+          host2.liveModelOwner.LIVE.version = adopted.version;
+          host2.liveModelOwner.remember(adopted);
+          if (host2.sidebarOnly || host2.nativePage) {
+            if (host2.nativePage)
+              host2.navigation.route = host2.navigation.historyRoute(
+                { v: host2.nativePage.nav },
+                { v: "home" }
+              );
+            host2.documentRendererOwner.render();
+            host2.liveModelOwner.schedule(2e3);
+            return;
+          }
+          host2.navigation.route = routeOf(location);
+          if (host2.navigation.route.v === "sessions")
+            host2.query = (new URLSearchParams(location.search).get("q") ?? "").trim();
+          if (host2.navigation.route.v === "machines" && host2.machinesPath && !host2.viewerHost) {
+            location.assign(host2.machinesPath);
+            return;
+          }
+          try {
+            history.replaceState(
+              { ...host2.navigation.route, scrollTop: 0 },
+              "",
+              urlOf(host2.navigation.route) + (host2.navigation.route.v === "session" ? location.hash : host2.navigation.route.v === "sessions" && host2.query ? "?q=" + host2.transportOwner.enc(host2.query) : "")
+            );
+          } catch {
+          }
+          const done = () => {
+            host2.documentRendererOwner.render();
+            if (host2.navigation.route.v === "session" && ("turn" in host2.navigation.route ? host2.navigation.route.turn : void 0)) {
+              host2.destination.revealTurn(
+                ("turn" in host2.navigation.route ? host2.navigation.route.turn : void 0) ?? "",
+                true
+              );
+              if (location.hash)
+                host2.scope.frame(
+                  () => host2.scope.frame(
+                    (...args) => host2.destination.revealEntryHash(...args)
+                  )
+                );
+            } else if (host2.navigation.route.v === "session" && location.hash)
+              host2.destination.revealEntryHash();
+            else if (host2.navigation.route.v === "session") {
+              host2.destination.openSessionAtEnd();
+              host2.viewport.syncJump();
+            } else host2.historyScrollOwner.quietTop();
+            host2.liveModelOwner.schedule(2e3);
+            host2.scope.interval(
+              (...args) => host2.tickerOwner.ticker(...args),
+              1e3
+            );
+          };
+          const initialRoute = host2.navigation.route, p = host2.transportOwner.load(initialRoute);
+          if (p)
+            p.then(() => {
+              done();
+            }, done);
+          else {
+            done();
+          }
+        },
+        (err) => {
+          if (host2.disposed) return;
+          if (host2.viewerHost?.modelFailed?.(err?.status ?? 0)) return;
+          if (host2.viewerHost) {
+            console.warn("semon: model unavailable", err.status);
+            return;
+          }
+          renderPlaceholder(
+            host2.$(host2.sidebarOnly ? "#lanes" : "#page"),
+            "Couldn't load the sessions: " + err.message
+          );
+        }
+      );
+    }
+    return { routeModel, urlOf, routeOf, boot };
+  }
+
+  // src/app/destination.ts
+  function createDestination(host2) {
+    function openSessionAtEnd() {
+      if (location.hash) return;
+      host2.viewport.startOpeningEndPin();
+    }
+    const SKELETON_MS = 150;
+    let skeletonTimer;
+    let lanesFor = null;
+    function paintPending(r) {
+      const page = host2.$("#page"), hadFocus = host2.$("#sidebar").contains(document.activeElement);
+      host2.navigationViewOwner.renderNav();
+      host2.recentNavigation.renderLanes();
+      host2.sessionChrome.drawSessionBar();
+      lanesFor = { r, version: host2.liveModelOwner.LIVE.version };
+      if (hadFocus)
+        host2.$("#lanes .srow[data-id='" + CSS.escape(r.id) + "']")?.focus({ preventScroll: true });
+      page.setAttribute("aria-busy", "true");
+      page.inert = true;
+      page.classList.add("loading");
+      host2.scope.clearTimeout(skeletonTimer);
+      skeletonTimer = host2.scope.timeout(() => {
+        if (host2.navigation.route !== r || !page.classList.contains("loading")) return;
+        page.classList.remove("loading");
+        page.classList.remove("child-page");
+        setGeometry(page, "paddingBottom", null);
+        renderPlaceholder(page);
+        host2.historyScrollOwner.quietTop();
+        host2.sessionChrome.syncBarLine();
+      }, SKELETON_MS);
+    }
+    function endLoading() {
+      host2.scope.clearTimeout(skeletonTimer);
+      skeletonTimer = void 0;
+      const page = host2.$("#page");
+      page.removeAttribute("aria-busy");
+      page.inert = false;
+      page.classList.remove("loading");
+    }
+    function focusTitle() {
+      const a = document.activeElement;
+      if (a && a !== document.body && !host2.$("#sidebar").contains(a)) return;
+      const h2 = host2.$("#page .ph h1");
+      if (h2) {
+        h2.tabIndex = -1;
+        h2.focus({ preventScroll: true });
+      }
+    }
+    function failLoad(r, err) {
+      if (host2.navigation.route !== r || err instanceof Error && err.name === "AbortError") return;
+      endLoading();
+      const page = host2.$("#page");
+      page.classList.remove("child-page");
+      setGeometry(page, "paddingBottom", null);
+      renderPlaceholder(
+        page,
+        "Couldn't load this session: " + (err instanceof Error ? err.message : "no response"),
+        () => go({ ...r }, true)
+      );
+    }
+    const isDeep = (r) => {
+      const t = r.turn ? host2.modelStore.turn.get(r.turn) : null;
+      return !!t && t.sid === r.id && !t.entries.length;
+    };
+    function go(r, fromHistory = false, prepared = false, nextContent = null) {
+      host2.navigation.cancelNative();
+      if (host2.nativePage) {
+        if (!fromHistory)
+          location.assign(
+            r.v === "machines" ? host2.machinesPath ?? host2.bootstrapOwner.urlOf(r) : host2.bootstrapOwner.urlOf(r)
+          );
+        return;
+      }
+      if (r.v === "machines" && host2.viewerHost && !prepared) {
+        host2.documentEventsOwner.closeDrawer(true);
+        host2.accountControlsOwner.closeAccountMenu(true, true);
+        host2.navigation.loadNative(
+          r,
+          (content) => go(r, fromHistory, true, content),
+          () => {
+            if (host2.viewerHost) location.assign(host2.viewerHost.machinesPath);
+          }
+        );
+        return;
+      }
+      if (r.v !== "sessions" || r !== host2.focusSessionsSearchOnRender)
+        host2.focusSessionsSearchOnRender = null;
+      if (host2.sidebarOnly) {
+        if (!fromHistory) {
+          host2.documentEventsOwner.closeDrawer(true);
+          location.assign(
+            r.v === "machines" && host2.machinesPath ? host2.machinesPath : host2.bootstrapOwner.urlOf(r)
+          );
+        }
+        return;
+      }
+      if (host2.navigation.route.v === "session")
+        host2.pagingOwner.clearPaging("id" in host2.navigation.route ? host2.navigation.route.id : "");
+      host2.pagingOwner.resetPagerInput();
+      host2.viewport.stopOpeningEndPin();
+      host2.navigation.cancelRoute();
+      if (r.v === "machines" && host2.machinesPath && !host2.viewerHost) {
+        location.assign(host2.machinesPath);
+        return;
+      }
+      if (!fromHistory) host2.historyScrollOwner.saveHistoryScroll();
+      host2.navigation.replaceContent(r, nextContent);
+      host2.accountControlsOwner.closeAccountMenu(true, true);
+      host2.sessionChrome.dropErrors(true);
+      if (host2.navigation.route.v === "session" && (r.v !== "session" || r.v !== "session" || r.id !== ("id" in host2.navigation.route ? host2.navigation.route.id : "")) && host2.transcripts.entries["id" in host2.navigation.route ? host2.navigation.route.id : ""] && host2.transcripts.meta["id" in host2.navigation.route ? host2.navigation.route.id : ""]) {
+        const sid = "id" in host2.navigation.route ? host2.navigation.route.id : "", entries = host2.transcripts.entries[sid], meta = { ...host2.transcripts.meta[sid], origin: !!host2.domain.originHandoff(sid) };
+        host2.scope.frame(
+          () => host2.scope.frame(() => host2.scope.timeout(() => host2.cacheTx(sid, entries, meta), 0))
+        );
+      }
+      if (r.v !== "session" || r.v !== "session" || r.id !== ("id" in host2.navigation.route ? host2.navigation.route.id : ""))
+        host2.show = { ...host2.allVisibility };
+      if (r.v !== "sessions") host2.orderingControlsOwner.ORD.delete("page");
+      host2.navigation.route = r;
+      host2.find = "";
+      host2.findOpen = false;
+      host2.documentEventsOwner.closeDrawer(true);
+      host2.viewport.clearNewEntries();
+      if (!fromHistory) {
+        const state2 = { ...r };
+        delete state2.scrollTop;
+        try {
+          history.pushState(state2, "", host2.bootstrapOwner.urlOf(r));
+        } catch {
+        }
+      }
+      const done = () => {
+        if (host2.navigation.route !== r) return;
+        endLoading();
+        host2.documentRendererOwner.render();
+        if (r.v === "session" || host2.viewerHost && r.v === "machines") focusTitle();
+        if (fromHistory && Number.isFinite(r.scrollTop)) {
+          const turns = [...host2.$("#page").querySelectorAll(".turn")];
+          for (const turn of turns) revealMeasuredTurn(turn, true);
+          const heights = turns.map((turn) => turn.getBoundingClientRect().height);
+          turns.forEach((turn, i) => {
+            setGeometry(turn, "intrinsicHeight", Math.ceil(heights[i]));
+            revealMeasuredTurn(turn, false);
+          });
+          host2.historyScrollOwner.restoreScroll(r.scrollTop);
+          host2.historyScrollOwner.restoreHostFocus(r.hostFocus);
+        } else if (r.v === "session" && r.turn) {
+          revealTurn(r.turn, !fromHistory);
+          if (location.hash) host2.scope.frame(() => host2.scope.frame(revealEntryHash));
+        } else if (r.v === "session" && location.hash) revealEntryHash();
+        else if (r.v === "session") openSessionAtEnd();
+        else host2.historyScrollOwner.quietTop();
+        host2.viewport.syncJump();
+      };
+      if (r.v === "session" && host2.modelStore.sessions[r.id]) {
+        if (host2.transcripts.staleBriefs.has(r.id)) {
+          delete host2.transcripts.entries[r.id];
+          delete host2.transcripts.meta[r.id];
+          host2.transcripts.cache.delete(r.id);
+        }
+        const kept = !host2.transcripts.entries[r.id];
+        if (kept ? host2.adoptCached(r) : !isDeep(r)) {
+          host2.transcripts.cache.delete(r.id);
+          paintPending(r);
+          host2.scope.frame(
+            () => host2.scope.timeout(() => {
+              if (host2.navigation.route !== r) return;
+              if (kept && !r.turn) host2.transportOwner.spread(r.id);
+              done();
+              host2.transcriptRevalidationOwner.revalidate(r);
+            }, 0)
+          );
+          return;
+        }
+      }
+      if (r.v === "session") paintPending(r);
+      host2.navigation.load(
+        r,
+        (signal) => host2.transportOwner.load(r, signal),
+        done,
+        (error) => failLoad(r, error)
+      );
+    }
+    if (!host2.sidebarOnly)
+      host2.scope.listen(window, "popstate", (e) => {
+        if (host2.toolViewsOwner.skipPop) {
+          host2.toolViewsOwner.skipPop = false;
+          if (host2.afterPop) {
+            const leave = host2.afterPop;
+            host2.afterPop = null;
+            leave();
+            return;
+          }
+          if (host2.pendingSessionOpen) {
+            const id = host2.pendingSessionOpen;
+            host2.pendingSessionOpen = null;
+            goSession(id);
+          }
+          return;
+        }
+        if (host2.accountSheet) {
+          host2.accountSheet = false;
+          host2.accountControlsOwner.closeAccountMenu(true);
+          return;
+        }
+        if (host2.toolViewsOwner.viewerEl) {
+          const d = host2.toolViewsOwner.viewerEl;
+          host2.toolViewsOwner.viewerEl = null;
+          d.close();
+          return;
+        }
+        if (e.state?.v)
+          go(host2.navigation.historyRoute(e.state, host2.bootstrapOwner.routeOf(location)), true);
+      });
+    const goSession = (id, turn = void 0) => go(turn ? { v: "session", id, turn } : { v: "session", id });
+    const goTrace = (turn) => {
+      const found = host2.modelStore.turn.get(turn);
+      if (found) go({ v: "trace", sid: found.sid, turn });
+    };
+    const openSender = (h2) => {
+      if (host2.modelStore.sessions[h2.from]) goSession(h2.from, host2.modelStore.holds.get(h2.id)?.id);
+    };
+    function revealTurn(id, flash) {
+      host2.pagingOwner.resetPagerInput();
+      const b = [...document.querySelectorAll(".turn")].find(
+        (x) => x.dataset.turn === id
+      );
+      if (!b) {
+        host2.historyScrollOwner.quietTop();
+        return;
+      }
+      const place = () => {
+        if (!b.isConnected) return;
+        const gap = host2.$("#topbar").offsetHeight + 8;
+        host2.pagingOwner.scrollProgrammatically(() => {
+          if (host2.phone.matches)
+            window.scrollTo(0, Math.max(0, window.scrollY + b.getBoundingClientRect().top - gap));
+          else {
+            const m = host2.$("#main");
+            m.scrollTop += b.getBoundingClientRect().top - m.getBoundingClientRect().top - gap;
+          }
+        });
+        host2.viewport.syncJump();
+        host2.historyScrollOwner.saveHistoryScroll();
+      };
+      place();
+      host2.scope.frame(() => host2.scope.frame(place));
+      if (flash) {
+        b.classList.add("flash");
+        host2.scope.timeout(() => b.classList.remove("flash"), 1500);
+      }
+    }
+    function revealEntryHash() {
+      host2.pagingOwner.resetPagerInput();
+      if (!location.hash) return;
+      let key = "";
+      try {
+        key = decodeURIComponent(location.hash.slice(1));
+      } catch {
+        key = location.hash.slice(1);
+      }
+      const target = document.getElementById(key) ?? [...document.querySelectorAll("[data-e]")].find((n) => n.dataset.e === key) ?? [...document.querySelectorAll(".turn[data-turn]")].find(
+        (n) => n.dataset.turn === key
+      );
+      if (!target) return;
+      const place = () => {
+        if (!target.isConnected) return;
+        const gap = host2.$("#topbar").offsetHeight + 8;
+        host2.pagingOwner.scrollProgrammatically(() => {
+          if (host2.phone.matches)
+            window.scrollTo(
+              0,
+              Math.max(0, window.scrollY + target.getBoundingClientRect().top - gap)
+            );
+          else {
+            const m = host2.$("#main");
+            m.scrollTop += target.getBoundingClientRect().top - m.getBoundingClientRect().top - gap;
+          }
+        });
+        host2.viewport.syncJump();
+        host2.historyScrollOwner.saveHistoryScroll();
+      };
+      place();
+      host2.scope.frame(() => host2.scope.frame(place));
+    }
+    return {
+      goSession,
+      go,
+      openSender,
+      revealTurn,
+      revealEntryHash,
+      openSessionAtEnd,
+      goTrace,
+      get lanesFor() {
+        return lanesFor;
+      },
+      set lanesFor(value) {
+        lanesFor = value;
+      }
+    };
+  }
+
+  // src/app/documentEvents.ts
+  function createDocumentEvents(host2) {
+    const sidebar = host2.$("#sidebar");
+    function openDrawer() {
+      host2.accountControlsOwner.shellChrome?.openDrawer();
+    }
+    function closeDrawer(quiet = void 0) {
+      host2.accountControlsOwner.shellChrome?.closeDrawer(quiet);
+    }
+    if (host2.sidebarOnly)
+      host2.scope.listen(
+        window,
+        "semon:drawer-open",
+        () => host2.orderingControlsOwner.orderApply("side")
+      );
+    if (!host2.sidebarOnly)
+      host2.scope.listen(document, "keydown", (e) => {
+        if (e.key === "Escape" && host2.accountSheet) host2.accountControlsOwner.accountChrome.escape();
+        else if (e.key === "Escape" && !host2.toolViewsOwner.viewerEl) {
+          closeDrawer();
+          host2.accountControlsOwner.closeAccountMenu();
+          host2.$(".session-menu")?.remove();
+          host2.$("#more-btn")?.setAttribute("aria-expanded", "false");
+        }
+        if (e.key === "/" && !/INPUT|TEXTAREA/.test(document.activeElement?.tagName ?? "") && !(document.activeElement instanceof HTMLElement && document.activeElement.isContentEditable) && !host2.toolViewsOwner.viewerEl) {
+          e.preventDefault();
+          if (host2.navigation.route.v === "session") {
+            host2.findOpen = true;
+            host2.documentRendererOwner.render();
+            host2.$("#find")?.focus();
+          } else if (host2.navigation.route.v === "sessions") {
+            host2.$("#sq")?.focus();
+          } else {
+            const r = { v: "sessions", q: host2.query };
+            host2.focusSessionsSearchOnRender = r;
+            host2.destination.go(r);
+          }
+        }
+      });
+    host2.scope.listen(host2.phone, "change", () => {
+      closeDrawer(true);
+      host2.layoutOwner.syncLayoutPrefs();
+      host2.recentNavigation.expandedAll = null;
+      host2.recentNavigation.renderLanes();
+      if (!host2.phone.matches && host2.toolViewsOwner.viewerEl?.classList.contains("kids-sheet"))
+        host2.toolViewsOwner.viewerEl.close();
+      if (host2.navigation.route.v === "session" || host2.navigation.route.v === "analytics") {
+        const top = host2.historyScrollOwner.currentScroll();
+        host2.documentRendererOwner.render();
+        host2.historyScrollOwner.restoreScroll(top);
+      } else host2.recentNavigation.renderLanes();
+      const l2 = host2.$("#topbar .meta-line");
+      if (l2 && host2.navigation.route.v === "session") measureViewerBar(host2.$("#topbar"));
+      host2.viewport.syncJump();
+    });
+    return { closeDrawer };
+  }
+
+  // src/app/documentRenderer.ts
+  function createDocumentRenderer(host2) {
+    function render2() {
+      if (host2.disposed) return;
+      const focusSearch = host2.focusSessionsSearchOnRender === host2.navigation.route;
+      host2.focusSessionsSearchOnRender = null;
+      if (host2.sidebarOnly) {
+        host2.transportOwner.tick();
+        host2.navigation.rendered = host2.navigation.route;
+        host2.navigationViewOwner.renderNav();
+        host2.recentNavigation.renderLanes();
+        return;
+      }
+      if (host2.nativePage || host2.navigation.route.v === "machines" && host2.viewerHost) {
+        host2.routeControls.retain(host2.navigation.route);
+        host2.transportOwner.tick();
+        host2.navigation.rendered = host2.navigation.route;
+        if (host2.navigation.content && !host2.navigation.content.element.isConnected) {
+          host2.pageRoot.native(host2.$("#page"));
+          host2.$("#page").append(host2.navigation.content.element);
+        }
+        document.title = (host2.nativePage?.title ?? "Machines") + " \xB7 Semon";
+        host2.sessionChrome.renderTopbar(host2.nativePage?.title ?? "Machines");
+        host2.layoutOwner.syncLayoutPrefs();
+        host2.sessionChrome.syncBarLine();
+        host2.navigationViewOwner.renderNav();
+        host2.recentNavigation.renderLanes();
+        host2.accountControlsOwner.renderDrawerAccount();
+        host2.viewport.syncJump();
+        return;
+      }
+      if (host2.viewerHost)
+        document.title = ({
+          home: "Home",
+          sessions: "Sessions",
+          analytics: "Analytics",
+          machines: "Machines",
+          machine: "Machine",
+          session: "Session",
+          trace: "Trace"
+        }[host2.navigation.route.v] ?? "Semon") + " \xB7 Semon";
+      host2.renderTransaction.begin();
+      const page = host2.$("#page"), r = host2.navigation.route;
+      host2.navigation.rendered = r;
+      setGeometry(page, "paddingBottom", null);
+      host2.pageRoot.viewer(page, r.v);
+      host2.routeControls.retain(r);
+      page.classList.remove("child-page");
+      if (r.v === "home") {
+        host2.screenViews.renderHome(page);
+        host2.sessionChrome.renderTopbar("Home");
+      } else if (r.v === "analytics") {
+        host2.analytics.renderAnalytics(page);
+        host2.sessionChrome.renderTopbar("Analytics", null, { analytics: true });
+      } else if (r.v === "sessions") {
+        host2.sessionListOwner.renderSessions(page, focusSearch);
+        host2.sessionChrome.renderTopbar("Sessions");
+      } else if (r.v === "machines") {
+        host2.screenViews.renderMachines(page);
+        host2.sessionChrome.renderTopbar("Machines");
+      } else if (r.v === "machine") {
+        host2.screenViews.renderMachine(page, r.id);
+        host2.sessionChrome.renderTopbar(
+          host2.modelStore.machines[r.id],
+          { label: "Machines", go: () => host2.destination.go({ v: "machines" }) },
+          { line2: host2.sessionChrome.machineLine(r.id) }
+        );
+      } else if (r.v === "trace") {
+        host2.screenViews.renderTrace(page, r.turn);
+        host2.sessionChrome.renderTopbar(
+          "Trace",
+          {
+            label: host2.modelStore.sessions[r.sid].name,
+            go: () => host2.destination.goSession(r.sid, r.turn)
+          },
+          { traceSession: host2.modelStore.sessions[r.sid] }
+        );
+      } else if (r.v === "session") {
+        const s = host2.modelStore.sessions[r.id], lineage = host2.domain.lineageOf(r.id).slice(0, -1);
+        host2.screenViews.renderSession(page, r.id);
+        host2.sessionChrome.renderTopbar(s.name, null, {
+          session: s,
+          lineage,
+          line2: host2.sessionChrome.sessionLine(s)
+        });
+      }
+      if (r.v === "session" && host2.sessionChrome.errOn(r.id)) host2.sessionChrome.markError(false);
+      setGeometry(document.documentElement, "barHeight", host2.$("#topbar").offsetHeight);
+      host2.renderTransaction.complete(r);
+    }
+    return { render: render2 };
+  }
+
+  // src/app/effects.ts
+  var EffectScope = class {
+    cleanups = /* @__PURE__ */ new Set();
+    requests = /* @__PURE__ */ new Map();
+    timers = /* @__PURE__ */ new Map();
+    frames = /* @__PURE__ */ new Map();
+    disposed = false;
+    own(cleanup) {
+      if (this.disposed) cleanup();
+      else this.cleanups.add(cleanup);
+      return cleanup;
+    }
+    listen(target, type, listener, options2) {
+      if (this.disposed) return;
+      const guarded = (event) => {
+        if (!this.disposed) listener(event);
+      };
+      target.addEventListener(type, guarded, options2);
+      this.own(() => target.removeEventListener(type, guarded, options2));
+    }
+    retire(collection, id) {
+      const cleanup = collection.get(id);
+      if (cleanup) this.cleanups.delete(cleanup);
+      collection.delete(id);
+    }
+    timeout(callback, delay = 0) {
+      if (this.disposed) return 0;
+      const id = window.setTimeout(() => {
+        this.retire(this.timers, id);
+        if (!this.disposed) callback();
+      }, delay);
+      this.timers.set(
+        id,
+        this.own(() => {
+          this.retire(this.timers, id);
+          window.clearTimeout(id);
+        })
+      );
+      return id;
+    }
+    clearTimeout(id) {
+      if (id !== void 0) this.timers.get(id)?.();
+    }
+    interval(callback, delay) {
+      if (this.disposed) return 0;
+      const id = window.setInterval(() => {
+        if (!this.disposed) callback();
+      }, delay);
+      this.timers.set(
+        id,
+        this.own(() => {
+          this.retire(this.timers, id);
+          window.clearInterval(id);
+        })
+      );
+      return id;
+    }
+    clearInterval(id) {
+      if (id !== void 0) this.timers.get(id)?.();
+    }
+    frame(callback) {
+      if (this.disposed) return 0;
+      const id = requestAnimationFrame((time) => {
+        this.retire(this.frames, id);
+        if (!this.disposed) callback(time);
+      });
+      this.frames.set(
+        id,
+        this.own(() => {
+          this.retire(this.frames, id);
+          cancelAnimationFrame(id);
+        })
+      );
+      return id;
+    }
+    cancelFrame(id) {
+      if (id !== void 0) this.frames.get(id)?.();
+    }
+    request() {
+      const controller = new AbortController();
+      if (this.disposed) {
+        controller.abort();
+        return controller;
+      }
+      const aborted = () => this.releaseRequest(controller), cleanup = this.own(() => controller.abort());
+      const release = () => {
+        controller.signal.removeEventListener("abort", aborted);
+        this.cleanups.delete(cleanup);
+        this.requests.delete(controller);
+      };
+      this.requests.set(controller, release);
+      controller.signal.addEventListener("abort", aborted, { once: true });
+      return controller;
+    }
+    releaseRequest(controller) {
+      this.requests.get(controller)?.();
+    }
+    destroy() {
+      if (this.disposed) return;
+      this.disposed = true;
+      for (const cleanup of this.cleanups) cleanup();
+      this.cleanups.clear();
+      this.requests.clear();
+    }
+  };
+
+  // src/app/historyScroll.ts
+  function createHistoryScroll(host2) {
+    const currentScroll = () => host2.phone.matches ? window.scrollY : host2.$("#main").scrollTop;
+    const restoreScroll = (top) => host2.pagingOwner.scrollProgrammatically(() => {
+      if (host2.phone.matches) window.scrollTo(0, top);
+      else host2.$("#main").scrollTop = top;
+    });
+    let hostFocus;
+    if (host2.viewerHost)
+      host2.scope.listen(document, "focusin", (event) => {
+        const node = event.target;
+        if (!(node instanceof HTMLElement) || !host2.$("#page").contains(node)) return;
+        hostFocus = node.id ? { id: node.id } : node.dataset.id ? { row: node.dataset.id } : node.getAttribute("aria-label") ? { label: node.getAttribute("aria-label") ?? void 0 } : void 0;
+      });
+    function restoreHostFocus(saved) {
+      if (!host2.viewerHost || !saved) return;
+      const selector = saved.id ? "#" + CSS.escape(saved.id) : saved.row ? '[data-id="' + CSS.escape(saved.row) + '"]' : saved.label ? '[aria-label="' + CSS.escape(saved.label) + '"]' : null;
+      if (selector)
+        host2.$("#page")?.querySelector(selector)?.focus({ preventScroll: true });
+    }
+    const saveHistoryScroll = () => {
+      if (host2.toolViewsOwner.viewerEl) return;
+      try {
+        if (history.state?.v)
+          history.replaceState(
+            {
+              ...history.state,
+              scrollTop: currentScroll(),
+              ...host2.viewerHost ? { hostFocus } : {}
+            },
+            ""
+          );
+      } catch {
+      }
+    };
+    let scrollSaveFrame = false;
+    const queueScrollSave = () => {
+      if (scrollSaveFrame) return;
+      scrollSaveFrame = true;
+      host2.scope.frame(() => {
+        scrollSaveFrame = false;
+        saveHistoryScroll();
+      });
+    };
+    if (!host2.sidebarOnly) {
+      host2.scope.listen(window, "scroll", queueScrollSave, { passive: true });
+      host2.scope.listen(host2.$("#main"), "scroll", queueScrollSave, { passive: true });
+    }
+    const quietTop = () => restoreScroll(0);
+    return { saveHistoryScroll, quietTop, restoreScroll, restoreHostFocus, currentScroll };
+  }
+
+  // src/app/layout.ts
+  function createLayout(host2) {
+    let wideMode = false, railMode = false;
+    let treePrefs = {};
+    try {
+      wideMode = localStorage.getItem("semon.wide") === "1";
+    } catch {
+    }
+    try {
+      railMode = !host2.sidebarOnly && localStorage.getItem("semon.rail") === "1";
+    } catch {
+    }
+    try {
+      const saved = JSON.parse(localStorage.getItem("semon.tree") ?? "{}");
+      if (saved && typeof saved === "object" && !Array.isArray(saved))
+        treePrefs = pruneTreePrefs(saved);
+    } catch {
+    }
+    const app = host2.$(".app");
+    const syncLayoutPrefs = () => {
+      if (host2.sidebarOnly) return;
+      app.classList.toggle("rail", railMode && !host2.phone.matches);
+      host2.$("#page").classList.toggle(
+        "wide-mode",
+        wideMode && !host2.phone.matches && host2.navigation.route.v === "session"
+      );
+    };
+    function setWideMode(on) {
+      wideMode = on;
+      try {
+        localStorage.setItem("semon.wide", on ? "1" : "0");
+      } catch {
+      }
+      syncLayoutPrefs();
+      host2.$(".wide-toggle")?.setAttribute("aria-pressed", String(on));
+      host2.accountControlsOwner.accountChrome.updateWide(on);
+    }
+    function setRailMode(on) {
+      railMode = on;
+      host2.orderingControlsOwner.ORD.delete("side");
+      try {
+        localStorage.setItem("semon.rail", on ? "1" : "0");
+      } catch {
+      }
+      syncLayoutPrefs();
+      host2.recentNavigation.expandedAll = null;
+      host2.recentNavigation.renderLanes();
+      const b = host2.$("#rail-toggle");
+      b?.setAttribute("aria-expanded", String(!on));
+      b?.setAttribute("aria-label", on ? "Expand sidebar" : "Collapse sidebar");
+      b?.setAttribute("data-tip", on ? "Expand sidebar" : "Collapse sidebar");
+    }
+    function pruneTreePrefs(saved) {
+      const kept = {};
+      if (!saved || typeof saved !== "object") return kept;
+      for (const [id, pref] of Object.entries(saved))
+        if (pref && typeof pref === "object" && "open" in pref && typeof pref.open === "boolean")
+          kept[id] = { open: pref.open, at: "at" in pref ? Number(pref.at) || 0 : 0 };
+      return kept;
+    }
+    function saveTreePref(id, open) {
+      treePrefs[id] = { open, at: Date.now() };
+      treePrefs = Object.fromEntries(
+        Object.entries(treePrefs).sort((a, b) => (b[1]?.at ?? 0) - (a[1]?.at ?? 0)).slice(0, 500)
+      );
+      try {
+        localStorage.setItem("semon.tree", JSON.stringify(treePrefs));
+      } catch {
+      }
+    }
+    const railToggle = host2.sidebarOnly ? host2.$("#rail-toggle") ?? document.createElement("button") : document.createElement("button");
+    railToggle.setAttribute("aria-expanded", String(!railMode));
+    railToggle.setAttribute("data-tip", railMode ? "Expand sidebar" : "Collapse sidebar");
+    railToggle.setAttribute("aria-label", railMode ? "Expand sidebar" : "Collapse sidebar");
+    host2.scope.listen(railToggle, "click", () => setRailMode(!railMode));
+    syncLayoutPrefs();
+    return {
+      app,
+      setRailMode,
+      get railMode() {
+        return railMode;
+      },
+      set railMode(value) {
+        railMode = value;
+      },
+      get wideMode() {
+        return wideMode;
+      },
+      set wideMode(value) {
+        wideMode = value;
+      },
+      setWideMode,
+      saveTreePref,
+      get treePrefs() {
+        return treePrefs;
+      },
+      set treePrefs(value) {
+        treePrefs = value;
+      },
+      syncLayoutPrefs
+    };
+  }
+
+  // src/app/liveModel.ts
+  function createLiveModel(host2) {
+    const liveController = createLiveController({
+      async poll() {
+        const response = await host2.transportOwner.api(
+          "/api/model?delta=1&since=" + host2.transportOwner.enc(LIVE.late ? "" : LIVE.version ?? ""),
+          void 0,
+          true
+        );
+        if (!response) return;
+        let model2;
+        try {
+          model2 = host2.liveUpdates.applyModelDelta(response);
+        } catch {
+          await host2.transportOwner.api("/api/model?delta=1").then(
+            (...args) => host2.liveUpdates.update(...args)
+          );
+          return;
+        }
+        await host2.liveUpdates.update(model2);
+      },
+      failed(error) {
+        return !!host2.viewerHost?.modelFailed?.(error instanceof ApiError ? error.status : 0);
+      },
+      ended
+    });
+    const LIVE = liveController.state;
+    const remember = (_m) => {
+      LIVE.turns = new Map(
+        Object.values(host2.modelStore.turns).flat().map((x) => [x.id, turnKey(x)])
+      );
+    };
+    const turnKey = (x) => [
+      x.start?.id,
+      x.end?.st,
+      x.end?.why,
+      x.end?.h,
+      x.sent.map((h2) => h2.id).join(","),
+      x.last ? 1 : 0
+    ].join("|");
+    const handKey = (h2) => [
+      h2.status,
+      h2.to,
+      h2.done,
+      h2.result?.length,
+      h2.kind === "toyou" ? h2.answer?.length : void 0,
+      h2.kind === "toyou" ? h2.answers?.length : void 0,
+      h2.declined ? 1 : 0
+    ].join("|");
+    const visible = () => document.visibilityState === "visible";
+    const schedule = (ms) => liveController.schedule(ms);
+    function ended(status2) {
+      if (host2.disposed) return;
+      liveController.stop();
+      if (host2.$(".livenote, .livenote-side")) return;
+      if (!window.dispatchEvent(
+        new CustomEvent("semon:ended", { cancelable: true, detail: { status: status2 } })
+      ))
+        return;
+      const n = createStatusNote(
+        host2.sidebarOnly ? "Sessions stopped updating: reload the page" : "Session ended: reload with the printed URL",
+        host2.sidebarOnly ? "ghead livenote-side" : "livenote"
+      );
+      if (host2.sidebarOnly) host2.$("#lanes").after(n);
+      else document.body.append(n);
+    }
+    const soft = (p) => p.catch((e) => {
+      if (e instanceof ApiError && (e.status === 403 || e.status === 0)) throw e;
+    });
+    const viewed = () => {
+      const v = /* @__PURE__ */ new Set();
+      if (host2.navigation.route.v === "session")
+        v.add("id" in host2.navigation.route ? host2.navigation.route.id : "");
+      return v;
+    };
+    const cardKeys = () => new Map(
+      host2.modelStore.handoffs.filter((h2) => h2.kind === "spawn" && host2.modelStore.sessions[h2.to]).map((h2) => {
+        const c = host2.modelStore.sessions[h2.to];
+        return [
+          h2.id,
+          [
+            c.name,
+            c.state,
+            c.kind,
+            c.model,
+            host2.domain.countOf(c, "calls"),
+            c.activity?.join("|"),
+            h2.status,
+            h2.result
+          ].join("")
+        ];
+      })
+    );
+    return {
+      liveController,
+      LIVE,
+      remember,
+      schedule,
+      visible,
+      ended,
+      handKey,
+      cardKeys,
+      viewed,
+      soft
+    };
+  }
+
+  // src/app/liveUpdates.ts
+  function createLiveUpdates(host2) {
+    let generation = 0;
+    const applyModelDelta = (value) => host2.modelStore.apply(value);
+    function update(value) {
+      if (host2.disposed) return Promise.resolve();
+      const m = applyModelDelta(value);
+      const oldH = new Map(
+        host2.modelStore.handoffs.map((h2) => [h2.id, host2.liveModelOwner.handKey(h2)])
+      ), oldT = host2.liveModelOwner.LIVE.turns, oldCards = host2.liveModelOwner.cardKeys(), names = new Map(Object.values(host2.modelStore.sessions).map((x) => [x.id, x.name]));
+      const hadOrigins = new Set(
+        [...host2.transcripts.cache.keys()].filter((sid) => !!host2.domain.originHandoff(sid))
+      );
+      const hadOrigin = host2.navigation.route.v === "session" && !!host2.modelStore.sessions["id" in host2.navigation.route ? host2.navigation.route.id : ""] && !!host2.domain.originHandoff("id" in host2.navigation.route ? host2.navigation.route.id : "");
+      host2.transportOwner.adopt(m);
+      const revision = ++generation;
+      host2.liveModelOwner.remember(m);
+      for (const sid of host2.transcripts.staleBriefs)
+        if (!host2.modelStore.sessions[sid]) host2.transcripts.staleBriefs.delete(sid);
+      for (const sid of [...host2.transcripts.cache.keys()])
+        if (!hadOrigins.has(sid) && host2.domain.originHandoff(sid))
+          host2.transcripts.cache.delete(sid);
+      if (host2.liveModelOwner.LIVE.late !== ("id" in host2.navigation.route ? host2.navigation.route.id : "")) {
+        if (host2.liveModelOwner.LIVE.late)
+          host2.transcripts.cache.delete(host2.liveModelOwner.LIVE.late);
+        host2.liveModelOwner.LIVE.late = null;
+      }
+      if (host2.navigation.route.v === "session" && !hadOrigin && !!host2.modelStore.sessions["id" in host2.navigation.route ? host2.navigation.route.id : ""] && !!host2.domain.originHandoff("id" in host2.navigation.route ? host2.navigation.route.id : "")) {
+        host2.liveModelOwner.LIVE.late = "id" in host2.navigation.route ? host2.navigation.route.id : "";
+        host2.liveModelOwner.LIVE.lateTries = 0;
+        host2.transcripts.staleBriefs.add(
+          "id" in host2.navigation.route ? host2.navigation.route.id : ""
+        );
+        host2.transcripts.cache.delete("id" in host2.navigation.route ? host2.navigation.route.id : "");
+      }
+      if (host2.liveModelOwner.LIVE.late && !host2.transcripts.entries[host2.liveModelOwner.LIVE.late])
+        host2.liveModelOwner.LIVE.late = null;
+      const changedH = new Set(
+        host2.modelStore.handoffs.filter((h2) => oldH.get(h2.id) !== host2.liveModelOwner.handKey(h2)).map((h2) => h2.id)
+      );
+      const newCards = host2.liveModelOwner.cardKeys(), changedCards = new Set(
+        [...newCards].filter(([id, k]) => oldCards.has(id) && oldCards.get(id) !== k).map(([id]) => id)
+      );
+      const view = host2.liveModelOwner.viewed(), grown = /* @__PURE__ */ new Set(), cuts = /* @__PURE__ */ new Map(), patched = /* @__PURE__ */ new Map();
+      let full = Object.values(host2.modelStore.sessions).some(
+        (x) => names.has(x.id) && names.get(x.id) !== x.name
+      );
+      for (const sid of Object.keys(host2.transcripts.entries)) {
+        if (view.has(sid) && host2.modelStore.sessions[sid]) host2.transportOwner.spread(sid);
+        else host2.pagingOwner.dropTx(sid);
+      }
+      let chain = Promise.resolve();
+      for (const sid of view)
+        if (host2.transcripts.entries[sid] && host2.liveModelOwner.LIVE.late === sid)
+          chain = chain.then(
+            () => host2.liveModelOwner.soft(
+              reloadLate(sid).then(() => {
+                grown.add(sid);
+                full = true;
+              })
+            )
+          );
+        else if (host2.transcripts.entries[sid] && host2.transcripts.meta[sid].tok != null && host2.transportOwner.TOK[sid] != null && host2.transcriptRevalidationOwner.shrank(
+          host2.transcripts.meta[sid].tok,
+          host2.transportOwner.TOK[sid]
+        ))
+          chain = chain.then(
+            () => host2.liveModelOwner.soft(
+              reload(sid).then(() => {
+                grown.add(sid);
+                full = true;
+              })
+            )
+          );
+        else if (host2.transcripts.entries[sid] && host2.transcripts.meta[sid].to >= host2.transcripts.meta[sid].total && host2.transcripts.meta[sid].tok !== host2.transportOwner.TOK[sid])
+          chain = chain.then(
+            () => host2.liveModelOwner.soft(
+              tail(sid).then((r) => {
+                grown.add(sid);
+                if (r.cut != null) cuts.set(sid, r.cut);
+                if (r.patched?.length) patched.set(sid, r.patched);
+                if (r.reload) full = true;
+              })
+            )
+          );
+      for (const sid of view)
+        if (host2.transcripts.entries[sid] && host2.transcripts.meta[sid].to < host2.transcripts.meta[sid].total && host2.transcripts.meta[sid].watchTok !== host2.transportOwner.TOK[sid])
+          chain = chain.then(
+            () => host2.liveModelOwner.soft(
+              watchLater(sid).then((r) => {
+                if (r?.reload) full = true;
+              })
+            )
+          );
+      return chain.then(() => {
+        if (host2.disposed || revision !== generation) return;
+        host2.liveModelOwner.LIVE.version = m.version;
+        host2.applicationRefreshOwner.refresh(
+          full ? null : dirtyTurns(cuts, grown, changedH, oldT, changedCards, patched)
+        );
+        if (host2.navigation.route.v === "analytics") host2.analytics.refreshAnalytics();
+        const e = host2.sessionChrome.errorsLive();
+        return e && host2.liveModelOwner.soft(e);
+      });
+    }
+    function dirtyTurns(cuts, grown, changedH, oldT, changedCards, patched) {
+      if (host2.navigation.route.v !== "session" || !host2.transcripts.entries["id" in host2.navigation.route ? host2.navigation.route.id : ""])
+        return null;
+      const sid = "id" in host2.navigation.route ? host2.navigation.route.id : "", dirty = /* @__PURE__ */ new Set(), owner = new Map(
+        (host2.modelStore.turns[sid] ?? []).flatMap((t) => t.entries.map((e) => [e, t.id]))
+      );
+      if (cuts.has(sid))
+        for (const e of host2.transcripts.entries[sid].slice(cuts.get(sid))) {
+          if (host2.isGap(e)) return null;
+          if (owner.has(e)) dirty.add(owner.get(e));
+        }
+      for (const e of patched?.get(sid) ?? []) {
+        if (!owner.has(e)) return null;
+        dirty.add(owner.get(e));
+      }
+      for (const t of host2.modelStore.turns[sid] ?? []) {
+        if (oldT.get(t.id) !== host2.liveModelOwner.LIVE.turns.get(t.id) || [t.start, ...t.sent].some((h2) => h2 && changedH.has(h2.id)) || t.entries.some((e) => e.k === "h" && changedH.has(e.id)))
+          dirty.add(t.id);
+      }
+      for (const h2 of host2.modelStore.handoffs)
+        if (h2.kind === "spawn" && h2.from === sid && changedCards.has(h2.id) && host2.modelStore.holds.get(h2.id))
+          dirty.add(host2.modelStore.holds.get(h2.id).id);
+      return dirty;
+    }
+    function watchLater(sid) {
+      const m = host2.transcripts.meta[sid], tok2 = host2.transportOwner.TOK[sid];
+      return host2.transportOwner.api("/api/tx?sid=" + host2.transportOwner.enc(sid) + "&after=" + m.total).then((value) => {
+        const p = parseTranscriptPage(value);
+        if (host2.transcripts.meta[sid] !== m) return;
+        if (p.total < m.total) return reload(sid);
+        m.newer = (m.newer ?? 0) + Math.max(0, p.total - m.total);
+        Object.assign(m, { total: p.total, calls: p.calls, errors: p.errors, watchTok: tok2 });
+        host2.transcripts.updates.transcript(sid);
+      });
+    }
+    function tail(sid) {
+      const es = host2.transcripts.entries[sid], m = host2.transcripts.meta[sid], tok2 = host2.transportOwner.TOK[sid];
+      let cut2 = es.findIndex((e) => e.live && e.slot != null);
+      if (cut2 < 0) cut2 = es.length;
+      for (let i = es.length - 1; i >= 0; i--) {
+        if (es[i].unfinished && es[i].slot != null) cut2 = Math.min(cut2, i);
+        if (es[i].turn) break;
+      }
+      let got = [], last = null, n = 0;
+      const page = (after) => host2.transportOwner.api("/api/tx?sid=" + host2.transportOwner.enc(sid) + "&after=" + after).then((value) => {
+        const p = parseTranscriptPage(value);
+        got = got.concat(p.entries.map((e) => host2.transportOwner.txEntry({ ...e, sid })));
+        last = p;
+        if (p.to < p.total && p.entries.length && ++n < 5) return page(p.to);
+      });
+      return page(cut2 < es.length ? es[cut2].slot : m.to).then(() => {
+        if (host2.transcripts.entries[sid] !== es) return { cut: null };
+        if (!last) return { cut: null };
+        if (last.total < m.total || last.to < last.total || cut2 < es.length && got[0]?.slot !== es[cut2].slot)
+          return reload(sid);
+        const ends = new Map(
+          got.flatMap((e) => e.k === "bgend" && e.bg ? [[e.call, e.bg]] : [])
+        ), still = new Set(last.bg_running ?? []), patched = [];
+        for (const e of es.slice(0, cut2))
+          if (e.bg) {
+            const next = ends.get(e.tid ?? "") ?? (still.has(e.tid ?? "") ? { ...e.bg, state: "running", secs: e.bg.secs ?? "\u2014" } : e.bg.state === "running" ? { state: "unknown" } : e.bg);
+            if (JSON.stringify(next) !== JSON.stringify(e.bg)) {
+              e.bg = next;
+              patched.push(e);
+            }
+          }
+        host2.transcripts.entries[sid] = es.slice(0, cut2).concat(got);
+        Object.assign(m, {
+          to: last.to,
+          total: last.total,
+          calls: last.calls,
+          errors: last.errors,
+          tok: tok2
+        });
+        host2.transportOwner.spread(sid);
+        host2.transcripts.updates.transcript(sid);
+        return { cut: cut2, patched };
+      });
+    }
+    function reload(sid) {
+      if (sid !== ("id" in host2.navigation.route ? host2.navigation.route.id : "")) {
+        host2.pagingOwner.dropTx(sid);
+        return Promise.resolve({ cut: null, reload: true });
+      }
+      return host2.transportOwner.fetchTx(sid, "").then(() => ({ cut: null, reload: true }));
+    }
+    const LATE_TRIES = 4;
+    function reloadLate(sid) {
+      return reload(sid).then(
+        (r) => {
+          if (host2.liveModelOwner.LIVE.late === sid) host2.liveModelOwner.LIVE.late = null;
+          return r;
+        },
+        (err) => {
+          if (host2.liveModelOwner.LIVE.late === sid) {
+            if (++host2.liveModelOwner.LIVE.lateTries >= LATE_TRIES) {
+              host2.liveModelOwner.LIVE.late = null;
+              console.warn(
+                "semon: gave up reloading the transcript of " + sid + " after its origin arrived"
+              );
+            } else host2.liveModelOwner.LIVE.retry = true;
+          }
+          throw err;
+        }
+      );
+    }
+    return { reload, tail, applyModelDelta, update };
+  }
+
+  // src/app/navigationView.ts
+  function createNavigationView(host2) {
+    function renderNav() {
+      const nav = host2.$("#nav"), destinations = [];
+      const under = {
+        home: ["home"],
+        analytics: ["analytics"],
+        sessions: ["sessions", "session", "trace"],
+        machines: ["machines", "machine"]
+      };
+      const item2 = (v, label, ic, count, hot) => {
+        destinations.push({
+          key: v,
+          label,
+          icon: ic,
+          href: v === "machines" && host2.machinesPath ? host2.machinesPath : host2.bootstrapOwner.urlOf({ v }),
+          current: under[v].includes(
+            (host2.sidebarOnly ? host2.layoutOwner.app.dataset.viewerNav : host2.nativePage?.nav) ?? host2.navigation.route.v
+          ),
+          count,
+          hot
+        });
+      };
+      item2("home", "Home", I.home, host2.domain.inbox().length, true);
+      item2("sessions", "Sessions", I.sessions);
+      item2("analytics", "Analytics", I.chart);
+      item2(
+        "machines",
+        "Machines",
+        I.machine,
+        Object.keys(host2.modelStore.machines).filter((m) => !host2.modelStore.machineUp[m]).length,
+        true
+      );
+      if (host2.accountControlsOwner.shellChrome)
+        host2.accountControlsOwner.shellChrome.update(destinations, host2.layoutOwner.railMode);
+      else
+        renderShellNavigation(nav, destinations, (destination) => {
+          host2.destination.go(host2.navigation.historyRoute({ v: destination.key }, { v: "home" }));
+          return true;
+        });
+    }
+    const sessMatch = (s, q) => !q || [
+      s.name,
+      s.repo,
+      s.branch,
+      host2.modelStore.machines[s.machine],
+      s.movedFrom ? host2.modelStore.machines[s.movedFrom] : "",
+      HARNESS[s.harness],
+      s.role ? "role no repo" : "",
+      ...(host2.modelStore.turns[s.id] ?? []).map((t) => t.start?.brief ?? t.u?.text ?? "")
+    ].join(" ").toLowerCase().includes(q.toLowerCase());
+    return { renderNav, sessMatch };
+  }
+
+  // src/app/orderingControls.ts
+  function createOrderingControls(host2) {
+    const ordering = createOrdering(), ORD = ordering.scopes, ordTouch = { down: false }, byLast = (a, b) => b.last - a.last;
+    const pageSig = () => JSON.stringify([host2.query, host2.groupBy, host2.sessionFilters]);
+    host2.scope.listen(
+      document,
+      "pointerdown",
+      () => {
+        ordTouch.down = true;
+      },
+      true
+    );
+    for (const t of ["pointerup", "pointercancel"])
+      host2.scope.listen(
+        document,
+        t,
+        () => {
+          ordTouch.down = false;
+        },
+        true
+      );
+    host2.scope.listen(window, "blur", () => {
+      ordTouch.down = false;
+    });
+    host2.scope.listen(document, "visibilitychange", () => {
+      ordTouch.down = false;
+      if (host2.liveModelOwner.visible()) {
+        orderApply("page");
+        orderApply("side");
+      }
+    });
+    function ordState(name) {
+      const side = name === "side", rows = side ? "#lanes .treeitem" : "#page .nrow", a = document.activeElement;
+      const inView = side ? sideRegion().scrollTop <= 1 : !host2.$(rows) || host2.$(rows).getBoundingClientRect().top >= host2.$("#topbar").getBoundingClientRect().bottom - 1;
+      const touched = ordTouch.down || !!a?.matches?.(":focus-visible") && !!a.closest(side ? "#lanes" : rows) || matchMedia("(hover: hover)").matches && !!host2.$(rows + ":hover");
+      return { inView, touched };
+    }
+    let ordPageState = null;
+    const pageState = () => ordPageState ?? ordState("page");
+    const orderScope = (name, sig, tie, state2) => ordering.begin(name, sig, tie, state2), orderList = orderRows;
+    const sideRegion = () => host2.$("#side-list") ?? host2.$("#sidebar");
+    const ordIdleMs = Reflect.get(window, "__semonOrderIdleMs");
+    const ORD_IDLE_MS = Number.isFinite(ordIdleMs) && ordIdleMs >= 200 && ordIdleMs <= 6e4 ? ordIdleMs : 1e4;
+    const ORD_DRAWER_MS = 320;
+    function orderApply(name) {
+      const sc = ORD.get(name);
+      if (!sc?.n || name === "page" && (sc.tie !== host2.navigation.route || host2.navigation.rendered !== host2.navigation.route || host2.toolViewsOwner.viewerEl || host2.$("#page").hasAttribute("aria-busy")))
+        return;
+      ORD.delete(name);
+      if (name === "side") host2.recentNavigation.renderLanes();
+      else {
+        const st = host2.viewport.capture();
+        host2.documentRendererOwner.render();
+        host2.viewport.restore(st);
+      }
+    }
+    let ordIdle;
+    function ordIdleArm() {
+      host2.scope.clearTimeout(ordIdle);
+      ordIdle = void 0;
+      if (host2.phone.matches || !ORD.get("side")?.n) return;
+      ordIdle = host2.scope.timeout(() => {
+        ordIdle = void 0;
+        const bar = host2.$("#sidebar"), a = document.activeElement;
+        const menu = host2.$(
+          ".session-menu, .account-popover, .runs-popover, .filters.pop:not([hidden])"
+        );
+        if (ordTouch.down || bar.matches(":hover") || a && bar.contains(a) && (a.matches(":focus-visible") || a.matches("input, textarea, select, [contenteditable]")) || menu || host2.toolViewsOwner.viewerEl)
+          ordIdleArm();
+        else orderApply("side");
+      }, ORD_IDLE_MS);
+    }
+    for (const t of [
+      "pointermove",
+      "pointerdown",
+      "pointerleave",
+      "focusin",
+      "focusout",
+      "wheel",
+      "keydown"
+    ])
+      host2.scope.listen(
+        host2.$("#sidebar"),
+        t,
+        () => {
+          if (ordIdle) ordIdleArm();
+        },
+        { passive: true }
+      );
+    return {
+      ORD,
+      orderApply,
+      ORD_DRAWER_MS,
+      byLast,
+      orderList,
+      ordState,
+      orderScope,
+      get ordIdle() {
+        return ordIdle;
+      },
+      set ordIdle(value) {
+        ordIdle = value;
+      },
+      ordIdleArm,
+      pageSig,
+      pageState,
+      get ordPageState() {
+        return ordPageState;
+      },
+      set ordPageState(value) {
+        ordPageState = value;
+      }
+    };
+  }
+
+  // src/app/paging.ts
+  function createPaging(host2) {
+    const pagingStore = host2.transcripts.paging, PAGING = pagingStore.states;
+    let pagerArmed = false, automaticLoads = 0, scrollRevision = 0, programmaticScrollPending = false, programmaticScrollTimer = void 0;
+    const clearPaging = (sid) => host2.transcripts.clearPaging(sid);
+    const dropTx = (sid) => host2.transcripts.drop(sid);
+    function resetPagerInput() {
+      pagerArmed = false;
+      automaticLoads = 0;
+      scrollRevision++;
+      disconnectPagerObservers();
+    }
+    function holdProgrammaticScroll() {
+      programmaticScrollPending = true;
+      host2.scope.clearTimeout(programmaticScrollTimer);
+      programmaticScrollTimer = host2.scope.timeout(() => {
+        programmaticScrollPending = false;
+        programmaticScrollTimer = void 0;
+      }, 120);
+    }
+    function scrollProgrammatically(fn, jump = true) {
+      if (jump) resetPagerInput();
+      holdProgrammaticScroll();
+      fn();
+    }
+    function readerScrollInput() {
+      if (host2.navigation.route.v !== "session" || host2.navigation.rendered !== host2.navigation.route || host2.$("#page").hasAttribute("aria-busy"))
+        return;
+      host2.scope.clearTimeout(programmaticScrollTimer);
+      programmaticScrollTimer = void 0;
+      programmaticScrollPending = false;
+      host2.viewport.stopOpeningEndPin();
+      pagerArmed = true;
+      automaticLoads = 0;
+      scrollRevision++;
+      queuePagerObservers();
+    }
+    const automaticPagingAllowed = () => pagerArmed && automaticLoads < 3 && !host2.viewport.openingEndUntil && !host2.findOpen && !host2.find && host2.show.messages && host2.show.tools && host2.show.thinking;
+    const pagingState = (sid, where) => pagingStore.get(sid, where);
+    function pagerSnapshot(sid, where) {
+      const state2 = pagingState(sid, where), direction = where === "before" ? "earlier" : "later";
+      return {
+        sid,
+        where,
+        disabled: state2.busy,
+        busy: state2.busy,
+        text: state2.busy ? "Loading " + direction + "\u2026" : state2.failed ? "Couldn't load " + direction + " entries \xB7 Retry" : "Load " + direction + (where === "after" && host2.transcripts.meta[sid]?.newer ? " \xB7 " + host2.transcripts.meta[sid].newer + " new" : "")
+      };
+    }
+    function paintPager(b) {
+      updateSessionPager(
+        host2.$("#page"),
+        pagerSnapshot(b.dataset.pagerSid, b.dataset.pagerWhere === "before" ? "before" : "after")
+      );
+    }
+    const pagerController = createPagerController({
+      route(sid) {
+        return host2.navigation.route.v === "session" && ("id" in host2.navigation.route ? host2.navigation.route.id : "") === sid && host2.navigation.rendered === host2.navigation.route ? host2.navigation.route : null;
+      },
+      range(sid) {
+        return host2.transcripts.meta[sid];
+      },
+      state: pagingState,
+      automatic: automaticPagingAllowed,
+      current(sid, where, state2, r) {
+        return PAGING.get(sid)?.[where] === state2;
+      },
+      beginManual: () => host2.viewport.stopOpeningEndPin(),
+      countAutomatic() {
+        automaticLoads++;
+      },
+      paint: paintPager,
+      load(sid, where, boundary, signal, applied) {
+        return host2.transportOwner.fetchTx(sid, where + "=" + boundary, where, signal, applied);
+      },
+      commit(r, where, manual) {
+        const box = host2.viewport.scroller(), top = host2.phone.matches ? 0 : box.getBoundingClientRect().top, st = host2.viewport.capture();
+        const entry = [
+          ...host2.$("#page").querySelectorAll(".turns [data-e][data-entry-key]:not(.tgroup)")
+        ].find((n) => {
+          const rect = n.getBoundingClientRect();
+          return rect.height && rect.top >= top;
+        });
+        st.paging = {
+          anchor: entry ? { key: entry.dataset.entryKey, off: entry.getBoundingClientRect().top - top } : null,
+          height: box.scrollHeight,
+          before: where === "before"
+        };
+        const armed = pagerArmed, used = automaticLoads;
+        host2.documentRendererOwner.render();
+        host2.viewport.restore(st);
+        if (!manual) {
+          pagerArmed = armed;
+          automaticLoads = used;
+        }
+        host2.viewport.syncJump();
+        host2.historyScrollOwner.saveHistoryScroll();
+      },
+      queue: queuePagerObservers
+    });
+    function disconnectPagerObservers() {
+      pagerController.disconnect();
+    }
+    function queuePagerObservers() {
+      if (host2.disposed || host2.sidebarOnly) return;
+      pagerController.queue(
+        host2.$("#page"),
+        host2.phone.matches ? null : host2.$("#main"),
+        () => host2.navigation.route.v === "session" && host2.navigation.rendered === host2.navigation.route && automaticPagingAllowed() && !host2.$("#page").hasAttribute("aria-busy")
+      );
+    }
+    function loadPager(button, manual) {
+      return pagerController.load(button, manual);
+    }
+    return {
+      pagerController,
+      resetPagerInput,
+      scrollProgrammatically,
+      clearPaging,
+      dropTx,
+      loadPager,
+      pagerSnapshot,
+      holdProgrammaticScroll,
+      queuePagerObservers,
+      disconnectPagerObservers,
+      get scrollRevision() {
+        return scrollRevision;
+      },
+      set scrollRevision(value) {
+        scrollRevision = value;
+      },
+      paintPager,
+      readerScrollInput,
+      get programmaticScrollPending() {
+        return programmaticScrollPending;
+      },
+      set programmaticScrollPending(value) {
+        programmaticScrollPending = value;
+      }
+    };
+  }
+
+  // src/app/recentNavigation.ts
+  function createRecentNavigation(host2) {
+    const isApprovalReview = (s) => s.kind === "Approval review";
+    const visibleInNavigation = (s, path = routedPath()) => host2.showApprovalReviews || !isApprovalReview(s) || s.id === path.current || path.ancestors.has(s.id);
+    const navigationTree = (path = routedPath()) => {
+      const canonical = host2.domain.sessionChildren(), roots = [], children = /* @__PURE__ */ new Map(), visited = /* @__PURE__ */ new Set();
+      const visit = (session, parent) => {
+        if (visited.has(session.id)) return;
+        visited.add(session.id);
+        let nearest = parent;
+        if (visibleInNavigation(session, path)) {
+          if (parent) {
+            if (!children.has(parent)) children.set(parent, []);
+            children.get(parent).push(session);
+          } else roots.push(session);
+          nearest = session.id;
+        }
+        for (const child of canonical.get(session.id) ?? []) visit(child, nearest);
+      };
+      for (const root of Object.values(host2.modelStore.sessions).filter(
+        (s) => s.lane && !host2.domain.parentOf(s.id)
+      ))
+        visit(root, null);
+      roots.sort(
+        (...args) => host2.orderingControlsOwner.byLast(...args)
+      );
+      for (const kids of children.values())
+        kids.sort(
+          (...args) => host2.orderingControlsOwner.byLast(...args)
+        );
+      return { roots, children };
+    };
+    const COST_TIP = "What these tokens would cost at API rates. Subscriptions (Claude Max, ChatGPT plans) aren't billed this way.";
+    const TREE_ACTIVE = 8, TREE_ROWS = 3;
+    function routedPath() {
+      const current = host2.navigation.route.v === "session" ? "id" in host2.navigation.route ? host2.navigation.route.id : "" : host2.navigation.route.v === "trace" ? host2.navigation.route.sid : null, ancestors = /* @__PURE__ */ new Set();
+      for (let id = current && host2.modelStore.sessions[current] ? host2.domain.parentOf(current) : null; id && host2.modelStore.sessions[id] && id !== current && !ancestors.has(id); id = host2.domain.parentOf(id))
+        ancestors.add(id);
+      return { current, ancestors };
+    }
+    let forcedOpen = {
+      route: null,
+      ids: /* @__PURE__ */ new Set()
+    };
+    function forcedOpenIds() {
+      if (forcedOpen.route !== host2.navigation.route)
+        forcedOpen = { route: host2.navigation.route, ids: routedPath().ancestors };
+      return forcedOpen.ids;
+    }
+    let expandedAll = null, revealedFor = null;
+    let expandedPath = /* @__PURE__ */ new Set(), expandedUnder = /* @__PURE__ */ new Set();
+    let sideOrder = null;
+    const ancestorsOf = (id) => {
+      const out = /* @__PURE__ */ new Set();
+      for (let p = id && host2.modelStore.sessions[id] ? host2.domain.parentOf(id) : null; p && host2.modelStore.sessions[p] && p !== id && !out.has(p); p = host2.domain.parentOf(p))
+        out.add(p);
+      return out;
+    };
+    function treeGroupSnapshot(parent, kids, children, depth, rail, open) {
+      const { current, ancestors } = routedPath(), rank = new Map(kids.map((c) => [c.id, host2.domain.kidRank(c, children)]));
+      const byRank = (a, b) => rank.get(a.id) - rank.get(b.id) || b.last - a.last, sorted = [...kids].sort(byRank), keep = /* @__PURE__ */ new Set();
+      for (const c of sorted) if (rank.get(c.id) < 2 && keep.size < TREE_ACTIVE) keep.add(c.id);
+      for (const c of sorted)
+        if (c.id === current || ancestors.has(c.id) || expandedPath.has(c.id)) keep.add(c.id);
+      for (const c of sorted) if (keep.size < TREE_ROWS) keep.add(c.id);
+      const listed = sorted.filter((c) => keep.has(c.id)), hidden = kids.length - listed.length;
+      if (!hidden && expandedAll === parent.id) expandedAll = null;
+      const full = hidden > 0 && !rail && (expandedAll === parent.id || expandedUnder.has(parent.id));
+      const key = (full ? "a:" : "k:") + parent.id, unseen = !!sideOrder?.keep && open && !full && !sideOrder.reseed && sideOrder.seen.has(parent.id) && !sideOrder.prev.has(key);
+      const shown = sideOrder ? host2.orderingControlsOwner.orderList(sideOrder, key, full ? sorted : listed, byRank, {
+        must: /* @__PURE__ */ new Set([...current ? [current] : [], ...ancestors, ...expandedPath]),
+        quiet: !open,
+        seed: full || sideOrder.reseed || !sideOrder.seen.has(parent.id)
+      }) : full ? sorted : listed;
+      const items = shown.map((child) => buildLaneSnapshot(child, depth + 1, children, rail));
+      return {
+        items,
+        all: kids.length === shown.length || full || unseen ? void 0 : host2.domain.descendantsOf(parent.id, children).length,
+        full: full && expandedAll === parent.id
+      };
+    }
+    let recentSnapshot = { items: [], empty: false };
+    const recentRenderer = createRecentRenderer(host2.$("#lanes"), {
+      open: (id) => host2.destination.goSession(id),
+      toggle(id, value) {
+        if (!value) forcedOpenIds().delete(id);
+        host2.layoutOwner.saveTreePref(id, value);
+        if (!value && (expandedAll === id || expandedPath.has(id))) {
+          expandedAll = null;
+          renderLanes();
+          host2.$('#lanes .treeitem[data-id="' + CSS.escape(id) + '"] > .tree-row .tree-toggle')?.focus();
+        } else {
+          const change = (items) => items.map((item2) => ({
+            ...item2,
+            open: item2.id === id ? value : item2.open,
+            children: item2.children ? change(item2.children) : void 0
+          }));
+          recentSnapshot = { ...recentSnapshot, items: change(recentSnapshot.items) };
+          recentRenderer.update(recentSnapshot);
+        }
+      },
+      all(id, trigger) {
+        if (!host2.modelStore.sessions[id]) return;
+        if (host2.phone.matches) {
+          openKidsSheet(host2.modelStore.sessions[id], trigger);
+          return;
+        }
+        expandedAll = id;
+        renderLanes();
+        host2.$('#lanes .treeitem[data-id="' + CSS.escape(id) + '"] > .tree-row .tree-fewer')?.focus();
+      },
+      fewer(id) {
+        expandedAll = null;
+        renderLanes();
+        const row = host2.$('#lanes .srow[data-id="' + CSS.escape(id) + '"]');
+        host2.pagingOwner.scrollProgrammatically(() => row?.scrollIntoView({ block: "nearest" }));
+        row?.focus({ preventScroll: true });
+      }
+    });
+    function openKidsSheet(parent, trigger) {
+      const all = host2.domain.descendantsOf(parent.id, navigationTree().children), bucket = (s) => s.state === "wait" ? 0 : s.state === "work" ? 1 : 2;
+      let picked = null;
+      const rows = [...all].sort((a, b) => b.last - a.last).map((s) => {
+        const above = host2.domain.parentOf(s.id);
+        return {
+          id: s.id,
+          name: s.name,
+          state: s.state,
+          stateLabel: STATE[s.state] ?? s.state,
+          age: host2.ago(s.last),
+          bucket: bucket(s),
+          under: above && above !== parent.id && host2.modelStore.sessions[above] ? host2.modelStore.sessions[above].name : void 0
+        };
+      });
+      const sheet2 = createKidsSheet(parent.name, rows, {
+        matches(id, query) {
+          return host2.navigationViewOwner.sessMatch(host2.modelStore.sessions[id], query);
+        },
+        select(id) {
+          picked = id;
+          host2.pendingSessionOpen = id;
+          sheet2.dialog.close();
+        },
+        opened(d) {
+          host2.toolViewsOwner.viewerEl = d;
+          document.documentElement.classList.add("viewer-open");
+          if (!host2.sidebarOnly)
+            try {
+              history.pushState(
+                {
+                  ...host2.navigation.route,
+                  sheet: 1,
+                  scrollTop: host2.historyScrollOwner.currentScroll()
+                },
+                ""
+              );
+            } catch {
+            }
+        },
+        closed(d) {
+          host2.dialogs.delete(d);
+          if (host2.disposed) return;
+          document.documentElement.classList.remove("viewer-open");
+          if (host2.toolViewsOwner.viewerEl === d) {
+            host2.toolViewsOwner.viewerEl = null;
+            if (!host2.sidebarOnly && history.state?.sheet) {
+              host2.toolViewsOwner.skipPop = true;
+              history.back();
+            } else if (host2.pendingSessionOpen) {
+              const id = host2.pendingSessionOpen;
+              host2.pendingSessionOpen = null;
+              host2.destination.goSession(id);
+            }
+          }
+          if (!picked)
+            (host2.$('#lanes .tree-all[data-id="' + CSS.escape(parent.id) + '"]') ?? trigger).focus();
+          if (host2.liveModelOwner.LIVE.pending) host2.applicationRefreshOwner.refresh();
+        }
+      });
+      host2.dialogs.set(sheet2.dialog, sheet2);
+      sheet2.show();
+    }
+    function buildLaneSnapshot(s, depth, children, rail) {
+      const kids = children.get(s.id) ?? [], allKids = host2.domain.descendantsOf(s.id, children);
+      const { current, ancestors } = routedPath(), saved = host2.layoutOwner.treePrefs[s.id];
+      const open = forcedOpenIds().has(s.id) || expandedPath.has(s.id) || (typeof saved?.open === "boolean" ? saved.open : host2.domain.defaultTreeOpen(s.id, children) || expandedUnder.has(s.id));
+      const group = kids.length && !rail ? treeGroupSnapshot(s, kids, children, depth, rail, open) : null;
+      const parts = allKids.length ? host2.domain.childParts(allKids) : [], harness = Object.hasOwn(HARNESSES, s.harness) ? HARNESSES[s.harness] : null;
+      const flag = kids.length && !rail ? allKids.some((x) => x.state === "wait") ? "wait" : allKids.some((x) => x.state === "err") ? "err" : null : null;
+      const fields = [
+        {
+          className: "row-duration",
+          text: host2.dur(s.start, s.state === "work" || s.state === "wait" ? null : s.last),
+          priority: 1,
+          tip: "Duration",
+          icon: I.duration
+        }
+      ];
+      if (Object.keys(host2.modelStore.machines).length > 1)
+        fields.push({
+          className: "row-machine host",
+          text: host2.domain.shortHost(s),
+          priority: 2,
+          tip: "Machine: " + host2.domain.hostOf(s),
+          icon: I.machine
+        });
+      if (s.repo)
+        fields.push({
+          className: "repo-short",
+          text: s.repo,
+          priority: 3,
+          tip: "Repo: " + s.repo,
+          icon: I.repo
+        });
+      return {
+        id: s.id,
+        name: s.name,
+        label: [
+          s.name,
+          STATE[s.state] ?? s.state,
+          HARNESS[s.harness] ?? s.harness,
+          host2.domain.shortHost(s),
+          ...parts
+        ].join(", "),
+        state: s.state,
+        stateLabel: STATE[s.state] ?? s.state,
+        age: host2.ago(s.last),
+        model: shortModel(s.model ?? s.modelId),
+        modelTip: "Model: " + host2.sessionChrome.modelIdOf(s),
+        harness: harness ? {
+          id: s.harness,
+          name: harness.name,
+          light: harness.icon.light,
+          dark: harness.icon.dark,
+          darkTheme: host2.darkTheme()
+        } : void 0,
+        fields,
+        current: current === s.id ? "page" : rail && ancestors.has(s.id) ? "true" : void 0,
+        rail,
+        childState: rail && allKids.some((x) => x.state === "work" || x.state === "wait") ? host2.domain.urgentDescendant(s.id, children) ?? "work" : void 0,
+        flag: flag ? {
+          state: flag,
+          tip: allKids.filter((x) => x.state === "wait").length + " needs you \xB7 " + allKids.filter((x) => x.state === "err").length + " failed"
+        } : void 0,
+        open,
+        depth,
+        children: group?.items,
+        all: group?.all,
+        stuck: !!group?.full && open
+      };
+    }
+    function laneFocus() {
+      const a = document.activeElement instanceof HTMLElement ? document.activeElement : null, item2 = a?.closest(".treeitem");
+      if (!a || !host2.$("#lanes").contains(a)) return null;
+      const kind = ["srow", "tree-all", "tree-fewer", "tree-toggle"].find((c) => a.classList.contains(c)) ?? (a === item2 ? "treeitem" : null);
+      const id = kind === "tree-toggle" ? a.dataset.treeToggle : kind === "srow" || kind === "tree-all" ? a.dataset.id : item2?.dataset.id;
+      return kind && id ? { kind, id, visible: a.matches(":focus-visible") } : null;
+    }
+    function restoreLaneFocus(f) {
+      if (!f || document.activeElement !== document.body) return;
+      const q = (sel) => host2.$("#lanes " + sel), id = CSS.escape(f.id);
+      const target = f.kind === "srow" ? q('.srow[data-id="' + id + '"]') : f.kind === "tree-all" ? q('.tree-all[data-id="' + id + '"]') : f.kind === "tree-fewer" ? q('.treeitem[data-id="' + id + '"] > .tree-row .tree-fewer') : f.kind === "tree-toggle" ? q('.tree-toggle[data-tree-toggle="' + id + '"]') : q('.treeitem[data-id="' + id + '"]');
+      (target ?? q('.srow[data-id="' + id + '"]'))?.focus({
+        preventScroll: true,
+        focusVisible: f.visible
+      });
+    }
+    function renderLanes() {
+      const rail = host2.layoutOwner.railMode && !host2.phone.matches, prevSide = host2.orderingControlsOwner.ORD.get("side");
+      if (rail || prevSide?.rail !== rail) host2.orderingControlsOwner.ORD.delete("side");
+      const sideState = host2.orderingControlsOwner.ordState("side"), focus = laneFocus(), path = routedPath(), { current, ancestors } = path, { roots: lanes, children: everyone } = navigationTree(path);
+      sideOrder = Object.assign(host2.orderingControlsOwner.orderScope("side", "", null, sideState), {
+        seen: /* @__PURE__ */ new Set()
+      });
+      sideOrder.rail = rail;
+      const box = host2.$("#lanes"), drawn = [...box.querySelectorAll(".treeitem")];
+      sideOrder.seen = new Set(drawn.map((r) => r.dataset.id));
+      const seeing = new Set(
+        drawn.filter((r) => r.querySelector(":scope > .tree-row .srow")?.getClientRects().length).map((r) => r.dataset.id)
+      );
+      let children = everyone;
+      if (sideOrder.keep) {
+        const held = [...everyone.keys()].filter(
+          (p) => !sideOrder.prevKids.has(p) && seeing.has(p) && p !== current && !ancestors.has(p)
+        );
+        if (held.length) {
+          children = new Map([...everyone].filter(([p]) => !held.includes(p)));
+          sideOrder.n += held.reduce((n, p) => n + everyone.get(p).length, 0);
+        }
+      }
+      sideOrder.kids = new Set(children.keys());
+      if (expandedAll && (host2.phone.matches || host2.layoutOwner.railMode || !host2.modelStore.sessions[expandedAll]))
+        expandedAll = null;
+      sideOrder.exp = JSON.stringify([expandedAll, host2.layoutOwner.railMode && !host2.phone.matches]);
+      sideOrder.reseed = sideOrder.keep && sideOrder.prevExp !== sideOrder.exp;
+      expandedPath = expandedAll ? ancestorsOf(expandedAll) : /* @__PURE__ */ new Set();
+      expandedUnder = expandedAll ? new Set(host2.domain.descendantsOf(expandedAll, children).map((x) => x.id)) : /* @__PURE__ */ new Set();
+      recentSnapshot = {
+        items: host2.orderingControlsOwner.orderList(
+          sideOrder,
+          "lanes",
+          lanes,
+          (...args) => host2.orderingControlsOwner.byLast(...args),
+          {
+            limit: 8,
+            must: /* @__PURE__ */ new Set([...current ? [current] : [], ...ancestors])
+          }
+        ).slice(0, 8).map((s) => buildLaneSnapshot(s, 0, children, rail)),
+        empty: !lanes.length
+      };
+      recentRenderer.update(recentSnapshot);
+      if (!sideOrder.n) {
+        host2.scope.clearTimeout(host2.orderingControlsOwner.ordIdle);
+        host2.orderingControlsOwner.ordIdle = void 0;
+      } else if (!host2.orderingControlsOwner.ordIdle) host2.orderingControlsOwner.ordIdleArm();
+      const q = host2.$("#q");
+      if (q && document.activeElement !== q) q.value = host2.query;
+      restoreLaneFocus(focus);
+      const stuck = box.querySelector(".tree-row.stuck"), navigated = revealedFor !== host2.navigation.route;
+      revealedFor = host2.navigation.route;
+      setGeometry(
+        host2.$("#side-list") ?? host2.$("#sidebar"),
+        "scrollPaddingTop",
+        stuck ? stuck.offsetHeight + 8 : null
+      );
+      if (stuck && navigated)
+        host2.pagingOwner.scrollProgrammatically(
+          () => box.querySelector('.srow[aria-current="page"]')?.scrollIntoView({ block: "nearest" })
+        );
+    }
+    return {
+      recentRenderer,
+      get expandedAll() {
+        return expandedAll;
+      },
+      set expandedAll(value) {
+        expandedAll = value;
+      },
+      renderLanes,
+      COST_TIP,
+      isApprovalReview
+    };
+  }
 
   // src/domain/trace.ts
   var finite = (value) => typeof value === "number" && Number.isFinite(value);
@@ -6380,7 +10782,14 @@ globalThis.__semonUIShared = __semonUIShared;
       return rows;
     };
     function traceAgentTree(root) {
-      const rootNode = { sid: root.sid, turn: root, handoff: null, kind: "root", depth: 0, children: [] };
+      const rootNode = {
+        sid: root.sid,
+        turn: root,
+        handoff: null,
+        kind: "root",
+        depth: 0,
+        children: []
+      };
       const peers = [], handoffs = [], spawns = [], seenTurns = /* @__PURE__ */ new Set(), seenSessions = /* @__PURE__ */ new Set([root.sid]);
       const walk = (node) => {
         const turn = node.turn;
@@ -6395,13 +10804,27 @@ globalThis.__semonUIShared = __semonUIShared;
             const childTurn = STARTS.get(h2.id);
             if (!SESS[h2.to] || seenSessions.has(h2.to)) continue;
             seenSessions.add(h2.to);
-            const child = { sid: h2.to, turn: childTurn ?? null, handoff: h2, kind: "spawn", depth: node.depth + 1, children: [] };
+            const child = {
+              sid: h2.to,
+              turn: childTurn ?? null,
+              handoff: h2,
+              kind: "spawn",
+              depth: node.depth + 1,
+              children: []
+            };
             node.children.push(child);
             children.push(child);
           } else if (h2.kind === "relay" && SESS[h2.to] && !seenSessions.has(h2.to)) {
             const peerTurn = STARTS.get(h2.id);
             seenSessions.add(h2.to);
-            const peer = { sid: h2.to, turn: peerTurn ?? null, handoff: h2, kind: "relay", depth: 0, children: [] };
+            const peer = {
+              sid: h2.to,
+              turn: peerTurn ?? null,
+              handoff: h2,
+              kind: "relay",
+              depth: 0,
+              children: []
+            };
             peers.push(peer);
             children.push(peer);
           }
@@ -6416,13 +10839,26 @@ globalThis.__semonUIShared = __semonUIShared;
       const start = root.at ?? root.start?.at ?? session.start;
       const nextTurn = (TURNS[root.sid] ?? []).find((t) => (t.at ?? 0) > start);
       const upper = root.end?.at ?? nextTurn?.at ?? (session.state === "work" ? now() : session.last) ?? start;
-      const end = Math.max(start, upper, ...model2.handoffs.map((h2) => h2.done).filter(finite), ...allRunNodes(model2).filter((n) => n.kind !== "root").map((n) => SESS[n.sid]?.state === "work" ? now() : n.handoff?.done ?? SESS[n.sid]?.last).filter(finite));
+      const end = Math.max(
+        start,
+        upper,
+        ...model2.handoffs.map((h2) => h2.done).filter(finite),
+        ...allRunNodes(model2).filter((n) => n.kind !== "root").map(
+          (n) => SESS[n.sid]?.state === "work" ? now() : n.handoff?.done ?? SESS[n.sid]?.last
+        ).filter(finite)
+      );
       const span = Math.max(1, end - start);
-      const waits = allRunNodes(model2).flatMap((node) => (SESS[node.sid]?.wait_edges ?? []).filter((w) => (!w.turn || w.turn === node.turn?.id) && w.start >= start && w.start <= end).map((w) => ({ ...w, sid: node.sid })));
-      const critical = new Set(model2.spawns.filter((h2) => waits.some((w) => w.sid === h2.from && w.targets?.includes(h2.to))).map((h2) => h2.id));
+      const waits = allRunNodes(model2).flatMap(
+        (node) => (SESS[node.sid]?.wait_edges ?? []).filter((w) => (!w.turn || w.turn === node.turn?.id) && w.start >= start && w.start <= end).map((w) => ({ ...w, sid: node.sid }))
+      );
+      const critical = new Set(
+        model2.spawns.filter((h2) => waits.some((w) => w.sid === h2.from && w.targets?.includes(h2.to))).map((h2) => h2.id)
+      );
       const pct = (m) => Math.max(0, Math.min(100, (m - start) / span * 100));
       const steps = [1, 2, 5, 10, 15, 30, 60, 120, 240].map((n) => n * 6e4).map((step2) => ({ step: step2, count: Math.floor((span - 1) / step2) })).filter((x) => x.count >= 3 && x.count <= 6).sort((a, b) => Math.abs(a.count - 5) - Math.abs(b.count - 5) || a.step - b.step);
-      const step = steps[0]?.step ?? [1, 2, 5, 10, 15, 30, 60, 120, 240].map((n) => n * 6e4).sort((a, b) => Math.abs(Math.floor((span - 1) / a) - 5) - Math.abs(Math.floor((span - 1) / b) - 5))[0];
+      const step = steps[0]?.step ?? [1, 2, 5, 10, 15, 30, 60, 120, 240].map((n) => n * 6e4).sort(
+        (a, b) => Math.abs(Math.floor((span - 1) / a) - 5) - Math.abs(Math.floor((span - 1) / b) - 5)
+      )[0];
       const ticks = [];
       for (let offset = step; offset < span; offset += step) ticks.push(offset);
       const rowCount = (node) => 1 + node.children.reduce((n, child) => n + rowCount(child), 0);
@@ -6434,15 +10870,26 @@ globalThis.__semonUIShared = __semonUIShared;
       const totalRows = rowCount(model2.rootNode) + model2.peers.reduce((n, peer) => n + rowCount(peer), 0), foldRows = totalRows > 12;
       const spawned = model2.spawns.filter((h2) => Number.isFinite(h2.at) && Number.isFinite(h2.done) && h2.done > h2.at).map((h2) => ({ start: h2.at, end: h2.done }));
       const missingSpawnEnds = model2.spawns.filter((h2) => !Number.isFinite(h2.done)).length;
-      const points = spawned.flatMap((x) => [{ at: x.start, change: 1 }, { at: x.end, change: -1 }]).sort((a, b) => a.at - b.at || a.change - b.change);
+      const points = spawned.flatMap((x) => [
+        { at: x.start, change: 1 },
+        { at: x.end, change: -1 }
+      ]).sort((a, b) => a.at - b.at || a.change - b.change);
       let active = 0, peak = 0;
       for (const p of points) {
         active += p.change;
         peak = Math.max(peak, active);
       }
-      const totalCost = costForSessions(allRunNodes(model2).map((n) => SESS[n.sid]).filter(Boolean));
+      const totalCost = costForSessions(
+        allRunNodes(model2).map((n) => SESS[n.sid]).filter(Boolean)
+      );
       const participantCount = allRunNodes(model2).length;
-      const summary = [participantCount + (participantCount === 1 ? " agent" : " agents"), dur2(start, end), costText(totalCost) + " session totals", ...spawned.length ? ["Recorded spawn overlap: " + peak] : [], ...missingSpawnEnds ? [missingSpawnEnds + " spawn end" + (missingSpawnEnds === 1 ? "" : "s") + " not recorded"] : []];
+      const summary = [
+        participantCount + (participantCount === 1 ? " agent" : " agents"),
+        dur2(start, end),
+        costText(totalCost) + " session totals",
+        ...spawned.length ? ["Recorded spawn overlap: " + peak] : [],
+        ...missingSpawnEnds ? [missingSpawnEnds + " spawn end" + (missingSpawnEnds === 1 ? "" : "s") + " not recorded"] : []
+      ];
       while (RUN_EXPANDED.size > 16) RUN_EXPANDED.delete(RUN_EXPANDED.keys().next().value);
       const expanded = RUN_EXPANDED.get(root.id) ?? /* @__PURE__ */ new Set();
       RUN_EXPANDED.set(root.id, expanded);
@@ -6451,7 +10898,9 @@ globalThis.__semonUIShared = __semonUIShared;
         const s = SESS[node.sid];
         if (!s) return;
         const handoff = node.handoff, from = node.kind === "root" ? start : handoff.at, to = node.kind === "root" ? end : s.state === "work" ? now() : handoff.done ?? s.last ?? from;
-        const duration = dur2(from, to), ownCost = costForSession(node.sid), rollup = costForSessions(allNodes(node).map((x) => SESS[x.sid]).filter(Boolean)), status2 = STATE2[s.state] ?? s.state;
+        const duration = dur2(from, to), ownCost = costForSession(node.sid), rollup = costForSessions(
+          allNodes(node).map((x) => SESS[x.sid]).filter(Boolean)
+        ), status2 = STATE2[s.state] ?? s.state;
         const segments = [], segment = (a, b, kind) => {
           if (b > a) segments.push({ left: pct(a), width: Math.max(0.2, pct(b) - pct(a)), kind });
         };
@@ -6467,7 +10916,9 @@ globalThis.__semonUIShared = __semonUIShared;
           kind: "agent",
           id: node.sid,
           depth: Math.min(3, depth),
-          label: [s.name, s.kind ?? HARNESS2[s.harness], status2, duration, costText(rollup)].join(", "),
+          label: [s.name, s.kind ?? HARNESS2[s.harness], status2, duration, costText(rollup)].join(
+            ", "
+          ),
           name: s.name,
           relay: node.kind === "relay",
           critical: !!handoff && critical.has(handoff.id),
@@ -6481,15 +10932,34 @@ globalThis.__semonUIShared = __semonUIShared;
           costTip: "Own cost: " + costText(ownCost),
           segments,
           spawns: node.children.map((child) => pct(child.handoff.at)),
-          waits: waits.filter((w) => w.sid === node.sid).map((w) => ({ left: pct(w.start), width: Math.max(0.2, pct(w.end ?? end) - pct(w.start)), tip: w.targets?.length ? "Waiting on " + w.targets.map(nameOf).join(", ") : "Wait without a recorded target" })),
+          waits: waits.filter((w) => w.sid === node.sid).map((w) => ({
+            left: pct(w.start),
+            width: Math.max(0.2, pct(w.end ?? end) - pct(w.start)),
+            tip: w.targets?.length ? "Waiting on " + w.targets.map(nameOf).join(", ") : "Wait without a recorded target"
+          })),
           turn: node.turn?.id,
-          edge: parent ? { parent, started: pct(handoff.at), done: pct(handoff.done ?? (s.state === "work" ? now() : s.last)), returned: Number.isFinite(handoff.done) } : void 0
+          edge: parent ? {
+            parent,
+            started: pct(handoff.at),
+            done: pct(handoff.done ?? (s.state === "work" ? now() : s.last)),
+            returned: Number.isFinite(handoff.done)
+          } : void 0
         });
         const folded = foldRows && node.children.length > 8 && !expanded.has(node.sid);
-        for (const child of folded ? node.children.slice(0, 8) : node.children) add(child, Math.min(3, depth + 1), node.sid);
+        for (const child of folded ? node.children.slice(0, 8) : node.children)
+          add(child, Math.min(3, depth + 1), node.sid);
         if (folded) {
           const hidden = node.children.slice(8), ids = new Set(hidden.flatMap((n) => allNodes(n).map((x) => x.sid))), cost2 = costForSessions([...ids].map((id) => SESS[id]).filter(Boolean));
-          rows.push({ kind: "more", id: "more:" + node.sid, fold: node.sid, depth: Math.min(3, depth + 1), name: "+" + hidden.length + " more", label: "Show " + hidden.length + " more agents under " + s.name, cost: cost2.usd == null ? "\u2014" : shortMoney(cost2.usd), costTip: "Hidden agents' rollup cost: " + costText(cost2) });
+          rows.push({
+            kind: "more",
+            id: "more:" + node.sid,
+            fold: node.sid,
+            depth: Math.min(3, depth + 1),
+            name: "+" + hidden.length + " more",
+            label: "Show " + hidden.length + " more agents under " + s.name,
+            cost: cost2.usd == null ? "\u2014" : shortMoney(cost2.usd),
+            costTip: "Hidden agents' rollup cost: " + costText(cost2)
+          });
         }
       };
       add(model2.rootNode, 0);
@@ -6501,7 +10971,11 @@ globalThis.__semonUIShared = __semonUIShared;
         summary,
         start: clock2(start),
         end: clock2(end),
-        ticks: ticks.map((offset) => ({ left: pct(start + offset), label: "+" + Math.round(offset / 6e4) + "m", nearEnd: offset / span > 0.86 })),
+        ticks: ticks.map((offset) => ({
+          left: pct(start + offset),
+          label: "+" + Math.round(offset / 6e4) + "m",
+          nearEnd: offset / span > 0.86
+        })),
         legend: waits.some((w) => w.targets?.length) ? "Recorded waits on agents" : waits.length ? "Recorded waits without known targets" : "Wait dependencies not recorded",
         incomplete: allRunNodes(model2).some((node) => SESS[node.sid]?.wait_edges_truncated),
         rows
@@ -6512,19 +10986,49 @@ globalThis.__semonUIShared = __semonUIShared;
 
   // src/app/screenViews.ts
   function createScreenViews(host2) {
-    const MENU_KINDS = [["Input", ["input"]], ["Output", ["output"]], ["Cache write", ["cache_write_5m", "cache_write_1h"]], ["Cache read", ["cache_read"]], ["Web search", ["web_search"]]];
+    const MENU_KINDS = [
+      ["Input", ["input"]],
+      ["Output", ["output"]],
+      ["Cache write", ["cache_write_5m", "cache_write_1h"]],
+      ["Cache read", ["cache_read"]],
+      ["Web search", ["web_search"]]
+    ];
     const COST_NOTE = "What these tokens would cost at API rates. Subscriptions aren't billed this way.";
     function costSnapshot(s, kids) {
-      const own = host2.costForSession(s.id), all = host2.costForSession(s.id, true), missing = host2.costMissing(all), details = [];
-      if (kids.length) details.push({ label: "This session", value: host2.costText(own) }, { label: kids.length === 1 ? "Its run" : "Its " + kids.length + " runs", value: host2.costText(host2.costForSessions(kids)) });
+      const own = host2.domain.costForSession(s.id), all = host2.domain.costForSession(s.id, true), missing = host2.domain.costMissing(all), details = [];
+      if (kids.length)
+        details.push(
+          { label: "This session", value: host2.domain.costText(own) },
+          {
+            label: kids.length === 1 ? "Its run" : "Its " + kids.length + " runs",
+            value: host2.domain.costText(host2.domain.costForSessions(kids))
+          }
+        );
       const reports = s.reported_runs ?? [], reported = reports.filter((r) => Number.isFinite(r.cost_usd));
-      if (reports.length) details.push({ label: host2.HARNESS[s.harness] + "'s own figure", value: reported.length ? host2.asMoney(reported.reduce((n, r) => n + (r.cost_usd ?? 0), 0)) + (reported.length === 1 ? ", last run" : ", last " + reported.length + " runs") : "not reported" });
-      const check = [...s.cost_check ?? []].reverse().find((c) => c.ok === false && Number.isFinite(c.computed_usd) && Number.isFinite(c.reported_usd));
-      const mismatch = check ? "Semon's estimate for that run is " + (check.reported_usd === 0 ? 100 : Math.round(Math.abs((check.computed_usd ?? 0) - (check.reported_usd ?? 0)) / Math.abs(check.reported_usd ?? 0) * 100)) + "% " + ((check.computed_usd ?? 0) > (check.reported_usd ?? 0) ? "above" : "below") + " " + host2.HARNESS[s.harness] + "'s figure: API rates differ from what a plan is charged." : void 0;
-      const children = host2.sessionChildren(), runs = [], walk = (id, depth) => {
+      if (reports.length)
+        details.push({
+          label: HARNESS[s.harness] + "'s own figure",
+          value: reported.length ? host2.domain.asMoney(reported.reduce((n, r) => n + (r.cost_usd ?? 0), 0)) + (reported.length === 1 ? ", last run" : ", last " + reported.length + " runs") : "not reported"
+        });
+      const check = [...s.cost_check ?? []].reverse().find(
+        (c) => c.ok === false && Number.isFinite(c.computed_usd) && Number.isFinite(c.reported_usd)
+      );
+      const mismatch = check ? "Semon's estimate for that run is " + (check.reported_usd === 0 ? 100 : Math.round(
+        Math.abs((check.computed_usd ?? 0) - (check.reported_usd ?? 0)) / Math.abs(check.reported_usd ?? 0) * 100
+      )) + "% " + ((check.computed_usd ?? 0) > (check.reported_usd ?? 0) ? "above" : "below") + " " + HARNESS[s.harness] + "'s figure: API rates differ from what a plan is charged." : void 0;
+      const children = host2.domain.sessionChildren(), runs = [], walk = (id, depth) => {
         for (const c of [...children.get(id) ?? []].sort((a, b) => b.last - a.last)) {
-          const cost2 = host2.costText(host2.costForSession(c.id));
-          runs.push({ id: c.id, depth, label: "Open " + c.name + ", " + host2.kindText(c) + ", " + host2.STATE[c.state] + ", " + cost2, name: c.name, kind: host2.kindText(c), state: c.state, stateLabel: host2.STATE[c.state], cost: cost2 });
+          const cost2 = host2.domain.costText(host2.domain.costForSession(c.id));
+          runs.push({
+            id: c.id,
+            depth,
+            label: "Open " + c.name + ", " + host2.sessionChrome.kindText(c) + ", " + STATE[c.state] + ", " + cost2,
+            name: c.name,
+            kind: host2.sessionChrome.kindText(c),
+            state: c.state,
+            stateLabel: STATE[c.state],
+            cost: cost2
+          });
           walk(c.id, depth + 1);
         }
       };
@@ -6534,12 +11038,17 @@ globalThis.__semonUIShared = __semonUIShared;
         for (const [label, keys] of MENU_KINDS) {
           const tokens2 = keys.reduce((n, k) => n + (Number(model2.tokens?.[k]) || 0), 0), usd = keys.reduce((n, k) => n + (Number(model2.usd_by_kind?.[k]) || 0), 0);
           if (tokens2 === 0 && (!priced2 || usd < 5e-3)) continue;
-          rows.push({ label, count: tokens2 ? compactCount(tokens2) : "", exact: tokens2 ? tokens2.toLocaleString() : void 0, cost: priced2 ? host2.asMoney(usd) : "\u2014" });
+          rows.push({
+            label,
+            count: tokens2 ? compactCount(tokens2) : "",
+            exact: tokens2 ? tokens2.toLocaleString() : void 0,
+            cost: priced2 ? host2.domain.asMoney(usd) : "\u2014"
+          });
         }
         return { id, rows };
       });
       return {
-        figure: host2.costText(kids.length ? all : own),
+        figure: host2.domain.costText(kids.length ? all : own),
         caption: kids.length ? "this session and its " + kids.length + (kids.length === 1 ? " run" : " runs") : "this session",
         note: COST_NOTE + (missing.length ? " No price for " + missing.join(", ") + "." : ""),
         details,
@@ -6549,145 +11058,234 @@ globalThis.__semonUIShared = __semonUIShared;
         includesRuns: !!kids.length
       };
     }
-    const upCount = () => Object.keys(host2.MACHINE).filter((m) => host2.MACHINE_UP[m]).length;
+    const upCount = () => Object.keys(host2.modelStore.machines).filter((m) => host2.modelStore.machineUp[m]).length;
     let allAnswered = false;
     function harnessSnapshot(id) {
-      const h2 = Object.hasOwn(host2.HARNESSES, id) ? host2.HARNESSES[id] : null;
+      const h2 = Object.hasOwn(HARNESSES, id) ? HARNESSES[id] : null;
       return h2 ? { id, name: h2.name, light: h2.icon.light, dark: h2.icon.dark, darkTheme: host2.darkTheme() } : void 0;
     }
     function liveSnapshot(s, showMachine) {
-      const cur = (host2.TURNS[s.id] ?? []).at(-1), msg = cur?.start?.brief ?? cur?.u?.text;
-      const inb = cur?.start ?? (cur?.u ? { from: "you" } : host2.H.find((h2) => h2.to === s.id && h2.kind !== "move"));
+      const cur = (host2.modelStore.turns[s.id] ?? []).at(-1), msg = cur?.start?.brief ?? cur?.u?.text;
+      const inb = cur?.start ?? (cur?.u ? { from: "you" } : host2.modelStore.handoffs.find((h2) => h2.to === s.id && h2.kind !== "move"));
       return {
         id: s.id,
         name: s.name,
         state: s.state,
-        stateLabel: host2.STATE[s.state] ?? s.state,
-        status: s.state === "work" ? host2.HARNESS[s.harness] : host2.ago(s.last),
+        stateLabel: STATE[s.state] ?? s.state,
+        status: s.state === "work" ? HARNESS[s.harness] : host2.ago(s.last),
         harness: s.state === "work" ? harnessSnapshot(s.harness) : void 0,
-        detail: [showMachine ? host2.MACHINE[s.machine] : null, inb ? inb.from === "you" ? "for you" : "for " + host2.nameOf(inb.from) : null, msg ? host2.oneLine(msg) : null].filter(Boolean).join(" \xB7 "),
+        detail: [
+          showMachine ? host2.modelStore.machines[s.machine] : null,
+          inb ? inb.from === "you" ? "for you" : "for " + host2.domain.nameOf(inb.from) : null,
+          msg ? host2.domain.oneLine(msg) : null
+        ].filter(Boolean).join(" \xB7 "),
         activity: s.state === "work" && s.activity ? [s.activity[0], s.activity[1], s.activity[2]] : void 0
       };
     }
     function inboxSnapshot(h2, quiet = false) {
-      const sid = h2.kind === "move" ? h2.to : h2.from, t = host2.HOLDS.get(h2.id), s = host2.SESS[sid];
+      const sid = h2.kind === "move" ? h2.to : h2.from, t = host2.modelStore.holds.get(h2.id), s = host2.modelStore.sessions[sid];
       const parts = [], part = (className, text2, tip) => parts.push({ className, text: text2, tip });
-      let path = host2.I.more;
+      let path = I.more;
       if (h2.kind === "ask") {
-        path = host2.I.ask;
-        part("who", host2.nameOf("you"));
+        path = I.ask;
+        part("who", host2.domain.nameOf("you"));
         part("verb", " asked ");
-        part("who", host2.nameOf(h2.to));
+        part("who", host2.domain.nameOf(h2.to));
       } else if (h2.kind === "spawn" || h2.kind === "relay") {
-        path = host2.I.out;
-        part("who", host2.nameOf(h2.from));
-        part("verb", h2.kind === "spawn" ? " handed off to " + (host2.SESS[h2.to]?.kind === "Subagent" ? "subagent" : host2.SESS[h2.to]?.kind ?? "") + " " : " relayed to ");
-        part("who", host2.nameOf(h2.to));
+        path = I.out;
+        part("who", host2.domain.nameOf(h2.from));
+        part(
+          "verb",
+          h2.kind === "spawn" ? " handed off to " + (host2.modelStore.sessions[h2.to]?.kind === "Subagent" ? "subagent" : host2.modelStore.sessions[h2.to]?.kind ?? "") + " " : " relayed to "
+        );
+        part("who", host2.domain.nameOf(h2.to));
       } else if (h2.kind === "move") {
-        path = host2.I.move;
-        const short = machineShorts([h2.fromMachine, h2.toMachine].map((id) => [id, host2.MACHINE[id] ?? id]));
+        path = I.move;
+        const short = machineShorts(
+          [h2.fromMachine, h2.toMachine].map((id) => [id, host2.modelStore.machines[id] ?? id])
+        );
         part("verb", "Semon moved ");
-        part("who", host2.nameOf(h2.to));
+        part("who", host2.domain.nameOf(h2.to));
         part("verb", " from ");
-        part("verb mach", short.get(h2.fromMachine) ?? h2.fromMachine, "Machine: " + (host2.MACHINE[h2.fromMachine] ?? h2.fromMachine));
+        part(
+          "verb mach",
+          short.get(h2.fromMachine) ?? h2.fromMachine,
+          "Machine: " + (host2.modelStore.machines[h2.fromMachine] ?? h2.fromMachine)
+        );
         part("verb", " to ");
-        part("verb mach", short.get(h2.toMachine) ?? h2.toMachine, "Machine: " + (host2.MACHINE[h2.toMachine] ?? h2.toMachine));
+        part(
+          "verb mach",
+          short.get(h2.toMachine) ?? h2.toMachine,
+          "Machine: " + (host2.modelStore.machines[h2.toMachine] ?? h2.toMachine)
+        );
       } else if (h2.kind === "toyou") {
-        path = h2.status === "done" && (h2.ask === "question" || h2.ask === "decision") ? host2.I.done : h2.ask === "question" ? host2.I.qc : h2.ask === "decision" ? host2.I.decide : host2.I.result;
-        part("who", host2.nameOf(h2.from));
-        part("verb", { question: " asked you", result: " sent you a result", decision: " needs your decision" }[h2.ask]);
+        path = h2.status === "done" && (h2.ask === "question" || h2.ask === "decision") ? I.done : h2.ask === "question" ? I.qc : h2.ask === "decision" ? I.decide : I.result;
+        part("who", host2.domain.nameOf(h2.from));
+        part(
+          "verb",
+          { question: " asked you", result: " sent you a result", decision: " needs your decision" }[h2.ask]
+        );
       }
-      const answer2 = quiet ? host2.answersOf(h2) : null, root = t ? host2.traceRoot(t) : null, msg = root?.start?.from === "you" ? root.start.brief : root?.u?.text;
+      const answer2 = quiet ? host2.domain.answersOf(h2) : null, root = t ? host2.domain.traceRoot(t) : null, msg = root?.start?.from === "you" ? root.start.brief : root?.u?.text;
       return {
         id: h2.id,
         quiet,
-        icon: quiet && h2.kind === "toyou" ? host2.I.done : path,
+        icon: quiet && h2.kind === "toyou" ? I.done : path,
         parts,
         age: host2.ago(h2.at),
         preview: preview(h2.brief ?? ""),
         answer: answer2 ? answer2.length ? "You answered: " + answer2.join(" \xB7 ") : "Answered \xB7 reply not in these logs" : void 0,
-        origin: root ? msg ? { message: host2.oneLine(msg) } : { text: "Started by " + host2.nameOf(root.start ? root.start.from : root.sid) } : void 0,
-        context: [host2.HARNESS[s.harness], host2.MACHINE[s.machine]].join(" \xB7 "),
+        origin: root ? msg ? { message: host2.domain.oneLine(msg) } : { text: "Started by " + host2.domain.nameOf(root.start ? root.start.from : root.sid) } : void 0,
+        context: [HARNESS[s.harness], host2.modelStore.machines[s.machine]].join(" \xB7 "),
         harness: harnessSnapshot(s.harness),
         trace: t?.out.length ? t.id : void 0
       };
     }
     const activityHost = {
-      session: host2.goSession,
-      committed: host2.observeTitle,
-      trace: host2.goTrace,
+      session: (...args) => host2.destination.goSession(...args),
+      committed: (...args) => host2.sessionChrome.observeTitle(...args),
+      trace: (...args) => host2.destination.goTrace(...args),
       inbox(id) {
-        const h2 = host2.H.find((h3) => h3.id === id) ?? host2.inbox().find((h3) => h3.id === id);
+        const h2 = host2.modelStore.handoffs.find((h3) => h3.id === id) ?? host2.domain.inbox().find((h3) => h3.id === id);
         if (!h2) return;
-        if (host2.isResult(h2)) host2.markSeenResults([h2]);
-        host2.goSession(h2.kind === "move" ? h2.to : h2.from, host2.HOLDS.get(h2.id)?.id);
+        if (host2.domain.isResult(h2)) host2.seenPersistenceOwner.markSeenResults([h2]);
+        host2.destination.goSession(
+          h2.kind === "move" ? h2.to : h2.from,
+          host2.modelStore.holds.get(h2.id)?.id
+        );
       },
       answered() {
         allAnswered = true;
-        host2.render();
+        host2.documentRendererOwner.render();
       }
     };
     function renderHome(page) {
-      const open = host2.inbox(), running = host2.working(), many = Object.keys(host2.MACHINE).length > 1;
-      const rows = host2.orderList(host2.orderScope("page", host2.pageSig(), host2.navigation.route, host2.pageState()), "working", running, host2.byLast);
-      const done = host2.H.filter((h2) => h2.kind === "toyou" && h2.status === "done").sort((a, b) => b.at - a.at);
-      renderHomeScreen(page, {
-        waiting: open.length,
-        working: running.length,
-        up: upCount(),
-        machines: Object.keys(host2.MACHINE).length,
-        inbox: open.map((h2) => inboxSnapshot(h2, false)),
-        live: rows.map((s) => liveSnapshot(s, many)),
-        answered: (allAnswered ? done : done.slice(0, 3)).map((h2) => inboxSnapshot(h2, true)),
-        totalAnswered: done.length,
-        allAnswered
-      }, activityHost);
+      const open = host2.domain.inbox(), running = host2.domain.working(), many = Object.keys(host2.modelStore.machines).length > 1;
+      const rows = host2.orderingControlsOwner.orderList(
+        host2.orderingControlsOwner.orderScope(
+          "page",
+          host2.orderingControlsOwner.pageSig(),
+          host2.navigation.route,
+          host2.orderingControlsOwner.pageState()
+        ),
+        "working",
+        running,
+        (...args) => host2.orderingControlsOwner.byLast(...args)
+      );
+      const done = host2.modelStore.handoffs.filter((h2) => h2.kind === "toyou" && h2.status === "done").sort((a, b) => b.at - a.at);
+      renderHomeScreen(
+        page,
+        {
+          waiting: open.length,
+          working: running.length,
+          up: upCount(),
+          machines: Object.keys(host2.modelStore.machines).length,
+          inbox: open.map((h2) => inboxSnapshot(h2, false)),
+          live: rows.map((s) => liveSnapshot(s, many)),
+          answered: (allAnswered ? done : done.slice(0, 3)).map((h2) => inboxSnapshot(h2, true)),
+          totalAnswered: done.length,
+          allAnswered
+        },
+        activityHost
+      );
     }
     function renderMachines(page) {
-      const ms = Object.keys(host2.MACHINE).sort((a, b) => Number(host2.MACHINE_UP[a]) - Number(host2.MACHINE_UP[b]));
+      const ms = Object.keys(host2.modelStore.machines).sort(
+        (a, b) => Number(host2.modelStore.machineUp[a]) - Number(host2.modelStore.machineUp[b])
+      );
       const rows = ms.map((m) => {
-        const here = host2.onMachine(m), w = here.filter((s) => s.state === "work").length, up = host2.MACHINE_UP[m], state2 = !up ? "err" : w ? "work" : "idle";
-        const mv = host2.movedOff(m).length, mh = host2.movesOf(m).find((h2) => h2.kind === "move" && h2.fromMachine === m);
+        const here = host2.domain.onMachine(m), w = here.filter((s) => s.state === "work").length, up = host2.modelStore.machineUp[m], state2 = !up ? "err" : w ? "work" : "idle";
+        const mv = host2.domain.movedOff(m).length, mh = host2.domain.movesOf(m).find((h2) => h2.kind === "move" && h2.fromMachine === m);
         return {
           id: m,
-          name: host2.MACHINE[m],
+          name: host2.modelStore.machines[m],
           state: state2,
-          stateLabel: host2.STATE[state2] ?? state2,
+          stateLabel: STATE[state2] ?? state2,
           status: !up ? "offline" : w ? "up" : "idle",
-          detail: up ? [w + " working", here.length + (here.length === 1 ? " session" : " sessions")].join(" \xB7 ") : ["Not responding" + (mh ? " since " + host2.clock(mh.at) : host2.MACHINE_LAST[m] != null ? " since " + host2.clock(host2.MACHINE_LAST[m]) : ""), mv ? mv + (mv === 1 ? " session" : " sessions") + " moved off" : null].filter(Boolean).join(" \xB7 ")
+          detail: up ? [w + " working", here.length + (here.length === 1 ? " session" : " sessions")].join(
+            " \xB7 "
+          ) : [
+            "Not responding" + (mh ? " since " + host2.clock(mh.at) : host2.modelStore.machineLast[m] != null ? " since " + host2.clock(host2.modelStore.machineLast[m]) : ""),
+            mv ? mv + (mv === 1 ? " session" : " sessions") + " moved off" : null
+          ].filter(Boolean).join(" \xB7 ")
         };
       });
-      renderMachinesScreen(page, { rows, up: upCount(), working: host2.working().length, admin: host2.ADMIN }, { machine(id) {
-        host2.go({ v: "machine", id });
-      }, admin(href) {
-        location.assign(href);
-      }, committed: host2.observeTitle });
+      renderMachinesScreen(
+        page,
+        { rows, up: upCount(), working: host2.domain.working().length, admin: host2.admin },
+        {
+          machine(id) {
+            host2.destination.go({ v: "machine", id });
+          },
+          admin(href) {
+            location.assign(href);
+          },
+          committed: (...args) => host2.sessionChrome.observeTitle(...args)
+        }
+      );
     }
     function renderMachine(page, m) {
-      const here = host2.onMachine(m), off = host2.movedOff(m), moves2 = host2.movesOf(m);
-      const ordered = host2.orderList(host2.orderScope("page", host2.pageSig(), host2.navigation.route, host2.pageState()), "machine:" + m, here, host2.byState);
-      renderMachineScreen(page, {
-        name: host2.MACHINE[m],
-        totalSessions: here.length,
-        sessions: ordered.map((s) => liveSnapshot(s, false)),
-        off: off.map((s) => ({ ...liveSnapshot(s, false), detail: "Now on " + host2.MACHINE[s.machine] })),
-        moves: moves2.map((h2) => inboxSnapshot(h2, true))
-      }, activityHost);
+      const here = host2.domain.onMachine(m), off = host2.domain.movedOff(m), moves2 = host2.domain.movesOf(m);
+      const ordered = host2.orderingControlsOwner.orderList(
+        host2.orderingControlsOwner.orderScope(
+          "page",
+          host2.orderingControlsOwner.pageSig(),
+          host2.navigation.route,
+          host2.orderingControlsOwner.pageState()
+        ),
+        "machine:" + m,
+        here,
+        (...args) => host2.domain.byState(...args)
+      );
+      renderMachineScreen(
+        page,
+        {
+          name: host2.modelStore.machines[m],
+          totalSessions: here.length,
+          sessions: ordered.map((s) => liveSnapshot(s, false)),
+          off: off.map((s) => ({
+            ...liveSnapshot(s, false),
+            detail: "Now on " + host2.modelStore.machines[s.machine]
+          })),
+          moves: moves2.map((h2) => inboxSnapshot(h2, true))
+        },
+        activityHost
+      );
     }
     const RUN_EXPANDED = /* @__PURE__ */ new Map();
-    const { agentSnapshot } = createTraceCalculations({ sessions: host2.SESS, turns: host2.TURNS, starts: host2.STARTS }, host2.domain, () => host2.NOW, RUN_EXPANDED, host2.HARNESS, host2.STATE);
+    const { agentSnapshot } = createTraceCalculations(
+      {
+        sessions: host2.modelStore.sessions,
+        turns: host2.modelStore.turns,
+        starts: host2.modelStore.starts
+      },
+      host2.domain,
+      () => host2.now,
+      RUN_EXPANDED,
+      HARNESS,
+      STATE
+    );
     function renderTrace(page, id) {
-      const root = host2.TURN.get(id);
+      const root = host2.modelStore.turn.get(id);
       if (!root) {
-        renderTraceScreen(page, { empty: true, hops: [] }, { ...host2.sentenceHost, committed: host2.observeTitle, fold() {
-        } });
+        renderTraceScreen(
+          page,
+          { empty: true, hops: [] },
+          {
+            ...host2.sentencesOwner.sentenceHost,
+            committed: (...args) => host2.sessionChrome.observeTitle(...args),
+            fold() {
+            }
+          }
+        );
         return;
       }
       const visited = /* @__PURE__ */ new Set(), read = (turn) => {
         if (!turn || visited.has(turn.id)) return;
         visited.add(turn.id);
-        host2.markSeenResults(turn.out);
-        for (const h2 of turn.out) if (h2.kind === "spawn" || h2.kind === "relay") read(host2.STARTS.get(h2.id));
+        host2.seenPersistenceOwner.markSeenResults(turn.out);
+        for (const h2 of turn.out)
+          if (h2.kind === "spawn" || h2.kind === "relay") read(host2.modelStore.starts.get(h2.id));
       };
       read(root);
       const seen = /* @__PURE__ */ new Set([root.id]), sessions = /* @__PURE__ */ new Set([root.sid]), scope = /* @__PURE__ */ new Set([root.sid]), reached = /* @__PURE__ */ new Set([root.id]);
@@ -6695,7 +11293,7 @@ globalThis.__semonUIShared = __semonUIShared;
       const reach = (turn) => {
         for (const h2 of turn.sent) {
           scope.add(h2.kind === "toyou" ? h2.from : h2.to);
-          const child = h2.kind === "spawn" || h2.kind === "relay" ? host2.STARTS.get(h2.id) : null;
+          const child = h2.kind === "spawn" || h2.kind === "relay" ? host2.modelStore.starts.get(h2.id) : null;
           if (child && !reached.has(child.id)) {
             reached.add(child.id);
             reach(child);
@@ -6704,14 +11302,14 @@ globalThis.__semonUIShared = __semonUIShared;
       };
       reach(root);
       const meta = (state2, text3, sid, turn, note) => {
-        const s = host2.SESS[sid], label = host2.machineLabel(s, scope);
+        const s = host2.modelStore.sessions[sid], label = host2.domain.machineLabel(s, scope);
         return {
           state: state2,
-          stateLabel: host2.STATE[state2] ?? state2,
+          stateLabel: STATE[state2] ?? state2,
           text: text3,
-          chip: s ? [s.kind ?? host2.HARNESS[s.harness], label].filter(Boolean).join(" \xB7 ") : void 0,
-          chipClass: s ? host2.hcls(sid) : void 0,
-          tip: label ? "Machine: " + host2.hostOf(s) : void 0,
+          chip: s ? [s.kind ?? HARNESS[s.harness], label].filter(Boolean).join(" \xB7 ") : void 0,
+          chipClass: s ? host2.domain.hcls(sid) : void 0,
+          tip: label ? "Machine: " + host2.domain.hostOf(s) : void 0,
           harness: s ? harnessSnapshot(s.harness) : void 0,
           note: note ?? void 0,
           session: s && !s.stub ? sid : void 0,
@@ -6719,20 +11317,62 @@ globalThis.__semonUIShared = __semonUIShared;
           name: s?.name
         };
       };
-      const start = root.start, text2 = start ? start.brief : root.u?.text, initial = start ? host2.sentenceSnapshot(start, null) : root.u ? host2.sentenceSnapshot({ kind: "ask", id: root.id, from: "you", to: root.sid, at: root.at ?? host2.NOW, status: "done" }, null) : { icon: host2.I.more, parts: [{ className: "who", text: host2.SESS[root.sid].name }, { className: "verb", text: " \xB7 a turn whose start isn't in these logs" }] };
-      const outcome = host2.turnEnd(root), hops = [{ key: "root:" + root.id, className: "k-root", icon: initial.icon, parts: initial.parts, nodeClass: host2.hcls(start ? start.from : root.u ? "you" : root.sid), turn: root.id, handoff: start?.id, time: start ? host2.clock(start.at) : void 0, brief: text2 || void 0, meta: meta(outcome?.st ?? "idle", outcome?.text ?? "Nothing recorded", root.sid, root) }];
+      const start = root.start, text2 = start ? start.brief : root.u?.text, initial = start ? host2.sentencesOwner.sentenceSnapshot(start, null) : root.u ? host2.sentencesOwner.sentenceSnapshot(
+        {
+          kind: "ask",
+          id: root.id,
+          from: "you",
+          to: root.sid,
+          at: root.at ?? host2.now,
+          status: "done",
+          brief: ""
+        },
+        null
+      ) : {
+        icon: I.more,
+        parts: [
+          { className: "who", text: host2.modelStore.sessions[root.sid].name },
+          { className: "verb", text: " \xB7 a turn whose start isn't in these logs" }
+        ]
+      };
+      const outcome = host2.domain.turnEnd(root), hops = [
+        {
+          key: "root:" + root.id,
+          className: "k-root",
+          icon: initial.icon,
+          parts: initial.parts,
+          nodeClass: host2.domain.hcls(start ? start.from : root.u ? "you" : root.sid),
+          turn: root.id,
+          handoff: start?.id,
+          time: start ? host2.clock(start.at) : void 0,
+          brief: text2 || void 0,
+          meta: meta(outcome?.st ?? "idle", outcome?.text ?? "Nothing recorded", root.sid, root)
+        }
+      ];
       const walk = (turn) => {
         for (const h2 of turn.sent) {
-          const result = h2.kind === "toyou" && h2.ask === "result", child = h2.kind === "spawn" || h2.kind === "relay" ? host2.STARTS.get(h2.id) : null, target = h2.kind === "toyou" ? h2.from : h2.to;
-          const sentence = result ? { icon: host2.I.result, parts: [{ className: "verb", text: host2.statWord(h2) ?? "" }] } : host2.sentenceSnapshot(h2, null);
-          const hop = { key: h2.id, className: "child k-" + h2.kind + " s-" + h2.status + (child || h2.kind === "toyou" || h2.kind === "move" ? "" : " stub"), icon: sentence.icon, parts: sentence.parts, nodeClass: host2.hcls(target), handoff: h2.id, turn: child?.id, time: host2.clock(h2.at) };
+          const result = h2.kind === "toyou" && h2.ask === "result", child = h2.kind === "spawn" || h2.kind === "relay" ? host2.modelStore.starts.get(h2.id) : null, target = h2.kind === "toyou" ? h2.from : h2.to;
+          const sentence = result ? {
+            icon: I.result,
+            parts: [{ className: "verb", text: host2.domain.statWord(h2) ?? "" }]
+          } : host2.sentencesOwner.sentenceSnapshot(h2, null);
+          const hop = {
+            key: h2.id,
+            className: "child k-" + h2.kind + " s-" + h2.status + (child || h2.kind === "toyou" || h2.kind === "move" ? "" : " stub"),
+            icon: sentence.icon,
+            parts: sentence.parts,
+            nodeClass: host2.domain.hcls(target),
+            handoff: h2.id,
+            turn: child?.id,
+            time: host2.clock(h2.at)
+          };
           hops.push(hop);
           if (result) {
             n++;
             continue;
           }
           hop.brief = h2.brief;
-          hop.answers = host2.answersOf(h2) ?? void 0;
+          hop.answers = host2.domain.answersOf(h2) ?? void 0;
           hop.result = h2.result || void 0;
           if (h2.kind === "move") {
             hop.meta = meta("done", "Moved", h2.to, turn);
@@ -6740,12 +11380,23 @@ globalThis.__semonUIShared = __semonUIShared;
           }
           n++;
           if (h2.kind === "toyou") {
-            hop.meta = meta(host2.isResult(h2) ? host2.SEEN_RESULTS.has(h2.id) ? "read" : "new" : h2.status === "done" ? "done" : h2.status, host2.statWord(h2) ?? "", h2.from, turn);
+            hop.meta = meta(
+              host2.domain.isResult(h2) ? host2.seenResultsOwner.SEEN_RESULTS.has(h2.id) ? "read" : "new" : h2.status === "done" ? "done" : h2.status,
+              host2.domain.statWord(h2) ?? "",
+              h2.from,
+              turn
+            );
             continue;
           }
           sessions.add(h2.to);
-          const end = child && host2.turnEnd(child);
-          hop.meta = meta(end ? end.st ?? "idle" : h2.status === "done" ? "done" : h2.status, end ? end.text ?? "Nothing recorded" : host2.statWord(h2) ?? "", h2.to, child, child ? void 0 : "Its turn isn't in these logs");
+          const end = child && host2.domain.turnEnd(child);
+          hop.meta = meta(
+            end ? end.st ?? "idle" : h2.status === "done" ? "done" : h2.status,
+            end ? end.text ?? "Nothing recorded" : host2.domain.statWord(h2) ?? "",
+            h2.to,
+            child,
+            child ? void 0 : "Its turn isn't in these logs"
+          );
           if (child && !seen.has(child.id)) {
             seen.add(child.id);
             walk(child);
@@ -6753,65 +11404,257 @@ globalThis.__semonUIShared = __semonUIShared;
         }
       };
       walk(root);
-      renderTraceScreen(page, { empty: false, hops, agents: agentSnapshot(root), summary: [sessions.size + (sessions.size === 1 ? " session" : " sessions"), n + (n === 1 ? " handoff" : " handoffs"), [...host2.machineLabels(scope).values()].join(", ")].filter(Boolean).join(" \xB7 ") }, {
-        ...host2.sentenceHost,
-        committed: host2.observeTitle,
-        fold(id2) {
-          RUN_EXPANDED.get(root.id)?.add(id2);
-          renderTrace(page, root.id);
+      renderTraceScreen(
+        page,
+        {
+          empty: false,
+          hops,
+          agents: agentSnapshot(root),
+          summary: [
+            sessions.size + (sessions.size === 1 ? " session" : " sessions"),
+            n + (n === 1 ? " handoff" : " handoffs"),
+            [...host2.domain.machineLabels(scope).values()].join(", ")
+          ].filter(Boolean).join(" \xB7 ")
+        },
+        {
+          ...host2.sentencesOwner.sentenceHost,
+          committed: (...args) => host2.sessionChrome.observeTitle(...args),
+          fold(id2) {
+            RUN_EXPANDED.get(root.id)?.add(id2);
+            renderTrace(page, root.id);
+          }
         }
-      });
-      return [sessions.size + (sessions.size === 1 ? " session" : " sessions"), n + (n === 1 ? " handoff" : " handoffs"), [...host2.machineLabels(scope).values()].join(", ")].filter(Boolean).join(" \xB7 ");
+      );
+      return [
+        sessions.size + (sessions.size === 1 ? " session" : " sessions"),
+        n + (n === 1 ? " handoff" : " handoffs"),
+        [...host2.domain.machineLabels(scope).values()].join(", ")
+      ].filter(Boolean).join(" \xB7 ");
     }
     function renderSession(page, sid, opts = {}) {
-      host2.markSeenResults(host2.H.filter((h2) => host2.isResult(h2) && h2.from === sid));
-      const raw = new Map(host2.transcriptEntries(host2.TX[sid] ?? [], sid).map((e) => [e.slot != null ? sid + "#slot:" + e.slot : e.key, e]));
-      renderSessionScreen(page, host2.transcriptSnapshot(sid, opts), {
-        ...host2.sentenceHost,
-        committed: host2.observeTitle,
-        trace: host2.goTrace,
+      host2.seenPersistenceOwner.markSeenResults(
+        host2.modelStore.handoffs.filter((h2) => host2.domain.isResult(h2) && h2.from === sid)
+      );
+      const raw = new Map(
+        host2.transcriptView.transcriptEntries(host2.transcripts.entries[sid] ?? [], sid).map((e) => [e.slot != null ? sid + "#slot:" + e.slot : e.key, e])
+      );
+      renderSessionScreen(page, host2.transcriptView.transcriptSnapshot(sid, opts), {
+        ...host2.sentencesOwner.sentenceHost,
+        committed: (...args) => host2.sessionChrome.observeTitle(...args),
+        trace: (...args) => host2.destination.goTrace(...args),
         toolAll(key, label) {
           const e = raw.get(key);
           if (e?.k === "tool") {
-            const [ic, v] = host2.verb(e.name);
-            host2.openStepViewer(e, v, ic, label);
+            const [ic, v] = host2.transcriptView.verb(e.name);
+            host2.toolViewsOwner.openStepViewer(e, v, ic, label);
           }
         },
         script(key) {
           const e = raw.get(key);
-          if (e?.k === "tool") host2.openScript(e);
+          if (e?.k === "tool") host2.toolViewsOwner.openScript(e);
         },
-        image: host2.openImage,
+        image: (...args) => host2.toolViewsOwner.openImage(...args),
         background(call, trigger) {
           const target = trigger.closest('section[aria-label="Transcript"]')?.querySelector('.step[data-tid="' + CSS.escape(call) + '"]');
           if (!target) return;
-          host2.stopOpeningEndPin();
+          host2.viewport.stopOpeningEndPin();
           for (let parent = target.parentElement; parent; parent = parent.parentElement) {
-            const toggle = host2.opener(parent);
+            const toggle = host2.viewport.opener(parent);
             if (toggle?.getAttribute("aria-expanded") === "false") toggle.click();
           }
-          host2.centre(target);
+          host2.sessionChrome.centre(target);
           target.classList.add("flash");
           host2.scope.timeout(() => target.classList.remove("flash"), 1500);
         },
         pager(button) {
-          host2.loadPager(button, true);
+          host2.pagingOwner.loadPager(button, true);
         },
-        jump: host2.jumpToLatest
+        jump: (...args) => host2.viewport.jumpToLatest(...args)
       });
     }
-    const showsFooter = (s, origin) => origin ? s.state === "work" || s.state === "done" || s.state === "err" || origin.status === "done" || origin.status === "err" : !s.stub && !s.role && s.state in host2.STATE;
-    return { harnessSnapshot, costSnapshot, showsFooter, renderHome, renderMachines, renderMachine, renderTrace, renderSession };
+    const showsFooter = (s, origin) => origin ? s.state === "work" || s.state === "done" || s.state === "err" || origin.status === "done" || origin.status === "err" : !s.stub && !s.role && s.state in STATE;
+    return {
+      harnessSnapshot,
+      costSnapshot,
+      showsFooter,
+      renderHome,
+      renderMachines,
+      renderMachine,
+      renderTrace,
+      renderSession
+    };
+  }
+
+  // src/app/seenPersistence.ts
+  function createSeenPersistence(host2) {
+    function markSeenResults(handoffs) {
+      let changed = false;
+      for (const h2 of handoffs)
+        if (host2.domain.isResult(h2) && typeof h2.id === "string" && !host2.seenResultsOwner.SEEN_RESULTS.has(h2.id)) {
+          host2.seenResultsOwner.SEEN_RESULTS.add(h2.id);
+          changed = true;
+        }
+      while (host2.seenResultsOwner.SEEN_RESULTS.size > host2.seenResultsOwner.SEEN_LIMIT)
+        host2.seenResultsOwner.SEEN_RESULTS.delete(
+          host2.seenResultsOwner.SEEN_RESULTS.values().next().value
+        );
+      if (changed)
+        try {
+          window.localStorage.setItem(
+            host2.seenResultsOwner.SEEN_KEY,
+            JSON.stringify([...host2.seenResultsOwner.SEEN_RESULTS])
+          );
+        } catch {
+        }
+    }
+    return { markSeenResults };
+  }
+
+  // src/app/seenResults.ts
+  function createSeenResults(host2) {
+    const SEEN_KEY = "semon.seen", SEEN_LIMIT = 2e3;
+    const SEEN_RESULTS = (() => {
+      try {
+        const ids = JSON.parse(window.localStorage.getItem(SEEN_KEY) ?? "[]");
+        if (!Array.isArray(ids)) return /* @__PURE__ */ new Set();
+        const clean2 = ids.filter((id) => typeof id === "string").slice(-SEEN_LIMIT), seen = new Set(clean2);
+        if (seen.size !== ids.length)
+          try {
+            window.localStorage.setItem(SEEN_KEY, JSON.stringify([...seen]));
+          } catch {
+          }
+        return seen;
+      } catch {
+        return /* @__PURE__ */ new Set();
+      }
+    })();
+    return { SEEN_RESULTS, SEEN_LIMIT, SEEN_KEY };
+  }
+
+  // src/app/sentences.ts
+  function createSentences(host2) {
+    function sentenceSnapshot(h2, viewer, links = false) {
+      const parts = [], text2 = (className, text3) => parts.push({ className, text: text3 });
+      const who = (id, action, label) => {
+        const name = host2.domain.nameOf(id), linked = links && action && id !== "you" && id !== viewer && host2.modelStore.sessions[id];
+        parts.push({
+          text: name,
+          className: linked ? "who-link" : "who",
+          action: linked ? action : void 0,
+          label: linked ? label?.(name) : void 0
+        });
+      };
+      const sender = { kind: "sender", id: h2.id }, recipient = {
+        kind: "session",
+        id: h2.to,
+        turn: host2.modelStore.starts.get(h2.id)?.id
+      };
+      const senderLabel = (name) => "Open " + name + " where it sent this", recipientLabel = (name) => "Open " + name + " at the turn this started";
+      let path;
+      if (h2.kind === "ask") {
+        path = I.ask;
+        who("you");
+        text2("verb", " asked ");
+        who(h2.to, recipient, recipientLabel);
+      } else if (h2.kind === "spawn" || h2.kind === "relay") {
+        if (viewer === h2.to) {
+          path = I.in;
+          text2("verb", h2.kind === "spawn" ? "Brief from " : "Relay from ");
+          who(h2.from, sender, senderLabel);
+        } else {
+          path = I.out;
+          who(h2.from, sender, senderLabel);
+          text2(
+            "verb",
+            h2.kind === "spawn" ? " handed off to " + (host2.modelStore.sessions[h2.to]?.kind === "Subagent" ? "subagent" : host2.modelStore.sessions[h2.to]?.kind ?? "") + " " : " relayed to "
+          );
+          who(h2.to, recipient, recipientLabel);
+        }
+      } else if (h2.kind === "move") {
+        path = I.move;
+        const short = machineShorts(
+          [h2.fromMachine, h2.toMachine].map((id) => [id, host2.modelStore.machines[id] ?? id])
+        );
+        const machine2 = (id) => parts.push({
+          className: "verb mach",
+          text: short.get(id) ?? id,
+          tip: "Machine: " + (host2.modelStore.machines[id] ?? id),
+          action: links ? { kind: "machine", id } : void 0,
+          label: links ? "Open machine " + (host2.modelStore.machines[id] ?? id) : void 0
+        });
+        text2("verb", "Semon moved ");
+        who(h2.to, { kind: "session", id: h2.to }, (name) => "Open " + name);
+        text2("verb", " from ");
+        machine2(h2.fromMachine);
+        text2("verb", " to ");
+        machine2(h2.toMachine);
+      } else if (h2.kind === "toyou") {
+        path = h2.status === "done" && (h2.ask === "question" || h2.ask === "decision") ? I.done : h2.ask === "question" ? I.qc : h2.ask === "decision" ? I.decide : I.result;
+        who(h2.from, sender, senderLabel);
+        text2(
+          "verb",
+          { question: " asked you", result: " sent you a result", decision: " needs your decision" }[h2.ask]
+        );
+      }
+      return { icon: path ?? "", parts };
+    }
+    const sentenceHost = {
+      session(id, turn) {
+        host2.destination.goSession(id, turn);
+      },
+      machine(id) {
+        host2.destination.go({ v: "machine", id });
+      },
+      sender(id) {
+        const h2 = host2.modelStore.handoff.get(id);
+        if (h2) host2.destination.openSender(h2);
+      }
+    };
+    return { sentenceHost, sentenceSnapshot };
   }
 
   // src/navigation/errors.ts
   function createErrorNavigation(host2) {
-    const { navigation, TX, TXM, TOK, SESS, show, drawSessionBar, render: render2, keepFocus, countOf, capture, restore, opener, resetPagerInput, stopOpeningEndPin, centre, fetchTx, dropTx, spread, tail } = host2;
+    const {
+      navigation,
+      TX,
+      TXM,
+      SESS,
+      drawSessionBar,
+      render: render2,
+      keepFocus,
+      countOf,
+      capture,
+      restore,
+      opener,
+      resetPagerInput,
+      stopOpeningEndPin,
+      centre,
+      fetchTx,
+      dropTx,
+      spread,
+      tail
+    } = host2;
     const scope = new EffectScope();
     let pending = null, modeRequest = null;
     const $ = (selector) => host2.page().ownerDocument.querySelector(selector);
     const enc = encodeURIComponent, SIDEBAR_ONLY = host2.sidebarOnly;
-    const ERR = { mode: "errors", on: false, sid: null, slots: [], listed: false, count: 0, version: null, k: -1, slot: null, saved: null, range: null, tools: true, chain: Promise.resolve(), gen: 0 };
+    const ERR = {
+      mode: "errors",
+      on: false,
+      sid: null,
+      slots: [],
+      listed: false,
+      count: 0,
+      version: null,
+      k: -1,
+      slot: null,
+      saved: null,
+      range: null,
+      tools: true,
+      chain: Promise.resolve(),
+      gen: 0
+    };
     const ERR_NEAR = 400, ERR_AROUND = 40;
     const errLive = createLiveRegion();
     if (!SIDEBAR_ONLY) document.body.append(errLive);
@@ -6823,43 +11666,82 @@ globalThis.__semonUIShared = __semonUIShared;
       if (navigation.route.v === "session" && ERR.on) drawSessionBar();
       if (announce) errLive.textContent = errText();
     }
+    function releaseMode() {
+      if (modeRequest) {
+        modeRequest.abort();
+        scope.releaseRequest(modeRequest);
+        modeRequest = null;
+      }
+    }
+    function releasePending() {
+      if (pending) {
+        pending.abort();
+        scope.releaseRequest(pending);
+        pending = null;
+      }
+    }
     function openErrors(sid, mode = "errors") {
-      if (ERR.on || navigation.route.v !== "session" || navigation.route.id !== sid || !TXM[sid]) return;
-      modeRequest?.abort();
+      if (ERR.on || navigation.route.v !== "session" || navigation.route.id !== sid || !TXM[sid])
+        return;
+      releaseMode();
       modeRequest = scope.request();
       resetPagerInput();
       stopOpeningEndPin();
       host2.clearFind();
-      Object.assign(ERR, { mode, on: true, sid, slots: [], listed: false, count: mode === "signals" ? signalCount(SESS[sid]) : countOf(SESS[sid], "errors") ?? 0, version: null, k: -1, slot: null, saved: capture(), range: { tx: TX[sid], m: { ...TXM[sid] } }, tools: show.tools, gen: ERR.gen + 1 });
-      if (!show.tools) {
-        show.tools = true;
+      Object.assign(ERR, {
+        mode,
+        on: true,
+        sid,
+        slots: [],
+        listed: false,
+        count: mode === "signals" ? signalCount(SESS[sid]) : countOf(SESS[sid], "errors") ?? 0,
+        version: null,
+        k: -1,
+        slot: null,
+        saved: capture(),
+        range: { tx: TX[sid], m: { ...TXM[sid] } },
+        tools: host2.show.tools,
+        gen: ERR.gen + 1
+      });
+      if (!host2.show.tools) {
+        host2.show.tools = true;
         render2();
       } else drawSessionBar();
       document.getElementById("err-next")?.focus({ preventScroll: true });
       errLabel(true);
       const gen = ERR.gen;
-      fetchErrors(sid).then(() => {
-        if (ERR.gen !== gen || !ERR.on) return;
-        if (ERR.slots.length) {
-          ERR.k = 0;
-          showError(true);
-        } else errLabel(true);
-      }, () => {
-        if (ERR.gen === gen && ERR.on) {
-          errLive.textContent = "Couldn't list " + ERR.mode;
-          ERR.notice = "Couldn't list " + ERR.mode;
-          drawSessionBar();
+      fetchErrors(sid).then(
+        () => {
+          if (ERR.gen !== gen || !ERR.on) return;
+          if (ERR.slots.length) {
+            ERR.k = 0;
+            showError(true);
+          } else errLabel(true);
+        },
+        () => {
+          if (ERR.gen === gen && ERR.on) {
+            errLive.textContent = "Couldn't list " + ERR.mode;
+            ERR.notice = "Couldn't list " + ERR.mode;
+            drawSessionBar();
+          }
         }
-      });
+      );
     }
     function fetchErrors(sid) {
-      pending?.abort();
+      releasePending();
       const request = scope.request();
       pending = request;
       const gen = ERR.gen, mode = ERR.mode;
-      return requestJson("/api/tx?sid=" + enc(sid) + "&" + mode + "=1" + (ERR.version ? "&since=" + enc(ERR.version) : ""), request.signal, true).then((x) => {
-        if (!x || request.signal.aborted || ERR.gen !== gen || !errOn(sid) || typeof x !== "object") return;
-        const slots = "slots" in x && Array.isArray(x.slots) ? x.slots.filter((value) => typeof value === "number" && Number.isInteger(value) && value >= 0) : [];
+      return requestJson(
+        "/api/tx?sid=" + enc(sid) + "&" + mode + "=1" + (ERR.version ? "&since=" + enc(ERR.version) : ""),
+        request.signal,
+        true
+      ).then((x) => {
+        if (!x || request.signal.aborted || ERR.gen !== gen || !errOn(sid) || typeof x !== "object")
+          return;
+        const slots = "slots" in x && Array.isArray(x.slots) ? x.slots.filter(
+          (value) => typeof value === "number" && Number.isInteger(value) && value >= 0
+        ) : [];
         const count = mode === "errors" ? "errors" in x ? x.errors : void 0 : "signals" in x ? x.signals : void 0;
         ERR.listed = true;
         ERR.slots = slots;
@@ -6870,6 +11752,12 @@ globalThis.__semonUIShared = __semonUIShared;
           ERR.k = at >= 0 ? at : !ERR.slots.length ? -1 : after >= 0 ? after : ERR.slots.length - 1;
           if (at < 0) ERR.slot = ERR.k >= 0 ? ERR.slots[ERR.k] : null;
         }
+      }).catch((error) => {
+        if (!request.signal.aborted && pending === request && ERR.gen === gen && errOn(sid))
+          throw error;
+      }).finally(() => {
+        scope.releaseRequest(request);
+        if (pending === request) pending = null;
       });
     }
     function stepErrors(delta) {
@@ -6888,18 +11776,36 @@ globalThis.__semonUIShared = __semonUIShared;
       if (!m || modeRequest?.signal.aborted) return Promise.resolve(false);
       const up = slot < m.from, near = up ? m.from - slot <= ERR_NEAR : slot - m.to < ERR_NEAR;
       let tries = 0;
-      const extend = () => modeRequest?.signal.aborted || hasSlot(sid, slot) || tries++ >= 3 ? null : fetchTx(sid, up ? "before=" + TXM[sid].from : "after=" + TXM[sid].to, up ? "before" : "after", modeRequest?.signal).then(extend);
-      const around = () => modeRequest?.signal.aborted || hasSlot(sid, slot) ? null : fetchTx(sid, "after=" + Math.max(0, slot - ERR_AROUND), void 0, modeRequest?.signal).then(() => hasSlot(sid, slot) ? null : fetchTx(sid, "after=" + slot, void 0, modeRequest?.signal));
+      const extend = () => modeRequest?.signal.aborted || hasSlot(sid, slot) || tries++ >= 3 ? null : fetchTx(
+        sid,
+        up ? "before=" + TXM[sid].from : "after=" + TXM[sid].to,
+        up ? "before" : "after",
+        modeRequest?.signal
+      ).then(extend);
+      const around = () => modeRequest?.signal.aborted || hasSlot(sid, slot) ? null : fetchTx(
+        sid,
+        "after=" + Math.max(0, slot - ERR_AROUND),
+        void 0,
+        modeRequest?.signal
+      ).then(
+        () => hasSlot(sid, slot) ? null : fetchTx(sid, "after=" + slot, void 0, modeRequest?.signal)
+      );
       return Promise.resolve(near ? extend() : null).then(around).then(() => true);
     }
     function errNode(sid, slot) {
-      const e = (TX[sid] ?? []).find((x) => x.k === (ERR.mode === "signals" ? "signal" : "tool") && x.slot === slot);
+      const e = (TX[sid] ?? []).find(
+        (x) => x.k === (ERR.mode === "signals" ? "signal" : "tool") && x.slot === slot
+      );
       if (!e?.key) return null;
-      return [...host2.page().querySelectorAll(".turns [data-e]")].find((n) => n.dataset.e === e.key) ?? null;
+      return [...host2.page().querySelectorAll(".turns [data-e]")].find(
+        (n) => n.dataset.e === e.key
+      ) ?? null;
     }
     function markError(ring) {
-      for (const n of host2.page().querySelectorAll("[data-e].err-current")) n.classList.remove("err-current", "err-ring");
-      if (!ERR.on || ERR.slot == null || navigation.route.v !== "session" || navigation.route.id !== ERR.sid) return null;
+      for (const n of host2.page().querySelectorAll("[data-e].err-current"))
+        n.classList.remove("err-current", "err-ring");
+      if (!ERR.on || ERR.slot == null || navigation.route.v !== "session" || navigation.route.id !== ERR.sid)
+        return null;
       const node = errNode(navigation.route.id, ERR.slot);
       if (!node) return null;
       const g = node.closest(".tgroup"), sum = g && opener(g);
@@ -6923,21 +11829,27 @@ globalThis.__semonUIShared = __semonUIShared;
       ERR.chain = ERR.chain.then(() => {
         if (!ERR.on || ERR.gen !== gen || ERR.slot !== slot) return null;
         stopOpeningEndPin();
-        return loadSlot(sid, slot).then((moved) => {
-          if (!ERR.on || ERR.gen !== gen || ERR.slot !== slot || navigation.route.v !== "session" || navigation.route.id !== sid) return;
-          if (moved) keepFocus(render2);
-          const node = markError(true);
-          if (!node) {
-            if (announce) errLive.textContent = errText() + ", not shown in this transcript";
-            return;
+        return loadSlot(sid, slot).then(
+          (moved) => {
+            if (!ERR.on || ERR.gen !== gen || ERR.slot !== slot || navigation.route.v !== "session" || navigation.route.id !== sid)
+              return;
+            if (moved) keepFocus(render2);
+            const node = markError(true);
+            if (!node) {
+              if (announce) errLive.textContent = errText() + ", not shown in this transcript";
+              return;
+            }
+            centre(node);
+            scope.frame(
+              () => scope.frame(() => {
+                if (ERR.on && ERR.slot === slot && node.isConnected) centre(node);
+              })
+            );
+          },
+          () => {
+            if (ERR.on && ERR.gen === gen) errLive.textContent = "Couldn't load " + errText();
           }
-          centre(node);
-          scope.frame(() => scope.frame(() => {
-            if (ERR.on && ERR.slot === slot && node.isConnected) centre(node);
-          }));
-        }, () => {
-          if (ERR.on && ERR.gen === gen) errLive.textContent = "Couldn't load " + errText();
-        });
+        );
       }).catch((e) => {
         scope.timeout(() => {
           throw e;
@@ -6949,11 +11861,11 @@ globalThis.__semonUIShared = __semonUIShared;
       const sid = ERR.sid;
       if (!sid) return;
       const range = ERR.range, m = TXM[sid];
-      pending?.abort();
-      modeRequest?.abort();
+      releasePending();
+      releaseMode();
       ERR.on = false;
       ERR.gen++;
-      show.tools = ERR.tools;
+      host2.show.tools = ERR.tools;
       ERR.saved = ERR.range = null;
       errLive.textContent = "";
       if (away && range && m && (m.from !== range.m.from || m.to < range.m.to)) dropTx(sid);
@@ -6970,47 +11882,53 @@ globalThis.__semonUIShared = __semonUIShared;
         TX[sid] = range.tx;
         TXM[sid] = range.m;
         spread(sid);
-        if (range.m.to >= range.m.total && range.m.tok !== TOK[sid]) p = tail(sid).catch(() => null);
+        if (range.m.to >= range.m.total && range.m.tok !== host2.TOK[sid])
+          p = tail(sid).catch(() => null);
       }
       p.then(() => {
-        if (navigation.route.v !== "session" || navigation.route.id !== sid || ERR.on || ERR.gen !== generation) return;
+        if (navigation.route.v !== "session" || navigation.route.id !== sid || ERR.on || ERR.gen !== generation)
+          return;
         render2();
         if (saved) restore(saved);
         const b0 = $("#topbar .lab-errs") ?? $('#topbar .chip[data-filter="failures"]'), b = b0 && !b0.getClientRects().length ? $("#more-btn") : b0;
-        if (b && !b.hidden && document.activeElement !== b && (!document.activeElement || document.activeElement === document.body || !document.activeElement.isConnected)) b.focus({ preventScroll: true });
+        if (b && !b.hidden && document.activeElement !== b && (!document.activeElement || document.activeElement === document.body || !document.activeElement.isConnected))
+          b.focus({ preventScroll: true });
       });
     }
-    if (!SIDEBAR_ONLY) scope.listen(document, "keydown", (e) => {
-      if (!ERR.on || e.defaultPrevented || e.altKey || e.ctrlKey || e.metaKey || document.querySelector("dialog[open]")) return;
-      if (!(e.target instanceof HTMLElement)) return;
-      if (document.body.classList.contains("drawer-open") || document.querySelector(".menu")) return;
-      if (e.target.closest?.("input, textarea, select, [contenteditable='true']")) return;
-      const inBar = !!e.target.closest?.("#topbar .errnav-bar"), onButton = e.target.tagName === "BUTTON";
-      if (e.key === "Escape") {
-        e.preventDefault();
-        closeErrors();
-        return;
-      }
-      if (e.key === "n" || e.key === "N") {
-        e.preventDefault();
-        stepErrors(1);
-        return;
-      }
-      if (e.key === "p" || e.key === "P") {
-        e.preventDefault();
-        stepErrors(-1);
-        return;
-      }
-      if (e.key === "Enter" && (inBar || e.target === document.body)) {
-        if (e.shiftKey) {
+    if (!SIDEBAR_ONLY)
+      scope.listen(document, "keydown", (e) => {
+        if (!ERR.on || e.defaultPrevented || e.altKey || e.ctrlKey || e.metaKey || document.querySelector("dialog[open]"))
+          return;
+        if (!(e.target instanceof HTMLElement)) return;
+        if (document.body.classList.contains("drawer-open") || document.querySelector(".menu"))
+          return;
+        if (e.target.closest?.("input, textarea, select, [contenteditable='true']")) return;
+        const inBar = !!e.target.closest?.("#topbar .errnav-bar"), onButton = e.target.tagName === "BUTTON";
+        if (e.key === "Escape") {
           e.preventDefault();
-          stepErrors(-1);
-        } else if (!onButton) {
+          closeErrors();
+          return;
+        }
+        if (e.key === "n" || e.key === "N") {
           e.preventDefault();
           stepErrors(1);
+          return;
         }
-      }
-    });
+        if (e.key === "p" || e.key === "P") {
+          e.preventDefault();
+          stepErrors(-1);
+          return;
+        }
+        if (e.key === "Enter" && (inBar || e.target === document.body)) {
+          if (e.shiftKey) {
+            e.preventDefault();
+            stepErrors(-1);
+          } else if (!onButton) {
+            e.preventDefault();
+            stepErrors(1);
+          }
+        }
+      });
     function errorsLive() {
       if (!ERR.on || navigation.route.v !== "session" || navigation.route.id !== ERR.sid) return null;
       const sid = ERR.sid;
@@ -7027,104 +11945,151 @@ globalThis.__semonUIShared = __semonUIShared;
         markError(false);
       });
     }
-    return { state: ERR, text: errText, on: errOn, open: openErrors, step: stepErrors, mark: markError, drop: dropErrors, close: closeErrors, live: errorsLive, destroy() {
-      pending?.abort();
-      modeRequest?.abort();
-      scope.destroy();
-      errLive.remove();
-      ERR.on = false;
-      ERR.gen++;
-    } };
+    return {
+      state: ERR,
+      text: errText,
+      on: errOn,
+      open: openErrors,
+      step: stepErrors,
+      mark: markError,
+      drop: dropErrors,
+      close: closeErrors,
+      live: errorsLive,
+      destroy() {
+        releasePending();
+        releaseMode();
+        scope.destroy();
+        errLive.remove();
+        ERR.on = false;
+        ERR.gen++;
+      }
+    };
   }
 
   // src/app/sessionChrome.ts
   function createSessionChrome(host2) {
-    const kindText = (s) => s.kind ?? host2.HARNESS[s.harness] ?? s.harness;
+    const kindText = (s) => s.kind ?? HARNESS[s.harness] ?? s.harness;
     const modelIdOf = (s) => s.model ?? Object.keys(s.tokens_by_model ?? {})[0];
     const viewerBar = createViewerBar();
     function renderTopbar(title, crumb = null, opts = {}) {
       const s = opts.session ?? opts.traceSession;
-      const account = host2.ACCOUNT ? { account: host2.ACCOUNT, compact: false, wide: host2.wideMode, onWideChange: () => host2.setWideMode(!host2.wideMode) } : null;
+      const account = host2.account ? {
+        account: host2.account,
+        compact: false,
+        wide: host2.layoutOwner.wideMode,
+        onWideChange: () => host2.layoutOwner.setWideMode(!host2.layoutOwner.wideMode)
+      } : null;
       const mode = s && errOn(s.id) ? "errors" : s && host2.findOpen ? "find" : "normal";
-      const content = viewerBar.update({
-        mode,
-        name: title,
-        session: s?.id,
-        state: s?.state,
-        stateLabel: s ? host2.STATE[s.state] : void 0,
-        stateTip: s ? "Status: " + host2.STATE[s.state] + " \xB7 " + turnsLabel(s) : void 0,
-        showState: !!s && !opts.traceSession && !(host2.phone.matches && opts.lineage?.length),
-        ancestors: !host2.phone.matches ? opts.lineage?.map((a) => ({ ...a, harnessName: host2.HARNESS[a.harness] ?? a.harness })) ?? [] : [],
-        crumb: opts.lineage?.length ? void 0 : crumb?.label,
-        labels: opts.line2 ?? [],
-        trace: !!opts.traceSession,
-        analytics: !!opts.analytics,
-        days: host2.analyticsRange,
-        query: host2.find,
-        count: matchText(matchCount()),
-        filter: host2.show.messages && host2.show.tools ? "all" : host2.show.messages ? "messages" : "steps",
-        failed: s ? host2.countOf(s, "errors") ?? 0 : 0,
-        signals: s ? signalCount(s) : 0,
-        errorMode: ERR.mode,
-        errorText: ERR.notice ?? errText(),
-        errorDisabled: ERR.listed && !ERR.slots.length,
-        icons: { search: host2.I.search, back: host2.I.back, x: host2.I.x, up: host2.I.up, more: host2.I.more, dn: host2.I.dn }
-      }, {
-        ancestor: host2.goSession,
-        crumb() {
-          crumb?.go();
-        },
-        find() {
-          host2.findOpen = true;
-          host2.render();
-          host2.$("#find")?.focus();
-        },
-        closeFind() {
-          host2.findOpen = false;
-          host2.find = "";
-          host2.show = { ...host2.SHOW_ALL };
-          host2.render();
-        },
-        query(value) {
-          host2.find = value.toLowerCase();
-          host2.render();
-        },
-        filter(key) {
-          if (key === "failures" || key === "signals") {
-            s && openErrors(s.id, key === "signals" ? "signals" : "errors");
-            return;
+      const content = viewerBar.update(
+        {
+          mode,
+          name: title,
+          session: s?.id,
+          state: s?.state,
+          stateLabel: s ? STATE[s.state] : void 0,
+          stateTip: s ? "Status: " + STATE[s.state] + " \xB7 " + turnsLabel(s) : void 0,
+          showState: !!s && !opts.traceSession && !(host2.phone.matches && opts.lineage?.length),
+          ancestors: !host2.phone.matches ? opts.lineage?.map((a) => ({
+            ...a,
+            harnessName: HARNESS[a.harness] ?? a.harness
+          })) ?? [] : [],
+          crumb: opts.lineage?.length ? void 0 : crumb?.label,
+          labels: opts.line2 ?? [],
+          trace: !!opts.traceSession,
+          analytics: !!opts.analytics,
+          days: host2.analyticsRange,
+          query: host2.find,
+          count: matchText(matchCount()),
+          filter: host2.show.messages && host2.show.tools ? "all" : host2.show.messages ? "messages" : "steps",
+          failed: s ? host2.domain.countOf(s, "errors") ?? 0 : 0,
+          signals: s ? signalCount(s) : 0,
+          errorMode: ERR.mode,
+          errorText: ERR.notice ?? errText(),
+          errorDisabled: ERR.listed && !ERR.slots.length,
+          icons: {
+            search: I.search,
+            back: I.back,
+            x: I.x,
+            up: I.up,
+            more: I.more,
+            dn: I.dn
           }
-          host2.show = key === "messages" ? { messages: true, tools: false, thinking: false } : key === "steps" ? { messages: false, tools: true, thinking: false } : { ...host2.SHOW_ALL };
-          host2.render();
         },
-        menu(trigger, runs) {
-          s && openSessionMenu(host2.SESS[s.id] ?? s, trigger, runs ? ".runs" : void 0);
-        },
-        errors() {
-          s && openErrors(s.id);
-        },
-        closeErrors,
-        step: stepErrors,
-        range(days) {
-          if (host2.analyticsRange === days) return;
-          const top = host2.currentScroll();
-          host2.analyticsRange = days;
-          host2.render();
-          host2.restoreScroll(top);
-          host2.refreshAnalytics(true);
+        {
+          ancestor: (...args) => host2.destination.goSession(...args),
+          crumb() {
+            crumb?.go();
+          },
+          find() {
+            host2.findOpen = true;
+            host2.documentRendererOwner.render();
+            host2.$("#find")?.focus();
+          },
+          closeFind() {
+            host2.findOpen = false;
+            host2.find = "";
+            host2.show = { ...host2.allVisibility };
+            host2.documentRendererOwner.render();
+          },
+          query(value) {
+            host2.find = value.toLowerCase();
+            host2.documentRendererOwner.render();
+          },
+          filter(key) {
+            if (key === "failures" || key === "signals") {
+              s && openErrors(s.id, key === "signals" ? "signals" : "errors");
+              return;
+            }
+            host2.show = key === "messages" ? { messages: true, tools: false, thinking: false } : key === "steps" ? { messages: false, tools: true, thinking: false } : { ...host2.allVisibility };
+            host2.documentRendererOwner.render();
+          },
+          menu(trigger, runs) {
+            s && openSessionMenu(
+              host2.modelStore.sessions[s.id] ?? s,
+              trigger,
+              runs ? ".runs" : void 0
+            );
+          },
+          errors() {
+            s && openErrors(s.id);
+          },
+          closeErrors,
+          step: stepErrors,
+          range(days) {
+            if (host2.analyticsRange === days) return;
+            const top = host2.historyScrollOwner.currentScroll();
+            host2.analyticsRange = days;
+            host2.documentRendererOwner.render();
+            host2.historyScrollOwner.restoreScroll(top);
+            host2.analytics.refreshAnalytics(true);
+          }
         }
-      });
-      const lead = { label: opts.traceSession ? "Back to " + s?.name : "Open navigation", icon: opts.traceSession ? host2.I.chev : host2.I.menu, back: opts.traceSession ? () => s && host2.goSession(s.id, "turn" in host2.navigation.route ? host2.navigation.route.turn : void 0) : void 0 };
-      host2.shellChrome?.topbar(mode === "normal" ? { titleSlot: content.titleSlot, actions: [content.actions], session: !!s, lead, account } : { mode: [content.mode], session: true, account, accountTarget: content.accountTarget });
-      if (s && mode === "normal") host2.scope.frame(() => {
-        const line = host2.$("#topbar .meta-line");
-        if (line) measureViewerBar(host2.$("#topbar"));
-      });
+      );
+      const lead = {
+        label: opts.traceSession ? "Back to " + s?.name : "Open navigation",
+        icon: opts.traceSession ? I.chev : I.menu,
+        back: opts.traceSession ? () => s && host2.destination.goSession(
+          s.id,
+          "turn" in host2.navigation.route ? host2.navigation.route.turn : void 0
+        ) : void 0
+      };
+      host2.accountControlsOwner.shellChrome?.topbar(
+        mode === "normal" ? { titleSlot: content.titleSlot, actions: [content.actions], session: !!s, lead, account } : { mode: [content.mode], session: true, account, accountTarget: content.accountTarget }
+      );
+      if (s && mode === "normal")
+        host2.scope.frame(() => {
+          const line = host2.$("#topbar .meta-line");
+          if (line) measureViewerBar(host2.$("#topbar"));
+        });
     }
     const drawSessionBar = () => {
-      const s = host2.SESS["id" in host2.navigation.route ? host2.navigation.route.id : ""];
+      const s = host2.modelStore.sessions["id" in host2.navigation.route ? host2.navigation.route.id : ""];
       if (host2.navigation.route.v !== "session" || !s) return;
-      renderTopbar(s.name, null, { session: s, lineage: host2.lineageOf("id" in host2.navigation.route ? host2.navigation.route.id : "").slice(0, -1), line2: sessionLine(s) });
+      renderTopbar(s.name, null, {
+        session: s,
+        lineage: host2.domain.lineageOf("id" in host2.navigation.route ? host2.navigation.route.id : "").slice(0, -1),
+        line2: sessionLine(s)
+      });
       setGeometry(document.documentElement, "barHeight", host2.$("#topbar").offsetHeight);
       syncBarLine();
     };
@@ -7136,46 +12101,136 @@ globalThis.__semonUIShared = __semonUIShared;
     };
     function centre(node) {
       if (!node.isConnected) return;
-      const sc = host2.scroller(), r = (node.querySelector(":scope > button") ?? node).getBoundingClientRect(), bottom = host2.phone.matches ? window.innerHeight : host2.$("#main").getBoundingClientRect().bottom;
-      const d = (r.top + r.bottom) / 2 - (host2.edge() + bottom) / 2;
-      host2.scrollProgrammatically(() => {
+      const sc = host2.viewport.scroller(), r = (node.querySelector(":scope > button") ?? node).getBoundingClientRect(), bottom = host2.phone.matches ? window.innerHeight : host2.$("#main").getBoundingClientRect().bottom;
+      const d = (r.top + r.bottom) / 2 - (host2.viewport.edge() + bottom) / 2;
+      host2.pagingOwner.scrollProgrammatically(() => {
         if (Math.abs(d) >= 1) sc.scrollTop += d;
       });
       syncBarLine();
-      host2.syncJump();
-      host2.saveHistoryScroll();
+      host2.viewport.syncJump();
+      host2.historyScrollOwner.saveHistoryScroll();
     }
-    const errorNavigation = createErrorNavigation({ navigation: host2.navigation, TX: host2.TX, TXM: host2.TXM, TOK: host2.TOK, SESS: host2.SESS, show: host2.show, sidebarOnly: host2.SIDEBAR_ONLY, page: () => host2.$("#page"), drawSessionBar, render: host2.render, keepFocus, countOf: (session, field) => session ? host2.countOf(session, field) ?? void 0 : void 0, capture: () => host2.capture(), restore: (saved) => host2.restore(saved), opener: (node) => host2.opener(node), resetPagerInput: host2.resetPagerInput, stopOpeningEndPin: () => host2.stopOpeningEndPin(), clearFind() {
-      host2.find = "";
-    }, centre, fetchTx: host2.fetchTx, dropTx: host2.dropTx, spread: host2.spread, tail: (sid) => host2.tail(sid) });
-    const { state: ERR, text: errText, on: errOn, open: openErrors, step: stepErrors, mark: markError, drop: dropErrors, close: closeErrors, live: errorsLive } = errorNavigation;
+    const errorNavigation = createErrorNavigation({
+      navigation: host2.navigation,
+      TX: host2.transcripts.entries,
+      TXM: host2.transcripts.meta,
+      get TOK() {
+        return host2.transportOwner.TOK;
+      },
+      SESS: host2.modelStore.sessions,
+      get show() {
+        return host2.show;
+      },
+      sidebarOnly: host2.sidebarOnly,
+      page: () => host2.$("#page"),
+      drawSessionBar,
+      render: (...args) => host2.documentRendererOwner.render(...args),
+      keepFocus,
+      countOf: (session, field) => session ? host2.domain.countOf(session, field) ?? void 0 : void 0,
+      capture: () => host2.viewport.capture(),
+      restore: (saved) => host2.viewport.restore(saved),
+      opener: (node) => host2.viewport.opener(node),
+      resetPagerInput: (...args) => host2.pagingOwner.resetPagerInput(...args),
+      stopOpeningEndPin: () => host2.viewport.stopOpeningEndPin(),
+      clearFind() {
+        host2.find = "";
+      },
+      centre,
+      fetchTx: (...args) => host2.transportOwner.fetchTx(...args),
+      dropTx: (...args) => host2.pagingOwner.dropTx(...args),
+      spread: (...args) => host2.transportOwner.spread(...args),
+      tail: (sid) => host2.liveUpdates.tail(sid)
+    });
+    const {
+      state: ERR,
+      text: errText,
+      on: errOn,
+      open: openErrors,
+      step: stepErrors,
+      mark: markError,
+      drop: dropErrors,
+      close: closeErrors,
+      live: errorsLive
+    } = errorNavigation;
     const signalCount = (s) => Object.values(s?.signals ?? {}).reduce((n, x) => n + x, 0);
     const turnsLabel = (s) => {
-      const n = (host2.TURNS[s.id] ?? []).filter(host2.hasTurn).length;
+      const n = (host2.modelStore.turns[s.id] ?? []).filter(
+        (...args) => host2.domain.hasTurn(...args)
+      ).length;
       return n + (n === 1 ? " turn" : " turns");
     };
     const sessionLine = (s) => {
-      const failed = host2.countOf(s, "errors") ?? 0, runs = host2.descendantsOf(s.id, host2.sessionChildren()), cost2 = runs.length ? host2.costForSessions([s, ...runs]) : host2.costForSession(s.id), labels = [];
+      const failed = host2.domain.countOf(s, "errors") ?? 0, runs = host2.domain.descendantsOf(s.id, host2.domain.sessionChildren()), cost2 = runs.length ? host2.domain.costForSessions([s, ...runs]) : host2.domain.costForSession(s.id), labels = [];
       const add = (key, text2, tip, drop, extra = {}) => labels.push({ key, text: text2, tip: tip ?? void 0, drop, ...extra });
-      add("state", host2.STATE[s.state], void 0, 0, { className: "state " + s.state, state: s.state, stateLabel: host2.STATE[s.state] });
-      add("kind", kindText(s), s.kind ? s.kind + " \xB7 " + host2.HARNESS[s.harness] : void 0, 2);
-      add("model", shortModel(s.model), "Model: " + modelIdOf(s) + (s.effort ? ". Reasoning effort: " + s.effort : ""), 3, { className: "meta-model", effort: s.effort });
-      if (failed) add("errors", failed + " failed", failed + (failed === 1 ? " failed step" : " failed steps") + ": step through them", 0, { className: "lab-errs", action: "errors" });
-      if (runs.length) add("runs", runs.length + (runs.length === 1 ? " run" : " runs"), runs.length + (runs.length === 1 ? " run" : " runs") + " under this session: open the list with their cost", 1, { className: "lab-runs", action: "runs" });
-      add("machine", host2.MACHINE[s.machine], "Machine: " + host2.MACHINE[s.machine] + " \xB7 " + host2.hostOf(s), 5);
+      add("state", STATE[s.state], void 0, 0, {
+        className: "state " + s.state,
+        state: s.state,
+        stateLabel: STATE[s.state]
+      });
+      add("kind", kindText(s), s.kind ? s.kind + " \xB7 " + HARNESS[s.harness] : void 0, 2);
+      add(
+        "model",
+        shortModel(s.model),
+        "Model: " + modelIdOf(s) + (s.effort ? ". Reasoning effort: " + s.effort : ""),
+        3,
+        { className: "meta-model", effort: s.effort }
+      );
+      if (failed)
+        add(
+          "errors",
+          failed + " failed",
+          failed + (failed === 1 ? " failed step" : " failed steps") + ": step through them",
+          0,
+          { className: "lab-errs", action: "errors" }
+        );
+      if (runs.length)
+        add(
+          "runs",
+          runs.length + (runs.length === 1 ? " run" : " runs"),
+          runs.length + (runs.length === 1 ? " run" : " runs") + " under this session: open the list with their cost",
+          1,
+          { className: "lab-runs", action: "runs" }
+        );
+      add(
+        "machine",
+        host2.modelStore.machines[s.machine],
+        "Machine: " + host2.modelStore.machines[s.machine] + " \xB7 " + host2.domain.hostOf(s),
+        5
+      );
       if (s.branch) add("branch", s.branch, "Branch: " + s.branch, 6);
-      add("cost", host2.costText(cost2), "API-equivalent cost" + (runs.length ? ", with " + runs.length + (runs.length === 1 ? " run" : " runs") : "") + ". Details in the session menu.", 7);
+      add(
+        "cost",
+        host2.domain.costText(cost2),
+        "API-equivalent cost" + (runs.length ? ", with " + runs.length + (runs.length === 1 ? " run" : " runs") : "") + ". Details in the session menu.",
+        7
+      );
       return labels;
     };
     const machineLine = (m) => {
-      const here = host2.onMachine(m), w = here.filter((s) => s.state === "work").length, up = host2.MACHINE_UP[m];
+      const here = host2.domain.onMachine(m), w = here.filter((s) => s.state === "work").length, up = host2.modelStore.machineUp[m];
       const sessions = here.length + (here.length === 1 ? " session" : " sessions");
       return [
-        { key: "state", text: up ? "Up" : "Not responding", drop: 0, className: "state " + (up ? "done" : "err"), state: up ? w ? "work" : "idle" : "err", stateLabel: host2.STATE[up ? w ? "work" : "idle" : "err"] },
-        { key: "activity", text: up ? w + " working \xB7 " + sessions : host2.movedOff(m).length ? host2.movedOff(m).length + " moved off" : [host2.MACHINE_LAST[m] != null ? "Last seen " + host2.clock(host2.MACHINE_LAST[m]) : null, sessions].filter(Boolean).join(" \xB7 "), drop: 1 }
+        {
+          key: "state",
+          text: up ? "Up" : "Not responding",
+          drop: 0,
+          className: "state " + (up ? "done" : "err"),
+          state: up ? w ? "work" : "idle" : "err",
+          stateLabel: STATE[up ? w ? "work" : "idle" : "err"]
+        },
+        {
+          key: "activity",
+          text: up ? w + " working \xB7 " + sessions : host2.domain.movedOff(m).length ? host2.domain.movedOff(m).length + " moved off" : [
+            host2.modelStore.machineLast[m] != null ? "Last seen " + host2.clock(host2.modelStore.machineLast[m]) : null,
+            sessions
+          ].filter(Boolean).join(" \xB7 "),
+          drop: 1
+        }
       ];
     };
-    const matchCount = () => host2.find || !host2.show.messages || !host2.show.tools || !host2.show.thinking ? host2.$("#page").querySelectorAll(".turns .msg, .turns .bubble, .turns .step:not(.bgend), .turns .event, .turns .child-card").length : null;
+    const matchCount = () => host2.find || !host2.show.messages || !host2.show.tools || !host2.show.thinking ? host2.$("#page").querySelectorAll(
+      ".turns .msg, .turns .bubble, .turns .step:not(.bgend), .turns .event, .turns .child-card"
+    ).length : null;
     const matchText = (n) => n == null ? "" : n ? n + (n === 1 ? " match" : " matches") : "No matches";
     let titleObs = null;
     function observeTitle() {
@@ -7185,127 +12240,663 @@ globalThis.__semonUIShared = __semonUIShared;
       const y = host2.phone.matches ? window.scrollY : host2.$("#main").scrollTop;
       host2.$("#topbar").classList.toggle("scrolled", y > 4);
     }
-    if (!host2.SIDEBAR_ONLY) {
+    if (!host2.sidebarOnly) {
       host2.scope.listen(window, "scroll", syncBarLine, { passive: true });
       host2.scope.listen(host2.$("#main"), "scroll", syncBarLine, { passive: true });
     }
-    if (!host2.SIDEBAR_ONLY) host2.scope.listen(window, "resize", () => {
-      const l2 = host2.$("#topbar .meta-line");
-      if (l2 && host2.navigation.route.v === "session") measureViewerBar(host2.$("#topbar"));
-      host2.syncLayoutPrefs();
-      host2.syncJump();
-    }, { passive: true });
-    function panel(title, opts = {}) {
-      const chrome = createPanelChrome({ title, className: opts.cls, label: opts.label, sub: opts.sub }, {
-        opened() {
-          host2.viewerEl = chrome.dialog;
-          document.documentElement.classList.add("panel-open");
-          try {
-            history.pushState({ ...host2.navigation.route, sheet: 1, scrollTop: host2.currentScroll() }, "");
-          } catch {
-          }
+    if (!host2.sidebarOnly)
+      host2.scope.listen(
+        window,
+        "resize",
+        () => {
+          const l2 = host2.$("#topbar .meta-line");
+          if (l2 && host2.navigation.route.v === "session") measureViewerBar(host2.$("#topbar"));
+          host2.layoutOwner.syncLayoutPrefs();
+          host2.viewport.syncJump();
         },
-        closed() {
-          render(null, chrome.body);
-          host2.dialogs.delete(chrome.dialog);
-          if (host2.disposed) return;
-          const d = chrome.dialog;
-          document.documentElement.classList.remove("panel-open");
-          opts.onClose?.();
-          if (host2.viewerEl === d) {
-            host2.viewerEl = null;
-            if (history.state?.sheet) {
-              host2.skipPop = true;
-              history.back();
-            } else if (host2.pendingSessionOpen) {
-              const id = host2.pendingSessionOpen;
-              host2.pendingSessionOpen = null;
-              host2.goSession(id);
+        { passive: true }
+      );
+    function panel(title, opts = {}) {
+      const chrome = createPanelChrome(
+        { title, className: opts.cls, label: opts.label, sub: opts.sub },
+        {
+          opened() {
+            host2.toolViewsOwner.viewerEl = chrome.dialog;
+            document.documentElement.classList.add("panel-open");
+            try {
+              history.pushState(
+                {
+                  ...host2.navigation.route,
+                  sheet: 1,
+                  scrollTop: host2.historyScrollOwner.currentScroll()
+                },
+                ""
+              );
+            } catch {
             }
+          },
+          closed() {
+            render(null, chrome.body);
+            host2.dialogs.delete(chrome.dialog);
+            if (host2.disposed) return;
+            const d = chrome.dialog;
+            document.documentElement.classList.remove("panel-open");
+            opts.onClose?.();
+            if (host2.toolViewsOwner.viewerEl === d) {
+              host2.toolViewsOwner.viewerEl = null;
+              if (history.state?.sheet) {
+                host2.toolViewsOwner.skipPop = true;
+                history.back();
+              } else if (host2.pendingSessionOpen) {
+                const id = host2.pendingSessionOpen;
+                host2.pendingSessionOpen = null;
+                host2.destination.goSession(id);
+              }
+            }
+            if (host2.liveModelOwner.LIVE.pending) host2.applicationRefreshOwner.refresh();
           }
-          if (host2.LIVE.pending) host2.refresh();
         }
-      });
+      );
       host2.dialogs.set(chrome.dialog, chrome);
       return { d: chrome.dialog, body: chrome.body, show: () => chrome.show() };
     }
     const RUNS_CAP = 5;
     const TRADEMARK_NOTICE = "Third-party trademarks are the property of their respective owners. Semon is not affiliated with or endorsed by these companies.";
     function openSessionMenu(s, anchor = null, scrollTo = void 0) {
-      const kids = host2.descendantsOf(s.id, host2.sessionChildren());
-      const { d, body, show: open } = panel(s.name, { cls: "anchored session-menu", label: "Session menu for " + s.name, sub: [host2.STATE[s.state], kindText(s), shortModel(s.model)].join(" \xB7 "), onClose: () => {
-        anchor?.setAttribute("aria-expanded", "false");
-        anchor?.focus({ focusVisible: false });
-      } });
-      const traceTurn = host2.navigation.route.v === "trace" ? host2.TURN.get(("turn" in host2.navigation.route ? host2.navigation.route.turn : void 0) ?? "") : (() => {
-        const top = host2.$("#topbar").getBoundingClientRect().bottom;
-        const nodes = [...document.querySelectorAll("#page .turn[data-turn]")].filter((n) => !n.closest(".cw-body"));
-        const visible = nodes.find((n) => n.getBoundingClientRect().bottom > top);
-        return host2.TURN.get(visible?.dataset.turn ?? "") ?? (host2.TURNS[s.id] ?? []).at(-1);
-      })();
-      const actions = [], addAction = (key, text2, icon, className, note, checked, dot) => actions.push({ key, text: text2, icon, className, note, checked, dot });
-      if (traceTurn?.out.length) addAction("trace", "Trace this turn", host2.I.trace, "menu-trace");
-      const command = s.harness === "codex" ? "codex resume " + s.id : "claude --resume " + (s.sessionId ?? s.id);
-      addAction("copy", "Copy resume command", host2.I.copy);
-      if (s.harness === "claude") addAction("external", "Open in claude.ai", host2.I.ext);
-      if (!host2.phone.matches) addAction("wide", "Wide transcript", host2.I.wide, void 0, void 0, host2.wideMode);
-      const signals = signalCount(s);
-      if (signals) addAction("signals", signals + " signals", void 0, "menu-signals", "Step through");
-      const errorCount = host2.countOf(s, "errors") ?? 0;
-      if (host2.phone.matches) {
-        if (errorCount) addAction("errors", errorCount + " failed", void 0, "menu-errors", "Step through", void 0, "err");
-        if (kids.length) addAction("runs", "Runs \xB7 " + kids.length, host2.I.stack, "menu-runs");
-      }
-      const machine2 = host2.MACHINE[s.machine] ?? s.machine ?? "Unknown machine", calls = host2.countOf(s, "calls");
-      const detailRows = [["Status", host2.STATE[s.state] + " \xB7 " + turnsLabel(s)], ...s.kind ? [["Kind", s.kind]] : [], ["Harness", host2.HARNESS[s.harness] ?? s.harness, false, host2.harnessSnapshot(s.harness)], ["Model", modelIdOf(s), true], ...s.effort ? [["Effort", s.effort]] : [], ["Machine", machine2 + (host2.hostOf(s) !== machine2 ? " \xB7 " + host2.hostOf(s) : "") + (s.movedFrom ? " (moved from " + (host2.MACHINE[s.movedFrom] ?? s.movedFrom) + ")" : "")], ["Directory", s.cwd ?? s.dir ?? s.directory, true], [s.worktree ? "Worktree" : "Branch", host2.branchOf(s), true], ["Tool calls", calls == null ? "\u2014" : String(calls)], ...errorCount ? [["Errors", String(errorCount)]] : [], ["Started", host2.clock(s.start)], ["Duration", host2.dur(s.start, s.state === "work" ? null : s.last)], ["Process id", s.pid, true], ["Session id", s.sessionId ?? s.id, true], ...Object.entries(s.signals ?? {}).map(([kind, n]) => ["Signals \xB7 " + kind, String(n)])];
-      const details = detailRows.filter(([, value]) => value != null && value !== "").map(([label, value, mono, harness]) => ({ label, value: String(value), mono, harness }));
-      renderSessionMenu(body, {
-        actions,
-        command,
-        path: host2.phone.matches ? host2.lineageOf(s.id).map((a) => ({ id: a.id, name: a.name, harness: a.harness, harnessName: host2.HARNESS[a.harness] ?? a.harness })) : [],
-        status: host2.STATE[s.state] + " \xB7 " + turnsLabel(s),
-        state: s.state,
-        stateLabel: host2.STATE[s.state],
-        details,
-        cost: host2.costSnapshot(s, kids),
-        notice: TRADEMARK_NOTICE,
-        icons: { chevron: host2.I.chev, copy: host2.I.copy }
-      }, {
-        wide: () => host2.wideMode,
-        session(id) {
-          host2.pendingSessionOpen = id;
-          d.close();
-        },
-        action(key) {
-          if (key === "trace" && traceTurn) {
-            host2.afterPop = () => host2.goTrace(traceTurn.id);
-            d.close();
-          } else if (key === "wide") host2.setWideMode(!host2.wideMode);
-          else if (key === "signals" || key === "errors") {
-            d.close();
-            s && openErrors(s.id, key === "signals" ? "signals" : "errors");
-          } else if (key === "runs") body.querySelector(".runs")?.scrollIntoView({ block: "start" });
+      const kids = host2.domain.descendantsOf(s.id, host2.domain.sessionChildren());
+      const {
+        d,
+        body,
+        show: open
+      } = panel(s.name, {
+        cls: "anchored session-menu",
+        label: "Session menu for " + s.name,
+        sub: [STATE[s.state], kindText(s), shortModel(s.model)].join(" \xB7 "),
+        onClose: () => {
+          anchor?.setAttribute("aria-expanded", "false");
+          anchor?.focus({ focusVisible: false });
         }
       });
+      const traceTurn = host2.navigation.route.v === "trace" ? host2.modelStore.turn.get(
+        ("turn" in host2.navigation.route ? host2.navigation.route.turn : void 0) ?? ""
+      ) : (() => {
+        const top = host2.$("#topbar").getBoundingClientRect().bottom;
+        const nodes = [
+          ...document.querySelectorAll("#page .turn[data-turn]")
+        ].filter((n) => !n.closest(".cw-body"));
+        const visible = nodes.find((n) => n.getBoundingClientRect().bottom > top);
+        return host2.modelStore.turn.get(visible?.dataset.turn ?? "") ?? (host2.modelStore.turns[s.id] ?? []).at(-1);
+      })();
+      const actions = [], addAction = (key, text2, icon, className, note, checked, dot) => actions.push({ key, text: text2, icon, className, note, checked, dot });
+      if (traceTurn?.out.length) addAction("trace", "Trace this turn", I.trace, "menu-trace");
+      const command = s.harness === "codex" ? "codex resume " + s.id : "claude --resume " + (s.sessionId ?? s.id);
+      addAction("copy", "Copy resume command", I.copy);
+      if (s.harness === "claude") addAction("external", "Open in claude.ai", I.ext);
+      if (!host2.phone.matches)
+        addAction("wide", "Wide transcript", I.wide, void 0, void 0, host2.layoutOwner.wideMode);
+      const signals = signalCount(s);
+      if (signals)
+        addAction("signals", signals + " signals", void 0, "menu-signals", "Step through");
+      const errorCount = host2.domain.countOf(s, "errors") ?? 0;
+      if (host2.phone.matches) {
+        if (errorCount)
+          addAction(
+            "errors",
+            errorCount + " failed",
+            void 0,
+            "menu-errors",
+            "Step through",
+            void 0,
+            "err"
+          );
+        if (kids.length) addAction("runs", "Runs \xB7 " + kids.length, I.stack, "menu-runs");
+      }
+      const machine2 = host2.modelStore.machines[s.machine] ?? s.machine ?? "Unknown machine", calls = host2.domain.countOf(s, "calls");
+      const detailRows = [
+        ["Status", STATE[s.state] + " \xB7 " + turnsLabel(s)],
+        ...s.kind ? [["Kind", s.kind]] : [],
+        [
+          "Harness",
+          HARNESS[s.harness] ?? s.harness,
+          false,
+          host2.screenViews.harnessSnapshot(s.harness)
+        ],
+        ["Model", modelIdOf(s), true],
+        ...s.effort ? [["Effort", s.effort]] : [],
+        [
+          "Machine",
+          machine2 + (host2.domain.hostOf(s) !== machine2 ? " \xB7 " + host2.domain.hostOf(s) : "") + (s.movedFrom ? " (moved from " + (host2.modelStore.machines[s.movedFrom] ?? s.movedFrom) + ")" : "")
+        ],
+        ["Directory", s.cwd ?? s.dir ?? s.directory, true],
+        [s.worktree ? "Worktree" : "Branch", host2.domain.branchOf(s), true],
+        ["Tool calls", calls == null ? "\u2014" : String(calls)],
+        ...errorCount ? [["Errors", String(errorCount)]] : [],
+        ["Started", host2.clock(s.start)],
+        ["Duration", host2.dur(s.start, s.state === "work" ? null : s.last)],
+        ["Process id", s.pid, true],
+        ["Session id", s.sessionId ?? s.id, true],
+        ...Object.entries(s.signals ?? {}).map(([kind, n]) => [
+          "Signals \xB7 " + kind,
+          String(n)
+        ])
+      ];
+      const details = detailRows.filter(([, value]) => value != null && value !== "").map(([label, value, mono, harness]) => ({ label, value: String(value), mono, harness }));
+      renderSessionMenu(
+        body,
+        {
+          actions,
+          command,
+          path: host2.phone.matches ? host2.domain.lineageOf(s.id).map((a) => ({
+            id: a.id,
+            name: a.name,
+            harness: a.harness,
+            harnessName: HARNESS[a.harness] ?? a.harness
+          })) : [],
+          status: STATE[s.state] + " \xB7 " + turnsLabel(s),
+          state: s.state,
+          stateLabel: STATE[s.state],
+          details,
+          cost: host2.screenViews.costSnapshot(s, kids),
+          notice: TRADEMARK_NOTICE,
+          icons: { chevron: I.chev, copy: I.copy }
+        },
+        {
+          wide: () => host2.layoutOwner.wideMode,
+          session(id) {
+            host2.pendingSessionOpen = id;
+            d.close();
+          },
+          action(key) {
+            if (key === "trace" && traceTurn) {
+              host2.afterPop = () => host2.destination.goTrace(traceTurn.id);
+              d.close();
+            } else if (key === "wide") host2.layoutOwner.setWideMode(!host2.layoutOwner.wideMode);
+            else if (key === "signals" || key === "errors") {
+              d.close();
+              s && openErrors(s.id, key === "signals" ? "signals" : "errors");
+            } else if (key === "runs")
+              body.querySelector(".runs")?.scrollIntoView({ block: "start" });
+          }
+        }
+      );
       anchor?.setAttribute("aria-expanded", "true");
       open();
       if (scrollTo) body.querySelector(scrollTo)?.scrollIntoView({ block: "nearest" });
       return d;
     }
-    return { errorNavigation, viewerBar, drawSessionBar, syncBarLine, dropErrors, modelIdOf, kindText, observeTitle, centre, panel, renderTopbar, machineLine, sessionLine, errOn, markError, errorsLive };
+    return {
+      errorNavigation,
+      viewerBar,
+      drawSessionBar,
+      syncBarLine,
+      dropErrors,
+      modelIdOf,
+      kindText,
+      observeTitle,
+      centre,
+      panel,
+      renderTopbar,
+      machineLine,
+      sessionLine,
+      errOn,
+      markError,
+      errorsLive
+    };
+  }
+
+  // src/app/sessionList.ts
+  function createSessionList(host2) {
+    const laneOf = (sid) => {
+      const seen = /* @__PURE__ */ new Set();
+      while (host2.domain.parentOf(sid) && !seen.has(sid)) {
+        seen.add(sid);
+        sid = host2.domain.parentOf(sid);
+      }
+      return sid;
+    };
+    function childRuns(sid) {
+      const kids = Object.values(host2.modelStore.sessions).filter(
+        (x) => x.id !== sid && laneOf(x.id) === sid && (host2.showApprovalReviews || !host2.recentNavigation.isApprovalReview(x))
+      ), sub = kids.filter((x) => x.kind === "Subagent").length, cdx = kids.filter((x) => x.kind === "Codex run").length, other = kids.length - sub - cdx;
+      return [
+        sub ? sub + (sub === 1 ? " subagent" : " subagents") : null,
+        cdx ? cdx + (cdx === 1 ? " Codex run" : " Codex runs") : null,
+        other ? other + (other === 1 ? " other run" : " other runs") : null
+      ].filter(Boolean).join(" \xB7 ");
+    }
+    function renderSessions(page, focusSearch = false) {
+      const all = Object.values(host2.modelStore.sessions).filter(
+        (s) => (host2.showApprovalReviews || !host2.recentNavigation.isApprovalReview(s)) && host2.analytics.matchesSessionFacets(s)
+      );
+      const lanes = all.filter((s) => host2.navigationViewOwner.sessMatch(s, host2.query)), order = host2.orderingControlsOwner.orderScope(
+        "page",
+        host2.orderingControlsOwner.pageSig(),
+        host2.navigation.route,
+        host2.orderingControlsOwner.pageState()
+      );
+      let groups;
+      if (host2.groupBy === "recent")
+        groups = [
+          [
+            "",
+            host2.orderingControlsOwner.orderList(
+              order,
+              "recent",
+              lanes,
+              (...args) => host2.orderingControlsOwner.byLast(...args)
+            ),
+            lanes.length
+          ]
+        ];
+      else {
+        const keysOf = {
+          machine: (s) => host2.modelStore.machines[s.machine],
+          project: (s) => s.repo ?? "No repo (roles)",
+          harness: (s) => HARNESS[s.harness]
+        };
+        const key = keysOf[host2.groupBy] ?? ((s) => s.name);
+        const keys = [...new Set(lanes.map(key))].sort(
+          (a, b) => Number(a.startsWith("No repo")) - Number(b.startsWith("No repo")) || a.localeCompare(b)
+        );
+        groups = keys.map((k) => {
+          const rows2 = lanes.filter((s) => key(s) === k);
+          return [
+            k,
+            host2.orderingControlsOwner.orderList(
+              order,
+              "g:" + k,
+              rows2,
+              (...args) => host2.orderingControlsOwner.byLast(...args)
+            ),
+            rows2.length
+          ];
+        });
+      }
+      const rows = groups.filter(([, items, total]) => items.length || !total).map(([title, items, total]) => ({
+        title,
+        total,
+        harness: host2.groupBy === "harness" ? host2.screenViews.harnessSnapshot(
+          Object.keys(HARNESS).find((k) => HARNESS[k] === title) ?? ""
+        ) : void 0,
+        rows: items.map((s) => {
+          const fields = [
+            {
+              className: "row-duration",
+              text: host2.dur(s.start, s.state === "work" || s.state === "wait" ? null : s.last),
+              priority: 1,
+              tip: "Duration",
+              icon: I.duration
+            }
+          ];
+          if (Object.keys(host2.modelStore.machines).length > 1)
+            fields.push({
+              className: "row-machine host",
+              text: host2.domain.shortHost(s),
+              priority: 2,
+              tip: "Machine: " + host2.domain.hostOf(s),
+              icon: I.machine
+            });
+          if (s.repo)
+            fields.push({
+              className: "repo-short",
+              text: s.repo,
+              priority: 3,
+              tip: "Repo: " + s.repo,
+              icon: I.repo
+            });
+          const counts = childRuns(s.id);
+          if (counts)
+            fields.push({
+              className: "row-counts",
+              text: counts.replace(/Codex runs/g, "runs"),
+              priority: 4
+            });
+          return {
+            id: s.id,
+            name: s.name,
+            state: s.state,
+            stateLabel: STATE[s.state] ?? s.state,
+            age: host2.ago(s.last),
+            harness: host2.screenViews.harnessSnapshot(s.harness),
+            model: shortModel(s.model ?? s.modelId),
+            modelTip: "Model: " + host2.sessionChrome.modelIdOf(s),
+            delegation: host2.domain.parentOf(s.id) ? I.stack : void 0,
+            fields
+          };
+        })
+      }));
+      renderSessionsScreen(
+        page,
+        {
+          total: all.length,
+          working: all.filter((s) => s.state === "work").length,
+          waiting: all.filter((s) => s.state === "wait").length,
+          query: host2.query,
+          groupBy: host2.groupBy,
+          reviews: host2.showApprovalReviews,
+          showReviews: Object.values(host2.modelStore.sessions).some(
+            (...args) => host2.recentNavigation.isApprovalReview(...args)
+          ) || host2.showApprovalReviews,
+          groups: rows,
+          matches: lanes.length
+        },
+        {
+          session: (...args) => host2.destination.goSession(...args),
+          committed: (...args) => host2.sessionChrome.observeTitle(...args),
+          facets: () => host2.analytics.renderFacetFilters(page, () => host2.documentRendererOwner.render()),
+          search(value) {
+            host2.query = value.trim();
+            const address = new URL(location.href);
+            if (host2.query) address.searchParams.set("q", host2.query);
+            else address.searchParams.delete("q");
+            history.replaceState(history.state, "", address);
+            renderSessions(page);
+            host2.recentNavigation.renderLanes();
+          },
+          group(value) {
+            host2.groupBy = value;
+            renderSessions(page);
+            host2.recentNavigation.renderLanes();
+          },
+          reviews() {
+            host2.showApprovalReviews = !host2.showApprovalReviews;
+            host2.orderingControlsOwner.ORD.delete("page");
+            host2.orderingControlsOwner.ORD.delete("side");
+            host2.documentRendererOwner.render();
+          }
+        },
+        focusSearch
+      );
+      host2.recentNavigation.renderLanes();
+    }
+    return { renderSessions };
+  }
+
+  // src/app/ticker.ts
+  function createTicker(host2) {
+    const running = (ms) => {
+      const x = Math.max(0, Math.floor(ms / 1e3));
+      return x < 60 ? x + "s" : Math.floor(x / 60) + "m " + x % 60 + "s";
+    };
+    function ticker() {
+      if (!host2.liveModelOwner.visible() || Date.now() === host2.transportOwner.fetchedAt) return;
+      host2.transportOwner.tick();
+      if (host2.navigation.route.v === "session" && host2.navigation.rendered === host2.navigation.route)
+        updateSessionClock(
+          host2.$("#page"),
+          host2.now,
+          Object.fromEntries(
+            Object.values(host2.modelStore.sessions).filter((s) => s.activity?.[3] != null).map((s) => [s.id, s.activity[3]])
+          )
+        );
+      else if (host2.navigation.route.v === "home" && host2.navigation.rendered === host2.navigation.route)
+        host2.screenViews.renderHome(host2.$("#page"));
+    }
+    return { ticker, running };
+  }
+
+  // src/app/toolLoader.ts
+  function createToolLoader(host2) {
+    function parseToolDetail(data) {
+      const entry = parseEntry({ ...data, k: "tool", name: "", arg: "", ok: true });
+      if (entry.k !== "tool") throw new Error("Invalid tool details");
+      return entry;
+    }
+    function fullOf(e) {
+      return Promise.all(
+        (e.more ?? []).map(async (part) => ({
+          part,
+          data: object2(
+            await host2.transportOwner.api(
+              "/api/entry?sid=" + host2.transportOwner.enc(e.sid ?? "") + "&slot=" + e.slot + "&as=" + part
+            )
+          )
+        }))
+      ).then((parts) => {
+        const full = {}, fullCut = [];
+        for (const { part, data } of parts) {
+          if (part === "diff") {
+            full.diff = parseToolDetail(data).diff;
+            full.changes = parseToolDetail(data).changes;
+          } else if (part === "out") {
+            full.out = optional(data.text, text);
+            full.cut = parseToolDetail(data).cut;
+          } else if (part === "in") full.in = optional(data.text, text);
+          else if (part === "arg") full.arg = optional(data.text, text);
+          if (data.truncated === true) fullCut.push(part);
+        }
+        full.fullCut = fullCut;
+        return full;
+      });
+    }
+    return { fullOf };
+  }
+
+  // src/app/toolViews.ts
+  function createToolViews(host2) {
+    let viewerEl = null;
+    let skipPop = false;
+    function openStepViewer(e, v, ic, inLabel = "Input") {
+      if (host2.disposed) return;
+      if (e.more?.length && e.slot != null && !e.full) {
+        const open2 = (f) => openStepViewer({ ...e, ...f, full: true }, v, ic, inLabel);
+        host2.toolLoaderOwner.fullOf(e).then(open2, () => open2({ fullFailed: true }));
+        return;
+      }
+      const status2 = e.live ? "Running \xB7 " + e.secs : e.unfinished ? "No result" : e.ok ? "Done \xB7 " + e.secs : e.ok === null ? "Exit unknown \xB7 " + e.secs : "Failed \xB7 " + e.secs;
+      const { body, show: open } = host2.sessionChrome.panel(v + " " + e.arg, {
+        cls: "full",
+        sub: e.name + " \xB7 " + status2,
+        label: v + " " + e.arg
+      });
+      body.classList.add("viewer-b");
+      renderFullTool(body, e, inLabel, host2.modelStore.sessions[e.sid ?? ""]?.state === "wait");
+      open();
+    }
+    const THUMB_W = 200, THUMB_H = 160;
+    const IMAGE_KIND = {
+      "image/png": "PNG",
+      "image/jpeg": "JPEG",
+      "image/gif": "GIF",
+      "image/webp": "WebP"
+    };
+    const sizeText = (n) => n >= 1048576 ? (n / 1048576).toFixed(1) + " MB" : n >= 1024 ? Math.round(n / 1024) + " KB" : n + " bytes";
+    function attachmentSnapshot(e) {
+      const images = (e.img ?? []).map((a, i) => {
+        const k = a.w != null && a.h != null && a.w > 0 && a.h > 0 ? Math.min(1, THUMB_W / a.w, THUMB_H / a.h) : null;
+        return {
+          unavailable: !!a.na,
+          url: "/api/attachment?sid=" + host2.transportOwner.enc(e.sid ?? "") + "&o=" + host2.transportOwner.enc(a.o) + "&b=" + host2.transportOwner.enc(a.b) + "&v=" + host2.transportOwner.enc(a.v ?? ""),
+          label: "Attached image " + (i + 1) + " (" + (IMAGE_KIND[a.type ?? ""] ?? "image") + ", " + sizeText(a.size ?? 0) + ")",
+          width: k ? Math.max(1, Math.round(a.w * k)) : void 0,
+          height: k ? Math.max(1, Math.round(a.h * k)) : void 0
+        };
+      });
+      return images;
+    }
+    function openImage(url, label, from) {
+      const image2 = createImageViewer(url, label, {
+        opened(d) {
+          viewerEl = d;
+          document.documentElement.classList.add("viewer-open");
+          try {
+            history.pushState({ ...host2.navigation.route, sheet: 1 }, "");
+          } catch {
+          }
+        },
+        closed(d) {
+          host2.dialogs.delete(d);
+          if (host2.disposed) return;
+          document.documentElement.classList.remove("viewer-open");
+          if (viewerEl === d) {
+            viewerEl = null;
+            if (history.state?.sheet) {
+              skipPop = true;
+              history.back();
+            }
+          }
+          if (host2.liveModelOwner.LIVE.pending) host2.applicationRefreshOwner.refresh();
+          (from.isConnected ? from : [...document.querySelectorAll("button.attach")].find(
+            (x) => x.querySelector("img")?.getAttribute("src") === url
+          ))?.focus();
+        }
+      });
+      host2.dialogs.set(image2.dialog, image2);
+      image2.show();
+    }
+    function openScript(e) {
+      const done = (fields) => openStepViewer({ ...e, ...fields, full: true }, "View script", "run", "Script");
+      host2.transportOwner.api(
+        "/api/entry?sid=" + host2.transportOwner.enc(e.sid ?? "") + "&slot=" + e.slot + "&as=script"
+      ).then((value) => {
+        const result = object2(value);
+        done({
+          scriptText: optional(result.text, text),
+          scriptTruncated: result.truncated === true
+        });
+      }).catch(() => done({ scriptFailed: true }));
+    }
+    function childSnapshot(h2, c) {
+      const calls = host2.domain.countOf(c, "calls"), holder = host2.modelStore.holds.get(h2.id);
+      return {
+        kind: "child",
+        handoff: h2.id,
+        id: c.id,
+        turn: host2.modelStore.starts.get(h2.id)?.id,
+        name: c.name,
+        state: c.state,
+        stateLabel: STATE[c.state] ?? c.state,
+        meta: [
+          host2.sessionChrome.kindText(c),
+          shortModel(c.model),
+          host2.dur(c.start, c.state === "work" ? null : c.last),
+          (calls ?? "\u2014") + (calls === 1 ? " step" : " steps"),
+          host2.domain.costText(host2.domain.costForSession(c.id, true))
+        ].join(" \xB7 "),
+        mark: host2.screenViews.harnessSnapshot(c.harness),
+        brief: preview(h2.brief ?? ""),
+        result: h2.result || void 0,
+        failed: h2.status === "err",
+        activity: !h2.result && c.state === "work" && c.activity ? [host2.transcriptView.verbNow(c.activity[0]), c.activity[1]] : void 0,
+        trace: holder?.id,
+        traceLabel: holder ? "Open run view for " + host2.domain.nameOf(h2.from) : void 0,
+        chevron: I.chev
+      };
+    }
+    const callsTip = (s) => {
+      const parts = Object.entries(s.tool_calls ?? {}).sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : 1)).map(([name, n]) => name + " " + n), failed = host2.domain.countOf(s, "errors");
+      if (failed) parts.push(failed + " failed");
+      return parts.join(" \xB7 ");
+    };
+    const timeTip = (s, h2, finished) => "Started " + host2.clock(s.start) + " \xB7 last activity " + host2.clock(s.last) + (finished ? " \xB7 finished " + host2.clock(h2?.done ?? s.last) : "");
+    function costTip(cost2) {
+      const groups = Object.entries(cost2.by_model ?? {}).map(([id, m]) => {
+        const k = m.usd_by_kind ?? {}, kinds2 = [
+          ["Input", k.input],
+          ["Output", k.output],
+          ["Cache read", k.cache_read],
+          ["Cache write", (Number(k.cache_write_5m) || 0) + (Number(k.cache_write_1h) || 0)]
+        ];
+        if (Number(k.web_search) >= 5e-3) kinds2.push(["Web search", k.web_search]);
+        return {
+          id,
+          text: kinds2.map(([label, usd]) => label + " " + host2.domain.asMoney(Number(usd) || 0)).join(" \xB7 ")
+        };
+      });
+      return (groups.length > 1 ? groups.map((g) => g.id + ": " + g.text).join("; ") : groups.map((g) => g.text).join("")) + (groups.length ? ". " : "") + host2.recentNavigation.COST_TIP;
+    }
+    function footerSnapshot(s, h2) {
+      const done = s.state === "done" || s.state === "err", finished = h2 ? done || h2.status === "done" || h2.status === "err" : done;
+      const state2 = h2 ? finished ? s.state === "err" || h2.status === "err" ? "err" : "done" : "work" : s.state;
+      const cost2 = host2.domain.costForSession(s.id), priced2 = cost2.usd != null && !host2.domain.costMissing(cost2).length && cost2.usd >= 5e-3, items = [];
+      if (!h2 || !finished)
+        items.push({
+          kind: "calls",
+          text: host2.domain.callsText(host2.domain.countOf(s, "calls")),
+          tip: callsTip(s)
+        });
+      items.push({
+        kind: "time",
+        text: host2.dur(s.start, state2 === "work" ? null : s.last),
+        tip: timeTip(s, h2, finished)
+      });
+      if (priced2)
+        items.push({ kind: "cost", text: host2.domain.asMoney(cost2.usd ?? 0), tip: costTip(cost2) });
+      return {
+        state: state2,
+        stateLabel: STATE[state2] ?? state2,
+        text: h2 && finished ? "Returned to " + host2.domain.nameOf(h2.from) + " \xB7 " + STATE[state2] : STATE[state2],
+        items,
+        parent: h2 && finished ? {
+          id: h2.from,
+          turn: host2.modelStore.holds.get(h2.id)?.id,
+          name: host2.domain.nameOf(h2.from)
+        } : void 0
+      };
+    }
+    return {
+      get viewerEl() {
+        return viewerEl;
+      },
+      set viewerEl(value) {
+        viewerEl = value;
+      },
+      get skipPop() {
+        return skipPop;
+      },
+      set skipPop(value) {
+        skipPop = value;
+      },
+      openStepViewer,
+      openScript,
+      openImage,
+      attachmentSnapshot,
+      childSnapshot,
+      footerSnapshot
+    };
+  }
+
+  // src/app/transcriptRevalidation.ts
+  function createTranscriptRevalidation(host2) {
+    function shrank(a, b) {
+      const [s0, b0] = String(a).split(".").map(Number), [s1, b1] = String(b).split(".").map(Number);
+      return s1 < s0 || b1 < b0;
+    }
+    function revalidate(r) {
+      const sid = r.id, m = host2.transcripts.meta[sid], moved = m && m.to >= m.total && m.tok != null && host2.transportOwner.TOK[sid] != null && m.tok !== host2.transportOwner.TOK[sid];
+      const job = moved ? shrank(m.tok, host2.transportOwner.TOK[sid]) ? host2.liveUpdates.reload(sid) : host2.liveUpdates.tail(sid) : null, work = job;
+      if (work)
+        work.then(
+          () => {
+            if (host2.navigation.route === r && host2.navigation.rendered === r)
+              host2.applicationRefreshOwner.refresh(null);
+          },
+          () => {
+          }
+        );
+    }
+    return { revalidate, shrank };
   }
 
   // src/app/transcriptView.ts
   function createTranscriptView(host2) {
     const thoughtText = (e) => String(e.text ?? "").trim();
-    const isPendingThought = (e, entries = [], i = 0, sid = "") => !!(e.pending || e.status === "thinking") || Array.isArray(entries) && e.k === "think" && !thoughtText(e) && i === entries.length - 1 && host2.SESS[sid]?.state === "work";
+    const isPendingThought = (e, entries = [], i = 0, sid = "") => !!(e.pending || e.status === "thinking") || Array.isArray(entries) && e.k === "think" && !thoughtText(e) && i === entries.length - 1 && host2.modelStore.sessions[sid]?.state === "work";
     const signalLabel = (e) => {
       const s = e.signal ?? {}, tag = s.tag ?? "", kind = s.kind;
-      if (kind === "compact") return "Context compacted" + (s.value != null ? " \xB7 " + compactCount(s.value) + " tokens before" : "");
+      if (kind === "compact")
+        return "Context compacted" + (s.value != null ? " \xB7 " + compactCount(s.value) + " tokens before" : "");
       if (kind === "interrupt") return "Interrupted by you";
       if (kind === "denial") return (s.tool ?? "Tool call") + " denied";
-      if (kind === "hook") return "Hook " + (tag.includes("block") ? "blocked" : tag || "ran") + (s.tool ? " " + s.tool : "");
-      const name = { model: "Model", effort: "Effort", approval: "Approval policy", sandbox: "Sandbox", permission: "Permission mode" }[kind] ?? "Signal";
+      if (kind === "hook")
+        return "Hook " + (tag.includes("block") ? "blocked" : tag || "ran") + (s.tool ? " " + s.tool : "");
+      const name = {
+        model: "Model",
+        effort: "Effort",
+        approval: "Approval policy",
+        sandbox: "Sandbox",
+        permission: "Permission mode"
+      }[kind] ?? "Signal";
       return name + (s.previous ? " " + s.previous + " \u2192 " : " \u2192 ") + tag;
     };
     const isMaskedThought = (e, entries = [], i = 0, sid = "") => e.k === "think" && !isPendingThought(e, entries, i, sid) && !thoughtText(e);
@@ -7322,8 +12913,8 @@ globalThis.__semonUIShared = __semonUIShared;
       return n < 1 ? "Thinking" : "Thinking \xB7 " + (n >= 60 ? Math.floor(n / 60) + "m " + n % 60 + "s" : n + "s");
     };
     function transcriptEntries(entries, sid) {
-      const out = [], codex = host2.SESS[sid]?.harness === "codex";
-      const turns = codex ? host2.TURNS[sid] ?? [] : [], owners2 = codex ? new Map(turns.flatMap((t) => t.entries.map((e) => [e.key, t.id]))) : /* @__PURE__ */ new Map();
+      const out = [], codex = host2.modelStore.sessions[sid]?.harness === "codex";
+      const turns = codex ? host2.modelStore.turns[sid] ?? [] : [], owners2 = codex ? new Map(turns.flatMap((t) => t.entries.map((e) => [e.key, t.id]))) : /* @__PURE__ */ new Map();
       const turnIds = codex ? new Set(turns.map((t) => t.id)) : /* @__PURE__ */ new Set();
       let chain = null, sawOwnedEntry = false, unresolvedOwner = false;
       for (let i = 0; i < entries.length; i++) {
@@ -7399,7 +12990,14 @@ globalThis.__semonUIShared = __semonUIShared;
       return ["run", name, name, "step", "steps"];
     };
     const verb = (name) => toolInfo(name).slice(0, 2);
-    const NOW_VERB = { Ran: "Running", Read: "Reading", Edited: "Editing", Patched: "Patching", Wrote: "Writing", "Searched for": "Searching for" };
+    const NOW_VERB = {
+      Ran: "Running",
+      Read: "Reading",
+      Edited: "Editing",
+      Patched: "Patching",
+      Wrote: "Writing",
+      "Searched for": "Searching for"
+    };
     const verbNow = (name) => NOW_VERB[verb(name)[1]] ?? verb(name)[1];
     const isCmd = (name) => /^(Bash|shell|exec_command|local_shell)$/.test(name);
     const backgroundText = (bg) => {
@@ -7413,14 +13011,19 @@ globalThis.__semonUIShared = __semonUIShared;
       return m ? (Number(m[1] ?? 0) * 60 + Number(m[2])) * 1e3 : null;
     };
     function transcriptSnapshot(sid, opts = {}) {
-      const entries = transcriptEntries(host2.TX[sid] ?? [], sid), blocks2 = [];
+      const projection = host2.transcripts.view(sid);
+      const entries = transcriptEntries(projection.entries ?? [], sid), blocks2 = [];
       let tx = [];
       const currentTurn = { value: null };
       let loose = 0;
       const hit = (text2) => !host2.find || String(text2 ?? "").toLowerCase().includes(host2.find);
       const filtering = !!host2.find || !host2.show.messages || !host2.show.tools || !host2.show.thinking;
       const entryKey = (e) => e.slot != null ? sid + "#slot:" + e.slot : e.key;
-      const keyed = (view, e) => ({ ...view, key: e.key, entryKey: e.key ? entryKey(e) : void 0 });
+      const keyed = (view, e) => ({
+        ...view,
+        key: e.key,
+        entryKey: e.key ? entryKey(e) : void 0
+      });
       const endedCalls = new Set(entries.flatMap((e) => e.k === "bgend" ? [e.call] : []));
       let run = [], masked = false;
       const flush = () => {
@@ -7433,22 +13036,53 @@ globalThis.__semonUIShared = __semonUIShared;
             counts.set(p, c);
           }
           if (ends.length) {
-            const outcomes = [[ends.filter((r) => r.state === "failed").length, "failed"], [ends.filter((r) => r.state === "killed").length, "stopped"]].filter(([n]) => n).map(([n, word]) => n + " " + word);
-            summary.push({ text: "Finished ", className: "long" }, { text: ends.length + " background" }, { text: " command" + (ends.length === 1 ? "" : "s"), className: "long" });
-            if (outcomes.length) summary.push({ text: " (" + outcomes.join(", ") + ")", className: "tt-counts" });
-            for (const [p, c] of counts) summary.push({ text: ", " }, { text: p + " ", className: p === "ran" ? "long" : void 0 }, { text: c.n + " " + (c.n === 1 ? c.one : c.many) });
+            const outcomes = [
+              [ends.filter((r) => r.state === "failed").length, "failed"],
+              [ends.filter((r) => r.state === "killed").length, "stopped"]
+            ].filter(([n]) => n).map(([n, word]) => n + " " + word);
+            summary.push(
+              { text: "Finished ", className: "long" },
+              { text: ends.length + " background" },
+              { text: " command" + (ends.length === 1 ? "" : "s"), className: "long" }
+            );
+            if (outcomes.length)
+              summary.push({ text: " (" + outcomes.join(", ") + ")", className: "tt-counts" });
+            for (const [p, c] of counts)
+              summary.push(
+                { text: ", " },
+                { text: p + " ", className: p === "ran" ? "long" : void 0 },
+                { text: c.n + " " + (c.n === 1 ? c.one : c.many) }
+              );
           } else {
             const text2 = [...counts].map(([p, c]) => p + " " + c.n + " " + (c.n === 1 ? c.one : c.many)).join(", ");
             summary.push({ text: text2[0].toUpperCase() + text2.slice(1) });
           }
         }
-        const failed = run.filter((r) => !r.end && r.err && (!r.bg || !endedCalls.has(r.tid ?? ""))).length;
+        const failed = run.filter(
+          (r) => !r.end && r.err && (!r.bg || !endedCalls.has(r.tid ?? ""))
+        ).length;
         const live = run.some((r) => r.bg) ? run.filter((r) => r.live).sort((a, b) => (elapsedMs(b.secs) ?? 0) - (elapsedMs(a.secs) ?? 0))[0] : run.find((r) => r.live);
-        tx.push({ kind: "group", key: run[0].key ? "g:" + run[0].key : void 0, entryKey: run[0].view.entryKey ? "g:" + run[0].view.entryKey : void 0, entries: run.map((r) => r.view), lone: run.length === 1 && !filtering, summary, background: !!ends.length, failed, running: live?.secs, stack: host2.I.stack, chevron: host2.I.chev });
+        tx.push({
+          kind: "group",
+          key: run[0].key ? "g:" + run[0].key : void 0,
+          entryKey: run[0].view.entryKey ? "g:" + run[0].view.entryKey : void 0,
+          entries: run.map((r) => r.view),
+          lone: run.length === 1 && !filtering,
+          summary,
+          background: !!ends.length,
+          failed,
+          running: live?.secs,
+          stack: I.stack,
+          chevron: I.chev
+        });
         run = [];
       };
-      const firsts = new Map((host2.TURNS[sid] ?? []).filter((t) => t.entries[0]?.key).map((t) => [t.entries[0].key, t]));
-      const owner = opts.only ? new Map((host2.TURNS[sid] ?? []).flatMap((t) => t.entries.map((e) => [e.key, t.id]))) : null;
+      const firsts = new Map(
+        (host2.modelStore.turns[sid] ?? []).filter((t) => t.entries[0]?.key).map((t) => [t.entries[0].key, t])
+      );
+      const owner = opts.only ? new Map(
+        (host2.modelStore.turns[sid] ?? []).flatMap((t) => t.entries.map((e) => [e.key, t.id]))
+      ) : null;
       const content = (values) => values.some((v) => v.kind !== "label" || v.className === "harness-note");
       const closeTurn = () => {
         flush();
@@ -7457,7 +13091,7 @@ globalThis.__semonUIShared = __semonUIShared;
           tx = [];
           return;
         }
-        const { t, view } = currentTurn.value, end = host2.turnEnd(t), returned = t.entries.some((e) => e.k === "end" && /^Returned to /.test(e.text ?? ""));
+        const { t, view } = currentTurn.value, end = host2.domain.turnEnd(t), returned = t.entries.some((e) => e.k === "end" && /^Returned to /.test(e.text ?? ""));
         if (!filtering) {
           if (end?.st === "err" && !returned) view.error = end.text;
           if (t.out.length) view.trace = t.id;
@@ -7470,18 +13104,29 @@ globalThis.__semonUIShared = __semonUIShared;
       };
       const openTurn = (t) => {
         closeTurn();
-        const h2 = t.start, view = { id: t.id, entries: [], traceIcon: host2.I.trace, stateLabel: host2.STATE.err };
-        if (t.u || h2?.kind === "ask") view.label = "Your message" + (h2 ? " at " + host2.clock(h2.at) : "");
-        else if (h2) view.header = { parts: host2.sentenceSnapshot(h2, sid, true).parts, mark: host2.SESS[h2.from] ? host2.harnessSnapshot(host2.SESS[h2.from].harness) : void 0, time: host2.clock(h2.at) };
+        const h2 = t.start, view = {
+          id: t.id,
+          entries: [],
+          traceIcon: I.trace,
+          stateLabel: STATE.err
+        };
+        if (t.u || h2?.kind === "ask")
+          view.label = "Your message" + (h2 ? " at " + host2.clock(h2.at) : "");
+        else if (h2)
+          view.header = {
+            parts: host2.sentencesOwner.sentenceSnapshot(h2, sid, true).parts,
+            mark: host2.modelStore.sessions[h2.from] ? host2.screenViews.harnessSnapshot(host2.modelStore.sessions[h2.from].harness) : void 0,
+            time: host2.clock(h2.at)
+          };
         currentTurn.value = { t, view };
       };
       const toolStep = (e, v, ic, live) => {
-        const bg = e.bg, bgRunning = bg?.state === "running", waiting = live && host2.SESS[sid]?.state === "wait";
-        const waitingText = host2.SESS[sid]?.waiting_for?.includes("permission") ? "Waiting on permission" : "Waiting for your input";
+        const bg = e.bg, bgRunning = bg?.state === "running", waiting = live && host2.modelStore.sessions[sid]?.state === "wait";
+        const waitingText = host2.modelStore.sessions[sid]?.waiting_for?.includes("permission") ? "Waiting on permission" : "Waiting for your input";
         const status2 = bg ? null : waiting ? waitingText : live ? e.secs : e.unfinished ? "no result" : e.exit != null ? "exit " + e.exit + " \xB7 " + e.secs : e.ok ? e.secs : e.ok === null ? "exit unknown \xB7 " + e.secs : "failed \xB7 " + e.secs;
         const title = e.title ? String(e.title) : null, command = e.in ?? e.arg;
         const firstLine = typeof command === "string" ? command.split(/\r\n|\n|\r/).find((line) => line.trim()) : null;
-        const bgSecs = bgRunning && bg.since != null ? host2.running(host2.NOW - bg.since) : bg?.secs;
+        const bgSecs = bgRunning && bg.since != null ? host2.tickerOwner.running(host2.now - bg.since) : bg?.secs;
         return {
           className: "step" + (bg ? (bg.state === "failed" ? " err" : "") + " background" + (bgRunning ? " background-running" : "") : live ? " live" : e.ok || e.ok === null ? "" : " err"),
           key: e.key,
@@ -7491,7 +13136,7 @@ globalThis.__semonUIShared = __semonUIShared;
           since: live ? e.since : bgRunning ? bg.since : void 0,
           running: live || bgRunning,
           background: !!bg,
-          waiting: host2.SESS[sid]?.state === "wait",
+          waiting: host2.modelStore.sessions[sid]?.state === "wait",
           named: !!title,
           prefix: title ? waiting ? waitingText + ": " : live ? "Running: " : e.ok === false ? "Failed: " : v + ": " : void 0,
           verb: waiting ? "Waiting" : live ? verbNow(e.name) : v,
@@ -7499,8 +13144,8 @@ globalThis.__semonUIShared = __semonUIShared;
           tip: title && firstLine != null ? firstLine.slice(0, 200) : void 0,
           status: status2 == null ? null : String(status2),
           backgroundStatus: bg ? backgroundText({ ...bg, secs: bgSecs }) : void 0,
-          icon: host2.I[ic],
-          chevron: host2.I.chev,
+          icon: I[ic],
+          chevron: I.chev,
           data: e
         };
       };
@@ -7508,7 +13153,12 @@ globalThis.__semonUIShared = __semonUIShared;
         if (owner && opts.only && !opts.only.has(owner.get(e.key) ?? "")) continue;
         if (host2.isGap(e)) {
           closeTurn();
-          if (!filtering) tx.push({ kind: "label", className: "divider", text: e.k === "end" ? e.text ?? "" : "" });
+          if (!filtering)
+            tx.push({
+              kind: "label",
+              className: "divider",
+              text: e.k === "end" ? e.text ?? "" : ""
+            });
           closeTurn();
           continue;
         }
@@ -7517,540 +13167,178 @@ globalThis.__semonUIShared = __semonUIShared;
         if (e.k === "think" && (!host2.show.thinking || host2.find)) continue;
         if (e.k === "signal") {
           const label = signalLabel(e);
-          if (hit(label)) tx.push(keyed({ kind: "label", className: "signal-marker", text: label }, e));
+          if (hit(label))
+            tx.push(keyed({ kind: "label", className: "signal-marker", text: label }, e));
           continue;
         }
         if (e.k === "think" && isMaskedThought(e)) {
           if (!masked) {
             masked = true;
-            tx.push(keyed({ kind: "thought", mode: "masked", label: "Thinking hidden by the harness" }, e));
+            tx.push(
+              keyed({ kind: "thought", mode: "masked", label: "Thinking hidden by the harness" }, e)
+            );
           }
           continue;
         }
         if (e.k === "bgend") {
           if (!host2.show.tools || !hit(e.label ?? "")) continue;
           const word = e.state === "failed" ? "failed" : e.state === "killed" ? "stopped" : "completed";
-          const view = keyed({ kind: "background", failed: e.state === "failed", label: "Background command " + word + " \xB7 " + (e.label ?? ""), call: e.call, loaded: entries.some((entry) => entry.k === "tool" && entry.tid === e.call) }, e);
+          const view = keyed(
+            {
+              kind: "background",
+              failed: e.state === "failed",
+              label: "Background command " + word + " \xB7 " + (e.label ?? ""),
+              call: e.call,
+              loaded: entries.some((entry) => entry.k === "tool" && entry.tid === e.call)
+            },
+            e
+          );
           run.push({ view, end: true, state: e.state, key: e.key });
           continue;
         }
         if (e.k === "tool") {
-          if (!host2.show.tools || !hit(e.name + " " + (e.title ?? "") + " " + e.arg + " " + (e.in ?? "") + " " + (e.out ?? ""))) continue;
+          if (!host2.show.tools || !hit(
+            e.name + " " + (e.title ?? "") + " " + e.arg + " " + (e.in ?? "") + " " + (e.out ?? "")
+          ))
+            continue;
           const [ic, v] = verb(e.name), view = keyed({ kind: "tool", step: toolStep(e, v, ic, !!e.live && !e.bg) }, e);
           if (e.live && !e.bg) run.push({ view, v, k: e.name, live: true, secs: e.secs, key: e.key });
           else if (e.bg) {
             const live = e.bg.state === "running";
-            run.push({ view, v, k: e.name, err: e.bg.state === "failed", bg: true, tid: e.tid, live, secs: live && e.bg.since != null ? host2.running(host2.NOW - e.bg.since) : e.bg.secs ?? e.secs, key: e.key });
+            run.push({
+              view,
+              v,
+              k: e.name,
+              err: e.bg.state === "failed",
+              bg: true,
+              tid: e.tid,
+              live,
+              secs: live && e.bg.since != null ? host2.tickerOwner.running(host2.now - e.bg.since) : e.bg.secs ?? e.secs,
+              key: e.key
+            });
           } else run.push({ view, v, k: e.name, err: e.ok === false, key: e.key });
           continue;
         }
         flush();
         if (e.k === "u" || e.k === "a") {
           if (!host2.show.messages || !hit(e.text)) continue;
-          tx.push(keyed({ kind: "message", flavor: e.k === "u" ? "user" : "assistant", text: e.text, images: e.k === "u" ? host2.attachmentSnapshot(e) : void 0 }, e));
-        } else if (e.k === "think") tx.push(keyed(isPendingThought(e) ? { kind: "thought", mode: "pending" } : { kind: "thought", mode: "readable", label: thoughtLabel(e.displaySecs), text: thoughtText(e) }, e));
+          tx.push(
+            keyed(
+              {
+                kind: "message",
+                flavor: e.k === "u" ? "user" : "assistant",
+                text: e.text,
+                images: e.k === "u" ? host2.toolViewsOwner.attachmentSnapshot(e) : void 0
+              },
+              e
+            )
+          );
+        } else if (e.k === "think")
+          tx.push(
+            keyed(
+              isPendingThought(e) ? { kind: "thought", mode: "pending" } : {
+                kind: "thought",
+                mode: "readable",
+                label: thoughtLabel(e.displaySecs),
+                text: thoughtText(e)
+              },
+              e
+            )
+          );
         else if (e.k === "harness") {
           if (!host2.show.messages || host2.find) continue;
-          tx.push(keyed({ kind: "label", className: "harness-note", text: "Harness text added before the prompt (" + e.label + ")" }, e));
+          tx.push(
+            keyed(
+              {
+                kind: "label",
+                className: "harness-note",
+                text: "Harness text added before the prompt (" + e.label + ")"
+              },
+              e
+            )
+          );
         } else if (e.k === "end") {
-          if (!filtering) tx.push(keyed({ kind: "label", className: "divider", text: e.text ?? "" }, e));
+          if (!filtering)
+            tx.push(keyed({ kind: "label", className: "divider", text: e.text ?? "" }, e));
         } else if (e.k === "h") {
-          const h2 = host2.HID.get(e.id);
+          const h2 = host2.modelStore.handoff.get(e.id);
           if (!h2 || !hit(h2.brief + " " + (h2.result ?? ""))) continue;
           if (h2.kind === "ask") {
             if (!host2.show.messages) continue;
-            tx.push(keyed({ kind: "message", flavor: "user", text: h2.brief ?? "", images: host2.attachmentSnapshot(e) }, e));
-            if (currentTurn.value?.t.start === h2) tx.push({ kind: "label", className: "msg-tm", text: host2.clock(h2.at) });
+            tx.push(
+              keyed(
+                {
+                  kind: "message",
+                  flavor: "user",
+                  text: h2.brief ?? "",
+                  images: host2.toolViewsOwner.attachmentSnapshot(e)
+                },
+                e
+              )
+            );
+            if (currentTurn.value?.t.start === h2)
+              tx.push({ kind: "label", className: "msg-tm", text: host2.clock(h2.at) });
             continue;
           }
           if (currentTurn.value && currentTurn.value.t.start === h2) {
-            if (host2.show.messages) tx.push(keyed({ kind: "message", flavor: "incoming", text: h2.brief ?? "", handoff: h2.id }, e));
+            if (host2.show.messages)
+              tx.push(
+                keyed({ kind: "message", flavor: "incoming", text: h2.brief ?? "", handoff: h2.id }, e)
+              );
             continue;
           }
-          if (h2.kind === "spawn" && h2.from === sid && host2.SESS[h2.to]) {
-            if (host2.show.tools) tx.push(keyed(host2.childSnapshot(h2, host2.SESS[h2.to]), e));
+          if (h2.kind === "spawn" && h2.from === sid && host2.modelStore.sessions[h2.to]) {
+            if (host2.show.tools)
+              tx.push(keyed(host2.toolViewsOwner.childSnapshot(h2, host2.modelStore.sessions[h2.to]), e));
             continue;
           }
-          if (host2.find && h2.kind === "move" || !host2.show.messages && h2.kind !== "move") continue;
-          const sentence = host2.sentenceSnapshot(h2, sid, true);
-          tx.push(keyed({ kind: "event", handoff: h2.id, className: "event" + (h2.kind === "toyou" && h2.status === "wait" ? " waiting" : "") + (h2.kind === "move" ? " move" : ""), icon: sentence.icon, parts: sentence.parts, time: host2.clock(h2.at), brief: preview(h2.brief ?? ""), result: h2.result || void 0, resultLabel: h2.kind === "relay" ? "Reply: " : "Returned: ", answers: host2.answersOf(h2) ?? void 0, waiting: h2.kind === "toyou" && h2.status === "wait", stateLabel: host2.STATE.wait }, e));
+          if (host2.find && h2.kind === "move" || !host2.show.messages && h2.kind !== "move")
+            continue;
+          const sentence = host2.sentencesOwner.sentenceSnapshot(h2, sid, true);
+          tx.push(
+            keyed(
+              {
+                kind: "event",
+                handoff: h2.id,
+                className: "event" + (h2.kind === "toyou" && h2.status === "wait" ? " waiting" : "") + (h2.kind === "move" ? " move" : ""),
+                icon: sentence.icon,
+                parts: sentence.parts,
+                time: host2.clock(h2.at),
+                brief: preview(h2.brief ?? ""),
+                result: h2.result || void 0,
+                resultLabel: h2.kind === "relay" ? "Reply: " : "Returned: ",
+                answers: host2.domain.answersOf(h2) ?? void 0,
+                waiting: h2.kind === "toyou" && h2.status === "wait",
+                stateLabel: STATE.wait
+              },
+              e
+            )
+          );
         }
       }
       closeTurn();
-      const range = host2.TXM[sid], s = host2.SESS[sid], origin = host2.originHandoff(sid);
+      const range = projection.range, s = host2.modelStore.sessions[sid], origin = host2.domain.originHandoff(sid);
       return {
         id: sid,
         name: s.name,
         blocks: blocks2,
-        order: (host2.TURNS[sid] ?? []).map((t) => t.id),
+        order: (host2.modelStore.turns[sid] ?? []).map((t) => t.id),
         dirty: opts.only,
-        before: range?.from > 0 ? host2.pagerSnapshot(sid, "before") : void 0,
-        after: range && range.to < range.total ? host2.pagerSnapshot(sid, "after") : void 0,
-        started: !range?.from && !filtering ? { lead: "Started " + host2.clock(s.start) + " on\xA0", machine: host2.MACHINE[s.movedFrom ?? s.machine] } : void 0,
+        before: range?.from > 0 ? host2.pagingOwner.pagerSnapshot(sid, "before") : void 0,
+        after: range && range.to < range.total ? host2.pagingOwner.pagerSnapshot(sid, "after") : void 0,
+        started: !range?.from && !filtering ? {
+          lead: "Started " + host2.clock(s.start) + " on\xA0",
+          machine: host2.modelStore.machines[s.movedFrom ?? s.machine]
+        } : void 0,
         empty: !opts.only && !blocks2.some((b) => content(b.kind === "turn" ? b.turn.entries : b.entries)) ? host2.find ? "Nothing matches \u201C" + host2.find + "\u201D." : "Nothing to show with these filters." : void 0,
-        footer: host2.showsFooter(s, origin) ? host2.footerSnapshot(s, origin) : void 0
+        footer: host2.screenViews.showsFooter(s, origin) ? host2.toolViewsOwner.footerSnapshot(s, origin) : void 0
       };
     }
     return { transcriptEntries, transcriptSnapshot, verb, verbNow };
   }
 
-  // src/navigation/scroll.ts
-  function createScrollTransactions(host2) {
-    let anchor = null, disposed = false;
-    const frames = /* @__PURE__ */ new Set();
-    const frame = (fn) => {
-      const id = requestAnimationFrame(() => {
-        frames.delete(id);
-        if (!disposed) fn();
-      });
-      frames.add(id);
-    };
-    const scroller = () => host2.phone() ? document.scrollingElement ?? document.documentElement : host2.main();
-    const ANCHORS = "[data-e], .turn, .hop, .ib, .nrow, .sec-h, .ph, .divider, .analytics-metric, .analytics-panel, .facet-filters, .groupby, .find, .empty";
-    const HOSTS = "[data-e], [data-h], [data-id], [data-sid], [data-go], [data-turn], [data-g], [data-m]";
-    const FOCUSABLE = "button, input, [tabindex], a[href]";
-    const stateKey = (n) => n.dataset.entryKey ?? n.dataset.e;
-    const identOf = (n) => {
-      const d = n.dataset, keys = [stateKey(n), d.turn, d.h, d.id, d.m, d.sid, d.go, d.g];
-      return [n.classList[0], ...keys, keys.some((x) => x != null) ? "" : n.firstChild?.nodeType === 3 ? n.firstChild.textContent : ""].map((x) => x ?? "").join("|");
-    };
-    function anchors(fn) {
-      const seen = /* @__PURE__ */ new Map();
-      for (const n of host2.page().querySelectorAll(ANCHORS)) {
-        const id = identOf(n), k = seen.get(id) ?? 0;
-        seen.set(id, k + 1);
-        if (fn(n, id + "#" + k)) return n;
-      }
-      return null;
-    }
-    const opener = (n) => n.classList.contains("step") ? n.querySelector(":scope > button") : n.classList.contains("tgroup") ? n.querySelector(":scope > .tsum") : null;
-    function capture() {
-      const sc = scroller(), line = host2.edge();
-      const st = { top: sc.scrollTop, bottom: sc.scrollHeight - sc.scrollTop - sc.clientHeight <= 80, anchor: null, open: /* @__PURE__ */ new Set(), groups: /* @__PURE__ */ new Set(), groupMembers: /* @__PURE__ */ new Set(), focus: null, drawer: document.body.classList.contains("drawer-open") };
-      const kept = anchor;
-      const still = kept && kept.route === host2.rendered() && Math.abs(sc.scrollTop - kept.top) < 1 ? anchors((n, id) => id === kept.id) : null;
-      if (still && kept && Math.abs(still.getBoundingClientRect().top - line - kept.off) <= 1) st.anchor = { id: kept.id, off: kept.off };
-      else {
-        const turnBounds = /* @__PURE__ */ new Map();
-        anchors((n, id) => {
-          const turn = n.closest(".turn");
-          if (turn) {
-            let bounds = turnBounds.get(turn);
-            if (!bounds) {
-              bounds = turn.getBoundingClientRect();
-              turnBounds.set(turn, bounds);
-            }
-            if (bounds.bottom <= line || bounds.top >= (host2.phone() ? innerHeight : sc.getBoundingClientRect().bottom)) return false;
-          }
-          if (n.querySelector(ANCHORS)) return false;
-          const b = n.getBoundingClientRect();
-          if (!b.height || b.bottom <= line) return false;
-          st.anchor = { id, off: b.top - line };
-          return true;
-        });
-      }
-      for (const n of host2.page().querySelectorAll("[data-e]")) {
-        if (n.classList.contains("tgroup")) st.groups.add(stateKey(n));
-        if (opener(n)?.getAttribute("aria-expanded") === "true") for (const step of n.querySelectorAll(".step[data-e]")) st.groupMembers.add(stateKey(step));
-        if (opener(n)?.getAttribute("aria-expanded") === "true" || n.classList.contains("event") && n.querySelector(":scope > .ev-text.open")) st.open.add(stateKey(n));
-      }
-      for (const n of host2.page().querySelectorAll(".hop")) if (n.querySelector(".brief.open")) st.open.add("hop:" + identOf(n));
-      const a = document.activeElement;
-      if (a instanceof HTMLElement && a !== document.body && !a.closest("dialog")) {
-        const owner = a.id ? null : a.closest(HOSTS), sel = owner && owner !== a ? a.tagName.toLowerCase() + [...a.classList].map((c) => "." + CSS.escape(c)).join("") : null;
-        st.focus = {
-          id: a.id || null,
-          host: owner ? identOf(owner) : null,
-          sel,
-          i: sel && owner ? [...owner.querySelectorAll(sel)].indexOf(a) : 0,
-          range: null,
-          label: a.getAttribute("aria-label"),
-          at: [...host2.page().querySelectorAll(FOCUSABLE)].indexOf(a),
-          of: host2.page().querySelectorAll(FOCUSABLE).length,
-          foot: a.closest("#page > .session-foot") ? a.closest("[data-foot]")?.dataset.foot ?? null : null
-        };
-        try {
-          if ((a instanceof HTMLInputElement || a instanceof HTMLTextAreaElement) && typeof a.selectionStart === "number" && a.selectionEnd !== null) st.focus.range = [a.selectionStart, a.selectionEnd];
-        } catch {
-        }
-      }
-      return st;
-    }
-    function restore(st, pin = false) {
-      const all = (sel) => [...host2.page().querySelectorAll(sel)], r0 = host2.rendered(), revision = host2.revision();
-      measureSessionScreen(host2.page());
-      measureTraceScreen(host2.page());
-      for (const n of all(".tgroup[data-e]")) {
-        const want = st.groups.has(stateKey(n)) ? st.open.has(stateKey(n)) : [...n.querySelectorAll(".step[data-e]")].some((x) => st.open.has(stateKey(x)) || st.groupMembers.has(stateKey(x)));
-        if (want && opener(n).getAttribute("aria-expanded") === "false") opener(n).click();
-      }
-      for (const n of all(".step[data-e]")) if (st.open.has(stateKey(n)) && opener(n)?.getAttribute("aria-expanded") === "false") opener(n).click();
-      for (const n of all(".event[data-e]")) if (st.open.has(stateKey(n)) && !n.querySelector(":scope > .ev-text.open")) {
-        const m = n.querySelector(":scope > .ev-more");
-        m.click();
-      }
-      for (const n of all(".hop")) if (st.open.has("hop:" + identOf(n)) && !n.querySelector(".brief.open")) {
-        const m = n.querySelector(".body > .more");
-        m.click();
-      }
-      if (st.drawer) host2.restoreDrawer();
-      if (st.focus) {
-        let n = st.focus.id ? document.getElementById(st.focus.id) : null;
-        if (!n && st.focus.host) {
-          const owner = [...document.querySelectorAll(HOSTS)].find((x) => identOf(x) === st.focus.host);
-          n = owner && st.focus.sel ? owner.querySelectorAll(st.focus.sel)[st.focus.i] : owner ?? null;
-        }
-        if (!n && st.focus.label) n = [...document.querySelectorAll("#page [aria-label], #topbar [aria-label]")].find((x) => x.getAttribute("aria-label") === st.focus.label) ?? null;
-        if (!n && st.focus.foot) {
-          const f = host2.page().querySelector(":scope > .session-foot");
-          n = f?.querySelector('[data-foot="' + st.focus.foot + '"]') ?? f?.querySelector('[data-foot="time"]') ?? null;
-        }
-        if (!n && !st.focus.host && st.focus.at >= 0 && host2.page().querySelectorAll(FOCUSABLE).length === st.focus.of) n = host2.page().querySelectorAll(FOCUSABLE)[st.focus.at];
-        if (n && n !== document.activeElement) {
-          n.focus({ preventScroll: true });
-          if (st.focus.range) try {
-            if (n instanceof HTMLInputElement || n instanceof HTMLTextAreaElement) n.setSelectionRange(...st.focus.range);
-          } catch {
-          }
-        }
-      }
-      const pagingTurns = st.paging ? all(".turn") : [];
-      if (st.paging) {
-        for (const turn of pagingTurns) revealMeasuredTurn(turn, true);
-        const heights = pagingTurns.map((turn) => turn.getBoundingClientRect().height);
-        pagingTurns.forEach((turn, i) => {
-          setGeometry(turn, "intrinsicHeight", Math.ceil(heights[i]));
-        });
-      }
-      const place = (first) => {
-        const sc = scroller();
-        host2.programmatic(() => {
-          if (pin) sc.scrollTop = sc.scrollHeight;
-          else {
-            const paging = st.paging;
-            let found = null;
-            if (paging?.anchor) found = all(".turns [data-e][data-entry-key]:not(.tgroup)").find((n) => n.dataset.entryKey === paging.anchor.key);
-            else if (!paging && st.anchor) found = anchors((n, id) => id === st.anchor.id);
-            if (found) {
-              const line = paging ? host2.phone() ? 0 : sc.getBoundingClientRect().top : host2.edge();
-              const d = found.getBoundingClientRect().top - line - (paging ? paging.anchor.off : st.anchor.off), want = sc.scrollTop + d, room = sc.scrollHeight - sc.clientHeight;
-              if (want > room + 0.5) {
-                const page = host2.page();
-                setGeometry(page, "paddingBottom", parseFloat(getComputedStyle(page).paddingBottom) + Math.ceil(want - room));
-              }
-              if (d) sc.scrollTop = want;
-              anchor = paging || !st.anchor ? null : { ...st.anchor, route: r0, top: sc.scrollTop };
-            } else if (first) sc.scrollTop = st.top + (paging?.before ? sc.scrollHeight - paging.height : 0);
-          }
-        }, false);
-        if (pin) anchor = null;
-        host2.sync();
-      };
-      place(true);
-      const placedTop = scroller().scrollTop;
-      frame(() => frame(() => {
-        for (const turn of pagingTurns) revealMeasuredTurn(turn, false);
-        if (host2.rendered() === r0 && !host2.sheet() && host2.revision() === revision && Math.abs(scroller().scrollTop - placedTop) < 1) place(false);
-      }));
-    }
-    return { capture, restore, opener, stateKey, identOf, get anchor() {
-      return anchor;
-    }, set anchor(value) {
-      anchor = value;
-    }, destroy() {
-      if (disposed) return;
-      disposed = true;
-      for (const id of frames) cancelAnimationFrame(id);
-      frames.clear();
-      anchor = null;
-    } };
-  }
-
-  // src/app/viewport.ts
-  function createViewport(host2) {
-    const scroller = () => host2.phone.matches ? document.documentElement : host2.$("#main");
-    const edge = () => host2.$("#topbar").getBoundingClientRect().bottom;
-    let openingEndUntil = 0;
-    let openingEndTimer;
-    let openingEndObserver = null;
-    function stopOpeningEndPin() {
-      const wasPinned = !!openingEndUntil;
-      openingEndUntil = 0;
-      clearTimeout(openingEndTimer);
-      openingEndTimer = void 0;
-      openingEndObserver?.disconnect();
-      openingEndObserver = null;
-      if (wasPinned) host2.queuePagerObservers();
-    }
-    function pinOpeningEnd() {
-      if (host2.navigation.route.v !== "session" || performance.now() >= openingEndUntil) {
-        stopOpeningEndPin();
-        return;
-      }
-      const sc = scroller();
-      host2.scrollProgrammatically(() => {
-        sc.scrollTop = sc.scrollHeight;
-      });
-      scrollController.anchor = null;
-      syncJump();
-      host2.saveHistoryScroll();
-    }
-    function startOpeningEndPin() {
-      host2.resetPagerInput();
-      stopOpeningEndPin();
-      if (host2.navigation.route.v !== "session" || location.hash) return;
-      openingEndUntil = performance.now() + 2e3;
-      host2.disconnectPagerObservers();
-      const turns = host2.$("#page section[aria-label='Transcript'] .turns");
-      if (turns) {
-        openingEndObserver = new ResizeObserver(pinOpeningEnd);
-        openingEndObserver.observe(turns);
-      }
-      pinOpeningEnd();
-      openingEndTimer = host2.scope.timeout(stopOpeningEndPin, 2e3);
-    }
-    const scrollController = createScrollTransactions({ page: () => host2.$("#page"), main: () => host2.$("#main"), phone: () => host2.phone.matches, edge, rendered: () => host2.navigation.rendered, sheet: () => !!host2.viewerEl, revision: () => host2.scrollRevision, programmatic: host2.scrollProgrammatically, sync: host2.syncBarLine, restoreDrawer: () => host2.shellChrome?.restoreDrawer() });
-    const { capture, restore, opener, stateKey, identOf } = scrollController;
-    function patchSession(dirty) {
-      host2.resetPagerInput();
-      host2.holdProgrammaticScroll();
-      host2.tick();
-      const s = host2.SESS["id" in host2.navigation.route ? host2.navigation.route.id : ""], box = host2.$("#page .turns");
-      const keys = () => new Set([...host2.$("#page").querySelectorAll(".turns :is(.msg, .bubble, .step, .event, .child-card, .thought, .think-pending)[data-e]")].map((n2) => n2.dataset.e));
-      const before = keys();
-      const whole = !dirty || box.querySelector(":scope > p.empty") || [...box.querySelectorAll(":scope > .turn")].some((b) => !host2.TURN.has(b.dataset.turn ?? ""));
-      host2.renderSession(host2.$("#page"), "id" in host2.navigation.route ? host2.navigation.route.id : "", whole ? {} : { only: dirty });
-      host2.drawSessionBar();
-      for (const pager of box.querySelectorAll("[data-pager-where]")) host2.paintPager(pager);
-      host2.renderNav();
-      host2.renderLanes();
-      host2.ticker();
-      let n = 0;
-      for (const k of keys()) if (!before.has(k)) n++;
-      host2.queuePagerObservers();
-      return n;
-    }
-    function scrollMetrics() {
-      if (host2.phone.matches) return { top: window.scrollY, height: document.documentElement.scrollHeight, viewport: window.innerHeight, gap: Math.max(0, document.documentElement.scrollHeight - window.innerHeight - window.scrollY) };
-      const m = host2.$("#main");
-      return { top: m.scrollTop, height: m.scrollHeight, viewport: m.clientHeight, gap: Math.max(0, m.scrollHeight - m.clientHeight - m.scrollTop) };
-    }
-    function scrollToEnd(behavior = "smooth") {
-      host2.scrollProgrammatically(() => {
-        if (host2.phone.matches) window.scrollTo({ top: document.documentElement.scrollHeight, behavior });
-        else {
-          const m = host2.$("#main");
-          m.scrollTo({ top: m.scrollHeight, behavior });
-        }
-      });
-    }
-    let jumpBusy = false;
-    function syncJump() {
-      if (host2.navigation.route.v !== "session") {
-        host2.LIVE.fresh = 0;
-        return;
-      }
-      const { gap } = scrollMetrics(), newer = host2.TXM["id" in host2.navigation.route ? host2.navigation.route.id : ""]?.newer ?? 0;
-      if (gap <= 80) host2.LIVE.fresh = 0;
-      updateSessionJump(host2.$("#page"), gap > 80 || !!newer, host2.LIVE.fresh + newer, jumpBusy);
-    }
-    function clearNewEntries() {
-      host2.LIVE.fresh = 0;
-      updateSessionJump(host2.$("#page"), false, 0, jumpBusy);
-    }
-    function jumpToLatest() {
-      const sid = "id" in host2.navigation.route ? host2.navigation.route.id : "", r = host2.navigation.route, m = host2.TXM[sid];
-      if (m && m.to < m.total) {
-        jumpBusy = true;
-        syncJump();
-        host2.fetchTx(sid, "").then(() => {
-          if (host2.navigation.route === r) host2.goSession(sid);
-        }).catch(() => {
-        }).finally(() => {
-          jumpBusy = false;
-          syncJump();
-        });
-      } else scrollToEnd("smooth");
-    }
-    if (!host2.SIDEBAR_ONLY) {
-      host2.scope.listen(window, "scroll", syncJump, { passive: true });
-      host2.scope.listen(host2.$("#main"), "scroll", syncJump, { passive: true });
-    }
-    const cancelOpeningEndPin = () => {
-      if (openingEndUntil) stopOpeningEndPin();
-    };
-    if (!host2.SIDEBAR_ONLY) {
-      host2.scope.listen(window, "wheel", cancelOpeningEndPin, { passive: true });
-      host2.scope.listen(window, "touchmove", cancelOpeningEndPin, { passive: true });
-      host2.scope.listen(window, "pointerdown", cancelOpeningEndPin, { passive: true });
-    }
-    const transcriptInput = (e) => e.target instanceof Element && !e.target.closest?.("#sidebar, dialog, input, textarea, select, [contenteditable='true']") && (host2.phone.matches || host2.$("#main").contains(e.target));
-    if (!host2.SIDEBAR_ONLY) {
-      const input = (e) => {
-        if (transcriptInput(e)) host2.readerScrollInput();
-      };
-      host2.scope.listen(window, "wheel", input, { passive: true });
-      host2.scope.listen(window, "touchmove", input, { passive: true });
-      const scroll = () => {
-        if (host2.programmaticScrollPending) host2.holdProgrammaticScroll();
-        else if (!openingEndUntil) host2.readerScrollInput();
-      };
-      host2.scope.listen(window, "scroll", () => {
-        if (host2.phone.matches) scroll();
-      }, { passive: true });
-      host2.scope.listen(host2.$("#main"), "scroll", () => {
-        if (!host2.phone.matches) scroll();
-      }, { passive: true });
-    }
-    if (!host2.SIDEBAR_ONLY) host2.scope.listen(document, "keydown", (e) => {
-      if (!e.defaultPrevented && (transcriptInput(e) || e.target === document.body || e.target === document.documentElement) && ["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", " "].includes(e.key)) host2.readerScrollInput();
-    });
-    return { scrollController, stopOpeningEndPin, get openingEndUntil() {
-      return openingEndUntil;
-    }, scroller, capture, restore, syncJump, startOpeningEndPin, clearNewEntries, edge, opener, jumpToLatest, patchSession };
-  }
-
-  // src/app/viewer.ts
-  var mounted = null;
-  function mountViewerApplication(host2 = getViewerHost()) {
-    mounted?.destroy();
-    const scope = new EffectScope(), dialogs = /* @__PURE__ */ new Map();
-    let disposed = false;
-    const application = { destroy() {
-      if (disposed) return;
-      disposed = true;
-      scope.destroy();
-      liveController.destroy();
-      navigation.destroy();
-      transcripts.destroy();
-      stopOpeningEndPin();
-      pagerController.disconnect();
-      errorNavigation.destroy();
-      scrollController.destroy();
-      for (const dialog of dialogs.values()) dialog.destroy();
-      dialogs.clear();
-      for (const slot2 of SLOTS.values()) slot2.ctx.destroy?.();
-      SLOTS.clear();
-      if (!SIDEBAR_ONLY) releaseScreen($("#page"));
-      recentRenderer.destroy();
-      viewerBar.destroy();
-      shellChrome?.destroy();
-      accountChrome.destroy();
-      releaseGeometry(app);
-      releaseGeometry(document.documentElement, ["barHeight"]);
-      document.querySelectorAll(".livenote, .livenote-side").forEach((node) => node.remove());
-      document.documentElement.classList.remove("viewer-open", "panel-open");
-      if (mounted === application) mounted = null;
-    } };
-    mounted = application;
-    let NOW = Date.now();
-    const modelStore = new ViewerModelStore();
-    const MACHINE = modelStore.machines;
-    const MACHINE_UP = modelStore.machineUp;
-    const MACHINE_LAST = modelStore.machineLast;
-    let ADMIN = null;
-    let ACCOUNT = null;
-    const viewerHost = host2;
-    const NATIVE_PAGE = viewerHost?.nativePage;
-    let NAV_MACHINES = viewerHost?.machinesPath ?? null;
-    const SIDEBAR_ONLY = document.querySelector(".app")?.dataset.viewer === "sidebar";
-    const SESS = modelStore.sessions;
-    const H = modelStore.handoffs;
-    const transcripts = new TranscriptStore({ request: (path, signal) => api(path, signal), turns: (sid) => modelStore.turns[sid] ?? [], turn: (id) => modelStore.turn.get(id), entry: (e) => txEntry(e), cleared(sid) {
-      if (navigation.route.v === "session" && ("id" in navigation.route ? navigation.route.id : "") === sid) resetPagerInput();
-    } });
-    const TX = transcripts.entries;
-    const SEEN_KEY = "semon.seen", SEEN_LIMIT = 2e3;
-    const SEEN_RESULTS = (() => {
-      try {
-        const ids = JSON.parse(window.localStorage.getItem(SEEN_KEY) ?? "[]");
-        if (!Array.isArray(ids)) return /* @__PURE__ */ new Set();
-        const clean2 = ids.filter((id) => typeof id === "string").slice(-SEEN_LIMIT), seen = new Set(clean2);
-        if (seen.size !== ids.length) try {
-          window.localStorage.setItem(SEEN_KEY, JSON.stringify([...seen]));
-        } catch {
-        }
-        return seen;
-      } catch {
-        return /* @__PURE__ */ new Set();
-      }
-    })();
-    const HID = modelStore.handoff;
-    const TURNS = modelStore.turns, TURN = modelStore.turn, STARTS = modelStore.starts, HOLDS = modelStore.holds;
-    const TXM = transcripts.meta;
-    const domain = createDomain({ sessions: SESS, machines: MACHINE, handoffs: H, turns: TURNS, turn: TURN, starts: STARTS, holds: HOLDS, handoff: HID, transcriptMeta: TXM }, () => NOW, SEEN_RESULTS);
-    const { nameOf, hcls, where, hostOf, machineLabels, machineLabel, branchOf, shortHost, parentOf, originHandoff, RANK, isResult, inbox, working, answersOf, statWord, hasTurn, oneLine, TOYOU, turnEnd: turnEnd2, traceRoot, countOf, callsText, sessionChildren, childSessions, descendantsOf, TOTAL_TOKEN_KINDS, TOKEN_KINDS, asMoney, usageTotal, costForSessions, costForSession, costText, costMissing, TREE_RANK, urgentDescendant, childParts, defaultTreeOpen, kidRank, lineageOf, byState, onMachine, movedOff, movesOf, shortMoney } = domain;
-    const clock2 = (t) => clock(t, NOW), ago2 = (t) => ago(t, NOW), dur2 = (a, b) => dur(a, b ?? void 0, NOW);
-    const $ = (s, r = document) => r.querySelector(s);
-    const spaced = (t) => String(t).replace(/ · /g, "\u2009 \xB7 \u2009").replace(/^· /, "\xB7\u2009 ");
-    const darkTheme = () => {
-      const t = document.documentElement.getAttribute("data-theme");
-      return t === "dark" || t !== "light" && !!window.matchMedia?.("(prefers-color-scheme: dark)").matches;
-    };
-    const facetLine = (s) => [s.kind ?? HARNESS[s.harness], MACHINE[s.machine], where(s)].join(" \xB7 ");
-    function markSeenResults(handoffs) {
-      let changed = false;
-      for (const h2 of handoffs) if (isResult(h2) && typeof h2.id === "string" && !SEEN_RESULTS.has(h2.id)) {
-        SEEN_RESULTS.add(h2.id);
-        changed = true;
-      }
-      while (SEEN_RESULTS.size > SEEN_LIMIT) SEEN_RESULTS.delete(SEEN_RESULTS.values().next().value);
-      if (changed) try {
-        window.localStorage.setItem(SEEN_KEY, JSON.stringify([...SEEN_RESULTS]));
-      } catch {
-      }
-    }
-    function sentenceSnapshot(h2, viewer, links = false) {
-      const parts = [], text2 = (className, text3) => parts.push({ className, text: text3 });
-      const who = (id, action, label) => {
-        const name = nameOf(id), linked = links && action && id !== "you" && id !== viewer && SESS[id];
-        parts.push({ text: name, className: linked ? "who-link" : "who", action: linked ? action : void 0, label: linked ? label?.(name) : void 0 });
-      };
-      const sender = { kind: "sender", id: h2.id }, recipient = { kind: "session", id: h2.to, turn: STARTS.get(h2.id)?.id };
-      const senderLabel = (name) => "Open " + name + " where it sent this", recipientLabel = (name) => "Open " + name + " at the turn this started";
-      let path;
-      if (h2.kind === "ask") {
-        path = I.ask;
-        who("you");
-        text2("verb", " asked ");
-        who(h2.to, recipient, recipientLabel);
-      } else if (h2.kind === "spawn" || h2.kind === "relay") {
-        if (viewer === h2.to) {
-          path = I.in;
-          text2("verb", h2.kind === "spawn" ? "Brief from " : "Relay from ");
-          who(h2.from, sender, senderLabel);
-        } else {
-          path = I.out;
-          who(h2.from, sender, senderLabel);
-          text2("verb", h2.kind === "spawn" ? " handed off to " + (SESS[h2.to]?.kind === "Subagent" ? "subagent" : SESS[h2.to]?.kind ?? "") + " " : " relayed to ");
-          who(h2.to, recipient, recipientLabel);
-        }
-      } else if (h2.kind === "move") {
-        path = I.move;
-        const short = machineShorts([h2.fromMachine, h2.toMachine].map((id) => [id, MACHINE[id] ?? id]));
-        const machine2 = (id) => parts.push({ className: "verb mach", text: short.get(id) ?? id, tip: "Machine: " + (MACHINE[id] ?? id), action: links ? { kind: "machine", id } : void 0, label: links ? "Open machine " + (MACHINE[id] ?? id) : void 0 });
-        text2("verb", "Semon moved ");
-        who(h2.to, { kind: "session", id: h2.to }, (name) => "Open " + name);
-        text2("verb", " from ");
-        machine2(h2.fromMachine);
-        text2("verb", " to ");
-        machine2(h2.toMachine);
-      } else if (h2.kind === "toyou") {
-        path = h2.status === "done" && (h2.ask === "question" || h2.ask === "decision") ? I.done : h2.ask === "question" ? I.qc : h2.ask === "decision" ? I.decide : I.result;
-        who(h2.from, sender, senderLabel);
-        text2("verb", { question: " asked you", result: " sent you a result", decision: " needs your decision" }[h2.ask]);
-      }
-      return { icon: path ?? "", parts };
-    }
-    const sentenceHost = { session(id, turn) {
-      goSession(id, turn);
-    }, machine(id) {
-      go({ v: "machine", id });
-    }, sender(id) {
-      const h2 = HID.get(id);
-      if (h2) openSender(h2);
-    } };
-    const isGap = (e) => e.k === "end" && /entries (not included|omitted)|^No activity/.test(e.text ?? "");
+  // src/app/transport.ts
+  function createTransport(host2) {
     let serverNow = 0, fetchedAt = 0;
     let TOK = {};
     const enc = encodeURIComponent;
@@ -8073,2254 +13361,776 @@ globalThis.__semonUIShared = __semonUIShared;
       return account;
     }
     async function api(path, signal, unchanged = false) {
-      if (disposed) throw new DOMException("Viewer destroyed", "AbortError");
-      const controller = scope.request(), release = () => scope.releaseRequest(controller);
+      if (host2.disposed) throw new DOMException("Viewer destroyed", "AbortError");
+      const controller = host2.scope.request(), release = () => host2.scope.releaseRequest(controller);
       try {
-        const response = await requestJson(path, signal ? AbortSignal.any([signal, controller.signal]) : controller.signal, unchanged);
-        if (disposed) throw new DOMException("Viewer destroyed", "AbortError");
+        const response = await requestJson(
+          path,
+          signal ? AbortSignal.any([signal, controller.signal]) : controller.signal,
+          unchanged
+        );
+        if (host2.disposed) throw new DOMException("Viewer destroyed", "AbortError");
         return response;
       } finally {
         release();
       }
     }
     function tick() {
-      NOW = serverNow + (Date.now() - fetchedAt);
-      for (const s of Object.values(SESS)) if (s.activity && s.activity[3] != null) s.activity[2] = Math.floor((NOW - s.activity[3]) / 1e3);
+      host2.now = serverNow + (Date.now() - fetchedAt);
+      for (const s of Object.values(host2.modelStore.sessions))
+        if (s.activity && s.activity[3] != null)
+          s.activity[2] = Math.floor((host2.now - s.activity[3]) / 1e3);
     }
     function adopt(value) {
-      const m = modelStore.adopt(value);
-      domain.invalidate();
-      serverNow = m.now;
-      fetchedAt = Date.now();
-      TOK = m.tx == null ? {} : dictionary(m.tx, text);
-      transcripts.marks = TOK;
-      const admin = m.admin == null ? null : object(m.admin);
-      ADMIN = admin && typeof admin.href === "string" && safePath2(admin.href) ? { href: admin.href, label: text(admin.label) } : null;
-      ACCOUNT = accountOf(m.account) ?? accountOf(viewerHost?.account) ?? embeddedAccount();
-      viewerHost?.modelAccount?.(ACCOUNT);
-      const nav = m.nav == null ? null : object(m.nav);
-      NAV_MACHINES = viewerHost?.machinesPath ?? (nav && typeof nav.machines === "string" && safePath2(nav.machines) ? nav.machines : null);
-      tick();
+      if (host2.disposed) throw new DOMException("Viewer destroyed", "AbortError");
+      const m = parseModel(value);
+      const marks = m.tx == null ? {} : dictionary(m.tx, text);
+      const admin = m.admin == null ? null : object2(m.admin);
+      const nextAdmin = admin && typeof admin.href === "string" && safePath2(admin.href) ? { href: admin.href, label: text(admin.label) } : null;
+      const account = accountOf(m.account) ?? accountOf(host2.viewerHost?.account) ?? embeddedAccount();
+      const nav = m.nav == null ? null : object2(m.nav);
+      const machinesPath = host2.viewerHost?.machinesPath ?? (nav && typeof nav.machines === "string" && safePath2(nav.machines) ? nav.machines : null);
+      host2.modelStore.adopt(m, () => {
+        serverNow = m.now;
+        fetchedAt = Date.now();
+        TOK = marks;
+        host2.transcripts.marks = marks;
+        host2.admin = nextAdmin;
+        host2.account = account;
+        host2.machinesPath = machinesPath;
+        tick();
+        for (const sid of Object.keys(host2.transcripts.entries)) host2.transcripts.spread(sid);
+      });
+      host2.viewerHost?.modelAccount?.(account);
       return m;
     }
-    const spread = (sid) => transcripts.spread(sid);
-    const txEntry = (e) => e.k === "end" && e.ret ? { k: "end", text: "Returned to " + nameOf(e.ret.to) + (e.ret.failed ? " \xB7 failed" : "") + (e.ret.at != null ? " \xB7 " + clock2(e.ret.at) : ""), turn: e.turn } : e;
-    const fetchTx = (sid, q = "", where2 = void 0, signal = void 0, onPage = void 0) => transcripts.fetch(sid, q, where2, signal, onPage);
+    const spread = (sid) => host2.transcripts.spread(sid);
+    const txEntry = (e) => e.k === "end" && e.ret ? {
+      k: "end",
+      text: "Returned to " + host2.domain.nameOf(e.ret.to) + (e.ret.failed ? " \xB7 failed" : "") + (e.ret.at != null ? " \xB7 " + host2.clock(e.ret.at) : ""),
+      turn: e.turn
+    } : e;
+    const fetchTx = (sid, q = "", where = void 0, signal = void 0, onPage = void 0) => host2.transcripts.fetch(sid, q, where, signal, onPage);
     function load(r, signal = void 0) {
-      if (r.v === "analytics") return fetchAnalytics().then(() => {
-        scheduleAnalytics();
-      });
-      if (r.v !== "session" || !SESS[r.id]) return null;
-      const t = r.turn ? TURN.get(r.turn) : null, deep = t && t.sid === r.id && !t.entries.length;
-      if (TX[r.id] && !deep) return null;
+      if (r.v === "analytics")
+        return host2.analytics.fetchAnalytics().then(() => {
+          host2.analytics.scheduleAnalytics();
+        });
+      if (r.v !== "session" || !host2.modelStore.sessions[r.id]) return null;
+      const t = r.turn ? host2.modelStore.turn.get(r.turn) : null, deep = t && t.sid === r.id && !t.entries.length;
+      if (host2.transcripts.entries[r.id] && !deep) return null;
       return fetchTx(r.id, deep ? "turn=" + enc(t.id) : "", void 0, signal);
     }
-    const STALE_BRIEFS = transcripts.staleBriefs;
-    const TXCACHE = transcripts.cache;
-    const cacheTx = (sid, entries, meta) => transcripts.keep(sid, entries, meta, !!originHandoff(sid));
-    const adoptCached = (r) => transcripts.adoptCached(r.id, r.turn);
-    function shrank(a, b) {
-      const [s0, b0] = String(a).split(".").map(Number), [s1, b1] = String(b).split(".").map(Number);
-      return s1 < s0 || b1 < b0;
-    }
-    function revalidate(r) {
-      const sid = r.id, m = TXM[sid], moved = m && m.to >= m.total && m.tok != null && TOK[sid] != null && m.tok !== TOK[sid];
-      const job = moved ? shrank(m.tok, TOK[sid]) ? reload(sid) : tail(sid) : null, work = job;
-      if (work) work.then(() => {
-        if (navigation.route === r && navigation.rendered === r) refresh(null);
-      }, () => {
-      });
-    }
-    const pagingStore = transcripts.paging, PAGING = pagingStore.states;
-    let pagerArmed = false, automaticLoads = 0, scrollRevision = 0, programmaticScrollPending = false, programmaticScrollTimer = void 0;
-    const clearPaging = (sid) => transcripts.clearPaging(sid);
-    const dropTx = (sid) => transcripts.drop(sid);
-    function resetPagerInput() {
-      pagerArmed = false;
-      automaticLoads = 0;
-      scrollRevision++;
-      disconnectPagerObservers();
-    }
-    function holdProgrammaticScroll() {
-      programmaticScrollPending = true;
-      clearTimeout(programmaticScrollTimer);
-      programmaticScrollTimer = scope.timeout(() => {
-        programmaticScrollPending = false;
-        programmaticScrollTimer = void 0;
-      }, 120);
-    }
-    function scrollProgrammatically(fn, jump = true) {
-      if (jump) resetPagerInput();
-      holdProgrammaticScroll();
-      fn();
-    }
-    function readerScrollInput() {
-      if (navigation.route.v !== "session" || navigation.rendered !== navigation.route || $("#page").hasAttribute("aria-busy")) return;
-      clearTimeout(programmaticScrollTimer);
-      programmaticScrollTimer = void 0;
-      programmaticScrollPending = false;
-      stopOpeningEndPin();
-      pagerArmed = true;
-      automaticLoads = 0;
-      scrollRevision++;
-      queuePagerObservers();
-    }
-    const automaticPagingAllowed = () => pagerArmed && automaticLoads < 3 && !viewport.openingEndUntil && !findOpen && !find && show.messages && show.tools && show.thinking;
-    const pagingState = (sid, where2) => pagingStore.get(sid, where2);
-    function pagerSnapshot(sid, where2) {
-      const state2 = pagingState(sid, where2), direction = where2 === "before" ? "earlier" : "later";
-      return { sid, where: where2, disabled: state2.busy, busy: state2.busy, text: state2.busy ? "Loading " + direction + "\u2026" : state2.failed ? "Couldn't load " + direction + " entries \xB7 Retry" : "Load " + direction + (where2 === "after" && TXM[sid]?.newer ? " \xB7 " + TXM[sid].newer + " new" : "") };
-    }
-    function paintPager(b) {
-      updateSessionPager($("#page"), pagerSnapshot(b.dataset.pagerSid, b.dataset.pagerWhere === "before" ? "before" : "after"));
-    }
-    const pagerController = createPagerController({
-      route(sid) {
-        return navigation.route.v === "session" && ("id" in navigation.route ? navigation.route.id : "") === sid && navigation.rendered === navigation.route ? navigation.route : null;
-      },
-      range(sid) {
-        return TXM[sid];
-      },
-      state: pagingState,
-      automatic: automaticPagingAllowed,
-      current(sid, where2, state2, r) {
-        return PAGING.get(sid)?.[where2] === state2;
-      },
-      beginManual: () => stopOpeningEndPin(),
-      countAutomatic() {
-        automaticLoads++;
-      },
-      paint: paintPager,
-      load(sid, where2, boundary, signal, applied) {
-        return fetchTx(sid, where2 + "=" + boundary, where2, signal, applied);
-      },
-      commit(r, where2, manual) {
-        const box = scroller(), top = phone.matches ? 0 : box.getBoundingClientRect().top, st = capture();
-        const entry = [...$("#page").querySelectorAll(".turns [data-e][data-entry-key]:not(.tgroup)")].find((n) => {
-          const rect = n.getBoundingClientRect();
-          return rect.height && rect.top >= top;
-        });
-        st.paging = { anchor: entry ? { key: entry.dataset.entryKey, off: entry.getBoundingClientRect().top - top } : null, height: box.scrollHeight, before: where2 === "before" };
-        const armed = pagerArmed, used = automaticLoads;
-        render2();
-        restore(st);
-        if (!manual) {
-          pagerArmed = armed;
-          automaticLoads = used;
-        }
-        syncJump();
-        saveHistoryScroll();
-      },
-      queue: queuePagerObservers
-    });
-    function disconnectPagerObservers() {
-      pagerController.disconnect();
-    }
-    function queuePagerObservers() {
-      if (disposed || SIDEBAR_ONLY) return;
-      pagerController.queue($("#page"), phone.matches ? null : $("#main"), () => navigation.route.v === "session" && navigation.rendered === navigation.route && automaticPagingAllowed() && !$("#page").hasAttribute("aria-busy"));
-    }
-    function loadPager(button, manual) {
-      return pagerController.load(button, manual);
-    }
-    function parseToolDetail(data) {
-      const entry = parseEntry({ ...data, k: "tool", name: "", arg: "", ok: true });
-      if (entry.k !== "tool") throw new Error("Invalid tool details");
-      return entry;
-    }
-    function fullOf(e) {
-      return Promise.all((e.more ?? []).map(async (part) => ({ part, data: object(await api("/api/entry?sid=" + enc(e.sid ?? "") + "&slot=" + e.slot + "&as=" + part)) }))).then((parts) => {
-        const full = {}, fullCut = [];
-        for (const { part, data } of parts) {
-          if (part === "diff") {
-            full.diff = parseToolDetail(data).diff;
-            full.changes = parseToolDetail(data).changes;
-          } else if (part === "out") {
-            full.out = optional(data.text, text);
-            full.cut = parseToolDetail(data).cut;
-          } else if (part === "in") full.in = optional(data.text, text);
-          else if (part === "arg") full.arg = optional(data.text, text);
-          if (data.truncated === true) fullCut.push(part);
-        }
-        full.fullCut = fullCut;
-        return full;
-      });
-    }
-    const routeModel = { session(id) {
-      return SESS[id];
-    }, machine(id) {
-      return !!MACHINE[id];
-    }, turn(id) {
-      return TURN.get(id);
-    }, get machinesPath() {
-      return viewerHost?.machinesPath;
-    } };
-    const urlOf = (r) => routeUrl(r, routeModel), routeOf = (location2) => parseRoute(location2, routeModel);
-    function boot() {
-      api("/api/model?delta=1").then((m) => {
-        const adopted = adopt(m);
-        LIVE.version = adopted.version;
-        remember(adopted);
-        if (SIDEBAR_ONLY || NATIVE_PAGE) {
-          if (NATIVE_PAGE) navigation.route = navigation.historyRoute({ v: NATIVE_PAGE.nav }, { v: "home" });
-          render2();
-          schedule(2e3);
-          return;
-        }
-        navigation.route = routeOf(location);
-        if (navigation.route.v === "sessions") query = (new URLSearchParams(location.search).get("q") ?? "").trim();
-        if (navigation.route.v === "machines" && NAV_MACHINES && !viewerHost) {
-          location.assign(NAV_MACHINES);
-          return;
-        }
-        try {
-          history.replaceState({ ...navigation.route, scrollTop: 0 }, "", urlOf(navigation.route) + (navigation.route.v === "session" ? location.hash : navigation.route.v === "sessions" && query ? "?q=" + enc(query) : ""));
-        } catch {
-        }
-        const done = () => {
-          render2();
-          if (navigation.route.v === "session" && ("turn" in navigation.route ? navigation.route.turn : void 0)) {
-            revealTurn(("turn" in navigation.route ? navigation.route.turn : void 0) ?? "", true);
-            if (location.hash) scope.frame(() => scope.frame(revealEntryHash));
-          } else if (navigation.route.v === "session" && location.hash) revealEntryHash();
-          else if (navigation.route.v === "session") {
-            openSessionAtEnd();
-            syncJump();
-          } else quietTop();
-          schedule(2e3);
-          scope.interval(ticker, 1e3);
-        };
-        const initialRoute = navigation.route, p = load(initialRoute);
-        if (p) p.then(() => {
-          done();
-        }, done);
-        else {
-          done();
-        }
-      }, (err) => {
-        if (disposed) return;
-        if (viewerHost?.modelFailed?.(err?.status ?? 0)) return;
-        if (viewerHost) {
-          console.warn("semon: model unavailable", err.status);
-          return;
-        }
-        renderPlaceholder($(SIDEBAR_ONLY ? "#lanes" : "#page"), "Couldn't load the sessions: " + err.message);
-      });
-    }
-    const phone = window.matchMedia("(max-width: 760px)");
-    const navigation = new NavigationController({ model: routeModel, loadMachines: viewerHost ? (signal) => viewerHost.loadMachines(signal) : void 0 }, viewerHost?.initialMachines ?? null);
-    let wideMode = false, railMode = false;
-    let treePrefs = {};
-    try {
-      wideMode = localStorage.getItem("semon.wide") === "1";
-    } catch {
-    }
-    try {
-      railMode = !SIDEBAR_ONLY && localStorage.getItem("semon.rail") === "1";
-    } catch {
-    }
-    try {
-      const saved = JSON.parse(localStorage.getItem("semon.tree") ?? "{}");
-      if (saved && typeof saved === "object" && !Array.isArray(saved)) treePrefs = pruneTreePrefs(saved);
-    } catch {
-    }
-    const app = $(".app");
-    const syncLayoutPrefs = () => {
-      if (SIDEBAR_ONLY) return;
-      app.classList.toggle("rail", railMode && !phone.matches);
-      $("#page").classList.toggle("wide-mode", wideMode && !phone.matches && navigation.route.v === "session");
-    };
-    function setWideMode(on) {
-      wideMode = on;
-      try {
-        localStorage.setItem("semon.wide", on ? "1" : "0");
-      } catch {
-      }
-      syncLayoutPrefs();
-      $(".wide-toggle")?.setAttribute("aria-pressed", String(on));
-      accountChrome.updateWide(on);
-    }
-    function setRailMode(on) {
-      railMode = on;
-      ORD.delete("side");
-      try {
-        localStorage.setItem("semon.rail", on ? "1" : "0");
-      } catch {
-      }
-      syncLayoutPrefs();
-      recentNavigation.expandedAll = null;
-      renderLanes();
-      const b = $("#rail-toggle");
-      b?.setAttribute("aria-expanded", String(!on));
-      b?.setAttribute("aria-label", on ? "Expand sidebar" : "Collapse sidebar");
-      b?.setAttribute("data-tip", on ? "Expand sidebar" : "Collapse sidebar");
-    }
-    function pruneTreePrefs(saved) {
-      const kept = {};
-      if (!saved || typeof saved !== "object") return kept;
-      for (const [id, pref] of Object.entries(saved)) if (pref && typeof pref === "object" && "open" in pref && typeof pref.open === "boolean") kept[id] = { open: pref.open, at: "at" in pref ? Number(pref.at) || 0 : 0 };
-      return kept;
-    }
-    function saveTreePref(id, open) {
-      treePrefs[id] = { open, at: Date.now() };
-      treePrefs = Object.fromEntries(Object.entries(treePrefs).sort((a, b) => (b[1]?.at ?? 0) - (a[1]?.at ?? 0)).slice(0, 500));
-      try {
-        localStorage.setItem("semon.tree", JSON.stringify(treePrefs));
-      } catch {
-      }
-    }
-    const railToggle = SIDEBAR_ONLY ? $("#rail-toggle") ?? document.createElement("button") : document.createElement("button");
-    railToggle.setAttribute("aria-expanded", String(!railMode));
-    railToggle.setAttribute("data-tip", railMode ? "Expand sidebar" : "Collapse sidebar");
-    railToggle.setAttribute("aria-label", railMode ? "Expand sidebar" : "Collapse sidebar");
-    scope.listen(railToggle, "click", () => setRailMode(!railMode));
-    syncLayoutPrefs();
-    let groupBy = "recent";
-    let query = "";
-    let focusSessionsSearchOnRender = null;
-    let analyticsRange = 7, analyticsMeasure = "hours";
-    let showApprovalReviews = false;
-    const sessionFilters = { repo: "", machine: "", harness: "", model: "" };
-    let pendingSessionOpen = null;
-    let accountSheet = false;
-    let afterPop = null;
-    if (!SIDEBAR_ONLY) try {
-      history.scrollRestoration = "manual";
-    } catch {
-    }
-    const SHOW_ALL = { messages: true, tools: true, thinking: true };
-    let show = { ...SHOW_ALL };
-    let find = "";
-    let findOpen = false;
-    const currentScroll = () => phone.matches ? window.scrollY : $("#main").scrollTop;
-    const restoreScroll = (top) => scrollProgrammatically(() => {
-      if (phone.matches) window.scrollTo(0, top);
-      else $("#main").scrollTop = top;
-    });
-    let hostFocus;
-    if (viewerHost) scope.listen(document, "focusin", (event) => {
-      const node = event.target;
-      if (!(node instanceof HTMLElement) || !$("#page").contains(node)) return;
-      hostFocus = node.id ? { id: node.id } : node.dataset.id ? { row: node.dataset.id } : node.getAttribute("aria-label") ? { label: node.getAttribute("aria-label") ?? void 0 } : void 0;
-    });
-    function restoreHostFocus(saved) {
-      if (!viewerHost || !saved) return;
-      const selector = saved.id ? "#" + CSS.escape(saved.id) : saved.row ? '[data-id="' + CSS.escape(saved.row) + '"]' : saved.label ? '[aria-label="' + CSS.escape(saved.label) + '"]' : null;
-      if (selector) $("#page")?.querySelector(selector)?.focus({ preventScroll: true });
-    }
-    const saveHistoryScroll = () => {
-      if (viewerEl) return;
-      try {
-        if (history.state?.v) history.replaceState({ ...history.state, scrollTop: currentScroll(), ...viewerHost ? { hostFocus } : {} }, "");
-      } catch {
-      }
-    };
-    let scrollSaveFrame = false;
-    const queueScrollSave = () => {
-      if (scrollSaveFrame) return;
-      scrollSaveFrame = true;
-      scope.frame(() => {
-        scrollSaveFrame = false;
-        saveHistoryScroll();
-      });
-    };
-    if (!SIDEBAR_ONLY) {
-      scope.listen(window, "scroll", queueScrollSave, { passive: true });
-      scope.listen($("#main"), "scroll", queueScrollSave, { passive: true });
-    }
-    const quietTop = () => restoreScroll(0);
-    const destination = createDestination({
-      get startOpeningEndPin() {
-        return startOpeningEndPin;
-      },
-      get $() {
-        return $;
-      },
-      get renderNav() {
-        return renderNav;
-      },
-      get renderLanes() {
-        return renderLanes;
-      },
-      get drawSessionBar() {
-        return drawSessionBar;
-      },
-      get LIVE() {
-        return LIVE;
-      },
-      get scope() {
-        return scope;
-      },
-      get navigation() {
-        return navigation;
-      },
-      get quietTop() {
-        return quietTop;
-      },
-      get syncBarLine() {
-        return syncBarLine;
-      },
-      get TURN() {
-        return TURN;
-      },
-      get NATIVE_PAGE() {
-        return NATIVE_PAGE;
-      },
-      get NAV_MACHINES() {
-        return NAV_MACHINES;
-      },
-      set NAV_MACHINES(value) {
-        NAV_MACHINES = value;
-      },
-      get urlOf() {
-        return urlOf;
-      },
-      get viewerHost() {
-        return viewerHost;
-      },
-      get closeDrawer() {
-        return closeDrawer;
-      },
-      get closeAccountMenu() {
-        return closeAccountMenu;
-      },
-      get focusSessionsSearchOnRender() {
-        return focusSessionsSearchOnRender;
-      },
-      set focusSessionsSearchOnRender(value) {
-        focusSessionsSearchOnRender = value;
-      },
-      get SIDEBAR_ONLY() {
-        return SIDEBAR_ONLY;
-      },
-      get clearPaging() {
-        return clearPaging;
-      },
-      get resetPagerInput() {
-        return resetPagerInput;
-      },
-      get stopOpeningEndPin() {
-        return stopOpeningEndPin;
-      },
-      get saveHistoryScroll() {
-        return saveHistoryScroll;
-      },
-      get dropErrors() {
-        return dropErrors;
-      },
-      get TX() {
-        return TX;
-      },
-      get TXM() {
-        return TXM;
-      },
-      get originHandoff() {
-        return originHandoff;
-      },
-      get cacheTx() {
-        return cacheTx;
-      },
-      get show() {
-        return show;
-      },
-      set show(value) {
-        show = value;
-      },
-      get SHOW_ALL() {
-        return SHOW_ALL;
-      },
-      get ORD() {
-        return ORD;
-      },
-      get find() {
-        return find;
-      },
-      set find(value) {
-        find = value;
-      },
-      get findOpen() {
-        return findOpen;
-      },
-      set findOpen(value) {
-        findOpen = value;
-      },
-      get clearNewEntries() {
-        return clearNewEntries;
-      },
-      get render() {
-        return render2;
-      },
-      get restoreScroll() {
-        return restoreScroll;
-      },
-      get restoreHostFocus() {
-        return restoreHostFocus;
-      },
-      get syncJump() {
-        return syncJump;
-      },
-      get SESS() {
-        return SESS;
-      },
-      get STALE_BRIEFS() {
-        return STALE_BRIEFS;
-      },
-      get TXCACHE() {
-        return TXCACHE;
-      },
-      get adoptCached() {
-        return adoptCached;
-      },
-      get spread() {
-        return spread;
-      },
-      get revalidate() {
-        return revalidate;
-      },
-      get load() {
-        return load;
-      },
-      get skipPop() {
-        return skipPop;
-      },
-      set skipPop(value) {
-        skipPop = value;
-      },
-      get afterPop() {
-        return afterPop;
-      },
-      set afterPop(value) {
-        afterPop = value;
-      },
-      get pendingSessionOpen() {
-        return pendingSessionOpen;
-      },
-      set pendingSessionOpen(value) {
-        pendingSessionOpen = value;
-      },
-      get accountSheet() {
-        return accountSheet;
-      },
-      set accountSheet(value) {
-        accountSheet = value;
-      },
-      get viewerEl() {
-        return viewerEl;
-      },
-      set viewerEl(value) {
-        viewerEl = value;
-      },
-      get routeOf() {
-        return routeOf;
-      },
-      get HOLDS() {
-        return HOLDS;
-      },
-      get scrollProgrammatically() {
-        return scrollProgrammatically;
-      },
-      get phone() {
-        return phone;
-      }
-    });
-    const { goSession, go, openSender, revealTurn, revealEntryHash, openSessionAtEnd, goTrace } = destination;
-    const accountHost = {
-      place(widget, trigger) {
-        const at = trigger.getBoundingClientRect();
-        setGeometry(widget, "accountLeft", at.left);
-        setGeometry(widget, "accountWidth", at.width);
-        setGeometry(widget, "accountBottom", Math.max(0, innerHeight - at.top + 6));
-      },
-      opened(compact) {
-        if (compact) try {
-          history.pushState({ ...navigation.route, sheet: 1, scrollTop: currentScroll() }, "");
-          accountSheet = true;
-        } catch {
-        }
-      },
-      closed({ keepEntry, navigating }) {
-        if (disposed) return;
-        if (accountSheet) {
-          accountSheet = false;
-          if (!keepEntry && history.state?.sheet) {
-            skipPop = true;
-            history.back();
-          }
-        }
-        if (LIVE.pending && !navigating) scope.timeout(() => {
-          if (LIVE.pending && !viewerEl && !accountChrome.open) refresh();
-        }, 0);
-      },
-      navigate(href) {
-        if (!accountSheet) return false;
-        leaveAccountSheet(() => location.assign(href));
-        return true;
-      },
-      submit(form) {
-        if (!accountSheet) return false;
-        leaveAccountSheet(() => form.submit());
-        return true;
-      }
-    };
-    const shellChrome = SIDEBAR_ONLY ? null : createShellChrome({
-      account: accountHost,
-      navigate(destination2) {
-        go(navigation.historyRoute({ v: destination2.key }, { v: "home" }));
-        return true;
-      },
-      drawerOpened() {
-        orderApply("side");
-      },
-      drawerClosed() {
-        scope.timeout(() => {
-          if (phone.matches && !document.body.classList.contains("drawer-open")) orderApply("side");
-        }, ORD_DRAWER_MS);
-      },
-      railChanged() {
-        setRailMode(!railMode);
-        renderNav();
-      }
-    });
-    if (shellChrome) shellChrome.mount(app);
-    const accountChrome = shellChrome?.account ?? createAccountChrome(accountHost);
-    function closeAccountMenu(keepEntry = void 0, navigating = void 0) {
-      accountChrome.close({ keepEntry, navigating });
-    }
-    function leaveAccountSheet(go2) {
-      accountSheet = false;
-      if (history.state?.sheet) {
-        skipPop = true;
-        afterPop = go2;
-        history.back();
-      } else go2();
-    }
-    function accountWidget(compact) {
-      return ACCOUNT ? accountChrome.mount({ account: ACCOUNT, compact, wide: wideMode, onWideChange: () => setWideMode(!wideMode) }) : null;
-    }
-    function renderDrawerAccount() {
-      if (shellChrome) {
-        shellChrome.drawerAccount(ACCOUNT ? { account: ACCOUNT, compact: true, wide: wideMode, onWideChange: () => setWideMode(!wideMode) } : null);
-        return;
-      }
-      const old = $("#account-drawer");
-      if (old) {
-        accountChrome.unmount(old);
-        old.remove();
-      }
-      if (!ACCOUNT) return;
-      const widget = accountWidget(true);
-      if (!widget) return;
-      widget.id = "account-drawer";
-      $("#sidebar").append(widget);
-    }
-    const ordering = createOrdering(), ORD = ordering.scopes, ordTouch = { down: false }, byLast = (a, b) => b.last - a.last;
-    const pageSig = () => JSON.stringify([query, groupBy, sessionFilters]);
-    scope.listen(document, "pointerdown", () => {
-      ordTouch.down = true;
-    }, true);
-    for (const t of ["pointerup", "pointercancel"]) scope.listen(document, t, () => {
-      ordTouch.down = false;
-    }, true);
-    scope.listen(window, "blur", () => {
-      ordTouch.down = false;
-    });
-    scope.listen(document, "visibilitychange", () => {
-      ordTouch.down = false;
-      if (visible()) {
-        orderApply("page");
-        orderApply("side");
-      }
-    });
-    function ordState(name) {
-      const side = name === "side", rows = side ? "#lanes .treeitem" : "#page .nrow", a = document.activeElement;
-      const inView = side ? sideRegion().scrollTop <= 1 : !$(rows) || $(rows).getBoundingClientRect().top >= $("#topbar").getBoundingClientRect().bottom - 1;
-      const touched = ordTouch.down || !!a?.matches?.(":focus-visible") && !!a.closest(side ? "#lanes" : rows) || matchMedia("(hover: hover)").matches && !!$(rows + ":hover");
-      return { inView, touched };
-    }
-    let ordPageState = null;
-    const pageState = () => ordPageState ?? ordState("page");
-    const orderScope = (name, sig, tie, state2) => ordering.begin(name, sig, tie, state2), orderList = orderRows;
-    const sideRegion = () => $("#side-list") ?? $("#sidebar");
-    const ordIdleMs = Reflect.get(window, "__semonOrderIdleMs");
-    const ORD_IDLE_MS = Number.isFinite(ordIdleMs) && ordIdleMs >= 200 && ordIdleMs <= 6e4 ? ordIdleMs : 1e4;
-    const ORD_DRAWER_MS = 320;
-    function orderApply(name) {
-      const sc = ORD.get(name);
-      if (!sc?.n || name === "page" && (sc.tie !== navigation.route || navigation.rendered !== navigation.route || viewerEl || $("#page").hasAttribute("aria-busy"))) return;
-      ORD.delete(name);
-      if (name === "side") renderLanes();
-      else {
-        const st = capture();
-        render2();
-        restore(st);
-      }
-    }
-    let ordIdle;
-    function ordIdleArm() {
-      clearTimeout(ordIdle);
-      ordIdle = void 0;
-      if (phone.matches || !ORD.get("side")?.n) return;
-      ordIdle = scope.timeout(() => {
-        ordIdle = void 0;
-        const bar = $("#sidebar"), a = document.activeElement;
-        const menu = $(".session-menu, .account-popover, .runs-popover, .filters.pop:not([hidden])");
-        if (ordTouch.down || bar.matches(":hover") || a && bar.contains(a) && (a.matches(":focus-visible") || a.matches("input, textarea, select, [contenteditable]")) || menu || viewerEl) ordIdleArm();
-        else orderApply("side");
-      }, ORD_IDLE_MS);
-    }
-    for (const t of ["pointermove", "pointerdown", "pointerleave", "focusin", "focusout", "wheel", "keydown"]) scope.listen($("#sidebar"), t, () => {
-      if (ordIdle) ordIdleArm();
-    }, { passive: true });
-    function renderNav() {
-      const nav = $("#nav"), destinations = [];
-      const under = { home: ["home"], analytics: ["analytics"], sessions: ["sessions", "session", "trace"], machines: ["machines", "machine"] };
-      const item2 = (v, label, ic, count, hot) => {
-        destinations.push({ key: v, label, icon: ic, href: v === "machines" && NAV_MACHINES ? NAV_MACHINES : urlOf({ v }), current: under[v].includes((SIDEBAR_ONLY ? app.dataset.viewerNav : NATIVE_PAGE?.nav) ?? navigation.route.v), count, hot });
-      };
-      item2("home", "Home", I.home, inbox().length, true);
-      item2("sessions", "Sessions", I.sessions);
-      item2("analytics", "Analytics", I.chart);
-      item2("machines", "Machines", I.machine, Object.keys(MACHINE).filter((m) => !MACHINE_UP[m]).length, true);
-      if (shellChrome) shellChrome.update(destinations, railMode);
-      else renderShellNavigation(nav, destinations, (destination2) => {
-        go(navigation.historyRoute({ v: destination2.key }, { v: "home" }));
-        return true;
-      });
-    }
-    const sessMatch = (s, q) => !q || [s.name, s.repo, s.branch, MACHINE[s.machine], s.movedFrom ? MACHINE[s.movedFrom] : "", HARNESS[s.harness], s.role ? "role no repo" : "", ...(TURNS[s.id] ?? []).map((t) => t.start?.brief ?? t.u?.text ?? "")].join(" ").toLowerCase().includes(q.toLowerCase());
-    const recentNavigation = createRecentNavigation({
-      get showApprovalReviews() {
-        return showApprovalReviews;
-      },
-      set showApprovalReviews(value) {
-        showApprovalReviews = value;
-      },
-      get sessionChildren() {
-        return sessionChildren;
-      },
-      get SESS() {
-        return SESS;
-      },
-      get parentOf() {
-        return parentOf;
-      },
-      get byLast() {
-        return byLast;
-      },
-      get navigation() {
-        return navigation;
-      },
-      get kidRank() {
-        return kidRank;
-      },
-      get orderList() {
-        return orderList;
-      },
-      get descendantsOf() {
-        return descendantsOf;
-      },
-      get $() {
-        return $;
-      },
-      get goSession() {
-        return goSession;
-      },
-      get saveTreePref() {
-        return saveTreePref;
-      },
-      get phone() {
-        return phone;
-      },
-      get scrollProgrammatically() {
-        return scrollProgrammatically;
-      },
-      get STATE() {
-        return STATE;
-      },
-      get ago() {
-        return ago2;
-      },
-      get sessMatch() {
-        return sessMatch;
-      },
-      get pendingSessionOpen() {
-        return pendingSessionOpen;
-      },
-      set pendingSessionOpen(value) {
-        pendingSessionOpen = value;
-      },
-      get viewerEl() {
-        return viewerEl;
-      },
-      set viewerEl(value) {
-        viewerEl = value;
-      },
-      get SIDEBAR_ONLY() {
-        return SIDEBAR_ONLY;
-      },
-      get currentScroll() {
-        return currentScroll;
-      },
-      get disposed() {
-        return disposed;
-      },
-      set disposed(value) {
-        disposed = value;
-      },
-      get skipPop() {
-        return skipPop;
-      },
-      set skipPop(value) {
-        skipPop = value;
-      },
-      get LIVE() {
-        return LIVE;
-      },
-      get refresh() {
-        return refresh;
-      },
-      get dialogs() {
-        return dialogs;
-      },
-      get treePrefs() {
-        return treePrefs;
-      },
-      set treePrefs(value) {
-        treePrefs = value;
-      },
-      get defaultTreeOpen() {
-        return defaultTreeOpen;
-      },
-      get childParts() {
-        return childParts;
-      },
-      get HARNESSES() {
-        return HARNESSES;
-      },
-      get dur() {
-        return dur2;
-      },
-      get I() {
-        return I;
-      },
-      get MACHINE() {
-        return MACHINE;
-      },
-      get shortHost() {
-        return shortHost;
-      },
-      get hostOf() {
-        return hostOf;
-      },
-      get HARNESS() {
-        return HARNESS;
-      },
-      get modelIdOf() {
-        return modelIdOf;
-      },
-      get darkTheme() {
-        return darkTheme;
-      },
-      get urgentDescendant() {
-        return urgentDescendant;
-      },
-      get railMode() {
-        return railMode;
-      },
-      set railMode(value) {
-        railMode = value;
-      },
-      get ORD() {
-        return ORD;
-      },
-      get ordState() {
-        return ordState;
-      },
-      get orderScope() {
-        return orderScope;
-      },
-      get ordIdle() {
-        return ordIdle;
-      },
-      set ordIdle(value) {
-        ordIdle = value;
-      },
-      get ordIdleArm() {
-        return ordIdleArm;
-      },
-      get query() {
-        return query;
-      },
-      set query(value) {
-        query = value;
-      }
-    });
-    const { recentRenderer, renderLanes, COST_TIP, isApprovalReview } = recentNavigation;
-    const { errorNavigation, viewerBar, drawSessionBar, syncBarLine, dropErrors, modelIdOf, kindText, observeTitle, centre, panel, renderTopbar, machineLine, sessionLine, errOn, markError, errorsLive } = createSessionChrome({
-      get HARNESS() {
-        return HARNESS;
-      },
-      get ACCOUNT() {
-        return ACCOUNT;
-      },
-      set ACCOUNT(value) {
-        ACCOUNT = value;
-      },
-      get wideMode() {
-        return wideMode;
-      },
-      set wideMode(value) {
-        wideMode = value;
-      },
-      get setWideMode() {
-        return setWideMode;
-      },
-      get findOpen() {
-        return findOpen;
-      },
-      set findOpen(value) {
-        findOpen = value;
-      },
-      get STATE() {
-        return STATE;
-      },
-      get phone() {
-        return phone;
-      },
-      get analyticsRange() {
-        return analyticsRange;
-      },
-      set analyticsRange(value) {
-        analyticsRange = value;
-      },
-      get find() {
-        return find;
-      },
-      set find(value) {
-        find = value;
-      },
-      get show() {
-        return show;
-      },
-      set show(value) {
-        show = value;
-      },
-      get countOf() {
-        return countOf;
-      },
-      get I() {
-        return I;
-      },
-      get goSession() {
-        return goSession;
-      },
-      get render() {
-        return render2;
-      },
-      get $() {
-        return $;
-      },
-      get SHOW_ALL() {
-        return SHOW_ALL;
-      },
-      get SESS() {
-        return SESS;
-      },
-      get currentScroll() {
-        return currentScroll;
-      },
-      get restoreScroll() {
-        return restoreScroll;
-      },
-      get refreshAnalytics() {
-        return refreshAnalytics;
-      },
-      get navigation() {
-        return navigation;
-      },
-      get shellChrome() {
-        return shellChrome;
-      },
-      get scope() {
-        return scope;
-      },
-      get lineageOf() {
-        return lineageOf;
-      },
-      get scroller() {
-        return scroller;
-      },
-      get edge() {
-        return edge;
-      },
-      get scrollProgrammatically() {
-        return scrollProgrammatically;
-      },
-      get syncJump() {
-        return syncJump;
-      },
-      get saveHistoryScroll() {
-        return saveHistoryScroll;
-      },
-      get TX() {
-        return TX;
-      },
-      get TXM() {
-        return TXM;
-      },
+    return {
+      api,
+      txEntry,
       get TOK() {
         return TOK;
       },
       set TOK(value) {
         TOK = value;
       },
-      get SIDEBAR_ONLY() {
-        return SIDEBAR_ONLY;
-      },
-      get capture() {
-        return capture;
-      },
-      get restore() {
-        return restore;
-      },
-      get opener() {
-        return opener;
-      },
-      get resetPagerInput() {
-        return resetPagerInput;
-      },
-      get stopOpeningEndPin() {
-        return stopOpeningEndPin;
-      },
-      get fetchTx() {
-        return fetchTx;
-      },
-      get dropTx() {
-        return dropTx;
-      },
-      get spread() {
-        return spread;
-      },
-      get tail() {
-        return tail;
-      },
-      get TURNS() {
-        return TURNS;
-      },
-      get hasTurn() {
-        return hasTurn;
-      },
-      get descendantsOf() {
-        return descendantsOf;
-      },
-      get sessionChildren() {
-        return sessionChildren;
-      },
-      get costForSessions() {
-        return costForSessions;
-      },
-      get costForSession() {
-        return costForSession;
-      },
-      get MACHINE() {
-        return MACHINE;
-      },
-      get hostOf() {
-        return hostOf;
-      },
-      get costText() {
-        return costText;
-      },
-      get onMachine() {
-        return onMachine;
-      },
-      get MACHINE_UP() {
-        return MACHINE_UP;
-      },
-      get movedOff() {
-        return movedOff;
-      },
-      get MACHINE_LAST() {
-        return MACHINE_LAST;
-      },
-      get clock() {
-        return clock2;
-      },
-      get syncLayoutPrefs() {
-        return syncLayoutPrefs;
-      },
-      get viewerEl() {
-        return viewerEl;
-      },
-      set viewerEl(value) {
-        viewerEl = value;
-      },
-      get dialogs() {
-        return dialogs;
-      },
-      get disposed() {
-        return disposed;
-      },
-      set disposed(value) {
-        disposed = value;
-      },
-      get skipPop() {
-        return skipPop;
-      },
-      set skipPop(value) {
-        skipPop = value;
-      },
-      get pendingSessionOpen() {
-        return pendingSessionOpen;
-      },
-      set pendingSessionOpen(value) {
-        pendingSessionOpen = value;
-      },
-      get LIVE() {
-        return LIVE;
-      },
-      get refresh() {
-        return refresh;
-      },
-      get TURN() {
-        return TURN;
-      },
-      get harnessSnapshot() {
-        return harnessSnapshot;
-      },
-      get branchOf() {
-        return branchOf;
-      },
-      get dur() {
-        return dur2;
-      },
-      get costSnapshot() {
-        return costSnapshot;
-      },
-      get afterPop() {
-        return afterPop;
-      },
-      set afterPop(value) {
-        afterPop = value;
-      },
-      get goTrace() {
-        return goTrace;
-      }
-    });
-    const { harnessSnapshot, costSnapshot, showsFooter, renderHome, renderMachines, renderMachine, renderTrace, renderSession } = createScreenViews({
-      get costForSession() {
-        return costForSession;
-      },
-      get costMissing() {
-        return costMissing;
-      },
-      get costText() {
-        return costText;
-      },
-      get costForSessions() {
-        return costForSessions;
-      },
-      get HARNESS() {
-        return HARNESS;
-      },
-      get asMoney() {
-        return asMoney;
-      },
-      get sessionChildren() {
-        return sessionChildren;
-      },
-      get kindText() {
-        return kindText;
-      },
-      get STATE() {
-        return STATE;
-      },
-      get MACHINE() {
-        return MACHINE;
-      },
-      get MACHINE_UP() {
-        return MACHINE_UP;
-      },
-      get HARNESSES() {
-        return HARNESSES;
-      },
-      get darkTheme() {
-        return darkTheme;
-      },
-      get TURNS() {
-        return TURNS;
-      },
-      get H() {
-        return H;
-      },
-      get ago() {
-        return ago2;
-      },
-      get nameOf() {
-        return nameOf;
-      },
-      get oneLine() {
-        return oneLine;
-      },
-      get HOLDS() {
-        return HOLDS;
-      },
-      get SESS() {
-        return SESS;
-      },
-      get I() {
-        return I;
-      },
-      get answersOf() {
-        return answersOf;
-      },
-      get traceRoot() {
-        return traceRoot;
-      },
-      get goSession() {
-        return goSession;
-      },
-      get observeTitle() {
-        return observeTitle;
-      },
-      get goTrace() {
-        return goTrace;
-      },
-      get inbox() {
-        return inbox;
-      },
-      get isResult() {
-        return isResult;
-      },
-      get markSeenResults() {
-        return markSeenResults;
-      },
-      get render() {
-        return render2;
-      },
-      get working() {
-        return working;
-      },
-      get orderList() {
-        return orderList;
-      },
-      get orderScope() {
-        return orderScope;
-      },
-      get pageSig() {
-        return pageSig;
-      },
-      get navigation() {
-        return navigation;
-      },
-      get pageState() {
-        return pageState;
-      },
-      get byLast() {
-        return byLast;
-      },
-      get onMachine() {
-        return onMachine;
-      },
-      get movedOff() {
-        return movedOff;
-      },
-      get movesOf() {
-        return movesOf;
-      },
-      get clock() {
-        return clock2;
-      },
-      get MACHINE_LAST() {
-        return MACHINE_LAST;
-      },
-      get ADMIN() {
-        return ADMIN;
-      },
-      set ADMIN(value) {
-        ADMIN = value;
-      },
-      get go() {
-        return go;
-      },
-      get byState() {
-        return byState;
-      },
-      get STARTS() {
-        return STARTS;
-      },
-      get domain() {
-        return domain;
-      },
-      get NOW() {
-        return NOW;
-      },
-      set NOW(value) {
-        NOW = value;
-      },
-      get TURN() {
-        return TURN;
-      },
-      get sentenceHost() {
-        return sentenceHost;
-      },
-      get machineLabel() {
-        return machineLabel;
-      },
-      get hcls() {
-        return hcls;
-      },
-      get hostOf() {
-        return hostOf;
-      },
-      get sentenceSnapshot() {
-        return sentenceSnapshot;
-      },
-      get turnEnd() {
-        return turnEnd2;
-      },
-      get statWord() {
-        return statWord;
-      },
-      get SEEN_RESULTS() {
-        return SEEN_RESULTS;
-      },
-      get machineLabels() {
-        return machineLabels;
-      },
-      get transcriptEntries() {
-        return transcriptEntries;
-      },
-      get TX() {
-        return TX;
-      },
-      get transcriptSnapshot() {
-        return transcriptSnapshot;
-      },
-      get verb() {
-        return verb;
-      },
-      get openStepViewer() {
-        return openStepViewer;
-      },
-      get openScript() {
-        return openScript;
-      },
-      get openImage() {
-        return openImage;
-      },
-      get stopOpeningEndPin() {
-        return stopOpeningEndPin;
-      },
-      get opener() {
-        return opener;
-      },
-      get centre() {
-        return centre;
-      },
-      get scope() {
-        return scope;
-      },
-      get loadPager() {
-        return loadPager;
-      },
-      get jumpToLatest() {
-        return jumpToLatest;
-      }
-    });
-    const { transcriptEntries, transcriptSnapshot, verb, verbNow } = createTranscriptView({
-      get SESS() {
-        return SESS;
-      },
-      get TURNS() {
-        return TURNS;
-      },
-      get TX() {
-        return TX;
-      },
-      get find() {
-        return find;
-      },
-      set find(value) {
-        find = value;
-      },
-      get show() {
-        return show;
-      },
-      set show(value) {
-        show = value;
-      },
-      get I() {
-        return I;
-      },
-      get turnEnd() {
-        return turnEnd2;
-      },
-      get STATE() {
-        return STATE;
-      },
-      get clock() {
-        return clock2;
-      },
-      get sentenceSnapshot() {
-        return sentenceSnapshot;
-      },
-      get harnessSnapshot() {
-        return harnessSnapshot;
-      },
-      get running() {
-        return running;
-      },
-      get NOW() {
-        return NOW;
-      },
-      set NOW(value) {
-        NOW = value;
-      },
-      get isGap() {
-        return isGap;
-      },
-      get attachmentSnapshot() {
-        return attachmentSnapshot;
-      },
-      get HID() {
-        return HID;
-      },
-      get childSnapshot() {
-        return childSnapshot;
-      },
-      get answersOf() {
-        return answersOf;
-      },
-      get TXM() {
-        return TXM;
-      },
-      get originHandoff() {
-        return originHandoff;
-      },
-      get pagerSnapshot() {
-        return pagerSnapshot;
-      },
-      get MACHINE() {
-        return MACHINE;
-      },
-      get showsFooter() {
-        return showsFooter;
-      },
-      get footerSnapshot() {
-        return footerSnapshot;
-      }
-    });
-    let viewerEl = null;
-    let skipPop = false;
-    function openStepViewer(e, v, ic, inLabel = "Input") {
-      if (disposed) return;
-      if (e.more?.length && e.slot != null && !e.full) {
-        const open2 = (f) => openStepViewer({ ...e, ...f, full: true }, v, ic, inLabel);
-        fullOf(e).then(open2, () => open2({ fullFailed: true }));
-        return;
-      }
-      const status2 = e.live ? "Running \xB7 " + e.secs : e.unfinished ? "No result" : e.ok ? "Done \xB7 " + e.secs : e.ok === null ? "Exit unknown \xB7 " + e.secs : "Failed \xB7 " + e.secs;
-      const { body, show: open } = panel(v + " " + e.arg, { cls: "full", sub: e.name + " \xB7 " + status2, label: v + " " + e.arg });
-      body.classList.add("viewer-b");
-      renderFullTool(body, e, inLabel, SESS[e.sid ?? ""]?.state === "wait");
-      open();
-    }
-    const THUMB_W = 200, THUMB_H = 160;
-    const IMAGE_KIND = { "image/png": "PNG", "image/jpeg": "JPEG", "image/gif": "GIF", "image/webp": "WebP" };
-    const sizeText = (n) => n >= 1048576 ? (n / 1048576).toFixed(1) + " MB" : n >= 1024 ? Math.round(n / 1024) + " KB" : n + " bytes";
-    function attachmentSnapshot(e) {
-      const images = (e.img ?? []).map((a, i) => {
-        const k = a.w != null && a.h != null && a.w > 0 && a.h > 0 ? Math.min(1, THUMB_W / a.w, THUMB_H / a.h) : null;
-        return {
-          unavailable: !!a.na,
-          url: "/api/attachment?sid=" + enc(e.sid ?? "") + "&o=" + enc(a.o) + "&b=" + enc(a.b) + "&v=" + enc(a.v ?? ""),
-          label: "Attached image " + (i + 1) + " (" + (IMAGE_KIND[a.type ?? ""] ?? "image") + ", " + sizeText(a.size ?? 0) + ")",
-          width: k ? Math.max(1, Math.round(a.w * k)) : void 0,
-          height: k ? Math.max(1, Math.round(a.h * k)) : void 0
-        };
+      fetchTx,
+      enc,
+      adopt,
+      load,
+      spread,
+      tick,
+      get fetchedAt() {
+        return fetchedAt;
+      },
+      set fetchedAt(value) {
+        fetchedAt = value;
+      },
+      accountOf
+    };
+  }
+
+  // src/navigation/scroll.ts
+  function createScrollTransactions(host2) {
+    let anchor = null, disposed = false;
+    const frames = /* @__PURE__ */ new Set();
+    const frame = (fn) => {
+      const id = requestAnimationFrame(() => {
+        frames.delete(id);
+        if (!disposed) fn();
       });
-      return images;
+      frames.add(id);
+    };
+    const scroller = () => host2.phone() ? document.scrollingElement ?? document.documentElement : host2.main();
+    const ANCHORS = "[data-e], .turn, .hop, .ib, .nrow, .sec-h, .ph, .divider, .analytics-metric, .analytics-panel, .facet-filters, .groupby, .find, .empty";
+    const HOSTS = "[data-e], [data-h], [data-id], [data-sid], [data-go], [data-turn], [data-g], [data-m]";
+    const FOCUSABLE = "button, input, [tabindex], a[href]";
+    const stateKey = (n) => n.dataset.entryKey ?? n.dataset.e;
+    const identOf = (n) => {
+      const d = n.dataset, keys = [stateKey(n), d.turn, d.h, d.id, d.m, d.sid, d.go, d.g];
+      return [
+        n.classList[0],
+        ...keys,
+        keys.some((x) => x != null) ? "" : n.firstChild?.nodeType === 3 ? n.firstChild.textContent : ""
+      ].map((x) => x ?? "").join("|");
+    };
+    function anchors(fn) {
+      const seen = /* @__PURE__ */ new Map();
+      for (const n of host2.page().querySelectorAll(ANCHORS)) {
+        const id = identOf(n), k = seen.get(id) ?? 0;
+        seen.set(id, k + 1);
+        if (fn(n, id + "#" + k)) return n;
+      }
+      return null;
     }
-    function openImage(url, label, from) {
-      const image2 = createImageViewer(url, label, {
-        opened(d) {
-          viewerEl = d;
-          document.documentElement.classList.add("viewer-open");
-          try {
-            history.pushState({ ...navigation.route, sheet: 1 }, "");
-          } catch {
-          }
-        },
-        closed(d) {
-          dialogs.delete(d);
-          if (disposed) return;
-          document.documentElement.classList.remove("viewer-open");
-          if (viewerEl === d) {
-            viewerEl = null;
-            if (history.state?.sheet) {
-              skipPop = true;
-              history.back();
+    const opener = (n) => n.classList.contains("step") ? n.querySelector(":scope > button") : n.classList.contains("tgroup") ? n.querySelector(":scope > .tsum") : null;
+    function capture() {
+      const sc = scroller(), line = host2.edge();
+      const st = {
+        top: sc.scrollTop,
+        bottom: sc.scrollHeight - sc.scrollTop - sc.clientHeight <= 80,
+        anchor: null,
+        open: /* @__PURE__ */ new Set(),
+        groups: /* @__PURE__ */ new Set(),
+        groupMembers: /* @__PURE__ */ new Set(),
+        focus: null,
+        drawer: document.body.classList.contains("drawer-open")
+      };
+      const kept = anchor;
+      const still = kept && kept.route === host2.rendered() && Math.abs(sc.scrollTop - kept.top) < 1 ? anchors((n, id) => id === kept.id) : null;
+      if (still && kept && Math.abs(still.getBoundingClientRect().top - line - kept.off) <= 1)
+        st.anchor = { id: kept.id, off: kept.off };
+      else {
+        const turnBounds = /* @__PURE__ */ new Map();
+        anchors((n, id) => {
+          const turn = n.closest(".turn");
+          if (turn) {
+            let bounds = turnBounds.get(turn);
+            if (!bounds) {
+              bounds = turn.getBoundingClientRect();
+              turnBounds.set(turn, bounds);
             }
+            if (bounds.bottom <= line || bounds.top >= (host2.phone() ? innerHeight : sc.getBoundingClientRect().bottom))
+              return false;
           }
-          if (LIVE.pending) refresh();
-          (from.isConnected ? from : [...document.querySelectorAll("button.attach")].find((x) => x.querySelector("img")?.getAttribute("src") === url))?.focus();
-        }
-      });
-      dialogs.set(image2.dialog, image2);
-      image2.show();
-    }
-    function openScript(e) {
-      const done = (fields) => openStepViewer({ ...e, ...fields, full: true }, "View script", "run", "Script");
-      api("/api/entry?sid=" + enc(e.sid ?? "") + "&slot=" + e.slot + "&as=script").then((value) => {
-        const result = object(value);
-        done({ scriptText: optional(result.text, text), scriptTruncated: result.truncated === true });
-      }).catch(() => done({ scriptFailed: true }));
-    }
-    function childSnapshot(h2, c) {
-      const calls = countOf(c, "calls"), holder = HOLDS.get(h2.id);
-      return {
-        kind: "child",
-        handoff: h2.id,
-        id: c.id,
-        turn: STARTS.get(h2.id)?.id,
-        name: c.name,
-        state: c.state,
-        stateLabel: STATE[c.state] ?? c.state,
-        meta: [kindText(c), shortModel(c.model), dur2(c.start, c.state === "work" ? null : c.last), (calls ?? "\u2014") + (calls === 1 ? " step" : " steps"), costText(costForSession(c.id, true))].join(" \xB7 "),
-        mark: harnessSnapshot(c.harness),
-        brief: preview(h2.brief ?? ""),
-        result: h2.result || void 0,
-        failed: h2.status === "err",
-        activity: !h2.result && c.state === "work" && c.activity ? [verbNow(c.activity[0]), c.activity[1]] : void 0,
-        trace: holder?.id,
-        traceLabel: holder ? "Open run view for " + nameOf(h2.from) : void 0,
-        chevron: I.chev
-      };
-    }
-    const callsTip = (s) => {
-      const parts = Object.entries(s.tool_calls ?? {}).sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : 1)).map(([name, n]) => name + " " + n), failed = countOf(s, "errors");
-      if (failed) parts.push(failed + " failed");
-      return parts.join(" \xB7 ");
-    };
-    const timeTip = (s, h2, finished) => "Started " + clock2(s.start) + " \xB7 last activity " + clock2(s.last) + (finished ? " \xB7 finished " + clock2(h2?.done ?? s.last) : "");
-    function costTip(cost2) {
-      const groups = Object.entries(cost2.by_model ?? {}).map(([id, m]) => {
-        const k = m.usd_by_kind ?? {}, kinds2 = [["Input", k.input], ["Output", k.output], ["Cache read", k.cache_read], ["Cache write", (Number(k.cache_write_5m) || 0) + (Number(k.cache_write_1h) || 0)]];
-        if (Number(k.web_search) >= 5e-3) kinds2.push(["Web search", k.web_search]);
-        return { id, text: kinds2.map(([label, usd]) => label + " " + asMoney(Number(usd) || 0)).join(" \xB7 ") };
-      });
-      return (groups.length > 1 ? groups.map((g) => g.id + ": " + g.text).join("; ") : groups.map((g) => g.text).join("")) + (groups.length ? ". " : "") + COST_TIP;
-    }
-    function footerSnapshot(s, h2) {
-      const done = s.state === "done" || s.state === "err", finished = h2 ? done || h2.status === "done" || h2.status === "err" : done;
-      const state2 = h2 ? finished ? s.state === "err" || h2.status === "err" ? "err" : "done" : "work" : s.state;
-      const cost2 = costForSession(s.id), priced2 = cost2.usd != null && !costMissing(cost2).length && cost2.usd >= 5e-3, items = [];
-      if (!h2 || !finished) items.push({ kind: "calls", text: callsText(countOf(s, "calls")), tip: callsTip(s) });
-      items.push({ kind: "time", text: dur2(s.start, state2 === "work" ? null : s.last), tip: timeTip(s, h2, finished) });
-      if (priced2) items.push({ kind: "cost", text: asMoney(cost2.usd ?? 0), tip: costTip(cost2) });
-      return { state: state2, stateLabel: STATE[state2] ?? state2, text: h2 && finished ? "Returned to " + nameOf(h2.from) + " \xB7 " + STATE[state2] : STATE[state2], items, parent: h2 && finished ? { id: h2.from, turn: HOLDS.get(h2.id)?.id, name: nameOf(h2.from) } : void 0 };
-    }
-    const SLOTS = /* @__PURE__ */ new Map();
-    function slot(key, box, build) {
-      let s = SLOTS.get(key);
-      if (!s || s.route !== navigation.route || s.box !== box || !box.contains(s.el)) {
-        s?.ctx.destroy?.();
-        const ctx = { sync() {
-        }, onChange() {
-        } };
-        s = { route: navigation.route, box, ctx, el: build(ctx) };
-        SLOTS.set(key, s);
-      }
-      return s;
-    }
-    function clearBox(box, r = null) {
-      for (const [key, s] of SLOTS) if (s.route !== r) {
-        s.ctx.destroy?.();
-        SLOTS.delete(key);
-      }
-      if (ownsScreen(box)) {
-        if (screenKind(box) === r?.v && !(r?.v === "machines" && viewerHost) && !NATIVE_PAGE) return;
-        releaseScreen(box);
-      }
-      const kept = new Set([...SLOTS.values()].filter((s) => s.box === box).map((s) => s.el));
-      for (const n of [...box.childNodes]) if (!(n instanceof HTMLElement && kept.has(n))) n.remove();
-    }
-    function placer(box) {
-      let cur = box.firstChild;
-      const put = (...nodes) => {
-        for (const n of nodes) {
-          if (n === cur) cur = cur?.nextSibling ?? null;
-          else box.insertBefore(n, cur);
-        }
-      };
-      put.done = () => {
-        while (cur) {
-          const next = cur.nextSibling;
-          cur.remove();
-          cur = next;
-        }
-      };
-      return put;
-    }
-    function render2() {
-      if (disposed) return;
-      const focusSearch = focusSessionsSearchOnRender === navigation.route;
-      focusSessionsSearchOnRender = null;
-      if (SIDEBAR_ONLY) {
-        domain.invalidate();
-        tick();
-        navigation.rendered = navigation.route;
-        renderNav();
-        renderLanes();
-        return;
-      }
-      if (NATIVE_PAGE || navigation.route.v === "machines" && viewerHost) {
-        tick();
-        navigation.rendered = navigation.route;
-        if (navigation.content && !navigation.content.element.isConnected) {
-          clearBox($("#page"), navigation.route);
-          $("#page").append(navigation.content.element);
-        }
-        document.title = (NATIVE_PAGE?.title ?? "Machines") + " \xB7 Semon";
-        renderTopbar(NATIVE_PAGE?.title ?? "Machines");
-        syncLayoutPrefs();
-        syncBarLine();
-        renderNav();
-        renderLanes();
-        renderDrawerAccount();
-        syncJump();
-        return;
-      }
-      if (viewerHost) document.title = ({ home: "Home", sessions: "Sessions", analytics: "Analytics", machines: "Machines", machine: "Machine", session: "Session", trace: "Trace" }[navigation.route.v] ?? "Semon") + " \xB7 Semon";
-      resetPagerInput();
-      holdProgrammaticScroll();
-      closeAccountMenu();
-      stopOpeningEndPin();
-      domain.invalidate();
-      ordPageState = ordState("page");
-      tick();
-      const page = $("#page"), r = navigation.route;
-      navigation.rendered = r;
-      setGeometry(page, "paddingBottom", null);
-      clearBox(page, r);
-      page.classList.remove("child-page");
-      if (r.v === "home") {
-        renderHome(page);
-        renderTopbar("Home");
-      } else if (r.v === "analytics") {
-        renderAnalytics(page);
-        renderTopbar("Analytics", null, { analytics: true });
-      } else if (r.v === "sessions") {
-        renderSessions(page, focusSearch);
-        renderTopbar("Sessions");
-      } else if (r.v === "machines") {
-        renderMachines(page);
-        renderTopbar("Machines");
-      } else if (r.v === "machine") {
-        renderMachine(page, r.id);
-        renderTopbar(MACHINE[r.id], { label: "Machines", go: () => go({ v: "machines" }) }, { line2: machineLine(r.id) });
-      } else if (r.v === "trace") {
-        renderTrace(page, r.turn);
-        renderTopbar("Trace", { label: SESS[r.sid].name, go: () => goSession(r.sid, r.turn) }, { traceSession: SESS[r.sid] });
-      } else if (r.v === "session") {
-        const s = SESS[r.id], lineage = lineageOf(r.id).slice(0, -1);
-        renderSession(page, r.id);
-        renderTopbar(s.name, null, { session: s, lineage, line2: sessionLine(s) });
-      }
-      if (r.v === "session" && errOn(r.id)) markError(false);
-      setGeometry(document.documentElement, "barHeight", $("#topbar").offsetHeight);
-      const lanesKept = destination.lanesFor && destination.lanesFor.r === r && destination.lanesFor.version === LIVE.version;
-      destination.lanesFor = null;
-      syncLayoutPrefs();
-      syncBarLine();
-      renderNav();
-      if (!lanesKept) renderLanes();
-      renderDrawerAccount();
-      syncJump();
-      ordPageState = null;
-    }
-    const { fetchAnalytics, scheduleAnalytics, refreshAnalytics, renderAnalytics, matchesSessionFacets, renderFacetFilters } = createAnalytics({
-      get dialogs() {
-        return dialogs;
-      },
-      get analyticsRange() {
-        return analyticsRange;
-      },
-      set analyticsRange(value) {
-        analyticsRange = value;
-      },
-      get sessionFilters() {
-        return sessionFilters;
-      },
-      get enc() {
-        return enc;
-      },
-      get scope() {
-        return scope;
-      },
-      get disposed() {
-        return disposed;
-      },
-      set disposed(value) {
-        disposed = value;
-      },
-      get ended() {
-        return ended;
-      },
-      get navigation() {
-        return navigation;
-      },
-      get LIVE() {
-        return LIVE;
-      },
-      get visible() {
-        return visible;
-      },
-      get viewerEl() {
-        return viewerEl;
-      },
-      set viewerEl(value) {
-        viewerEl = value;
-      },
-      get accountChrome() {
-        return accountChrome;
-      },
-      get capture() {
-        return capture;
-      },
-      get render() {
-        return render2;
-      },
-      get restore() {
-        return restore;
-      },
-      get SIDEBAR_ONLY() {
-        return SIDEBAR_ONLY;
-      },
-      get SESS() {
-        return SESS;
-      },
-      get MACHINE() {
-        return MACHINE;
-      },
-      get HARNESS() {
-        return HARNESS;
-      },
-      get slot() {
-        return slot;
-      },
-      get currentScroll() {
-        return currentScroll;
-      },
-      get skipPop() {
-        return skipPop;
-      },
-      set skipPop(value) {
-        skipPop = value;
-      },
-      get refresh() {
-        return refresh;
-      },
-      get $() {
-        return $;
-      },
-      get panel() {
-        return panel;
-      },
-      get asMoney() {
-        return asMoney;
-      },
-      get TURNS() {
-        return TURNS;
-      },
-      get pendingSessionOpen() {
-        return pendingSessionOpen;
-      },
-      set pendingSessionOpen(value) {
-        pendingSessionOpen = value;
-      },
-      get afterPop() {
-        return afterPop;
-      },
-      set afterPop(value) {
-        afterPop = value;
-      },
-      get goTrace() {
-        return goTrace;
-      },
-      get goSession() {
-        return goSession;
-      },
-      get HARNESS_SHORT() {
-        return HARNESS_SHORT;
-      },
-      get harnessSnapshot() {
-        return harnessSnapshot;
-      },
-      get urlOf() {
-        return urlOf;
-      },
-      get COST_TIP() {
-        return COST_TIP;
-      },
-      get clock() {
-        return clock2;
-      },
-      get analyticsMeasure() {
-        return analyticsMeasure;
-      },
-      set analyticsMeasure(value) {
-        analyticsMeasure = value;
-      },
-      get observeTitle() {
-        return observeTitle;
-      },
-      get restoreScroll() {
-        return restoreScroll;
-      },
-      get query() {
-        return query;
-      },
-      set query(value) {
-        query = value;
-      },
-      get groupBy() {
-        return groupBy;
-      },
-      set groupBy(value) {
-        groupBy = value;
-      },
-      get go() {
-        return go;
-      }
-    });
-    const laneOf = (sid) => {
-      const seen = /* @__PURE__ */ new Set();
-      while (parentOf(sid) && !seen.has(sid)) {
-        seen.add(sid);
-        sid = parentOf(sid);
-      }
-      return sid;
-    };
-    function childRuns(sid) {
-      const kids = Object.values(SESS).filter((x) => x.id !== sid && laneOf(x.id) === sid && (showApprovalReviews || !isApprovalReview(x))), sub = kids.filter((x) => x.kind === "Subagent").length, cdx = kids.filter((x) => x.kind === "Codex run").length, other = kids.length - sub - cdx;
-      return [sub ? sub + (sub === 1 ? " subagent" : " subagents") : null, cdx ? cdx + (cdx === 1 ? " Codex run" : " Codex runs") : null, other ? other + (other === 1 ? " other run" : " other runs") : null].filter(Boolean).join(" \xB7 ");
-    }
-    function renderSessions(page, focusSearch = false) {
-      const all = Object.values(SESS).filter((s) => (showApprovalReviews || !isApprovalReview(s)) && matchesSessionFacets(s));
-      const lanes = all.filter((s) => sessMatch(s, query)), order = orderScope("page", pageSig(), navigation.route, pageState());
-      let groups;
-      if (groupBy === "recent") groups = [["", orderList(order, "recent", lanes, byLast), lanes.length]];
-      else {
-        const keysOf = { machine: (s) => MACHINE[s.machine], project: (s) => s.repo ?? "No repo (roles)", harness: (s) => HARNESS[s.harness] };
-        const key = keysOf[groupBy] ?? ((s) => s.name);
-        const keys = [...new Set(lanes.map(key))].sort((a, b) => Number(a.startsWith("No repo")) - Number(b.startsWith("No repo")) || a.localeCompare(b));
-        groups = keys.map((k) => {
-          const rows2 = lanes.filter((s) => key(s) === k);
-          return [k, orderList(order, "g:" + k, rows2, byLast), rows2.length];
+          if (n.querySelector(ANCHORS)) return false;
+          const b = n.getBoundingClientRect();
+          if (!b.height || b.bottom <= line) return false;
+          st.anchor = { id, off: b.top - line };
+          return true;
         });
       }
-      const rows = groups.filter(([, items, total]) => items.length || !total).map(([title, items, total]) => ({
-        title,
-        total,
-        harness: groupBy === "harness" ? harnessSnapshot(Object.keys(HARNESS).find((k) => HARNESS[k] === title) ?? "") : void 0,
-        rows: items.map((s) => {
-          const fields = [{ className: "row-duration", text: dur2(s.start, s.state === "work" || s.state === "wait" ? null : s.last), priority: 1, tip: "Duration", icon: I.duration }];
-          if (Object.keys(MACHINE).length > 1) fields.push({ className: "row-machine host", text: shortHost(s), priority: 2, tip: "Machine: " + hostOf(s), icon: I.machine });
-          if (s.repo) fields.push({ className: "repo-short", text: s.repo, priority: 3, tip: "Repo: " + s.repo, icon: I.repo });
-          const counts = childRuns(s.id);
-          if (counts) fields.push({ className: "row-counts", text: counts.replace(/Codex runs/g, "runs"), priority: 4 });
-          return {
-            id: s.id,
-            name: s.name,
-            state: s.state,
-            stateLabel: STATE[s.state] ?? s.state,
-            age: ago2(s.last),
-            harness: harnessSnapshot(s.harness),
-            model: shortModel(s.model ?? s.modelId),
-            modelTip: "Model: " + modelIdOf(s),
-            delegation: parentOf(s.id) ? I.stack : void 0,
-            fields
-          };
-        })
-      }));
-      renderSessionsScreen(page, {
-        total: all.length,
-        working: all.filter((s) => s.state === "work").length,
-        waiting: all.filter((s) => s.state === "wait").length,
-        query,
-        groupBy,
-        reviews: showApprovalReviews,
-        showReviews: Object.values(SESS).some(isApprovalReview) || showApprovalReviews,
-        groups: rows,
-        matches: lanes.length
-      }, {
-        session: goSession,
-        committed: observeTitle,
-        facets: () => renderFacetFilters(page, () => render2()),
-        search(value) {
-          query = value.trim();
-          const address = new URL(location.href);
-          if (query) address.searchParams.set("q", query);
-          else address.searchParams.delete("q");
-          history.replaceState(history.state, "", address);
-          renderSessions(page);
-          renderLanes();
-        },
-        group(value) {
-          groupBy = value;
-          renderSessions(page);
-          renderLanes();
-        },
-        reviews() {
-          showApprovalReviews = !showApprovalReviews;
-          ORD.delete("page");
-          ORD.delete("side");
-          render2();
-        }
-      }, focusSearch);
-      renderLanes();
-    }
-    const sidebar = $("#sidebar");
-    function openDrawer() {
-      shellChrome?.openDrawer();
-    }
-    function closeDrawer(quiet = void 0) {
-      shellChrome?.closeDrawer(quiet);
-    }
-    if (SIDEBAR_ONLY) scope.listen(window, "semon:drawer-open", () => orderApply("side"));
-    if (!SIDEBAR_ONLY) scope.listen(document, "keydown", (e) => {
-      if (e.key === "Escape" && accountSheet) accountChrome.escape();
-      else if (e.key === "Escape" && !viewerEl) {
-        closeDrawer();
-        closeAccountMenu();
-        $(".session-menu")?.remove();
-        $("#more-btn")?.setAttribute("aria-expanded", "false");
+      for (const n of host2.page().querySelectorAll("[data-e]")) {
+        if (n.classList.contains("tgroup")) st.groups.add(stateKey(n));
+        if (opener(n)?.getAttribute("aria-expanded") === "true")
+          for (const step of n.querySelectorAll(".step[data-e]"))
+            st.groupMembers.add(stateKey(step));
+        if (opener(n)?.getAttribute("aria-expanded") === "true" || n.classList.contains("event") && n.querySelector(":scope > .ev-text.open"))
+          st.open.add(stateKey(n));
       }
-      if (e.key === "/" && !/INPUT|TEXTAREA/.test(document.activeElement?.tagName ?? "") && !(document.activeElement instanceof HTMLElement && document.activeElement.isContentEditable) && !viewerEl) {
-        e.preventDefault();
-        if (navigation.route.v === "session") {
-          findOpen = true;
-          render2();
-          $("#find")?.focus();
-        } else if (navigation.route.v === "sessions") {
-          $("#sq")?.focus();
-        } else {
-          const r = { v: "sessions", q: query };
-          focusSessionsSearchOnRender = r;
-          go(r);
-        }
-      }
-    });
-    scope.listen(phone, "change", () => {
-      closeDrawer(true);
-      syncLayoutPrefs();
-      recentNavigation.expandedAll = null;
-      renderLanes();
-      if (!phone.matches && viewerEl?.classList.contains("kids-sheet")) viewerEl.close();
-      if (navigation.route.v === "session" || navigation.route.v === "analytics") {
-        const top = currentScroll();
-        render2();
-        restoreScroll(top);
-      } else renderLanes();
-      const l2 = $("#topbar .meta-line");
-      if (l2 && navigation.route.v === "session") measureViewerBar($("#topbar"));
-      syncJump();
-    });
-    const liveController = createLiveController({
-      async poll() {
-        const response = await api("/api/model?delta=1&since=" + enc(LIVE.late ? "" : LIVE.version ?? ""), void 0, true);
-        if (!response) return;
-        let model2;
+      for (const n of host2.page().querySelectorAll(".hop"))
+        if (n.querySelector(".brief.open")) st.open.add("hop:" + identOf(n));
+      const a = document.activeElement;
+      if (a instanceof HTMLElement && a !== document.body && !a.closest("dialog")) {
+        const owner = a.id ? null : a.closest(HOSTS), sel = owner && owner !== a ? a.tagName.toLowerCase() + [...a.classList].map((c) => "." + CSS.escape(c)).join("") : null;
+        st.focus = {
+          id: a.id || null,
+          host: owner ? identOf(owner) : null,
+          sel,
+          i: sel && owner ? [...owner.querySelectorAll(sel)].indexOf(a) : 0,
+          range: null,
+          label: a.getAttribute("aria-label"),
+          at: [...host2.page().querySelectorAll(FOCUSABLE)].indexOf(a),
+          of: host2.page().querySelectorAll(FOCUSABLE).length,
+          foot: a.closest("#page > .session-foot") ? a.closest("[data-foot]")?.dataset.foot ?? null : null
+        };
         try {
-          model2 = applyModelDelta(response);
+          if ((a instanceof HTMLInputElement || a instanceof HTMLTextAreaElement) && typeof a.selectionStart === "number" && a.selectionEnd !== null)
+            st.focus.range = [a.selectionStart, a.selectionEnd];
         } catch {
-          await api("/api/model?delta=1").then(update);
-          return;
         }
-        await update(model2);
-      },
-      failed(error) {
-        return !!viewerHost?.modelFailed?.(error instanceof ApiError ? error.status : 0);
-      },
-      ended
-    });
-    const LIVE = liveController.state;
-    const remember = (_m) => {
-      LIVE.turns = new Map(Object.values(TURNS).flat().map((x) => [x.id, turnKey(x)]));
-    };
-    const turnKey = (x) => [x.start?.id, x.end?.st, x.end?.why, x.end?.h, x.sent.map((h2) => h2.id).join(","), x.last ? 1 : 0].join("|");
-    const handKey = (h2) => [h2.status, h2.to, h2.done, h2.result?.length, h2.kind === "toyou" ? h2.answer?.length : void 0, h2.kind === "toyou" ? h2.answers?.length : void 0, h2.declined ? 1 : 0].join("|");
-    const visible = () => document.visibilityState === "visible";
-    const schedule = (ms) => liveController.schedule(ms);
-    function ended(status2) {
-      if (disposed) return;
-      liveController.stop();
-      if ($(".livenote, .livenote-side")) return;
-      if (!window.dispatchEvent(new CustomEvent("semon:ended", { cancelable: true, detail: { status: status2 } }))) return;
-      const n = createStatusNote(SIDEBAR_ONLY ? "Sessions stopped updating: reload the page" : "Session ended: reload with the printed URL", SIDEBAR_ONLY ? "ghead livenote-side" : "livenote");
-      if (SIDEBAR_ONLY) $("#lanes").after(n);
-      else document.body.append(n);
+      }
+      return st;
     }
-    const soft = (p) => p.catch((e) => {
-      if (e instanceof ApiError && (e.status === 403 || e.status === 0)) throw e;
-    });
-    const viewed = () => {
-      const v = /* @__PURE__ */ new Set();
-      if (navigation.route.v === "session") v.add("id" in navigation.route ? navigation.route.id : "");
-      return v;
+    function restore(st, pin = false) {
+      const all = (sel) => [...host2.page().querySelectorAll(sel)], r0 = host2.rendered(), revision = host2.revision();
+      measureSessionScreen(host2.page());
+      measureTraceScreen(host2.page());
+      for (const n of all(".tgroup[data-e]")) {
+        const want = st.groups.has(stateKey(n)) ? st.open.has(stateKey(n)) : [...n.querySelectorAll(".step[data-e]")].some(
+          (x) => st.open.has(stateKey(x)) || st.groupMembers.has(stateKey(x))
+        );
+        if (want && opener(n).getAttribute("aria-expanded") === "false") opener(n).click();
+      }
+      for (const n of all(".step[data-e]"))
+        if (st.open.has(stateKey(n)) && opener(n)?.getAttribute("aria-expanded") === "false")
+          opener(n).click();
+      for (const n of all(".event[data-e]"))
+        if (st.open.has(stateKey(n)) && !n.querySelector(":scope > .ev-text.open")) {
+          const m = n.querySelector(":scope > .ev-more");
+          m.click();
+        }
+      for (const n of all(".hop"))
+        if (st.open.has("hop:" + identOf(n)) && !n.querySelector(".brief.open")) {
+          const m = n.querySelector(".body > .more");
+          m.click();
+        }
+      if (st.drawer) host2.restoreDrawer();
+      if (st.focus) {
+        let n = st.focus.id ? document.getElementById(st.focus.id) : null;
+        if (!n && st.focus.host) {
+          const owner = [...document.querySelectorAll(HOSTS)].find(
+            (x) => identOf(x) === st.focus.host
+          );
+          n = owner && st.focus.sel ? owner.querySelectorAll(st.focus.sel)[st.focus.i] : owner ?? null;
+        }
+        if (!n && st.focus.label)
+          n = [
+            ...document.querySelectorAll("#page [aria-label], #topbar [aria-label]")
+          ].find((x) => x.getAttribute("aria-label") === st.focus.label) ?? null;
+        if (!n && st.focus.foot) {
+          const f = host2.page().querySelector(":scope > .session-foot");
+          n = f?.querySelector('[data-foot="' + st.focus.foot + '"]') ?? f?.querySelector('[data-foot="time"]') ?? null;
+        }
+        if (!n && !st.focus.host && st.focus.at >= 0 && host2.page().querySelectorAll(FOCUSABLE).length === st.focus.of)
+          n = host2.page().querySelectorAll(FOCUSABLE)[st.focus.at];
+        if (n && n !== document.activeElement) {
+          n.focus({ preventScroll: true });
+          if (st.focus.range)
+            try {
+              if (n instanceof HTMLInputElement || n instanceof HTMLTextAreaElement)
+                n.setSelectionRange(...st.focus.range);
+            } catch {
+            }
+        }
+      }
+      const pagingTurns = st.paging ? all(".turn") : [];
+      if (st.paging) {
+        for (const turn of pagingTurns) revealMeasuredTurn(turn, true);
+        const heights = pagingTurns.map((turn) => turn.getBoundingClientRect().height);
+        pagingTurns.forEach((turn, i) => {
+          setGeometry(turn, "intrinsicHeight", Math.ceil(heights[i]));
+        });
+      }
+      const place = (first) => {
+        const sc = scroller();
+        host2.programmatic(() => {
+          if (pin) sc.scrollTop = sc.scrollHeight;
+          else {
+            const paging = st.paging;
+            let found = null;
+            if (paging?.anchor)
+              found = all(".turns [data-e][data-entry-key]:not(.tgroup)").find(
+                (n) => n.dataset.entryKey === paging.anchor.key
+              );
+            else if (!paging && st.anchor) found = anchors((n, id) => id === st.anchor.id);
+            if (found) {
+              const line = paging ? host2.phone() ? 0 : sc.getBoundingClientRect().top : host2.edge();
+              const d = found.getBoundingClientRect().top - line - (paging ? paging.anchor.off : st.anchor.off), want = sc.scrollTop + d, room = sc.scrollHeight - sc.clientHeight;
+              if (want > room + 0.5) {
+                const page = host2.page();
+                setGeometry(
+                  page,
+                  "paddingBottom",
+                  parseFloat(getComputedStyle(page).paddingBottom) + Math.ceil(want - room)
+                );
+              }
+              if (d) sc.scrollTop = want;
+              anchor = paging || !st.anchor ? null : { ...st.anchor, route: r0, top: sc.scrollTop };
+            } else if (first)
+              sc.scrollTop = st.top + (paging?.before ? sc.scrollHeight - paging.height : 0);
+          }
+        }, false);
+        if (pin) anchor = null;
+        host2.sync();
+      };
+      place(true);
+      const placedTop = scroller().scrollTop;
+      frame(
+        () => frame(() => {
+          for (const turn of pagingTurns) revealMeasuredTurn(turn, false);
+          if (host2.rendered() === r0 && !host2.sheet() && host2.revision() === revision && Math.abs(scroller().scrollTop - placedTop) < 1)
+            place(false);
+        })
+      );
+    }
+    return {
+      capture,
+      restore,
+      opener,
+      stateKey,
+      identOf,
+      get anchor() {
+        return anchor;
+      },
+      set anchor(value) {
+        anchor = value;
+      },
+      destroy() {
+        if (disposed) return;
+        disposed = true;
+        for (const id of frames) cancelAnimationFrame(id);
+        frames.clear();
+        anchor = null;
+      }
     };
-    const cardKeys = () => new Map(H.filter((h2) => h2.kind === "spawn" && SESS[h2.to]).map((h2) => {
-      const c = SESS[h2.to];
-      return [h2.id, [c.name, c.state, c.kind, c.model, countOf(c, "calls"), c.activity?.join("|"), h2.status, h2.result].join("")];
-    }));
-    const { reload, tail, applyModelDelta, update } = createLiveUpdates({
-      get modelStore() {
-        return modelStore;
-      },
-      get H() {
-        return H;
-      },
-      get handKey() {
-        return handKey;
-      },
-      get LIVE() {
-        return LIVE;
-      },
-      get cardKeys() {
-        return cardKeys;
-      },
-      get SESS() {
-        return SESS;
-      },
-      get TXCACHE() {
-        return TXCACHE;
-      },
-      get originHandoff() {
-        return originHandoff;
-      },
-      get navigation() {
-        return navigation;
-      },
-      get adopt() {
-        return adopt;
-      },
-      get remember() {
-        return remember;
-      },
-      get STALE_BRIEFS() {
-        return STALE_BRIEFS;
-      },
-      get TX() {
-        return TX;
-      },
-      get viewed() {
-        return viewed;
-      },
-      get spread() {
-        return spread;
-      },
-      get dropTx() {
-        return dropTx;
-      },
-      get soft() {
-        return soft;
-      },
-      get TXM() {
-        return TXM;
-      },
-      get TOK() {
-        return TOK;
-      },
-      set TOK(value) {
-        TOK = value;
-      },
-      get shrank() {
-        return shrank;
-      },
-      get refresh() {
-        return refresh;
-      },
-      get refreshAnalytics() {
-        return refreshAnalytics;
-      },
-      get errorsLive() {
-        return errorsLive;
-      },
-      get TURNS() {
-        return TURNS;
-      },
-      get isGap() {
-        return isGap;
-      },
-      get HOLDS() {
-        return HOLDS;
-      },
-      get api() {
-        return api;
-      },
-      get enc() {
-        return enc;
-      },
-      get txEntry() {
-        return txEntry;
-      },
-      get fetchTx() {
-        return fetchTx;
-      }
-    });
-    function refresh(dirty = null) {
-      if (disposed) return;
-      if (accountChrome.open && !$(".account-popover")?.isConnected) closeAccountMenu();
-      if (viewerEl || accountChrome.open) {
-        LIVE.pending = true;
+  }
+
+  // src/app/viewport.ts
+  function createViewport(host2) {
+    const scroller = () => host2.phone.matches ? document.documentElement : host2.$("#main");
+    const edge = () => host2.$("#topbar").getBoundingClientRect().bottom;
+    let openingEndUntil = 0;
+    let openingEndTimer;
+    let openingEndObserver = null;
+    function stopOpeningEndPin() {
+      const wasPinned = !!openingEndUntil;
+      openingEndUntil = 0;
+      host2.scope.clearTimeout(openingEndTimer);
+      openingEndTimer = void 0;
+      openingEndObserver?.disconnect();
+      openingEndObserver = null;
+      if (wasPinned) host2.pagingOwner.queuePagerObservers();
+    }
+    function pinOpeningEnd() {
+      if (host2.navigation.route.v !== "session" || performance.now() >= openingEndUntil) {
+        stopOpeningEndPin();
         return;
       }
-      if (SIDEBAR_ONLY) {
-        LIVE.pending = false;
-        render2();
-        return;
-      }
-      LIVE.pending = false;
-      const r = navigation.route;
-      if (navigation.rendered !== r || r.v === "session" && !SESS[r.id] || r.v === "trace" && !SESS[r.sid] || r.v === "machine" && !MACHINE[r.id]) return;
-      const st = capture();
-      setGeometry($("#page"), "paddingBottom", null);
-      if (r.v !== "session") {
-        render2();
-        restore(st);
-        return;
-      }
-      const n = patchSession(dirty);
-      restore(st, st.bottom);
-      if (!st.bottom && n) LIVE.fresh += n;
+      const sc = scroller();
+      host2.pagingOwner.scrollProgrammatically(() => {
+        sc.scrollTop = sc.scrollHeight;
+      });
+      scrollController.anchor = null;
       syncJump();
+      host2.historyScrollOwner.saveHistoryScroll();
     }
-    const viewport = createViewport({
-      get phone() {
-        return phone;
-      },
-      get $() {
-        return $;
-      },
-      get queuePagerObservers() {
-        return queuePagerObservers;
-      },
-      get navigation() {
-        return navigation;
-      },
-      get scrollProgrammatically() {
-        return scrollProgrammatically;
-      },
-      get saveHistoryScroll() {
-        return saveHistoryScroll;
-      },
-      get resetPagerInput() {
-        return resetPagerInput;
-      },
-      get disconnectPagerObservers() {
-        return disconnectPagerObservers;
-      },
-      get scope() {
-        return scope;
-      },
-      get viewerEl() {
-        return viewerEl;
-      },
-      set viewerEl(value) {
-        viewerEl = value;
-      },
-      get scrollRevision() {
-        return scrollRevision;
-      },
-      set scrollRevision(value) {
-        scrollRevision = value;
-      },
-      get syncBarLine() {
-        return syncBarLine;
-      },
-      get shellChrome() {
-        return shellChrome;
-      },
-      get holdProgrammaticScroll() {
-        return holdProgrammaticScroll;
-      },
-      get tick() {
-        return tick;
-      },
-      get SESS() {
-        return SESS;
-      },
-      get TURN() {
-        return TURN;
-      },
-      get renderSession() {
-        return renderSession;
-      },
-      get drawSessionBar() {
-        return drawSessionBar;
-      },
-      get paintPager() {
-        return paintPager;
-      },
-      get renderNav() {
-        return renderNav;
-      },
-      get renderLanes() {
-        return renderLanes;
-      },
-      get ticker() {
-        return ticker;
-      },
-      get LIVE() {
-        return LIVE;
-      },
-      get TXM() {
-        return TXM;
-      },
-      get fetchTx() {
-        return fetchTx;
-      },
-      get goSession() {
-        return goSession;
-      },
-      get SIDEBAR_ONLY() {
-        return SIDEBAR_ONLY;
-      },
-      get readerScrollInput() {
-        return readerScrollInput;
-      },
-      get programmaticScrollPending() {
-        return programmaticScrollPending;
-      },
-      set programmaticScrollPending(value) {
-        programmaticScrollPending = value;
+    function startOpeningEndPin() {
+      host2.pagingOwner.resetPagerInput();
+      stopOpeningEndPin();
+      if (host2.navigation.route.v !== "session" || location.hash) return;
+      openingEndUntil = performance.now() + 2e3;
+      host2.pagingOwner.disconnectPagerObservers();
+      const turns = host2.$("#page section[aria-label='Transcript'] .turns");
+      if (turns) {
+        openingEndObserver = new ResizeObserver(pinOpeningEnd);
+        openingEndObserver.observe(turns);
       }
+      pinOpeningEnd();
+      openingEndTimer = host2.scope.timeout(stopOpeningEndPin, 2e3);
+    }
+    const scrollController = createScrollTransactions({
+      page: () => host2.$("#page"),
+      main: () => host2.$("#main"),
+      phone: () => host2.phone.matches,
+      edge,
+      rendered: () => host2.navigation.rendered,
+      sheet: () => !!host2.toolViewsOwner.viewerEl,
+      revision: () => host2.pagingOwner.scrollRevision,
+      programmatic: (...args) => host2.pagingOwner.scrollProgrammatically(...args),
+      sync: (...args) => host2.sessionChrome.syncBarLine(...args),
+      restoreDrawer: () => host2.accountControlsOwner.shellChrome?.restoreDrawer()
     });
-    const { scrollController, stopOpeningEndPin, scroller, capture, restore, syncJump, startOpeningEndPin, clearNewEntries, edge, opener, jumpToLatest, patchSession } = viewport;
-    const running = (ms) => {
-      const x = Math.max(0, Math.floor(ms / 1e3));
-      return x < 60 ? x + "s" : Math.floor(x / 60) + "m " + x % 60 + "s";
+    const { capture, restore, opener, stateKey, identOf } = scrollController;
+    function patchSession(dirty) {
+      host2.pagingOwner.resetPagerInput();
+      host2.pagingOwner.holdProgrammaticScroll();
+      host2.transportOwner.tick();
+      const s = host2.modelStore.sessions["id" in host2.navigation.route ? host2.navigation.route.id : ""], box = host2.$("#page .turns");
+      const keys = () => new Set(
+        [
+          ...host2.$("#page").querySelectorAll(
+            ".turns :is(.msg, .bubble, .step, .event, .child-card, .thought, .think-pending)[data-e]"
+          )
+        ].map((n2) => n2.dataset.e)
+      );
+      const before = keys();
+      const whole = !dirty || box.querySelector(":scope > p.empty") || [...box.querySelectorAll(":scope > .turn")].some(
+        (b) => !host2.modelStore.turn.has(b.dataset.turn ?? "")
+      );
+      host2.screenViews.renderSession(
+        host2.$("#page"),
+        "id" in host2.navigation.route ? host2.navigation.route.id : "",
+        whole ? {} : { only: dirty }
+      );
+      host2.sessionChrome.drawSessionBar();
+      for (const pager of box.querySelectorAll("[data-pager-where]"))
+        host2.pagingOwner.paintPager(pager);
+      host2.navigationViewOwner.renderNav();
+      host2.recentNavigation.renderLanes();
+      host2.tickerOwner.ticker();
+      let n = 0;
+      for (const k of keys()) if (!before.has(k)) n++;
+      host2.pagingOwner.queuePagerObservers();
+      return n;
+    }
+    function scrollMetrics() {
+      if (host2.phone.matches)
+        return {
+          top: window.scrollY,
+          height: document.documentElement.scrollHeight,
+          viewport: window.innerHeight,
+          gap: Math.max(
+            0,
+            document.documentElement.scrollHeight - window.innerHeight - window.scrollY
+          )
+        };
+      const m = host2.$("#main");
+      return {
+        top: m.scrollTop,
+        height: m.scrollHeight,
+        viewport: m.clientHeight,
+        gap: Math.max(0, m.scrollHeight - m.clientHeight - m.scrollTop)
+      };
+    }
+    function scrollToEnd(behavior = "smooth") {
+      host2.pagingOwner.scrollProgrammatically(() => {
+        if (host2.phone.matches)
+          window.scrollTo({ top: document.documentElement.scrollHeight, behavior });
+        else {
+          const m = host2.$("#main");
+          m.scrollTo({ top: m.scrollHeight, behavior });
+        }
+      });
+    }
+    let jumpBusy = false;
+    function syncJump() {
+      if (host2.navigation.route.v !== "session") {
+        host2.liveModelOwner.LIVE.fresh = 0;
+        return;
+      }
+      const { gap } = scrollMetrics(), newer = host2.transcripts.meta["id" in host2.navigation.route ? host2.navigation.route.id : ""]?.newer ?? 0;
+      if (gap <= 80) host2.liveModelOwner.LIVE.fresh = 0;
+      updateSessionJump(
+        host2.$("#page"),
+        gap > 80 || !!newer,
+        host2.liveModelOwner.LIVE.fresh + newer,
+        jumpBusy
+      );
+    }
+    function clearNewEntries() {
+      host2.liveModelOwner.LIVE.fresh = 0;
+      updateSessionJump(host2.$("#page"), false, 0, jumpBusy);
+    }
+    function jumpToLatest() {
+      const sid = "id" in host2.navigation.route ? host2.navigation.route.id : "", r = host2.navigation.route, m = host2.transcripts.meta[sid];
+      if (m && m.to < m.total) {
+        jumpBusy = true;
+        syncJump();
+        host2.transportOwner.fetchTx(sid, "").then(() => {
+          if (host2.navigation.route === r) host2.destination.goSession(sid);
+        }).catch(() => {
+        }).finally(() => {
+          jumpBusy = false;
+          syncJump();
+        });
+      } else scrollToEnd("smooth");
+    }
+    if (!host2.sidebarOnly) {
+      host2.scope.listen(window, "scroll", syncJump, { passive: true });
+      host2.scope.listen(host2.$("#main"), "scroll", syncJump, { passive: true });
+    }
+    const cancelOpeningEndPin = () => {
+      if (openingEndUntil) stopOpeningEndPin();
     };
-    function ticker() {
-      if (!visible() || Date.now() === fetchedAt) return;
-      tick();
-      if (navigation.route.v === "session" && navigation.rendered === navigation.route) updateSessionClock($("#page"), NOW, Object.fromEntries(Object.values(SESS).filter((s) => s.activity?.[3] != null).map((s) => [s.id, s.activity[3]])));
-      else if (navigation.route.v === "home" && navigation.rendered === navigation.route) renderHome($("#page"));
+    if (!host2.sidebarOnly) {
+      host2.scope.listen(window, "wheel", cancelOpeningEndPin, { passive: true });
+      host2.scope.listen(window, "touchmove", cancelOpeningEndPin, { passive: true });
+      host2.scope.listen(window, "pointerdown", cancelOpeningEndPin, { passive: true });
     }
-    if (SIDEBAR_ONLY) {
-      const nav = app.dataset.viewerNav;
-      navigation.route = navigation.historyRoute({ v: nav }, { v: "home" });
+    const transcriptInput = (e) => e.target instanceof Element && !e.target.closest?.("#sidebar, dialog, input, textarea, select, [contenteditable='true']") && (host2.phone.matches || host2.$("#main").contains(e.target));
+    if (!host2.sidebarOnly) {
+      const input = (e) => {
+        if (transcriptInput(e)) host2.pagingOwner.readerScrollInput();
+      };
+      host2.scope.listen(window, "wheel", input, { passive: true });
+      host2.scope.listen(window, "touchmove", input, { passive: true });
+      const scroll = () => {
+        if (host2.pagingOwner.programmaticScrollPending) host2.pagingOwner.holdProgrammaticScroll();
+        else if (!openingEndUntil) host2.pagingOwner.readerScrollInput();
+      };
+      host2.scope.listen(
+        window,
+        "scroll",
+        () => {
+          if (host2.phone.matches) scroll();
+        },
+        { passive: true }
+      );
+      host2.scope.listen(
+        host2.$("#main"),
+        "scroll",
+        () => {
+          if (!host2.phone.matches) scroll();
+        },
+        { passive: true }
+      );
     }
-    if (viewerHost) {
-      ACCOUNT = accountOf(viewerHost.account);
-      if (NATIVE_PAGE) navigation.route = navigation.historyRoute({ v: NATIVE_PAGE.nav }, { v: "home" });
-      else if (navigation.content) navigation.route = { v: "machines" };
-      if (NATIVE_PAGE || navigation.content) render2();
+    if (!host2.sidebarOnly)
+      host2.scope.listen(document, "keydown", (e) => {
+        if (!e.defaultPrevented && (transcriptInput(e) || e.target === document.body || e.target === document.documentElement) && ["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", " "].includes(e.key))
+          host2.pagingOwner.readerScrollInput();
+      });
+    return {
+      scrollController,
+      stopOpeningEndPin,
+      get openingEndUntil() {
+        return openingEndUntil;
+      },
+      scroller,
+      capture,
+      restore,
+      syncJump,
+      startOpeningEndPin,
+      clearNewEntries,
+      edge,
+      opener,
+      jumpToLatest,
+      patchSession
+    };
+  }
+
+  // src/app/composition.ts
+  var ViewerComposition = class {
+    scope;
+    dialogs;
+    disposed;
+    application;
+    now;
+    updates = new ViewUpdates();
+    modelStore;
+    admin;
+    account;
+    viewerHost;
+    nativePage;
+    machinesPath;
+    sidebarOnly;
+    transcripts;
+    seenResultsOwner;
+    domain;
+    clock;
+    ago;
+    dur;
+    $;
+    spaced;
+    darkTheme;
+    facetLine;
+    seenPersistenceOwner;
+    sentencesOwner;
+    isGap;
+    transportOwner;
+    cacheTx;
+    adoptCached;
+    transcriptRevalidationOwner;
+    pagingOwner;
+    toolLoaderOwner;
+    bootstrapOwner;
+    phone;
+    navigation;
+    layoutOwner;
+    groupBy;
+    query;
+    focusSessionsSearchOnRender;
+    analyticsRange;
+    analyticsMeasure;
+    showApprovalReviews;
+    sessionFilters;
+    pendingSessionOpen;
+    accountSheet;
+    afterPop;
+    allVisibility;
+    show;
+    find;
+    findOpen;
+    historyScrollOwner;
+    destination;
+    accountControlsOwner;
+    orderingControlsOwner;
+    navigationViewOwner;
+    recentNavigation;
+    sessionChrome;
+    screenViews;
+    transcriptView;
+    toolViewsOwner;
+    pageRoot = createPageRoot();
+    routeControls;
+    renderTransaction;
+    documentRendererOwner;
+    analytics;
+    sessionListOwner;
+    documentEventsOwner;
+    liveModelOwner;
+    liveUpdates;
+    applicationRefreshOwner;
+    viewport;
+    tickerOwner;
+    constructor(host2, onDestroyed) {
+      const context = this;
+      this.scope = new EffectScope();
+      this.dialogs = /* @__PURE__ */ new Map();
+      this.disposed = false;
+      this.application = {
+        destroy() {
+          if (context.disposed) return;
+          context.disposed = true;
+          context.updates.destroy();
+          context.scope.destroy();
+          context.liveModelOwner.liveController.destroy();
+          context.navigation.destroy();
+          context.transcripts.destroy();
+          context.viewport.stopOpeningEndPin();
+          context.pagingOwner.pagerController.disconnect();
+          context.sessionChrome.errorNavigation.destroy();
+          context.viewport.scrollController.destroy();
+          for (const dialog of context.dialogs.values()) dialog.destroy();
+          context.dialogs.clear();
+          context.routeControls.destroy();
+          if (!context.sidebarOnly) context.pageRoot.destroy(context.$("#page"));
+          context.recentNavigation.recentRenderer.destroy();
+          context.sessionChrome.viewerBar.destroy();
+          context.accountControlsOwner.shellChrome?.destroy();
+          context.accountControlsOwner.accountChrome.destroy();
+          releaseGeometry(context.layoutOwner.app);
+          releaseGeometry(document.documentElement, ["barHeight"]);
+          document.querySelectorAll(".livenote, .livenote-side").forEach((node) => node.remove());
+          document.documentElement.classList.remove("viewer-open", "panel-open");
+          onDestroyed(context.application);
+        }
+      };
+      this.now = Date.now();
+      this.modelStore = new ViewerModelStore(this.updates);
+      this.admin = null;
+      this.account = null;
+      this.viewerHost = host2;
+      this.nativePage = context.viewerHost?.nativePage;
+      this.machinesPath = context.viewerHost?.machinesPath ?? null;
+      this.sidebarOnly = document.querySelector(".app")?.dataset.viewer === "sidebar";
+      this.transcripts = new TranscriptStore(
+        {
+          request: (path, signal) => context.transportOwner.api(path, signal),
+          turns: (sid) => context.modelStore.turns[sid] ?? [],
+          turn: (id) => context.modelStore.turn.get(id),
+          entry: (e) => context.transportOwner.txEntry(e),
+          cleared(sid) {
+            if (context.navigation.route.v === "session" && ("id" in context.navigation.route ? context.navigation.route.id : "") === sid)
+              context.pagingOwner.resetPagerInput();
+          }
+        },
+        this.updates
+      );
+      this.seenResultsOwner = createSeenResults({});
+      this.domain = createDomain(
+        {
+          sessions: context.modelStore.sessions,
+          machines: context.modelStore.machines,
+          handoffs: context.modelStore.handoffs,
+          turns: context.modelStore.turns,
+          turn: context.modelStore.turn,
+          starts: context.modelStore.starts,
+          holds: context.modelStore.holds,
+          handoff: context.modelStore.handoff,
+          transcriptMeta: context.transcripts.meta
+        },
+        () => context.now,
+        context.seenResultsOwner.SEEN_RESULTS
+      );
+      this.updates.subscribe(() => this.domain.invalidate());
+      this.clock = (t) => clock(t, context.now);
+      this.ago = (t) => ago(t, context.now);
+      this.dur = (a, b) => dur(a, b ?? void 0, context.now);
+      this.$ = (s, r = document) => r.querySelector(s);
+      this.spaced = (t) => String(t).replace(/ · /g, "\u2009 \xB7 \u2009").replace(/^· /, "\xB7\u2009 ");
+      this.darkTheme = () => {
+        const t = document.documentElement.getAttribute("data-theme");
+        return t === "dark" || t !== "light" && !!window.matchMedia?.("(prefers-color-scheme: dark)").matches;
+      };
+      this.facetLine = (s) => [
+        s.kind ?? HARNESS[s.harness],
+        context.modelStore.machines[s.machine],
+        context.domain.where(s)
+      ].join(" \xB7 ");
+      this.seenPersistenceOwner = createSeenPersistence(context);
+      this.sentencesOwner = createSentences(context);
+      this.isGap = (e) => e.k === "end" && /entries (not included|omitted)|^No activity/.test(e.text ?? "");
+      this.transportOwner = createTransport(context);
+      this.cacheTx = (sid, entries, meta) => context.transcripts.keep(sid, entries, meta, !!context.domain.originHandoff(sid));
+      this.adoptCached = (r) => context.transcripts.adoptCached(r.id, r.turn);
+      this.transcriptRevalidationOwner = createTranscriptRevalidation(context);
+      this.pagingOwner = createPaging(context);
+      this.toolLoaderOwner = createToolLoader(context);
+      this.bootstrapOwner = createBootstrap(context);
+      this.phone = window.matchMedia("(max-width: 760px)");
+      this.navigation = new NavigationController(
+        {
+          model: context.bootstrapOwner.routeModel,
+          loadMachines: host2 ? (signal) => host2.loadMachines(signal) : void 0
+        },
+        context.viewerHost?.initialMachines ?? null
+      );
+      this.routeControls = createRouteControls(this.navigation);
+      this.layoutOwner = createLayout(context);
+      this.groupBy = "recent";
+      this.query = "";
+      this.focusSessionsSearchOnRender = null;
+      this.analyticsRange = 7;
+      this.analyticsMeasure = "hours";
+      this.showApprovalReviews = false;
+      this.sessionFilters = { repo: "", machine: "", harness: "", model: "" };
+      this.pendingSessionOpen = null;
+      this.accountSheet = false;
+      this.afterPop = null;
+      if (!context.sidebarOnly)
+        try {
+          history.scrollRestoration = "manual";
+        } catch {
+        }
+      this.allVisibility = { messages: true, tools: true, thinking: true };
+      this.show = { ...context.allVisibility };
+      this.find = "";
+      this.findOpen = false;
+      this.historyScrollOwner = createHistoryScroll(context);
+      this.destination = createDestination(context);
+      this.accountControlsOwner = createAccountControls(context);
+      this.orderingControlsOwner = createOrderingControls(context);
+      this.navigationViewOwner = createNavigationView(context);
+      this.recentNavigation = createRecentNavigation(context);
+      this.sessionChrome = createSessionChrome(context);
+      this.screenViews = createScreenViews(context);
+      this.transcriptView = createTranscriptView(context);
+      this.toolViewsOwner = createToolViews(context);
+      this.renderTransaction = createRenderTransaction(context);
+      this.documentRendererOwner = createDocumentRenderer(context);
+      this.analytics = createAnalytics(context);
+      this.sessionListOwner = createSessionList(context);
+      this.documentEventsOwner = createDocumentEvents(context);
+      this.liveModelOwner = createLiveModel(context);
+      this.liveUpdates = createLiveUpdates(context);
+      this.applicationRefreshOwner = createApplicationRefresh(context);
+      this.viewport = createViewport(context);
+      this.tickerOwner = createTicker(context);
+      if (context.sidebarOnly) {
+        const nav = context.layoutOwner.app.dataset.viewerNav;
+        context.navigation.route = context.navigation.historyRoute({ v: nav }, { v: "home" });
+      }
+      if (context.viewerHost) {
+        this.account = context.transportOwner.accountOf(context.viewerHost.account);
+        if (context.nativePage)
+          context.navigation.route = context.navigation.historyRoute(
+            { v: context.nativePage.nav },
+            { v: "home" }
+          );
+        else if (context.navigation.content) context.navigation.route = { v: "machines" };
+        if (context.nativePage || context.navigation.content) context.documentRendererOwner.render();
+      }
+      context.bootstrapOwner.boot();
     }
-    boot();
-    return application;
+  };
+
+  // src/app/viewer.ts
+  var mounted = null;
+  function mountViewerApplication(host2 = getViewerHost()) {
+    mounted?.destroy();
+    const composition = new ViewerComposition(host2, (owner) => {
+      if (mounted === owner) mounted = null;
+    });
+    mounted = composition.application;
+    return composition.application;
   }
 
   // src/viewer.ts

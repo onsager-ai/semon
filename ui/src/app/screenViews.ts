@@ -1,218 +1,805 @@
-import { compactCount,machineShorts,preview } from "../domain/format";
-import { createTraceCalculations } from "../domain/trace";
-import type { Entry,Handoff,Session,TokenKind,Turn } from '../domain/types';
-import type { HarnessMark,InboxRow,LiveRow,MenuRun,SentencePart,SessionMenuSnapshot } from '../lib';
-import { renderHomeScreen,renderMachineScreen,renderMachinesScreen,renderSessionScreen,renderTraceScreen } from "../lib";
+import { I } from './registry';
+import { HARNESSES } from './registry';
+import { STATE } from './registry';
+import { HARNESS } from './registry';
+import type { ViewerModelStore } from '../state/model';
+import type { TranscriptStore } from '../state/transcript';
+import type { EffectScope } from '../app/effects';
+import type { NavigationController } from '../navigation/routes';
+import type { createDomain } from '../domain/calculations';
+import type { createSessionChrome } from './sessionChrome';
+import type { createDestination } from './destination';
+import type { createSeenPersistence } from './seenPersistence';
+import type { createDocumentRenderer } from './documentRenderer';
+import type { createOrderingControls } from './orderingControls';
+import type { createSentences } from './sentences';
+import type { createSeenResults } from './seenResults';
+import type { createTranscriptView } from './transcriptView';
+import type { createToolViews } from './toolViews';
+import type { createViewport } from './viewport';
+import type { createPaging } from './paging';
+import { compactCount, machineShorts, preview } from '../domain/format';
+import { createTraceCalculations } from '../domain/trace';
+import type { Entry, Handoff, Session, TokenKind, Turn } from '../domain/types';
+import type {
+  HarnessMark,
+  InboxRow,
+  LiveRow,
+  MenuRun,
+  SentencePart,
+  SessionMenuSnapshot,
+} from '../lib';
+import {
+  renderHomeScreen,
+  renderMachineScreen,
+  renderMachinesScreen,
+  renderSessionScreen,
+  renderTraceScreen,
+} from '../lib';
 import type { Hop } from '../lib/trace';
-type ToolEntry = Extract<Entry, {k: 'tool'}> & {full?: boolean; scriptLoaded?: boolean};
+type ToolEntry = Extract<Entry, { k: 'tool' }> & { full?: boolean; scriptLoaded?: boolean };
 interface ScreenViewsHost {
-  costForSession: (sid: string, includeRuns?: boolean) => Required<import("../domain/types").Cost>;
-  costMissing: (cost: import("../domain/types").Cost) => string[];
-  costText: (cost: import("../domain/types").Cost) => string;
-  costForSessions: (sessions: Iterable<import("../domain/types").Session>) => Required<import("../domain/types").Cost>;
-  HARNESS: { [k: string]: string; };
-  asMoney: (usd: number) => string;
-  sessionChildren: () => Map<string, import("../domain/types").Session[]>;
-  kindText: (s: import("../domain/types").Session) => string;
-  STATE: Record<string, string>;
-  MACHINE: Record<string, string>;
-  MACHINE_UP: Record<string, boolean>;
-  HARNESSES: Record<string, { name: string; short: string; icon: { light: string; dark: string; }; }>;
   darkTheme: () => boolean;
-  TURNS: Record<string, import("../domain/types").Turn[]>;
-  H: import("../domain/types").Handoff[];
   ago: (t: number) => string;
-  nameOf: (id: string) => string;
-  oneLine: (s: string) => string;
-  HOLDS: Map<string, import("../domain/types").Turn>;
-  SESS: Record<string, import("../domain/types").Session>;
-  I: Record<string, string>;
-  answersOf: (h: import("../domain/types").Handoff) => string[] | null;
-  traceRoot: (t: import("../domain/types").Turn) => import("../domain/types").Turn;
-  goSession: (id: string, turn?: string | undefined) => void;
-  observeTitle: () => void;
-  goTrace: (turn: string) => void;
-  inbox: () => import("../domain/types").Handoff[];
-  isResult: (h: import("../domain/types").Handoff) => boolean;
-  markSeenResults: (handoffs: Iterable<import("../domain/types").Handoff>) => void;
-  render: () => void;
-  working: () => import("../domain/types").Session[];
-  orderList: <Row extends { id: string; }, Tie extends object>(scope: import("../lib/ordering").OrderScope<Tie>, key: string, items: readonly Row[], compare: (a: Row, b: Row) => number, { must, limit, quiet, seed }?: { must?: ReadonlySet<string> | null | undefined; limit?: number | undefined; quiet?: boolean | undefined; seed?: boolean | undefined; }) => Row[];
-  orderScope: (name: string, sig: string, tie: import("../navigation/routes").ApplicationRoute | null, state: { inView: boolean; touched: boolean; }) => import("../lib/ordering").OrderScope<import("../navigation/routes").ApplicationRoute>;
-  pageSig: () => string;
-  navigation: import("../navigation/routes").NavigationController;
-  pageState: () => { inView: boolean; touched: boolean; };
-  byLast: (a: import("../domain/types").Session, b: import("../domain/types").Session) => number;
-  onMachine: (m: string) => import("../domain/types").Session[];
-  movedOff: (m: string) => import("../domain/types").Session[];
-  movesOf: (m: string) => import("../domain/types").Handoff[];
+  navigation: NavigationController;
   clock: (t: number) => string;
-  MACHINE_LAST: Record<string, number>;
-  ADMIN: { href: string; label: string; } | null;
-  go: (r: import("../navigation/routes").ApplicationRoute, fromHistory?: boolean, prepared?: boolean, nextContent?: import("../viewer-host").ViewerContent | null) => void;
-  byState: (a: import("../domain/types").Session, b: import("../domain/types").Session) => number;
-  STARTS: Map<string, import("../domain/types").Turn>;
-  domain: { invalidate: () => void; nameOf: (id: string) => string; hcls: (id: string) => string; where: (s: import("../domain/types").Session) => string; hostOf: (s: import("../domain/types").Session) => string; machineLabels: (scope?: Iterable<string | import("../domain/types").Session>) => Map<any, any>; machineLabel: (s: import("../domain/types").Session | null | undefined, scope?: Iterable<string | import("../domain/types").Session> | undefined) => any; branchOf: (s: import("../domain/types").Session) => string; shortHost: (s: import("../domain/types").Session) => string; parentOf: (sid: string) => string | undefined; originHandoff: (sid: string) => import("../domain/types").Handoff | undefined; RANK: Partial<Record<import("../domain/types").SessionState, number>>; isResult: (h: import("../domain/types").Handoff) => boolean; inbox: () => import("../domain/types").Handoff[]; working: () => import("../domain/types").Session[]; answersOf: (h: import("../domain/types").Handoff) => string[] | null; statWord: (h: import("../domain/types").Handoff) => string | undefined; hasTurn: (t: import("../domain/types").Turn) => boolean; oneLine: (s: string) => string; TOYOU: Record<string, string>; turnEnd: (t: import("../domain/types").Turn) => { st: import("../domain/types").SessionState; text: string; } | null; traceRoot: (t: import("../domain/types").Turn) => import("../domain/types").Turn; countOf: (s: import("../domain/types").Session, key: "calls" | "errors") => number | null; callsText: (calls: number | null | undefined) => string; sessionChildren: () => Map<string, import("../domain/types").Session[]>; childSessions: (sid: string) => import("../domain/types").Session[]; descendantsOf: (sid: string, children: ReadonlyMap<string, import("../domain/types").Session[]>, out?: import("../domain/types").Session[], seen?: Set<string>) => import("../domain/types").Session[]; TOTAL_TOKEN_KINDS: import("../domain/types").TokenKind[]; TOKEN_KINDS: [import("../domain/types").TokenKind, string][]; asMoney: (usd: number) => string; usageTotal: (s: import("../domain/types").Session) => number; costForSessions: (sessions: Iterable<import("../domain/types").Session>) => Required<import("../domain/types").Cost>; costForSession: (sid: string, includeRuns?: boolean) => Required<import("../domain/types").Cost>; costText: (cost: import("../domain/types").Cost) => string; costMissing: (cost: import("../domain/types").Cost) => string[]; TREE_RANK: Record<import("../domain/types").SessionState, number>; urgentDescendant: (sid: string, children: ReadonlyMap<string, import("../domain/types").Session[]>) => import("../domain/types").SessionState; childParts: (all: import("../domain/types").Session[]) => (string | 0)[]; defaultTreeOpen: (sid: string, children: ReadonlyMap<string, import("../domain/types").Session[]>) => boolean; kidRank: (c: import("../domain/types").Session, children: ReadonlyMap<string, import("../domain/types").Session[]>) => number; lineageOf: (sid: string) => import("../domain/types").Session[]; byState: (a: import("../domain/types").Session, b: import("../domain/types").Session) => number; onMachine: (m: string) => import("../domain/types").Session[]; movedOff: (m: string) => import("../domain/types").Session[]; movesOf: (m: string) => import("../domain/types").Handoff[]; shortMoney: (usd: number) => string; };
-  NOW: number;
-  TURN: Map<string, import("../domain/types").Turn>;
-  sentenceHost: import("../lib/sentence").SentenceHost;
-  machineLabel: (s: import("../domain/types").Session | null | undefined, scope?: Iterable<string | import("../domain/types").Session> | undefined) => any;
-  hcls: (id: string) => string;
-  hostOf: (s: import("../domain/types").Session) => string;
-  sentenceSnapshot: (h: import("../domain/types").Handoff, viewer: string | null | undefined, links?: boolean) => import("../lib/sentence").SentenceSnapshot;
-  turnEnd: (t: import("../domain/types").Turn) => { st: import("../domain/types").SessionState; text: string; } | null;
-  statWord: (h: import("../domain/types").Handoff) => string | undefined;
-  SEEN_RESULTS: Set<string>;
-  machineLabels: (scope?: Iterable<string | import("../domain/types").Session>) => Map<any, any>;
-  transcriptEntries: (entries: import("../domain/types").Entry[], sid: string) => import("../domain/types").Entry[];
-  TX: Record<string, import("../domain/types").Entry[]>;
-  transcriptSnapshot: (sid: string, opts?: { only?: ReadonlySet<string> | undefined; }) => import("../lib/transcript").SessionSnapshot;
-  verb: (name: string) => string[];
-  openStepViewer: (e: ToolEntry, v: string, ic: string, inLabel?: string) => void;
-  openScript: (e: ToolEntry) => void;
-  openImage: (url: string, label: string, from: HTMLButtonElement) => void;
-  stopOpeningEndPin: () => void;
-  opener: (n: HTMLElement) => HTMLButtonElement | null;
-  centre: (node: HTMLElement) => void;
-  scope: import("../app/effects").EffectScope;
-  loadPager: (button: HTMLButtonElement, manual: boolean) => Promise<void>;
-  jumpToLatest: () => void;
+  admin: { href: string; label: string } | null;
+  now: number;
+  scope: EffectScope;
+
+  pagingOwner: Pick<ReturnType<typeof createPaging>, 'loadPager'>;
+
+  viewport: Pick<
+    ReturnType<typeof createViewport>,
+    'stopOpeningEndPin' | 'opener' | 'jumpToLatest'
+  >;
+
+  toolViewsOwner: Pick<
+    ReturnType<typeof createToolViews>,
+    'openStepViewer' | 'openScript' | 'openImage'
+  >;
+
+  transcripts: Pick<TranscriptStore, 'entries'>;
+
+  transcriptView: Pick<
+    ReturnType<typeof createTranscriptView>,
+    'transcriptEntries' | 'transcriptSnapshot' | 'verb'
+  >;
+
+  seenResultsOwner: Pick<ReturnType<typeof createSeenResults>, 'SEEN_RESULTS'>;
+
+  sentencesOwner: Pick<ReturnType<typeof createSentences>, 'sentenceHost' | 'sentenceSnapshot'>;
+
+  orderingControlsOwner: Pick<
+    ReturnType<typeof createOrderingControls>,
+    'orderList' | 'orderScope' | 'pageSig' | 'pageState' | 'byLast'
+  >;
+
+  documentRendererOwner: Pick<ReturnType<typeof createDocumentRenderer>, 'render'>;
+
+  seenPersistenceOwner: Pick<ReturnType<typeof createSeenPersistence>, 'markSeenResults'>;
+
+  destination: Pick<ReturnType<typeof createDestination>, 'goSession' | 'goTrace' | 'go'>;
+
+  modelStore: Pick<
+    ViewerModelStore,
+    | 'machines'
+    | 'machineUp'
+    | 'turns'
+    | 'handoffs'
+    | 'holds'
+    | 'sessions'
+    | 'machineLast'
+    | 'starts'
+    | 'turn'
+  >;
+
+  sessionChrome: Pick<
+    ReturnType<typeof createSessionChrome>,
+    'kindText' | 'observeTitle' | 'centre'
+  >;
+
+  domain: Pick<
+    ReturnType<typeof createDomain>,
+    | 'costForSession'
+    | 'costMissing'
+    | 'costText'
+    | 'costForSessions'
+    | 'asMoney'
+    | 'sessionChildren'
+    | 'nameOf'
+    | 'oneLine'
+    | 'answersOf'
+    | 'traceRoot'
+    | 'inbox'
+    | 'isResult'
+    | 'working'
+    | 'onMachine'
+    | 'movedOff'
+    | 'movesOf'
+    | 'usageTotal'
+    | 'shortMoney'
+    | 'byState'
+    | 'machineLabel'
+    | 'hcls'
+    | 'hostOf'
+    | 'turnEnd'
+    | 'statWord'
+    | 'machineLabels'
+  >;
 }
 /** Owns screenViews behavior through explicit application ports. */
 export function createScreenViews(host: ScreenViewsHost) {
-  const MENU_KINDS: [string, TokenKind[]][] = [["Input", ["input"]], ["Output", ["output"]], ["Cache write", ["cache_write_5m", "cache_write_1h"]], ["Cache read", ["cache_read"]], ["Web search", ["web_search"]]];
-  const COST_NOTE = "What these tokens would cost at API rates. Subscriptions aren't billed this way.";
-  function costSnapshot(s: Session, kids: Session[]): SessionMenuSnapshot["cost"] {
-    const own = host.costForSession(s.id), all = host.costForSession(s.id, true), missing = host.costMissing(all), details = [];
-    if (kids.length) details.push({ label: "This session", value: host.costText(own) }, { label: kids.length === 1 ? "Its run" : "Its " + kids.length + " runs", value: host.costText(host.costForSessions(kids)) });
-    const reports = s.reported_runs ?? [], reported = reports.filter((r) => Number.isFinite(r.cost_usd));
-    if (reports.length) details.push({ label: host.HARNESS[s.harness] + "'s own figure", value: reported.length ? host.asMoney(reported.reduce((n, r) => n + (r.cost_usd ?? 0), 0)) + (reported.length === 1 ? ", last run" : ", last " + reported.length + " runs") : "not reported" });
-    const check = [...(s.cost_check ?? [])].reverse().find((c) => c.ok === false && Number.isFinite(c.computed_usd) && Number.isFinite(c.reported_usd));
-    const mismatch = check ? "Semon's estimate for that run is " + (check.reported_usd === 0 ? 100 : Math.round(Math.abs((check.computed_usd ?? 0) - (check.reported_usd ?? 0)) / Math.abs(check.reported_usd ?? 0) * 100)) + "% " + ((check.computed_usd ?? 0) > (check.reported_usd ?? 0) ? "above" : "below") + " " + host.HARNESS[s.harness] + "'s figure: API rates differ from what a plan is charged." : undefined;
-    const children = host.sessionChildren(), runs: MenuRun[] = [], walk = (id: string, depth: number) => { for (const c of [...(children.get(id) ?? [])].sort((a, b) => b.last - a.last)) { const cost = host.costText(host.costForSession(c.id)); runs.push({ id: c.id, depth, label: "Open " + c.name + ", " + host.kindText(c) + ", " + host.STATE[c.state] + ", " + cost, name: c.name, kind: host.kindText(c), state: c.state, stateLabel: host.STATE[c.state], cost }); walk(c.id, depth + 1); } }; if (kids.length) walk(s.id, 0);
+  const MENU_KINDS: [string, TokenKind[]][] = [
+    ['Input', ['input']],
+    ['Output', ['output']],
+    ['Cache write', ['cache_write_5m', 'cache_write_1h']],
+    ['Cache read', ['cache_read']],
+    ['Web search', ['web_search']],
+  ];
+  const COST_NOTE =
+    "What these tokens would cost at API rates. Subscriptions aren't billed this way.";
+  function costSnapshot(s: Session, kids: Session[]): SessionMenuSnapshot['cost'] {
+    const own = host.domain.costForSession(s.id),
+      all = host.domain.costForSession(s.id, true),
+      missing = host.domain.costMissing(all),
+      details = [];
+    if (kids.length)
+      details.push(
+        { label: 'This session', value: host.domain.costText(own) },
+        {
+          label: kids.length === 1 ? 'Its run' : 'Its ' + kids.length + ' runs',
+          value: host.domain.costText(host.domain.costForSessions(kids)),
+        },
+      );
+    const reports = s.reported_runs ?? [],
+      reported = reports.filter((r) => Number.isFinite(r.cost_usd));
+    if (reports.length)
+      details.push({
+        label: HARNESS[s.harness] + "'s own figure",
+        value: reported.length
+          ? host.domain.asMoney(reported.reduce((n, r) => n + (r.cost_usd ?? 0), 0)) +
+            (reported.length === 1 ? ', last run' : ', last ' + reported.length + ' runs')
+          : 'not reported',
+      });
+    const check = [...(s.cost_check ?? [])]
+      .reverse()
+      .find(
+        (c) => c.ok === false && Number.isFinite(c.computed_usd) && Number.isFinite(c.reported_usd),
+      );
+    const mismatch = check
+      ? "Semon's estimate for that run is " +
+        (check.reported_usd === 0
+          ? 100
+          : Math.round(
+              (Math.abs((check.computed_usd ?? 0) - (check.reported_usd ?? 0)) /
+                Math.abs(check.reported_usd ?? 0)) *
+                100,
+            )) +
+        '% ' +
+        ((check.computed_usd ?? 0) > (check.reported_usd ?? 0) ? 'above' : 'below') +
+        ' ' +
+        HARNESS[s.harness] +
+        "'s figure: API rates differ from what a plan is charged."
+      : undefined;
+    const children = host.domain.sessionChildren(),
+      runs: MenuRun[] = [],
+      walk = (id: string, depth: number) => {
+        for (const c of [...(children.get(id) ?? [])].sort((a, b) => b.last - a.last)) {
+          const cost = host.domain.costText(host.domain.costForSession(c.id));
+          runs.push({
+            id: c.id,
+            depth,
+            label:
+              'Open ' +
+              c.name +
+              ', ' +
+              host.sessionChrome.kindText(c) +
+              ', ' +
+              STATE[c.state] +
+              ', ' +
+              cost,
+            name: c.name,
+            kind: host.sessionChrome.kindText(c),
+            state: c.state,
+            stateLabel: STATE[c.state],
+            cost,
+          });
+          walk(c.id, depth + 1);
+        }
+      };
+    if (kids.length) walk(s.id, 0);
     const models = Object.entries(all.by_model ?? {}).map(([id, model]) => {
-      const priced = model.usd != null && !missing.includes(id), rows = [];
-      for (const [label, keys] of MENU_KINDS) { const tokens = keys.reduce((n, k) => n + (Number(model.tokens?.[k]) || 0), 0), usd = keys.reduce((n, k) => n + (Number(model.usd_by_kind?.[k]) || 0), 0); if (tokens === 0 && (!priced || usd < 0.005)) continue; rows.push({ label, count: tokens ? compactCount(tokens) : "", exact: tokens ? tokens.toLocaleString() : undefined, cost: priced ? host.asMoney(usd) : "—" }); }
+      const priced = model.usd != null && !missing.includes(id),
+        rows = [];
+      for (const [label, keys] of MENU_KINDS) {
+        const tokens = keys.reduce((n, k) => n + (Number(model.tokens?.[k]) || 0), 0),
+          usd = keys.reduce((n, k) => n + (Number(model.usd_by_kind?.[k]) || 0), 0);
+        if (tokens === 0 && (!priced || usd < 0.005)) continue;
+        rows.push({
+          label,
+          count: tokens ? compactCount(tokens) : '',
+          exact: tokens ? tokens.toLocaleString() : undefined,
+          cost: priced ? host.domain.asMoney(usd) : '—',
+        });
+      }
       return { id, rows };
     });
-    return { figure: host.costText(kids.length ? all : own), caption: kids.length ? "this session and its " + kids.length + (kids.length === 1 ? " run" : " runs") : "this session",
-      note: COST_NOTE + (missing.length ? " No price for " + missing.join(", ") + "." : ""), details, mismatch, runs, models, includesRuns: !!kids.length };
+    return {
+      figure: host.domain.costText(kids.length ? all : own),
+      caption: kids.length
+        ? 'this session and its ' + kids.length + (kids.length === 1 ? ' run' : ' runs')
+        : 'this session',
+      note: COST_NOTE + (missing.length ? ' No price for ' + missing.join(', ') + '.' : ''),
+      details,
+      mismatch,
+      runs,
+      models,
+      includesRuns: !!kids.length,
+    };
   }
 
   // ---- Home: what needs you, then what is running ------------------------------------------------------
-  const upCount = () => Object.keys(host.MACHINE).filter((m) => host.MACHINE_UP[m]).length;
+  const upCount = () =>
+    Object.keys(host.modelStore.machines).filter((m) => host.modelStore.machineUp[m]).length;
   let allAnswered = false;
   function harnessSnapshot(id: string): HarnessMark | undefined {
-    const h = Object.hasOwn(host.HARNESSES, id) ? host.HARNESSES[id] : null;
-    return h ? { id, name: h.name, light: h.icon.light, dark: h.icon.dark, darkTheme: host.darkTheme() } : undefined;
+    const h = Object.hasOwn(HARNESSES, id) ? HARNESSES[id] : null;
+    return h
+      ? { id, name: h.name, light: h.icon.light, dark: h.icon.dark, darkTheme: host.darkTheme() }
+      : undefined;
   }
   function liveSnapshot(s: Session, showMachine: boolean): LiveRow {
-    const cur = (host.TURNS[s.id] ?? []).at(-1), msg = cur?.start?.brief ?? cur?.u?.text;
-    const inb = cur?.start ?? (cur?.u ? { from: "you" } : host.H.find((h) => h.to === s.id && h.kind !== "move"));
-    return { id: s.id, name: s.name, state: s.state, stateLabel: host.STATE[s.state] ?? s.state,
-      status: s.state === "work" ? host.HARNESS[s.harness] : host.ago(s.last), harness: s.state === "work" ? harnessSnapshot(s.harness) : undefined,
-      detail: [showMachine ? host.MACHINE[s.machine] : null, inb ? (inb.from === "you" ? "for you" : "for " + host.nameOf(inb.from)) : null, msg ? host.oneLine(msg) : null].filter(Boolean).join(" · "),
-      activity: s.state === "work" && s.activity ? [s.activity[0],s.activity[1],s.activity[2]] : undefined };
+    const cur = (host.modelStore.turns[s.id] ?? []).at(-1),
+      msg = cur?.start?.brief ?? cur?.u?.text;
+    const inb =
+      cur?.start ??
+      (cur?.u
+        ? { from: 'you' }
+        : host.modelStore.handoffs.find((h) => h.to === s.id && h.kind !== 'move'));
+    return {
+      id: s.id,
+      name: s.name,
+      state: s.state,
+      stateLabel: STATE[s.state] ?? s.state,
+      status: s.state === 'work' ? HARNESS[s.harness] : host.ago(s.last),
+      harness: s.state === 'work' ? harnessSnapshot(s.harness) : undefined,
+      detail: [
+        showMachine ? host.modelStore.machines[s.machine] : null,
+        inb ? (inb.from === 'you' ? 'for you' : 'for ' + host.domain.nameOf(inb.from)) : null,
+        msg ? host.domain.oneLine(msg) : null,
+      ]
+        .filter(Boolean)
+        .join(' · '),
+      activity:
+        s.state === 'work' && s.activity
+          ? [s.activity[0], s.activity[1], s.activity[2]]
+          : undefined,
+    };
   }
   function inboxSnapshot(h: Handoff, quiet: boolean = false): InboxRow {
-    const sid = h.kind === "move" ? h.to : h.from, t = host.HOLDS.get(h.id), s = host.SESS[sid];
-    const parts: SentencePart[] = [], part = (className: string, text: string, tip?: string) => parts.push({ className, text, tip });
-    let path = host.I.more;
-    if (h.kind === "ask") { path = host.I.ask; part("who", host.nameOf("you")); part("verb", " asked "); part("who", host.nameOf(h.to)); }
-    else if (h.kind === "spawn" || h.kind === "relay") { path = host.I.out; part("who", host.nameOf(h.from)); part("verb", h.kind === "spawn" ? " handed off to " + (host.SESS[h.to]?.kind === "Subagent" ? "subagent" : host.SESS[h.to]?.kind ?? "") + " " : " relayed to "); part("who", host.nameOf(h.to)); }
-    else if (h.kind === "move") {
-      path = host.I.move; const short = machineShorts([h.fromMachine, h.toMachine].map((id) => [id, host.MACHINE[id] ?? id]));
-      part("verb", "Semon moved "); part("who", host.nameOf(h.to)); part("verb", " from "); part("verb mach", short.get(h.fromMachine) ?? h.fromMachine, "Machine: " + (host.MACHINE[h.fromMachine] ?? h.fromMachine)); part("verb", " to "); part("verb mach", short.get(h.toMachine) ?? h.toMachine, "Machine: " + (host.MACHINE[h.toMachine] ?? h.toMachine));
-    } else if (h.kind === "toyou") {
-      path = h.status === "done" && (h.ask === "question" || h.ask === "decision") ? host.I.done : h.ask === "question" ? host.I.qc : h.ask === "decision" ? host.I.decide : host.I.result;
-      part("who", host.nameOf(h.from)); part("verb", { question: " asked you", result: " sent you a result", decision: " needs your decision" }[h.ask]);
+    const sid = h.kind === 'move' ? h.to : h.from,
+      t = host.modelStore.holds.get(h.id),
+      s = host.modelStore.sessions[sid];
+    const parts: SentencePart[] = [],
+      part = (className: string, text: string, tip?: string) =>
+        parts.push({ className, text, tip });
+    let path = I.more;
+    if (h.kind === 'ask') {
+      path = I.ask;
+      part('who', host.domain.nameOf('you'));
+      part('verb', ' asked ');
+      part('who', host.domain.nameOf(h.to));
+    } else if (h.kind === 'spawn' || h.kind === 'relay') {
+      path = I.out;
+      part('who', host.domain.nameOf(h.from));
+      part(
+        'verb',
+        h.kind === 'spawn'
+          ? ' handed off to ' +
+              (host.modelStore.sessions[h.to]?.kind === 'Subagent'
+                ? 'subagent'
+                : (host.modelStore.sessions[h.to]?.kind ?? '')) +
+              ' '
+          : ' relayed to ',
+      );
+      part('who', host.domain.nameOf(h.to));
+    } else if (h.kind === 'move') {
+      path = I.move;
+      const short = machineShorts(
+        [h.fromMachine, h.toMachine].map((id) => [id, host.modelStore.machines[id] ?? id]),
+      );
+      part('verb', 'Semon moved ');
+      part('who', host.domain.nameOf(h.to));
+      part('verb', ' from ');
+      part(
+        'verb mach',
+        short.get(h.fromMachine) ?? h.fromMachine,
+        'Machine: ' + (host.modelStore.machines[h.fromMachine] ?? h.fromMachine),
+      );
+      part('verb', ' to ');
+      part(
+        'verb mach',
+        short.get(h.toMachine) ?? h.toMachine,
+        'Machine: ' + (host.modelStore.machines[h.toMachine] ?? h.toMachine),
+      );
+    } else if (h.kind === 'toyou') {
+      path =
+        h.status === 'done' && (h.ask === 'question' || h.ask === 'decision')
+          ? I.done
+          : h.ask === 'question'
+            ? I.qc
+            : h.ask === 'decision'
+              ? I.decide
+              : I.result;
+      part('who', host.domain.nameOf(h.from));
+      part(
+        'verb',
+        { question: ' asked you', result: ' sent you a result', decision: ' needs your decision' }[
+          h.ask
+        ],
+      );
     }
-    const answer = quiet ? host.answersOf(h) : null, root = t ? host.traceRoot(t) : null, msg = root?.start?.from === "you" ? root.start.brief : root?.u?.text;
-    return { id: h.id, quiet, icon: quiet && h.kind === "toyou" ? host.I.done : path, parts, age: host.ago(h.at), preview: preview(h.brief ?? ""),
-      answer: answer ? answer.length ? "You answered: " + answer.join(" · ") : "Answered · reply not in these logs" : undefined,
-      origin: root ? msg ? { message: host.oneLine(msg) } : { text: "Started by " + host.nameOf(root.start ? root.start.from : root.sid) } : undefined,
-      context: [host.HARNESS[s.harness], host.MACHINE[s.machine]].join(" · "), harness: harnessSnapshot(s.harness), trace: t?.out.length ? t.id : undefined };
+    const answer = quiet ? host.domain.answersOf(h) : null,
+      root = t ? host.domain.traceRoot(t) : null,
+      msg = root?.start?.from === 'you' ? root.start.brief : root?.u?.text;
+    return {
+      id: h.id,
+      quiet,
+      icon: quiet && h.kind === 'toyou' ? I.done : path,
+      parts,
+      age: host.ago(h.at),
+      preview: preview(h.brief ?? ''),
+      answer: answer
+        ? answer.length
+          ? 'You answered: ' + answer.join(' · ')
+          : 'Answered · reply not in these logs'
+        : undefined,
+      origin: root
+        ? msg
+          ? { message: host.domain.oneLine(msg) }
+          : { text: 'Started by ' + host.domain.nameOf(root.start ? root.start.from : root.sid) }
+        : undefined,
+      context: [HARNESS[s.harness], host.modelStore.machines[s.machine]].join(' · '),
+      harness: harnessSnapshot(s.harness),
+      trace: t?.out.length ? t.id : undefined,
+    };
   }
   const activityHost = {
-    session: host.goSession, committed: host.observeTitle, trace: host.goTrace,
-    inbox(id: string) { const h = host.H.find((h) => h.id === id) ?? host.inbox().find((h) => h.id === id); if (!h) return; if (host.isResult(h)) host.markSeenResults([h]); host.goSession(h.kind === "move" ? h.to : h.from, host.HOLDS.get(h.id)?.id); },
-    answered() { allAnswered = true; host.render(); },
+    session: (...args: Parameters<typeof host.destination.goSession>) =>
+      host.destination.goSession(...args),
+    committed: (...args: Parameters<typeof host.sessionChrome.observeTitle>) =>
+      host.sessionChrome.observeTitle(...args),
+    trace: (...args: Parameters<typeof host.destination.goTrace>) =>
+      host.destination.goTrace(...args),
+    inbox(id: string) {
+      const h =
+        host.modelStore.handoffs.find((h) => h.id === id) ??
+        host.domain.inbox().find((h) => h.id === id);
+      if (!h) return;
+      if (host.domain.isResult(h)) host.seenPersistenceOwner.markSeenResults([h]);
+      host.destination.goSession(
+        h.kind === 'move' ? h.to : h.from,
+        host.modelStore.holds.get(h.id)?.id,
+      );
+    },
+    answered() {
+      allAnswered = true;
+      host.documentRendererOwner.render();
+    },
   };
   function renderHome(page: HTMLElement) {
-    const open = host.inbox(), running = host.working(), many = Object.keys(host.MACHINE).length > 1;
-    const rows = host.orderList(host.orderScope("page", host.pageSig(), host.navigation.route, host.pageState()), "working", running, host.byLast);
-    const done = host.H.filter((h) => h.kind === "toyou" && h.status === "done").sort((a, b) => b.at - a.at);
-    renderHomeScreen(page, { waiting: open.length, working: running.length, up: upCount(), machines: Object.keys(host.MACHINE).length,
-      inbox: open.map((h) => inboxSnapshot(h, false)), live: rows.map((s) => liveSnapshot(s, many)),
-      answered: (allAnswered ? done : done.slice(0, 3)).map((h) => inboxSnapshot(h, true)), totalAnswered: done.length, allAnswered }, activityHost);
+    const open = host.domain.inbox(),
+      running = host.domain.working(),
+      many = Object.keys(host.modelStore.machines).length > 1;
+    const rows = host.orderingControlsOwner.orderList(
+      host.orderingControlsOwner.orderScope(
+        'page',
+        host.orderingControlsOwner.pageSig(),
+        host.navigation.route,
+        host.orderingControlsOwner.pageState(),
+      ),
+      'working',
+      running,
+      (...args: Parameters<typeof host.orderingControlsOwner.byLast>) =>
+        host.orderingControlsOwner.byLast(...args),
+    );
+    const done = host.modelStore.handoffs
+      .filter((h) => h.kind === 'toyou' && h.status === 'done')
+      .sort((a, b) => b.at - a.at);
+    renderHomeScreen(
+      page,
+      {
+        waiting: open.length,
+        working: running.length,
+        up: upCount(),
+        machines: Object.keys(host.modelStore.machines).length,
+        inbox: open.map((h) => inboxSnapshot(h, false)),
+        live: rows.map((s) => liveSnapshot(s, many)),
+        answered: (allAnswered ? done : done.slice(0, 3)).map((h) => inboxSnapshot(h, true)),
+        totalAnswered: done.length,
+        allAnswered,
+      },
+      activityHost,
+    );
   }
   // ---- Machines: where sessions run, and what happens when a machine goes away ------------------------------
   function renderMachines(page: HTMLElement) {
-    const ms = Object.keys(host.MACHINE).sort((a, b) => Number(host.MACHINE_UP[a]) - Number(host.MACHINE_UP[b]));
+    const ms = Object.keys(host.modelStore.machines).sort(
+      (a, b) => Number(host.modelStore.machineUp[a]) - Number(host.modelStore.machineUp[b]),
+    );
     const rows = ms.map((m) => {
-      const here = host.onMachine(m), w = here.filter((s) => s.state === "work").length, up = host.MACHINE_UP[m], state = !up ? "err" : w ? "work" : "idle";
-      const mv = host.movedOff(m).length, mh = host.movesOf(m).find((h) => h.kind === "move" && h.fromMachine === m);
-      return { id: m, name: host.MACHINE[m], state, stateLabel: host.STATE[state] ?? state, status: !up ? "offline" : w ? "up" : "idle",
-        detail: up ? [w + " working", here.length + (here.length === 1 ? " session" : " sessions")].join(" · ") : ["Not responding" + (mh ? " since " + host.clock(mh.at) : host.MACHINE_LAST[m] != null ? " since " + host.clock(host.MACHINE_LAST[m]) : ""), mv ? mv + (mv === 1 ? " session" : " sessions") + " moved off" : null].filter(Boolean).join(" · ") };
+      const here = host.domain.onMachine(m),
+        w = here.filter((s) => s.state === 'work').length,
+        up = host.modelStore.machineUp[m],
+        state = !up ? 'err' : w ? 'work' : 'idle';
+      const mv = host.domain.movedOff(m).length,
+        mh = host.domain.movesOf(m).find((h) => h.kind === 'move' && h.fromMachine === m);
+      return {
+        id: m,
+        name: host.modelStore.machines[m],
+        state,
+        stateLabel: STATE[state] ?? state,
+        status: !up ? 'offline' : w ? 'up' : 'idle',
+        detail: up
+          ? [w + ' working', here.length + (here.length === 1 ? ' session' : ' sessions')].join(
+              ' · ',
+            )
+          : [
+              'Not responding' +
+                (mh
+                  ? ' since ' + host.clock(mh.at)
+                  : host.modelStore.machineLast[m] != null
+                    ? ' since ' + host.clock(host.modelStore.machineLast[m])
+                    : ''),
+              mv ? mv + (mv === 1 ? ' session' : ' sessions') + ' moved off' : null,
+            ]
+              .filter(Boolean)
+              .join(' · '),
+      };
     });
-    renderMachinesScreen(page, { rows, up: upCount(), working: host.working().length, admin: host.ADMIN }, { machine(id) { host.go({ v: "machine", id }); }, admin(href) { location.assign(href); }, committed: host.observeTitle });
+    renderMachinesScreen(
+      page,
+      { rows, up: upCount(), working: host.domain.working().length, admin: host.admin },
+      {
+        machine(id) {
+          host.destination.go({ v: 'machine', id });
+        },
+        admin(href) {
+          location.assign(href);
+        },
+        committed: (...args: Parameters<typeof host.sessionChrome.observeTitle>) =>
+          host.sessionChrome.observeTitle(...args),
+      },
+    );
   }
   function renderMachine(page: HTMLElement, m: string) {
-    const here = host.onMachine(m), off = host.movedOff(m), moves = host.movesOf(m);
-    const ordered = host.orderList(host.orderScope("page", host.pageSig(), host.navigation.route, host.pageState()), "machine:" + m, here, host.byState);
-    renderMachineScreen(page, { name: host.MACHINE[m], totalSessions: here.length, sessions: ordered.map((s) => liveSnapshot(s, false)),
-      off: off.map((s) => ({ ...liveSnapshot(s, false), detail: "Now on " + host.MACHINE[s.machine] })), moves: moves.map((h) => inboxSnapshot(h, true)) }, activityHost);
+    const here = host.domain.onMachine(m),
+      off = host.domain.movedOff(m),
+      moves = host.domain.movesOf(m);
+    const ordered = host.orderingControlsOwner.orderList(
+      host.orderingControlsOwner.orderScope(
+        'page',
+        host.orderingControlsOwner.pageSig(),
+        host.navigation.route,
+        host.orderingControlsOwner.pageState(),
+      ),
+      'machine:' + m,
+      here,
+      (...args: Parameters<typeof host.domain.byState>) => host.domain.byState(...args),
+    );
+    renderMachineScreen(
+      page,
+      {
+        name: host.modelStore.machines[m],
+        totalSessions: here.length,
+        sessions: ordered.map((s) => liveSnapshot(s, false)),
+        off: off.map((s) => ({
+          ...liveSnapshot(s, false),
+          detail: 'Now on ' + host.modelStore.machines[s.machine],
+        })),
+        moves: moves.map((h) => inboxSnapshot(h, true)),
+      },
+      activityHost,
+    );
   }
 
   // ---- Trace: one turn and what it set off -------------------------------------------------------------------------
   // The root is the turn. Each spawn or relay it sent leads to the turn that handoff started in the receiving session,
   // and on down from there; a message to you is a leaf. One rail, as everywhere: depth shows as a smaller node.
   // One observer measures expandable messages, and releases detached nodes after a redraw.
-  const RUN_EXPANDED = new Map<string,Set<string>>();
-  const { agentSnapshot } = createTraceCalculations({ sessions: host.SESS, turns: host.TURNS, starts: host.STARTS }, host.domain, () => host.NOW, RUN_EXPANDED, host.HARNESS, host.STATE);
+  const RUN_EXPANDED = new Map<string, Set<string>>();
+  const { agentSnapshot } = createTraceCalculations(
+    {
+      sessions: host.modelStore.sessions,
+      turns: host.modelStore.turns,
+      starts: host.modelStore.starts,
+    },
+    host.domain,
+    () => host.now,
+    RUN_EXPANDED,
+    HARNESS,
+    STATE,
+  );
   function renderTrace(page: HTMLElement, id: string) {
-    const root = host.TURN.get(id);
-    if (!root) { renderTraceScreen(page, { empty: true, hops: [] }, { ...host.sentenceHost, committed: host.observeTitle, fold() {} }); return; }
-    const visited = new Set<string>(), read = (turn: Turn | undefined) => { if (!turn || visited.has(turn.id)) return; visited.add(turn.id); host.markSeenResults(turn.out); for (const h of turn.out) if (h.kind === "spawn" || h.kind === "relay") read(host.STARTS.get(h.id)); }; read(root);
-    const seen = new Set([root.id]), sessions = new Set([root.sid]), scope = new Set([root.sid]), reached = new Set([root.id]); let n = 0;
-    const reach = (turn: Turn) => { for (const h of turn.sent) { scope.add(h.kind === "toyou" ? h.from : h.to); const child = h.kind === "spawn" || h.kind === "relay" ? host.STARTS.get(h.id) : null; if (child && !reached.has(child.id)) { reached.add(child.id); reach(child); } } }; reach(root);
-    const meta = (state: string, text: string, sid: string, turn: Turn | null | undefined, note?: string) => { const s = host.SESS[sid], label = host.machineLabel(s, scope); return { state, stateLabel: host.STATE[state] ?? state, text,
-      chip: s ? [s.kind ?? host.HARNESS[s.harness], label].filter(Boolean).join(" · ") : undefined, chipClass: s ? host.hcls(sid) : undefined, tip: label ? "Machine: " + host.hostOf(s) : undefined,
-      harness: s ? harnessSnapshot(s.harness) : undefined, note: note ?? undefined, session: s && !s.stub ? sid : undefined, turn: turn?.id, name: s?.name }; };
-    const start = root.start, text = start ? start.brief : root.u?.text, initial = start ? host.sentenceSnapshot(start, null) : root.u ? host.sentenceSnapshot({ kind: "ask", id: root.id, from: "you", to: root.sid, at: root.at ?? host.NOW, status: "done" }, null) : { icon: host.I.more, parts: [{ className: "who", text: host.SESS[root.sid].name }, { className: "verb", text: " · a turn whose start isn't in these logs" }] };
-    const outcome = host.turnEnd(root), hops: Hop[] = [{ key: "root:" + root.id, className: "k-root", icon: initial.icon, parts: initial.parts, nodeClass: host.hcls(start ? start.from : root.u ? "you" : root.sid), turn: root.id, handoff: start?.id, time: start ? host.clock(start.at) : undefined, brief: text || undefined, meta: meta(outcome?.st ?? "idle", outcome?.text ?? "Nothing recorded", root.sid, root) }];
-    const walk = (turn: Turn) => { for (const h of turn.sent) {
-      const result = h.kind === "toyou" && h.ask === "result", child = h.kind === "spawn" || h.kind === "relay" ? host.STARTS.get(h.id) : null, target = h.kind === "toyou" ? h.from : h.to;
-      const sentence = result ? { icon: host.I.result, parts: [{ className: "verb", text: host.statWord(h) ?? "" }] } : host.sentenceSnapshot(h, null);
-      const hop: Hop = { key: h.id, className: "child k-" + h.kind + " s-" + h.status + (child || h.kind === "toyou" || h.kind === "move" ? "" : " stub"), icon: sentence.icon, parts: sentence.parts, nodeClass: host.hcls(target), handoff: h.id, turn: child?.id, time: host.clock(h.at) }; hops.push(hop);
-      if (result) { n++; continue; }
-      hop.brief = h.brief; hop.answers = host.answersOf(h) ?? undefined; hop.result = h.result || undefined;
-      if (h.kind === "move") { hop.meta = meta("done", "Moved", h.to, turn); continue; }
-      n++;
-      if (h.kind === "toyou") { hop.meta = meta(host.isResult(h) ? host.SEEN_RESULTS.has(h.id) ? "read" : "new" : h.status === "done" ? "done" : h.status, host.statWord(h) ?? "", h.from, turn); continue; }
-      sessions.add(h.to); const end = child && host.turnEnd(child); hop.meta = meta(end ? end.st ?? "idle" : h.status === "done" ? "done" : h.status, end ? end.text ?? "Nothing recorded" : host.statWord(h) ?? "", h.to, child, child ? undefined : "Its turn isn't in these logs");
-      if (child && !seen.has(child.id)) { seen.add(child.id); walk(child); }
-    } }; walk(root);
-    renderTraceScreen(page, { empty: false, hops, agents: agentSnapshot(root), summary: [sessions.size + (sessions.size === 1 ? " session" : " sessions"), n + (n === 1 ? " handoff" : " handoffs"), [...host.machineLabels(scope).values()].join(", ")].filter(Boolean).join(" · ") }, { ...host.sentenceHost, committed: host.observeTitle,
-      fold(id) { RUN_EXPANDED.get(root.id)?.add(id); renderTrace(page, root.id); },
-    });
-    return [sessions.size + (sessions.size === 1 ? " session" : " sessions"), n + (n === 1 ? " handoff" : " handoffs"), [...host.machineLabels(scope).values()].join(", ")].filter(Boolean).join(" · ");
+    const root = host.modelStore.turn.get(id);
+    if (!root) {
+      renderTraceScreen(
+        page,
+        { empty: true, hops: [] },
+        {
+          ...host.sentencesOwner.sentenceHost,
+          committed: (...args: Parameters<typeof host.sessionChrome.observeTitle>) =>
+            host.sessionChrome.observeTitle(...args),
+          fold() {},
+        },
+      );
+      return;
+    }
+    const visited = new Set<string>(),
+      read = (turn: Turn | undefined) => {
+        if (!turn || visited.has(turn.id)) return;
+        visited.add(turn.id);
+        host.seenPersistenceOwner.markSeenResults(turn.out);
+        for (const h of turn.out)
+          if (h.kind === 'spawn' || h.kind === 'relay') read(host.modelStore.starts.get(h.id));
+      };
+    read(root);
+    const seen = new Set([root.id]),
+      sessions = new Set([root.sid]),
+      scope = new Set([root.sid]),
+      reached = new Set([root.id]);
+    let n = 0;
+    const reach = (turn: Turn) => {
+      for (const h of turn.sent) {
+        scope.add(h.kind === 'toyou' ? h.from : h.to);
+        const child =
+          h.kind === 'spawn' || h.kind === 'relay' ? host.modelStore.starts.get(h.id) : null;
+        if (child && !reached.has(child.id)) {
+          reached.add(child.id);
+          reach(child);
+        }
+      }
+    };
+    reach(root);
+    const meta = (
+      state: string,
+      text: string,
+      sid: string,
+      turn: Turn | null | undefined,
+      note?: string,
+    ) => {
+      const s = host.modelStore.sessions[sid],
+        label = host.domain.machineLabel(s, scope);
+      return {
+        state,
+        stateLabel: STATE[state] ?? state,
+        text,
+        chip: s ? [s.kind ?? HARNESS[s.harness], label].filter(Boolean).join(' · ') : undefined,
+        chipClass: s ? host.domain.hcls(sid) : undefined,
+        tip: label ? 'Machine: ' + host.domain.hostOf(s) : undefined,
+        harness: s ? harnessSnapshot(s.harness) : undefined,
+        note: note ?? undefined,
+        session: s && !s.stub ? sid : undefined,
+        turn: turn?.id,
+        name: s?.name,
+      };
+    };
+    const start = root.start,
+      text = start ? start.brief : root.u?.text,
+      initial = start
+        ? host.sentencesOwner.sentenceSnapshot(start, null)
+        : root.u
+          ? host.sentencesOwner.sentenceSnapshot(
+              {
+                kind: 'ask',
+                id: root.id,
+                from: 'you',
+                to: root.sid,
+                at: root.at ?? host.now,
+                status: 'done',
+                brief: '',
+              },
+              null,
+            )
+          : {
+              icon: I.more,
+              parts: [
+                { className: 'who', text: host.modelStore.sessions[root.sid].name },
+                { className: 'verb', text: " · a turn whose start isn't in these logs" },
+              ],
+            };
+    const outcome = host.domain.turnEnd(root),
+      hops: Hop[] = [
+        {
+          key: 'root:' + root.id,
+          className: 'k-root',
+          icon: initial.icon,
+          parts: initial.parts,
+          nodeClass: host.domain.hcls(start ? start.from : root.u ? 'you' : root.sid),
+          turn: root.id,
+          handoff: start?.id,
+          time: start ? host.clock(start.at) : undefined,
+          brief: text || undefined,
+          meta: meta(outcome?.st ?? 'idle', outcome?.text ?? 'Nothing recorded', root.sid, root),
+        },
+      ];
+    const walk = (turn: Turn) => {
+      for (const h of turn.sent) {
+        const result = h.kind === 'toyou' && h.ask === 'result',
+          child =
+            h.kind === 'spawn' || h.kind === 'relay' ? host.modelStore.starts.get(h.id) : null,
+          target = h.kind === 'toyou' ? h.from : h.to;
+        const sentence = result
+          ? {
+              icon: I.result,
+              parts: [{ className: 'verb', text: host.domain.statWord(h) ?? '' }],
+            }
+          : host.sentencesOwner.sentenceSnapshot(h, null);
+        const hop: Hop = {
+          key: h.id,
+          className:
+            'child k-' +
+            h.kind +
+            ' s-' +
+            h.status +
+            (child || h.kind === 'toyou' || h.kind === 'move' ? '' : ' stub'),
+          icon: sentence.icon,
+          parts: sentence.parts,
+          nodeClass: host.domain.hcls(target),
+          handoff: h.id,
+          turn: child?.id,
+          time: host.clock(h.at),
+        };
+        hops.push(hop);
+        if (result) {
+          n++;
+          continue;
+        }
+        hop.brief = h.brief;
+        hop.answers = host.domain.answersOf(h) ?? undefined;
+        hop.result = h.result || undefined;
+        if (h.kind === 'move') {
+          hop.meta = meta('done', 'Moved', h.to, turn);
+          continue;
+        }
+        n++;
+        if (h.kind === 'toyou') {
+          hop.meta = meta(
+            host.domain.isResult(h)
+              ? host.seenResultsOwner.SEEN_RESULTS.has(h.id)
+                ? 'read'
+                : 'new'
+              : h.status === 'done'
+                ? 'done'
+                : h.status,
+            host.domain.statWord(h) ?? '',
+            h.from,
+            turn,
+          );
+          continue;
+        }
+        sessions.add(h.to);
+        const end = child && host.domain.turnEnd(child);
+        hop.meta = meta(
+          end ? (end.st ?? 'idle') : h.status === 'done' ? 'done' : h.status,
+          end ? (end.text ?? 'Nothing recorded') : (host.domain.statWord(h) ?? ''),
+          h.to,
+          child,
+          child ? undefined : "Its turn isn't in these logs",
+        );
+        if (child && !seen.has(child.id)) {
+          seen.add(child.id);
+          walk(child);
+        }
+      }
+    };
+    walk(root);
+    renderTraceScreen(
+      page,
+      {
+        empty: false,
+        hops,
+        agents: agentSnapshot(root),
+        summary: [
+          sessions.size + (sessions.size === 1 ? ' session' : ' sessions'),
+          n + (n === 1 ? ' handoff' : ' handoffs'),
+          [...host.domain.machineLabels(scope).values()].join(', '),
+        ]
+          .filter(Boolean)
+          .join(' · '),
+      },
+      {
+        ...host.sentencesOwner.sentenceHost,
+        committed: (...args: Parameters<typeof host.sessionChrome.observeTitle>) =>
+          host.sessionChrome.observeTitle(...args),
+        fold(id) {
+          RUN_EXPANDED.get(root.id)?.add(id);
+          renderTrace(page, root.id);
+        },
+      },
+    );
+    return [
+      sessions.size + (sessions.size === 1 ? ' session' : ' sessions'),
+      n + (n === 1 ? ' handoff' : ' handoffs'),
+      [...host.domain.machineLabels(scope).values()].join(', '),
+    ]
+      .filter(Boolean)
+      .join(' · ');
   }
   // ---- Session page --------------------------------------------------------------------------------------------------
-  function renderSession(page: HTMLElement, sid: string, opts: {only?: ReadonlySet<string>} = {}) {
-    host.markSeenResults(host.H.filter((h) => host.isResult(h) && h.from === sid));
-    const raw = new Map(host.transcriptEntries(host.TX[sid] ?? [], sid).map((e) => [e.slot != null ? sid + "#slot:" + e.slot : e.key, e]));
-    renderSessionScreen(page, host.transcriptSnapshot(sid, opts), { ...host.sentenceHost, committed: host.observeTitle, trace: host.goTrace,
-      toolAll(key, label) { const e = raw.get(key); if (e?.k === "tool") { const [ic,v] = host.verb(e.name); host.openStepViewer(e, v, ic, label); } },
-      script(key) { const e = raw.get(key); if (e?.k === "tool") host.openScript(e); }, image: host.openImage,
-      background(call, trigger) { const target = trigger.closest('section[aria-label="Transcript"]')?.querySelector<HTMLElement>('.step[data-tid="' + CSS.escape(call) + '"]'); if (!target) return; host.stopOpeningEndPin(); for (let parent = target.parentElement; parent; parent = parent.parentElement) { const toggle = host.opener(parent); if (toggle?.getAttribute("aria-expanded") === "false") toggle.click(); } host.centre(target); target.classList.add("flash"); host.scope.timeout(() => target.classList.remove("flash"), 1500); },
-      pager(button) { host.loadPager(button, true); }, jump: host.jumpToLatest,
+  function renderSession(
+    page: HTMLElement,
+    sid: string,
+    opts: { only?: ReadonlySet<string> } = {},
+  ) {
+    host.seenPersistenceOwner.markSeenResults(
+      host.modelStore.handoffs.filter((h) => host.domain.isResult(h) && h.from === sid),
+    );
+    const raw = new Map(
+      host.transcriptView
+        .transcriptEntries(host.transcripts.entries[sid] ?? [], sid)
+        .map((e) => [e.slot != null ? sid + '#slot:' + e.slot : e.key, e]),
+    );
+    renderSessionScreen(page, host.transcriptView.transcriptSnapshot(sid, opts), {
+      ...host.sentencesOwner.sentenceHost,
+      committed: (...args: Parameters<typeof host.sessionChrome.observeTitle>) =>
+        host.sessionChrome.observeTitle(...args),
+      trace: (...args: Parameters<typeof host.destination.goTrace>) =>
+        host.destination.goTrace(...args),
+      toolAll(key, label) {
+        const e = raw.get(key);
+        if (e?.k === 'tool') {
+          const [ic, v] = host.transcriptView.verb(e.name);
+          host.toolViewsOwner.openStepViewer(e, v, ic, label);
+        }
+      },
+      script(key) {
+        const e = raw.get(key);
+        if (e?.k === 'tool') host.toolViewsOwner.openScript(e);
+      },
+      image: (...args: Parameters<typeof host.toolViewsOwner.openImage>) =>
+        host.toolViewsOwner.openImage(...args),
+      background(call, trigger) {
+        const target = trigger
+          .closest('section[aria-label="Transcript"]')
+          ?.querySelector<HTMLElement>('.step[data-tid="' + CSS.escape(call) + '"]');
+        if (!target) return;
+        host.viewport.stopOpeningEndPin();
+        for (let parent = target.parentElement; parent; parent = parent.parentElement) {
+          const toggle = host.viewport.opener(parent);
+          if (toggle?.getAttribute('aria-expanded') === 'false') toggle.click();
+        }
+        host.sessionChrome.centre(target);
+        target.classList.add('flash');
+        host.scope.timeout(() => target.classList.remove('flash'), 1500);
+      },
+      pager(button) {
+        host.pagingOwner.loadPager(button, true);
+      },
+      jump: (...args: Parameters<typeof host.viewport.jumpToLatest>) =>
+        host.viewport.jumpToLatest(...args),
     });
   }
   // Whether a session page ends in its status line: a child's when it is running or has returned, any other session's always.
   // renderSession and patchSession share it.
-  const showsFooter = (s: Session, origin: Handoff | undefined) => origin ? s.state === "work" || s.state === "done" || s.state === "err" || origin.status === "done" || origin.status === "err" : !s.stub && !s.role && s.state in host.STATE;
+  const showsFooter = (s: Session, origin: Handoff | undefined) =>
+    origin
+      ? s.state === 'work' ||
+        s.state === 'done' ||
+        s.state === 'err' ||
+        origin.status === 'done' ||
+        origin.status === 'err'
+      : !s.stub && !s.role && s.state in STATE;
 
-
-  return {harnessSnapshot, costSnapshot, showsFooter, renderHome, renderMachines, renderMachine, renderTrace, renderSession};
+  return {
+    harnessSnapshot,
+    costSnapshot,
+    showsFooter,
+    renderHome,
+    renderMachines,
+    renderMachine,
+    renderTrace,
+    renderSession,
+  };
 }

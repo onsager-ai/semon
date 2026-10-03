@@ -1,4 +1,10 @@
-use std::{env, fs, path::PathBuf, process::ExitCode};
+use std::{
+    env,
+    ffi::OsStr,
+    fs,
+    path::{Path, PathBuf},
+    process::ExitCode,
+};
 
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
@@ -127,13 +133,22 @@ fn ensure_store_dir(store: &std::path::Path) -> Result<(), String> {
     Ok(())
 }
 
+fn native_inputs(home: &Path, codex_home: Option<&OsStr>) -> (PathBuf, PathBuf) {
+    let root = codex_home
+        .filter(|root| !root.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home.join(".codex"));
+    (root.join("sessions"), root.join("history.jsonl"))
+}
+
 fn parse_args() -> Result<Args, String> {
     let home = env::var_os("HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."));
+    let (sessions, history) = native_inputs(&home, env::var_os("CODEX_HOME").as_deref());
     let mut result = Args {
-        sessions: home.join(".codex/sessions"),
-        history: home.join(".codex/history.jsonl"),
+        sessions,
+        history,
         state: default_state_path(),
         store: default_store_path(),
         repo: env::var("SEMON_REPO").unwrap_or_default(),
@@ -161,7 +176,7 @@ fn parse_args() -> Result<Args, String> {
             "--dry-run" => result.dry_run = true,
             "-h" | "--help" => {
                 println!(
-                    "Usage: semon-codex [--sessions PATH] [--history PATH] [--state PATH] [--store PATH] [--repo NAME] [--verbose] [--backfill-raw | --repair-subagent-keys] [--dry-run]\n\n--repair-subagent-keys repairs stores captured before subagent keys were fixed. --dry-run writes no repair changes, but opening the store can migrate an older schema."
+                    "Usage: semon-codex [--sessions PATH] [--history PATH] [--state PATH] [--store PATH] [--repo NAME] [--verbose] [--backfill-raw | --repair-subagent-keys] [--dry-run]\n\n--sessions and --history default beneath CODEX_HOME, or ~/.codex when unset.\n\n--repair-subagent-keys repairs stores captured before subagent keys were fixed. --dry-run writes no repair changes, but opening the store can migrate an older schema."
                 );
                 std::process::exit(0);
             }
@@ -225,5 +240,32 @@ mod tests {
         );
 
         let _ = fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod native_home_tests {
+    use super::*;
+    #[test]
+    fn configured_native_home_selects_sessions_and_history_together() {
+        let home = Path::new("/fixture/fallback");
+        assert_eq!(
+            native_inputs(home, Some(OsStr::new("/fixture/codex-config"))),
+            (
+                PathBuf::from("/fixture/codex-config/sessions"),
+                PathBuf::from("/fixture/codex-config/history.jsonl")
+            )
+        );
+        assert_eq!(
+            native_inputs(home, None),
+            (
+                home.join(".codex/sessions"),
+                home.join(".codex/history.jsonl")
+            )
+        );
+        assert_eq!(
+            native_inputs(home, Some(OsStr::new(""))),
+            native_inputs(home, None)
+        );
     }
 }
