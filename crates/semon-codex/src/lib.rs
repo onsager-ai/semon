@@ -297,7 +297,10 @@ pub fn process_file(
     store: &mut TraceStore,
     options: &ProcessOptions<'_>,
 ) -> Result<usize, AdapterError> {
-    process_file_until(path, state, store, options, None, true)
+    let source_key = resolved(path)?.to_string_lossy().into_owned();
+    store.with_capture_source(CARRIER, &source_key, |store| {
+        process_file_until(path, state, store, options, None, true)
+    })
 }
 
 fn process_file_until(
@@ -327,6 +330,7 @@ fn process_file_until(
         || saved.prefix_sha256.as_deref()
             == Some(format!("{:x}", prefix.clone().finalize()).as_str());
     if saved.offset > size || !prefix_matches {
+        store.reset_capture_source(CARRIER, &key)?;
         saved = state::FileCursor::default();
         prefix = Sha256::new();
         if persist_state {
