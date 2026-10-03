@@ -20,7 +20,7 @@ The former OTLP/Collector/ClickHouse pipeline is intentionally gone.
 
 ## Checks and completion
 
-Run the affected checks and report their actual outcomes:
+Core Rust checks:
 
 ```sh
 cargo fmt --all --check
@@ -38,8 +38,6 @@ The Rust and UI workflow files supply exact CI setup and aggregate semantics.
 
 ## Conditional reading and workflows
 
-Before editing a module, locate applicable ancestor/module instruction files.
-
 - Storage/identity: docs/design/carrier-neutral-trace-storage.md,
   docs/design/trace-identity-and-occurrences.md.
 - Forensic access/retention: docs/design/forensic-retention-and-exposure.md.
@@ -48,5 +46,13 @@ Before editing a module, locate applicable ancestor/module instruction files.
 - Relay/protocol changes: docs/mirror-protocol.md and
   docs/encrypted-remote-sessions.md.
 
-Read only the references relevant to the task. Pass an exact ref or isolated
-checkout path when delegating. Report skipped/blocked checks and remaining scope.
+Pass an exact ref or isolated checkout path when delegating.
+
+<!-- agent-config:begin -->
+## Shared agent conventions (generated)
+
+- **authority:** Opening, updating or merging a pull request requires authority from the task or declared repository policy. Shared procedures grant no authority themselves; opening or updating authority does not authorize merging.
+- **checks:** Run checks appropriate to the affected behavior. Report commands, actual results, blocked prerequisites and remaining scope. A quick check does not replace a declared merge gate.
+- **discovery:** Before editing a module, locate applicable ancestor/module instruction files and load only relevant references. Shared workflows and their dependencies are checked in under .agents/skills; Claude discovery copies are generated under .claude/skills.
+- **ownership:** Edit repo-owned contracts and local skills at their canonical paths. Shared skills, Claude projections, this managed section and synchronization tooling are generated: change the upstream source or manifest selection and regenerate; do not hand-edit generated copies.
+<!-- agent-config:end -->
