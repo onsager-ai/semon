@@ -1,0 +1,10 @@
+{"type":"session_meta","timestamp":"2026-10-03T00:00:00Z","payload":{"session_id":"compat","cwd":"/fixture/repo"}}
+{"type":"event_msg","payload":{"type":"user_message","message":"source-shaped compatibility request"},"timestamp":"2026-10-03T00:00:01Z"}
+{"type":"response_item","payload":{"type":"function_call","call_id":"call-1","name":"shell","arguments":"{\"command\": \"echo 1\"}"},"timestamp":"2026-10-03T00:00:01Z"}
+{"type":"response_item","payload":{"type":"function_call","call_id":"call-2","name":"shell","arguments":"{\"command\": \"echo 2\"}"},"timestamp":"2026-10-03T00:00:01Z"}
+{"type":"response_item","payload":{"type":"function_call_output","call_id":"call-2","output":"result 2"},"timestamp":"2026-10-03T00:00:01Z"}
+{"type":"response_item","payload":{"type":"function_call_output","call_id":"call-1","output":"result 1"},"timestamp":"2026-10-03T00:00:01Z"}
+{"type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":12,"output_tokens":5}}},"timestamp":"2026-10-03T00:00:01Z"}
+{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"complete"}]},"timestamp":"2026-10-03T00:00:01Z"}
+{"type":"future_unknown","payload":{"value":1},"timestamp":"2026-10-03T00:00:01Z"}
+{malformed}
