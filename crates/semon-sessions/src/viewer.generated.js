@@ -7026,7 +7026,7 @@ globalThis.__semonUIShared = __semonUIShared;
       syncJump();
       saveHistoryScroll();
     }
-    const errorNavigation = createErrorNavigation({ navigation, TX, TXM, TOK, SESS, show, sidebarOnly: SIDEBAR_ONLY, page: () => $("#page"), drawSessionBar, render: render2, keepFocus, countOf, capture, restore, opener, resetPagerInput, stopOpeningEndPin, clearFind() {
+    const errorNavigation = createErrorNavigation({ navigation, TX, TXM, TOK, SESS, show, sidebarOnly: SIDEBAR_ONLY, page: () => $("#page"), drawSessionBar, render: render2, keepFocus, countOf, capture: () => capture(), restore: (saved) => restore(saved), opener: (node) => opener(node), resetPagerInput, stopOpeningEndPin, clearFind() {
       find = "";
     }, centre, fetchTx, dropTx, spread, tail });
     const { state: ERR, text: errText, on: errOn, open: openErrors, step: stepErrors, mark: markError, drop: dropErrors, close: closeErrors, live: errorsLive } = errorNavigation;
