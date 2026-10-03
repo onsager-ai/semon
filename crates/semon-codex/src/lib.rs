@@ -340,6 +340,38 @@ fn process_file_until(
     }
     let mut context = saved.context();
     let history_source = same_path(path, options.history_path)?;
+    // Whether this file carries the `item_completed` item stream decides
+    // whether the legacy `response_item`/`message` mirror still projects
+    // (see `NormalizeContext::has_item_stream`). That decision has to be
+    // known for the *whole* file before any of its lines are normalized:
+    // Codex writes a harness-injected mirror message (role `user`, no item
+    // stream counterpart at all, e.g. `<recommended_plugins>`) before the
+    // first `item_completed` line of the same session, so a flag latched
+    // only once that first line is reached would miss it. A history file
+    // never carries this stream and is skipped; once latched true the flag
+    // is never rechecked, and once a file is fully consumed there is no new
+    // line left for the flag to change the outcome of, so neither case pays
+    // for a rescan.
+    if !history_source
+        && !context.has_item_stream
+        && saved.offset < size
+        && file_uses_item_stream_prefix(path, size)?
+    {
+        if saved.offset > 0 {
+            // The earlier mirror was projected before the native item stream
+            // existed. Reconcile only this source's projection and replay the
+            // complete file using the now-authoritative item dispatch.
+            store.reset_capture_source(CARRIER, &key)?;
+            saved = state::FileCursor::default();
+            context = saved.context();
+            prefix = Sha256::new();
+            if persist_state {
+                state.put_file(key.clone(), saved.clone());
+                save_state(options.state_path, state)?;
+            }
+        }
+        context.has_item_stream = true;
+    }
     if saved.offset > 0 && !history_source && context.parent_session_id.is_none() {
         let mut first = Vec::new();
         BufReader::new(File::open(path)?).read_until(b'\n', &mut first)?;
@@ -372,21 +404,6 @@ fn process_file_until(
     let mut next_line_ordinal = saved.next_line_ordinal;
     let mut last_projected_sequence = saved.last_projected_sequence.clone();
     let mut consumed = 0;
-    // Whether this file carries the `item_completed` item stream decides
-    // whether the legacy `response_item`/`message` mirror still projects
-    // (see `NormalizeContext::has_item_stream`). That decision has to be
-    // known for the *whole* file before any of its lines are normalized:
-    // Codex writes a harness-injected mirror message (role `user`, no item
-    // stream counterpart at all, e.g. `<recommended_plugins>`) before the
-    // first `item_completed` line of the same session, so a flag latched
-    // only once that first line is reached would miss it. A history file
-    // never carries this stream and is skipped; once latched true the flag
-    // is never rechecked, and once a file is fully consumed there is no new
-    // line left for the flag to change the outcome of, so neither case pays
-    // for a rescan.
-    if !history_source && !context.has_item_stream && saved.offset < size {
-        context.has_item_stream = file_uses_item_stream_prefix(path, size)?;
-    }
     let mut reader = BufReader::new(File::open(path)?);
     reader.seek(io::SeekFrom::Start(saved.offset))?;
 
@@ -638,7 +655,7 @@ fn file_uses_item_stream_prefix(path: &Path, limit: u64) -> Result<bool, Adapter
     let mut line = Vec::new();
     loop {
         line.clear();
-        if reader.read_until(b'\n', &mut line)? == 0 {
+        if reader.read_until(b'\n', &mut line)? == 0 || !line.ends_with(b"\n") {
             return Ok(false);
         }
         let Ok(record) = serde_json::from_slice::<Value>(&line) else {
