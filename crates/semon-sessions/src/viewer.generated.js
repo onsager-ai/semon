@@ -53,7 +53,7 @@ var __semonUIShared = (() => {
     preact: () => preact_module_exports
   });
 
-  // node_modules/preact/dist/preact.module.js
+  // ../../semon/ui/node_modules/preact/dist/preact.module.js
   var preact_module_exports = {};
   __export(preact_module_exports, {
     Component: () => C,
@@ -364,7 +364,7 @@ var __semonUIShared = (() => {
     return n3.__v.__b - l4.__v.__b;
   }, H.__r = 0, f = Math.random().toString(8), c = "__d" + f, a = "__a" + f, s = /(PointerCapture)$|Capture$/i, h = 0, p = V(false), v = V(true), y = 0;
 
-  // node_modules/preact/hooks/dist/hooks.module.js
+  // ../../semon/ui/node_modules/preact/hooks/dist/hooks.module.js
   var hooks_module_exports = {};
   __export(hooks_module_exports, {
     useCallback: () => q2,
@@ -566,7 +566,7 @@ var __semonUIShared = (() => {
     return "function" == typeof t4 ? t4(n3) : t4;
   }
 
-  // node_modules/preact/jsx-runtime/dist/jsxRuntime.module.js
+  // ../../semon/ui/node_modules/preact/jsx-runtime/dist/jsxRuntime.module.js
   var jsxRuntime_module_exports = {};
   __export(jsxRuntime_module_exports, {
     Fragment: () => S,
@@ -5255,8 +5255,11 @@ globalThis.__semonUIShared = __semonUIShared;
     return { state: state2, secs: optional(v.secs, text), since: optional(v.since, number), exit: optional(v.exit, number), summary: optional(v.summary, text) };
   }
   function image(value) {
-    const v = object2(value);
-    return { o: number(v.o), b: number(v.b), v: text(v.v), w: optional(v.w, number), h: optional(v.h, number), type: optional(v.type, text), size: optional(v.size, number), na: optional(v.na, boolean) };
+    const v = object2(value), base = { o: number(v.o), b: number(v.b), w: optional(v.w, number), h: optional(v.h, number), type: optional(v.type, text), size: optional(v.size, number) };
+    return v.na === true ? { ...base, na: true, v: optional(v.v, text) } : { ...base, na: optional(v.na, (value2) => {
+      if (value2 !== false) throw new Error("Invalid image availability");
+      return false;
+    }), v: text(v.v) };
   }
   var diff = (value) => array(value, (value2) => {
     if (!Array.isArray(value2) || value2.length !== 2) throw new Error("Invalid diff");
