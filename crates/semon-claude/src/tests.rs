@@ -15,6 +15,70 @@ use super::*;
 
 static TEST_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
+/// Source-shaped baseline with reversed results for overlapping same-name
+/// calls. Every partial frame is followed by a durable cursor/store restart.
+#[test]
+fn compatibility_blocks_cold_restart_and_retained_raw_parity() {
+    let source = include_bytes!("../../../tests/fixtures/compatibility/v1/claude-blocks.jsonl");
+    let root = TestDir::new();
+    let path = root.path().join("compat.jsonl");
+    let cursor = root.path().join("cursor.json");
+    let database = root.path().join("incremental.sqlite3");
+    let mut cold = TraceStore::open_in_memory().unwrap();
+    fs::write(&path, source).unwrap();
+    process_file(
+        &path,
+        &mut CursorState::default(),
+        &mut cold,
+        &options(&cursor),
+    )
+    .unwrap();
+    assert!(
+        !cold.log(&LogFilter::default()).unwrap().is_empty(),
+        "the fixture must project occurrences"
+    );
+    fs::remove_file(&cursor).unwrap();
+    let mut end = 0;
+    for line in source.split_inclusive(|byte| *byte == b'\n') {
+        for boundary in [end + line.len() / 2, end + line.len()] {
+            fs::write(&path, &source[..boundary]).unwrap();
+            let mut state = load_state(&cursor).unwrap();
+            let mut store = TraceStore::open(&database).unwrap();
+            process_file(&path, &mut state, &mut store, &options(&cursor)).unwrap();
+        }
+        end += line.len();
+    }
+    let incremental = TraceStore::open(&database).unwrap();
+    assert_eq!(
+        cold.log(&LogFilter::default()).unwrap(),
+        incremental.log(&LogFilter::default()).unwrap()
+    );
+    let raw = incremental
+        .fetch_raw_carrier_records_for_occurrences(OccurrenceSelector::Session("compat"))
+        .unwrap();
+    let retained: Vec<u8> = raw
+        .iter()
+        .flat_map(|row| row.bytes().iter().copied())
+        .collect();
+    assert_eq!(
+        retained, source,
+        "unknown and malformed complete lines must survive"
+    );
+    fs::write(&path, retained).unwrap();
+    let mut rebuilt = TraceStore::open_in_memory().unwrap();
+    process_file(
+        &path,
+        &mut CursorState::default(),
+        &mut rebuilt,
+        &options(&cursor),
+    )
+    .unwrap();
+    assert_eq!(
+        cold.log(&LogFilter::default()).unwrap(),
+        rebuilt.log(&LogFilter::default()).unwrap()
+    );
+}
+
 struct TestDir(PathBuf);
 
 impl TestDir {
