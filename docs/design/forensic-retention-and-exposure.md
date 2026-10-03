@@ -95,3 +95,34 @@ The measured limitation above was resolved by `semon forget --forensic`: deliber
 ## What this does not decide
 
 Whether capture is installed. That is a separate decision: running `scripts/install-user-timer.sh` creates the credential-bearing artifact described above on a schedule, and this document only establishes the policy that was its precondition.
+
+## Capture custody for source revisions
+
+Schema v7 records local collector custody separately from native bytes. Private
+`capture_evidence_generations` rows identify an observed source revision by
+carrier and SHA-256 of its resolved source key, with the consumed complete-prefix
+length/digest and checkpoint status. `capture_evidence_records` binds its ordered
+line keys to exact retained raw record IDs. These bindings are authoritative
+collector observations, not a derived content index or native lineage claims.
+They are necessary because A→B→A can reuse the original raw row: insertion order
+cannot select the current source bytes. Earlier revisions and raw links remain.
+
+Normal capture binds raw bytes, custody, semantic rows and derived ownership in
+the same line savepoint, then confirms each batch before saving its external
+cursor. A lost or disagreeing modern cursor replays its explicitly owned source;
+an interrupted checkpoint cannot silently select an older revision. Full-prefix
+verification still detects native mutation. No automatic raw pruning is added.
+
+The derived ownership index now stores the same local source-key digest, and
+schema v6 ownership keys migrate by hashing the already-recorded values. This
+allows reconstruction from custody without retaining pathname text in that
+index. Canonical identity and ordinary reads do not include any of this data.
+
+Legacy cursor adoption verifies the current native prefix and links only exact
+already-retained rows at the corresponding carrier/session/line keys. Missing
+bytes remain unavailable; adoption never recreates deliberately forgotten raw.
+Forensic deletion can remove bindings through their raw-record foreign key, but
+cursor agreement alone does not force recapture of that consumed prefix. The
+explicit forensic snapshot API validates both byte length and digest and fails
+closed for interrupted or unavailable evidence. Unknown pre-upgrade ownership
+remains protected; it is never guessed from bytes, cwd or timing.
