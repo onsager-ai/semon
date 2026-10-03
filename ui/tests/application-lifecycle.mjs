@@ -105,6 +105,7 @@ test('error-navigation request owners stay bounded across polls and mode changes
       timerOwner.clearTimeout(timer);timerOwner.destroy();window.clearTimeout=clear0;
       check(canceled===1,'a canceled timer retained its teardown cleanup');
       const retained=()=>[...scopes.values()].reduce((count,items)=>count+items.size,0);
+      const requestOwner=new ErrorOwnership.EffectScope(),aborted=requestOwner.request();aborted.abort();check(retained()===0,'aborted request retained scope ownership');requestOwner.destroy();
       let resolvePending,signal,hold=false,draws=0,tails=0;
       const fetch0=window.fetch;
       window.fetch=(_url,options)=>hold?new Promise(resolve=>{signal=options.signal;resolvePending=resolve}):Promise.resolve(new Response(JSON.stringify({slots:[],errors:0,version:'stable'}),{headers:{'Content-Type':'application/json'}}));
@@ -118,6 +119,12 @@ test('error-navigation request owners stay bounded across polls and mode changes
           host.TXM.s={from:1,to:1,total:1};owner.close();await Promise.resolve();
           check(!host.show.tools&&tails===0,'error close used stale view/growth state');check(retained()===0,'closed error mode retained its request owner');
         }
+        const queue=[];
+        window.fetch=(_url,options)=>new Promise((resolve,reject)=>{options.signal.addEventListener('abort',()=>reject(new DOMException('Aborted','AbortError')),{once:true});queue.push({resolve,reject})});
+        owner.open('s');const refreshed=owner.live();queue[1].resolve(new Response(JSON.stringify({slots:[],errors:0,version:'fresh'}),{headers:{'Content-Type':'application/json'}}));await refreshed;await Promise.resolve();
+        check(!owner.state.notice&&!document.body.textContent.includes("Couldn't list"),'superseded initial request reported a false failure');
+        const failed=owner.live();queue[2].reject(new Error('Current request failed'));let rejected=false;try{await failed}catch{rejected=true}check(rejected,'current transport failure was suppressed');owner.close();
+        window.fetch=(_url,options)=>hold?new Promise(resolve=>{signal=options.signal;resolvePending=resolve}):Promise.resolve(new Response(JSON.stringify({slots:[],errors:0,version:'stable'}),{headers:{'Content-Type':'application/json'}}));
         owner.open('s');await owner.live();hold=true;const pending=owner.live();
         check(signal&&!signal.aborted,'pending error-list request lacks a live owner');owner.destroy();check(signal.aborted&&retained()===0,'error-navigation destroy leaked a pending request');
         const before=draws;resolvePending(new Response(JSON.stringify({slots:[1],errors:1,version:'late'}),{headers:{'Content-Type':'application/json'}}));await pending;check(draws===before,'late error-list response drew after destroy');
