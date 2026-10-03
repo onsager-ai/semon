@@ -3,7 +3,7 @@ export const GROUPS = {
   navigation: ["home", "bar", "turns", "analytics", "runview", "signals", "models", "stepnames", "sidebarfocus"],
   transcript: ["viewer", "md", "full", "check-real", "extras", "attach", "viewer-backlog", "deeplink-live", "codex-thinking"],
   shell: ["shell", "embedsidebar", "names", "hicons", "sidebar", "agentfont"],
-  interaction: ["account-lifecycle", "tokens", "scrollbars", "switch", "embed", "tooltip", "details", "select", "filters", "breakdown", "tracebrief"],
+  interaction: ["panel-lifecycle", "account-lifecycle", "tokens", "scrollbars", "switch", "embed", "tooltip", "details", "select", "filters", "breakdown", "tracebrief"],
   accessibility: ["taps"],
 };
 

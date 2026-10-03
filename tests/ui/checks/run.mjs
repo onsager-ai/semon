@@ -46,10 +46,12 @@ import modelsCheck from "./models.mjs";
 import stepNamesCheck from "./stepnames.mjs";
 import sidebarFocusCheck from "./sidebarfocus.mjs";
 import accountLifecycle from "./account-lifecycle.mjs";
+import panelLifecycle from "./panel-lifecycle.mjs";
 
 import signalsCheck from "./signals.mjs";
 
 const checks = [
+  ["panel-lifecycle", panelLifecycle],
   ["account-lifecycle", accountLifecycle],
   ["runview", runView],
   ["signals", signalsCheck],

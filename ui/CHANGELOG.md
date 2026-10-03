@@ -1,5 +1,19 @@
 # Shared UI changes
 
+## 2026-10-03 — shared top-bar panel pilot
+
+Added `createPanelChrome`, `PanelChrome`, `PanelHost` and `PanelOptions`.
+The session menu, full tool-details panel and Analytics work-item panel share
+a native dialog controller and Preact header. The body is a separate host-owned
+slot; screen data/actions, history and live-update release remain in the viewer.
+The controller releases wheel/touch listeners and its header root before its
+one-shot `closed()` callback. `destroy()` is idempotent and stale controls cannot
+affect later panels. No CSS, endpoint, router, poller or Rust installation change.
+
+This starts stage 4; filter/Recent/transcript sheets and individual screens remain
+legacy. Hub still pins the completed stage-3 source; adoption requires a separate
+tested pin. Transcript/paging/live migration stays last.
+
 ## 2026-10-02 — shared Recent and consumer builds
 
 Added `createRecentRenderer`, `RecentSnapshot`, `RecentItem`, `RecentHost` and
