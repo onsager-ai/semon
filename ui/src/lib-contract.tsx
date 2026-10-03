@@ -34,3 +34,5 @@ import { createRecentRenderer, type RecentHost, type RecentSnapshot } from './li
 export function mountRecentExample(container: HTMLElement, host: RecentHost, snapshot: RecentSnapshot) {
   const recent = createRecentRenderer(container, host); recent.update(snapshot); return recent;
 }
+
+export { createPanelChrome } from './lib';

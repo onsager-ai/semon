@@ -6,6 +6,34 @@ Marvin selected **Preact + TypeScript/TSX + esbuild** in [#224](https://github.c
 
 The top-level `ui/` stays in Semon. Use native Preact; `preact/compat` needs a demonstrated dependency requirement. CSS, URLs, CSP, embedding prelude, `window.semonEmbed` and `semon:refresh` / `semon:polled` / `semon:ended` stay unchanged. Rust embeds checked-in production assets and requires no Node or build script.
 
+### Stage 4 first slice — shared top-bar panels (2026-10-03)
+
+Stages 1–3 are merged. Fresh Semon main is `26da6ef`; Hub main `eb45207`
+pins it in both gitlink and `semon.rev`. All three source-main and all four
+Hub-main workflows pass. Stage 4 begins with the shared `panel()` boundary,
+used by session menu, full tool details and Analytics work items.
+
+`createPanelChrome` gives Preact the header/close button only. The native dialog
+controller owns modal commit, backdrop, wheel/touch guards and cleanup, with a
+separate host-owned `.panel-b` slot. Explicit render commits before modal/focus;
+there is no queued state in this transaction. Host callbacks retain route/history,
+pending navigation, focus return and live release. Native close releases the
+root/listeners before those callbacks; destroy is one-shot/idempotent. No global
+viewer state moves into a component. Other sheets, screen bodies and transcript
+orchestration remain legacy and are subsequent bounded work.
+
+The security scan retains the exact pinned-runtime exception and explicitly
+includes the panel module. Independent lifecycle tests cover both device sizes
+and themes, hostile labels, preserved host content, native Escape, stale controls,
+scroll guards and disposal. Served-asset coverage checks Back/Escape/button/backdrop
+history, route and focus. No CSS, visual reference or performance threshold changes.
+This source slice does not advance Hub's pin or claim production rollout.
+
+Equivalent production served asset: baseline 378,803 raw / 215,208 minified /
+75,741 minified gzip-9; pilot 380,451 / 216,059 / 76,012 bytes. Increment:
+1,648 raw / 851 minified / 271 minified gzip bytes. Prefixes and build flags match.
+No endpoint or poller is added. Exact-head test evidence belongs to the stage PR.
+
 ### Stage 3 item 1 — shared shell frame/navigation
 
 The viewer now consumes `createShellChrome(ShellHost)` through the library bridge.

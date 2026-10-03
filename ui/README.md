@@ -79,8 +79,8 @@ root)` before removal. Full viewer and sidebar-only navigation remain equivalent
 One Preact instance resolves per production bundle; no router, fetch or poller is
 added. The Rust shell API and shell.js remain available for existing consumers.
 
-Account and shell frame/navigation lifecycle are implemented. Shared Recent,
-a supported consumer build entry, and Hub adoption follow before sheets/screens. See [the current design](../docs/design/tsx.md)
+Account, shell frame/navigation, shared Recent and consumer builds are implemented;
+Hub adopted stage 3 at source `26da6ef`. Sheets/screens are next. See [the current design](../docs/design/tsx.md)
 and [consumer plan](../docs/design/ui-library.md) for remaining stages, runtime sink
 review and actual Hub pin/embedding contracts. Legacy sources remain in the
 crate during the bounded migration to avoid interfering with parallel work.
@@ -89,3 +89,16 @@ External consumers: `node ui/build.mjs --entry /absolute/consumer.ts --output /a
 (typecheck, source security and one pinned Preact runtime). Repeat with `--check`
 for checked-in asset freshness. Recent's typed snapshot renderer is exported
 from `src/lib`; ordering, model refresh, focus/scroll and sheet policy remain host-owned.
+
+`createPanelChrome(options, host)` creates a one-shot native dialog. Options are
+`title`, optional `label`, `sub` and `className`; strings render as text. It exposes
+`dialog`, `body`, `show()` and `destroy()`. Preact owns only `.panel-h` descendants.
+Append screen content into `body` (`.panel-b`); teardown preserves its descendants.
+`show()` synchronously commits the modal, scroll guards and body focus, then calls
+`host.opened()`. Native close (Escape/backdrop/button) unmounts the header, detaches
+the dialog and removes guards before `host.closed()` exactly once. The host owns
+history, live holds and focus return. Destroy is idempotent; stale controls cannot
+revive a disposed panel. Destroying an unused panel emits no callbacks. Destroy
+an active panel before disposing its host; a detached active dialog also releases
+guards on the next wheel/touch event. Session menu, full tool details and Analytics
+work items consume this API; other sheets remain legacy.
