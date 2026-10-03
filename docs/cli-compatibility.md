@@ -273,3 +273,12 @@ reports are not claimed as an accepted usage baseline. This remains usage
 telemetry, not an invoice. The rebuildable viewer index moves to schema 2/parser
 20 while preserving separately retained reported-run snapshots; native source
 logs and canonical/raw trace storage are unchanged.
+
+The CLI session tree and encrypted relay summaries use the same complete native
+per-response decoder as the viewer. Their private structural summaries deduplicate
+exact request identities and keep cumulative fork context out of fresh request
+counts. Local tree index version 4 and encrypted summary index version 2 rebuild
+older cached accounting from the retained source records/frames; no transcript
+text is added to those caches. This extends the fresh-usage correction to those
+read surfaces without changing canonical/raw storage or adding logical spawn
+edges from physical inherited history.

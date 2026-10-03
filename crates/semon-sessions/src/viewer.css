@@ -30,7 +30,7 @@ body{margin:0}[hidden]{display:none!important}img{max-width:100%}
   --shadow: 0 12px 32px color-mix(in srgb, #000 14%, transparent);
   --sans: "Instrument Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
   --mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
-  --fs-cap: 12px; --fs-sm: 13px; --fs-ui: 14px; --fs-read: 16px; --fs-title: 16px; --fs-fig: 22px;
+  --fs-cap: 12px; --fs-sm: 13px; --fs-ui: 14px; --fs-read: 16px; --fs-title: 16px; --fs-fig: 22px; --fs-display: 26px;
   --lh-ui: 20px; --lh-cap: 18px;
   --s1: 4px; --s2: 8px; --s3: 12px; --s4: 16px; --s5: 24px; --s6: 32px;
   --r1: 6px; --r2: 10px; --r3: 14px;

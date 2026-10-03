@@ -170,9 +170,9 @@ pub fn collect_remote(
     let mut index = read_regular_at_most(&path, 64 * 1024 * 1024)
         .ok()
         .and_then(|bytes| serde_json::from_slice::<RemoteIndex>(&bytes).ok())
-        .filter(|index| index.version == 1 && index.namespace == namespace)
+        .filter(|index| index.version == 2 && index.namespace == namespace)
         .unwrap_or(RemoteIndex {
-            version: 1,
+            version: 2,
             namespace,
             deletion_revision: String::new(),
             streams: BTreeMap::new(),

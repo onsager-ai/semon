@@ -14,7 +14,8 @@ agent tools come from harness-operations, not this product verification workflow
 
 ## Prerequisites
 
-Read those references, docs/design/viewer-ownership.md and tests/ui/lib.mjs.
+Read those references, docs/design/viewer-ownership.md,
+docs/design/design-contract.md and tests/ui/lib.mjs.
 For refactors, follow the ownership contract and complete its review checklist.
 Use the workflow's Node version,
 locked dependencies, Chromium/fontconfig and test-clock binaries. Serve synthetic
