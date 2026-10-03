@@ -1,0 +1,65 @@
+{
+  "version": 1,
+  "harness": "GitHub Copilot CLI",
+  "harness_version": "1.0.91",
+  "build": "216810c5",
+  "binary_sha256": "5ba1d69542af6fd91702d4dbf4845f41c0a29efa3e9bc56fcc308347ff70ff3e",
+  "os": "Linux x86_64",
+  "execution_mode": "headless initial, --resume=<native-session>, fresh --deny-tool=shell; localhost synthetic OpenAI SSE",
+  "storage_schema": {
+    "session.start.version": 1
+  },
+  "home_override": "COPILOT_HOME=<new-disposable-output>/home",
+  "evidence_origin": "native CLI persistence with deterministic mock model",
+  "fixtures": [
+    {
+      "path": "initial.events.jsonl",
+      "original_source_sha256": "38459cfe2d35d63d66b3a3d2fc1421c6b8f23d68cd392494be7917f750b0610c",
+      "fixture_sha256": "3623dac163f85ce81e0d92e84f2900259bc48122852a6abc0f3264fc294a7a0c"
+    },
+    {
+      "path": "resumed.events.jsonl",
+      "original_source_sha256": "a49f0ac762530bd00051e5a13fecda570d841d64e75c2323566f9221bc12f057",
+      "fixture_sha256": "97de549318fb88b4a0b5410a0360fb3826bdc5da9041d6dc9e7e314406d16521"
+    },
+    {
+      "path": "denied.events.jsonl",
+      "original_source_sha256": "1f1f0668acd93bc16314c5ef82b7951b595c9fd9887fed1b508717f814a7a11b",
+      "fixture_sha256": "6ce57979023e2fe83fa476c7b2bbb349fb8167918ebf5e24c8ead9ba93de6c73"
+    }
+  ],
+  "transformations": [
+    "Replaced native system.message data with a removal marker",
+    "Replaced disposable root consistently with /fixture/copilot-lifecycle",
+    "Replaced native session IDs consistently with stable valid fixture UUIDs"
+  ],
+  "expected_fields": {
+    "known": [
+      "same persisted session ID across resume",
+      "byte-identical persisted prefix before resume",
+      "explicit session.resume",
+      "exact requested/start/denied-result toolCallId and arguments",
+      "tool error.code denied and success false",
+      "per-model cumulative shutdown usage 11/3/2 then 22/6/4 input/output/cache-read"
+    ],
+    "unknown": [
+      "logical fork parent",
+      "explicit approval record/identity",
+      "ownership of inherited context",
+      "billing invoice",
+      "cancel/compaction/subagent/interactive semantics"
+    ]
+  },
+  "observed": {
+    "resume_prefix_byte_identical": true,
+    "denied_command_marker_absent": true,
+    "model_requests": 4,
+    "usage_confidence": "CLI persisted model-attributed cumulative snapshots of synthetic provider counts; not native billing"
+  },
+  "limitations": [
+    "Only pinned Linux headless executions",
+    "Transformed recordings, not exact retained originals",
+    "No separate approval event persisted in the denial probe",
+    "No fork, cancellation, compaction, subagent, interactive or retention/deletion coverage"
+  ]
+}
