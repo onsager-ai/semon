@@ -1277,6 +1277,6 @@ html.viewer-open, html.viewer-open body { overflow: hidden; }
 
 /* Landscape touch reaches 44px without changing the compact header pitch. */
 @media (any-pointer: coarse) and (min-width: 761px) {
-  .viewer-b .vs .copy { position: relative; }
-  .viewer-b .vs .copy::before { content: ""; position: absolute; inset: min(0px, calc((100% - 44px) / 2)) 0; }
+  .viewer-b .vs .link { position: relative; }
+  .viewer-b .vs .link::before { content: ""; position: absolute; inset: min(0px, calc((100% - 44px) / 2)) 0; }
 }
