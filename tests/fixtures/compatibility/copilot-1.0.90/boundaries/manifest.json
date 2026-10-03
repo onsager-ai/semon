@@ -1,0 +1,64 @@
+{
+  "version": 1,
+  "harness": "GitHub Copilot CLI",
+  "harness_version": "1.0.90",
+  "build": "ccf052b4",
+  "binary_sha256": "be17b42705ca17490098d7b87f293300d72a094d125b6bb2b2557dc4a0a4f8a8",
+  "os": "Linux x86_64",
+  "execution_mode": "headless cancellation; interactive PTY and manual /compact; offline localhost mock",
+  "storage_schema": {
+    "session.start.version": 1
+  },
+  "home_override": "COPILOT_HOME beneath a new private disposable root for each phase",
+  "evidence_origin": "native CLI persistence with deterministic mock model",
+  "source_reference": {
+    "probe_path": "tests/spikes/copilot-boundaries.py",
+    "probe_sha256": "eda9a8d817cd0a4793ec328c10b87a038db606b598b5d7f5cc7f2cc8d3cf1023",
+    "probe_git_blob": "6d3a828c70445a1d88120ba3749ac759a12cfda4"
+  },
+  "fixtures": [
+    {
+      "path": "cancel.events.jsonl",
+      "original_source_sha256": "0a8f2836fe0f6d08a5b0640b7b082b16ff355aaece537d32d628a10ba619cf01",
+      "fixture_sha256": "28b16b783c582e7a5b5603793661f5dbf9591e5623cd976aa3efa2f14aca0866",
+      "mode": "cancel"
+    },
+    {
+      "path": "interactive.events.jsonl",
+      "original_source_sha256": "5d63c38ae20385e933db2ff444c8a2d5e1943a336d7471a13ae7a09cb4eee8a4",
+      "fixture_sha256": "2760e3cc9b377a48d7e0c11e058ad2aa2c5792f49b2cf8f0c783f40e4cb22db6",
+      "mode": "interactive"
+    },
+    {
+      "path": "before-compaction.events.jsonl",
+      "original_source_sha256": "763fd6601418010800da4c9ff8983631b4fe28c33cdc82ab1e97d57eb0724487",
+      "fixture_sha256": "7749861a6270e0c5a9d126323e985313ae050438a93286864ea334f3bdf14379",
+      "mode": "compaction"
+    },
+    {
+      "path": "compaction.events.jsonl",
+      "original_source_sha256": "ac8d6ff658999906df0461882ce461226f359cbcc353c2e9ccebd8d1cc113d44",
+      "fixture_sha256": "c7355e28cab8ed75165118c35e0fc6467955a38b524b56e848a814e5669b3a00",
+      "mode": "compaction",
+      "native_checkpoint_sha256": "b92311bcb6be41cf6a1dba63880eaf1c8149ab18a20a02df436037e0316b0d1a"
+    }
+  ],
+  "transformations": [
+    "Removed native system.message payload",
+    "Removed prompt-rich model.message/model.messages_snapshot payloads, preserving event types/IDs and observed field names",
+    "Replaced disposable roots and session UUIDs consistently; other native IDs retained"
+  ],
+  "observed": [
+    "Interactive reply persisted after ephemeral folder trust acceptance",
+    "SIGINT after disposable command marker yields abort with native reason and no tool completion",
+    "Manual compaction appends events and writes a private checkpoint; consumed events unchanged",
+    "Compaction usage is separate from shutdown model metrics under the mock"
+  ],
+  "limitations": [
+    "Mock usage/summary, no native billing or real model quality claim",
+    "Folder trust selection is a live UI action; no persisted approval identity inferred",
+    "Abort has no toolCallId; individual missing tool results remain unknown",
+    "Checkpoint existence and original hash verified; raw checkpoint remains private, not vendored",
+    "No native truncation, deletion/retention guarantees, logical forks, non-Linux or older releases verified"
+  ]
+}
