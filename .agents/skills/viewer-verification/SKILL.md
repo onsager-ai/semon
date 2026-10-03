@@ -1,25 +1,41 @@
 ---
 name: viewer-verification
-description: Verify Semon viewer changes using existing fixture servers, functional suites and pixel comparisons without weakening required coverage.
+description: Verify Semon viewer changes with its typed UI sources, generated bundles, synthetic fixture servers, functional/touch/transport suites and reviewed pixel baselines.
 ---
 
-# Viewer verification
+# Semon viewer verification
 
-1. Read ui/README.md, tests/ui/README.md, tests/ui/lib.mjs and
-   .github/workflows/ui.yml for source ownership, generated assets, fixture servers,
-   environment variables and the aggregate job. Select affected suites.
-   With Node 22+, install locked ui tooling using `npm --prefix ui ci --no-audit
-   --no-fund`; run typecheck, test, check:bundle and sizes as in the foundation lane.
-   Edit ui/src/ sources and deliberately regenerate with `npm --prefix ui run build`;
-   never hand-edit generated bundles or use regeneration to hide a failing check.
-2. Install locked tests/ui tooling with npm ci and the workflow's Chromium setup.
-   Use its test-clock binaries and synthetic fixtures; do not serve personal logs.
-3. Run applicable functional, touch, transport and visual checks. Record selected
-   coverage and fixture cases; infrastructure failure is a failed check.
-4. Review changed screenshots before updating affected baseline entries. Preserve
-   pixel thresholds and required assertions; historical sample reports are distinct.
-5. Report command/setup, results, reviewed baselines and tests not run. Do not claim
-   the full aggregate gate passed after running only one suite.
+## Scope
 
-Pixel rendering depends on the documented fontconfig/browser setup. Use the
-checked-in configuration rather than changing the host's fonts or system settings.
+Owns Semon's viewer fixtures and coverage selection. ui/README.md owns source,
+chrome/host and generation boundaries; tests/ui/README.md and
+.github/workflows/ui.yml own exact setup and aggregate semantics. Native coding
+agent tools come from harness-operations, not this product verification workflow.
+
+## Prerequisites
+
+Read those references and tests/ui/lib.mjs. Use the workflow's Node version,
+locked dependencies, Chromium/fontconfig and test-clock binaries. Serve synthetic
+fixtures, never personal logs. Do not change host fonts to compensate for results.
+
+## Procedure
+
+1. Identify affected screens, interactions and shared components. Select suites
+   from the owning workflow and record the fixture cases/viewport/theme coverage.
+2. Edit canonical ui/src/ sources, not generated bundles. Follow ui/README.md's
+   build/regeneration and UI foundation commands. Verify type/security checks,
+   deterministic bundle freshness and sizes before browser evidence.
+3. Prepare the tests/ui fixture servers and tooling using the workflow's exact
+   environment/setup. Run affected functional, touch, transport, accessibility,
+   lifecycle and visual checks; identify unselected suites explicitly.
+4. Review screenshots/diffs before updating only justified baseline entries.
+   Preserve pixel thresholds and required assertions. A historical sample-mockup
+   report is separate from the required served-fixture comparisons.
+5. Read the aggregate job's actual result. A single suite pass does not establish
+   aggregate success; unavailable infrastructure is blocked execution, not a pass.
+
+## Completion
+
+Report selected coverage, setup, commands/results, reviewed baseline changes,
+source/bundle freshness and unrun/blocked suites. Keep generation commands and
+exact CI flags in their owning references rather than copying another toolchain.

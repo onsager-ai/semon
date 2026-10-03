@@ -48,6 +48,9 @@ The Rust and UI workflow files supply exact CI setup and aggregate semantics.
 
 Pass an exact ref or isolated checkout path when delegating.
 
+For native capability mapping, use harness-operations; Codex-specific reference
+routing is in .agents/adapters/codex.md. These adapters grant no extra scope.
+
 <!-- agent-config:begin -->
 ## Shared agent conventions (generated)
 
