@@ -357,11 +357,13 @@ fn process_file_until(
         && saved.offset < size
         && file_uses_item_stream_prefix(path, size)?
     {
+        // A lost cursor can coexist with a previously captured source. Its
+        // explicit ownership is still authoritative even when offset is zero.
+        store.reset_capture_source(CARRIER, &key)?;
         if saved.offset > 0 {
             // The earlier mirror was projected before the native item stream
             // existed. Reconcile only this source's projection and replay the
             // complete file using the now-authoritative item dispatch.
-            store.reset_capture_source(CARRIER, &key)?;
             saved = state::FileCursor::default();
             context = saved.context();
             prefix = Sha256::new();

@@ -1835,3 +1835,62 @@ fn an_unterminated_item_does_not_retire_the_complete_legacy_prefix() {
     assert_eq!(log[0].sequence(), 2);
     assert_eq!(log[0].parent_sequence(), None);
 }
+
+#[test]
+fn a_missing_cursor_still_retires_the_owned_early_mirror() {
+    let source = include_bytes!("../../../tests/fixtures/compatibility/v1/codex-early-item.jsonl");
+    let root = TestDir::new();
+    let path = root.path().join("early.jsonl");
+    let cursor = root.path().join("cursor.json");
+    let history = root.path().join("history.jsonl");
+    let database = root.path().join("capture.sqlite3");
+    let prefix: Vec<u8> = source
+        .split_inclusive(|byte| *byte == b'\n')
+        .take(2)
+        .flatten()
+        .copied()
+        .collect();
+    fs::write(&path, &prefix).unwrap();
+    {
+        let mut store = TraceStore::open(&database).unwrap();
+        process_file(
+            &path,
+            &mut CursorState::default(),
+            &mut store,
+            &options(&cursor, &history),
+        )
+        .unwrap();
+    }
+    fs::remove_file(&cursor).unwrap();
+    fs::write(&path, source).unwrap();
+    let mut store = TraceStore::open(&database).unwrap();
+    process_file(
+        &path,
+        &mut load_state(&cursor).unwrap(),
+        &mut store,
+        &options(&cursor, &history),
+    )
+    .unwrap();
+    let mut cold = TraceStore::open_in_memory().unwrap();
+    process_file(
+        &path,
+        &mut CursorState::default(),
+        &mut cold,
+        &options(&cursor, &history),
+    )
+    .unwrap();
+    assert_eq!(
+        store.log(&LogFilter::default()).unwrap(),
+        cold.log(&LogFilter::default()).unwrap()
+    );
+    let raw = store
+        .fetch_raw_carrier_records_for_occurrences(OccurrenceSelector::Session("early-item"))
+        .unwrap();
+    assert_eq!(
+        raw.iter()
+            .flat_map(|row| row.bytes())
+            .copied()
+            .collect::<Vec<_>>(),
+        source
+    );
+}
