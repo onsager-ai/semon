@@ -69,3 +69,21 @@ accounting. This is native CLI persistence with a mock model, not a paid/native
 model validation. Interactive, prior releases, concurrent tools, resume/fork,
 approvals, compaction and mutation behavior remain unverified. #238 is not yet
 accepted and the adapter implementation gate remains open.
+
+## Versioned Claude and Codex native baselines
+
+The `claude-2.1.288` and `codex-0.159.0-alpha.3` fixture directories contain
+transformed recordings from isolated Linux headless executions against local
+synthetic model providers. Each manifest identifies the executable hash, native
+version, storage shape, original and transformed hashes, transformations and
+unknown capabilities. These are runtime persistence observations; synthetic
+usage counts do not establish billing correctness or stable-version support.
+
+Claude's baseline passes the full cold/restarted/retained-byte occurrence oracle.
+Its attachment and prompt-state content is removed while retaining record types
+and structural relationships. Codex's baseline establishes native paginated
+history and mixed legacy/item records. It is a provenance/schema fixture only:
+the early legacy-to-item transition still requires reconciliation under #237.
+Neither recording establishes tools, approvals, cancellation, compaction or
+fork semantics. The offline Python validator checks provenance and file hashes;
+CI does not launch either harness or access personal native homes.
