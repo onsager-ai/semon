@@ -242,6 +242,64 @@ impl Transport for Stub {
     }
 }
 #[test]
+fn native_codex_fork_relay_uses_request_counts_and_rebuilds_old_summaries() {
+    let fixture = Fixture::new();
+    let source = include_str!(
+        "../../../tests/fixtures/compatibility/codex-0.159.0-alpha.3/fork/child-turn-rollout.jsonl"
+    );
+    let records: Vec<Value> = source
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    for record in &records[..2] {
+        fixture.add("child", "codex/rollout.jsonl", record.clone(), "machine-a");
+    }
+    assert_eq!(fixture.collect()[0].children[0].tokens.total, 0);
+    for record in &records[2..] {
+        fixture.add("child", "codex/rollout.jsonl", record.clone(), "machine-a");
+    }
+    let tree = fixture.collect();
+    let child = &tree[0].children[0];
+    assert_eq!(child.tokens.input, 5);
+    assert_eq!(child.tokens.output, 3);
+    assert_eq!(child.tokens.total, 8);
+    let duplicate = records
+        .iter()
+        .find(|record| record["type"] == "token_usage_record")
+        .unwrap();
+    fixture.add(
+        "child",
+        "codex/rollout.jsonl",
+        duplicate.clone(),
+        "machine-a",
+    );
+    assert_eq!(fixture.collect()[0].children[0].tokens, child.tokens);
+    let cache_path = fs::read_dir(fixture.root.join("cache"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let mut old: Value = serde_json::from_slice(&fs::read(&cache_path).unwrap()).unwrap();
+    old["version"] = json!(1);
+    for entry in old["streams"].as_object_mut().unwrap().values_mut() {
+        entry["summary"]
+            .as_object_mut()
+            .unwrap()
+            .remove("codex_native_usage");
+    }
+    fs::write(&cache_path, serde_json::to_vec(&old).unwrap()).unwrap();
+    let before = fixture.transport.calls.borrow().len();
+    assert_eq!(fixture.collect()[0].children[0].tokens, child.tokens);
+    assert_eq!(fixture.transport.calls.borrow()[before], None);
+    assert!(!fixture.cache().contains("SEMON_SYNTHETIC_FORK_CHILD"));
+    assert_eq!(
+        serde_json::from_str::<Value>(&fixture.cache()).unwrap()["version"],
+        2
+    );
+}
+
+#[test]
 fn metadata_tree_links_machines_incrementally_without_retaining_content() {
     let fixture = Fixture::new();
     fixture.add("parent","main",json!({"type":"assistant","timestamp":"2026-10-01T00:00:00Z","cwd":"/repo","message":{"id":"m","model":"claude-sonnet","usage":{"input_tokens":3,"output_tokens":2},"content":[{"type":"tool_use","id":"task","name":"Task","input":{"prompt":"SECRET-INPUT"}},{"type":"text","text":"SECRET-OUTPUT"}]}}),"machine-a");
