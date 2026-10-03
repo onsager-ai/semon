@@ -122,6 +122,39 @@ else:
                 self.assertIn('RuntimeError: Probe validation failed:', result.stderr)
                 self.assertFalse((output / 'report.json').exists())
 
+    def test_claude_native_resume_and_copied_fork_context(self):
+        directory = ROOT / 'claude-2.1.288/lifecycle'
+        manifest = json.loads((directory / 'manifest.json').read_text())
+        fixtures = {}
+        for entry in manifest['fixtures']:
+            data = (directory / entry['path']).read_bytes()
+            self.assertEqual(hashlib.sha256(data).hexdigest(), entry['fixture_sha256'])
+            self.assertNotIn(b'/workspace/', data)
+            fixtures[entry['path']] = data
+        self.assertTrue(fixtures['resumed-transcript.jsonl'].startswith(fixtures['initial-transcript.jsonl']))
+        parent = list(map(json.loads, fixtures['resumed-transcript.jsonl'].splitlines()))
+        child = list(map(json.loads, fixtures['forked-transcript.jsonl'].splitlines()))
+        messages = lambda rows: [r for r in rows if r['type'] in ('user', 'assistant')]
+        parent_messages = messages(parent)
+        child_messages = messages(child)
+        self.assertEqual(len(parent_messages), 4)
+        self.assertEqual(len(child_messages), 6)
+        for original, inherited in zip(parent_messages, child_messages):
+            self.assertEqual(original['uuid'], inherited['uuid'])
+            self.assertEqual(original['parentUuid'], inherited['parentUuid'])
+            self.assertEqual(original['message'], inherited['message'])
+            self.assertNotEqual(original['sessionId'], inherited['sessionId'])
+        for rows, expected in ((parent, (10, 6)), (child, (15, 9))):
+            costs = [r for r in rows if r['type'] == 'cost-state']
+            usage = costs[-1]['modelUsage']['claude-sonnet-4-6']
+            self.assertEqual((usage['inputTokens'], usage['outputTokens']), expected)
+            for row in rows:
+                if row['type'] == 'attachment':
+                    self.assertEqual(row['attachment']['fixture_removed'], 'native harness attachment payload')
+                self.assertNotIn('parentSessionId', row)
+        source = manifest['source_reference']
+        self.assertEqual(hashlib.sha256(Path(__file__).with_name('claude-lifecycle.py').read_bytes()).hexdigest(), source['probe_sha256'])
+
     def test_native_baseline_provenance_and_hashes(self):
         for fixture in ('claude-2.1.288', 'codex-0.159.0-alpha.3'):
             with self.subTest(fixture=fixture):

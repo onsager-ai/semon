@@ -1,0 +1,51 @@
+{
+  "version": 1,
+  "harness": "Claude Code",
+  "harness_version": "2.1.288",
+  "build": null,
+  "binary_sha256": "0298068b686e7fdbaf9402a7a587bb7f49c0b0e084de09f69145a0719207640c",
+  "os": "Linux x86_64",
+  "execution_mode": "headless --print, isolated localhost synthetic Anthropic SSE; no tools",
+  "storage_schema": "JSONL with UUID/parentUuid, message IDs, usage and cost-state snapshots",
+  "home_override": "CLAUDE_CONFIG_DIR=/workspace/scratch/235-claude-lifecycle-repro-final/config (disposable)",
+  "evidence_origin": "native CLI persistence with deterministic mock model",
+  "source_reference": {
+    "probe_path": "tests/spikes/claude-lifecycle.py",
+    "probe_sha256": "616d3ec793822342df5964ce3d8a1f8a90fb41ac5dd9b6cc08162efa064948d9",
+    "probe_git_blob": "1cd9c798b169fc26e09c615c3399478d255b3b96"
+  },
+  "fixtures": [
+    {
+      "path": "initial-transcript.jsonl",
+      "original_source_sha256": "623d78cde7a42807f1e8f5e0395285b36a49f9e6a63cc433ea37e860cd6aefd3",
+      "fixture_sha256": "4f122fce502a9afbaa30758799a8355422a50cd4fb76921ff844fc7438d0c9d7"
+    },
+    {
+      "path": "resumed-transcript.jsonl",
+      "original_source_sha256": "4a5d2a2807b7a553e7fa8325b94505ff337cc9aa3f4e8072bb8f6ba6df8f2b60",
+      "fixture_sha256": "67325377cec78c060d6e44a0b8a7c3bbc9e69e813dd8c6dcee35827384cde48b"
+    },
+    {
+      "path": "forked-transcript.jsonl",
+      "original_source_sha256": "ea2569adf610e12779ba162634c854d245a73fc1d52fd3ffe3311beb90373dea",
+      "fixture_sha256": "4b62dcc13c974b8ab4dd7785903ceb9fc7fe7c1a6389e70f3c77e682bbbc62c7"
+    }
+  ],
+  "transformations": [
+    "Removed native attachment/rendered payloads and prompt-state text",
+    "Replaced parent/child session identities consistently; record UUIDs/API message IDs retained",
+    "Replaced disposable root consistently with /fixture/claude-lifecycle"
+  ],
+  "observed": [
+    "Same physical parent session on resume with byte-identical consumed prefix",
+    "Fork child copies the four parent user/assistant UUIDs and API IDs but rewrites sessionId",
+    "No explicit logical fork-parent session field observed",
+    "Cost-state model usage accumulates 5/3,10/6,15/9 mock input/output tokens; child includes inherited context"
+  ],
+  "limitations": [
+    "Mock token/cost-state observations, not actual billing or an invoice",
+    "Copied record identity establishes inherited context, not a logical parent edge",
+    "Only pinned Linux headless mode; other versions/platforms unknown",
+    "No tools, approval, cancellation or compaction in this probe"
+  ]
+}
