@@ -140,6 +140,89 @@ fn native_copied_prefix_keeps_distinct_physical_session_occurrences() {
     assert_eq!(records, rebuilt.log(&LogFilter::default()).unwrap());
 }
 
+#[test]
+fn retained_custody_rebuilds_restored_source_without_guessing_raw_order() {
+    let root = TestDir::new();
+    let path = root.path().join("native-claude-compat.jsonl");
+    let cursor = root.path().join("cursor.json");
+    let database = root.path().join("custody.sqlite");
+    let original = include_bytes!(
+        "../../../tests/fixtures/compatibility/claude-2.1.288/initial-transcript.jsonl"
+    );
+    let replacement = String::from_utf8(original.to_vec())
+        .unwrap()
+        .replace("SYNTHETIC_CLAUDE_ACK", "SYNTHETIC_CHANGED_ACK")
+        .into_bytes();
+    for source in [
+        original.as_slice(),
+        replacement.as_slice(),
+        original.as_slice(),
+    ] {
+        fs::write(&path, source).unwrap();
+        let mut store = TraceStore::open(&database).unwrap();
+        let mut state = load_state(&cursor).unwrap();
+        process_file(&path, &mut state, &mut store, &options(&cursor)).unwrap();
+    }
+    let store = TraceStore::open(&database).unwrap();
+    let key = path.canonicalize().unwrap().to_string_lossy().into_owned();
+    let retained = store
+        .fetch_current_capture_source_raw(CARRIER, &key)
+        .unwrap()
+        .unwrap();
+    assert_eq!(retained, original);
+    assert!(
+        store
+            .fetch_raw_carrier_records_for_occurrences(OccurrenceSelector::Session(
+                "native-claude-compat"
+            ))
+            .unwrap()
+            .len()
+            > original.split_inclusive(|byte| *byte == b'\n').count()
+    );
+    fs::write(&path, retained).unwrap();
+    let mut rebuilt = TraceStore::open_in_memory().unwrap();
+    process_file(
+        &path,
+        &mut CursorState::default(),
+        &mut rebuilt,
+        &options(&cursor),
+    )
+    .unwrap();
+    assert_eq!(
+        store.log(&LogFilter::default()).unwrap(),
+        rebuilt.log(&LogFilter::default()).unwrap()
+    );
+    // A lost cursor must replay even a legacy source with no item-stream switch.
+    fs::remove_file(&cursor).unwrap();
+    fs::write(&path, &replacement).unwrap();
+    let mut warm = TraceStore::open(&database).unwrap();
+    process_file(
+        &path,
+        &mut CursorState::default(),
+        &mut warm,
+        &options(&cursor),
+    )
+    .unwrap();
+    let mut cold = TraceStore::open_in_memory().unwrap();
+    process_file(
+        &path,
+        &mut CursorState::default(),
+        &mut cold,
+        &options(&cursor),
+    )
+    .unwrap();
+    assert_eq!(
+        warm.log(&LogFilter::default()).unwrap(),
+        cold.log(&LogFilter::default()).unwrap()
+    );
+    assert_eq!(
+        warm.fetch_current_capture_source_raw(CARRIER, &key)
+            .unwrap()
+            .unwrap(),
+        replacement
+    );
+}
+
 fn compatibility_capture_parity(source: &[u8], session: &str, expected_occurrences: usize) {
     let root = TestDir::new();
     let path = root.path().join(format!("{session}.jsonl"));

@@ -101,18 +101,18 @@ record is deleted.
 This deliberately reads the consumed prefix on each capture invocation, including
 idle invocations. It prioritizes verified replacement handling over the former
 size-only shortcut; an idle-read optimization needs equally strong source-change
-evidence. It does not establish rebuild selection across retained generations.
-Those remain #237 work, so this bounded repair
-does not establish the complete historical/incremental/retained-evidence oracle.
+evidence. Current source selection from retained evidence is described below. Legacy
+records without explicit custody remain unknown; prefix verification alone
+does not identify an older retained generation.
 
 Capture records local source ownership of projected occurrence rows alongside
 its raw/semantic transaction. When verified source bytes change, it retires that
 source's occurrence projection before replay; another recorded owner keeps its
 shared rows. This reconciles metadata/malformed replacement, fewer Claude blocks,
 truncation tails and changed Codex session identity without deleting canonical
-traces, raw records or raw-to-trace links. Source keys are resolved local paths;
-they are excluded from transferable identity and ordinary trace/log results.
-The version-6 store migration adds only this structural ownership index.
+traces, raw records or raw-to-trace links. Source keys derive from resolved local paths and are excluded from transferable
+identity and ordinary trace/log results. Version 6 introduced this structural
+ownership index; version 7 hashes recorded keys and adds private capture custody.
 
 Pre-upgrade occurrence rows have no reliable file ownership. They remain observed
 memory until independently attributable; the migration never guesses ownership
@@ -167,8 +167,9 @@ Cost-state model usage accumulates 5/3, 10/6 and 15/9; the fork includes inherit
 context. These are native snapshots of synthetic accounting, not invoices or
 newly attributable child consumption. Canonical message occurrences preserve
 the physical session namespace. Fixture tests compare cold, restarted and
-retained-raw replay for each complete snapshot; retained generation selection
-following source replacement remains a separate unresolved gate.
+retained-raw replay for each complete snapshot. Current-source revision
+selection after replacement is described below; unowned legacy custody remains
+unknown.
 
 ### Native Claude tools and model switch
 
@@ -193,3 +194,18 @@ shared streamed API message IDs must not be summed as independent requests.
 Reproduce with `tests/spikes/claude-tools.py` using the pinned binary and a new
 private output directory. The manifest pins script content, binary and original
 source hashes, transformations, and unsupported scenarios.
+
+## Retained source revision selection
+
+Complete raw history can contain several byte variants at the same source line.
+Schema v7 therefore retains private collector custody for each observed capture
+revision. Current-source forensic replay selects those recorded ordered bindings
+and validates their complete-prefix checksum. A→B→A tests for both native Claude
+and native paginated Codex compare full current occurrence rows against replay,
+while retaining both raw variants and all canonical/raw links. A lost legacy
+Codex cursor also retires only the explicitly owned projection before replay.
+
+Custody is local source provenance, not a native generation, logical parent or
+transferable trace identity. Explicit raw forgetting leaves replay unavailable;
+idle capture and legacy adoption do not recreate those bytes. Unowned historical
+rows are preserved because their source cannot be established retrospectively.
