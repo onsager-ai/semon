@@ -234,14 +234,17 @@ pub fn repair_subagent_keys(
         };
         let counts = store.repair_session_keys(CARRIER, &parent, &rekeys, dry_run, |store| {
             for file in &replay_files {
-                process_file_until(
-                    &file.path,
-                    &mut replay_state,
-                    store,
-                    &options,
-                    Some(file.offset),
-                    false,
-                )?;
+                let source_key = crate::resolved(&file.path)?.to_string_lossy().into_owned();
+                store.with_capture_source(CARRIER, &source_key, |store| {
+                    process_file_until(
+                        &file.path,
+                        &mut replay_state,
+                        store,
+                        &options,
+                        Some(file.offset),
+                        false,
+                    )
+                })?;
             }
             Ok::<(), AdapterError>(())
         })?;

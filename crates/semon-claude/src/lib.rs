@@ -325,6 +325,34 @@ pub fn process_file(
     })
 }
 
+fn retained_prefix_lines(
+    path: &Path,
+    offset: u64,
+    session: &str,
+) -> Result<Vec<RawBackfillLine>, AdapterError> {
+    let mut reader = BufReader::new(File::open(path)?.take(offset));
+    let mut lines = Vec::new();
+    let mut consumed = 0u64;
+    while consumed < offset {
+        let mut bytes = Vec::new();
+        let count = reader.read_until(b'\n', &mut bytes)?;
+        if count == 0 || !bytes.ends_with(b"\n") {
+            return Err(AdapterError::State(
+                "legacy cursor is not on a complete frame".into(),
+            ));
+        }
+        consumed += count as u64;
+        let derived = derive_line(&bytes, lines.len() as u64, session);
+        lines.push(RawBackfillLine {
+            bytes,
+            session: derived.session,
+            sequence: derived.sequence,
+            timestamp: derived.timestamp,
+        });
+    }
+    Ok(lines)
+}
+
 fn process_source_file(
     path: &Path,
     state: &mut CursorState,
@@ -346,7 +374,22 @@ fn process_source_file(
     let prefix_matches = saved.offset == 0
         || saved.prefix_sha256.as_deref()
             == Some(format!("{:x}", prefix.clone().finalize()).as_str());
-    if saved.offset > size || !prefix_matches {
+    let prefix_digest = format!("{:x}", prefix.clone().finalize());
+    if saved.offset > 0
+        && saved.offset <= size
+        && prefix_matches
+        && !store.has_capture_source_custody(CARRIER, &key)?
+    {
+        let lines = retained_prefix_lines(
+            path,
+            saved.offset,
+            &session_label(&file_identity(path).0, file_identity(path).1.as_deref()),
+        )?;
+        store.adopt_retained_capture_prefix(CARRIER, &key, &lines, saved.offset, &prefix_digest)?;
+    }
+    let custody_matches =
+        store.capture_source_cursor_matches(CARRIER, &key, saved.offset, &prefix_digest)?;
+    if saved.offset > size || !prefix_matches || !custody_matches {
         store.reset_capture_source(CARRIER, &key)?;
         saved = state::FileCursor::default();
         prefix = Sha256::new();
@@ -441,11 +484,23 @@ fn process_source_file(
         saved.offset = batch_end;
         saved.prefix_sha256 = Some(format!("{:x}", prefix.clone().finalize()));
         saved.next_line_ordinal = next_line_ordinal;
+        store.checkpoint_capture_source(
+            CARRIER,
+            &key,
+            saved.offset,
+            &format!("{:x}", prefix.clone().finalize()),
+        )?;
         state.put_file(key.clone(), saved.clone());
         save_state(options.state_path, state)?;
         consumed += batch_count;
     }
 
+    store.checkpoint_capture_source(
+        CARRIER,
+        &key,
+        saved.offset,
+        &format!("{:x}", prefix.clone().finalize()),
+    )?;
     state.put_file(key, saved);
     Ok(consumed)
 }
