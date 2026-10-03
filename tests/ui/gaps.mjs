@@ -4,27 +4,40 @@
 //
 //   node gaps.mjs --base http://127.0.0.1:PORT --token TOKEN     against a running `semon sessions --serve`
 //   node gaps.mjs --model model.json --tx tx.json                against saved JSON
-import fs from "node:fs";
-import path from "node:path";
-import { fileURLToPath } from "node:url";
-import { sample, BASE } from "./fixture.mjs";
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { sample, BASE } from './fixture.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const J = JSON.stringify;
 const min = (t) => (t == null ? t : Math.round(((t - BASE) / 60000) * 1000) / 1000);
 const wallMinute = (value) => {
-  if (typeof value !== "string") return value;
+  if (typeof value !== 'string') return value;
   const m = /^(\d{4})-(\d\d)-(\d\d)T(\d\d):(\d\d)(?::(\d\d))?/.exec(value);
-  return m ? Math.round((Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +(m[6] ?? 0)) - BASE) / 60000 * 1000) / 1000 : value;
+  return m
+    ? Math.round(
+        ((Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +(m[6] ?? 0)) - BASE) / 60000) * 1000,
+      ) / 1000
+    : value;
 };
 
 // A served transcript in full: every page, back from the last.
 export async function served(base, token) {
-  const get = async (p) => { const r = await fetch(base + p + (p.includes("?") ? "&" : "?") + "t=" + token); if (!r.ok) throw new Error(p + ": " + r.status); return r.json(); };
-  const model = await get("/api/model"), tx = {};
+  const get = async (p) => {
+    const r = await fetch(base + p + (p.includes('?') ? '&' : '?') + 't=' + token);
+    if (!r.ok) throw new Error(p + ': ' + r.status);
+    return r.json();
+  };
+  const model = await get('/api/model'),
+    tx = {};
   for (const sid of Object.keys(model.sessions)) {
-    let page = await get("/api/tx?sid=" + encodeURIComponent(sid)), entries = page.entries;
-    while (page.from > 0) { page = await get("/api/tx?sid=" + encodeURIComponent(sid) + "&before=" + page.from); entries = page.entries.concat(entries); }
+    let page = await get('/api/tx?sid=' + encodeURIComponent(sid)),
+      entries = page.entries;
+    while (page.from > 0) {
+      page = await get('/api/tx?sid=' + encodeURIComponent(sid) + '&before=' + page.from);
+      entries = page.entries.concat(entries);
+    }
     tx[sid] = entries;
   }
   return { model, tx };
@@ -33,91 +46,250 @@ export async function served(base, token) {
 // The longest common subsequence of two lists of strings, as [kept, removed from a, added in b].
 function align(a, b) {
   const L = Array.from({ length: a.length + 1 }, () => Array(b.length + 1).fill(0));
-  for (let i = a.length - 1; i >= 0; i--) for (let j = b.length - 1; j >= 0; j--) L[i][j] = a[i] === b[j] ? L[i + 1][j + 1] + 1 : Math.max(L[i + 1][j], L[i][j + 1]);
-  const gone = [], added = [];
-  let i = 0, j = 0;
-  while (i < a.length && j < b.length) { if (a[i] === b[j]) { i++; j++; } else if (L[i + 1][j] >= L[i][j + 1]) gone.push(a[i++]); else added.push(b[j++]); }
-  gone.push(...a.slice(i)); added.push(...b.slice(j));
+  for (let i = a.length - 1; i >= 0; i--)
+    for (let j = b.length - 1; j >= 0; j--)
+      L[i][j] = a[i] === b[j] ? L[i + 1][j + 1] + 1 : Math.max(L[i + 1][j], L[i][j + 1]);
+  const gone = [],
+    added = [];
+  let i = 0,
+    j = 0;
+  while (i < a.length && j < b.length) {
+    if (a[i] === b[j]) {
+      i++;
+      j++;
+    } else if (L[i + 1][j] >= L[i][j + 1]) gone.push(a[i++]);
+    else added.push(b[j++]);
+  }
+  gone.push(...a.slice(i));
+  added.push(...b.slice(j));
   return [gone, added];
 }
 
 export function gaps({ model, tx }) {
-  const S = sample(), out = [];
+  const S = sample(),
+    out = [];
   const say = (x) => out.push(x);
   // The sample's API_PRICE is only for its static illustration. The served viewer now reads exact per-session `cost`;
   // pricing and token rates are no longer compared as frontend inputs.
   // Machines.
-  const sampleMachines = Object.values(S.MACHINE), servedMachines = [model.machine.name];
-  for (const m of sampleMachines) if (!servedMachines.includes(m)) say("machine " + m + ": not served");
+  const sampleMachines = Object.values(S.MACHINE),
+    servedMachines = [model.machine.name];
+  for (const m of sampleMachines)
+    if (!servedMachines.includes(m)) say('machine ' + m + ': not served');
   // Sessions.
   for (const [id, s] of Object.entries(S.SESS)) {
     const v = model.sessions[id];
-    if (!v) { say("session " + id + ": not served"); continue; }
-    const cmp = (field, a, b) => { if (J(a) !== J(b)) say("session " + id + "." + field + ": sample " + J(a) + ", served " + J(b)); };
-    cmp("name", s.name, v.name); cmp("kind", s.kind, v.kind); cmp("lane", !!s.lane, !!v.lane); cmp("role", !!s.role, !!v.role);
-    cmp("harness", s.harness, v.harness); cmp("machine", S.MACHINE[s.machine], v.machine === model.machine.id ? model.machine.name : v.machine);
-    cmp("movedFrom", s.movedFrom, v.movedFrom); cmp("model", s.model, v.model); cmp("state", s.state, v.state); cmp("tokens", s.tokens, v.tokens);
-    const parent = S.H.find((h) => (h.kind === "spawn" || h.kind === "relay") && h.to === id && h.from !== id && (h.kind === "spawn" || s.kind === "Relayed" || !s.lane))?.from;
-    cmp("parent", parent, v.parent);
-    const expectedTokens = Object.fromEntries(Object.entries(s.tokensByModel ?? {}).map(([modelId, usage]) => [modelId, { input: usage.input, output: usage.output, cacheWrite: usage.cacheWrite, cacheRead: usage.cacheRead }]));
-    const actualTokens = Object.fromEntries(Object.entries(v.tokens_by_model ?? {}).map(([modelId, usage]) => [modelId, { input: usage.input, output: usage.output, cacheWrite: usage.cache_write, cacheRead: usage.cache_read }]));
-    cmp("tokens_by_model", expectedTokens, actualTokens);
+    if (!v) {
+      say('session ' + id + ': not served');
+      continue;
+    }
+    const cmp = (field, a, b) => {
+      if (J(a) !== J(b))
+        say('session ' + id + '.' + field + ': sample ' + J(a) + ', served ' + J(b));
+    };
+    cmp('name', s.name, v.name);
+    cmp('kind', s.kind, v.kind);
+    cmp('lane', !!s.lane, !!v.lane);
+    cmp('role', !!s.role, !!v.role);
+    cmp('harness', s.harness, v.harness);
+    cmp(
+      'machine',
+      S.MACHINE[s.machine],
+      v.machine === model.machine.id ? model.machine.name : v.machine,
+    );
+    cmp('movedFrom', s.movedFrom, v.movedFrom);
+    cmp('model', s.model, v.model);
+    cmp('state', s.state, v.state);
+    cmp('tokens', s.tokens, v.tokens);
+    const parent = S.H.find(
+      (h) =>
+        (h.kind === 'spawn' || h.kind === 'relay') &&
+        h.to === id &&
+        h.from !== id &&
+        (h.kind === 'spawn' || s.kind === 'Relayed' || !s.lane),
+    )?.from;
+    cmp('parent', parent, v.parent);
+    const expectedTokens = Object.fromEntries(
+      Object.entries(s.tokensByModel ?? {}).map(([modelId, usage]) => [
+        modelId,
+        {
+          input: usage.input,
+          output: usage.output,
+          cacheWrite: usage.cacheWrite,
+          cacheRead: usage.cacheRead,
+        },
+      ]),
+    );
+    const actualTokens = Object.fromEntries(
+      Object.entries(v.tokens_by_model ?? {}).map(([modelId, usage]) => [
+        modelId,
+        {
+          input: usage.input,
+          output: usage.output,
+          cacheWrite: usage.cache_write,
+          cacheRead: usage.cache_read,
+        },
+      ]),
+    );
+    cmp('tokens_by_model', expectedTokens, actualTokens);
     if (s.rate_limits) {
       const expectedRate = {
         recorded_at: wallMinute(s.rate_limits.recorded_at),
-        windows: [[300, s.rate_limits.five_hour], [10080, s.rate_limits.weekly]].map(([minutes, window]) => ({ minutes, used_percent: window.used_percent, resets_at: wallMinute(window.resets_at) })),
+        windows: [
+          [300, s.rate_limits.five_hour],
+          [10080, s.rate_limits.weekly],
+        ].map(([minutes, window]) => ({
+          minutes,
+          used_percent: window.used_percent,
+          resets_at: wallMinute(window.resets_at),
+        })),
       };
-      const actualRate = v.rate_limits && { recorded_at: min(v.rate_limits.recorded_at), windows: (v.rate_limits.windows ?? []).map((window) => ({ minutes: window.minutes, used_percent: window.used_percent, resets_at: min(window.resets_at) })) };
-      cmp("rate_limits", expectedRate, actualRate);
+      const actualRate = v.rate_limits && {
+        recorded_at: min(v.rate_limits.recorded_at),
+        windows: (v.rate_limits.windows ?? []).map((window) => ({
+          minutes: window.minutes,
+          used_percent: window.used_percent,
+          resets_at: min(window.resets_at),
+        })),
+      };
+      cmp('rate_limits', expectedRate, actualRate);
     }
-    cmp("repo", s.repo, v.repo); cmp("branch", s.branch, v.branch); cmp("start", s.start, min(v.start)); cmp("last", s.last, min(v.last));
-    cmp("busy", s.busy, v.busy.map(([a, b]) => [min(a), min(b)])); cmp("activity", s.activity, v.activity?.slice(0, 3));
+    cmp('repo', s.repo, v.repo);
+    cmp('branch', s.branch, v.branch);
+    cmp('start', s.start, min(v.start));
+    cmp('last', s.last, min(v.last));
+    cmp(
+      'busy',
+      s.busy,
+      v.busy.map(([a, b]) => [min(a), min(b)]),
+    );
+    cmp('activity', s.activity, v.activity?.slice(0, 3));
   }
-  for (const id of Object.keys(model.sessions)) if (!S.SESS[id]) say("session " + id + ": served, not in the sample");
+  for (const id of Object.keys(model.sessions))
+    if (!S.SESS[id]) say('session ' + id + ': served, not in the sample');
   // Handoffs, matched by kind, ends and time.
-  const ids = new Map(), used = new Set();
+  const ids = new Map(),
+    used = new Set();
   for (const h of S.H) {
-    const v = model.handoffs.find((x) => !used.has(x.id) && x.kind === h.kind && x.from === h.from && x.to === h.to && min(x.at) === h.at);
-    if (!v) { say("handoff " + h.id + " (" + h.kind + (h.ask ? " " + h.ask : "") + " " + h.from + "→" + h.to + " at " + h.at + "): not served"); continue; }
-    used.add(v.id); ids.set(v.id, h.id);
-    const cmp = (field, a, b) => { if (J(a) !== J(b)) say("handoff " + h.id + "." + field + ": sample " + J(a) + ", served " + J(b)); };
-    cmp("ask", h.ask, v.ask); cmp("status", h.status, v.status); cmp("done", h.done, min(v.done)); cmp("brief", h.brief, v.brief);
-    cmp("result", h.result, v.result); cmp("answer", h.answer, v.answer);
+    const v = model.handoffs.find(
+      (x) =>
+        !used.has(x.id) &&
+        x.kind === h.kind &&
+        x.from === h.from &&
+        x.to === h.to &&
+        min(x.at) === h.at,
+    );
+    if (!v) {
+      say(
+        'handoff ' +
+          h.id +
+          ' (' +
+          h.kind +
+          (h.ask ? ' ' + h.ask : '') +
+          ' ' +
+          h.from +
+          '→' +
+          h.to +
+          ' at ' +
+          h.at +
+          '): not served',
+      );
+      continue;
+    }
+    used.add(v.id);
+    ids.set(v.id, h.id);
+    const cmp = (field, a, b) => {
+      if (J(a) !== J(b))
+        say('handoff ' + h.id + '.' + field + ': sample ' + J(a) + ', served ' + J(b));
+    };
+    cmp('ask', h.ask, v.ask);
+    cmp('status', h.status, v.status);
+    cmp('done', h.done, min(v.done));
+    cmp('brief', h.brief, v.brief);
+    cmp('result', h.result, v.result);
+    cmp('answer', h.answer, v.answer);
   }
-  for (const v of model.handoffs) if (!used.has(v.id)) say("handoff " + v.kind + (v.ask ? " " + v.ask : "") + " " + v.from + "→" + v.to + " at " + min(v.at) + ": served, not in the sample");
+  for (const v of model.handoffs)
+    if (!used.has(v.id))
+      say(
+        'handoff ' +
+          v.kind +
+          (v.ask ? ' ' + v.ask : '') +
+          ' ' +
+          v.from +
+          '→' +
+          v.to +
+          ' at ' +
+          min(v.at) +
+          ': served, not in the sample',
+      );
   // Transcripts, entry by entry, with the served handoff ids read as the sample's.
   // The sample records thought kind and timing from its source-log timestamps; the served model normalizes both
   // harness formats to `think` and may precompute seconds. They are the same UI entry, so compare the shared content.
   const norm = (e) => {
-    const k = e.k === "reasoning" ? "think" : e.k;
+    const k = e.k === 'reasoning' ? 'think' : e.k;
     const x = { k };
-    for (const f of ["text", "label", "name", "arg", "ok", "secs", "in", "out", "diff", "live", "unfinished"]) {
-      if (f === "secs" && k === "think") continue;
+    for (const f of [
+      'text',
+      'label',
+      'name',
+      'arg',
+      'ok',
+      'secs',
+      'in',
+      'out',
+      'diff',
+      'live',
+      'unfinished',
+    ]) {
+      if (f === 'secs' && k === 'think') continue;
       if (e[f] !== undefined) x[f] = e[f];
     }
-    if (e.k === "signal") x.signal = e.signal;
-    if (e.k === "h") x.id = ids.get(e.id) ?? e.id;
-    if (e.ret) x.text = "Returned to " + (model.sessions[e.ret.to]?.name ?? e.ret.to) + (e.ret.failed ? " · failed" : "") + " · " + new Date(e.ret.at).toISOString().slice(11, 16);
+    if (e.k === 'signal') x.signal = e.signal;
+    if (e.k === 'h') x.id = ids.get(e.id) ?? e.id;
+    if (e.ret)
+      x.text =
+        'Returned to ' +
+        (model.sessions[e.ret.to]?.name ?? e.ret.to) +
+        (e.ret.failed ? ' · failed' : '') +
+        ' · ' +
+        new Date(e.ret.at).toISOString().slice(11, 16);
     return J(x);
   };
   for (const sid of Object.keys(S.TX)) {
     const [gone, added] = align(S.TX[sid].map(norm), (tx[sid] ?? []).map(norm));
-    for (const g of gone) say("tx " + sid + ": sample entry not served: " + g);
-    for (const a of added) say("tx " + sid + ": served entry not in the sample: " + a);
+    for (const g of gone) say('tx ' + sid + ': sample entry not served: ' + g);
+    for (const a of added) say('tx ' + sid + ': served entry not in the sample: ' + a);
   }
   return out;
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
-  const arg = (k) => { const i = process.argv.indexOf("--" + k); return i > 0 ? process.argv[i + 1] : null; };
-  const data = arg("base") ? await served(arg("base"), arg("token")) : { model: JSON.parse(fs.readFileSync(arg("model"), "utf8")), tx: Object.fromEntries(Object.entries(JSON.parse(fs.readFileSync(arg("tx"), "utf8"))).map(([k, p]) => [k, p.entries ?? p])) };
+  const arg = (k) => {
+    const i = process.argv.indexOf('--' + k);
+    return i > 0 ? process.argv[i + 1] : null;
+  };
+  const data = arg('base')
+    ? await served(arg('base'), arg('token'))
+    : {
+        model: JSON.parse(fs.readFileSync(arg('model'), 'utf8')),
+        tx: Object.fromEntries(
+          Object.entries(JSON.parse(fs.readFileSync(arg('tx'), 'utf8'))).map(([k, p]) => [
+            k,
+            p.entries ?? p,
+          ]),
+        ),
+      };
   const found = gaps(data);
-  if (arg("write")) { fs.writeFileSync(arg("write"), J(found, null, 1) + "\n"); }
-  const listed = JSON.parse(fs.readFileSync(path.join(here, "gaps.json"), "utf8"));
+  if (arg('write')) {
+    fs.writeFileSync(arg('write'), J(found, null, 1) + '\n');
+  }
+  const listed = JSON.parse(fs.readFileSync(path.join(here, 'gaps.json'), 'utf8'));
   const known = new Set(listed.map((g) => g.gap));
-  const fresh = found.filter((g) => !known.has(g)), fixed = [...known].filter((g) => !found.includes(g));
-  console.log("fixture gaps: " + found.length + " found, " + listed.length + " listed");
-  for (const g of fresh) console.log("  NEW (not in gaps.json): " + g);
-  for (const g of fixed) console.log("  GONE (listed, no longer found): " + g);
+  const fresh = found.filter((g) => !known.has(g)),
+    fixed = [...known].filter((g) => !found.includes(g));
+  console.log('fixture gaps: ' + found.length + ' found, ' + listed.length + ' listed');
+  for (const g of fresh) console.log('  NEW (not in gaps.json): ' + g);
+  for (const g of fixed) console.log('  GONE (listed, no longer found): ' + g);
   if (fresh.length || fixed.length) process.exit(1);
 }

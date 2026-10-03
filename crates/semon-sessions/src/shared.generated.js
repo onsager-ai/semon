@@ -671,18 +671,30 @@ var __semonUIShared = (() => {
       previous?.(vnode);
       if (typeof vnode.type === "string") {
         for (const key of Object.keys(vnode.props)) {
-          if (["dangerouslySetInnerHTML", "style", "title"].includes(key)) throw new Error(`Forbidden DOM prop: ${key}`);
+          if (["dangerouslySetInnerHTML", "style", "title"].includes(key))
+            throw new Error(`Forbidden DOM prop: ${key}`);
           const value = vnode.props[key];
           const externalLink = key === "href" && vnode.type === "a" && externalUrl(value) && vnode.props.target === "_blank" && vnode.props.rel === "noopener noreferrer";
-          if (["href", "src", "action"].includes(key) && value != null && !safePath(value) && !externalLink) throw new Error(`Unsafe DOM path: ${key}`);
-          if (/^on/i.test(key) && typeof value === "string") throw new Error(`Inline DOM handler: ${key}`);
+          if (["href", "src", "action"].includes(key) && value != null && !safePath(value) && !externalLink)
+            throw new Error(`Unsafe DOM path: ${key}`);
+          if (/^on/i.test(key) && typeof value === "string")
+            throw new Error(`Inline DOM handler: ${key}`);
         }
       }
     };
   }
 
   // src/lib/layout.ts
-  var properties = ["width", "height", "left", "top", "margin-left", "min-width", "max-height", "max-width"];
+  var properties = [
+    "width",
+    "height",
+    "left",
+    "top",
+    "margin-left",
+    "min-width",
+    "max-height",
+    "max-width"
+  ];
   var serial = 0;
   function createMeasuredLayout() {
     const sheet2 = new CSSStyleSheet(), prefix = "semon-geometry-" + ++serial + "-";
@@ -697,11 +709,15 @@ var __semonUIShared = (() => {
       },
       className(property, value, unit) {
         if (disposed) throw new Error("Measured layout is destroyed");
-        if (!properties.includes(property) || !Number.isFinite(value) || Math.abs(value) > 1e8 || !["px", "%"].includes(unit)) throw new Error("Invalid measured geometry");
+        if (!properties.includes(property) || !Number.isFinite(value) || Math.abs(value) > 1e8 || !["px", "%"].includes(unit))
+          throw new Error("Invalid measured geometry");
         const key = property + ":" + value + unit, existing = rules.get(key);
         if (existing) return existing;
         const name = prefix + rules.size;
-        sheet2.insertRule("." + name + "{" + property + ":" + value + unit + "}", sheet2.cssRules.length);
+        sheet2.insertRule(
+          "." + name + "{" + property + ":" + value + unit + "}",
+          sheet2.cssRules.length
+        );
         rules.set(key, name);
         return name;
       },
@@ -716,9 +732,27 @@ var __semonUIShared = (() => {
   }
 
   // src/lib/select.tsx
-  var ICON = { chevron: "M6 9l6 6 6-6", check: "M5 12.5l4.5 4.5L19 7", search: "M11 18a7 7 0 1 1 0-14 7 7 0 0 1 0 14zM20 20l-4-4", close: "M6 6l12 12M18 6L6 18" };
+  var ICON = {
+    chevron: "M6 9l6 6 6-6",
+    check: "M5 12.5l4.5 4.5L19 7",
+    search: "M11 18a7 7 0 1 1 0-14 7 7 0 0 1 0 14zM20 20l-4-4",
+    close: "M6 6l12 12M18 6L6 18"
+  };
   function Icon({ path, className }) {
-    return /* @__PURE__ */ u3("svg", { class: className, viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", "stroke-width": "2", "stroke-linecap": "round", "stroke-linejoin": "round", "aria-hidden": "true", children: /* @__PURE__ */ u3("path", { d: path }) });
+    return /* @__PURE__ */ u3(
+      "svg",
+      {
+        class: className,
+        viewBox: "0 0 24 24",
+        fill: "none",
+        stroke: "currentColor",
+        "stroke-width": "2",
+        "stroke-linecap": "round",
+        "stroke-linejoin": "round",
+        "aria-hidden": "true",
+        children: /* @__PURE__ */ u3("path", { d: path })
+      }
+    );
   }
   var serial2 = 0;
   var sheet = null;
@@ -744,7 +778,8 @@ var __semonUIShared = (() => {
       return;
     }
     const room = sheetList.scrollHeight - sheetList.clientHeight, delta = event instanceof WheelEvent ? event.deltaY : event instanceof TouchEvent ? touchY - (event.touches[0]?.clientY ?? touchY) : 0;
-    if (room <= 1 || delta > 0 && sheetList.scrollTop >= room - 1 || delta < 0 && sheetList.scrollTop <= 0) event.preventDefault();
+    if (room <= 1 || delta > 0 && sheetList.scrollTop >= room - 1 || delta < 0 && sheetList.scrollTop <= 0)
+      event.preventDefault();
   }
   function lock(list) {
     sheetList = list;
@@ -778,61 +813,141 @@ var __semonUIShared = (() => {
     const descendant = () => active === null ? void 0 : listId + "-" + options.findIndex((o4) => o4.value === active);
     function paintTrigger() {
       const text = options.find((o4) => o4.value === value)?.label ?? "";
-      R(/* @__PURE__ */ u3("button", { class: "sh-select-trigger", type: "button", role: "combobox", "aria-haspopup": "listbox", "aria-expanded": !!opened, "aria-controls": listId, "aria-labelledby": (label ? labelId + " " : "") + valueId, "aria-activedescendant": owner() === trigger ? descendant() : void 0, ref: (node) => {
-        trigger = node;
-      }, onClick: (event) => {
-        if (event.currentTarget.isConnected && !disposed) {
-          if (opened) close();
-          else openList();
-        }
-      }, onKeyDown: onKey, onKeyUp: (event) => {
-        if (event.key === " ") event.preventDefault();
-      }, children: [
-        /* @__PURE__ */ u3("span", { class: "sh-select-text", "data-tip-clipped": "", "data-tip": (label ? label + ": " : "") + text, children: [
-          /* @__PURE__ */ u3("span", { id: labelId, class: "sh-select-label", children: label ? label + ":" : "" }),
-          label ? " " : "",
-          /* @__PURE__ */ u3("span", { id: valueId, class: "sh-select-value", children: text })
-        ] }),
-        /* @__PURE__ */ u3(Icon, { path: ICON.chevron, className: "sh-select-chevron" })
-      ] }), triggerRoot);
+      R(
+        /* @__PURE__ */ u3(
+          "button",
+          {
+            class: "sh-select-trigger",
+            type: "button",
+            role: "combobox",
+            "aria-haspopup": "listbox",
+            "aria-expanded": !!opened,
+            "aria-controls": listId,
+            "aria-labelledby": (label ? labelId + " " : "") + valueId,
+            "aria-activedescendant": owner() === trigger ? descendant() : void 0,
+            ref: (node) => {
+              trigger = node;
+            },
+            onClick: (event) => {
+              if (event.currentTarget.isConnected && !disposed) {
+                if (opened) close();
+                else openList();
+              }
+            },
+            onKeyDown: onKey,
+            onKeyUp: (event) => {
+              if (event.key === " ") event.preventDefault();
+            },
+            children: [
+              /* @__PURE__ */ u3(
+                "span",
+                {
+                  class: "sh-select-text",
+                  "data-tip-clipped": "",
+                  "data-tip": (label ? label + ": " : "") + text,
+                  children: [
+                    /* @__PURE__ */ u3("span", { id: labelId, class: "sh-select-label", children: label ? label + ":" : "" }),
+                    label ? " " : "",
+                    /* @__PURE__ */ u3("span", { id: valueId, class: "sh-select-value", children: text })
+                  ]
+                }
+              ),
+              /* @__PURE__ */ u3(Icon, { path: ICON.chevron, className: "sh-select-chevron" })
+            ]
+          }
+        ),
+        triggerRoot
+      );
     }
     function paintList() {
       const items = shown();
-      R(/* @__PURE__ */ u3(S, { children: [
-        /* @__PURE__ */ u3("div", { class: "sh-select-search", hidden: !opened?.search, children: [
-          /* @__PURE__ */ u3(Icon, { path: ICON.search }),
-          /* @__PURE__ */ u3("input", { type: "search", autoComplete: "off", spellcheck: false, placeholder: "Search", "aria-label": "Search " + (label || "options"), role: "combobox", "aria-autocomplete": "list", "aria-expanded": "true", "aria-controls": listId, "aria-activedescendant": owner() === search ? descendant() : void 0, value: query, ref: (node) => {
-            search = node;
-          }, onKeyDown: onKey, onInput: (event) => {
-            if (!event.currentTarget.isConnected || disposed) return;
-            query = event.currentTarget.value;
-            paintList();
-            settle();
-            position();
-          } })
+      R(
+        /* @__PURE__ */ u3(S, { children: [
+          /* @__PURE__ */ u3("div", { class: "sh-select-search", hidden: !opened?.search, children: [
+            /* @__PURE__ */ u3(Icon, { path: ICON.search }),
+            /* @__PURE__ */ u3(
+              "input",
+              {
+                type: "search",
+                autoComplete: "off",
+                spellcheck: false,
+                placeholder: "Search",
+                "aria-label": "Search " + (label || "options"),
+                role: "combobox",
+                "aria-autocomplete": "list",
+                "aria-expanded": "true",
+                "aria-controls": listId,
+                "aria-activedescendant": owner() === search ? descendant() : void 0,
+                value: query,
+                ref: (node) => {
+                  search = node;
+                },
+                onKeyDown: onKey,
+                onInput: (event) => {
+                  if (!event.currentTarget.isConnected || disposed) return;
+                  query = event.currentTarget.value;
+                  paintList();
+                  settle();
+                  position();
+                }
+              }
+            )
+          ] }),
+          /* @__PURE__ */ u3(
+            "div",
+            {
+              class: "sh-select-list",
+              id: listId,
+              role: "listbox",
+              "aria-label": label || void 0,
+              tabIndex: -1,
+              "aria-activedescendant": owner() === list ? descendant() : void 0,
+              ref: (node) => {
+                list = node;
+              },
+              onKeyDown: onKey,
+              children: items.map((option) => /* @__PURE__ */ u3(
+                "div",
+                {
+                  class: "sh-select-option" + (option.value === active ? " sh-active" : ""),
+                  id: listId + "-" + options.indexOf(option),
+                  "data-value": option.value,
+                  role: "option",
+                  "aria-selected": option.value === value,
+                  onPointerDown: (event) => event.preventDefault(),
+                  onPointerMove: (event) => {
+                    if (event.currentTarget.isConnected && option.value !== active)
+                      setActive(option.value, false);
+                  },
+                  onClick: (event) => {
+                    if (event.currentTarget.isConnected && !disposed) choose(option.value);
+                  },
+                  children: [
+                    /* @__PURE__ */ u3(Icon, { path: ICON.check, className: "sh-select-check" }),
+                    /* @__PURE__ */ u3("span", { class: "sh-select-option-text", children: option.label })
+                  ]
+                },
+                option.value
+              ))
+            }
+          ),
+          /* @__PURE__ */ u3("div", { class: "sh-select-empty", role: "status", hidden: items.length > 0, children: "No matches" })
         ] }),
-        /* @__PURE__ */ u3("div", { class: "sh-select-list", id: listId, role: "listbox", "aria-label": label || void 0, tabIndex: -1, "aria-activedescendant": owner() === list ? descendant() : void 0, ref: (node) => {
-          list = node;
-        }, onKeyDown: onKey, children: items.map((option) => /* @__PURE__ */ u3("div", { class: "sh-select-option" + (option.value === active ? " sh-active" : ""), id: listId + "-" + options.indexOf(option), "data-value": option.value, role: "option", "aria-selected": option.value === value, onPointerDown: (event) => event.preventDefault(), onPointerMove: (event) => {
-          if (event.currentTarget.isConnected && option.value !== active) setActive(option.value, false);
-        }, onClick: (event) => {
-          if (event.currentTarget.isConnected && !disposed) choose(option.value);
-        }, children: [
-          /* @__PURE__ */ u3(Icon, { path: ICON.check, className: "sh-select-check" }),
-          /* @__PURE__ */ u3("span", { class: "sh-select-option-text", children: option.label })
-        ] }, option.value)) }),
-        /* @__PURE__ */ u3("div", { class: "sh-select-empty", role: "status", hidden: items.length > 0, children: "No matches" })
-      ] }), parts);
+        parts
+      );
     }
     function setActive(next, scroll = true) {
       active = next;
       paintList();
       paintTrigger();
-      if (scroll && active !== null) document.getElementById(descendant())?.scrollIntoView({ block: "nearest" });
+      if (scroll && active !== null)
+        document.getElementById(descendant())?.scrollIntoView({ block: "nearest" });
     }
     function settle() {
       const items = shown();
-      setActive(items.some((o4) => o4.value === active) ? active : items.some((o4) => o4.value === value) ? value : items[0]?.value ?? null);
+      setActive(
+        items.some((o4) => o4.value === active) ? active : items.some((o4) => o4.value === value) ? value : items[0]?.value ?? null
+      );
     }
     function move(to) {
       const items = shown();
@@ -842,7 +957,12 @@ var __semonUIShared = (() => {
     }
     function geometry(left, top, min, max) {
       layout.reset();
-      popClass = [layout.className("left", left, "px"), layout.className("top", top, "px"), layout.className("min-width", min, "px"), ...max === void 0 ? [] : [layout.className("max-height", max, "px")]].join(" ");
+      popClass = [
+        layout.className("left", left, "px"),
+        layout.className("top", top, "px"),
+        layout.className("min-width", min, "px"),
+        ...max === void 0 ? [] : [layout.className("max-height", max, "px")]
+      ].join(" ");
       pop.className = "sh-select-pop " + popClass;
     }
     function position() {
@@ -851,7 +971,12 @@ var __semonUIShared = (() => {
       geometry(0, 0, min);
       const bar = document.getElementById("topbar"), floor = Math.max(margin, bar ? bar.getBoundingClientRect().bottom + gap : 0), width = Math.min(pop.offsetWidth, vw - 2 * margin), height = pop.offsetHeight, below = vh - r3.bottom - gap - margin, above = r3.top - gap - floor;
       const up = height > below && above > below, room = Math.max(48, Math.min(up ? above : below, 360));
-      geometry(Math.max(margin, Math.min(r3.left, vw - width - margin)), Math.max(floor, up ? r3.top - gap - Math.min(height, room) : r3.bottom + gap), min, room);
+      geometry(
+        Math.max(margin, Math.min(r3.left, vw - width - margin)),
+        Math.max(floor, up ? r3.top - gap - Math.min(height, room) : r3.bottom + gap),
+        min,
+        room
+      );
       pop.dataset.side = up ? "top" : "bottom";
     }
     const outside = (event) => {
@@ -873,10 +998,13 @@ var __semonUIShared = (() => {
         dialog.setAttribute("aria-label", label || "Options");
         const head = document.createElement("div");
         head.className = "sh-select-sheet-h";
-        R(/* @__PURE__ */ u3(S, { children: [
-          /* @__PURE__ */ u3("span", { class: "sh-select-sheet-title", children: label }),
-          /* @__PURE__ */ u3("button", { class: "sh-select-close", type: "button", "aria-label": "Close", onClick: () => close(), children: /* @__PURE__ */ u3(Icon, { path: ICON.close }) })
-        ] }), head);
+        R(
+          /* @__PURE__ */ u3(S, { children: [
+            /* @__PURE__ */ u3("span", { class: "sh-select-sheet-title", children: label }),
+            /* @__PURE__ */ u3("button", { class: "sh-select-close", type: "button", "aria-label": "Close", onClick: () => close(), children: /* @__PURE__ */ u3(Icon, { path: ICON.close }) })
+          ] }),
+          head
+        );
         dialog.append(head, parts);
         root.append(dialog);
         dialog.addEventListener("click", (event) => {
@@ -891,10 +1019,12 @@ var __semonUIShared = (() => {
           history.pushState({ ...history.state, shSelect: n3 }, "");
           swallow = 0;
           opened.entry = true;
-          sheet = { popped() {
-            if (opened) opened.entry = false;
-            close();
-          } };
+          sheet = {
+            popped() {
+              if (opened) opened.entry = false;
+              close();
+            }
+          };
         } catch {
         }
         settle();
@@ -956,7 +1086,9 @@ var __semonUIShared = (() => {
       typed = now - typedAt > 500 ? ch : typed + ch;
       typedAt = now;
       const items = shown(), at = items.findIndex((o4) => o4.value === active), cycle = [...typed].every((c4) => c4 === typed[0]), key = cycle ? typed[0] : typed, from = cycle ? at + 1 : Math.max(0, at);
-      const hit = [...items.slice(from), ...items.slice(0, from)].find((o4) => o4.label.toLowerCase().startsWith(key));
+      const hit = [...items.slice(from), ...items.slice(0, from)].find(
+        (o4) => o4.label.toLowerCase().startsWith(key)
+      );
       if (hit) setActive(hit.value);
     }
     function toSearch(text) {
@@ -968,7 +1100,8 @@ var __semonUIShared = (() => {
       position();
     }
     function onKey(event) {
-      if (disposed || !(event.currentTarget instanceof HTMLElement) || !event.currentTarget.isConnected) return;
+      if (disposed || !(event.currentTarget instanceof HTMLElement) || !event.currentTarget.isConnected)
+        return;
       const key = event.key, inField = event.target === search, printable = key.length === 1 && !event.ctrlKey && !event.metaKey && !event.altKey;
       if (!opened) {
         if (["ArrowDown", "ArrowUp", "Enter", " "].includes(key)) {
@@ -1032,40 +1165,55 @@ var __semonUIShared = (() => {
       if (event.target !== search) event.preventDefault();
     });
     root.addEventListener("focusout", (event) => {
-      if (opened && !opened.sheet && (!(event.relatedTarget instanceof Node) || !root.contains(event.relatedTarget))) close(false);
+      if (opened && !opened.sheet && (!(event.relatedTarget instanceof Node) || !root.contains(event.relatedTarget)))
+        close(false);
     });
-    const api = { el: root, get value() {
-      return value;
-    }, get options() {
-      return options.map((option) => ({ ...option }));
-    }, get isOpen() {
-      return !!opened;
-    }, setOptions(next) {
-      if (disposed) return;
-      options = next.map((option) => ({ value: String(option.value), label: String(option.label ?? option.value) }));
-      paintTrigger();
-      if (opened) {
-        paintList();
-        settle();
-        position();
+    const api = {
+      el: root,
+      get value() {
+        return value;
+      },
+      get options() {
+        return options.map((option) => ({ ...option }));
+      },
+      get isOpen() {
+        return !!opened;
+      },
+      setOptions(next) {
+        if (disposed) return;
+        options = next.map((option) => ({
+          value: String(option.value),
+          label: String(option.label ?? option.value)
+        }));
+        paintTrigger();
+        if (opened) {
+          paintList();
+          settle();
+          position();
+        }
+      },
+      setValue(next) {
+        if (disposed) return;
+        value = String(next ?? "");
+        paintTrigger();
+        if (opened) paintList();
+      },
+      open: openList,
+      close,
+      focus() {
+        trigger?.focus();
+      },
+      destroy() {
+        if (disposed) return;
+        close(false);
+        disposed = true;
+        if (sizing !== null) cancelAnimationFrame(sizing);
+        R(null, triggerRoot);
+        R(null, parts);
+        layout.destroy();
+        root.remove();
       }
-    }, setValue(next) {
-      if (disposed) return;
-      value = String(next ?? "");
-      paintTrigger();
-      if (opened) paintList();
-    }, open: openList, close, focus() {
-      trigger?.focus();
-    }, destroy() {
-      if (disposed) return;
-      close(false);
-      disposed = true;
-      if (sizing !== null) cancelAnimationFrame(sizing);
-      R(null, triggerRoot);
-      R(null, parts);
-      layout.destroy();
-      root.remove();
-    } };
+    };
     root.semonSelect = api;
     api.setOptions(config.options ?? []);
     paintList();
@@ -1073,10 +1221,18 @@ var __semonUIShared = (() => {
   }
   function enhanceSelect(native) {
     if (native.dataset.selectReady !== void 0) return null;
-    const api = createSelect({ label: native.dataset.label ?? native.getAttribute("aria-label") ?? "", value: native.value, options: [...native.options].map((option) => ({ value: option.value, label: option.textContent?.trim() ?? "" })), onChange(value) {
-      native.value = value;
-      native.dispatchEvent(new Event("change", { bubbles: true }));
-    } });
+    const api = createSelect({
+      label: native.dataset.label ?? native.getAttribute("aria-label") ?? "",
+      value: native.value,
+      options: [...native.options].map((option) => ({
+        value: option.value,
+        label: option.textContent?.trim() ?? ""
+      })),
+      onChange(value) {
+        native.value = value;
+        native.dispatchEvent(new Event("change", { bubbles: true }));
+      }
+    });
     native.dataset.selectReady = "";
     native.hidden = true;
     native.after(api.el);
@@ -1155,8 +1311,17 @@ var __semonUIShared = (() => {
       const size = tip.getBoundingClientRect(), need = size.height + GAP + MARGIN, room = { top: box.top, bottom: height - box.bottom };
       const side = room.top >= need ? "top" : room.bottom >= need ? "bottom" : room.top >= room.bottom ? "top" : "bottom";
       const top = side === "top" ? box.top - size.height - GAP : box.bottom + GAP;
-      const left = Math.min(Math.max(box.left + box.width / 2 - size.width / 2, MARGIN), Math.max(MARGIN, width - MARGIN - size.width));
-      tip.className = "tip " + maxWidth + " " + layout.className("left", Math.round(left), "px") + " " + layout.className("top", Math.round(Math.min(Math.max(top, MARGIN), Math.max(MARGIN, height - MARGIN - size.height))), "px");
+      const left = Math.min(
+        Math.max(box.left + box.width / 2 - size.width / 2, MARGIN),
+        Math.max(MARGIN, width - MARGIN - size.width)
+      );
+      tip.className = "tip " + maxWidth + " " + layout.className("left", Math.round(left), "px") + " " + layout.className(
+        "top",
+        Math.round(
+          Math.min(Math.max(top, MARGIN), Math.max(MARGIN, height - MARGIN - size.height))
+        ),
+        "px"
+      );
       tip.dataset.side = side;
     }
     function link(node, text) {
@@ -1200,7 +1365,12 @@ var __semonUIShared = (() => {
           place(target);
         }
       });
-      watcher.observe(document.documentElement, { childList: true, subtree: true, attributes: true, attributeFilter: ["data-tip", "hidden"] });
+      watcher.observe(document.documentElement, {
+        childList: true,
+        subtree: true,
+        attributes: true,
+        attributeFilter: ["data-tip", "hidden"]
+      });
     }
     function unwatch() {
       watcher?.disconnect();
@@ -1254,10 +1424,11 @@ var __semonUIShared = (() => {
     function schedule(node) {
       target = node;
       if (performance.now() - closedAt < SKIP_WINDOW) show(node, true);
-      else timer = window.setTimeout(() => {
-        const now = shown(node) ? node : successor();
-        if (now) show(now, false);
-      }, SHOW_DELAY);
+      else
+        timer = window.setTimeout(() => {
+          const now = shown(node) ? node : successor();
+          if (now) show(now, false);
+        }, SHOW_DELAY);
     }
     document.addEventListener("pointerover", (event) => {
       pointerType = event.pointerType || "mouse";
@@ -1271,25 +1442,33 @@ var __semonUIShared = (() => {
       hide(true);
       if (node) schedule(node);
     });
-    document.addEventListener("pointermove", (event) => {
-      if (event.pointerType === "touch") return;
-      const over = dismissed ? tipOf(event.target) : null;
-      if (over && dismissed && isDismissed(over)) {
-        dismissed.node = over;
-        dismissed.x = event.clientX;
-        dismissed.y = event.clientY;
-      }
-      pointer = { x: event.clientX, y: event.clientY };
-    }, { capture: true, passive: true });
+    document.addEventListener(
+      "pointermove",
+      (event) => {
+        if (event.pointerType === "touch") return;
+        const over = dismissed ? tipOf(event.target) : null;
+        if (over && dismissed && isDismissed(over)) {
+          dismissed.node = over;
+          dismissed.x = event.clientX;
+          dismissed.y = event.clientY;
+        }
+        pointer = { x: event.clientX, y: event.clientY };
+      },
+      { capture: true, passive: true }
+    );
     document.addEventListener("pointerout", (event) => {
       if (!event.relatedTarget && event.pointerType !== "touch") hide(true);
     });
-    document.addEventListener("pointerdown", (event) => {
-      pointerType = event.pointerType || "mouse";
-      if (event.pointerType === "touch") return;
-      dismiss();
-      hide();
-    }, true);
+    document.addEventListener(
+      "pointerdown",
+      (event) => {
+        pointerType = event.pointerType || "mouse";
+        if (event.pointerType === "touch") return;
+        dismiss();
+        hide();
+      },
+      true
+    );
     document.addEventListener("focusin", (event) => {
       const focused = event.target, node = tipOf(focused);
       if (!node || !focusVisible(focused)) return;
@@ -1303,30 +1482,43 @@ var __semonUIShared = (() => {
     document.addEventListener("focusout", (event) => {
       if (target && tipOf(event.target) === target) hide(true);
     });
-    document.addEventListener("keydown", (event) => {
-      if (event.key !== "Escape" || !target) return;
-      const inDialog = opened && !!target.closest?.("dialog[open]");
-      dismiss();
-      hide();
-      if (inDialog) {
-        event.preventDefault();
-        event.stopPropagation();
-      }
-    }, true);
-    document.addEventListener("click", (event) => {
-      if (pointerType !== "touch") return;
-      const node = tipOf(event.target), wasOpen = opened && target === node;
-      hide();
-      if (!node || wasOpen || event.target instanceof Element && event.target.closest(INTERACTIVE) || node.closest(INTERACTIVE)) return;
-      target = node;
-      origin = "touch";
-      show(node, true);
-    }, true);
-    window.addEventListener("scroll", () => {
-      if (!opened || !target || !anchor) return;
-      const box = target.getBoundingClientRect();
-      if (Math.abs(box.top - anchor.top) > 0.5 || Math.abs(box.left - anchor.left) > 0.5) hide();
-    }, { capture: true, passive: true });
+    document.addEventListener(
+      "keydown",
+      (event) => {
+        if (event.key !== "Escape" || !target) return;
+        const inDialog = opened && !!target.closest?.("dialog[open]");
+        dismiss();
+        hide();
+        if (inDialog) {
+          event.preventDefault();
+          event.stopPropagation();
+        }
+      },
+      true
+    );
+    document.addEventListener(
+      "click",
+      (event) => {
+        if (pointerType !== "touch") return;
+        const node = tipOf(event.target), wasOpen = opened && target === node;
+        hide();
+        if (!node || wasOpen || event.target instanceof Element && event.target.closest(INTERACTIVE) || node.closest(INTERACTIVE))
+          return;
+        target = node;
+        origin = "touch";
+        show(node, true);
+      },
+      true
+    );
+    window.addEventListener(
+      "scroll",
+      () => {
+        if (!opened || !target || !anchor) return;
+        const box = target.getBoundingClientRect();
+        if (Math.abs(box.top - anchor.top) > 0.5 || Math.abs(box.left - anchor.left) > 0.5) hide();
+      },
+      { capture: true, passive: true }
+    );
     window.addEventListener("resize", () => hide());
     window.addEventListener("blur", () => hide());
     document.addEventListener("visibilitychange", () => {

@@ -1,0 +1,5 @@
+#!/bin/sh
+set -eu
+command -v node >/dev/null 2>&1 || { echo 'Install Node 22+ before using the UI hook.' >&2; exit 1; }
+[ -d ui/node_modules/prettier ] || { echo 'Run npm --prefix ui ci --no-audit --no-fund before using the UI hook.' >&2; exit 1; }
+node ui/format.mjs --staged
