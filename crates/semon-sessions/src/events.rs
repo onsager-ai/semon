@@ -60,7 +60,8 @@ thread_local! {
 /// v17: Claude assistant lines index their reasoning effort (`effort`, or `perTurnEffort` when set) as an `Effort` signal.
 /// v18: background Claude Bash calls retain their launch flag and terminal
 /// notifications retain their failure outcome.
-const CACHE_VERSION: u32 = 18;
+/// v19: ledgers verify the full consumed prefix instead of just two windows.
+const CACHE_VERSION: u32 = 19;
 
 /// The four token categories the model serves for an exact model id.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -660,48 +661,51 @@ impl Stat {
     }
 }
 
-/// How many bytes each of a ledger's hashes covers: the first 4 KiB, as
-/// the mirror protocol's `head_sha256` does, and the 4 KiB before the
-/// offset.
+/// How many bytes the ledger's tail hash covers before its offset.
 const WINDOW: u64 = 4096;
 
 /// What the index records about a file it has read: the stat it was read
 /// at, the offset its complete lines end at, and SHA-256 hashes of the
-/// first [`WINDOW`] bytes and of the [`WINDOW`] bytes before that offset
-/// (each shorter when the offset is).
+/// complete consumed prefix and of the tail window before that offset.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Ledger {
     pub(crate) stat: Stat,
     pub(crate) offset: u64,
-    pub(crate) head: [u8; 32],
+    pub(crate) prefix: [u8; 32],
     pub(crate) tail: [u8; 32],
 }
 
 impl Ledger {
     /// The file still holds what was read, so reading resumes at the
-    /// offset: the same identity, at least as long, and both hashed windows
+    /// offset: the same identity, at least as long, and the consumed prefix
     /// unchanged. That covers a file that grew and one only touched; any
     /// other change (a rewrite, a truncation, a new inode) rereads it.
     fn resumes(&self, stat: &Stat, file: &mut LogFile) -> bool {
         self.stat.dev == stat.dev
             && self.stat.ino == stat.ino
             && self.offset <= stat.size
-            && window_hashes(file, self.offset)
-                .is_ok_and(|(head, tail)| head == self.head && tail == self.tail)
+            && consumed_hashes(file, self.offset)
+                .is_ok_and(|(prefix, tail)| prefix == self.prefix && tail == self.tail)
     }
 }
 
-/// The hashes a [`Ledger`] keeps for `offset`: two reads of at most
-/// [`WINDOW`] bytes.
-fn window_hashes(file: &mut LogFile, offset: u64) -> io::Result<([u8; 32], [u8; 32])> {
+/// Hash the complete consumed prefix and its tail window. Idle scans retain
+/// the stat shortcut; changed files must verify all consumed bytes because
+/// unchanged end windows cannot establish an unchanged interior.
+fn consumed_hashes(file: &mut LogFile, offset: u64) -> io::Result<([u8; 32], [u8; 32])> {
+    file.seek(SeekFrom::Start(0))?;
+    let mut prefix = Sha256::new();
+    if io::copy(&mut (&mut *file).take(offset), &mut prefix)? != offset {
+        return Err(io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            "consumed prefix shortened",
+        ));
+    }
     let width = offset.min(WINDOW);
-    let mut hash = |start: u64| -> io::Result<[u8; 32]> {
-        let mut bytes = vec![0; width as usize];
-        file.seek(SeekFrom::Start(start))?;
-        file.read_exact(&mut bytes)?;
-        Ok(Sha256::digest(&bytes).into())
-    };
-    Ok((hash(0)?, hash(offset - width)?))
+    let mut tail = vec![0; width as usize];
+    file.seek(SeekFrom::Start(offset - width))?;
+    file.read_exact(&mut tail)?;
+    Ok((prefix.finalize().into(), Sha256::digest(&tail).into()))
 }
 
 /// Why a store call failed.
@@ -950,7 +954,7 @@ impl EventCache {
                     ledger.stat.dev,
                     ledger.stat.ino,
                     ledger.offset,
-                    ledger.head,
+                    ledger.prefix,
                     ledger.tail,
                 )
             })
@@ -1375,11 +1379,11 @@ pub(crate) fn scan_file(
             .dirty_rows
             .take()
             .expect("parser tracks dirty rows");
-        let (head, tail) = window_hashes(&mut file, offset)?;
+        let (prefix, tail) = consumed_hashes(&mut file, offset)?;
         let ledger = Ledger {
             stat,
             offset,
-            head,
+            prefix,
             tail,
         };
         #[cfg(test)]
@@ -4933,7 +4937,54 @@ mod tests {
     }
 
     #[test]
-    fn a_ledger_hashes_at_most_4_kib_at_each_end() {
+    fn an_interior_rewrite_between_unchanged_windows_rebuilds_after_restart() {
+        let root = scratch("interior-rewrite");
+        let cache_path = root.join("index.json");
+        let log = root.join("session.jsonl");
+        let padding = serde_json::json!({"type":"future_padding", "data":"x".repeat(8192)});
+        write_lines(
+            &log,
+            &[
+                padding.clone(),
+                claude_tool("t1"),
+                claude_result("t1"),
+                padding,
+            ],
+        );
+        touch(&log, 1);
+        scan_file(
+            &log,
+            "claude",
+            &mut EventCache::open(&cache_path),
+            &mut false,
+        )
+        .unwrap();
+        let original = fs::read_to_string(&log).unwrap();
+        let changed = original.replacen("\"id\":\"t1\"", "\"id\":\"t2\"", 1);
+        assert_ne!(original, changed);
+        assert_eq!(original.len(), changed.len());
+        assert_eq!(&original.as_bytes()[..4096], &changed.as_bytes()[..4096]);
+        assert_eq!(
+            &original.as_bytes()[original.len() - 4096..],
+            &changed.as_bytes()[changed.len() - 4096..]
+        );
+        fs::write(&log, changed).unwrap();
+        touch(&log, 2);
+        ledger_trace();
+        scan_file(
+            &log,
+            "claude",
+            &mut EventCache::open(&cache_path),
+            &mut false,
+        )
+        .unwrap();
+        assert_eq!(ledger_trace(), ["replace"]);
+        assert_eq!(stored(&cache_path, &log), cold(&log));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_ledger_hashes_the_complete_prefix_and_tail_window() {
         let root = scratch("windows");
         let path = root.join("big.jsonl");
         let bytes: Vec<u8> = (0..10_000u32).map(|n| (n % 251) as u8).collect();
@@ -4941,18 +4992,18 @@ mod tests {
         let mut file = LogFile::open(&path).unwrap();
         let file = &mut file;
         let digest = |bytes: &[u8]| -> [u8; 32] { Sha256::digest(bytes).into() };
-        // Past 4 KiB: the first 4 KiB, and the 4 KiB before the offset.
-        let (head, tail) = window_hashes(file, 9_000).unwrap();
-        assert_eq!(head, digest(&bytes[..4096]));
+        // Past 4 KiB: the whole prefix and the 4 KiB before the offset.
+        let (head, tail) = consumed_hashes(file, 9_000).unwrap();
+        assert_eq!(head, digest(&bytes[..9000]));
         assert_eq!(tail, digest(&bytes[9_000 - 4096..9_000]));
         // Within the first 4 KiB both cover everything before the offset.
-        let (head, tail) = window_hashes(file, 100).unwrap();
+        let (head, tail) = consumed_hashes(file, 100).unwrap();
         assert_eq!(head, digest(&bytes[..100]));
         assert_eq!(tail, head);
-        let (head, tail) = window_hashes(file, 0).unwrap();
+        let (head, tail) = consumed_hashes(file, 0).unwrap();
         assert_eq!((head, tail), (digest(&[]), digest(&[])));
         // An offset past the end is an error, never a short hash.
-        assert!(window_hashes(file, 20_000).is_err());
+        assert!(consumed_hashes(file, 20_000).is_err());
         fs::remove_dir_all(root).unwrap();
     }
 
