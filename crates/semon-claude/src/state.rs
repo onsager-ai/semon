@@ -2,8 +2,8 @@
 //!
 //! Mirrors semon-codex's atomic save/load shape (`crates/semon-codex/src/state.rs`)
 //! but a fresh implementation rather than a shared one: Claude Code's cursor
-//! carries no per-record data at all — just an offset and a line counter per
-//! file, exactly like a flat carrier would. The DAG-ancestor map that
+//! carries no per-record data at all — an offset, line counter and
+//! constant-size prefix digest per file, exactly like a flat carrier would. The DAG-ancestor map that
 //! `parent_sequence`'s block-0 case needs (see
 //! `crate::rebuild_ancestor_sequence`) is deliberately **not** part of this
 //! durable state.
@@ -104,13 +104,14 @@ impl CursorState {
     }
 }
 
-/// Cursor state for one tracked transcript file: just an offset and a line
-/// counter, deliberately as small as Codex's own per-file cursor. See the
-/// module docs for why the DAG-ancestor map is not stored here.
+/// Cursor state for one tracked transcript file: an offset, line
+/// counter and constant-size prefix digest. See the module docs for why the DAG-ancestor map is not stored here.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(crate) struct FileCursor {
     /// Byte offset of the next unread line.
     pub(crate) offset: u64,
+    /// SHA-256 of exactly the complete bytes committed at `offset`.
+    pub(crate) prefix_sha256: Option<String>,
     /// The zero-based ordinal to assign to the next source line read from
     /// this file — this file's own line counter, not a write-time counter,
     /// so replaying the file from scratch (as happens on truncation)
@@ -131,6 +132,10 @@ impl FileCursor {
             .and_then(Value::as_u64)
             .unwrap_or(0);
         Ok(Self {
+            prefix_sha256: object
+                .get("prefix_sha256")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
             offset,
             next_line_ordinal,
         })
@@ -143,6 +148,12 @@ impl FileCursor {
                 Value::Number(self.next_line_ordinal.into()),
             ),
             ("offset".into(), Value::Number(self.offset.into())),
+            (
+                "prefix_sha256".into(),
+                self.prefix_sha256
+                    .clone()
+                    .map_or(Value::Null, Value::String),
+            ),
         ]))
     }
 }

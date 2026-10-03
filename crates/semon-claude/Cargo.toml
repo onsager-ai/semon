@@ -11,3 +11,4 @@ semon-codex = { path = "../semon-codex" }
 semon-store = { path = "../semon-store" }
 serde_json.workspace = true
 thiserror.workspace = true
+sha2.workspace = true

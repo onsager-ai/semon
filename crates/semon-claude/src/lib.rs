@@ -26,6 +26,8 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+use sha2::{Digest, Sha256};
+
 mod normalize;
 mod state;
 
@@ -324,15 +326,23 @@ pub fn process_file(
     let key = resolved(path)?.to_string_lossy().into_owned();
     let size = fs::metadata(path)?.len();
     let mut saved = state.take_file(&key);
-    if saved.offset > size {
+    let mut prefix = Sha256::new();
+    if saved.offset <= size {
+        let mut consumed = File::open(path)?.take(saved.offset);
+        io::copy(&mut consumed, &mut prefix)?;
+    }
+    let prefix_matches = saved.offset == 0
+        || saved.prefix_sha256.as_deref()
+            == Some(format!("{:x}", prefix.clone().finalize()).as_str());
+    if saved.offset > size || !prefix_matches {
         saved = state::FileCursor::default();
+        prefix = Sha256::new();
         // The reset must reach disk even if the file below turns out to have
         // no complete line to consume right now (e.g. it was truncated
         // mid-line): otherwise the stale offset stays saved, and once the
         // file grows past it, the next run resumes from the stale offset and
-        // silently skips the new prefix. A file that was never truncated
-        // never takes this branch, so a fully consumed file still pays no
-        // write here.
+        // silently skips the new prefix. An unchanged verified file never takes this branch and pays no
+        // cursor write here. Older cursors without a digest replay once.
         state.put_file(key.clone(), saved.clone());
         save_state(options.state_path, state)?;
     }
@@ -371,6 +381,7 @@ pub fn process_file(
                 break;
             }
 
+            prefix.update(&line);
             batch_end = reader.stream_position()?;
             pending_bytes += line.len();
             batch_count += 1;
@@ -415,6 +426,7 @@ pub fn process_file(
         }
 
         saved.offset = batch_end;
+        saved.prefix_sha256 = Some(format!("{:x}", prefix.clone().finalize()));
         saved.next_line_ordinal = next_line_ordinal;
         state.put_file(key.clone(), saved.clone());
         save_state(options.state_path, state)?;
