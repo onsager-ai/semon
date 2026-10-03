@@ -14,6 +14,8 @@ test('delta snapshots are isolated from host normalization; rejected bases leave
   assert.throws(() => store.apply({...delta,from:'expired'}), /base expired/);
   const next=store.apply(delta); assert.equal(next.sessions.s.name,'Session'); assert.deepEqual(next.turns.map(t=>t.id),['u','t']);
   assert.throws(() => store.apply({...delta,collections:{turns:{order:['missing']}}}), /Incomplete/);
+  for (const order of [[], ['u'], ['u','u'], ['u','t','t']]) assert.throws(() => store.apply({...delta,collections:{turns:{set:delta.collections.turns.set,order}}}), /Incomplete/);
+  assert.deepEqual(store.apply(delta).turns.map(t=>t.id),['u','t']);
   assert.throws(() => parseModel({...model(),now:Infinity}), /Invalid/);
   assert.throws(() => parseModel({...model(),turns:[{id:'t',sid:'s',sent:[3]}]}), /Invalid/);
 });
@@ -23,9 +25,16 @@ test('transcript cache enforces both bounds and refreshes admission order', () =
   cache.keep('large',[{text:'x'.repeat(46)}],{});assert.deepEqual([...cache.keys()],['large']);
 });
 test('routes retain harness URLs, deep-link ownership and the Hub Machines path', () => {
-  const api={session:id=>id==='s'?{harness:'codex'}:undefined,machine:id=>id==='m',turn:id=>id==='t'?{id:'t',sid:'s'}:undefined,machinesPath:'/workspace/machines'};
+  const api={session:id=>id==='s'?{harness:'codex'}:undefined,machine:id=>id==='m',turn:id=>id==='t'?{id:'t',sid:'s'}:id==='foreign'?{id:'foreign',sid:'other'}:undefined,machinesPath:'/workspace/machines'};
   assert.equal(routeUrl({v:'session',id:'s',turn:'t'},api),'/s/codex/s?turn=t');
   assert.deepEqual(parseRoute({pathname:'/s/codex/s',search:'',hash:'#t#slot:1'},api),{v:'session',id:'s',turn:'t'});
+  assert.deepEqual(parseRoute({pathname:'/s/codex/s',search:'?turn=t',hash:''},api),{v:'session',id:'s',turn:'t'});
+  assert.deepEqual(parseRoute({pathname:'/trace/codex/s/t',search:'',hash:''},api),{v:'trace',sid:'s',turn:'t'});
+  for (const turn of ['foreign','missing']) {
+    assert.deepEqual(parseRoute({pathname:'/s/codex/s',search:'?turn='+turn,hash:'#t'},api),{v:'session',id:'s'});
+    assert.deepEqual(parseRoute({pathname:'/s/codex/s',search:'',hash:'#'+turn},api),{v:'session',id:'s'});
+    assert.deepEqual(parseRoute({pathname:'/trace/codex/s/'+turn,search:'',hash:''},api),{v:'home'});
+  }
   assert.deepEqual(parseRoute({pathname:'/workspace/machines',search:'',hash:''},api),{v:'machines'});
   assert.deepEqual(parseRoute({pathname:'/s/codex/missing',search:'',hash:''},api),{v:'home'});
 });
