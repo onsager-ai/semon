@@ -5252,7 +5252,7 @@ globalThis.__semonUIShared = __semonUIShared;
   function background(value) {
     const v = object2(value), state2 = v.state;
     if (state2 !== "running" && state2 !== "unknown" && state2 !== "failed" && state2 !== "killed" && state2 !== "done") throw new Error("Invalid background state");
-    return { state: state2, secs: optional(v.secs, text), since: optional(v.since, number), exit: optional(v.exit, number), summary: optional(v.summary, text) };
+    return { state: state2, secs: optional(v.secs, (value2) => typeof value2 === "number" ? String(number(value2)) : text(value2)), since: optional(v.since, number), exit: optional(v.exit, number), summary: optional(v.summary, text) };
   }
   function image(value) {
     const v = object2(value), base = { o: number(v.o), b: number(v.b), w: optional(v.w, number), h: optional(v.h, number), type: optional(v.type, text), size: optional(v.size, number) };
@@ -5300,7 +5300,7 @@ globalThis.__semonUIShared = __semonUIShared;
       case "bgend":
         return { ...base, k: "bgend", call: text(v.call), state: text(v.state), label: optional(v.label, text) };
       case "tool":
-        return { ...base, k: "tool", name: text(v.name), arg: text(v.arg), title: optional(v.title, text), secs: optional(v.secs, text), since: optional(v.since, number), exit: optional(v.exit, number), ok: v.ok == null ? v.ok : boolean(v.ok), in: optional(v.in, text), out: optional(v.out, text), cwd: optional(v.cwd, text), diff: optional(v.diff, diff), changes: optional(v.changes, (v2) => array(v2, (v3) => {
+        return { ...base, k: "tool", name: text(v.name), arg: text(v.arg), title: optional(v.title, text), secs: optional(v.secs, (value2) => typeof value2 === "number" ? String(number(value2)) : text(value2)), since: optional(v.since, number), exit: optional(v.exit, number), ok: v.ok == null ? v.ok : boolean(v.ok), in: optional(v.in, text), out: optional(v.out, text), cwd: optional(v.cwd, text), diff: optional(v.diff, diff), changes: optional(v.changes, (v2) => array(v2, (v3) => {
           const c = object2(v3);
           return { path: text(c.path), move: optional(c.move, text), diff: optional(c.diff, diff) };
         })), more: optional(v.more, strings3), script: v.script, cut: optional(v.cut, cut) };

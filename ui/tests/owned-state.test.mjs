@@ -14,3 +14,5 @@ test('page validation rejects invalid ranges and hostile entry structures',()=>{
 test('handoff entries retain validated image references, including masked prompts',()=>{const reference={o:12,b:1,v:'0123456789abcdef',w:180,h:390,type:'image/png',size:99};const p=parseTranscriptPage({...page(0,1,1),entries:[{k:'h',id:'ask',img:[reference]}]});assert.deepEqual(p.entries[0].img[0],{...reference,na:undefined});});
 
 test('unavailable attachment records omit a version while available images require it',()=>{const masked={o:5738,b:0,na:true};const p=parseTranscriptPage({...page(0,1,1),entries:[{k:'h',id:'ask',img:[masked]}]});assert.equal(p.entries[0].img[0].na,true);assert.equal(p.entries[0].img[0].v,undefined);assert.throws(()=>parseTranscriptPage({...page(0,1,1),entries:[{k:'h',id:'ask',img:[{o:1,b:0}]}]}),/Invalid/);});
+
+test('numeric tool elapsed values normalize to display text at the wire boundary',()=>{const p=parseTranscriptPage({...page(0,1,1),entries:[{k:'tool',name:'Read',arg:'file',secs:1}]});assert.equal(p.entries[0].secs,'1');});
