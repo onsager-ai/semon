@@ -7,6 +7,8 @@
 
 #![forbid(unsafe_code)]
 
+pub mod codex_auth;
+
 use serde::{Deserialize, Serialize};
 use std::future::Future;
 use thiserror::Error;
