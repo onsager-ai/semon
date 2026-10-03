@@ -1,0 +1,47 @@
+{
+  "version": 1,
+  "harness": "GitHub Copilot CLI",
+  "harness_version": "1.0.91",
+  "build": "216810c5",
+  "binary_sha256": "5ba1d69542af6fd91702d4dbf4845f41c0a29efa3e9bc56fcc308347ff70ff3e",
+  "os": "Linux x86_64",
+  "execution_mode": "headless -p, offline localhost OpenAI-compatible mock provider",
+  "storage_schema": {
+    "session.start.version": 1
+  },
+  "home_override": "COPILOT_HOME=/workspace/scratch/copilot-probe-tools/home (disposable)",
+  "evidence_origin": "native CLI persistence with deterministic mock model",
+  "original_source_sha256": "c3cfb3e4bdb0f6d32444f570dc088fc017f39551a102e3b742ab8ff85c5ee33a",
+  "fixture_path": "headless-tools.events.jsonl",
+  "fixture_sha256": "cea21d63c4b806fd9ce63f615a7b7c6ebaaf64e3a173bf58e3593dbf6bf70457",
+  "transformations": [
+    "Removed native system.message payload to avoid vendoring the system prompt",
+    "Replaced disposable absolute working directory with /fixture/probe"
+  ],
+  "observed": [
+    "two overlapping bash calls with distinct toolCallId and reversed completion",
+    "arguments and result.content persisted",
+    "shellExecution.exitCode preserved separately from success",
+    "ephemeral stdout events absent from saved events"
+  ],
+  "unverified": [
+    "interactive",
+    "approval denial",
+    "cancellation",
+    "resume/fork",
+    "compaction/truncation",
+    "deletion/retention",
+    "native model billing/token usage",
+    "non-Linux OS",
+    "versions before 1.0.90"
+  ],
+  "limitations": [
+    "A transformed runtime recording, not byte-identical native evidence",
+    "Mock model supplies calls and no authoritative token counts",
+    "The synthetic tool success flag can be true with nonzero shell exit status"
+  ],
+  "completion_order": [
+    "mock-call-1",
+    "mock-call-0"
+  ]
+}
