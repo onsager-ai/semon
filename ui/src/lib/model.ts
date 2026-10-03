@@ -36,7 +36,7 @@ export class ModelStore {
       else { if (previous !== undefined && !object(previous)) throw new Error('Invalid delta base'); for (const [id,row] of Object.entries(object(previous) ? previous : {})) rows.set(id,row); }
       for (const id of (patch.remove ?? []) as string[]) rows.delete(id);
       for (const [id,row] of Object.entries(object(patch.set) ? patch.set : {})) rows.set(id,row);
-      if (array) { const order = (patch.order ?? [...rows.keys()]) as string[]; if (order.some(id => !rows.has(id))) throw new Error('Incomplete model delta'); next[field] = order.map(id => rows.get(id)!); }
+      if (array) { const order = (patch.order ?? [...rows.keys()]) as string[]; if (order.length !== rows.size || new Set(order).size !== rows.size || order.some(id => !rows.has(id))) throw new Error('Incomplete model delta'); next[field] = order.map(id => rows.get(id)!); }
       else next[field] = Object.fromEntries(rows);
     }
     next.version = value.version ?? null; return parseModel(next);

@@ -10,8 +10,8 @@ export function parseRoute(location: Pick<Location,'pathname' | 'search' | 'hash
   if (parts[0] === 'timeline' || parts[0] === 'analytics') return { v: 'analytics' };
   if (parts[0] === 'sessions') return { v: 'sessions' };
   if (parts[0] === 'machines') return parts[1] && model.machine(parts[1]) ? { v: 'machine', id: parts[1] } : { v: 'machines' };
-  if (parts[0] === 's' && sid && model.session(sid)) { const fragmentTurn = model.turn(decode(location.hash.slice(1)).split('#')[0] ?? ''), target = turn ?? (fragmentTurn?.sid === sid ? fragmentTurn.id : null); return target ? { v: 'session', id: sid, turn: target } : { v: 'session', id: sid }; }
-  if (parts[0] === 'trace' && sid && model.session(sid) && parts[3]) return { v: 'trace', sid, turn: parts[3] };
+  if (parts[0] === 's' && sid && model.session(sid)) { const candidate = model.turn(turn ?? (decode(location.hash.slice(1)).split('#')[0] ?? '')), target = candidate?.sid === sid ? candidate.id : null; return target ? { v: 'session', id: sid, turn: target } : { v: 'session', id: sid }; }
+  if (parts[0] === 'trace' && sid && model.session(sid) && parts[3] && model.turn(parts[3])?.sid === sid) return { v: 'trace', sid, turn: parts[3] };
   return { v: 'home' };
 }
 export class TranscriptCache<Entry extends object, Meta> extends Map<string,{ entries: Entry[]; meta: Meta; bytes: number }> {
