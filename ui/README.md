@@ -113,3 +113,11 @@ an active panel before disposing its host; a detached active dialog also release
 guards on the next wheel/touch event. Session menu, full tool details and Analytics
 work items consume this API. Filters, child runs, image dialogs and search sheets
 have typed lifecycle controllers and independently owned body roots.
+
+The legacy-host cleanup is tracked in #224. `src/domain/types.ts` declares the
+normalized discriminated shapes; `normalize.ts` copies and validates session,
+handoff and turn data before host adoption. `calculations.ts`, `trace.ts` and
+`format.ts` contain document-independent relationships, outcomes, costs, run
+charts and labels. The host keeps raw delta snapshots separate from these
+resolved relationships. Ownership and commit ordering are documented in
+[viewer-ownership.md](../docs/design/viewer-ownership.md).
