@@ -77,7 +77,13 @@ Sidebar-only embeddings retain their server frame/drawer owner and use
 root. Do not mutate its descendants; a disposing host may call Preact `render(null,
 root)` before removal. Full viewer and sidebar-only navigation remain equivalent.
 One Preact instance resolves per production bundle; no router, fetch or poller is
-added. The Rust shell API and shell.js remain available for existing consumers.
+added. The Rust shell API serves generated native-shell enhancements from typed sources.
+`src/app/native-shell.ts` owns native-page listeners, confirmation dialogs, copy
+timers and abortable readiness polling. `mountNativeShell()` destroys any previous
+mount and returns an idempotent `destroy()` controller. Native forms and links
+retain server behavior; a destroyed owner cannot submit a confirmation or navigate
+after a pending readiness/clipboard response. Cargo embeds `shell.generated.js`
+and requires no JavaScript toolchain.
 
 All viewer screens, top-bar modes, sheets, Markdown, attachments and transcript
 entries now render through typed native Preact components. Keyed turns preserve

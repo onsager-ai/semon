@@ -27,7 +27,7 @@ pub const CSS: &str = include_str!("shell.css");
 pub const JS: &str = concat!(
     include_str!("shared.generated.js"),
     "\n",
-    include_str!("shell.js")
+    include_str!("shell.generated.js")
 );
 
 /// The Semon mark, a monochrome glyph. `.mark` paints it as a mask from `/mark.svg`, so a page that uses `.mark` must
