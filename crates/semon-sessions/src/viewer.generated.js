@@ -1838,7 +1838,7 @@ globalThis.__semonUIShared = __semonUIShared;
     })) };
   }
   function parseEntry(value) {
-    const v = object2(value), base = { turn: optional(v.turn, text), slot: optional(v.slot, number), live: optional(v.live, boolean), unfinished: optional(v.unfinished, boolean), tid: optional(v.tid, text), bg: optional(v.bg, background) };
+    const v = object2(value), base = { img: optional(v.img, (v2) => array(v2, image)), turn: optional(v.turn, text), slot: optional(v.slot, number), live: optional(v.live, boolean), unfinished: optional(v.unfinished, boolean), tid: optional(v.tid, text), bg: optional(v.bg, background) };
     switch (v.k) {
       case "u":
       case "a":
