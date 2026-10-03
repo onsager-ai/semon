@@ -1,70 +1,61 @@
-// The tooltip. Any element with a non-empty data-tip="text" gets one; a single element (#sh-tooltip) is reused for all of
-// them, and the styles are .tip in viewer.css. Nothing calls into this file: a page sets or changes data-tip and the
-// delegated listeners below read it when they need it, so re-rendered and live-updated nodes work without wiring.
-// The text goes in through textContent only. This file is served inside both /viewer.js and /shell.js.
-//
-// Timing (the Radix defaults): it opens after 500 ms of hover; once one has shown, another tipped element reached within
-// 300 ms shows at once; keyboard focus (:focus-visible only) shows it with no delay. It closes on pointer leave, blur, Esc,
-// a click, or a scroll that moves the target. When a live update replaces the element under a shown tip, it moves to the
-// replacement under the pointer (or holding focus) and stays open. On touch a tap on a static tipped element toggles its tip, and a tap
-// anywhere else closes it; a tap on a button, link or other control runs the control and shows no tip.
-// data-tip-clipped: show only while the element's own text is cut off (an ellipsis), for a tip that repeats visible text.
-(() => {
-  // One controller per page, even if a page loads both /viewer.js and /shell.js.
-  if (window.__semonTooltip) return;
-  window.__semonTooltip = true;
+import { render } from "preact";
+import { createMeasuredLayout } from "./layout";
+let installed = false;
+export function installTooltip() {
+ if (installed) return; installed = true;
+ const layout = createMeasuredLayout();
   const SHOW_DELAY = 500, SKIP_WINDOW = 300, MARGIN = 8, GAP = 6, MAX_WIDTH = 280, ID = "sh-tooltip";
   const INTERACTIVE = 'a[href], button, input, select, textarea, summary, label, [role="button"], [role="link"], [role="menuitem"], [role="tab"], [contenteditable="true"]';
   const HAS_TIP = '[data-tip]:not([data-tip=""])';
 
-  let tip = null;        // the element, made on first use
-  let target = null;     // the element the tip is open for, or scheduled for
+  let tip: HTMLDivElement | null = null;        // the element, made on first use
+  let target: HTMLElement | null = null;     // the element the tip is open for, or scheduled for
   let opened = false;
   let timer = 0;
   let closedAt = -Infinity;   // when a shown tip last closed by moving away: the skip-delay window runs from here
-  let dismissed = null;  // what Esc or a click closed: it stays closed until the pointer leaves, or moves off the spot it rested on
+  let dismissed: { node: HTMLElement; text: string | null; x?: number; y?: number } | null = null;  // what Esc or a click closed: it stays closed until the pointer leaves, or moves off the spot it rested on
   let pointerType = "mouse";
-  let described = null;  // the aria-describedby to give back when the tip closes
-  let watcher = null;
-  let anchor = null;     // where the target stood when the tip opened, to tell whether a scroll moved it
-  let pointer = null;    // the last mouse or pen position, to find the element a re-render put under it
+  let described: { node: HTMLElement; before: string | null } | null = null;  // the aria-describedby to give back when the tip closes
+  let watcher: MutationObserver | null = null;
+  let anchor: { top: number; left: number } | null = null;     // where the target stood when the tip opened, to tell whether a scroll moved it
+  let pointer: { x: number; y: number } | null = null;    // the last mouse or pen position, to find the element a re-render put under it
   let origin = "pointer"; // what opened the tip: the pointer, keyboard focus or a touch
 
-  const tipOf = (node) => node?.closest?.(HAS_TIP) ?? null;
-  const focusVisible = (node) => { try { return node.matches(":focus-visible"); } catch { return true; } };
-  const shown = (node) => node.isConnected && node.getClientRects().length > 0;
+  const tipOf = (node: EventTarget | null): HTMLElement | null => node instanceof Element ? node.closest<HTMLElement>(HAS_TIP) : null;
+  const focusVisible = (node: EventTarget | null) => { try { return node instanceof Element && node.matches(":focus-visible"); } catch { return true; } };
+  const shown = (node: HTMLElement) => node.isConnected && node.getClientRects().length > 0;
   // A rebuild puts a new node with the same tip under a resting pointer: that is still what was dismissed.
   // With no tip open or pending there is nothing new to dismiss, so an earlier dismissal stands (hover, Esc, click the same badge, rebuild).
   const dismiss = () => { dismissed = target ? { node: target, text: target.getAttribute("data-tip"), x: pointer?.x, y: pointer?.y } : dismissed; };
-  const isDismissed = (node) => !!dismissed && !!node && (node === dismissed.node || (pointer != null && pointer.x === dismissed.x && pointer.y === dismissed.y && node.getAttribute("data-tip") === dismissed.text));
-  const clipped = (node) => node.scrollWidth > node.clientWidth + 1 || node.scrollHeight > node.clientHeight + 1;
+  const isDismissed = (node: HTMLElement | null) => !!dismissed && !!node && (node === dismissed.node || (pointer != null && pointer.x === dismissed.x && pointer.y === dismissed.y && node.getAttribute("data-tip") === dismissed.text));
+  const clipped = (node: HTMLElement) => node.scrollWidth > node.clientWidth + 1 || node.scrollHeight > node.clientHeight + 1;
 
   function element() {
     if (tip) return tip;
     tip = document.createElement("div");
-    tip.id = ID; tip.className = "tip"; tip.hidden = true; tip.setAttribute("role", "tooltip");
+    tip!.id = ID; tip!.className = "tip"; tip!.hidden = true; tip!.setAttribute("role", "tooltip");
     // A popover sits in the top layer, above an open modal dialog; without popover support the z-index does the work.
-    if (typeof tip.showPopover === "function") tip.setAttribute("popover", "manual");
+    if (typeof tip!.showPopover === "function") tip!.setAttribute("popover", "manual");
     document.body.append(tip);
     return tip;
   }
 
   // Above the target by default, below when there is no room above, then centred on it and kept 8 px inside the viewport.
-  function place(node) {
+  function place(node: HTMLElement) {
     const box = node.getBoundingClientRect(), width = document.documentElement.clientWidth, height = document.documentElement.clientHeight;
-    tip.style.maxWidth = Math.min(MAX_WIDTH, width - 2 * MARGIN) + "px";
-    tip.style.left = "0px"; tip.style.top = "0px"; // measured at the origin, so its wrapped size is known
-    const size = tip.getBoundingClientRect(), need = size.height + GAP + MARGIN, room = { top: box.top, bottom: height - box.bottom };
+    layout.reset();
+    const maxWidth = layout.className('max-width', Math.min(MAX_WIDTH, width - 2 * MARGIN), 'px');
+    tip!.className = 'tip ' + maxWidth + ' ' + layout.className('left', 0, 'px') + ' ' + layout.className('top', 0, 'px');
+    const size = tip!.getBoundingClientRect(), need = size.height + GAP + MARGIN, room = { top: box.top, bottom: height - box.bottom };
     const side = room.top >= need ? "top" : room.bottom >= need ? "bottom" : room.top >= room.bottom ? "top" : "bottom";
     const top = side === "top" ? box.top - size.height - GAP : box.bottom + GAP;
     const left = Math.min(Math.max(box.left + box.width / 2 - size.width / 2, MARGIN), Math.max(MARGIN, width - MARGIN - size.width));
-    tip.style.left = Math.round(left) + "px";
-    tip.style.top = Math.round(Math.min(Math.max(top, MARGIN), Math.max(MARGIN, height - MARGIN - size.height))) + "px";
-    tip.dataset.side = side;
+    tip!.className = 'tip ' + maxWidth + ' ' + layout.className('left', Math.round(left), 'px') + ' ' + layout.className('top', Math.round(Math.min(Math.max(top, MARGIN), Math.max(MARGIN, height - MARGIN - size.height))), 'px');
+    tip!.dataset.side = side;
   }
 
   // The target is described by the tip while it shows, unless its own name or text already says the same thing.
-  function link(node, text) {
+  function link(node: HTMLElement, text: string) {
     const label = node.getAttribute("aria-label") ?? "";
     const before = node.getAttribute("aria-describedby");
     const said = (before ?? "").split(/\s+/).some((id) => id && document.getElementById(id)?.textContent?.includes(text));
@@ -94,20 +85,20 @@
       const text = target.getAttribute("data-tip");
       if (!shown(target)) { const next = successor(); if (next) show(next, true); else hide(); return; }
       if (!text) { hide(); return; }
-      if (text !== tip.textContent) { unlink(); tip.textContent = text; link(target, text); place(target); }
+      if (text !== tip!.textContent) { unlink(); render(text, tip!); link(target, text); place(target); }
     });
     watcher.observe(document.documentElement, { childList: true, subtree: true, attributes: true, attributeFilter: ["data-tip", "hidden"] });
   }
   function unwatch() { watcher?.disconnect(); watcher = null; }
 
-  function show(node, instant) {
+  function show(node: HTMLElement, instant: boolean) {
     clearTimeout(timer); timer = 0;
     const text = node.getAttribute("data-tip");
     if (!text || !shown(node) || (node.hasAttribute("data-tip-clipped") && !clipped(node))) { if (target === node && !opened) target = null; return; }
     const box = element();
     unlink();
     target = node;
-    box.textContent = text;
+    render(text, box);
     box.toggleAttribute("data-instant", instant);
     box.hidden = false;
     if (box.hasAttribute("popover") && !box.matches(":popover-open")) { try { box.showPopover(); } catch { /* shown by its z-index instead */ } }
@@ -124,14 +115,14 @@
     clearTimeout(timer); timer = 0;
     if (opened) {
       unlink(); unwatch();
-      if (tip.hasAttribute("popover") && tip.matches(":popover-open")) { try { tip.hidePopover(); } catch { /* already closed */ } }
-      tip.hidden = true;
+      if (tip!.hasAttribute("popover") && tip!.matches(":popover-open")) { try { tip!.hidePopover(); } catch { /* already closed */ } }
+      tip!.hidden = true;
       closedAt = moved ? performance.now() : -Infinity;
     }
     opened = false; target = null;
   }
 
-  function schedule(node) {
+  function schedule(node: HTMLElement) {
     target = node;
     if (performance.now() - closedAt < SKIP_WINDOW) show(node, true);
     else timer = window.setTimeout(() => { const now = shown(node) ? node : successor(); if (now) show(now, false); }, SHOW_DELAY);
@@ -154,7 +145,7 @@
     // A nudge inside what was dismissed keeps it dismissed: the spot it rests on follows the pointer, and so does the node
     // (a rebuild may have replaced it), so a later rebuild under the pointer is still the same dismissal.
     const over = dismissed ? tipOf(event.target) : null;
-    if (over && isDismissed(over)) { dismissed.node = over; dismissed.x = event.clientX; dismissed.y = event.clientY; }
+    if (over && dismissed && isDismissed(over)) { dismissed.node = over; dismissed.x = event.clientX; dismissed.y = event.clientY; }
     pointer = { x: event.clientX, y: event.clientY };
   }, { capture: true, passive: true });
   // Leaving the window sends no pointerover to anything else.
@@ -188,12 +179,12 @@
     if (inDialog) { event.preventDefault(); event.stopPropagation(); }
   }, true);
 
-  // Capture phase, so a control that stops the click's propagation still closes the tip.
+  // Capture phase, so a control that stops the click's propagation still closes the tip!.
   document.addEventListener("click", (event) => {
     if (pointerType !== "touch") return;
     const node = tipOf(event.target), wasOpen = opened && target === node;
     hide();
-    if (!node || wasOpen || event.target.closest?.(INTERACTIVE) || node.closest(INTERACTIVE)) return;
+    if (!node || wasOpen || (event.target instanceof Element && event.target.closest(INTERACTIVE)) || node.closest(INTERACTIVE)) return;
     target = node;
     origin = "touch";
     show(node, true);
@@ -210,4 +201,4 @@
   window.addEventListener("resize", () => hide());
   window.addEventListener("blur", () => hide());
   document.addEventListener("visibilitychange", () => { if (document.hidden) hide(); });
-})();
+}

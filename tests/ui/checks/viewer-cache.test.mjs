@@ -6,12 +6,15 @@ import vm from "node:vm";
 // origin can arrive before that callback runs, even after LIVE.late was cleared.
 const source = fs.readFileSync(new URL("../../../crates/semon-sessions/src/viewer.js", import.meta.url), "utf8");
 const start = source.indexOf("  function cacheTx("), end = source.indexOf("\n  // A kept transcript", start);
+const bundle = fs.readFileSync(new URL("../../../crates/semon-sessions/src/viewer.generated.js", import.meta.url), "utf8");
+const cacheStart = bundle.indexOf("  // src/lib/routes.ts"), cacheEnd = bundle.indexOf("  // src/lib/paging.ts", cacheStart);
+assert.ok(cacheStart >= 0 && cacheEnd > cacheStart, "production route/cache controller is present");
 const context = vm.createContext({});
+vm.runInContext(bundle.slice(cacheStart, cacheEnd), context);
 vm.runInContext(`
-  const TXCACHE = new Map(), STALE_BRIEFS = new Set(), TXCACHE_MAX = 5, TXCACHE_BYTES = 1024;
+  const TXCACHE = new TranscriptCache(5, 1024), STALE_BRIEFS = new Set();
   let hasOrigin = false;
   const originHandoff = () => hasOrigin;
-  const weigh = () => 10;
   ${source.slice(start, end)}
   globalThis.run = (originSnapshot, originNow, stale) => {
     TXCACHE.clear(); STALE_BRIEFS.clear(); hasOrigin = originNow;

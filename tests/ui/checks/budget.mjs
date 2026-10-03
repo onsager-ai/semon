@@ -276,10 +276,11 @@ const scenarios = {
           await scrollTop(page);
           const button = page.locator(LOAD_EARLIER).first();
           if (!(await button.count())) break;
+          const previous = await page.locator("#page .turns [data-e]").count();
           const handle = await button.elementHandle();
           if (!handle) continue; // an automatic load already replaced the control
           if (await handle.evaluate((b) => { if (!b.isConnected || b.disabled) return false; b.click(); return true; })) presses++;
-          if (!(await softly(page.waitForFunction((b) => !b.isConnected, handle, { timeout: 30_000 })))) { stuck = true; break; }
+          if (!(await softly(page.waitForFunction(({ b, previous }) => !b.isConnected || (!b.disabled && document.querySelectorAll("#page .turns [data-e]").length > previous), { b: handle, previous }, { timeout: 30_000 })))) { stuck = true; break; }
           await handle.dispose();
         }
       } finally { page.off("request", olderRequest); }

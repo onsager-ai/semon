@@ -42,6 +42,7 @@ import { fileURLToPath } from "node:url";
 import { ENV, launch, reporter } from "../lib.mjs";
 import { write, ms } from "../fixture.mjs";
 import { serve, model, open } from "./live.mjs";
+import { committedModel } from "./live.mjs";
 
 const at = (h, m, s = 0) => ms(h * 60 + m, s);
 const iso = (t) => new Date(t).toISOString();
@@ -350,14 +351,15 @@ async function scheme(browser, name, opts, r) {
       const heldPoll = await (async () => { const t0 = Date.now(); while (!gate.held.length && Date.now() - t0 < 6000) await sleep(50); return gate.held.length > 0; })();
       say(heldPoll, "no poll was held, so the check below proves nothing");
       const mark = () => page.evaluate(() => document.querySelectorAll("#page .nrow, #lanes .treeitem").forEach((x) => { x.__d = 1; }));
-      const redrawn = () => until(page, () => !document.querySelector("#page .nrow")?.__d, null, 8000);
       await mark(); await page.evaluate(() => document.dispatchEvent(new Event("visibilitychange")));
-      say(await redrawn(), "the page didn't draw when the tab returned");
+      say(await until(page, (id) => document.querySelector("#page .nrow")?.dataset.id === id, A, 8000), "the page didn't apply the held order when the tab returned");
+      say(await page.evaluate(() => [...document.querySelectorAll("#page .nrow")].every(row => row.__d === 1)), "the held-order commit replaced keyed rows");
       const applied = await pageRows(page), sideApplied = phone ? [] : await sideRows(page);
       say(applied[0]?.id === A && inRecency(ids(applied), lastOf(modelA1)) && same([...ids(applied)].sort(), [...list].sort()), "the return didn't apply the first change from the data the page has: " + ids(applied).slice(0, 5).join(","));
       say(applied[0]?.id !== B, "the second change was applied by the return, before its poll landed");
       await mark(); u0 = page.updates; await gate.release();
-      say(await redrawn() && page.updates > u0, "the catch-up poll wasn't drawn");
+      say(await committedModel(page, u0, 8000), "the catch-up poll wasn't drawn");
+      say(await page.evaluate(() => [...document.querySelectorAll("#page .nrow")].every(row => row.__d === 1)), "the catch-up commit replaced keyed rows");
       const caught = await pageRows(page);
       say(same(ids(caught), ids(applied)) && still(applied, caught), "the catch-up poll after the tab's return reordered rows that were in view: " + ids(caught).slice(0, 5).join(",") + " vs " + ids(applied).slice(0, 5).join(","));
       if (!phone) say(same(ids(await sideRows(page)), ids(sideApplied)), "the catch-up poll reordered the sidebar's rows");
