@@ -166,3 +166,11 @@ native descendants. `routeControls` owns independently embedded facet lifetimes.
 subscription disposal. Feature consumers use narrow capabilities of real service
 owners rather than composition forwarding methods. The ownership document
 records transaction order and the justified measured/native subroots.
+
+Refactoring rules and the required review checklist live in
+[the viewer ownership contract](../docs/design/viewer-ownership.md). Read it
+before changing ownership, ports, adoption or rendering. Run
+`npm --prefix ui run check:architecture` to check composition dependencies and
+cycles in emitted runtime imports. Type-only feature cycles remain permitted;
+module paths must be literal so the graph can be checked. CI runs this check in
+the required UI foundation lane; unit tests verify rejection and acceptance cases.

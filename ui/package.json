@@ -14,7 +14,8 @@
     "format": "node format.mjs --write",
     "format:check": "node format.mjs",
     "hooks:install": "node hooks.mjs install",
-    "hooks:remove": "node hooks.mjs remove"
+    "hooks:remove": "node hooks.mjs remove",
+    "check:architecture": "node architecture-check.mjs"
   },
   "dependencies": {
     "preact": "10.29.8"

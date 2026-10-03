@@ -43,6 +43,7 @@ jobs:
       - name: Type-check, security boundaries, deterministic build and freshness
         run: |
           npm --prefix ui run format:check
+          npm --prefix ui run check:architecture
           npm --prefix ui run typecheck
           npm --prefix ui test
           npm --prefix ui run check:bundle
