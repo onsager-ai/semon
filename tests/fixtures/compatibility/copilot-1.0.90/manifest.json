@@ -9,11 +9,11 @@
   "storage_schema": {
     "session.start.version": 1
   },
-  "home_override": "COPILOT_HOME=/workspace/scratch/copilot-repro-prior-v1/home (disposable)",
+  "home_override": "COPILOT_HOME=/workspace/scratch/copilot-review-1.0.90/home (disposable)",
   "evidence_origin": "native CLI persistence with deterministic mock model",
-  "original_source_sha256": "42ff26e9f1081d6a42b2504dd7a4b8a384cb1a3ceff678412b2a8d613be64150",
+  "original_source_sha256": "19ebf2e95c6a256cd8e2457f5d34721ec99669c2ece36b01bdb56bffea87ece4",
   "fixture_path": "headless-tools.events.jsonl",
-  "fixture_sha256": "3a4b46e51f4106a1f90db7f6da31befb55fe0cbd1ae8f510ff98a4ef2a00b73e",
+  "fixture_sha256": "58bb027c8facc6b3f532e73e5d432964c1affcb07678cabf77e5244d771fd76c",
   "transformations": [
     "Removed native system.message payload to avoid vendoring the system prompt",
     "Replaced disposable absolute working directory with /fixture/probe"
@@ -41,7 +41,9 @@
     "The synthetic tool success flag can be true with nonzero shell exit status"
   ],
   "completion_order": [
-    "mock-call-0",
-    "mock-call-1"
-  ]
+    "mock-call-1",
+    "mock-call-0"
+  ],
+  "probe_control": "call 0 waits for call 1 marker in the disposable cwd before finishing; joins and ordering are asserted from persisted IDs/event sequence, never inferred from time",
+  "environment_policy": "allow only PATH, locale, timezone and terminal settings; set private temp paths and COPILOT_HOME; no parent HOME, proxy/auth settings or credential variables forwarded"
 }

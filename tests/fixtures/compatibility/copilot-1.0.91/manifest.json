@@ -9,11 +9,11 @@
   "storage_schema": {
     "session.start.version": 1
   },
-  "home_override": "COPILOT_HOME=/workspace/scratch/copilot-probe-tools/home (disposable)",
+  "home_override": "COPILOT_HOME=/workspace/scratch/copilot-review-1.0.91/home (disposable)",
   "evidence_origin": "native CLI persistence with deterministic mock model",
-  "original_source_sha256": "c3cfb3e4bdb0f6d32444f570dc088fc017f39551a102e3b742ab8ff85c5ee33a",
+  "original_source_sha256": "dd0c14557e040409dc0d384d226b7caa826aeb5f1efc8cc2dc265897f2550f85",
   "fixture_path": "headless-tools.events.jsonl",
-  "fixture_sha256": "cea21d63c4b806fd9ce63f615a7b7c6ebaaf64e3a173bf58e3593dbf6bf70457",
+  "fixture_sha256": "db6cda9c000d58379fcbb129472de89f76bbb3a497417b30cb54efaad4defc64",
   "transformations": [
     "Removed native system.message payload to avoid vendoring the system prompt",
     "Replaced disposable absolute working directory with /fixture/probe"
@@ -43,5 +43,7 @@
   "completion_order": [
     "mock-call-1",
     "mock-call-0"
-  ]
+  ],
+  "probe_control": "call 0 waits for call 1 marker in the disposable cwd before finishing; joins and ordering are asserted from persisted IDs/event sequence, never inferred from time",
+  "environment_policy": "allow only PATH, locale, timezone and terminal settings; set private temp paths and COPILOT_HOME; no parent HOME, proxy/auth settings or credential variables forwarded"
 }

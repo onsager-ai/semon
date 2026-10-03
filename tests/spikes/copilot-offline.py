@@ -15,6 +15,19 @@ import subprocess
 import threading
 
 
+def probe_environment(output, ambient=None):
+    """Construct child settings without forwarding the parent environment."""
+    ambient = os.environ if ambient is None else ambient
+    environment = {name: ambient[name] for name in
+                   ('PATH', 'LANG', 'LC_ALL', 'LC_CTYPE', 'TZ', 'TERM')
+                   if name in ambient}
+    temporary = output / 'tmp'
+    temporary.mkdir(mode=0o700)
+    environment.update(COPILOT_HOME=str(output / 'home'), COPILOT_OFFLINE='true',
+                       TMPDIR=str(temporary), TMP=str(temporary), TEMP=str(temporary))
+    return environment
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--copilot', required=True, type=Path)
@@ -24,13 +37,9 @@ def main():
     executable = args.copilot.resolve(strict=True)
     output = args.output.resolve()
     output.mkdir(parents=True, mode=0o700, exist_ok=False)
-    environment = dict(os.environ)
-    # All model requests go to this process's localhost server; never forward
-    # GitHub or provider credentials to the disposable CLI or tool processes.
-    for name in list(environment):
-        if name.startswith('COPILOT_') or name in ('GH_TOKEN', 'GITHUB_TOKEN'):
-            environment.pop(name)
-    environment.update(COPILOT_HOME=str(output / 'home'), COPILOT_OFFLINE='true')
+    # The parent's proxy, authentication guards and environment remain intact.
+    # The offline child receives only these explicit non-sensitive settings.
+    environment = probe_environment(output)
     version = subprocess.run([str(executable), '--no-auto-update', '--version'], env=environment,
                              text=True, capture_output=True, check=True)
     if version.stdout.splitlines()[0] != f'GitHub Copilot CLI {args.expected_version}.':
@@ -59,7 +68,10 @@ def main():
                 calls = [{'index': i, 'id': f'mock-call-{i}', 'type': 'function',
                           'function': {'name': 'bash', 'arguments': json.dumps({
                               'command': command, 'description': 'Disposable mock tool probe'})}}
-                         for i, command in enumerate(['printf mock-one', 'printf mock-two; exit 1'])]
+                         for i, command in enumerate([
+                             'for i in $(seq 1 50); do [ -f mock-two.done ] && break; sleep 0.1; done; '
+                             '[ -f mock-two.done ] || exit 2; sleep 1; printf mock-one',
+                             'printf mock-two; : > mock-two.done; exit 1'])]
                 delta = {'role': 'assistant', 'tool_calls': calls}
                 finish = 'tool_calls'
             self.send_response(200)
@@ -106,6 +118,10 @@ def main():
         raise RuntimeError('Unexpected missing or duplicated tool evidence')
     if set(starts) != {'mock-call-0', 'mock-call-1'} or starts.keys() != completes.keys() or starts.keys() != requested.keys():
         raise RuntimeError('Native tool identities did not join exactly')
+    start_order = [row['toolCallId'] for row in start_rows]
+    completion_order = [row['toolCallId'] for row in complete_rows]
+    if completion_order != list(reversed(start_order)):
+        raise RuntimeError('Expected out-of-order native completion, got start-order completion')
     for identity, expected in [('mock-call-0', 0), ('mock-call-1', 1)]:
         if starts[identity]['arguments'] != requested[identity]['arguments']:
             raise RuntimeError('Requested and executed tool arguments differ')
@@ -121,6 +137,7 @@ def main():
     report = {'version': version.stdout.strip(), 'native_sha256': hashlib.sha256(native).hexdigest(),
               'persisted_event_types': sorted({r['type'] for r in records}),
               'exact_tool_ids': sorted(starts), 'request_count': len(requests),
+              'start_order': start_order, 'completion_order': completion_order,
               'confidence': 'native headless persistence, localhost mock model; no native token claim'}
     (output / 'report.json').write_text(json.dumps(report, indent=2) + '\n')
     print(json.dumps(report, indent=2))

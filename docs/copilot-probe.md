@@ -17,10 +17,15 @@ python tests/spikes/copilot-offline.py \
 ```
 
 The script requires a new output directory, sets `COPILOT_HOME` and offline
-mode, strips GitHub/provider credential environment variables, disables custom
+mode, constructs a minimal allowlist of PATH/locale/timezone/terminal settings, uses
+private temporary paths, and disables custom
 instructions, builtin MCP, remote export/control and updates, and uses only a
-localhost mock provider. The two shell commands print fixture strings; one
-returns exit status 1. No personal session or credential file is mounted.
+localhost mock provider. The two shell commands print fixture strings; one writes a marker inside the
+disposable cwd and returns exit status 1. The other waits for that marker before
+finishing. The probe asserts reversed completion from saved event order and
+exact IDs, rather than inferring any relationship from timing. No parent HOME or credential variables are forwarded; COPILOT_HOME selects
+the disposable native state root. The parent runtime environment stays intact.
+No personal session or credential file is mounted.
 The script checks pinned version, exact persisted tool identities and exit
 codes, and exclusion of ephemeral events from the saved log.
 

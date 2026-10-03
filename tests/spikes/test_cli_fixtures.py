@@ -3,11 +3,32 @@ import hashlib
 import json
 from pathlib import Path
 import unittest
+import importlib.util
+import tempfile
 
 ROOT = Path(__file__).resolve().parents[1] / 'fixtures/compatibility'
 
 
 class CompatibilityFixtures(unittest.TestCase):
+    def test_runtime_environment_does_not_forward_ambient_secrets(self):
+        script = Path(__file__).with_name('copilot-offline.py')
+        spec = importlib.util.spec_from_file_location('copilot_probe', script)
+        probe = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(probe)
+        ambient = {'PATH': '/usr/bin', 'LANG': 'C.UTF-8', 'HOME': '/fixture/private',
+                   'OPENAI_API_KEY': 'fixture-only', 'AWS_SECRET_ACCESS_KEY': 'fixture-only',
+                   'DATABASE_URL': 'fixture-only', 'ARBITRARY_CI_SECRET': 'fixture-only',
+                   'GH_TOKEN': 'fixture-only', 'COPILOT_PROVIDER_API_KEY': 'fixture-only'}
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+            original = dict(ambient)
+            environment = probe.probe_environment(output, ambient)
+            self.assertEqual(set(environment), {'PATH', 'LANG', 'COPILOT_HOME', 'COPILOT_OFFLINE',
+                                               'TMPDIR', 'TMP', 'TEMP'})
+            self.assertEqual(environment['COPILOT_HOME'], str(output / 'home'))
+            self.assertEqual(environment['TMPDIR'], str(output / 'tmp'))
+            self.assertEqual(ambient, original, 'parent settings must remain intact')
+
     def test_source_shaped_hashes_and_explicit_unknown_version(self):
         manifest = json.loads((ROOT / 'v1/manifest.json').read_text())
         self.assertEqual(manifest['version'], 1)
@@ -52,6 +73,8 @@ class CompatibilityFixtures(unittest.TestCase):
         self.assertEqual({row['toolCallId'] for row in ends}, set(by_id))
         self.assertEqual({row['toolName'] for row in starts}, {'bash'})
         self.assertEqual([row['toolCallId'] for row in ends], manifest['completion_order'])
+        self.assertEqual([row['toolCallId'] for row in ends],
+                         list(reversed([row['toolCallId'] for row in starts])))
         for end in ends:
             identity = end['toolCallId']
             self.assertEqual(by_id[identity]['arguments'], requests[identity]['arguments'])
