@@ -23,7 +23,7 @@ def main():
     args = parser.parse_args()
     executable = args.copilot.resolve(strict=True)
     output = args.output.resolve()
-    output.mkdir(parents=True, exist_ok=False)
+    output.mkdir(parents=True, mode=0o700, exist_ok=False)
     environment = dict(os.environ)
     # All model requests go to this process's localhost server; never forward
     # GitHub or provider credentials to the disposable CLI or tool processes.
