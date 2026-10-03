@@ -1,5 +1,16 @@
 # The viewer in TSX components: bundler and runtime compared
 
+## Legacy-host removal in progress — 2026-10-03
+
+The merged component/controller migration does not complete application ownership.
+Issue #224 retains five legacy-host cleanup stages. Domain normalization,
+relationships, outcomes, trace calculations, costs and formatting now live in
+strict typed modules under `ui/src/domain`; callers switch and their superseded
+functions are deleted together. Application boot, transcript orchestration,
+navigation/scroll and native shell cleanup remain subsequent work. See
+[viewer ownership](viewer-ownership.md) for transaction boundaries and owners.
+No integrated pin or production acceptance is claimed by this source record.
+
 ## Current decision — 2026-10-02
 
 Marvin selected **Preact + TypeScript/TSX + esbuild** in [#224](https://github.com/onsager-ai/semon/issues/224): “Okay. Go for preact then. Record that decision and start a new codex cloud session to implement”. This supersedes the custom `h()`/no-runtime decision below. The benchmark remains a historical comparison, including its sample runtime costs; those are not production-viewer measurements.
