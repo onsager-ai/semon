@@ -3625,7 +3625,6 @@ mod tests {
             }
             // DOM attributes are checked by ui/security-check.mjs on the TypeScript AST.
             // Ordinary model/view-model `title` fields are data, not native tooltip attributes.
-
         }
         for banned in ["@import", "http://", "https://"] {
             assert!(
