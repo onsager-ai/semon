@@ -4960,7 +4960,7 @@ mod tests {
         )
         .unwrap();
         let original = fs::read_to_string(&log).unwrap();
-        let changed = original.replacen("t1", "t2", 1);
+        let changed = original.replacen("\"id\":\"t1\"", "\"id\":\"t2\"", 1);
         assert_ne!(original, changed);
         assert_eq!(original.len(), changed.len());
         assert_eq!(&original.as_bytes()[..4096], &changed.as_bytes()[..4096]);
