@@ -1,8 +1,9 @@
 # Authenticated Codex on E2B qualification (#249)
 
-Status: **not qualified**. This is the experiment procedure, not a passing
-result or a production authentication decision. #250–#256 remain gated on
-#249; Daytona #257 remains deferred.
+Status: **minimal authenticated personal experiment measured** on 2026-10-03.
+See [the results](codex-e2b-results.md) for exact identities, outcomes and limits.
+This procedure is not a production authentication decision. Follow the recorded
+dependencies for #250–#256; Daytona #257 remains deferred.
 
 ## Reconciliation against main
 
@@ -100,7 +101,7 @@ after exporting evidence and preserving any needed recoverable original source.
    compute. Report any incomplete cleanup explicitly. Attach the summary to
    #249 only as a passing milestone when all acceptance observations exist.
 
-## Qualification limits and current blocker
+## Qualification limits and initial blocker
 
 Report the exact retained recovery set actually exercised. Retaining an entire
 home proves only that set sufficient; it does not prove rollout-only recovery
@@ -110,10 +111,12 @@ tools, different CLI versions and non-Linux locks remain unsupported by this
 experiment unless separately exercised. Reference-receiver success does not
 prove authenticated hub readback or production ACK/storage durability.
 
-On 2026-10-03 this worker's managed environment reported no configured secrets,
+During preparation on 2026-10-03 this worker's environment reported no configured secrets,
 runtime variables or outbound identities; `E2B_API_KEY` was unset. Local Codex
 reported `0.159.0-alpha.3` and a ChatGPT login, but no supported guest credential
-path was established. No E2B sandbox was created, authenticated turn run,
-pause/resume performed, or runtime identity/log result measured. The first gate
-is blocked on E2B coordinator access and selection/provisioning of supported
-guest model authentication. No implementation milestone is claimed complete.
+path was established. No experiment had run at that point. Subsequently the user
+supplied coordinator E2B access, selected a personal ChatGPT subscription, and
+completed device authorization inside the guest. The resulting experiment and
+cleanup are documented in [the results](codex-e2b-results.md). This resolves the
+experiment's credential blocker; hosted multi-user authentication remains an
+explicit production design decision.
