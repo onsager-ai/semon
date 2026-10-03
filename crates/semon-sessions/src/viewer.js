@@ -281,7 +281,7 @@ queueMicrotask(() => {
 
   // ---- State & navigation ---------------------------------------------------------------
   const phone = window.matchMedia("(max-width: 760px)");
-  const navigation = new NavigationController({ loadMachines: viewerHost ? signal => viewerHost.loadMachines(signal) : undefined }, viewerHost?.initialMachines ?? null); // (before the layout preferences, which read it)
+  const navigation = new NavigationController({ model: routeModel, loadMachines: viewerHost ? signal => viewerHost.loadMachines(signal) : undefined }, viewerHost?.initialMachines ?? null); // (before the layout preferences, which read it)
   let wideMode = false, railMode = false, treePrefs = {};
   try { wideMode = localStorage.getItem("semon.wide") === "1"; } catch {}
   try { railMode = !SIDEBAR_ONLY && localStorage.getItem("semon.rail") === "1"; } catch {} // the rail is the viewer's own layout: an embedding page keeps its sidebar whole
