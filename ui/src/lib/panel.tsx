@@ -22,11 +22,27 @@ export interface PanelChrome {
 
 function PanelHeader({ heading, sub, close }: { heading: string; sub?: string; close(): void }) {
   // Match the viewer's text helper: Instrument Sans needs separator side bearing.
-  const spaced = (text: string) => text.replace(/ · /g, '\u2009 · \u2009').replace(/^· /, '·\u2009 ');
-  return <><div class="panel-t">{spaced(heading)}</div>{sub && <div class="panel-sub">{spaced(sub)}</div>}
-    <button class="ibtn" type="button" aria-label="Close" onClick={close}>
-      <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M6 6l12 12M18 6L6 18" /></svg>
-    </button></>;
+  const spaced = (text: string) =>
+    text.replace(/ · /g, '\u2009 · \u2009').replace(/^· /, '·\u2009 ');
+  return (
+    <>
+      <div class="panel-t">{spaced(heading)}</div>
+      {sub && <div class="panel-sub">{spaced(sub)}</div>}
+      <button class="ibtn" type="button" aria-label="Close" onClick={close}>
+        <svg
+          viewBox="0 0 24 24"
+          aria-hidden="true"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="1.8"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+        >
+          <path d="M6 6l12 12M18 6L6 18" />
+        </svg>
+      </button>
+    </>
+  );
 }
 
 /** One-shot native modal, with a disjoint Preact header and imperative content slot. */
@@ -34,25 +50,42 @@ export function createPanelChrome(options: PanelOptions, host: PanelHost): Panel
   const dialog = document.createElement('dialog');
   dialog.className = 'panel' + (options.className ? ' ' + options.className : '');
   dialog.setAttribute('aria-label', options.label ?? options.title);
-  const header = document.createElement('div'); header.className = 'panel-h';
-  const body = document.createElement('div'); body.className = 'panel-b'; body.tabIndex = -1;
-  let disposed = false, shown = false;
-  const close = () => { if (!disposed && dialog.open) dialog.close(); };
+  const header = document.createElement('div');
+  header.className = 'panel-h';
+  const body = document.createElement('div');
+  body.className = 'panel-b';
+  body.tabIndex = -1;
+  let disposed = false,
+    shown = false;
+  const close = () => {
+    if (!disposed && dialog.open) dialog.close();
+  };
   render(<PanelHeader heading={options.title} sub={options.sub} close={close} />, header);
   dialog.append(header, body);
   document.body.append(dialog);
   const hold = (event: Event) => {
-    if (!dialog.isConnected) { destroy(); return; }
+    if (!dialog.isConnected) {
+      destroy();
+      return;
+    }
     if (!dialog.open) return;
-    if (!(event.target instanceof Node) || !body.contains(event.target) || body.scrollHeight <= body.clientHeight + 1) event.preventDefault();
+    if (
+      !(event.target instanceof Node) ||
+      !body.contains(event.target) ||
+      body.scrollHeight <= body.clientHeight + 1
+    )
+      event.preventDefault();
   };
-  const backdrop = (event: MouseEvent) => { if (event.target === dialog) close(); };
+  const backdrop = (event: MouseEvent) => {
+    if (event.target === dialog) close();
+  };
   function destroy() {
     if (disposed) return;
     disposed = true;
     dialog.removeEventListener('click', backdrop);
     dialog.removeEventListener('close', destroy);
-    for (const type of ['wheel', 'touchmove']) document.removeEventListener(type, hold, { capture: true });
+    for (const type of ['wheel', 'touchmove'])
+      document.removeEventListener(type, hold, { capture: true });
     if (dialog.open) dialog.close();
     render(null, header);
     dialog.remove();
@@ -61,12 +94,15 @@ export function createPanelChrome(options: PanelOptions, host: PanelHost): Panel
   dialog.addEventListener('click', backdrop);
   dialog.addEventListener('close', destroy);
   return {
-    dialog, body, destroy,
+    dialog,
+    body,
+    destroy,
     show() {
       if (disposed || shown || !dialog.isConnected) return;
       dialog.showModal();
       shown = true;
-      for (const type of ['wheel', 'touchmove']) document.addEventListener(type, hold, { capture: true, passive: false });
+      for (const type of ['wheel', 'touchmove'])
+        document.addEventListener(type, hold, { capture: true, passive: false });
       body.focus({ preventScroll: true });
       host.opened();
     },

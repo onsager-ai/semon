@@ -32,10 +32,13 @@
         this.retire(this.timers, id);
         if (!this.disposed) callback();
       }, delay);
-      this.timers.set(id, this.own(() => {
-        this.retire(this.timers, id);
-        window.clearTimeout(id);
-      }));
+      this.timers.set(
+        id,
+        this.own(() => {
+          this.retire(this.timers, id);
+          window.clearTimeout(id);
+        })
+      );
       return id;
     }
     clearTimeout(id) {
@@ -46,10 +49,13 @@
       const id = window.setInterval(() => {
         if (!this.disposed) callback();
       }, delay);
-      this.timers.set(id, this.own(() => {
-        this.retire(this.timers, id);
-        window.clearInterval(id);
-      }));
+      this.timers.set(
+        id,
+        this.own(() => {
+          this.retire(this.timers, id);
+          window.clearInterval(id);
+        })
+      );
       return id;
     }
     clearInterval(id) {
@@ -61,10 +67,13 @@
         this.retire(this.frames, id);
         if (!this.disposed) callback(time);
       });
-      this.frames.set(id, this.own(() => {
-        this.retire(this.frames, id);
-        cancelAnimationFrame(id);
-      }));
+      this.frames.set(
+        id,
+        this.own(() => {
+          this.retire(this.frames, id);
+          cancelAnimationFrame(id);
+        })
+      );
       return id;
     }
     cancelFrame(id) {
@@ -144,19 +153,30 @@
         }
       };
       effects.listen(document, "keydown", (event) => {
-        if (event.key === "Escape" && !popoverOpen() && !document.querySelector("dialog[open]")) closeDrawer2();
+        if (event.key === "Escape" && !popoverOpen() && !document.querySelector("dialog[open]"))
+          closeDrawer2();
       });
       let touchStart = null;
-      sidebar && effects.listen(sidebar, "touchstart", (event) => {
-        touchStart = event.touches[0]?.clientX ?? null;
-      }, { passive: true });
-      sidebar && effects.listen(sidebar, "touchmove", (event) => {
-        const x = event.touches[0]?.clientX;
-        if (phone.matches && touchStart !== null && x !== void 0 && x - touchStart < -50) {
-          touchStart = null;
-          closeDrawer2();
-        }
-      }, { passive: true });
+      sidebar && effects.listen(
+        sidebar,
+        "touchstart",
+        (event) => {
+          touchStart = event.touches[0]?.clientX ?? null;
+        },
+        { passive: true }
+      );
+      sidebar && effects.listen(
+        sidebar,
+        "touchmove",
+        (event) => {
+          const x = event.touches[0]?.clientX;
+          if (phone.matches && touchStart !== null && x !== void 0 && x - touchStart < -50) {
+            touchStart = null;
+            closeDrawer2();
+          }
+        },
+        { passive: true }
+      );
       effects.listen(phone, "change", () => closeDrawer2(false));
       const topbar = document.getElementById("topbar");
       const main = document.getElementById("main");
@@ -184,11 +204,14 @@
       button.setAttribute("aria-label", "Copied");
       button.classList.add("copied");
       effects.clearTimeout(copyTimers.get(button));
-      copyTimers.set(button, effects.timeout(() => {
-        button.setAttribute("aria-label", button.dataset.copyLabel ?? "Copy");
-        button.classList.remove("copied");
-        copyTimers.delete(button);
-      }, 1500));
+      copyTimers.set(
+        button,
+        effects.timeout(() => {
+          button.setAttribute("aria-label", button.dataset.copyLabel ?? "Copy");
+          button.classList.remove("copied");
+          copyTimers.delete(button);
+        }, 1500)
+      );
     }
     effects.listen(document, "click", async (event) => {
       const button = event.target instanceof Element ? event.target.closest("[data-copy]") : null;
@@ -252,12 +275,14 @@
       if (dialog instanceof HTMLDialogElement && target === dialog) {
         if (event.clientX === 0 && event.clientY === 0) return;
         const box = dialog.getBoundingClientRect();
-        if (event.clientX < box.left || event.clientX > box.right || event.clientY < box.top || event.clientY > box.bottom) dialog.close();
+        if (event.clientX < box.left || event.clientX > box.right || event.clientY < box.top || event.clientY > box.bottom)
+          dialog.close();
         return;
       }
       const button = target?.closest?.("button");
       const parentDialog = button?.closest?.("dialog");
-      if (!button || !(parentDialog instanceof HTMLDialogElement) || !waitingForms.has(parentDialog)) return;
+      if (!button || !(parentDialog instanceof HTMLDialogElement) || !waitingForms.has(parentDialog))
+        return;
       const form = waitingForms.get(parentDialog);
       waitingForms.delete(parentDialog);
       if (button.value === "confirm") {
@@ -269,12 +294,17 @@
         parentDialog.close("cancel");
       }
     });
-    effects.listen(document, "close", (event) => {
-      if (event.target instanceof HTMLDialogElement) {
-        waitingForms.delete(event.target);
-        dialogs.delete(event.target);
-      }
-    }, true);
+    effects.listen(
+      document,
+      "close",
+      (event) => {
+        if (event.target instanceof HTMLDialogElement) {
+          waitingForms.delete(event.target);
+          dialogs.delete(event.target);
+        }
+      },
+      true
+    );
     document.querySelectorAll("[data-poll]").forEach((element) => {
       const url = element.dataset.poll;
       if (!url) return;
@@ -289,7 +319,11 @@
         if (pending) return;
         pending = true;
         try {
-          const response = await fetch(url, { signal: request.signal, credentials: "same-origin", cache: "no-store" });
+          const response = await fetch(url, {
+            signal: request.signal,
+            credentials: "same-origin",
+            cache: "no-store"
+          });
           if (!disposed && element.isConnected && Date.now() < deadline && response.status === 200) {
             effects.clearInterval(interval);
             window.location.assign(element.dataset.pollGo || "/");
@@ -301,23 +335,25 @@
       }, 3e3);
       effects.timeout(() => effects.clearInterval(interval), 30 * 60 * 1e3);
     });
-    const controller = { destroy() {
-      if (disposed) return;
-      disposed = true;
-      effects.destroy();
-      for (const button of copyTimers.keys()) {
-        button.setAttribute("aria-label", button.dataset.copyLabel ?? "Copy");
-        button.classList.remove("copied");
+    const controller = {
+      destroy() {
+        if (disposed) return;
+        disposed = true;
+        effects.destroy();
+        for (const button of copyTimers.keys()) {
+          button.setAttribute("aria-label", button.dataset.copyLabel ?? "Copy");
+          button.classList.remove("copied");
+        }
+        copyTimers.clear();
+        releaseChrome();
+        for (const dialog of dialogs) {
+          waitingForms.delete(dialog);
+          if (dialog.open) dialog.close();
+        }
+        dialogs.clear();
+        if (current === controller) current = null;
       }
-      copyTimers.clear();
-      releaseChrome();
-      for (const dialog of dialogs) {
-        waitingForms.delete(dialog);
-        if (dialog.open) dialog.close();
-      }
-      dialogs.clear();
-      if (current === controller) current = null;
-    } };
+    };
     current = controller;
     return controller;
   }

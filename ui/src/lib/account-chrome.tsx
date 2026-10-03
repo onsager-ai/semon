@@ -32,34 +32,81 @@ export function createAccountChrome(host: AccountChromeHost): AccountChrome {
   let active: Widget | null = null;
   let destroyed = false;
   const initialFocus: FocusOptions & { focusVisible: boolean } = { focusVisible: false };
-  const returnFocus: FocusOptions & { focusVisible: boolean } = { focusVisible: false, preventScroll: true };
-  const triggerOf = (widget: Widget) => widget.root.querySelector<HTMLButtonElement>('.account-trigger')!;
+  const returnFocus: FocusOptions & { focusVisible: boolean } = {
+    focusVisible: false,
+    preventScroll: true,
+  };
+  const triggerOf = (widget: Widget) =>
+    widget.root.querySelector<HTMLButtonElement>('.account-trigger')!;
   function commit(widget: Widget) {
     const { root, props } = widget;
     const { account, compact, wide, onWideChange } = props;
-    const current = account.workspaces.find(workspace => workspace.current);
+    const current = account.workspaces.find((workspace) => workspace.current);
     const expanded = active === widget;
-    render(<>
-      {expanded && compact && <div key="backdrop" class="account-backdrop" onClick={event => { event.stopPropagation(); close(); }} />}
-      <button key="trigger" class={'account-trigger' + (compact ? '' : ' account-avatar-button')} type="button"
-        aria-haspopup="menu" aria-expanded={expanded}
-        aria-label={compact ? account.name + ', ' + (current?.name ?? account.login) : account.name + ' account menu'}
-        onClick={event => { event.stopPropagation(); toggle(widget); }}>
-        <AccountAvatar account={account} />
-        {compact && <span class="account-summary"><span class="account-summary-name">{account.name}</span><span class="account-summary-workspace">{current?.name ?? account.login}</span></span>}
-      </button>
-      {expanded && <div key="menu" class="menu account-popover" role="menu" aria-label="Account"
-        onClick={event => {
-          const target = event.target;
-          const link = target instanceof Element ? target.closest<HTMLAnchorElement>('a[href]') : null;
-          if (compact && link && host.navigate(link.href)) event.preventDefault();
-        }}
-        onSubmit={event => {
-          if (compact && event.target instanceof HTMLFormElement && host.submit(event.target)) event.preventDefault();
-        }}>
-        <AccountMenu account={account} compact={compact} wide={wide} onWideChange={onWideChange} />
-      </div>}
-    </>, root);
+    render(
+      <>
+        {expanded && compact && (
+          <div
+            key="backdrop"
+            class="account-backdrop"
+            onClick={(event) => {
+              event.stopPropagation();
+              close();
+            }}
+          />
+        )}
+        <button
+          key="trigger"
+          class={'account-trigger' + (compact ? '' : ' account-avatar-button')}
+          type="button"
+          aria-haspopup="menu"
+          aria-expanded={expanded}
+          aria-label={
+            compact
+              ? account.name + ', ' + (current?.name ?? account.login)
+              : account.name + ' account menu'
+          }
+          onClick={(event) => {
+            event.stopPropagation();
+            toggle(widget);
+          }}
+        >
+          <AccountAvatar account={account} />
+          {compact && (
+            <span class="account-summary">
+              <span class="account-summary-name">{account.name}</span>
+              <span class="account-summary-workspace">{current?.name ?? account.login}</span>
+            </span>
+          )}
+        </button>
+        {expanded && (
+          <div
+            key="menu"
+            class="menu account-popover"
+            role="menu"
+            aria-label="Account"
+            onClick={(event) => {
+              const target = event.target;
+              const link =
+                target instanceof Element ? target.closest<HTMLAnchorElement>('a[href]') : null;
+              if (compact && link && host.navigate(link.href)) event.preventDefault();
+            }}
+            onSubmit={(event) => {
+              if (compact && event.target instanceof HTMLFormElement && host.submit(event.target))
+                event.preventDefault();
+            }}
+          >
+            <AccountMenu
+              account={account}
+              compact={compact}
+              wide={wide}
+              onWideChange={onWideChange}
+            />
+          </div>
+        )}
+      </>,
+      root,
+    );
   }
   function close(options: AccountCloseOptions = {}) {
     const widget = active;
@@ -75,7 +122,10 @@ export function createAccountChrome(host: AccountChromeHost): AccountChrome {
   function toggle(widget: Widget) {
     // Detached or unmounted triggers cannot reopen stale account roots.
     if (destroyed || !widgets.has(widget.root) || !widget.root.isConnected) return;
-    if (active) { close(); return; }
+    if (active) {
+      close();
+      return;
+    }
     const trigger = triggerOf(widget);
     if (widget.props.compact) host.place(widget.root, trigger);
     active = widget;
@@ -92,11 +142,15 @@ export function createAccountChrome(host: AccountChromeHost): AccountChrome {
   let listening = false;
   function startListening() {
     if (listening) return;
-    listening = true; document.addEventListener('click', outside); window.addEventListener('pageshow', pageshow);
+    listening = true;
+    document.addEventListener('click', outside);
+    window.addEventListener('pageshow', pageshow);
   }
   function stopListening() {
     if (!listening) return;
-    listening = false; document.removeEventListener('click', outside); window.removeEventListener('pageshow', pageshow);
+    listening = false;
+    document.removeEventListener('click', outside);
+    window.removeEventListener('pageshow', pageshow);
   }
   function unmount(root: HTMLElement) {
     const widget = widgets.get(root);
@@ -107,11 +161,14 @@ export function createAccountChrome(host: AccountChromeHost): AccountChrome {
     if (!widgets.size) stopListening();
   }
   return {
-    get open() { return active !== null; },
+    get open() {
+      return active !== null;
+    },
     mount(props) {
       if (destroyed) throw new Error('Account chrome is destroyed');
       const root = document.createElement('div');
-      root.className = 'account-widget ' + (props.compact ? 'account-widget-phone' : 'account-widget-desktop');
+      root.className =
+        'account-widget ' + (props.compact ? 'account-widget-phone' : 'account-widget-desktop');
       const widget = { root, props };
       widgets.set(root, widget);
       startListening();
