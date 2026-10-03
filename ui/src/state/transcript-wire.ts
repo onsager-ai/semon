@@ -11,7 +11,7 @@ function image(value: unknown): Image { const v = object(value); return { o: num
 const diff = (value: unknown) => array(value, (value): [string, string] => { if (!Array.isArray(value) || value.length !== 2) throw new Error('Invalid diff'); return [text(value[0]), text(value[1])]; });
 function cut(value: unknown): ToolData['cut'] { const v = object(value); return { original_tokens: optional(v.original_tokens, number), parts: optional(v.parts, v => array(v, v => { const p = object(v); return { text: optional(p.text, text), gap: optional(p.gap, v => { const g = object(v); return { unit: text(g.unit), n: number(g.n), of: optional(g.of, number) }; }) }; })) }; }
 export function parseEntry(value: unknown): Entry {
-  const v = object(value), base = { turn: optional(v.turn, text), slot: optional(v.slot, number), live: optional(v.live, boolean), unfinished: optional(v.unfinished, boolean), tid: optional(v.tid, text), bg: optional(v.bg, background) };
+  const v = object(value), base = { img: optional(v.img, v => array(v, image)), turn: optional(v.turn, text), slot: optional(v.slot, number), live: optional(v.live, boolean), unfinished: optional(v.unfinished, boolean), tid: optional(v.tid, text), bg: optional(v.bg, background) };
   switch (v.k) {
     case 'u': case 'a': return { ...base, k: v.k, text: text(v.text), img: optional(v.img, v => array(v, image)) };
     case 'think': return { ...base, k: 'think', text: optional(v.text, text), pending: optional(v.pending, boolean), status: optional(v.status, text), secs: optional(v.secs, v => typeof v === 'string' ? v : number(v)) };

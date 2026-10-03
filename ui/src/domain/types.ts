@@ -25,7 +25,7 @@ export type Handoff = HandoffBase & (
 export interface TurnEnd { st?: SessionState; why: string; h?: string; at?: number }
 export interface Background { state: 'running' | 'unknown' | 'failed' | 'killed' | 'done'; secs?: string; since?: number; exit?: number; summary?: string }
 export interface Image { o: number; b: number; v: string; w?: number; h?: number; type?: string; size?: number; na?: boolean }
-interface EntryBase { key?: string; turn?: string; sid?: string; slot?: number; live?: boolean; unfinished?: boolean; bg?: Background; tid?: string }
+interface EntryBase { img?: Image[]; key?: string; turn?: string; sid?: string; slot?: number; live?: boolean; unfinished?: boolean; bg?: Background; tid?: string }
 export type Entry = EntryBase & (
   { k: 'u' | 'a'; text: string; img?: Image[] } | { k: 'think'; text?: string; pending?: boolean; status?: string; secs?: number | string; displaySecs?: number | null } |
   { k: 'h'; id: string } | { k: 'end'; text?: string; ret?: { to: string; failed?: boolean; at?: number } } |
