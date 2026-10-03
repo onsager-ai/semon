@@ -12,6 +12,45 @@ ROOT = Path(__file__).resolve().parents[1] / 'fixtures/compatibility'
 
 
 class CompatibilityFixtures(unittest.TestCase):
+    def test_claude_native_tools_model_switch_and_shared_api_ids(self):
+        directory = ROOT / 'claude-2.1.288' / 'tools'
+        manifest = json.loads((directory / 'manifest.json').read_text())
+        probe = Path(__file__).with_name('claude-tools.py').read_bytes()
+        self.assertEqual(hashlib.sha256(probe).hexdigest(), manifest['source_reference']['probe_sha256'])
+        self.assertEqual(hashlib.sha1(b'blob ' + str(len(probe)).encode() + b'\0' + probe).hexdigest(),
+                         manifest['source_reference']['probe_git_blob'])
+        snapshots = {}
+        for entry in manifest['fixtures']:
+            data = (directory / entry['path']).read_bytes()
+            self.assertEqual(hashlib.sha256(data).hexdigest(), entry['fixture_sha256'])
+            self.assertNotIn(b'/workspace/', data)
+            snapshots[entry['path']] = (data, list(map(json.loads, data.splitlines())))
+        initial, rows = snapshots['initial-transcript.jsonl']
+        resumed, resumed_rows = snapshots['resumed-transcript.jsonl']
+        self.assertTrue(resumed.startswith(initial))
+        calls = {block['id']: (row, block) for row in rows if row['type'] == 'assistant'
+                 for block in row.get('message', {}).get('content', []) if block.get('type') == 'tool_use'}
+        results = {block['tool_use_id']: block for row in rows if row['type'] == 'user'
+                   for block in row.get('message', {}).get('content', [])
+                   if isinstance(block, dict) and block.get('type') == 'tool_result'}
+        expected = {'fixture-read', 'fixture-bash-one', 'fixture-bash-two', 'fixture-edit'}
+        self.assertEqual(set(calls), expected)
+        self.assertEqual(set(results), expected)
+        self.assertEqual({key for key, block in results.items() if block.get('is_error')}, {'fixture-bash-two'})
+        bash = [calls[key] for key in ('fixture-bash-one', 'fixture-bash-two')]
+        self.assertEqual([block['name'] for row, block in bash], ['Bash', 'Bash'])
+        streamed = [calls[key][0] for key in ('fixture-read', 'fixture-bash-one', 'fixture-bash-two')]
+        self.assertEqual(len({row['uuid'] for row in streamed}), 3)
+        self.assertEqual({row['message']['id'] for row in streamed}, {'fixture-msg-1'})
+        self.assertEqual({row['message']['model'] for row in resumed_rows if row['type'] == 'assistant'},
+                         {'claude-sonnet-4-6', 'claude-haiku-4-5'})
+        fork_rows = snapshots['forked-transcript.jsonl'][1]
+        parent_messages = [row for row in resumed_rows if row['type'] in ('user', 'assistant')]
+        child_messages = [row for row in fork_rows if row['type'] in ('user', 'assistant')]
+        self.assertEqual([row['uuid'] for row in child_messages[:12]], [row['uuid'] for row in parent_messages])
+        self.assertEqual({row['sessionId'] for row in parent_messages}, {'native-claude-tools-parent'})
+        self.assertEqual({row['sessionId'] for row in child_messages}, {'native-claude-tools-child'})
+
     def test_runtime_environment_does_not_forward_ambient_secrets(self):
         script = Path(__file__).with_name('copilot-offline.py')
         spec = importlib.util.spec_from_file_location('copilot_probe', script)

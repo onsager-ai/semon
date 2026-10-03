@@ -169,3 +169,25 @@ newly attributable child consumption. Canonical message occurrences preserve
 the physical session namespace. Fixture tests compare cold, restarted and
 retained-raw replay for each complete snapshot; retained generation selection
 following source replacement remains a separate unresolved gate.
+
+### Native Claude tools and model switch
+
+`claude-2.1.288/tools` exercises Read, Edit, successful Bash and Bash exit 1
+against disposable files with localhost synthetic model replies. Tool request
+IDs join exact persisted result IDs. Three streamed assistant blocks share one
+API message ID but retain distinct record UUIDs. They must all remain visible;
+an API message ID alone is not a block identity.
+
+The batch executes serially in this native run. Overlapping/reversed same-name
+call decoding remains covered by the separately labeled source-shaped fixture.
+An explicit fixture tool allowlist does not establish a persisted approval ID.
+Resume appends under the same physical session and switches Sonnet to Haiku;
+fork copies these records into a distinct physical session without an explicit
+logical parent edge. The cold/restart/raw oracle compares six, eight and ten
+semantic occurrences respectively. Tool results remain in the forensic region
+under the existing Claude projection contract. Usage is mock evidence, and
+shared streamed API message IDs must not be summed as independent requests.
+
+Reproduce with `tests/spikes/claude-tools.py` using the pinned binary and a new
+private output directory. The manifest pins script content, binary and original
+source hashes, transformations, and unsupported scenarios.
