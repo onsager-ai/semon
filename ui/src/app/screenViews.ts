@@ -1,4 +1,3 @@
-import type { createDomain } from "../domain/calculations";
 import { compactCount,machineShorts,preview } from "../domain/format";
 import { createTraceCalculations } from "../domain/trace";
 import type { Entry,Handoff,Session,TokenKind,Turn } from '../domain/types';
@@ -6,7 +5,6 @@ import type { HarnessMark,InboxRow,LiveRow,MenuRun,SentencePart,SessionMenuSnaps
 import { renderHomeScreen,renderMachineScreen,renderMachinesScreen,renderSessionScreen,renderTraceScreen } from "../lib";
 import type { Hop } from '../lib/trace';
 type ToolEntry = Extract<Entry, {k: 'tool'}> & {full?: boolean; scriptLoaded?: boolean};
-type Domain = ReturnType<typeof createDomain>;
 interface ScreenViewsHost {
   costForSession: (sid: string, includeRuns?: boolean) => Required<import("../domain/types").Cost>;
   costMissing: (cost: import("../domain/types").Cost) => string[];
@@ -54,18 +52,18 @@ interface ScreenViewsHost {
   go: (r: import("../navigation/routes").ApplicationRoute, fromHistory?: boolean, prepared?: boolean, nextContent?: import("../viewer-host").ViewerContent | null) => void;
   byState: (a: import("../domain/types").Session, b: import("../domain/types").Session) => number;
   STARTS: Map<string, import("../domain/types").Turn>;
-  domain: Domain;
+  domain: import("../domain/calculations").DomainController;
   NOW: number;
   TURN: Map<string, import("../domain/types").Turn>;
   sentenceHost: import("../lib/sentence").SentenceHost;
-  machineLabel: Domain['machineLabel'];
+  machineLabel: (s: import("../domain/types").Session | null | undefined, scope?: Iterable<string | import("../domain/types").Session> | undefined) => string;
   hcls: (id: string) => string;
   hostOf: (s: import("../domain/types").Session) => string;
   sentenceSnapshot: (h: import("../domain/types").Handoff, viewer: string | null | undefined, links?: boolean) => import("../lib/sentence").SentenceSnapshot;
   turnEnd: (t: import("../domain/types").Turn) => { st: import("../domain/types").SessionState; text: string; } | null;
   statWord: (h: import("../domain/types").Handoff) => string | undefined;
   SEEN_RESULTS: Set<string>;
-  machineLabels: Domain['machineLabels'];
+  machineLabels: (scope?: Iterable<string | import("../domain/types").Session>) => Map<string, string>;
   transcriptEntries: (entries: import("../domain/types").Entry[], sid: string) => import("../domain/types").Entry[];
   TX: Record<string, import("../domain/types").Entry[]>;
   transcriptSnapshot: (sid: string, opts?: { only?: ReadonlySet<string> | undefined; }) => import("../lib/transcript").SessionSnapshot;
