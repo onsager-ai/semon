@@ -75,10 +75,14 @@ try:
  child_id=fork['thread']['id'];deadline=time.monotonic()+10
  while time.monotonic()<deadline:
   children=[p for p in (root/'home/sessions').rglob('*.jsonl') if p!=parent]
-  if children:break
+  if len(children)==1:
+   child=children[0];child_bytes=child.read_bytes()
+   if child_bytes.endswith(b'\n') and len(child_bytes.splitlines())==2:
+    records=[json.loads(line) for line in child_bytes.splitlines()]
+    if records[0].get('type')=='session_meta' and records[0].get('payload',{}).get('id')==child_id and records[1].get('type')=='event_msg' and records[1].get('payload',{}).get('type')=='thread_settings_applied':break
   time.sleep(.1)
- if len(children)!=1:raise RuntimeError('Expected one child rollout')
- child=children[0];child_bytes=child.read_bytes();(root/'forked-rollout.jsonl').write_bytes(child_bytes)
+ else:raise RuntimeError('Missing complete durable fork metadata/settings snapshot')
+ (root/'forked-rollout.jsonl').write_bytes(child_bytes)
  if parent.read_bytes()!=initial_bytes:raise RuntimeError('Fork mutated parent')
  if len(Mock.requests)!=1:raise RuntimeError('Fork made a model request')
  meta=json.loads(child_bytes.splitlines()[0])['payload']

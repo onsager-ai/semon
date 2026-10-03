@@ -7,7 +7,7 @@
 //! - `claude/projects/**/subagents/agent-<id>.meta.json`: a subagent's
 //!   metadata;
 //! - `claude/sessions/<pid>.json`: a running Claude process's record;
-//! - `codex/sessions/**/*.jsonl`: Codex rollouts.
+//! - `codex/sessions/**/*.jsonl` and `codex/archived_sessions/**/*.jsonl`: Codex rollouts.
 
 use std::{fs, io, path::PathBuf};
 
@@ -109,7 +109,7 @@ pub fn is_input_path(root: &str, rel: &str) -> bool {
                         .is_some_and(|id| !id.is_empty()))
         }
         (InputRoot::Claude, ["projects", _]) => jsonl(name),
-        (InputRoot::Codex, ["sessions", .., _]) => jsonl(name),
+        (InputRoot::Codex, ["sessions" | "archived_sessions", .., _]) => jsonl(name),
         _ => false,
     }
 }
@@ -117,6 +117,15 @@ pub fn is_input_path(root: &str, rel: &str) -> bool {
 fn jsonl(name: &str) -> bool {
     name.strip_suffix(".jsonl")
         .is_some_and(|stem| !stem.is_empty())
+}
+
+/// Pinned Codex stores active and archived plain JSONL beneath these roots.
+/// Compressed rollouts and database files are not supported viewing inputs.
+pub(crate) fn codex_rollout_dirs(options: &Options) -> [PathBuf; 2] {
+    [
+        options.codex_home.join("sessions"),
+        options.codex_home.join("archived_sessions"),
+    ]
 }
 
 /// Every input file under the homes `options` names, sorted. Directories are
@@ -128,6 +137,7 @@ pub fn inputs(options: &Options) -> io::Result<Vec<Input>> {
         (InputRoot::Claude, "projects"),
         (InputRoot::Claude, "sessions"),
         (InputRoot::Codex, "sessions"),
+        (InputRoot::Codex, "archived_sessions"),
     ] {
         walk(
             root,
@@ -146,6 +156,9 @@ fn walk(
     rel: String,
     found: &mut Vec<Input>,
 ) -> io::Result<()> {
+    if fs::symlink_metadata(dir).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
+        return Ok(());
+    }
     let entries = match fs::read_dir(dir) {
         Ok(entries) => entries,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
