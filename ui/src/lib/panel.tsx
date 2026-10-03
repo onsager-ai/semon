@@ -21,7 +21,9 @@ export interface PanelChrome {
 }
 
 function PanelHeader({ heading, sub, close }: { heading: string; sub?: string; close(): void }) {
-  return <><div class="panel-t">{heading}</div>{sub && <div class="panel-sub">{sub}</div>}
+  // Match the viewer's text helper: Instrument Sans needs separator side bearing.
+  const spaced = (text: string) => text.replace(/ · /g, '\u2009 · \u2009').replace(/^· /, '·\u2009 ');
+  return <><div class="panel-t">{spaced(heading)}</div>{sub && <div class="panel-sub">{spaced(sub)}</div>}
     <button class="ibtn" type="button" aria-label="Close" onClick={close}>
       <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M6 6l12 12M18 6L6 18" /></svg>
     </button></>;

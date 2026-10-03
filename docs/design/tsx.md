@@ -30,8 +30,8 @@ history, route and focus. No CSS, visual reference or performance threshold chan
 This source slice does not advance Hub's pin or claim production rollout.
 
 Equivalent production served asset: baseline 378,803 raw / 215,208 minified /
-75,741 minified gzip-9; pilot 380,451 / 216,059 / 76,012 bytes. Increment:
-1,648 raw / 851 minified / 271 minified gzip bytes. Prefixes and build flags match.
+75,741 minified gzip-9; pilot 380,572 / 216,146 / 76,030 bytes. Increment:
+1,769 raw / 938 minified / 289 minified gzip bytes. Prefixes and build flags match.
 No endpoint or poller is added. Exact-head test evidence belongs to the stage PR.
 
 ### Stage 3 item 1 — shared shell frame/navigation
