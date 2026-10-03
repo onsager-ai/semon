@@ -24,7 +24,11 @@ pub const CSS: &str = include_str!("shell.css");
 
 /// Shared typed tooltip and Select controls (`SemonShell.select` and `<select data-select>`),
 /// followed by drawer, copy, dialog and readiness-poll behavior for shell pages.
-pub const JS: &str = concat!(include_str!("shared.generated.js"), "\n", include_str!("shell.js"));
+pub const JS: &str = concat!(
+    include_str!("shared.generated.js"),
+    "\n",
+    include_str!("shell.js")
+);
 
 /// The Semon mark, a monochrome glyph. `.mark` paints it as a mask from `/mark.svg`, so a page that uses `.mark` must
 /// serve this at that path (as `image/svg+xml`).
