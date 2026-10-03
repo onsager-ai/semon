@@ -7,7 +7,7 @@ import vm from "node:vm";
 const source = fs.readFileSync(new URL("../../../crates/semon-sessions/src/viewer.js", import.meta.url), "utf8");
 const start = source.indexOf("  function cacheTx("), end = source.indexOf("\n  // A kept transcript", start);
 const bundle = fs.readFileSync(new URL("../../../crates/semon-sessions/src/viewer.generated.js", import.meta.url), "utf8");
-const cacheStart = bundle.indexOf("  // src/lib/routes.ts"), cacheEnd = bundle.indexOf("  // src/lib/paging.ts", cacheStart);
+const cacheStart = bundle.indexOf("  // src/lib/routes.ts"), cacheEnd = bundle.indexOf("\n  // ", cacheStart + 1);
 assert.ok(cacheStart >= 0 && cacheEnd > cacheStart, "production route/cache controller is present");
 const context = vm.createContext({});
 vm.runInContext(bundle.slice(cacheStart, cacheEnd), context);
