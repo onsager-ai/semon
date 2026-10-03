@@ -21,11 +21,12 @@
   "source_reference": "tests/spikes/codex-resume.py at semon main 3b05a9fc; inherited authentication/proxy guards preserved in the local runner",
   "original_source_sha256": "af0a756686bdd862c2d5aaff47a0f1b640d47622eea92e2e68a988d0165e824b",
   "fixture_path": "initial-rollout.jsonl",
-  "fixture_sha256": "9c25d4ea7bfc9fe9e2feef70056632ed0ab265a82f83b7ba0cc4f6b668795d08",
+  "fixture_sha256": "3716b2bb79c26d60315f821e37014c3f4b50cfd15a4368bbad126556ab88916c",
   "transformations": [
     "Removed native default/harness instruction content",
     "Replaced native session identity consistently with native-codex-compat",
-    "Replaced disposable cwd consistently with /fixture/repo"
+    "Replaced disposable cwd consistently with /fixture/repo",
+    "Removed nested native host_skills.body and replaced remaining disposable probe paths"
   ],
   "observed": [
     "item_completed and legacy response_item in same file",
@@ -45,5 +46,6 @@
     "known": "session_meta id/session_id/cli_version/history_mode, legacy and item stream, user/assistant content and mock token usage",
     "oracle": "incremental early mirror then item stream is a known parity failure for #237, not an accepted release capability",
     "unknown": "native billing, compaction, denial/cancellation, tools and fork lineage"
-  }
+  },
+  "binary_sha256": "981ade7b03926534c654fd718ced3a9f378b7b2841271e29156f939462d176e9"
 }

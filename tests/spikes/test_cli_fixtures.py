@@ -38,6 +38,8 @@ class CompatibilityFixtures(unittest.TestCase):
                 self.assertEqual(hashlib.sha256(native).hexdigest(), manifest['fixture_sha256'])
                 self.assertEqual(manifest['evidence_origin'],
                                  'native CLI persistence with deterministic mock model')
+                self.assertRegex(manifest['binary_sha256'], r'^[a-f0-9]{64}$')
+                self.assertNotIn(b'/tmp/semon-codex-resume-', native)
                 self.assertTrue(manifest['transformations'])
                 self.assertTrue(manifest['limitations'])
                 self.assertNotEqual(manifest['original_source_sha256'], manifest['fixture_sha256'])
@@ -50,6 +52,10 @@ class CompatibilityFixtures(unittest.TestCase):
                     self.assertEqual(records[0]['type'], 'session_meta')
                     self.assertEqual(records[0]['payload']['cli_version'], '0.159.0-alpha.3')
                     self.assertEqual(records[0]['payload']['history_mode'], 'paginated')
+                    for row in records:
+                        skills = row.get('payload', {}).get('state', {}).get('host_skills', {})
+                        if isinstance(skills, dict) and 'body' in skills:
+                            self.assertEqual(skills['body'], '[fixture: native host skill instructions removed]')
 
     def test_source_shaped_hashes_and_explicit_unknown_version(self):
         manifest = json.loads((ROOT / 'v1/manifest.json').read_text())
