@@ -1,5 +1,16 @@
 # The UI library: semon's `ui/` as components an embedding app imports
 
+## Legacy-host removal in progress — 2026-10-03
+
+The merged component/controller migration does not complete application ownership.
+Issue #224 retains five legacy-host cleanup stages. Domain normalization,
+relationships, outcomes, trace calculations, costs and formatting now live in
+strict typed modules under `ui/src/domain`; callers switch and their superseded
+functions are deleted together. Application boot, transcript orchestration,
+navigation/scroll and native shell cleanup remain subsequent work. See
+[viewer ownership](viewer-ownership.md) for transaction boundaries and owners.
+No integrated pin or production acceptance is claimed by this source record.
+
 ## Current library decision — 2026-10-02
 
 ### Remaining migration implemented — 2026-10-03

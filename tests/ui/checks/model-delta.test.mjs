@@ -3,7 +3,7 @@ import fs from "node:fs";
 import vm from "node:vm";
 // Exercise the checked-in production controller, including its runtime wire validation.
 const source = fs.readFileSync(new URL("../../../crates/semon-sessions/src/viewer.generated.js", import.meta.url), "utf8");
-const start = source.indexOf("  // src/lib/model.ts"), end = source.indexOf("  // src/lib/live.ts", start);
+const start = source.indexOf("  // src/lib/model.ts"), end = source.indexOf("\n  // ", start + 3);
 assert.ok(start >= 0 && end > start, "production model controller is present");
 const context = vm.createContext({ structuredClone });
 vm.runInContext(`${source.slice(start, end)}; globalThis.apply = (base, delta) => { const store = new ModelStore(); store.adopt(base); return store.apply(delta); };`, context);
