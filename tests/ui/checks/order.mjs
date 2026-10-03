@@ -42,6 +42,7 @@ import { fileURLToPath } from "node:url";
 import { ENV, launch, reporter } from "../lib.mjs";
 import { write, ms } from "../fixture.mjs";
 import { serve, model, open } from "./live.mjs";
+import { committedModel } from "./live.mjs";
 
 const at = (h, m, s = 0) => ms(h * 60 + m, s);
 const iso = (t) => new Date(t).toISOString();
@@ -357,7 +358,7 @@ async function scheme(browser, name, opts, r) {
       say(applied[0]?.id === A && inRecency(ids(applied), lastOf(modelA1)) && same([...ids(applied)].sort(), [...list].sort()), "the return didn't apply the first change from the data the page has: " + ids(applied).slice(0, 5).join(","));
       say(applied[0]?.id !== B, "the second change was applied by the return, before its poll landed");
       await mark(); u0 = page.updates; await gate.release();
-      say(await drawn(u0), "the catch-up poll wasn't drawn");
+      say(await committedModel(page, u0, 8000), "the catch-up poll wasn't drawn");
       say(await page.evaluate(() => [...document.querySelectorAll("#page .nrow")].every(row => row.__d === 1)), "the catch-up commit replaced keyed rows");
       const caught = await pageRows(page);
       say(same(ids(caught), ids(applied)) && still(applied, caught), "the catch-up poll after the tab's return reordered rows that were in view: " + ids(caught).slice(0, 5).join(",") + " vs " + ids(applied).slice(0, 5).join(","));

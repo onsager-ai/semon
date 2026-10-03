@@ -125,12 +125,13 @@ function logs(dir) {
 // The page counts its own /api/model and /api/tx requests in flight (window.__live.max), from the call to its response.
 function counter() {
   const orig = window.fetch; let n = 0, models = 0;
-  window.__live = { max: 0, models: 0, reset() { this.max = n; this.models = models; } };
+  window.__live = { max: 0, models: 0, updates: 0, committedUpdates: 0, reset() { this.max = n; this.models = models; } };
+  window.addEventListener("semon:polled", () => { window.__live.committedUpdates = window.__live.updates; });
   window.fetch = function (...a) {
     const url = String(a[0]), mine = /\/api\/(model|tx)\b/.test(url), model = /\/api\/model\b/.test(url);
     if (mine) { n++; window.__live.max = Math.max(window.__live.max, n); }
     if (model) { models++; window.__live.models = Math.max(window.__live.models, models); }
-    const p = orig.apply(window, a);
+    const p = orig.apply(window, a).then(response => { if (model && response.status === 200) window.__live.updates++; return response; });
     return mine ? p.finally(() => { n--; if (model) models--; }) : p;
   };
   window.__sc = () => (matchMedia("(max-width: 760px)").matches ? document.scrollingElement : document.querySelector("#main"));
@@ -161,6 +162,9 @@ export async function appear(page, since, fn, arg, limit = 4000) {
 async function updated(page, before, limit = 4000) {
   const t0 = Date.now(); while (page.updates <= before && Date.now() - t0 < limit) await sleep(50);
   await sleep(700); return page.updates > before;
+}
+export async function committedModel(page, before, limit = 4000) {
+  try { await page.waitForFunction(before => window.__live.committedUpdates > before, before, { timeout: limit, polling: 25 }); return true; } catch { return false; }
 }
 const openKeys = (page) => page.evaluate(() => [...document.querySelectorAll("#page [data-e]")].filter((n) => {
   const t = n.matches(".step") ? n.querySelector(":scope > button") : n.matches(".tgroup") ? n.querySelector(":scope > .tsum") : null;
@@ -390,8 +394,10 @@ async function scheme(browser, name, opts, r, protocol) {
     fs.mkdirSync(path.dirname(sub.path), { recursive: true });
     fs.writeFileSync(sub.path.replace(/\.jsonl$/, ".meta.json"), JSON.stringify({ agentType: "general-purpose", description: "Live reviewer", toolUseId: "toolu-live2" }));
     sub.append(sub.prompt(at(12, 43, 1), BRIEF), sub.text(at(12, 43, 20), "Live check: the flush change looks right."));
-    await AN.evaluate(() => { document.querySelector(".analytics-metrics").dataset.liveProbe = "before-subagent"; });
-    R.subagentUpdate = await appear(AN, t0, () => document.querySelector(".analytics-metrics")?.dataset.liveProbe !== "before-subagent");
+    const subagentUpdates = AN.updates;
+    await AN.evaluate(() => { document.querySelector(".analytics-metrics").dataset.liveProbe = "kept"; });
+    R.subagentUpdate = await committedModel(AN, subagentUpdates, Math.max(1, 4000 - (Date.now() - t0))) ? Date.now() - t0 : null;
+    r.expect(await AN.evaluate(() => document.querySelector(".analytics-metrics")?.dataset.liveProbe === "kept"), name + ": Analytics replaced its keyed metrics root");
     r.expect(R.subagentUpdate != null, name + ": Analytics didn't redraw after the subagent's lines were written");
     R.analyticsAfterSubagent = await analyticsState();
     r.expect(R.analyticsAfterSubagent.range === "30 d" && R.analyticsAfterSubagent.metrics === 8, name + ": Analytics changed after the subagent update: " + JSON.stringify(R.analyticsAfterSubagent));
@@ -446,8 +452,8 @@ async function scheme(browser, name, opts, r, protocol) {
     principal.append(principal.peer(at(12, 44, 1), 102, "Sentinel", "m-live", RELAY));
     const relay = await (async () => { for (let k = 0; k < 40; k++) { const h = (await model(srv)).handoffs.find((x) => x.kind === "relay" && x.brief === RELAY); if (h) return h; await sleep(100); } return null; })();
     r.expect(!!relay, name + ": the model has no relay from Sentinel");
-    await AN.evaluate(() => { document.querySelector(".analytics-metrics").dataset.liveProbe = "before-relay"; });
-    R.relayUpdate = await appear(AN, t0, () => document.querySelector(".analytics-metrics")?.dataset.liveProbe !== "before-relay");
+    const relayUpdates = AN.updates;
+    R.relayUpdate = await committedModel(AN, relayUpdates, Math.max(1, 4000 - (Date.now() - t0))) ? Date.now() - t0 : null;
     r.expect(R.relayUpdate != null, name + ": Analytics didn't redraw after the relay appeared in the served model");
     await sleep(300);
     R.analyticsAfterRelay = { ...(await analyticsState()), focus: await AN.evaluate(() => document.activeElement?.textContent.trim()) };
@@ -692,7 +698,8 @@ async function analyticsCounts(browser, r) {
     await page.evaluate(() => { document.querySelector(".analytics-metrics").dataset.liveProbe = "before"; });
     const updates = page.updates; let t0 = Date.now();
     atlas.append(atlas.tool(at(12, 42), "toolu-counts1", "Bash", { command: "true" }), atlas.result(at(12, 42, 5), "toolu-counts1", "ok"));
-    R.redrawn = await appear(page, t0, () => document.querySelector(".analytics-metrics")?.dataset.liveProbe !== "before", null, 6000);
+    R.redrawn = await committedModel(page, updates, 6000) ? Date.now() - t0 : null;
+    r.expect(await page.evaluate(() => document.querySelector(".analytics-metrics")?.dataset.liveProbe === "before"), "analytics-counts: the keyed metrics root was replaced");
     r.expect(R.redrawn != null && page.updates > updates, "analytics-counts: a live update did not redraw Analytics");
     R.grew = await appear(page, t0, (was) => { const v = document.querySelector(".analytics-metric:nth-child(5) .value")?.textContent; return Number((v ?? "").replace(/,/g, "")) === was + 1; }, R.first, 8000);
     r.expect(R.grew != null, "analytics-counts: the new tool call never reached the Tool calls figure: " + await tool(page).locator(".value").textContent());
@@ -1078,12 +1085,6 @@ async function childIntroLateAway(browser, r) {
 
     await goto(page, { v: "home" }, {});
     R.home = await page.evaluate(() => document.querySelector("#page .ph h1")?.textContent);
-    const redraws = await page.evaluate(() => {
-      const box = document.querySelector("#page");
-      window.__lateAwayHomeRedraws = 0;
-      new MutationObserver(() => { window.__lateAwayHomeRedraws++; }).observe(box, { childList: true, subtree: true });
-      return window.__lateAwayHomeRedraws;
-    });
     let homeHandoff = false;
     const homePoll = page.waitForResponse((q) => {
       if (!q.url().includes("/api/model") || q.status() !== 200) return false;
@@ -1091,7 +1092,7 @@ async function childIntroLateAway(browser, r) {
       return q.json().then((m) => homeHandoff = m.handoffs.some((h) => h.kind === "spawn" && h.to === "late-sub"));
     }, { timeout: 12000 }).then(() => true, () => false);
     R.homePoll = await homePoll;
-    if (R.homePoll) await page.waitForFunction((n) => window.__lateAwayHomeRedraws > n, redraws, { timeout: 12000 });
+    if (R.homePoll) await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
     R.homeHandoff = homeHandoff;
     r.expect(R.home === "Home" && R.homePoll && R.homeHandoff, "child-intro-late-away: Home did not settle on the model update with the child's origin");
 
