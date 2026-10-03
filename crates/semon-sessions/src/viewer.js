@@ -1,3 +1,8 @@
+import { parseModel } from "../../../ui/src/lib/model";
+import { createTraceCalculations } from "../../../ui/src/domain/trace";
+import { normalizeModel } from "../../../ui/src/domain/normalize";
+import { createDomain } from "../../../ui/src/domain/calculations";
+import { clock as formatClock, ago as formatAgo, dur as formatDuration, tok, shortName, machineShorts, shortModel, clean, liveUrl, preview, compactCount, niceStep, timeText, countText, hLabel } from "../../../ui/src/domain/format";
 import { measureSessionScreen, measureTraceScreen, measureViewerBar, createOrdering, orderRows, createPagerController, routeUrl, parseRoute, TranscriptCache, setGeometry, revealMeasuredTurn, createLiveRegion, requestJson, ModelStore, createLiveController, createPagingStore, renderPlaceholder, createStatusNote, createSelect, createViewerBar, renderSessionScreen, updateSessionPager, updateSessionJump, updateSessionClock, renderTraceScreen, renderSliceBody, renderModelItems, renderAnalyticsScreen, createKidsSheet, createNativeSheet, renderSessionMenu, renderFullTool, createImageViewer, parseAccount, createAccountChrome, createShellChrome, renderShellNavigation, createRecentRenderer, createPanelChrome, createFacetChrome, renderSessionsScreen, renderMachinesScreen, renderHomeScreen, renderMachineScreen, ownsScreen, screenKind, releaseScreen } from "../../../ui/src/account-adapter";
 import { getViewerHost } from "../../../ui/src/viewer-host";
 queueMicrotask(() => {
@@ -43,6 +48,12 @@ queueMicrotask(() => {
   })();
 
   // ====================================================================================
+  const HID = new Map();
+  const TURNS = {}, TURN = new Map(), STARTS = new Map(), HOLDS = new Map();
+  const TXM = {}; // per session: the loaded range of its transcript { from, to, total } and its totals { calls, errors }
+  const domain = createDomain({ sessions: SESS, machines: MACHINE, handoffs: H, turns: TURNS, turn: TURN, starts: STARTS, holds: HOLDS, handoff: HID, transcriptMeta: TXM }, () => NOW, SEEN_RESULTS);
+  const { nameOf, hcls, where, hostOf, machineLabels, machineLabel, branchOf, shortHost, parentOf, originHandoff, RANK, isResult, inbox, working, answersOf, statWord, hasTurn, oneLine, TOYOU, turnEnd, traceRoot, countOf, callsText, sessionChildren, childSessions, descendantsOf, TOTAL_TOKEN_KINDS, TOKEN_KINDS, asMoney, usageTotal, costForSessions, costForSession, costText, costMissing, TREE_RANK, urgentDescendant, childParts, defaultTreeOpen, kidRank, lineageOf, byState, onMachine, movedOff, movesOf, shortMoney } = domain;
+  const clock = t => formatClock(t, NOW), ago = t => formatAgo(t, NOW), dur = (a, b) => formatDuration(a, b, NOW);
   const $ = (s, r = document) => r.querySelector(s);
   // Instrument Sans sets the middle dot with little side bearing. Thin spaces keep separators readable without changing code.
   const spaced = (t) => String(t).replace(/ · /g, "\u2009 · \u2009").replace(/^· /, "·\u2009 ");
@@ -55,42 +66,11 @@ queueMicrotask(() => {
     down: "M12 4v15M5 12l7 7 7-7", up: "M6 15l6-6 6 6", dn: "M6 9l6 6 6-6", branch: "M6 3v12M6 15a3 3 0 1 0 0 6 3 3 0 0 0 0-6zM18 9a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM18 9c0 6-12 3-12 6",
     wrench: "M14.5 6.5a5 5 0 0 0-6.9 6.9l-4.8 4.8a2 2 0 0 0 2.8 2.8l4.8-4.8a5 5 0 0 0 6.9-6.9l-3 3-2.8-2.8z", wide: "M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5", sidebar: "M4 5h16v14H4zM9 5v14", tokens: "M5 5h14M12 5v14M9 19h6", chart: "M4 19V5M4 19h17M8 15l3-4 3 2 5-7", coin: "M12 3v18M17 7.5C17 6.1 14.8 5 12 5S7 6.1 7 7.5 9.2 10 12 10s5 1.1 5 2.5-2.2 2.5-5 2.5-5-1.1-5-2.5", relay: "M4 7h13l-3-3M20 17H7l3 3",
   };
-  const clock = (t) => { const d = new Date(t), n = new Date(NOW); const hm = String(d.getHours()).padStart(2, "0") + ":" + String(d.getMinutes()).padStart(2, "0"); return d.toDateString() === n.toDateString() ? hm : d.toLocaleDateString(undefined, { weekday: "short" }) + " " + hm; };
-  const ago = (t) => { const d = Math.floor((NOW - t) / 60000); return d < 1 ? "now" : d < 60 ? d + "m" : d < 2880 ? Math.floor(d / 60) + "h" : Math.floor(d / 1440) + "d"; };
-  const dur = (a, b) => { const d = Math.max(0, Math.floor(((b ?? NOW) - a) / 60000)); return d >= 1440 ? Math.floor(d / 1440) + "d " + Math.floor((d % 1440) / 60) + "h" : d >= 60 ? Math.floor(d / 60) + "h " + (d % 60) + "m" : d + "m"; };
-  const tok = (m) => m >= 1 ? m.toFixed(1) + "M" : Math.round(m * 1000) + "k";
   // A dot is the state's only sign where nothing beside it says the state, and then it carries a tooltip; `tip = false` where a word does.
   const STATE = { work: "Working", wait: "Needs you", idle: "Idle", done: "Done", err: "Failed", new: "New result", read: "Read result" };
-  const nameOf = (id) => id === "you" ? "You" : SESS[id].name;
-  const hcls = (id) => id === "you" ? "h-you" : "h-" + SESS[id].harness;
-  const where = (s) => s.repo ? s.repo + (s.branch && s.branch !== "main" && s.branch !== s.name ? " · " + s.branch : "") : "No repo";
-  const hostOf = (s) => s.host ?? MACHINE[s.machine] ?? s.machine ?? "Unknown machine";
   // The name of a machine that has none is drawn whole ("Unknown machine"); a real one is cut to 14 characters.
-  const shortName = (name) => { const h = String(name).split(".")[0]; return h.length > 14 ? h.slice(0, 14) + "…" : h; };
-  const shortHost = (s) => s.host == null && MACHINE[s.machine] == null && s.machine == null ? hostOf(s) : shortName(hostOf(s));
-  // Short display names for machines, `[[id, full name]]` in, a Map of id to name out. A long name is cut to 14 characters; two that
-  // cut alike keep their tails ("build-…-east-1"), then their whole first label, then their id, until no two in the list are alike.
-  const machineShorts = (names) => {
-    const forms = (id, full) => { const first = String(full).split(".")[0]; return [shortName(first), first.length > 14 ? first.slice(0, 6) + "…" + first.slice(-7) : first, first, id]; };
-    const opts = new Map(names.map(([id, full]) => [id, forms(id, full)])), level = new Map([...opts.keys()].map((id) => [id, 0]));
-    for (let step = 0; step < 3; step++) {
-      const groups = new Map(); for (const [id, o] of opts) { const l = o[level.get(id)]; if (!groups.has(l)) groups.set(l, []); groups.get(l).push(id); }
-      let clash = false; for (const ids of groups.values()) if (ids.length > 1) { clash = true; for (const id of ids) level.set(id, level.get(id) + 1); }
-      if (!clash) break;
-    }
-    return new Map([...opts].map(([id, o]) => [id, o[level.get(id)]]));
-  };
   // Each machine the sessions in `scope` (sessions or their ids; every session by default) run on, by its short display name, only where
   // they span several machines. With one machine every line would say the same thing, so the Map is empty. One entry per machine id.
-  const machineLabels = (scope = Object.values(SESS)) => {
-    const names = new Map();
-    for (const x of scope) { const s = typeof x === "string" ? SESS[x] : x; if (s?.machine != null && !names.has(s.machine)) names.set(s.machine, s.host ?? MACHINE[s.machine] ?? s.machine); }
-    return names.size > 1 ? machineShorts([...names]) : new Map();
-  };
-  // A session's machine by its short name, or "" where the view is of one machine.
-  const machineLabel = (s, scope) => (s ? machineLabels(scope).get(s.machine) ?? "" : "");
-  const branchOf = (s) => s.worktree ?? s.branch ?? "No branch";
-  const shortModel = (model) => String(model ?? "Unknown model").replace(/^gpt-(\d+\.\d+)-(.+)$/i, "$2 $1").replace(/^gpt-\d+-/i, "").replace(/^claude-/i, "").replace(/^(opus|sonnet|haiku)-(\d+)-(\d+)$/i, "$1 $2.$3").replace(/^(opus|sonnet|haiku)-(\d+)\.(\d+)$/i, "$1 $2.$3").replace(/^(opus|sonnet|haiku)-(\d+)$/i, "$1 $2");
   // A harness is named in plain muted text (.hname), never in a vendor colour; "short" gives "Claude" where the line is tight. The label itself
   // holds text only: its official mark (harnessIcon) is drawn beside it, outside the span, so the word still tells Claude and Codex apart.
   // The short name ("Claude") gets the long one ("Claude Code") as its tooltip; the long one repeats itself, so it has none.
@@ -103,10 +83,6 @@ queueMicrotask(() => {
   // `lead` puts a small gap after the mark, where it sits in running text. An id the registry doesn't know has no mark: null.
   const darkTheme = () => { const t = document.documentElement.getAttribute("data-theme"); return t === "dark" || (t !== "light" && !!window.matchMedia?.("(prefers-color-scheme: dark)").matches); };
   const facetLine = (s) => [s.kind ?? HARNESS[s.harness], MACHINE[s.machine], where(s)].join(" · ");
-  const parentOf = (sid) => SESS[sid]?.parent ?? H.find((h) => h.kind === "spawn" && h.to === sid)?.from;
-  const originHandoff = (sid) => H.find((h) => (h.kind === "spawn" || h.kind === "relay") && h.to === sid && h.from !== sid && (h.kind === "spawn" || SESS[sid]?.kind === "Relayed" || !SESS[sid]?.lane));
-  const RANK = { wait: 0, work: 1, err: 2, done: 3 };
-  const isResult = (h) => h.kind === "toyou" && h.ask === "result";
   function markSeenResults(handoffs) {
     let changed = false;
     for (const h of handoffs) if (isResult(h) && typeof h.id === "string" && !SEEN_RESULTS.has(h.id)) {
@@ -115,22 +91,9 @@ queueMicrotask(() => {
     while (SEEN_RESULTS.size > SEEN_LIMIT) SEEN_RESULTS.delete(SEEN_RESULTS.values().next().value);
     if (changed) try { window.localStorage.setItem(SEEN_KEY, JSON.stringify([...SEEN_RESULTS])); } catch {}
   }
-  const inbox = () => {
-    const entries = H.filter((h) => h.kind === "toyou" && (h.status === "wait" || (isResult(h) && !SEEN_RESULTS.has(h.id))));
-    const waiting = new Set(entries.filter((h) => h.status === "wait").map((h) => h.from));
-    for (const s of Object.values(SESS)) if (s.state === "wait" && !waiting.has(s.id)) entries.push({ id: "wait:" + s.id, kind: "toyou", from: s.id, to: "you", ask: "decision", status: "wait", at: s.waiting_since ?? s.last, brief: s.waiting_for ?? "Waiting for your input or permission" });
-    return entries.sort((a, b) => b.at - a.at);
-  };
-  const working = () => Object.values(SESS).filter((s) => s.state === "work");
-  const clean = (t) => t.replace(/[`*]/g, "");
-
   // Inline marks: `code`, **bold**, *italic*, ~~strike~~, [text](url) and bare URLs. Everything goes in as text nodes;
   // only http(s) links are live, and they open in a new tab. Anything else stays literal text, <tags> included.
-  const liveUrl = (u) => { try { return /^https?:$/.test(new URL(u).protocol) && /^https?:\/\//i.test(u) ? u : null; } catch { return null; } };
-  // A one-line preview (Home): block markers dropped, lines run together.
-  const preview = (t) => t.split("\n").map((l) => l.replace(/^\s*(#{1,6}\s+|>\s?|[-*]\s+|\d{1,3}[.)]\s+)/, "").trim()).filter((l) => l && !/^\s*\|?\s*:?-{2,}/.test(l)).join(" ");
   // What you answered, when the logs kept it: h.answer holds one string per question, in the brief's order.
-  const answersOf = (h) => h.kind === "toyou" && h.ask !== "result" && h.status === "done" ? (Array.isArray(h.answers) ? h.answers.map((a) => (a.values ?? []).join(", ")) : Array.isArray(h.answer) ? h.answer : h.answer != null ? [h.answer] : []).map((a) => String(a).trim()).filter(Boolean) : null;
   function sentenceSnapshot(h, viewer, links = false) {
     const parts = [], text = (className, text) => parts.push({ className, text });
     const who = (id, action, label) => { const name = nameOf(id), linked = links && action && id !== "you" && id !== viewer && SESS[id]; parts.push({ text: name, className: linked ? "who-link" : "who", action: linked ? action : undefined, label: linked ? label(name) : undefined }); };
@@ -149,8 +112,6 @@ queueMicrotask(() => {
     return { icon: path, parts };
   }
   const sentenceHost = { session(id, turn) { goSession(id, turn); }, machine(id) { go({ v: "machine", id }); }, sender(id) { const h = HID.get(id); if (h) openSender(h); } };
-  const statWord = (h) => isResult(h) ? SEEN_RESULTS.has(h.id) ? "read" : "new" : ({ work: "working", wait: "waiting on you", err: "failed", done: h.kind === "toyou" ? "answered" : h.result ? "returned" : "delivered" })[h.status];
-
   // ---- Turns and traces, computed from the transcripts ---------------------------------------------------
   // A turn starts at each incoming entry: your message, a relay from another session, or the brief that starts a
   // subagent or Codex run. It runs to the next incoming entry. What it sends on (spawns, relays, messages to you)
@@ -160,56 +121,13 @@ queueMicrotask(() => {
   // A gap marker ("Earlier entries not included in this copy") is where this copy skips part of the log. It ends the
   // turn before it, and what follows starts a turn of its own, so the marker is drawn between turns, never inside one.
   const isGap = (e) => e.k === "end" && /entries (not included|omitted)|^No activity/.test(e.text ?? "");
-  const HID = new Map();
   // TURNS, TURN, STARTS and HOLDS keep the shapes above, filled from the server's turn index (adopt), since the page no longer
   // holds every transcript. A turn's entries are the loaded ones (spread).
-  const TURNS = {}, TURN = new Map(), STARTS = new Map(), HOLDS = new Map();
-  const hasTurn = (t) => !!t.end || !!(t.start || t.u) || t.entries.some((e) => e.k === "a" || e.k === "tool" || e.k === "h");
-  const oneLine = (s) => clean(s).replace(/\s+/g, " ").trim();
-  // How a turn ended: still working, a message to you, a failure, a return or reply, or nothing recorded.
-  const TOYOU = { question: "Asked you", result: "Sent you a result", decision: "Needs your decision" };
-  function turnEnd(t) {
-    if (!hasTurn(t)) return null;
-    // The model leaves an active or partially indexed turn without an end record. Keep the mockup's
-    // transcript-derived fallback so outgoing work remains traceable while the run is in progress.
-    if (!t.end) {
-      if (t.last && SESS[t.sid]?.state === "wait") return { st: "wait", text: "Waiting on permission or input" };
-      if (t.last && SESS[t.sid]?.state === "work") return { st: "work", text: "Still working" };
-      const ty = t.out.filter((h) => h.kind === "toyou").at(-1);
-      if (ty) return { st: ty.status === "wait" ? "wait" : "done", text: (TOYOU[ty.ask] ?? "Sent you a message") + " · " + statWord(ty) + " · " + clock(ty.at) };
-      const entries = t.entries.filter((e) => e.k === "a" || e.k === "tool" || (e.k === "h" && t.out.includes(HID.get(e.id))));
-      const last = entries.at(-1), h = last?.k === "h" ? HID.get(last.id) : null;
-      if (t.start?.status === "err") return { st: "err", text: "Failed" + (t.start.done ? " · " + clock(t.start.done) : "") };
-      if (last?.k === "tool" && last.ok === false && !last.live) return { st: "err", text: last.unfinished ? "Stopped on a step with no result" : "Stopped on a failed step" };
-      if (h?.status === "err") return { st: "err", text: "Handoff to " + nameOf(h.to) + " failed" };
-      if (t.start?.kind === "spawn" && t.start.status === "done") return { st: "done", text: "Returned to " + nameOf(t.start.from) + (t.start.done ? " · " + clock(t.start.done) : "") };
-      if (entries.some((e) => e.k === "a")) return { st: "done", text: "Replied" };
-      return { st: "idle", text: "No reply in these logs" };
-    }
-    const { st, why } = t.end, mh = t.end.h ? HID.get(t.end.h) : null;
-    if (why === "input") return { st: "wait", text: "Waiting for your input" };
-    if (why === "permission" || why === "waiting" || why === "waiting_permission") return { st: "wait", text: "Waiting on permission" };
-    if (why === "working") return { st: "work", text: "Still working" };
-    if (why === "toyou" && mh) return { st: mh.status === "wait" ? "wait" : "done", text: (TOYOU[mh.ask] ?? "Sent you a message") + " · " + statWord(mh) + " · " + clock(mh.at) };
-    if (why === "failed") return { st: "err", text: "Failed" + (t.start?.done ? " · " + clock(t.start.done) : "") };
-    if (why === "unfinished_step") return { st: "err", text: "Stopped on a step with no result" };
-    if (why === "failed_step") return { st: "err", text: "Stopped on a failed step" };
-    if (why === "handoff_failed" && mh) return { st: "err", text: "Handoff to " + nameOf(mh.to) + " failed" };
-    if (why === "returned" && t.start) return { st: "done", text: "Returned to " + nameOf(t.start.from) + (t.start.done ? " · " + clock(t.start.done) : "") };
-    if (why === "replied") return { st: "done", text: "Replied" };
-    return { st: st ?? "idle", text: "No reply in these logs" };
-  }
-  // Where a turn's trace began: from a relay or brief, step back to the sender's turn that sent it, until a turn
-  // that started with your message or whose sender's side isn't in the logs.
-  function traceRoot(t) { const seen = new Set(); while (!seen.has(t.id)) { seen.add(t.id); const up = t.start && t.start.from !== "you" ? HOLDS.get(t.start.id) : null; if (!up) break; t = up; } return t; }
   // ---- Loading: the model from /api/model, transcripts a page at a time from /api/tx --------------------------
-  const TXM = {}; // per session: the loaded range of its transcript { from, to, total } and its totals { calls, errors }
   // A session's tool calls and errors, from the model (`calls` and `errors` on each session; absent from an older server or
   // cache: null, shown as "—"). Nothing fetches a transcript only to count it. A transcript loaded to its end is tailed by
   // every update, so its own totals agree with its entries; a range that stops short (a deep link, a child's start turn)
   // keeps the totals from when it was fetched, so the model's win there.
-  const countOf = (s, key) => { const m = TXM[s.id]; return (m && m.to >= m.total ? m[key] : undefined) ?? s[key] ?? m?.[key] ?? null; };
-  const callsText = (calls) => (calls == null ? "—" : calls) + (calls === 1 ? " tool call" : " tool calls");
   let serverNow = 0, fetchedAt = 0;
   let TOK = {}; // per session: its transcript's growth mark in the model; a loaded transcript is tailed only when it moved
   const enc = encodeURIComponent;
@@ -233,8 +151,9 @@ queueMicrotask(() => {
   }
   const modelStore = new ModelStore();
   function adopt(m) {
+    const normalized = normalizeModel(parseModel(m));
     m = modelStore.adopt(m);
-    CHILDREN = null;
+    domain.invalidate();
     serverNow = m.now; fetchedAt = Date.now(); TOK = m.tx ?? {};
     for (const k of Object.keys(MACHINE)) { delete MACHINE[k]; delete MACHINE_UP[k]; delete MACHINE_LAST[k]; }
     // Several machines come as `machines`; one comes as `machine` alone.
@@ -244,24 +163,10 @@ queueMicrotask(() => {
     ACCOUNT = accountOf(m.account) ?? accountOf(viewerHost?.account) ?? embeddedAccount();
     viewerHost?.modelAccount?.(ACCOUNT);
     NAV_MACHINES = viewerHost?.machinesPath ?? (m.nav && safePath(m.nav.machines) ? m.nav.machines : null);
-    for (const k of Object.keys(SESS)) delete SESS[k];
-    for (const [id, s] of Object.entries(m.sessions)) { s.id = id; SESS[id] = s; }
-    H.length = 0; H.push(...m.handoffs);
-    // A failed send reached no one: a stub named as the send addressed it stands for the other end, marked failed.
-    for (const h of H) if (h.to == null) {
-      // With several machines, a stand-in belongs to the sender's machine: nothing is linked across machines.
-      const machine = SESS[h.from]?.machine ?? m.machine.id, id = "unsent:" + (h.target ?? "") + (m.machines ? "@" + machine : "");
-      const s = SESS[id] ??= { id, name: h.target || "unknown", harness: "claude", stub: true, machine, state: "err", model: "—", tokens: [0, 0, 0], start: h.at, last: h.at, busy: [] };
-      s.start = Math.min(s.start, h.at); s.last = Math.max(s.last, h.at); h.to = id;
-    }
-    HID.clear(); for (const h of H) HID.set(h.id, h);
-    for (const k of Object.keys(TURNS)) delete TURNS[k];
-    TURN.clear(); STARTS.clear(); HOLDS.clear();
-    for (const x of m.turns) {
-      const t = { id: x.id, sid: x.sid, start: x.start ? HID.get(x.start) ?? null : null, at: x.at, u: x.u ? { k: "u", text: x.text ?? "" } : null, entries: [], out: [], sent: [], end: x.end };
-      t.sent = x.sent.map((id) => HID.get(id)).filter(Boolean); t.out = t.sent.filter((h) => h.kind !== "move"); if (x.last) t.last = true;
-      (TURNS[x.sid] ??= []).push(t); TURN.set(t.id, t); if (t.start) STARTS.set(t.start.id, t); for (const h of t.sent) HOLDS.set(h.id, t);
-    }
+    for (const k of Object.keys(SESS)) delete SESS[k]; Object.assign(SESS, normalized.sessions);
+    H.length = 0; H.push(...normalized.handoffs);
+    for (const k of Object.keys(TURNS)) delete TURNS[k]; Object.assign(TURNS, normalized.turns);
+    for (const [target, source] of [[HID, normalized.handoff], [TURN, normalized.turn], [STARTS, normalized.starts], [HOLDS, normalized.holds]]) { target.clear(); for (const [id, row] of source) target.set(id, row); }
     tick();
   }
   // Each loaded entry goes to its turn: an entry that starts a turn (or a page) names it. Its key, its turn and place in
@@ -729,14 +634,6 @@ queueMicrotask(() => {
   // Sessions match by name, repo, branch, machine, harness and the messages that started their turns.
   const sessMatch = (s, q) => !q || [s.name, s.repo, s.branch, MACHINE[s.machine], s.movedFrom ? MACHINE[s.movedFrom] : "", HARNESS[s.harness], s.role ? "role no repo" : "", ...(TURNS[s.id] ?? []).map((t) => t.start?.brief ?? t.u?.text ?? "")].join(" ").toLowerCase().includes(q.toLowerCase());
   // Built once per model and per render (both drop it) and shared: callers copy an array before reordering it.
-  let CHILDREN = null;
-  const sessionChildren = () => {
-    if (CHILDREN) return CHILDREN;
-    const children = new Map();
-    for (const s of Object.values(SESS)) { const parent = parentOf(s.id); if (parent && SESS[parent]) { if (!children.has(parent)) children.set(parent, []); children.get(parent).push(s); } }
-    for (const xs of children.values()) xs.sort((a, b) => b.last - a.last);
-    return (CHILDREN = children);
-  };
   const isApprovalReview = (s) => s.kind === "Approval review";
   const visibleInNavigation = (s, path = routedPath()) => showApprovalReviews || !isApprovalReview(s) || s.id === path.current || path.ancestors.has(s.id);
   // Hide review rows while forwarding their visible descendants to the nearest shown parent; roots are promoted the same way.
@@ -759,45 +656,8 @@ queueMicrotask(() => {
     return { roots, children };
   };
   // Children in the order their handoffs were sent; the sidebar list stays newest-first.
-  const childSessions = (sid) => [...(sessionChildren().get(sid) ?? [])].sort((a, b) => (originHandoff(a.id)?.at ?? a.last) - (originHandoff(b.id)?.at ?? b.last));
-  const descendantsOf = (sid, children, out = [], seen = new Set([sid])) => {
-    for (const child of children.get(sid) ?? []) if (!seen.has(child.id)) { seen.add(child.id); out.push(child); descendantsOf(child.id, children, out, seen); }
-    return out;
-  };
-  const TOTAL_TOKEN_KINDS = ["input", "output", "cache_write", "cache_read"];
-  const TOKEN_KINDS = [["input", "Input"], ["output", "Output"], ["cache_read", "Cache read"], ["cache_write_5m", "Cache write · 5m"], ["cache_write_1h", "Cache write · 1h"], ["web_search", "Web search"]];
-  const asMoney = (usd) => "$" + usd.toFixed(2), shortMoney = (usd) => "$" + usd.toFixed(1);
-  const usageTotal = (s) => Object.values(s.tokens_by_model ?? {}).reduce((sum, usage) => sum + TOTAL_TOKEN_KINDS.reduce((n, key) => n + (Number(usage[key]) || 0), 0), 0);
-  function costForSessions(sessions) {
-    const total = { usd: 0, unpriced_models: [], split_unknown_messages: 0, by_model: {}, by_day: {} }, unpriced = new Set(); let allPriced = true;
-    for (const s of sessions) {
-      const cost = s.cost ?? {};
-      if (cost.usd == null) allPriced = false; else total.usd += Number(cost.usd) || 0;
-      for (const model of cost.unpriced_models ?? []) unpriced.add(model);
-      total.split_unknown_messages += Number(cost.split_unknown_messages) || 0;
-      for (const [day, amount] of Object.entries(cost.by_day ?? {})) total.by_day[day] = (total.by_day[day] ?? 0) + (Number(amount) || 0);
-      for (const [modelId, model] of Object.entries(cost.by_model ?? {})) {
-        const current = total.by_model[modelId] ?? { usd: 0, tokens: {}, usd_by_kind: {} };
-        if (model.usd == null) current.usd = null; else if (current.usd != null) current.usd += Number(model.usd) || 0;
-        for (const [key, amount] of Object.entries(model.tokens ?? {})) current.tokens[key] = (current.tokens[key] ?? 0) + (Number(amount) || 0);
-        for (const [key, amount] of Object.entries(model.usd_by_kind ?? {})) current.usd_by_kind[key] = (current.usd_by_kind[key] ?? 0) + (Number(amount) || 0);
-        total.by_model[modelId] = current;
-      }
-    }
-    total.unpriced_models = [...unpriced].sort();
-    if (!allPriced || unpriced.size) total.usd = null;
-    return total;
-  }
-  const costForSession = (sid, includeRuns = false) => costForSessions(SESS[sid] ? [SESS[sid], ...(includeRuns ? descendantsOf(sid, sessionChildren()) : [])] : []);
-  const costText = (cost) => cost.usd == null || cost.unpriced_models?.length ? "—" : asMoney(cost.usd);
-  const costMissing = (cost) => cost.unpriced_models ?? [];
   const COST_TIP = "What these tokens would cost at API rates. Subscriptions (Claude Max, ChatGPT plans) aren't billed this way.";
   // The icon is the only place this text is; it takes keyboard focus so the tip is reachable without a pointer.
-  const TREE_RANK = { wait: 0, work: 1, err: 2, idle: 3, done: 4 };
-  const urgentDescendant = (sid, children) => descendantsOf(sid, children).filter((s) => s.state in TREE_RANK).sort((a, b) => TREE_RANK[a.state] - TREE_RANK[b.state] || b.last - a.last)[0]?.state;
-  // What a parent's descendants are doing, as parts to join: the runs, then only the non-zero needs-you, working and failed counts (the viewer's own state words).
-  const childParts = (all) => { const n = (state) => all.filter((x) => x.state === state).length, wait = n("wait"), work = n("work"), err = n("err"); return [all.length + (all.length === 1 ? " run" : " runs"), wait && wait + " needs you", work && work + " working", err && err + " failed"].filter(Boolean); };
-  const defaultTreeOpen = (sid, children) => descendantsOf(sid, children).some((s) => s.state === "wait" || s.state === "work");
   // An open parent lists its waiting children, then its running ones (at most 8), then the newest finished ones until three rows are
   // listed. "All N" opens the rest: a sheet on a phone, the whole list in the tree on a wide screen.
   const TREE_ACTIVE = 8, TREE_ROWS = 3;
@@ -812,11 +672,6 @@ queueMicrotask(() => {
   let forcedOpen = { route: null, ids: new Set() };
   function forcedOpenIds() { if (forcedOpen.route !== route) forcedOpen = { route, ids: routedPath().ancestors }; return forcedOpen.ids; }
   // Waiting is 0, running 1, finished 2. A finished child with a waiting or running session below it ranks as that session does.
-  function kidRank(c, children) {
-    let rank = c.state === "wait" ? 0 : c.state === "work" ? 1 : 2;
-    if (rank) for (const d of descendantsOf(c.id, children)) { if (d.state === "wait") return 0; if (d.state === "work") rank = 1; }
-    return rank;
-  }
   // The one parent whose whole list is open in the tree (wide screens only). Nothing saves it: a reload starts with the short lists.
   // The parents above it stay listed and open (`expandedPath`) and everything below it is listed in full and open (`expandedUnder`), so
   // its "All N" and the rows it reveals agree.
@@ -976,11 +831,6 @@ queueMicrotask(() => {
     const lead = { label: opts.traceSession ? "Back to " + s.name : "Open navigation", icon: opts.traceSession ? I.chev : I.menu, back: opts.traceSession ? () => goSession(s.id, route.turn) : undefined };
     shellChrome.topbar(mode === "normal" ? { titleSlot: content.titleSlot, actions: [content.actions], session: !!s, lead, account } : { mode: [content.mode], session: true, account, accountTarget: content.accountTarget });
     if (s && mode === "normal") requestAnimationFrame(() => { const line = $("#topbar .meta-line"); if (line) measureViewerBar($("#topbar")); });
-  }
-  function lineageOf(sid) {
-    const path = [], seen = new Set(); let id = sid;
-    while (id && SESS[id] && !seen.has(id)) { seen.add(id); path.push(SESS[id]); id = parentOf(id); }
-    return path.reverse();
   }
   // The label and buttons in place, so focus stays where it is.
   // ---- Errors mode: "N errors" steps through the session's failed steps ---------------------------------------------------------
@@ -1210,7 +1060,6 @@ queueMicrotask(() => {
     open(); if (scrollTo) body.querySelector(scrollTo)?.scrollIntoView({ block: "nearest" }); return d;
   }
   // 739,682 reads "740k" and 12,422,228 "12.4M"; the exact figure is the cell's tooltip.
-  const compactCount = (n) => { if (n < 1e3) return String(n); if (n < 1e4) return +(n / 1e3).toFixed(1) + "k"; const k = Math.round(n / 1e3); return k < 1e3 ? k + "k" : +(n / 1e6).toFixed(1) + "M"; };
   const MENU_KINDS = [["Input", ["input"]], ["Output", ["output"]], ["Cache write", ["cache_write_5m", "cache_write_1h"]], ["Cache read", ["cache_read"]], ["Web search", ["web_search"]]];
   const COST_NOTE = "What these tokens would cost at API rates. Subscriptions aren't billed this way.";
   function costSnapshot(s, kids) {
@@ -1278,10 +1127,6 @@ queueMicrotask(() => {
       answered: (allAnswered ? done : done.slice(0, 3)).map(h => inboxSnapshot(h, true)), totalAnswered: done.length, allAnswered }, activityHost);
   }
   // ---- Machines: where sessions run, and what happens when a machine goes away ------------------------------
-  const byState = (a, b) => (RANK[a.state] ?? 3) - (RANK[b.state] ?? 3) || b.last - a.last;
-  const onMachine = (m) => Object.values(SESS).filter((s) => s.machine === m).sort(byState);
-  const movedOff = (m) => Object.values(SESS).filter((s) => s.movedFrom === m);
-  const movesOf = (m) => H.filter((h) => h.kind === "move" && (h.fromMachine === m || h.toMachine === m)).sort((a, b) => b.at - a.at);
   function renderMachines(page) {
     const ms = Object.keys(MACHINE).sort((a, b) => MACHINE_UP[a] - MACHINE_UP[b]);
     const rows = ms.map((m) => {
@@ -1304,85 +1149,7 @@ queueMicrotask(() => {
   // and on down from there; a message to you is a leaf. One rail, as everywhere: depth shows as a smaller node.
   // One observer measures expandable messages, and releases detached nodes after a redraw.
   const RUN_EXPANDED = new Map();
-  const allRunNodes = (model) => { const rows = [], walk = (n) => { rows.push(n); n.children.forEach(walk); }; walk(model.rootNode); model.peers.forEach(walk); return rows; };
-  // Walk only the turns connected by recorded spawns and relays; the relay rows remain peers in the view.
-  function traceAgentTree(root) {
-    const rootNode = { sid: root.sid, turn: root, handoff: null, kind: "root", depth: 0, children: [] };
-    const peers = [], handoffs = [], spawns = [], seenTurns = new Set(), seenSessions = new Set([root.sid]);
-    const walk = (node) => {
-      const turn = node.turn;
-      if (!turn || seenTurns.has(turn.id)) return;
-      seenTurns.add(turn.id);
-      const sent = [...(turn.sent ?? [])].sort((a, b) => a.at - b.at);
-      handoffs.push(...sent);
-      const children = [];
-      for (const h of sent) {
-        if (h.kind === "spawn") {
-          spawns.push(h);
-          const childTurn = STARTS.get(h.id);
-          if (!SESS[h.to] || seenSessions.has(h.to)) continue;
-          seenSessions.add(h.to);
-          const child = { sid: h.to, turn: childTurn ?? null, handoff: h, kind: "spawn", depth: node.depth + 1, children: [] };
-          node.children.push(child); children.push(child);
-        } else if (h.kind === "relay" && SESS[h.to] && !seenSessions.has(h.to)) {
-          const peerTurn = STARTS.get(h.id);
-          seenSessions.add(h.to);
-          const peer = { sid: h.to, turn: peerTurn ?? null, handoff: h, kind: "relay", depth: 0, children: [] };
-          peers.push(peer); children.push(peer);
-        }
-      }
-      for (const child of children) walk(child);
-    };
-    walk(rootNode);
-    return { rootNode, peers, handoffs, spawns };
-  }
-  function agentSnapshot(root) {
-    const model = traceAgentTree(root), session = SESS[root.sid];
-    const start = root.at ?? root.start?.at ?? session.start;
-    const nextTurn = (TURNS[root.sid] ?? []).find((t) => t.at > start);
-    const upper = root.end?.at ?? nextTurn?.at ?? (session.state === "work" ? NOW : session.last) ?? start;
-    const end = Math.max(start, upper, ...model.handoffs.map((h) => h.done).filter(Number.isFinite), ...allRunNodes(model).filter((n) => n.kind !== "root").map((n) => SESS[n.sid]?.state === "work" ? NOW : n.handoff?.done ?? SESS[n.sid]?.last).filter(Number.isFinite));
-    const span = Math.max(1, end - start);
-    const waits = allRunNodes(model).flatMap((node) => (SESS[node.sid]?.wait_edges ?? []).filter((w) => (!w.turn || w.turn === node.turn?.id) && w.start >= start && w.start <= end).map((w) => ({ ...w, sid: node.sid })));
-    const critical = new Set(model.spawns.filter((h) => waits.some((w) => w.sid === h.from && w.targets?.includes(h.to))).map((h) => h.id));
-    const pct = (m) => Math.max(0, Math.min(100, ((m - start) / span) * 100));
-    const steps = [1, 2, 5, 10, 15, 30, 60, 120, 240].map((n) => n * 60000).map((step) => ({ step, count: Math.floor((span - 1) / step) })).filter((x) => x.count >= 3 && x.count <= 6)
-      .sort((a, b) => Math.abs(a.count - 5) - Math.abs(b.count - 5) || a.step - b.step);
-    const step = steps[0]?.step ?? [1, 2, 5, 10, 15, 30, 60, 120, 240].map((n) => n * 60000).sort((a, b) => Math.abs(Math.floor((span - 1) / a) - 5) - Math.abs(Math.floor((span - 1) / b) - 5))[0];
-    const ticks = []; for (let offset = step; offset < span; offset += step) ticks.push(offset);
-    const rowCount = (node) => 1 + node.children.reduce((n, child) => n + rowCount(child), 0);
-    const allNodes = (node, into = []) => { into.push(node); for (const child of node.children) allNodes(child, into); return into; };
-    const totalRows = rowCount(model.rootNode) + model.peers.reduce((n, peer) => n + rowCount(peer), 0), foldRows = totalRows > 12;
-    const spawned = model.spawns.filter((h) => Number.isFinite(h.at) && Number.isFinite(h.done) && h.done > h.at).map((h) => ({ start: h.at, end: h.done }));
-    const missingSpawnEnds = model.spawns.filter((h) => !Number.isFinite(h.done)).length;
-    const points = spawned.flatMap((x) => [{ at: x.start, change: 1 }, { at: x.end, change: -1 }]).sort((a, b) => a.at - b.at || a.change - b.change);
-    let active = 0, peak = 0; for (const p of points) { active += p.change; peak = Math.max(peak, active); }
-    const totalCost = costForSessions(allRunNodes(model).map((n) => SESS[n.sid]).filter(Boolean));
-    const participantCount = allRunNodes(model).length;
-    const summary = [participantCount + (participantCount === 1 ? " agent" : " agents"), dur(start, end), costText(totalCost) + " session totals", ...(spawned.length ? ["Recorded spawn overlap: " + peak] : []), ...(missingSpawnEnds ? [missingSpawnEnds + " spawn end" + (missingSpawnEnds === 1 ? "" : "s") + " not recorded"] : [])];
-    while (RUN_EXPANDED.size > 16) RUN_EXPANDED.delete(RUN_EXPANDED.keys().next().value);
-    const expanded = RUN_EXPANDED.get(root.id) ?? new Set(); RUN_EXPANDED.set(root.id, expanded);
-    const rows = [];
-    const add = (node, depth, parent) => {
-      const s = SESS[node.sid]; if (!s) return;
-      const handoff = node.handoff, from = node.kind === "root" ? start : handoff.at, to = node.kind === "root" ? end : s.state === "work" ? NOW : handoff.done ?? s.last ?? from;
-      const duration = dur(from, to), ownCost = costForSession(node.sid), rollup = costForSessions(allNodes(node).map(x => SESS[x.sid]).filter(Boolean)), status = STATE[s.state] ?? s.state;
-      const segments = [], segment = (a, b, kind) => { if (b > a) segments.push({ left: pct(a), width: Math.max(.2, pct(b) - pct(a)), kind }); };
-      const intervals = (s.busy ?? []).map(([a, b]) => [Math.max(from, a), Math.min(to, b)]).filter(([a, b]) => b > a).sort((a, b) => a[0] - b[0]);
-      let cursor = from; for (const [a, b] of intervals) { if (a > cursor) segment(cursor, a, "idle"); segment(a, b, "busy"); cursor = Math.max(cursor, b); } if (to > cursor) segment(cursor, to, "idle");
-      rows.push({ kind: "agent", id: node.sid, depth: Math.min(3, depth), label: [s.name, s.kind ?? HARNESS[s.harness], status, duration, costText(rollup)].join(", "), name: s.name,
-        relay: node.kind === "relay", critical: !!handoff && critical.has(handoff.id), harnessClass: hcls(node.sid), model: [kindText(s), shortModel(s.model)].filter(Boolean).join(" · "), state: s.state, stateLabel: status,
-        tokens: tok(allNodes(node).reduce((sum, n) => sum + usageTotal(SESS[n.sid] ?? {}), 0) / 1000000) + " tokens", duration, cost: rollup.usd == null ? "—" : shortMoney(rollup.usd), costTip: "Own cost: " + costText(ownCost), segments,
-        spawns: node.children.map(child => pct(child.handoff.at)), waits: waits.filter(w => w.sid === node.sid).map(w => ({ left: pct(w.start), width: Math.max(.2, pct(w.end ?? end) - pct(w.start)), tip: w.targets?.length ? "Waiting on " + w.targets.map(nameOf).join(", ") : "Wait without a recorded target" })), turn: node.turn?.id,
-        edge: parent ? { parent, started: pct(handoff.at), done: pct(handoff.done ?? (s.state === "work" ? NOW : s.last)), returned: Number.isFinite(handoff.done) } : undefined });
-      const folded = foldRows && node.children.length > 8 && !expanded.has(node.sid);
-      for (const child of folded ? node.children.slice(0, 8) : node.children) add(child, Math.min(3, depth + 1), node.sid);
-      if (folded) { const hidden = node.children.slice(8), ids = new Set(hidden.flatMap(n => allNodes(n).map(x => x.sid))), cost = costForSessions([...ids].map(id => SESS[id]).filter(Boolean)); rows.push({ kind: "more", id: "more:" + node.sid, fold: node.sid, depth: Math.min(3, depth + 1), name: "+" + hidden.length + " more", label: "Show " + hidden.length + " more agents under " + s.name, cost: cost.usd == null ? "—" : shortMoney(cost.usd), costTip: "Hidden agents' rollup cost: " + costText(cost) }); }
-    };
-    add(model.rootNode, 0); if (model.peers.length) { rows.push({ kind: "heading", id: "relayed-heading", depth: 0, label: "", name: "" }); for (const peer of model.peers) add(peer, 0); }
-    return { summary, start: clock(start), end: clock(end), ticks: ticks.map(offset => ({ left: pct(start + offset), label: "+" + Math.round(offset / 60000) + "m", nearEnd: offset / span > .86 })),
-      legend: waits.some(w => w.targets?.length) ? "Recorded waits on agents" : waits.length ? "Recorded waits without known targets" : "Wait dependencies not recorded", incomplete: allRunNodes(model).some(node => SESS[node.sid]?.wait_edges_truncated), rows };
-  }
+  const { agentSnapshot } = createTraceCalculations({ sessions: SESS, turns: TURNS, starts: STARTS }, domain, () => NOW, RUN_EXPANDED, HARNESS, STATE);
   function renderTrace(page, id) {
     const root = TURN.get(id);
     if (!root) { renderTraceScreen(page, { empty: true, hops: [] }, { ...sentenceHost, committed: observeTitle, fold() {} }); return; }
@@ -1705,7 +1472,7 @@ queueMicrotask(() => {
   function render() {
 
     const focusSearch = focusSessionsSearchOnRender === route; focusSessionsSearchOnRender = null;
-    if (SIDEBAR_ONLY) { CHILDREN = null; tick(); rendered = route; renderNav(); renderLanes(); return; } // the embedding page draws its own page and bar
+    if (SIDEBAR_ONLY) { domain.invalidate(); tick(); rendered = route; renderNav(); renderLanes(); return; } // the embedding page draws its own page and bar
     if (NATIVE_PAGE || (route.v === "machines" && viewerHost)) {
       tick(); rendered = route;
       if (externalContent && !externalContent.element.isConnected) { clearBox($("#page"), route); $("#page").append(externalContent.element); }
@@ -1714,7 +1481,7 @@ queueMicrotask(() => {
     }
     // The page first, then the bar: the bar's summary (a trace's counts, a search's matches) comes from the page.
     if (viewerHost) document.title = ({ home: "Home", sessions: "Sessions", analytics: "Analytics" }[route.v] ?? "Semon") + " · Semon";
-    resetPagerInput(); holdProgrammaticScroll(); closeAccountMenu(); stopOpeningEndPin(); CHILDREN = null; // a redraw inside the open-at-end window ends the pin
+    resetPagerInput(); holdProgrammaticScroll(); closeAccountMenu(); stopOpeningEndPin(); domain.invalidate(); // a redraw inside the open-at-end window ends the pin
     ordPageState = ordState("page"); tick(); const page = $("#page"), r = route; rendered = r; setGeometry(page, "paddingBottom", null); clearBox(page, r); page.classList.remove("child-page");
     if (r.v === "home") { renderHome(page); renderTopbar("Home"); }
     else if (r.v === "analytics") { renderAnalytics(page); renderTopbar("Analytics", null, { analytics: true }); }
@@ -1837,9 +1604,6 @@ queueMicrotask(() => {
   }
   const hoursText = (ms) => (ms / HOUR).toFixed(1) + " h", rangeName = () => analyticsRange === 1 ? "24 h" : analyticsRange + " d";
   function chartWidth() { const page = $("#page"), style = getComputedStyle(page); return Math.max(280, Math.round(page.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight))); }
-  const niceStep = (max) => [.25, .5, 1, 2, 5, 10, 20, 50, 100, 200, 500].find((x) => x * 3 >= max) ?? 1000;
-  function timeText(ms) { const mins = Math.max(0, Math.round(ms / MIN)), days = Math.floor(mins / 1440), hours = Math.floor(mins % 1440 / 60), rem = mins % 60; return days ? days + "d " + hours + "h" : hours ? hours + "h " + rem + "m" : mins + "m"; }
-  const countText = (n) => Math.round(n).toLocaleString(), hLabel = (n) => n ? +n.toFixed(2) + " h" : "0";
   const rangeAgo = (A) => A.days === 1 ? "24 h ago" : A.days + " d ago";
   function openModelItems(group) {
     const { d, body, show: open } = panel(shortModel(group.model) + " · " + group.band, { label: "Work items for " + group.model + ", " + group.band });

@@ -319,6 +319,18 @@ pub fn process_file(
     store: &mut TraceStore,
     options: &ProcessOptions<'_>,
 ) -> Result<usize, AdapterError> {
+    let source_key = resolved(path)?.to_string_lossy().into_owned();
+    store.with_capture_source(CARRIER, &source_key, |store| {
+        process_source_file(path, state, store, options)
+    })
+}
+
+fn process_source_file(
+    path: &Path,
+    state: &mut CursorState,
+    store: &mut TraceStore,
+    options: &ProcessOptions<'_>,
+) -> Result<usize, AdapterError> {
     if options.batch_size == 0 || options.max_batch_bytes == 0 {
         return Err(AdapterError::InvalidBatchLimit);
     }
@@ -335,6 +347,7 @@ pub fn process_file(
         || saved.prefix_sha256.as_deref()
             == Some(format!("{:x}", prefix.clone().finalize()).as_str());
     if saved.offset > size || !prefix_matches {
+        store.reset_capture_source(CARRIER, &key)?;
         saved = state::FileCursor::default();
         prefix = Sha256::new();
         // The reset must reach disk even if the file below turns out to have
