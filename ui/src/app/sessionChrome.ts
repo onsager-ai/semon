@@ -634,14 +634,12 @@ export function createSessionChrome(host: SessionChromeHost) {
         actions,
         command,
         path: host.phone.matches
-          ? host
-              .lineageOf(s.id)
-              .map((a) => ({
-                id: a.id,
-                name: a.name,
-                harness: a.harness,
-                harnessName: host.HARNESS[a.harness] ?? a.harness,
-              }))
+          ? host.lineageOf(s.id).map((a) => ({
+              id: a.id,
+              name: a.name,
+              harness: a.harness,
+              harnessName: host.HARNESS[a.harness] ?? a.harness,
+            }))
           : [],
         status: host.STATE[s.state] + ' · ' + turnsLabel(s),
         state: s.state,

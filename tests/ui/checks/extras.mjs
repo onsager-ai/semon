@@ -146,13 +146,11 @@ async function automaticPaging(browser, size, D, r, dark = false) {
   await scrollTranscript(page);
   await page.waitForFunction(() => document.querySelector('[data-load-earlier]')?.disabled);
   await firstHeld;
-  const loading = await page
-    .locator('[data-load-earlier]')
-    .evaluate((b) => ({
-      text: b.textContent,
-      spin: !!b.querySelector('.spin'),
-      disabled: b.disabled,
-    }));
+  const loading = await page.locator('[data-load-earlier]').evaluate((b) => ({
+    text: b.textContent,
+    spin: !!b.querySelector('.spin'),
+    disabled: b.disabled,
+  }));
   r.expect(
     loading.text === 'Loading earlier…' && loading.spin && loading.disabled,
     size + ': automatic paging shows its disabled loading control',
@@ -401,15 +399,13 @@ async function pagingBoundaryCheck(browser, size, D, r) {
   await page.evaluate(
     () => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))),
   );
-  const after = await page
-    .locator('[data-entry-key="backlog#slot:10"]')
-    .evaluate((n) => ({
-      top: n.getBoundingClientRect().top,
-      key: n.dataset.e,
-      group: n.closest('.tgroup')?.querySelector('.tsum')?.getAttribute('aria-expanded'),
-      step: n.querySelector(':scope > button')?.getAttribute('aria-expanded'),
-      output: !n.querySelector(':scope > .out')?.hidden,
-    }));
+  const after = await page.locator('[data-entry-key="backlog#slot:10"]').evaluate((n) => ({
+    top: n.getBoundingClientRect().top,
+    key: n.dataset.e,
+    group: n.closest('.tgroup')?.querySelector('.tsum')?.getAttribute('aria-expanded'),
+    step: n.querySelector(':scope > button')?.getAttribute('aria-expanded'),
+    output: !n.querySelector(':scope > .out')?.hidden,
+  }));
   r.expect(
     after.key !== oldKey,
     size + ": loading the older prefix changes the entry's turn-relative key",
