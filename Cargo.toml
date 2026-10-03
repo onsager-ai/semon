@@ -6,6 +6,7 @@ members = [
     "crates/semon-control",
     "crates/semon-push",
     "crates/semon-relay",
+    "crates/semon-runtime",
     "crates/semon-sessions",
     "crates/semon-store",
 ]
@@ -19,6 +20,7 @@ edition = "2024"
 license = "Apache-2.0"
 
 [workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
 age = "=0.12.1"
 chacha20poly1305 = "=0.10.1"
 ed25519-dalek = "=2.2.0"
