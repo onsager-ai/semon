@@ -1,3 +1,6 @@
+import { createErrorNavigation } from "../../../ui/src/navigation/errors";
+import { NavigationController } from "../../../ui/src/navigation/routes";
+import { createScrollTransactions } from "../../../ui/src/navigation/scroll";
 import { ViewerModelStore } from "../../../ui/src/state/model";
 import { TranscriptStore } from "../../../ui/src/state/transcript";
 import { createTraceCalculations } from "../../../ui/src/domain/trace";
@@ -25,7 +28,6 @@ queueMicrotask(() => {
   let ACCOUNT = null;
   const viewerHost = getViewerHost();
   const NATIVE_PAGE = viewerHost?.nativePage;
-  let externalContent = viewerHost?.initialMachines ?? null, externalPending = null;
   let NAV_MACHINES = viewerHost?.machinesPath ?? null;
   // An embedding page that shows the viewer's sidebar beside its own content marks its .app data-viewer="sidebar" (docs/shell.md):
   // only the sidebar is drawn there, and every destination opens the viewer's own page.
@@ -36,7 +38,7 @@ queueMicrotask(() => {
   const HARNESS_SHORT = Object.fromEntries(Object.entries(HARNESSES).map(([id, h]) => [id, h.short]));
   const SESS = modelStore.sessions;
   const H = modelStore.handoffs;
-  const transcripts = new TranscriptStore({ request: (path, signal) => api(path, signal), turns: sid => modelStore.turns[sid] ?? [], turn: id => modelStore.turn.get(id), entry: e => txEntry(e), cleared(sid) { if (route.v === "session" && route.id === sid) resetPagerInput(); } });
+  const transcripts = new TranscriptStore({ request: (path, signal) => api(path, signal), turns: sid => modelStore.turns[sid] ?? [], turn: id => modelStore.turn.get(id), entry: e => txEntry(e), cleared(sid) { if (navigation.route.v === "session" && navigation.route.id === sid) resetPagerInput(); } });
   const TX = transcripts.entries;
   const SEEN_KEY = "semon.seen", SEEN_LIMIT = 2000;
   const SEEN_RESULTS = (() => {
@@ -194,7 +196,7 @@ queueMicrotask(() => {
   function revalidate(r) {
     const sid = r.id, m = TXM[sid], moved = m && m.to >= m.total && m.tok != null && TOK[sid] != null && m.tok !== TOK[sid];
     const job = moved ? (shrank(m.tok, TOK[sid]) ? reload(sid) : tail(sid)) : null, work = job;
-    if (work) work.then(() => { if (route === r && rendered === r) refresh(null); }, () => {});
+    if (work) work.then(() => { if (navigation.route === r && navigation.rendered === r) refresh(null); }, () => {});
   }
   // Paging state survives redraws: a click and an observer share one request per session and direction, and a failed
   // page stays manual until Retry succeeds. Observers belong only to the buttons currently drawn.
@@ -214,7 +216,7 @@ queueMicrotask(() => {
     holdProgrammaticScroll(); fn();
   }
   function readerScrollInput() {
-    if (route.v !== "session" || rendered !== route || $("#page").hasAttribute("aria-busy")) return;
+    if (navigation.route.v !== "session" || navigation.rendered !== navigation.route || $("#page").hasAttribute("aria-busy")) return;
     clearTimeout(programmaticScrollTimer); programmaticScrollTimer = null; programmaticScrollPending = false;
     stopOpeningEndPin(); pagerArmed = true; automaticLoads = 0; scrollRevision++; queuePagerObservers();
   }
@@ -226,7 +228,7 @@ queueMicrotask(() => {
   }
   function paintPager(b) { updateSessionPager($("#page"), pagerSnapshot(b.dataset.pagerSid, b.dataset.pagerWhere)); }
   const pagerController = createPagerController({
-    route(sid) { return route.v === "session" && route.id === sid && rendered === route ? route : null; }, range(sid) { return TXM[sid]; }, state: pagingState, automatic: automaticPagingAllowed,
+    route(sid) { return navigation.route.v === "session" && navigation.route.id === sid && navigation.rendered === navigation.route ? navigation.route : null; }, range(sid) { return TXM[sid]; }, state: pagingState, automatic: automaticPagingAllowed,
     current(sid, where, state, r) { return PAGING.get(sid)?.[where] === state; }, beginManual: stopOpeningEndPin, countAutomatic() { automaticLoads++; }, paint: paintPager,
     load(sid, where, boundary, signal, applied) { return fetchTx(sid, where + "=" + boundary, where, signal, applied); },
     commit(r, where, manual) {
@@ -239,7 +241,7 @@ queueMicrotask(() => {
   function disconnectPagerObservers() { pagerController.disconnect(); }
   function queuePagerObservers() {
     if (SIDEBAR_ONLY) return;
-    pagerController.queue($("#page"), phone.matches ? null : $("#main"), () => route.v === "session" && rendered === route && automaticPagingAllowed() && !$("#page").hasAttribute("aria-busy"));
+    pagerController.queue($("#page"), phone.matches ? null : $("#main"), () => navigation.route.v === "session" && navigation.rendered === navigation.route && automaticPagingAllowed() && !$("#page").hasAttribute("aria-busy"));
   }
   function loadPager(button, manual) { return pagerController.load(button, manual); }
   // "Load earlier" at the top of a transcript, and "Load later" at its end when a deep link loaded a middle page.
@@ -259,19 +261,19 @@ queueMicrotask(() => {
   const urlOf = r => routeUrl(r, routeModel), routeOf = location => parseRoute(location, routeModel);
   function boot() {
     api("/api/model?delta=1").then((m) => {
-      adopt(m); LIVE.version = m.version; remember(m); if (SIDEBAR_ONLY || NATIVE_PAGE) { if (NATIVE_PAGE) route = { v: NATIVE_PAGE.nav }; render(); schedule(2000); return; } route = routeOf(location);
-      if (route.v === "sessions") query = (new URLSearchParams(location.search).get("q") ?? "").trim(); // direct Sessions links can prefill its search field
-      if (route.v === "machines" && NAV_MACHINES && !viewerHost) { location.assign(NAV_MACHINES); return; }
-      try { history.replaceState({ ...route, scrollTop: 0 }, "", urlOf(route) + (route.v === "session" ? location.hash : route.v === "sessions" && query ? "?q=" + enc(query) : "")); } catch {}
+      adopt(m); LIVE.version = m.version; remember(m); if (SIDEBAR_ONLY || NATIVE_PAGE) { if (NATIVE_PAGE) navigation.route = { v: NATIVE_PAGE.nav }; render(); schedule(2000); return; } navigation.route = routeOf(location);
+      if (navigation.route.v === "sessions") query = (new URLSearchParams(location.search).get("q") ?? "").trim(); // direct Sessions links can prefill its search field
+      if (navigation.route.v === "machines" && NAV_MACHINES && !viewerHost) { location.assign(NAV_MACHINES); return; }
+      try { history.replaceState({ ...navigation.route, scrollTop: 0 }, "", urlOf(navigation.route) + (navigation.route.v === "session" ? location.hash : navigation.route.v === "sessions" && query ? "?q=" + enc(query) : "")); } catch {}
       const done = () => {
         render();
-        if (route.v === "session" && route.turn) { revealTurn(route.turn, true); if (location.hash) requestAnimationFrame(() => requestAnimationFrame(revealEntryHash)); }
-        else if (route.v === "session" && location.hash) revealEntryHash();
-        else if (route.v === "session") { openSessionAtEnd(); syncJump(); }
+        if (navigation.route.v === "session" && navigation.route.turn) { revealTurn(navigation.route.turn, true); if (location.hash) requestAnimationFrame(() => requestAnimationFrame(revealEntryHash)); }
+        else if (navigation.route.v === "session" && location.hash) revealEntryHash();
+        else if (navigation.route.v === "session") { openSessionAtEnd(); syncJump(); }
         else quietTop();
         schedule(2000); setInterval(ticker, 1000);
       };
-      const initialRoute = route, p = load(initialRoute);
+      const initialRoute = navigation.route, p = load(initialRoute);
       if (p) p.then(() => { done();  }, done);
       else { done();  }
     }, (err) => { if (viewerHost?.modelFailed?.(err?.status ?? 0)) return; if (viewerHost) { console.warn("semon: model unavailable", err.status); return; } renderPlaceholder($(SIDEBAR_ONLY ? "#lanes" : "#page"), "Couldn't load the sessions: " + err.message); });
@@ -279,13 +281,13 @@ queueMicrotask(() => {
 
   // ---- State & navigation ---------------------------------------------------------------
   const phone = window.matchMedia("(max-width: 760px)");
-  let route = { v: "home" }; // (before the layout preferences, which read it)
+  const navigation = new NavigationController({ loadMachines: viewerHost ? signal => viewerHost.loadMachines(signal) : undefined }, viewerHost?.initialMachines ?? null); // (before the layout preferences, which read it)
   let wideMode = false, railMode = false, treePrefs = {};
   try { wideMode = localStorage.getItem("semon.wide") === "1"; } catch {}
   try { railMode = !SIDEBAR_ONLY && localStorage.getItem("semon.rail") === "1"; } catch {} // the rail is the viewer's own layout: an embedding page keeps its sidebar whole
   try { const saved = JSON.parse(localStorage.getItem("semon.tree") ?? "{}"); if (saved && typeof saved === "object" && !Array.isArray(saved)) treePrefs = pruneTreePrefs(saved); } catch {}
   const app = $(".app");
-  const syncLayoutPrefs = () => { if (SIDEBAR_ONLY) return; app.classList.toggle("rail", railMode && !phone.matches); $("#page").classList.toggle("wide-mode", wideMode && !phone.matches && route.v === "session"); };
+  const syncLayoutPrefs = () => { if (SIDEBAR_ONLY) return; app.classList.toggle("rail", railMode && !phone.matches); $("#page").classList.toggle("wide-mode", wideMode && !phone.matches && navigation.route.v === "session"); };
   function setWideMode(on) { wideMode = on; try { localStorage.setItem("semon.wide", on ? "1" : "0"); } catch {} syncLayoutPrefs(); $(".wide-toggle")?.setAttribute("aria-pressed", String(on)); accountChrome.updateWide(on); }
   function setRailMode(on) { railMode = on; ORD.delete("side"); try { localStorage.setItem("semon.rail", on ? "1" : "0"); } catch {} syncLayoutPrefs(); expandedAll = null; renderLanes(); const b = $("#rail-toggle"); b?.setAttribute("aria-expanded", String(!on)); b?.setAttribute("aria-label", on ? "Expand sidebar" : "Collapse sidebar"); b?.setAttribute("data-tip", on ? "Expand sidebar" : "Collapse sidebar"); }
   // A parent's saved choice is whether it is `open`. Saves from before the sidebar's "All N" row also held `more`, which nothing reads now:
@@ -338,7 +340,7 @@ queueMicrotask(() => {
   // navigation the reader has left; a response that still arrives late is dropped because its route is no longer the current one.
   const SKELETON_MS = 150;
   // The sidebar's list was drawn for this route under this model version: the render that follows draws it only if either changed.
-  let navAbort = null, skeletonTimer = null, lanesFor = null;
+  let skeletonTimer = null, lanesFor = null;
   // The turn shapes the skeleton cycles through: a bubble (yours), text lines, a step row. Widths are classes, sk-w1..sk-w5, in percent.
   function paintPending(r) {
     const page = $("#page"), hadFocus = $("#sidebar").contains(document.activeElement);
@@ -348,7 +350,7 @@ queueMicrotask(() => {
     page.setAttribute("aria-busy", "true"); page.inert = true; page.classList.add("loading");
     clearTimeout(skeletonTimer);
     skeletonTimer = setTimeout(() => {
-      if (route !== r || !page.classList.contains("loading")) return;
+      if (navigation.route !== r || !page.classList.contains("loading")) return;
       page.classList.remove("loading"); page.classList.remove("child-page"); setGeometry(page, "paddingBottom", null);
       renderPlaceholder(page); quietTop(); syncBarLine();
     }, SKELETON_MS);
@@ -364,47 +366,39 @@ queueMicrotask(() => {
   }
   // The session's own transcript couldn't be loaded: the skeleton gives way to the reason and a way to try again.
   function failLoad(r, err) {
-    if (route !== r || err?.name === "AbortError") return;
+    if (navigation.route !== r || err?.name === "AbortError") return;
     endLoading();
     const page = $("#page"); page.classList.remove("child-page"); setGeometry(page, "paddingBottom", null); renderPlaceholder(page, "Couldn't load this session: " + (err?.message ?? "no response"), () => go({ ...r }, true));
   }
   // A deep link to a turn the loaded transcript doesn't hold yet.
   const isDeep = (r) => { const t = r.turn ? TURN.get(r.turn) : null; return !!t && t.sid === r.id && !t.entries.length; };
   function go(r, fromHistory, prepared = false, nextContent = null) {
-    externalPending?.abort(); externalPending = null;
+    navigation.cancelNative();
     if (NATIVE_PAGE) { if (!fromHistory) location.assign(r.v === "machines" ? NAV_MACHINES : urlOf(r)); return; }
     if (r.v === "machines" && viewerHost && !prepared) {
-      const controller = new AbortController(); externalPending = controller;
       closeDrawer(true); closeAccountMenu(true, true);
-      viewerHost.loadMachines(controller.signal).then(content => {
-        if (controller.signal.aborted || externalPending !== controller) { content.destroy(); return; }
-        externalPending = null;
-        go(r, fromHistory, true, content);
-      }, error => {
-        if (!controller.signal.aborted && externalPending === controller) { externalPending = null; location.assign(viewerHost.machinesPath); }
-      });
+      navigation.loadNative(r, content => go(r, fromHistory, true, content), () => location.assign(viewerHost.machinesPath));
       return;
     }
     if (r.v !== "sessions" || r !== focusSessionsSearchOnRender) focusSessionsSearchOnRender = null;
     if (SIDEBAR_ONLY) { if (!fromHistory) { closeDrawer(true); location.assign(r.v === "machines" && NAV_MACHINES ? NAV_MACHINES : urlOf(r)); } return; } // an embedding page's sidebar leads to the viewer's pages
-    if (route.v === "session") clearPaging(route.id);
-    resetPagerInput(); stopOpeningEndPin(); navAbort?.abort(); navAbort = null;
+    if (navigation.route.v === "session") clearPaging(navigation.route.id);
+    resetPagerInput(); stopOpeningEndPin(); navigation.cancelRoute();
     if (r.v === "timeline") { r = { ...r, v: "analytics" }; try { history.replaceState({ ...r, scrollTop: r.scrollTop ?? currentScroll() }, "", urlOf(r)); } catch {} }
     if (r.v === "machines" && NAV_MACHINES && !viewerHost) { location.assign(NAV_MACHINES); return; }
     if (!fromHistory) saveHistoryScroll();
     // Capture outgoing history before removing host content: removal can clamp its scroll offset.
-    if (nextContent) { externalContent?.destroy(); externalContent = nextContent; }
-    else if (r.v !== "machines" && externalContent) { externalContent.destroy(); externalContent = null; }
+    navigation.replaceContent(r, nextContent);
     closeAccountMenu(true, true);
     dropErrors(true); // (first: it drops a range the error stepper moved, and that is not kept)
     // Keep the session left after the cached destination has had a frame to draw; weighing it must not delay that draw.
-    if (route.v === "session" && (r.v !== "session" || r.id !== route.id) && TX[route.id] && TXM[route.id]) { const sid = route.id, entries = TX[sid], meta = { ...TXM[sid], origin: !!originHandoff(sid) }; requestAnimationFrame(() => requestAnimationFrame(() => setTimeout(() => cacheTx(sid, entries, meta), 0))); }
-    if (r.v !== "session" || r.id !== route.id) show = { ...SHOW_ALL };
+    if (navigation.route.v === "session" && (r.v !== "session" || r.id !== navigation.route.id) && TX[navigation.route.id] && TXM[navigation.route.id]) { const sid = navigation.route.id, entries = TX[sid], meta = { ...TXM[sid], origin: !!originHandoff(sid) }; requestAnimationFrame(() => requestAnimationFrame(() => setTimeout(() => cacheTx(sid, entries, meta), 0))); }
+    if (r.v !== "session" || r.id !== navigation.route.id) show = { ...SHOW_ALL };
     if (r.v !== "sessions") ORD.delete("page");
-    route = r; find = ""; findOpen = false; closeDrawer(true); clearNewEntries();
+    navigation.route = r; find = ""; findOpen = false; closeDrawer(true); clearNewEntries();
     if (!fromHistory) { const state = { ...r }; delete state.scrollTop; try { history.pushState(state, "", urlOf(r)); } catch {} }
     const done = () => {
-      if (route !== r) return;
+      if (navigation.route !== r) return;
       endLoading(); render(); if (r.v === "session" || (viewerHost && r.v === "machines")) focusTitle();
       if (fromHistory && Number.isFinite(r.scrollTop)) {
         // A fresh offscreen turn has only its intrinsic estimate. Measure once on history navigation
@@ -431,18 +425,18 @@ queueMicrotask(() => {
       if (kept ? adoptCached(r) : !isDeep(r)) {
         TXCACHE.delete(r.id);
         paintPending(r);
-        requestAnimationFrame(() => setTimeout(() => { if (route !== r) return; if (kept && !r.turn) spread(r.id); done(); revalidate(r); }, 0));
+        requestAnimationFrame(() => setTimeout(() => { if (navigation.route !== r) return; if (kept && !r.turn) spread(r.id); done(); revalidate(r); }, 0));
         return;
       }
     }
-    const signal = r.v === "session" ? (navAbort = new AbortController()).signal : undefined, p = load(r, signal);
-    if (p) { if (r.v === "session") paintPending(r); p.then(() => { done();  }, (err) => failLoad(r, err)); } else done();
+    if (r.v === "session") paintPending(r);
+    navigation.load(r, signal => load(r, signal), done, error => failLoad(r, error));
   }
   if (!SIDEBAR_ONLY) window.addEventListener("popstate", (e) => {
     if (skipPop) { skipPop = false; if (afterPop) { const leave = afterPop; afterPop = null; leave(); return; } if (pendingSessionOpen) { const id = pendingSessionOpen; pendingSessionOpen = null; goSession(id); } return; } // close a sheet before opening its session
     if (accountSheet) { accountSheet = false; closeAccountMenu(true); return; } // back gesture closes the phone's account menu
     if (viewerEl) { const d = viewerEl; viewerEl = null; d.close(); return; } // back gesture closes the viewer, page stays
-    if (e.state?.v) go(e.state, true); });
+    if (e.state?.v) go(navigation.historyRoute(e.state, routeOf(location)), true); });
   const goSession = (id, turn) => go(turn ? { v: "session", id, turn } : { v: "session", id });
   const goTrace = (turn) => go({ v: "trace", sid: TURN.get(turn).sid, turn });
   const openSender = (h) => { if (SESS[h.from]) goSession(h.from, HOLDS.get(h.id)?.id); };
@@ -480,7 +474,7 @@ queueMicrotask(() => {
       setGeometry(widget, "accountBottom", Math.max(0, innerHeight - at.top + 6));
     },
     opened(compact) {
-      if (compact) try { history.pushState({ ...route, sheet: 1, scrollTop: currentScroll() }, ""); accountSheet = true; } catch {}
+      if (compact) try { history.pushState({ ...navigation.route, sheet: 1, scrollTop: currentScroll() }, ""); accountSheet = true; } catch {}
     },
     closed({ keepEntry, navigating }) {
       if (accountSheet) { accountSheet = false; if (!keepEntry && history.state?.sheet) { skipPop = true; history.back(); } }
@@ -562,7 +556,7 @@ queueMicrotask(() => {
   const ORD_DRAWER_MS = 320; // the drawer's slide (0.24 s) and a little
   // Applies what a screen holds: the list is drawn sorted, from scratch.
   function orderApply(name) {
-    const sc = ORD.get(name); if (!sc?.n || (name === "page" && (sc.tie !== route || rendered !== route || viewerEl || $("#page").hasAttribute("aria-busy")))) return;
+    const sc = ORD.get(name); if (!sc?.n || (name === "page" && (sc.tie !== navigation.route || navigation.rendered !== navigation.route || viewerEl || $("#page").hasAttribute("aria-busy")))) return;
     ORD.delete(name);
     if (name === "side") renderLanes(); else { const st = capture(); render(); restore(st); }
   }
@@ -584,7 +578,7 @@ queueMicrotask(() => {
     const nav = $("#nav"), destinations = [];
     // A session or a trace sits under Sessions, a machine under Machines.
     const under = { home: ["home"], analytics: ["analytics"], sessions: ["sessions", "session", "trace"], machines: ["machines", "machine"] };
-    const item = (v, label, ic, count, hot) => { destinations.push({ key: v, label, icon: ic, href: v === "machines" && NAV_MACHINES ? NAV_MACHINES : urlOf({ v }), current: under[v].includes(route.v), count, hot }); };
+    const item = (v, label, ic, count, hot) => { destinations.push({ key: v, label, icon: ic, href: v === "machines" && NAV_MACHINES ? NAV_MACHINES : urlOf({ v }), current: under[v].includes(navigation.route.v), count, hot }); };
     item("home", "Home", I.home, inbox().length, true);
     item("sessions", "Sessions", I.sessions);
     item("analytics", "Analytics", I.chart);
@@ -625,13 +619,13 @@ queueMicrotask(() => {
   // The open session and the sessions above it. Only the open one is marked current; its ancestors are opened in the tree for this render
   // (nothing is saved) and are always listed, so the current row can always be found.
   function routedPath() {
-    const current = route.v === "session" ? route.id : route.v === "trace" ? route.sid : null, ancestors = new Set();
+    const current = navigation.route.v === "session" ? navigation.route.id : navigation.route.v === "trace" ? navigation.route.sid : null, ancestors = new Set();
     for (let id = current && SESS[current] ? parentOf(current) : null; id && SESS[id] && id !== current && !ancestors.has(id); id = parentOf(id)) ancestors.add(id);
     return { current, ancestors };
   }
   // Those ancestors open once per navigation, held in memory: a parent collapsed after that stays collapsed until the next one.
   let forcedOpen = { route: null, ids: new Set() };
-  function forcedOpenIds() { if (forcedOpen.route !== route) forcedOpen = { route, ids: routedPath().ancestors }; return forcedOpen.ids; }
+  function forcedOpenIds() { if (forcedOpen.route !== navigation.route) forcedOpen = { route: navigation.route, ids: routedPath().ancestors }; return forcedOpen.ids; }
   // Waiting is 0, running 1, finished 2. A finished child with a waiting or running session below it ranks as that session does.
   // The one parent whose whole list is open in the tree (wide screens only). Nothing saves it: a reload starts with the short lists.
   // The parents above it stay listed and open (`expandedPath`) and everything below it is listed in full and open (`expandedUnder`), so
@@ -689,7 +683,7 @@ queueMicrotask(() => {
     const sheet = createKidsSheet(parent.name, rows, {
       matches(id, query) { return sessMatch(SESS[id], query); },
       select(id) { picked = id; pendingSessionOpen = id; sheet.dialog.close(); },
-      opened(d) { viewerEl = d; document.documentElement.classList.add("viewer-open"); if (!SIDEBAR_ONLY) try { history.pushState({ ...route, sheet: 1, scrollTop: currentScroll() }, ""); } catch {} },
+      opened(d) { viewerEl = d; document.documentElement.classList.add("viewer-open"); if (!SIDEBAR_ONLY) try { history.pushState({ ...navigation.route, sheet: 1, scrollTop: currentScroll() }, ""); } catch {} },
       closed(d) {
         document.documentElement.classList.remove("viewer-open");
         if (viewerEl === d) { viewerEl = null; if (!SIDEBAR_ONLY && history.state?.sheet) { skipPop = true; history.back(); } else if (pendingSessionOpen) { const id = pendingSessionOpen; pendingSessionOpen = null; goSession(id); } }
@@ -762,7 +756,7 @@ queueMicrotask(() => {
     const q = $("#q"); if (q && document.activeElement !== q) q.value = query;
     restoreLaneFocus(focus);
     // A stuck row covers the top of the sidebar: what is scrolled into view (the open session, after a navigation) stays clear of it.
-    const stuck = box.querySelector(".tree-row.stuck"), navigated = revealedFor !== route; revealedFor = route;
+    const stuck = box.querySelector(".tree-row.stuck"), navigated = revealedFor !== navigation.route; revealedFor = navigation.route;
     setGeometry($("#side-list") ?? $("#sidebar"), "scrollPaddingTop", stuck ? stuck.offsetHeight + 8 : null);
     if (stuck && navigated) scrollProgrammatically(() => box.querySelector('.srow[aria-current="page"]')?.scrollIntoView({ block: "nearest" }));
   }
@@ -789,7 +783,7 @@ queueMicrotask(() => {
       menu(trigger, runs) { openSessionMenu(SESS[s.id] ?? s, trigger, runs ? ".runs" : undefined); }, errors() { openErrors(s.id); }, closeErrors, step: stepErrors,
       range(days) { if (analyticsRange === days) return; const top = currentScroll(); analyticsRange = days; render(); restoreScroll(top); refreshAnalytics(true); },
     });
-    const lead = { label: opts.traceSession ? "Back to " + s.name : "Open navigation", icon: opts.traceSession ? I.chev : I.menu, back: opts.traceSession ? () => goSession(s.id, route.turn) : undefined };
+    const lead = { label: opts.traceSession ? "Back to " + s.name : "Open navigation", icon: opts.traceSession ? I.chev : I.menu, back: opts.traceSession ? () => goSession(s.id, navigation.route.turn) : undefined };
     shellChrome.topbar(mode === "normal" ? { titleSlot: content.titleSlot, actions: [content.actions], session: !!s, lead, account } : { mode: [content.mode], session: true, account, accountTarget: content.accountTarget });
     if (s && mode === "normal") requestAnimationFrame(() => { const line = $("#topbar .meta-line"); if (line) measureViewerBar($("#topbar")); });
   }
@@ -800,149 +794,22 @@ queueMicrotask(() => {
   // further away replaces it with the page around the step. Each step is scrolled to the middle and marked, never opened;
   // its tool group opens so it shows. Closing puts back the pages, what was open and the scroll position from before. The
   // mode is its own controller, apart from find, so the two can become one mode later.
-  const ERR = { mode: "errors", on: false, sid: null, slots: [], listed: false, count: 0, version: null, k: -1, slot: null, saved: null, range: null, tools: true, chain: Promise.resolve(), gen: 0 };
-  const ERR_NEAR = 400, ERR_AROUND = 40; // slots: a page (at most 200 entries) or two away is added; 40 entries of context above
-  const errLive = createLiveRegion(); if (!SIDEBAR_ONLY) document.body.append(errLive);
-  const signalCount = (s) => Object.values(s?.signals ?? {}).reduce((n, x) => n + x, 0);
-  const errText = () => ERR.k < 0 ? (ERR.count ? "Finding " + ERR.mode + "…" : "No " + ERR.mode) : (ERR.mode === "signals" ? "Signal " : "Error ") + (ERR.k + 1) + " of " + ERR.count;
-  const errOn = (sid) => ERR.on && ERR.sid === sid;
-  // The label and buttons in place, so focus stays where it is.
-  function errLabel(announce) {
-    ERR.notice = null;
-    if (route.v === "session" && ERR.on) drawSessionBar();
-    if (announce) errLive.textContent = errText();
-  }
   const drawSessionBar = () => {
-    const s = SESS[route.id]; if (route.v !== "session" || !s) return;
-    renderTopbar(s.name, null, { session: s, lineage: lineageOf(route.id).slice(0, -1), line2: sessionLine(s) });
+    const s = SESS[navigation.route.id]; if (navigation.route.v !== "session" || !s) return;
+    renderTopbar(s.name, null, { session: s, lineage: lineageOf(navigation.route.id).slice(0, -1), line2: sessionLine(s) });
     setGeometry(document.documentElement, "barHeight", $("#topbar").offsetHeight); syncBarLine();
   };
   // A redraw keeps focus on the bar's control that had it.
   const keepFocus = (fn) => { const id = document.activeElement?.id; fn(); const n = id && document.getElementById(id); if (n && n !== document.activeElement) n.focus({ preventScroll: true }); };
-  function openErrors(sid, mode = "errors") {
-    if (ERR.on || route.v !== "session" || route.id !== sid || !TXM[sid]) return;
-    resetPagerInput(); stopOpeningEndPin(); find = "";
-    Object.assign(ERR, { mode, on: true, sid, slots: [], listed: false, count: mode === "signals" ? signalCount(SESS[sid]) : countOf(SESS[sid], "errors") ?? 0, version: null, k: -1, slot: null, saved: capture(), range: { tx: TX[sid], m: { ...TXM[sid] } }, tools: show.tools, gen: ERR.gen + 1 });
-    if (!show.tools) { show.tools = true; render(); } else drawSessionBar();
-    document.getElementById("err-next")?.focus({ preventScroll: true }); errLabel(true);
-    const gen = ERR.gen;
-    fetchErrors(sid).then(() => { if (ERR.gen === gen && ERR.on && ERR.slots.length) { ERR.k = 0; showError(true); } else errLabel(true); }, () => { if (ERR.gen === gen && ERR.on) { errLive.textContent = "Couldn't list " + ERR.mode; ERR.notice = "Couldn't list " + ERR.mode; drawSessionBar(); } });
-  }
-  // The list, or nothing new (304) when the model hasn't moved since it was fetched.
-  function fetchErrors(sid) {
-    return fetch("/api/tx?sid=" + enc(sid) + "&" + ERR.mode + "=1" + (ERR.version ? "&since=" + enc(ERR.version) : ""), { credentials: "same-origin" })
-      .then((r) => r.status === 304 ? null : r.ok ? r.json() : Promise.reject(Object.assign(new Error(r.status + " " + r.statusText), { status: r.status })), (e) => Promise.reject(Object.assign(e, { status: 0 })))
-      .then((x) => {
-        if (!x || !errOn(sid)) return;
-        ERR.listed = true; ERR.slots = Array.isArray(x.slots) ? x.slots.filter(Number.isInteger) : []; ERR.count = Number.isInteger(x[ERR.mode]) ? Math.max(x[ERR.mode], ERR.slots.length) : ERR.slots.length; ERR.version = typeof x.version === "string" ? x.version : null;
-        // The current step stays current wherever it now is in the list; one no longer failed gives way to the next after it.
-        if (ERR.slot != null) {
-          const at = ERR.slots.indexOf(ERR.slot), after = ERR.slots.findIndex((slot) => slot > ERR.slot);
-          ERR.k = at >= 0 ? at : !ERR.slots.length ? -1 : after >= 0 ? after : ERR.slots.length - 1;
-          if (at < 0) ERR.slot = ERR.k >= 0 ? ERR.slots[ERR.k] : null;
-        }
-      });
-  }
-  function stepErrors(delta) {
-    if (!ERR.on || !ERR.slots.length) return;
-    const n = ERR.slots.length; ERR.k = ERR.k < 0 ? 0 : (((ERR.k + delta) % n) + n) % n; showError(true);
-  }
-  const hasSlot = (sid, slot) => { const m = TXM[sid]; return !!m && slot >= m.from && slot < m.to; };
-  // Loads the page holding `slot` when it isn't loaded: resolves true when the loaded range changed.
-  function loadSlot(sid, slot) {
-    if (hasSlot(sid, slot)) return Promise.resolve(false);
-    const m = TXM[sid], up = slot < m.from, near = up ? m.from - slot <= ERR_NEAR : slot - m.to < ERR_NEAR;
-    let tries = 0;
-    const extend = () => hasSlot(sid, slot) || tries++ >= 3 ? null : fetchTx(sid, up ? "before=" + TXM[sid].from : "after=" + TXM[sid].to, up ? "before" : "after").then(extend);
-    const around = () => hasSlot(sid, slot) ? null : fetchTx(sid, "after=" + Math.max(0, slot - ERR_AROUND)).then(() => (hasSlot(sid, slot) ? null : fetchTx(sid, "after=" + slot)));
-    return Promise.resolve(near ? extend() : null).then(around).then(() => true);
-  }
-  // The session's own step for a slot: not one in a child run's work drawn inside it.
-  function errNode(sid, slot) {
-    const e = (TX[sid] ?? []).find((x) => x.k === (ERR.mode === "signals" ? "signal" : "tool") && x.slot === slot); if (!e?.key) return null;
-    return [...$("#page").querySelectorAll(".turns [data-e]")].find((n) => n.dataset.e === e.key) ?? null;
-  }
-  // Marks the current step (its group opened so it shows); with `ring`, rings it for a moment and centres it under the bar.
-  function markError(ring) {
-    for (const n of $("#page").querySelectorAll("[data-e].err-current")) n.classList.remove("err-current", "err-ring");
-    if (!ERR.on || ERR.slot == null || route.v !== "session" || route.id !== ERR.sid) return null;
-    const node = errNode(ERR.sid, ERR.slot); if (!node) return null;
-    const g = node.closest(".tgroup"), sum = g && opener(g); if (sum?.getAttribute("aria-expanded") === "false") sum.click();
-    node.classList.add("err-current");
-    if (ring) { node.classList.remove("err-ring"); void node.offsetWidth; node.classList.add("err-ring"); setTimeout(() => node.classList.remove("err-ring"), 1500); }
-    return node;
-  }
   function centre(node) {
     if (!node.isConnected) return;
     const sc = scroller(), r = (node.querySelector(":scope > button") ?? node).getBoundingClientRect(), bottom = phone.matches ? window.innerHeight : $("#main").getBoundingClientRect().bottom;
     const d = (r.top + r.bottom) / 2 - (edge() + bottom) / 2; scrollProgrammatically(() => { if (Math.abs(d) >= 1) sc.scrollTop += d; });
     syncBarLine(); syncJump(); saveHistoryScroll();
   }
-  function showError(announce) {
-    resetPagerInput();
-    const sid = ERR.sid, slot = ERR.slots[ERR.k], gen = ERR.gen; ERR.slot = slot; errLabel(announce);
-    ERR.chain = ERR.chain.then(() => {
-      if (!ERR.on || ERR.gen !== gen || ERR.slot !== slot) return null; // a later step or a close since
-      stopOpeningEndPin();
-      return loadSlot(sid, slot).then((moved) => {
-        if (!ERR.on || ERR.gen !== gen || ERR.slot !== slot || route.v !== "session" || route.id !== sid) return;
-        if (moved) keepFocus(render); // render marks the current step again
-        const node = markError(true);
-        if (!node) { if (announce) errLive.textContent = errText() + ", not shown in this transcript"; return; }
-        centre(node); requestAnimationFrame(() => requestAnimationFrame(() => { if (ERR.on && ERR.slot === slot && node.isConnected) centre(node); }));
-      }, () => { if (ERR.on && ERR.gen === gen) errLive.textContent = "Couldn't load " + errText(); });
-    }).catch((e) => { setTimeout(() => { throw e; }); }); // a fault on the page, reported as one; the next step still runs
-  }
-  // Leaves the mode. By navigation (`away`), a range the mode moved is dropped, so the next visit loads the end afresh and
-  // is tailed again; closeErrors puts the range from before back instead.
-  function dropErrors(away) {
-    if (!ERR.on) return;
-    const sid = ERR.sid, range = ERR.range, m = TXM[sid];
-    ERR.on = false; ERR.gen++; show.tools = ERR.tools; ERR.saved = ERR.range = null; errLive.textContent = "";
-    if (away && range && m && (m.from !== range.m.from || m.to < range.m.to)) dropTx(sid);
-  }
-  function closeErrors() {
-    if (!ERR.on) return;
-    const sid = ERR.sid, saved = ERR.saved, range = ERR.range, m = TXM[sid]; dropErrors();
-    let p = Promise.resolve();
-    // Pages loaded above the range (or a range replaced by a page further off) move its entries' keys: the range from before
-    // comes back, caught up with the tail when it reached the end and the session grew since.
-    if (range && m && TX[sid] && (m.from !== range.m.from || m.to < range.m.to)) {
-      TX[sid] = range.tx; TXM[sid] = range.m; spread(sid);
-      if (range.m.to >= range.m.total && range.m.tok !== TOK[sid]) p = tail(sid).catch(() => null);
-    }
-    p.then(() => {
-      if (route.v !== "session" || route.id !== sid || ERR.on) return;
-      render(); if (saved) restore(saved);
-      const b0 = $("#topbar .lab-errs") ?? $('#topbar .chip[data-filter="failures"]'), b = b0 && !b0.getClientRects().length ? $("#more-btn") : b0; /* on a phone the line is not drawn: focus goes to ⋯ */ if (b && !b.hidden && document.activeElement !== b && (!document.activeElement || document.activeElement === document.body || !document.activeElement.isConnected)) b.focus({ preventScroll: true });
-    });
-  }
-  // Keys while the mode is on: n and p (and Enter, Shift+Enter in the bar) step, Escape closes. Not while typing, and not
-  // under an open sheet.
-  if (!SIDEBAR_ONLY) document.addEventListener("keydown", (e) => {
-    if (!ERR.on || e.defaultPrevented || e.altKey || e.ctrlKey || e.metaKey || document.querySelector("dialog[open]")) return;
-    // The drawer and an open menu have the keys first: Escape closes them and leaves the mode on.
-    if (document.body.classList.contains("drawer-open") || document.querySelector(".menu")) return;
-    if (e.target.closest?.("input, textarea, select, [contenteditable='true']")) return;
-    const inBar = !!e.target.closest?.("#topbar .errnav-bar"), onButton = e.target.tagName === "BUTTON";
-    if (e.key === "Escape") { e.preventDefault(); closeErrors(); return; }
-    if (e.key === "n" || e.key === "N") { e.preventDefault(); stepErrors(1); return; }
-    if (e.key === "p" || e.key === "P") { e.preventDefault(); stepErrors(-1); return; }
-    if (e.key === "Enter" && (inBar || e.target === document.body)) {
-      if (e.shiftKey) { e.preventDefault(); stepErrors(-1); }
-      else if (!onButton) { e.preventDefault(); stepErrors(1); }
-    }
-  });
-  // Live: a new model lists the errors again; N grows, the current one stays.
-  function errorsLive() {
-    if (!ERR.on || route.v !== "session" || route.id !== ERR.sid) return null;
-    const sid = ERR.sid, gen = ERR.gen, was = ERR.count;
-    return fetchErrors(sid).then(() => {
-      if (!ERR.on || ERR.gen !== gen) return;
-      if (ERR.k < 0 && ERR.slots.length) { ERR.k = 0; showError(true); return; }
-      errLabel(ERR.count !== was); markError(false);
-    });
-  }
+  const errorNavigation = createErrorNavigation({ navigation, TX, TXM, TOK, SESS, show, sidebarOnly: SIDEBAR_ONLY, page: () => $("#page"), drawSessionBar, render, keepFocus, countOf, capture, restore, opener, resetPagerInput, stopOpeningEndPin, clearFind() { find = ""; }, centre, fetchTx, dropTx, spread, tail });
+  const { state: ERR, text: errText, on: errOn, open: openErrors, step: stepErrors, mark: markError, drop: dropErrors, close: closeErrors, live: errorsLive } = errorNavigation;
+  const signalCount = (s) => Object.values(s?.signals ?? {}).reduce((n, x) => n + x, 0);
   // A label is information; one that leads somewhere (`act`) is a button that looks the same, with its hit area padded to the tap size.
   const turnsLabel = (s) => { const n = (TURNS[s.id] ?? []).filter(hasTurn).length; return n + (n === 1 ? " turn" : " turns"); };
   // On a phone the line of labels leaves the bar and the state is the small dot before the title. The dot names the state for a screen reader, and
@@ -974,14 +841,14 @@ queueMicrotask(() => {
   // The bar's divider shows only once the page has scrolled.
   function syncBarLine() { const y = phone.matches ? window.scrollY : $("#main").scrollTop; $("#topbar").classList.toggle("scrolled", y > 4); }
   if (!SIDEBAR_ONLY) { window.addEventListener("scroll", syncBarLine, { passive: true }); $("#main").addEventListener("scroll", syncBarLine, { passive: true }); }
-  if (!SIDEBAR_ONLY) window.addEventListener("resize", () => { const l2 = $("#topbar .meta-line"); if (l2 && route.v === "session") measureViewerBar($("#topbar")); syncLayoutPrefs(); syncJump(); }, { passive: true });
+  if (!SIDEBAR_ONLY) window.addEventListener("resize", () => { const l2 = $("#topbar .meta-line"); if (l2 && navigation.route.v === "session") measureViewerBar($("#topbar")); syncLayoutPrefs(); syncJump(); }, { passive: true });
 
   // ---- Panels: one builder for the sheets and menus opened from the top bar --------------------------------------------
   // A phone gets a bottom sheet; a desktop a dialog, or for the session menu a panel that hangs from its button. Each is a
   // history entry, so back closes it without leaving the page, and a live update waits until it closes.
   function panel(title, opts = {}) {
     const chrome = createPanelChrome({ title, className: opts.cls, label: opts.label, sub: opts.sub }, {
-      opened() { viewerEl = chrome.dialog; document.documentElement.classList.add("panel-open"); try { history.pushState({ ...route, sheet: 1, scrollTop: currentScroll() }, ""); } catch {} },
+      opened() { viewerEl = chrome.dialog; document.documentElement.classList.add("panel-open"); try { history.pushState({ ...navigation.route, sheet: 1, scrollTop: currentScroll() }, ""); } catch {} },
       closed() { const d = chrome.dialog; document.documentElement.classList.remove("panel-open"); opts.onClose?.(); if (viewerEl === d) { viewerEl = null; if (history.state?.sheet) { skipPop = true; history.back(); } else if (pendingSessionOpen) { const id = pendingSessionOpen; pendingSessionOpen = null; goSession(id); } } if (LIVE.pending) refresh(); },
     });
     return { d: chrome.dialog, body: chrome.body, show: () => chrome.show() };
@@ -994,7 +861,7 @@ queueMicrotask(() => {
   function openSessionMenu(s, anchor, scrollTo) {
     const kids = descendantsOf(s.id, sessionChildren());
     const { d, body, show: open } = panel(s.name, { cls: "anchored session-menu", label: "Session menu for " + s.name, sub: [STATE[s.state], kindText(s), shortModel(s.model)].join(" · "), onClose: () => { anchor?.setAttribute("aria-expanded", "false"); anchor?.focus({ focusVisible: false }); } });
-    const traceTurn = route.v === "trace" ? TURN.get(route.turn) : (() => { const top = $("#topbar").getBoundingClientRect().bottom; const nodes = [...document.querySelectorAll("#page .turn[data-turn]")].filter(n => !n.closest(".cw-body")); const visible = nodes.find(n => n.getBoundingClientRect().bottom > top); return TURN.get(visible?.dataset.turn) ?? (TURNS[s.id] ?? []).at(-1); })();
+    const traceTurn = navigation.route.v === "trace" ? TURN.get(navigation.route.turn) : (() => { const top = $("#topbar").getBoundingClientRect().bottom; const nodes = [...document.querySelectorAll("#page .turn[data-turn]")].filter(n => !n.closest(".cw-body")); const visible = nodes.find(n => n.getBoundingClientRect().bottom > top); return TURN.get(visible?.dataset.turn) ?? (TURNS[s.id] ?? []).at(-1); })();
     const actions = [], addAction = (key, text, icon, className, note, checked, dot) => actions.push({ key, text, icon, className, note, checked, dot });
     if (traceTurn?.out.length) addAction("trace", "Trace this turn", I.trace, "menu-trace");
     const command = s.harness === "codex" ? "codex resume " + s.id : "claude --resume " + (s.sessionId ?? s.id);
@@ -1081,7 +948,7 @@ queueMicrotask(() => {
   };
   function renderHome(page) {
     const open = inbox(), running = working(), many = Object.keys(MACHINE).length > 1;
-    const rows = orderList(orderScope("page", pageSig(), route, pageState()), "working", running, byLast);
+    const rows = orderList(orderScope("page", pageSig(), navigation.route, pageState()), "working", running, byLast);
     const done = H.filter(h => h.kind === "toyou" && h.status === "done").sort((a, b) => b.at - a.at);
     renderHomeScreen(page, { waiting: open.length, working: running.length, up: upCount(), machines: Object.keys(MACHINE).length,
       inbox: open.map(h => inboxSnapshot(h, false)), live: rows.map(s => liveSnapshot(s, many)),
@@ -1100,7 +967,7 @@ queueMicrotask(() => {
   }
   function renderMachine(page, m) {
     const here = onMachine(m), off = movedOff(m), moves = movesOf(m);
-    const ordered = orderList(orderScope("page", pageSig(), route, pageState()), "machine:" + m, here, byState);
+    const ordered = orderList(orderScope("page", pageSig(), navigation.route, pageState()), "machine:" + m, here, byState);
     renderMachineScreen(page, { name: MACHINE[m], totalSessions: here.length, sessions: ordered.map(s => liveSnapshot(s, false)),
       off: off.map(s => ({ ...liveSnapshot(s, false), detail: "Now on " + MACHINE[s.machine] })), moves: moves.map(h => inboxSnapshot(h, true)) }, activityHost);
   }
@@ -1359,7 +1226,7 @@ queueMicrotask(() => {
   }
   function openImage(url, label, from) {
     const image = createImageViewer(url, label, {
-      opened(d) { viewerEl = d; document.documentElement.classList.add("viewer-open"); try { history.pushState({ ...route, sheet: 1 }, ""); } catch {} },
+      opened(d) { viewerEl = d; document.documentElement.classList.add("viewer-open"); try { history.pushState({ ...navigation.route, sheet: 1 }, ""); } catch {} },
       closed(d) {
         document.documentElement.classList.remove("viewer-open");
         if (viewerEl === d) { viewerEl = null; if (history.state?.sheet) { skipPop = true; history.back(); } }
@@ -1412,7 +1279,7 @@ queueMicrotask(() => {
   const SLOTS = new Map();
   function slot(key, box, build) {
     let s = SLOTS.get(key);
-    if (!s || s.route !== route || s.box !== box || !box.contains(s.el)) { s?.ctx.destroy?.(); s = { route, box, ctx: {}, el: null }; s.el = build(s.ctx); SLOTS.set(key, s); }
+    if (!s || s.route !== navigation.route || s.box !== box || !box.contains(s.el)) { s?.ctx.destroy?.(); s = { route: navigation.route, box, ctx: {}, el: null }; s.el = build(s.ctx); SLOTS.set(key, s); }
     return s;
   }
   // Empties `box` of everything but the slots the route being drawn already holds in it.
@@ -1432,18 +1299,18 @@ queueMicrotask(() => {
   }
   function render() {
 
-    const focusSearch = focusSessionsSearchOnRender === route; focusSessionsSearchOnRender = null;
-    if (SIDEBAR_ONLY) { domain.invalidate(); tick(); rendered = route; renderNav(); renderLanes(); return; } // the embedding page draws its own page and bar
-    if (NATIVE_PAGE || (route.v === "machines" && viewerHost)) {
-      tick(); rendered = route;
-      if (externalContent && !externalContent.element.isConnected) { clearBox($("#page"), route); $("#page").append(externalContent.element); }
+    const focusSearch = focusSessionsSearchOnRender === navigation.route; focusSessionsSearchOnRender = null;
+    if (SIDEBAR_ONLY) { domain.invalidate(); tick(); navigation.rendered = navigation.route; renderNav(); renderLanes(); return; } // the embedding page draws its own page and bar
+    if (NATIVE_PAGE || (navigation.route.v === "machines" && viewerHost)) {
+      tick(); navigation.rendered = navigation.route;
+      if (navigation.content && !navigation.content.element.isConnected) { clearBox($("#page"), navigation.route); $("#page").append(navigation.content.element); }
       document.title = (NATIVE_PAGE?.title ?? "Machines") + " · Semon";
       renderTopbar(NATIVE_PAGE?.title ?? "Machines"); syncLayoutPrefs(); syncBarLine(); renderNav(); renderLanes(); renderDrawerAccount(); syncJump(); return;
     }
     // The page first, then the bar: the bar's summary (a trace's counts, a search's matches) comes from the page.
-    if (viewerHost) document.title = ({ home: "Home", sessions: "Sessions", analytics: "Analytics" }[route.v] ?? "Semon") + " · Semon";
+    if (viewerHost) document.title = ({ home: "Home", sessions: "Sessions", analytics: "Analytics" }[navigation.route.v] ?? "Semon") + " · Semon";
     resetPagerInput(); holdProgrammaticScroll(); closeAccountMenu(); stopOpeningEndPin(); domain.invalidate(); // a redraw inside the open-at-end window ends the pin
-    ordPageState = ordState("page"); tick(); const page = $("#page"), r = route; rendered = r; setGeometry(page, "paddingBottom", null); clearBox(page, r); page.classList.remove("child-page");
+    ordPageState = ordState("page"); tick(); const page = $("#page"), r = navigation.route; navigation.rendered = r; setGeometry(page, "paddingBottom", null); clearBox(page, r); page.classList.remove("child-page");
     if (r.v === "home") { renderHome(page); renderTopbar("Home"); }
     else if (r.v === "analytics") { renderAnalytics(page); renderTopbar("Analytics", null, { analytics: true }); }
     else if (r.v === "sessions") { renderSessions(page, focusSearch); renderTopbar("Sessions"); }
@@ -1504,25 +1371,25 @@ queueMicrotask(() => {
   const backingOff = () => AN.error != null && performance.now() - AN.failedAt < AN_EVERY; // a monotonic clock: a wall-clock jump neither stalls nor rushes it
   function scheduleAnalytics() {
     clearTimeout(AN.timer); AN.timer = null;
-    if (route.v !== "analytics" || LIVE.ended || !visible()) return;
+    if (navigation.route.v !== "analytics" || LIVE.ended || !visible()) return;
     const data = analyticsData(), behind = !AN.error && data && LIVE.version && data.version !== LIVE.version;
     AN.timer = setTimeout(() => { AN.timer = null; refreshAnalytics(); }, AN.error ? Math.max(0, AN.failedAt + AN_EVERY - performance.now()) : behind ? 1200 : AN_EVERY);
   }
   // `asked`: the reader changed the range or a filter, which asks at once. Anything else (a model update, the tab showing
   // again) waits out the backoff while asking fails, so failed asks keep 10 s apart however fast the model moves.
   function refreshAnalytics(asked = false) {
-    if (route.v !== "analytics") return Promise.resolve();
+    if (navigation.route.v !== "analytics") return Promise.resolve();
     if (asked !== true && backingOff()) { if (!AN.timer) scheduleAnalytics(); return Promise.resolve(); }
     clearTimeout(AN.timer); AN.timer = null;
     return fetchAnalytics(asked === true).then((changed) => {
-      if (changed && route.v === "analytics" && rendered === route) {
+      if (changed && navigation.route.v === "analytics" && navigation.rendered === navigation.route) {
         if (viewerEl || accountChrome.open) LIVE.pending = true; // drawn when the sheet or the account menu closes
         else { const st = capture(); render(); restore(st); }
       }
       scheduleAnalytics();
     });
   }
-  if (!SIDEBAR_ONLY) document.addEventListener("visibilitychange", () => { if (visible() && route.v === "analytics") refreshAnalytics(); else if (!visible()) { clearTimeout(AN.timer); AN.timer = null; } });
+  if (!SIDEBAR_ONLY) document.addEventListener("visibilitychange", () => { if (visible() && navigation.route.v === "analytics") refreshAnalytics(); else if (!visible()) { clearTimeout(AN.timer); AN.timer = null; } });
   const nameOfSid = (A, sid) => SESS[sid]?.name ?? A.sessions[sid]?.name ?? sid;
   const harnessOfSid = (A, sid) => SESS[sid]?.harness ?? A.sessions[sid]?.harness ?? "";
   const sessionFacetValue = (s, key) => key === "repo" ? s.repo ?? "__none__" : key === "model" ? s.model ?? s.modelId ?? "Unknown model" : s[key] ?? "";
@@ -1534,7 +1401,7 @@ queueMicrotask(() => {
   // count up to date in place. A selected value that no session has now stays selected, marked "(no sessions)", until the reader
   // changes it. The sheet lives inside the control, so its Selects are in the page even while it is shut.
   // On Analytics the range's own values join the model's: a repo that worked last week is a choice there.
-  const rangeFacet = (key) => route.v !== "analytics" ? [] : (analyticsData()?.facets?.[key] ?? []).map((v) => v ?? "__none__");
+  const rangeFacet = (key) => navigation.route.v !== "analytics" ? [] : (analyticsData()?.facets?.[key] ?? []).map((v) => v ?? "__none__");
   const FACETS = [
     ["repo", "Repo", "All repos", () => [...new Set([...Object.values(SESS).map((s) => sessionFacetValue(s, "repo")), ...rangeFacet("repo")])].sort((a, b) => a === "__none__" ? 1 : b === "__none__" ? -1 : a.localeCompare(b)), (v) => v === "__none__" ? "No repo" : v],
     ["machine", "Machine", "All machines", () => [...new Set([...Object.values(SESS).map((s) => s.machine ?? ""), ...rangeFacet("machine")])].sort(), (v) => MACHINE[v] ?? v],
@@ -1549,7 +1416,7 @@ queueMicrotask(() => {
         change(key, value) { sessionFilters[key] = value; },
         cleared(key) { sessionFilters[key] = ""; ctx.sync(); ctx.onChange(); },
         canOpen() { return !viewerEl; },
-        opened(d) { ctx.sync(); before = JSON.stringify(sessionFilters); viewerEl = d; try { history.pushState({ ...route, sheet: 1, scrollTop: currentScroll() }, ""); } catch {} },
+        opened(d) { ctx.sync(); before = JSON.stringify(sessionFilters); viewerEl = d; try { history.pushState({ ...navigation.route, sheet: 1, scrollTop: currentScroll() }, ""); } catch {} },
         closed(d, reason) { if (viewerEl === d) { viewerEl = null; if (history.state?.sheet) { skipPop = true; history.back(); } } if (reason === "destroyed") return; if (JSON.stringify(sessionFilters) !== before) { LIVE.pending = false; ctx.onChange(); } else if (LIVE.pending) refresh(); },
         clear() { for (const key of Object.keys(sessionFilters)) sessionFilters[key] = ""; },
       });
@@ -1577,7 +1444,7 @@ queueMicrotask(() => {
   function openAnalyticsSlice(A, a, b, items, more, costMode = false) {
     const when = new Date(a).toLocaleString([], { weekday: "short", hour: "numeric", minute: "2-digit" }) + "–" + new Date(b).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }), heading = costMode ? "Sessions with cost" : "Sessions busy";
     const sheet = createNativeSheet({ className: "analytics-slice", heading: heading + " · " + when, label: heading + " " + when, closeLabel: "Close sessions list" }, {
-      opened(d) { viewerEl = d; document.documentElement.classList.add("viewer-open"); try { history.pushState({ ...route, sheet: 1, scrollTop: currentScroll() }, ""); } catch {} },
+      opened(d) { viewerEl = d; document.documentElement.classList.add("viewer-open"); try { history.pushState({ ...navigation.route, sheet: 1, scrollTop: currentScroll() }, ""); } catch {} },
       closed(d) { document.documentElement.classList.remove("viewer-open"); if (viewerEl === d) { viewerEl = null; if (history.state?.sheet) { skipPop = true; history.back(); } else if (pendingSessionOpen) { const id = pendingSessionOpen; pendingSessionOpen = null; goSession(id); } } },
     });
     const rows = items.map(item => { const harness = harnessOfSid(A, item.sid); return { id: item.sid, name: nameOfSid(A, item.sid), harness, harnessName: HARNESS_SHORT[harness] ?? harness, harnessTip: HARNESS[harness] && HARNESS[harness] !== HARNESS_SHORT[harness] ? HARNESS[harness] : undefined, mark: harnessSnapshot(harness), value: costMode ? asMoney(item.usd) : timeText(item.ms) + " busy", href: SESS[item.sid] ? urlOf({ v: "session", id: item.sid }) : undefined, className: "analytics-session analytics-slice", missing: costMode && item.unpriced_models.length ? "no price for " + item.unpriced_models.join(", ") : undefined }; });
@@ -1656,7 +1523,7 @@ queueMicrotask(() => {
   }
   function renderSessions(page, focusSearch = false) {
     const all = Object.values(SESS).filter(s => (showApprovalReviews || !isApprovalReview(s)) && matchesSessionFacets(s));
-    const lanes = all.filter(s => sessMatch(s, query)), order = orderScope("page", pageSig(), route, pageState());
+    const lanes = all.filter(s => sessMatch(s, query)), order = orderScope("page", pageSig(), navigation.route, pageState());
     let groups;
     if (groupBy === "recent") groups = [["", orderList(order, "recent", lanes, byLast), lanes.length]];
     else { const key = { machine: s => MACHINE[s.machine], project: s => s.repo ?? "No repo (roles)", harness: s => HARNESS[s.harness] }[groupBy];
@@ -1688,13 +1555,13 @@ queueMicrotask(() => {
   function closeDrawer(quiet) { shellChrome?.closeDrawer(quiet); }
   // Sidebar-only consumers retain their existing server shell.js owner.
   if (SIDEBAR_ONLY) window.addEventListener("semon:drawer-open", () => orderApply("side"));
-    if (!SIDEBAR_ONLY) document.addEventListener("keydown", (e) => { if (e.key === "Escape" && accountSheet) accountChrome.escape(); else if (e.key === "Escape" && !viewerEl) { closeDrawer(); closeAccountMenu(); $(".session-menu")?.remove(); $("#more-btn")?.setAttribute("aria-expanded", "false"); } if (e.key === "/" && !/INPUT|TEXTAREA/.test(document.activeElement?.tagName ?? "") && !document.activeElement?.isContentEditable && !viewerEl) { e.preventDefault(); if (route.v === "session") { findOpen = true; render(); $("#find")?.focus(); } else if (route.v === "sessions") { $("#sq")?.focus(); } else { const r = { v: "sessions", q: query }; focusSessionsSearchOnRender = r; go(r); } } });
+    if (!SIDEBAR_ONLY) document.addEventListener("keydown", (e) => { if (e.key === "Escape" && accountSheet) accountChrome.escape(); else if (e.key === "Escape" && !viewerEl) { closeDrawer(); closeAccountMenu(); $(".session-menu")?.remove(); $("#more-btn")?.setAttribute("aria-expanded", "false"); } if (e.key === "/" && !/INPUT|TEXTAREA/.test(document.activeElement?.tagName ?? "") && !document.activeElement?.isContentEditable && !viewerEl) { e.preventDefault(); if (navigation.route.v === "session") { findOpen = true; render(); $("#find")?.focus(); } else if (navigation.route.v === "sessions") { $("#sq")?.focus(); } else { const r = { v: "sessions", q: query }; focusSessionsSearchOnRender = r; go(r); } } });
   phone.addEventListener("change", () => {
     closeDrawer(true); syncLayoutPrefs(); expandedAll = null; renderLanes();
     if (!phone.matches && viewerEl?.classList.contains("kids-sheet")) viewerEl.close(); // a sheet is a phone's: a wide screen opens the list in the tree
-    if (route.v === "session" || route.v === "analytics") { const top = currentScroll(); render(); restoreScroll(top); }
+    if (navigation.route.v === "session" || navigation.route.v === "analytics") { const top = currentScroll(); render(); restoreScroll(top); }
     else renderLanes();
-    const l2 = $("#topbar .meta-line"); if (l2 && route.v === "session") measureViewerBar($("#topbar")); syncJump();
+    const l2 = $("#topbar .meta-line"); if (l2 && navigation.route.v === "session") measureViewerBar($("#topbar")); syncJump();
   });
 
   // ---- Live updates (deliberate difference 3) --------------------------------------------------------------------------------
@@ -1718,7 +1585,7 @@ queueMicrotask(() => {
   // What an update can change in a turn record or a handoff, cheaply (not the text, which a record never rewrites).
   const turnKey = (x) => [x.start, x.end?.st, x.end?.why, x.end?.h, x.sent.join(","), x.last ? 1 : 0].join("|");
   const handKey = (h) => [h.status, h.to, h.done, h.result?.length, h.answer?.length, h.answers?.length, h.declined ? 1 : 0].join("|");
-  let rendered = null; // the route the page shows
+  // rendered route is owned by navigation; // the route the page shows
   const visible = () => document.visibilityState === "visible";
   const schedule = ms => liveController.schedule(ms);
   // An embedding page can cancel `semon:ended` to draw its own note in place of this one.
@@ -1732,7 +1599,7 @@ queueMicrotask(() => {
   const soft = (p) => p.catch((e) => { if (e?.status === 403 || e?.status === 0) throw e; });
   // The transcript on screen: a session page's own. Any other loaded transcript is dropped from TX (the last few opened are kept in
   // TXCACHE, and brought up to date when opened again). A child run's card is drawn from the model, so its transcript is not loaded.
-  const viewed = () => { const v = new Set(); if (route.v === "session") v.add(route.id); return v; };
+  const viewed = () => { const v = new Set(); if (navigation.route.v === "session") v.add(navigation.route.id); return v; };
   // What a child card shows, so an update knows which cards changed: the run's name, state, kind, model, steps and current call.
   const cardKeys = () => new Map(H.filter((h) => h.kind === "spawn" && SESS[h.to]).map((h) => { const c = SESS[h.to]; return [h.id, [c.name, c.state, c.kind, c.model, countOf(c, "calls"), c.activity?.join("|"), h.status, h.result].join("\u0001")]; }));
   const applyModelDelta = value => modelStore.apply(value);
@@ -1740,15 +1607,15 @@ queueMicrotask(() => {
     m = applyModelDelta(m);
     const oldH = new Map(H.map((h) => [h.id, handKey(h)])), oldT = LIVE.turns, oldCards = cardKeys(), names = new Map(Object.values(SESS).map((x) => [x.id, x.name]));
     const hadOrigins = new Set([...TXCACHE.keys()].filter((sid) => !!originHandoff(sid)));
-    const hadOrigin = route.v === "session" && !!SESS[route.id] && !!originHandoff(route.id);
+    const hadOrigin = navigation.route.v === "session" && !!SESS[navigation.route.id] && !!originHandoff(navigation.route.id);
     adopt(m); remember(m);
     for (const sid of STALE_BRIEFS) if (!SESS[sid]) STALE_BRIEFS.delete(sid);
     for (const sid of [...TXCACHE.keys()]) if (!hadOrigins.has(sid) && originHandoff(sid)) TXCACHE.delete(sid);
     // A page that had no origin and now has one (its parent's spawn arrived) loads its transcript again: the first prompt it drew as
     // a message is the brief, which the intro now shows. A failed request is retried on the next poll, which backs off, up to
     // LATE_TRIES requests in all; after that the page stays as drawn (the brief shows twice until a reload) and polls as usual.
-    if (LIVE.late !== route.id) { if (LIVE.late) TXCACHE.delete(LIVE.late); LIVE.late = null; }
-    if (route.v === "session" && !hadOrigin && !!SESS[route.id] && !!originHandoff(route.id)) { LIVE.late = route.id; LIVE.lateTries = 0; STALE_BRIEFS.add(route.id); TXCACHE.delete(route.id); }
+    if (LIVE.late !== navigation.route.id) { if (LIVE.late) TXCACHE.delete(LIVE.late); LIVE.late = null; }
+    if (navigation.route.v === "session" && !hadOrigin && !!SESS[navigation.route.id] && !!originHandoff(navigation.route.id)) { LIVE.late = navigation.route.id; LIVE.lateTries = 0; STALE_BRIEFS.add(navigation.route.id); TXCACHE.delete(navigation.route.id); }
     if (LIVE.late && !TX[LIVE.late]) LIVE.late = null; // nothing loaded to load again: the page loads it with its origin
     const changedH = new Set(H.filter((h) => oldH.get(h.id) !== handKey(h)).map((h) => h.id));
     const newCards = cardKeys(), changedCards = new Set([...newCards].filter(([id, k]) => oldCards.has(id) && oldCards.get(id) !== k).map(([id]) => id));
@@ -1761,14 +1628,14 @@ queueMicrotask(() => {
     else if (TX[sid] && TXM[sid].tok != null && TOK[sid] != null && shrank(TXM[sid].tok, TOK[sid])) chain = chain.then(() => soft(reload(sid).then(() => { grown.add(sid); full = true; })));
     else if (TX[sid] && TXM[sid].to >= TXM[sid].total && TXM[sid].tok !== TOK[sid]) chain = chain.then(() => soft(tail(sid).then((r) => { grown.add(sid); if (r.cut != null) cuts.set(sid, r.cut); if (r.patched?.length) patched.set(sid, r.patched); if (r.reload) full = true; })));
     for (const sid of view) if (TX[sid] && TXM[sid].to < TXM[sid].total && TXM[sid].watchTok !== TOK[sid]) chain = chain.then(() => soft(watchLater(sid).then((r) => { if (r?.reload) full = true; })));
-    return chain.then(() => { LIVE.version = m.version; refresh(full ? null : dirtyTurns(cuts, grown, changedH, oldT, changedCards, patched)); if (route.v === "analytics") refreshAnalytics(); const e = errorsLive(); return e && soft(e); });
+    return chain.then(() => { LIVE.version = m.version; refresh(full ? null : dirtyTurns(cuts, grown, changedH, oldT, changedCards, patched)); if (navigation.route.v === "analytics") refreshAnalytics(); const e = errorsLive(); return e && soft(e); });
   }
   // The turns of the session page an update changed: those holding entries its tail brought (from the cut on), or a background
   // call it updated, those whose record or handoffs changed, and those holding the spawn of a child run that grew. Null: draw
   // them all.
   function dirtyTurns(cuts, grown, changedH, oldT, changedCards, patched) {
-    if (route.v !== "session" || !TX[route.id]) return null;
-    const sid = route.id, dirty = new Set(), owner = new Map((TURNS[sid] ?? []).flatMap((t) => t.entries.map((e) => [e, t.id])));
+    if (navigation.route.v !== "session" || !TX[navigation.route.id]) return null;
+    const sid = navigation.route.id, dirty = new Set(), owner = new Map((TURNS[sid] ?? []).flatMap((t) => t.entries.map((e) => [e, t.id])));
     if (cuts.has(sid)) for (const e of TX[sid].slice(cuts.get(sid))) { if (isGap(e)) return null; if (owner.has(e)) dirty.add(owner.get(e)); }
     for (const e of patched?.get(sid) ?? []) { if (!owner.has(e)) return null; dirty.add(owner.get(e)); }
     for (const t of TURNS[sid] ?? []) {
@@ -1815,7 +1682,7 @@ queueMicrotask(() => {
   }
   // The page's own transcript loads its last page again; a child run's is dropped, and loads again as new child work.
   function reload(sid) {
-    if (sid !== route.id) { dropTx(sid); return Promise.resolve({ cut: null, reload: true }); }
+    if (sid !== navigation.route.id) { dropTx(sid); return Promise.resolve({ cut: null, reload: true }); }
     return fetchTx(sid, "").then(() => ({ cut: null, reload: true }));
   }
   // The reload of a page whose origin arrived late (update): done once it loads; a failure is counted, makes the poll back off, and
@@ -1836,8 +1703,8 @@ queueMicrotask(() => {
     if (accountChrome.open && !$(".account-popover")?.isConnected) closeAccountMenu(); // a menu some redraw took away is closed
     if (viewerEl || accountChrome.open) { LIVE.pending = true; return; } // drawn whole when the sheet or the account menu closes
     if (SIDEBAR_ONLY) { LIVE.pending = false; render(); return; } // the page is the embedding page's: only the sidebar is redrawn
-    LIVE.pending = false; const r = route;
-    if (rendered !== r || (r.v === "session" && !SESS[r.id]) || (r.v === "trace" && !SESS[r.sid]) || (r.v === "machine" && !MACHINE[r.id])) return;
+    LIVE.pending = false; const r = navigation.route;
+    if (navigation.rendered !== r || (r.v === "session" && !SESS[r.id]) || (r.v === "trace" && !SESS[r.sid]) || (r.v === "machine" && !MACHINE[r.id])) return;
     const st = capture(); setGeometry($("#page"), "paddingBottom", null);
     if (r.v !== "session") { render(); restore(st); return; }
     const n = patchSession(dirty); restore(st, st.bottom);
@@ -1858,142 +1725,31 @@ queueMicrotask(() => {
     if (wasPinned) queuePagerObservers();
   }
   function pinOpeningEnd() {
-    if (route.v !== "session" || performance.now() >= openingEndUntil) { stopOpeningEndPin(); return; }
-    const sc = scroller(); scrollProgrammatically(() => { sc.scrollTop = sc.scrollHeight; }); LIVE.anchor = null; syncJump(); saveHistoryScroll();
+    if (navigation.route.v !== "session" || performance.now() >= openingEndUntil) { stopOpeningEndPin(); return; }
+    const sc = scroller(); scrollProgrammatically(() => { sc.scrollTop = sc.scrollHeight; }); scrollController.anchor = null; syncJump(); saveHistoryScroll();
   }
   function startOpeningEndPin() {
     resetPagerInput();
-    stopOpeningEndPin(); if (route.v !== "session" || location.hash) return;
+    stopOpeningEndPin(); if (navigation.route.v !== "session" || location.hash) return;
     openingEndUntil = performance.now() + 2000;
     disconnectPagerObservers();
     const turns = $("#page section[aria-label='Transcript'] .turns");
     if (turns) { openingEndObserver = new ResizeObserver(pinOpeningEnd); openingEndObserver.observe(turns); }
     pinOpeningEnd(); openingEndTimer = setTimeout(stopOpeningEndPin, 2000);
   }
-  const ANCHORS = "[data-e], .turn, .hop, .ib, .nrow, .sec-h, .ph, .divider, .analytics-metric, .analytics-panel, .facet-filters, .groupby, .find, .empty";
-  const HOSTS = "[data-e], [data-h], [data-id], [data-sid], [data-go], [data-turn], [data-g], [data-m]";
-  const FOCUSABLE = "button, input, [tabindex], a[href]";
-  const stateKey = (n) => n.dataset.entryKey ?? n.dataset.e;
-  const identOf = (n) => { const d = n.dataset, keys = [stateKey(n), d.turn, d.h, d.id, d.m, d.sid, d.go, d.g];
-    return [n.classList[0], ...keys, keys.some((x) => x != null) ? "" : n.firstChild?.nodeType === 3 ? n.firstChild.data : ""].map((x) => x ?? "").join("|"); };
-  // Each anchor candidate on the page, in order, with its identity made unique by how many came before it.
-  function anchors(fn) { const seen = new Map(); for (const n of $("#page").querySelectorAll(ANCHORS)) { const id = identOf(n), k = seen.get(id) ?? 0; seen.set(id, k + 1); if (fn(n, id + "#" + k)) return; } }
-  const opener = (n) => n.classList.contains("step") ? n.querySelector(":scope > button") : n.classList.contains("tgroup") ? n.querySelector(":scope > .tsum") : null;
-  function capture() {
-    const sc = scroller(), line = edge();
-    const st = { top: sc.scrollTop, bottom: sc.scrollHeight - sc.scrollTop - sc.clientHeight <= 80, anchor: null, open: new Set(), groups: new Set(), groupMembers: new Set(), focus: null, drawer: document.body.classList.contains("drawer-open") };
-    // The first block, innermost, still visible under the bar, and how far its top is from the bar. While the reader hasn't
-    // scrolled since the last redraw placed it, that placement's block and offset are kept as they were, so the fraction
-    // of a pixel each placement rounds off can't add up over many updates.
-    const kept = LIVE.anchor; let still = null;
-    if (kept && kept.route === rendered && Math.abs(sc.scrollTop - kept.top) < 1) anchors((n, id) => (id === kept.id ? (still = n) : false));
-    // ... and only while that block is still where it was placed (a filter, find or zoom since has moved it).
-    if (still && Math.abs(still.getBoundingClientRect().top - line - kept.off) <= 1) st.anchor = { id: kept.id, off: kept.off };
-    else {
-      const turnBounds = new Map();
-      anchors((n, id) => {
-        // Hidden turn contents need no measurements: only the enclosing turn's box can be near the reader.
-        const turn = n.closest(".turn");
-        if (turn) {
-          let bounds = turnBounds.get(turn); if (!bounds) { bounds = turn.getBoundingClientRect(); turnBounds.set(turn, bounds); }
-          if (bounds.bottom <= line || bounds.top >= (phone.matches ? innerHeight : sc.getBoundingClientRect().bottom)) return false;
-        }
-        if (n.querySelector(ANCHORS)) return false;
-        const b = n.getBoundingClientRect(); if (!b.height || b.bottom <= line) return false;
-        st.anchor = { id, off: b.top - line }; return true;
-      });
-    }
-    for (const n of $("#page").querySelectorAll("[data-e]")) {
-      if (n.classList.contains("tgroup")) st.groups.add(stateKey(n));
-        if (opener(n)?.getAttribute("aria-expanded") === "true") for (const step of n.querySelectorAll(".step[data-e]")) st.groupMembers.add(stateKey(step));
-      if (opener(n)?.getAttribute("aria-expanded") === "true" || (n.classList.contains("event") && n.querySelector(":scope > .ev-text.open"))) st.open.add(stateKey(n));
-    }
-    for (const n of $("#page").querySelectorAll(".hop")) if (n.querySelector(".brief.open")) st.open.add("hop:" + identOf(n));
-    const a = document.activeElement;
-    if (a && a !== document.body && !a.closest("dialog")) {
-      const host = a.id ? null : a.closest(HOSTS), sel = host && host !== a ? a.tagName.toLowerCase() + [...a.classList].map((c) => "." + CSS.escape(c)).join("") : null;
-      // By id, else by its keyed block and place in it, else by its label, else by its place among the page's controls.
-      st.focus = { id: a.id || null, host: host ? identOf(host) : null, sel, i: sel ? [...host.querySelectorAll(sel)].indexOf(a) : 0, range: null,
-        label: a.getAttribute("aria-label"), at: [...$("#page").querySelectorAll(FOCUSABLE)].indexOf(a), of: $("#page").querySelectorAll(FOCUSABLE).length,
-        foot: a.closest("#page > .session-foot") ? a.closest("[data-foot]")?.dataset.foot ?? null : null };
-      try { if (typeof a.selectionStart === "number") st.focus.range = [a.selectionStart, a.selectionEnd]; } catch {}
-    }
-    return st;
-  }
-  function restore(st, pin) {
-    const all = (sel) => [...$("#page").querySelectorAll(sel)], r0 = rendered, revision = scrollRevision;
-    // A new card or brief measures its "Show more" now, as its ResizeObserver would a frame later, so nothing moves after the
-    // scroll position is set.
-    measureSessionScreen($("#page")); measureTraceScreen($("#page"));
-    // Groups first (a new one opens if it holds an open step), then steps and events.
-    for (const n of all(".tgroup[data-e]")) {
-      const want = st.groups.has(stateKey(n)) ? st.open.has(stateKey(n)) : [...n.querySelectorAll(".step[data-e]")].some((x) => st.open.has(stateKey(x)) || st.groupMembers.has(stateKey(x)));
-      if (want && opener(n).getAttribute("aria-expanded") === "false") opener(n).click();
-    }
-    for (const n of all(".step[data-e]")) if (st.open.has(stateKey(n)) && opener(n)?.getAttribute("aria-expanded") === "false") opener(n).click();
-    // An event opened before its size was measured: its "Show less" is shown by hand.
-    for (const n of all(".event[data-e]")) if (st.open.has(stateKey(n)) && !n.querySelector(":scope > .ev-text.open")) { const m = n.querySelector(":scope > .ev-more"); m.click(); }
-    for (const n of all(".hop")) if (st.open.has("hop:" + identOf(n)) && !n.querySelector(".brief.open")) { const m = n.querySelector(".body > .more"); m.click(); }
-    if (st.drawer) shellChrome?.restoreDrawer();
-    if (st.focus) {
-      let n = st.focus.id ? document.getElementById(st.focus.id) : null;
-      if (!n && st.focus.host) { const host = [...document.querySelectorAll(HOSTS)].find((x) => identOf(x) === st.focus.host); n = host && st.focus.sel ? host.querySelectorAll(st.focus.sel)[st.focus.i] : host; }
-      if (!n && st.focus.label) n = [...document.querySelectorAll("#page [aria-label], #topbar [aria-label]")].find((x) => x.getAttribute("aria-label") === st.focus.label);
-      // A session footer's item or button, by its kind: the footer's items change as the session runs and finishes, so its place
-      // among the page's controls can name another one (patchSession's footer rule: else the time item, never the button).
-      if (!n && st.focus.foot) { const f = $("#page > .session-foot"); n = f?.querySelector('[data-foot="' + st.focus.foot + '"]') ?? f?.querySelector('[data-foot="time"]') ?? null; }
-      // By place only when it had no keyed block and the page has as many controls as before: never onto another row.
-      if (!n && !st.focus.host && st.focus.at >= 0 && $("#page").querySelectorAll(FOCUSABLE).length === st.focus.of) n = $("#page").querySelectorAll(FOCUSABLE)[st.focus.at];
-      if (n && n !== document.activeElement) { n.focus({ preventScroll: true }); if (st.focus.range) try { n.setSelectionRange(...st.focus.range); } catch {} }
-    }
-    const pagingTurns = st.paging ? all(".turn") : [];
-    if (st.paging) {
-      // Newly prepended offscreen turns must have measured heights before placing the visible
-      // entry; otherwise their lazy intrinsic estimates change after the anchor has been restored.
-      for (const turn of pagingTurns) revealMeasuredTurn(turn, true);
-      const heights = pagingTurns.map((turn) => turn.getBoundingClientRect().height);
-      pagingTurns.forEach((turn, i) => { setGeometry(turn, "intrinsicHeight", Math.ceil(heights[i])); });
-    }
-    const place = (first) => {
-      const sc = scroller();
-      scrollProgrammatically(() => {
-        if (pin) sc.scrollTop = sc.scrollHeight;
-        else {
-          const paging = st.paging;
-          let found = null;
-          if (paging?.anchor) found = all(".turns [data-e][data-entry-key]:not(.tgroup)").find((n) => n.dataset.entryKey === paging.anchor.key);
-          else if (!paging && st.anchor) anchors((n, id) => (id === st.anchor.id ? (found = n) : false));
-          if (found) {
-            // Rows that moved from below the anchor to above it (a re-sorted list) need more room below than the page may
-            // have: the page's bottom padding grows by what is missing, rather than the view sliding. The next redraw or
-            // navigation drops it.
-            const line = paging ? (phone.matches ? 0 : sc.getBoundingClientRect().top) : edge();
-            const d = found.getBoundingClientRect().top - line - (paging ? paging.anchor.off : st.anchor.off), want = sc.scrollTop + d, room = sc.scrollHeight - sc.clientHeight;
-            if (want > room + 0.5) { const page = $("#page"); setGeometry(page, "paddingBottom", parseFloat(getComputedStyle(page).paddingBottom) + Math.ceil(want - room)); }
-            if (d) sc.scrollTop = want;
-            LIVE.anchor = paging ? null : { ...st.anchor, route: r0, top: sc.scrollTop };
-          } else if (first) sc.scrollTop = st.top + (paging?.before ? sc.scrollHeight - paging.height : 0);
-        }
-      }, false);
-      if (pin) LIVE.anchor = null;
-      syncBarLine();
-    };
-    // And once more two frames later, in case something above changed size after all (as revealTurn does).
-    place(true); const placedTop = scroller().scrollTop;
-    requestAnimationFrame(() => requestAnimationFrame(() => { for (const turn of pagingTurns) revealMeasuredTurn(turn, false); if (rendered === r0 && !viewerEl && scrollRevision === revision && Math.abs(scroller().scrollTop - placedTop) < 1) place(false); })); // yield to a new scroll or jump
-  }
-
+  const scrollController = createScrollTransactions({ page: () => $("#page"), main: () => $("#main"), phone: () => phone.matches, edge, rendered: () => navigation.rendered, sheet: () => !!viewerEl, revision: () => scrollRevision, programmatic: scrollProgrammatically, sync: syncBarLine, restoreDrawer: () => shellChrome?.restoreDrawer() });
+  const { capture, restore, opener, stateKey, identOf } = scrollController;
   // A session page in place: its turns are drawn again and only those that changed (or are new) replace the ones shown, so
   // the rest keep their nodes and state. The bar's summary line, the title and the sidebar follow. Returns how many entries
   // are new.
   function patchSession(dirty) {
     resetPagerInput(); holdProgrammaticScroll();
-    tick(); const s = SESS[route.id], box = $("#page .turns");
+    tick(); const s = SESS[navigation.route.id], box = $("#page .turns");
     const keys = () => new Set([...$("#page").querySelectorAll(".turns :is(.msg, .bubble, .step, .event, .child-card, .thought, .think-pending)[data-e]")].map((n) => n.dataset.e));
     const before = keys();
     // Only the changed turns are drawn again, unless the turns shown no longer match the index or nothing was shown.
     const whole = !dirty || box.querySelector(":scope > p.empty") || [...box.querySelectorAll(":scope > .turn")].some((b) => !TURN.has(b.dataset.turn));
-    renderSession($("#page"), route.id, whole ? {} : { only: dirty });
+    renderSession($("#page"), navigation.route.id, whole ? {} : { only: dirty });
     drawSessionBar();
     for (const pager of box.querySelectorAll("[data-pager-where]")) paintPager(pager);
     renderNav(); renderLanes(); ticker();
@@ -2010,15 +1766,15 @@ queueMicrotask(() => {
   // The button is rebuilt only when what it shows changes (hidden or not, and the new-entry count), not on every scroll.
   let jumpBusy = false;
   function syncJump() {
-    if (route.v !== "session") { LIVE.fresh = 0; return; }
-    const { gap } = scrollMetrics(), newer = TXM[route.id]?.newer ?? 0; if (gap <= 80) LIVE.fresh = 0;
+    if (navigation.route.v !== "session") { LIVE.fresh = 0; return; }
+    const { gap } = scrollMetrics(), newer = TXM[navigation.route.id]?.newer ?? 0; if (gap <= 80) LIVE.fresh = 0;
     updateSessionJump($("#page"), gap > 80 || !!newer, LIVE.fresh + newer, jumpBusy);
   }
   function clearNewEntries() { LIVE.fresh = 0; updateSessionJump($("#page"), false, 0, jumpBusy); }
   function jumpToLatest() {
-    const sid = route.id, r = route, m = TXM[sid];
+    const sid = navigation.route.id, r = navigation.route, m = TXM[sid];
     if (m && m.to < m.total) {
-      jumpBusy = true; syncJump(); fetchTx(sid, "").then(() => { if (route === r) goSession(sid); }).catch(() => {}).finally(() => { jumpBusy = false; syncJump(); });
+      jumpBusy = true; syncJump(); fetchTx(sid, "").then(() => { if (navigation.route === r) goSession(sid); }).catch(() => {}).finally(() => { jumpBusy = false; syncJump(); });
     } else scrollToEnd("smooth");
   }
   if (!SIDEBAR_ONLY) { window.addEventListener("scroll", syncJump, { passive: true }); $("#main").addEventListener("scroll", syncJump, { passive: true }); }
@@ -2042,17 +1798,17 @@ queueMicrotask(() => {
   function ticker() {
     if (!visible() || Date.now() === fetchedAt) return;
     tick();
-    if (route.v === "session" && rendered === route) updateSessionClock($("#page"), NOW, Object.fromEntries(Object.values(SESS).filter(s => s.activity?.[3] != null).map(s => [s.id, s.activity[3]])));
-    else if (route.v === "home" && rendered === route) renderHome($("#page"));
+    if (navigation.route.v === "session" && navigation.rendered === navigation.route) updateSessionClock($("#page"), NOW, Object.fromEntries(Object.values(SESS).filter(s => s.activity?.[3] != null).map(s => [s.id, s.activity[3]])));
+    else if (navigation.route.v === "home" && navigation.rendered === navigation.route) renderHome($("#page"));
   }
 
   // An embedding page's sidebar: the row its data-viewer-nav names (home, sessions or machines) is current.
-  if (SIDEBAR_ONLY) { const nav = app.dataset.viewerNav; route = { v: ["home", "sessions", "machines"].includes(nav) ? nav : "" }; }
+  if (SIDEBAR_ONLY) { const nav = app.dataset.viewerNav; navigation.route = { v: ["home", "sessions", "machines"].includes(nav) ? nav : "" }; }
   if (viewerHost) {
     ACCOUNT = accountOf(viewerHost.account);
-    if (NATIVE_PAGE) route = { v: NATIVE_PAGE.nav };
-    else if (externalContent) route = { v: "machines" };
-    if (NATIVE_PAGE || externalContent) render();
+    if (NATIVE_PAGE) navigation.route = { v: NATIVE_PAGE.nav };
+    else if (navigation.content) navigation.route = { v: "machines" };
+    if (NATIVE_PAGE || navigation.content) render();
   }
   boot();
 });
