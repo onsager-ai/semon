@@ -59,6 +59,7 @@ pub struct Options {
     pub claude_home: PathBuf,
     /// Claude Code's sibling state file. Only allowlisted last-run fields
     /// are read; the default is the `.claude.json` beside `claude_home`.
+    /// With CLAUDE_CONFIG_DIR, the native settings file is inside that directory.
     pub claude_json: PathBuf,
     pub codex_home: PathBuf,
     pub proc_root: PathBuf,
@@ -99,16 +100,41 @@ pub(crate) fn state_dir() -> PathBuf {
     default_state_dir(&home)
 }
 
+fn native_homes(
+    home: &Path,
+    claude_config: Option<&std::ffi::OsStr>,
+    codex_config: Option<&std::ffi::OsStr>,
+) -> (PathBuf, PathBuf, PathBuf) {
+    let claude_config = claude_config.filter(|root| !root.is_empty());
+    let (claude, settings) = match claude_config {
+        Some(root) => (
+            PathBuf::from(root),
+            PathBuf::from(root).join(".claude.json"),
+        ),
+        None => (home.join(".claude"), home.join(".claude.json")),
+    };
+    let codex = codex_config
+        .filter(|root| !root.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home.join(".codex"));
+    (claude, settings, codex)
+}
+
 impl Default for Options {
     fn default() -> Self {
         let home = env::var_os("HOME")
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from("."));
         let cache = default_state_dir(&home).join("sessions-index.json");
+        let (claude_home, claude_json, codex_home) = native_homes(
+            &home,
+            env::var_os("CLAUDE_CONFIG_DIR").as_deref(),
+            env::var_os("CODEX_HOME").as_deref(),
+        );
         Self {
-            claude_home: home.join(".claude"),
-            claude_json: home.join(".claude.json"),
-            codex_home: home.join(".codex"),
+            claude_home,
+            claude_json,
+            codex_home,
             proc_root: PathBuf::from("/proc"),
             cache,
             all: false,
@@ -1422,4 +1448,107 @@ pub fn parse_duration(value: &str) -> Result<Duration, String> {
         .checked_mul(factor)
         .map(Duration::from_secs)
         .ok_or_else(|| format!("duration too large: {value}"))
+}
+
+#[cfg(test)]
+mod native_home_tests {
+    use super::*;
+    use std::ffi::OsStr;
+    #[test]
+    fn configured_roots_discover_isolated_native_transcripts_read_only() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root =
+            env::temp_dir().join(format!("semon-native-homes-{}-{nonce}", std::process::id()));
+        std::fs::create_dir(&root).unwrap();
+        let claude_config = root.join("claude-config");
+        let codex_config = root.join("codex-config");
+        let (claude_home, claude_json, codex_home) = native_homes(
+            &root.join("unused-fallback"),
+            Some(claude_config.as_os_str()),
+            Some(codex_config.as_os_str()),
+        );
+        // Guard the test's read surface before discovery, even if resolution regresses.
+        assert!(
+            claude_home.starts_with(&root)
+                && claude_json.starts_with(&root)
+                && codex_home.starts_with(&root)
+        );
+        let claude_id = "00000000-0000-4000-8000-000000000001";
+        let codex_id = "00000000-0000-4000-8000-000000000002";
+        let claude_path = claude_home
+            .join("projects/fixture-repo")
+            .join(format!("{claude_id}.jsonl"));
+        let codex_path = codex_home
+            .join("sessions/2026/10/03")
+            .join(format!("rollout-2026-10-03T07-49-53-{codex_id}.jsonl"));
+        std::fs::create_dir_all(claude_path.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(codex_path.parent().unwrap()).unwrap();
+        let claude = include_str!(
+            "../../../tests/fixtures/compatibility/claude-2.1.288/initial-transcript.jsonl"
+        )
+        .replace("native-claude-compat", claude_id);
+        let codex = include_str!(
+            "../../../tests/fixtures/compatibility/codex-0.159.0-alpha.3/initial-rollout.jsonl"
+        )
+        .replace("native-codex-compat", codex_id);
+        std::fs::write(&claude_path, &claude).unwrap();
+        std::fs::write(&codex_path, &codex).unwrap();
+        std::fs::write(&claude_json, b"{}").unwrap();
+        let options = Options {
+            claude_home,
+            claude_json: claude_json.clone(),
+            codex_home,
+            proc_root: root.join("empty-proc"),
+            cache: root.join("cache/index.json"),
+            all: true,
+            ..Options::default()
+        };
+        let nodes = collect(&options).unwrap();
+        assert!(
+            nodes
+                .iter()
+                .any(|node| node.harness == "claude" && node.id == claude_id)
+        );
+        assert!(
+            nodes
+                .iter()
+                .any(|node| node.harness == "codex" && node.id == codex_id)
+        );
+        assert_eq!(std::fs::read(&claude_path).unwrap(), claude.as_bytes());
+        assert_eq!(std::fs::read(&codex_path).unwrap(), codex.as_bytes());
+        assert_eq!(std::fs::read(&claude_json).unwrap(), b"{}");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn configured_homes_use_the_observed_native_settings_layout() {
+        let home = Path::new("/fixture/fallback");
+        assert_eq!(
+            native_homes(
+                home,
+                Some(OsStr::new("/fixture/claude-config")),
+                Some(OsStr::new("/fixture/codex-config"))
+            ),
+            (
+                PathBuf::from("/fixture/claude-config"),
+                PathBuf::from("/fixture/claude-config/.claude.json"),
+                PathBuf::from("/fixture/codex-config")
+            )
+        );
+        assert_eq!(
+            native_homes(home, None, None),
+            (
+                home.join(".claude"),
+                home.join(".claude.json"),
+                home.join(".codex")
+            )
+        );
+        assert_eq!(
+            native_homes(home, Some(OsStr::new("")), Some(OsStr::new(""))),
+            native_homes(home, None, None)
+        );
+    }
 }

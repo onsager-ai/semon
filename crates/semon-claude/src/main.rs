@@ -1,4 +1,10 @@
-use std::{env, fs, path::PathBuf, process::ExitCode};
+use std::{
+    env,
+    ffi::OsStr,
+    fs,
+    path::{Path, PathBuf},
+    process::ExitCode,
+};
 
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
@@ -100,12 +106,20 @@ fn ensure_store_dir(store: &std::path::Path) -> Result<(), String> {
     Ok(())
 }
 
+fn native_projects(home: &Path, config_dir: Option<&OsStr>) -> PathBuf {
+    config_dir
+        .filter(|root| !root.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home.join(".claude"))
+        .join("projects")
+}
+
 fn parse_args() -> Result<Args, String> {
     let home = env::var_os("HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."));
     let mut result = Args {
-        projects: home.join(".claude/projects"),
+        projects: native_projects(&home, env::var_os("CLAUDE_CONFIG_DIR").as_deref()),
         state: default_state_path(),
         store: default_store_path(),
         repo: env::var("SEMON_REPO").unwrap_or_default(),
@@ -130,7 +144,7 @@ fn parse_args() -> Result<Args, String> {
             "--dry-run" => result.dry_run = true,
             "-h" | "--help" => {
                 println!(
-                    "Usage: semon-claude [--projects PATH] [--state PATH] [--store PATH] [--repo NAME] [--verbose] [--backfill-raw [--dry-run]]"
+                    "Usage: semon-claude [--projects PATH] [--state PATH] [--store PATH] [--repo NAME] [--verbose] [--backfill-raw [--dry-run]]\n\n--projects defaults beneath CLAUDE_CONFIG_DIR, or ~/.claude when unset."
                 );
                 std::process::exit(0);
             }
@@ -191,5 +205,23 @@ mod tests {
         );
 
         let _ = fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod native_home_tests {
+    use super::*;
+    #[test]
+    fn configured_native_directory_selects_its_projects_root() {
+        let home = Path::new("/fixture/fallback");
+        assert_eq!(
+            native_projects(home, Some(OsStr::new("/fixture/claude-config"))),
+            PathBuf::from("/fixture/claude-config/projects")
+        );
+        assert_eq!(native_projects(home, None), home.join(".claude/projects"));
+        assert_eq!(
+            native_projects(home, Some(OsStr::new(""))),
+            native_projects(home, None)
+        );
     }
 }
