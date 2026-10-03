@@ -20,6 +20,24 @@ static TEST_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 #[test]
 fn compatibility_legacy_cold_restart_and_retained_raw_parity() {
     let source = include_bytes!("../../../tests/fixtures/compatibility/v1/codex-legacy.jsonl");
+    compatibility_capture_parity(source, "compat", 2);
+}
+
+#[test]
+fn compatibility_early_item_cold_restart_and_retained_raw_parity() {
+    let source = include_bytes!("../../../tests/fixtures/compatibility/v1/codex-early-item.jsonl");
+    compatibility_capture_parity(source, "early-item", 1);
+}
+
+#[test]
+fn compatibility_native_codex_paginated_cold_restart_and_retained_raw_parity() {
+    let source = include_bytes!(
+        "../../../tests/fixtures/compatibility/codex-0.159.0-alpha.3/initial-rollout.jsonl"
+    );
+    compatibility_capture_parity(source, "native-codex-compat", 3);
+}
+
+fn compatibility_capture_parity(source: &[u8], session: &str, expected_occurrences: usize) {
     let root = TestDir::new();
     let path = root.path().join("rollout-compat.jsonl");
     let history = root.path().join("history.jsonl");
@@ -34,9 +52,10 @@ fn compatibility_legacy_cold_restart_and_retained_raw_parity() {
         &options(&cursor, &history),
     )
     .unwrap();
-    assert!(
-        !cold.log(&LogFilter::default()).unwrap().is_empty(),
-        "the fixture must project occurrences"
+    assert_eq!(
+        cold.log(&LogFilter::default()).unwrap().len(),
+        expected_occurrences,
+        "known messages must project"
     );
     fs::remove_file(&cursor).unwrap();
     let mut end = 0;
@@ -55,7 +74,7 @@ fn compatibility_legacy_cold_restart_and_retained_raw_parity() {
         incremental.log(&LogFilter::default()).unwrap()
     );
     let raw = incremental
-        .fetch_raw_carrier_records_for_occurrences(OccurrenceSelector::Session("compat"))
+        .fetch_raw_carrier_records_for_occurrences(OccurrenceSelector::Session(session))
         .unwrap();
     let retained: Vec<u8> = raw
         .iter()
@@ -1766,4 +1785,112 @@ fn replacement_retires_obsolete_source_projection_but_retains_raw() {
             );
         }
     }
+}
+
+#[test]
+fn an_unterminated_item_does_not_retire_the_complete_legacy_prefix() {
+    let source = include_bytes!("../../../tests/fixtures/compatibility/v1/codex-early-item.jsonl");
+    let root = TestDir::new();
+    let path = root.path().join("early.jsonl");
+    let cursor = root.path().join("cursor.json");
+    let history = root.path().join("history.jsonl");
+    let database = root.path().join("capture.sqlite3");
+    let prefix: Vec<u8> = source
+        .split_inclusive(|byte| *byte == b'\n')
+        .take(2)
+        .flatten()
+        .copied()
+        .collect();
+    fs::write(&path, &prefix).unwrap();
+    {
+        let mut store = TraceStore::open(&database).unwrap();
+        process_file(
+            &path,
+            &mut CursorState::default(),
+            &mut store,
+            &options(&cursor, &history),
+        )
+        .unwrap();
+    }
+    let previous_cursor = fs::read(&cursor).unwrap();
+    fs::write(&path, &source[..source.len() - 1]).unwrap();
+    {
+        let mut state = load_state(&cursor).unwrap();
+        let mut store = TraceStore::open(&database).unwrap();
+        assert_eq!(
+            process_file(&path, &mut state, &mut store, &options(&cursor, &history)).unwrap(),
+            0
+        );
+        assert_eq!(fs::read(&cursor).unwrap(), previous_cursor);
+        let log = store.log(&LogFilter::default()).unwrap();
+        assert_eq!(log.len(), 1);
+        assert_eq!(log[0].sequence(), 1);
+    }
+    fs::write(&path, source).unwrap();
+    let mut state = load_state(&cursor).unwrap();
+    let mut store = TraceStore::open(&database).unwrap();
+    process_file(&path, &mut state, &mut store, &options(&cursor, &history)).unwrap();
+    let log = store.log(&LogFilter::default()).unwrap();
+    assert_eq!(log.len(), 1);
+    assert_eq!(log[0].sequence(), 2);
+    assert_eq!(log[0].parent_sequence(), None);
+}
+
+#[test]
+fn a_missing_cursor_still_retires_the_owned_early_mirror() {
+    let source = include_bytes!("../../../tests/fixtures/compatibility/v1/codex-early-item.jsonl");
+    let root = TestDir::new();
+    let path = root.path().join("early.jsonl");
+    let cursor = root.path().join("cursor.json");
+    let history = root.path().join("history.jsonl");
+    let database = root.path().join("capture.sqlite3");
+    let prefix: Vec<u8> = source
+        .split_inclusive(|byte| *byte == b'\n')
+        .take(2)
+        .flatten()
+        .copied()
+        .collect();
+    fs::write(&path, &prefix).unwrap();
+    {
+        let mut store = TraceStore::open(&database).unwrap();
+        process_file(
+            &path,
+            &mut CursorState::default(),
+            &mut store,
+            &options(&cursor, &history),
+        )
+        .unwrap();
+    }
+    fs::remove_file(&cursor).unwrap();
+    fs::write(&path, source).unwrap();
+    let mut store = TraceStore::open(&database).unwrap();
+    process_file(
+        &path,
+        &mut load_state(&cursor).unwrap(),
+        &mut store,
+        &options(&cursor, &history),
+    )
+    .unwrap();
+    let mut cold = TraceStore::open_in_memory().unwrap();
+    process_file(
+        &path,
+        &mut CursorState::default(),
+        &mut cold,
+        &options(&cursor, &history),
+    )
+    .unwrap();
+    assert_eq!(
+        store.log(&LogFilter::default()).unwrap(),
+        cold.log(&LogFilter::default()).unwrap()
+    );
+    let raw = store
+        .fetch_raw_carrier_records_for_occurrences(OccurrenceSelector::Session("early-item"))
+        .unwrap();
+    assert_eq!(
+        raw.iter()
+            .flat_map(|row| row.bytes())
+            .copied()
+            .collect::<Vec<_>>(),
+        source
+    );
 }
