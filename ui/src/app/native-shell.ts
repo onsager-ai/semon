@@ -67,7 +67,7 @@ export function mountNativeShell(options: NativeShellOptions = {}) {
     main && effects.listen(main, "scroll", syncBarLine, { passive: true });
     syncBarLine();
 
-    releaseChrome = () => closeDrawer(false);
+    releaseChrome = () => { closeDrawer(false); topbar?.classList.remove('scrolled'); };
   }
 
   const copyTimers = new Map<HTMLElement,number>();
@@ -85,7 +85,7 @@ export function mountNativeShell(options: NativeShellOptions = {}) {
     }
     button.setAttribute("aria-label", "Copied");
     button.classList.add("copied");
-    window.clearTimeout(copyTimers.get(button));
+    effects.clearTimeout(copyTimers.get(button));
     copyTimers.set(button, effects.timeout(() => {
       button.setAttribute("aria-label", button.dataset.copyLabel ?? "Copy");
       button.classList.remove("copied");
@@ -102,7 +102,7 @@ export function mountNativeShell(options: NativeShellOptions = {}) {
       try {
         await navigator.clipboard.writeText(value);
       } catch {
-        if (!disposed && source.isConnected) selectText(source);
+        if (!disposed && button.isConnected && source.isConnected) selectText(source);
       }
     } else {
       selectText(source);
@@ -184,7 +184,7 @@ export function mountNativeShell(options: NativeShellOptions = {}) {
     const request = effects.request();
     const interval = effects.interval(async () => {
       if (!element.isConnected || Date.now() >= deadline) {
-        window.clearInterval(interval);
+        effects.clearInterval(interval);
         return;
       }
       if (pending) return;
@@ -192,7 +192,7 @@ export function mountNativeShell(options: NativeShellOptions = {}) {
       try {
         const response = await fetch(url, { signal: request.signal, credentials: "same-origin", cache: "no-store" });
         if (!disposed && element.isConnected && Date.now() < deadline && response.status === 200) {
-          window.clearInterval(interval);
+          effects.clearInterval(interval);
           window.location.assign(element.dataset.pollGo || "/");
         }
       } catch {
@@ -201,7 +201,7 @@ export function mountNativeShell(options: NativeShellOptions = {}) {
         pending = false;
       }
     }, 3000);
-    effects.timeout(() => window.clearInterval(interval), 30 * 60 * 1000);
+    effects.timeout(() => effects.clearInterval(interval), 30 * 60 * 1000);
   });
   const controller = { destroy() {
     if (disposed) return;

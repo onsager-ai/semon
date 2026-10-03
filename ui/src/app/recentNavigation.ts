@@ -5,6 +5,7 @@ import { createKidsSheet,createRecentRenderer,setGeometry } from "../lib";
 import type { ApplicationRoute } from '../navigation/routes';
 interface TreePref { open: boolean; at: number }
 interface RecentNavigationHost {
+  scope: import("./effects").EffectScope;
   showApprovalReviews: boolean;
   sessionChildren: () => Map<string, import("../domain/types").Session[]>;
   SESS: Record<string, import("../domain/types").Session>;
@@ -217,7 +218,7 @@ export function createRecentNavigation(host: RecentNavigationHost) {
     expandedPath = expandedAll ? ancestorsOf(expandedAll) : new Set<string>(); expandedUnder = expandedAll ? new Set(host.descendantsOf(expandedAll, children).map((x) => x.id)) : new Set<string>();
     recentSnapshot = { items: host.orderList(sideOrder, "lanes", lanes, host.byLast, { limit: 8, must: new Set([...(current ? [current] : []), ...ancestors]) }).slice(0, 8).map((s) => buildLaneSnapshot(s, 0, children, rail)), empty: !lanes.length };
     recentRenderer.update(recentSnapshot);
-    if (!sideOrder.n) { clearTimeout(host.ordIdle); host.ordIdle = undefined; } else if (!host.ordIdle) host.ordIdleArm(); // (counted from when something was first held)
+    if (!sideOrder.n) { host.scope.clearTimeout(host.ordIdle); host.ordIdle = undefined; } else if (!host.ordIdle) host.ordIdleArm(); // (counted from when something was first held)
     const q = host.$<HTMLInputElement>("#q"); if (q && document.activeElement !== q) q.value = host.query;
     restoreLaneFocus(focus);
     // A stuck row covers the top of the sidebar: what is scrolled into view (the open session, after a navigation) stays clear of it.

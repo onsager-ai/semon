@@ -31,9 +31,11 @@ export function createErrorNavigation(host: ErrorNavigationHost) {
     if (navigation.route.v === "session" && ERR.on) drawSessionBar();
     if (announce) errLive.textContent = errText();
   }
+  function releaseMode() { if (modeRequest) { modeRequest.abort(); scope.releaseRequest(modeRequest); modeRequest = null; } }
+  function releasePending() { if (pending) { pending.abort(); scope.releaseRequest(pending); pending = null; } }
   function openErrors(sid: string, mode: ErrorState["mode"] = "errors") {
     if (ERR.on || navigation.route.v !== "session" || navigation.route.id !== sid || !TXM[sid]) return;
-    modeRequest?.abort(); modeRequest = scope.request(); resetPagerInput(); stopOpeningEndPin(); host.clearFind();
+    releaseMode(); modeRequest = scope.request(); resetPagerInput(); stopOpeningEndPin(); host.clearFind();
     Object.assign(ERR, { mode, on: true, sid, slots: [], listed: false, count: mode === "signals" ? signalCount(SESS[sid]) : countOf(SESS[sid], "errors") ?? 0, version: null, k: -1, slot: null, saved: capture(), range: { tx: TX[sid], m: { ...TXM[sid] } }, tools: show.tools, gen: ERR.gen + 1 });
     if (!show.tools) { show.tools = true; render(); } else drawSessionBar();
     document.getElementById("err-next")?.focus({ preventScroll: true }); errLabel(true);
@@ -42,7 +44,7 @@ export function createErrorNavigation(host: ErrorNavigationHost) {
   }
   // The list, or nothing new (304) when the model hasn't moved since it was fetched.
   function fetchErrors(sid: string) {
-    pending?.abort(); const request = scope.request(); pending = request; const gen = ERR.gen, mode = ERR.mode;
+    releasePending(); const request = scope.request(); pending = request; const gen = ERR.gen, mode = ERR.mode;
     return requestJson("/api/tx?sid=" + enc(sid) + "&" + mode + "=1" + (ERR.version ? "&since=" + enc(ERR.version) : ""), request.signal, true).then((x) => {
         if (!x || request.signal.aborted || ERR.gen !== gen || !errOn(sid) || typeof x !== 'object') return;
         const slots = 'slots' in x && Array.isArray(x.slots) ? x.slots.filter((value): value is number => typeof value === 'number' && Number.isInteger(value) && value >= 0) : [];
@@ -55,7 +57,7 @@ export function createErrorNavigation(host: ErrorNavigationHost) {
           ERR.k = at >= 0 ? at : !ERR.slots.length ? -1 : after >= 0 ? after : ERR.slots.length - 1;
           if (at < 0) ERR.slot = ERR.k >= 0 ? ERR.slots[ERR.k] : null;
         }
-      });
+      }).finally(() => { scope.releaseRequest(request); if (pending === request) pending = null; });
   }
   function stepErrors(delta: number) {
     if (!ERR.on || !ERR.slots.length) return;
@@ -106,7 +108,7 @@ export function createErrorNavigation(host: ErrorNavigationHost) {
   function dropErrors(away = false) {
     if (!ERR.on) return;
     const sid = ERR.sid; if (!sid) return; const range = ERR.range, m = TXM[sid];
-    pending?.abort(); modeRequest?.abort(); ERR.on = false; ERR.gen++; show.tools = ERR.tools; ERR.saved = ERR.range = null; errLive.textContent = "";
+    releasePending(); releaseMode(); ERR.on = false; ERR.gen++; show.tools = ERR.tools; ERR.saved = ERR.range = null; errLive.textContent = "";
     if (away && range && m && (m.from !== range.m.from || m.to < range.m.to)) dropTx(sid);
   }
   function closeErrors() {
@@ -152,5 +154,5 @@ export function createErrorNavigation(host: ErrorNavigationHost) {
       errLabel(ERR.count !== was); markError(false);
     });
   }
-  return { state: ERR, text: errText, on: errOn, open: openErrors, step: stepErrors, mark: markError, drop: dropErrors, close: closeErrors, live: errorsLive, destroy() { pending?.abort(); modeRequest?.abort(); scope.destroy(); errLive.remove(); ERR.on = false; ERR.gen++; } };
+  return { state: ERR, text: errText, on: errOn, open: openErrors, step: stepErrors, mark: markError, drop: dropErrors, close: closeErrors, live: errorsLive, destroy() { releasePending(); releaseMode(); scope.destroy(); errLive.remove(); ERR.on = false; ERR.gen++; } };
 }

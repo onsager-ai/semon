@@ -98,7 +98,7 @@ export function createAnalytics(host: AnalyticsHost) {
   // asking fails (a 409 or a 500), it asks 10 s after the last failure: the kept answer stays drawn, with the error above it.
   const backingOff = () => AN.error != null && performance.now() - AN.failedAt < AN_EVERY; // a monotonic clock: a wall-clock jump neither stalls nor rushes it
   function scheduleAnalytics() {
-    clearTimeout(AN.timer); AN.timer = undefined;
+    host.scope.clearTimeout(AN.timer); AN.timer = undefined;
     if (host.navigation.route.v !== "analytics" || host.LIVE.ended || !host.visible()) return;
     const data = analyticsData(), behind = !AN.error && data && host.LIVE.version && data.version !== host.LIVE.version;
     AN.timer = host.scope.timeout(() => { AN.timer = undefined; refreshAnalytics(); }, AN.error ? Math.max(0, AN.failedAt + AN_EVERY - performance.now()) : behind ? 1200 : AN_EVERY);
@@ -108,7 +108,7 @@ export function createAnalytics(host: AnalyticsHost) {
   function refreshAnalytics(asked = false) {
     if (host.navigation.route.v !== "analytics") return Promise.resolve();
     if (asked !== true && backingOff()) { if (!AN.timer) scheduleAnalytics(); return Promise.resolve(); }
-    clearTimeout(AN.timer); AN.timer = undefined;
+    host.scope.clearTimeout(AN.timer); AN.timer = undefined;
     return fetchAnalytics(asked === true).then((changed) => {
       if (changed && host.navigation.route.v === "analytics" && host.navigation.rendered === host.navigation.route) {
         if (host.viewerEl || host.accountChrome.open) host.LIVE.pending = true; // drawn when the sheet or the account menu closes
@@ -117,7 +117,7 @@ export function createAnalytics(host: AnalyticsHost) {
       scheduleAnalytics();
     });
   }
-  if (!host.SIDEBAR_ONLY) host.scope.listen(document, "visibilitychange", () => { if (host.visible() && host.navigation.route.v === "analytics") refreshAnalytics(); else if (!host.visible()) { clearTimeout(AN.timer); AN.timer = undefined; } });
+  if (!host.SIDEBAR_ONLY) host.scope.listen(document, "visibilitychange", () => { if (host.visible() && host.navigation.route.v === "analytics") refreshAnalytics(); else if (!host.visible()) { host.scope.clearTimeout(AN.timer); AN.timer = undefined; } });
   const nameOfSid = (A: AnalyticsData, sid: string) => host.SESS[sid]?.name ?? A.sessions[sid]?.name ?? sid;
   const harnessOfSid = (A: AnalyticsData, sid: string) => host.SESS[sid]?.harness ?? A.sessions[sid]?.harness ?? "";
   const sessionFacetValue = (s: Session, key: FacetKey) => key === "repo" ? s.repo ?? "__none__" : key === "model" ? s.model ?? s.modelId ?? "Unknown model" : s[key] ?? "";

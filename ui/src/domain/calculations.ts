@@ -8,10 +8,10 @@ export function createDomain(state: DomainState, now: () => number, SEEN_RESULTS
   const where = (s: Session) => s.repo ? s.repo + (s.branch && s.branch !== "main" && s.branch !== s.name ? " · " + s.branch : "") : "No repo";
   const hostOf = (s: Session) => s.host ?? MACHINE[s.machine] ?? s.machine ?? "Unknown machine";
 
-  const machineLabels = (scope: Iterable<Session | string> = Object.values(SESS)) => {
+  const machineLabels = (scope: Iterable<Session | string> = Object.values(SESS)): Map<string, string> => {
     const names = new Map<string, string>();
     for (const x of scope) { const s = typeof x === "string" ? SESS[x] : x; if (s?.machine != null && !names.has(s.machine)) names.set(s.machine, s.host ?? MACHINE[s.machine] ?? s.machine); }
-    return names.size > 1 ? machineShorts([...names]) : new Map();
+    return names.size > 1 ? machineShorts([...names]) : new Map<string, string>();
   };
   // A session's machine by its short name, or "" where the view is of one machine.
   const machineLabel = (s: Session | null | undefined, scope?: Iterable<Session | string>) => (s ? machineLabels(scope).get(s.machine) ?? "" : "");
@@ -148,3 +148,5 @@ export function createDomain(state: DomainState, now: () => number, SEEN_RESULTS
 
   return { invalidate, nameOf, hcls, where, hostOf, machineLabels, machineLabel, branchOf, shortHost, parentOf, originHandoff, RANK, isResult, inbox, working, answersOf, statWord, hasTurn, oneLine, TOYOU, turnEnd, traceRoot, countOf, callsText, sessionChildren, childSessions, descendantsOf, TOTAL_TOKEN_KINDS, TOKEN_KINDS, asMoney, usageTotal, costForSessions, costForSession, costText, costMissing, TREE_RANK, urgentDescendant, childParts, defaultTreeOpen, kidRank, lineageOf, byState, onMachine, movedOff, movesOf, shortMoney };
 }
+
+export type DomainController = ReturnType<typeof createDomain>;

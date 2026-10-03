@@ -1,7 +1,7 @@
 # Viewer ownership and migration transactions
 
-Issue [#224](https://github.com/onsager-ai/semon/issues/224) tracks five remaining
-legacy-host removal slices. Component rendering is integrated; the application
+Issue [#224](https://github.com/onsager-ai/semon/issues/224) tracks the completed five
+legacy-host removal slices and final consumer integration. The application
 host and native shell are composed from strict typed controllers. This record
 describes source boundaries and does not claim production acceptance.
 
@@ -51,3 +51,13 @@ It retains Rust markup and native forms, owns each enhancement listener/timer an
 aborts readiness requests before removing effects. Replacement mounts destroy
 the previous owner. Full-viewer pages continue to use their existing drawer
 owner; sidebar-only and native pages consume this separately served entry.
+
+`mountViewerApplication` replaces the previous owner and constructs a typed service
+composition. It carries no model, navigation or rendering algorithms. Focused
+factories own transport/adoption, boot, paging, layout preferences, history and
+focus, account controls, held ordering, navigation markup, native dialogs/tool
+views, screen commits, session lists, document events, live updates and clocks.
+Feature-specific mutable values stay behind their owners' typed accessors; one shared
+composition connects those ports without copying state or constructing large
+getter tables in the mount function. The source scan rejects explicit `any` and
+type-check suppression directives throughout the application and consumer code.

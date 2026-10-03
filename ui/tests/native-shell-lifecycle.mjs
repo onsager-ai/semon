@@ -34,9 +34,12 @@ for (const width of [390, 1280]) test(`native shell teardown and remount ${width
         const form=document.querySelector('form'); let submissions=0;
         const submitted=e=>{submissions++;e.preventDefault();}; form.addEventListener('submit',submitted);
         form.requestSubmit(); if(!document.getElementById('confirm').open) throw new Error('confirmation did not open');
-        document.querySelector('[value="cancel"]').click(); if(document.getElementById('confirm').open) throw new Error('cancel did not close');
+        document.querySelector('[value="confirm"]').click(); if(submissions!==2||document.getElementById('confirm').open)throw new Error('confirm did not resubmit the original form');
+        form.requestSubmit();document.querySelector('[value="cancel"]').click();if(submissions!==3||document.getElementById('confirm').open)throw new Error('cancel did not close without resubmitting');
         form.removeEventListener('submit',submitted);
+        document.getElementById('topbar').classList.add('scrolled');
         owner.destroy();owner.destroy();
+        if(document.getElementById('topbar').classList.contains('scrolled'))throw new Error('stale scroll chrome survived destroy');
         document.getElementById('lead-btn').click();form.requestSubmit();
         if(document.body.classList.contains('drawer-open')||document.getElementById('confirm').open)throw new Error('stale controls revived');
         outcomes.push(resources());
@@ -48,10 +51,10 @@ for (const width of [390, 1280]) test(`native shell teardown and remount ${width
       if(!document.getElementById('confirm').open)throw new Error('controls-only mode lost native confirmation');
       document.querySelector('[value="cancel"]').click();controls.destroy();outcomes.push(resources());
       // A transport/clipboard completion that ignores abort must still be inert after teardown.
-      const originalFetch=window.fetch, originalInterval=window.setInterval; let poll, signal, resolvePoll, resolveCopy;
+      const originalFetch=window.fetch, originalInterval=window.setInterval; let poll, signal, resolvePoll, resolveCopy, rejectCopy;
       window.setInterval=(fn,delay)=>{poll=fn;return originalInterval(fn,delay);};
       window.fetch=(_url,options)=>{signal=options.signal;return new Promise(resolve=>{resolvePoll=resolve;});};
-      Object.defineProperty(navigator,'clipboard',{configurable:true,value:{writeText:()=>new Promise(resolve=>{resolveCopy=resolve;})}});
+      Object.defineProperty(navigator,'clipboard',{configurable:true,value:{writeText:()=>new Promise((resolve,reject)=>{resolveCopy=resolve;rejectCopy=reject;})}});
       const pending=NativeShell.mountNativeShell(); poll(); document.querySelector('[data-copy]').click();
       if(!signal || signal.aborted)throw new Error('poll has no live owner');
       pending.destroy(); if(!signal.aborted)throw new Error('readiness request survived teardown');
@@ -64,6 +67,12 @@ for (const width of [390, 1280]) test(`native shell teardown and remount ${width
       if(location.pathname!=='/')throw new Error('detached readiness control navigated');
       detached.destroy();document.body.append(readiness);
       window.fetch=originalFetch;window.setInterval=originalInterval;outcomes.push(resources());
+      const stale=NativeShell.mountNativeShell();
+      const copy=document.querySelector('[data-copy]');copy.click();copy.remove();
+      const selection=getSelection();selection.removeAllRanges();rejectCopy(Error('clipboard unavailable'));
+      await Promise.resolve();await Promise.resolve();
+      if(selection.rangeCount)throw new Error('detached copy rejection changed selection');
+      stale.destroy();document.body.append(copy);outcomes.push(resources());
       const active=NativeShell.mountNativeShell(); const mounted=resources(); const replaced=NativeShell.mountNativeShell();
       if(resources().some((n,i)=>n!==mounted[i]))throw new Error('remount duplicated effects');
       active.destroy();replaced.destroy();outcomes.push(resources());

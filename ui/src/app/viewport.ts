@@ -41,7 +41,7 @@ export function createViewport(host: ViewportHost) {
   function stopOpeningEndPin() {
     const wasPinned = !!openingEndUntil;
     openingEndUntil = 0;
-    clearTimeout(openingEndTimer); openingEndTimer = undefined;
+    host.scope.clearTimeout(openingEndTimer); openingEndTimer = undefined;
     openingEndObserver?.disconnect(); openingEndObserver = null;
     if (wasPinned) host.queuePagerObservers();
   }
