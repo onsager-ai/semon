@@ -261,6 +261,8 @@ struct Summary {
     tools: BTreeMap<String, String>,
     closed_tools: BTreeSet<String>,
     codex_tokens: Tokens,
+    #[serde(default)]
+    codex_native_usage: Option<events::CodexNativeUsage>,
     // Never persisted: a marker can carry a handoff prompt path, and the
     // on-disk cache must not retain session content (risk:secret).
     #[serde(skip)]
@@ -278,7 +280,10 @@ struct Marker {
 impl Summary {
     fn tokens(&self, harness: &str) -> Tokens {
         if harness == "codex" {
-            return self.codex_tokens.clone();
+            return self.codex_native_usage.as_ref().map_or_else(
+                || self.codex_tokens.clone(),
+                events::CodexNativeUsage::tokens,
+            );
         }
         let mut total = Tokens::default();
         for usage in self.usage_by_id.values() {
@@ -391,9 +396,9 @@ pub(crate) fn read_index(path: &Path) -> Index {
     fs::read(path)
         .ok()
         .and_then(|bytes| serde_json::from_slice::<Index>(&bytes).ok())
-        .filter(|index| index.version == 3)
+        .filter(|index| index.version == 4)
         .unwrap_or_else(|| Index {
-            version: 3,
+            version: 4,
             ..Index::default()
         })
 }
@@ -666,6 +671,11 @@ fn update_codex(summary: &mut Summary, record: &Value) {
     let payload = &record["payload"];
     match field(record, "type") {
         Some("session_meta") => {
+            if field(payload, "forked_from_id").is_some() {
+                summary
+                    .codex_native_usage
+                    .get_or_insert_with(Default::default);
+            }
             if let Some(cwd) = field(payload, "cwd") {
                 summary.cwd = Some(cwd.into());
             }
@@ -677,6 +687,16 @@ fn update_codex(summary: &mut Summary, record: &Value) {
             if let Some(model) = field(payload, "model") {
                 summary.models.insert(model.into());
             }
+        }
+        Some("token_usage_record") => {
+            // Tree summaries preserve available request counts without asserting
+            // model attribution; their native model labels are tracked separately.
+            events::CodexNativeUsage::observe(
+                &mut summary.codex_native_usage,
+                payload,
+                "unknown".to_owned(),
+                None,
+            );
         }
         Some("event_msg") if field(payload, "type") == Some("token_count") => {
             if let Some(usage) = payload
