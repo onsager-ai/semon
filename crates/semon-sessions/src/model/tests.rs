@@ -3198,6 +3198,59 @@ fn reported_cost_checks_keep_overwritten_runs_and_drop_account_values() {
     assert!(!facts_json.contains("/private/fixture/project"));
 }
 
+#[cfg(unix)]
+#[test]
+fn archived_codex_root_links_are_not_viewing_inputs() {
+    let home = Home::new();
+    let outside = Home::new();
+    outside.codex(
+        "outside-archive",
+        json!({}),
+        &[codex_user(ts(18, 0), "private fixture")],
+    );
+    fs::create_dir_all(&home.options.codex_home).unwrap();
+    std::os::unix::fs::symlink(
+        outside.options.codex_home.join("sessions"),
+        home.options.codex_home.join("archived_sessions"),
+    )
+    .unwrap();
+    assert!(crate::inputs(&home.options).unwrap().is_empty());
+    assert!(!home.build().sessions.contains_key("outside-archive"));
+}
+
+#[test]
+fn archived_codex_rollouts_keep_history_and_input_copy_parity() {
+    let home = Home::new();
+    home.codex(
+        "archived-root",
+        json!({}),
+        &[codex_user(ts(18, 0), "archive fixture")],
+    );
+    let active = home
+        .root
+        .join("codex/sessions/2026/09/24/rollout-archived-root.jsonl");
+    let before = home.build();
+    let before_pages = pages(&before);
+    let archived = home
+        .root
+        .join("codex/archived_sessions/rollout-archived-root.jsonl");
+    fs::create_dir_all(archived.parent().unwrap()).unwrap();
+    fs::rename(&active, &archived).unwrap();
+    let bytes = fs::read(&archived).unwrap();
+    let after = home.build();
+    assert!(after.sessions.contains_key("archived-root"));
+    assert_eq!(before_pages, pages(&after));
+    assert!(
+        crate::inputs(&home.options)
+            .unwrap()
+            .iter()
+            .any(|input| input.path == "archived_sessions/rollout-archived-root.jsonl")
+    );
+    assert_mirrors(&home);
+    assert_eq!(fs::read(&archived).unwrap(), bytes);
+    assert!(!active.exists());
+}
+
 #[test]
 fn input_paths_are_the_builders_and_nothing_else() {
     for (root, path) in [
@@ -3209,6 +3262,7 @@ fn input_paths_are_the_builders_and_nothing_else() {
         ),
         ("claude", "sessions/1234.json"),
         ("codex", "sessions/2026/09/24/rollout-x.jsonl"),
+        ("codex", "archived_sessions/rollout-x.jsonl"),
     ] {
         assert!(crate::is_input_path(root, path), "{root}/{path}");
     }
@@ -3232,6 +3286,10 @@ fn input_paths_are_the_builders_and_nothing_else() {
         ("codex", "auth.json"),
         ("codex", "thread-writer-locks/x.lock"),
         ("codex", "sessions/.jsonl"),
+        ("codex", "archived_sessions/.jsonl"),
+        ("codex", "archived_sessions/auth.json"),
+        ("codex", "archived_sessions/r.jsonl.zst"),
+        ("codex", "archived_sessions/r.jsonl.seal/r.jsonl"),
         ("claude", "projects/p/x.jsonl.seal/y.jsonl"),
         (
             "claude",

@@ -6,6 +6,7 @@
 
 ## What is sent
 
+- Plain Codex archive rollouts under `codex/archived_sessions/**/*.jsonl` are viewing inputs alongside active rollouts. Compressed rollouts and native databases are excluded.
 - **The input set:** exactly the files the model builder reads, listed by `semon_sessions::inputs` and checked by `semon_sessions::is_input_path`. Nothing else under the agent homes is read. `*.key` files never are.
   - `claude` root: `projects/**/*.jsonl`, `projects/**/subagents/agent-<id>.meta.json`, `sessions/<pid>.json`.
   - `codex` root: `sessions/**/*.jsonl`.

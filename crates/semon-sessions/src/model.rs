@@ -1206,7 +1206,9 @@ fn scan(
         });
     }
     let mut paths = Vec::new();
-    file_list(&options.codex_home.join("sessions"), &mut paths, "jsonl")?;
+    for root in crate::inputs::codex_rollout_dirs(options) {
+        file_list(&root, &mut paths, "jsonl")?;
+    }
     for path in paths {
         if outside(&path) {
             seen.insert(path.to_string_lossy().into_owned());

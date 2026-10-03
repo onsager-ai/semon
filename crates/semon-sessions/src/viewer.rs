@@ -508,6 +508,9 @@ pub(crate) const FONTS: [(&str, &[u8]); 4] = [
 ];
 
 fn watch_tree(path: &Path, suffixes: &[&str], watched: &mut BTreeMap<PathBuf, Option<Stamp>>) {
+    if fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
+        return;
+    }
     watched.insert(path.to_owned(), stamp(path));
     let Ok(entries) = fs::read_dir(path) else {
         return;
@@ -568,11 +571,9 @@ impl Snapshot {
             &[".json"],
             &mut watched,
         );
-        watch_tree(
-            &options.codex_home.join("sessions"),
-            &[".jsonl"],
-            &mut watched,
-        );
+        for root in crate::inputs::codex_rollout_dirs(options) {
+            watch_tree(&root, &[".jsonl"], &mut watched);
+        }
         watch_tree(
             &options.codex_home.join("thread-writer-locks"),
             &[".lock"],
@@ -1747,11 +1748,9 @@ impl MachineView {
             &mut paths,
             "jsonl",
         )?;
-        file_list(
-            &self.options.codex_home.join("sessions"),
-            &mut paths,
-            "jsonl",
-        )?;
+        for root in crate::inputs::codex_rollout_dirs(&self.options) {
+            file_list(&root, &mut paths, "jsonl")?;
+        }
         self.update_files(paths);
         Ok(lock(&self.files).paths.get(&key).cloned())
     }
@@ -5707,6 +5706,13 @@ mod tests {
         symlink(
             outside.root.join("claude/sessions/77.json"),
             alpha.join("claude/sessions/77.json"),
+        )
+        .unwrap();
+        // An archive root behind a link must not expose external rollouts.
+        fs::create_dir_all(alpha.join("codex")).unwrap();
+        symlink(
+            outside.root.join("codex/sessions"),
+            alpha.join("codex/archived_sessions"),
         )
         .unwrap();
         // Homes behind a link, and facts behind one.

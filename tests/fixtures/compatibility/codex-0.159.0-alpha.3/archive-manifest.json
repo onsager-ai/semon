@@ -1,0 +1,42 @@
+{
+  "version": 1,
+  "harness": "Codex",
+  "harness_version": "0.159.0-alpha.3",
+  "build": null,
+  "os": "disposable Linux Semon test; upstream source evidence",
+  "execution_mode": "Semon reads a transformed native initial rollout moved into a source-documented archive path; no native archive command is executed",
+  "storage_schema": "plain JSONL under CODEX_HOME/archived_sessions",
+  "home_override": "CODEX_HOME selects a disposable test root; compiled Semon child has an empty fallback HOME",
+  "evidence_origin": "source-backed archive location plus native/mock transcript fixture; simulated archive move",
+  "source_references": [
+    {
+      "repository": "openai/codex",
+      "commit": "3b01b36fa5eb96ba82a776bd3c2fc57f8969181f",
+      "path": "codex-rs/rollout/src/lib.rs",
+      "git_blob": "6bcbf57fde3b524a6e09aef1719d5fd22a617998",
+      "sha256": "f4f9dbb751a467de8232e7d07cb4dd0fbd5440f0bc24e28dd6b86ce364351be8"
+    },
+    {
+      "repository": "openai/codex",
+      "commit": "3b01b36fa5eb96ba82a776bd3c2fc57f8969181f",
+      "path": "codex-rs/thread-store/src/local/archive_thread.rs",
+      "git_blob": "397ab0f9e26dfcd811310b77ee882c775a28fbb4",
+      "sha256": "d159197c4e6929ac7793be2a013d5c873ea0278c50bb3ed4da82df3bedfbc289"
+    }
+  ],
+  "fixture_reference": {
+    "path": "initial-rollout.jsonl",
+    "sha256": "3716b2bb79c26d60315f821e37014c3f4b50cfd15a4368bbad126556ab88916c"
+  },
+  "expected": [
+    "Read-only cold and warm CLI session discovery after a move from active to archived path",
+    "Model retains source-supported history/transcript pages after the path move",
+    "Exact viewing inputs plus recorded machine facts rebuild the same model and transcripts",
+    "Archive path allowlist rejects secrets, compressed files, traversal and sealed segments; received archive symlinks are refused"
+  ],
+  "limitations": [
+    "Upstream source establishes archive directory and rename operation, not runtime archive validation",
+    "Only plain JSONL is supported here; upstream compressed rollouts remain unsupported",
+    "No native archive command, restored DB, inferred lineage, or archived capture default is claimed"
+  ]
+}

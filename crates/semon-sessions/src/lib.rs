@@ -365,6 +365,9 @@ pub(crate) fn read_regular_at_most(path: &Path, max: u64) -> io::Result<Vec<u8>>
 }
 
 fn file_list(root: &Path, output: &mut Vec<PathBuf>, suffix: &str) -> io::Result<()> {
+    if fs::symlink_metadata(root).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
+        return Ok(());
+    }
     let entries = match fs::read_dir(root) {
         Ok(entries) => entries,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
@@ -1111,11 +1114,9 @@ pub(crate) fn collect_with_index(
         }
     }
     let mut codex_files = Vec::new();
-    file_list(
-        &options.codex_home.join("sessions"),
-        &mut codex_files,
-        "jsonl",
-    )?;
+    for root in inputs::codex_rollout_dirs(options) {
+        file_list(&root, &mut codex_files, "jsonl")?;
+    }
     for path in codex_files {
         if !options.all && options.session.is_none() && !modified_recently(&path, cutoff) {
             continue;
