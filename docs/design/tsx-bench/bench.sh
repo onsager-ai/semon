@@ -10,7 +10,7 @@ cd "$(dirname "$0")"
 ESBUILD_VERSION=0.28.2
 BUN_VERSION=1.4.2
 RUNTIMES=(h preact solid lit)
-# legacy (historical target name): today's served script (tooltip.js, select.js and viewer.generated.js, joined as shell::VIEWER_JS joins them), bundled as it is.
+# legacy (historical target name): today's served script (viewer.generated.js including its shared production prefix, joined as shell::VIEWER_JS joins them), bundled as it is.
 TARGETS=(legacy "${RUNTIMES[@]}")
 BUNDLERS=(esbuild bun vite)
 RUNS=${RUNS:-10}
@@ -66,7 +66,7 @@ done
 
 # ---- Bundles ------------------------------------------------------------------------------------------------------------
 SRC=../../../crates/semon-sessions/src
-{ cat "$SRC/tooltip.js"; echo; cat "$SRC/select.js"; echo; cat "$SRC/viewer.generated.js"; } > out/legacy-entry.js
+cat "$SRC/viewer.generated.js" > out/legacy-entry.js
 entry() { case "$1" in legacy) echo out/legacy-entry.js ;; lit) echo src/lit/main.ts ;; *) echo "src/$1/main.tsx" ;; esac; }
 build_cmd() { # bundler runtime min(1|0) out
   local b=$1 rt=$2 min=$3 out=$4 flag="" dir=vite
@@ -162,7 +162,7 @@ done
   echo
   echo "### Output size (minified / gzip -9 of minified / unminified)"
   echo
-  echo "legacy is today's served script, shell::VIEWER_JS (tooltip.js, select.js and viewer.generated.js): $(kb "$(stat -c %s out/legacy-entry.js)") as served, $(kb "$(gzip -9c out/legacy-entry.js | wc -c)") gzipped. The other rows are the sample (the tooltip, the session tree, a clamped brief) for each runtime; h has no runtime, so each other row's excess over h is its runtime."
+  echo "legacy is today's served script, shell::VIEWER_JS (viewer.generated.js including its shared production prefix): $(kb "$(stat -c %s out/legacy-entry.js)") as served, $(kb "$(gzip -9c out/legacy-entry.js | wc -c)") gzipped. The other rows are the sample (the tooltip, the session tree, a clamped brief) for each runtime; h has no runtime, so each other row's excess over h is its runtime."
   echo
   echo "| Runtime | esbuild | Bun | Vite |"
   echo "|---|---|---|---|"

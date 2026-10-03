@@ -1253,3 +1253,30 @@ html.viewer-open, html.viewer-open body { overflow: hidden; }
 @media (any-pointer: coarse) and (min-width: 761px) {
   .page .groupby button, .hop button.open { min-height: 44px; min-width: 44px; }
 }
+
+.hicon.hi-screen { --hi: 14px; }
+
+.session-facet-slot { display: contents; }
+.session-groups { display: grid; gap: 16px; }
+.session-group { display: grid; }
+
+.hicon.hi-screen-16 { --hi: 16px; }
+
+.analytics-legend .legend-claude { --h: var(--claude); }
+.analytics-legend .legend-codex { --h: var(--codex); }
+.row-bar.bar-claude { background: var(--claude); }
+.row-bar.bar-codex { background: var(--codex); }
+
+.viewer-bar-actions, .viewer-bar-mode, .viewer-crumb { display: contents; }
+
+.sh-select-trigger-slot, .sh-select-parts { display: contents; }
+
+.viewer-status-slot { display: contents; }
+
+.turn.semon-measuring-turn { content-visibility: visible; }
+
+/* Landscape touch reaches 44px without changing the compact header pitch. */
+@media (any-pointer: coarse) and (min-width: 761px) {
+  .viewer-b .vs .link { position: relative; }
+  .viewer-b .vs .link::before { content: ""; position: absolute; inset: min(0px, calc((100% - 44px) / 2)) 0; }
+}

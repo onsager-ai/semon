@@ -185,11 +185,12 @@ export default async function breakdownCheck(browser) {
       const before = await page.evaluate(() => { const rows = [...document.querySelectorAll(".analytics-split .analytics-session.ranked")], row = rows[7]; row.focus(); row.__old = true; return { index: rows.indexOf(row), focused: document.activeElement === row }; });
       r.expect(before.focused, mode + ": a top-session link cannot take focus");
       page.fakeState.n++;
-      const redrawn = await page.waitForFunction(() => ![...document.querySelectorAll(".analytics-split .analytics-session.ranked")].some((x) => x.__old), null, { timeout: 20000 }).then(() => true, () => false);
+      const redrawn = await page.waitForResponse(response => new URL(response.url()).pathname === "/api/analytics" && response.status() === 200 && response.headers().etag?.endsWith("-fake" + page.fakeState.n), { timeout: 20000 }).then(() => true, () => false);
+      await page.evaluate(() => new Promise(done => requestAnimationFrame(() => requestAnimationFrame(done))));
       await page.waitForTimeout(400);
-      const after = await page.evaluate(() => { const rows = [...document.querySelectorAll(".analytics-split .analytics-session.ranked")], a = document.activeElement; return { index: rows.indexOf(a), tag: a?.tagName }; });
+      const after = await page.evaluate(() => { const rows = [...document.querySelectorAll(".analytics-split .analytics-session.ranked")], a = document.activeElement; return { index: rows.indexOf(a), tag: a?.tagName, kept: !!a?.__old }; });
       res.focus = { before, redrawn, after };
-      r.expect(redrawn && after.index === before.index, mode + ": focus on a top-session link did not survive a redraw: " + JSON.stringify(res.focus));
+      r.expect(redrawn && after.kept && after.index === before.index, mode + ": focus on a top-session link did not survive a redraw: " + JSON.stringify(res.focus));
     }
     // A tap on a row opens its session (the link is still handled in the page).
     const first = page.locator(".analytics-split .analytics-session.ranked").first();

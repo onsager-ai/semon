@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { buildViewer, assertFresh } from '../build.mjs';
+import { buildViewer, buildShared, assertFresh } from '../build.mjs';
 test('production builds are deterministic and stale assets fail', async () => {
   const first = await buildViewer(), second = await buildViewer();
   const bytes = first.outputFiles[0].contents;
@@ -18,6 +18,12 @@ test('production builds are deterministic and stale assets fail', async () => {
   const inputs = Object.keys(first.metafile.inputs);
   assert.ok(inputs.some(p => p.endsWith('preact/dist/preact.module.js')));
   assert.ok(inputs.every(p => !/preact\/(debug|devtools|compat)\//.test(p)));
+});
+
+test('standalone shared controls retain the pinned runtime license', async () => {
+  const shared = await buildShared();
+  assert.match(shared.outputFiles[0].text, /Copyright \(c\) 2015-present Jason Miller/);
+  assert.match(shared.outputFiles[0].text, /The MIT License/);
 });
 
 test('consumer build uses pinned types/security/runtime and rejects stale output', async () => {
