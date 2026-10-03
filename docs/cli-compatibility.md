@@ -130,3 +130,16 @@ but does not reparse unchanged history. Explicit native tool IDs and byte-offset
 metadata are rebuilt from the source after an interior mutation. A writer that
 preserves the entire file stat while mutating bytes is outside this shortcut's
 change-detection contract.
+
+## Native home overrides
+
+Capture CLI defaults and session discovery honor nonempty `CODEX_HOME` and
+`CLAUDE_CONFIG_DIR`. Explicit input flags still take precedence. Codex sessions
+and history live beneath its configured root. Claude projects live beneath its
+configured root, and custom-root settings use `<CLAUDE_CONFIG_DIR>/.claude.json`,
+as observed in the isolated 2.1.288 probe; default settings remain
+`~/.claude.json`. Empty overrides retain the ordinary home defaults.
+
+Fixture-backed discovery tests resolve only disposable roots and verify native
+transcripts and settings remain byte-identical after collection. These native
+roots do not relocate Semon's own state or derived cache.
