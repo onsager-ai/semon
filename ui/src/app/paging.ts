@@ -1,54 +1,35 @@
+import type { TranscriptStore } from '../state/transcript';
+import type { NavigationController } from '../navigation/routes';
+import type { EffectScope } from '../app/effects';
+import type { createViewport } from './viewport';
+import type { createTransport } from './transport';
+import type { createDocumentRenderer } from './documentRenderer';
+import type { createHistoryScroll } from './historyScroll';
 import { createPagerController, updateSessionPager } from '../lib';
 import type { PageDirection } from '../state/transcript';
 interface PagingHost {
-  transcripts: import('../state/transcript').TranscriptStore;
-  scope: import('../app/effects').EffectScope;
-  navigation: import('../navigation/routes').NavigationController;
+  scope: EffectScope;
+  navigation: NavigationController;
   $: <T extends HTMLElement = HTMLElement>(s: string, r?: ParentNode) => T;
-  stopOpeningEndPin: () => void;
-  viewport: {
-    scrollController: {
-      capture: () => import('../navigation/scroll').ScrollSnapshot;
-      restore: (st: import('../navigation/scroll').ScrollSnapshot, pin?: boolean) => void;
-      opener: (n: HTMLElement) => HTMLButtonElement | null;
-      stateKey: (n: HTMLElement) => string | undefined;
-      identOf: (n: HTMLElement) => string;
-      anchor: { id: string; off: number; route: object | null; top: number } | null;
-      destroy(): void;
-    };
-    stopOpeningEndPin: () => void;
-    readonly openingEndUntil: number;
-    scroller: () => HTMLElement;
-    capture: () => import('../navigation/scroll').ScrollSnapshot;
-    restore: (st: import('../navigation/scroll').ScrollSnapshot, pin?: boolean) => void;
-    syncJump: () => void;
-    startOpeningEndPin: () => void;
-    clearNewEntries: () => void;
-    edge: () => number;
-    opener: (n: HTMLElement) => HTMLButtonElement | null;
-    jumpToLatest: () => void;
-    patchSession: (dirty: ReadonlySet<string> | null) => number;
-  };
   findOpen: boolean;
   find: string;
   show: { messages: boolean; tools: boolean; thinking: boolean };
-  TXM: Record<string, import('../domain/types').TranscriptMeta>;
-  fetchTx: (
-    sid: string,
-    q?: string,
-    where?: import('../state/transcript').PageDirection | undefined,
-    signal?: AbortSignal | undefined,
-    onPage?: (() => void) | undefined,
-  ) => Promise<void>;
-  scroller: () => HTMLElement;
   phone: MediaQueryList;
-  capture: () => import('../navigation/scroll').ScrollSnapshot;
-  render: () => void;
-  restore: (st: import('../navigation/scroll').ScrollSnapshot, pin?: boolean) => void;
-  syncJump: () => void;
-  saveHistoryScroll: () => void;
   disposed: boolean;
-  SIDEBAR_ONLY: boolean;
+  sidebarOnly: boolean;
+
+  historyScrollOwner: Pick<ReturnType<typeof createHistoryScroll>, 'saveHistoryScroll'>;
+
+  documentRendererOwner: Pick<ReturnType<typeof createDocumentRenderer>, 'render'>;
+
+  transportOwner: Pick<ReturnType<typeof createTransport>, 'fetchTx'>;
+
+  transcripts: Pick<TranscriptStore, 'meta' | 'paging' | 'clearPaging' | 'drop'>;
+
+  viewport: Pick<
+    ReturnType<typeof createViewport>,
+    'stopOpeningEndPin' | 'scroller' | 'capture' | 'restore' | 'syncJump' | 'openingEndUntil'
+  >;
 }
 /** Owns paging behavior through explicit application ports. */
 export function createPaging(host: PagingHost) {
@@ -91,7 +72,7 @@ export function createPaging(host: PagingHost) {
     host.scope.clearTimeout(programmaticScrollTimer);
     programmaticScrollTimer = undefined;
     programmaticScrollPending = false;
-    host.stopOpeningEndPin();
+    host.viewport.stopOpeningEndPin();
     pagerArmed = true;
     automaticLoads = 0;
     scrollRevision++;
@@ -121,7 +102,9 @@ export function createPaging(host: PagingHost) {
           ? "Couldn't load " + direction + ' entries · Retry'
           : 'Load ' +
             direction +
-            (where === 'after' && host.TXM[sid]?.newer ? ' · ' + host.TXM[sid].newer + ' new' : ''),
+            (where === 'after' && host.transcripts.meta[sid]?.newer
+              ? ' · ' + host.transcripts.meta[sid].newer + ' new'
+              : ''),
     };
   }
   function paintPager(b: HTMLElement) {
@@ -139,25 +122,25 @@ export function createPaging(host: PagingHost) {
         : null;
     },
     range(sid) {
-      return host.TXM[sid];
+      return host.transcripts.meta[sid];
     },
     state: pagingState,
     automatic: automaticPagingAllowed,
     current(sid, where, state, r) {
       return PAGING.get(sid)?.[where] === state;
     },
-    beginManual: () => host.stopOpeningEndPin(),
+    beginManual: () => host.viewport.stopOpeningEndPin(),
     countAutomatic() {
       automaticLoads++;
     },
     paint: paintPager,
     load(sid, where, boundary, signal, applied) {
-      return host.fetchTx(sid, where + '=' + boundary, where, signal, applied);
+      return host.transportOwner.fetchTx(sid, where + '=' + boundary, where, signal, applied);
     },
     commit(r, where, manual) {
-      const box = host.scroller(),
+      const box = host.viewport.scroller(),
         top = host.phone.matches ? 0 : box.getBoundingClientRect().top,
-        st = host.capture();
+        st = host.viewport.capture();
       const entry = [
         ...host
           .$('#page')
@@ -175,14 +158,14 @@ export function createPaging(host: PagingHost) {
       };
       const armed = pagerArmed,
         used = automaticLoads;
-      host.render();
-      host.restore(st);
+      host.documentRendererOwner.render();
+      host.viewport.restore(st);
       if (!manual) {
         pagerArmed = armed;
         automaticLoads = used;
       }
-      host.syncJump();
-      host.saveHistoryScroll();
+      host.viewport.syncJump();
+      host.historyScrollOwner.saveHistoryScroll();
     },
     queue: queuePagerObservers,
   });
@@ -190,7 +173,7 @@ export function createPaging(host: PagingHost) {
     pagerController.disconnect();
   }
   function queuePagerObservers() {
-    if (host.disposed || host.SIDEBAR_ONLY) return;
+    if (host.disposed || host.sidebarOnly) return;
     pagerController.queue(
       host.$('#page'),
       host.phone.matches ? null : host.$('#main'),

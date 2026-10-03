@@ -1,3 +1,13 @@
+import { STATE } from './registry';
+import { I } from './registry';
+import type { ViewerModelStore } from '../state/model';
+import type { TranscriptStore } from '../state/transcript';
+import type { createDomain } from '../domain/calculations';
+import type { createSentences } from './sentences';
+import type { createScreenViews } from './screenViews';
+import type { createTicker } from './ticker';
+import type { createToolViews } from './toolViews';
+import type { createPaging } from './paging';
 import { compactCount, preview } from '../domain/format';
 import type { Background, Entry, Turn } from '../domain/types';
 import type {
@@ -25,56 +35,30 @@ interface GroupEntry {
   secs?: string;
 }
 interface TranscriptViewHost {
-  SESS: Record<string, import('../domain/types').Session>;
-  TURNS: Record<string, import('../domain/types').Turn[]>;
-  TX: Record<string, import('../domain/types').Entry[]>;
   find: string;
   show: { messages: boolean; tools: boolean; thinking: boolean };
-  I: Record<string, string>;
-  turnEnd: (
-    t: import('../domain/types').Turn,
-  ) => { st: import('../domain/types').SessionState; text: string } | null;
-  STATE: Record<string, string>;
   clock: (t: number) => string;
-  sentenceSnapshot: (
-    h: import('../domain/types').Handoff,
-    viewer: string | null | undefined,
-    links?: boolean,
-  ) => import('../lib/sentence').SentenceSnapshot;
-  harnessSnapshot: (id: string) => import('../lib/screens').HarnessMark | undefined;
-  running: (ms: number) => string;
-  NOW: number;
-  isGap: (e: import('../domain/types').Entry) => boolean;
-  attachmentSnapshot: (
-    e: import('../domain/types').Entry,
-  ) => import('../lib/attachments').Attachment[];
-  HID: Map<string, import('../domain/types').Handoff>;
-  childSnapshot: (
-    h: import('../domain/types').Handoff,
-    c: import('../domain/types').Session,
-  ) => import('../lib/transcript').ChildView;
-  answersOf: (h: import('../domain/types').Handoff) => string[] | null;
-  TXM: Record<string, import('../domain/types').TranscriptMeta>;
-  originHandoff: (sid: string) => import('../domain/types').Handoff | undefined;
-  pagerSnapshot: (
-    sid: string,
-    where: import('../state/transcript').PageDirection,
-  ) => {
-    sid: string;
-    where: import('../state/transcript').PageDirection;
-    disabled: boolean;
-    busy: boolean;
-    text: string;
-  };
-  MACHINE: Record<string, string>;
-  showsFooter: (
-    s: import('../domain/types').Session,
-    origin: import('../domain/types').Handoff | undefined,
-  ) => boolean;
-  footerSnapshot: (
-    s: import('../domain/types').Session,
-    h: import('../domain/types').Handoff | undefined,
-  ) => import('../lib/transcript').FooterView;
+  now: number;
+  isGap: (e: Entry) => boolean;
+
+  pagingOwner: Pick<ReturnType<typeof createPaging>, 'pagerSnapshot'>;
+
+  toolViewsOwner: Pick<
+    ReturnType<typeof createToolViews>,
+    'attachmentSnapshot' | 'childSnapshot' | 'footerSnapshot'
+  >;
+
+  tickerOwner: Pick<ReturnType<typeof createTicker>, 'running'>;
+
+  screenViews: Pick<ReturnType<typeof createScreenViews>, 'harnessSnapshot' | 'showsFooter'>;
+
+  sentencesOwner: Pick<ReturnType<typeof createSentences>, 'sentenceSnapshot'>;
+
+  domain: Pick<ReturnType<typeof createDomain>, 'turnEnd' | 'answersOf' | 'originHandoff'>;
+
+  transcripts: Pick<TranscriptStore, 'entries' | 'meta' | 'view'>;
+
+  modelStore: Pick<ViewerModelStore, 'sessions' | 'turns' | 'handoff' | 'machines'>;
 }
 /** Owns transcriptView behavior through explicit application ports. */
 export function createTranscriptView(host: TranscriptViewHost) {
@@ -90,7 +74,7 @@ export function createTranscriptView(host: TranscriptViewHost) {
       e.k === 'think' &&
       !thoughtText(e) &&
       i === entries.length - 1 &&
-      host.SESS[sid]?.state === 'work');
+      host.modelStore.sessions[sid]?.state === 'work');
   const signalLabel = (e: Extract<Entry, { k: 'signal' }>) => {
     const s = e.signal ?? {},
       tag = s.tag ?? '',
@@ -140,8 +124,8 @@ export function createTranscriptView(host: TranscriptViewHost) {
   // Join adjacent Codex snapshots with the same resolved owner; unknown explicit turns block merging until ownership resumes.
   function transcriptEntries(entries: Entry[], sid: string) {
     const out: Entry[] = [],
-      codex = host.SESS[sid]?.harness === 'codex';
-    const turns = codex ? (host.TURNS[sid] ?? []) : [],
+      codex = host.modelStore.sessions[sid]?.harness === 'codex';
+    const turns = codex ? (host.modelStore.turns[sid] ?? []) : [],
       owners = codex
         ? new Map(turns.flatMap((t) => t.entries.map((e) => [e.key, t.id])))
         : new Map<string | undefined, string>();
@@ -271,7 +255,8 @@ export function createTranscriptView(host: TranscriptViewHost) {
     sid: string,
     opts: { only?: ReadonlySet<string> } = {},
   ): SessionSnapshot {
-    const entries = transcriptEntries(host.TX[sid] ?? [], sid),
+    const projection = host.transcripts.view(sid);
+    const entries = transcriptEntries(projection.entries ?? [], sid),
       blocks: TranscriptBlock[] = [];
     let tx: EntryView[] = [];
     const currentTurn: { value: { t: Turn; view: TurnView } | null } = { value: null };
@@ -348,16 +333,20 @@ export function createTranscriptView(host: TranscriptViewHost) {
         background: !!ends.length,
         failed,
         running: live?.secs,
-        stack: host.I.stack,
-        chevron: host.I.chev,
+        stack: I.stack,
+        chevron: I.chev,
       });
       run = [];
     };
     const firsts = new Map(
-      (host.TURNS[sid] ?? []).filter((t) => t.entries[0]?.key).map((t) => [t.entries[0].key, t]),
+      (host.modelStore.turns[sid] ?? [])
+        .filter((t) => t.entries[0]?.key)
+        .map((t) => [t.entries[0].key, t]),
     );
     const owner = opts.only
-      ? new Map((host.TURNS[sid] ?? []).flatMap((t) => t.entries.map((e) => [e.key, t.id])))
+      ? new Map(
+          (host.modelStore.turns[sid] ?? []).flatMap((t) => t.entries.map((e) => [e.key, t.id])),
+        )
       : null;
     const content = (values: readonly EntryView[]) =>
       values.some((v) => v.kind !== 'label' || v.className === 'harness-note');
@@ -369,7 +358,7 @@ export function createTranscriptView(host: TranscriptViewHost) {
         return;
       }
       const { t, view } = currentTurn.value,
-        end = host.turnEnd(t),
+        end = host.domain.turnEnd(t),
         returned = t.entries.some((e) => e.k === 'end' && /^Returned to /.test(e.text ?? ''));
       if (!filtering) {
         if (end?.st === 'err' && !returned) view.error = end.text;
@@ -387,15 +376,17 @@ export function createTranscriptView(host: TranscriptViewHost) {
         view: TurnView = {
           id: t.id,
           entries: [],
-          traceIcon: host.I.trace,
-          stateLabel: host.STATE.err,
+          traceIcon: I.trace,
+          stateLabel: STATE.err,
         };
       if (t.u || h?.kind === 'ask')
         view.label = 'Your message' + (h ? ' at ' + host.clock(h.at) : '');
       else if (h)
         view.header = {
-          parts: host.sentenceSnapshot(h, sid, true).parts,
-          mark: host.SESS[h.from] ? host.harnessSnapshot(host.SESS[h.from].harness) : undefined,
+          parts: host.sentencesOwner.sentenceSnapshot(h, sid, true).parts,
+          mark: host.modelStore.sessions[h.from]
+            ? host.screenViews.harnessSnapshot(host.modelStore.sessions[h.from].harness)
+            : undefined,
           time: host.clock(h.at),
         };
       currentTurn.value = { t, view };
@@ -403,8 +394,8 @@ export function createTranscriptView(host: TranscriptViewHost) {
     const toolStep = (e: ToolEntry, v: string, ic: string, live: boolean): ToolStepSnapshot => {
       const bg = e.bg,
         bgRunning = bg?.state === 'running',
-        waiting = live && host.SESS[sid]?.state === 'wait';
-      const waitingText = host.SESS[sid]?.waiting_for?.includes('permission')
+        waiting = live && host.modelStore.sessions[sid]?.state === 'wait';
+      const waitingText = host.modelStore.sessions[sid]?.waiting_for?.includes('permission')
         ? 'Waiting on permission'
         : 'Waiting for your input';
       const status = bg
@@ -428,7 +419,8 @@ export function createTranscriptView(host: TranscriptViewHost) {
         typeof command === 'string'
           ? command.split(/\r\n|\n|\r/).find((line) => line.trim())
           : null;
-      const bgSecs = bgRunning && bg.since != null ? host.running(host.NOW - bg.since) : bg?.secs;
+      const bgSecs =
+        bgRunning && bg.since != null ? host.tickerOwner.running(host.now - bg.since) : bg?.secs;
       return {
         className:
           'step' +
@@ -448,7 +440,7 @@ export function createTranscriptView(host: TranscriptViewHost) {
         since: live ? e.since : bgRunning ? bg.since : undefined,
         running: live || bgRunning,
         background: !!bg,
-        waiting: host.SESS[sid]?.state === 'wait',
+        waiting: host.modelStore.sessions[sid]?.state === 'wait',
         named: !!title,
         prefix: title
           ? waiting
@@ -464,8 +456,8 @@ export function createTranscriptView(host: TranscriptViewHost) {
         tip: title && firstLine != null ? firstLine.slice(0, 200) : undefined,
         status: status == null ? null : String(status),
         backgroundStatus: bg ? backgroundText({ ...bg, secs: bgSecs }) : undefined,
-        icon: host.I[ic],
-        chevron: host.I.chev,
+        icon: I[ic],
+        chevron: I.chev,
         data: e,
       };
     };
@@ -540,7 +532,7 @@ export function createTranscriptView(host: TranscriptViewHost) {
             live,
             secs:
               live && e.bg.since != null
-                ? host.running(host.NOW - e.bg.since)
+                ? host.tickerOwner.running(host.now - e.bg.since)
                 : (e.bg.secs ?? e.secs),
             key: e.key,
           });
@@ -556,7 +548,7 @@ export function createTranscriptView(host: TranscriptViewHost) {
               kind: 'message',
               flavor: e.k === 'u' ? 'user' : 'assistant',
               text: e.text,
-              images: e.k === 'u' ? host.attachmentSnapshot(e) : undefined,
+              images: e.k === 'u' ? host.toolViewsOwner.attachmentSnapshot(e) : undefined,
             },
             e,
           ),
@@ -591,7 +583,7 @@ export function createTranscriptView(host: TranscriptViewHost) {
         if (!filtering)
           tx.push(keyed({ kind: 'label', className: 'divider', text: e.text ?? '' }, e));
       } else if (e.k === 'h') {
-        const h = host.HID.get(e.id);
+        const h = host.modelStore.handoff.get(e.id);
         if (!h || !hit(h.brief + ' ' + (h.result ?? ''))) continue;
         if (h.kind === 'ask') {
           if (!host.show.messages) continue;
@@ -601,7 +593,7 @@ export function createTranscriptView(host: TranscriptViewHost) {
                 kind: 'message',
                 flavor: 'user',
                 text: h.brief ?? '',
-                images: host.attachmentSnapshot(e),
+                images: host.toolViewsOwner.attachmentSnapshot(e),
               },
               e,
             ),
@@ -617,13 +609,14 @@ export function createTranscriptView(host: TranscriptViewHost) {
             );
           continue;
         }
-        if (h.kind === 'spawn' && h.from === sid && host.SESS[h.to]) {
-          if (host.show.tools) tx.push(keyed(host.childSnapshot(h, host.SESS[h.to]), e));
+        if (h.kind === 'spawn' && h.from === sid && host.modelStore.sessions[h.to]) {
+          if (host.show.tools)
+            tx.push(keyed(host.toolViewsOwner.childSnapshot(h, host.modelStore.sessions[h.to]), e));
           continue;
         }
         if ((host.find && h.kind === 'move') || (!host.show.messages && h.kind !== 'move'))
           continue;
-        const sentence = host.sentenceSnapshot(h, sid, true);
+        const sentence = host.sentencesOwner.sentenceSnapshot(h, sid, true);
         tx.push(
           keyed(
             {
@@ -639,9 +632,9 @@ export function createTranscriptView(host: TranscriptViewHost) {
               brief: preview(h.brief ?? ''),
               result: h.result || undefined,
               resultLabel: h.kind === 'relay' ? 'Reply: ' : 'Returned: ',
-              answers: host.answersOf(h) ?? undefined,
+              answers: host.domain.answersOf(h) ?? undefined,
               waiting: h.kind === 'toyou' && h.status === 'wait',
-              stateLabel: host.STATE.wait,
+              stateLabel: STATE.wait,
             },
             e,
           ),
@@ -649,22 +642,23 @@ export function createTranscriptView(host: TranscriptViewHost) {
       }
     }
     closeTurn();
-    const range = host.TXM[sid],
-      s = host.SESS[sid],
-      origin = host.originHandoff(sid);
+    const range = projection.range,
+      s = host.modelStore.sessions[sid],
+      origin = host.domain.originHandoff(sid);
     return {
       id: sid,
       name: s.name,
       blocks,
-      order: (host.TURNS[sid] ?? []).map((t) => t.id),
+      order: (host.modelStore.turns[sid] ?? []).map((t) => t.id),
       dirty: opts.only,
-      before: range?.from > 0 ? host.pagerSnapshot(sid, 'before') : undefined,
-      after: range && range.to < range.total ? host.pagerSnapshot(sid, 'after') : undefined,
+      before: range?.from > 0 ? host.pagingOwner.pagerSnapshot(sid, 'before') : undefined,
+      after:
+        range && range.to < range.total ? host.pagingOwner.pagerSnapshot(sid, 'after') : undefined,
       started:
         !range?.from && !filtering
           ? {
               lead: 'Started ' + host.clock(s.start) + ' on\u00a0',
-              machine: host.MACHINE[s.movedFrom ?? s.machine],
+              machine: host.modelStore.machines[s.movedFrom ?? s.machine],
             }
           : undefined,
       empty:
@@ -673,7 +667,9 @@ export function createTranscriptView(host: TranscriptViewHost) {
             ? 'Nothing matches “' + host.find + '”.'
             : 'Nothing to show with these filters.'
           : undefined,
-      footer: host.showsFooter(s, origin) ? host.footerSnapshot(s, origin) : undefined,
+      footer: host.screenViews.showsFooter(s, origin)
+        ? host.toolViewsOwner.footerSnapshot(s, origin)
+        : undefined,
     };
   }
 

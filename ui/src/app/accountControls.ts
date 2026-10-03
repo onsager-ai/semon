@@ -1,32 +1,47 @@
+import type { Account } from '../lib/account';
+import type { EffectScope } from '../app/effects';
+import type { createToolViews } from './toolViews';
+import type { NavigationController } from '../navigation/routes';
+import type { createHistoryScroll } from './historyScroll';
+import type { createLiveModel } from './liveModel';
+import type { createApplicationRefresh } from './applicationRefresh';
+import type { createDestination } from './destination';
+import type { createOrderingControls } from './orderingControls';
+import type { createLayout } from './layout';
+import type { createNavigationView } from './navigationView';
 import type { AccountChromeHost } from '../lib';
 import { createAccountChrome, createShellChrome, setGeometry } from '../lib';
 interface AccountControlsHost {
-  navigation: import('../navigation/routes').NavigationController;
-  currentScroll: () => number;
+  navigation: NavigationController;
   accountSheet: boolean;
   disposed: boolean;
-  toolViewsOwner: ReturnType<typeof import('./toolViews').createToolViews>;
-  LIVE: import('../lib/live').LiveState;
-  scope: import('../app/effects').EffectScope;
-  refresh: (dirty?: ReadonlySet<string> | null) => void;
-  SIDEBAR_ONLY: boolean;
-  go: (
-    r: import('../navigation/routes').ApplicationRoute,
-    fromHistory?: boolean,
-    prepared?: boolean,
-    nextContent?: import('../viewer-host').ViewerContent | null,
-  ) => void;
-  orderApply: (name: string) => void;
+  toolViewsOwner: ReturnType<typeof createToolViews>;
+  scope: EffectScope;
+  sidebarOnly: boolean;
   phone: MediaQueryList;
-  ORD_DRAWER_MS: number;
-  setRailMode: (on: boolean) => void;
-  layoutOwner: ReturnType<typeof import('./layout').createLayout>;
-  renderNav: () => void;
-  app: HTMLElement;
   afterPop: (() => void) | null;
-  ACCOUNT: import('../lib/account').Account | null;
-  setWideMode: (on: boolean) => void;
+  account: Account | null;
   $: <T extends HTMLElement = HTMLElement>(s: string, r?: ParentNode) => T;
+
+  navigationViewOwner: Pick<ReturnType<typeof createNavigationView>, 'renderNav'>;
+
+  layoutOwner: Pick<
+    ReturnType<typeof createLayout>,
+    'setRailMode' | 'app' | 'setWideMode' | 'railMode' | 'wideMode'
+  >;
+
+  orderingControlsOwner: Pick<
+    ReturnType<typeof createOrderingControls>,
+    'orderApply' | 'ORD_DRAWER_MS'
+  >;
+
+  destination: Pick<ReturnType<typeof createDestination>, 'go'>;
+
+  applicationRefreshOwner: Pick<ReturnType<typeof createApplicationRefresh>, 'refresh'>;
+
+  liveModelOwner: Pick<ReturnType<typeof createLiveModel>, 'LIVE'>;
+
+  historyScrollOwner: Pick<ReturnType<typeof createHistoryScroll>, 'currentScroll'>;
 }
 /** Owns accountControls behavior through explicit application ports. */
 export function createAccountControls(host: AccountControlsHost) {
@@ -41,7 +56,11 @@ export function createAccountControls(host: AccountControlsHost) {
       if (compact)
         try {
           history.pushState(
-            { ...host.navigation.route, sheet: 1, scrollTop: host.currentScroll() },
+            {
+              ...host.navigation.route,
+              sheet: 1,
+              scrollTop: host.historyScrollOwner.currentScroll(),
+            },
             '',
           );
           host.accountSheet = true;
@@ -56,10 +75,14 @@ export function createAccountControls(host: AccountControlsHost) {
           history.back();
         }
       }
-      if (host.LIVE.pending && !navigating)
+      if (host.liveModelOwner.LIVE.pending && !navigating)
         host.scope.timeout(() => {
-          if (host.LIVE.pending && !host.toolViewsOwner.viewerEl && !accountChrome.open)
-            host.refresh();
+          if (
+            host.liveModelOwner.LIVE.pending &&
+            !host.toolViewsOwner.viewerEl &&
+            !accountChrome.open
+          )
+            host.applicationRefreshOwner.refresh();
         }, 0);
     },
     navigate(href) {
@@ -73,29 +96,29 @@ export function createAccountControls(host: AccountControlsHost) {
       return true;
     },
   };
-  const shellChrome = host.SIDEBAR_ONLY
+  const shellChrome = host.sidebarOnly
     ? null
     : createShellChrome({
         account: accountHost,
         navigate(destination) {
-          host.go(host.navigation.historyRoute({ v: destination.key }, { v: 'home' }));
+          host.destination.go(host.navigation.historyRoute({ v: destination.key }, { v: 'home' }));
           return true;
         },
         drawerOpened() {
-          host.orderApply('side');
+          host.orderingControlsOwner.orderApply('side');
         },
         drawerClosed() {
           host.scope.timeout(() => {
             if (host.phone.matches && !document.body.classList.contains('drawer-open'))
-              host.orderApply('side');
-          }, host.ORD_DRAWER_MS);
+              host.orderingControlsOwner.orderApply('side');
+          }, host.orderingControlsOwner.ORD_DRAWER_MS);
         },
         railChanged() {
-          host.setRailMode(!host.layoutOwner.railMode);
-          host.renderNav();
+          host.layoutOwner.setRailMode(!host.layoutOwner.railMode);
+          host.navigationViewOwner.renderNav();
         },
       });
-  if (shellChrome) shellChrome.mount(host.app);
+  if (shellChrome) shellChrome.mount(host.layoutOwner.app);
   const accountChrome = shellChrome?.account ?? createAccountChrome(accountHost);
   function closeAccountMenu(
     keepEntry: boolean | undefined = undefined,
@@ -113,24 +136,24 @@ export function createAccountControls(host: AccountControlsHost) {
     } else go();
   }
   function accountWidget(compact: boolean) {
-    return host.ACCOUNT
+    return host.account
       ? accountChrome.mount({
-          account: host.ACCOUNT,
+          account: host.account,
           compact,
           wide: host.layoutOwner.wideMode,
-          onWideChange: () => host.setWideMode(!host.layoutOwner.wideMode),
+          onWideChange: () => host.layoutOwner.setWideMode(!host.layoutOwner.wideMode),
         })
       : null;
   }
   function renderDrawerAccount() {
     if (shellChrome) {
       shellChrome.drawerAccount(
-        host.ACCOUNT
+        host.account
           ? {
-              account: host.ACCOUNT,
+              account: host.account,
               compact: true,
               wide: host.layoutOwner.wideMode,
-              onWideChange: () => host.setWideMode(!host.layoutOwner.wideMode),
+              onWideChange: () => host.layoutOwner.setWideMode(!host.layoutOwner.wideMode),
             }
           : null,
       );
@@ -141,7 +164,7 @@ export function createAccountControls(host: AccountControlsHost) {
       accountChrome.unmount(old);
       old.remove();
     }
-    if (!host.ACCOUNT) return;
+    if (!host.account) return;
     const widget = accountWidget(true);
     if (!widget) return;
     widget.id = 'account-drawer';

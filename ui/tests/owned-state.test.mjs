@@ -4,7 +4,7 @@ import { build } from 'esbuild';
 const { outputFiles } = await build({
   stdin: {
     contents:
-      "export * from './src/state/model';export * from './src/state/transcript';export * from './src/state/transcript-wire';",
+      "export * from './src/state/viewUpdates';export * from './src/app/transport';export * from './src/state/model';export * from './src/state/transcript';export * from './src/state/transcript-wire';",
     resolveDir: new URL('..', import.meta.url).pathname,
   },
   bundle: true,
@@ -12,9 +12,10 @@ const { outputFiles } = await build({
   format: 'esm',
   platform: 'node',
 });
-const { ViewerModelStore, TranscriptStore, parseTranscriptPage } = await import(
-  'data:text/javascript;base64,' + Buffer.from(outputFiles[0].contents).toString('base64')
-);
+const { ViewUpdates, createTransport, ViewerModelStore, TranscriptStore, parseTranscriptPage } =
+  await import(
+    'data:text/javascript;base64,' + Buffer.from(outputFiles[0].contents).toString('base64')
+  );
 const model = () => ({
   now: 1,
   version: 'v1',
@@ -188,4 +189,65 @@ test('numeric tool elapsed values normalize to display text at the wire boundary
     entries: [{ k: 'tool', name: 'Read', arg: 'file', secs: 1 }],
   });
   assert.equal(p.entries[0].secs, '1');
+});
+
+test('accepted updates publish coherent revisions once; invalid auxiliary input cannot change a delta baseline', () => {
+  const updates = new ViewUpdates(),
+    graph = new ViewerModelStore(updates);
+  const host = {
+    disposed: false,
+    modelStore: graph,
+    transcripts: { entries: {}, marks: {}, spread() {} },
+    viewerHost: null,
+  };
+  const transport = createTransport(host),
+    seen = [];
+  const unsubscribe = updates.subscribe((change) =>
+    seen.push([change, graph.sessions.s.name, host.transcripts.marks.s, host.admin]),
+  );
+  transport.adopt({ ...model(), tx: { s: 'mark' }, admin: { href: '/admin', label: 'Admin' } });
+  assert.equal(seen.length, 1);
+  assert.equal(seen[0][1], 'Session');
+  assert.equal(seen[0][2], 'mark');
+  assert.equal(seen[0][3].label, 'Admin');
+  const before = graph.sessions.s;
+  assert.throws(() => transport.adopt({ ...model(), version: 'bad', tx: { s: 42 } }), /Invalid/);
+  assert.equal(graph.sessions.s, before);
+  assert.equal(seen.length, 1);
+  assert.equal(graph.apply({ delta: 1, from: 'v1', version: 'v2' }).version, 'v2');
+  unsubscribe();
+  transport.adopt(model());
+  assert.equal(seen.length, 1);
+  updates.destroy();
+  transport.adopt(model());
+  assert.equal(updates.revision, 2);
+  host.disposed = true;
+  assert.throws(() => transport.adopt(model()), /destroyed/);
+});
+
+test('transcript subscribers select sessions and never see stale, malformed or post-destroy pages', async () => {
+  const { store, asked } = fixture(),
+    seen = [];
+  store.updates.subscribe((change) => seen.push([change, store.view('s')]), 's');
+  const first = store.fetch('s'),
+    second = store.fetch('s');
+  asked[0].resolve(page(0, 1, 1));
+  await first;
+  assert.equal(seen.length, 0);
+  asked[1].resolve(page(5, 10, 10));
+  await second;
+  assert.equal(seen.length, 1);
+  assert.equal(seen[0][1].entries, store.entries.s);
+  assert.equal(seen[0][1].range.from, 5);
+  const bad = store.fetch('s');
+  asked[2].resolve({ ...page(0, 1, 1), entries: [{ k: 'invalid' }] });
+  await assert.rejects(bad);
+  assert.equal(seen.length, 1);
+  const late = store.fetch('s');
+  store.destroy();
+  asked[3].resolve(page(0, 1, 1));
+  await late;
+  assert.equal(seen.length, 1);
+  store.updates.transcript('s');
+  assert.equal(seen.length, 1);
 });

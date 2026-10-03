@@ -1,3 +1,10 @@
+import type { createToolViews } from './toolViews';
+import type { NavigationController } from '../navigation/routes';
+import type { EffectScope } from '../app/effects';
+import type { createLiveModel } from './liveModel';
+import type { createRecentNavigation } from './recentNavigation';
+import type { createViewport } from './viewport';
+import type { createDocumentRenderer } from './documentRenderer';
 import type { Session } from '../domain/types';
 import { createOrdering, orderRows } from '../lib';
 import type { ApplicationRoute } from '../navigation/routes';
@@ -5,16 +12,19 @@ interface OrderingControlsHost {
   query: string;
   groupBy: string;
   sessionFilters: { repo: string; machine: string; harness: string; model: string };
-  scope: import('../app/effects').EffectScope;
-  visible: () => boolean;
+  scope: EffectScope;
   $: <T extends HTMLElement = HTMLElement>(s: string, r?: ParentNode) => T;
-  navigation: import('../navigation/routes').NavigationController;
-  toolViewsOwner: ReturnType<typeof import('./toolViews').createToolViews>;
-  renderLanes: () => void;
-  capture: () => import('../navigation/scroll').ScrollSnapshot;
-  render: () => void;
-  restore: (st: import('../navigation/scroll').ScrollSnapshot, pin?: boolean) => void;
+  navigation: NavigationController;
+  toolViewsOwner: ReturnType<typeof createToolViews>;
   phone: MediaQueryList;
+
+  documentRendererOwner: Pick<ReturnType<typeof createDocumentRenderer>, 'render'>;
+
+  viewport: Pick<ReturnType<typeof createViewport>, 'capture' | 'restore'>;
+
+  recentNavigation: Pick<ReturnType<typeof createRecentNavigation>, 'renderLanes'>;
+
+  liveModelOwner: Pick<ReturnType<typeof createLiveModel>, 'visible'>;
 }
 /** Owns orderingControls behavior through explicit application ports. */
 export function createOrderingControls(host: OrderingControlsHost) {
@@ -47,7 +57,7 @@ export function createOrderingControls(host: OrderingControlsHost) {
   // poll brings after that is held like any other update.
   host.scope.listen(document, 'visibilitychange', () => {
     ordTouch.down = false;
-    if (host.visible()) {
+    if (host.liveModelOwner.visible()) {
       orderApply('page');
       orderApply('side');
     }
@@ -102,11 +112,11 @@ export function createOrderingControls(host: OrderingControlsHost) {
     )
       return;
     ORD.delete(name);
-    if (name === 'side') host.renderLanes();
+    if (name === 'side') host.recentNavigation.renderLanes();
     else {
-      const st = host.capture();
-      host.render();
-      host.restore(st);
+      const st = host.viewport.capture();
+      host.documentRendererOwner.render();
+      host.viewport.restore(st);
     }
   }
   // The wide screen's sidebar is always in view: what it holds is applied once it has been left alone for ORD_IDLE_MS. Left alone means

@@ -1,3 +1,14 @@
+import type { ViewerModelStore } from '../state/model';
+import type { NavigationController } from '../navigation/routes';
+import type { createToolLoader } from './toolLoader';
+import type { createSessionChrome } from './sessionChrome';
+import type { createTransport } from './transport';
+import type { createLiveModel } from './liveModel';
+import type { createApplicationRefresh } from './applicationRefresh';
+import type { createDomain } from '../domain/calculations';
+import type { createScreenViews } from './screenViews';
+import type { createTranscriptView } from './transcriptView';
+import type { createRecentNavigation } from './recentNavigation';
 import { preview, shortModel } from '../domain/format';
 import type { Cost, Entry, Handoff, Session } from '../domain/types';
 import { object, optional, text } from '../domain/validate';
@@ -8,39 +19,33 @@ import { I, STATE } from './registry';
 type ToolEntry = Extract<Entry, { k: 'tool' }> & { full?: boolean; scriptLoaded?: boolean };
 interface ToolViewsHost {
   disposed: boolean;
-  fullOf: (e: ToolEntry) => Promise<Partial<Omit<import('../lib/tool-details').ToolData, 'bg'>>>;
-  panel: (
-    title: string,
-    opts?: {
-      cls?: string | undefined;
-      sub?: string | undefined;
-      label?: string | undefined;
-      from?: HTMLElement | null | undefined;
-      onClose?: (() => void) | undefined;
-    },
-  ) => { d: HTMLDialogElement; body: HTMLDivElement; show: () => void };
-  SESS: Record<string, import('../domain/types').Session>;
-  enc: (uriComponent: string | number | boolean) => string;
-  navigation: import('../navigation/routes').NavigationController;
+  navigation: NavigationController;
   dialogs: Map<HTMLDialogElement, { destroy(): void }>;
-  LIVE: import('../lib/live').LiveState;
-  refresh: (dirty?: ReadonlySet<string> | null) => void;
-  api: (path: string, signal?: AbortSignal | undefined, unchanged?: boolean) => Promise<unknown>;
-  countOf: (s: import('../domain/types').Session, key: 'calls' | 'errors') => number | null;
-  HOLDS: Map<string, import('../domain/types').Turn>;
-  STARTS: Map<string, import('../domain/types').Turn>;
-  kindText: (s: import('../domain/types').Session) => string;
   dur: (a: number, b: number | null | undefined) => string;
-  costText: (cost: import('../domain/types').Cost) => string;
-  costForSession: (sid: string, includeRuns?: boolean) => Required<import('../domain/types').Cost>;
-  harnessSnapshot: (id: string) => import('../lib/screens').HarnessMark | undefined;
-  verbNow: (name: string) => string;
-  nameOf: (id: string) => string;
   clock: (t: number) => string;
-  asMoney: (usd: number) => string;
-  COST_TIP: string;
-  costMissing: (cost: import('../domain/types').Cost) => string[];
-  callsText: (calls: number | null | undefined) => string;
+
+  recentNavigation: Pick<ReturnType<typeof createRecentNavigation>, 'COST_TIP'>;
+
+  transcriptView: Pick<ReturnType<typeof createTranscriptView>, 'verbNow'>;
+
+  screenViews: Pick<ReturnType<typeof createScreenViews>, 'harnessSnapshot'>;
+
+  domain: Pick<
+    ReturnType<typeof createDomain>,
+    'countOf' | 'costText' | 'costForSession' | 'nameOf' | 'asMoney' | 'costMissing' | 'callsText'
+  >;
+
+  applicationRefreshOwner: Pick<ReturnType<typeof createApplicationRefresh>, 'refresh'>;
+
+  liveModelOwner: Pick<ReturnType<typeof createLiveModel>, 'LIVE'>;
+
+  transportOwner: Pick<ReturnType<typeof createTransport>, 'enc' | 'api'>;
+
+  modelStore: Pick<ViewerModelStore, 'sessions' | 'holds' | 'starts'>;
+
+  sessionChrome: Pick<ReturnType<typeof createSessionChrome>, 'panel' | 'kindText'>;
+
+  toolLoaderOwner: Pick<ReturnType<typeof createToolLoader>, 'fullOf'>;
 }
 /** Owns toolViews behavior through explicit application ports. */
 export function createToolViews(host: ToolViewsHost) {
@@ -54,7 +59,7 @@ export function createToolViews(host: ToolViewsHost) {
     if (e.more?.length && e.slot != null && !e.full) {
       const open = (f: Partial<Omit<ToolData, 'bg'>>) =>
         openStepViewer({ ...e, ...f, full: true }, v, ic, inLabel);
-      host.fullOf(e).then(open, () => open({ fullFailed: true }));
+      host.toolLoaderOwner.fullOf(e).then(open, () => open({ fullFailed: true }));
       return;
     }
     const status = e.live
@@ -66,13 +71,13 @@ export function createToolViews(host: ToolViewsHost) {
           : e.ok === null
             ? 'Exit unknown · ' + e.secs
             : 'Failed · ' + e.secs;
-    const { body, show: open } = host.panel(v + ' ' + e.arg, {
+    const { body, show: open } = host.sessionChrome.panel(v + ' ' + e.arg, {
       cls: 'full',
       sub: e.name + ' · ' + status,
       label: v + ' ' + e.arg,
     });
     body.classList.add('viewer-b');
-    renderFullTool(body, e, inLabel, host.SESS[e.sid ?? '']?.state === 'wait');
+    renderFullTool(body, e, inLabel, host.modelStore.sessions[e.sid ?? '']?.state === 'wait');
     open();
   }
 
@@ -105,13 +110,13 @@ export function createToolViews(host: ToolViewsHost) {
         unavailable: !!a.na,
         url:
           '/api/attachment?sid=' +
-          host.enc(e.sid ?? '') +
+          host.transportOwner.enc(e.sid ?? '') +
           '&o=' +
-          host.enc(a.o) +
+          host.transportOwner.enc(a.o) +
           '&b=' +
-          host.enc(a.b) +
+          host.transportOwner.enc(a.b) +
           '&v=' +
-          host.enc(a.v ?? ''),
+          host.transportOwner.enc(a.v ?? ''),
         label:
           'Attached image ' +
           (i + 1) +
@@ -146,7 +151,7 @@ export function createToolViews(host: ToolViewsHost) {
             history.back();
           }
         }
-        if (host.LIVE.pending) host.refresh();
+        if (host.liveModelOwner.LIVE.pending) host.applicationRefreshOwner.refresh();
         (from.isConnected
           ? from
           : [...document.querySelectorAll<HTMLElement>('button.attach')].find(
@@ -162,8 +167,10 @@ export function createToolViews(host: ToolViewsHost) {
   function openScript(e: ToolEntry) {
     const done = (fields: Partial<Omit<ToolData, 'bg'>>) =>
       openStepViewer({ ...e, ...fields, full: true }, 'View script', 'run', 'Script');
-    host
-      .api('/api/entry?sid=' + host.enc(e.sid ?? '') + '&slot=' + e.slot + '&as=script')
+    host.transportOwner
+      .api(
+        '/api/entry?sid=' + host.transportOwner.enc(e.sid ?? '') + '&slot=' + e.slot + '&as=script',
+      )
       .then((value) => {
         const result = object(value);
         done({
@@ -176,33 +183,33 @@ export function createToolViews(host: ToolViewsHost) {
 
   // A brief or message clamped to three lines; "Show more" opens it in place, and only appears when it is cut.
   function childSnapshot(h: Handoff, c: Session): ChildView {
-    const calls = host.countOf(c, 'calls'),
-      holder = host.HOLDS.get(h.id);
+    const calls = host.domain.countOf(c, 'calls'),
+      holder = host.modelStore.holds.get(h.id);
     return {
       kind: 'child',
       handoff: h.id,
       id: c.id,
-      turn: host.STARTS.get(h.id)?.id,
+      turn: host.modelStore.starts.get(h.id)?.id,
       name: c.name,
       state: c.state,
       stateLabel: STATE[c.state] ?? c.state,
       meta: [
-        host.kindText(c),
+        host.sessionChrome.kindText(c),
         shortModel(c.model),
         host.dur(c.start, c.state === 'work' ? null : c.last),
         (calls ?? '—') + (calls === 1 ? ' step' : ' steps'),
-        host.costText(host.costForSession(c.id, true)),
+        host.domain.costText(host.domain.costForSession(c.id, true)),
       ].join(' · '),
-      mark: host.harnessSnapshot(c.harness),
+      mark: host.screenViews.harnessSnapshot(c.harness),
       brief: preview(h.brief ?? ''),
       result: h.result || undefined,
       failed: h.status === 'err',
       activity:
         !h.result && c.state === 'work' && c.activity
-          ? [host.verbNow(c.activity[0]), c.activity[1]]
+          ? [host.transcriptView.verbNow(c.activity[0]), c.activity[1]]
           : undefined,
       trace: holder?.id,
-      traceLabel: holder ? 'Open run view for ' + host.nameOf(h.from) : undefined,
+      traceLabel: holder ? 'Open run view for ' + host.domain.nameOf(h.from) : undefined,
       chevron: I.chev,
     };
   }
@@ -211,7 +218,7 @@ export function createToolViews(host: ToolViewsHost) {
     const parts = Object.entries(s.tool_calls ?? {})
         .sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : 1))
         .map(([name, n]) => name + ' ' + n),
-      failed = host.countOf(s, 'errors');
+      failed = host.domain.countOf(s, 'errors');
     if (failed) parts.push(failed + ' failed');
     return parts.join(' · ');
   };
@@ -233,7 +240,9 @@ export function createToolViews(host: ToolViewsHost) {
       if (Number(k.web_search) >= 0.005) kinds.push(['Web search', k.web_search]);
       return {
         id,
-        text: kinds.map(([label, usd]) => label + ' ' + host.asMoney(Number(usd) || 0)).join(' · '),
+        text: kinds
+          .map(([label, usd]) => label + ' ' + host.domain.asMoney(Number(usd) || 0))
+          .join(' · '),
       };
     });
     return (
@@ -241,7 +250,7 @@ export function createToolViews(host: ToolViewsHost) {
         ? groups.map((g) => g.id + ': ' + g.text).join('; ')
         : groups.map((g) => g.text).join('')) +
       (groups.length ? '. ' : '') +
-      host.COST_TIP
+      host.recentNavigation.COST_TIP
     );
   }
   // What a footer shows: its text, its tips, its state, and whether it has the button to the parent.
@@ -257,13 +266,13 @@ export function createToolViews(host: ToolViewsHost) {
           : 'done'
         : 'work'
       : s.state;
-    const cost = host.costForSession(s.id),
-      priced = cost.usd != null && !host.costMissing(cost).length && cost.usd >= 0.005,
+    const cost = host.domain.costForSession(s.id),
+      priced = cost.usd != null && !host.domain.costMissing(cost).length && cost.usd >= 0.005,
       items: FooterView['items'][number][] = [];
     if (!h || !finished)
       items.push({
         kind: 'calls',
-        text: host.callsText(host.countOf(s, 'calls')),
+        text: host.domain.callsText(host.domain.countOf(s, 'calls')),
         tip: callsTip(s),
       });
     items.push({
@@ -271,16 +280,23 @@ export function createToolViews(host: ToolViewsHost) {
       text: host.dur(s.start, state === 'work' ? null : s.last),
       tip: timeTip(s, h, finished),
     });
-    if (priced) items.push({ kind: 'cost', text: host.asMoney(cost.usd ?? 0), tip: costTip(cost) });
+    if (priced)
+      items.push({ kind: 'cost', text: host.domain.asMoney(cost.usd ?? 0), tip: costTip(cost) });
     return {
       state,
       stateLabel: STATE[state] ?? state,
       text:
-        h && finished ? 'Returned to ' + host.nameOf(h.from) + ' · ' + STATE[state] : STATE[state],
+        h && finished
+          ? 'Returned to ' + host.domain.nameOf(h.from) + ' · ' + STATE[state]
+          : STATE[state],
       items,
       parent:
         h && finished
-          ? { id: h.from, turn: host.HOLDS.get(h.id)?.id, name: host.nameOf(h.from) }
+          ? {
+              id: h.from,
+              turn: host.modelStore.holds.get(h.id)?.id,
+              name: host.domain.nameOf(h.from),
+            }
           : undefined,
     };
   }

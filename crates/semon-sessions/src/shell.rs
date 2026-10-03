@@ -340,19 +340,24 @@ mod tests {
     #[test]
     fn the_viewer_script_draws_the_exported_nav() {
         let js = include_str!("../../../ui/src/app/navigationView.ts");
-        let registry = include_str!("../../../ui/src/app/registry.ts");
+        let registry = include_str!("../../../ui/src/app/registry.ts").replace('\'', "\"");
         let render = js
             .split("function renderNav()")
             .nth(1)
             .expect("typed navigation owner has renderNav")
             .split("\n  }\n")
             .next()
-            .expect("renderNav's body");
+            .expect("renderNav's body")
+            .lines()
+            .map(str::trim)
+            .collect::<String>()
+            .replace('\'', "\"")
+            .replace(", ", ",");
         // The viewer's names for these icons in its `I` table.
         let icon_names = ["home", "sessions", "chart", "machine"];
         let mut last = 0;
         for (link, icon_name) in super::NAV.iter().zip(icon_names) {
-            let call = format!("item(\"{}\", \"{}\", I.{icon_name}", link.key, link.label);
+            let call = format!("item(\"{}\",\"{}\",I.{icon_name}", link.key, link.label);
             let at = render
                 .find(&call)
                 .unwrap_or_else(|| panic!("renderNav lacks `{call}`"));

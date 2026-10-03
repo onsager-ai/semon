@@ -1,3 +1,26 @@
+import { I } from './registry';
+import { STATE } from './registry';
+import { HARNESS } from './registry';
+import type { ViewerModelStore } from '../state/model';
+import type { TranscriptStore } from '../state/transcript';
+import type { EffectScope } from '../app/effects';
+import type { NavigationController } from '../navigation/routes';
+import type { Account } from '../lib/account';
+import type { createLayout } from './layout';
+import type { createDomain } from '../domain/calculations';
+import type { createDestination } from './destination';
+import type { createDocumentRenderer } from './documentRenderer';
+import type { createHistoryScroll } from './historyScroll';
+import type { createAnalytics } from './analytics';
+import type { createAccountControls } from './accountControls';
+import type { createViewport } from './viewport';
+import type { createPaging } from './paging';
+import type { createTransport } from './transport';
+import type { createLiveUpdates } from './liveUpdates';
+import type { createToolViews } from './toolViews';
+import type { createLiveModel } from './liveModel';
+import type { createApplicationRefresh } from './applicationRefresh';
+import type { createScreenViews } from './screenViews';
 import { render as releaseRoot } from 'preact';
 import { shortModel } from '../domain/format';
 import type { Entry, Session } from '../domain/types';
@@ -23,106 +46,90 @@ interface TopbarOptions {
   analytics?: boolean;
 }
 interface SessionChromeHost {
-  HARNESS: { [k: string]: string };
-  ACCOUNT: import('../lib/account').Account | null;
-  wideMode: boolean;
-  setWideMode: (on: boolean) => void;
+  account: Account | null;
   findOpen: boolean;
-  STATE: Record<string, string>;
   phone: MediaQueryList;
   analyticsRange: number;
   find: string;
   show: { messages: boolean; tools: boolean; thinking: boolean };
-  countOf: (s: import('../domain/types').Session, key: 'calls' | 'errors') => number | null;
-  I: Record<string, string>;
-  goSession: (id: string, turn?: string | undefined) => void;
-  render: () => void;
   $: <T extends HTMLElement = HTMLElement>(s: string, r?: ParentNode) => T;
-  SHOW_ALL: { messages: boolean; tools: boolean; thinking: boolean };
-  SESS: Record<string, import('../domain/types').Session>;
-  currentScroll: () => number;
-  restoreScroll: (top: number) => void;
-  refreshAnalytics: (asked?: boolean) => Promise<void>;
-  navigation: import('../navigation/routes').NavigationController;
-  shellChrome: import('../lib/shell').ShellChrome | null;
-  scope: import('../app/effects').EffectScope;
-  lineageOf: (sid: string) => import('../domain/types').Session[];
-  scroller: () => HTMLElement;
-  edge: () => number;
-  scrollProgrammatically: (fn: () => void, jump?: boolean) => void;
-  syncJump: () => void;
-  saveHistoryScroll: () => void;
-  TX: Record<string, import('../domain/types').Entry[]>;
-  TXM: Record<string, import('../domain/types').TranscriptMeta>;
-  TOK: Record<string, string>;
-  SIDEBAR_ONLY: boolean;
-  capture: () => import('../navigation/scroll').ScrollSnapshot;
-  restore: (st: import('../navigation/scroll').ScrollSnapshot, pin?: boolean) => void;
-  opener: (n: HTMLElement) => HTMLButtonElement | null;
-  resetPagerInput: () => void;
-  stopOpeningEndPin: () => void;
-  fetchTx: (
-    sid: string,
-    q?: string,
-    where?: import('../state/transcript').PageDirection | undefined,
-    signal?: AbortSignal | undefined,
-    onPage?: (() => void) | undefined,
-  ) => Promise<void>;
-  dropTx: (sid: string) => void;
-  spread: (sid: string) => void;
-  tail: (sid: string) => Promise<TailResult>;
-  TURNS: Record<string, import('../domain/types').Turn[]>;
-  hasTurn: (t: import('../domain/types').Turn) => boolean;
-  descendantsOf: (
-    sid: string,
-    children: ReadonlyMap<string, import('../domain/types').Session[]>,
-    out?: import('../domain/types').Session[],
-    seen?: Set<string>,
-  ) => import('../domain/types').Session[];
-  sessionChildren: () => Map<string, import('../domain/types').Session[]>;
-  costForSessions: (
-    sessions: Iterable<import('../domain/types').Session>,
-  ) => Required<import('../domain/types').Cost>;
-  costForSession: (sid: string, includeRuns?: boolean) => Required<import('../domain/types').Cost>;
-  MACHINE: Record<string, string>;
-  hostOf: (s: import('../domain/types').Session) => string;
-  costText: (cost: import('../domain/types').Cost) => string;
-  onMachine: (m: string) => import('../domain/types').Session[];
-  MACHINE_UP: Record<string, boolean>;
-  movedOff: (m: string) => import('../domain/types').Session[];
-  MACHINE_LAST: Record<string, number>;
+  allVisibility: { messages: boolean; tools: boolean; thinking: boolean };
+  navigation: NavigationController;
+  scope: EffectScope;
+  sidebarOnly: boolean;
   clock: (t: number) => string;
-  syncLayoutPrefs: () => void;
-  viewerEl: HTMLDialogElement | null;
   dialogs: Map<HTMLDialogElement, { destroy(): void }>;
   disposed: boolean;
-  skipPop: boolean;
   pendingSessionOpen: string | null;
-  LIVE: import('../lib/live').LiveState;
-  refresh: (dirty?: ReadonlySet<string> | null) => void;
-  TURN: Map<string, import('../domain/types').Turn>;
-  harnessSnapshot: (id: string) => import('../lib/screens').HarnessMark | undefined;
-  branchOf: (s: import('../domain/types').Session) => string;
   dur: (a: number, b: number | null | undefined) => string;
-  costSnapshot: (
-    s: import('../domain/types').Session,
-    kids: import('../domain/types').Session[],
-  ) => {
-    figure: string;
-    caption: string;
-    note: string;
-    details: readonly import('../lib/session-menu').MenuDetail[];
-    mismatch?: string | undefined;
-    runs: readonly import('../lib/session-menu').MenuRun[];
-    models: readonly import('../lib/session-menu').MenuTokenModel[];
-    includesRuns: boolean;
-  };
   afterPop: (() => void) | null;
-  goTrace: (turn: string) => void;
+
+  screenViews: Pick<ReturnType<typeof createScreenViews>, 'harnessSnapshot' | 'costSnapshot'>;
+
+  applicationRefreshOwner: Pick<ReturnType<typeof createApplicationRefresh>, 'refresh'>;
+
+  liveModelOwner: Pick<ReturnType<typeof createLiveModel>, 'LIVE'>;
+
+  toolViewsOwner: Pick<ReturnType<typeof createToolViews>, 'viewerEl' | 'skipPop'>;
+
+  liveUpdates: Pick<ReturnType<typeof createLiveUpdates>, 'tail'>;
+
+  transportOwner: Pick<ReturnType<typeof createTransport>, 'TOK' | 'fetchTx' | 'spread'>;
+
+  transcripts: Pick<TranscriptStore, 'entries' | 'meta'>;
+
+  pagingOwner: Pick<
+    ReturnType<typeof createPaging>,
+    'scrollProgrammatically' | 'resetPagerInput' | 'dropTx'
+  >;
+
+  viewport: Pick<
+    ReturnType<typeof createViewport>,
+    'scroller' | 'edge' | 'syncJump' | 'capture' | 'restore' | 'opener' | 'stopOpeningEndPin'
+  >;
+
+  accountControlsOwner: Pick<ReturnType<typeof createAccountControls>, 'shellChrome'>;
+
+  analytics: Pick<ReturnType<typeof createAnalytics>, 'refreshAnalytics'>;
+
+  historyScrollOwner: Pick<
+    ReturnType<typeof createHistoryScroll>,
+    'currentScroll' | 'restoreScroll' | 'saveHistoryScroll'
+  >;
+
+  modelStore: Pick<
+    ViewerModelStore,
+    'sessions' | 'turns' | 'machines' | 'machineUp' | 'machineLast' | 'turn'
+  >;
+
+  documentRendererOwner: Pick<ReturnType<typeof createDocumentRenderer>, 'render'>;
+
+  destination: Pick<ReturnType<typeof createDestination>, 'goSession' | 'goTrace'>;
+
+  domain: Pick<
+    ReturnType<typeof createDomain>,
+    | 'countOf'
+    | 'lineageOf'
+    | 'hasTurn'
+    | 'descendantsOf'
+    | 'sessionChildren'
+    | 'costForSessions'
+    | 'costForSession'
+    | 'hostOf'
+    | 'costText'
+    | 'onMachine'
+    | 'movedOff'
+    | 'branchOf'
+  >;
+
+  layoutOwner: Pick<
+    ReturnType<typeof createLayout>,
+    'wideMode' | 'setWideMode' | 'syncLayoutPrefs'
+  >;
 }
 /** Owns sessionChrome behavior through explicit application ports. */
 export function createSessionChrome(host: SessionChromeHost) {
-  const kindText = (s: Session) => s.kind ?? host.HARNESS[s.harness] ?? s.harness;
+  const kindText = (s: Session) => s.kind ?? HARNESS[s.harness] ?? s.harness;
   // The model the session is on (what the line's label abbreviates), so the label, its tip and the Details row name the same one; a session that used more than one is priced per model in the cost section.
   const modelIdOf = (s: Session) => s.model ?? Object.keys(s.tokens_by_model ?? {})[0];
   const viewerBar = createViewerBar();
@@ -132,12 +139,12 @@ export function createSessionChrome(host: SessionChromeHost) {
     opts: TopbarOptions = {},
   ) {
     const s = opts.session ?? opts.traceSession;
-    const account = host.ACCOUNT
+    const account = host.account
       ? {
-          account: host.ACCOUNT,
+          account: host.account,
           compact: false,
-          wide: host.wideMode,
-          onWideChange: () => host.setWideMode(!host.wideMode),
+          wide: host.layoutOwner.wideMode,
+          onWideChange: () => host.layoutOwner.setWideMode(!host.layoutOwner.wideMode),
         }
       : null;
     const mode = s && errOn(s.id) ? 'errors' : s && host.findOpen ? 'find' : 'normal';
@@ -147,13 +154,13 @@ export function createSessionChrome(host: SessionChromeHost) {
         name: title,
         session: s?.id,
         state: s?.state,
-        stateLabel: s ? host.STATE[s.state] : undefined,
-        stateTip: s ? 'Status: ' + host.STATE[s.state] + ' · ' + turnsLabel(s) : undefined,
+        stateLabel: s ? STATE[s.state] : undefined,
+        stateTip: s ? 'Status: ' + STATE[s.state] + ' · ' + turnsLabel(s) : undefined,
         showState: !!s && !opts.traceSession && !(host.phone.matches && opts.lineage?.length),
         ancestors: !host.phone.matches
           ? (opts.lineage?.map((a) => ({
               ...a,
-              harnessName: host.HARNESS[a.harness] ?? a.harness,
+              harnessName: HARNESS[a.harness] ?? a.harness,
             })) ?? [])
           : [],
         crumb: opts.lineage?.length ? undefined : crumb?.label,
@@ -165,39 +172,40 @@ export function createSessionChrome(host: SessionChromeHost) {
         count: matchText(matchCount()),
         filter:
           host.show.messages && host.show.tools ? 'all' : host.show.messages ? 'messages' : 'steps',
-        failed: s ? (host.countOf(s, 'errors') ?? 0) : 0,
+        failed: s ? (host.domain.countOf(s, 'errors') ?? 0) : 0,
         signals: s ? signalCount(s) : 0,
         errorMode: ERR.mode,
         errorText: ERR.notice ?? errText(),
         errorDisabled: ERR.listed && !ERR.slots.length,
         icons: {
-          search: host.I.search,
-          back: host.I.back,
-          x: host.I.x,
-          up: host.I.up,
-          more: host.I.more,
-          dn: host.I.dn,
+          search: I.search,
+          back: I.back,
+          x: I.x,
+          up: I.up,
+          more: I.more,
+          dn: I.dn,
         },
       },
       {
-        ancestor: host.goSession,
+        ancestor: (...args: Parameters<typeof host.destination.goSession>) =>
+          host.destination.goSession(...args),
         crumb() {
           crumb?.go();
         },
         find() {
           host.findOpen = true;
-          host.render();
+          host.documentRendererOwner.render();
           host.$('#find')?.focus();
         },
         closeFind() {
           host.findOpen = false;
           host.find = '';
-          host.show = { ...host.SHOW_ALL };
-          host.render();
+          host.show = { ...host.allVisibility };
+          host.documentRendererOwner.render();
         },
         query(value) {
           host.find = value.toLowerCase();
-          host.render();
+          host.documentRendererOwner.render();
         },
         filter(key) {
           if (key === 'failures' || key === 'signals') {
@@ -209,11 +217,16 @@ export function createSessionChrome(host: SessionChromeHost) {
               ? { messages: true, tools: false, thinking: false }
               : key === 'steps'
                 ? { messages: false, tools: true, thinking: false }
-                : { ...host.SHOW_ALL };
-          host.render();
+                : { ...host.allVisibility };
+          host.documentRendererOwner.render();
         },
         menu(trigger, runs) {
-          s && openSessionMenu(host.SESS[s.id] ?? s, trigger, runs ? '.runs' : undefined);
+          s &&
+            openSessionMenu(
+              host.modelStore.sessions[s.id] ?? s,
+              trigger,
+              runs ? '.runs' : undefined,
+            );
         },
         errors() {
           s && openErrors(s.id);
@@ -222,27 +235,27 @@ export function createSessionChrome(host: SessionChromeHost) {
         step: stepErrors,
         range(days) {
           if (host.analyticsRange === days) return;
-          const top = host.currentScroll();
+          const top = host.historyScrollOwner.currentScroll();
           host.analyticsRange = days;
-          host.render();
-          host.restoreScroll(top);
-          host.refreshAnalytics(true);
+          host.documentRendererOwner.render();
+          host.historyScrollOwner.restoreScroll(top);
+          host.analytics.refreshAnalytics(true);
         },
       },
     );
     const lead = {
       label: opts.traceSession ? 'Back to ' + s?.name : 'Open navigation',
-      icon: opts.traceSession ? host.I.chev : host.I.menu,
+      icon: opts.traceSession ? I.chev : I.menu,
       back: opts.traceSession
         ? () =>
             s &&
-            host.goSession(
+            host.destination.goSession(
               s.id,
               'turn' in host.navigation.route ? host.navigation.route.turn : undefined,
             )
         : undefined,
     };
-    host.shellChrome?.topbar(
+    host.accountControlsOwner.shellChrome?.topbar(
       mode === 'normal'
         ? { titleSlot: content.titleSlot, actions: [content.actions], session: !!s, lead, account }
         : { mode: [content.mode], session: true, account, accountTarget: content.accountTarget },
@@ -261,11 +274,12 @@ export function createSessionChrome(host: SessionChromeHost) {
   // its tool group opens so it shows. Closing puts back the pages, what was open and the scroll position from before. The
   // mode is its own controller, apart from find, so the two can become one mode later.
   const drawSessionBar = () => {
-    const s = host.SESS['id' in host.navigation.route ? host.navigation.route.id : ''];
+    const s =
+      host.modelStore.sessions['id' in host.navigation.route ? host.navigation.route.id : ''];
     if (host.navigation.route.v !== 'session' || !s) return;
     renderTopbar(s.name, null, {
       session: s,
-      lineage: host
+      lineage: host.domain
         .lineageOf('id' in host.navigation.route ? host.navigation.route.id : '')
         .slice(0, -1),
       line2: sessionLine(s),
@@ -282,46 +296,55 @@ export function createSessionChrome(host: SessionChromeHost) {
   };
   function centre(node: HTMLElement) {
     if (!node.isConnected) return;
-    const sc = host.scroller(),
+    const sc = host.viewport.scroller(),
       r = (node.querySelector(':scope > button') ?? node).getBoundingClientRect(),
       bottom = host.phone.matches
         ? window.innerHeight
         : host.$('#main').getBoundingClientRect().bottom;
-    const d = (r.top + r.bottom) / 2 - (host.edge() + bottom) / 2;
-    host.scrollProgrammatically(() => {
+    const d = (r.top + r.bottom) / 2 - (host.viewport.edge() + bottom) / 2;
+    host.pagingOwner.scrollProgrammatically(() => {
       if (Math.abs(d) >= 1) sc.scrollTop += d;
     });
     syncBarLine();
-    host.syncJump();
-    host.saveHistoryScroll();
+    host.viewport.syncJump();
+    host.historyScrollOwner.saveHistoryScroll();
   }
   const errorNavigation = createErrorNavigation({
     navigation: host.navigation,
-    TX: host.TX,
-    TXM: host.TXM,
-    TOK: host.TOK,
-    SESS: host.SESS,
-    show: host.show,
-    sidebarOnly: host.SIDEBAR_ONLY,
+    TX: host.transcripts.entries,
+    TXM: host.transcripts.meta,
+    get TOK() {
+      return host.transportOwner.TOK;
+    },
+    SESS: host.modelStore.sessions,
+    get show() {
+      return host.show;
+    },
+    sidebarOnly: host.sidebarOnly,
     page: () => host.$('#page'),
     drawSessionBar,
-    render: host.render,
+    render: (...args: Parameters<typeof host.documentRendererOwner.render>) =>
+      host.documentRendererOwner.render(...args),
     keepFocus,
     countOf: (session, field) =>
-      session ? (host.countOf(session, field) ?? undefined) : undefined,
-    capture: () => host.capture(),
-    restore: (saved) => host.restore(saved),
-    opener: (node) => host.opener(node),
-    resetPagerInput: host.resetPagerInput,
-    stopOpeningEndPin: () => host.stopOpeningEndPin(),
+      session ? (host.domain.countOf(session, field) ?? undefined) : undefined,
+    capture: () => host.viewport.capture(),
+    restore: (saved) => host.viewport.restore(saved),
+    opener: (node) => host.viewport.opener(node),
+    resetPagerInput: (...args: Parameters<typeof host.pagingOwner.resetPagerInput>) =>
+      host.pagingOwner.resetPagerInput(...args),
+    stopOpeningEndPin: () => host.viewport.stopOpeningEndPin(),
     clearFind() {
       host.find = '';
     },
     centre,
-    fetchTx: host.fetchTx,
-    dropTx: host.dropTx,
-    spread: host.spread,
-    tail: (sid) => host.tail(sid),
+    fetchTx: (...args: Parameters<typeof host.transportOwner.fetchTx>) =>
+      host.transportOwner.fetchTx(...args),
+    dropTx: (...args: Parameters<typeof host.pagingOwner.dropTx>) =>
+      host.pagingOwner.dropTx(...args),
+    spread: (...args: Parameters<typeof host.transportOwner.spread>) =>
+      host.transportOwner.spread(...args),
+    tail: (sid) => host.liveUpdates.tail(sid),
   });
   const {
     state: ERR,
@@ -337,7 +360,9 @@ export function createSessionChrome(host: SessionChromeHost) {
   const signalCount = (s: Session) => Object.values(s?.signals ?? {}).reduce((n, x) => n + x, 0);
   // A label is information; one that leads somewhere (`act`) is a button that looks the same, with its hit area padded to the tap size.
   const turnsLabel = (s: Session) => {
-    const n = (host.TURNS[s.id] ?? []).filter(host.hasTurn).length;
+    const n = (host.modelStore.turns[s.id] ?? []).filter(
+      (...args: Parameters<typeof host.domain.hasTurn>) => host.domain.hasTurn(...args),
+    ).length;
     return n + (n === 1 ? ' turn' : ' turns');
   };
   // On a phone the line of labels leaves the bar and the state is the small dot before the title. The dot names the state for a screen reader, and
@@ -345,9 +370,11 @@ export function createSessionChrome(host: SessionChromeHost) {
   // "Started 21:57 on <machine>" stays on one line: the machine name ellipsises (its tip, only while cut off, has the whole name).
   // A session's line: its state, then kind, model, failed steps, machine, branch and API-equivalent cost, each a plain label.
   const sessionLine = (s: Session): BarLabel[] => {
-    const failed = host.countOf(s, 'errors') ?? 0,
-      runs = host.descendantsOf(s.id, host.sessionChildren()),
-      cost = runs.length ? host.costForSessions([s, ...runs]) : host.costForSession(s.id),
+    const failed = host.domain.countOf(s, 'errors') ?? 0,
+      runs = host.domain.descendantsOf(s.id, host.domain.sessionChildren()),
+      cost = runs.length
+        ? host.domain.costForSessions([s, ...runs])
+        : host.domain.costForSession(s.id),
       labels: BarLabel[] = [];
     const add = (
       key: string,
@@ -356,12 +383,12 @@ export function createSessionChrome(host: SessionChromeHost) {
       drop: number,
       extra: Partial<BarLabel> = {},
     ) => labels.push({ key, text, tip: tip ?? undefined, drop, ...extra });
-    add('state', host.STATE[s.state], undefined, 0, {
+    add('state', STATE[s.state], undefined, 0, {
       className: 'state ' + s.state,
       state: s.state,
-      stateLabel: host.STATE[s.state],
+      stateLabel: STATE[s.state],
     });
-    add('kind', kindText(s), s.kind ? s.kind + ' · ' + host.HARNESS[s.harness] : undefined, 2);
+    add('kind', kindText(s), s.kind ? s.kind + ' · ' + HARNESS[s.harness] : undefined, 2);
     add(
       'model',
       shortModel(s.model),
@@ -389,14 +416,14 @@ export function createSessionChrome(host: SessionChromeHost) {
       );
     add(
       'machine',
-      host.MACHINE[s.machine],
-      'Machine: ' + host.MACHINE[s.machine] + ' · ' + host.hostOf(s),
+      host.modelStore.machines[s.machine],
+      'Machine: ' + host.modelStore.machines[s.machine] + ' · ' + host.domain.hostOf(s),
       5,
     );
     if (s.branch) add('branch', s.branch, 'Branch: ' + s.branch, 6);
     add(
       'cost',
-      host.costText(cost),
+      host.domain.costText(cost),
       'API-equivalent cost' +
         (runs.length ? ', with ' + runs.length + (runs.length === 1 ? ' run' : ' runs') : '') +
         '. Details in the session menu.',
@@ -405,9 +432,9 @@ export function createSessionChrome(host: SessionChromeHost) {
     return labels;
   };
   const machineLine = (m: string): BarLabel[] => {
-    const here = host.onMachine(m),
+    const here = host.domain.onMachine(m),
       w = here.filter((s) => s.state === 'work').length,
-      up = host.MACHINE_UP[m];
+      up = host.modelStore.machineUp[m];
     const sessions = here.length + (here.length === 1 ? ' session' : ' sessions');
     return [
       {
@@ -416,17 +443,17 @@ export function createSessionChrome(host: SessionChromeHost) {
         drop: 0,
         className: 'state ' + (up ? 'done' : 'err'),
         state: up ? (w ? 'work' : 'idle') : 'err',
-        stateLabel: host.STATE[up ? (w ? 'work' : 'idle') : 'err'],
+        stateLabel: STATE[up ? (w ? 'work' : 'idle') : 'err'],
       },
       {
         key: 'activity',
         text: up
           ? w + ' working · ' + sessions
-          : host.movedOff(m).length
-            ? host.movedOff(m).length + ' moved off'
+          : host.domain.movedOff(m).length
+            ? host.domain.movedOff(m).length + ' moved off'
             : [
-                host.MACHINE_LAST[m] != null
-                  ? 'Last seen ' + host.clock(host.MACHINE_LAST[m])
+                host.modelStore.machineLast[m] != null
+                  ? 'Last seen ' + host.clock(host.modelStore.machineLast[m])
                   : null,
                 sessions,
               ]
@@ -458,19 +485,19 @@ export function createSessionChrome(host: SessionChromeHost) {
     const y = host.phone.matches ? window.scrollY : host.$('#main').scrollTop;
     host.$('#topbar').classList.toggle('scrolled', y > 4);
   }
-  if (!host.SIDEBAR_ONLY) {
+  if (!host.sidebarOnly) {
     host.scope.listen(window, 'scroll', syncBarLine, { passive: true });
     host.scope.listen(host.$('#main'), 'scroll', syncBarLine, { passive: true });
   }
-  if (!host.SIDEBAR_ONLY)
+  if (!host.sidebarOnly)
     host.scope.listen(
       window,
       'resize',
       () => {
         const l2 = host.$('#topbar .meta-line');
         if (l2 && host.navigation.route.v === 'session') measureViewerBar(host.$('#topbar'));
-        host.syncLayoutPrefs();
-        host.syncJump();
+        host.layoutOwner.syncLayoutPrefs();
+        host.viewport.syncJump();
       },
       { passive: true },
     );
@@ -492,11 +519,15 @@ export function createSessionChrome(host: SessionChromeHost) {
       { title, className: opts.cls, label: opts.label, sub: opts.sub },
       {
         opened() {
-          host.viewerEl = chrome.dialog;
+          host.toolViewsOwner.viewerEl = chrome.dialog;
           document.documentElement.classList.add('panel-open');
           try {
             history.pushState(
-              { ...host.navigation.route, sheet: 1, scrollTop: host.currentScroll() },
+              {
+                ...host.navigation.route,
+                sheet: 1,
+                scrollTop: host.historyScrollOwner.currentScroll(),
+              },
               '',
             );
           } catch {}
@@ -508,18 +539,18 @@ export function createSessionChrome(host: SessionChromeHost) {
           const d = chrome.dialog;
           document.documentElement.classList.remove('panel-open');
           opts.onClose?.();
-          if (host.viewerEl === d) {
-            host.viewerEl = null;
+          if (host.toolViewsOwner.viewerEl === d) {
+            host.toolViewsOwner.viewerEl = null;
             if (history.state?.sheet) {
-              host.skipPop = true;
+              host.toolViewsOwner.skipPop = true;
               history.back();
             } else if (host.pendingSessionOpen) {
               const id = host.pendingSessionOpen;
               host.pendingSessionOpen = null;
-              host.goSession(id);
+              host.destination.goSession(id);
             }
           }
-          if (host.LIVE.pending) host.refresh();
+          if (host.liveModelOwner.LIVE.pending) host.applicationRefreshOwner.refresh();
         },
       },
     );
@@ -537,7 +568,7 @@ export function createSessionChrome(host: SessionChromeHost) {
     anchor: HTMLElement | null = null,
     scrollTo: string | undefined = undefined,
   ) {
-    const kids = host.descendantsOf(s.id, host.sessionChildren());
+    const kids = host.domain.descendantsOf(s.id, host.domain.sessionChildren());
     const {
       d,
       body,
@@ -545,7 +576,7 @@ export function createSessionChrome(host: SessionChromeHost) {
     } = panel(s.name, {
       cls: 'anchored session-menu',
       label: 'Session menu for ' + s.name,
-      sub: [host.STATE[s.state], kindText(s), shortModel(s.model)].join(' · '),
+      sub: [STATE[s.state], kindText(s), shortModel(s.model)].join(' · '),
       onClose: () => {
         anchor?.setAttribute('aria-expanded', 'false');
         anchor?.focus({ focusVisible: false });
@@ -553,7 +584,7 @@ export function createSessionChrome(host: SessionChromeHost) {
     });
     const traceTurn =
       host.navigation.route.v === 'trace'
-        ? host.TURN.get(
+        ? host.modelStore.turn.get(
             ('turn' in host.navigation.route ? host.navigation.route.turn : undefined) ?? '',
           )
         : (() => {
@@ -562,7 +593,10 @@ export function createSessionChrome(host: SessionChromeHost) {
               ...document.querySelectorAll<HTMLElement>('#page .turn[data-turn]'),
             ].filter((n) => !n.closest('.cw-body'));
             const visible = nodes.find((n) => n.getBoundingClientRect().bottom > top);
-            return host.TURN.get(visible?.dataset.turn ?? '') ?? (host.TURNS[s.id] ?? []).at(-1);
+            return (
+              host.modelStore.turn.get(visible?.dataset.turn ?? '') ??
+              (host.modelStore.turns[s.id] ?? []).at(-1)
+            );
           })();
     const actions: MenuAction[] = [],
       addAction = (
@@ -574,17 +608,17 @@ export function createSessionChrome(host: SessionChromeHost) {
         checked?: boolean,
         dot?: string,
       ) => actions.push({ key, text, icon, className, note, checked, dot });
-    if (traceTurn?.out.length) addAction('trace', 'Trace this turn', host.I.trace, 'menu-trace');
+    if (traceTurn?.out.length) addAction('trace', 'Trace this turn', I.trace, 'menu-trace');
     const command =
       s.harness === 'codex' ? 'codex resume ' + s.id : 'claude --resume ' + (s.sessionId ?? s.id);
-    addAction('copy', 'Copy resume command', host.I.copy);
-    if (s.harness === 'claude') addAction('external', 'Open in claude.ai', host.I.ext);
+    addAction('copy', 'Copy resume command', I.copy);
+    if (s.harness === 'claude') addAction('external', 'Open in claude.ai', I.ext);
     if (!host.phone.matches)
-      addAction('wide', 'Wide transcript', host.I.wide, undefined, undefined, host.wideMode);
+      addAction('wide', 'Wide transcript', I.wide, undefined, undefined, host.layoutOwner.wideMode);
     const signals = signalCount(s);
     if (signals)
       addAction('signals', signals + ' signals', undefined, 'menu-signals', 'Step through');
-    const errorCount = host.countOf(s, 'errors') ?? 0;
+    const errorCount = host.domain.countOf(s, 'errors') ?? 0;
     if (host.phone.matches) {
       if (errorCount)
         addAction(
@@ -596,24 +630,31 @@ export function createSessionChrome(host: SessionChromeHost) {
           undefined,
           'err',
         );
-      if (kids.length) addAction('runs', 'Runs · ' + kids.length, host.I.stack, 'menu-runs');
+      if (kids.length) addAction('runs', 'Runs · ' + kids.length, I.stack, 'menu-runs');
     }
-    const machine = host.MACHINE[s.machine] ?? s.machine ?? 'Unknown machine',
-      calls = host.countOf(s, 'calls');
+    const machine = host.modelStore.machines[s.machine] ?? s.machine ?? 'Unknown machine',
+      calls = host.domain.countOf(s, 'calls');
     const detailRows: [string, string | number | undefined, boolean?, HarnessMark?][] = [
-      ['Status', host.STATE[s.state] + ' · ' + turnsLabel(s)],
+      ['Status', STATE[s.state] + ' · ' + turnsLabel(s)],
       ...(s.kind ? [['Kind', s.kind] as [string, string]] : []),
-      ['Harness', host.HARNESS[s.harness] ?? s.harness, false, host.harnessSnapshot(s.harness)],
+      [
+        'Harness',
+        HARNESS[s.harness] ?? s.harness,
+        false,
+        host.screenViews.harnessSnapshot(s.harness),
+      ],
       ['Model', modelIdOf(s), true],
       ...(s.effort ? [['Effort', s.effort] as [string, string]] : []),
       [
         'Machine',
         machine +
-          (host.hostOf(s) !== machine ? ' · ' + host.hostOf(s) : '') +
-          (s.movedFrom ? ' (moved from ' + (host.MACHINE[s.movedFrom] ?? s.movedFrom) + ')' : ''),
+          (host.domain.hostOf(s) !== machine ? ' · ' + host.domain.hostOf(s) : '') +
+          (s.movedFrom
+            ? ' (moved from ' + (host.modelStore.machines[s.movedFrom] ?? s.movedFrom) + ')'
+            : ''),
       ],
       ['Directory', s.cwd ?? s.dir ?? s.directory, true],
-      [s.worktree ? 'Worktree' : 'Branch', host.branchOf(s), true],
+      [s.worktree ? 'Worktree' : 'Branch', host.domain.branchOf(s), true],
       ['Tool calls', calls == null ? '—' : String(calls)],
       ...(errorCount ? [['Errors', String(errorCount)] as [string, string]] : []),
       ['Started', host.clock(s.start)],
@@ -634,32 +675,32 @@ export function createSessionChrome(host: SessionChromeHost) {
         actions,
         command,
         path: host.phone.matches
-          ? host.lineageOf(s.id).map((a) => ({
+          ? host.domain.lineageOf(s.id).map((a) => ({
               id: a.id,
               name: a.name,
               harness: a.harness,
-              harnessName: host.HARNESS[a.harness] ?? a.harness,
+              harnessName: HARNESS[a.harness] ?? a.harness,
             }))
           : [],
-        status: host.STATE[s.state] + ' · ' + turnsLabel(s),
+        status: STATE[s.state] + ' · ' + turnsLabel(s),
         state: s.state,
-        stateLabel: host.STATE[s.state],
+        stateLabel: STATE[s.state],
         details,
-        cost: host.costSnapshot(s, kids),
+        cost: host.screenViews.costSnapshot(s, kids),
         notice: TRADEMARK_NOTICE,
-        icons: { chevron: host.I.chev, copy: host.I.copy },
+        icons: { chevron: I.chev, copy: I.copy },
       },
       {
-        wide: () => host.wideMode,
+        wide: () => host.layoutOwner.wideMode,
         session(id) {
           host.pendingSessionOpen = id;
           d.close();
         },
         action(key) {
           if (key === 'trace' && traceTurn) {
-            host.afterPop = () => host.goTrace(traceTurn.id);
+            host.afterPop = () => host.destination.goTrace(traceTurn.id);
             d.close();
-          } else if (key === 'wide') host.setWideMode(!host.wideMode);
+          } else if (key === 'wide') host.layoutOwner.setWideMode(!host.layoutOwner.wideMode);
           else if (key === 'signals' || key === 'errors') {
             d.close();
             s && openErrors(s.id, key === 'signals' ? 'signals' : 'errors');

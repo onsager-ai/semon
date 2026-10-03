@@ -1,3 +1,4 @@
+import { commitApplicationView } from './application-view';
 import { render } from 'preact';
 
 export interface MachineRow {
@@ -45,12 +46,14 @@ export function releaseScreen(root: HTMLElement) {
 }
 export const screenText = (text: string) =>
   text.replace(/ · /g, '\u2009 · \u2009').replace(/^· /, '·\u2009 ');
-export function renderMachinesScreen(
-  root: HTMLElement,
-  snapshot: MachinesSnapshot,
-  host: MachinesHost,
-) {
-  render(
+export function MachinesView({
+  snapshot,
+  host,
+}: {
+  snapshot: MachinesSnapshot;
+  host: MachinesHost;
+}) {
+  return (
     <>
       <div class="ph">
         <h1>Machines</h1>
@@ -97,9 +100,15 @@ export function renderMachinesScreen(
           </button>
         )}
       </div>
-    </>,
-    root,
+    </>
   );
+}
+export function renderMachinesScreen(
+  root: HTMLElement,
+  snapshot: MachinesSnapshot,
+  host: MachinesHost,
+) {
+  commitApplicationView(root, <MachinesView snapshot={snapshot} host={host} />);
   owned.add(root);
   kinds.set(root, 'machines');
   host.committed();
@@ -323,8 +332,8 @@ function Inbox({ row, host }: { row: InboxRow; host: ActivityHost }) {
     </div>
   );
 }
-export function renderHomeScreen(root: HTMLElement, snapshot: HomeSnapshot, host: HomeHost) {
-  render(
+export function HomeView({ snapshot, host }: { snapshot: HomeSnapshot; host: HomeHost }) {
+  return (
     <>
       <div class="ph">
         <h1>Home</h1>
@@ -376,19 +385,17 @@ export function renderHomeScreen(root: HTMLElement, snapshot: HomeSnapshot, host
           </div>
         </>
       )}
-    </>,
-    root,
+    </>
   );
+}
+export function renderHomeScreen(root: HTMLElement, snapshot: HomeSnapshot, host: HomeHost) {
+  commitApplicationView(root, <HomeView snapshot={snapshot} host={host} />);
   owned.add(root);
   kinds.set(root, 'home');
   host.committed();
 }
-export function renderMachineScreen(
-  root: HTMLElement,
-  snapshot: MachineSnapshot,
-  host: ActivityHost,
-) {
-  render(
+export function MachineView({ snapshot, host }: { snapshot: MachineSnapshot; host: ActivityHost }) {
+  return (
     <>
       <div class="ph sr">
         <h1>{screenText(snapshot.name)}</h1>
@@ -426,9 +433,15 @@ export function renderMachineScreen(
       {!snapshot.totalSessions && !snapshot.off.length && (
         <p class="empty">No sessions have run here.</p>
       )}
-    </>,
-    root,
+    </>
   );
+}
+export function renderMachineScreen(
+  root: HTMLElement,
+  snapshot: MachineSnapshot,
+  host: ActivityHost,
+) {
+  commitApplicationView(root, <MachineView snapshot={snapshot} host={host} />);
   owned.add(root);
   kinds.set(root, 'machine');
   host.committed();
@@ -602,7 +615,8 @@ export function renderSessionsScreen(
   const fieldValue =
     current.input?.value.trim() === snapshot.query ? current.input.value : snapshot.query;
   const facet = host.facets();
-  render(
+  commitApplicationView(
+    root,
     <>
       <div class="ph">
         <h1>Sessions</h1>
@@ -697,7 +711,6 @@ export function renderSessionsScreen(
         )}
       </div>
     </>,
-    root,
   );
   owned.add(root);
   kinds.set(root, 'sessions');
