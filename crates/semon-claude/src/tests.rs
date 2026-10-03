@@ -33,6 +33,10 @@ fn compatibility_blocks_cold_restart_and_retained_raw_parity() {
         &options(&cursor),
     )
     .unwrap();
+    assert!(
+        !cold.log(&LogFilter::default()).unwrap().is_empty(),
+        "the fixture must project occurrences"
+    );
     fs::remove_file(&cursor).unwrap();
     let mut end = 0;
     for line in source.split_inclusive(|byte| *byte == b'\n') {
