@@ -1,11 +1,18 @@
+import type { TranscriptStore } from '../state/transcript';
+import type { NavigationController } from '../navigation/routes';
+import type { createTransport } from './transport';
+import type { createLiveUpdates } from './liveUpdates';
+import type { createApplicationRefresh } from './applicationRefresh';
 import type { ApplicationRoute } from '../navigation/routes';
 interface TranscriptRevalidationHost {
-  TXM: Record<string, import('../domain/types').TranscriptMeta>;
-  transportOwner: ReturnType<typeof import('./transport').createTransport>;
-  reload: (sid: string) => Promise<{ cut: null; reload: boolean }>;
-  tail: ReturnType<typeof import('./liveUpdates').createLiveUpdates>['tail'];
-  navigation: import('../navigation/routes').NavigationController;
-  refresh: (dirty?: ReadonlySet<string> | null) => void;
+  transportOwner: ReturnType<typeof createTransport>;
+  navigation: NavigationController;
+
+  applicationRefreshOwner: Pick<ReturnType<typeof createApplicationRefresh>, 'refresh'>;
+
+  liveUpdates: Pick<ReturnType<typeof createLiveUpdates>, 'reload' | 'tail'>;
+
+  transcripts: Pick<TranscriptStore, 'meta'>;
 }
 /** Owns transcriptRevalidation behavior through explicit application ports. */
 export function createTranscriptRevalidation(host: TranscriptRevalidationHost) {
@@ -19,7 +26,7 @@ export function createTranscriptRevalidation(host: TranscriptRevalidationHost) {
   // for when the mark is the same. The page is drawn again, keeping the reader's place, once something arrived.
   function revalidate(r: Extract<ApplicationRoute, { v: 'session' }>) {
     const sid = r.id,
-      m = host.TXM[sid],
+      m = host.transcripts.meta[sid],
       moved =
         m &&
         m.to >= m.total &&
@@ -28,14 +35,15 @@ export function createTranscriptRevalidation(host: TranscriptRevalidationHost) {
         m.tok !== host.transportOwner.TOK[sid];
     const job = moved
         ? shrank(m.tok, host.transportOwner.TOK[sid])
-          ? host.reload(sid)
-          : host.tail(sid)
+          ? host.liveUpdates.reload(sid)
+          : host.liveUpdates.tail(sid)
         : null,
       work = job;
     if (work)
       work.then(
         () => {
-          if (host.navigation.route === r && host.navigation.rendered === r) host.refresh(null);
+          if (host.navigation.route === r && host.navigation.rendered === r)
+            host.applicationRefreshOwner.refresh(null);
         },
         () => {},
       );

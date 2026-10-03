@@ -1,3 +1,4 @@
+import { commitApplicationView } from './application-view';
 import { Component, Fragment, render } from 'preact';
 import type { ComponentChildren } from 'preact';
 import { claimScreen, releaseScreen, Glyph, Harness, screenText } from './screens';
@@ -734,7 +735,8 @@ export function renderSessionScreen(
           : null,
       heldKind = held?.dataset.foot;
     const view = state.snapshot;
-    render(
+    commitApplicationView(
+      root,
       <>
         <div class="ph sr">
           <h1>{screenText(view.name)}</h1>
@@ -825,7 +827,6 @@ export function renderSessionScreen(
           </div>
         )}
       </>,
-      root,
     );
     if (heldKind && held && !held.isConnected)
       (

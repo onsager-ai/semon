@@ -24,7 +24,16 @@ export function createTraceCalculations(
     turns: Record<string, Turn[]>;
     starts: Map<string, Turn>;
   },
-  domain: ReturnType<typeof createDomain>,
+  domain: Pick<
+    ReturnType<typeof createDomain>,
+    | 'costForSessions'
+    | 'costForSession'
+    | 'costText'
+    | 'shortMoney'
+    | 'hcls'
+    | 'usageTotal'
+    | 'nameOf'
+  >,
   now: () => number,
   RUN_EXPANDED: Map<string, Set<string>>,
   HARNESS: Record<string, string>,

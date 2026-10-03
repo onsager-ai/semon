@@ -10,11 +10,15 @@ export function authored(path) {
   return /^(ui\/(src\/.*\.tsx?|tests\/.*\.mjs|[^/]+\.(mjs|json))|tests\/ui\/.*\.mjs)$/.test(path);
 }
 export async function checkFiles(staged = false, write = false) {
+  if (staged && write) throw new Error('Staged checks are read-only');
   const args = staged
     ? ['diff', '--cached', '--name-only', '--diff-filter=ACMR', '-z']
     : ['ls-files', '-z'];
   const paths = execFileSync('git', args, { cwd: root }).toString().split('\0').filter(authored);
-  const config = await prettier.resolveConfig(resolve(root, '.prettierrc.json'));
+  const config = staged
+    ? JSON.parse(execFileSync('git', ['show', ':.prettierrc.json'], { cwd: root }).toString())
+    : await prettier.resolveConfig(resolve(root, '.prettierrc.json'));
+
   let ok = true;
   for (const path of paths) {
     // Read the index, never the working tree, when checking a partially staged file.

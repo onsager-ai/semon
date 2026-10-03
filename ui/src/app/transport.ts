@@ -1,3 +1,11 @@
+import { parseModel } from '../lib/model';
+import type { ViewerModelStore } from '../state/model';
+import type { TranscriptStore } from '../state/transcript';
+import type { ViewerHost } from '../viewer-host';
+import type { Account } from '../lib/account';
+import type { EffectScope } from '../app/effects';
+import type { createDomain } from '../domain/calculations';
+import type { createAnalytics } from './analytics';
 import type { Entry } from '../domain/types';
 import { dictionary, object, text } from '../domain/validate';
 import { parseAccount, requestJson } from '../lib';
@@ -5,22 +13,21 @@ import type { ApplicationRoute } from '../navigation/routes';
 import type { PageDirection } from '../state/transcript';
 interface TransportHost {
   disposed: boolean;
-  scope: import('../app/effects').EffectScope;
-  NOW: number;
-  SESS: Record<string, import('../domain/types').Session>;
-  modelStore: import('../state/model').ViewerModelStore;
-  domain: import('../domain/calculations').DomainController;
-  transcripts: import('../state/transcript').TranscriptStore;
-  ADMIN: { href: string; label: string } | null;
-  ACCOUNT: import('../lib/account').Account | null;
-  viewerHost: import('../viewer-host').ViewerHost | null;
-  NAV_MACHINES: string | null;
-  nameOf: (id: string) => string;
+  scope: EffectScope;
+  now: number;
+  admin: { href: string; label: string } | null;
+  account: Account | null;
+  viewerHost: ViewerHost | null;
+  machinesPath: string | null;
   clock: (t: number) => string;
-  fetchAnalytics: (askedByUser?: boolean) => Promise<boolean>;
-  scheduleAnalytics: () => void;
-  TURN: Map<string, import('../domain/types').Turn>;
-  TX: Record<string, import('../domain/types').Entry[]>;
+
+  transcripts: Pick<TranscriptStore, 'entries' | 'marks' | 'spread' | 'fetch'>;
+
+  analytics: Pick<ReturnType<typeof createAnalytics>, 'fetchAnalytics' | 'scheduleAnalytics'>;
+
+  domain: Pick<ReturnType<typeof createDomain>, 'nameOf'>;
+
+  modelStore: Pick<ViewerModelStore, 'sessions' | 'turn' | 'adopt'>;
 }
 /** Owns transport behavior through explicit application ports. */
 export function createTransport(host: TransportHost) {
@@ -72,33 +79,41 @@ export function createTransport(host: TransportHost) {
       release();
     }
   }
-  // NOW follows the client clock from the model's `now`, so every "ago" keeps moving; a running tool's age follows NOW.
+  // now follows the client clock from the model's `now`, so every "ago" keeps moving; a running tool's age follows now.
   function tick() {
-    host.NOW = serverNow + (Date.now() - fetchedAt);
-    for (const s of Object.values(host.SESS))
+    host.now = serverNow + (Date.now() - fetchedAt);
+    for (const s of Object.values(host.modelStore.sessions))
       if (s.activity && s.activity[3] != null)
-        s.activity[2] = Math.floor((host.NOW - s.activity[3]) / 1000);
+        s.activity[2] = Math.floor((host.now - s.activity[3]) / 1000);
   }
   function adopt(value: unknown) {
-    const m = host.modelStore.adopt(value);
-    host.domain.invalidate();
-    serverNow = m.now;
-    fetchedAt = Date.now();
-    TOK = m.tx == null ? {} : dictionary(m.tx, text);
-    host.transcripts.marks = TOK;
+    if (host.disposed) throw new DOMException('Viewer destroyed', 'AbortError');
+    // Prepare every auxiliary field before the model owner changes its raw baseline.
+    const m = parseModel(value);
+    const marks = m.tx == null ? {} : dictionary(m.tx, text);
     const admin = m.admin == null ? null : object(m.admin);
-    host.ADMIN =
+    const nextAdmin =
       admin && typeof admin.href === 'string' && safePath(admin.href)
         ? { href: admin.href, label: text(admin.label) }
         : null;
-    // A server-provided menu wins; otherwise an embedding page may set `window.semonEmbed.account`, held to the same rules.
-    host.ACCOUNT = accountOf(m.account) ?? accountOf(host.viewerHost?.account) ?? embeddedAccount();
-    host.viewerHost?.modelAccount?.(host.ACCOUNT);
+    const account =
+      accountOf(m.account) ?? accountOf(host.viewerHost?.account) ?? embeddedAccount();
     const nav = m.nav == null ? null : object(m.nav);
-    host.NAV_MACHINES =
+    const machinesPath =
       host.viewerHost?.machinesPath ??
       (nav && typeof nav.machines === 'string' && safePath(nav.machines) ? nav.machines : null);
-    tick();
+    host.modelStore.adopt(m, () => {
+      serverNow = m.now;
+      fetchedAt = Date.now();
+      TOK = marks;
+      host.transcripts.marks = marks;
+      host.admin = nextAdmin;
+      host.account = account;
+      host.machinesPath = machinesPath;
+      tick();
+      for (const sid of Object.keys(host.transcripts.entries)) host.transcripts.spread(sid);
+    });
+    host.viewerHost?.modelAccount?.(account);
     return m;
   }
   // Each loaded entry goes to its turn: an entry that starts a turn (or a page) names it. Its key, its turn and place in
@@ -111,7 +126,7 @@ export function createTransport(host: TransportHost) {
           k: 'end',
           text:
             'Returned to ' +
-            host.nameOf(e.ret.to) +
+            host.domain.nameOf(e.ret.to) +
             (e.ret.failed ? ' · failed' : '') +
             (e.ret.at != null ? ' · ' + host.clock(e.ret.at) : ''),
           turn: e.turn,
@@ -129,13 +144,13 @@ export function createTransport(host: TransportHost) {
   // `signal` cancels what a navigation asked for when the reader goes elsewhere first.
   function load(r: ApplicationRoute, signal: AbortSignal | undefined = undefined) {
     if (r.v === 'analytics')
-      return host.fetchAnalytics().then(() => {
-        host.scheduleAnalytics();
+      return host.analytics.fetchAnalytics().then(() => {
+        host.analytics.scheduleAnalytics();
       }); // the range's answer, from the server
-    if (r.v !== 'session' || !host.SESS[r.id]) return null;
-    const t = r.turn ? host.TURN.get(r.turn) : null,
+    if (r.v !== 'session' || !host.modelStore.sessions[r.id]) return null;
+    const t = r.turn ? host.modelStore.turn.get(r.turn) : null,
       deep = t && t.sid === r.id && !t.entries.length;
-    if (host.TX[r.id] && !deep) return null;
+    if (host.transcripts.entries[r.id] && !deep) return null;
     return fetchTx(r.id, deep ? 'turn=' + enc(t.id) : '', undefined, signal);
   }
   // The last few transcripts opened, kept when the reader leaves them, so opening one again draws it at once. (A transcript

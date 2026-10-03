@@ -158,3 +158,11 @@ A fast pre-push workflow is format:check, typecheck and UI tests; use
 check:bundle. Browser/Rust gates stay in CI and are not run on each commit.
 Use `git config --local blame.ignoreRevsFile .git-blame-ignore-revs` to omit the
 initial formatting commit from blame.
+
+Viewer pages share the declarative `ApplicationView` commit boundary. `pageRoot`
+is the small fallback/native-content adapter; it never renders into host-owned
+native descendants. `routeControls` owns independently embedded facet lifetimes.
+`ViewUpdates` publishes accepted coherent model/transcript revisions and owns
+subscription disposal. Feature consumers use narrow capabilities of real service
+owners rather than composition forwarding methods. The ownership document
+records transaction order and the justified measured/native subroots.

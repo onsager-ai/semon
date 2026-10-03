@@ -1,18 +1,23 @@
+import type { createToolViews } from './toolViews';
+import type { EffectScope } from '../app/effects';
+import type { ViewerHost } from '../viewer-host';
+import type { createPaging } from './paging';
 import type { HostFocus } from '../navigation/routes';
 interface HistoryScrollHost {
   phone: MediaQueryList;
   $: <T extends HTMLElement = HTMLElement>(s: string, r?: ParentNode) => T;
-  scrollProgrammatically: (fn: () => void, jump?: boolean) => void;
-  viewerHost: import('../viewer-host').ViewerHost | null;
-  scope: import('../app/effects').EffectScope;
-  toolViewsOwner: ReturnType<typeof import('./toolViews').createToolViews>;
-  SIDEBAR_ONLY: boolean;
+  viewerHost: ViewerHost | null;
+  scope: EffectScope;
+  toolViewsOwner: ReturnType<typeof createToolViews>;
+  sidebarOnly: boolean;
+
+  pagingOwner: Pick<ReturnType<typeof createPaging>, 'scrollProgrammatically'>;
 }
 /** Owns historyScroll behavior through explicit application ports. */
 export function createHistoryScroll(host: HistoryScrollHost) {
   const currentScroll = () => (host.phone.matches ? window.scrollY : host.$('#main').scrollTop);
   const restoreScroll = (top: number) =>
-    host.scrollProgrammatically(() => {
+    host.pagingOwner.scrollProgrammatically(() => {
       if (host.phone.matches) window.scrollTo(0, top);
       else host.$('#main').scrollTop = top;
     });
@@ -64,7 +69,7 @@ export function createHistoryScroll(host: HistoryScrollHost) {
       saveHistoryScroll();
     });
   };
-  if (!host.SIDEBAR_ONLY) {
+  if (!host.sidebarOnly) {
     host.scope.listen(window, 'scroll', queueScrollSave, { passive: true });
     host.scope.listen(host.$('#main'), 'scroll', queueScrollSave, { passive: true });
   }

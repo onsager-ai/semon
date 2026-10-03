@@ -1,21 +1,16 @@
+import type { ViewerModelStore } from '../state/model';
+import type { createDomain } from '../domain/calculations';
+import type { createDestination } from './destination';
 import { machineShorts } from '../domain/format';
 import type { Handoff } from '../domain/types';
 import type { SentenceHost, SentencePart, SentenceSnapshot } from '../lib';
 import { I } from './registry';
 interface SentencesHost {
-  nameOf: (id: string) => string;
-  SESS: Record<string, import('../domain/types').Session>;
-  STARTS: Map<string, import('../domain/types').Turn>;
-  MACHINE: Record<string, string>;
-  goSession: (id: string, turn?: string | undefined) => void;
-  go: (
-    r: import('../navigation/routes').ApplicationRoute,
-    fromHistory?: boolean,
-    prepared?: boolean,
-    nextContent?: import('../viewer-host').ViewerContent | null,
-  ) => void;
-  HID: Map<string, import('../domain/types').Handoff>;
-  openSender: (h: import('../domain/types').Handoff) => void;
+  destination: Pick<ReturnType<typeof createDestination>, 'goSession' | 'go' | 'openSender'>;
+
+  modelStore: Pick<ViewerModelStore, 'sessions' | 'starts' | 'machines' | 'handoff'>;
+
+  domain: Pick<ReturnType<typeof createDomain>, 'nameOf'>;
 }
 /** Owns sentences behavior through explicit application ports. */
 export function createSentences(host: SentencesHost) {
@@ -27,8 +22,8 @@ export function createSentences(host: SentencesHost) {
     const parts: SentencePart[] = [],
       text = (className: string, text: string) => parts.push({ className, text });
     const who = (id: string, action?: SentencePart['action'], label?: (name: string) => string) => {
-      const name = host.nameOf(id),
-        linked = links && action && id !== 'you' && id !== viewer && host.SESS[id];
+      const name = host.domain.nameOf(id),
+        linked = links && action && id !== 'you' && id !== viewer && host.modelStore.sessions[id];
       parts.push({
         text: name,
         className: linked ? 'who-link' : 'who',
@@ -40,7 +35,7 @@ export function createSentences(host: SentencesHost) {
       recipient: SentencePart['action'] = {
         kind: 'session',
         id: h.to,
-        turn: host.STARTS.get(h.id)?.id,
+        turn: host.modelStore.starts.get(h.id)?.id,
       };
     const senderLabel = (name: string) => 'Open ' + name + ' where it sent this',
       recipientLabel = (name: string) => 'Open ' + name + ' at the turn this started';
@@ -62,9 +57,9 @@ export function createSentences(host: SentencesHost) {
           'verb',
           h.kind === 'spawn'
             ? ' handed off to ' +
-                (host.SESS[h.to]?.kind === 'Subagent'
+                (host.modelStore.sessions[h.to]?.kind === 'Subagent'
                   ? 'subagent'
-                  : (host.SESS[h.to]?.kind ?? '')) +
+                  : (host.modelStore.sessions[h.to]?.kind ?? '')) +
                 ' '
             : ' relayed to ',
         );
@@ -73,15 +68,15 @@ export function createSentences(host: SentencesHost) {
     } else if (h.kind === 'move') {
       path = I.move;
       const short = machineShorts(
-        [h.fromMachine, h.toMachine].map((id) => [id, host.MACHINE[id] ?? id]),
+        [h.fromMachine, h.toMachine].map((id) => [id, host.modelStore.machines[id] ?? id]),
       );
       const machine = (id: string) =>
         parts.push({
           className: 'verb mach',
           text: short.get(id) ?? id,
-          tip: 'Machine: ' + (host.MACHINE[id] ?? id),
+          tip: 'Machine: ' + (host.modelStore.machines[id] ?? id),
           action: links ? { kind: 'machine', id } : undefined,
-          label: links ? 'Open machine ' + (host.MACHINE[id] ?? id) : undefined,
+          label: links ? 'Open machine ' + (host.modelStore.machines[id] ?? id) : undefined,
         });
       text('verb', 'Semon moved ');
       who(h.to, { kind: 'session', id: h.to }, (name: string) => 'Open ' + name);
@@ -110,14 +105,14 @@ export function createSentences(host: SentencesHost) {
   }
   const sentenceHost: SentenceHost = {
     session(id, turn) {
-      host.goSession(id, turn);
+      host.destination.goSession(id, turn);
     },
     machine(id) {
-      host.go({ v: 'machine', id });
+      host.destination.go({ v: 'machine', id });
     },
     sender(id) {
-      const h = host.HID.get(id);
-      if (h) host.openSender(h);
+      const h = host.modelStore.handoff.get(id);
+      if (h) host.destination.openSender(h);
     },
   };
 

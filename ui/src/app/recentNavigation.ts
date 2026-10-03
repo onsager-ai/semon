@@ -1,3 +1,21 @@
+import { HARNESS } from './registry';
+import { I } from './registry';
+import { HARNESSES } from './registry';
+import { STATE } from './registry';
+import type { ViewerModelStore } from '../state/model';
+import type { NavigationController } from '../navigation/routes';
+import type { EffectScope } from './effects';
+import type { createDomain } from '../domain/calculations';
+import type { createOrderingControls } from './orderingControls';
+import type { createDestination } from './destination';
+import type { createLayout } from './layout';
+import type { createPaging } from './paging';
+import type { createNavigationView } from './navigationView';
+import type { createToolViews } from './toolViews';
+import type { createHistoryScroll } from './historyScroll';
+import type { createLiveModel } from './liveModel';
+import type { createApplicationRefresh } from './applicationRefresh';
+import type { createSessionChrome } from './sessionChrome';
 import { shortModel } from '../domain/format';
 import type { Session } from '../domain/types';
 import type { OrderScope, RecentItem, RecentSnapshot } from '../lib';
@@ -8,91 +26,57 @@ interface TreePref {
   at: number;
 }
 interface RecentNavigationHost {
-  scope: import('./effects').EffectScope;
+  scope: EffectScope;
   showApprovalReviews: boolean;
-  sessionChildren: () => Map<string, import('../domain/types').Session[]>;
-  SESS: Record<string, import('../domain/types').Session>;
-  parentOf: (sid: string) => string | undefined;
-  byLast: (a: import('../domain/types').Session, b: import('../domain/types').Session) => number;
-  navigation: import('../navigation/routes').NavigationController;
-  kidRank: (
-    c: import('../domain/types').Session,
-    children: ReadonlyMap<string, import('../domain/types').Session[]>,
-  ) => number;
-  orderList: <Row extends { id: string }, Tie extends object>(
-    scope: import('../lib/ordering').OrderScope<Tie>,
-    key: string,
-    items: readonly Row[],
-    compare: (a: Row, b: Row) => number,
-    {
-      must,
-      limit,
-      quiet,
-      seed,
-    }?: {
-      must?: ReadonlySet<string> | null | undefined;
-      limit?: number | undefined;
-      quiet?: boolean | undefined;
-      seed?: boolean | undefined;
-    },
-  ) => Row[];
-  descendantsOf: (
-    sid: string,
-    children: ReadonlyMap<string, import('../domain/types').Session[]>,
-    out?: import('../domain/types').Session[],
-    seen?: Set<string>,
-  ) => import('../domain/types').Session[];
+  navigation: NavigationController;
   $: <T extends HTMLElement = HTMLElement>(s: string, r?: ParentNode) => T;
-  goSession: (id: string, turn?: string | undefined) => void;
-  saveTreePref: (id: string, open: boolean) => void;
   phone: MediaQueryList;
-  scrollProgrammatically: (fn: () => void, jump?: boolean) => void;
-  STATE: Record<string, string>;
   ago: (t: number) => string;
-  sessMatch: (s: import('../domain/types').Session, q: string) => boolean;
   pendingSessionOpen: string | null;
-  viewerEl: HTMLDialogElement | null;
-  SIDEBAR_ONLY: boolean;
-  currentScroll: () => number;
+  sidebarOnly: boolean;
   disposed: boolean;
-  skipPop: boolean;
-  LIVE: import('../lib/live').LiveState;
-  refresh: (dirty?: ReadonlySet<string> | null) => void;
   dialogs: Map<HTMLDialogElement, { destroy(): void }>;
-  treePrefs: Record<string, TreePref>;
-  defaultTreeOpen: (
-    sid: string,
-    children: ReadonlyMap<string, import('../domain/types').Session[]>,
-  ) => boolean;
-  childParts: (all: import('../domain/types').Session[]) => (string | 0)[];
-  HARNESSES: Record<string, { name: string; short: string; icon: { light: string; dark: string } }>;
   dur: (a: number, b: number | null | undefined) => string;
-  I: Record<string, string>;
-  MACHINE: Record<string, string>;
-  shortHost: (s: import('../domain/types').Session) => string;
-  hostOf: (s: import('../domain/types').Session) => string;
-  HARNESS: { [k: string]: string };
-  modelIdOf: (s: import('../domain/types').Session) => string;
   darkTheme: () => boolean;
-  urgentDescendant: (
-    sid: string,
-    children: ReadonlyMap<string, import('../domain/types').Session[]>,
-  ) => import('../domain/types').SessionState;
-  railMode: boolean;
-  ORD: Map<
-    string,
-    import('../lib/ordering').OrderScope<import('../navigation/routes').ApplicationRoute>
-  >;
-  ordState: (name: string) => { inView: boolean; touched: boolean };
-  orderScope: (
-    name: string,
-    sig: string,
-    tie: import('../navigation/routes').ApplicationRoute | null,
-    state: { inView: boolean; touched: boolean },
-  ) => import('../lib/ordering').OrderScope<import('../navigation/routes').ApplicationRoute>;
-  ordIdle: number | undefined;
-  ordIdleArm: () => void;
   query: string;
+
+  sessionChrome: Pick<ReturnType<typeof createSessionChrome>, 'modelIdOf'>;
+
+  applicationRefreshOwner: Pick<ReturnType<typeof createApplicationRefresh>, 'refresh'>;
+
+  liveModelOwner: Pick<ReturnType<typeof createLiveModel>, 'LIVE'>;
+
+  historyScrollOwner: Pick<ReturnType<typeof createHistoryScroll>, 'currentScroll'>;
+
+  toolViewsOwner: Pick<ReturnType<typeof createToolViews>, 'viewerEl' | 'skipPop'>;
+
+  navigationViewOwner: Pick<ReturnType<typeof createNavigationView>, 'sessMatch'>;
+
+  pagingOwner: Pick<ReturnType<typeof createPaging>, 'scrollProgrammatically'>;
+
+  layoutOwner: Pick<ReturnType<typeof createLayout>, 'saveTreePref' | 'treePrefs' | 'railMode'>;
+
+  destination: Pick<ReturnType<typeof createDestination>, 'goSession'>;
+
+  orderingControlsOwner: Pick<
+    ReturnType<typeof createOrderingControls>,
+    'byLast' | 'orderList' | 'ORD' | 'ordState' | 'orderScope' | 'ordIdle' | 'ordIdleArm'
+  >;
+
+  modelStore: Pick<ViewerModelStore, 'sessions' | 'machines'>;
+
+  domain: Pick<
+    ReturnType<typeof createDomain>,
+    | 'sessionChildren'
+    | 'parentOf'
+    | 'kidRank'
+    | 'descendantsOf'
+    | 'defaultTreeOpen'
+    | 'childParts'
+    | 'shortHost'
+    | 'hostOf'
+    | 'urgentDescendant'
+  >;
 }
 /** Owns recentNavigation behavior through explicit application ports. */
 export function createRecentNavigation(host: RecentNavigationHost) {
@@ -104,7 +88,7 @@ export function createRecentNavigation(host: RecentNavigationHost) {
     path.ancestors.has(s.id);
   // Hide review rows while forwarding their visible descendants to the nearest shown parent; roots are promoted the same way.
   const navigationTree = (path = routedPath()) => {
-    const canonical = host.sessionChildren(),
+    const canonical = host.domain.sessionChildren(),
       roots: Session[] = [],
       children = new Map<string, Session[]>(),
       visited = new Set<string>();
@@ -121,10 +105,17 @@ export function createRecentNavigation(host: RecentNavigationHost) {
       }
       for (const child of canonical.get(session.id) ?? []) visit(child, nearest);
     };
-    for (const root of Object.values(host.SESS).filter((s) => s.lane && !host.parentOf(s.id)))
+    for (const root of Object.values(host.modelStore.sessions).filter(
+      (s) => s.lane && !host.domain.parentOf(s.id),
+    ))
       visit(root, null);
-    roots.sort(host.byLast);
-    for (const kids of children.values()) kids.sort(host.byLast);
+    roots.sort((...args: Parameters<typeof host.orderingControlsOwner.byLast>) =>
+      host.orderingControlsOwner.byLast(...args),
+    );
+    for (const kids of children.values())
+      kids.sort((...args: Parameters<typeof host.orderingControlsOwner.byLast>) =>
+        host.orderingControlsOwner.byLast(...args),
+      );
     return { roots, children };
   };
   // Children in the order their handoffs were sent; the sidebar list stays newest-first.
@@ -148,9 +139,9 @@ export function createRecentNavigation(host: RecentNavigationHost) {
             : null,
       ancestors = new Set<string>();
     for (
-      let id = current && host.SESS[current] ? host.parentOf(current) : null;
-      id && host.SESS[id] && id !== current && !ancestors.has(id);
-      id = host.parentOf(id)
+      let id = current && host.modelStore.sessions[current] ? host.domain.parentOf(current) : null;
+      id && host.modelStore.sessions[id] && id !== current && !ancestors.has(id);
+      id = host.domain.parentOf(id)
     )
       ancestors.add(id);
     return { current, ancestors };
@@ -177,9 +168,9 @@ export function createRecentNavigation(host: RecentNavigationHost) {
   const ancestorsOf = (id: string) => {
     const out = new Set<string>();
     for (
-      let p = id && host.SESS[id] ? host.parentOf(id) : null;
-      p && host.SESS[p] && p !== id && !out.has(p);
-      p = host.parentOf(p)
+      let p = id && host.modelStore.sessions[id] ? host.domain.parentOf(id) : null;
+      p && host.modelStore.sessions[p] && p !== id && !out.has(p);
+      p = host.domain.parentOf(p)
     )
       out.add(p);
     return out;
@@ -194,7 +185,7 @@ export function createRecentNavigation(host: RecentNavigationHost) {
     open: boolean,
   ): { items: RecentItem[]; all?: number; full: boolean } {
     const { current, ancestors } = routedPath(),
-      rank = new Map(kids.map((c) => [c.id, host.kidRank(c, children)]));
+      rank = new Map(kids.map((c) => [c.id, host.domain.kidRank(c, children)]));
     const byRank = (a: Session, b: Session) => rank.get(a.id)! - rank.get(b.id)! || b.last - a.last,
       sorted = [...kids].sort(byRank),
       keep = new Set<string>();
@@ -218,7 +209,7 @@ export function createRecentNavigation(host: RecentNavigationHost) {
         sideOrder.seen.has(parent.id) &&
         !sideOrder.prev.has(key);
     const shown = sideOrder
-      ? host.orderList(sideOrder, key, full ? sorted : listed, byRank, {
+      ? host.orderingControlsOwner.orderList(sideOrder, key, full ? sorted : listed, byRank, {
           must: new Set([...(current ? [current] : []), ...ancestors, ...expandedPath]),
           quiet: !open,
           seed: full || sideOrder.reseed || !sideOrder.seen.has(parent.id),
@@ -232,16 +223,16 @@ export function createRecentNavigation(host: RecentNavigationHost) {
       all:
         kids.length === shown.length || full || unseen
           ? undefined
-          : host.descendantsOf(parent.id, children).length,
+          : host.domain.descendantsOf(parent.id, children).length,
       full: full && expandedAll === parent.id,
     };
   }
   let recentSnapshot: RecentSnapshot = { items: [], empty: false };
   const recentRenderer = createRecentRenderer(host.$('#lanes'), {
-    open: (id) => host.goSession(id),
+    open: (id) => host.destination.goSession(id),
     toggle(id, value) {
       if (!value) forcedOpenIds().delete(id);
-      host.saveTreePref(id, value);
+      host.layoutOwner.saveTreePref(id, value);
       if (!value && (expandedAll === id || expandedPath.has(id))) {
         expandedAll = null;
         renderLanes();
@@ -260,9 +251,9 @@ export function createRecentNavigation(host: RecentNavigationHost) {
       }
     },
     all(id, trigger) {
-      if (!host.SESS[id]) return;
+      if (!host.modelStore.sessions[id]) return;
       if (host.phone.matches) {
-        openKidsSheet(host.SESS[id], trigger);
+        openKidsSheet(host.modelStore.sessions[id], trigger);
         return;
       }
       expandedAll = id;
@@ -273,33 +264,35 @@ export function createRecentNavigation(host: RecentNavigationHost) {
       expandedAll = null;
       renderLanes();
       const row = host.$('#lanes .srow[data-id="' + CSS.escape(id) + '"]');
-      host.scrollProgrammatically(() => row?.scrollIntoView({ block: 'nearest' }));
+      host.pagingOwner.scrollProgrammatically(() => row?.scrollIntoView({ block: 'nearest' }));
       row?.focus({ preventScroll: true });
     },
   });
   // A phone's "All N": every session below the parent in one sheet, waiting first, then running, then finished, newest first in each.
   function openKidsSheet(parent: Session, trigger: HTMLElement) {
-    const all = host.descendantsOf(parent.id, navigationTree().children),
+    const all = host.domain.descendantsOf(parent.id, navigationTree().children),
       bucket = (s: Session) => (s.state === 'wait' ? 0 : s.state === 'work' ? 1 : 2);
     let picked: string | null = null;
     const rows = [...all]
       .sort((a, b) => b.last - a.last)
       .map((s) => {
-        const above = host.parentOf(s.id);
+        const above = host.domain.parentOf(s.id);
         return {
           id: s.id,
           name: s.name,
           state: s.state,
-          stateLabel: host.STATE[s.state] ?? s.state,
+          stateLabel: STATE[s.state] ?? s.state,
           age: host.ago(s.last),
           bucket: bucket(s),
           under:
-            above && above !== parent.id && host.SESS[above] ? host.SESS[above].name : undefined,
+            above && above !== parent.id && host.modelStore.sessions[above]
+              ? host.modelStore.sessions[above].name
+              : undefined,
         };
       });
     const sheet = createKidsSheet(parent.name, rows, {
       matches(id, query) {
-        return host.sessMatch(host.SESS[id], query);
+        return host.navigationViewOwner.sessMatch(host.modelStore.sessions[id], query);
       },
       select(id) {
         picked = id;
@@ -307,12 +300,16 @@ export function createRecentNavigation(host: RecentNavigationHost) {
         sheet.dialog.close();
       },
       opened(d) {
-        host.viewerEl = d;
+        host.toolViewsOwner.viewerEl = d;
         document.documentElement.classList.add('viewer-open');
-        if (!host.SIDEBAR_ONLY)
+        if (!host.sidebarOnly)
           try {
             history.pushState(
-              { ...host.navigation.route, sheet: 1, scrollTop: host.currentScroll() },
+              {
+                ...host.navigation.route,
+                sheet: 1,
+                scrollTop: host.historyScrollOwner.currentScroll(),
+              },
               '',
             );
           } catch {}
@@ -321,20 +318,20 @@ export function createRecentNavigation(host: RecentNavigationHost) {
         host.dialogs.delete(d);
         if (host.disposed) return;
         document.documentElement.classList.remove('viewer-open');
-        if (host.viewerEl === d) {
-          host.viewerEl = null;
-          if (!host.SIDEBAR_ONLY && history.state?.sheet) {
-            host.skipPop = true;
+        if (host.toolViewsOwner.viewerEl === d) {
+          host.toolViewsOwner.viewerEl = null;
+          if (!host.sidebarOnly && history.state?.sheet) {
+            host.toolViewsOwner.skipPop = true;
             history.back();
           } else if (host.pendingSessionOpen) {
             const id = host.pendingSessionOpen;
             host.pendingSessionOpen = null;
-            host.goSession(id);
+            host.destination.goSession(id);
           }
         }
         if (!picked)
           (host.$('#lanes .tree-all[data-id="' + CSS.escape(parent.id) + '"]') ?? trigger).focus();
-        if (host.LIVE.pending) host.refresh();
+        if (host.liveModelOwner.LIVE.pending) host.applicationRefreshOwner.refresh();
       },
     });
     host.dialogs.set(sheet.dialog, sheet);
@@ -347,19 +344,19 @@ export function createRecentNavigation(host: RecentNavigationHost) {
     rail: boolean,
   ): RecentItem {
     const kids = children.get(s.id) ?? [],
-      allKids = host.descendantsOf(s.id, children);
+      allKids = host.domain.descendantsOf(s.id, children);
     const { current, ancestors } = routedPath(),
-      saved = host.treePrefs[s.id];
+      saved = host.layoutOwner.treePrefs[s.id];
     const open =
       forcedOpenIds().has(s.id) ||
       expandedPath.has(s.id) ||
       (typeof saved?.open === 'boolean'
         ? saved.open
-        : host.defaultTreeOpen(s.id, children) || expandedUnder.has(s.id));
+        : host.domain.defaultTreeOpen(s.id, children) || expandedUnder.has(s.id));
     const group =
       kids.length && !rail ? treeGroupSnapshot(s, kids, children, depth, rail, open) : null;
-    const parts = allKids.length ? host.childParts(allKids) : [],
-      harness = Object.hasOwn(host.HARNESSES, s.harness) ? host.HARNESSES[s.harness] : null;
+    const parts = allKids.length ? host.domain.childParts(allKids) : [],
+      harness = Object.hasOwn(HARNESSES, s.harness) ? HARNESSES[s.harness] : null;
     const flag =
       kids.length && !rail
         ? allKids.some((x) => x.state === 'wait')
@@ -374,16 +371,16 @@ export function createRecentNavigation(host: RecentNavigationHost) {
         text: host.dur(s.start, s.state === 'work' || s.state === 'wait' ? null : s.last),
         priority: 1,
         tip: 'Duration',
-        icon: host.I.duration,
+        icon: I.duration,
       },
     ];
-    if (Object.keys(host.MACHINE).length > 1)
+    if (Object.keys(host.modelStore.machines).length > 1)
       fields.push({
         className: 'row-machine host',
-        text: host.shortHost(s),
+        text: host.domain.shortHost(s),
         priority: 2,
-        tip: 'Machine: ' + host.hostOf(s),
-        icon: host.I.machine,
+        tip: 'Machine: ' + host.domain.hostOf(s),
+        icon: I.machine,
       });
     if (s.repo)
       fields.push({
@@ -391,23 +388,23 @@ export function createRecentNavigation(host: RecentNavigationHost) {
         text: s.repo,
         priority: 3,
         tip: 'Repo: ' + s.repo,
-        icon: host.I.repo,
+        icon: I.repo,
       });
     return {
       id: s.id,
       name: s.name,
       label: [
         s.name,
-        host.STATE[s.state] ?? s.state,
-        host.HARNESS[s.harness] ?? s.harness,
-        host.shortHost(s),
+        STATE[s.state] ?? s.state,
+        HARNESS[s.harness] ?? s.harness,
+        host.domain.shortHost(s),
         ...parts,
       ].join(', '),
       state: s.state,
-      stateLabel: host.STATE[s.state] ?? s.state,
+      stateLabel: STATE[s.state] ?? s.state,
       age: host.ago(s.last),
       model: shortModel(s.model ?? s.modelId),
-      modelTip: 'Model: ' + host.modelIdOf(s),
+      modelTip: 'Model: ' + host.sessionChrome.modelIdOf(s),
       harness: harness
         ? {
             id: s.harness,
@@ -422,7 +419,7 @@ export function createRecentNavigation(host: RecentNavigationHost) {
       rail,
       childState:
         rail && allKids.some((x) => x.state === 'work' || x.state === 'wait')
-          ? (host.urgentDescendant(s.id, children) ?? 'work')
+          ? (host.domain.urgentDescendant(s.id, children) ?? 'work')
           : undefined,
       flag: flag
         ? {
@@ -477,15 +474,15 @@ export function createRecentNavigation(host: RecentNavigationHost) {
     });
   }
   function renderLanes() {
-    const rail = host.railMode && !host.phone.matches,
-      prevSide = host.ORD.get('side');
-    if (rail || prevSide?.rail !== rail) host.ORD.delete('side'); // the rail draws sorted, and so does a change into or out of it
-    const sideState = host.ordState('side'),
+    const rail = host.layoutOwner.railMode && !host.phone.matches,
+      prevSide = host.orderingControlsOwner.ORD.get('side');
+    if (rail || prevSide?.rail !== rail) host.orderingControlsOwner.ORD.delete('side'); // the rail draws sorted, and so does a change into or out of it
+    const sideState = host.orderingControlsOwner.ordState('side'),
       focus = laneFocus(),
       path = routedPath(),
       { current, ancestors } = path,
       { roots: lanes, children: everyone } = navigationTree(path);
-    sideOrder = Object.assign(host.orderScope('side', '', null, sideState), {
+    sideOrder = Object.assign(host.orderingControlsOwner.orderScope('side', '', null, sideState), {
       seen: new Set<string>(),
     });
     sideOrder.rail = rail;
@@ -512,31 +509,41 @@ export function createRecentNavigation(host: RecentNavigationHost) {
       }
     }
     sideOrder.kids = new Set(children.keys());
-    if (expandedAll && (host.phone.matches || host.railMode || !host.SESS[expandedAll]))
+    if (
+      expandedAll &&
+      (host.phone.matches || host.layoutOwner.railMode || !host.modelStore.sessions[expandedAll])
+    )
       expandedAll = null;
     // Opening or folding a parent's whole list, or crossing into or out of the rail, changes which lists are drawn: those the reader
     // just brought back are drawn sorted, not held as new.
-    sideOrder.exp = JSON.stringify([expandedAll, host.railMode && !host.phone.matches]);
+    sideOrder.exp = JSON.stringify([expandedAll, host.layoutOwner.railMode && !host.phone.matches]);
     sideOrder.reseed = sideOrder.keep && sideOrder.prevExp !== sideOrder.exp;
     expandedPath = expandedAll ? ancestorsOf(expandedAll) : new Set<string>();
     expandedUnder = expandedAll
-      ? new Set(host.descendantsOf(expandedAll, children).map((x) => x.id))
+      ? new Set(host.domain.descendantsOf(expandedAll, children).map((x) => x.id))
       : new Set<string>();
     recentSnapshot = {
-      items: host
-        .orderList(sideOrder, 'lanes', lanes, host.byLast, {
-          limit: 8,
-          must: new Set([...(current ? [current] : []), ...ancestors]),
-        })
+      items: host.orderingControlsOwner
+        .orderList(
+          sideOrder,
+          'lanes',
+          lanes,
+          (...args: Parameters<typeof host.orderingControlsOwner.byLast>) =>
+            host.orderingControlsOwner.byLast(...args),
+          {
+            limit: 8,
+            must: new Set([...(current ? [current] : []), ...ancestors]),
+          },
+        )
         .slice(0, 8)
         .map((s) => buildLaneSnapshot(s, 0, children, rail)),
       empty: !lanes.length,
     };
     recentRenderer.update(recentSnapshot);
     if (!sideOrder.n) {
-      host.scope.clearTimeout(host.ordIdle);
-      host.ordIdle = undefined;
-    } else if (!host.ordIdle) host.ordIdleArm(); // (counted from when something was first held)
+      host.scope.clearTimeout(host.orderingControlsOwner.ordIdle);
+      host.orderingControlsOwner.ordIdle = undefined;
+    } else if (!host.orderingControlsOwner.ordIdle) host.orderingControlsOwner.ordIdleArm(); // (counted from when something was first held)
     const q = host.$<HTMLInputElement>('#q');
     if (q && document.activeElement !== q) q.value = host.query;
     restoreLaneFocus(focus);
@@ -550,7 +557,7 @@ export function createRecentNavigation(host: RecentNavigationHost) {
       stuck ? stuck.offsetHeight + 8 : null,
     );
     if (stuck && navigated)
-      host.scrollProgrammatically(() =>
+      host.pagingOwner.scrollProgrammatically(() =>
         box.querySelector('.srow[aria-current="page"]')?.scrollIntoView({ block: 'nearest' }),
       );
   }

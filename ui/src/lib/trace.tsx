@@ -1,3 +1,4 @@
+import { commitApplicationView } from './application-view';
 import { render } from 'preact';
 import { createMeasuredLayout } from './layout';
 import { claimScreen, Glyph, Harness, screenText } from './screens';
@@ -249,7 +250,8 @@ export function renderTraceScreen(root: HTMLElement, snapshot: TraceSnapshot, ho
       width = (value: number) => owner.layout.className('width', value, '%'),
       indent = (depth: number) => owner.layout.className('width', Math.min(3, depth) * 12, 'px');
     const agents = snapshot.agents;
-    render(
+    commitApplicationView(
+      root,
       <>
         {snapshot.summary && <p class="trace-summary">{screenText(snapshot.summary)}</p>}
         <div class="ph sr">
@@ -560,7 +562,6 @@ export function renderTraceScreen(root: HTMLElement, snapshot: TraceSnapshot, ho
           </>
         )}
       </>,
-      root,
     );
     if (owner.chart) owner.observer.observe(owner.chart);
     for (const pair of owner.briefs.values()) owner.observer.observe(pair.node);

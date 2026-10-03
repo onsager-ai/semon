@@ -1,13 +1,21 @@
+import type { ViewerModelStore } from '../state/model';
+import type { NavigationController } from '../navigation/routes';
+import type { createLiveModel } from './liveModel';
+import type { createTransport } from './transport';
+import type { createScreenViews } from './screenViews';
 import { updateSessionClock } from '../lib';
 interface TickerHost {
-  visible: () => boolean;
-  transportOwner: ReturnType<typeof import('./transport').createTransport>;
-  tick: () => void;
-  navigation: import('../navigation/routes').NavigationController;
+  navigation: NavigationController;
   $: <T extends HTMLElement = HTMLElement>(s: string, r?: ParentNode) => T;
-  NOW: number;
-  SESS: Record<string, import('../domain/types').Session>;
-  renderHome: (page: HTMLElement) => void;
+  now: number;
+
+  screenViews: Pick<ReturnType<typeof createScreenViews>, 'renderHome'>;
+
+  modelStore: Pick<ViewerModelStore, 'sessions'>;
+
+  transportOwner: Pick<ReturnType<typeof createTransport>, 'tick' | 'fetchedAt'>;
+
+  liveModelOwner: Pick<ReturnType<typeof createLiveModel>, 'visible'>;
 }
 /** Owns ticker behavior through explicit application ports. */
 export function createTicker(host: TickerHost) {
@@ -16,14 +24,14 @@ export function createTicker(host: TickerHost) {
     return x < 60 ? x + 's' : Math.floor(x / 60) + 'm ' + (x % 60) + 's';
   };
   function ticker() {
-    if (!host.visible() || Date.now() === host.transportOwner.fetchedAt) return;
-    host.tick();
+    if (!host.liveModelOwner.visible() || Date.now() === host.transportOwner.fetchedAt) return;
+    host.transportOwner.tick();
     if (host.navigation.route.v === 'session' && host.navigation.rendered === host.navigation.route)
       updateSessionClock(
         host.$('#page'),
-        host.NOW,
+        host.now,
         Object.fromEntries(
-          Object.values(host.SESS)
+          Object.values(host.modelStore.sessions)
             .filter((s) => s.activity?.[3] != null)
             .map((s) => [s.id, s.activity![3]!]),
         ),
@@ -32,7 +40,7 @@ export function createTicker(host: TickerHost) {
       host.navigation.route.v === 'home' &&
       host.navigation.rendered === host.navigation.route
     )
-      host.renderHome(host.$('#page'));
+      host.screenViews.renderHome(host.$('#page'));
   }
 
   return { ticker, running };

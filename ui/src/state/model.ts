@@ -1,3 +1,4 @@
+import { ViewUpdates } from './viewUpdates';
 import { ModelStore, parseModel } from '../lib/model';
 import { normalizeModel } from '../domain/normalize';
 import type { DomainState, Session, Handoff, Turn } from '../domain/types';
@@ -11,6 +12,7 @@ function replaceMap<T>(target: Map<string, T>, next: Map<string, T>) {
 }
 /** The raw delta baseline and the normalized graph have one owner and one commit. */
 export class ViewerModelStore {
+  constructor(readonly updates = new ViewUpdates()) {}
   private readonly raw = new ModelStore();
   readonly sessions: Record<string, Session> = Object.create(null);
   readonly machines: Record<string, string> = Object.create(null);
@@ -25,7 +27,7 @@ export class ViewerModelStore {
   apply(value: unknown) {
     return this.raw.apply(value);
   }
-  adopt(value: unknown) {
+  adopt(value: unknown, finalize?: () => void) {
     const model = parseModel(value),
       normalized = normalizeModel(model);
     const machines =
@@ -49,6 +51,8 @@ export class ViewerModelStore {
       this.machineUp[row.id] = row.up;
       if (row.last !== undefined) this.machineLast[row.id] = row.last;
     }
+    finalize?.();
+    this.updates.model();
     return model;
   }
   domain(transcriptMeta: DomainState['transcriptMeta']): DomainState {

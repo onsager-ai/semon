@@ -1,11 +1,11 @@
+import type { createTransport } from './transport';
 import type { Entry } from '../domain/types';
 import { object, optional, text } from '../domain/validate';
 import type { ToolData } from '../lib/tool-details';
 import { parseEntry } from '../state/transcript-wire';
 type ToolEntry = Extract<Entry, { k: 'tool' }> & { full?: boolean; scriptLoaded?: boolean };
 interface ToolLoaderHost {
-  api: (path: string, signal?: AbortSignal | undefined, unchanged?: boolean) => Promise<unknown>;
-  enc: (uriComponent: string | number | boolean) => string;
+  transportOwner: Pick<ReturnType<typeof createTransport>, 'api' | 'enc'>;
 }
 /** Owns toolLoader behavior through explicit application ports. */
 export function createToolLoader(host: ToolLoaderHost) {
@@ -19,8 +19,13 @@ export function createToolLoader(host: ToolLoaderHost) {
       (e.more ?? []).map(async (part) => ({
         part,
         data: object(
-          await host.api(
-            '/api/entry?sid=' + host.enc(e.sid ?? '') + '&slot=' + e.slot + '&as=' + part,
+          await host.transportOwner.api(
+            '/api/entry?sid=' +
+              host.transportOwner.enc(e.sid ?? '') +
+              '&slot=' +
+              e.slot +
+              '&as=' +
+              part,
           ),
         ),
       })),

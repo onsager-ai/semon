@@ -1,3 +1,4 @@
+import { ViewUpdates } from './viewUpdates';
 import type { Entry, TranscriptMeta, Turn } from '../domain/types';
 import { TranscriptCache } from '../lib/routes';
 import { createPagingStore } from '../lib/live';
@@ -21,7 +22,15 @@ export class TranscriptStore {
   private readonly requests = new Set<AbortController>();
   private readonly replacements = new Map<string, AbortController>();
   private disposed = false;
-  constructor(private readonly host: TranscriptHost) {}
+  readonly updates: ViewUpdates;
+  private readonly ownsUpdates: boolean;
+  constructor(
+    private readonly host: TranscriptHost,
+    updates?: ViewUpdates,
+  ) {
+    this.ownsUpdates = updates === undefined;
+    this.updates = updates ?? new ViewUpdates();
+  }
   spread(sid: string) {
     for (const turn of this.host.turns(sid)) turn.entries = [];
     let turn: Turn | undefined,
@@ -47,6 +56,7 @@ export class TranscriptStore {
     this.clearPaging(sid);
     delete this.entries[sid];
     delete this.meta[sid];
+    this.updates.transcript(sid);
   }
   async fetch(
     sid: string,
@@ -106,6 +116,7 @@ export class TranscriptStore {
         this.meta[sid].newer = 0;
       }
       this.spread(sid);
+      this.updates.transcript(sid);
       onPage?.();
     } catch (error) {
       if (!this.disposed && !controller.signal.aborted) throw error;
@@ -139,18 +150,27 @@ export class TranscriptStore {
     this.cache.delete(sid);
     this.entries[sid] = cached.entries;
     this.meta[sid] = cached.meta;
-    if (!turn) return true;
     this.spread(sid);
+    if (!turn) {
+      this.updates.transcript(sid);
+      return true;
+    }
     const target = this.host.turn(turn);
     if (target && target.sid === sid && !target.entries.length) {
       this.drop(sid);
       return false;
     }
+    this.updates.transcript(sid);
     return true;
+  }
+  /** A coherent projection borrows accepted entries; no full-transcript copies. */
+  view(sid: string) {
+    return { entries: this.entries[sid], range: this.meta[sid], revision: this.updates.revision };
   }
   destroy() {
     if (this.disposed) return;
     this.disposed = true;
+    if (this.ownsUpdates) this.updates.destroy();
     for (const request of this.requests) request.abort();
     this.requests.clear();
     this.replacements.clear();

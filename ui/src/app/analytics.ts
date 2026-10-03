@@ -1,3 +1,23 @@
+import { HARNESS_SHORT } from './registry';
+import { HARNESS } from './registry';
+import type { ViewerModelStore } from '../state/model';
+import type { NavigationController } from '../navigation/routes';
+import type { EffectScope } from '../app/effects';
+import type { createTransport } from './transport';
+import type { createLiveModel } from './liveModel';
+import type { createToolViews } from './toolViews';
+import type { createAccountControls } from './accountControls';
+import type { createViewport } from './viewport';
+import type { createDocumentRenderer } from './documentRenderer';
+import type { createRouteControls } from './routeControls';
+import type { createHistoryScroll } from './historyScroll';
+import type { createApplicationRefresh } from './applicationRefresh';
+import type { createSessionChrome } from './sessionChrome';
+import type { createDomain } from '../domain/calculations';
+import type { createDestination } from './destination';
+import type { createScreenViews } from './screenViews';
+import type { createBootstrap } from './bootstrap';
+import type { createRecentNavigation } from './recentNavigation';
 import { render as releaseRoot } from 'preact';
 import { countText, hLabel, liveUrl, niceStep, shortModel, timeText } from '../domain/format';
 import type { Session } from '../domain/types';
@@ -30,62 +50,54 @@ interface ControlSlot {
 }
 type FacetKey = 'repo' | 'machine' | 'harness' | 'model';
 interface AnalyticsHost {
+  routeControls: Pick<ReturnType<typeof createRouteControls>, 'slot'>;
   dialogs: Map<HTMLDialogElement, { destroy(): void }>;
   analyticsRange: number;
   sessionFilters: { repo: string; machine: string; harness: string; model: string };
-  enc: (uriComponent: string | number | boolean) => string;
-  scope: import('../app/effects').EffectScope;
+  scope: EffectScope;
   disposed: boolean;
-  ended: (status: number) => void;
-  navigation: import('../navigation/routes').NavigationController;
-  LIVE: import('../lib/live').LiveState;
-  visible: () => boolean;
-  viewerEl: HTMLDialogElement | null;
-  accountChrome: import('../lib/account-chrome').AccountChrome;
-  capture: () => import('../navigation/scroll').ScrollSnapshot;
-  render: () => void;
-  restore: (st: import('../navigation/scroll').ScrollSnapshot, pin?: boolean) => void;
-  SIDEBAR_ONLY: boolean;
-  SESS: Record<string, import('../domain/types').Session>;
-  MACHINE: Record<string, string>;
-  HARNESS: { [k: string]: string };
-  slot: (key: string, box: HTMLElement, build: (ctx: SlotContext) => HTMLElement) => ControlSlot;
-  currentScroll: () => number;
-  skipPop: boolean;
-  refresh: (dirty?: ReadonlySet<string> | null) => void;
+  navigation: NavigationController;
+  sidebarOnly: boolean;
   $: <T extends HTMLElement = HTMLElement>(s: string, r?: ParentNode) => T;
-  panel: (
-    title: string,
-    opts?: {
-      cls?: string | undefined;
-      sub?: string | undefined;
-      label?: string | undefined;
-      from?: HTMLElement | null | undefined;
-      onClose?: (() => void) | undefined;
-    },
-  ) => { d: HTMLDialogElement; body: HTMLDivElement; show: () => void };
-  asMoney: (usd: number) => string;
-  TURNS: Record<string, import('../domain/types').Turn[]>;
   pendingSessionOpen: string | null;
   afterPop: (() => void) | null;
-  goTrace: (turn: string) => void;
-  goSession: (id: string, turn?: string | undefined) => void;
-  HARNESS_SHORT: { [k: string]: string };
-  harnessSnapshot: (id: string) => import('../lib/screens').HarnessMark | undefined;
-  urlOf: (r: import('../navigation/routes').ApplicationRoute) => string;
-  COST_TIP: string;
   clock: (t: number) => string;
   analyticsMeasure: string;
-  observeTitle: () => void;
-  restoreScroll: (top: number) => void;
   query: string;
   groupBy: string;
-  go: (
-    r: import('../navigation/routes').ApplicationRoute,
-    fromHistory?: boolean,
-    prepared?: boolean,
-    nextContent?: import('../viewer-host').ViewerContent | null,
-  ) => void;
+
+  recentNavigation: Pick<ReturnType<typeof createRecentNavigation>, 'COST_TIP'>;
+
+  bootstrapOwner: Pick<ReturnType<typeof createBootstrap>, 'urlOf'>;
+
+  screenViews: Pick<ReturnType<typeof createScreenViews>, 'harnessSnapshot'>;
+
+  destination: Pick<ReturnType<typeof createDestination>, 'goTrace' | 'goSession' | 'go'>;
+
+  domain: Pick<ReturnType<typeof createDomain>, 'asMoney'>;
+
+  sessionChrome: Pick<ReturnType<typeof createSessionChrome>, 'panel' | 'observeTitle'>;
+
+  applicationRefreshOwner: Pick<ReturnType<typeof createApplicationRefresh>, 'refresh'>;
+
+  historyScrollOwner: Pick<
+    ReturnType<typeof createHistoryScroll>,
+    'currentScroll' | 'restoreScroll'
+  >;
+
+  modelStore: Pick<ViewerModelStore, 'sessions' | 'machines' | 'turns'>;
+
+  documentRendererOwner: Pick<ReturnType<typeof createDocumentRenderer>, 'render'>;
+
+  viewport: Pick<ReturnType<typeof createViewport>, 'capture' | 'restore'>;
+
+  accountControlsOwner: Pick<ReturnType<typeof createAccountControls>, 'accountChrome'>;
+
+  toolViewsOwner: Pick<ReturnType<typeof createToolViews>, 'viewerEl' | 'skipPop'>;
+
+  liveModelOwner: Pick<ReturnType<typeof createLiveModel>, 'ended' | 'LIVE' | 'visible'>;
+
+  transportOwner: Pick<ReturnType<typeof createTransport>, 'enc'>;
 }
 /** Owns analytics behavior through explicit application ports. */
 export function createAnalytics(host: AnalyticsHost) {
@@ -116,10 +128,13 @@ export function createAnalytics(host: AnalyticsHost) {
     if (host.sessionFilters.repo)
       q.push(
         'repo=' +
-          (host.sessionFilters.repo === '__none__' ? '' : host.enc(host.sessionFilters.repo)),
+          (host.sessionFilters.repo === '__none__'
+            ? ''
+            : host.transportOwner.enc(host.sessionFilters.repo)),
       );
     for (const key of ['machine', 'harness', 'model'] as const)
-      if (host.sessionFilters[key]) q.push(key + '=' + host.enc(host.sessionFilters[key]));
+      if (host.sessionFilters[key])
+        q.push(key + '=' + host.transportOwner.enc(host.sessionFilters[key]));
     return q.join('&');
   }
   const analyticsData = () => AN.answers.get(analyticsQuery())?.data ?? null;
@@ -146,7 +161,7 @@ export function createAnalytics(host: AnalyticsHost) {
           return cleared;
         } // unchanged, and asking works again
         if (r.status === 403) {
-          host.ended(403);
+          host.liveModelOwner.ended(403);
           return false;
         }
         if (!r.ok)
@@ -187,9 +202,18 @@ export function createAnalytics(host: AnalyticsHost) {
   function scheduleAnalytics() {
     host.scope.clearTimeout(AN.timer);
     AN.timer = undefined;
-    if (host.navigation.route.v !== 'analytics' || host.LIVE.ended || !host.visible()) return;
+    if (
+      host.navigation.route.v !== 'analytics' ||
+      host.liveModelOwner.LIVE.ended ||
+      !host.liveModelOwner.visible()
+    )
+      return;
     const data = analyticsData(),
-      behind = !AN.error && data && host.LIVE.version && data.version !== host.LIVE.version;
+      behind =
+        !AN.error &&
+        data &&
+        host.liveModelOwner.LIVE.version &&
+        data.version !== host.liveModelOwner.LIVE.version;
     AN.timer = host.scope.timeout(
       () => {
         AN.timer = undefined;
@@ -214,29 +238,30 @@ export function createAnalytics(host: AnalyticsHost) {
         host.navigation.route.v === 'analytics' &&
         host.navigation.rendered === host.navigation.route
       ) {
-        if (host.viewerEl || host.accountChrome.open)
-          host.LIVE.pending = true; // drawn when the sheet or the account menu closes
+        if (host.toolViewsOwner.viewerEl || host.accountControlsOwner.accountChrome.open)
+          host.liveModelOwner.LIVE.pending = true; // drawn when the sheet or the account menu closes
         else {
-          const st = host.capture();
-          host.render();
-          host.restore(st);
+          const st = host.viewport.capture();
+          host.documentRendererOwner.render();
+          host.viewport.restore(st);
         }
       }
       scheduleAnalytics();
     });
   }
-  if (!host.SIDEBAR_ONLY)
+  if (!host.sidebarOnly)
     host.scope.listen(document, 'visibilitychange', () => {
-      if (host.visible() && host.navigation.route.v === 'analytics') refreshAnalytics();
-      else if (!host.visible()) {
+      if (host.liveModelOwner.visible() && host.navigation.route.v === 'analytics')
+        refreshAnalytics();
+      else if (!host.liveModelOwner.visible()) {
         host.scope.clearTimeout(AN.timer);
         AN.timer = undefined;
       }
     });
   const nameOfSid = (A: AnalyticsData, sid: string) =>
-    host.SESS[sid]?.name ?? A.sessions[sid]?.name ?? sid;
+    host.modelStore.sessions[sid]?.name ?? A.sessions[sid]?.name ?? sid;
   const harnessOfSid = (A: AnalyticsData, sid: string) =>
-    host.SESS[sid]?.harness ?? A.sessions[sid]?.harness ?? '';
+    host.modelStore.sessions[sid]?.harness ?? A.sessions[sid]?.harness ?? '';
   const sessionFacetValue = (s: Session, key: FacetKey) =>
     key === 'repo'
       ? (s.repo ?? '__none__')
@@ -267,7 +292,7 @@ export function createAnalytics(host: AnalyticsHost) {
       () =>
         [
           ...new Set([
-            ...Object.values(host.SESS).map((s) => sessionFacetValue(s, 'repo')),
+            ...Object.values(host.modelStore.sessions).map((s) => sessionFacetValue(s, 'repo')),
             ...rangeFacet('repo'),
           ]),
         ].sort((a, b) => (a === '__none__' ? 1 : b === '__none__' ? -1 : a.localeCompare(b))),
@@ -280,11 +305,11 @@ export function createAnalytics(host: AnalyticsHost) {
       () =>
         [
           ...new Set([
-            ...Object.values(host.SESS).map((s) => s.machine ?? ''),
+            ...Object.values(host.modelStore.sessions).map((s) => s.machine ?? ''),
             ...rangeFacet('machine'),
           ]),
         ].sort(),
-      (v) => host.MACHINE[v] ?? v,
+      (v) => host.modelStore.machines[v] ?? v,
     ],
     [
       'harness',
@@ -293,11 +318,11 @@ export function createAnalytics(host: AnalyticsHost) {
       () =>
         [
           ...new Set([
-            ...Object.values(host.SESS).map((s) => s.harness ?? ''),
+            ...Object.values(host.modelStore.sessions).map((s) => s.harness ?? ''),
             ...rangeFacet('harness'),
           ]),
         ].sort(),
-      (v) => host.HARNESS[v] ?? v,
+      (v) => HARNESS[v] ?? v,
     ],
     [
       'model',
@@ -306,7 +331,7 @@ export function createAnalytics(host: AnalyticsHost) {
       () =>
         [
           ...new Set([
-            ...Object.values(host.SESS).map((s) => sessionFacetValue(s, 'model')),
+            ...Object.values(host.modelStore.sessions).map((s) => sessionFacetValue(s, 'model')),
             ...rangeFacet('model'),
           ]),
         ].sort(),
@@ -314,7 +339,7 @@ export function createAnalytics(host: AnalyticsHost) {
     ],
   ];
   function renderFacetFilters(box: HTMLElement, onChange: () => void) {
-    const s = host.slot('facets', box, (ctx) => {
+    const s = host.routeControls.slot('facets', box, (ctx) => {
       let before = '';
       const control = createFacetChrome({
         select(label, value, onChange) {
@@ -329,32 +354,36 @@ export function createAnalytics(host: AnalyticsHost) {
           ctx.onChange();
         },
         canOpen() {
-          return !host.viewerEl;
+          return !host.toolViewsOwner.viewerEl;
         },
         opened(d) {
           ctx.sync();
           before = JSON.stringify(host.sessionFilters);
-          host.viewerEl = d;
+          host.toolViewsOwner.viewerEl = d;
           try {
             history.pushState(
-              { ...host.navigation.route, sheet: 1, scrollTop: host.currentScroll() },
+              {
+                ...host.navigation.route,
+                sheet: 1,
+                scrollTop: host.historyScrollOwner.currentScroll(),
+              },
               '',
             );
           } catch {}
         },
         closed(d, reason) {
           if (host.disposed || reason === 'destroyed') return;
-          if (host.viewerEl === d) {
-            host.viewerEl = null;
+          if (host.toolViewsOwner.viewerEl === d) {
+            host.toolViewsOwner.viewerEl = null;
             if (history.state?.sheet) {
-              host.skipPop = true;
+              host.toolViewsOwner.skipPop = true;
               history.back();
             }
           }
           if (JSON.stringify(host.sessionFilters) !== before) {
-            host.LIVE.pending = false;
+            host.liveModelOwner.LIVE.pending = false;
             ctx.onChange();
-          } else if (host.LIVE.pending) host.refresh();
+          } else if (host.liveModelOwner.LIVE.pending) host.applicationRefreshOwner.refresh();
         },
         clear() {
           for (const key of Object.keys(host.sessionFilters) as FacetKey[])
@@ -406,7 +435,7 @@ export function createAnalytics(host: AnalyticsHost) {
       d,
       body,
       show: open,
-    } = host.panel(shortModel(group.model) + ' · ' + group.band, {
+    } = host.sessionChrome.panel(shortModel(group.model) + ' · ' + group.band, {
       label: 'Work items for ' + group.model + ', ' + group.band,
     });
     renderModelItems(
@@ -414,12 +443,12 @@ export function createAnalytics(host: AnalyticsHost) {
       group.n + ' work items' + (group.small_sample ? ' · small sample' : ''),
       (group.items ?? []).map((item) => ({
         id: item.sid,
-        name: host.SESS[item.sid]?.name,
+        name: host.modelStore.sessions[item.sid]?.name,
         description:
           (item.models ?? []).map(shortModel).join(' → ') +
           ' · ' +
-          (item.cost_usd == null ? 'cost unknown' : host.asMoney(item.cost_usd)),
-        trace: (host.TURNS[item.sid] ?? []).find((t) => t.out.length)?.id,
+          (item.cost_usd == null ? 'cost unknown' : host.domain.asMoney(item.cost_usd)),
+        trace: (host.modelStore.turns[item.sid] ?? []).find((t) => t.out.length)?.id,
         url: liveUrl(item.pr_url ?? '') ?? undefined,
       })),
       group.items_more ? group.items_more + ' more items in the selected range' : undefined,
@@ -429,7 +458,7 @@ export function createAnalytics(host: AnalyticsHost) {
           d.close();
         },
         trace(id) {
-          host.afterPop = () => host.goTrace(id);
+          host.afterPop = () => host.destination.goTrace(id);
           d.close();
         },
       },
@@ -459,11 +488,15 @@ export function createAnalytics(host: AnalyticsHost) {
       },
       {
         opened(d) {
-          host.viewerEl = d;
+          host.toolViewsOwner.viewerEl = d;
           document.documentElement.classList.add('viewer-open');
           try {
             history.pushState(
-              { ...host.navigation.route, sheet: 1, scrollTop: host.currentScroll() },
+              {
+                ...host.navigation.route,
+                sheet: 1,
+                scrollTop: host.historyScrollOwner.currentScroll(),
+              },
               '',
             );
           } catch {}
@@ -472,15 +505,15 @@ export function createAnalytics(host: AnalyticsHost) {
           host.dialogs.delete(d);
           if (host.disposed) return;
           document.documentElement.classList.remove('viewer-open');
-          if (host.viewerEl === d) {
-            host.viewerEl = null;
+          if (host.toolViewsOwner.viewerEl === d) {
+            host.toolViewsOwner.viewerEl = null;
             if (history.state?.sheet) {
-              host.skipPop = true;
+              host.toolViewsOwner.skipPop = true;
               history.back();
             } else if (host.pendingSessionOpen) {
               const id = host.pendingSessionOpen;
               host.pendingSessionOpen = null;
-              host.goSession(id);
+              host.destination.goSession(id);
             }
           }
         },
@@ -492,16 +525,18 @@ export function createAnalytics(host: AnalyticsHost) {
         id: item.sid,
         name: nameOfSid(A, item.sid),
         harness,
-        harnessName: host.HARNESS_SHORT[harness] ?? harness,
+        harnessName: HARNESS_SHORT[harness] ?? harness,
         harnessTip:
-          host.HARNESS[harness] && host.HARNESS[harness] !== host.HARNESS_SHORT[harness]
-            ? host.HARNESS[harness]
+          HARNESS[harness] && HARNESS[harness] !== HARNESS_SHORT[harness]
+            ? HARNESS[harness]
             : undefined,
-        mark: host.harnessSnapshot(harness),
+        mark: host.screenViews.harnessSnapshot(harness),
         value: costMode
-          ? host.asMoney('usd' in item ? (item.usd ?? 0) : 0)
+          ? host.domain.asMoney('usd' in item ? (item.usd ?? 0) : 0)
           : timeText('ms' in item ? item.ms : 0) + ' busy',
-        href: host.SESS[item.sid] ? host.urlOf({ v: 'session', id: item.sid }) : undefined,
+        href: host.modelStore.sessions[item.sid]
+          ? host.bootstrapOwner.urlOf({ v: 'session', id: item.sid })
+          : undefined,
         className: 'analytics-session analytics-slice',
         missing:
           costMode && 'unpriced_models' in item && item.unpriced_models.length
@@ -588,7 +623,7 @@ export function createAnalytics(host: AnalyticsHost) {
         return {
           key,
           heading: 'Cost over time',
-          info: host.COST_TIP,
+          info: host.recentNavigation.COST_TIP,
           empty:
             'Cost is recorded per UTC day, so there is no hourly series. Pick 7 d or 30 d for a daily chart.',
           width: W,
@@ -647,16 +682,16 @@ export function createAnalytics(host: AnalyticsHost) {
           active: costMode ? !!bin.sessions.length : total > 0,
           tip: costMode ? undefined : tip,
           label: costMode
-            ? host.clock(bin.a) + ' to ' + host.clock(bin.b) + ': ' + host.asMoney(total)
+            ? host.clock(bin.a) + ' to ' + host.clock(bin.b) + ': ' + host.domain.asMoney(total)
             : tip + '. Open the sessions busy then',
           when,
-          value: costMode ? host.asMoney(total) : hLabel(total) + ' agent-hours',
+          value: costMode ? host.domain.asMoney(total) : hLabel(total) + ' agent-hours',
         };
       });
       return {
         key,
         heading: costMode ? 'Cost over time' : 'Agents at work',
-        info: costMode ? host.COST_TIP : undefined,
+        info: costMode ? host.recentNavigation.COST_TIP : undefined,
         sub: costMode
           ? 'API-equivalent cost per UTC day · today so far · stacked by harness'
           : 'Agent-hours ' + A.agents.unit + ' · stacked by harness',
@@ -673,7 +708,7 @@ export function createAnalytics(host: AnalyticsHost) {
         legend: [
           ['claude', 'Claude'],
           ['codex', 'Codex'],
-        ].map(([id, label]) => ({ id, label, mark: host.harnessSnapshot(id) })),
+        ].map(([id, label]) => ({ id, label, mark: host.screenViews.harnessSnapshot(id) })),
         missing:
           costMode && A.cost!.unpriced_models.length
             ? 'no price for ' +
@@ -707,7 +742,13 @@ export function createAnalytics(host: AnalyticsHost) {
       ['Review rounds', 'median_review_rounds', 'review_rounds_n', 'review_rounds', String],
       ['Red CI heads', 'median_red_ci_heads', 'red_ci_n', 'ci', String],
       ['Model time', 'median_model_ms', 'model_time_n', 'model_time', timeText],
-      ['API cost', 'median_cost_usd', 'cost_n', 'cost', host.asMoney],
+      [
+        'API cost',
+        'median_cost_usd',
+        'cost_n',
+        'cost',
+        (...args: Parameters<typeof host.domain.asMoney>) => host.domain.asMoney(...args),
+      ],
       [
         'Allowance / M input',
         'allowance_per_million_input',
@@ -729,7 +770,7 @@ export function createAnalytics(host: AnalyticsHost) {
       );
       metric(
         A.days === 1 ? 'Cost today (UTC)' : 'Cost, last ' + A.days + ' UTC days',
-        now.cost.usd == null ? '—' : host.asMoney(now.cost.usd),
+        now.cost.usd == null ? '—' : host.domain.asMoney(now.cost.usd),
         now.cost.usd == null || previous.cost.usd == null
           ? {
               text:
@@ -738,7 +779,11 @@ export function createAnalytics(host: AnalyticsHost) {
                   ', ',
                 ),
             }
-          : note(now.cost.usd, previous.cost.usd, host.asMoney),
+          : note(
+              now.cost.usd,
+              previous.cost.usd,
+              (...args: Parameters<typeof host.domain.asMoney>) => host.domain.asMoney(...args),
+            ),
         A.days === 1
           ? 'API-equivalent cost. Cost is recorded per UTC day: this is the whole current UTC day so far, compared with the whole day before.'
           : 'API-equivalent cost. Cost is recorded per UTC day: the last ' +
@@ -746,7 +791,7 @@ export function createAnalytics(host: AnalyticsHost) {
               ' UTC days count, today so far, compared with the ' +
               A.days +
               ' whole UTC days before.',
-        host.COST_TIP,
+        host.recentNavigation.COST_TIP,
       );
       metric(
         'Sessions started',
@@ -817,8 +862,8 @@ export function createAnalytics(host: AnalyticsHost) {
               ? 'No repo (roles)'
               : id
             : key === 'machine'
-              ? (host.MACHINE[id] ?? id)
-              : (host.HARNESS[id.split('\u0000')[0]] ?? id.split('\u0000')[0]) +
+              ? (host.modelStore.machines[id] ?? id)
+              : (HARNESS[id.split('\u0000')[0]] ?? id.split('\u0000')[0]) +
                 ' · ' +
                 shortModel(id.split('\u0000')[1]);
         const selected = (g: AnalyticsData['breakdown']['repo'][number]) =>
@@ -839,7 +884,7 @@ export function createAnalytics(host: AnalyticsHost) {
             color:
               key === 'harness' ? (keyFor(g).startsWith('claude') ? 'claude' : 'codex') : undefined,
             hours: hoursText(g.ms),
-            cost: g.unpriced_models.length ? '—' : host.asMoney(g.usd),
+            cost: g.unpriced_models.length ? '—' : host.domain.asMoney(g.usd),
             missing: g.unpriced_models.length
               ? 'no price for ' + g.unpriced_models.join(', ')
               : undefined,
@@ -867,7 +912,7 @@ export function createAnalytics(host: AnalyticsHost) {
         [
           'Most expensive sessions · API-equivalent cost',
           A.top.cost,
-          (x) => ('usd' in x && x.usd != null ? host.asMoney(x.usd) : '—'),
+          (x) => ('usd' in x && x.usd != null ? host.domain.asMoney(x.usd) : '—'),
           (x) => ('usd' in x ? (x.usd ?? 0) : 0),
         ],
       ];
@@ -882,14 +927,16 @@ export function createAnalytics(host: AnalyticsHost) {
               id: item.sid,
               name: nameOfSid(A, item.sid),
               harness,
-              harnessName: host.HARNESS_SHORT[harness] ?? harness,
+              harnessName: HARNESS_SHORT[harness] ?? harness,
               harnessTip:
-                host.HARNESS[harness] && host.HARNESS[harness] !== host.HARNESS_SHORT[harness]
-                  ? host.HARNESS[harness]
+                HARNESS[harness] && HARNESS[harness] !== HARNESS_SHORT[harness]
+                  ? HARNESS[harness]
                   : undefined,
-              mark: host.harnessSnapshot(harness),
+              mark: host.screenViews.harnessSnapshot(harness),
               value: value(item),
-              href: host.SESS[item.sid] ? host.urlOf({ v: 'session', id: item.sid }) : undefined,
+              href: host.modelStore.sessions[item.sid]
+                ? host.bootstrapOwner.urlOf({ v: 'session', id: item.sid })
+                : undefined,
               rank: widthOf(measure(item), max),
               missing: missing.length ? 'no price for ' + missing.join(', ') : undefined,
             };
@@ -949,7 +996,7 @@ export function createAnalytics(host: AnalyticsHost) {
               tip:
                 g.model +
                 ': ' +
-                host.asMoney(g.median_cost_usd ?? 0) +
+                host.domain.asMoney(g.median_cost_usd ?? 0) +
                 ', ' +
                 (g.first_pass_acceptance! * 100).toFixed(0) +
                 '% accepted; acceptance n=' +
@@ -1007,19 +1054,21 @@ export function createAnalytics(host: AnalyticsHost) {
         ],
       },
       {
-        committed: host.observeTitle,
+        committed: (...args: Parameters<typeof host.sessionChrome.observeTitle>) =>
+          host.sessionChrome.observeTitle(...args),
         facets: () =>
           renderFacetFilters(page, () => {
-            host.render();
+            host.documentRendererOwner.render();
             refreshAnalytics(true);
           }),
-        session: host.goSession,
+        session: (...args: Parameters<typeof host.destination.goSession>) =>
+          host.destination.goSession(...args),
         measure(value) {
           if (host.analyticsMeasure === value) return;
-          const top = host.currentScroll();
+          const top = host.historyScrollOwner.currentScroll();
           host.analyticsMeasure = value;
-          host.render();
-          host.restoreScroll(top);
+          host.documentRendererOwner.render();
+          host.historyScrollOwner.restoreScroll(top);
         },
         breakdown(group, key) {
           if (group === 'repo') host.sessionFilters.repo = key;
@@ -1031,7 +1080,7 @@ export function createAnalytics(host: AnalyticsHost) {
           }
           host.query = '';
           host.groupBy = 'recent';
-          host.go({ v: 'sessions' });
+          host.destination.go({ v: 'sessions' });
         },
         slice(key) {
           const slice = slices.get(key);

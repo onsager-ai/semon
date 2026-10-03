@@ -1,3 +1,4 @@
+import { commitApplicationView } from './application-view';
 import { render } from 'preact';
 import { createMeasuredLayout } from './layout';
 import { Glyph, Harness, screenText, claimScreen } from './screens';
@@ -188,7 +189,8 @@ export function renderAnalyticsScreen(
   const active = (action: () => void) => {
     if (root.isConnected) action();
   };
-  render(
+  commitApplicationView(
+    root,
     <>
       <div class="ph">
         <h1>Analytics</h1>
@@ -566,7 +568,6 @@ export function renderAnalyticsScreen(
         </>
       )}
     </>,
-    root,
   );
   host.committed();
 }
@@ -578,7 +579,8 @@ export function renderSliceBody(
   empty: string,
   open: (id: string) => void,
 ) {
-  render(
+  commitApplicationView(
+    root,
     <>
       {!rows.length ? (
         <p class="empty">{empty}</p>
@@ -598,7 +600,6 @@ export function renderSliceBody(
         </div>
       )}
     </>,
-    root,
   );
 }
 export interface ModelItem {
@@ -615,7 +616,8 @@ export function renderModelItems(
   more: string | undefined,
   host: { session(id: string): void; trace(id: string): void },
 ) {
-  render(
+  commitApplicationView(
+    root,
     <>
       <p class="panel-sub">{screenText(count)}</p>
       {items.map((item, i) => (
@@ -654,6 +656,5 @@ export function renderModelItems(
       ))}
       {more && <p class="panel-sub">{more}</p>}
     </>,
-    root,
   );
 }

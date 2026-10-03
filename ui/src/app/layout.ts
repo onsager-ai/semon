@@ -1,26 +1,24 @@
+import type { EffectScope } from '../app/effects';
+import type { NavigationController } from '../navigation/routes';
+import type { createAccountControls } from './accountControls';
+import type { createOrderingControls } from './orderingControls';
+import type { createRecentNavigation } from './recentNavigation';
 interface TreePref {
   open: boolean;
   at: number;
 }
 interface LayoutHost {
-  SIDEBAR_ONLY: boolean;
+  sidebarOnly: boolean;
   $: <T extends HTMLElement = HTMLElement>(s: string, r?: ParentNode) => T;
   phone: MediaQueryList;
-  navigation: import('../navigation/routes').NavigationController;
-  accountChrome: import('../lib/account-chrome').AccountChrome;
-  ORD: Map<
-    string,
-    import('../lib/ordering').OrderScope<import('../navigation/routes').ApplicationRoute>
-  >;
-  recentNavigation: {
-    recentRenderer: import('../lib/recent').RecentRenderer;
-    expandedAll: string | null;
-    renderLanes: () => void;
-    COST_TIP: string;
-    isApprovalReview: (s: import('../domain/types').Session) => boolean;
-  };
-  renderLanes: () => void;
-  scope: import('../app/effects').EffectScope;
+  navigation: NavigationController;
+  scope: EffectScope;
+
+  recentNavigation: Pick<ReturnType<typeof createRecentNavigation>, 'renderLanes' | 'expandedAll'>;
+
+  orderingControlsOwner: Pick<ReturnType<typeof createOrderingControls>, 'ORD'>;
+
+  accountControlsOwner: Pick<ReturnType<typeof createAccountControls>, 'accountChrome'>;
 }
 /** Owns layout behavior through explicit application ports. */
 export function createLayout(host: LayoutHost) {
@@ -31,7 +29,7 @@ export function createLayout(host: LayoutHost) {
     wideMode = localStorage.getItem('semon.wide') === '1';
   } catch {}
   try {
-    railMode = !host.SIDEBAR_ONLY && localStorage.getItem('semon.rail') === '1';
+    railMode = !host.sidebarOnly && localStorage.getItem('semon.rail') === '1';
   } catch {} // the rail is the viewer's own layout: an embedding page keeps its sidebar whole
   try {
     const saved = JSON.parse(localStorage.getItem('semon.tree') ?? '{}');
@@ -40,7 +38,7 @@ export function createLayout(host: LayoutHost) {
   } catch {}
   const app = host.$('.app');
   const syncLayoutPrefs = () => {
-    if (host.SIDEBAR_ONLY) return;
+    if (host.sidebarOnly) return;
     app.classList.toggle('rail', railMode && !host.phone.matches);
     host
       .$('#page')
@@ -56,17 +54,17 @@ export function createLayout(host: LayoutHost) {
     } catch {}
     syncLayoutPrefs();
     host.$('.wide-toggle')?.setAttribute('aria-pressed', String(on));
-    host.accountChrome.updateWide(on);
+    host.accountControlsOwner.accountChrome.updateWide(on);
   }
   function setRailMode(on: boolean) {
     railMode = on;
-    host.ORD.delete('side');
+    host.orderingControlsOwner.ORD.delete('side');
     try {
       localStorage.setItem('semon.rail', on ? '1' : '0');
     } catch {}
     syncLayoutPrefs();
     host.recentNavigation.expandedAll = null;
-    host.renderLanes();
+    host.recentNavigation.renderLanes();
     const b = host.$('#rail-toggle');
     b?.setAttribute('aria-expanded', String(!on));
     b?.setAttribute('aria-label', on ? 'Expand sidebar' : 'Collapse sidebar');
@@ -94,7 +92,7 @@ export function createLayout(host: LayoutHost) {
     } catch {}
   }
   // An embedding page's sidebar has no rail and no toggle for it (shell::session_sidebar): the toggle is then a detached button.
-  const railToggle = host.SIDEBAR_ONLY
+  const railToggle = host.sidebarOnly
     ? (host.$('#rail-toggle') ?? document.createElement('button'))
     : document.createElement('button');
   railToggle.setAttribute('aria-expanded', String(!railMode));

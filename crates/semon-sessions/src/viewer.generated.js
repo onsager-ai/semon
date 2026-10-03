@@ -53,7 +53,7 @@ var __semonUIShared = (() => {
     preact: () => preact_module_exports
   });
 
-  // ../../semon/ui/node_modules/preact/dist/preact.module.js
+  // node_modules/preact/dist/preact.module.js
   var preact_module_exports = {};
   __export(preact_module_exports, {
     Component: () => C,
@@ -364,7 +364,7 @@ var __semonUIShared = (() => {
     return n3.__v.__b - l4.__v.__b;
   }, H.__r = 0, f = Math.random().toString(8), c = "__d" + f, a = "__a" + f, s = /(PointerCapture)$|Capture$/i, h = 0, p = V(false), v = V(true), y = 0;
 
-  // ../../semon/ui/node_modules/preact/hooks/dist/hooks.module.js
+  // node_modules/preact/hooks/dist/hooks.module.js
   var hooks_module_exports = {};
   __export(hooks_module_exports, {
     useCallback: () => q2,
@@ -566,7 +566,7 @@ var __semonUIShared = (() => {
     return "function" == typeof t4 ? t4(n3) : t4;
   }
 
-  // ../../semon/ui/node_modules/preact/jsx-runtime/dist/jsxRuntime.module.js
+  // node_modules/preact/jsx-runtime/dist/jsxRuntime.module.js
   var jsxRuntime_module_exports = {};
   __export(jsxRuntime_module_exports, {
     Fragment: () => S,
@@ -2989,6 +2989,14 @@ globalThis.__semonUIShared = __semonUIShared;
     };
   }
 
+  // src/lib/application-view.tsx
+  function ApplicationView({ children }) {
+    return /* @__PURE__ */ jsx(Fragment2, { children });
+  }
+  function commitApplicationView(root, view) {
+    render(/* @__PURE__ */ jsx(ApplicationView, { children: view }), root);
+  }
+
   // src/lib/screens.tsx
   var owned = /* @__PURE__ */ new WeakSet();
   var kinds = /* @__PURE__ */ new WeakMap();
@@ -3015,64 +3023,67 @@ globalThis.__semonUIShared = __semonUIShared;
     if (owned.delete(root)) render(null, root);
   }
   var screenText = (text2) => text2.replace(/ · /g, "\u2009 \xB7 \u2009").replace(/^· /, "\xB7\u2009 ");
-  function renderMachinesScreen(root, snapshot, host2) {
-    render(
-      /* @__PURE__ */ jsxs(Fragment2, { children: [
-        /* @__PURE__ */ jsxs("div", { class: "ph", children: [
-          /* @__PURE__ */ jsx("h1", { children: "Machines" }),
-          /* @__PURE__ */ jsxs("div", { class: "sub", children: [
-            /* @__PURE__ */ jsxs("span", { children: [
-              /* @__PURE__ */ jsx("b", { children: snapshot.up + " of " + snapshot.rows.length }),
-              "up"
-            ] }),
-            /* @__PURE__ */ jsxs("span", { children: [
-              /* @__PURE__ */ jsx("b", { children: snapshot.working }),
-              "sessions working"
-            ] })
+  function MachinesView({
+    snapshot,
+    host: host2
+  }) {
+    return /* @__PURE__ */ jsxs(Fragment2, { children: [
+      /* @__PURE__ */ jsxs("div", { class: "ph", children: [
+        /* @__PURE__ */ jsx("h1", { children: "Machines" }),
+        /* @__PURE__ */ jsxs("div", { class: "sub", children: [
+          /* @__PURE__ */ jsxs("span", { children: [
+            /* @__PURE__ */ jsx("b", { children: snapshot.up + " of " + snapshot.rows.length }),
+            "up"
+          ] }),
+          /* @__PURE__ */ jsxs("span", { children: [
+            /* @__PURE__ */ jsx("b", { children: snapshot.working }),
+            "sessions working"
           ] })
-        ] }),
-        /* @__PURE__ */ jsxs("div", { class: "list", children: [
-          snapshot.rows.map((row) => /* @__PURE__ */ jsxs(
-            "button",
-            {
-              class: "nrow",
-              type: "button",
-              "data-m": row.id,
-              onClick: (event) => {
-                if (event.currentTarget.isConnected) host2.machine(row.id);
-              },
-              children: [
-                /* @__PURE__ */ jsx(
-                  "span",
-                  {
-                    class: "dot " + row.state,
-                    role: "img",
-                    "aria-label": row.stateLabel,
-                    "data-tip": row.stateLabel
-                  }
-                ),
-                /* @__PURE__ */ jsx("span", { class: "nm", children: screenText(row.name) }),
-                /* @__PURE__ */ jsx("span", { class: "ag", children: row.status }),
-                /* @__PURE__ */ jsx("span", { class: "for", children: screenText(row.detail) })
-              ]
-            },
-            row.id
-          )),
-          snapshot.admin && /* @__PURE__ */ jsx(
-            "button",
-            {
-              class: "more",
-              type: "button",
-              onClick: (event) => {
-                if (event.currentTarget.isConnected) host2.admin(snapshot.admin.href);
-              },
-              children: screenText(snapshot.admin.label)
-            }
-          )
         ] })
       ] }),
-      root
-    );
+      /* @__PURE__ */ jsxs("div", { class: "list", children: [
+        snapshot.rows.map((row) => /* @__PURE__ */ jsxs(
+          "button",
+          {
+            class: "nrow",
+            type: "button",
+            "data-m": row.id,
+            onClick: (event) => {
+              if (event.currentTarget.isConnected) host2.machine(row.id);
+            },
+            children: [
+              /* @__PURE__ */ jsx(
+                "span",
+                {
+                  class: "dot " + row.state,
+                  role: "img",
+                  "aria-label": row.stateLabel,
+                  "data-tip": row.stateLabel
+                }
+              ),
+              /* @__PURE__ */ jsx("span", { class: "nm", children: screenText(row.name) }),
+              /* @__PURE__ */ jsx("span", { class: "ag", children: row.status }),
+              /* @__PURE__ */ jsx("span", { class: "for", children: screenText(row.detail) })
+            ]
+          },
+          row.id
+        )),
+        snapshot.admin && /* @__PURE__ */ jsx(
+          "button",
+          {
+            class: "more",
+            type: "button",
+            onClick: (event) => {
+              if (event.currentTarget.isConnected) host2.admin(snapshot.admin.href);
+            },
+            children: screenText(snapshot.admin.label)
+          }
+        )
+      ] })
+    ] });
+  }
+  function renderMachinesScreen(root, snapshot, host2) {
+    commitApplicationView(root, /* @__PURE__ */ jsx(MachinesView, { snapshot, host: host2 }));
     owned.add(root);
     kinds.set(root, "machines");
     host2.committed();
@@ -3227,80 +3238,80 @@ globalThis.__semonUIShared = __semonUIShared;
       }
     );
   }
-  function renderHomeScreen(root, snapshot, host2) {
-    render(
-      /* @__PURE__ */ jsxs(Fragment2, { children: [
-        /* @__PURE__ */ jsxs("div", { class: "ph", children: [
-          /* @__PURE__ */ jsx("h1", { children: "Home" }),
-          /* @__PURE__ */ jsxs("div", { class: "sub", children: [
-            /* @__PURE__ */ jsxs("span", { children: [
-              /* @__PURE__ */ jsx("b", { children: snapshot.waiting }),
-              "waiting on you"
-            ] }),
-            /* @__PURE__ */ jsxs("span", { children: [
-              /* @__PURE__ */ jsx("b", { children: snapshot.working }),
-              "working"
-            ] }),
-            /* @__PURE__ */ jsxs("span", { children: [
-              /* @__PURE__ */ jsx("b", { children: snapshot.up + " of " + snapshot.machines }),
-              snapshot.machines === 1 ? "machine up" : "machines up"
-            ] })
-          ] })
-        ] }),
-        /* @__PURE__ */ jsx(Section, { heading: "Needs you", count: snapshot.waiting }),
-        /* @__PURE__ */ jsxs("div", { class: "list", children: [
-          snapshot.inbox.map((row) => /* @__PURE__ */ jsx(Inbox, { row, host: host2 }, row.id)),
-          !snapshot.waiting && /* @__PURE__ */ jsx("p", { class: "empty", children: "Nothing is waiting on you." })
-        ] }),
-        /* @__PURE__ */ jsx(Section, { heading: "Working now", count: snapshot.working }),
-        /* @__PURE__ */ jsxs("div", { class: "list", children: [
-          snapshot.live.map((row) => /* @__PURE__ */ jsx(Live, { row, host: host2 }, row.id)),
-          !snapshot.working && /* @__PURE__ */ jsx("p", { class: "empty", children: "Nothing is running." })
-        ] }),
-        snapshot.totalAnswered > 0 && /* @__PURE__ */ jsxs(Fragment2, { children: [
-          /* @__PURE__ */ jsx(Section, { heading: "Answered", count: snapshot.totalAnswered }),
-          /* @__PURE__ */ jsxs("div", { class: "list", children: [
-            snapshot.answered.map((row) => /* @__PURE__ */ jsx(Inbox, { row, host: host2 }, row.id)),
-            !snapshot.allAnswered && snapshot.totalAnswered > 3 && /* @__PURE__ */ jsx(
-              "button",
-              {
-                class: "more",
-                type: "button",
-                onClick: (event) => {
-                  if (event.currentTarget.isConnected) host2.answered();
-                },
-                children: "Show all " + snapshot.totalAnswered + " answered"
-              }
-            )
+  function HomeView({ snapshot, host: host2 }) {
+    return /* @__PURE__ */ jsxs(Fragment2, { children: [
+      /* @__PURE__ */ jsxs("div", { class: "ph", children: [
+        /* @__PURE__ */ jsx("h1", { children: "Home" }),
+        /* @__PURE__ */ jsxs("div", { class: "sub", children: [
+          /* @__PURE__ */ jsxs("span", { children: [
+            /* @__PURE__ */ jsx("b", { children: snapshot.waiting }),
+            "waiting on you"
+          ] }),
+          /* @__PURE__ */ jsxs("span", { children: [
+            /* @__PURE__ */ jsx("b", { children: snapshot.working }),
+            "working"
+          ] }),
+          /* @__PURE__ */ jsxs("span", { children: [
+            /* @__PURE__ */ jsx("b", { children: snapshot.up + " of " + snapshot.machines }),
+            snapshot.machines === 1 ? "machine up" : "machines up"
           ] })
         ] })
       ] }),
-      root
-    );
+      /* @__PURE__ */ jsx(Section, { heading: "Needs you", count: snapshot.waiting }),
+      /* @__PURE__ */ jsxs("div", { class: "list", children: [
+        snapshot.inbox.map((row) => /* @__PURE__ */ jsx(Inbox, { row, host: host2 }, row.id)),
+        !snapshot.waiting && /* @__PURE__ */ jsx("p", { class: "empty", children: "Nothing is waiting on you." })
+      ] }),
+      /* @__PURE__ */ jsx(Section, { heading: "Working now", count: snapshot.working }),
+      /* @__PURE__ */ jsxs("div", { class: "list", children: [
+        snapshot.live.map((row) => /* @__PURE__ */ jsx(Live, { row, host: host2 }, row.id)),
+        !snapshot.working && /* @__PURE__ */ jsx("p", { class: "empty", children: "Nothing is running." })
+      ] }),
+      snapshot.totalAnswered > 0 && /* @__PURE__ */ jsxs(Fragment2, { children: [
+        /* @__PURE__ */ jsx(Section, { heading: "Answered", count: snapshot.totalAnswered }),
+        /* @__PURE__ */ jsxs("div", { class: "list", children: [
+          snapshot.answered.map((row) => /* @__PURE__ */ jsx(Inbox, { row, host: host2 }, row.id)),
+          !snapshot.allAnswered && snapshot.totalAnswered > 3 && /* @__PURE__ */ jsx(
+            "button",
+            {
+              class: "more",
+              type: "button",
+              onClick: (event) => {
+                if (event.currentTarget.isConnected) host2.answered();
+              },
+              children: "Show all " + snapshot.totalAnswered + " answered"
+            }
+          )
+        ] })
+      ] })
+    ] });
+  }
+  function renderHomeScreen(root, snapshot, host2) {
+    commitApplicationView(root, /* @__PURE__ */ jsx(HomeView, { snapshot, host: host2 }));
     owned.add(root);
     kinds.set(root, "home");
     host2.committed();
   }
-  function renderMachineScreen(root, snapshot, host2) {
-    render(
-      /* @__PURE__ */ jsxs(Fragment2, { children: [
-        /* @__PURE__ */ jsx("div", { class: "ph sr", children: /* @__PURE__ */ jsx("h1", { children: screenText(snapshot.name) }) }),
-        snapshot.totalSessions > 0 && /* @__PURE__ */ jsxs(Fragment2, { children: [
-          /* @__PURE__ */ jsx(Section, { heading: "Sessions", count: snapshot.totalSessions }),
-          /* @__PURE__ */ jsx("div", { class: "list", children: snapshot.sessions.map((row) => /* @__PURE__ */ jsx(Live, { row, host: host2 }, row.id)) })
-        ] }),
-        snapshot.off.length > 0 && /* @__PURE__ */ jsxs(Fragment2, { children: [
-          /* @__PURE__ */ jsx(Section, { heading: "Moved off", count: snapshot.off.length }),
-          /* @__PURE__ */ jsx("div", { class: "list", children: snapshot.off.map((row) => /* @__PURE__ */ jsx(Live, { row, host: host2 }, row.id)) })
-        ] }),
-        snapshot.moves.length > 0 && /* @__PURE__ */ jsxs(Fragment2, { children: [
-          /* @__PURE__ */ jsx(Section, { heading: "Moves", count: snapshot.moves.length }),
-          /* @__PURE__ */ jsx("div", { class: "list", children: snapshot.moves.map((row) => /* @__PURE__ */ jsx(Inbox, { row, host: host2 }, row.id)) })
-        ] }),
-        !snapshot.totalSessions && !snapshot.off.length && /* @__PURE__ */ jsx("p", { class: "empty", children: "No sessions have run here." })
+  function MachineView({ snapshot, host: host2 }) {
+    return /* @__PURE__ */ jsxs(Fragment2, { children: [
+      /* @__PURE__ */ jsx("div", { class: "ph sr", children: /* @__PURE__ */ jsx("h1", { children: screenText(snapshot.name) }) }),
+      snapshot.totalSessions > 0 && /* @__PURE__ */ jsxs(Fragment2, { children: [
+        /* @__PURE__ */ jsx(Section, { heading: "Sessions", count: snapshot.totalSessions }),
+        /* @__PURE__ */ jsx("div", { class: "list", children: snapshot.sessions.map((row) => /* @__PURE__ */ jsx(Live, { row, host: host2 }, row.id)) })
       ] }),
-      root
-    );
+      snapshot.off.length > 0 && /* @__PURE__ */ jsxs(Fragment2, { children: [
+        /* @__PURE__ */ jsx(Section, { heading: "Moved off", count: snapshot.off.length }),
+        /* @__PURE__ */ jsx("div", { class: "list", children: snapshot.off.map((row) => /* @__PURE__ */ jsx(Live, { row, host: host2 }, row.id)) })
+      ] }),
+      snapshot.moves.length > 0 && /* @__PURE__ */ jsxs(Fragment2, { children: [
+        /* @__PURE__ */ jsx(Section, { heading: "Moves", count: snapshot.moves.length }),
+        /* @__PURE__ */ jsx("div", { class: "list", children: snapshot.moves.map((row) => /* @__PURE__ */ jsx(Inbox, { row, host: host2 }, row.id)) })
+      ] }),
+      !snapshot.totalSessions && !snapshot.off.length && /* @__PURE__ */ jsx("p", { class: "empty", children: "No sessions have run here." })
+    ] });
+  }
+  function renderMachineScreen(root, snapshot, host2) {
+    commitApplicationView(root, /* @__PURE__ */ jsx(MachineView, { snapshot, host: host2 }));
     owned.add(root);
     kinds.set(root, "machine");
     host2.committed();
@@ -3421,7 +3432,8 @@ globalThis.__semonUIShared = __semonUIShared;
     const current = state2;
     const fieldValue = current.input?.value.trim() === snapshot.query ? current.input.value : snapshot.query;
     const facet = host2.facets();
-    render(
+    commitApplicationView(
+      root,
       /* @__PURE__ */ jsxs(Fragment2, { children: [
         /* @__PURE__ */ jsxs("div", { class: "ph", children: [
           /* @__PURE__ */ jsx("h1", { children: "Sessions" }),
@@ -3509,8 +3521,7 @@ globalThis.__semonUIShared = __semonUIShared;
           ] }, group.title)),
           !snapshot.matches && /* @__PURE__ */ jsx("p", { class: "empty", children: "No sessions match \u201C" + screenText(snapshot.query) + "\u201D." })
         ] })
-      ] }),
-      root
+      ] })
     );
     owned.add(root);
     kinds.set(root, "sessions");
@@ -4345,7 +4356,8 @@ globalThis.__semonUIShared = __semonUIShared;
     const active = (action) => {
       if (root.isConnected) action();
     };
-    render(
+    commitApplicationView(
+      root,
       /* @__PURE__ */ jsxs(Fragment2, { children: [
         /* @__PURE__ */ jsxs("div", { class: "ph", children: [
           /* @__PURE__ */ jsx("h1", { children: "Analytics" }),
@@ -4643,13 +4655,13 @@ globalThis.__semonUIShared = __semonUIShared;
             ] }, window2.label)) })
           ] })
         ] })
-      ] }),
-      root
+      ] })
     );
     host2.committed();
   }
   function renderSliceBody(root, rows, more, empty, open) {
-    render(
+    commitApplicationView(
+      root,
       /* @__PURE__ */ jsx(Fragment2, { children: !rows.length ? /* @__PURE__ */ jsx("p", { class: "empty", children: empty }) : /* @__PURE__ */ jsxs("div", { class: "analytics-list", children: [
         rows.map((row) => /* @__PURE__ */ jsx(
           Row,
@@ -4663,12 +4675,12 @@ globalThis.__semonUIShared = __semonUIShared;
           row.id
         )),
         more > 0 && /* @__PURE__ */ jsx("p", { class: "empty", children: "and " + more + " more" })
-      ] }) }),
-      root
+      ] }) })
     );
   }
   function renderModelItems(root, count, items, more, host2) {
-    render(
+    commitApplicationView(
+      root,
       /* @__PURE__ */ jsxs(Fragment2, { children: [
         /* @__PURE__ */ jsx("p", { class: "panel-sub", children: screenText(count) }),
         items.map((item2, i) => /* @__PURE__ */ jsxs("div", { class: "model-item", children: [
@@ -4698,8 +4710,7 @@ globalThis.__semonUIShared = __semonUIShared;
           item2.url && /* @__PURE__ */ jsx("a", { href: item2.url, target: "_blank", rel: "noopener noreferrer", children: "Open pull request" })
         ] }, i)),
         more && /* @__PURE__ */ jsx("p", { class: "panel-sub", children: more })
-      ] }),
-      root
+      ] })
     );
   }
 
@@ -4858,7 +4869,8 @@ globalThis.__semonUIShared = __semonUIShared;
       owner.layout.reset();
       const left = (value) => owner.layout.className("left", value, "%"), width = (value) => owner.layout.className("width", value, "%"), indent = (depth) => owner.layout.className("width", Math.min(3, depth) * 12, "px");
       const agents = snapshot.agents;
-      render(
+      commitApplicationView(
+        root,
         /* @__PURE__ */ jsxs(Fragment2, { children: [
           snapshot.summary && /* @__PURE__ */ jsx("p", { class: "trace-summary", children: screenText(snapshot.summary) }),
           /* @__PURE__ */ jsx("div", { class: "ph sr", children: /* @__PURE__ */ jsx("h1", { children: "Trace" }) }),
@@ -5123,8 +5135,7 @@ globalThis.__semonUIShared = __semonUIShared;
               hop.key
             )) })
           ] })
-        ] }),
-        root
+        ] })
       );
       if (owner.chart) owner.observer.observe(owner.chart);
       for (const pair of owner.briefs.values()) owner.observer.observe(pair.node);
@@ -5609,7 +5620,8 @@ globalThis.__semonUIShared = __semonUIShared;
       if (state2.disposed) return;
       const held = document.activeElement instanceof HTMLElement && document.activeElement.closest(".session-foot") ? document.activeElement : null, heldKind = held?.dataset.foot;
       const view = state2.snapshot;
-      render(
+      commitApplicationView(
+        root,
         /* @__PURE__ */ jsxs(Fragment2, { children: [
           /* @__PURE__ */ jsx("div", { class: "ph sr", children: /* @__PURE__ */ jsx("h1", { children: screenText(view.name) }) }),
           /* @__PURE__ */ jsxs("section", { class: "transcript", "aria-label": "Transcript", children: [
@@ -5684,8 +5696,7 @@ globalThis.__semonUIShared = __semonUIShared;
               }
             )
           ] })
-        ] }),
-        root
+        ] })
       );
       if (heldKind && held && !held.isConnected)
         (root.querySelector('[data-foot="' + CSS.escape(heldKind) + '"]') ?? root.querySelector('[data-foot="time"]'))?.focus({ preventScroll: true });
@@ -6584,6 +6595,120 @@ globalThis.__semonUIShared = __semonUIShared;
     return host;
   }
 
+  // src/app/renderTransaction.ts
+  function createRenderTransaction(host2) {
+    return {
+      begin() {
+        host2.pagingOwner.resetPagerInput();
+        host2.pagingOwner.holdProgrammaticScroll();
+        host2.accountControlsOwner.closeAccountMenu();
+        host2.viewport.stopOpeningEndPin();
+        host2.orderingControlsOwner.ordPageState = host2.orderingControlsOwner.ordState("page");
+        host2.transportOwner.tick();
+      },
+      complete(r) {
+        const lanesKept = host2.destination.lanesFor && host2.destination.lanesFor.r === r && host2.destination.lanesFor.version === host2.liveModelOwner.LIVE.version;
+        host2.destination.lanesFor = null;
+        host2.layoutOwner.syncLayoutPrefs();
+        host2.sessionChrome.syncBarLine();
+        host2.navigationViewOwner.renderNav();
+        if (!lanesKept) host2.recentNavigation.renderLanes();
+        host2.accountControlsOwner.renderDrawerAccount();
+        host2.viewport.syncJump();
+        host2.orderingControlsOwner.ordPageState = null;
+      }
+    };
+  }
+
+  // src/state/viewUpdates.ts
+  var ViewUpdates = class {
+    listeners = /* @__PURE__ */ new Set();
+    disposed = false;
+    sequence = 0;
+    modelSequence = 0;
+    get revision() {
+      return this.sequence;
+    }
+    get modelRevision() {
+      return this.modelSequence;
+    }
+    subscribe(listener, session) {
+      if (this.disposed) return () => {
+      };
+      const selected = (change) => {
+        if (session === void 0 || change.kind === "model" || change.session === session)
+          listener(change);
+      };
+      this.listeners.add(selected);
+      return () => {
+        this.listeners.delete(selected);
+      };
+    }
+    model() {
+      if (this.disposed) return;
+      this.modelSequence++;
+      this.publish({ kind: "model", revision: ++this.sequence });
+    }
+    transcript(session) {
+      if (!this.disposed) this.publish({ kind: "transcript", session, revision: ++this.sequence });
+    }
+    publish(change) {
+      for (const listener of this.listeners) listener(change);
+    }
+    destroy() {
+      this.disposed = true;
+      this.listeners.clear();
+    }
+  };
+
+  // src/app/pageRoot.ts
+  function createPageRoot() {
+    return {
+      viewer(root, kind) {
+        if (ownsScreen(root) && screenKind(root) === kind) return;
+        releaseScreen(root);
+        root.replaceChildren();
+      },
+      native(root) {
+        releaseScreen(root);
+      },
+      destroy(root) {
+        releaseScreen(root);
+      }
+    };
+  }
+
+  // src/app/routeControls.ts
+  function createRouteControls(navigation) {
+    const SLOTS = /* @__PURE__ */ new Map();
+    function slot(key, box, build) {
+      let s = SLOTS.get(key);
+      if (!s || s.route !== navigation.route || s.box !== box || !box.contains(s.el)) {
+        s?.ctx.destroy?.();
+        const ctx = { sync() {
+        }, onChange() {
+        } };
+        s = { route: navigation.route, box, ctx, el: build(ctx) };
+        SLOTS.set(key, s);
+      }
+      return s;
+    }
+    function retain(route) {
+      for (const [key, control] of SLOTS)
+        if (control.route !== route) {
+          control.ctx.destroy?.();
+          SLOTS.delete(key);
+        }
+    }
+    return {
+      slot,
+      retain,
+      destroy() {
+        retain(null);
+      }
+    };
+  }
+
   // src/domain/format.ts
   var clock = (t, NOW) => {
     const d = new Date(t), n = new Date(NOW);
@@ -7373,6 +7498,10 @@ globalThis.__semonUIShared = __semonUIShared;
     for (const [id, row] of next) target.set(id, row);
   }
   var ViewerModelStore = class {
+    constructor(updates = new ViewUpdates()) {
+      this.updates = updates;
+    }
+    updates;
     raw = new ModelStore();
     sessions = /* @__PURE__ */ Object.create(null);
     machines = /* @__PURE__ */ Object.create(null);
@@ -7387,7 +7516,7 @@ globalThis.__semonUIShared = __semonUIShared;
     apply(value) {
       return this.raw.apply(value);
     }
-    adopt(value) {
+    adopt(value, finalize) {
       const model2 = parseModel(value), normalized = normalizeModel(model2);
       const machines = model2.machines == null ? [parseModelMachine(model2.machine)] : array(model2.machines, parseModelMachine);
       this.raw.adopt(model2);
@@ -7405,6 +7534,8 @@ globalThis.__semonUIShared = __semonUIShared;
         this.machineUp[row.id] = row.up;
         if (row.last !== void 0) this.machineLast[row.id] = row.last;
       }
+      finalize?.();
+      this.updates.model();
       return model2;
     }
     domain(transcriptMeta) {
@@ -7602,8 +7733,10 @@ globalThis.__semonUIShared = __semonUIShared;
 
   // src/state/transcript.ts
   var TranscriptStore = class {
-    constructor(host2) {
+    constructor(host2, updates) {
       this.host = host2;
+      this.ownsUpdates = updates === void 0;
+      this.updates = updates ?? new ViewUpdates();
     }
     host;
     entries = /* @__PURE__ */ Object.create(null);
@@ -7615,6 +7748,8 @@ globalThis.__semonUIShared = __semonUIShared;
     requests = /* @__PURE__ */ new Set();
     replacements = /* @__PURE__ */ new Map();
     disposed = false;
+    updates;
+    ownsUpdates;
     spread(sid) {
       for (const turn2 of this.host.turns(sid)) turn2.entries = [];
       let turn, pre = 0;
@@ -7639,6 +7774,7 @@ globalThis.__semonUIShared = __semonUIShared;
       this.clearPaging(sid);
       delete this.entries[sid];
       delete this.meta[sid];
+      this.updates.transcript(sid);
     }
     async fetch(sid, query = "", direction, signal, onPage) {
       if (this.disposed || signal?.aborted) return;
@@ -7681,6 +7817,7 @@ globalThis.__semonUIShared = __semonUIShared;
           this.meta[sid].newer = 0;
         }
         this.spread(sid);
+        this.updates.transcript(sid);
         onPage?.();
       } catch (error) {
         if (!this.disposed && !controller.signal.aborted) throw error;
@@ -7702,18 +7839,27 @@ globalThis.__semonUIShared = __semonUIShared;
       this.cache.delete(sid);
       this.entries[sid] = cached.entries;
       this.meta[sid] = cached.meta;
-      if (!turn) return true;
       this.spread(sid);
+      if (!turn) {
+        this.updates.transcript(sid);
+        return true;
+      }
       const target = this.host.turn(turn);
       if (target && target.sid === sid && !target.entries.length) {
         this.drop(sid);
         return false;
       }
+      this.updates.transcript(sid);
       return true;
+    }
+    /** A coherent projection borrows accepted entries; no full-transcript copies. */
+    view(sid) {
+      return { entries: this.entries[sid], range: this.meta[sid], revision: this.updates.revision };
     }
     destroy() {
       if (this.disposed) return;
       this.disposed = true;
+      if (this.ownsUpdates) this.updates.destroy();
       for (const request of this.requests) request.abort();
       this.requests.clear();
       this.replacements.clear();
@@ -7738,7 +7884,11 @@ globalThis.__semonUIShared = __semonUIShared;
         if (compact)
           try {
             history.pushState(
-              { ...host2.navigation.route, sheet: 1, scrollTop: host2.currentScroll() },
+              {
+                ...host2.navigation.route,
+                sheet: 1,
+                scrollTop: host2.historyScrollOwner.currentScroll()
+              },
               ""
             );
             host2.accountSheet = true;
@@ -7754,10 +7904,10 @@ globalThis.__semonUIShared = __semonUIShared;
             history.back();
           }
         }
-        if (host2.LIVE.pending && !navigating)
+        if (host2.liveModelOwner.LIVE.pending && !navigating)
           host2.scope.timeout(() => {
-            if (host2.LIVE.pending && !host2.toolViewsOwner.viewerEl && !accountChrome.open)
-              host2.refresh();
+            if (host2.liveModelOwner.LIVE.pending && !host2.toolViewsOwner.viewerEl && !accountChrome.open)
+              host2.applicationRefreshOwner.refresh();
           }, 0);
       },
       navigate(href) {
@@ -7771,27 +7921,27 @@ globalThis.__semonUIShared = __semonUIShared;
         return true;
       }
     };
-    const shellChrome = host2.SIDEBAR_ONLY ? null : createShellChrome({
+    const shellChrome = host2.sidebarOnly ? null : createShellChrome({
       account: accountHost,
       navigate(destination) {
-        host2.go(host2.navigation.historyRoute({ v: destination.key }, { v: "home" }));
+        host2.destination.go(host2.navigation.historyRoute({ v: destination.key }, { v: "home" }));
         return true;
       },
       drawerOpened() {
-        host2.orderApply("side");
+        host2.orderingControlsOwner.orderApply("side");
       },
       drawerClosed() {
         host2.scope.timeout(() => {
           if (host2.phone.matches && !document.body.classList.contains("drawer-open"))
-            host2.orderApply("side");
-        }, host2.ORD_DRAWER_MS);
+            host2.orderingControlsOwner.orderApply("side");
+        }, host2.orderingControlsOwner.ORD_DRAWER_MS);
       },
       railChanged() {
-        host2.setRailMode(!host2.layoutOwner.railMode);
-        host2.renderNav();
+        host2.layoutOwner.setRailMode(!host2.layoutOwner.railMode);
+        host2.navigationViewOwner.renderNav();
       }
     });
-    if (shellChrome) shellChrome.mount(host2.app);
+    if (shellChrome) shellChrome.mount(host2.layoutOwner.app);
     const accountChrome = shellChrome?.account ?? createAccountChrome(accountHost);
     function closeAccountMenu(keepEntry = void 0, navigating = void 0) {
       accountChrome.close({ keepEntry, navigating });
@@ -7805,21 +7955,21 @@ globalThis.__semonUIShared = __semonUIShared;
       } else go();
     }
     function accountWidget(compact) {
-      return host2.ACCOUNT ? accountChrome.mount({
-        account: host2.ACCOUNT,
+      return host2.account ? accountChrome.mount({
+        account: host2.account,
         compact,
         wide: host2.layoutOwner.wideMode,
-        onWideChange: () => host2.setWideMode(!host2.layoutOwner.wideMode)
+        onWideChange: () => host2.layoutOwner.setWideMode(!host2.layoutOwner.wideMode)
       }) : null;
     }
     function renderDrawerAccount() {
       if (shellChrome) {
         shellChrome.drawerAccount(
-          host2.ACCOUNT ? {
-            account: host2.ACCOUNT,
+          host2.account ? {
+            account: host2.account,
             compact: true,
             wide: host2.layoutOwner.wideMode,
-            onWideChange: () => host2.setWideMode(!host2.layoutOwner.wideMode)
+            onWideChange: () => host2.layoutOwner.setWideMode(!host2.layoutOwner.wideMode)
           } : null
         );
         return;
@@ -7829,7 +7979,7 @@ globalThis.__semonUIShared = __semonUIShared;
         accountChrome.unmount(old);
         old.remove();
       }
-      if (!host2.ACCOUNT) return;
+      if (!host2.account) return;
       const widget = accountWidget(true);
       if (!widget) return;
       widget.id = "account-drawer";
@@ -7837,6 +7987,86 @@ globalThis.__semonUIShared = __semonUIShared;
     }
     return { shellChrome, accountChrome, closeAccountMenu, renderDrawerAccount };
   }
+
+  // src/app/registry.ts
+  var HARNESSES = {
+    claude: {
+      name: "Claude Code",
+      short: "Claude",
+      icon: { light: "/harness/claude-code.svg", dark: "/harness/claude-code.svg" }
+    },
+    codex: {
+      name: "Codex",
+      short: "Codex",
+      icon: { light: "/harness/codex-black.svg", dark: "/harness/codex.svg" }
+    },
+    opencode: {
+      name: "OpenCode",
+      short: "OpenCode",
+      icon: { light: "/harness/opencode-light.svg", dark: "/harness/opencode-dark.svg" }
+    }
+  };
+  var HARNESS = Object.fromEntries(Object.entries(HARNESSES).map(([id, h2]) => [id, h2.name]));
+  var HARNESS_SHORT = Object.fromEntries(
+    Object.entries(HARNESSES).map(([id, h2]) => [id, h2.short])
+  );
+  var I = {
+    menu: "M4 7h16M4 12h16M4 17h16",
+    more: "M5 12h.01M12 12h.01M19 12h.01",
+    back: "M15 6l-6 6 6 6",
+    chev: "M9 6l6 6-6 6",
+    search: "M11 18a7 7 0 1 1 0-14 7 7 0 0 1 0 14zM20 20l-4-4",
+    filter: "M4 6h16M7 12h10M10 18h4",
+    home: "M4 11l8-7 8 7M6 9.5V20h12V9.5M10 20v-5h4v5",
+    inbox: "M4 13l2.5-8h11L20 13v6H4zM4 13h5l1 2h4l1-2h5",
+    now: "M3 12h4l2.5-6 5 12 2.5-6h4",
+    trace: "M6 4v10a4 4 0 0 0 4 4h8M6 10h12M15 7l3 3-3 3M15 15l3 3-3 3",
+    sessions: "M9 6h11M9 12h11M9 18h11M4.5 6h.01M4.5 12h.01M4.5 18h.01",
+    run: "M4 17l5-5-5-5M12 19h8",
+    stack: "M12 3l9 5-9 5-9-5zM3 13l9 5 9-5",
+    read: "M6 3h8l4 4v14H6zM14 3v4h4",
+    edit: "M4 20h4L19 9l-4-4L4 16zM13 7l4 4",
+    find: "M11 18a7 7 0 1 1 0-14 7 7 0 0 1 0 14zM20 20l-4-4",
+    machine: "M3 5h18v11H3zM8 20h8M12 16v4",
+    repo: "M6 3v12M6 15a3 3 0 1 0 0 6 3 3 0 0 0 0-6zM18 9a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM18 9c0 6-12 3-12 6",
+    duration: "M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18zM12 7v5l3 2",
+    delegate: "M4 3h7v5H4zM7.5 8v9H13M13 14h7v6h-7z",
+    out: "M7 17L17 7M9 7h8v8",
+    in: "M17 7L7 17M15 17H7V9",
+    move: "M4 8h13l-3-3M20 16H7l3 3",
+    ask: "M5 18l-1 3 3-1 11-11-2-2zM14 6l4 4",
+    you: "M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8zM4 21c1-4 4-6 8-6s7 2 8 6",
+    q: "M9 9a3 3 0 1 1 4 2.8c-.7.3-1 .9-1 1.7V14M12 18h.01",
+    check: "M5 12l4 4 10-10",
+    qc: "M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18zM9.6 9.4a2.5 2.5 0 1 1 3.4 2.4c-.6.3-1 .8-1 1.5v.4M12 17h.01",
+    decide: "M12 21v-6M12 15L6 9M12 15l6-6M6 9V4M18 9V4M4 6l2-2 2 2M16 6l2-2 2 2",
+    result: "M14 3H6v18h12V7zM14 3v4h4M9 12h6M9 16h6",
+    done: "M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18zM8 12.5l2.7 2.7L16 9.8",
+    x: "M6 6l12 12M18 6L6 18",
+    expand: "M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7",
+    copy: "M9 9h11v11H9zM5 15H4V4h11v1",
+    ext: "M14 4h6v6M20 4l-9 9M18 14v6H4V6h6",
+    down: "M12 4v15M5 12l7 7 7-7",
+    up: "M6 15l6-6 6 6",
+    dn: "M6 9l6 6 6-6",
+    branch: "M6 3v12M6 15a3 3 0 1 0 0 6 3 3 0 0 0 0-6zM18 9a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM18 9c0 6-12 3-12 6",
+    wrench: "M14.5 6.5a5 5 0 0 0-6.9 6.9l-4.8 4.8a2 2 0 0 0 2.8 2.8l4.8-4.8a5 5 0 0 0 6.9-6.9l-3 3-2.8-2.8z",
+    wide: "M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5",
+    sidebar: "M4 5h16v14H4zM9 5v14",
+    tokens: "M5 5h14M12 5v14M9 19h6",
+    chart: "M4 19V5M4 19h17M8 15l3-4 3 2 5-7",
+    coin: "M12 3v18M17 7.5C17 6.1 14.8 5 12 5S7 6.1 7 7.5 9.2 10 12 10s5 1.1 5 2.5-2.2 2.5-5 2.5-5-1.1-5-2.5",
+    relay: "M4 7h13l-3-3M20 17H7l3 3"
+  };
+  var STATE = {
+    work: "Working",
+    wait: "Needs you",
+    idle: "Idle",
+    done: "Done",
+    err: "Failed",
+    new: "New result",
+    read: "Read result"
+  };
 
   // src/state/analytics-wire.ts
   function shape(fields) {
@@ -7966,10 +8196,11 @@ globalThis.__semonUIShared = __semonUIShared;
       const q = ["range=" + (host2.analyticsRange === 1 ? "24h" : host2.analyticsRange + "d")];
       if (host2.sessionFilters.repo)
         q.push(
-          "repo=" + (host2.sessionFilters.repo === "__none__" ? "" : host2.enc(host2.sessionFilters.repo))
+          "repo=" + (host2.sessionFilters.repo === "__none__" ? "" : host2.transportOwner.enc(host2.sessionFilters.repo))
         );
       for (const key of ["machine", "harness", "model"])
-        if (host2.sessionFilters[key]) q.push(key + "=" + host2.enc(host2.sessionFilters[key]));
+        if (host2.sessionFilters[key])
+          q.push(key + "=" + host2.transportOwner.enc(host2.sessionFilters[key]));
       return q.join("&");
     }
     const analyticsData = () => AN.answers.get(analyticsQuery())?.data ?? null;
@@ -7993,7 +8224,7 @@ globalThis.__semonUIShared = __semonUIShared;
           return cleared;
         }
         if (r.status === 403) {
-          host2.ended(403);
+          host2.liveModelOwner.ended(403);
           return false;
         }
         if (!r.ok)
@@ -8031,8 +8262,9 @@ globalThis.__semonUIShared = __semonUIShared;
     function scheduleAnalytics() {
       host2.scope.clearTimeout(AN.timer);
       AN.timer = void 0;
-      if (host2.navigation.route.v !== "analytics" || host2.LIVE.ended || !host2.visible()) return;
-      const data = analyticsData(), behind = !AN.error && data && host2.LIVE.version && data.version !== host2.LIVE.version;
+      if (host2.navigation.route.v !== "analytics" || host2.liveModelOwner.LIVE.ended || !host2.liveModelOwner.visible())
+        return;
+      const data = analyticsData(), behind = !AN.error && data && host2.liveModelOwner.LIVE.version && data.version !== host2.liveModelOwner.LIVE.version;
       AN.timer = host2.scope.timeout(
         () => {
           AN.timer = void 0;
@@ -8051,27 +8283,28 @@ globalThis.__semonUIShared = __semonUIShared;
       AN.timer = void 0;
       return fetchAnalytics(asked === true).then((changed) => {
         if (changed && host2.navigation.route.v === "analytics" && host2.navigation.rendered === host2.navigation.route) {
-          if (host2.viewerEl || host2.accountChrome.open)
-            host2.LIVE.pending = true;
+          if (host2.toolViewsOwner.viewerEl || host2.accountControlsOwner.accountChrome.open)
+            host2.liveModelOwner.LIVE.pending = true;
           else {
-            const st = host2.capture();
-            host2.render();
-            host2.restore(st);
+            const st = host2.viewport.capture();
+            host2.documentRendererOwner.render();
+            host2.viewport.restore(st);
           }
         }
         scheduleAnalytics();
       });
     }
-    if (!host2.SIDEBAR_ONLY)
+    if (!host2.sidebarOnly)
       host2.scope.listen(document, "visibilitychange", () => {
-        if (host2.visible() && host2.navigation.route.v === "analytics") refreshAnalytics();
-        else if (!host2.visible()) {
+        if (host2.liveModelOwner.visible() && host2.navigation.route.v === "analytics")
+          refreshAnalytics();
+        else if (!host2.liveModelOwner.visible()) {
           host2.scope.clearTimeout(AN.timer);
           AN.timer = void 0;
         }
       });
-    const nameOfSid = (A, sid) => host2.SESS[sid]?.name ?? A.sessions[sid]?.name ?? sid;
-    const harnessOfSid = (A, sid) => host2.SESS[sid]?.harness ?? A.sessions[sid]?.harness ?? "";
+    const nameOfSid = (A, sid) => host2.modelStore.sessions[sid]?.name ?? A.sessions[sid]?.name ?? sid;
+    const harnessOfSid = (A, sid) => host2.modelStore.sessions[sid]?.harness ?? A.sessions[sid]?.harness ?? "";
     const sessionFacetValue = (s, key) => key === "repo" ? s.repo ?? "__none__" : key === "model" ? s.model ?? s.modelId ?? "Unknown model" : s[key] ?? "";
     function matchesSessionFacets(s) {
       return Object.keys(host2.sessionFilters).every(
@@ -8086,7 +8319,7 @@ globalThis.__semonUIShared = __semonUIShared;
         "All repos",
         () => [
           .../* @__PURE__ */ new Set([
-            ...Object.values(host2.SESS).map((s) => sessionFacetValue(s, "repo")),
+            ...Object.values(host2.modelStore.sessions).map((s) => sessionFacetValue(s, "repo")),
             ...rangeFacet("repo")
           ])
         ].sort((a, b) => a === "__none__" ? 1 : b === "__none__" ? -1 : a.localeCompare(b)),
@@ -8098,11 +8331,11 @@ globalThis.__semonUIShared = __semonUIShared;
         "All machines",
         () => [
           .../* @__PURE__ */ new Set([
-            ...Object.values(host2.SESS).map((s) => s.machine ?? ""),
+            ...Object.values(host2.modelStore.sessions).map((s) => s.machine ?? ""),
             ...rangeFacet("machine")
           ])
         ].sort(),
-        (v) => host2.MACHINE[v] ?? v
+        (v) => host2.modelStore.machines[v] ?? v
       ],
       [
         "harness",
@@ -8110,11 +8343,11 @@ globalThis.__semonUIShared = __semonUIShared;
         "All harnesses",
         () => [
           .../* @__PURE__ */ new Set([
-            ...Object.values(host2.SESS).map((s) => s.harness ?? ""),
+            ...Object.values(host2.modelStore.sessions).map((s) => s.harness ?? ""),
             ...rangeFacet("harness")
           ])
         ].sort(),
-        (v) => host2.HARNESS[v] ?? v
+        (v) => HARNESS[v] ?? v
       ],
       [
         "model",
@@ -8122,7 +8355,7 @@ globalThis.__semonUIShared = __semonUIShared;
         "All models",
         () => [
           .../* @__PURE__ */ new Set([
-            ...Object.values(host2.SESS).map((s) => sessionFacetValue(s, "model")),
+            ...Object.values(host2.modelStore.sessions).map((s) => sessionFacetValue(s, "model")),
             ...rangeFacet("model")
           ])
         ].sort(),
@@ -8130,7 +8363,7 @@ globalThis.__semonUIShared = __semonUIShared;
       ]
     ];
     function renderFacetFilters(box, onChange) {
-      const s = host2.slot("facets", box, (ctx) => {
+      const s = host2.routeControls.slot("facets", box, (ctx) => {
         let before = "";
         const control = createFacetChrome({
           select(label, value, onChange2) {
@@ -8145,15 +8378,19 @@ globalThis.__semonUIShared = __semonUIShared;
             ctx.onChange();
           },
           canOpen() {
-            return !host2.viewerEl;
+            return !host2.toolViewsOwner.viewerEl;
           },
           opened(d) {
             ctx.sync();
             before = JSON.stringify(host2.sessionFilters);
-            host2.viewerEl = d;
+            host2.toolViewsOwner.viewerEl = d;
             try {
               history.pushState(
-                { ...host2.navigation.route, sheet: 1, scrollTop: host2.currentScroll() },
+                {
+                  ...host2.navigation.route,
+                  sheet: 1,
+                  scrollTop: host2.historyScrollOwner.currentScroll()
+                },
                 ""
               );
             } catch {
@@ -8161,17 +8398,17 @@ globalThis.__semonUIShared = __semonUIShared;
           },
           closed(d, reason) {
             if (host2.disposed || reason === "destroyed") return;
-            if (host2.viewerEl === d) {
-              host2.viewerEl = null;
+            if (host2.toolViewsOwner.viewerEl === d) {
+              host2.toolViewsOwner.viewerEl = null;
               if (history.state?.sheet) {
-                host2.skipPop = true;
+                host2.toolViewsOwner.skipPop = true;
                 history.back();
               }
             }
             if (JSON.stringify(host2.sessionFilters) !== before) {
-              host2.LIVE.pending = false;
+              host2.liveModelOwner.LIVE.pending = false;
               ctx.onChange();
-            } else if (host2.LIVE.pending) host2.refresh();
+            } else if (host2.liveModelOwner.LIVE.pending) host2.applicationRefreshOwner.refresh();
           },
           clear() {
             for (const key of Object.keys(host2.sessionFilters))
@@ -8218,7 +8455,7 @@ globalThis.__semonUIShared = __semonUIShared;
         d,
         body,
         show: open
-      } = host2.panel(shortModel(group.model) + " \xB7 " + group.band, {
+      } = host2.sessionChrome.panel(shortModel(group.model) + " \xB7 " + group.band, {
         label: "Work items for " + group.model + ", " + group.band
       });
       renderModelItems(
@@ -8226,9 +8463,9 @@ globalThis.__semonUIShared = __semonUIShared;
         group.n + " work items" + (group.small_sample ? " \xB7 small sample" : ""),
         (group.items ?? []).map((item2) => ({
           id: item2.sid,
-          name: host2.SESS[item2.sid]?.name,
-          description: (item2.models ?? []).map(shortModel).join(" \u2192 ") + " \xB7 " + (item2.cost_usd == null ? "cost unknown" : host2.asMoney(item2.cost_usd)),
-          trace: (host2.TURNS[item2.sid] ?? []).find((t) => t.out.length)?.id,
+          name: host2.modelStore.sessions[item2.sid]?.name,
+          description: (item2.models ?? []).map(shortModel).join(" \u2192 ") + " \xB7 " + (item2.cost_usd == null ? "cost unknown" : host2.domain.asMoney(item2.cost_usd)),
+          trace: (host2.modelStore.turns[item2.sid] ?? []).find((t) => t.out.length)?.id,
           url: liveUrl(item2.pr_url ?? "") ?? void 0
         })),
         group.items_more ? group.items_more + " more items in the selected range" : void 0,
@@ -8238,7 +8475,7 @@ globalThis.__semonUIShared = __semonUIShared;
             d.close();
           },
           trace(id) {
-            host2.afterPop = () => host2.goTrace(id);
+            host2.afterPop = () => host2.destination.goTrace(id);
             d.close();
           }
         }
@@ -8256,11 +8493,15 @@ globalThis.__semonUIShared = __semonUIShared;
         },
         {
           opened(d) {
-            host2.viewerEl = d;
+            host2.toolViewsOwner.viewerEl = d;
             document.documentElement.classList.add("viewer-open");
             try {
               history.pushState(
-                { ...host2.navigation.route, sheet: 1, scrollTop: host2.currentScroll() },
+                {
+                  ...host2.navigation.route,
+                  sheet: 1,
+                  scrollTop: host2.historyScrollOwner.currentScroll()
+                },
                 ""
               );
             } catch {
@@ -8270,15 +8511,15 @@ globalThis.__semonUIShared = __semonUIShared;
             host2.dialogs.delete(d);
             if (host2.disposed) return;
             document.documentElement.classList.remove("viewer-open");
-            if (host2.viewerEl === d) {
-              host2.viewerEl = null;
+            if (host2.toolViewsOwner.viewerEl === d) {
+              host2.toolViewsOwner.viewerEl = null;
               if (history.state?.sheet) {
-                host2.skipPop = true;
+                host2.toolViewsOwner.skipPop = true;
                 history.back();
               } else if (host2.pendingSessionOpen) {
                 const id = host2.pendingSessionOpen;
                 host2.pendingSessionOpen = null;
-                host2.goSession(id);
+                host2.destination.goSession(id);
               }
             }
           }
@@ -8290,11 +8531,11 @@ globalThis.__semonUIShared = __semonUIShared;
           id: item2.sid,
           name: nameOfSid(A, item2.sid),
           harness,
-          harnessName: host2.HARNESS_SHORT[harness] ?? harness,
-          harnessTip: host2.HARNESS[harness] && host2.HARNESS[harness] !== host2.HARNESS_SHORT[harness] ? host2.HARNESS[harness] : void 0,
-          mark: host2.harnessSnapshot(harness),
-          value: costMode ? host2.asMoney("usd" in item2 ? item2.usd ?? 0 : 0) : timeText("ms" in item2 ? item2.ms : 0) + " busy",
-          href: host2.SESS[item2.sid] ? host2.urlOf({ v: "session", id: item2.sid }) : void 0,
+          harnessName: HARNESS_SHORT[harness] ?? harness,
+          harnessTip: HARNESS[harness] && HARNESS[harness] !== HARNESS_SHORT[harness] ? HARNESS[harness] : void 0,
+          mark: host2.screenViews.harnessSnapshot(harness),
+          value: costMode ? host2.domain.asMoney("usd" in item2 ? item2.usd ?? 0 : 0) : timeText("ms" in item2 ? item2.ms : 0) + " busy",
+          href: host2.modelStore.sessions[item2.sid] ? host2.bootstrapOwner.urlOf({ v: "session", id: item2.sid }) : void 0,
           className: "analytics-session analytics-slice",
           missing: costMode && "unpriced_models" in item2 && item2.unpriced_models.length ? "no price for " + item2.unpriced_models.join(", ") : void 0
         };
@@ -8341,7 +8582,7 @@ globalThis.__semonUIShared = __semonUIShared;
           return {
             key,
             heading: "Cost over time",
-            info: host2.COST_TIP,
+            info: host2.recentNavigation.COST_TIP,
             empty: "Cost is recorded per UTC day, so there is no hourly series. Pick 7 d or 30 d for a daily chart.",
             width: W,
             left,
@@ -8390,15 +8631,15 @@ globalThis.__semonUIShared = __semonUIShared;
             codex: 139 * bin.codex / max,
             active: costMode ? !!bin.sessions.length : total > 0,
             tip: costMode ? void 0 : tip,
-            label: costMode ? host2.clock(bin.a) + " to " + host2.clock(bin.b) + ": " + host2.asMoney(total) : tip + ". Open the sessions busy then",
+            label: costMode ? host2.clock(bin.a) + " to " + host2.clock(bin.b) + ": " + host2.domain.asMoney(total) : tip + ". Open the sessions busy then",
             when,
-            value: costMode ? host2.asMoney(total) : hLabel(total) + " agent-hours"
+            value: costMode ? host2.domain.asMoney(total) : hLabel(total) + " agent-hours"
           };
         });
         return {
           key,
           heading: costMode ? "Cost over time" : "Agents at work",
-          info: costMode ? host2.COST_TIP : void 0,
+          info: costMode ? host2.recentNavigation.COST_TIP : void 0,
           sub: costMode ? "API-equivalent cost per UTC day \xB7 today so far \xB7 stacked by harness" : "Agent-hours " + A.agents.unit + " \xB7 stacked by harness",
           width: W,
           left,
@@ -8411,7 +8652,7 @@ globalThis.__semonUIShared = __semonUIShared;
           legend: [
             ["claude", "Claude"],
             ["codex", "Codex"]
-          ].map(([id, label]) => ({ id, label, mark: host2.harnessSnapshot(id) })),
+          ].map(([id, label]) => ({ id, label, mark: host2.screenViews.harnessSnapshot(id) })),
           missing: costMode && A.cost.unpriced_models.length ? "no price for " + A.cost.unpriced_models.join(", ") + "; unpriced usage is omitted from bars." : void 0
         };
       };
@@ -8427,7 +8668,13 @@ globalThis.__semonUIShared = __semonUIShared;
         ["Review rounds", "median_review_rounds", "review_rounds_n", "review_rounds", String],
         ["Red CI heads", "median_red_ci_heads", "red_ci_n", "ci", String],
         ["Model time", "median_model_ms", "model_time_n", "model_time", timeText],
-        ["API cost", "median_cost_usd", "cost_n", "cost", host2.asMoney],
+        [
+          "API cost",
+          "median_cost_usd",
+          "cost_n",
+          "cost",
+          (...args) => host2.domain.asMoney(...args)
+        ],
         [
           "Allowance / M input",
           "allowance_per_million_input",
@@ -8446,14 +8693,18 @@ globalThis.__semonUIShared = __semonUIShared;
         );
         metric(
           A.days === 1 ? "Cost today (UTC)" : "Cost, last " + A.days + " UTC days",
-          now.cost.usd == null ? "\u2014" : host2.asMoney(now.cost.usd),
+          now.cost.usd == null ? "\u2014" : host2.domain.asMoney(now.cost.usd),
           now.cost.usd == null || previous.cost.usd == null ? {
             text: "no price for " + [.../* @__PURE__ */ new Set([...now.cost.unpriced_models, ...previous.cost.unpriced_models])].join(
               ", "
             )
-          } : note(now.cost.usd, previous.cost.usd, host2.asMoney),
+          } : note(
+            now.cost.usd,
+            previous.cost.usd,
+            (...args) => host2.domain.asMoney(...args)
+          ),
           A.days === 1 ? "API-equivalent cost. Cost is recorded per UTC day: this is the whole current UTC day so far, compared with the whole day before." : "API-equivalent cost. Cost is recorded per UTC day: the last " + A.days + " UTC days count, today so far, compared with the " + A.days + " whole UTC days before.",
-          host2.COST_TIP
+          host2.recentNavigation.COST_TIP
         );
         metric(
           "Sessions started",
@@ -8496,7 +8747,7 @@ globalThis.__semonUIShared = __semonUIShared;
           ["harness", "By harness and model", A.breakdown.model]
         ]) {
           const keyFor = (g) => key === "repo" ? g.repo ?? "__none__" : key === "machine" ? g.machine ?? "" : g.harness + "\0" + g.model;
-          const labelFor = (id) => key === "repo" ? id === "__none__" ? "No repo (roles)" : id : key === "machine" ? host2.MACHINE[id] ?? id : (host2.HARNESS[id.split("\0")[0]] ?? id.split("\0")[0]) + " \xB7 " + shortModel(id.split("\0")[1]);
+          const labelFor = (id) => key === "repo" ? id === "__none__" ? "No repo (roles)" : id : key === "machine" ? host2.modelStore.machines[id] ?? id : (HARNESS[id.split("\0")[0]] ?? id.split("\0")[0]) + " \xB7 " + shortModel(id.split("\0")[1]);
           const selected = (g) => host2.analyticsMeasure === "cost" ? g.usd : g.ms, rows = [...groups].sort(
             (a, b) => selected(b) - selected(a) || labelFor(keyFor(a)).localeCompare(labelFor(keyFor(b)))
           ), max = Math.max(1, ...rows.map(selected));
@@ -8510,7 +8761,7 @@ globalThis.__semonUIShared = __semonUIShared;
               width: widthOf(selected(g), max),
               color: key === "harness" ? keyFor(g).startsWith("claude") ? "claude" : "codex" : void 0,
               hours: hoursText(g.ms),
-              cost: g.unpriced_models.length ? "\u2014" : host2.asMoney(g.usd),
+              cost: g.unpriced_models.length ? "\u2014" : host2.domain.asMoney(g.usd),
               missing: g.unpriced_models.length ? "no price for " + g.unpriced_models.join(", ") : void 0
             }))
           });
@@ -8531,7 +8782,7 @@ globalThis.__semonUIShared = __semonUIShared;
           [
             "Most expensive sessions \xB7 API-equivalent cost",
             A.top.cost,
-            (x) => "usd" in x && x.usd != null ? host2.asMoney(x.usd) : "\u2014",
+            (x) => "usd" in x && x.usd != null ? host2.domain.asMoney(x.usd) : "\u2014",
             (x) => "usd" in x ? x.usd ?? 0 : 0
           ]
         ];
@@ -8545,11 +8796,11 @@ globalThis.__semonUIShared = __semonUIShared;
                 id: item2.sid,
                 name: nameOfSid(A, item2.sid),
                 harness,
-                harnessName: host2.HARNESS_SHORT[harness] ?? harness,
-                harnessTip: host2.HARNESS[harness] && host2.HARNESS[harness] !== host2.HARNESS_SHORT[harness] ? host2.HARNESS[harness] : void 0,
-                mark: host2.harnessSnapshot(harness),
+                harnessName: HARNESS_SHORT[harness] ?? harness,
+                harnessTip: HARNESS[harness] && HARNESS[harness] !== HARNESS_SHORT[harness] ? HARNESS[harness] : void 0,
+                mark: host2.screenViews.harnessSnapshot(harness),
                 value: value(item2),
-                href: host2.SESS[item2.sid] ? host2.urlOf({ v: "session", id: item2.sid }) : void 0,
+                href: host2.modelStore.sessions[item2.sid] ? host2.bootstrapOwner.urlOf({ v: "session", id: item2.sid }) : void 0,
                 rank: widthOf(measure(item2), max),
                 missing: missing.length ? "no price for " + missing.join(", ") : void 0
               };
@@ -8599,7 +8850,7 @@ globalThis.__semonUIShared = __semonUIShared;
                 x: 42 + g.median_cost_usd / maxCost * (W - 58),
                 y: 150 - g.first_pass_acceptance * 130,
                 label: shortModel(g.model),
-                tip: g.model + ": " + host2.asMoney(g.median_cost_usd ?? 0) + ", " + (g.first_pass_acceptance * 100).toFixed(0) + "% accepted; acceptance n=" + g.acceptance_n + ", cost n=" + g.cost_n
+                tip: g.model + ": " + host2.domain.asMoney(g.median_cost_usd ?? 0) + ", " + (g.first_pass_acceptance * 100).toFixed(0) + "% accepted; acceptance n=" + g.acceptance_n + ", cost n=" + g.cost_n
               }))
             });
           }
@@ -8644,18 +8895,18 @@ globalThis.__semonUIShared = __semonUIShared;
           ]
         },
         {
-          committed: host2.observeTitle,
+          committed: (...args) => host2.sessionChrome.observeTitle(...args),
           facets: () => renderFacetFilters(page, () => {
-            host2.render();
+            host2.documentRendererOwner.render();
             refreshAnalytics(true);
           }),
-          session: host2.goSession,
+          session: (...args) => host2.destination.goSession(...args),
           measure(value) {
             if (host2.analyticsMeasure === value) return;
-            const top = host2.currentScroll();
+            const top = host2.historyScrollOwner.currentScroll();
             host2.analyticsMeasure = value;
-            host2.render();
-            host2.restoreScroll(top);
+            host2.documentRendererOwner.render();
+            host2.historyScrollOwner.restoreScroll(top);
           },
           breakdown(group, key) {
             if (group === "repo") host2.sessionFilters.repo = key;
@@ -8667,7 +8918,7 @@ globalThis.__semonUIShared = __semonUIShared;
             }
             host2.query = "";
             host2.groupBy = "recent";
-            host2.go({ v: "sessions" });
+            host2.destination.go({ v: "sessions" });
           },
           slice(key) {
             const slice = slices.get(key);
@@ -8696,32 +8947,32 @@ globalThis.__semonUIShared = __semonUIShared;
   function createApplicationRefresh(host2) {
     function refresh(dirty = null) {
       if (host2.disposed) return;
-      if (host2.accountChrome.open && !host2.$(".account-popover")?.isConnected)
-        host2.closeAccountMenu();
-      if (host2.toolViewsOwner.viewerEl || host2.accountChrome.open) {
-        host2.LIVE.pending = true;
+      if (host2.accountControlsOwner.accountChrome.open && !host2.$(".account-popover")?.isConnected)
+        host2.accountControlsOwner.closeAccountMenu();
+      if (host2.toolViewsOwner.viewerEl || host2.accountControlsOwner.accountChrome.open) {
+        host2.liveModelOwner.LIVE.pending = true;
         return;
       }
-      if (host2.SIDEBAR_ONLY) {
-        host2.LIVE.pending = false;
-        host2.render();
+      if (host2.sidebarOnly) {
+        host2.liveModelOwner.LIVE.pending = false;
+        host2.documentRendererOwner.render();
         return;
       }
-      host2.LIVE.pending = false;
+      host2.liveModelOwner.LIVE.pending = false;
       const r = host2.navigation.route;
-      if (host2.navigation.rendered !== r || r.v === "session" && !host2.SESS[r.id] || r.v === "trace" && !host2.SESS[r.sid] || r.v === "machine" && !host2.MACHINE[r.id])
+      if (host2.navigation.rendered !== r || r.v === "session" && !host2.modelStore.sessions[r.id] || r.v === "trace" && !host2.modelStore.sessions[r.sid] || r.v === "machine" && !host2.modelStore.machines[r.id])
         return;
-      const st = host2.capture();
+      const st = host2.viewport.capture();
       setGeometry(host2.$("#page"), "paddingBottom", null);
       if (r.v !== "session") {
-        host2.render();
-        host2.restore(st);
+        host2.documentRendererOwner.render();
+        host2.viewport.restore(st);
         return;
       }
-      const n = host2.patchSession(dirty);
-      host2.restore(st, st.bottom);
-      if (!st.bottom && n) host2.LIVE.fresh += n;
-      host2.syncJump();
+      const n = host2.viewport.patchSession(dirty);
+      host2.viewport.restore(st, st.bottom);
+      if (!st.bottom && n) host2.liveModelOwner.LIVE.fresh += n;
+      host2.viewport.syncJump();
     }
     return { refresh };
   }
@@ -8730,13 +8981,13 @@ globalThis.__semonUIShared = __semonUIShared;
   function createBootstrap(host2) {
     const routeModel = {
       session(id) {
-        return host2.SESS[id];
+        return host2.modelStore.sessions[id];
       },
       machine(id) {
-        return !!host2.MACHINE[id];
+        return !!host2.modelStore.machines[id];
       },
       turn(id) {
-        return host2.TURN.get(id);
+        return host2.modelStore.turn.get(id);
       },
       get machinesPath() {
         return host2.viewerHost?.machinesPath;
@@ -8744,53 +8995,62 @@ globalThis.__semonUIShared = __semonUIShared;
     };
     const urlOf = (r) => routeUrl(r, routeModel), routeOf = (location2) => parseRoute(location2, routeModel);
     function boot() {
-      host2.api("/api/model?delta=1").then(
+      host2.transportOwner.api("/api/model?delta=1").then(
         (m) => {
-          const adopted = host2.adopt(m);
-          host2.LIVE.version = adopted.version;
-          host2.remember(adopted);
-          if (host2.SIDEBAR_ONLY || host2.NATIVE_PAGE) {
-            if (host2.NATIVE_PAGE)
+          const adopted = host2.transportOwner.adopt(m);
+          host2.liveModelOwner.LIVE.version = adopted.version;
+          host2.liveModelOwner.remember(adopted);
+          if (host2.sidebarOnly || host2.nativePage) {
+            if (host2.nativePage)
               host2.navigation.route = host2.navigation.historyRoute(
-                { v: host2.NATIVE_PAGE.nav },
+                { v: host2.nativePage.nav },
                 { v: "home" }
               );
-            host2.render();
-            host2.schedule(2e3);
+            host2.documentRendererOwner.render();
+            host2.liveModelOwner.schedule(2e3);
             return;
           }
           host2.navigation.route = routeOf(location);
           if (host2.navigation.route.v === "sessions")
             host2.query = (new URLSearchParams(location.search).get("q") ?? "").trim();
-          if (host2.navigation.route.v === "machines" && host2.NAV_MACHINES && !host2.viewerHost) {
-            location.assign(host2.NAV_MACHINES);
+          if (host2.navigation.route.v === "machines" && host2.machinesPath && !host2.viewerHost) {
+            location.assign(host2.machinesPath);
             return;
           }
           try {
             history.replaceState(
               { ...host2.navigation.route, scrollTop: 0 },
               "",
-              urlOf(host2.navigation.route) + (host2.navigation.route.v === "session" ? location.hash : host2.navigation.route.v === "sessions" && host2.query ? "?q=" + host2.enc(host2.query) : "")
+              urlOf(host2.navigation.route) + (host2.navigation.route.v === "session" ? location.hash : host2.navigation.route.v === "sessions" && host2.query ? "?q=" + host2.transportOwner.enc(host2.query) : "")
             );
           } catch {
           }
           const done = () => {
-            host2.render();
+            host2.documentRendererOwner.render();
             if (host2.navigation.route.v === "session" && ("turn" in host2.navigation.route ? host2.navigation.route.turn : void 0)) {
-              host2.revealTurn(
+              host2.destination.revealTurn(
                 ("turn" in host2.navigation.route ? host2.navigation.route.turn : void 0) ?? "",
                 true
               );
-              if (location.hash) host2.scope.frame(() => host2.scope.frame(host2.revealEntryHash));
-            } else if (host2.navigation.route.v === "session" && location.hash) host2.revealEntryHash();
+              if (location.hash)
+                host2.scope.frame(
+                  () => host2.scope.frame(
+                    (...args) => host2.destination.revealEntryHash(...args)
+                  )
+                );
+            } else if (host2.navigation.route.v === "session" && location.hash)
+              host2.destination.revealEntryHash();
             else if (host2.navigation.route.v === "session") {
-              host2.openSessionAtEnd();
-              host2.syncJump();
-            } else host2.quietTop();
-            host2.schedule(2e3);
-            host2.scope.interval(host2.ticker, 1e3);
+              host2.destination.openSessionAtEnd();
+              host2.viewport.syncJump();
+            } else host2.historyScrollOwner.quietTop();
+            host2.liveModelOwner.schedule(2e3);
+            host2.scope.interval(
+              (...args) => host2.tickerOwner.ticker(...args),
+              1e3
+            );
           };
-          const initialRoute = host2.navigation.route, p = host2.load(initialRoute);
+          const initialRoute = host2.navigation.route, p = host2.transportOwner.load(initialRoute);
           if (p)
             p.then(() => {
               done();
@@ -8807,7 +9067,7 @@ globalThis.__semonUIShared = __semonUIShared;
             return;
           }
           renderPlaceholder(
-            host2.$(host2.SIDEBAR_ONLY ? "#lanes" : "#page"),
+            host2.$(host2.sidebarOnly ? "#lanes" : "#page"),
             "Couldn't load the sessions: " + err.message
           );
         }
@@ -8820,17 +9080,17 @@ globalThis.__semonUIShared = __semonUIShared;
   function createDestination(host2) {
     function openSessionAtEnd() {
       if (location.hash) return;
-      host2.startOpeningEndPin();
+      host2.viewport.startOpeningEndPin();
     }
     const SKELETON_MS = 150;
     let skeletonTimer;
     let lanesFor = null;
     function paintPending(r) {
       const page = host2.$("#page"), hadFocus = host2.$("#sidebar").contains(document.activeElement);
-      host2.renderNav();
-      host2.renderLanes();
-      host2.drawSessionBar();
-      lanesFor = { r, version: host2.LIVE.version };
+      host2.navigationViewOwner.renderNav();
+      host2.recentNavigation.renderLanes();
+      host2.sessionChrome.drawSessionBar();
+      lanesFor = { r, version: host2.liveModelOwner.LIVE.version };
       if (hadFocus)
         host2.$("#lanes .srow[data-id='" + CSS.escape(r.id) + "']")?.focus({ preventScroll: true });
       page.setAttribute("aria-busy", "true");
@@ -8843,8 +9103,8 @@ globalThis.__semonUIShared = __semonUIShared;
         page.classList.remove("child-page");
         setGeometry(page, "paddingBottom", null);
         renderPlaceholder(page);
-        host2.quietTop();
-        host2.syncBarLine();
+        host2.historyScrollOwner.quietTop();
+        host2.sessionChrome.syncBarLine();
       }, SKELETON_MS);
     }
     function endLoading() {
@@ -8877,19 +9137,21 @@ globalThis.__semonUIShared = __semonUIShared;
       );
     }
     const isDeep = (r) => {
-      const t = r.turn ? host2.TURN.get(r.turn) : null;
+      const t = r.turn ? host2.modelStore.turn.get(r.turn) : null;
       return !!t && t.sid === r.id && !t.entries.length;
     };
     function go(r, fromHistory = false, prepared = false, nextContent = null) {
       host2.navigation.cancelNative();
-      if (host2.NATIVE_PAGE) {
+      if (host2.nativePage) {
         if (!fromHistory)
-          location.assign(r.v === "machines" ? host2.NAV_MACHINES ?? host2.urlOf(r) : host2.urlOf(r));
+          location.assign(
+            r.v === "machines" ? host2.machinesPath ?? host2.bootstrapOwner.urlOf(r) : host2.bootstrapOwner.urlOf(r)
+          );
         return;
       }
       if (r.v === "machines" && host2.viewerHost && !prepared) {
-        host2.closeDrawer(true);
-        host2.closeAccountMenu(true, true);
+        host2.documentEventsOwner.closeDrawer(true);
+        host2.accountControlsOwner.closeAccountMenu(true, true);
         host2.navigation.loadNative(
           r,
           (content) => go(r, fromHistory, true, content),
@@ -8901,54 +9163,54 @@ globalThis.__semonUIShared = __semonUIShared;
       }
       if (r.v !== "sessions" || r !== host2.focusSessionsSearchOnRender)
         host2.focusSessionsSearchOnRender = null;
-      if (host2.SIDEBAR_ONLY) {
+      if (host2.sidebarOnly) {
         if (!fromHistory) {
-          host2.closeDrawer(true);
+          host2.documentEventsOwner.closeDrawer(true);
           location.assign(
-            r.v === "machines" && host2.NAV_MACHINES ? host2.NAV_MACHINES : host2.urlOf(r)
+            r.v === "machines" && host2.machinesPath ? host2.machinesPath : host2.bootstrapOwner.urlOf(r)
           );
         }
         return;
       }
       if (host2.navigation.route.v === "session")
-        host2.clearPaging("id" in host2.navigation.route ? host2.navigation.route.id : "");
-      host2.resetPagerInput();
-      host2.stopOpeningEndPin();
+        host2.pagingOwner.clearPaging("id" in host2.navigation.route ? host2.navigation.route.id : "");
+      host2.pagingOwner.resetPagerInput();
+      host2.viewport.stopOpeningEndPin();
       host2.navigation.cancelRoute();
-      if (r.v === "machines" && host2.NAV_MACHINES && !host2.viewerHost) {
-        location.assign(host2.NAV_MACHINES);
+      if (r.v === "machines" && host2.machinesPath && !host2.viewerHost) {
+        location.assign(host2.machinesPath);
         return;
       }
-      if (!fromHistory) host2.saveHistoryScroll();
+      if (!fromHistory) host2.historyScrollOwner.saveHistoryScroll();
       host2.navigation.replaceContent(r, nextContent);
-      host2.closeAccountMenu(true, true);
-      host2.dropErrors(true);
-      if (host2.navigation.route.v === "session" && (r.v !== "session" || r.v !== "session" || r.id !== ("id" in host2.navigation.route ? host2.navigation.route.id : "")) && host2.TX["id" in host2.navigation.route ? host2.navigation.route.id : ""] && host2.TXM["id" in host2.navigation.route ? host2.navigation.route.id : ""]) {
-        const sid = "id" in host2.navigation.route ? host2.navigation.route.id : "", entries = host2.TX[sid], meta = { ...host2.TXM[sid], origin: !!host2.originHandoff(sid) };
+      host2.accountControlsOwner.closeAccountMenu(true, true);
+      host2.sessionChrome.dropErrors(true);
+      if (host2.navigation.route.v === "session" && (r.v !== "session" || r.v !== "session" || r.id !== ("id" in host2.navigation.route ? host2.navigation.route.id : "")) && host2.transcripts.entries["id" in host2.navigation.route ? host2.navigation.route.id : ""] && host2.transcripts.meta["id" in host2.navigation.route ? host2.navigation.route.id : ""]) {
+        const sid = "id" in host2.navigation.route ? host2.navigation.route.id : "", entries = host2.transcripts.entries[sid], meta = { ...host2.transcripts.meta[sid], origin: !!host2.domain.originHandoff(sid) };
         host2.scope.frame(
           () => host2.scope.frame(() => host2.scope.timeout(() => host2.cacheTx(sid, entries, meta), 0))
         );
       }
       if (r.v !== "session" || r.v !== "session" || r.id !== ("id" in host2.navigation.route ? host2.navigation.route.id : ""))
-        host2.show = { ...host2.SHOW_ALL };
-      if (r.v !== "sessions") host2.ORD.delete("page");
+        host2.show = { ...host2.allVisibility };
+      if (r.v !== "sessions") host2.orderingControlsOwner.ORD.delete("page");
       host2.navigation.route = r;
       host2.find = "";
       host2.findOpen = false;
-      host2.closeDrawer(true);
-      host2.clearNewEntries();
+      host2.documentEventsOwner.closeDrawer(true);
+      host2.viewport.clearNewEntries();
       if (!fromHistory) {
         const state2 = { ...r };
         delete state2.scrollTop;
         try {
-          history.pushState(state2, "", host2.urlOf(r));
+          history.pushState(state2, "", host2.bootstrapOwner.urlOf(r));
         } catch {
         }
       }
       const done = () => {
         if (host2.navigation.route !== r) return;
         endLoading();
-        host2.render();
+        host2.documentRendererOwner.render();
         if (r.v === "session" || host2.viewerHost && r.v === "machines") focusTitle();
         if (fromHistory && Number.isFinite(r.scrollTop)) {
           const turns = [...host2.$("#page").querySelectorAll(".turn")];
@@ -8958,32 +9220,32 @@ globalThis.__semonUIShared = __semonUIShared;
             setGeometry(turn, "intrinsicHeight", Math.ceil(heights[i]));
             revealMeasuredTurn(turn, false);
           });
-          host2.restoreScroll(r.scrollTop);
-          host2.restoreHostFocus(r.hostFocus);
+          host2.historyScrollOwner.restoreScroll(r.scrollTop);
+          host2.historyScrollOwner.restoreHostFocus(r.hostFocus);
         } else if (r.v === "session" && r.turn) {
           revealTurn(r.turn, !fromHistory);
           if (location.hash) host2.scope.frame(() => host2.scope.frame(revealEntryHash));
         } else if (r.v === "session" && location.hash) revealEntryHash();
         else if (r.v === "session") openSessionAtEnd();
-        else host2.quietTop();
-        host2.syncJump();
+        else host2.historyScrollOwner.quietTop();
+        host2.viewport.syncJump();
       };
-      if (r.v === "session" && host2.SESS[r.id]) {
-        if (host2.STALE_BRIEFS.has(r.id)) {
-          delete host2.TX[r.id];
-          delete host2.TXM[r.id];
-          host2.TXCACHE.delete(r.id);
+      if (r.v === "session" && host2.modelStore.sessions[r.id]) {
+        if (host2.transcripts.staleBriefs.has(r.id)) {
+          delete host2.transcripts.entries[r.id];
+          delete host2.transcripts.meta[r.id];
+          host2.transcripts.cache.delete(r.id);
         }
-        const kept = !host2.TX[r.id];
+        const kept = !host2.transcripts.entries[r.id];
         if (kept ? host2.adoptCached(r) : !isDeep(r)) {
-          host2.TXCACHE.delete(r.id);
+          host2.transcripts.cache.delete(r.id);
           paintPending(r);
           host2.scope.frame(
             () => host2.scope.timeout(() => {
               if (host2.navigation.route !== r) return;
-              if (kept && !r.turn) host2.spread(r.id);
+              if (kept && !r.turn) host2.transportOwner.spread(r.id);
               done();
-              host2.revalidate(r);
+              host2.transcriptRevalidationOwner.revalidate(r);
             }, 0)
           );
           return;
@@ -8992,15 +9254,15 @@ globalThis.__semonUIShared = __semonUIShared;
       if (r.v === "session") paintPending(r);
       host2.navigation.load(
         r,
-        (signal) => host2.load(r, signal),
+        (signal) => host2.transportOwner.load(r, signal),
         done,
         (error) => failLoad(r, error)
       );
     }
-    if (!host2.SIDEBAR_ONLY)
+    if (!host2.sidebarOnly)
       host2.scope.listen(window, "popstate", (e) => {
-        if (host2.skipPop) {
-          host2.skipPop = false;
+        if (host2.toolViewsOwner.skipPop) {
+          host2.toolViewsOwner.skipPop = false;
           if (host2.afterPop) {
             const leave = host2.afterPop;
             host2.afterPop = null;
@@ -9016,38 +9278,39 @@ globalThis.__semonUIShared = __semonUIShared;
         }
         if (host2.accountSheet) {
           host2.accountSheet = false;
-          host2.closeAccountMenu(true);
+          host2.accountControlsOwner.closeAccountMenu(true);
           return;
         }
-        if (host2.viewerEl) {
-          const d = host2.viewerEl;
-          host2.viewerEl = null;
+        if (host2.toolViewsOwner.viewerEl) {
+          const d = host2.toolViewsOwner.viewerEl;
+          host2.toolViewsOwner.viewerEl = null;
           d.close();
           return;
         }
-        if (e.state?.v) go(host2.navigation.historyRoute(e.state, host2.routeOf(location)), true);
+        if (e.state?.v)
+          go(host2.navigation.historyRoute(e.state, host2.bootstrapOwner.routeOf(location)), true);
       });
     const goSession = (id, turn = void 0) => go(turn ? { v: "session", id, turn } : { v: "session", id });
     const goTrace = (turn) => {
-      const found = host2.TURN.get(turn);
+      const found = host2.modelStore.turn.get(turn);
       if (found) go({ v: "trace", sid: found.sid, turn });
     };
     const openSender = (h2) => {
-      if (host2.SESS[h2.from]) goSession(h2.from, host2.HOLDS.get(h2.id)?.id);
+      if (host2.modelStore.sessions[h2.from]) goSession(h2.from, host2.modelStore.holds.get(h2.id)?.id);
     };
     function revealTurn(id, flash) {
-      host2.resetPagerInput();
+      host2.pagingOwner.resetPagerInput();
       const b = [...document.querySelectorAll(".turn")].find(
         (x) => x.dataset.turn === id
       );
       if (!b) {
-        host2.quietTop();
+        host2.historyScrollOwner.quietTop();
         return;
       }
       const place = () => {
         if (!b.isConnected) return;
         const gap = host2.$("#topbar").offsetHeight + 8;
-        host2.scrollProgrammatically(() => {
+        host2.pagingOwner.scrollProgrammatically(() => {
           if (host2.phone.matches)
             window.scrollTo(0, Math.max(0, window.scrollY + b.getBoundingClientRect().top - gap));
           else {
@@ -9055,8 +9318,8 @@ globalThis.__semonUIShared = __semonUIShared;
             m.scrollTop += b.getBoundingClientRect().top - m.getBoundingClientRect().top - gap;
           }
         });
-        host2.syncJump();
-        host2.saveHistoryScroll();
+        host2.viewport.syncJump();
+        host2.historyScrollOwner.saveHistoryScroll();
       };
       place();
       host2.scope.frame(() => host2.scope.frame(place));
@@ -9066,7 +9329,7 @@ globalThis.__semonUIShared = __semonUIShared;
       }
     }
     function revealEntryHash() {
-      host2.resetPagerInput();
+      host2.pagingOwner.resetPagerInput();
       if (!location.hash) return;
       let key = "";
       try {
@@ -9081,7 +9344,7 @@ globalThis.__semonUIShared = __semonUIShared;
       const place = () => {
         if (!target.isConnected) return;
         const gap = host2.$("#topbar").offsetHeight + 8;
-        host2.scrollProgrammatically(() => {
+        host2.pagingOwner.scrollProgrammatically(() => {
           if (host2.phone.matches)
             window.scrollTo(
               0,
@@ -9092,8 +9355,8 @@ globalThis.__semonUIShared = __semonUIShared;
             m.scrollTop += target.getBoundingClientRect().top - m.getBoundingClientRect().top - gap;
           }
         });
-        host2.syncJump();
-        host2.saveHistoryScroll();
+        host2.viewport.syncJump();
+        host2.historyScrollOwner.saveHistoryScroll();
       };
       place();
       host2.scope.frame(() => host2.scope.frame(place));
@@ -9119,19 +9382,23 @@ globalThis.__semonUIShared = __semonUIShared;
   function createDocumentEvents(host2) {
     const sidebar = host2.$("#sidebar");
     function openDrawer() {
-      host2.shellChrome?.openDrawer();
+      host2.accountControlsOwner.shellChrome?.openDrawer();
     }
     function closeDrawer(quiet = void 0) {
-      host2.shellChrome?.closeDrawer(quiet);
+      host2.accountControlsOwner.shellChrome?.closeDrawer(quiet);
     }
-    if (host2.SIDEBAR_ONLY)
-      host2.scope.listen(window, "semon:drawer-open", () => host2.orderApply("side"));
-    if (!host2.SIDEBAR_ONLY)
+    if (host2.sidebarOnly)
+      host2.scope.listen(
+        window,
+        "semon:drawer-open",
+        () => host2.orderingControlsOwner.orderApply("side")
+      );
+    if (!host2.sidebarOnly)
       host2.scope.listen(document, "keydown", (e) => {
-        if (e.key === "Escape" && host2.accountSheet) host2.accountChrome.escape();
+        if (e.key === "Escape" && host2.accountSheet) host2.accountControlsOwner.accountChrome.escape();
         else if (e.key === "Escape" && !host2.toolViewsOwner.viewerEl) {
           closeDrawer();
-          host2.closeAccountMenu();
+          host2.accountControlsOwner.closeAccountMenu();
           host2.$(".session-menu")?.remove();
           host2.$("#more-btn")?.setAttribute("aria-expanded", "false");
         }
@@ -9139,109 +9406,65 @@ globalThis.__semonUIShared = __semonUIShared;
           e.preventDefault();
           if (host2.navigation.route.v === "session") {
             host2.findOpen = true;
-            host2.render();
+            host2.documentRendererOwner.render();
             host2.$("#find")?.focus();
           } else if (host2.navigation.route.v === "sessions") {
             host2.$("#sq")?.focus();
           } else {
             const r = { v: "sessions", q: host2.query };
             host2.focusSessionsSearchOnRender = r;
-            host2.go(r);
+            host2.destination.go(r);
           }
         }
       });
     host2.scope.listen(host2.phone, "change", () => {
       closeDrawer(true);
-      host2.syncLayoutPrefs();
+      host2.layoutOwner.syncLayoutPrefs();
       host2.recentNavigation.expandedAll = null;
-      host2.renderLanes();
+      host2.recentNavigation.renderLanes();
       if (!host2.phone.matches && host2.toolViewsOwner.viewerEl?.classList.contains("kids-sheet"))
         host2.toolViewsOwner.viewerEl.close();
       if (host2.navigation.route.v === "session" || host2.navigation.route.v === "analytics") {
-        const top = host2.currentScroll();
-        host2.render();
-        host2.restoreScroll(top);
-      } else host2.renderLanes();
+        const top = host2.historyScrollOwner.currentScroll();
+        host2.documentRendererOwner.render();
+        host2.historyScrollOwner.restoreScroll(top);
+      } else host2.recentNavigation.renderLanes();
       const l2 = host2.$("#topbar .meta-line");
       if (l2 && host2.navigation.route.v === "session") measureViewerBar(host2.$("#topbar"));
-      host2.syncJump();
+      host2.viewport.syncJump();
     });
     return { closeDrawer };
   }
 
   // src/app/documentRenderer.ts
   function createDocumentRenderer(host2) {
-    const SLOTS = /* @__PURE__ */ new Map();
-    function slot(key, box, build) {
-      let s = SLOTS.get(key);
-      if (!s || s.route !== host2.navigation.route || s.box !== box || !box.contains(s.el)) {
-        s?.ctx.destroy?.();
-        const ctx = { sync() {
-        }, onChange() {
-        } };
-        s = { route: host2.navigation.route, box, ctx, el: build(ctx) };
-        SLOTS.set(key, s);
-      }
-      return s;
-    }
-    function clearBox(box, r = null) {
-      for (const [key, s] of SLOTS)
-        if (s.route !== r) {
-          s.ctx.destroy?.();
-          SLOTS.delete(key);
-        }
-      if (ownsScreen(box)) {
-        if (screenKind(box) === r?.v && !(r?.v === "machines" && host2.viewerHost) && !host2.NATIVE_PAGE)
-          return;
-        releaseScreen(box);
-      }
-      const kept = new Set([...SLOTS.values()].filter((s) => s.box === box).map((s) => s.el));
-      for (const n of [...box.childNodes]) if (!(n instanceof HTMLElement && kept.has(n))) n.remove();
-    }
-    function placer(box) {
-      let cur = box.firstChild;
-      const put = (...nodes) => {
-        for (const n of nodes) {
-          if (n === cur) cur = cur?.nextSibling ?? null;
-          else box.insertBefore(n, cur);
-        }
-      };
-      put.done = () => {
-        while (cur) {
-          const next = cur.nextSibling;
-          cur.remove();
-          cur = next;
-        }
-      };
-      return put;
-    }
     function render2() {
       if (host2.disposed) return;
       const focusSearch = host2.focusSessionsSearchOnRender === host2.navigation.route;
       host2.focusSessionsSearchOnRender = null;
-      if (host2.SIDEBAR_ONLY) {
-        host2.domain.invalidate();
-        host2.tick();
+      if (host2.sidebarOnly) {
+        host2.transportOwner.tick();
         host2.navigation.rendered = host2.navigation.route;
-        host2.renderNav();
-        host2.renderLanes();
+        host2.navigationViewOwner.renderNav();
+        host2.recentNavigation.renderLanes();
         return;
       }
-      if (host2.NATIVE_PAGE || host2.navigation.route.v === "machines" && host2.viewerHost) {
-        host2.tick();
+      if (host2.nativePage || host2.navigation.route.v === "machines" && host2.viewerHost) {
+        host2.routeControls.retain(host2.navigation.route);
+        host2.transportOwner.tick();
         host2.navigation.rendered = host2.navigation.route;
         if (host2.navigation.content && !host2.navigation.content.element.isConnected) {
-          clearBox(host2.$("#page"), host2.navigation.route);
+          host2.pageRoot.native(host2.$("#page"));
           host2.$("#page").append(host2.navigation.content.element);
         }
-        document.title = (host2.NATIVE_PAGE?.title ?? "Machines") + " \xB7 Semon";
-        host2.renderTopbar(host2.NATIVE_PAGE?.title ?? "Machines");
-        host2.syncLayoutPrefs();
-        host2.syncBarLine();
-        host2.renderNav();
-        host2.renderLanes();
-        host2.renderDrawerAccount();
-        host2.syncJump();
+        document.title = (host2.nativePage?.title ?? "Machines") + " \xB7 Semon";
+        host2.sessionChrome.renderTopbar(host2.nativePage?.title ?? "Machines");
+        host2.layoutOwner.syncLayoutPrefs();
+        host2.sessionChrome.syncBarLine();
+        host2.navigationViewOwner.renderNav();
+        host2.recentNavigation.renderLanes();
+        host2.accountControlsOwner.renderDrawerAccount();
+        host2.viewport.syncJump();
         return;
       }
       if (host2.viewerHost)
@@ -9254,62 +9477,56 @@ globalThis.__semonUIShared = __semonUIShared;
           session: "Session",
           trace: "Trace"
         }[host2.navigation.route.v] ?? "Semon") + " \xB7 Semon";
-      host2.resetPagerInput();
-      host2.holdProgrammaticScroll();
-      host2.closeAccountMenu();
-      host2.stopOpeningEndPin();
-      host2.domain.invalidate();
-      host2.orderingControlsOwner.ordPageState = host2.ordState("page");
-      host2.tick();
+      host2.renderTransaction.begin();
       const page = host2.$("#page"), r = host2.navigation.route;
       host2.navigation.rendered = r;
       setGeometry(page, "paddingBottom", null);
-      clearBox(page, r);
+      host2.pageRoot.viewer(page, r.v);
+      host2.routeControls.retain(r);
       page.classList.remove("child-page");
       if (r.v === "home") {
-        host2.renderHome(page);
-        host2.renderTopbar("Home");
+        host2.screenViews.renderHome(page);
+        host2.sessionChrome.renderTopbar("Home");
       } else if (r.v === "analytics") {
-        host2.renderAnalytics(page);
-        host2.renderTopbar("Analytics", null, { analytics: true });
+        host2.analytics.renderAnalytics(page);
+        host2.sessionChrome.renderTopbar("Analytics", null, { analytics: true });
       } else if (r.v === "sessions") {
-        host2.renderSessions(page, focusSearch);
-        host2.renderTopbar("Sessions");
+        host2.sessionListOwner.renderSessions(page, focusSearch);
+        host2.sessionChrome.renderTopbar("Sessions");
       } else if (r.v === "machines") {
-        host2.renderMachines(page);
-        host2.renderTopbar("Machines");
+        host2.screenViews.renderMachines(page);
+        host2.sessionChrome.renderTopbar("Machines");
       } else if (r.v === "machine") {
-        host2.renderMachine(page, r.id);
-        host2.renderTopbar(
-          host2.MACHINE[r.id],
-          { label: "Machines", go: () => host2.go({ v: "machines" }) },
-          { line2: host2.machineLine(r.id) }
+        host2.screenViews.renderMachine(page, r.id);
+        host2.sessionChrome.renderTopbar(
+          host2.modelStore.machines[r.id],
+          { label: "Machines", go: () => host2.destination.go({ v: "machines" }) },
+          { line2: host2.sessionChrome.machineLine(r.id) }
         );
       } else if (r.v === "trace") {
-        host2.renderTrace(page, r.turn);
-        host2.renderTopbar(
+        host2.screenViews.renderTrace(page, r.turn);
+        host2.sessionChrome.renderTopbar(
           "Trace",
-          { label: host2.SESS[r.sid].name, go: () => host2.goSession(r.sid, r.turn) },
-          { traceSession: host2.SESS[r.sid] }
+          {
+            label: host2.modelStore.sessions[r.sid].name,
+            go: () => host2.destination.goSession(r.sid, r.turn)
+          },
+          { traceSession: host2.modelStore.sessions[r.sid] }
         );
       } else if (r.v === "session") {
-        const s = host2.SESS[r.id], lineage = host2.lineageOf(r.id).slice(0, -1);
-        host2.renderSession(page, r.id);
-        host2.renderTopbar(s.name, null, { session: s, lineage, line2: host2.sessionLine(s) });
+        const s = host2.modelStore.sessions[r.id], lineage = host2.domain.lineageOf(r.id).slice(0, -1);
+        host2.screenViews.renderSession(page, r.id);
+        host2.sessionChrome.renderTopbar(s.name, null, {
+          session: s,
+          lineage,
+          line2: host2.sessionChrome.sessionLine(s)
+        });
       }
-      if (r.v === "session" && host2.errOn(r.id)) host2.markError(false);
+      if (r.v === "session" && host2.sessionChrome.errOn(r.id)) host2.sessionChrome.markError(false);
       setGeometry(document.documentElement, "barHeight", host2.$("#topbar").offsetHeight);
-      const lanesKept = host2.destination.lanesFor && host2.destination.lanesFor.r === r && host2.destination.lanesFor.version === host2.LIVE.version;
-      host2.destination.lanesFor = null;
-      host2.syncLayoutPrefs();
-      host2.syncBarLine();
-      host2.renderNav();
-      if (!lanesKept) host2.renderLanes();
-      host2.renderDrawerAccount();
-      host2.syncJump();
-      host2.orderingControlsOwner.ordPageState = null;
+      host2.renderTransaction.complete(r);
     }
-    return { SLOTS, render: render2, slot };
+    return { render: render2 };
   }
 
   // src/app/effects.ts
@@ -9421,7 +9638,7 @@ globalThis.__semonUIShared = __semonUIShared;
   // src/app/historyScroll.ts
   function createHistoryScroll(host2) {
     const currentScroll = () => host2.phone.matches ? window.scrollY : host2.$("#main").scrollTop;
-    const restoreScroll = (top) => host2.scrollProgrammatically(() => {
+    const restoreScroll = (top) => host2.pagingOwner.scrollProgrammatically(() => {
       if (host2.phone.matches) window.scrollTo(0, top);
       else host2.$("#main").scrollTop = top;
     });
@@ -9462,7 +9679,7 @@ globalThis.__semonUIShared = __semonUIShared;
         saveHistoryScroll();
       });
     };
-    if (!host2.SIDEBAR_ONLY) {
+    if (!host2.sidebarOnly) {
       host2.scope.listen(window, "scroll", queueScrollSave, { passive: true });
       host2.scope.listen(host2.$("#main"), "scroll", queueScrollSave, { passive: true });
     }
@@ -9479,7 +9696,7 @@ globalThis.__semonUIShared = __semonUIShared;
     } catch {
     }
     try {
-      railMode = !host2.SIDEBAR_ONLY && localStorage.getItem("semon.rail") === "1";
+      railMode = !host2.sidebarOnly && localStorage.getItem("semon.rail") === "1";
     } catch {
     }
     try {
@@ -9490,7 +9707,7 @@ globalThis.__semonUIShared = __semonUIShared;
     }
     const app = host2.$(".app");
     const syncLayoutPrefs = () => {
-      if (host2.SIDEBAR_ONLY) return;
+      if (host2.sidebarOnly) return;
       app.classList.toggle("rail", railMode && !host2.phone.matches);
       host2.$("#page").classList.toggle(
         "wide-mode",
@@ -9505,18 +9722,18 @@ globalThis.__semonUIShared = __semonUIShared;
       }
       syncLayoutPrefs();
       host2.$(".wide-toggle")?.setAttribute("aria-pressed", String(on));
-      host2.accountChrome.updateWide(on);
+      host2.accountControlsOwner.accountChrome.updateWide(on);
     }
     function setRailMode(on) {
       railMode = on;
-      host2.ORD.delete("side");
+      host2.orderingControlsOwner.ORD.delete("side");
       try {
         localStorage.setItem("semon.rail", on ? "1" : "0");
       } catch {
       }
       syncLayoutPrefs();
       host2.recentNavigation.expandedAll = null;
-      host2.renderLanes();
+      host2.recentNavigation.renderLanes();
       const b = host2.$("#rail-toggle");
       b?.setAttribute("aria-expanded", String(!on));
       b?.setAttribute("aria-label", on ? "Expand sidebar" : "Collapse sidebar");
@@ -9540,7 +9757,7 @@ globalThis.__semonUIShared = __semonUIShared;
       } catch {
       }
     }
-    const railToggle = host2.SIDEBAR_ONLY ? host2.$("#rail-toggle") ?? document.createElement("button") : document.createElement("button");
+    const railToggle = host2.sidebarOnly ? host2.$("#rail-toggle") ?? document.createElement("button") : document.createElement("button");
     railToggle.setAttribute("aria-expanded", String(!railMode));
     railToggle.setAttribute("data-tip", railMode ? "Expand sidebar" : "Collapse sidebar");
     railToggle.setAttribute("aria-label", railMode ? "Expand sidebar" : "Collapse sidebar");
@@ -9577,20 +9794,22 @@ globalThis.__semonUIShared = __semonUIShared;
   function createLiveModel(host2) {
     const liveController = createLiveController({
       async poll() {
-        const response = await host2.api(
-          "/api/model?delta=1&since=" + host2.enc(LIVE.late ? "" : LIVE.version ?? ""),
+        const response = await host2.transportOwner.api(
+          "/api/model?delta=1&since=" + host2.transportOwner.enc(LIVE.late ? "" : LIVE.version ?? ""),
           void 0,
           true
         );
         if (!response) return;
         let model2;
         try {
-          model2 = host2.applyModelDelta(response);
+          model2 = host2.liveUpdates.applyModelDelta(response);
         } catch {
-          await host2.api("/api/model?delta=1").then(host2.update);
+          await host2.transportOwner.api("/api/model?delta=1").then(
+            (...args) => host2.liveUpdates.update(...args)
+          );
           return;
         }
-        await host2.update(model2);
+        await host2.liveUpdates.update(model2);
       },
       failed(error) {
         return !!host2.viewerHost?.modelFailed?.(error instanceof ApiError ? error.status : 0);
@@ -9600,7 +9819,7 @@ globalThis.__semonUIShared = __semonUIShared;
     const LIVE = liveController.state;
     const remember = (_m) => {
       LIVE.turns = new Map(
-        Object.values(host2.TURNS).flat().map((x) => [x.id, turnKey(x)])
+        Object.values(host2.modelStore.turns).flat().map((x) => [x.id, turnKey(x)])
       );
     };
     const turnKey = (x) => [
@@ -9631,10 +9850,10 @@ globalThis.__semonUIShared = __semonUIShared;
       ))
         return;
       const n = createStatusNote(
-        host2.SIDEBAR_ONLY ? "Sessions stopped updating: reload the page" : "Session ended: reload with the printed URL",
-        host2.SIDEBAR_ONLY ? "ghead livenote-side" : "livenote"
+        host2.sidebarOnly ? "Sessions stopped updating: reload the page" : "Session ended: reload with the printed URL",
+        host2.sidebarOnly ? "ghead livenote-side" : "livenote"
       );
-      if (host2.SIDEBAR_ONLY) host2.$("#lanes").after(n);
+      if (host2.sidebarOnly) host2.$("#lanes").after(n);
       else document.body.append(n);
     }
     const soft = (p) => p.catch((e) => {
@@ -9647,8 +9866,8 @@ globalThis.__semonUIShared = __semonUIShared;
       return v;
     };
     const cardKeys = () => new Map(
-      host2.H.filter((h2) => h2.kind === "spawn" && host2.SESS[h2.to]).map((h2) => {
-        const c = host2.SESS[h2.to];
+      host2.modelStore.handoffs.filter((h2) => h2.kind === "spawn" && host2.modelStore.sessions[h2.to]).map((h2) => {
+        const c = host2.modelStore.sessions[h2.to];
         return [
           h2.id,
           [
@@ -9656,7 +9875,7 @@ globalThis.__semonUIShared = __semonUIShared;
             c.state,
             c.kind,
             c.model,
-            host2.countOf(c, "calls"),
+            host2.domain.countOf(c, "calls"),
             c.activity?.join("|"),
             h2.status,
             h2.result
@@ -9680,63 +9899,81 @@ globalThis.__semonUIShared = __semonUIShared;
 
   // src/app/liveUpdates.ts
   function createLiveUpdates(host2) {
+    let generation = 0;
     const applyModelDelta = (value) => host2.modelStore.apply(value);
     function update(value) {
+      if (host2.disposed) return Promise.resolve();
       const m = applyModelDelta(value);
-      const oldH = new Map(host2.H.map((h2) => [h2.id, host2.handKey(h2)])), oldT = host2.LIVE.turns, oldCards = host2.cardKeys(), names = new Map(Object.values(host2.SESS).map((x) => [x.id, x.name]));
-      const hadOrigins = new Set([...host2.TXCACHE.keys()].filter((sid) => !!host2.originHandoff(sid)));
-      const hadOrigin = host2.navigation.route.v === "session" && !!host2.SESS["id" in host2.navigation.route ? host2.navigation.route.id : ""] && !!host2.originHandoff("id" in host2.navigation.route ? host2.navigation.route.id : "");
-      host2.adopt(m);
-      host2.remember(m);
-      for (const sid of host2.STALE_BRIEFS) if (!host2.SESS[sid]) host2.STALE_BRIEFS.delete(sid);
-      for (const sid of [...host2.TXCACHE.keys()])
-        if (!hadOrigins.has(sid) && host2.originHandoff(sid)) host2.TXCACHE.delete(sid);
-      if (host2.LIVE.late !== ("id" in host2.navigation.route ? host2.navigation.route.id : "")) {
-        if (host2.LIVE.late) host2.TXCACHE.delete(host2.LIVE.late);
-        host2.LIVE.late = null;
-      }
-      if (host2.navigation.route.v === "session" && !hadOrigin && !!host2.SESS["id" in host2.navigation.route ? host2.navigation.route.id : ""] && !!host2.originHandoff("id" in host2.navigation.route ? host2.navigation.route.id : "")) {
-        host2.LIVE.late = "id" in host2.navigation.route ? host2.navigation.route.id : "";
-        host2.LIVE.lateTries = 0;
-        host2.STALE_BRIEFS.add("id" in host2.navigation.route ? host2.navigation.route.id : "");
-        host2.TXCACHE.delete("id" in host2.navigation.route ? host2.navigation.route.id : "");
-      }
-      if (host2.LIVE.late && !host2.TX[host2.LIVE.late]) host2.LIVE.late = null;
-      const changedH = new Set(
-        host2.H.filter((h2) => oldH.get(h2.id) !== host2.handKey(h2)).map((h2) => h2.id)
+      const oldH = new Map(
+        host2.modelStore.handoffs.map((h2) => [h2.id, host2.liveModelOwner.handKey(h2)])
+      ), oldT = host2.liveModelOwner.LIVE.turns, oldCards = host2.liveModelOwner.cardKeys(), names = new Map(Object.values(host2.modelStore.sessions).map((x) => [x.id, x.name]));
+      const hadOrigins = new Set(
+        [...host2.transcripts.cache.keys()].filter((sid) => !!host2.domain.originHandoff(sid))
       );
-      const newCards = host2.cardKeys(), changedCards = new Set(
+      const hadOrigin = host2.navigation.route.v === "session" && !!host2.modelStore.sessions["id" in host2.navigation.route ? host2.navigation.route.id : ""] && !!host2.domain.originHandoff("id" in host2.navigation.route ? host2.navigation.route.id : "");
+      host2.transportOwner.adopt(m);
+      const revision = ++generation;
+      host2.liveModelOwner.remember(m);
+      for (const sid of host2.transcripts.staleBriefs)
+        if (!host2.modelStore.sessions[sid]) host2.transcripts.staleBriefs.delete(sid);
+      for (const sid of [...host2.transcripts.cache.keys()])
+        if (!hadOrigins.has(sid) && host2.domain.originHandoff(sid))
+          host2.transcripts.cache.delete(sid);
+      if (host2.liveModelOwner.LIVE.late !== ("id" in host2.navigation.route ? host2.navigation.route.id : "")) {
+        if (host2.liveModelOwner.LIVE.late)
+          host2.transcripts.cache.delete(host2.liveModelOwner.LIVE.late);
+        host2.liveModelOwner.LIVE.late = null;
+      }
+      if (host2.navigation.route.v === "session" && !hadOrigin && !!host2.modelStore.sessions["id" in host2.navigation.route ? host2.navigation.route.id : ""] && !!host2.domain.originHandoff("id" in host2.navigation.route ? host2.navigation.route.id : "")) {
+        host2.liveModelOwner.LIVE.late = "id" in host2.navigation.route ? host2.navigation.route.id : "";
+        host2.liveModelOwner.LIVE.lateTries = 0;
+        host2.transcripts.staleBriefs.add(
+          "id" in host2.navigation.route ? host2.navigation.route.id : ""
+        );
+        host2.transcripts.cache.delete("id" in host2.navigation.route ? host2.navigation.route.id : "");
+      }
+      if (host2.liveModelOwner.LIVE.late && !host2.transcripts.entries[host2.liveModelOwner.LIVE.late])
+        host2.liveModelOwner.LIVE.late = null;
+      const changedH = new Set(
+        host2.modelStore.handoffs.filter((h2) => oldH.get(h2.id) !== host2.liveModelOwner.handKey(h2)).map((h2) => h2.id)
+      );
+      const newCards = host2.liveModelOwner.cardKeys(), changedCards = new Set(
         [...newCards].filter(([id, k]) => oldCards.has(id) && oldCards.get(id) !== k).map(([id]) => id)
       );
-      const view = host2.viewed(), grown = /* @__PURE__ */ new Set(), cuts = /* @__PURE__ */ new Map(), patched = /* @__PURE__ */ new Map();
-      let full = Object.values(host2.SESS).some((x) => names.has(x.id) && names.get(x.id) !== x.name);
-      for (const sid of Object.keys(host2.TX)) {
-        if (view.has(sid) && host2.SESS[sid]) host2.spread(sid);
-        else host2.dropTx(sid);
+      const view = host2.liveModelOwner.viewed(), grown = /* @__PURE__ */ new Set(), cuts = /* @__PURE__ */ new Map(), patched = /* @__PURE__ */ new Map();
+      let full = Object.values(host2.modelStore.sessions).some(
+        (x) => names.has(x.id) && names.get(x.id) !== x.name
+      );
+      for (const sid of Object.keys(host2.transcripts.entries)) {
+        if (view.has(sid) && host2.modelStore.sessions[sid]) host2.transportOwner.spread(sid);
+        else host2.pagingOwner.dropTx(sid);
       }
       let chain = Promise.resolve();
       for (const sid of view)
-        if (host2.TX[sid] && host2.LIVE.late === sid)
+        if (host2.transcripts.entries[sid] && host2.liveModelOwner.LIVE.late === sid)
           chain = chain.then(
-            () => host2.soft(
+            () => host2.liveModelOwner.soft(
               reloadLate(sid).then(() => {
                 grown.add(sid);
                 full = true;
               })
             )
           );
-        else if (host2.TX[sid] && host2.TXM[sid].tok != null && host2.TOK[sid] != null && host2.shrank(host2.TXM[sid].tok, host2.TOK[sid]))
+        else if (host2.transcripts.entries[sid] && host2.transcripts.meta[sid].tok != null && host2.transportOwner.TOK[sid] != null && host2.transcriptRevalidationOwner.shrank(
+          host2.transcripts.meta[sid].tok,
+          host2.transportOwner.TOK[sid]
+        ))
           chain = chain.then(
-            () => host2.soft(
+            () => host2.liveModelOwner.soft(
               reload(sid).then(() => {
                 grown.add(sid);
                 full = true;
               })
             )
           );
-        else if (host2.TX[sid] && host2.TXM[sid].to >= host2.TXM[sid].total && host2.TXM[sid].tok !== host2.TOK[sid])
+        else if (host2.transcripts.entries[sid] && host2.transcripts.meta[sid].to >= host2.transcripts.meta[sid].total && host2.transcripts.meta[sid].tok !== host2.transportOwner.TOK[sid])
           chain = chain.then(
-            () => host2.soft(
+            () => host2.liveModelOwner.soft(
               tail(sid).then((r) => {
                 grown.add(sid);
                 if (r.cut != null) cuts.set(sid, r.cut);
@@ -9746,28 +9983,33 @@ globalThis.__semonUIShared = __semonUIShared;
             )
           );
       for (const sid of view)
-        if (host2.TX[sid] && host2.TXM[sid].to < host2.TXM[sid].total && host2.TXM[sid].watchTok !== host2.TOK[sid])
+        if (host2.transcripts.entries[sid] && host2.transcripts.meta[sid].to < host2.transcripts.meta[sid].total && host2.transcripts.meta[sid].watchTok !== host2.transportOwner.TOK[sid])
           chain = chain.then(
-            () => host2.soft(
+            () => host2.liveModelOwner.soft(
               watchLater(sid).then((r) => {
                 if (r?.reload) full = true;
               })
             )
           );
       return chain.then(() => {
-        host2.LIVE.version = m.version;
-        host2.refresh(full ? null : dirtyTurns(cuts, grown, changedH, oldT, changedCards, patched));
-        if (host2.navigation.route.v === "analytics") host2.refreshAnalytics();
-        const e = host2.errorsLive();
-        return e && host2.soft(e);
+        if (host2.disposed || revision !== generation) return;
+        host2.liveModelOwner.LIVE.version = m.version;
+        host2.applicationRefreshOwner.refresh(
+          full ? null : dirtyTurns(cuts, grown, changedH, oldT, changedCards, patched)
+        );
+        if (host2.navigation.route.v === "analytics") host2.analytics.refreshAnalytics();
+        const e = host2.sessionChrome.errorsLive();
+        return e && host2.liveModelOwner.soft(e);
       });
     }
     function dirtyTurns(cuts, grown, changedH, oldT, changedCards, patched) {
-      if (host2.navigation.route.v !== "session" || !host2.TX["id" in host2.navigation.route ? host2.navigation.route.id : ""])
+      if (host2.navigation.route.v !== "session" || !host2.transcripts.entries["id" in host2.navigation.route ? host2.navigation.route.id : ""])
         return null;
-      const sid = "id" in host2.navigation.route ? host2.navigation.route.id : "", dirty = /* @__PURE__ */ new Set(), owner = new Map((host2.TURNS[sid] ?? []).flatMap((t) => t.entries.map((e) => [e, t.id])));
+      const sid = "id" in host2.navigation.route ? host2.navigation.route.id : "", dirty = /* @__PURE__ */ new Set(), owner = new Map(
+        (host2.modelStore.turns[sid] ?? []).flatMap((t) => t.entries.map((e) => [e, t.id]))
+      );
       if (cuts.has(sid))
-        for (const e of host2.TX[sid].slice(cuts.get(sid))) {
+        for (const e of host2.transcripts.entries[sid].slice(cuts.get(sid))) {
           if (host2.isGap(e)) return null;
           if (owner.has(e)) dirty.add(owner.get(e));
         }
@@ -9775,27 +10017,28 @@ globalThis.__semonUIShared = __semonUIShared;
         if (!owner.has(e)) return null;
         dirty.add(owner.get(e));
       }
-      for (const t of host2.TURNS[sid] ?? []) {
-        if (oldT.get(t.id) !== host2.LIVE.turns.get(t.id) || [t.start, ...t.sent].some((h2) => h2 && changedH.has(h2.id)) || t.entries.some((e) => e.k === "h" && changedH.has(e.id)))
+      for (const t of host2.modelStore.turns[sid] ?? []) {
+        if (oldT.get(t.id) !== host2.liveModelOwner.LIVE.turns.get(t.id) || [t.start, ...t.sent].some((h2) => h2 && changedH.has(h2.id)) || t.entries.some((e) => e.k === "h" && changedH.has(e.id)))
           dirty.add(t.id);
       }
-      for (const h2 of host2.H)
-        if (h2.kind === "spawn" && h2.from === sid && changedCards.has(h2.id) && host2.HOLDS.get(h2.id))
-          dirty.add(host2.HOLDS.get(h2.id).id);
+      for (const h2 of host2.modelStore.handoffs)
+        if (h2.kind === "spawn" && h2.from === sid && changedCards.has(h2.id) && host2.modelStore.holds.get(h2.id))
+          dirty.add(host2.modelStore.holds.get(h2.id).id);
       return dirty;
     }
     function watchLater(sid) {
-      const m = host2.TXM[sid], tok2 = host2.TOK[sid];
-      return host2.api("/api/tx?sid=" + host2.enc(sid) + "&after=" + m.total).then((value) => {
+      const m = host2.transcripts.meta[sid], tok2 = host2.transportOwner.TOK[sid];
+      return host2.transportOwner.api("/api/tx?sid=" + host2.transportOwner.enc(sid) + "&after=" + m.total).then((value) => {
         const p = parseTranscriptPage(value);
-        if (host2.TXM[sid] !== m) return;
+        if (host2.transcripts.meta[sid] !== m) return;
         if (p.total < m.total) return reload(sid);
         m.newer = (m.newer ?? 0) + Math.max(0, p.total - m.total);
         Object.assign(m, { total: p.total, calls: p.calls, errors: p.errors, watchTok: tok2 });
+        host2.transcripts.updates.transcript(sid);
       });
     }
     function tail(sid) {
-      const es = host2.TX[sid], m = host2.TXM[sid], tok2 = host2.TOK[sid];
+      const es = host2.transcripts.entries[sid], m = host2.transcripts.meta[sid], tok2 = host2.transportOwner.TOK[sid];
       let cut2 = es.findIndex((e) => e.live && e.slot != null);
       if (cut2 < 0) cut2 = es.length;
       for (let i = es.length - 1; i >= 0; i--) {
@@ -9803,14 +10046,14 @@ globalThis.__semonUIShared = __semonUIShared;
         if (es[i].turn) break;
       }
       let got = [], last = null, n = 0;
-      const page = (after) => host2.api("/api/tx?sid=" + host2.enc(sid) + "&after=" + after).then((value) => {
+      const page = (after) => host2.transportOwner.api("/api/tx?sid=" + host2.transportOwner.enc(sid) + "&after=" + after).then((value) => {
         const p = parseTranscriptPage(value);
-        got = got.concat(p.entries.map((e) => host2.txEntry({ ...e, sid })));
+        got = got.concat(p.entries.map((e) => host2.transportOwner.txEntry({ ...e, sid })));
         last = p;
         if (p.to < p.total && p.entries.length && ++n < 5) return page(p.to);
       });
       return page(cut2 < es.length ? es[cut2].slot : m.to).then(() => {
-        if (host2.TX[sid] !== es) return { cut: null };
+        if (host2.transcripts.entries[sid] !== es) return { cut: null };
         if (!last) return { cut: null };
         if (last.total < m.total || last.to < last.total || cut2 < es.length && got[0]?.slot !== es[cut2].slot)
           return reload(sid);
@@ -9825,7 +10068,7 @@ globalThis.__semonUIShared = __semonUIShared;
               patched.push(e);
             }
           }
-        host2.TX[sid] = es.slice(0, cut2).concat(got);
+        host2.transcripts.entries[sid] = es.slice(0, cut2).concat(got);
         Object.assign(m, {
           to: last.to,
           total: last.total,
@@ -9833,32 +10076,33 @@ globalThis.__semonUIShared = __semonUIShared;
           errors: last.errors,
           tok: tok2
         });
-        host2.spread(sid);
+        host2.transportOwner.spread(sid);
+        host2.transcripts.updates.transcript(sid);
         return { cut: cut2, patched };
       });
     }
     function reload(sid) {
       if (sid !== ("id" in host2.navigation.route ? host2.navigation.route.id : "")) {
-        host2.dropTx(sid);
+        host2.pagingOwner.dropTx(sid);
         return Promise.resolve({ cut: null, reload: true });
       }
-      return host2.fetchTx(sid, "").then(() => ({ cut: null, reload: true }));
+      return host2.transportOwner.fetchTx(sid, "").then(() => ({ cut: null, reload: true }));
     }
     const LATE_TRIES = 4;
     function reloadLate(sid) {
       return reload(sid).then(
         (r) => {
-          if (host2.LIVE.late === sid) host2.LIVE.late = null;
+          if (host2.liveModelOwner.LIVE.late === sid) host2.liveModelOwner.LIVE.late = null;
           return r;
         },
         (err) => {
-          if (host2.LIVE.late === sid) {
-            if (++host2.LIVE.lateTries >= LATE_TRIES) {
-              host2.LIVE.late = null;
+          if (host2.liveModelOwner.LIVE.late === sid) {
+            if (++host2.liveModelOwner.LIVE.lateTries >= LATE_TRIES) {
+              host2.liveModelOwner.LIVE.late = null;
               console.warn(
                 "semon: gave up reloading the transcript of " + sid + " after its origin arrived"
               );
-            } else host2.LIVE.retry = true;
+            } else host2.liveModelOwner.LIVE.retry = true;
           }
           throw err;
         }
@@ -9866,86 +10110,6 @@ globalThis.__semonUIShared = __semonUIShared;
     }
     return { reload, tail, applyModelDelta, update };
   }
-
-  // src/app/registry.ts
-  var HARNESSES = {
-    claude: {
-      name: "Claude Code",
-      short: "Claude",
-      icon: { light: "/harness/claude-code.svg", dark: "/harness/claude-code.svg" }
-    },
-    codex: {
-      name: "Codex",
-      short: "Codex",
-      icon: { light: "/harness/codex-black.svg", dark: "/harness/codex.svg" }
-    },
-    opencode: {
-      name: "OpenCode",
-      short: "OpenCode",
-      icon: { light: "/harness/opencode-light.svg", dark: "/harness/opencode-dark.svg" }
-    }
-  };
-  var HARNESS = Object.fromEntries(Object.entries(HARNESSES).map(([id, h2]) => [id, h2.name]));
-  var HARNESS_SHORT = Object.fromEntries(
-    Object.entries(HARNESSES).map(([id, h2]) => [id, h2.short])
-  );
-  var I = {
-    menu: "M4 7h16M4 12h16M4 17h16",
-    more: "M5 12h.01M12 12h.01M19 12h.01",
-    back: "M15 6l-6 6 6 6",
-    chev: "M9 6l6 6-6 6",
-    search: "M11 18a7 7 0 1 1 0-14 7 7 0 0 1 0 14zM20 20l-4-4",
-    filter: "M4 6h16M7 12h10M10 18h4",
-    home: "M4 11l8-7 8 7M6 9.5V20h12V9.5M10 20v-5h4v5",
-    inbox: "M4 13l2.5-8h11L20 13v6H4zM4 13h5l1 2h4l1-2h5",
-    now: "M3 12h4l2.5-6 5 12 2.5-6h4",
-    trace: "M6 4v10a4 4 0 0 0 4 4h8M6 10h12M15 7l3 3-3 3M15 15l3 3-3 3",
-    sessions: "M9 6h11M9 12h11M9 18h11M4.5 6h.01M4.5 12h.01M4.5 18h.01",
-    run: "M4 17l5-5-5-5M12 19h8",
-    stack: "M12 3l9 5-9 5-9-5zM3 13l9 5 9-5",
-    read: "M6 3h8l4 4v14H6zM14 3v4h4",
-    edit: "M4 20h4L19 9l-4-4L4 16zM13 7l4 4",
-    find: "M11 18a7 7 0 1 1 0-14 7 7 0 0 1 0 14zM20 20l-4-4",
-    machine: "M3 5h18v11H3zM8 20h8M12 16v4",
-    repo: "M6 3v12M6 15a3 3 0 1 0 0 6 3 3 0 0 0 0-6zM18 9a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM18 9c0 6-12 3-12 6",
-    duration: "M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18zM12 7v5l3 2",
-    delegate: "M4 3h7v5H4zM7.5 8v9H13M13 14h7v6h-7z",
-    out: "M7 17L17 7M9 7h8v8",
-    in: "M17 7L7 17M15 17H7V9",
-    move: "M4 8h13l-3-3M20 16H7l3 3",
-    ask: "M5 18l-1 3 3-1 11-11-2-2zM14 6l4 4",
-    you: "M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8zM4 21c1-4 4-6 8-6s7 2 8 6",
-    q: "M9 9a3 3 0 1 1 4 2.8c-.7.3-1 .9-1 1.7V14M12 18h.01",
-    check: "M5 12l4 4 10-10",
-    qc: "M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18zM9.6 9.4a2.5 2.5 0 1 1 3.4 2.4c-.6.3-1 .8-1 1.5v.4M12 17h.01",
-    decide: "M12 21v-6M12 15L6 9M12 15l6-6M6 9V4M18 9V4M4 6l2-2 2 2M16 6l2-2 2 2",
-    result: "M14 3H6v18h12V7zM14 3v4h4M9 12h6M9 16h6",
-    done: "M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18zM8 12.5l2.7 2.7L16 9.8",
-    x: "M6 6l12 12M18 6L6 18",
-    expand: "M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7",
-    copy: "M9 9h11v11H9zM5 15H4V4h11v1",
-    ext: "M14 4h6v6M20 4l-9 9M18 14v6H4V6h6",
-    down: "M12 4v15M5 12l7 7 7-7",
-    up: "M6 15l6-6 6 6",
-    dn: "M6 9l6 6 6-6",
-    branch: "M6 3v12M6 15a3 3 0 1 0 0 6 3 3 0 0 0 0-6zM18 9a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM18 9c0 6-12 3-12 6",
-    wrench: "M14.5 6.5a5 5 0 0 0-6.9 6.9l-4.8 4.8a2 2 0 0 0 2.8 2.8l4.8-4.8a5 5 0 0 0 6.9-6.9l-3 3-2.8-2.8z",
-    wide: "M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5",
-    sidebar: "M4 5h16v14H4zM9 5v14",
-    tokens: "M5 5h14M12 5v14M9 19h6",
-    chart: "M4 19V5M4 19h17M8 15l3-4 3 2 5-7",
-    coin: "M12 3v18M17 7.5C17 6.1 14.8 5 12 5S7 6.1 7 7.5 9.2 10 12 10s5 1.1 5 2.5-2.2 2.5-5 2.5-5-1.1-5-2.5",
-    relay: "M4 7h13l-3-3M20 17H7l3 3"
-  };
-  var STATE = {
-    work: "Working",
-    wait: "Needs you",
-    idle: "Idle",
-    done: "Done",
-    err: "Failed",
-    new: "New result",
-    read: "Read result"
-  };
 
   // src/app/navigationView.ts
   function createNavigationView(host2) {
@@ -9962,28 +10126,29 @@ globalThis.__semonUIShared = __semonUIShared;
           key: v,
           label,
           icon: ic,
-          href: v === "machines" && host2.NAV_MACHINES ? host2.NAV_MACHINES : host2.urlOf({ v }),
+          href: v === "machines" && host2.machinesPath ? host2.machinesPath : host2.bootstrapOwner.urlOf({ v }),
           current: under[v].includes(
-            (host2.SIDEBAR_ONLY ? host2.app.dataset.viewerNav : host2.NATIVE_PAGE?.nav) ?? host2.navigation.route.v
+            (host2.sidebarOnly ? host2.layoutOwner.app.dataset.viewerNav : host2.nativePage?.nav) ?? host2.navigation.route.v
           ),
           count,
           hot
         });
       };
-      item2("home", "Home", I.home, host2.inbox().length, true);
+      item2("home", "Home", I.home, host2.domain.inbox().length, true);
       item2("sessions", "Sessions", I.sessions);
       item2("analytics", "Analytics", I.chart);
       item2(
         "machines",
         "Machines",
         I.machine,
-        Object.keys(host2.MACHINE).filter((m) => !host2.MACHINE_UP[m]).length,
+        Object.keys(host2.modelStore.machines).filter((m) => !host2.modelStore.machineUp[m]).length,
         true
       );
-      if (host2.shellChrome) host2.shellChrome.update(destinations, host2.layoutOwner.railMode);
+      if (host2.accountControlsOwner.shellChrome)
+        host2.accountControlsOwner.shellChrome.update(destinations, host2.layoutOwner.railMode);
       else
         renderShellNavigation(nav, destinations, (destination) => {
-          host2.go(host2.navigation.historyRoute({ v: destination.key }, { v: "home" }));
+          host2.destination.go(host2.navigation.historyRoute({ v: destination.key }, { v: "home" }));
           return true;
         });
     }
@@ -9991,11 +10156,11 @@ globalThis.__semonUIShared = __semonUIShared;
       s.name,
       s.repo,
       s.branch,
-      host2.MACHINE[s.machine],
-      s.movedFrom ? host2.MACHINE[s.movedFrom] : "",
+      host2.modelStore.machines[s.machine],
+      s.movedFrom ? host2.modelStore.machines[s.movedFrom] : "",
       HARNESS[s.harness],
       s.role ? "role no repo" : "",
-      ...(host2.TURNS[s.id] ?? []).map((t) => t.start?.brief ?? t.u?.text ?? "")
+      ...(host2.modelStore.turns[s.id] ?? []).map((t) => t.start?.brief ?? t.u?.text ?? "")
     ].join(" ").toLowerCase().includes(q.toLowerCase());
     return { renderNav, sessMatch };
   }
@@ -10026,7 +10191,7 @@ globalThis.__semonUIShared = __semonUIShared;
     });
     host2.scope.listen(document, "visibilitychange", () => {
       ordTouch.down = false;
-      if (host2.visible()) {
+      if (host2.liveModelOwner.visible()) {
         orderApply("page");
         orderApply("side");
       }
@@ -10049,11 +10214,11 @@ globalThis.__semonUIShared = __semonUIShared;
       if (!sc?.n || name === "page" && (sc.tie !== host2.navigation.route || host2.navigation.rendered !== host2.navigation.route || host2.toolViewsOwner.viewerEl || host2.$("#page").hasAttribute("aria-busy")))
         return;
       ORD.delete(name);
-      if (name === "side") host2.renderLanes();
+      if (name === "side") host2.recentNavigation.renderLanes();
       else {
-        const st = host2.capture();
-        host2.render();
-        host2.restore(st);
+        const st = host2.viewport.capture();
+        host2.documentRendererOwner.render();
+        host2.viewport.restore(st);
       }
     }
     let ordIdle;
@@ -10146,7 +10311,7 @@ globalThis.__semonUIShared = __semonUIShared;
       host2.scope.clearTimeout(programmaticScrollTimer);
       programmaticScrollTimer = void 0;
       programmaticScrollPending = false;
-      host2.stopOpeningEndPin();
+      host2.viewport.stopOpeningEndPin();
       pagerArmed = true;
       automaticLoads = 0;
       scrollRevision++;
@@ -10161,7 +10326,7 @@ globalThis.__semonUIShared = __semonUIShared;
         where,
         disabled: state2.busy,
         busy: state2.busy,
-        text: state2.busy ? "Loading " + direction + "\u2026" : state2.failed ? "Couldn't load " + direction + " entries \xB7 Retry" : "Load " + direction + (where === "after" && host2.TXM[sid]?.newer ? " \xB7 " + host2.TXM[sid].newer + " new" : "")
+        text: state2.busy ? "Loading " + direction + "\u2026" : state2.failed ? "Couldn't load " + direction + " entries \xB7 Retry" : "Load " + direction + (where === "after" && host2.transcripts.meta[sid]?.newer ? " \xB7 " + host2.transcripts.meta[sid].newer + " new" : "")
       };
     }
     function paintPager(b) {
@@ -10175,23 +10340,23 @@ globalThis.__semonUIShared = __semonUIShared;
         return host2.navigation.route.v === "session" && ("id" in host2.navigation.route ? host2.navigation.route.id : "") === sid && host2.navigation.rendered === host2.navigation.route ? host2.navigation.route : null;
       },
       range(sid) {
-        return host2.TXM[sid];
+        return host2.transcripts.meta[sid];
       },
       state: pagingState,
       automatic: automaticPagingAllowed,
       current(sid, where, state2, r) {
         return PAGING.get(sid)?.[where] === state2;
       },
-      beginManual: () => host2.stopOpeningEndPin(),
+      beginManual: () => host2.viewport.stopOpeningEndPin(),
       countAutomatic() {
         automaticLoads++;
       },
       paint: paintPager,
       load(sid, where, boundary, signal, applied) {
-        return host2.fetchTx(sid, where + "=" + boundary, where, signal, applied);
+        return host2.transportOwner.fetchTx(sid, where + "=" + boundary, where, signal, applied);
       },
       commit(r, where, manual) {
-        const box = host2.scroller(), top = host2.phone.matches ? 0 : box.getBoundingClientRect().top, st = host2.capture();
+        const box = host2.viewport.scroller(), top = host2.phone.matches ? 0 : box.getBoundingClientRect().top, st = host2.viewport.capture();
         const entry = [
           ...host2.$("#page").querySelectorAll(".turns [data-e][data-entry-key]:not(.tgroup)")
         ].find((n) => {
@@ -10204,14 +10369,14 @@ globalThis.__semonUIShared = __semonUIShared;
           before: where === "before"
         };
         const armed = pagerArmed, used = automaticLoads;
-        host2.render();
-        host2.restore(st);
+        host2.documentRendererOwner.render();
+        host2.viewport.restore(st);
         if (!manual) {
           pagerArmed = armed;
           automaticLoads = used;
         }
-        host2.syncJump();
-        host2.saveHistoryScroll();
+        host2.viewport.syncJump();
+        host2.historyScrollOwner.saveHistoryScroll();
       },
       queue: queuePagerObservers
     });
@@ -10219,7 +10384,7 @@ globalThis.__semonUIShared = __semonUIShared;
       pagerController.disconnect();
     }
     function queuePagerObservers() {
-      if (host2.disposed || host2.SIDEBAR_ONLY) return;
+      if (host2.disposed || host2.sidebarOnly) return;
       pagerController.queue(
         host2.$("#page"),
         host2.phone.matches ? null : host2.$("#main"),
@@ -10262,7 +10427,7 @@ globalThis.__semonUIShared = __semonUIShared;
     const isApprovalReview = (s) => s.kind === "Approval review";
     const visibleInNavigation = (s, path = routedPath()) => host2.showApprovalReviews || !isApprovalReview(s) || s.id === path.current || path.ancestors.has(s.id);
     const navigationTree = (path = routedPath()) => {
-      const canonical = host2.sessionChildren(), roots = [], children = /* @__PURE__ */ new Map(), visited = /* @__PURE__ */ new Set();
+      const canonical = host2.domain.sessionChildren(), roots = [], children = /* @__PURE__ */ new Map(), visited = /* @__PURE__ */ new Set();
       const visit = (session, parent) => {
         if (visited.has(session.id)) return;
         visited.add(session.id);
@@ -10276,17 +10441,24 @@ globalThis.__semonUIShared = __semonUIShared;
         }
         for (const child of canonical.get(session.id) ?? []) visit(child, nearest);
       };
-      for (const root of Object.values(host2.SESS).filter((s) => s.lane && !host2.parentOf(s.id)))
+      for (const root of Object.values(host2.modelStore.sessions).filter(
+        (s) => s.lane && !host2.domain.parentOf(s.id)
+      ))
         visit(root, null);
-      roots.sort(host2.byLast);
-      for (const kids of children.values()) kids.sort(host2.byLast);
+      roots.sort(
+        (...args) => host2.orderingControlsOwner.byLast(...args)
+      );
+      for (const kids of children.values())
+        kids.sort(
+          (...args) => host2.orderingControlsOwner.byLast(...args)
+        );
       return { roots, children };
     };
     const COST_TIP = "What these tokens would cost at API rates. Subscriptions (Claude Max, ChatGPT plans) aren't billed this way.";
     const TREE_ACTIVE = 8, TREE_ROWS = 3;
     function routedPath() {
       const current = host2.navigation.route.v === "session" ? "id" in host2.navigation.route ? host2.navigation.route.id : "" : host2.navigation.route.v === "trace" ? host2.navigation.route.sid : null, ancestors = /* @__PURE__ */ new Set();
-      for (let id = current && host2.SESS[current] ? host2.parentOf(current) : null; id && host2.SESS[id] && id !== current && !ancestors.has(id); id = host2.parentOf(id))
+      for (let id = current && host2.modelStore.sessions[current] ? host2.domain.parentOf(current) : null; id && host2.modelStore.sessions[id] && id !== current && !ancestors.has(id); id = host2.domain.parentOf(id))
         ancestors.add(id);
       return { current, ancestors };
     }
@@ -10304,12 +10476,12 @@ globalThis.__semonUIShared = __semonUIShared;
     let sideOrder = null;
     const ancestorsOf = (id) => {
       const out = /* @__PURE__ */ new Set();
-      for (let p = id && host2.SESS[id] ? host2.parentOf(id) : null; p && host2.SESS[p] && p !== id && !out.has(p); p = host2.parentOf(p))
+      for (let p = id && host2.modelStore.sessions[id] ? host2.domain.parentOf(id) : null; p && host2.modelStore.sessions[p] && p !== id && !out.has(p); p = host2.domain.parentOf(p))
         out.add(p);
       return out;
     };
     function treeGroupSnapshot(parent, kids, children, depth, rail, open) {
-      const { current, ancestors } = routedPath(), rank = new Map(kids.map((c) => [c.id, host2.kidRank(c, children)]));
+      const { current, ancestors } = routedPath(), rank = new Map(kids.map((c) => [c.id, host2.domain.kidRank(c, children)]));
       const byRank = (a, b) => rank.get(a.id) - rank.get(b.id) || b.last - a.last, sorted = [...kids].sort(byRank), keep = /* @__PURE__ */ new Set();
       for (const c of sorted) if (rank.get(c.id) < 2 && keep.size < TREE_ACTIVE) keep.add(c.id);
       for (const c of sorted)
@@ -10319,7 +10491,7 @@ globalThis.__semonUIShared = __semonUIShared;
       if (!hidden && expandedAll === parent.id) expandedAll = null;
       const full = hidden > 0 && !rail && (expandedAll === parent.id || expandedUnder.has(parent.id));
       const key = (full ? "a:" : "k:") + parent.id, unseen = !!sideOrder?.keep && open && !full && !sideOrder.reseed && sideOrder.seen.has(parent.id) && !sideOrder.prev.has(key);
-      const shown = sideOrder ? host2.orderList(sideOrder, key, full ? sorted : listed, byRank, {
+      const shown = sideOrder ? host2.orderingControlsOwner.orderList(sideOrder, key, full ? sorted : listed, byRank, {
         must: /* @__PURE__ */ new Set([...current ? [current] : [], ...ancestors, ...expandedPath]),
         quiet: !open,
         seed: full || sideOrder.reseed || !sideOrder.seen.has(parent.id)
@@ -10327,16 +10499,16 @@ globalThis.__semonUIShared = __semonUIShared;
       const items = shown.map((child) => buildLaneSnapshot(child, depth + 1, children, rail));
       return {
         items,
-        all: kids.length === shown.length || full || unseen ? void 0 : host2.descendantsOf(parent.id, children).length,
+        all: kids.length === shown.length || full || unseen ? void 0 : host2.domain.descendantsOf(parent.id, children).length,
         full: full && expandedAll === parent.id
       };
     }
     let recentSnapshot = { items: [], empty: false };
     const recentRenderer = createRecentRenderer(host2.$("#lanes"), {
-      open: (id) => host2.goSession(id),
+      open: (id) => host2.destination.goSession(id),
       toggle(id, value) {
         if (!value) forcedOpenIds().delete(id);
-        host2.saveTreePref(id, value);
+        host2.layoutOwner.saveTreePref(id, value);
         if (!value && (expandedAll === id || expandedPath.has(id))) {
           expandedAll = null;
           renderLanes();
@@ -10352,9 +10524,9 @@ globalThis.__semonUIShared = __semonUIShared;
         }
       },
       all(id, trigger) {
-        if (!host2.SESS[id]) return;
+        if (!host2.modelStore.sessions[id]) return;
         if (host2.phone.matches) {
-          openKidsSheet(host2.SESS[id], trigger);
+          openKidsSheet(host2.modelStore.sessions[id], trigger);
           return;
         }
         expandedAll = id;
@@ -10365,28 +10537,28 @@ globalThis.__semonUIShared = __semonUIShared;
         expandedAll = null;
         renderLanes();
         const row = host2.$('#lanes .srow[data-id="' + CSS.escape(id) + '"]');
-        host2.scrollProgrammatically(() => row?.scrollIntoView({ block: "nearest" }));
+        host2.pagingOwner.scrollProgrammatically(() => row?.scrollIntoView({ block: "nearest" }));
         row?.focus({ preventScroll: true });
       }
     });
     function openKidsSheet(parent, trigger) {
-      const all = host2.descendantsOf(parent.id, navigationTree().children), bucket = (s) => s.state === "wait" ? 0 : s.state === "work" ? 1 : 2;
+      const all = host2.domain.descendantsOf(parent.id, navigationTree().children), bucket = (s) => s.state === "wait" ? 0 : s.state === "work" ? 1 : 2;
       let picked = null;
       const rows = [...all].sort((a, b) => b.last - a.last).map((s) => {
-        const above = host2.parentOf(s.id);
+        const above = host2.domain.parentOf(s.id);
         return {
           id: s.id,
           name: s.name,
           state: s.state,
-          stateLabel: host2.STATE[s.state] ?? s.state,
+          stateLabel: STATE[s.state] ?? s.state,
           age: host2.ago(s.last),
           bucket: bucket(s),
-          under: above && above !== parent.id && host2.SESS[above] ? host2.SESS[above].name : void 0
+          under: above && above !== parent.id && host2.modelStore.sessions[above] ? host2.modelStore.sessions[above].name : void 0
         };
       });
       const sheet2 = createKidsSheet(parent.name, rows, {
         matches(id, query) {
-          return host2.sessMatch(host2.SESS[id], query);
+          return host2.navigationViewOwner.sessMatch(host2.modelStore.sessions[id], query);
         },
         select(id) {
           picked = id;
@@ -10394,12 +10566,16 @@ globalThis.__semonUIShared = __semonUIShared;
           sheet2.dialog.close();
         },
         opened(d) {
-          host2.viewerEl = d;
+          host2.toolViewsOwner.viewerEl = d;
           document.documentElement.classList.add("viewer-open");
-          if (!host2.SIDEBAR_ONLY)
+          if (!host2.sidebarOnly)
             try {
               history.pushState(
-                { ...host2.navigation.route, sheet: 1, scrollTop: host2.currentScroll() },
+                {
+                  ...host2.navigation.route,
+                  sheet: 1,
+                  scrollTop: host2.historyScrollOwner.currentScroll()
+                },
                 ""
               );
             } catch {
@@ -10409,31 +10585,31 @@ globalThis.__semonUIShared = __semonUIShared;
           host2.dialogs.delete(d);
           if (host2.disposed) return;
           document.documentElement.classList.remove("viewer-open");
-          if (host2.viewerEl === d) {
-            host2.viewerEl = null;
-            if (!host2.SIDEBAR_ONLY && history.state?.sheet) {
-              host2.skipPop = true;
+          if (host2.toolViewsOwner.viewerEl === d) {
+            host2.toolViewsOwner.viewerEl = null;
+            if (!host2.sidebarOnly && history.state?.sheet) {
+              host2.toolViewsOwner.skipPop = true;
               history.back();
             } else if (host2.pendingSessionOpen) {
               const id = host2.pendingSessionOpen;
               host2.pendingSessionOpen = null;
-              host2.goSession(id);
+              host2.destination.goSession(id);
             }
           }
           if (!picked)
             (host2.$('#lanes .tree-all[data-id="' + CSS.escape(parent.id) + '"]') ?? trigger).focus();
-          if (host2.LIVE.pending) host2.refresh();
+          if (host2.liveModelOwner.LIVE.pending) host2.applicationRefreshOwner.refresh();
         }
       });
       host2.dialogs.set(sheet2.dialog, sheet2);
       sheet2.show();
     }
     function buildLaneSnapshot(s, depth, children, rail) {
-      const kids = children.get(s.id) ?? [], allKids = host2.descendantsOf(s.id, children);
-      const { current, ancestors } = routedPath(), saved = host2.treePrefs[s.id];
-      const open = forcedOpenIds().has(s.id) || expandedPath.has(s.id) || (typeof saved?.open === "boolean" ? saved.open : host2.defaultTreeOpen(s.id, children) || expandedUnder.has(s.id));
+      const kids = children.get(s.id) ?? [], allKids = host2.domain.descendantsOf(s.id, children);
+      const { current, ancestors } = routedPath(), saved = host2.layoutOwner.treePrefs[s.id];
+      const open = forcedOpenIds().has(s.id) || expandedPath.has(s.id) || (typeof saved?.open === "boolean" ? saved.open : host2.domain.defaultTreeOpen(s.id, children) || expandedUnder.has(s.id));
       const group = kids.length && !rail ? treeGroupSnapshot(s, kids, children, depth, rail, open) : null;
-      const parts = allKids.length ? host2.childParts(allKids) : [], harness = Object.hasOwn(host2.HARNESSES, s.harness) ? host2.HARNESSES[s.harness] : null;
+      const parts = allKids.length ? host2.domain.childParts(allKids) : [], harness = Object.hasOwn(HARNESSES, s.harness) ? HARNESSES[s.harness] : null;
       const flag = kids.length && !rail ? allKids.some((x) => x.state === "wait") ? "wait" : allKids.some((x) => x.state === "err") ? "err" : null : null;
       const fields = [
         {
@@ -10441,16 +10617,16 @@ globalThis.__semonUIShared = __semonUIShared;
           text: host2.dur(s.start, s.state === "work" || s.state === "wait" ? null : s.last),
           priority: 1,
           tip: "Duration",
-          icon: host2.I.duration
+          icon: I.duration
         }
       ];
-      if (Object.keys(host2.MACHINE).length > 1)
+      if (Object.keys(host2.modelStore.machines).length > 1)
         fields.push({
           className: "row-machine host",
-          text: host2.shortHost(s),
+          text: host2.domain.shortHost(s),
           priority: 2,
-          tip: "Machine: " + host2.hostOf(s),
-          icon: host2.I.machine
+          tip: "Machine: " + host2.domain.hostOf(s),
+          icon: I.machine
         });
       if (s.repo)
         fields.push({
@@ -10458,23 +10634,23 @@ globalThis.__semonUIShared = __semonUIShared;
           text: s.repo,
           priority: 3,
           tip: "Repo: " + s.repo,
-          icon: host2.I.repo
+          icon: I.repo
         });
       return {
         id: s.id,
         name: s.name,
         label: [
           s.name,
-          host2.STATE[s.state] ?? s.state,
-          host2.HARNESS[s.harness] ?? s.harness,
-          host2.shortHost(s),
+          STATE[s.state] ?? s.state,
+          HARNESS[s.harness] ?? s.harness,
+          host2.domain.shortHost(s),
           ...parts
         ].join(", "),
         state: s.state,
-        stateLabel: host2.STATE[s.state] ?? s.state,
+        stateLabel: STATE[s.state] ?? s.state,
         age: host2.ago(s.last),
         model: shortModel(s.model ?? s.modelId),
-        modelTip: "Model: " + host2.modelIdOf(s),
+        modelTip: "Model: " + host2.sessionChrome.modelIdOf(s),
         harness: harness ? {
           id: s.harness,
           name: harness.name,
@@ -10485,7 +10661,7 @@ globalThis.__semonUIShared = __semonUIShared;
         fields,
         current: current === s.id ? "page" : rail && ancestors.has(s.id) ? "true" : void 0,
         rail,
-        childState: rail && allKids.some((x) => x.state === "work" || x.state === "wait") ? host2.urgentDescendant(s.id, children) ?? "work" : void 0,
+        childState: rail && allKids.some((x) => x.state === "work" || x.state === "wait") ? host2.domain.urgentDescendant(s.id, children) ?? "work" : void 0,
         flag: flag ? {
           state: flag,
           tip: allKids.filter((x) => x.state === "wait").length + " needs you \xB7 " + allKids.filter((x) => x.state === "err").length + " failed"
@@ -10514,10 +10690,10 @@ globalThis.__semonUIShared = __semonUIShared;
       });
     }
     function renderLanes() {
-      const rail = host2.railMode && !host2.phone.matches, prevSide = host2.ORD.get("side");
-      if (rail || prevSide?.rail !== rail) host2.ORD.delete("side");
-      const sideState = host2.ordState("side"), focus = laneFocus(), path = routedPath(), { current, ancestors } = path, { roots: lanes, children: everyone } = navigationTree(path);
-      sideOrder = Object.assign(host2.orderScope("side", "", null, sideState), {
+      const rail = host2.layoutOwner.railMode && !host2.phone.matches, prevSide = host2.orderingControlsOwner.ORD.get("side");
+      if (rail || prevSide?.rail !== rail) host2.orderingControlsOwner.ORD.delete("side");
+      const sideState = host2.orderingControlsOwner.ordState("side"), focus = laneFocus(), path = routedPath(), { current, ancestors } = path, { roots: lanes, children: everyone } = navigationTree(path);
+      sideOrder = Object.assign(host2.orderingControlsOwner.orderScope("side", "", null, sideState), {
         seen: /* @__PURE__ */ new Set()
       });
       sideOrder.rail = rail;
@@ -10537,24 +10713,30 @@ globalThis.__semonUIShared = __semonUIShared;
         }
       }
       sideOrder.kids = new Set(children.keys());
-      if (expandedAll && (host2.phone.matches || host2.railMode || !host2.SESS[expandedAll]))
+      if (expandedAll && (host2.phone.matches || host2.layoutOwner.railMode || !host2.modelStore.sessions[expandedAll]))
         expandedAll = null;
-      sideOrder.exp = JSON.stringify([expandedAll, host2.railMode && !host2.phone.matches]);
+      sideOrder.exp = JSON.stringify([expandedAll, host2.layoutOwner.railMode && !host2.phone.matches]);
       sideOrder.reseed = sideOrder.keep && sideOrder.prevExp !== sideOrder.exp;
       expandedPath = expandedAll ? ancestorsOf(expandedAll) : /* @__PURE__ */ new Set();
-      expandedUnder = expandedAll ? new Set(host2.descendantsOf(expandedAll, children).map((x) => x.id)) : /* @__PURE__ */ new Set();
+      expandedUnder = expandedAll ? new Set(host2.domain.descendantsOf(expandedAll, children).map((x) => x.id)) : /* @__PURE__ */ new Set();
       recentSnapshot = {
-        items: host2.orderList(sideOrder, "lanes", lanes, host2.byLast, {
-          limit: 8,
-          must: /* @__PURE__ */ new Set([...current ? [current] : [], ...ancestors])
-        }).slice(0, 8).map((s) => buildLaneSnapshot(s, 0, children, rail)),
+        items: host2.orderingControlsOwner.orderList(
+          sideOrder,
+          "lanes",
+          lanes,
+          (...args) => host2.orderingControlsOwner.byLast(...args),
+          {
+            limit: 8,
+            must: /* @__PURE__ */ new Set([...current ? [current] : [], ...ancestors])
+          }
+        ).slice(0, 8).map((s) => buildLaneSnapshot(s, 0, children, rail)),
         empty: !lanes.length
       };
       recentRenderer.update(recentSnapshot);
       if (!sideOrder.n) {
-        host2.scope.clearTimeout(host2.ordIdle);
-        host2.ordIdle = void 0;
-      } else if (!host2.ordIdle) host2.ordIdleArm();
+        host2.scope.clearTimeout(host2.orderingControlsOwner.ordIdle);
+        host2.orderingControlsOwner.ordIdle = void 0;
+      } else if (!host2.orderingControlsOwner.ordIdle) host2.orderingControlsOwner.ordIdleArm();
       const q = host2.$("#q");
       if (q && document.activeElement !== q) q.value = host2.query;
       restoreLaneFocus(focus);
@@ -10566,7 +10748,7 @@ globalThis.__semonUIShared = __semonUIShared;
         stuck ? stuck.offsetHeight + 8 : null
       );
       if (stuck && navigated)
-        host2.scrollProgrammatically(
+        host2.pagingOwner.scrollProgrammatically(
           () => box.querySelector('.srow[aria-current="page"]')?.scrollIntoView({ block: "nearest" })
         );
     }
@@ -10813,38 +10995,38 @@ globalThis.__semonUIShared = __semonUIShared;
     ];
     const COST_NOTE = "What these tokens would cost at API rates. Subscriptions aren't billed this way.";
     function costSnapshot(s, kids) {
-      const own = host2.costForSession(s.id), all = host2.costForSession(s.id, true), missing = host2.costMissing(all), details = [];
+      const own = host2.domain.costForSession(s.id), all = host2.domain.costForSession(s.id, true), missing = host2.domain.costMissing(all), details = [];
       if (kids.length)
         details.push(
-          { label: "This session", value: host2.costText(own) },
+          { label: "This session", value: host2.domain.costText(own) },
           {
             label: kids.length === 1 ? "Its run" : "Its " + kids.length + " runs",
-            value: host2.costText(host2.costForSessions(kids))
+            value: host2.domain.costText(host2.domain.costForSessions(kids))
           }
         );
       const reports = s.reported_runs ?? [], reported = reports.filter((r) => Number.isFinite(r.cost_usd));
       if (reports.length)
         details.push({
-          label: host2.HARNESS[s.harness] + "'s own figure",
-          value: reported.length ? host2.asMoney(reported.reduce((n, r) => n + (r.cost_usd ?? 0), 0)) + (reported.length === 1 ? ", last run" : ", last " + reported.length + " runs") : "not reported"
+          label: HARNESS[s.harness] + "'s own figure",
+          value: reported.length ? host2.domain.asMoney(reported.reduce((n, r) => n + (r.cost_usd ?? 0), 0)) + (reported.length === 1 ? ", last run" : ", last " + reported.length + " runs") : "not reported"
         });
       const check = [...s.cost_check ?? []].reverse().find(
         (c) => c.ok === false && Number.isFinite(c.computed_usd) && Number.isFinite(c.reported_usd)
       );
       const mismatch = check ? "Semon's estimate for that run is " + (check.reported_usd === 0 ? 100 : Math.round(
         Math.abs((check.computed_usd ?? 0) - (check.reported_usd ?? 0)) / Math.abs(check.reported_usd ?? 0) * 100
-      )) + "% " + ((check.computed_usd ?? 0) > (check.reported_usd ?? 0) ? "above" : "below") + " " + host2.HARNESS[s.harness] + "'s figure: API rates differ from what a plan is charged." : void 0;
-      const children = host2.sessionChildren(), runs = [], walk = (id, depth) => {
+      )) + "% " + ((check.computed_usd ?? 0) > (check.reported_usd ?? 0) ? "above" : "below") + " " + HARNESS[s.harness] + "'s figure: API rates differ from what a plan is charged." : void 0;
+      const children = host2.domain.sessionChildren(), runs = [], walk = (id, depth) => {
         for (const c of [...children.get(id) ?? []].sort((a, b) => b.last - a.last)) {
-          const cost2 = host2.costText(host2.costForSession(c.id));
+          const cost2 = host2.domain.costText(host2.domain.costForSession(c.id));
           runs.push({
             id: c.id,
             depth,
-            label: "Open " + c.name + ", " + host2.kindText(c) + ", " + host2.STATE[c.state] + ", " + cost2,
+            label: "Open " + c.name + ", " + host2.sessionChrome.kindText(c) + ", " + STATE[c.state] + ", " + cost2,
             name: c.name,
-            kind: host2.kindText(c),
+            kind: host2.sessionChrome.kindText(c),
             state: c.state,
-            stateLabel: host2.STATE[c.state],
+            stateLabel: STATE[c.state],
             cost: cost2
           });
           walk(c.id, depth + 1);
@@ -10860,13 +11042,13 @@ globalThis.__semonUIShared = __semonUIShared;
             label,
             count: tokens2 ? compactCount(tokens2) : "",
             exact: tokens2 ? tokens2.toLocaleString() : void 0,
-            cost: priced2 ? host2.asMoney(usd) : "\u2014"
+            cost: priced2 ? host2.domain.asMoney(usd) : "\u2014"
           });
         }
         return { id, rows };
       });
       return {
-        figure: host2.costText(kids.length ? all : own),
+        figure: host2.domain.costText(kids.length ? all : own),
         caption: kids.length ? "this session and its " + kids.length + (kids.length === 1 ? " run" : " runs") : "this session",
         note: COST_NOTE + (missing.length ? " No price for " + missing.join(", ") + "." : ""),
         details,
@@ -10876,122 +11058,128 @@ globalThis.__semonUIShared = __semonUIShared;
         includesRuns: !!kids.length
       };
     }
-    const upCount = () => Object.keys(host2.MACHINE).filter((m) => host2.MACHINE_UP[m]).length;
+    const upCount = () => Object.keys(host2.modelStore.machines).filter((m) => host2.modelStore.machineUp[m]).length;
     let allAnswered = false;
     function harnessSnapshot(id) {
-      const h2 = Object.hasOwn(host2.HARNESSES, id) ? host2.HARNESSES[id] : null;
+      const h2 = Object.hasOwn(HARNESSES, id) ? HARNESSES[id] : null;
       return h2 ? { id, name: h2.name, light: h2.icon.light, dark: h2.icon.dark, darkTheme: host2.darkTheme() } : void 0;
     }
     function liveSnapshot(s, showMachine) {
-      const cur = (host2.TURNS[s.id] ?? []).at(-1), msg = cur?.start?.brief ?? cur?.u?.text;
-      const inb = cur?.start ?? (cur?.u ? { from: "you" } : host2.H.find((h2) => h2.to === s.id && h2.kind !== "move"));
+      const cur = (host2.modelStore.turns[s.id] ?? []).at(-1), msg = cur?.start?.brief ?? cur?.u?.text;
+      const inb = cur?.start ?? (cur?.u ? { from: "you" } : host2.modelStore.handoffs.find((h2) => h2.to === s.id && h2.kind !== "move"));
       return {
         id: s.id,
         name: s.name,
         state: s.state,
-        stateLabel: host2.STATE[s.state] ?? s.state,
-        status: s.state === "work" ? host2.HARNESS[s.harness] : host2.ago(s.last),
+        stateLabel: STATE[s.state] ?? s.state,
+        status: s.state === "work" ? HARNESS[s.harness] : host2.ago(s.last),
         harness: s.state === "work" ? harnessSnapshot(s.harness) : void 0,
         detail: [
-          showMachine ? host2.MACHINE[s.machine] : null,
-          inb ? inb.from === "you" ? "for you" : "for " + host2.nameOf(inb.from) : null,
-          msg ? host2.oneLine(msg) : null
+          showMachine ? host2.modelStore.machines[s.machine] : null,
+          inb ? inb.from === "you" ? "for you" : "for " + host2.domain.nameOf(inb.from) : null,
+          msg ? host2.domain.oneLine(msg) : null
         ].filter(Boolean).join(" \xB7 "),
         activity: s.state === "work" && s.activity ? [s.activity[0], s.activity[1], s.activity[2]] : void 0
       };
     }
     function inboxSnapshot(h2, quiet = false) {
-      const sid = h2.kind === "move" ? h2.to : h2.from, t = host2.HOLDS.get(h2.id), s = host2.SESS[sid];
+      const sid = h2.kind === "move" ? h2.to : h2.from, t = host2.modelStore.holds.get(h2.id), s = host2.modelStore.sessions[sid];
       const parts = [], part = (className, text2, tip) => parts.push({ className, text: text2, tip });
-      let path = host2.I.more;
+      let path = I.more;
       if (h2.kind === "ask") {
-        path = host2.I.ask;
-        part("who", host2.nameOf("you"));
+        path = I.ask;
+        part("who", host2.domain.nameOf("you"));
         part("verb", " asked ");
-        part("who", host2.nameOf(h2.to));
+        part("who", host2.domain.nameOf(h2.to));
       } else if (h2.kind === "spawn" || h2.kind === "relay") {
-        path = host2.I.out;
-        part("who", host2.nameOf(h2.from));
+        path = I.out;
+        part("who", host2.domain.nameOf(h2.from));
         part(
           "verb",
-          h2.kind === "spawn" ? " handed off to " + (host2.SESS[h2.to]?.kind === "Subagent" ? "subagent" : host2.SESS[h2.to]?.kind ?? "") + " " : " relayed to "
+          h2.kind === "spawn" ? " handed off to " + (host2.modelStore.sessions[h2.to]?.kind === "Subagent" ? "subagent" : host2.modelStore.sessions[h2.to]?.kind ?? "") + " " : " relayed to "
         );
-        part("who", host2.nameOf(h2.to));
+        part("who", host2.domain.nameOf(h2.to));
       } else if (h2.kind === "move") {
-        path = host2.I.move;
+        path = I.move;
         const short = machineShorts(
-          [h2.fromMachine, h2.toMachine].map((id) => [id, host2.MACHINE[id] ?? id])
+          [h2.fromMachine, h2.toMachine].map((id) => [id, host2.modelStore.machines[id] ?? id])
         );
         part("verb", "Semon moved ");
-        part("who", host2.nameOf(h2.to));
+        part("who", host2.domain.nameOf(h2.to));
         part("verb", " from ");
         part(
           "verb mach",
           short.get(h2.fromMachine) ?? h2.fromMachine,
-          "Machine: " + (host2.MACHINE[h2.fromMachine] ?? h2.fromMachine)
+          "Machine: " + (host2.modelStore.machines[h2.fromMachine] ?? h2.fromMachine)
         );
         part("verb", " to ");
         part(
           "verb mach",
           short.get(h2.toMachine) ?? h2.toMachine,
-          "Machine: " + (host2.MACHINE[h2.toMachine] ?? h2.toMachine)
+          "Machine: " + (host2.modelStore.machines[h2.toMachine] ?? h2.toMachine)
         );
       } else if (h2.kind === "toyou") {
-        path = h2.status === "done" && (h2.ask === "question" || h2.ask === "decision") ? host2.I.done : h2.ask === "question" ? host2.I.qc : h2.ask === "decision" ? host2.I.decide : host2.I.result;
-        part("who", host2.nameOf(h2.from));
+        path = h2.status === "done" && (h2.ask === "question" || h2.ask === "decision") ? I.done : h2.ask === "question" ? I.qc : h2.ask === "decision" ? I.decide : I.result;
+        part("who", host2.domain.nameOf(h2.from));
         part(
           "verb",
           { question: " asked you", result: " sent you a result", decision: " needs your decision" }[h2.ask]
         );
       }
-      const answer2 = quiet ? host2.answersOf(h2) : null, root = t ? host2.traceRoot(t) : null, msg = root?.start?.from === "you" ? root.start.brief : root?.u?.text;
+      const answer2 = quiet ? host2.domain.answersOf(h2) : null, root = t ? host2.domain.traceRoot(t) : null, msg = root?.start?.from === "you" ? root.start.brief : root?.u?.text;
       return {
         id: h2.id,
         quiet,
-        icon: quiet && h2.kind === "toyou" ? host2.I.done : path,
+        icon: quiet && h2.kind === "toyou" ? I.done : path,
         parts,
         age: host2.ago(h2.at),
         preview: preview(h2.brief ?? ""),
         answer: answer2 ? answer2.length ? "You answered: " + answer2.join(" \xB7 ") : "Answered \xB7 reply not in these logs" : void 0,
-        origin: root ? msg ? { message: host2.oneLine(msg) } : { text: "Started by " + host2.nameOf(root.start ? root.start.from : root.sid) } : void 0,
-        context: [host2.HARNESS[s.harness], host2.MACHINE[s.machine]].join(" \xB7 "),
+        origin: root ? msg ? { message: host2.domain.oneLine(msg) } : { text: "Started by " + host2.domain.nameOf(root.start ? root.start.from : root.sid) } : void 0,
+        context: [HARNESS[s.harness], host2.modelStore.machines[s.machine]].join(" \xB7 "),
         harness: harnessSnapshot(s.harness),
         trace: t?.out.length ? t.id : void 0
       };
     }
     const activityHost = {
-      session: host2.goSession,
-      committed: host2.observeTitle,
-      trace: host2.goTrace,
+      session: (...args) => host2.destination.goSession(...args),
+      committed: (...args) => host2.sessionChrome.observeTitle(...args),
+      trace: (...args) => host2.destination.goTrace(...args),
       inbox(id) {
-        const h2 = host2.H.find((h3) => h3.id === id) ?? host2.inbox().find((h3) => h3.id === id);
+        const h2 = host2.modelStore.handoffs.find((h3) => h3.id === id) ?? host2.domain.inbox().find((h3) => h3.id === id);
         if (!h2) return;
-        if (host2.isResult(h2)) host2.markSeenResults([h2]);
-        host2.goSession(h2.kind === "move" ? h2.to : h2.from, host2.HOLDS.get(h2.id)?.id);
+        if (host2.domain.isResult(h2)) host2.seenPersistenceOwner.markSeenResults([h2]);
+        host2.destination.goSession(
+          h2.kind === "move" ? h2.to : h2.from,
+          host2.modelStore.holds.get(h2.id)?.id
+        );
       },
       answered() {
         allAnswered = true;
-        host2.render();
+        host2.documentRendererOwner.render();
       }
     };
     function renderHome(page) {
-      const open = host2.inbox(), running = host2.working(), many = Object.keys(host2.MACHINE).length > 1;
-      const rows = host2.orderList(
-        host2.orderScope("page", host2.pageSig(), host2.navigation.route, host2.pageState()),
+      const open = host2.domain.inbox(), running = host2.domain.working(), many = Object.keys(host2.modelStore.machines).length > 1;
+      const rows = host2.orderingControlsOwner.orderList(
+        host2.orderingControlsOwner.orderScope(
+          "page",
+          host2.orderingControlsOwner.pageSig(),
+          host2.navigation.route,
+          host2.orderingControlsOwner.pageState()
+        ),
         "working",
         running,
-        host2.byLast
+        (...args) => host2.orderingControlsOwner.byLast(...args)
       );
-      const done = host2.H.filter((h2) => h2.kind === "toyou" && h2.status === "done").sort(
-        (a, b) => b.at - a.at
-      );
+      const done = host2.modelStore.handoffs.filter((h2) => h2.kind === "toyou" && h2.status === "done").sort((a, b) => b.at - a.at);
       renderHomeScreen(
         page,
         {
           waiting: open.length,
           working: running.length,
           up: upCount(),
-          machines: Object.keys(host2.MACHINE).length,
+          machines: Object.keys(host2.modelStore.machines).length,
           inbox: open.map((h2) => inboxSnapshot(h2, false)),
           live: rows.map((s) => liveSnapshot(s, many)),
           answered: (allAnswered ? done : done.slice(0, 3)).map((h2) => inboxSnapshot(h2, true)),
@@ -11002,57 +11190,62 @@ globalThis.__semonUIShared = __semonUIShared;
       );
     }
     function renderMachines(page) {
-      const ms = Object.keys(host2.MACHINE).sort(
-        (a, b) => Number(host2.MACHINE_UP[a]) - Number(host2.MACHINE_UP[b])
+      const ms = Object.keys(host2.modelStore.machines).sort(
+        (a, b) => Number(host2.modelStore.machineUp[a]) - Number(host2.modelStore.machineUp[b])
       );
       const rows = ms.map((m) => {
-        const here = host2.onMachine(m), w = here.filter((s) => s.state === "work").length, up = host2.MACHINE_UP[m], state2 = !up ? "err" : w ? "work" : "idle";
-        const mv = host2.movedOff(m).length, mh = host2.movesOf(m).find((h2) => h2.kind === "move" && h2.fromMachine === m);
+        const here = host2.domain.onMachine(m), w = here.filter((s) => s.state === "work").length, up = host2.modelStore.machineUp[m], state2 = !up ? "err" : w ? "work" : "idle";
+        const mv = host2.domain.movedOff(m).length, mh = host2.domain.movesOf(m).find((h2) => h2.kind === "move" && h2.fromMachine === m);
         return {
           id: m,
-          name: host2.MACHINE[m],
+          name: host2.modelStore.machines[m],
           state: state2,
-          stateLabel: host2.STATE[state2] ?? state2,
+          stateLabel: STATE[state2] ?? state2,
           status: !up ? "offline" : w ? "up" : "idle",
           detail: up ? [w + " working", here.length + (here.length === 1 ? " session" : " sessions")].join(
             " \xB7 "
           ) : [
-            "Not responding" + (mh ? " since " + host2.clock(mh.at) : host2.MACHINE_LAST[m] != null ? " since " + host2.clock(host2.MACHINE_LAST[m]) : ""),
+            "Not responding" + (mh ? " since " + host2.clock(mh.at) : host2.modelStore.machineLast[m] != null ? " since " + host2.clock(host2.modelStore.machineLast[m]) : ""),
             mv ? mv + (mv === 1 ? " session" : " sessions") + " moved off" : null
           ].filter(Boolean).join(" \xB7 ")
         };
       });
       renderMachinesScreen(
         page,
-        { rows, up: upCount(), working: host2.working().length, admin: host2.ADMIN },
+        { rows, up: upCount(), working: host2.domain.working().length, admin: host2.admin },
         {
           machine(id) {
-            host2.go({ v: "machine", id });
+            host2.destination.go({ v: "machine", id });
           },
           admin(href) {
             location.assign(href);
           },
-          committed: host2.observeTitle
+          committed: (...args) => host2.sessionChrome.observeTitle(...args)
         }
       );
     }
     function renderMachine(page, m) {
-      const here = host2.onMachine(m), off = host2.movedOff(m), moves2 = host2.movesOf(m);
-      const ordered = host2.orderList(
-        host2.orderScope("page", host2.pageSig(), host2.navigation.route, host2.pageState()),
+      const here = host2.domain.onMachine(m), off = host2.domain.movedOff(m), moves2 = host2.domain.movesOf(m);
+      const ordered = host2.orderingControlsOwner.orderList(
+        host2.orderingControlsOwner.orderScope(
+          "page",
+          host2.orderingControlsOwner.pageSig(),
+          host2.navigation.route,
+          host2.orderingControlsOwner.pageState()
+        ),
         "machine:" + m,
         here,
-        host2.byState
+        (...args) => host2.domain.byState(...args)
       );
       renderMachineScreen(
         page,
         {
-          name: host2.MACHINE[m],
+          name: host2.modelStore.machines[m],
           totalSessions: here.length,
           sessions: ordered.map((s) => liveSnapshot(s, false)),
           off: off.map((s) => ({
             ...liveSnapshot(s, false),
-            detail: "Now on " + host2.MACHINE[s.machine]
+            detail: "Now on " + host2.modelStore.machines[s.machine]
           })),
           moves: moves2.map((h2) => inboxSnapshot(h2, true))
         },
@@ -11061,30 +11254,38 @@ globalThis.__semonUIShared = __semonUIShared;
     }
     const RUN_EXPANDED = /* @__PURE__ */ new Map();
     const { agentSnapshot } = createTraceCalculations(
-      { sessions: host2.SESS, turns: host2.TURNS, starts: host2.STARTS },
+      {
+        sessions: host2.modelStore.sessions,
+        turns: host2.modelStore.turns,
+        starts: host2.modelStore.starts
+      },
       host2.domain,
-      () => host2.NOW,
+      () => host2.now,
       RUN_EXPANDED,
-      host2.HARNESS,
-      host2.STATE
+      HARNESS,
+      STATE
     );
     function renderTrace(page, id) {
-      const root = host2.TURN.get(id);
+      const root = host2.modelStore.turn.get(id);
       if (!root) {
         renderTraceScreen(
           page,
           { empty: true, hops: [] },
-          { ...host2.sentenceHost, committed: host2.observeTitle, fold() {
-          } }
+          {
+            ...host2.sentencesOwner.sentenceHost,
+            committed: (...args) => host2.sessionChrome.observeTitle(...args),
+            fold() {
+            }
+          }
         );
         return;
       }
       const visited = /* @__PURE__ */ new Set(), read = (turn) => {
         if (!turn || visited.has(turn.id)) return;
         visited.add(turn.id);
-        host2.markSeenResults(turn.out);
+        host2.seenPersistenceOwner.markSeenResults(turn.out);
         for (const h2 of turn.out)
-          if (h2.kind === "spawn" || h2.kind === "relay") read(host2.STARTS.get(h2.id));
+          if (h2.kind === "spawn" || h2.kind === "relay") read(host2.modelStore.starts.get(h2.id));
       };
       read(root);
       const seen = /* @__PURE__ */ new Set([root.id]), sessions = /* @__PURE__ */ new Set([root.sid]), scope = /* @__PURE__ */ new Set([root.sid]), reached = /* @__PURE__ */ new Set([root.id]);
@@ -11092,7 +11293,7 @@ globalThis.__semonUIShared = __semonUIShared;
       const reach = (turn) => {
         for (const h2 of turn.sent) {
           scope.add(h2.kind === "toyou" ? h2.from : h2.to);
-          const child = h2.kind === "spawn" || h2.kind === "relay" ? host2.STARTS.get(h2.id) : null;
+          const child = h2.kind === "spawn" || h2.kind === "relay" ? host2.modelStore.starts.get(h2.id) : null;
           if (child && !reached.has(child.id)) {
             reached.add(child.id);
             reach(child);
@@ -11101,14 +11302,14 @@ globalThis.__semonUIShared = __semonUIShared;
       };
       reach(root);
       const meta = (state2, text3, sid, turn, note) => {
-        const s = host2.SESS[sid], label = host2.machineLabel(s, scope);
+        const s = host2.modelStore.sessions[sid], label = host2.domain.machineLabel(s, scope);
         return {
           state: state2,
-          stateLabel: host2.STATE[state2] ?? state2,
+          stateLabel: STATE[state2] ?? state2,
           text: text3,
-          chip: s ? [s.kind ?? host2.HARNESS[s.harness], label].filter(Boolean).join(" \xB7 ") : void 0,
-          chipClass: s ? host2.hcls(sid) : void 0,
-          tip: label ? "Machine: " + host2.hostOf(s) : void 0,
+          chip: s ? [s.kind ?? HARNESS[s.harness], label].filter(Boolean).join(" \xB7 ") : void 0,
+          chipClass: s ? host2.domain.hcls(sid) : void 0,
+          tip: label ? "Machine: " + host2.domain.hostOf(s) : void 0,
           harness: s ? harnessSnapshot(s.harness) : void 0,
           note: note ?? void 0,
           session: s && !s.stub ? sid : void 0,
@@ -11116,31 +11317,31 @@ globalThis.__semonUIShared = __semonUIShared;
           name: s?.name
         };
       };
-      const start = root.start, text2 = start ? start.brief : root.u?.text, initial = start ? host2.sentenceSnapshot(start, null) : root.u ? host2.sentenceSnapshot(
+      const start = root.start, text2 = start ? start.brief : root.u?.text, initial = start ? host2.sentencesOwner.sentenceSnapshot(start, null) : root.u ? host2.sentencesOwner.sentenceSnapshot(
         {
           kind: "ask",
           id: root.id,
           from: "you",
           to: root.sid,
-          at: root.at ?? host2.NOW,
+          at: root.at ?? host2.now,
           status: "done",
           brief: ""
         },
         null
       ) : {
-        icon: host2.I.more,
+        icon: I.more,
         parts: [
-          { className: "who", text: host2.SESS[root.sid].name },
+          { className: "who", text: host2.modelStore.sessions[root.sid].name },
           { className: "verb", text: " \xB7 a turn whose start isn't in these logs" }
         ]
       };
-      const outcome = host2.turnEnd(root), hops = [
+      const outcome = host2.domain.turnEnd(root), hops = [
         {
           key: "root:" + root.id,
           className: "k-root",
           icon: initial.icon,
           parts: initial.parts,
-          nodeClass: host2.hcls(start ? start.from : root.u ? "you" : root.sid),
+          nodeClass: host2.domain.hcls(start ? start.from : root.u ? "you" : root.sid),
           turn: root.id,
           handoff: start?.id,
           time: start ? host2.clock(start.at) : void 0,
@@ -11150,14 +11351,17 @@ globalThis.__semonUIShared = __semonUIShared;
       ];
       const walk = (turn) => {
         for (const h2 of turn.sent) {
-          const result = h2.kind === "toyou" && h2.ask === "result", child = h2.kind === "spawn" || h2.kind === "relay" ? host2.STARTS.get(h2.id) : null, target = h2.kind === "toyou" ? h2.from : h2.to;
-          const sentence = result ? { icon: host2.I.result, parts: [{ className: "verb", text: host2.statWord(h2) ?? "" }] } : host2.sentenceSnapshot(h2, null);
+          const result = h2.kind === "toyou" && h2.ask === "result", child = h2.kind === "spawn" || h2.kind === "relay" ? host2.modelStore.starts.get(h2.id) : null, target = h2.kind === "toyou" ? h2.from : h2.to;
+          const sentence = result ? {
+            icon: I.result,
+            parts: [{ className: "verb", text: host2.domain.statWord(h2) ?? "" }]
+          } : host2.sentencesOwner.sentenceSnapshot(h2, null);
           const hop = {
             key: h2.id,
             className: "child k-" + h2.kind + " s-" + h2.status + (child || h2.kind === "toyou" || h2.kind === "move" ? "" : " stub"),
             icon: sentence.icon,
             parts: sentence.parts,
-            nodeClass: host2.hcls(target),
+            nodeClass: host2.domain.hcls(target),
             handoff: h2.id,
             turn: child?.id,
             time: host2.clock(h2.at)
@@ -11168,7 +11372,7 @@ globalThis.__semonUIShared = __semonUIShared;
             continue;
           }
           hop.brief = h2.brief;
-          hop.answers = host2.answersOf(h2) ?? void 0;
+          hop.answers = host2.domain.answersOf(h2) ?? void 0;
           hop.result = h2.result || void 0;
           if (h2.kind === "move") {
             hop.meta = meta("done", "Moved", h2.to, turn);
@@ -11177,18 +11381,18 @@ globalThis.__semonUIShared = __semonUIShared;
           n++;
           if (h2.kind === "toyou") {
             hop.meta = meta(
-              host2.isResult(h2) ? host2.SEEN_RESULTS.has(h2.id) ? "read" : "new" : h2.status === "done" ? "done" : h2.status,
-              host2.statWord(h2) ?? "",
+              host2.domain.isResult(h2) ? host2.seenResultsOwner.SEEN_RESULTS.has(h2.id) ? "read" : "new" : h2.status === "done" ? "done" : h2.status,
+              host2.domain.statWord(h2) ?? "",
               h2.from,
               turn
             );
             continue;
           }
           sessions.add(h2.to);
-          const end = child && host2.turnEnd(child);
+          const end = child && host2.domain.turnEnd(child);
           hop.meta = meta(
             end ? end.st ?? "idle" : h2.status === "done" ? "done" : h2.status,
-            end ? end.text ?? "Nothing recorded" : host2.statWord(h2) ?? "",
+            end ? end.text ?? "Nothing recorded" : host2.domain.statWord(h2) ?? "",
             h2.to,
             child,
             child ? void 0 : "Its turn isn't in these logs"
@@ -11209,12 +11413,12 @@ globalThis.__semonUIShared = __semonUIShared;
           summary: [
             sessions.size + (sessions.size === 1 ? " session" : " sessions"),
             n + (n === 1 ? " handoff" : " handoffs"),
-            [...host2.machineLabels(scope).values()].join(", ")
+            [...host2.domain.machineLabels(scope).values()].join(", ")
           ].filter(Boolean).join(" \xB7 ")
         },
         {
-          ...host2.sentenceHost,
-          committed: host2.observeTitle,
+          ...host2.sentencesOwner.sentenceHost,
+          committed: (...args) => host2.sessionChrome.observeTitle(...args),
           fold(id2) {
             RUN_EXPANDED.get(root.id)?.add(id2);
             renderTrace(page, root.id);
@@ -11224,49 +11428,51 @@ globalThis.__semonUIShared = __semonUIShared;
       return [
         sessions.size + (sessions.size === 1 ? " session" : " sessions"),
         n + (n === 1 ? " handoff" : " handoffs"),
-        [...host2.machineLabels(scope).values()].join(", ")
+        [...host2.domain.machineLabels(scope).values()].join(", ")
       ].filter(Boolean).join(" \xB7 ");
     }
     function renderSession(page, sid, opts = {}) {
-      host2.markSeenResults(host2.H.filter((h2) => host2.isResult(h2) && h2.from === sid));
-      const raw = new Map(
-        host2.transcriptEntries(host2.TX[sid] ?? [], sid).map((e) => [e.slot != null ? sid + "#slot:" + e.slot : e.key, e])
+      host2.seenPersistenceOwner.markSeenResults(
+        host2.modelStore.handoffs.filter((h2) => host2.domain.isResult(h2) && h2.from === sid)
       );
-      renderSessionScreen(page, host2.transcriptSnapshot(sid, opts), {
-        ...host2.sentenceHost,
-        committed: host2.observeTitle,
-        trace: host2.goTrace,
+      const raw = new Map(
+        host2.transcriptView.transcriptEntries(host2.transcripts.entries[sid] ?? [], sid).map((e) => [e.slot != null ? sid + "#slot:" + e.slot : e.key, e])
+      );
+      renderSessionScreen(page, host2.transcriptView.transcriptSnapshot(sid, opts), {
+        ...host2.sentencesOwner.sentenceHost,
+        committed: (...args) => host2.sessionChrome.observeTitle(...args),
+        trace: (...args) => host2.destination.goTrace(...args),
         toolAll(key, label) {
           const e = raw.get(key);
           if (e?.k === "tool") {
-            const [ic, v] = host2.verb(e.name);
-            host2.openStepViewer(e, v, ic, label);
+            const [ic, v] = host2.transcriptView.verb(e.name);
+            host2.toolViewsOwner.openStepViewer(e, v, ic, label);
           }
         },
         script(key) {
           const e = raw.get(key);
-          if (e?.k === "tool") host2.openScript(e);
+          if (e?.k === "tool") host2.toolViewsOwner.openScript(e);
         },
-        image: host2.openImage,
+        image: (...args) => host2.toolViewsOwner.openImage(...args),
         background(call, trigger) {
           const target = trigger.closest('section[aria-label="Transcript"]')?.querySelector('.step[data-tid="' + CSS.escape(call) + '"]');
           if (!target) return;
-          host2.stopOpeningEndPin();
+          host2.viewport.stopOpeningEndPin();
           for (let parent = target.parentElement; parent; parent = parent.parentElement) {
-            const toggle = host2.opener(parent);
+            const toggle = host2.viewport.opener(parent);
             if (toggle?.getAttribute("aria-expanded") === "false") toggle.click();
           }
-          host2.centre(target);
+          host2.sessionChrome.centre(target);
           target.classList.add("flash");
           host2.scope.timeout(() => target.classList.remove("flash"), 1500);
         },
         pager(button) {
-          host2.loadPager(button, true);
+          host2.pagingOwner.loadPager(button, true);
         },
-        jump: host2.jumpToLatest
+        jump: (...args) => host2.viewport.jumpToLatest(...args)
       });
     }
-    const showsFooter = (s, origin) => origin ? s.state === "work" || s.state === "done" || s.state === "err" || origin.status === "done" || origin.status === "err" : !s.stub && !s.role && s.state in host2.STATE;
+    const showsFooter = (s, origin) => origin ? s.state === "work" || s.state === "done" || s.state === "err" || origin.status === "done" || origin.status === "err" : !s.stub && !s.role && s.state in STATE;
     return {
       harnessSnapshot,
       costSnapshot,
@@ -11284,15 +11490,20 @@ globalThis.__semonUIShared = __semonUIShared;
     function markSeenResults(handoffs) {
       let changed = false;
       for (const h2 of handoffs)
-        if (host2.isResult(h2) && typeof h2.id === "string" && !host2.SEEN_RESULTS.has(h2.id)) {
-          host2.SEEN_RESULTS.add(h2.id);
+        if (host2.domain.isResult(h2) && typeof h2.id === "string" && !host2.seenResultsOwner.SEEN_RESULTS.has(h2.id)) {
+          host2.seenResultsOwner.SEEN_RESULTS.add(h2.id);
           changed = true;
         }
-      while (host2.SEEN_RESULTS.size > host2.SEEN_LIMIT)
-        host2.SEEN_RESULTS.delete(host2.SEEN_RESULTS.values().next().value);
+      while (host2.seenResultsOwner.SEEN_RESULTS.size > host2.seenResultsOwner.SEEN_LIMIT)
+        host2.seenResultsOwner.SEEN_RESULTS.delete(
+          host2.seenResultsOwner.SEEN_RESULTS.values().next().value
+        );
       if (changed)
         try {
-          window.localStorage.setItem(host2.SEEN_KEY, JSON.stringify([...host2.SEEN_RESULTS]));
+          window.localStorage.setItem(
+            host2.seenResultsOwner.SEEN_KEY,
+            JSON.stringify([...host2.seenResultsOwner.SEEN_RESULTS])
+          );
         } catch {
         }
     }
@@ -11325,7 +11536,7 @@ globalThis.__semonUIShared = __semonUIShared;
     function sentenceSnapshot(h2, viewer, links = false) {
       const parts = [], text2 = (className, text3) => parts.push({ className, text: text3 });
       const who = (id, action, label) => {
-        const name = host2.nameOf(id), linked = links && action && id !== "you" && id !== viewer && host2.SESS[id];
+        const name = host2.domain.nameOf(id), linked = links && action && id !== "you" && id !== viewer && host2.modelStore.sessions[id];
         parts.push({
           text: name,
           className: linked ? "who-link" : "who",
@@ -11336,7 +11547,7 @@ globalThis.__semonUIShared = __semonUIShared;
       const sender = { kind: "sender", id: h2.id }, recipient = {
         kind: "session",
         id: h2.to,
-        turn: host2.STARTS.get(h2.id)?.id
+        turn: host2.modelStore.starts.get(h2.id)?.id
       };
       const senderLabel = (name) => "Open " + name + " where it sent this", recipientLabel = (name) => "Open " + name + " at the turn this started";
       let path;
@@ -11355,21 +11566,21 @@ globalThis.__semonUIShared = __semonUIShared;
           who(h2.from, sender, senderLabel);
           text2(
             "verb",
-            h2.kind === "spawn" ? " handed off to " + (host2.SESS[h2.to]?.kind === "Subagent" ? "subagent" : host2.SESS[h2.to]?.kind ?? "") + " " : " relayed to "
+            h2.kind === "spawn" ? " handed off to " + (host2.modelStore.sessions[h2.to]?.kind === "Subagent" ? "subagent" : host2.modelStore.sessions[h2.to]?.kind ?? "") + " " : " relayed to "
           );
           who(h2.to, recipient, recipientLabel);
         }
       } else if (h2.kind === "move") {
         path = I.move;
         const short = machineShorts(
-          [h2.fromMachine, h2.toMachine].map((id) => [id, host2.MACHINE[id] ?? id])
+          [h2.fromMachine, h2.toMachine].map((id) => [id, host2.modelStore.machines[id] ?? id])
         );
         const machine2 = (id) => parts.push({
           className: "verb mach",
           text: short.get(id) ?? id,
-          tip: "Machine: " + (host2.MACHINE[id] ?? id),
+          tip: "Machine: " + (host2.modelStore.machines[id] ?? id),
           action: links ? { kind: "machine", id } : void 0,
-          label: links ? "Open machine " + (host2.MACHINE[id] ?? id) : void 0
+          label: links ? "Open machine " + (host2.modelStore.machines[id] ?? id) : void 0
         });
         text2("verb", "Semon moved ");
         who(h2.to, { kind: "session", id: h2.to }, (name) => "Open " + name);
@@ -11389,14 +11600,14 @@ globalThis.__semonUIShared = __semonUIShared;
     }
     const sentenceHost = {
       session(id, turn) {
-        host2.goSession(id, turn);
+        host2.destination.goSession(id, turn);
       },
       machine(id) {
-        host2.go({ v: "machine", id });
+        host2.destination.go({ v: "machine", id });
       },
       sender(id) {
-        const h2 = host2.HID.get(id);
-        if (h2) host2.openSender(h2);
+        const h2 = host2.modelStore.handoff.get(id);
+        if (h2) host2.destination.openSender(h2);
       }
     };
     return { sentenceHost, sentenceSnapshot };
@@ -11757,16 +11968,16 @@ globalThis.__semonUIShared = __semonUIShared;
 
   // src/app/sessionChrome.ts
   function createSessionChrome(host2) {
-    const kindText = (s) => s.kind ?? host2.HARNESS[s.harness] ?? s.harness;
+    const kindText = (s) => s.kind ?? HARNESS[s.harness] ?? s.harness;
     const modelIdOf = (s) => s.model ?? Object.keys(s.tokens_by_model ?? {})[0];
     const viewerBar = createViewerBar();
     function renderTopbar(title, crumb = null, opts = {}) {
       const s = opts.session ?? opts.traceSession;
-      const account = host2.ACCOUNT ? {
-        account: host2.ACCOUNT,
+      const account = host2.account ? {
+        account: host2.account,
         compact: false,
-        wide: host2.wideMode,
-        onWideChange: () => host2.setWideMode(!host2.wideMode)
+        wide: host2.layoutOwner.wideMode,
+        onWideChange: () => host2.layoutOwner.setWideMode(!host2.layoutOwner.wideMode)
       } : null;
       const mode = s && errOn(s.id) ? "errors" : s && host2.findOpen ? "find" : "normal";
       const content = viewerBar.update(
@@ -11775,12 +11986,12 @@ globalThis.__semonUIShared = __semonUIShared;
           name: title,
           session: s?.id,
           state: s?.state,
-          stateLabel: s ? host2.STATE[s.state] : void 0,
-          stateTip: s ? "Status: " + host2.STATE[s.state] + " \xB7 " + turnsLabel(s) : void 0,
+          stateLabel: s ? STATE[s.state] : void 0,
+          stateTip: s ? "Status: " + STATE[s.state] + " \xB7 " + turnsLabel(s) : void 0,
           showState: !!s && !opts.traceSession && !(host2.phone.matches && opts.lineage?.length),
           ancestors: !host2.phone.matches ? opts.lineage?.map((a) => ({
             ...a,
-            harnessName: host2.HARNESS[a.harness] ?? a.harness
+            harnessName: HARNESS[a.harness] ?? a.harness
           })) ?? [] : [],
           crumb: opts.lineage?.length ? void 0 : crumb?.label,
           labels: opts.line2 ?? [],
@@ -11790,50 +12001,54 @@ globalThis.__semonUIShared = __semonUIShared;
           query: host2.find,
           count: matchText(matchCount()),
           filter: host2.show.messages && host2.show.tools ? "all" : host2.show.messages ? "messages" : "steps",
-          failed: s ? host2.countOf(s, "errors") ?? 0 : 0,
+          failed: s ? host2.domain.countOf(s, "errors") ?? 0 : 0,
           signals: s ? signalCount(s) : 0,
           errorMode: ERR.mode,
           errorText: ERR.notice ?? errText(),
           errorDisabled: ERR.listed && !ERR.slots.length,
           icons: {
-            search: host2.I.search,
-            back: host2.I.back,
-            x: host2.I.x,
-            up: host2.I.up,
-            more: host2.I.more,
-            dn: host2.I.dn
+            search: I.search,
+            back: I.back,
+            x: I.x,
+            up: I.up,
+            more: I.more,
+            dn: I.dn
           }
         },
         {
-          ancestor: host2.goSession,
+          ancestor: (...args) => host2.destination.goSession(...args),
           crumb() {
             crumb?.go();
           },
           find() {
             host2.findOpen = true;
-            host2.render();
+            host2.documentRendererOwner.render();
             host2.$("#find")?.focus();
           },
           closeFind() {
             host2.findOpen = false;
             host2.find = "";
-            host2.show = { ...host2.SHOW_ALL };
-            host2.render();
+            host2.show = { ...host2.allVisibility };
+            host2.documentRendererOwner.render();
           },
           query(value) {
             host2.find = value.toLowerCase();
-            host2.render();
+            host2.documentRendererOwner.render();
           },
           filter(key) {
             if (key === "failures" || key === "signals") {
               s && openErrors(s.id, key === "signals" ? "signals" : "errors");
               return;
             }
-            host2.show = key === "messages" ? { messages: true, tools: false, thinking: false } : key === "steps" ? { messages: false, tools: true, thinking: false } : { ...host2.SHOW_ALL };
-            host2.render();
+            host2.show = key === "messages" ? { messages: true, tools: false, thinking: false } : key === "steps" ? { messages: false, tools: true, thinking: false } : { ...host2.allVisibility };
+            host2.documentRendererOwner.render();
           },
           menu(trigger, runs) {
-            s && openSessionMenu(host2.SESS[s.id] ?? s, trigger, runs ? ".runs" : void 0);
+            s && openSessionMenu(
+              host2.modelStore.sessions[s.id] ?? s,
+              trigger,
+              runs ? ".runs" : void 0
+            );
           },
           errors() {
             s && openErrors(s.id);
@@ -11842,23 +12057,23 @@ globalThis.__semonUIShared = __semonUIShared;
           step: stepErrors,
           range(days) {
             if (host2.analyticsRange === days) return;
-            const top = host2.currentScroll();
+            const top = host2.historyScrollOwner.currentScroll();
             host2.analyticsRange = days;
-            host2.render();
-            host2.restoreScroll(top);
-            host2.refreshAnalytics(true);
+            host2.documentRendererOwner.render();
+            host2.historyScrollOwner.restoreScroll(top);
+            host2.analytics.refreshAnalytics(true);
           }
         }
       );
       const lead = {
         label: opts.traceSession ? "Back to " + s?.name : "Open navigation",
-        icon: opts.traceSession ? host2.I.chev : host2.I.menu,
-        back: opts.traceSession ? () => s && host2.goSession(
+        icon: opts.traceSession ? I.chev : I.menu,
+        back: opts.traceSession ? () => s && host2.destination.goSession(
           s.id,
           "turn" in host2.navigation.route ? host2.navigation.route.turn : void 0
         ) : void 0
       };
-      host2.shellChrome?.topbar(
+      host2.accountControlsOwner.shellChrome?.topbar(
         mode === "normal" ? { titleSlot: content.titleSlot, actions: [content.actions], session: !!s, lead, account } : { mode: [content.mode], session: true, account, accountTarget: content.accountTarget }
       );
       if (s && mode === "normal")
@@ -11868,11 +12083,11 @@ globalThis.__semonUIShared = __semonUIShared;
         });
     }
     const drawSessionBar = () => {
-      const s = host2.SESS["id" in host2.navigation.route ? host2.navigation.route.id : ""];
+      const s = host2.modelStore.sessions["id" in host2.navigation.route ? host2.navigation.route.id : ""];
       if (host2.navigation.route.v !== "session" || !s) return;
       renderTopbar(s.name, null, {
         session: s,
-        lineage: host2.lineageOf("id" in host2.navigation.route ? host2.navigation.route.id : "").slice(0, -1),
+        lineage: host2.domain.lineageOf("id" in host2.navigation.route ? host2.navigation.route.id : "").slice(0, -1),
         line2: sessionLine(s)
       });
       setGeometry(document.documentElement, "barHeight", host2.$("#topbar").offsetHeight);
@@ -11886,41 +12101,45 @@ globalThis.__semonUIShared = __semonUIShared;
     };
     function centre(node) {
       if (!node.isConnected) return;
-      const sc = host2.scroller(), r = (node.querySelector(":scope > button") ?? node).getBoundingClientRect(), bottom = host2.phone.matches ? window.innerHeight : host2.$("#main").getBoundingClientRect().bottom;
-      const d = (r.top + r.bottom) / 2 - (host2.edge() + bottom) / 2;
-      host2.scrollProgrammatically(() => {
+      const sc = host2.viewport.scroller(), r = (node.querySelector(":scope > button") ?? node).getBoundingClientRect(), bottom = host2.phone.matches ? window.innerHeight : host2.$("#main").getBoundingClientRect().bottom;
+      const d = (r.top + r.bottom) / 2 - (host2.viewport.edge() + bottom) / 2;
+      host2.pagingOwner.scrollProgrammatically(() => {
         if (Math.abs(d) >= 1) sc.scrollTop += d;
       });
       syncBarLine();
-      host2.syncJump();
-      host2.saveHistoryScroll();
+      host2.viewport.syncJump();
+      host2.historyScrollOwner.saveHistoryScroll();
     }
     const errorNavigation = createErrorNavigation({
       navigation: host2.navigation,
-      TX: host2.TX,
-      TXM: host2.TXM,
-      TOK: host2.TOK,
-      SESS: host2.SESS,
-      show: host2.show,
-      sidebarOnly: host2.SIDEBAR_ONLY,
+      TX: host2.transcripts.entries,
+      TXM: host2.transcripts.meta,
+      get TOK() {
+        return host2.transportOwner.TOK;
+      },
+      SESS: host2.modelStore.sessions,
+      get show() {
+        return host2.show;
+      },
+      sidebarOnly: host2.sidebarOnly,
       page: () => host2.$("#page"),
       drawSessionBar,
-      render: host2.render,
+      render: (...args) => host2.documentRendererOwner.render(...args),
       keepFocus,
-      countOf: (session, field) => session ? host2.countOf(session, field) ?? void 0 : void 0,
-      capture: () => host2.capture(),
-      restore: (saved) => host2.restore(saved),
-      opener: (node) => host2.opener(node),
-      resetPagerInput: host2.resetPagerInput,
-      stopOpeningEndPin: () => host2.stopOpeningEndPin(),
+      countOf: (session, field) => session ? host2.domain.countOf(session, field) ?? void 0 : void 0,
+      capture: () => host2.viewport.capture(),
+      restore: (saved) => host2.viewport.restore(saved),
+      opener: (node) => host2.viewport.opener(node),
+      resetPagerInput: (...args) => host2.pagingOwner.resetPagerInput(...args),
+      stopOpeningEndPin: () => host2.viewport.stopOpeningEndPin(),
       clearFind() {
         host2.find = "";
       },
       centre,
-      fetchTx: host2.fetchTx,
-      dropTx: host2.dropTx,
-      spread: host2.spread,
-      tail: (sid) => host2.tail(sid)
+      fetchTx: (...args) => host2.transportOwner.fetchTx(...args),
+      dropTx: (...args) => host2.pagingOwner.dropTx(...args),
+      spread: (...args) => host2.transportOwner.spread(...args),
+      tail: (sid) => host2.liveUpdates.tail(sid)
     });
     const {
       state: ERR,
@@ -11935,18 +12154,20 @@ globalThis.__semonUIShared = __semonUIShared;
     } = errorNavigation;
     const signalCount = (s) => Object.values(s?.signals ?? {}).reduce((n, x) => n + x, 0);
     const turnsLabel = (s) => {
-      const n = (host2.TURNS[s.id] ?? []).filter(host2.hasTurn).length;
+      const n = (host2.modelStore.turns[s.id] ?? []).filter(
+        (...args) => host2.domain.hasTurn(...args)
+      ).length;
       return n + (n === 1 ? " turn" : " turns");
     };
     const sessionLine = (s) => {
-      const failed = host2.countOf(s, "errors") ?? 0, runs = host2.descendantsOf(s.id, host2.sessionChildren()), cost2 = runs.length ? host2.costForSessions([s, ...runs]) : host2.costForSession(s.id), labels = [];
+      const failed = host2.domain.countOf(s, "errors") ?? 0, runs = host2.domain.descendantsOf(s.id, host2.domain.sessionChildren()), cost2 = runs.length ? host2.domain.costForSessions([s, ...runs]) : host2.domain.costForSession(s.id), labels = [];
       const add = (key, text2, tip, drop, extra = {}) => labels.push({ key, text: text2, tip: tip ?? void 0, drop, ...extra });
-      add("state", host2.STATE[s.state], void 0, 0, {
+      add("state", STATE[s.state], void 0, 0, {
         className: "state " + s.state,
         state: s.state,
-        stateLabel: host2.STATE[s.state]
+        stateLabel: STATE[s.state]
       });
-      add("kind", kindText(s), s.kind ? s.kind + " \xB7 " + host2.HARNESS[s.harness] : void 0, 2);
+      add("kind", kindText(s), s.kind ? s.kind + " \xB7 " + HARNESS[s.harness] : void 0, 2);
       add(
         "model",
         shortModel(s.model),
@@ -11972,21 +12193,21 @@ globalThis.__semonUIShared = __semonUIShared;
         );
       add(
         "machine",
-        host2.MACHINE[s.machine],
-        "Machine: " + host2.MACHINE[s.machine] + " \xB7 " + host2.hostOf(s),
+        host2.modelStore.machines[s.machine],
+        "Machine: " + host2.modelStore.machines[s.machine] + " \xB7 " + host2.domain.hostOf(s),
         5
       );
       if (s.branch) add("branch", s.branch, "Branch: " + s.branch, 6);
       add(
         "cost",
-        host2.costText(cost2),
+        host2.domain.costText(cost2),
         "API-equivalent cost" + (runs.length ? ", with " + runs.length + (runs.length === 1 ? " run" : " runs") : "") + ". Details in the session menu.",
         7
       );
       return labels;
     };
     const machineLine = (m) => {
-      const here = host2.onMachine(m), w = here.filter((s) => s.state === "work").length, up = host2.MACHINE_UP[m];
+      const here = host2.domain.onMachine(m), w = here.filter((s) => s.state === "work").length, up = host2.modelStore.machineUp[m];
       const sessions = here.length + (here.length === 1 ? " session" : " sessions");
       return [
         {
@@ -11995,12 +12216,12 @@ globalThis.__semonUIShared = __semonUIShared;
           drop: 0,
           className: "state " + (up ? "done" : "err"),
           state: up ? w ? "work" : "idle" : "err",
-          stateLabel: host2.STATE[up ? w ? "work" : "idle" : "err"]
+          stateLabel: STATE[up ? w ? "work" : "idle" : "err"]
         },
         {
           key: "activity",
-          text: up ? w + " working \xB7 " + sessions : host2.movedOff(m).length ? host2.movedOff(m).length + " moved off" : [
-            host2.MACHINE_LAST[m] != null ? "Last seen " + host2.clock(host2.MACHINE_LAST[m]) : null,
+          text: up ? w + " working \xB7 " + sessions : host2.domain.movedOff(m).length ? host2.domain.movedOff(m).length + " moved off" : [
+            host2.modelStore.machineLast[m] != null ? "Last seen " + host2.clock(host2.modelStore.machineLast[m]) : null,
             sessions
           ].filter(Boolean).join(" \xB7 "),
           drop: 1
@@ -12019,19 +12240,19 @@ globalThis.__semonUIShared = __semonUIShared;
       const y = host2.phone.matches ? window.scrollY : host2.$("#main").scrollTop;
       host2.$("#topbar").classList.toggle("scrolled", y > 4);
     }
-    if (!host2.SIDEBAR_ONLY) {
+    if (!host2.sidebarOnly) {
       host2.scope.listen(window, "scroll", syncBarLine, { passive: true });
       host2.scope.listen(host2.$("#main"), "scroll", syncBarLine, { passive: true });
     }
-    if (!host2.SIDEBAR_ONLY)
+    if (!host2.sidebarOnly)
       host2.scope.listen(
         window,
         "resize",
         () => {
           const l2 = host2.$("#topbar .meta-line");
           if (l2 && host2.navigation.route.v === "session") measureViewerBar(host2.$("#topbar"));
-          host2.syncLayoutPrefs();
-          host2.syncJump();
+          host2.layoutOwner.syncLayoutPrefs();
+          host2.viewport.syncJump();
         },
         { passive: true }
       );
@@ -12040,11 +12261,15 @@ globalThis.__semonUIShared = __semonUIShared;
         { title, className: opts.cls, label: opts.label, sub: opts.sub },
         {
           opened() {
-            host2.viewerEl = chrome.dialog;
+            host2.toolViewsOwner.viewerEl = chrome.dialog;
             document.documentElement.classList.add("panel-open");
             try {
               history.pushState(
-                { ...host2.navigation.route, sheet: 1, scrollTop: host2.currentScroll() },
+                {
+                  ...host2.navigation.route,
+                  sheet: 1,
+                  scrollTop: host2.historyScrollOwner.currentScroll()
+                },
                 ""
               );
             } catch {
@@ -12057,18 +12282,18 @@ globalThis.__semonUIShared = __semonUIShared;
             const d = chrome.dialog;
             document.documentElement.classList.remove("panel-open");
             opts.onClose?.();
-            if (host2.viewerEl === d) {
-              host2.viewerEl = null;
+            if (host2.toolViewsOwner.viewerEl === d) {
+              host2.toolViewsOwner.viewerEl = null;
               if (history.state?.sheet) {
-                host2.skipPop = true;
+                host2.toolViewsOwner.skipPop = true;
                 history.back();
               } else if (host2.pendingSessionOpen) {
                 const id = host2.pendingSessionOpen;
                 host2.pendingSessionOpen = null;
-                host2.goSession(id);
+                host2.destination.goSession(id);
               }
             }
-            if (host2.LIVE.pending) host2.refresh();
+            if (host2.liveModelOwner.LIVE.pending) host2.applicationRefreshOwner.refresh();
           }
         }
       );
@@ -12078,7 +12303,7 @@ globalThis.__semonUIShared = __semonUIShared;
     const RUNS_CAP = 5;
     const TRADEMARK_NOTICE = "Third-party trademarks are the property of their respective owners. Semon is not affiliated with or endorsed by these companies.";
     function openSessionMenu(s, anchor = null, scrollTo = void 0) {
-      const kids = host2.descendantsOf(s.id, host2.sessionChildren());
+      const kids = host2.domain.descendantsOf(s.id, host2.domain.sessionChildren());
       const {
         d,
         body,
@@ -12086,13 +12311,13 @@ globalThis.__semonUIShared = __semonUIShared;
       } = panel(s.name, {
         cls: "anchored session-menu",
         label: "Session menu for " + s.name,
-        sub: [host2.STATE[s.state], kindText(s), shortModel(s.model)].join(" \xB7 "),
+        sub: [STATE[s.state], kindText(s), shortModel(s.model)].join(" \xB7 "),
         onClose: () => {
           anchor?.setAttribute("aria-expanded", "false");
           anchor?.focus({ focusVisible: false });
         }
       });
-      const traceTurn = host2.navigation.route.v === "trace" ? host2.TURN.get(
+      const traceTurn = host2.navigation.route.v === "trace" ? host2.modelStore.turn.get(
         ("turn" in host2.navigation.route ? host2.navigation.route.turn : void 0) ?? ""
       ) : (() => {
         const top = host2.$("#topbar").getBoundingClientRect().bottom;
@@ -12100,19 +12325,19 @@ globalThis.__semonUIShared = __semonUIShared;
           ...document.querySelectorAll("#page .turn[data-turn]")
         ].filter((n) => !n.closest(".cw-body"));
         const visible = nodes.find((n) => n.getBoundingClientRect().bottom > top);
-        return host2.TURN.get(visible?.dataset.turn ?? "") ?? (host2.TURNS[s.id] ?? []).at(-1);
+        return host2.modelStore.turn.get(visible?.dataset.turn ?? "") ?? (host2.modelStore.turns[s.id] ?? []).at(-1);
       })();
       const actions = [], addAction = (key, text2, icon, className, note, checked, dot) => actions.push({ key, text: text2, icon, className, note, checked, dot });
-      if (traceTurn?.out.length) addAction("trace", "Trace this turn", host2.I.trace, "menu-trace");
+      if (traceTurn?.out.length) addAction("trace", "Trace this turn", I.trace, "menu-trace");
       const command = s.harness === "codex" ? "codex resume " + s.id : "claude --resume " + (s.sessionId ?? s.id);
-      addAction("copy", "Copy resume command", host2.I.copy);
-      if (s.harness === "claude") addAction("external", "Open in claude.ai", host2.I.ext);
+      addAction("copy", "Copy resume command", I.copy);
+      if (s.harness === "claude") addAction("external", "Open in claude.ai", I.ext);
       if (!host2.phone.matches)
-        addAction("wide", "Wide transcript", host2.I.wide, void 0, void 0, host2.wideMode);
+        addAction("wide", "Wide transcript", I.wide, void 0, void 0, host2.layoutOwner.wideMode);
       const signals = signalCount(s);
       if (signals)
         addAction("signals", signals + " signals", void 0, "menu-signals", "Step through");
-      const errorCount = host2.countOf(s, "errors") ?? 0;
+      const errorCount = host2.domain.countOf(s, "errors") ?? 0;
       if (host2.phone.matches) {
         if (errorCount)
           addAction(
@@ -12124,21 +12349,26 @@ globalThis.__semonUIShared = __semonUIShared;
             void 0,
             "err"
           );
-        if (kids.length) addAction("runs", "Runs \xB7 " + kids.length, host2.I.stack, "menu-runs");
+        if (kids.length) addAction("runs", "Runs \xB7 " + kids.length, I.stack, "menu-runs");
       }
-      const machine2 = host2.MACHINE[s.machine] ?? s.machine ?? "Unknown machine", calls = host2.countOf(s, "calls");
+      const machine2 = host2.modelStore.machines[s.machine] ?? s.machine ?? "Unknown machine", calls = host2.domain.countOf(s, "calls");
       const detailRows = [
-        ["Status", host2.STATE[s.state] + " \xB7 " + turnsLabel(s)],
+        ["Status", STATE[s.state] + " \xB7 " + turnsLabel(s)],
         ...s.kind ? [["Kind", s.kind]] : [],
-        ["Harness", host2.HARNESS[s.harness] ?? s.harness, false, host2.harnessSnapshot(s.harness)],
+        [
+          "Harness",
+          HARNESS[s.harness] ?? s.harness,
+          false,
+          host2.screenViews.harnessSnapshot(s.harness)
+        ],
         ["Model", modelIdOf(s), true],
         ...s.effort ? [["Effort", s.effort]] : [],
         [
           "Machine",
-          machine2 + (host2.hostOf(s) !== machine2 ? " \xB7 " + host2.hostOf(s) : "") + (s.movedFrom ? " (moved from " + (host2.MACHINE[s.movedFrom] ?? s.movedFrom) + ")" : "")
+          machine2 + (host2.domain.hostOf(s) !== machine2 ? " \xB7 " + host2.domain.hostOf(s) : "") + (s.movedFrom ? " (moved from " + (host2.modelStore.machines[s.movedFrom] ?? s.movedFrom) + ")" : "")
         ],
         ["Directory", s.cwd ?? s.dir ?? s.directory, true],
-        [s.worktree ? "Worktree" : "Branch", host2.branchOf(s), true],
+        [s.worktree ? "Worktree" : "Branch", host2.domain.branchOf(s), true],
         ["Tool calls", calls == null ? "\u2014" : String(calls)],
         ...errorCount ? [["Errors", String(errorCount)]] : [],
         ["Started", host2.clock(s.start)],
@@ -12156,31 +12386,31 @@ globalThis.__semonUIShared = __semonUIShared;
         {
           actions,
           command,
-          path: host2.phone.matches ? host2.lineageOf(s.id).map((a) => ({
+          path: host2.phone.matches ? host2.domain.lineageOf(s.id).map((a) => ({
             id: a.id,
             name: a.name,
             harness: a.harness,
-            harnessName: host2.HARNESS[a.harness] ?? a.harness
+            harnessName: HARNESS[a.harness] ?? a.harness
           })) : [],
-          status: host2.STATE[s.state] + " \xB7 " + turnsLabel(s),
+          status: STATE[s.state] + " \xB7 " + turnsLabel(s),
           state: s.state,
-          stateLabel: host2.STATE[s.state],
+          stateLabel: STATE[s.state],
           details,
-          cost: host2.costSnapshot(s, kids),
+          cost: host2.screenViews.costSnapshot(s, kids),
           notice: TRADEMARK_NOTICE,
-          icons: { chevron: host2.I.chev, copy: host2.I.copy }
+          icons: { chevron: I.chev, copy: I.copy }
         },
         {
-          wide: () => host2.wideMode,
+          wide: () => host2.layoutOwner.wideMode,
           session(id) {
             host2.pendingSessionOpen = id;
             d.close();
           },
           action(key) {
             if (key === "trace" && traceTurn) {
-              host2.afterPop = () => host2.goTrace(traceTurn.id);
+              host2.afterPop = () => host2.destination.goTrace(traceTurn.id);
               d.close();
-            } else if (key === "wide") host2.setWideMode(!host2.wideMode);
+            } else if (key === "wide") host2.layoutOwner.setWideMode(!host2.layoutOwner.wideMode);
             else if (key === "signals" || key === "errors") {
               d.close();
               s && openErrors(s.id, key === "signals" ? "signals" : "errors");
@@ -12218,15 +12448,15 @@ globalThis.__semonUIShared = __semonUIShared;
   function createSessionList(host2) {
     const laneOf = (sid) => {
       const seen = /* @__PURE__ */ new Set();
-      while (host2.parentOf(sid) && !seen.has(sid)) {
+      while (host2.domain.parentOf(sid) && !seen.has(sid)) {
         seen.add(sid);
-        sid = host2.parentOf(sid);
+        sid = host2.domain.parentOf(sid);
       }
       return sid;
     };
     function childRuns(sid) {
-      const kids = Object.values(host2.SESS).filter(
-        (x) => x.id !== sid && laneOf(x.id) === sid && (host2.showApprovalReviews || !host2.isApprovalReview(x))
+      const kids = Object.values(host2.modelStore.sessions).filter(
+        (x) => x.id !== sid && laneOf(x.id) === sid && (host2.showApprovalReviews || !host2.recentNavigation.isApprovalReview(x))
       ), sub = kids.filter((x) => x.kind === "Subagent").length, cdx = kids.filter((x) => x.kind === "Codex run").length, other = kids.length - sub - cdx;
       return [
         sub ? sub + (sub === 1 ? " subagent" : " subagents") : null,
@@ -12235,16 +12465,32 @@ globalThis.__semonUIShared = __semonUIShared;
       ].filter(Boolean).join(" \xB7 ");
     }
     function renderSessions(page, focusSearch = false) {
-      const all = Object.values(host2.SESS).filter(
-        (s) => (host2.showApprovalReviews || !host2.isApprovalReview(s)) && host2.matchesSessionFacets(s)
+      const all = Object.values(host2.modelStore.sessions).filter(
+        (s) => (host2.showApprovalReviews || !host2.recentNavigation.isApprovalReview(s)) && host2.analytics.matchesSessionFacets(s)
       );
-      const lanes = all.filter((s) => host2.sessMatch(s, host2.query)), order = host2.orderScope("page", host2.pageSig(), host2.navigation.route, host2.pageState());
+      const lanes = all.filter((s) => host2.navigationViewOwner.sessMatch(s, host2.query)), order = host2.orderingControlsOwner.orderScope(
+        "page",
+        host2.orderingControlsOwner.pageSig(),
+        host2.navigation.route,
+        host2.orderingControlsOwner.pageState()
+      );
       let groups;
       if (host2.groupBy === "recent")
-        groups = [["", host2.orderList(order, "recent", lanes, host2.byLast), lanes.length]];
+        groups = [
+          [
+            "",
+            host2.orderingControlsOwner.orderList(
+              order,
+              "recent",
+              lanes,
+              (...args) => host2.orderingControlsOwner.byLast(...args)
+            ),
+            lanes.length
+          ]
+        ];
       else {
         const keysOf = {
-          machine: (s) => host2.MACHINE[s.machine],
+          machine: (s) => host2.modelStore.machines[s.machine],
           project: (s) => s.repo ?? "No repo (roles)",
           harness: (s) => HARNESS[s.harness]
         };
@@ -12254,13 +12500,24 @@ globalThis.__semonUIShared = __semonUIShared;
         );
         groups = keys.map((k) => {
           const rows2 = lanes.filter((s) => key(s) === k);
-          return [k, host2.orderList(order, "g:" + k, rows2, host2.byLast), rows2.length];
+          return [
+            k,
+            host2.orderingControlsOwner.orderList(
+              order,
+              "g:" + k,
+              rows2,
+              (...args) => host2.orderingControlsOwner.byLast(...args)
+            ),
+            rows2.length
+          ];
         });
       }
       const rows = groups.filter(([, items, total]) => items.length || !total).map(([title, items, total]) => ({
         title,
         total,
-        harness: host2.groupBy === "harness" ? host2.harnessSnapshot(Object.keys(HARNESS).find((k) => HARNESS[k] === title) ?? "") : void 0,
+        harness: host2.groupBy === "harness" ? host2.screenViews.harnessSnapshot(
+          Object.keys(HARNESS).find((k) => HARNESS[k] === title) ?? ""
+        ) : void 0,
         rows: items.map((s) => {
           const fields = [
             {
@@ -12271,12 +12528,12 @@ globalThis.__semonUIShared = __semonUIShared;
               icon: I.duration
             }
           ];
-          if (Object.keys(host2.MACHINE).length > 1)
+          if (Object.keys(host2.modelStore.machines).length > 1)
             fields.push({
               className: "row-machine host",
-              text: host2.shortHost(s),
+              text: host2.domain.shortHost(s),
               priority: 2,
-              tip: "Machine: " + host2.hostOf(s),
+              tip: "Machine: " + host2.domain.hostOf(s),
               icon: I.machine
             });
           if (s.repo)
@@ -12300,10 +12557,10 @@ globalThis.__semonUIShared = __semonUIShared;
             state: s.state,
             stateLabel: STATE[s.state] ?? s.state,
             age: host2.ago(s.last),
-            harness: host2.harnessSnapshot(s.harness),
+            harness: host2.screenViews.harnessSnapshot(s.harness),
             model: shortModel(s.model ?? s.modelId),
-            modelTip: "Model: " + host2.modelIdOf(s),
-            delegation: host2.parentOf(s.id) ? I.stack : void 0,
+            modelTip: "Model: " + host2.sessionChrome.modelIdOf(s),
+            delegation: host2.domain.parentOf(s.id) ? I.stack : void 0,
             fields
           };
         })
@@ -12317,14 +12574,16 @@ globalThis.__semonUIShared = __semonUIShared;
           query: host2.query,
           groupBy: host2.groupBy,
           reviews: host2.showApprovalReviews,
-          showReviews: Object.values(host2.SESS).some(host2.isApprovalReview) || host2.showApprovalReviews,
+          showReviews: Object.values(host2.modelStore.sessions).some(
+            (...args) => host2.recentNavigation.isApprovalReview(...args)
+          ) || host2.showApprovalReviews,
           groups: rows,
           matches: lanes.length
         },
         {
-          session: host2.goSession,
-          committed: host2.observeTitle,
-          facets: () => host2.renderFacetFilters(page, () => host2.render()),
+          session: (...args) => host2.destination.goSession(...args),
+          committed: (...args) => host2.sessionChrome.observeTitle(...args),
+          facets: () => host2.analytics.renderFacetFilters(page, () => host2.documentRendererOwner.render()),
           search(value) {
             host2.query = value.trim();
             const address = new URL(location.href);
@@ -12332,23 +12591,23 @@ globalThis.__semonUIShared = __semonUIShared;
             else address.searchParams.delete("q");
             history.replaceState(history.state, "", address);
             renderSessions(page);
-            host2.renderLanes();
+            host2.recentNavigation.renderLanes();
           },
           group(value) {
             host2.groupBy = value;
             renderSessions(page);
-            host2.renderLanes();
+            host2.recentNavigation.renderLanes();
           },
           reviews() {
             host2.showApprovalReviews = !host2.showApprovalReviews;
-            host2.ORD.delete("page");
-            host2.ORD.delete("side");
-            host2.render();
+            host2.orderingControlsOwner.ORD.delete("page");
+            host2.orderingControlsOwner.ORD.delete("side");
+            host2.documentRendererOwner.render();
           }
         },
         focusSearch
       );
-      host2.renderLanes();
+      host2.recentNavigation.renderLanes();
     }
     return { renderSessions };
   }
@@ -12360,18 +12619,18 @@ globalThis.__semonUIShared = __semonUIShared;
       return x < 60 ? x + "s" : Math.floor(x / 60) + "m " + x % 60 + "s";
     };
     function ticker() {
-      if (!host2.visible() || Date.now() === host2.transportOwner.fetchedAt) return;
-      host2.tick();
+      if (!host2.liveModelOwner.visible() || Date.now() === host2.transportOwner.fetchedAt) return;
+      host2.transportOwner.tick();
       if (host2.navigation.route.v === "session" && host2.navigation.rendered === host2.navigation.route)
         updateSessionClock(
           host2.$("#page"),
-          host2.NOW,
+          host2.now,
           Object.fromEntries(
-            Object.values(host2.SESS).filter((s) => s.activity?.[3] != null).map((s) => [s.id, s.activity[3]])
+            Object.values(host2.modelStore.sessions).filter((s) => s.activity?.[3] != null).map((s) => [s.id, s.activity[3]])
           )
         );
       else if (host2.navigation.route.v === "home" && host2.navigation.rendered === host2.navigation.route)
-        host2.renderHome(host2.$("#page"));
+        host2.screenViews.renderHome(host2.$("#page"));
     }
     return { ticker, running };
   }
@@ -12388,8 +12647,8 @@ globalThis.__semonUIShared = __semonUIShared;
         (e.more ?? []).map(async (part) => ({
           part,
           data: object2(
-            await host2.api(
-              "/api/entry?sid=" + host2.enc(e.sid ?? "") + "&slot=" + e.slot + "&as=" + part
+            await host2.transportOwner.api(
+              "/api/entry?sid=" + host2.transportOwner.enc(e.sid ?? "") + "&slot=" + e.slot + "&as=" + part
             )
           )
         }))
@@ -12421,17 +12680,17 @@ globalThis.__semonUIShared = __semonUIShared;
       if (host2.disposed) return;
       if (e.more?.length && e.slot != null && !e.full) {
         const open2 = (f) => openStepViewer({ ...e, ...f, full: true }, v, ic, inLabel);
-        host2.fullOf(e).then(open2, () => open2({ fullFailed: true }));
+        host2.toolLoaderOwner.fullOf(e).then(open2, () => open2({ fullFailed: true }));
         return;
       }
       const status2 = e.live ? "Running \xB7 " + e.secs : e.unfinished ? "No result" : e.ok ? "Done \xB7 " + e.secs : e.ok === null ? "Exit unknown \xB7 " + e.secs : "Failed \xB7 " + e.secs;
-      const { body, show: open } = host2.panel(v + " " + e.arg, {
+      const { body, show: open } = host2.sessionChrome.panel(v + " " + e.arg, {
         cls: "full",
         sub: e.name + " \xB7 " + status2,
         label: v + " " + e.arg
       });
       body.classList.add("viewer-b");
-      renderFullTool(body, e, inLabel, host2.SESS[e.sid ?? ""]?.state === "wait");
+      renderFullTool(body, e, inLabel, host2.modelStore.sessions[e.sid ?? ""]?.state === "wait");
       open();
     }
     const THUMB_W = 200, THUMB_H = 160;
@@ -12447,7 +12706,7 @@ globalThis.__semonUIShared = __semonUIShared;
         const k = a.w != null && a.h != null && a.w > 0 && a.h > 0 ? Math.min(1, THUMB_W / a.w, THUMB_H / a.h) : null;
         return {
           unavailable: !!a.na,
-          url: "/api/attachment?sid=" + host2.enc(e.sid ?? "") + "&o=" + host2.enc(a.o) + "&b=" + host2.enc(a.b) + "&v=" + host2.enc(a.v ?? ""),
+          url: "/api/attachment?sid=" + host2.transportOwner.enc(e.sid ?? "") + "&o=" + host2.transportOwner.enc(a.o) + "&b=" + host2.transportOwner.enc(a.b) + "&v=" + host2.transportOwner.enc(a.v ?? ""),
           label: "Attached image " + (i + 1) + " (" + (IMAGE_KIND[a.type ?? ""] ?? "image") + ", " + sizeText(a.size ?? 0) + ")",
           width: k ? Math.max(1, Math.round(a.w * k)) : void 0,
           height: k ? Math.max(1, Math.round(a.h * k)) : void 0
@@ -12476,7 +12735,7 @@ globalThis.__semonUIShared = __semonUIShared;
               history.back();
             }
           }
-          if (host2.LIVE.pending) host2.refresh();
+          if (host2.liveModelOwner.LIVE.pending) host2.applicationRefreshOwner.refresh();
           (from.isConnected ? from : [...document.querySelectorAll("button.attach")].find(
             (x) => x.querySelector("img")?.getAttribute("src") === url
           ))?.focus();
@@ -12487,7 +12746,9 @@ globalThis.__semonUIShared = __semonUIShared;
     }
     function openScript(e) {
       const done = (fields) => openStepViewer({ ...e, ...fields, full: true }, "View script", "run", "Script");
-      host2.api("/api/entry?sid=" + host2.enc(e.sid ?? "") + "&slot=" + e.slot + "&as=script").then((value) => {
+      host2.transportOwner.api(
+        "/api/entry?sid=" + host2.transportOwner.enc(e.sid ?? "") + "&slot=" + e.slot + "&as=script"
+      ).then((value) => {
         const result = object2(value);
         done({
           scriptText: optional(result.text, text),
@@ -12496,34 +12757,34 @@ globalThis.__semonUIShared = __semonUIShared;
       }).catch(() => done({ scriptFailed: true }));
     }
     function childSnapshot(h2, c) {
-      const calls = host2.countOf(c, "calls"), holder = host2.HOLDS.get(h2.id);
+      const calls = host2.domain.countOf(c, "calls"), holder = host2.modelStore.holds.get(h2.id);
       return {
         kind: "child",
         handoff: h2.id,
         id: c.id,
-        turn: host2.STARTS.get(h2.id)?.id,
+        turn: host2.modelStore.starts.get(h2.id)?.id,
         name: c.name,
         state: c.state,
         stateLabel: STATE[c.state] ?? c.state,
         meta: [
-          host2.kindText(c),
+          host2.sessionChrome.kindText(c),
           shortModel(c.model),
           host2.dur(c.start, c.state === "work" ? null : c.last),
           (calls ?? "\u2014") + (calls === 1 ? " step" : " steps"),
-          host2.costText(host2.costForSession(c.id, true))
+          host2.domain.costText(host2.domain.costForSession(c.id, true))
         ].join(" \xB7 "),
-        mark: host2.harnessSnapshot(c.harness),
+        mark: host2.screenViews.harnessSnapshot(c.harness),
         brief: preview(h2.brief ?? ""),
         result: h2.result || void 0,
         failed: h2.status === "err",
-        activity: !h2.result && c.state === "work" && c.activity ? [host2.verbNow(c.activity[0]), c.activity[1]] : void 0,
+        activity: !h2.result && c.state === "work" && c.activity ? [host2.transcriptView.verbNow(c.activity[0]), c.activity[1]] : void 0,
         trace: holder?.id,
-        traceLabel: holder ? "Open run view for " + host2.nameOf(h2.from) : void 0,
+        traceLabel: holder ? "Open run view for " + host2.domain.nameOf(h2.from) : void 0,
         chevron: I.chev
       };
     }
     const callsTip = (s) => {
-      const parts = Object.entries(s.tool_calls ?? {}).sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : 1)).map(([name, n]) => name + " " + n), failed = host2.countOf(s, "errors");
+      const parts = Object.entries(s.tool_calls ?? {}).sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : 1)).map(([name, n]) => name + " " + n), failed = host2.domain.countOf(s, "errors");
       if (failed) parts.push(failed + " failed");
       return parts.join(" \xB7 ");
     };
@@ -12539,19 +12800,19 @@ globalThis.__semonUIShared = __semonUIShared;
         if (Number(k.web_search) >= 5e-3) kinds2.push(["Web search", k.web_search]);
         return {
           id,
-          text: kinds2.map(([label, usd]) => label + " " + host2.asMoney(Number(usd) || 0)).join(" \xB7 ")
+          text: kinds2.map(([label, usd]) => label + " " + host2.domain.asMoney(Number(usd) || 0)).join(" \xB7 ")
         };
       });
-      return (groups.length > 1 ? groups.map((g) => g.id + ": " + g.text).join("; ") : groups.map((g) => g.text).join("")) + (groups.length ? ". " : "") + host2.COST_TIP;
+      return (groups.length > 1 ? groups.map((g) => g.id + ": " + g.text).join("; ") : groups.map((g) => g.text).join("")) + (groups.length ? ". " : "") + host2.recentNavigation.COST_TIP;
     }
     function footerSnapshot(s, h2) {
       const done = s.state === "done" || s.state === "err", finished = h2 ? done || h2.status === "done" || h2.status === "err" : done;
       const state2 = h2 ? finished ? s.state === "err" || h2.status === "err" ? "err" : "done" : "work" : s.state;
-      const cost2 = host2.costForSession(s.id), priced2 = cost2.usd != null && !host2.costMissing(cost2).length && cost2.usd >= 5e-3, items = [];
+      const cost2 = host2.domain.costForSession(s.id), priced2 = cost2.usd != null && !host2.domain.costMissing(cost2).length && cost2.usd >= 5e-3, items = [];
       if (!h2 || !finished)
         items.push({
           kind: "calls",
-          text: host2.callsText(host2.countOf(s, "calls")),
+          text: host2.domain.callsText(host2.domain.countOf(s, "calls")),
           tip: callsTip(s)
         });
       items.push({
@@ -12559,13 +12820,18 @@ globalThis.__semonUIShared = __semonUIShared;
         text: host2.dur(s.start, state2 === "work" ? null : s.last),
         tip: timeTip(s, h2, finished)
       });
-      if (priced2) items.push({ kind: "cost", text: host2.asMoney(cost2.usd ?? 0), tip: costTip(cost2) });
+      if (priced2)
+        items.push({ kind: "cost", text: host2.domain.asMoney(cost2.usd ?? 0), tip: costTip(cost2) });
       return {
         state: state2,
         stateLabel: STATE[state2] ?? state2,
-        text: h2 && finished ? "Returned to " + host2.nameOf(h2.from) + " \xB7 " + STATE[state2] : STATE[state2],
+        text: h2 && finished ? "Returned to " + host2.domain.nameOf(h2.from) + " \xB7 " + STATE[state2] : STATE[state2],
         items,
-        parent: h2 && finished ? { id: h2.from, turn: host2.HOLDS.get(h2.id)?.id, name: host2.nameOf(h2.from) } : void 0
+        parent: h2 && finished ? {
+          id: h2.from,
+          turn: host2.modelStore.holds.get(h2.id)?.id,
+          name: host2.domain.nameOf(h2.from)
+        } : void 0
       };
     }
     return {
@@ -12597,12 +12863,13 @@ globalThis.__semonUIShared = __semonUIShared;
       return s1 < s0 || b1 < b0;
     }
     function revalidate(r) {
-      const sid = r.id, m = host2.TXM[sid], moved = m && m.to >= m.total && m.tok != null && host2.transportOwner.TOK[sid] != null && m.tok !== host2.transportOwner.TOK[sid];
-      const job = moved ? shrank(m.tok, host2.transportOwner.TOK[sid]) ? host2.reload(sid) : host2.tail(sid) : null, work = job;
+      const sid = r.id, m = host2.transcripts.meta[sid], moved = m && m.to >= m.total && m.tok != null && host2.transportOwner.TOK[sid] != null && m.tok !== host2.transportOwner.TOK[sid];
+      const job = moved ? shrank(m.tok, host2.transportOwner.TOK[sid]) ? host2.liveUpdates.reload(sid) : host2.liveUpdates.tail(sid) : null, work = job;
       if (work)
         work.then(
           () => {
-            if (host2.navigation.route === r && host2.navigation.rendered === r) host2.refresh(null);
+            if (host2.navigation.route === r && host2.navigation.rendered === r)
+              host2.applicationRefreshOwner.refresh(null);
           },
           () => {
           }
@@ -12614,7 +12881,7 @@ globalThis.__semonUIShared = __semonUIShared;
   // src/app/transcriptView.ts
   function createTranscriptView(host2) {
     const thoughtText = (e) => String(e.text ?? "").trim();
-    const isPendingThought = (e, entries = [], i = 0, sid = "") => !!(e.pending || e.status === "thinking") || Array.isArray(entries) && e.k === "think" && !thoughtText(e) && i === entries.length - 1 && host2.SESS[sid]?.state === "work";
+    const isPendingThought = (e, entries = [], i = 0, sid = "") => !!(e.pending || e.status === "thinking") || Array.isArray(entries) && e.k === "think" && !thoughtText(e) && i === entries.length - 1 && host2.modelStore.sessions[sid]?.state === "work";
     const signalLabel = (e) => {
       const s = e.signal ?? {}, tag = s.tag ?? "", kind = s.kind;
       if (kind === "compact")
@@ -12646,8 +12913,8 @@ globalThis.__semonUIShared = __semonUIShared;
       return n < 1 ? "Thinking" : "Thinking \xB7 " + (n >= 60 ? Math.floor(n / 60) + "m " + n % 60 + "s" : n + "s");
     };
     function transcriptEntries(entries, sid) {
-      const out = [], codex = host2.SESS[sid]?.harness === "codex";
-      const turns = codex ? host2.TURNS[sid] ?? [] : [], owners2 = codex ? new Map(turns.flatMap((t) => t.entries.map((e) => [e.key, t.id]))) : /* @__PURE__ */ new Map();
+      const out = [], codex = host2.modelStore.sessions[sid]?.harness === "codex";
+      const turns = codex ? host2.modelStore.turns[sid] ?? [] : [], owners2 = codex ? new Map(turns.flatMap((t) => t.entries.map((e) => [e.key, t.id]))) : /* @__PURE__ */ new Map();
       const turnIds = codex ? new Set(turns.map((t) => t.id)) : /* @__PURE__ */ new Set();
       let chain = null, sawOwnedEntry = false, unresolvedOwner = false;
       for (let i = 0; i < entries.length; i++) {
@@ -12744,7 +13011,8 @@ globalThis.__semonUIShared = __semonUIShared;
       return m ? (Number(m[1] ?? 0) * 60 + Number(m[2])) * 1e3 : null;
     };
     function transcriptSnapshot(sid, opts = {}) {
-      const entries = transcriptEntries(host2.TX[sid] ?? [], sid), blocks2 = [];
+      const projection = host2.transcripts.view(sid);
+      const entries = transcriptEntries(projection.entries ?? [], sid), blocks2 = [];
       let tx = [];
       const currentTurn = { value: null };
       let loose = 0;
@@ -12804,15 +13072,17 @@ globalThis.__semonUIShared = __semonUIShared;
           background: !!ends.length,
           failed,
           running: live?.secs,
-          stack: host2.I.stack,
-          chevron: host2.I.chev
+          stack: I.stack,
+          chevron: I.chev
         });
         run = [];
       };
       const firsts = new Map(
-        (host2.TURNS[sid] ?? []).filter((t) => t.entries[0]?.key).map((t) => [t.entries[0].key, t])
+        (host2.modelStore.turns[sid] ?? []).filter((t) => t.entries[0]?.key).map((t) => [t.entries[0].key, t])
       );
-      const owner = opts.only ? new Map((host2.TURNS[sid] ?? []).flatMap((t) => t.entries.map((e) => [e.key, t.id]))) : null;
+      const owner = opts.only ? new Map(
+        (host2.modelStore.turns[sid] ?? []).flatMap((t) => t.entries.map((e) => [e.key, t.id]))
+      ) : null;
       const content = (values) => values.some((v) => v.kind !== "label" || v.className === "harness-note");
       const closeTurn = () => {
         flush();
@@ -12821,7 +13091,7 @@ globalThis.__semonUIShared = __semonUIShared;
           tx = [];
           return;
         }
-        const { t, view } = currentTurn.value, end = host2.turnEnd(t), returned = t.entries.some((e) => e.k === "end" && /^Returned to /.test(e.text ?? ""));
+        const { t, view } = currentTurn.value, end = host2.domain.turnEnd(t), returned = t.entries.some((e) => e.k === "end" && /^Returned to /.test(e.text ?? ""));
         if (!filtering) {
           if (end?.st === "err" && !returned) view.error = end.text;
           if (t.out.length) view.trace = t.id;
@@ -12837,26 +13107,26 @@ globalThis.__semonUIShared = __semonUIShared;
         const h2 = t.start, view = {
           id: t.id,
           entries: [],
-          traceIcon: host2.I.trace,
-          stateLabel: host2.STATE.err
+          traceIcon: I.trace,
+          stateLabel: STATE.err
         };
         if (t.u || h2?.kind === "ask")
           view.label = "Your message" + (h2 ? " at " + host2.clock(h2.at) : "");
         else if (h2)
           view.header = {
-            parts: host2.sentenceSnapshot(h2, sid, true).parts,
-            mark: host2.SESS[h2.from] ? host2.harnessSnapshot(host2.SESS[h2.from].harness) : void 0,
+            parts: host2.sentencesOwner.sentenceSnapshot(h2, sid, true).parts,
+            mark: host2.modelStore.sessions[h2.from] ? host2.screenViews.harnessSnapshot(host2.modelStore.sessions[h2.from].harness) : void 0,
             time: host2.clock(h2.at)
           };
         currentTurn.value = { t, view };
       };
       const toolStep = (e, v, ic, live) => {
-        const bg = e.bg, bgRunning = bg?.state === "running", waiting = live && host2.SESS[sid]?.state === "wait";
-        const waitingText = host2.SESS[sid]?.waiting_for?.includes("permission") ? "Waiting on permission" : "Waiting for your input";
+        const bg = e.bg, bgRunning = bg?.state === "running", waiting = live && host2.modelStore.sessions[sid]?.state === "wait";
+        const waitingText = host2.modelStore.sessions[sid]?.waiting_for?.includes("permission") ? "Waiting on permission" : "Waiting for your input";
         const status2 = bg ? null : waiting ? waitingText : live ? e.secs : e.unfinished ? "no result" : e.exit != null ? "exit " + e.exit + " \xB7 " + e.secs : e.ok ? e.secs : e.ok === null ? "exit unknown \xB7 " + e.secs : "failed \xB7 " + e.secs;
         const title = e.title ? String(e.title) : null, command = e.in ?? e.arg;
         const firstLine = typeof command === "string" ? command.split(/\r\n|\n|\r/).find((line) => line.trim()) : null;
-        const bgSecs = bgRunning && bg.since != null ? host2.running(host2.NOW - bg.since) : bg?.secs;
+        const bgSecs = bgRunning && bg.since != null ? host2.tickerOwner.running(host2.now - bg.since) : bg?.secs;
         return {
           className: "step" + (bg ? (bg.state === "failed" ? " err" : "") + " background" + (bgRunning ? " background-running" : "") : live ? " live" : e.ok || e.ok === null ? "" : " err"),
           key: e.key,
@@ -12866,7 +13136,7 @@ globalThis.__semonUIShared = __semonUIShared;
           since: live ? e.since : bgRunning ? bg.since : void 0,
           running: live || bgRunning,
           background: !!bg,
-          waiting: host2.SESS[sid]?.state === "wait",
+          waiting: host2.modelStore.sessions[sid]?.state === "wait",
           named: !!title,
           prefix: title ? waiting ? waitingText + ": " : live ? "Running: " : e.ok === false ? "Failed: " : v + ": " : void 0,
           verb: waiting ? "Waiting" : live ? verbNow(e.name) : v,
@@ -12874,8 +13144,8 @@ globalThis.__semonUIShared = __semonUIShared;
           tip: title && firstLine != null ? firstLine.slice(0, 200) : void 0,
           status: status2 == null ? null : String(status2),
           backgroundStatus: bg ? backgroundText({ ...bg, secs: bgSecs }) : void 0,
-          icon: host2.I[ic],
-          chevron: host2.I.chev,
+          icon: I[ic],
+          chevron: I.chev,
           data: e
         };
       };
@@ -12943,7 +13213,7 @@ globalThis.__semonUIShared = __semonUIShared;
               bg: true,
               tid: e.tid,
               live,
-              secs: live && e.bg.since != null ? host2.running(host2.NOW - e.bg.since) : e.bg.secs ?? e.secs,
+              secs: live && e.bg.since != null ? host2.tickerOwner.running(host2.now - e.bg.since) : e.bg.secs ?? e.secs,
               key: e.key
             });
           } else run.push({ view, v, k: e.name, err: e.ok === false, key: e.key });
@@ -12958,7 +13228,7 @@ globalThis.__semonUIShared = __semonUIShared;
                 kind: "message",
                 flavor: e.k === "u" ? "user" : "assistant",
                 text: e.text,
-                images: e.k === "u" ? host2.attachmentSnapshot(e) : void 0
+                images: e.k === "u" ? host2.toolViewsOwner.attachmentSnapshot(e) : void 0
               },
               e
             )
@@ -12991,7 +13261,7 @@ globalThis.__semonUIShared = __semonUIShared;
           if (!filtering)
             tx.push(keyed({ kind: "label", className: "divider", text: e.text ?? "" }, e));
         } else if (e.k === "h") {
-          const h2 = host2.HID.get(e.id);
+          const h2 = host2.modelStore.handoff.get(e.id);
           if (!h2 || !hit(h2.brief + " " + (h2.result ?? ""))) continue;
           if (h2.kind === "ask") {
             if (!host2.show.messages) continue;
@@ -13001,7 +13271,7 @@ globalThis.__semonUIShared = __semonUIShared;
                   kind: "message",
                   flavor: "user",
                   text: h2.brief ?? "",
-                  images: host2.attachmentSnapshot(e)
+                  images: host2.toolViewsOwner.attachmentSnapshot(e)
                 },
                 e
               )
@@ -13017,13 +13287,14 @@ globalThis.__semonUIShared = __semonUIShared;
               );
             continue;
           }
-          if (h2.kind === "spawn" && h2.from === sid && host2.SESS[h2.to]) {
-            if (host2.show.tools) tx.push(keyed(host2.childSnapshot(h2, host2.SESS[h2.to]), e));
+          if (h2.kind === "spawn" && h2.from === sid && host2.modelStore.sessions[h2.to]) {
+            if (host2.show.tools)
+              tx.push(keyed(host2.toolViewsOwner.childSnapshot(h2, host2.modelStore.sessions[h2.to]), e));
             continue;
           }
           if (host2.find && h2.kind === "move" || !host2.show.messages && h2.kind !== "move")
             continue;
-          const sentence = host2.sentenceSnapshot(h2, sid, true);
+          const sentence = host2.sentencesOwner.sentenceSnapshot(h2, sid, true);
           tx.push(
             keyed(
               {
@@ -13036,9 +13307,9 @@ globalThis.__semonUIShared = __semonUIShared;
                 brief: preview(h2.brief ?? ""),
                 result: h2.result || void 0,
                 resultLabel: h2.kind === "relay" ? "Reply: " : "Returned: ",
-                answers: host2.answersOf(h2) ?? void 0,
+                answers: host2.domain.answersOf(h2) ?? void 0,
                 waiting: h2.kind === "toyou" && h2.status === "wait",
-                stateLabel: host2.STATE.wait
+                stateLabel: STATE.wait
               },
               e
             )
@@ -13046,21 +13317,21 @@ globalThis.__semonUIShared = __semonUIShared;
         }
       }
       closeTurn();
-      const range = host2.TXM[sid], s = host2.SESS[sid], origin = host2.originHandoff(sid);
+      const range = projection.range, s = host2.modelStore.sessions[sid], origin = host2.domain.originHandoff(sid);
       return {
         id: sid,
         name: s.name,
         blocks: blocks2,
-        order: (host2.TURNS[sid] ?? []).map((t) => t.id),
+        order: (host2.modelStore.turns[sid] ?? []).map((t) => t.id),
         dirty: opts.only,
-        before: range?.from > 0 ? host2.pagerSnapshot(sid, "before") : void 0,
-        after: range && range.to < range.total ? host2.pagerSnapshot(sid, "after") : void 0,
+        before: range?.from > 0 ? host2.pagingOwner.pagerSnapshot(sid, "before") : void 0,
+        after: range && range.to < range.total ? host2.pagingOwner.pagerSnapshot(sid, "after") : void 0,
         started: !range?.from && !filtering ? {
           lead: "Started " + host2.clock(s.start) + " on\xA0",
-          machine: host2.MACHINE[s.movedFrom ?? s.machine]
+          machine: host2.modelStore.machines[s.movedFrom ?? s.machine]
         } : void 0,
         empty: !opts.only && !blocks2.some((b) => content(b.kind === "turn" ? b.turn.entries : b.entries)) ? host2.find ? "Nothing matches \u201C" + host2.find + "\u201D." : "Nothing to show with these filters." : void 0,
-        footer: host2.showsFooter(s, origin) ? host2.footerSnapshot(s, origin) : void 0
+        footer: host2.screenViews.showsFooter(s, origin) ? host2.toolViewsOwner.footerSnapshot(s, origin) : void 0
       };
     }
     return { transcriptEntries, transcriptSnapshot, verb, verbNow };
@@ -13105,42 +13376,49 @@ globalThis.__semonUIShared = __semonUIShared;
       }
     }
     function tick() {
-      host2.NOW = serverNow + (Date.now() - fetchedAt);
-      for (const s of Object.values(host2.SESS))
+      host2.now = serverNow + (Date.now() - fetchedAt);
+      for (const s of Object.values(host2.modelStore.sessions))
         if (s.activity && s.activity[3] != null)
-          s.activity[2] = Math.floor((host2.NOW - s.activity[3]) / 1e3);
+          s.activity[2] = Math.floor((host2.now - s.activity[3]) / 1e3);
     }
     function adopt(value) {
-      const m = host2.modelStore.adopt(value);
-      host2.domain.invalidate();
-      serverNow = m.now;
-      fetchedAt = Date.now();
-      TOK = m.tx == null ? {} : dictionary(m.tx, text);
-      host2.transcripts.marks = TOK;
+      if (host2.disposed) throw new DOMException("Viewer destroyed", "AbortError");
+      const m = parseModel(value);
+      const marks = m.tx == null ? {} : dictionary(m.tx, text);
       const admin = m.admin == null ? null : object2(m.admin);
-      host2.ADMIN = admin && typeof admin.href === "string" && safePath2(admin.href) ? { href: admin.href, label: text(admin.label) } : null;
-      host2.ACCOUNT = accountOf(m.account) ?? accountOf(host2.viewerHost?.account) ?? embeddedAccount();
-      host2.viewerHost?.modelAccount?.(host2.ACCOUNT);
+      const nextAdmin = admin && typeof admin.href === "string" && safePath2(admin.href) ? { href: admin.href, label: text(admin.label) } : null;
+      const account = accountOf(m.account) ?? accountOf(host2.viewerHost?.account) ?? embeddedAccount();
       const nav = m.nav == null ? null : object2(m.nav);
-      host2.NAV_MACHINES = host2.viewerHost?.machinesPath ?? (nav && typeof nav.machines === "string" && safePath2(nav.machines) ? nav.machines : null);
-      tick();
+      const machinesPath = host2.viewerHost?.machinesPath ?? (nav && typeof nav.machines === "string" && safePath2(nav.machines) ? nav.machines : null);
+      host2.modelStore.adopt(m, () => {
+        serverNow = m.now;
+        fetchedAt = Date.now();
+        TOK = marks;
+        host2.transcripts.marks = marks;
+        host2.admin = nextAdmin;
+        host2.account = account;
+        host2.machinesPath = machinesPath;
+        tick();
+        for (const sid of Object.keys(host2.transcripts.entries)) host2.transcripts.spread(sid);
+      });
+      host2.viewerHost?.modelAccount?.(account);
       return m;
     }
     const spread = (sid) => host2.transcripts.spread(sid);
     const txEntry = (e) => e.k === "end" && e.ret ? {
       k: "end",
-      text: "Returned to " + host2.nameOf(e.ret.to) + (e.ret.failed ? " \xB7 failed" : "") + (e.ret.at != null ? " \xB7 " + host2.clock(e.ret.at) : ""),
+      text: "Returned to " + host2.domain.nameOf(e.ret.to) + (e.ret.failed ? " \xB7 failed" : "") + (e.ret.at != null ? " \xB7 " + host2.clock(e.ret.at) : ""),
       turn: e.turn
     } : e;
     const fetchTx = (sid, q = "", where = void 0, signal = void 0, onPage = void 0) => host2.transcripts.fetch(sid, q, where, signal, onPage);
     function load(r, signal = void 0) {
       if (r.v === "analytics")
-        return host2.fetchAnalytics().then(() => {
-          host2.scheduleAnalytics();
+        return host2.analytics.fetchAnalytics().then(() => {
+          host2.analytics.scheduleAnalytics();
         });
-      if (r.v !== "session" || !host2.SESS[r.id]) return null;
-      const t = r.turn ? host2.TURN.get(r.turn) : null, deep = t && t.sid === r.id && !t.entries.length;
-      if (host2.TX[r.id] && !deep) return null;
+      if (r.v !== "session" || !host2.modelStore.sessions[r.id]) return null;
+      const t = r.turn ? host2.modelStore.turn.get(r.turn) : null, deep = t && t.sid === r.id && !t.entries.length;
+      if (host2.transcripts.entries[r.id] && !deep) return null;
       return fetchTx(r.id, deep ? "turn=" + enc(t.id) : "", void 0, signal);
     }
     return {
@@ -13408,7 +13686,7 @@ globalThis.__semonUIShared = __semonUIShared;
       openingEndTimer = void 0;
       openingEndObserver?.disconnect();
       openingEndObserver = null;
-      if (wasPinned) host2.queuePagerObservers();
+      if (wasPinned) host2.pagingOwner.queuePagerObservers();
     }
     function pinOpeningEnd() {
       if (host2.navigation.route.v !== "session" || performance.now() >= openingEndUntil) {
@@ -13416,19 +13694,19 @@ globalThis.__semonUIShared = __semonUIShared;
         return;
       }
       const sc = scroller();
-      host2.scrollProgrammatically(() => {
+      host2.pagingOwner.scrollProgrammatically(() => {
         sc.scrollTop = sc.scrollHeight;
       });
       scrollController.anchor = null;
       syncJump();
-      host2.saveHistoryScroll();
+      host2.historyScrollOwner.saveHistoryScroll();
     }
     function startOpeningEndPin() {
-      host2.resetPagerInput();
+      host2.pagingOwner.resetPagerInput();
       stopOpeningEndPin();
       if (host2.navigation.route.v !== "session" || location.hash) return;
       openingEndUntil = performance.now() + 2e3;
-      host2.disconnectPagerObservers();
+      host2.pagingOwner.disconnectPagerObservers();
       const turns = host2.$("#page section[aria-label='Transcript'] .turns");
       if (turns) {
         openingEndObserver = new ResizeObserver(pinOpeningEnd);
@@ -13443,18 +13721,18 @@ globalThis.__semonUIShared = __semonUIShared;
       phone: () => host2.phone.matches,
       edge,
       rendered: () => host2.navigation.rendered,
-      sheet: () => !!host2.viewerEl,
-      revision: () => host2.scrollRevision,
-      programmatic: host2.scrollProgrammatically,
-      sync: host2.syncBarLine,
-      restoreDrawer: () => host2.shellChrome?.restoreDrawer()
+      sheet: () => !!host2.toolViewsOwner.viewerEl,
+      revision: () => host2.pagingOwner.scrollRevision,
+      programmatic: (...args) => host2.pagingOwner.scrollProgrammatically(...args),
+      sync: (...args) => host2.sessionChrome.syncBarLine(...args),
+      restoreDrawer: () => host2.accountControlsOwner.shellChrome?.restoreDrawer()
     });
     const { capture, restore, opener, stateKey, identOf } = scrollController;
     function patchSession(dirty) {
-      host2.resetPagerInput();
-      host2.holdProgrammaticScroll();
-      host2.tick();
-      const s = host2.SESS["id" in host2.navigation.route ? host2.navigation.route.id : ""], box = host2.$("#page .turns");
+      host2.pagingOwner.resetPagerInput();
+      host2.pagingOwner.holdProgrammaticScroll();
+      host2.transportOwner.tick();
+      const s = host2.modelStore.sessions["id" in host2.navigation.route ? host2.navigation.route.id : ""], box = host2.$("#page .turns");
       const keys = () => new Set(
         [
           ...host2.$("#page").querySelectorAll(
@@ -13464,22 +13742,22 @@ globalThis.__semonUIShared = __semonUIShared;
       );
       const before = keys();
       const whole = !dirty || box.querySelector(":scope > p.empty") || [...box.querySelectorAll(":scope > .turn")].some(
-        (b) => !host2.TURN.has(b.dataset.turn ?? "")
+        (b) => !host2.modelStore.turn.has(b.dataset.turn ?? "")
       );
-      host2.renderSession(
+      host2.screenViews.renderSession(
         host2.$("#page"),
         "id" in host2.navigation.route ? host2.navigation.route.id : "",
         whole ? {} : { only: dirty }
       );
-      host2.drawSessionBar();
+      host2.sessionChrome.drawSessionBar();
       for (const pager of box.querySelectorAll("[data-pager-where]"))
-        host2.paintPager(pager);
-      host2.renderNav();
-      host2.renderLanes();
-      host2.ticker();
+        host2.pagingOwner.paintPager(pager);
+      host2.navigationViewOwner.renderNav();
+      host2.recentNavigation.renderLanes();
+      host2.tickerOwner.ticker();
       let n = 0;
       for (const k of keys()) if (!before.has(k)) n++;
-      host2.queuePagerObservers();
+      host2.pagingOwner.queuePagerObservers();
       return n;
     }
     function scrollMetrics() {
@@ -13502,7 +13780,7 @@ globalThis.__semonUIShared = __semonUIShared;
       };
     }
     function scrollToEnd(behavior = "smooth") {
-      host2.scrollProgrammatically(() => {
+      host2.pagingOwner.scrollProgrammatically(() => {
         if (host2.phone.matches)
           window.scrollTo({ top: document.documentElement.scrollHeight, behavior });
         else {
@@ -13514,24 +13792,29 @@ globalThis.__semonUIShared = __semonUIShared;
     let jumpBusy = false;
     function syncJump() {
       if (host2.navigation.route.v !== "session") {
-        host2.LIVE.fresh = 0;
+        host2.liveModelOwner.LIVE.fresh = 0;
         return;
       }
-      const { gap } = scrollMetrics(), newer = host2.TXM["id" in host2.navigation.route ? host2.navigation.route.id : ""]?.newer ?? 0;
-      if (gap <= 80) host2.LIVE.fresh = 0;
-      updateSessionJump(host2.$("#page"), gap > 80 || !!newer, host2.LIVE.fresh + newer, jumpBusy);
+      const { gap } = scrollMetrics(), newer = host2.transcripts.meta["id" in host2.navigation.route ? host2.navigation.route.id : ""]?.newer ?? 0;
+      if (gap <= 80) host2.liveModelOwner.LIVE.fresh = 0;
+      updateSessionJump(
+        host2.$("#page"),
+        gap > 80 || !!newer,
+        host2.liveModelOwner.LIVE.fresh + newer,
+        jumpBusy
+      );
     }
     function clearNewEntries() {
-      host2.LIVE.fresh = 0;
+      host2.liveModelOwner.LIVE.fresh = 0;
       updateSessionJump(host2.$("#page"), false, 0, jumpBusy);
     }
     function jumpToLatest() {
-      const sid = "id" in host2.navigation.route ? host2.navigation.route.id : "", r = host2.navigation.route, m = host2.TXM[sid];
+      const sid = "id" in host2.navigation.route ? host2.navigation.route.id : "", r = host2.navigation.route, m = host2.transcripts.meta[sid];
       if (m && m.to < m.total) {
         jumpBusy = true;
         syncJump();
-        host2.fetchTx(sid, "").then(() => {
-          if (host2.navigation.route === r) host2.goSession(sid);
+        host2.transportOwner.fetchTx(sid, "").then(() => {
+          if (host2.navigation.route === r) host2.destination.goSession(sid);
         }).catch(() => {
         }).finally(() => {
           jumpBusy = false;
@@ -13539,28 +13822,28 @@ globalThis.__semonUIShared = __semonUIShared;
         });
       } else scrollToEnd("smooth");
     }
-    if (!host2.SIDEBAR_ONLY) {
+    if (!host2.sidebarOnly) {
       host2.scope.listen(window, "scroll", syncJump, { passive: true });
       host2.scope.listen(host2.$("#main"), "scroll", syncJump, { passive: true });
     }
     const cancelOpeningEndPin = () => {
       if (openingEndUntil) stopOpeningEndPin();
     };
-    if (!host2.SIDEBAR_ONLY) {
+    if (!host2.sidebarOnly) {
       host2.scope.listen(window, "wheel", cancelOpeningEndPin, { passive: true });
       host2.scope.listen(window, "touchmove", cancelOpeningEndPin, { passive: true });
       host2.scope.listen(window, "pointerdown", cancelOpeningEndPin, { passive: true });
     }
     const transcriptInput = (e) => e.target instanceof Element && !e.target.closest?.("#sidebar, dialog, input, textarea, select, [contenteditable='true']") && (host2.phone.matches || host2.$("#main").contains(e.target));
-    if (!host2.SIDEBAR_ONLY) {
+    if (!host2.sidebarOnly) {
       const input = (e) => {
-        if (transcriptInput(e)) host2.readerScrollInput();
+        if (transcriptInput(e)) host2.pagingOwner.readerScrollInput();
       };
       host2.scope.listen(window, "wheel", input, { passive: true });
       host2.scope.listen(window, "touchmove", input, { passive: true });
       const scroll = () => {
-        if (host2.programmaticScrollPending) host2.holdProgrammaticScroll();
-        else if (!openingEndUntil) host2.readerScrollInput();
+        if (host2.pagingOwner.programmaticScrollPending) host2.pagingOwner.holdProgrammaticScroll();
+        else if (!openingEndUntil) host2.pagingOwner.readerScrollInput();
       };
       host2.scope.listen(
         window,
@@ -13579,10 +13862,10 @@ globalThis.__semonUIShared = __semonUIShared;
         { passive: true }
       );
     }
-    if (!host2.SIDEBAR_ONLY)
+    if (!host2.sidebarOnly)
       host2.scope.listen(document, "keydown", (e) => {
         if (!e.defaultPrevented && (transcriptInput(e) || e.target === document.body || e.target === document.documentElement) && ["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", " "].includes(e.key))
-          host2.readerScrollInput();
+          host2.pagingOwner.readerScrollInput();
       });
     return {
       scrollController,
@@ -13609,69 +13892,18 @@ globalThis.__semonUIShared = __semonUIShared;
     dialogs;
     disposed;
     application;
-    NOW;
+    now;
+    updates = new ViewUpdates();
     modelStore;
-    MACHINE;
-    MACHINE_UP;
-    MACHINE_LAST;
-    ADMIN;
-    ACCOUNT;
+    admin;
+    account;
     viewerHost;
-    NATIVE_PAGE;
-    NAV_MACHINES;
-    SIDEBAR_ONLY;
-    SESS;
-    H;
+    nativePage;
+    machinesPath;
+    sidebarOnly;
     transcripts;
-    TX;
     seenResultsOwner;
-    HID;
-    TURNS;
-    TURN;
-    STARTS;
-    HOLDS;
-    TXM;
     domain;
-    nameOf = (...args) => this.domain.nameOf(...args);
-    hcls = (...args) => this.domain.hcls(...args);
-    where = (...args) => this.domain.where(...args);
-    hostOf = (...args) => this.domain.hostOf(...args);
-    machineLabels = (...args) => this.domain.machineLabels(...args);
-    machineLabel = (...args) => this.domain.machineLabel(...args);
-    branchOf = (...args) => this.domain.branchOf(...args);
-    shortHost = (...args) => this.domain.shortHost(...args);
-    parentOf = (...args) => this.domain.parentOf(...args);
-    originHandoff = (...args) => this.domain.originHandoff(...args);
-    isResult = (...args) => this.domain.isResult(...args);
-    inbox = (...args) => this.domain.inbox(...args);
-    working = (...args) => this.domain.working(...args);
-    answersOf = (...args) => this.domain.answersOf(...args);
-    statWord = (...args) => this.domain.statWord(...args);
-    hasTurn = (...args) => this.domain.hasTurn(...args);
-    oneLine = (...args) => this.domain.oneLine(...args);
-    turnEnd = (...args) => this.domain.turnEnd(...args);
-    traceRoot = (...args) => this.domain.traceRoot(...args);
-    countOf = (...args) => this.domain.countOf(...args);
-    callsText = (...args) => this.domain.callsText(...args);
-    sessionChildren = (...args) => this.domain.sessionChildren(...args);
-    childSessions = (...args) => this.domain.childSessions(...args);
-    descendantsOf = (...args) => this.domain.descendantsOf(...args);
-    asMoney = (...args) => this.domain.asMoney(...args);
-    usageTotal = (...args) => this.domain.usageTotal(...args);
-    costForSessions = (...args) => this.domain.costForSessions(...args);
-    costForSession = (...args) => this.domain.costForSession(...args);
-    costText = (...args) => this.domain.costText(...args);
-    costMissing = (...args) => this.domain.costMissing(...args);
-    urgentDescendant = (...args) => this.domain.urgentDescendant(...args);
-    childParts = (...args) => this.domain.childParts(...args);
-    defaultTreeOpen = (...args) => this.domain.defaultTreeOpen(...args);
-    kidRank = (...args) => this.domain.kidRank(...args);
-    lineageOf = (...args) => this.domain.lineageOf(...args);
-    byState = (...args) => this.domain.byState(...args);
-    onMachine = (...args) => this.domain.onMachine(...args);
-    movedOff = (...args) => this.domain.movedOff(...args);
-    movesOf = (...args) => this.domain.movesOf(...args);
-    shortMoney = (...args) => this.domain.shortMoney(...args);
     clock;
     ago;
     dur;
@@ -13680,52 +13912,18 @@ globalThis.__semonUIShared = __semonUIShared;
     darkTheme;
     facetLine;
     seenPersistenceOwner;
-    markSeenResults = (...args) => this.seenPersistenceOwner.markSeenResults(...args);
     sentencesOwner;
-    sentenceSnapshot = (...args) => this.sentencesOwner.sentenceSnapshot(...args);
     isGap;
     transportOwner;
-    api = (...args) => this.transportOwner.api(...args);
-    txEntry = (...args) => this.transportOwner.txEntry(...args);
-    fetchTx = (...args) => this.transportOwner.fetchTx(...args);
-    enc = (...args) => this.transportOwner.enc(...args);
-    adopt = (...args) => this.transportOwner.adopt(...args);
-    load = (...args) => this.transportOwner.load(...args);
-    spread = (...args) => this.transportOwner.spread(...args);
-    tick = (...args) => this.transportOwner.tick(...args);
-    accountOf = (...args) => this.transportOwner.accountOf(...args);
-    STALE_BRIEFS;
-    TXCACHE;
     cacheTx;
     adoptCached;
     transcriptRevalidationOwner;
-    revalidate = (...args) => this.transcriptRevalidationOwner.revalidate(...args);
-    shrank = (...args) => this.transcriptRevalidationOwner.shrank(...args);
     pagingOwner;
-    resetPagerInput = (...args) => this.pagingOwner.resetPagerInput(...args);
-    scrollProgrammatically = (...args) => this.pagingOwner.scrollProgrammatically(...args);
-    clearPaging = (...args) => this.pagingOwner.clearPaging(...args);
-    dropTx = (...args) => this.pagingOwner.dropTx(...args);
-    loadPager = (...args) => this.pagingOwner.loadPager(...args);
-    pagerSnapshot = (...args) => this.pagingOwner.pagerSnapshot(...args);
-    holdProgrammaticScroll = (...args) => this.pagingOwner.holdProgrammaticScroll(...args);
-    queuePagerObservers = (...args) => this.pagingOwner.queuePagerObservers(...args);
-    disconnectPagerObservers = (...args) => this.pagingOwner.disconnectPagerObservers(...args);
-    paintPager = (...args) => this.pagingOwner.paintPager(...args);
-    readerScrollInput = (...args) => this.pagingOwner.readerScrollInput(...args);
     toolLoaderOwner;
-    fullOf = (...args) => this.toolLoaderOwner.fullOf(...args);
     bootstrapOwner;
-    urlOf = (...args) => this.bootstrapOwner.urlOf(...args);
-    routeOf = (...args) => this.bootstrapOwner.routeOf(...args);
-    boot = (...args) => this.bootstrapOwner.boot(...args);
     phone;
     navigation;
     layoutOwner;
-    setRailMode = (...args) => this.layoutOwner.setRailMode(...args);
-    setWideMode = (...args) => this.layoutOwner.setWideMode(...args);
-    saveTreePref = (...args) => this.layoutOwner.saveTreePref(...args);
-    syncLayoutPrefs = (...args) => this.layoutOwner.syncLayoutPrefs(...args);
     groupBy;
     query;
     focusSessionsSearchOnRender;
@@ -13736,264 +13934,32 @@ globalThis.__semonUIShared = __semonUIShared;
     pendingSessionOpen;
     accountSheet;
     afterPop;
-    SHOW_ALL;
+    allVisibility;
     show;
     find;
     findOpen;
     historyScrollOwner;
-    saveHistoryScroll = (...args) => this.historyScrollOwner.saveHistoryScroll(...args);
-    quietTop = (...args) => this.historyScrollOwner.quietTop(...args);
-    restoreScroll = (...args) => this.historyScrollOwner.restoreScroll(...args);
-    restoreHostFocus = (...args) => this.historyScrollOwner.restoreHostFocus(...args);
-    currentScroll = (...args) => this.historyScrollOwner.currentScroll(...args);
     destination;
-    goSession = (...args) => this.destination.goSession(...args);
-    go = (...args) => this.destination.go(...args);
-    openSender = (...args) => this.destination.openSender(...args);
-    revealTurn = (...args) => this.destination.revealTurn(...args);
-    revealEntryHash = (...args) => this.destination.revealEntryHash(...args);
-    openSessionAtEnd = (...args) => this.destination.openSessionAtEnd(...args);
-    goTrace = (...args) => this.destination.goTrace(...args);
     accountControlsOwner;
-    closeAccountMenu = (...args) => this.accountControlsOwner.closeAccountMenu(...args);
-    renderDrawerAccount = (...args) => this.accountControlsOwner.renderDrawerAccount(...args);
     orderingControlsOwner;
-    orderApply = (...args) => this.orderingControlsOwner.orderApply(...args);
-    byLast = (...args) => this.orderingControlsOwner.byLast(...args);
-    orderList = (...args) => this.orderingControlsOwner.orderList(...args);
-    ordState = (...args) => this.orderingControlsOwner.ordState(...args);
-    orderScope = (...args) => this.orderingControlsOwner.orderScope(...args);
-    ordIdleArm = (...args) => this.orderingControlsOwner.ordIdleArm(...args);
-    pageSig = (...args) => this.orderingControlsOwner.pageSig(...args);
-    pageState = (...args) => this.orderingControlsOwner.pageState(...args);
     navigationViewOwner;
-    renderNav = (...args) => this.navigationViewOwner.renderNav(...args);
-    sessMatch = (...args) => this.navigationViewOwner.sessMatch(...args);
     recentNavigation;
-    renderLanes = (...args) => this.recentNavigation.renderLanes(...args);
-    isApprovalReview = (...args) => this.recentNavigation.isApprovalReview(...args);
-    _SessionChrome;
-    drawSessionBar = (...args) => this._SessionChrome.drawSessionBar(...args);
-    syncBarLine = (...args) => this._SessionChrome.syncBarLine(...args);
-    dropErrors = (...args) => this._SessionChrome.dropErrors(...args);
-    modelIdOf = (...args) => this._SessionChrome.modelIdOf(...args);
-    kindText = (...args) => this._SessionChrome.kindText(...args);
-    observeTitle = (...args) => this._SessionChrome.observeTitle(...args);
-    centre = (...args) => this._SessionChrome.centre(...args);
-    panel = (...args) => this._SessionChrome.panel(...args);
-    renderTopbar = (...args) => this._SessionChrome.renderTopbar(...args);
-    machineLine = (...args) => this._SessionChrome.machineLine(...args);
-    sessionLine = (...args) => this._SessionChrome.sessionLine(...args);
-    errOn = (...args) => this._SessionChrome.errOn(...args);
-    markError = (...args) => this._SessionChrome.markError(...args);
-    errorsLive = (...args) => this._SessionChrome.errorsLive(...args);
-    _ScreenViews;
-    harnessSnapshot = (...args) => this._ScreenViews.harnessSnapshot(...args);
-    costSnapshot = (...args) => this._ScreenViews.costSnapshot(...args);
-    showsFooter = (...args) => this._ScreenViews.showsFooter(...args);
-    renderHome = (...args) => this._ScreenViews.renderHome(...args);
-    renderMachines = (...args) => this._ScreenViews.renderMachines(...args);
-    renderMachine = (...args) => this._ScreenViews.renderMachine(...args);
-    renderTrace = (...args) => this._ScreenViews.renderTrace(...args);
-    renderSession = (...args) => this._ScreenViews.renderSession(...args);
-    _TranscriptView;
-    transcriptEntries = (...args) => this._TranscriptView.transcriptEntries(...args);
-    transcriptSnapshot = (...args) => this._TranscriptView.transcriptSnapshot(...args);
-    verb = (...args) => this._TranscriptView.verb(...args);
-    verbNow = (...args) => this._TranscriptView.verbNow(...args);
+    sessionChrome;
+    screenViews;
+    transcriptView;
     toolViewsOwner;
-    openStepViewer = (...args) => this.toolViewsOwner.openStepViewer(...args);
-    openScript = (...args) => this.toolViewsOwner.openScript(...args);
-    openImage = (...args) => this.toolViewsOwner.openImage(...args);
-    attachmentSnapshot = (...args) => this.toolViewsOwner.attachmentSnapshot(...args);
-    childSnapshot = (...args) => this.toolViewsOwner.childSnapshot(...args);
-    footerSnapshot = (...args) => this.toolViewsOwner.footerSnapshot(...args);
+    pageRoot = createPageRoot();
+    routeControls;
+    renderTransaction;
     documentRendererOwner;
-    render = (...args) => this.documentRendererOwner.render(...args);
-    slot = (...args) => this.documentRendererOwner.slot(...args);
-    _Analytics;
-    fetchAnalytics = (...args) => this._Analytics.fetchAnalytics(...args);
-    scheduleAnalytics = (...args) => this._Analytics.scheduleAnalytics(...args);
-    refreshAnalytics = (...args) => this._Analytics.refreshAnalytics(...args);
-    renderAnalytics = (...args) => this._Analytics.renderAnalytics(...args);
-    matchesSessionFacets = (...args) => this._Analytics.matchesSessionFacets(...args);
-    renderFacetFilters = (...args) => this._Analytics.renderFacetFilters(...args);
+    analytics;
     sessionListOwner;
-    renderSessions = (...args) => this.sessionListOwner.renderSessions(...args);
     documentEventsOwner;
-    closeDrawer = (...args) => this.documentEventsOwner.closeDrawer(...args);
     liveModelOwner;
-    remember = (...args) => this.liveModelOwner.remember(...args);
-    schedule = (...args) => this.liveModelOwner.schedule(...args);
-    visible = (...args) => this.liveModelOwner.visible(...args);
-    ended = (...args) => this.liveModelOwner.ended(...args);
-    handKey = (...args) => this.liveModelOwner.handKey(...args);
-    cardKeys = (...args) => this.liveModelOwner.cardKeys(...args);
-    viewed = (...args) => this.liveModelOwner.viewed(...args);
-    soft = (...args) => this.liveModelOwner.soft(...args);
-    _LiveUpdates;
-    reload = (...args) => this._LiveUpdates.reload(...args);
-    tail = (...args) => this._LiveUpdates.tail(...args);
-    applyModelDelta = (...args) => this._LiveUpdates.applyModelDelta(...args);
-    update = (...args) => this._LiveUpdates.update(...args);
+    liveUpdates;
     applicationRefreshOwner;
-    refresh = (...args) => this.applicationRefreshOwner.refresh(...args);
     viewport;
-    stopOpeningEndPin = (...args) => this.viewport.stopOpeningEndPin(...args);
-    scroller = (...args) => this.viewport.scroller(...args);
-    capture = (...args) => this.viewport.capture(...args);
-    restore = (...args) => this.viewport.restore(...args);
-    syncJump = (...args) => this.viewport.syncJump(...args);
-    startOpeningEndPin = (...args) => this.viewport.startOpeningEndPin(...args);
-    clearNewEntries = (...args) => this.viewport.clearNewEntries(...args);
-    edge = (...args) => this.viewport.edge(...args);
-    opener = (...args) => this.viewport.opener(...args);
-    jumpToLatest = (...args) => this.viewport.jumpToLatest(...args);
-    patchSession = (...args) => this.viewport.patchSession(...args);
     tickerOwner;
-    ticker = (...args) => this.tickerOwner.ticker(...args);
-    running = (...args) => this.tickerOwner.running(...args);
-    get SEEN_RESULTS() {
-      return this.seenResultsOwner.SEEN_RESULTS;
-    }
-    get SEEN_LIMIT() {
-      return this.seenResultsOwner.SEEN_LIMIT;
-    }
-    get SEEN_KEY() {
-      return this.seenResultsOwner.SEEN_KEY;
-    }
-    get RANK() {
-      return this.domain.RANK;
-    }
-    get TOYOU() {
-      return this.domain.TOYOU;
-    }
-    get TOTAL_TOKEN_KINDS() {
-      return this.domain.TOTAL_TOKEN_KINDS;
-    }
-    get TOKEN_KINDS() {
-      return this.domain.TOKEN_KINDS;
-    }
-    get TREE_RANK() {
-      return this.domain.TREE_RANK;
-    }
-    get sentenceHost() {
-      return this.sentencesOwner.sentenceHost;
-    }
-    get pagerController() {
-      return this.pagingOwner.pagerController;
-    }
-    get routeModel() {
-      return this.bootstrapOwner.routeModel;
-    }
-    get app() {
-      return this.layoutOwner.app;
-    }
-    get shellChrome() {
-      return this.accountControlsOwner.shellChrome;
-    }
-    get accountChrome() {
-      return this.accountControlsOwner.accountChrome;
-    }
-    get ORD() {
-      return this.orderingControlsOwner.ORD;
-    }
-    get ORD_DRAWER_MS() {
-      return this.orderingControlsOwner.ORD_DRAWER_MS;
-    }
-    get recentRenderer() {
-      return this.recentNavigation.recentRenderer;
-    }
-    get COST_TIP() {
-      return this.recentNavigation.COST_TIP;
-    }
-    get errorNavigation() {
-      return this._SessionChrome.errorNavigation;
-    }
-    get viewerBar() {
-      return this._SessionChrome.viewerBar;
-    }
-    get SLOTS() {
-      return this.documentRendererOwner.SLOTS;
-    }
-    get liveController() {
-      return this.liveModelOwner.liveController;
-    }
-    get LIVE() {
-      return this.liveModelOwner.LIVE;
-    }
-    get scrollController() {
-      return this.viewport.scrollController;
-    }
-    get skipPop() {
-      return this.toolViewsOwner.skipPop;
-    }
-    set skipPop(value) {
-      this.toolViewsOwner.skipPop = value;
-    }
-    get viewerEl() {
-      return this.toolViewsOwner.viewerEl;
-    }
-    set viewerEl(value) {
-      this.toolViewsOwner.viewerEl = value;
-    }
-    get STATE() {
-      return STATE;
-    }
-    get treePrefs() {
-      return this.layoutOwner.treePrefs;
-    }
-    set treePrefs(value) {
-      this.layoutOwner.treePrefs = value;
-    }
-    get HARNESSES() {
-      return HARNESSES;
-    }
-    get I() {
-      return I;
-    }
-    get HARNESS() {
-      return HARNESS;
-    }
-    get railMode() {
-      return this.layoutOwner.railMode;
-    }
-    set railMode(value) {
-      this.layoutOwner.railMode = value;
-    }
-    get ordIdle() {
-      return this.orderingControlsOwner.ordIdle;
-    }
-    set ordIdle(value) {
-      this.orderingControlsOwner.ordIdle = value;
-    }
-    get wideMode() {
-      return this.layoutOwner.wideMode;
-    }
-    set wideMode(value) {
-      this.layoutOwner.wideMode = value;
-    }
-    get TOK() {
-      return this.transportOwner.TOK;
-    }
-    set TOK(value) {
-      this.transportOwner.TOK = value;
-    }
-    get HARNESS_SHORT() {
-      return HARNESS_SHORT;
-    }
-    get scrollRevision() {
-      return this.pagingOwner.scrollRevision;
-    }
-    set scrollRevision(value) {
-      this.pagingOwner.scrollRevision = value;
-    }
-    get programmaticScrollPending() {
-      return this.pagingOwner.programmaticScrollPending;
-    }
-    set programmaticScrollPending(value) {
-      this.pagingOwner.programmaticScrollPending = value;
-    }
     constructor(host2, onDestroyed) {
       const context = this;
       this.scope = new EffectScope();
@@ -14003,93 +13969,87 @@ globalThis.__semonUIShared = __semonUIShared;
         destroy() {
           if (context.disposed) return;
           context.disposed = true;
+          context.updates.destroy();
           context.scope.destroy();
-          context.liveController.destroy();
+          context.liveModelOwner.liveController.destroy();
           context.navigation.destroy();
           context.transcripts.destroy();
-          context.stopOpeningEndPin();
-          context.pagerController.disconnect();
-          context.errorNavigation.destroy();
-          context.scrollController.destroy();
+          context.viewport.stopOpeningEndPin();
+          context.pagingOwner.pagerController.disconnect();
+          context.sessionChrome.errorNavigation.destroy();
+          context.viewport.scrollController.destroy();
           for (const dialog of context.dialogs.values()) dialog.destroy();
           context.dialogs.clear();
-          for (const slot of context.SLOTS.values()) slot.ctx.destroy?.();
-          context.SLOTS.clear();
-          if (!context.SIDEBAR_ONLY) releaseScreen(context.$("#page"));
-          context.recentRenderer.destroy();
-          context.viewerBar.destroy();
-          context.shellChrome?.destroy();
-          context.accountChrome.destroy();
-          releaseGeometry(context.app);
+          context.routeControls.destroy();
+          if (!context.sidebarOnly) context.pageRoot.destroy(context.$("#page"));
+          context.recentNavigation.recentRenderer.destroy();
+          context.sessionChrome.viewerBar.destroy();
+          context.accountControlsOwner.shellChrome?.destroy();
+          context.accountControlsOwner.accountChrome.destroy();
+          releaseGeometry(context.layoutOwner.app);
           releaseGeometry(document.documentElement, ["barHeight"]);
           document.querySelectorAll(".livenote, .livenote-side").forEach((node) => node.remove());
           document.documentElement.classList.remove("viewer-open", "panel-open");
           onDestroyed(context.application);
         }
       };
-      this.NOW = Date.now();
-      this.modelStore = new ViewerModelStore();
-      this.MACHINE = context.modelStore.machines;
-      this.MACHINE_UP = context.modelStore.machineUp;
-      this.MACHINE_LAST = context.modelStore.machineLast;
-      this.ADMIN = null;
-      this.ACCOUNT = null;
+      this.now = Date.now();
+      this.modelStore = new ViewerModelStore(this.updates);
+      this.admin = null;
+      this.account = null;
       this.viewerHost = host2;
-      this.NATIVE_PAGE = context.viewerHost?.nativePage;
-      this.NAV_MACHINES = context.viewerHost?.machinesPath ?? null;
-      this.SIDEBAR_ONLY = document.querySelector(".app")?.dataset.viewer === "sidebar";
-      this.SESS = context.modelStore.sessions;
-      this.H = context.modelStore.handoffs;
-      this.transcripts = new TranscriptStore({
-        request: (path, signal) => context.api(path, signal),
-        turns: (sid) => context.modelStore.turns[sid] ?? [],
-        turn: (id) => context.modelStore.turn.get(id),
-        entry: (e) => context.txEntry(e),
-        cleared(sid) {
-          if (context.navigation.route.v === "session" && ("id" in context.navigation.route ? context.navigation.route.id : "") === sid)
-            context.resetPagerInput();
-        }
-      });
-      this.TX = context.transcripts.entries;
+      this.nativePage = context.viewerHost?.nativePage;
+      this.machinesPath = context.viewerHost?.machinesPath ?? null;
+      this.sidebarOnly = document.querySelector(".app")?.dataset.viewer === "sidebar";
+      this.transcripts = new TranscriptStore(
+        {
+          request: (path, signal) => context.transportOwner.api(path, signal),
+          turns: (sid) => context.modelStore.turns[sid] ?? [],
+          turn: (id) => context.modelStore.turn.get(id),
+          entry: (e) => context.transportOwner.txEntry(e),
+          cleared(sid) {
+            if (context.navigation.route.v === "session" && ("id" in context.navigation.route ? context.navigation.route.id : "") === sid)
+              context.pagingOwner.resetPagerInput();
+          }
+        },
+        this.updates
+      );
       this.seenResultsOwner = createSeenResults({});
-      this.HID = context.modelStore.handoff;
-      this.TURNS = context.modelStore.turns;
-      this.TURN = context.modelStore.turn;
-      this.STARTS = context.modelStore.starts;
-      this.HOLDS = context.modelStore.holds;
-      this.TXM = context.transcripts.meta;
       this.domain = createDomain(
         {
-          sessions: context.SESS,
-          machines: context.MACHINE,
-          handoffs: context.H,
-          turns: context.TURNS,
-          turn: context.TURN,
-          starts: context.STARTS,
-          holds: context.HOLDS,
-          handoff: context.HID,
-          transcriptMeta: context.TXM
+          sessions: context.modelStore.sessions,
+          machines: context.modelStore.machines,
+          handoffs: context.modelStore.handoffs,
+          turns: context.modelStore.turns,
+          turn: context.modelStore.turn,
+          starts: context.modelStore.starts,
+          holds: context.modelStore.holds,
+          handoff: context.modelStore.handoff,
+          transcriptMeta: context.transcripts.meta
         },
-        () => context.NOW,
-        context.SEEN_RESULTS
+        () => context.now,
+        context.seenResultsOwner.SEEN_RESULTS
       );
-      this.clock = (t) => clock(t, context.NOW);
-      this.ago = (t) => ago(t, context.NOW);
-      this.dur = (a, b) => dur(a, b ?? void 0, context.NOW);
+      this.updates.subscribe(() => this.domain.invalidate());
+      this.clock = (t) => clock(t, context.now);
+      this.ago = (t) => ago(t, context.now);
+      this.dur = (a, b) => dur(a, b ?? void 0, context.now);
       this.$ = (s, r = document) => r.querySelector(s);
       this.spaced = (t) => String(t).replace(/ · /g, "\u2009 \xB7 \u2009").replace(/^· /, "\xB7\u2009 ");
       this.darkTheme = () => {
         const t = document.documentElement.getAttribute("data-theme");
         return t === "dark" || t !== "light" && !!window.matchMedia?.("(prefers-color-scheme: dark)").matches;
       };
-      this.facetLine = (s) => [s.kind ?? HARNESS[s.harness], context.MACHINE[s.machine], context.where(s)].join(" \xB7 ");
+      this.facetLine = (s) => [
+        s.kind ?? HARNESS[s.harness],
+        context.modelStore.machines[s.machine],
+        context.domain.where(s)
+      ].join(" \xB7 ");
       this.seenPersistenceOwner = createSeenPersistence(context);
       this.sentencesOwner = createSentences(context);
       this.isGap = (e) => e.k === "end" && /entries (not included|omitted)|^No activity/.test(e.text ?? "");
       this.transportOwner = createTransport(context);
-      this.STALE_BRIEFS = context.transcripts.staleBriefs;
-      this.TXCACHE = context.transcripts.cache;
-      this.cacheTx = (sid, entries, meta) => context.transcripts.keep(sid, entries, meta, !!context.originHandoff(sid));
+      this.cacheTx = (sid, entries, meta) => context.transcripts.keep(sid, entries, meta, !!context.domain.originHandoff(sid));
       this.adoptCached = (r) => context.transcripts.adoptCached(r.id, r.turn);
       this.transcriptRevalidationOwner = createTranscriptRevalidation(context);
       this.pagingOwner = createPaging(context);
@@ -14098,11 +14058,12 @@ globalThis.__semonUIShared = __semonUIShared;
       this.phone = window.matchMedia("(max-width: 760px)");
       this.navigation = new NavigationController(
         {
-          model: context.routeModel,
+          model: context.bootstrapOwner.routeModel,
           loadMachines: host2 ? (signal) => host2.loadMachines(signal) : void 0
         },
         context.viewerHost?.initialMachines ?? null
       );
+      this.routeControls = createRouteControls(this.navigation);
       this.layoutOwner = createLayout(context);
       this.groupBy = "recent";
       this.query = "";
@@ -14114,13 +14075,13 @@ globalThis.__semonUIShared = __semonUIShared;
       this.pendingSessionOpen = null;
       this.accountSheet = false;
       this.afterPop = null;
-      if (!context.SIDEBAR_ONLY)
+      if (!context.sidebarOnly)
         try {
           history.scrollRestoration = "manual";
         } catch {
         }
-      this.SHOW_ALL = { messages: true, tools: true, thinking: true };
-      this.show = { ...context.SHOW_ALL };
+      this.allVisibility = { messages: true, tools: true, thinking: true };
+      this.show = { ...context.allVisibility };
       this.find = "";
       this.findOpen = false;
       this.historyScrollOwner = createHistoryScroll(context);
@@ -14129,34 +14090,35 @@ globalThis.__semonUIShared = __semonUIShared;
       this.orderingControlsOwner = createOrderingControls(context);
       this.navigationViewOwner = createNavigationView(context);
       this.recentNavigation = createRecentNavigation(context);
-      this._SessionChrome = createSessionChrome(context);
-      this._ScreenViews = createScreenViews(context);
-      this._TranscriptView = createTranscriptView(context);
+      this.sessionChrome = createSessionChrome(context);
+      this.screenViews = createScreenViews(context);
+      this.transcriptView = createTranscriptView(context);
       this.toolViewsOwner = createToolViews(context);
+      this.renderTransaction = createRenderTransaction(context);
       this.documentRendererOwner = createDocumentRenderer(context);
-      this._Analytics = createAnalytics(context);
+      this.analytics = createAnalytics(context);
       this.sessionListOwner = createSessionList(context);
       this.documentEventsOwner = createDocumentEvents(context);
       this.liveModelOwner = createLiveModel(context);
-      this._LiveUpdates = createLiveUpdates(context);
+      this.liveUpdates = createLiveUpdates(context);
       this.applicationRefreshOwner = createApplicationRefresh(context);
       this.viewport = createViewport(context);
       this.tickerOwner = createTicker(context);
-      if (context.SIDEBAR_ONLY) {
-        const nav = context.app.dataset.viewerNav;
+      if (context.sidebarOnly) {
+        const nav = context.layoutOwner.app.dataset.viewerNav;
         context.navigation.route = context.navigation.historyRoute({ v: nav }, { v: "home" });
       }
       if (context.viewerHost) {
-        this.ACCOUNT = context.accountOf(context.viewerHost.account);
-        if (context.NATIVE_PAGE)
+        this.account = context.transportOwner.accountOf(context.viewerHost.account);
+        if (context.nativePage)
           context.navigation.route = context.navigation.historyRoute(
-            { v: context.NATIVE_PAGE.nav },
+            { v: context.nativePage.nav },
             { v: "home" }
           );
         else if (context.navigation.content) context.navigation.route = { v: "machines" };
-        if (context.NATIVE_PAGE || context.navigation.content) context.render();
+        if (context.nativePage || context.navigation.content) context.documentRendererOwner.render();
       }
-      context.boot();
+      context.bootstrapOwner.boot();
     }
   };
 
