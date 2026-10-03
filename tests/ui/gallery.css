@@ -1,0 +1,5 @@
+/* Fixture arrangement only; component appearance comes from production CSS. */
+.page > section { min-width: 0; }
+#select-root { display: grid; gap: var(--s2); }
+.page .status { margin-block: var(--s2); }
+.account-widget-phone { --account-width: calc(min(86vw, 330px) - 17px); }
