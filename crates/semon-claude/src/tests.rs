@@ -32,6 +32,17 @@ fn compatibility_native_claude_2_1_288_cold_restart_and_retained_raw_parity() {
 }
 
 #[test]
+fn native_tools_and_model_switch_have_cold_restart_and_retained_raw_parity() {
+    for (source, session, count) in [
+        (include_bytes!("../../../tests/fixtures/compatibility/claude-2.1.288/tools/initial-transcript.jsonl").as_slice(), "native-claude-tools-parent", 6),
+        (include_bytes!("../../../tests/fixtures/compatibility/claude-2.1.288/tools/resumed-transcript.jsonl").as_slice(), "native-claude-tools-parent", 8),
+        (include_bytes!("../../../tests/fixtures/compatibility/claude-2.1.288/tools/forked-transcript.jsonl").as_slice(), "native-claude-tools-child", 10),
+    ] {
+        compatibility_capture_parity(source, session, count);
+    }
+}
+
+#[test]
 fn native_resume_and_fork_snapshots_have_restart_and_raw_parity() {
     for (source, session, count) in [
         (include_bytes!("../../../tests/fixtures/compatibility/claude-2.1.288/lifecycle/initial-transcript.jsonl").as_slice(), "native-claude-parent", 2),
