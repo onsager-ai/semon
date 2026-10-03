@@ -273,3 +273,22 @@ reports are not claimed as an accepted usage baseline. This remains usage
 telemetry, not an invoice. The rebuildable viewer index moves to schema 2/parser
 20 while preserving separately retained reported-run snapshots; native source
 logs and canonical/raw trace storage are unchanged.
+
+
+### Colliding native identifiers
+
+Native session identifiers are scoped to their harness and machine. The viewer
+keeps existing bare keys for unambiguous Claude/Codex inputs. When both harnesses
+use the same identifier, their viewer keys are qualified with `claude:` or
+`codex:`; extra leading colons avoid conflicts with recorded native identifiers.
+Source identifiers remain unchanged. Exact native parent and process lookups use
+the harness namespace rather than the served key. Tool lookups are scoped to the
+modeled session; a Claude child first looks for its exact call under its
+recorded storage ancestor. Nested agents can share that ancestor's directory;
+when it has no matching call, only a unique exact Claude call elsewhere is
+accepted. Repeated ambiguous IDs remain unlinked.
+
+The versioned `namespace-*` fixtures are source-shaped synthetic records, with
+unknown native versions. They demonstrate separate sessions with the same native
+ID and call ID, source-local results, and cold/restart/retained-raw capture parity.
+This is no claim about native UUID collision frequency or invented lineage.

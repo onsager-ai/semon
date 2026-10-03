@@ -531,6 +531,203 @@ fn claude_dated_model_ids_strip_only_the_trailing_date_for_price_matching() {
 }
 
 #[test]
+fn source_shaped_cross_harness_native_id_and_call_id_collisions_stay_separate() {
+    let home = Home::new();
+    home.write(
+        "claude/projects/project/00000000-0000-4000-8000-000000000001.jsonl",
+        include_str!("../../../../tests/fixtures/compatibility/v1/namespace-claude.jsonl"),
+    );
+    home.write(
+        "codex/sessions/rollout.jsonl",
+        include_str!("../../../../tests/fixtures/compatibility/v1/namespace-codex.jsonl"),
+    );
+    let built = home.build();
+    assert_eq!(built.sessions.len(), 2, "native IDs are scoped by harness");
+    let mut harnesses = BTreeSet::new();
+    for (id, session) in &built.sessions {
+        harnesses.insert(session.harness);
+        assert_eq!(session.calls, Some(1));
+        assert_eq!(session.errors, Some(0));
+        let tools: Vec<_> = built.tx[id]
+            .slots
+            .iter()
+            .filter_map(|slot| {
+                if let SlotKind::Tool {
+                    reply: Some(reply), ..
+                } = &slot.kind
+                {
+                    Some((slot, reply))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        assert_eq!(tools.len(), 1);
+        let (slot, reply) = tools[0];
+        let bytes = fs::read(&slot.file.as_ref().unwrap().path).unwrap();
+        let result = std::str::from_utf8(&bytes[reply.o as usize..]).unwrap();
+        let expected = if session.harness == "claude" {
+            "SEMON_SYNTHETIC_CLAUDE_OUTPUT"
+        } else {
+            "SEMON_SYNTHETIC_CODEX_OUTPUT"
+        };
+        assert!(result.lines().next().unwrap().contains(expected));
+    }
+    assert_eq!(harnesses, BTreeSet::from(["claude", "codex"]));
+}
+
+#[test]
+fn qualified_viewer_keys_do_not_shadow_native_identifiers() {
+    let home = Home::new();
+    home.top(
+        "same-id",
+        &[human("same-id", ts(0, 0), "Synthetic Claude query")],
+    );
+    home.codex("same-id", json!({}), &[]);
+    home.top(
+        "claude:same-id",
+        &[human(
+            "claude:same-id",
+            ts(0, 0),
+            "Synthetic reserved query",
+        )],
+    );
+    let built = home.build();
+    assert_eq!(built.sessions.len(), 3);
+    assert_eq!(built.sessions["claude:same-id"].harness, "claude");
+    assert_eq!(built.sessions[":claude:same-id"].harness, "claude");
+    assert_eq!(built.sessions["codex:same-id"].harness, "codex");
+}
+
+#[test]
+fn repeated_tool_ids_use_the_explicit_claude_parent() {
+    let home = Home::new();
+    for (parent, child) in [
+        ("first-parent", "first-child"),
+        ("second-parent", "second-child"),
+    ] {
+        home.top(
+            parent,
+            &[
+                human(parent, ts(0, 0), "Synthetic namespace query"),
+                assistant(
+                    parent,
+                    ts(0, 1),
+                    vec![tool(
+                        "shared-call",
+                        "Agent",
+                        json!({"prompt":"Synthetic child query"}),
+                    )],
+                ),
+                result(
+                    parent,
+                    ts(0, 2),
+                    "shared-call",
+                    "Synthetic result",
+                    false,
+                    json!({}),
+                ),
+            ],
+        );
+        home.agent(
+            parent,
+            child,
+            "shared-call",
+            &[
+                user(parent, ts(0, 1), "Synthetic child query"),
+                assistant(parent, ts(0, 2), vec![text("Synthetic child response")]),
+            ],
+        );
+    }
+    home.agent(
+        "missing-parent",
+        "ambiguous-child",
+        "shared-call",
+        &[user("missing-parent", ts(0, 1), "Synthetic child query")],
+    );
+    let built = home.build();
+    for (parent, child) in [
+        ("first-parent", "first-child"),
+        ("second-parent", "second-child"),
+    ] {
+        assert_eq!(built.sessions[child].parent.as_deref(), Some(parent));
+    }
+    assert!(built.sessions["ambiguous-child"].parent.is_none());
+}
+
+#[test]
+fn nested_claude_calls_resolve_under_a_shared_storage_ancestor() {
+    let home = Home::new();
+    home.top(
+        "root",
+        &[
+            human("root", ts(0, 0), "Synthetic root query"),
+            assistant(
+                "root",
+                ts(0, 1),
+                vec![tool(
+                    "outer-call",
+                    "Agent",
+                    json!({"prompt":"Synthetic middle query"}),
+                )],
+            ),
+        ],
+    );
+    home.agent(
+        "root",
+        "middle",
+        "outer-call",
+        &[
+            user("root", ts(0, 1), "Synthetic middle query"),
+            assistant(
+                "root",
+                ts(0, 2),
+                vec![tool(
+                    "inner-call",
+                    "Agent",
+                    json!({"prompt":"Synthetic nested query"}),
+                )],
+            ),
+        ],
+    );
+    home.agent(
+        "root",
+        "nested",
+        "inner-call",
+        &[user("root", ts(0, 2), "Synthetic nested query")],
+    );
+    let built = home.build();
+    assert_eq!(built.sessions["middle"].parent.as_deref(), Some("root"));
+    assert_eq!(built.sessions["nested"].parent.as_deref(), Some("middle"));
+}
+
+#[test]
+fn native_codex_parents_resolve_only_within_codex() {
+    let home = Home::new();
+    home.top(
+        "shared-parent",
+        &[human("shared-parent", ts(0, 0), "Synthetic query")],
+    );
+    home.codex("shared-parent", json!({}), &[]);
+    home.codex("child", json!({"parent_thread_id":"shared-parent"}), &[]);
+    home.top(
+        "claude-only",
+        &[human("claude-only", ts(0, 0), "Synthetic query")],
+    );
+    home.codex(
+        "unmatched-child",
+        json!({"parent_thread_id":"claude-only"}),
+        &[],
+    );
+    let built = home.build();
+    assert_eq!(
+        built.sessions["child"].parent.as_deref(),
+        Some("codex:shared-parent")
+    );
+    assert!(built.sessions["unmatched-child"].parent.is_none());
+}
+
+#[test]
 fn native_codex_fork_reports_only_child_owned_usage() {
     let home = Home::new();
     home.write(
