@@ -12,7 +12,7 @@ for (const width of [390, 1280]) for (const colorScheme of ['light', 'dark']) {
       await page.route('http://panel.test/**', route => route.fulfill({
         contentType: route.request().url().endsWith('.js') ? 'text/javascript' : 'text/html',
         headers: { 'Content-Security-Policy': "default-src 'self'; script-src 'self'; style-src 'self'" },
-        body: route.request().url().endsWith('.js') ? bundle.outputFiles[0].text : '<!doctype html><button id="trigger">Open</button><script src="/consumer.js"></script>',
+        body: route.request().url().endsWith('.js') ? bundle.outputFiles[0].text : '<!doctype html><meta charset="utf-8"><button id="trigger">Open</button><script src="/consumer.js"></script>',
       }));
       await page.goto('http://panel.test/');
       await page.evaluate(async () => {
@@ -63,6 +63,9 @@ for (const width of [390, 1280]) for (const colorScheme of ['light', 'dark']) {
           const neverShown = AccountExample.createPanelChrome({ title: 'Unused' }, { opened() { throw new Error('unexpected open'); }, closed() { throw new Error('unexpected close'); } });
           neverShown.destroy(); neverShown.show();
           assert(!neverShown.dialog.isConnected && registrations === removals, 'unused root or listeners leaked');
+          const spaced = AccountExample.createPanelChrome({ title: 'One · two', sub: '· Leading' }, { opened() {}, closed() {} });
+          assert(spaced.dialog.querySelector('.panel-t').textContent === 'One\u2009 · \u2009two' && spaced.dialog.querySelector('.panel-sub').textContent === '·\u2009 Leading', 'separator spacing changed: ' + JSON.stringify([spaced.dialog.querySelector('.panel-t').textContent, spaced.dialog.querySelector('.panel-sub').textContent]));
+          spaced.destroy();
         } finally { document.addEventListener = add; document.removeEventListener = remove; }
       });
       // Real Escape exercises the browser's native cancel/close path.

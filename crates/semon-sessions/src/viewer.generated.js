@@ -990,9 +990,10 @@ SOFTWARE.
 
   // src/lib/panel.tsx
   function PanelHeader({ heading, sub, close }) {
+    const spaced = (text) => text.replace(/ · /g, "\u2009 \xB7 \u2009").replace(/^· /, "\xB7\u2009 ");
     return /* @__PURE__ */ u2(S, { children: [
-      /* @__PURE__ */ u2("div", { class: "panel-t", children: heading }),
-      sub && /* @__PURE__ */ u2("div", { class: "panel-sub", children: sub }),
+      /* @__PURE__ */ u2("div", { class: "panel-t", children: spaced(heading) }),
+      sub && /* @__PURE__ */ u2("div", { class: "panel-sub", children: spaced(sub) }),
       /* @__PURE__ */ u2("button", { class: "ibtn", type: "button", "aria-label": "Close", onClick: close, children: /* @__PURE__ */ u2("svg", { viewBox: "0 0 24 24", "aria-hidden": "true", fill: "none", stroke: "currentColor", "stroke-width": "1.8", "stroke-linecap": "round", "stroke-linejoin": "round", children: /* @__PURE__ */ u2("path", { d: "M6 6l12 12M18 6L6 18" }) }) })
     ] });
   }
