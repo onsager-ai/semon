@@ -1275,4 +1275,8 @@ html.viewer-open, html.viewer-open body { overflow: hidden; }
 
 .turn.semon-measuring-turn { content-visibility: visible; }
 
-@media (any-pointer: coarse) { .viewer-b .vs .link { min-height: 44px; min-width: 44px; margin: 0; } }
+/* Landscape touch reaches 44px without changing the compact header pitch. */
+@media (any-pointer: coarse) and (min-width: 761px) {
+  .viewer-b .vs .copy { position: relative; }
+  .viewer-b .vs .copy::before { content: ""; position: absolute; inset: min(0px, calc((100% - 44px) / 2)) 0; }
+}
