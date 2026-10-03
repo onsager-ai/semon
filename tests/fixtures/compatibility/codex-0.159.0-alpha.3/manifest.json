@@ -39,12 +39,11 @@
     "Alpha release fixture; no stable-release compatibility claim",
     "Mock-provider synthetic usage is not native billing evidence",
     "No tool, cancellation, denial, compaction or fork runtime coverage",
-    "Native initial rollout retained separately in private execution workspace; checked-in fixture is transformed",
-    "Incremental early legacy/item-stream parity is currently known to fail; see #237"
+    "Native initial rollout retained separately in private execution workspace; checked-in fixture is transformed"
   ],
   "expected_fields": {
     "known": "session_meta id/session_id/cli_version/history_mode, legacy and item stream, user/assistant content and mock token usage",
-    "oracle": "incremental early mirror then item stream is a known parity failure for #237, not an accepted release capability",
+    "oracle": "full structural occurrence and exact retained-byte parity across cold ingestion, restarts at frame boundaries and raw replay; not a stable release capability claim",
     "unknown": "native billing, compaction, denial/cancellation, tools and fork lineage"
   },
   "binary_sha256": "981ade7b03926534c654fd718ced3a9f378b7b2841271e29156f939462d176e9"
