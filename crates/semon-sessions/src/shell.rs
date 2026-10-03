@@ -339,7 +339,8 @@ mod tests {
     /// with the icon path `NAV` gives it.
     #[test]
     fn the_viewer_script_draws_the_exported_nav() {
-        let js = include_str!("viewer.js");
+        let js = include_str!("../../../ui/src/app/viewer.ts");
+        let registry = include_str!("../../../ui/src/app/registry.ts");
         let render = js
             .split("function renderNav()")
             .nth(1)
@@ -363,7 +364,7 @@ mod tests {
             last = at;
             let entry = format!("{icon_name}: \"{}\"", link.icon);
             assert!(
-                js.contains(&entry),
+                registry.contains(&entry),
                 "viewer.js's I.{icon_name} is not NAV's {} icon",
                 link.key
             );

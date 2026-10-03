@@ -1,6 +1,7 @@
 /** Document effects are owned by one mount and cannot call back after teardown. */
 export class EffectScope {
   private readonly cleanups = new Set<() => void>();
+  private readonly requests = new Map<AbortController, () => void>();
   private disposed = false;
   own(cleanup: () => void) { if (this.disposed) cleanup(); else this.cleanups.add(cleanup); return cleanup; }
   listen<K extends keyof DocumentEventMap>(target: Document, type: K, listener: (event: DocumentEventMap[K]) => void, options?: AddEventListenerOptions | boolean): void;
@@ -14,6 +15,7 @@ export class EffectScope {
   timeout(callback: () => void, delay = 0): number { if (this.disposed) return 0; let cleanup: () => void; const id = window.setTimeout(() => { this.cleanups.delete(cleanup); if (!this.disposed) callback(); }, delay); cleanup = this.own(() => clearTimeout(id)); return id; }
   interval(callback: () => void, delay: number): number { if (this.disposed) return 0; const id = window.setInterval(() => { if (!this.disposed) callback(); }, delay); this.own(() => clearInterval(id)); return id; }
   frame(callback: FrameRequestCallback): number { if (this.disposed) return 0; let cleanup: () => void; const id = requestAnimationFrame(time => { this.cleanups.delete(cleanup); if (!this.disposed) callback(time); }); cleanup = this.own(() => cancelAnimationFrame(id)); return id; }
-  request(): AbortController { const controller = new AbortController(); this.own(() => controller.abort()); return controller; }
-  destroy() { if (this.disposed) return; this.disposed = true; for (const cleanup of this.cleanups) cleanup(); this.cleanups.clear(); }
+  request(): AbortController { const controller = new AbortController(); const cleanup = this.own(() => controller.abort()); this.requests.set(controller, cleanup); return controller; }
+  releaseRequest(controller: AbortController) { const cleanup = this.requests.get(controller); if (cleanup) this.cleanups.delete(cleanup); this.requests.delete(controller); }
+  destroy() { if (this.disposed) return; this.disposed = true; for (const cleanup of this.cleanups) cleanup(); this.cleanups.clear(); this.requests.clear(); }
 }

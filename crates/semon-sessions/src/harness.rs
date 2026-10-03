@@ -114,10 +114,10 @@ mod tests {
 
     #[test]
     fn javascript_registry_mirrors_rust_registry() {
-        let js = include_str!("viewer.js");
+        let js = include_str!("../../../ui/src/app/registry.ts");
         let registry_lines: Vec<&str> = js
             .lines()
-            .filter(|line| line.starts_with("  const HARNESSES = {"))
+            .filter(|line| line.starts_with("export const HARNESSES:"))
             .collect();
         assert_eq!(registry_lines.len(), 1);
         let line = registry_lines[0];

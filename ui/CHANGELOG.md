@@ -1,5 +1,16 @@
 # Shared UI changes
 
+## 2026-10-03 — application ownership and handwritten viewer removal
+
+The document entry now composes strict typed application controllers and returns
+an idempotent mount/destroy owner. Teardown invalidates late work, aborts pending
+requests, stops the poller/pager, releases chrome/screens/dialogs, and cancels
+listeners, timers and animation frames. Standalone, sidebar and native host
+mounts exercise the same owner. The handwritten viewer and internal compatibility
+bridge are deleted; Cargo still consumes checked-in generated assets without Node.
+Public shared-library exports, URLs, embed configuration/events and fallback shell
+contracts remain supported. Native-shell removal and final Hub pin follow separately.
+
 ## 2026-10-03 — complete screen and controller migration
 
 Typed native Preact owns every viewer screen, transcript entry, sheet body and

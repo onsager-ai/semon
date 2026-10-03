@@ -2,7 +2,8 @@
 
 Issue [#224](https://github.com/onsager-ai/semon/issues/224) tracks five remaining
 legacy-host removal slices. Component rendering is integrated; the application
-host and native shell are still being migrated. This record describes source
+host is composed from strict typed controllers; native-shell integration remains
+the next slice. This record describes source
 boundaries and does not claim production acceptance.
 
 | Owner | Data and effects | Commit boundary |
@@ -15,7 +16,7 @@ boundaries and does not claim production acceptance.
 | Application owner | Chrome, screen roots, listeners, timers, frames, observers, requests and poller | Mount once per document; destroy invalidates pending work before releasing roots and effects. |
 | Native shell owner | Rust fallback drawer, copy, confirmation dialogs and readiness polling | Native forms remain native; no second viewer router/model poller. |
 
-The first slice removes superseded calculations from `viewer.js` when switching
+The domain slice removed superseded calculations from the handwritten host when switching
 callers to `ui/src/domain`. The raw wire snapshot never acquires failed-send
 stand-ins or resolved turn references. Derived child lists are cached per domain
 instance and explicitly invalidated on model/render transactions. Cyclic ancestry
@@ -36,3 +37,12 @@ the range object's identity and requested boundary before applying its page.
 Loaded entries are distributed into the latest model's turns, including when a
 model update arrives during loading. An explicit transcript-wire parser validates
 entry variants and ranges at the response boundary.
+
+The document entry calls `mountViewerApplication`; it returns a teardown owner
+that invalidates callbacks before releasing navigation, model/transcript, poller,
+pager, scroll, chrome, screen and dialog owners. `EffectScope` owns document and
+media-query listeners, timers, animation frames and outstanding requests. Settled
+requests leave the scope so long-lived polling does not retain old controllers.
+Application controllers consume explicit typed ports instead of importing a
+second router/model/poller. Late boot responses cannot notify the host or recreate
+a root after teardown; replacing a mount first destroys the previous owner.
