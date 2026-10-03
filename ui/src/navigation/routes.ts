@@ -1,8 +1,8 @@
-import type { ViewerRoute } from '../lib/routes';
+import type { ViewerRoute, RouteModel } from '../lib/routes';
 import type { ViewerContent } from '../viewer-host';
 export interface HostFocus { id?: string; row?: string; label?: string }
 export type ApplicationRoute = ViewerRoute & { scrollTop?: number; hostFocus?: HostFocus; q?: string; sheet?: number };
-export interface NavigationHost { loadMachines?(signal: AbortSignal): Promise<ViewerContent> }
+export interface NavigationHost { model?: RouteModel; loadMachines?(signal: AbortSignal): Promise<ViewerContent> }
 /** Owns route tokens, destination requests and native-content lifetime. */
 export class NavigationController {
   route: ApplicationRoute = { v: 'home' };
@@ -35,9 +35,20 @@ export class NavigationController {
     else if (current()) { this.routePending = null; done(); }
   }
   historyRoute(value: unknown, fallback: ApplicationRoute): ApplicationRoute {
-    // URLs/model validation remain authoritative; history only adds validated restoration metadata.
+    // Saved destinations must belong to the current model; URLs remain the fallback for invalid records.
     if (!value || typeof value !== 'object') return fallback;
-    const out = { ...fallback };
+    let route = fallback;
+    if ('v' in value) {
+      const v = value.v;
+      if (v === 'home' || v === 'analytics' || v === 'sessions' || v === 'machines') route = {v};
+      else if (v === 'timeline') route = {v: 'analytics'};
+      else if (v === 'session' && 'id' in value && typeof value.id === 'string' && this.host.model?.session(value.id)) {
+        const turn = 'turn' in value && typeof value.turn === 'string' ? this.host.model.turn(value.turn) : undefined;
+        route = turn?.sid === value.id ? {v, id: value.id, turn: turn.id} : {v, id: value.id};
+      } else if (v === 'machine' && 'id' in value && typeof value.id === 'string' && this.host.model?.machine(value.id)) route = {v, id:value.id};
+      else if (v === 'trace' && 'sid' in value && typeof value.sid === 'string' && 'turn' in value && typeof value.turn === 'string' && this.host.model?.session(value.sid) && this.host.model.turn(value.turn)?.sid === value.sid) route = {v, sid:value.sid, turn:value.turn};
+    }
+    const out = { ...route };
     if ('scrollTop' in value && typeof value.scrollTop === 'number' && Number.isFinite(value.scrollTop)) out.scrollTop = value.scrollTop;
     if ('hostFocus' in value && value.hostFocus && typeof value.hostFocus === 'object') {
       const focus = value.hostFocus;

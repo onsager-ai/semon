@@ -4816,7 +4816,18 @@ globalThis.__semonUIShared = __semonUIShared;
     }
     historyRoute(value, fallback) {
       if (!value || typeof value !== "object") return fallback;
-      const out = { ...fallback };
+      let route = fallback;
+      if ("v" in value) {
+        const v = value.v;
+        if (v === "home" || v === "analytics" || v === "sessions" || v === "machines") route = { v };
+        else if (v === "timeline") route = { v: "analytics" };
+        else if (v === "session" && "id" in value && typeof value.id === "string" && this.host.model?.session(value.id)) {
+          const turn = "turn" in value && typeof value.turn === "string" ? this.host.model.turn(value.turn) : void 0;
+          route = turn?.sid === value.id ? { v, id: value.id, turn: turn.id } : { v, id: value.id };
+        } else if (v === "machine" && "id" in value && typeof value.id === "string" && this.host.model?.machine(value.id)) route = { v, id: value.id };
+        else if (v === "trace" && "sid" in value && typeof value.sid === "string" && "turn" in value && typeof value.turn === "string" && this.host.model?.session(value.sid) && this.host.model.turn(value.turn)?.sid === value.sid) route = { v, sid: value.sid, turn: value.turn };
+      }
+      const out = { ...route };
       if ("scrollTop" in value && typeof value.scrollTop === "number" && Number.isFinite(value.scrollTop)) out.scrollTop = value.scrollTop;
       if ("hostFocus" in value && value.hostFocus && typeof value.hostFocus === "object") {
         const focus = value.hostFocus;
@@ -6179,7 +6190,7 @@ globalThis.__semonUIShared = __semonUIShared;
       });
     }
     const phone = window.matchMedia("(max-width: 760px)");
-    const navigation = new NavigationController({ loadMachines: viewerHost ? (signal) => viewerHost.loadMachines(signal) : void 0 }, viewerHost?.initialMachines ?? null);
+    const navigation = new NavigationController({ model: routeModel, loadMachines: viewerHost ? (signal) => viewerHost.loadMachines(signal) : void 0 }, viewerHost?.initialMachines ?? null);
     let wideMode = false, railMode = false, treePrefs = {};
     try {
       wideMode = localStorage.getItem("semon.wide") === "1";
