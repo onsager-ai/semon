@@ -167,6 +167,8 @@ impl CursorState {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct FileCursor {
     pub(crate) offset: u64,
+    /// SHA-256 of exactly the complete bytes committed at `offset`.
+    pub(crate) prefix_sha256: Option<String>,
     session_id: String,
     parent_session_id: Option<String>,
     agent: Option<String>,
@@ -203,6 +205,7 @@ impl Default for FileCursor {
     fn default() -> Self {
         Self {
             offset: 0,
+            prefix_sha256: None,
             session_id: String::new(),
             parent_session_id: None,
             agent: None,
@@ -287,6 +290,10 @@ impl FileCursor {
             }
         };
         Ok(Self {
+            prefix_sha256: object
+                .get("prefix_sha256")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
             offset,
             session_id: string("session_id"),
             parent_session_id: object
@@ -325,6 +332,12 @@ impl FileCursor {
                 Value::Number(self.next_line_ordinal.into()),
             ),
             ("offset".into(), Value::Number(self.offset.into())),
+            (
+                "prefix_sha256".into(),
+                self.prefix_sha256
+                    .clone()
+                    .map_or(Value::Null, Value::String),
+            ),
             ("repo".into(), Value::String(self.repo.clone())),
             (
                 "repo_source".into(),

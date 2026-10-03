@@ -8,6 +8,8 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+use sha2::{Digest, Sha256};
+
 mod normalize;
 mod repair;
 mod state;
@@ -295,7 +297,10 @@ pub fn process_file(
     store: &mut TraceStore,
     options: &ProcessOptions<'_>,
 ) -> Result<usize, AdapterError> {
-    process_file_until(path, state, store, options, None, true)
+    let source_key = resolved(path)?.to_string_lossy().into_owned();
+    store.with_capture_source(CARRIER, &source_key, |store| {
+        process_file_until(path, state, store, options, None, true)
+    })
 }
 
 fn process_file_until(
@@ -316,8 +321,22 @@ fn process_file_until(
         .len()
         .min(offset_limit.unwrap_or(u64::MAX));
     let mut saved = state.take_file(&key);
-    if saved.offset > size {
+    let mut prefix = Sha256::new();
+    if saved.offset <= size {
+        let mut consumed = File::open(path)?.take(saved.offset);
+        io::copy(&mut consumed, &mut prefix)?;
+    }
+    let prefix_matches = saved.offset == 0
+        || saved.prefix_sha256.as_deref()
+            == Some(format!("{:x}", prefix.clone().finalize()).as_str());
+    if saved.offset > size || !prefix_matches {
+        store.reset_capture_source(CARRIER, &key)?;
         saved = state::FileCursor::default();
+        prefix = Sha256::new();
+        if persist_state {
+            state.put_file(key.clone(), saved.clone());
+            save_state(options.state_path, state)?;
+        }
     }
     let mut context = saved.context();
     let history_source = same_path(path, options.history_path)?;
@@ -394,6 +413,7 @@ fn process_file_until(
                 break;
             }
 
+            prefix.update(&line);
             batch_end = reader.stream_position()?;
             pending_bytes += line.len();
             batch_count += 1;
@@ -466,6 +486,7 @@ fn process_file_until(
         }
 
         saved.offset = batch_end;
+        saved.prefix_sha256 = Some(format!("{:x}", prefix.clone().finalize()));
         saved.update_context(&context);
         saved.next_line_ordinal = next_line_ordinal;
         saved.last_projected_sequence = last_projected_sequence.clone();

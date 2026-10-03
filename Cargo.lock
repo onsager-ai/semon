@@ -1876,6 +1876,7 @@ dependencies = [
  "semon-codex",
  "semon-store",
  "serde_json",
+ "sha2 0.10.9",
  "thiserror 2.0.19",
 ]
 
@@ -1885,6 +1886,7 @@ version = "0.1.0"
 dependencies = [
  "semon-store",
  "serde_json",
+ "sha2 0.10.9",
  "thiserror 2.0.19",
 ]
 

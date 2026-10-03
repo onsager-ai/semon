@@ -87,3 +87,37 @@ the early legacy-to-item transition still requires reconciliation under #237.
 Neither recording establishes tools, approvals, cancellation, compaction or
 fork semantics. The offline Python validator checks provenance and file hashes;
 CI does not launch either harness or access personal native homes.
+
+## Capture replacement detection
+
+Claude and Codex capture cursors store a constant-size SHA-256 digest of the
+complete consumed prefix. Before resuming, capture verifies that prefix;
+replacement, interior mutation or truncation resets parser context and line
+ordinals, then replays the current source. Older cursors without a digest replay
+once. Batch commits extend the digest only with complete records after their raw
+capture succeeds. No transcript text is added to cursor state and no old raw
+record is deleted.
+
+This deliberately reads the consumed prefix on each capture invocation, including
+idle invocations. It prioritizes verified replacement handling over the former
+size-only shortcut; an idle-read optimization needs equally strong source-change
+evidence. It does not repair the separate sessions viewer index's window-based
+ledger. It does not establish rebuild selection across retained generations or early
+legacy-to-item reconciliation. Those remain #237 work, so this bounded repair
+does not establish the complete historical/incremental/retained-evidence oracle.
+
+Capture records local source ownership of projected occurrence rows alongside
+its raw/semantic transaction. When verified source bytes change, it retires that
+source's occurrence projection before replay; another recorded owner keeps its
+shared rows. This reconciles metadata/malformed replacement, fewer Claude blocks,
+truncation tails and changed Codex session identity without deleting canonical
+traces, raw records or raw-to-trace links. Source keys are resolved local paths;
+they are excluded from transferable identity and ordinary trace/log results.
+The version-6 store migration adds only this structural ownership index.
+
+Pre-upgrade occurrence rows have no reliable file ownership. They remain observed
+memory until independently attributable; the migration never guesses ownership
+from session name, timing or text. A replay claims only rows actually projected
+by that source. Full parity for arbitrary pre-upgrade stale rows and generation
+selection when rebuilding from all retained raw bytes remain unresolved release
+gates, not a native support claim.

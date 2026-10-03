@@ -232,3 +232,16 @@ Two of the decisions above land on P2 as schema, not as rendering, and are the r
 ## Not decided here
 
 No implementation is authorised by this document. The decisions above constrain the occurrence region's schema; the schema itself, its write path, and the migration are code, and they go through the plan→implement checkpoint separately. What `sequence` means across a branch stays open for P3. Capture remains uninstalled: the systemd installer is not to be run and `~/.local/share/semon` is not to be created until the exposure policy of P4 exists, because that installer creates a credential-bearing artifact on first run.
+
+
+### Local capture source ownership
+
+Capture may record the resolved local source path that projected an occurrence
+in a separate structural index. This is neither canonical identity nor a logical
+parent relationship. A verified replacement retires the source's current
+occurrence projection and replays its new complete bytes. Rows with another
+explicit owner remain; unowned legacy rows remain because ownership is unknown.
+Canonical traces and all forensic rows/links survive projection reconciliation.
+The ownership index contains paths and row identities, never transcript text,
+and ordinary trace/log APIs do not expose it. It does not establish retained
+source-generation selection for reconstruction from multiple observed versions.
