@@ -7,7 +7,10 @@ function background(value: unknown): Background {
   if (state !== 'running' && state !== 'unknown' && state !== 'failed' && state !== 'killed' && state !== 'done') throw new Error('Invalid background state');
   return { state, secs: optional(v.secs, text), since: optional(v.since, number), exit: optional(v.exit, number), summary: optional(v.summary, text) };
 }
-function image(value: unknown): Image { const v = object(value); return { o: number(v.o), b: number(v.b), v: text(v.v), w: optional(v.w, number), h: optional(v.h, number), type: optional(v.type, text), size: optional(v.size, number), na: optional(v.na, boolean) }; }
+function image(value: unknown): Image {
+  const v = object(value), base = { o: number(v.o), b: number(v.b), w: optional(v.w, number), h: optional(v.h, number), type: optional(v.type, text), size: optional(v.size, number) };
+  return v.na === true ? { ...base, na: true, v: optional(v.v, text) } : { ...base, na: optional(v.na, value => { if (value !== false) throw new Error('Invalid image availability'); return false; }), v: text(v.v) };
+}
 const diff = (value: unknown) => array(value, (value): [string, string] => { if (!Array.isArray(value) || value.length !== 2) throw new Error('Invalid diff'); return [text(value[0]), text(value[1])]; });
 function cut(value: unknown): ToolData['cut'] { const v = object(value); return { original_tokens: optional(v.original_tokens, number), parts: optional(v.parts, v => array(v, v => { const p = object(v); return { text: optional(p.text, text), gap: optional(p.gap, v => { const g = object(v); return { unit: text(g.unit), n: number(g.n), of: optional(g.of, number) }; }) }; })) }; }
 export function parseEntry(value: unknown): Entry {
