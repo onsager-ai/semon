@@ -252,5 +252,23 @@ report 10/6 including inherited parent context. These are distinct observations,
 not billing evidence. Live mock-provider checks that inherited context was sent
 are recorded separately from persisted facts. Capture tests compare cold,
 restart and retained-raw replay for the parent, empty child and completed child.
-Viewer interpretation of these fork fields and fresh versus inherited usage is
-a remaining compatibility requirement; this corpus does not claim that support.
+The corpus supplies the native evidence for the viewer interpretation described
+below; the probe itself does not claim decoder support.
+
+The viewer now exposes machine-scoped native root, logical fork and physical
+prefix fields separately as optional `codex_history` metadata. A physical base
+alone does not invent a logical parent, and forks do not become spawned-agent
+edges or merge their child-owned turns with the parent. Missing fields stay
+absent, including exclusive ordinals; an observed zero remains zero.
+
+For the pinned native per-response format, exact thread/session/turn/response
+identities select fresh usage independently of the cumulative `token_count`
+channel. Repeated exact reports count once, and the selected accounting survives
+index restart. A fork's cumulative-only or incomplete report is insufficient
+for fresh usage and produces no model-usage row. Legacy non-fork files retain
+existing cumulative-delta behavior. Complete per-response observations take
+precedence over legacy counters; mixed-format histories without complete native
+reports are not claimed as an accepted usage baseline. This remains usage
+telemetry, not an invoice. The rebuildable viewer index moves to schema 2/parser
+20 while preserving separately retained reported-run snapshots; native source
+logs and canonical/raw trace storage are unchanged.
