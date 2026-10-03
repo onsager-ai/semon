@@ -1,0 +1,6 @@
+{"type":"user","uuid":"u0","parentUuid":null,"cwd":"/fixture/repo","message":{"role":"user","content":"source-shaped compatibility request"},"timestamp":"2026-10-03T00:00:01Z"}
+{"type":"assistant","uuid":"a0","parentUuid":"u0","cwd":"/fixture/repo","message":{"role":"assistant","model":"fixture-model","content":[{"type":"text","text":"parallel calls"},{"type":"tool_use","id":"call-1","name":"Bash","input":{"command":"echo 1"}},{"type":"tool_use","id":"call-2","name":"Bash","input":{"command":"echo 2"}}],"usage":{"input_tokens":12,"output_tokens":5}},"timestamp":"2026-10-03T00:00:01Z"}
+{"type":"user","uuid":"u1","parentUuid":"a0","cwd":"/fixture/repo","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"call-2","content":"result 2","is_error":true},{"type":"tool_result","tool_use_id":"call-1","content":"result 1"}]},"timestamp":"2026-10-03T00:00:01Z"}
+{"type":"assistant","uuid":"a1","parentUuid":"u1","cwd":"/fixture/repo","message":{"role":"assistant","model":"fixture-model-2","content":[{"type":"text","text":"complete"}]},"timestamp":"2026-10-03T00:00:01Z"}
+{"type":"future_unknown","uuid":"x0","parentUuid":"a1","timestamp":"2026-10-03T00:00:01Z"}
+{malformed}
