@@ -195,6 +195,31 @@ Reproduce with `tests/spikes/claude-tools.py` using the pinned binary and a new
 private output directory. The manifest pins script content, binary and original
 source hashes, transformations, and unsupported scenarios.
 
+## Source-backed Codex archive discovery
+
+Codex `0.159.0-alpha.3` source at commit
+`3b01b36fa5eb96ba82a776bd3c2fc57f8969181f` defines `archived_sessions` and
+archives owned rollout files by moving them there. The source hashes and the
+simulated-move fixture limitations are recorded in
+`codex-0.159.0-alpha.3/archive-manifest.json`. This is source-backed evidence;
+the native archive command has not been executed in the test.
+
+Semon discovers plain JSONL in both `CODEX_HOME/sessions` and
+`CODEX_HOME/archived_sessions` for session lists, model building, transcript
+lookup and refresh. These archived files are part of the existing explicit
+viewing-input allowlist. Input copies with recorded machine facts preserve
+model and transcript parity. Optional recorded facts carry a content-free
+current Codex source inventory, so active/archive transitions select the
+current paths while retaining older mirrored bytes. End-to-end push tests cover
+both directions with deliberate redaction. An absent inventory in older facts
+remains unknown; an explicit empty inventory selects no current sources.
+Received archive roots behind symbolic links are refused, and native source
+bytes remain read-only.
+
+Compressed native rollouts are outside this supported subset. To capture a
+plain archived tree explicitly, select it with `semon-codex --sessions PATH`;
+this fixture does not establish native archive lifecycle or logical lineage.
+
 ## Retained source revision selection
 
 Complete raw history can contain several byte variants at the same source line.

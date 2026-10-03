@@ -419,6 +419,104 @@ fn a_long_line_is_redacted_whole_before_it_is_cut_into_chunks() {
 }
 
 #[test]
+fn archive_and_unarchive_pushes_select_current_sources_without_deleting_old_copies() {
+    let mut home = Home::new();
+    home.options.all = true;
+    let receiver = receiver();
+    let mirrored = Home::new();
+    let mut mirrored_options = mirrored.options.clone();
+    mirrored_options.all = true;
+    mirrored_options.facts = Some(mirrored.root.join("facts.json"));
+    let active = "codex/sessions/2026/09/24/rollout-archive-root.jsonl";
+    let archive = "codex/archived_sessions/rollout-archive-root.jsonl";
+    let secret = "sk-ant-api03-SECRETSECRETSECRETSECRET";
+    let record = |number| {
+        json!({"timestamp":format!("2026-09-24T00:00:0{number}Z"),"type":"event_msg","payload":{"type":"user_message","message":format!("fixture {number} {secret}")}}).to_string()+"\n"
+    };
+    let initial = json!({"timestamp":"2026-09-24T00:00:00Z","type":"session_meta","payload":{"id":"archive-root","cwd":"/fixture/repo"}}).to_string()+"\n"+&record(1);
+    home.write(active, &initial);
+    for pass in 0..3 {
+        if pass == 1 {
+            home.append(active, &record(2));
+            fs::create_dir_all(home.root.join("codex/archived_sessions")).unwrap();
+            fs::rename(home.root.join(active), home.root.join(archive)).unwrap();
+        } else if pass == 2 {
+            fs::rename(home.root.join(archive), home.root.join(active)).unwrap();
+            home.append(active, &record(3));
+        }
+        semon_push::push(&home.push_options(&receiver.url), false).unwrap();
+        let (files, facts) = {
+            let state = receiver.state.lock().unwrap();
+            (state.files.clone(), state.facts.clone().unwrap())
+        };
+        let current = if pass == 1 { archive } else { active };
+        assert_eq!(facts.codex_rollouts.as_ref().unwrap().len(), 1);
+        assert!(
+            facts
+                .codex_rollouts
+                .as_ref()
+                .unwrap()
+                .contains(current.strip_prefix("codex/").unwrap())
+        );
+        for (path, bytes) in &files {
+            let destination = mirrored.root.join(path);
+            fs::create_dir_all(destination.parent().unwrap()).unwrap();
+            fs::write(destination, bytes).unwrap();
+            assert!(!String::from_utf8_lossy(bytes).contains(secret));
+        }
+        semon_sessions::write_facts(mirrored_options.facts.as_ref().unwrap(), &facts).unwrap();
+        // Compare against a deliberate redacted current-source copy, not the
+        // unredacted local transcript. The stale receiver paths remain on disk.
+        let expected = Home::new();
+        let mut expected_options = expected.options.clone();
+        expected_options.all = true;
+        expected_options.facts = Some(expected.root.join("facts.json"));
+        semon_sessions::write_facts(expected_options.facts.as_ref().unwrap(), &facts).unwrap();
+        let destination = expected.root.join(current);
+        fs::create_dir_all(destination.parent().unwrap()).unwrap();
+        fs::write(
+            destination,
+            redacted(&fs::read_to_string(home.root.join(current)).unwrap()),
+        )
+        .unwrap();
+        let now = 1_790_208_000_000;
+        assert_eq!(
+            semon_sessions::model_json_at(&mirrored_options, now).unwrap(),
+            semon_sessions::model_json_at(&expected_options, now).unwrap(),
+            "pass {pass}"
+        );
+        let core = semon_sessions::ViewerCore::new(mirrored_options.clone());
+        let expected_core = semon_sessions::ViewerCore::new(expected_options);
+        for (path, query) in [
+            ("/api/tx", "sid=archive-root"),
+            ("/api/transcript", "harness=codex&id=archive-root"),
+        ] {
+            let actual = core.respond("GET", path, query, None);
+            let wanted = expected_core.respond("GET", path, query, None);
+            assert_eq!(actual.status, 200, "{path} pass {pass}");
+            assert_eq!(actual.body, wanted.body, "{path} pass {pass}");
+        }
+        assert_eq!(
+            fs::read(home.root.join(current)).unwrap(),
+            if pass == 0 {
+                initial.clone()
+            } else if pass == 1 {
+                initial.clone() + &record(2)
+            } else {
+                initial.clone() + &record(2) + &record(3)
+            }
+            .as_bytes()
+        );
+        if pass > 0 {
+            assert!(files.contains_key(active));
+            assert!(files.contains_key(archive));
+            assert!(mirrored.root.join(active).exists());
+            assert!(mirrored.root.join(archive).exists());
+        }
+    }
+}
+
+#[test]
 fn facts_are_sent_and_a_bad_token_is_refused() {
     let home = Home::new();
     let receiver = receiver();

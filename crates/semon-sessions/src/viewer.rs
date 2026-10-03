@@ -509,6 +509,14 @@ pub(crate) const FONTS: [(&str, &[u8]); 4] = [
 
 fn watch_tree(path: &Path, suffixes: &[&str], watched: &mut BTreeMap<PathBuf, Option<Stamp>>) {
     watched.insert(path.to_owned(), stamp(path));
+    if fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
+        if let Some(parent) = path.parent() {
+            watched
+                .entry(parent.to_owned())
+                .or_insert_with(|| stamp(parent));
+        }
+        return;
+    }
     let Ok(entries) = fs::read_dir(path) else {
         return;
     };
@@ -568,11 +576,9 @@ impl Snapshot {
             &[".json"],
             &mut watched,
         );
-        watch_tree(
-            &options.codex_home.join("sessions"),
-            &[".jsonl"],
-            &mut watched,
-        );
+        for root in crate::inputs::codex_rollout_dirs(options) {
+            watch_tree(&root, &[".jsonl"], &mut watched);
+        }
         watch_tree(
             &options.codex_home.join("thread-writer-locks"),
             &[".lock"],
@@ -1723,8 +1729,10 @@ impl MachineView {
         }
         let key = (harness.to_owned(), id.to_owned());
         let known = lock(&self.files).paths.get(&key).cloned();
+        let machine = crate::facts::MachineFacts::of(&self.options);
         if let Some(path) = known
             && regular(&path)
+            && (harness != "codex" || machine.codex_rollout_is_current(&self.options, &path))
         {
             return Ok(Some(path));
         }
@@ -1747,11 +1755,15 @@ impl MachineView {
             &mut paths,
             "jsonl",
         )?;
-        file_list(
-            &self.options.codex_home.join("sessions"),
-            &mut paths,
-            "jsonl",
-        )?;
+        let mut codex_paths = Vec::new();
+        for root in crate::inputs::codex_rollout_dirs(&self.options) {
+            file_list(&root, &mut codex_paths, "jsonl")?;
+        }
+        paths.extend(
+            codex_paths
+                .into_iter()
+                .filter(|path| machine.codex_rollout_is_current(&self.options, path)),
+        );
         self.update_files(paths);
         Ok(lock(&self.files).paths.get(&key).cloned())
     }
@@ -1772,9 +1784,15 @@ impl MachineView {
         &self,
         paths: impl IntoIterator<Item = PathBuf>,
     ) -> (BTreeSet<PathBuf>, BTreeSet<PathBuf>) {
+        let machine = crate::facts::MachineFacts::of(&self.options);
+        let codex_dirs = crate::inputs::codex_rollout_dirs(&self.options);
         let paths: BTreeSet<_> = paths
             .into_iter()
             .filter(|path| path.extension().is_some_and(|ext| ext == "jsonl") && regular(path))
+            .filter(|path| {
+                !codex_dirs.iter().any(|root| path.starts_with(root))
+                    || machine.codex_rollout_is_current(&self.options, path)
+            })
             .collect();
         let new = paths
             .difference(&lock(&self.files).known)
@@ -4750,6 +4768,25 @@ mod tests {
 
     /// A machine named `host` with one session, `sid`, and a relay from a
     /// sender whose logs are gone: a stub only this machine knows.
+    #[cfg(unix)]
+    #[test]
+    fn a_refused_archive_root_replaced_by_a_directory_invalidates_the_snapshot() {
+        let fixture = Fixture::new();
+        let target = fixture.root.join("disposable-outside");
+        let root = fixture.options.codex_home.join("archived_sessions");
+        fs::create_dir_all(&target).unwrap();
+        fs::create_dir_all(root.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(&target, &root).unwrap();
+        let snapshot =
+            Snapshot::capture_pids(&fixture.options, BTreeSet::new(), std::iter::empty());
+        assert!(snapshot.watched.contains_key(root.parent().unwrap()));
+        fs::remove_file(&root).unwrap();
+        // Keep the target inode and mtime: watching only the resolved target
+        // would miss this change from refused link to accepted directory.
+        fs::rename(&target, &root).unwrap();
+        assert!(snapshot.changed(&fixture.options));
+    }
+
     fn machine(host: &str, sid: &str) -> Fixture {
         let fixture = Fixture::new();
         fixture.write("proc/sys/kernel/hostname", &format!("{host}\n"));
@@ -5707,6 +5744,13 @@ mod tests {
         symlink(
             outside.root.join("claude/sessions/77.json"),
             alpha.join("claude/sessions/77.json"),
+        )
+        .unwrap();
+        // An archive root behind a link must not expose external rollouts.
+        fs::create_dir_all(alpha.join("codex")).unwrap();
+        symlink(
+            outside.root.join("codex/sessions"),
+            alpha.join("codex/archived_sessions"),
         )
         .unwrap();
         // Homes behind a link, and facts behind one.

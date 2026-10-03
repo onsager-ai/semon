@@ -40,6 +40,11 @@ pub struct Facts {
     /// `sessions/<pid>.json` names, when that process exists. A pid file is
     /// live when its `procStart` equals this.
     pub proc_starts: BTreeMap<u32, u64>,
+    /// Current native Codex plain-rollout paths, relative to its home.
+    /// None is an older snapshot with unknown source selection; Some(empty)
+    /// explicitly selects no sources. Retired mirrored bytes stay retained.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub codex_rollouts: Option<BTreeSet<String>>,
     /// Each Codex thread whose writer lock is held, with the holder's pid.
     pub codex_locks: BTreeMap<String, u32>,
     /// The repository (its directory's name) of every working directory the
@@ -217,6 +222,13 @@ fn collect_facts(
         home: env_home(),
         proc_starts,
         codex_locks,
+        codex_rollouts: Some(
+            crate::inputs(options)?
+                .into_iter()
+                .filter(|input| input.root == crate::InputRoot::Codex)
+                .map(|input| input.path)
+                .collect(),
+        ),
         repos,
         offline_since: None,
         runs,
@@ -293,6 +305,25 @@ impl MachineFacts {
             None => Self::Local,
             Some(path) => Self::Recorded(Box::new(read_facts(path).unwrap_or_default())),
         }
+    }
+
+    /// Current-source selection is collector evidence, never a guessed move.
+    pub(crate) fn codex_rollout_is_current(&self, options: &Options, path: &Path) -> bool {
+        let Self::Recorded(facts) = self else {
+            return true;
+        };
+        let Some(paths) = &facts.codex_rollouts else {
+            return true;
+        };
+        let Ok(relative) = path.strip_prefix(&options.codex_home) else {
+            return false;
+        };
+        let relative = relative
+            .components()
+            .map(|part| part.as_os_str().to_string_lossy())
+            .collect::<Vec<_>>()
+            .join("/");
+        crate::is_input_path("codex", &relative) && paths.contains(&relative)
     }
 
     pub(crate) fn proc_start(&self, options: &Options, pid: u32) -> Option<u64> {
