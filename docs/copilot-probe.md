@@ -51,8 +51,9 @@ copy of retained native evidence. It contains no real user session.
 
 ## Remaining gate
 
-Interactive behavior, releases before 1.0.90, fork/subagent metadata,
-native model billing, explicit approval records, cancellation, compaction, truncation,
+Interactive behavior, releases before 1.0.90, logical forks and unprobed
+subagent execution modes, native billing, explicit approval records,
+cancellation, compaction, truncation,
 mutable records, retention/deletion and non-Linux platforms remain unverified.
 The parent event chain and `parentAgentTaskId` must not be interpreted as a
 logical parent session without additional source evidence. No supported-version
@@ -101,5 +102,28 @@ resumed and denied recordings. Manifests retain original/transformed hashes and
 binary provenance, and declare removed system-prompt payloads, replaced private
 paths and stable session UUIDs. Offline tests check exact prefix preservation,
 usage snapshots, explicit denied results and requested/start/result identity.
-This increment does not accept #238 or establish fork, cancellation, compaction,
-subagent, interactive or native retention behavior.
+This resume/denial probe leaves logical forks, cancellation, compaction,
+interactive execution and native retention unknown. The task probe below adds
+subagent metadata evidence. #238 remains open.
+
+## Native task and subagent persistence
+
+`tests/spikes/copilot-subagent.py` reproduces a synthetic `task` invocation with
+pinned 1.0.90 or 1.0.91 using the same private-root, offline environment policy.
+All root and child model responses come from the localhost mock. Each version's
+`subagent/task.events.jsonl` records one physical session containing
+`subagent.started`, `subagent.completed` and child messages whose explicit
+`parentToolCallId` joins the task's request and result. Child assistant
+`originatingMessageId` also joins its distinct child user message and explicit
+interaction ID. Lifecycle and child message records have no `agentId` field;
+that identity remains unknown. Manifests retain executable
+and source hashes and declare every transformation.
+
+This is a native tool relationship. No explicit logical parent session was
+observed, and `parentAgentTaskId` also appears on root user messages, so it does
+not establish session lineage. No separate child session file was observed.
+
+The mock child reports 14 total tokens. Session shutdown reports three requests
+with 33 input, 9 output and 6 cache-read tokens, already including that child.
+Adding the child total again would double count. These synthetic measurements
+establish persisted accounting shape; native billing units remain unknown.
