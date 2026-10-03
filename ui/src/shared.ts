@@ -1,0 +1,12 @@
+import * as preact from 'preact';
+import * as hooks from 'preact/hooks';
+import * as jsxRuntime from 'preact/jsx-runtime';
+import { installPropGuard } from './lib/security';
+import { createSelect, enhanceSelect, installSelect } from './lib/select';
+import { installTooltip } from './lib/tooltip';
+export { preact, hooks, jsxRuntime, createSelect, enhanceSelect, installSelect };
+installPropGuard();
+const shell = (window as Window & { SemonShell?: { select?: typeof createSelect; enhance?: typeof enhanceSelect } }).SemonShell ?? {};
+shell.select = createSelect; shell.enhance = enhanceSelect;
+(window as Window & { SemonShell?: typeof shell }).SemonShell = shell;
+installSelect(); installTooltip();

@@ -194,6 +194,11 @@ export default async function tooltipCheck(browser) {
       // A changed data-tip is followed; a removed target closes it.
       await reveal(page);
       await hover(page, "#tip-static-2", 1500);
+      // Native hosts can still replace an open target; the tooltip follows the same spot.
+      await page.evaluate(() => { const old = document.getElementById("tip-static-2"); old.replaceWith(old.cloneNode(true)); });
+      await page.waitForTimeout(100);
+      r.expect((await state(page)).open, tag + ": replacing a native target closed its tooltip");
+
       await page.evaluate(() => { document.getElementById("tip-static-2").dataset.tip = "The text changed while it showed"; });
       await page.waitForTimeout(150);
       r.expect((await state(page)).text === "The text changed while it showed", tag + ": an open tooltip did not follow a changed data-tip");
@@ -348,12 +353,12 @@ export default async function tooltipCheck(browser) {
     });
   }
 
-  // ---- A live update rebuilds the bar and the sidebar under a resting pointer: the tip follows to the new node ----
+  // ---- Keyed live updates preserve the bar/sidebar target and its tooltip under a resting pointer ----
   {
     const tag = "live", page = await served(browser, { size: "desktop" });
     await guard(r, tag, page, async () => {
       await goto(page, { v: "session", id: parent.id }, D); await page.waitForTimeout(250);
-      // Every poll for changes gets the whole model back under a new version, so the bar and the sidebar are rebuilt each time.
+      // Each changed model commits through the typed owners while unchanged target nodes stay connected.
       let polls = 0;
       await page.route("**/api/model**", async (route) => {
         if (!new URL(route.request().url()).searchParams.has("since")) return route.fallback();
@@ -373,12 +378,11 @@ export default async function tooltipCheck(browser) {
           new MutationObserver(() => { if (tip.hidden) window.__hides++; }).observe(tip, { attributes: true, attributeFilter: ["hidden"] });
         }, selector);
         const seen = polls;
-        if (selector.startsWith("#lanes")) await page.waitForResponse(response => new URL(response.url()).pathname === "/api/model" && new URL(response.url()).searchParams.has("since"), { timeout: 12000 });
-        else await page.waitForFunction(() => window.__was && !window.__was.isConnected, null, { timeout: 12000 }).catch(() => {});
+        await page.waitForResponse(response => new URL(response.url()).pathname === "/api/model" && new URL(response.url()).searchParams.has("since"), { timeout: 12000 });
         await page.waitForTimeout(400);
         const after = await state(page), info = await page.evaluate(() => ({ replaced: !window.__was.isConnected, hides: window.__hides }));
         results[tag][name] = { polls: polls - seen, before: before.text, after: after.text, ...info };
-        r.expect(polls > seen && (selector.startsWith("#lanes") ? !info.replaced : info.replaced), tag + ": " + name + " did not commit with the expected root identity");
+        r.expect(polls > seen && !info.replaced, tag + ": " + name + " did not commit with the expected root identity");
         r.expect(after.open && after.text === before.text && info.hides === 0, tag + ": " + name + ": the tooltip did not stay open on the rebuilt element " + JSON.stringify({ before: before.text, after: after.text, hides: info.hides }));
         await away(page); await page.waitForTimeout(200);
       }
@@ -394,13 +398,14 @@ export default async function tooltipCheck(browser) {
       r.expect(!(await state(page)).open, tag + ": Esc did not close the tooltip");
       await page.mouse.move(px + 2, py + 1); // a nudge inside the badge
       await page.evaluate(() => { window.__was = document.querySelector("#topbar .meta-line > span.lab[data-tip]"); });
-      await page.waitForFunction(() => !window.__was.isConnected, null, { timeout: 12000 }).catch(() => {});
+      const dismissedAt = polls;
+      await page.waitForResponse(response => new URL(response.url()).pathname === "/api/model" && new URL(response.url()).searchParams.has("since"), { timeout: 12000 });
       await page.waitForTimeout(300);
       await page.mouse.move(px + 2, py + 1); // and put back on the same coordinates after the rebuild
       await page.waitForTimeout(700);
       const back = await page.evaluate(() => ({ replaced: !window.__was.isConnected, open: !document.getElementById("sh-tooltip").hidden }));
       results[tag].escThenRebuild = back;
-      r.expect(back.replaced && !back.open, tag + ": after Esc, a rebuild under the resting pointer brought the tooltip back or never happened " + JSON.stringify(back));
+      r.expect(polls > dismissedAt && !back.replaced && !back.open, tag + ": after Esc, a rebuild under the resting pointer brought the tooltip back or never happened " + JSON.stringify(back));
       // The positive control: off the badge and back on it, the tip shows again.
       await away(page); await page.waitForTimeout(450);
       const again = await hover(page, spot, 1500);

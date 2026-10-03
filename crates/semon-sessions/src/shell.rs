@@ -7,22 +7,13 @@
 /// The viewer's base styles, including its tokens, fonts, and chrome, and the Select's styles (`select.css`).
 pub const VIEWER_CSS: &str = concat!(include_str!("viewer.css"), "\n", include_str!("select.css"));
 
-/// The viewer's page script. Embedders serving the viewer without a `ViewerCore` can serve it at `/viewer.js`. It starts
-/// with the tooltip (`tooltip.js`, also the start of [`JS`]), then the Select component (`select.js`), then the production Preact pilot and legacy viewer (built by `ui/build.mjs`).
-pub const COMPONENT_JS: &str = concat!(
-    include_str!("tooltip.js"),
-    "\n",
-    include_str!("select.js"),
-    "\n"
-);
+/// Shared production Preact runtime, Select and tooltip controls for custom script hosts.
+/// Bundles produced by `ui/build.mjs` already include this prefix; do not prepend it again.
+pub const COMPONENT_JS: &str = include_str!("shared.generated.js");
 
-pub const VIEWER_JS: &str = concat!(
-    include_str!("tooltip.js"),
-    "\n",
-    include_str!("select.js"),
-    "\n",
-    include_str!("viewer.generated.js")
-);
+/// The complete production viewer script, including its shared component prefix.
+/// Embedders serving the viewer without a `ViewerCore` can serve it at `/viewer.js`.
+pub const VIEWER_JS: &str = include_str!("viewer.generated.js");
 
 /// The viewer page returned by its page routes. Embedders serving the viewer without a `ViewerCore` can serve these
 /// bytes for each page route.
@@ -31,16 +22,9 @@ pub const PAGE_HTML: &str = include_str!("viewer.html");
 /// Additional components for forms and other server-rendered pages.
 pub const CSS: &str = include_str!("shell.css");
 
-/// The tooltip for any element with a `data-tip` attribute (its source, `tooltip.js`, is also the start of the viewer's own
-/// script), the Select component (`SemonShell.select`, and `<select data-select>` pages), then the drawer, copy, dialog, and
-/// readiness-poll behavior for shell pages.
-pub const JS: &str = concat!(
-    include_str!("tooltip.js"),
-    "\n",
-    include_str!("select.js"),
-    "\n",
-    include_str!("shell.js")
-);
+/// Shared typed tooltip and Select controls (`SemonShell.select` and `<select data-select>`),
+/// followed by drawer, copy, dialog and readiness-poll behavior for shell pages.
+pub const JS: &str = concat!(include_str!("shared.generated.js"), "\n", include_str!("shell.js"));
 
 /// The Semon mark, a monochrome glyph. `.mark` paints it as a mask from `/mark.svg`, so a page that uses `.mark` must
 /// serve this at that path (as `image/svg+xml`).

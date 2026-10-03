@@ -1,5 +1,6 @@
 import { options } from 'preact';
 import { safePath } from './account';
+import { externalUrl } from './richtext';
 let installed = false;
 /** Application VNodes cannot reach the pinned runtime's HTML or style sinks. */
 export function installPropGuard() {
@@ -12,7 +13,8 @@ export function installPropGuard() {
       for (const key of Object.keys(vnode.props)) {
         if (['dangerouslySetInnerHTML', 'style', 'title'].includes(key)) throw new Error(`Forbidden DOM prop: ${key}`);
         const value = (vnode.props as Record<string, unknown>)[key];
-        if (['href', 'src', 'action'].includes(key) && value != null && !safePath(value)) throw new Error(`Unsafe DOM path: ${key}`);
+        const externalLink = key === 'href' && vnode.type === 'a' && externalUrl(value) && (vnode.props as Record<string, unknown>).target === '_blank' && (vnode.props as Record<string, unknown>).rel === 'noopener noreferrer';
+        if (['href', 'src', 'action'].includes(key) && value != null && !safePath(value) && !externalLink) throw new Error(`Unsafe DOM path: ${key}`);
         if (/^on/i.test(key) && typeof value === 'string') throw new Error(`Inline DOM handler: ${key}`);
       }
     }

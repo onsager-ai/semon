@@ -13,3 +13,13 @@ test('native VNodes reject HTML/style props, unsafe paths and inline handlers', 
   }
   assert.doesNotThrow(() => h('a', {href:'/account', onClick:() => {}}, '<script>alert(1)</script>'));
 });
+
+test('external log links require a safe protocol and explicit tab isolation', () => {
+  assert.doesNotThrow(() => h('a', {href:'https://example.com/path', target:'_blank', rel:'noopener noreferrer'}));
+  for (const props of [
+    {href:'https://example.com'}, {href:'https://example.com', target:'_blank'},
+    {href:'javascript:alert(1)', target:'_blank', rel:'noopener noreferrer'},
+    {href:'//example.com', target:'_blank', rel:'noopener noreferrer'},
+  ]) assert.throws(() => h('a', props), /Unsafe DOM path/);
+  assert.throws(() => h('img', {src:'https://example.com/pixel', target:'_blank', rel:'noopener noreferrer'}), /Unsafe DOM path/);
+});

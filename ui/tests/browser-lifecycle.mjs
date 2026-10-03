@@ -264,3 +264,63 @@ test('Recent commits preserve keyed focus and destroy rejects detached controls'
     assert.deepEqual(result, { events: ['parent', false, 'parent'], empty: true, rejected: true });
   } finally { await browser.close(); }
 });
+
+test('persistent facet root keeps open controls and releases detached modal listeners', async () => {
+  const bundle = await build({ absWorkingDir: new URL('../', import.meta.url).pathname, entryPoints: ['src/lib-contract.tsx'], bundle: true, write: false, format: 'iife', globalName: 'AccountExample', platform: 'browser', tsconfig: 'tsconfig.json', define: { 'process.env.NODE_ENV': '"production"' } });
+  const browser = await chromium.launch();
+  try {
+    const page = await browser.newPage();
+    await page.setContent('<!doctype html><meta charset="utf-8"><main></main>'); await page.addScriptTag({ content: bundle.outputFiles[0].text });
+    await page.evaluate(async () => {
+      const assert = (condition, message) => { if (!condition) throw new Error(message); };
+      let created = 0, opens = 0; const closures = [], choices = [];
+      const fields = [{ key: 'repo', label: 'Repo', value: '', options: [{ value: '', label: 'All repos' }], display: '' }];
+      const facets = AccountExample.createFacetChrome({
+        select(label) { created++; const el = document.createElement('div'), input = document.createElement('input'); el.append(input); return { el, setOptions() {}, setValue() {}, focus() { input.focus(); }, close() {} }; },
+        change() {}, cleared() {}, canOpen: () => true, opened() { opens++; }, closed(dialog, reason) { closures.push(reason); }, clear() {},
+      });
+      facets.update(fields); document.querySelector('main').append(facets.element);
+      facets.element.querySelector('.facet-btn').click();
+      const dialog = facets.element.querySelector('dialog'), input = dialog.querySelector('input'); input.value = 'typing'; input.setSelectionRange(2, 4);
+      facets.update(fields); assert(dialog.open && input === dialog.querySelector('input') && document.activeElement === input && input.selectionStart === 2 && created === 1, 'open control identity/caret changed');
+      const blocked = new Event('wheel', { cancelable: true }); document.dispatchEvent(blocked); assert(blocked.defaultPrevented, 'modal scroll escaped');
+      facets.element.remove(); const released = new Event('wheel', { cancelable: true }); document.dispatchEvent(released); assert(!released.defaultPrevented && closures.join() === 'destroyed', 'detached modal did not release owner');
+      facets.destroy(); facets.destroy(); assert(closures.length === 1, 'duplicate destruction callback');
+      facets.element.querySelector('.facet-btn')?.click(); assert(opens === 1, 'destroyed controller revived');
+    });
+  } finally { await browser.close(); }
+});
+
+test('typed markdown treats hostile content as text and preserves nested log structure', async () => {
+  const bundle = await build({ absWorkingDir: new URL('../', import.meta.url).pathname, entryPoints: ['src/lib-contract.tsx'], bundle: true, write: false, format: 'iife', globalName: 'AccountExample', platform: 'browser', tsconfig: 'tsconfig.json', define: { 'process.env.NODE_ENV': '"production"' } });
+  const browser = await chromium.launch();
+  try {
+    const page = await browser.newPage(); await page.setContent('<!doctype html><meta charset="utf-8"><main></main>'); await page.addScriptTag({ content: bundle.outputFiles[0].text });
+    const result = await page.evaluate(() => {
+      const markdown = AccountExample.createMarkdown('<img src=x onerror=alert(1)>\n[javascript](javascript:alert) [safe](https://example.com)\n3. first\n   - nested\n     continuation\n| name | value |\n| --- | --- |\n| **text** | `code` |\n```sh\nprintf "<tag>"'); document.querySelector('main').append(markdown);
+      return { images: markdown.querySelectorAll('img').length, links: [...markdown.querySelectorAll('a')].map(a => [a.getAttribute('href'), a.target, a.rel]), nested: markdown.querySelector('ol[start="3"] > li > ul > li')?.textContent, table: markdown.querySelector('table tbody')?.textContent, code: markdown.querySelector('pre')?.textContent, text: markdown.textContent };
+    });
+    assert.equal(result.images, 0); assert.deepEqual(result.links, [['https://example.com', '_blank', 'noopener noreferrer']]); assert.equal(result.nested, 'nestedcontinuation'); assert.equal(result.table, 'textcode'); assert.equal(result.code, 'printf "<tag>"'); assert.match(result.text, /<img src=x onerror=alert\(1\)>/);
+  } finally { await browser.close(); }
+});
+
+test('numeric chart geometry works under the served CSP and releases its stylesheet', async () => {
+  const bundle = await build({ absWorkingDir: new URL('../', import.meta.url).pathname, entryPoints: ['src/lib-contract.tsx'], bundle: true, write: false, format: 'iife', globalName: 'AccountExample', platform: 'browser', tsconfig: 'tsconfig.json', define: { 'process.env.NODE_ENV': '"production"' } });
+  const browser = await chromium.launch();
+  try {
+    const page = await browser.newPage();
+    await page.route('http://geometry.test/**', route => { const url = route.request().url(); return route.fulfill({ contentType: url.endsWith('.js') ? 'text/javascript' : url.endsWith('.css') ? 'text/css' : 'text/html', headers: { 'Content-Security-Policy': "default-src 'self'; script-src 'self'; style-src 'self'" }, body: url.endsWith('.js') ? bundle.outputFiles[0].text : url.endsWith('.css') ? '.track{width:100px}.bar{height:10px}' : '<!doctype html><meta charset="utf-8"><link rel="stylesheet" href="/geometry.css"><div class="track"><div class="bar"></div></div><script src="/consumer.js"></script>' }); });
+    await page.goto('http://geometry.test/');
+    const result = await page.evaluate(() => {
+      const before = document.adoptedStyleSheets.length, layout = AccountExample.createMeasuredLayout(), bar = document.querySelector('.bar');
+      bar.classList.add(layout.className('width', 37.5, '%'));
+      const width = bar.getBoundingClientRect().width;
+      let rejected = 0;
+      for (const [property, value, unit] of [['width', NaN, '%'], ['width', Infinity, 'px'], ['width', '1; background:url(https://evil.test)', '%'], ['background', 1, '%'], ['width', 1, ';color:red']]) { try { layout.className(property, value, unit); } catch { rejected++; } }
+      const mounted = document.adoptedStyleSheets.length;
+      layout.destroy(); layout.destroy(); let disposed = false; try { layout.className('width', 1, '%'); } catch { disposed = true; }
+      return { width, before, mounted, after: document.adoptedStyleSheets.length, rejected, disposed, inlineStyles: document.querySelectorAll('[style]').length };
+    });
+    assert.equal(result.width, 37.5); assert.equal(result.mounted, result.before + 1); assert.equal(result.after, result.before); assert.equal(result.rejected, 5); assert.equal(result.disposed, true); assert.equal(result.inlineStyles, 0);
+  } finally { await browser.close(); }
+});

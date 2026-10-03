@@ -7,7 +7,7 @@ export function checkSource(source, name) {
   const fail = text => { throw new Error(`${name}: forbidden application boundary ${text}`); };
   function visit(node) {
     if ((ts.isIdentifier(node) || ts.isStringLiteral(node)) && sinks.includes(node.text) && !(name.endsWith('/lib/security.ts') && ts.isStringLiteral(node) && ts.isArrayLiteralExpression(node.parent))) fail(node.text);
-    if (name !== 'viewer.js' && name !== 'tooltip.js' && name !== 'select.js' && name !== 'shell.js') {
+    if (name !== 'shell.js') {
       if (ts.isPropertyAccessExpression(node) && node.name.text === 'style') fail('inline DOM style');
       if (ts.isElementAccessExpression(node) && node.argumentExpression?.text === 'style') fail('inline DOM style');
     }
@@ -37,7 +37,7 @@ export async function checkSources() {
     }
   }
   await walk(root);
-  for (const name of ['viewer', 'tooltip', 'select', 'shell']) {
+  for (const name of ['viewer', 'shell']) {
     checkSource(await readFile(new URL(`../crates/semon-sessions/src/${name}.js`, import.meta.url), 'utf8'), `${name}.js`);
   }
 }
