@@ -152,3 +152,20 @@ as observed in the isolated 2.1.288 probe; default settings remain
 Fixture-backed discovery tests resolve only disposable roots and verify native
 transcripts and settings remain byte-identical after collection. These native
 roots do not relocate Semon's own state or derived cache.
+
+## Claude resume and copied fork context
+
+The pinned 2.1.288 lifecycle probe retains initial, resumed and forked native
+transcript snapshots under a disposable `CLAUDE_CONFIG_DIR`. Parent resume
+preserves its consumed bytes. The fork rewrites `sessionId` while copying the
+four existing user/assistant UUIDs, parent UUIDs and API message identities.
+These exact identities establish inherited context; no explicit logical
+parent-session field was observed, so they do not establish that lineage.
+
+The localhost mock supplies five input and three output tokens per request.
+Cost-state model usage accumulates 5/3, 10/6 and 15/9; the fork includes inherited
+context. These are native snapshots of synthetic accounting, not invoices or
+newly attributable child consumption. Canonical message occurrences preserve
+the physical session namespace. Fixture tests compare cold, restarted and
+retained-raw replay for each complete snapshot; retained generation selection
+following source replacement remains a separate unresolved gate.
