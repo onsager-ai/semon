@@ -1,0 +1,49 @@
+{
+  "version": 1,
+  "harness": "GitHub Copilot CLI",
+  "harness_version": "1.0.90",
+  "build": "ccf052b4",
+  "binary_sha256": "be17b42705ca17490098d7b87f293300d72a094d125b6bb2b2557dc4a0a4f8a8",
+  "os": "Linux x86_64",
+  "execution_mode": "headless -p, offline localhost OpenAI-compatible mock provider",
+  "storage_schema": {
+    "session.start.version": 1
+  },
+  "home_override": "COPILOT_HOME=/workspace/scratch/copilot-review-1.0.90/home (disposable)",
+  "evidence_origin": "native CLI persistence with deterministic mock model",
+  "original_source_sha256": "19ebf2e95c6a256cd8e2457f5d34721ec99669c2ece36b01bdb56bffea87ece4",
+  "fixture_path": "headless-tools.events.jsonl",
+  "fixture_sha256": "58bb027c8facc6b3f532e73e5d432964c1affcb07678cabf77e5244d771fd76c",
+  "transformations": [
+    "Removed native system.message payload to avoid vendoring the system prompt",
+    "Replaced disposable absolute working directory with /fixture/probe"
+  ],
+  "observed": [
+    "two overlapping bash calls with distinct toolCallId and reversed completion",
+    "arguments and result.content persisted",
+    "shellExecution.exitCode preserved separately from success",
+    "ephemeral stdout events absent from saved events"
+  ],
+  "unverified": [
+    "interactive",
+    "approval denial",
+    "cancellation",
+    "resume/fork",
+    "compaction/truncation",
+    "deletion/retention",
+    "native model billing/token usage",
+    "non-Linux OS",
+    "versions before 1.0.90"
+  ],
+  "limitations": [
+    "A transformed runtime recording, not byte-identical native evidence",
+    "Mock model supplies calls and no authoritative token counts",
+    "The synthetic tool success flag can be true with nonzero shell exit status"
+  ],
+  "completion_order": [
+    "mock-call-1",
+    "mock-call-0"
+  ],
+  "probe_control": "call 0 waits for call 1 marker in the disposable cwd before finishing; joins and ordering are asserted from persisted IDs/event sequence, never inferred from time",
+  "environment_policy": "allow only PATH, locale, timezone and terminal settings; set private temp paths and COPILOT_HOME; no parent HOME, proxy/auth settings or credential variables forwarded"
+}
