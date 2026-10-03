@@ -44,6 +44,7 @@ for (const width of [390, 1280]) for (const mode of ['full', 'sidebar', 'native'
         window.cancelAnimationFrame=id=>{frames.delete(id);originalTimers.cancelAnimationFrame.call(window,id)};
         const originalObservers={MutationObserver:window.MutationObserver,ResizeObserver:window.ResizeObserver,IntersectionObserver:window.IntersectionObserver}, observers=new Map();
         for(const [name,Original] of Object.entries(originalObservers)) window[name]=class extends Original {observe(target,...args){let targets=observers.get(this);if(!targets)observers.set(this,targets=new Set());targets.add(target);super.observe(target,...args)}unobserve(target){observers.get(this)?.delete(target);super.unobserve(target)}disconnect(){observers.delete(this);super.disconnect()}};
+        const ready=async()=>{const deadline=performance.now()+10000;while(!document.querySelector('#lanes .srow')){assert(performance.now()<deadline,'boot did not draw Recent');await new Promise(resolve=>originalTimers.setTimeout.call(window,resolve,25));}await settle();};
         const effects=()=>timers.size+intervals.size+frames.size+[...observers.values()].filter(targets=>targets.size).length;
         const count=()=>[...registrations.values()].reduce((sum,list)=>sum+list.length,0);
         const app=document.querySelector('.app');
@@ -51,12 +52,13 @@ for (const width of [390, 1280]) for (const mode of ['full', 'sidebar', 'native'
         let destroys=0, accounts=0, pendingResolve, pendingSignal, nativeResolve, nativeSignal, staleDestroyed=0, requests=0, hold=false;
         window.fetch=(path,options)=>{
           if(String(path).startsWith('/api/model')) { requests++; if(hold) {pendingSignal=options?.signal; return new Promise(resolve=>{pendingResolve=()=>resolve(new Response(JSON.stringify(model),{headers:{'Content-Type':'application/json'}}));});} return Promise.resolve(new Response(JSON.stringify(model),{headers:{'Content-Type':'application/json'}})); }
+          if(String(path).startsWith('/api/tx'))return new Promise(resolve=>originalTimers.setTimeout.call(window,resolve,100)).then(()=>originalFetch(path,options));
           return originalFetch(path,options);
         };
         const host=()=>(mode==='native'||mode==='host')?{machinesPath:'/manage/machines',nativePage:mode==='native'?{title:'Workspace',nav:'machines'}:undefined,initialMachines:{element:document.createElement('div'),destroy(){destroys++}},loadMachines(signal){nativeSignal=signal;return new Promise(resolve=>{nativeResolve=()=>resolve({element:document.createElement('div'),destroy(){staleDestroyed++}})});},modelAccount(){accounts++}}:null;
         try {
           for(let i=0;i<3;i++) {
-            const owner=Application.mountViewerApplication(host()); await settle();
+            const owner=Application.mountViewerApplication(host()); await ready();
             assert(document.querySelectorAll('#lanes .srow').length>0,'boot did not draw Recent');
             let panelBody; const active=count(); assert(active>0,'no document effects were owned');
             if(mode==='full') {document.querySelector('#lanes .srow').click();for(let attempt=0;attempt<20&&!document.querySelector('#page .turns');attempt++)await new Promise(resolve=>originalTimers.setTimeout.call(window,resolve,50));assert(document.querySelector('#page .turns'),'session did not commit');document.querySelector('#more-btn').click();await settle();assert(document.querySelector('dialog'),'session panel did not open');panelBody=document.querySelector('dialog .panel-b');} if(mode==='host') {document.querySelector('#nav [data-go="home"]').click();await settle();document.querySelector('#nav [data-go="machines"]').click();await settle();}
@@ -69,8 +71,8 @@ for (const width of [390, 1280]) for (const mode of ['full', 'sidebar', 'native'
           old.destroy();assert(pendingSignal?.aborted,'pending model was not aborted');
           const before=document.body.textContent, beforeAccounts=accounts;
           pendingResolve();await settle();assert(document.body.textContent===before&&accounts===beforeAccounts,'late model revived a root or host callback');
-          hold=false;const first=Application.mountViewerApplication(host());await settle();const active=count();
-          const second=Application.mountViewerApplication(host());await settle();assert(count()===active,'replacement duplicated document effects');
+          hold=false;const first=Application.mountViewerApplication(host());await ready();const active=count();
+          const second=Application.mountViewerApplication(host());await ready();assert(count()===active,'replacement duplicated document effects');
           first.destroy();assert(count()===active,'old owner destroyed replacement');second.destroy();await settle();assert(count()===0&&effects()===0,'replacement effects leaked');
           return {requests,destroys};
         } finally {Object.assign(window,originalTimers,originalObservers);window.fetch=originalFetch;EventTarget.prototype.addEventListener=add;EventTarget.prototype.removeEventListener=remove;}
