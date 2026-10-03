@@ -1322,7 +1322,7 @@ fn ledger_row(connection: &Connection, path: &str) -> rusqlite::Result<Option<(i
                             modified_ns: u128::from_be_bytes(row.get(4)?),
                         },
                         offset: uint(row.get(5)?),
-                        head: row.get(6)?,
+                        prefix: row.get(6)?,
                         tail: row.get(7)?,
                     },
                 ))
@@ -1373,7 +1373,7 @@ fn read_file(
             modified_ns: u128::from_be_bytes(row.get(5)?),
         },
         offset: uint(row.get(6)?),
-        head: row.get(7)?,
+        prefix: row.get(7)?,
         tail: row.get(8)?,
     };
 
@@ -1644,7 +1644,7 @@ fn write_file(
                 modified_ns,
             },
         offset,
-        head,
+        prefix,
         tail,
     } = ledger;
     let rate_limits = rate_limits.as_ref().map(json).transpose()?;
@@ -1657,7 +1657,7 @@ fn write_file(
             int(*size),
             modified_ns.to_be_bytes(),
             int(*offset),
-            head,
+            prefix,
             tail,
             entrypoint,
             title,
@@ -2039,7 +2039,7 @@ mod tests {
                 modified_ns: u128::MAX - u128::from(n),
             },
             offset: 3,
-            head: [n; 32],
+            prefix: [n; 32],
             tail: [n.wrapping_add(1); 32],
         }
     }

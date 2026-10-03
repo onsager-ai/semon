@@ -101,8 +101,18 @@ record is deleted.
 This deliberately reads the consumed prefix on each capture invocation, including
 idle invocations. It prioritizes verified replacement handling over the former
 size-only shortcut; an idle-read optimization needs equally strong source-change
-evidence. It does not repair the separate sessions viewer index's window-based
-ledger. It also does not define removal of old occurrence tails on truncation,
+evidence. It does not define removal of old occurrence tails on truncation,
 rebuild selection across retained generations, or early legacy-to-item
 reconciliation. Those remain #237 work, so this bounded repair does not establish
 the complete historical/incremental/retained-evidence oracle.
+
+
+The sessions viewer ledger also verifies the complete consumed prefix when file
+stat changes, replacing its former two-window shortcut. Its versioned, text-free
+cache rebuilds once on upgrade; idle scans with unchanged stat retain their
+existing shortcut. Changed-file scans hash the old prefix before resuming and
+the consumed prefix after parsing. This adds reads on growing or touched files,
+but does not reparse unchanged history. Explicit native tool IDs and byte-offset
+metadata are rebuilt from the source after an interior mutation. A writer that
+preserves the entire file stat while mutating bytes is outside this shortcut's
+change-detection contract.
