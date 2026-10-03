@@ -180,7 +180,9 @@ an API message ID alone is not a block identity.
 
 The batch executes serially in this native run. Overlapping/reversed same-name
 call decoding remains covered by the separately labeled source-shaped fixture.
-An explicit fixture tool allowlist does not establish a persisted approval ID.
+The initial run uses `permission-mode default` with an explicit fixture tool
+allowlist; resume and fork use native default `auto` and perform no new tools.
+The allowlist does not establish a persisted approval ID.
 Resume appends under the same physical session and switches Sonnet to Haiku;
 fork copies these records into a distinct physical session without an explicit
 logical parent edge. The cold/restart/raw oracle compares six, eight and ten
