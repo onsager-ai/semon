@@ -105,15 +105,18 @@ test('error-navigation request owners stay bounded across polls and mode changes
       timerOwner.clearTimeout(timer);timerOwner.destroy();window.clearTimeout=clear0;
       check(canceled===1,'a canceled timer retained its teardown cleanup');
       const retained=()=>[...scopes.values()].reduce((count,items)=>count+items.size,0);
-      let resolvePending,signal,hold=false,draws=0;
+      let resolvePending,signal,hold=false,draws=0,tails=0;
       const fetch0=window.fetch;
       window.fetch=(_url,options)=>hold?new Promise(resolve=>{signal=options.signal;resolvePending=resolve}):Promise.resolve(new Response(JSON.stringify({slots:[],errors:0,version:'stable'}),{headers:{'Content-Type':'application/json'}}));
-      const owner=ErrorOwnership.createErrorNavigation({navigation:{route:{v:'session',id:'s'}},TX:{s:[]},TXM:{s:{from:0,to:0,total:0}},TOK:{},SESS:{s:{signals:{}}},show:{tools:true},sidebarOnly:false,page:()=>document.getElementById('page'),drawSessionBar(){draws++},render(){draws++},keepFocus:fn=>fn(),countOf:()=>0,capture:()=>({}),restore(){},opener:()=>null,resetPagerInput(){},stopOpeningEndPin(){},clearFind(){},centre(){},fetchTx:async()=>null,dropTx(){},spread(){},tail:async()=>null});
+      const host={navigation:{route:{v:'session',id:'s'}},TX:{s:[]},TXM:{s:{from:0,to:0,total:0,tok:'a'}},TOK:{},SESS:{s:{signals:{}}},show:{tools:true},sidebarOnly:false,page:()=>document.getElementById('page'),drawSessionBar(){draws++},render(){draws++},keepFocus:fn=>fn(),countOf:()=>0,capture:()=>({}),restore(){},opener:()=>null,resetPagerInput(){},stopOpeningEndPin(){},clearFind(){},centre(){},fetchTx:async()=>null,dropTx(){},spread(){},tail:async()=>{tails++;return null}};
+      const owner=ErrorOwnership.createErrorNavigation(host);
       try {
         for(let mode=0;mode<3;mode++){
-          owner.open('s');await owner.live();check(retained()===1,'completed error-list request remained owned');
+          host.show={tools:false};host.TOK={s:'a'};
+          owner.open('s');check(host.show.tools,'error mode used a stale replaced view state');await owner.live();check(retained()===1,'completed error-list request remained owned');
           for(let poll=0;poll<10;poll++){await owner.live();check(retained()===1,'polls accumulated completed request controllers')}
-          owner.close();await Promise.resolve();check(retained()===0,'closed error mode retained its request owner');
+          host.TXM.s={from:1,to:1,total:1};owner.close();await Promise.resolve();
+          check(!host.show.tools&&tails===0,'error close used stale view/growth state');check(retained()===0,'closed error mode retained its request owner');
         }
         owner.open('s');await owner.live();hold=true;const pending=owner.live();
         check(signal&&!signal.aborted,'pending error-list request lacks a live owner');owner.destroy();check(signal.aborted&&retained()===0,'error-navigation destroy leaked a pending request');

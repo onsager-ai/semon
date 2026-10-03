@@ -7667,7 +7667,7 @@ globalThis.__semonUIShared = __semonUIShared;
 
   // src/navigation/errors.ts
   function createErrorNavigation(host2) {
-    const { navigation, TX, TXM, TOK, SESS, show, drawSessionBar, render: render2, keepFocus, countOf, capture, restore, opener, resetPagerInput, stopOpeningEndPin, centre, fetchTx, dropTx, spread, tail } = host2;
+    const { navigation, TX, TXM, SESS, drawSessionBar, render: render2, keepFocus, countOf, capture, restore, opener, resetPagerInput, stopOpeningEndPin, centre, fetchTx, dropTx, spread, tail } = host2;
     const scope = new EffectScope();
     let pending = null, modeRequest = null;
     const $ = (selector) => host2.page().ownerDocument.querySelector(selector);
@@ -7705,9 +7705,9 @@ globalThis.__semonUIShared = __semonUIShared;
       resetPagerInput();
       stopOpeningEndPin();
       host2.clearFind();
-      Object.assign(ERR, { mode, on: true, sid, slots: [], listed: false, count: mode === "signals" ? signalCount(SESS[sid]) : countOf(SESS[sid], "errors") ?? 0, version: null, k: -1, slot: null, saved: capture(), range: { tx: TX[sid], m: { ...TXM[sid] } }, tools: show.tools, gen: ERR.gen + 1 });
-      if (!show.tools) {
-        show.tools = true;
+      Object.assign(ERR, { mode, on: true, sid, slots: [], listed: false, count: mode === "signals" ? signalCount(SESS[sid]) : countOf(SESS[sid], "errors") ?? 0, version: null, k: -1, slot: null, saved: capture(), range: { tx: TX[sid], m: { ...TXM[sid] } }, tools: host2.show.tools, gen: ERR.gen + 1 });
+      if (!host2.show.tools) {
+        host2.show.tools = true;
         render2();
       } else drawSessionBar();
       document.getElementById("err-next")?.focus({ preventScroll: true });
@@ -7831,7 +7831,7 @@ globalThis.__semonUIShared = __semonUIShared;
       releaseMode();
       ERR.on = false;
       ERR.gen++;
-      show.tools = ERR.tools;
+      host2.show.tools = ERR.tools;
       ERR.saved = ERR.range = null;
       errLive.textContent = "";
       if (away && range && m && (m.from !== range.m.from || m.to < range.m.to)) dropTx(sid);
@@ -7848,7 +7848,7 @@ globalThis.__semonUIShared = __semonUIShared;
         TX[sid] = range.tx;
         TXM[sid] = range.m;
         spread(sid);
-        if (range.m.to >= range.m.total && range.m.tok !== TOK[sid]) p = tail(sid).catch(() => null);
+        if (range.m.to >= range.m.total && range.m.tok !== host2.TOK[sid]) p = tail(sid).catch(() => null);
       }
       p.then(() => {
         if (navigation.route.v !== "session" || navigation.route.id !== sid || ERR.on || ERR.gen !== generation) return;
