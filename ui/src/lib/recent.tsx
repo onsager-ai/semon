@@ -81,8 +81,8 @@ export function createRecentRenderer(root: HTMLElement, host: RecentHost): Recen
           <span class="session-row-meta srow-meta for">
             {harness && <span class="hicon hi-sidebar" data-harness={harness.id} role="img" aria-label={harness.name} data-tip={harness.name}>
               {harness.light === harness.dark ? <img src={harness.light} alt="" draggable={false} decoding="async" /> : <>
-                <img class="hi-light" src={harness.light} alt="" draggable={false} decoding="async" loading={harness.darkTheme ? 'lazy' : undefined} />
-                <img class="hi-dark" src={harness.dark} alt="" draggable={false} decoding="async" loading={harness.darkTheme ? undefined : 'lazy'} />
+                <img class="hi-light" loading={harness.darkTheme ? 'lazy' : undefined} src={harness.light} alt="" draggable={false} decoding="async" />
+                <img class="hi-dark" loading={harness.darkTheme ? undefined : 'lazy'} src={harness.dark} alt="" draggable={false} decoding="async" />
               </>}
             </span>}
             <span class="row-model" data-tip={item.modelTip}>{item.model}</span>
