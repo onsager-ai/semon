@@ -15,4 +15,15 @@ export function setGeometry(node: HTMLElement, slot: GeometrySlot, value: number
   if (value === null) record.values.delete(slot); else record.values.set(slot,value); paint();
   if (!observer) { observer = new MutationObserver(() => { if ([...records.keys()].some(node => !node.isConnected)) paint(); }); observer.observe(document.documentElement,{ childList: true, subtree: true }); }
 }
+/** Release measurements when the host owning these document nodes is torn down. */
+export function releaseGeometry(root: HTMLElement, slots?: readonly GeometrySlot[]) {
+  for (const [node, record] of records) {
+    if (slots ? node === root : node === root || root.contains(node) || !node.isConnected) {
+      if (slots) for (const slot of slots) record.values.delete(slot);
+      if (!slots || !record.values.size) { records.delete(node); delete node.dataset.semonGeometry; }
+    }
+  }
+  if (records.size) paint();
+  else { observer?.disconnect(); observer = null; if (sheet) document.adoptedStyleSheets = document.adoptedStyleSheets.filter(value => value !== sheet); sheet = null; }
+}
 export function revealMeasuredTurn(node: HTMLElement, visible: boolean) { node.classList.toggle('semon-measuring-turn',visible); }
