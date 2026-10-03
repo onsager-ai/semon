@@ -20,8 +20,20 @@ static TEST_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 #[test]
 fn compatibility_blocks_cold_restart_and_retained_raw_parity() {
     let source = include_bytes!("../../../tests/fixtures/compatibility/v1/claude-blocks.jsonl");
+    compatibility_capture_parity(source, "compat", 5);
+}
+
+#[test]
+fn compatibility_native_claude_2_1_288_cold_restart_and_retained_raw_parity() {
+    let source = include_bytes!(
+        "../../../tests/fixtures/compatibility/claude-2.1.288/initial-transcript.jsonl"
+    );
+    compatibility_capture_parity(source, "native-claude-compat", 2);
+}
+
+fn compatibility_capture_parity(source: &[u8], session: &str, expected_occurrences: usize) {
     let root = TestDir::new();
-    let path = root.path().join("compat.jsonl");
+    let path = root.path().join(format!("{session}.jsonl"));
     let cursor = root.path().join("cursor.json");
     let database = root.path().join("incremental.sqlite3");
     let mut cold = TraceStore::open_in_memory().unwrap();
@@ -33,9 +45,10 @@ fn compatibility_blocks_cold_restart_and_retained_raw_parity() {
         &options(&cursor),
     )
     .unwrap();
-    assert!(
-        !cold.log(&LogFilter::default()).unwrap().is_empty(),
-        "the fixture must project occurrences"
+    assert_eq!(
+        cold.log(&LogFilter::default()).unwrap().len(),
+        expected_occurrences,
+        "known fixture messages and blocks must project"
     );
     fs::remove_file(&cursor).unwrap();
     let mut end = 0;
@@ -54,7 +67,7 @@ fn compatibility_blocks_cold_restart_and_retained_raw_parity() {
         incremental.log(&LogFilter::default()).unwrap()
     );
     let raw = incremental
-        .fetch_raw_carrier_records_for_occurrences(OccurrenceSelector::Session("compat"))
+        .fetch_raw_carrier_records_for_occurrences(OccurrenceSelector::Session(session))
         .unwrap();
     let retained: Vec<u8> = raw
         .iter()

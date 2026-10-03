@@ -1,0 +1,37 @@
+{
+  "version": 1,
+  "harness": "Claude Code",
+  "harness_version": "2.1.288",
+  "build": null,
+  "binary_sha256": "0298068b686e7fdbaf9402a7a587bb7f49c0b0e084de09f69145a0719207640c",
+  "os": "Linux x86_64",
+  "execution_mode": "headless --print, isolated localhost synthetic Anthropic SSE; no tools",
+  "storage_schema": "JSONL transcript with user/assistant, parentUuid, version and native metadata records",
+  "home_override": "CLAUDE_CONFIG_DIR=/workspace/scratch/claude-probe-2.1.288/config (disposable)",
+  "evidence_origin": "native CLI persistence with deterministic mock model",
+  "original_source_sha256": "23f816d1422a64275ec0dc2ea1e3aa8fc606a5850eef4ba0a437ed9af1444f56",
+  "fixture_path": "initial-transcript.jsonl",
+  "fixture_sha256": "3f2b1108a753708da406d0f312d40a2fcc435bd85453a1799f1a687d7fc0e06b",
+  "transformations": [
+    "Removed native attachment/rendered harness content and prompt-state payloads",
+    "Replaced native session identity consistently with native-claude-compat",
+    "Replaced disposable root path consistently with /fixture/probe"
+  ],
+  "observed": [
+    "native home override and projects transcript discovery",
+    "headless user/assistant IDs and parentUuid chain",
+    "assistant usage supplied by mock provider",
+    "queue, attachment, atis-latch, last-prompt and cost-state records persisted"
+  ],
+  "limitations": [
+    "Transformed runtime recording, not byte-identical retained native evidence",
+    "Mock provider token counts are synthetic; native cost-state is not an invoice",
+    "No native tool, denial, cancellation, resume/fork or compaction coverage",
+    "Only one pinned Linux headless release tested; other versions and platforms unknown"
+  ],
+  "expected_fields": {
+    "known": "native sessionId, UUID/parentUuid, version, user/assistant content and assistant usage presence",
+    "oracle": "full structural occurrence parity and exact retained transformed bytes across cold/restart/raw replay",
+    "unknown": "native billing, fork/continuation, compaction, tool approvals/results and other modes/platforms"
+  }
+}
