@@ -15,7 +15,7 @@ export interface ErrorNavigationHost {
   dropTx(sid: string): void; spread(sid: string): void; tail(sid: string): Promise<unknown>;
 }
 export function createErrorNavigation(host: ErrorNavigationHost) {
-  const { navigation, TX, TXM, TOK, SESS, show, drawSessionBar, render, keepFocus, countOf, capture, restore, opener, resetPagerInput, stopOpeningEndPin, centre, fetchTx, dropTx, spread, tail } = host;
+  const { navigation, TX, TXM, SESS, drawSessionBar, render, keepFocus, countOf, capture, restore, opener, resetPagerInput, stopOpeningEndPin, centre, fetchTx, dropTx, spread, tail } = host;
   const scope = new EffectScope(); let pending: AbortController | null = null, modeRequest: AbortController | null = null;
   const $ = <T extends HTMLElement = HTMLElement>(selector: string): T | null => host.page().ownerDocument.querySelector<T>(selector);
   const enc = encodeURIComponent, SIDEBAR_ONLY = host.sidebarOnly;
@@ -36,8 +36,8 @@ export function createErrorNavigation(host: ErrorNavigationHost) {
   function openErrors(sid: string, mode: ErrorState["mode"] = "errors") {
     if (ERR.on || navigation.route.v !== "session" || navigation.route.id !== sid || !TXM[sid]) return;
     releaseMode(); modeRequest = scope.request(); resetPagerInput(); stopOpeningEndPin(); host.clearFind();
-    Object.assign(ERR, { mode, on: true, sid, slots: [], listed: false, count: mode === "signals" ? signalCount(SESS[sid]) : countOf(SESS[sid], "errors") ?? 0, version: null, k: -1, slot: null, saved: capture(), range: { tx: TX[sid], m: { ...TXM[sid] } }, tools: show.tools, gen: ERR.gen + 1 });
-    if (!show.tools) { show.tools = true; render(); } else drawSessionBar();
+    Object.assign(ERR, { mode, on: true, sid, slots: [], listed: false, count: mode === "signals" ? signalCount(SESS[sid]) : countOf(SESS[sid], "errors") ?? 0, version: null, k: -1, slot: null, saved: capture(), range: { tx: TX[sid], m: { ...TXM[sid] } }, tools: host.show.tools, gen: ERR.gen + 1 });
+    if (!host.show.tools) { host.show.tools = true; render(); } else drawSessionBar();
     document.getElementById("err-next")?.focus({ preventScroll: true }); errLabel(true);
     const gen = ERR.gen;
     fetchErrors(sid).then(() => { if (ERR.gen !== gen || !ERR.on) return; if (ERR.slots.length) { ERR.k = 0; showError(true); } else errLabel(true); }, () => { if (ERR.gen === gen && ERR.on) { errLive.textContent = "Couldn't list " + ERR.mode; ERR.notice = "Couldn't list " + ERR.mode; drawSessionBar(); } });
@@ -108,7 +108,7 @@ export function createErrorNavigation(host: ErrorNavigationHost) {
   function dropErrors(away = false) {
     if (!ERR.on) return;
     const sid = ERR.sid; if (!sid) return; const range = ERR.range, m = TXM[sid];
-    releasePending(); releaseMode(); ERR.on = false; ERR.gen++; show.tools = ERR.tools; ERR.saved = ERR.range = null; errLive.textContent = "";
+    releasePending(); releaseMode(); ERR.on = false; ERR.gen++; host.show.tools = ERR.tools; ERR.saved = ERR.range = null; errLive.textContent = "";
     if (away && range && m && (m.from !== range.m.from || m.to < range.m.to)) dropTx(sid);
   }
   function closeErrors() {
@@ -119,7 +119,7 @@ export function createErrorNavigation(host: ErrorNavigationHost) {
     // comes back, caught up with the tail when it reached the end and the session grew since.
     if (range && m && TX[sid] && (m.from !== range.m.from || m.to < range.m.to)) {
       TX[sid] = range.tx; TXM[sid] = range.m; spread(sid);
-      if (range.m.to >= range.m.total && range.m.tok !== TOK[sid]) p = tail(sid).catch(() => null);
+      if (range.m.to >= range.m.total && range.m.tok !== host.TOK[sid]) p = tail(sid).catch(() => null);
     }
     p.then(() => {
       if (navigation.route.v !== "session" || navigation.route.id !== sid || ERR.on || ERR.gen !== generation) return;
