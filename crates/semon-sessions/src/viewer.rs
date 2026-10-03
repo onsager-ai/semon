@@ -3558,7 +3558,6 @@ mod tests {
             "src/lib/routes.ts",
             "src/lib/paging.ts",
             "src/lib/ordering.ts",
-
         ] {
             assert!(
                 app.contains(&format!("  // {module}\n")),
