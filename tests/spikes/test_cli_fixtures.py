@@ -5,6 +5,8 @@ from pathlib import Path
 import unittest
 import importlib.util
 import tempfile
+import subprocess
+import sys
 
 ROOT = Path(__file__).resolve().parents[1] / 'fixtures/compatibility'
 
@@ -28,6 +30,41 @@ class CompatibilityFixtures(unittest.TestCase):
             self.assertEqual(environment['COPILOT_HOME'], str(output / 'home'))
             self.assertEqual(environment['TMPDIR'], str(output / 'tmp'))
             self.assertEqual(ambient, original, 'parent settings must remain intact')
+
+    def test_lifecycle_validation_survives_python_optimization(self):
+        # Only a disposable fake executable is launched, never a native harness.
+        script = Path(__file__).with_name('copilot-lifecycle.py')
+        for failure in ('changed-prefix', 'executed-denial'):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                fake = root / 'fake-copilot'
+                fake.write_text('#!' + sys.executable + '\n' + """
+import os, pathlib, sys
+if '--version' in sys.argv:
+    print('GitHub Copilot CLI 1.0.91.')
+    sys.exit(0)
+root = pathlib.Path.cwd()
+state = pathlib.Path(os.environ['COPILOT_HOME']) / 'session-state'
+initial = state / 'synthetic-session' / 'events.jsonl'
+initial.parent.mkdir(parents=True, exist_ok=True)
+if any(arg.startswith('--resume=') for arg in sys.argv):
+    initial.write_bytes(b'changed\\n' if FAILURE == 'changed-prefix' else b'{}\\n{}\\n')
+elif '--deny-tool=shell' in sys.argv:
+    denied = state / 'synthetic-denied' / 'events.jsonl'
+    denied.parent.mkdir(parents=True)
+    denied.write_bytes(b'{}\\n')
+    (root / 'SHOULD-NOT-EXIST').touch()
+else:
+    initial.write_bytes(b'{}\\n')
+""".replace('FAILURE', repr(failure)))
+                fake.chmod(0o700)
+                output = root / 'probe'
+                result = subprocess.run([sys.executable, '-O', str(script), '--copilot',
+                                         str(fake), '--output', str(output)],
+                                        capture_output=True, text=True, timeout=15)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn('RuntimeError: Probe validation failed:', result.stderr)
+                self.assertFalse((output / 'report.json').exists())
 
     def test_native_baseline_provenance_and_hashes(self):
         for fixture in ('claude-2.1.288', 'codex-0.159.0-alpha.3'):

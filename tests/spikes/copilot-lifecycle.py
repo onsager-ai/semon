@@ -4,6 +4,11 @@
 import argparse, importlib.util, pathlib, subprocess, json, http.server, threading, hashlib, collections
 
 
+def require(condition, message):
+    if not condition:
+        raise RuntimeError(message)
+
+
 def main():
     spec = importlib.util.spec_from_file_location(
         "probe", pathlib.Path(__file__).with_name("copilot-offline.py")
@@ -149,34 +154,47 @@ def main():
     try:
         run("initial", [])
         initial = snapshot()
-        assert len(initial) == 1
+        require(len(initial) == 1, "Probe validation failed: len(initial) == 1")
         sid = next(iter(initial))
         (root / "initial.events.jsonl").write_bytes(initial[sid])
         mode = "resume"
         run("resume", ["--resume=" + sid])
         resumed = snapshot()
-        assert len(resumed) == 1
-        assert resumed[sid].startswith(initial[sid])
+        require(len(resumed) == 1, "Probe validation failed: len(resumed) == 1")
+        require(
+            resumed[sid].startswith(initial[sid]),
+            "Probe validation failed: resumed[sid].startswith(initial[sid])",
+        )
         mode = "denial"
         run("denial", ["--deny-tool=shell"])
         denied = snapshot()
-        assert len(denied) == 2
-        assert not (root / "SHOULD-NOT-EXIST").exists()
+        require(len(denied) == 2, "Probe validation failed: len(denied) == 2")
+        require(
+            not (root / "SHOULD-NOT-EXIST").exists(),
+            "Probe validation failed: not (root / 'SHOULD-NOT-EXIST').exists()",
+        )
     finally:
         server.shutdown()
         server.server_close()
         thread.join()
     resumed_rows = [json.loads(line) for line in resumed[sid].splitlines()]
-    assert sum(row["type"] == "session.resume" for row in resumed_rows) == 1
+    require(
+        sum(row["type"] == "session.resume" for row in resumed_rows) == 1,
+        "Probe validation failed: sum((row['type'] == 'session.resume' for row in resumed_rows)) == 1",
+    )
     snapshots = [
         row["data"]["modelMetrics"]["gpt-4"]["usage"]
         for row in resumed_rows
         if row["type"] == "session.shutdown"
     ]
-    assert [
-        (row["inputTokens"], row["outputTokens"], row["cacheReadTokens"])
-        for row in snapshots
-    ] == [(11, 3, 2), (22, 6, 4)]
+    require(
+        [
+            (row["inputTokens"], row["outputTokens"], row["cacheReadTokens"])
+            for row in snapshots
+        ]
+        == [(11, 3, 2), (22, 6, 4)],
+        "Probe validation failed: [(row['inputTokens'], row['outputTokens'], row['cacheReadTokens']) for row in snapshots] == [(11, 3, 2), (22, 6, 4)]",
+    )
     denial_id = next(identity for identity in denied if identity != sid)
     denial_rows = [json.loads(line) for line in denied[denial_id].splitlines()]
     starts = [
@@ -185,13 +203,20 @@ def main():
     completions = [
         row["data"] for row in denial_rows if row["type"] == "tool.execution_complete"
     ]
-    assert len(starts) == len(completions) == 1
-    assert (
-        starts[0]["toolCallId"] == completions[0]["toolCallId"] == "fixture-denied-call"
+    require(
+        len(starts) == len(completions) == 1,
+        "Probe validation failed: len(starts) == len(completions) == 1",
     )
-    assert (
+    require(
+        starts[0]["toolCallId"]
+        == completions[0]["toolCallId"]
+        == "fixture-denied-call",
+        "Probe validation failed: starts[0]['toolCallId'] == completions[0]['toolCallId'] == 'fixture-denied-call'",
+    )
+    require(
         completions[0]["success"] is False
-        and completions[0]["error"]["code"] == "denied"
+        and completions[0]["error"]["code"] == "denied",
+        "Probe validation failed: completions[0]['success'] is False and completions[0]['error']['code'] == 'denied'",
     )
     requested = [
         call
@@ -199,8 +224,14 @@ def main():
         if row["type"] == "assistant.message"
         for call in row["data"].get("toolRequests", [])
     ]
-    assert len(requested) == 1 and requested[0]["toolCallId"] == starts[0]["toolCallId"]
-    assert requested[0]["arguments"] == starts[0]["arguments"]
+    require(
+        len(requested) == 1 and requested[0]["toolCallId"] == starts[0]["toolCallId"],
+        "Probe validation failed: len(requested) == 1 and requested[0]['toolCallId'] == starts[0]['toolCallId']",
+    )
+    require(
+        requested[0]["arguments"] == starts[0]["arguments"],
+        "Probe validation failed: requested[0]['arguments'] == starts[0]['arguments']",
+    )
     report = {
         "initial_sha256": hashlib.sha256(initial[sid]).hexdigest(),
         "version": args.expected_version,

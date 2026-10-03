@@ -63,12 +63,13 @@ The home also contains workspace YAML and a SQLite session store with WAL/SHM.
 Do not copy live database/WAL files into mirrors.
 
 The headless stdout stream contains ephemeral model/delta/idle events absent
-from the saved events. The saved file includes `session.shutdown` and per-model
-metrics, but this single no-token mock response cannot establish native usage
-accounting. This is native CLI persistence with a mock model, not a paid/native
-model validation. Interactive, prior releases, concurrent tools, resume/fork,
-approvals, compaction and mutation behavior remain unverified. #238 is not yet
-accepted and the adapter implementation gate remains open.
+from saved events. Pinned 1.0.90 and 1.0.91 probes now cover concurrent tool
+completion, same-session resume and explicit shell denial. Saved shutdown
+metrics accumulate across resume under synthetic mock usage; their native billing
+units remain unknown. See [the detailed probe](copilot-probe.md) for fixture
+provenance and observed boundaries. Interactive execution, logical forks,
+approval identities, compaction and mutation behavior remain unverified. #238
+is not yet accepted and the adapter implementation gate remains open.
 
 ## Versioned Claude and Codex native baselines
 
