@@ -2,9 +2,8 @@
 
 Issue [#224](https://github.com/onsager-ai/semon/issues/224) tracks five remaining
 legacy-host removal slices. Component rendering is integrated; the application
-host is composed from strict typed controllers; native-shell integration remains
-the next slice. This record describes source
-boundaries and does not claim production acceptance.
+host and native shell are composed from strict typed controllers. This record
+describes source boundaries and does not claim production acceptance.
 
 | Owner | Data and effects | Commit boundary |
 | --- | --- | --- |
@@ -46,3 +45,9 @@ requests leave the scope so long-lived polling does not retain old controllers.
 Application controllers consume explicit typed ports instead of importing a
 second router/model/poller. Late boot responses cannot notify the host or recreate
 a root after teardown; replacing a mount first destroys the previous owner.
+
+The native shell owner is `mountNativeShell()` in `ui/src/app/native-shell.ts`.
+It retains Rust markup and native forms, owns each enhancement listener/timer and
+aborts readiness requests before removing effects. Replacement mounts destroy
+the previous owner. Full-viewer pages continue to use their existing drawer
+owner; sidebar-only and native pages consume this separately served entry.

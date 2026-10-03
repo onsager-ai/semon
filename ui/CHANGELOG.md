@@ -1,5 +1,16 @@
 # Shared UI changes
 
+## 2026-10-03 — typed native shell and final source assets
+
+The fallback shell enhancements now have a typed `mountNativeShell` owner for
+native forms, dialogs, copy controls and readiness polling. Its optional
+`chrome: false` mode shares these controls with a viewer host without duplicating
+the drawer or top bar. Teardown cancels effects and aborts readiness requests;
+late clipboard/readiness responses remain inert. Both handwritten application
+scripts and the internal bridge are deleted. Rust embeds generated assets and
+build/freshness/security checks include the shell alongside the viewer/shared
+prefix. External consumers must integrate and test the final source pin.
+
 ## 2026-10-03 — application ownership and handwritten viewer removal
 
 The document entry now composes strict typed application controllers and returns
@@ -9,7 +20,7 @@ listeners, timers and animation frames. Standalone, sidebar and native host
 mounts exercise the same owner. The handwritten viewer and internal compatibility
 bridge are deleted; Cargo still consumes checked-in generated assets without Node.
 Public shared-library exports, URLs, embed configuration/events and fallback shell
-contracts remain supported. Native-shell removal and final Hub pin follow separately.
+contracts remain supported. Native-shell removal and final consumer adoption follow separately.
 
 ## 2026-10-03 — complete screen and controller migration
 
