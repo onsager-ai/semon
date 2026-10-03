@@ -1,0 +1,39 @@
+{
+  "version": 1,
+  "fixtures": [
+    {
+      "path": "codex-legacy.jsonl",
+      "sha256": "8032c1ffccbbd98dfd08017b0872c9fbdd7e8a250065848d779ffa8aa6b4907c",
+      "origin": "source-shaped synthetic",
+      "harness_version": null,
+      "build": null,
+      "os": "synthetic POSIX paths; no native OS claim",
+      "execution_mode": "saved-state parser only",
+      "storage_schema": "codex-legacy",
+      "home_override": "isolated temporary directory passed directly to process_file",
+      "source_reference": "semon main 24e1932ef78238fdb13b5c1d11b61636695baf34 existing normalization/tests",
+      "expected": "cold/restart/raw-replay occurrence and retained-byte parity; structural projection only",
+      "limitations": [
+        "Not a native harness capture",
+        "No runtime lifecycle, approvals, fork or usage completeness claim"
+      ]
+    },
+    {
+      "path": "claude-blocks.jsonl",
+      "sha256": "432410f5069e90cc8d9efcefda4538e7a6556bfa73c35c01bc7bae2808f44841",
+      "origin": "source-shaped synthetic",
+      "harness_version": null,
+      "build": null,
+      "os": "synthetic POSIX paths; no native OS claim",
+      "execution_mode": "saved-state parser only",
+      "storage_schema": "claude-blocks",
+      "home_override": "isolated temporary directory passed directly to process_file",
+      "source_reference": "semon main 24e1932ef78238fdb13b5c1d11b61636695baf34 existing normalization/tests",
+      "expected": "cold/restart/raw-replay occurrence and retained-byte parity; structural projection only",
+      "limitations": [
+        "Not a native harness capture",
+        "No runtime lifecycle, approvals, fork or usage completeness claim"
+      ]
+    }
+  ]
+}
