@@ -21,6 +21,7 @@ This reverses the overhaul's original "serif for what agents write" rule. Marvin
 | `--fs-ui` | 14 / 20 desktop, 15 / 22 phone | Interface body: list rows, names, buttons |
 | `--fs-read` | 16 / 1.5 sans | Messages from agents, briefs and questions on Home |
 | `--fs-title` | 16 desktop, 17 phone, 600 | The top bar's title, the only page title |
+| `--fs-display` | 26 / 1.2, 400 | First-run and public-document headings |
 | `--fs-fig` | 22 / 28, 600 | Figures: Analytics headlines, the session's cost |
 
 Nothing is smaller than 12 px. Weight 600 marks names and titles only.

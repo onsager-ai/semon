@@ -1,0 +1,70 @@
+{
+  "runtimeTokens": {
+    "--account-bottom": "Measured account menu placement, set by the shell host.",
+    "--account-left": "Measured account menu placement, set by the shell host.",
+    "--account-width": "Measured account menu width, set by the shell host.",
+    "--barh": "Measured topbar height, set by application layout."
+  },
+  "approvedLiterals": [
+    "color:#000",
+    "color:rgb(0 0 0 / .12)",
+    "color:rgb(0 0 0 / .2)",
+    "color:rgb(0 0 0 / .25)",
+    "color:rgb(0 0 0 / .32)",
+    "color:rgb(0 0 0 / .35)",
+    "color:rgb(0 0 0 / .45)",
+    "type:.86em",
+    "type:.88em",
+    "type:1.1em",
+    "type:1.2em",
+    "type:12.5px",
+    "type:12px",
+    "type:15px",
+    "type:16px",
+    "type:18px",
+    "type:1px",
+    "type:26px"
+  ],
+  "exceptions": [
+    {
+      "declaration": "crates/semon-sessions/src/viewer.css|.crumb-sep|color|var(--faint)",
+      "reason": "Existing icon or punctuation-only decoration; rendered text remains audited."
+    },
+    {
+      "declaration": "crates/semon-sessions/src/viewer.css|.meta-line .lab + .lab::before|color|var(--faint)",
+      "reason": "Existing icon or punctuation-only decoration; rendered text remains audited."
+    },
+    {
+      "declaration": "crates/semon-sessions/src/viewer.css|.meta-line .meta-effort .meta-sep|color|var(--faint)",
+      "reason": "Existing icon or punctuation-only decoration; rendered text remains audited."
+    },
+    {
+      "declaration": "crates/semon-sessions/src/viewer.css|.run-row .chev, .disclose .chev|color|var(--faint)",
+      "reason": "Existing icon or punctuation-only decoration; rendered text remains audited."
+    },
+    {
+      "declaration": "crates/semon-sessions/src/viewer.css|.ib.quiet > svg|color|var(--faint)",
+      "reason": "Existing icon or punctuation-only decoration; rendered text remains audited."
+    },
+    {
+      "declaration": "crates/semon-sessions/src/viewer.css|.mhead svg|color|var(--faint)",
+      "reason": "Existing icon or punctuation-only decoration; rendered text remains audited."
+    },
+    {
+      "declaration": "crates/semon-sessions/src/viewer.css|.chev|color|var(--faint)",
+      "reason": "Existing icon or punctuation-only decoration; rendered text remains audited."
+    },
+    {
+      "declaration": "crates/semon-sessions/src/viewer.css|.cost-info|color|var(--faint)",
+      "reason": "Existing icon or punctuation-only decoration; rendered text remains audited."
+    },
+    {
+      "declaration": "crates/semon-sessions/src/viewer.css|.topbar .errnav-bar .ibtn:disabled|color|var(--faint)",
+      "reason": "Disabled control, excluded from AA text requirements."
+    },
+    {
+      "declaration": "crates/semon-sessions/src/viewer.css|.srow-meta svg|color|var(--faint)",
+      "reason": "Existing icon or punctuation-only decoration; rendered text remains audited."
+    }
+  ]
+}

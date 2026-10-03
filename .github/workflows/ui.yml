@@ -42,6 +42,7 @@ jobs:
         run: npm --prefix ui ci --no-audit --no-fund
       - name: Type-check, security boundaries, deterministic build and freshness
         run: |
+          npm --prefix ui run check:design
           npm --prefix ui run typecheck
           npm --prefix ui test
           npm --prefix ui run check:bundle
@@ -131,12 +132,14 @@ jobs:
           npx playwright install --with-deps chromium
 
       - name: Browser-check infrastructure regression tests
-        run: node --test tests/ui/suite-plan.test.mjs tests/ui/pixel-diff.test.mjs tests/ui/tap-hit.test.mjs tests/ui/checks/viewer-cache.test.mjs tests/ui/checks/model-delta.test.mjs
+        run: node --test tests/ui/suite-plan.test.mjs tests/ui/pixel-diff.test.mjs tests/ui/tap-hit.test.mjs tests/ui/checks/viewer-cache.test.mjs tests/ui/checks/model-delta.test.mjs tests/ui/visual-contract.test.mjs
 
       - name: Independent shared-account and application-shell lifecycle
         if: matrix.suite == 'interaction'
         run: |
           npm --prefix ui ci --no-audit --no-fund
+          node --test tests/ui/text-audit.test.mjs
+          node tests/ui/gallery.mjs
           node --test ui/tests/browser-lifecycle.mjs ui/tests/application-lifecycle.mjs ui/tests/native-shell-lifecycle.mjs
 
       - name: Write the sample fixtures
