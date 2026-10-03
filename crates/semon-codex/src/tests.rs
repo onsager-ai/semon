@@ -30,6 +30,31 @@ fn compatibility_early_item_cold_restart_and_retained_raw_parity() {
 }
 
 #[test]
+fn native_codex_fork_snapshots_have_cold_restart_and_retained_raw_parity() {
+    compatibility_capture_parity(
+        include_bytes!(
+            "../../../tests/fixtures/compatibility/codex-0.159.0-alpha.3/fork/initial-rollout.jsonl"
+        ),
+        "native-codex-fork-parent",
+        3,
+    );
+    compatibility_capture_parity(
+        include_bytes!(
+            "../../../tests/fixtures/compatibility/codex-0.159.0-alpha.3/fork/forked-rollout.jsonl"
+        ),
+        "native-codex-fork-child",
+        0,
+    );
+    compatibility_capture_parity(
+        include_bytes!(
+            "../../../tests/fixtures/compatibility/codex-0.159.0-alpha.3/fork/child-turn-rollout.jsonl"
+        ),
+        "native-codex-fork-child",
+        3,
+    );
+}
+
+#[test]
 fn compatibility_native_codex_paginated_cold_restart_and_retained_raw_parity() {
     let source = include_bytes!(
         "../../../tests/fixtures/compatibility/codex-0.159.0-alpha.3/initial-rollout.jsonl"
