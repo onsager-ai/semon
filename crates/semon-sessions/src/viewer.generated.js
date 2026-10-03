@@ -4111,7 +4111,7 @@ globalThis.__semonUIShared = __semonUIShared;
         for (const [id, row] of Object.entries(object(patch.set) ? patch.set : {})) rows.set(id, row);
         if (array) {
           const order = patch.order ?? [...rows.keys()];
-          if (order.some((id) => !rows.has(id))) throw new Error("Incomplete model delta");
+          if (order.length !== rows.size || new Set(order).size !== rows.size || order.some((id) => !rows.has(id))) throw new Error("Incomplete model delta");
           next[field] = order.map((id) => rows.get(id));
         } else next[field] = Object.fromEntries(rows);
       }
@@ -4306,10 +4306,10 @@ globalThis.__semonUIShared = __semonUIShared;
     if (parts[0] === "sessions") return { v: "sessions" };
     if (parts[0] === "machines") return parts[1] && model.machine(parts[1]) ? { v: "machine", id: parts[1] } : { v: "machines" };
     if (parts[0] === "s" && sid && model.session(sid)) {
-      const fragmentTurn = model.turn(decode(location2.hash.slice(1)).split("#")[0] ?? ""), target = turn ?? (fragmentTurn?.sid === sid ? fragmentTurn.id : null);
+      const candidate = model.turn(turn ?? (decode(location2.hash.slice(1)).split("#")[0] ?? "")), target = candidate?.sid === sid ? candidate.id : null;
       return target ? { v: "session", id: sid, turn: target } : { v: "session", id: sid };
     }
-    if (parts[0] === "trace" && sid && model.session(sid) && parts[3]) return { v: "trace", sid, turn: parts[3] };
+    if (parts[0] === "trace" && sid && model.session(sid) && parts[3] && model.turn(parts[3])?.sid === sid) return { v: "trace", sid, turn: parts[3] };
     return { v: "home" };
   }
   var TranscriptCache = class extends Map {
