@@ -51,10 +51,9 @@ copy of retained native evidence. It contains no real user session.
 
 ## Remaining gate
 
-Interactive behavior, releases before 1.0.90, logical forks and unprobed
-subagent execution modes, native billing, explicit approval records,
-cancellation, compaction, truncation,
-mutable records, retention/deletion and non-Linux platforms remain unverified.
+Releases before 1.0.90, logical forks, unprobed subagent execution modes,
+native billing, explicit approval identities, native truncation, mutable records,
+retention/deletion and non-Linux platforms remain unverified.
 The parent event chain and `parentAgentTaskId` must not be interpreted as a
 logical parent session without additional source evidence. No supported-version
 or complete-trajectory promise is made yet. Follow-up probes must establish
@@ -102,9 +101,9 @@ resumed and denied recordings. Manifests retain original/transformed hashes and
 binary provenance, and declare removed system-prompt payloads, replaced private
 paths and stable session UUIDs. Offline tests check exact prefix preservation,
 usage snapshots, explicit denied results and requested/start/result identity.
-This resume/denial probe leaves logical forks, cancellation, compaction,
-interactive execution and native retention unknown. The task probe below adds
-subagent metadata evidence. #238 remains open.
+The following task and boundary probes add subagent, interactive, cancellation
+and compaction evidence. Logical forks and native retention remain unknown;
+#238 remains open.
 
 ## Native task and subagent persistence
 
@@ -127,3 +126,34 @@ The mock child reports 14 total tokens. Session shutdown reports three requests
 with 33 input, 9 output and 6 cache-read tokens, already including that child.
 Adding the child total again would double count. These synthetic measurements
 establish persisted accounting shape; native billing units remain unknown.
+
+## Interactive, cancellation and compaction boundaries
+
+`tests/spikes/copilot-boundaries.py` runs each mode in a new private root with a
+pinned executable, offline settings and a localhost mock. Interactive mode uses
+a Linux pseudo-terminal and accepts only the temporary folder's live trust
+prompt. It persists the synthetic assistant reply on both 1.0.90 and 1.0.91.
+Folder trust is not a persisted approval identity.
+
+Cancellation waits for a disposable shell marker and the exact saved tool-start
+record before sending SIGINT to its own process group. Saved `abort` reasons
+include `user_initiated` and `user_abort`. Neither carries a `toolCallId`; a
+missing tool result stays unknown even when a turn/session abort is observed.
+The probe preserves those reasons rather than converting them into call results.
+
+Manual `/compact` appends start/completion, model events and a usage checkpoint;
+the consumed event prefix remains byte-identical. A checkpoint Markdown file is
+written under the private native home, and the probe verifies its path, existence
+and hash. Checkpoint bytes and prompt-rich model payloads remain private. Fixture
+transformations remove those payloads, including nested `requestMessages` in
+model-call success records, while preserving structural event IDs and usage.
+
+Compaction records its own mock 11 input, 3 output and 2 cache-read tokens. The
+shutdown metrics still report only the initial request with 11 input tokens,
+even though the provider saw two requests. Those snapshots describe different
+accounting categories. They cannot be summed indiscriminately or treated as a
+native bill. The synthetic summary increases the measured post-compaction token
+count in this short probe; no compression-quality promise follows.
+
+Native file truncation, automatic deletion/retention, logical forks and other
+platforms remain unknown. These observations advance #238 without accepting it.

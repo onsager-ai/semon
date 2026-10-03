@@ -122,6 +122,69 @@ else:
                 self.assertIn('RuntimeError: Probe validation failed:', result.stderr)
                 self.assertFalse((output / 'report.json').exists())
 
+    def test_copilot_persisted_boundaries_and_separate_compaction_usage(self):
+        for version in ('1.0.90', '1.0.91'):
+            with self.subTest(version=version):
+                directory = ROOT / f'copilot-{version}' / 'boundaries'
+                manifest = json.loads((directory / 'manifest.json').read_text())
+                fixtures = {}
+                for entry in manifest['fixtures']:
+                    data = (directory / entry['path']).read_bytes()
+                    self.assertEqual(hashlib.sha256(data).hexdigest(), entry['fixture_sha256'])
+                    self.assertNotIn(b'/workspace/', data)
+                    fixtures[entry['path']] = data
+                    for row in map(json.loads, data.splitlines()):
+                        if row['type'] == 'session.start':
+                            self.assertEqual(row['data']['copilotVersion'], version)
+                        if row['type'] == 'system.message':
+                            self.assertEqual(row['data'], {'content': '[fixture: native system prompt removed]'})
+                        def check_nested_prompts(value):
+                            if isinstance(value, dict):
+                                for key, nested in value.items():
+                                    if key == 'requestMessages':
+                                        self.assertEqual(nested, '[fixture: native prompt-rich request messages removed]')
+                                    check_nested_prompts(nested)
+                            elif isinstance(value, list):
+                                for nested in value:
+                                    check_nested_prompts(nested)
+                        check_nested_prompts(row)
+                        if row['type'] in ('model.message', 'model.messages_snapshot'):
+                            self.assertEqual(row['data']['fixture_removed'], 'native prompt-rich model payload')
+                cancellation = list(map(json.loads, fixtures['cancel.events.jsonl'].splitlines()))
+                starts = [r['data'] for r in cancellation if r['type'] == 'tool.execution_start']
+                requested = [c for r in cancellation if r['type'] == 'assistant.message'
+                             for c in r['data'].get('toolRequests', [])]
+                self.assertEqual(len(starts), 1)
+                self.assertEqual(len(requested), 1)
+                self.assertEqual(starts[0]['toolCallId'], requested[0]['toolCallId'])
+                self.assertEqual(starts[0]['arguments'], requested[0]['arguments'])
+                aborts = [r['data'] for r in cancellation if r['type'] == 'abort']
+                self.assertEqual(len(aborts), 1)
+                self.assertIn(aborts[0]['reason'], ('user_initiated', 'user_abort'))
+                self.assertNotIn('toolCallId', aborts[0])
+                self.assertFalse(any(r['type'] == 'tool.execution_complete' for r in cancellation))
+                interactive = list(map(json.loads, fixtures['interactive.events.jsonl'].splitlines()))
+                self.assertTrue(any(r['type'] == 'assistant.message' and
+                                    r['data'].get('content') == 'SYNTHETIC_COPILOT_LIFECYCLE_ACK'
+                                    for r in interactive))
+                self.assertTrue(fixtures['compaction.events.jsonl'].startswith(fixtures['before-compaction.events.jsonl']))
+                rows = list(map(json.loads, fixtures['compaction.events.jsonl'].splitlines()))
+                compacted = [r['data'] for r in rows if r['type'] == 'session.compaction_complete']
+                self.assertEqual(len(compacted), 1)
+                self.assertIs(compacted[0]['success'], True)
+                self.assertEqual(compacted[0]['trigger'], 'manual')
+                self.assertEqual(compacted[0]['summaryContent'], 'SYNTHETIC_COPILOT_LIFECYCLE_ACK')
+                self.assertTrue(compacted[0]['checkpointPath'].startswith('/fixture/copilot-compaction/'))
+                usage = compacted[0]['compactionTokensUsed']
+                self.assertEqual((usage['inputTokens'], usage['outputTokens'], usage['cacheReadTokens']), (11, 3, 2))
+                shutdown = [r['data']['modelMetrics']['gpt-4'] for r in rows if r['type'] == 'session.shutdown']
+                self.assertEqual(len(shutdown), 1)
+                self.assertEqual(shutdown[0]['requests']['count'], 1)
+                self.assertEqual(shutdown[0]['usage']['inputTokens'], 11)
+                self.assertTrue(any(r['type'] == 'session.usage_checkpoint' for r in rows))
+                source = manifest['source_reference']
+                self.assertEqual(hashlib.sha256(Path(__file__).with_name('copilot-boundaries.py').read_bytes()).hexdigest(), source['probe_sha256'])
+
     def test_claude_native_resume_and_copied_fork_context(self):
         directory = ROOT / 'claude-2.1.288/lifecycle'
         manifest = json.loads((directory / 'manifest.json').read_text())
