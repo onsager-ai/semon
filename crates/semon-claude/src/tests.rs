@@ -1157,8 +1157,8 @@ fn saved_cursor_state_carries_no_per_record_data() {
         .collect();
     assert_eq!(
         keys,
-        std::collections::BTreeSet::from(["offset", "next_line_ordinal"]),
-        "the per-file cursor must carry only an offset and a line counter, \
+        std::collections::BTreeSet::from(["offset", "next_line_ordinal", "prefix_sha256"]),
+        "the per-file cursor must carry only an offset, a line counter and a constant-size digest, \
          never a per-record ancestor map"
     );
     assert!(
@@ -1226,4 +1226,182 @@ fn truncation_reset_persists_even_without_a_complete_line_to_consume() {
         "must recapture from the start once the file grows back, not skip \
          the prefix a stale offset would have hidden"
     );
+}
+
+#[test]
+fn consumed_prefix_replacement_replays_after_restart() {
+    let fixture = include_str!("../../../tests/fixtures/compatibility/v1/claude-blocks.jsonl");
+    for (padding, replacement) in [
+        (0, "compatibility example"),
+        (0, "compatibility expanded replacement example"),
+        (8192, "compatibility example"),
+    ] {
+        let root = TestDir::new();
+        let path = root.path().join("compat.jsonl");
+        let cursor = root.path().join("cursor.json");
+        let database = root.path().join("capture.sqlite3");
+        let padding = format!(
+            "{{\"type\":\"future_padding\",\"data\":\"{}\"}}\n",
+            "x".repeat(padding)
+        );
+        let original = format!("{padding}{fixture}{padding}");
+        let changed = original.replace("compatibility request", replacement);
+        assert_ne!(original, changed);
+        fs::write(&path, &original).unwrap();
+        {
+            let mut store = TraceStore::open(&database).unwrap();
+            process_file(
+                &path,
+                &mut CursorState::default(),
+                &mut store,
+                &options(&cursor),
+            )
+            .unwrap();
+        }
+        // Old installed cursors have no digest: replay once without duplicating.
+        let mut document: Value = serde_json::from_slice(&fs::read(&cursor).unwrap()).unwrap();
+        for value in document["files"].as_object_mut().unwrap().values_mut() {
+            value.as_object_mut().unwrap().remove("prefix_sha256");
+        }
+        fs::write(&cursor, serde_json::to_vec(&document).unwrap()).unwrap();
+        {
+            let mut state = load_state(&cursor).unwrap();
+            let mut store = TraceStore::open(&database).unwrap();
+            assert!(process_file(&path, &mut state, &mut store, &options(&cursor)).unwrap() > 0);
+            assert_eq!(
+                process_file(&path, &mut state, &mut store, &options(&cursor)).unwrap(),
+                0
+            );
+        }
+        fs::write(&path, &changed).unwrap();
+        let mut state = load_state(&cursor).unwrap();
+        let mut store = TraceStore::open(&database).unwrap();
+        assert!(process_file(&path, &mut state, &mut store, &options(&cursor)).unwrap() > 0);
+        let mut cold = TraceStore::open_in_memory().unwrap();
+        process_file(
+            &path,
+            &mut CursorState::default(),
+            &mut cold,
+            &options(&cursor),
+        )
+        .unwrap();
+        assert_eq!(
+            store.log(&LogFilter::default()).unwrap(),
+            cold.log(&LogFilter::default()).unwrap()
+        );
+        let retained = store
+            .fetch_raw_carrier_records_for_occurrences(OccurrenceSelector::Session("compat"))
+            .unwrap();
+        let old_line = original
+            .lines()
+            .find(|line| line.contains("compatibility request"))
+            .unwrap();
+        assert!(
+            retained
+                .iter()
+                .any(|row| row.bytes() == format!("{old_line}\n").as_bytes()),
+            "replacement must preserve previous forensic bytes"
+        );
+    }
+}
+
+#[test]
+fn replacement_retires_obsolete_source_projection_but_retains_raw() {
+    let source = include_str!("../../../tests/fixtures/compatibility/v1/claude-blocks.jsonl");
+    for case in ["metadata", "malformed", "truncate", "fewer-blocks"] {
+        let root = TestDir::new();
+        let path = root.path().join("compat.jsonl");
+        let cursor = root.path().join("cursor.json");
+        let database = root.path().join("capture.sqlite3");
+        fs::write(&path, source).unwrap();
+        {
+            let mut store = TraceStore::open(&database).unwrap();
+            process_file(
+                &path,
+                &mut CursorState::default(),
+                &mut store,
+                &options(&cursor),
+            )
+            .unwrap();
+        }
+        let changed = match case {
+            "fewer-blocks" => {
+                source
+                    .lines()
+                    .map(|line| {
+                        let Ok(mut row) = serde_json::from_str::<Value>(line) else {
+                            return line.to_owned();
+                        };
+                        if row["uuid"] == "a0" {
+                            row["message"]["content"]
+                                .as_array_mut()
+                                .unwrap()
+                                .truncate(1);
+                        }
+                        serde_json::to_string(&row).unwrap()
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n")
+                    + "\n"
+            }
+            "metadata" => {
+                source
+                    .lines()
+                    .map(|line| {
+                        if line.contains("parallel calls") || line.contains("compatibility request")
+                        {
+                            "{\"type\":\"future_metadata\"}"
+                        } else {
+                            line
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n")
+                    + "\n"
+            }
+            "malformed" => {
+                source
+                    .lines()
+                    .map(|line| {
+                        if line.contains("parallel calls") || line.contains("compatibility request")
+                        {
+                            "{malformed replacement}"
+                        } else {
+                            line
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n")
+                    + "\n"
+            }
+            "truncate" => source.lines().take(2).collect::<Vec<_>>().join("\n") + "\n",
+            _ => source.replace("\"compat\"", "\"replacement-session\""),
+        };
+        fs::write(&path, &changed).unwrap();
+        let mut state = load_state(&cursor).unwrap();
+        let mut store = TraceStore::open(&database).unwrap();
+        process_file(&path, &mut state, &mut store, &options(&cursor)).unwrap();
+        let mut cold = TraceStore::open_in_memory().unwrap();
+        process_file(
+            &path,
+            &mut CursorState::default(),
+            &mut cold,
+            &options(&cursor),
+        )
+        .unwrap();
+        assert_eq!(
+            store.log(&LogFilter::default()).unwrap(),
+            cold.log(&LogFilter::default()).unwrap(),
+            "{case}"
+        );
+        let raw = store
+            .fetch_raw_carrier_records_for_occurrences(OccurrenceSelector::Session("compat"))
+            .unwrap();
+        for line in source.split_inclusive('\n') {
+            assert!(
+                raw.iter().any(|row| row.bytes() == line.as_bytes()),
+                "previous raw missing in {case}"
+            );
+        }
+    }
 }

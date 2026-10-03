@@ -165,7 +165,20 @@ CREATE INDEX IF NOT EXISTS raw_carrier_records_by_carrier_session_sequence
 /// again to remove that column; each rebuild advances its marker in its own
 /// transaction. A fresh database (`user_version` 0) is created directly in
 /// the v5 shape.
-const SCHEMA_VERSION: u32 = 5;
+/// Version 6 adds local source ownership for replaceable occurrence projections.
+/// Canonical traces, raw records and their forensic links are unchanged.
+const SCHEMA_VERSION: u32 = 6;
+
+const CAPTURE_SOURCE_SCHEMA: &str = r#"
+CREATE TABLE IF NOT EXISTS capture_source_occurrences (
+    carrier TEXT NOT NULL,
+    source_key TEXT NOT NULL,
+    occurrence_id INTEGER NOT NULL REFERENCES occurrences(occurrence_id) ON DELETE CASCADE,
+    PRIMARY KEY(carrier, source_key, occurrence_id)
+) STRICT;
+CREATE INDEX IF NOT EXISTS capture_sources_by_occurrence
+    ON capture_source_occurrences(occurrence_id);
+"#;
 
 /// Errors returned by the trace store.
 #[derive(Debug, Error)]
@@ -231,6 +244,7 @@ pub enum StoreError {
 /// A single-file SQLite trace store.
 pub struct TraceStore {
     connection: Connection,
+    capture_source: Option<(String, String)>,
 }
 
 /// Selects forensic rows by their own provenance. Backs
@@ -342,11 +356,60 @@ impl TraceStore {
         }
         connection.execute_batch(RAW_CARRIER_LINK_INDEX)?;
         connection.execute_batch(RAW_RECORD_TRACES_SCHEMA)?;
-        if user_version == 0 {
-            connection.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION};"))?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        transaction.execute_batch(CAPTURE_SOURCE_SCHEMA)?;
+        if user_version < SCHEMA_VERSION {
+            transaction.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION};"))?;
         }
+        transaction.commit()?;
 
-        Ok(Self { connection })
+        Ok(Self {
+            connection,
+            capture_source: None,
+        })
+    }
+
+    /// Attribute occurrence writes during this operation to one explicit local
+    /// source. This is structural projection ownership, never transcript content
+    /// or transferable trace identity. Nested operations restore the prior owner.
+    pub fn with_capture_source<T, E>(
+        &mut self,
+        carrier: &str,
+        source_key: &str,
+        operation: impl FnOnce(&mut Self) -> Result<T, E>,
+    ) -> Result<T, E> {
+        let previous = self
+            .capture_source
+            .replace((carrier.into(), source_key.into()));
+        let result = operation(self);
+        self.capture_source = previous;
+        result
+    }
+
+    /// Retire this source's derived occurrences before replaying changed bytes.
+    /// Other explicitly recorded owners retain their rows. Unowned legacy rows
+    /// are preserved because their source cannot be established retrospectively.
+    /// Canonical traces, raw records and raw-to-trace links are never deleted.
+    pub fn reset_capture_source(
+        &mut self,
+        carrier: &str,
+        source_key: &str,
+    ) -> Result<(), StoreError> {
+        let transaction = self.connection.savepoint()?;
+        transaction.execute(
+            "DELETE FROM occurrences WHERE occurrence_id IN \
+             (SELECT occurrence_id FROM capture_source_occurrences WHERE carrier = ?1 AND source_key = ?2) \
+             AND NOT EXISTS (SELECT 1 FROM capture_source_occurrences owners \
+             WHERE owners.occurrence_id = occurrences.occurrence_id \
+             AND (owners.carrier != ?1 OR owners.source_key != ?2))",
+            params![carrier, source_key],
+        )?;
+        transaction.execute(
+            "DELETE FROM capture_source_occurrences WHERE carrier = ?1 AND source_key = ?2",
+            params![carrier, source_key],
+        )?;
+        transaction.commit()?;
+        Ok(())
     }
 
     /// Captures one projected block while preserving the existing one-block API.
@@ -436,6 +499,16 @@ impl TraceStore {
                     occurrence.authored_by.as_str(),
                 ],
             )?;
+            if let Some((carrier, source_key)) = &self.capture_source
+                && carrier == raw_record.carrier
+            {
+                transaction.execute(
+                    "INSERT OR IGNORE INTO capture_source_occurrences (carrier, source_key, occurrence_id) \
+                     SELECT ?1, ?2, occurrence_id FROM occurrences \
+                     WHERE carrier = ?1 AND session = ?3 AND sequence = ?4",
+                    params![carrier, source_key, occurrence.session, occurrence.sequence],
+                )?;
+            }
             transaction.execute(
                 "INSERT OR IGNORE INTO raw_record_traces (raw_record_id, trace_id) VALUES (?1, ?2)",
                 params![raw_record_id, trace_id.as_str()],
@@ -1163,7 +1236,7 @@ fn migrate_raw_carrier_records_v5(connection: &mut Connection) -> Result<(), Sto
             )?;
         }
     }
-    transaction.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION};"))?;
+    transaction.execute_batch("PRAGMA user_version = 5;")?;
     transaction.commit()?;
     Ok(())
 }
@@ -1691,6 +1764,104 @@ mod tests {
     }
 
     #[test]
+    fn capture_source_reset_preserves_shared_unowned_and_forensic_evidence() {
+        let mut store = TraceStore::open_in_memory().unwrap();
+        let core = semantic(r#"{"goal":"source-owned projection"}"#);
+        let capture = |store: &mut TraceStore, sequence| {
+            store.capture(
+                &core,
+                NewRawCarrierRecord::new("codex", b"private-native-bytes"),
+                occurrence("s", sequence),
+            )
+        };
+        store
+            .with_capture_source("codex", "/fixture/a", |store| capture(store, 0))
+            .unwrap();
+        store
+            .with_capture_source("codex", "/fixture/a", |store| capture(store, 1))
+            .unwrap();
+        store
+            .with_capture_source("codex", "/fixture/b", |store| capture(store, 1))
+            .unwrap();
+        capture(&mut store, 2).unwrap();
+        let raw_before = raw_record_count(&store);
+        let links_before = link_count(&store);
+        store.reset_capture_source("claude", "/fixture/a").unwrap();
+        assert_eq!(occurrence_count(&store), 3);
+        store.reset_capture_source("codex", "/fixture/a").unwrap();
+        assert_eq!(occurrence_count(&store), 2);
+        store.reset_capture_source("codex", "/fixture/b").unwrap();
+        assert_eq!(
+            occurrence_count(&store),
+            1,
+            "unowned observations must remain"
+        );
+        assert_eq!(raw_record_count(&store), raw_before);
+        assert_eq!(link_count(&store), links_before);
+        assert_eq!(store.list_traces(None, 10).unwrap().len(), 1);
+        let leaked: Result<(), StoreError> =
+            store.with_capture_source("codex", "/fixture/error", |_| Err(StoreError::BlankCarrier));
+        assert!(leaked.is_err());
+        capture(&mut store, 3).unwrap();
+        store
+            .reset_capture_source("codex", "/fixture/error")
+            .unwrap();
+        assert_eq!(
+            occurrence_count(&store),
+            2,
+            "owner must restore after an error"
+        );
+    }
+
+    #[test]
+    fn a_failed_source_ownership_write_rolls_back_the_entire_capture() {
+        let mut store = TraceStore::open_in_memory().unwrap();
+        store.connection.execute_batch("CREATE TRIGGER reject_owner BEFORE INSERT ON capture_source_occurrences BEGIN SELECT RAISE(ABORT, 'ownership failure'); END;").unwrap();
+        let core = semantic(r#"{"goal":"atomic source ownership"}"#);
+        let result = store.with_capture_source("codex", "/fixture/source", |store| {
+            store.capture(
+                &core,
+                NewRawCarrierRecord::new("codex", b"native"),
+                occurrence("s", 0),
+            )
+        });
+        assert!(result.is_err());
+        assert_eq!(raw_record_count(&store), 0);
+        assert_eq!(occurrence_count(&store), 0);
+        assert_eq!(link_count(&store), 0);
+        assert!(store.list_traces(None, 10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn version_five_ownership_migration_does_not_guess_legacy_sources() {
+        let path = unique_temp_db_path("source-ownership-migration");
+        let mut store = TraceStore::open(&path).unwrap();
+        let core = semantic(r#"{"goal":"legacy source remains unknown"}"#);
+        store
+            .capture(
+                &core,
+                NewRawCarrierRecord::new("codex", b"legacy-native"),
+                occurrence("s", 0),
+            )
+            .unwrap();
+        store
+            .connection
+            .execute_batch("DROP TABLE capture_source_occurrences; PRAGMA user_version = 5;")
+            .unwrap();
+        drop(store);
+        let mut store = TraceStore::open(&path).unwrap();
+        assert_eq!(user_version(&store), SCHEMA_VERSION);
+        store
+            .reset_capture_source("codex", "/fixture/source")
+            .unwrap();
+        assert_eq!(occurrence_count(&store), 1);
+        assert_eq!(raw_record_count(&store), 1);
+        assert_eq!(link_count(&store), 1);
+        drop(store);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
     fn write_then_fetch_by_hash_round_trips_semantics() {
         let core = semantic(
             r#"{"goal":"test round trip","observations":["one","two"],"conclusion":null}"#,
@@ -1854,7 +2025,7 @@ mod tests {
                     .unwrap();
             }
             let store = TraceStore::open(&path).unwrap();
-            assert_eq!(user_version(&store), 5);
+            assert_eq!(user_version(&store), SCHEMA_VERSION);
             assert_eq!(raw_record_count(&store), 3);
             assert_eq!(link_count(&store), 5);
             let rows = {
