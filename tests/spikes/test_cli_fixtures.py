@@ -57,6 +57,54 @@ class CompatibilityFixtures(unittest.TestCase):
                         if isinstance(skills, dict) and 'body' in skills:
                             self.assertEqual(skills['body'], '[fixture: native host skill instructions removed]')
 
+    def test_copilot_resume_denial_and_cumulative_mock_usage(self):
+        for version in ('1.0.90', '1.0.91'):
+            directory = ROOT / f'copilot-{version}' / 'lifecycle'
+            manifest = json.loads((directory / 'manifest.json').read_text())
+            self.assertEqual(manifest['harness_version'], version)
+            self.assertEqual(manifest['evidence_origin'],
+                             'native CLI persistence with deterministic mock model')
+            fixtures = {}
+            for entry in manifest['fixtures']:
+                data = (directory / entry['path']).read_bytes()
+                self.assertEqual(hashlib.sha256(data).hexdigest(), entry['fixture_sha256'])
+                self.assertNotEqual(entry['original_source_sha256'], entry['fixture_sha256'])
+                self.assertNotIn(b'/workspace/scratch/', data)
+                fixtures[entry['path']] = data
+                for row in map(json.loads, data.splitlines()):
+                    if row['type'] == 'session.start':
+                        self.assertEqual(row['data']['copilotVersion'], version)
+                        self.assertEqual(row['data']['version'], 1)
+                    if row['type'] == 'system.message':
+                        self.assertEqual(row['data'], {'content': '[fixture: native system prompt removed]'})
+            initial = fixtures['initial.events.jsonl']
+            resumed = fixtures['resumed.events.jsonl']
+            self.assertTrue(resumed.startswith(initial))
+            records = list(map(json.loads, resumed.splitlines()))
+            self.assertEqual(sum(row['type'] == 'session.resume' for row in records), 1)
+            snapshots = [row['data']['modelMetrics']['gpt-4'] for row in records
+                         if row['type'] == 'session.shutdown']
+            self.assertEqual([(row['usage']['inputTokens'], row['usage']['outputTokens'],
+                               row['usage']['cacheReadTokens']) for row in snapshots],
+                             [(11, 3, 2), (22, 6, 4)])
+            self.assertEqual([row['requests']['count'] for row in snapshots], [1, 2])
+            denial = list(map(json.loads, fixtures['denied.events.jsonl'].splitlines()))
+            starts = [row['data'] for row in denial if row['type'] == 'tool.execution_start']
+            results = [row['data'] for row in denial if row['type'] == 'tool.execution_complete']
+            requested = [call for row in denial if row['type'] == 'assistant.message'
+                         for call in row['data'].get('toolRequests', [])]
+            self.assertEqual(len(starts), 1)
+            self.assertEqual(len(results), 1)
+            self.assertEqual(len(requested), 1)
+            self.assertEqual(starts[0]['toolCallId'], results[0]['toolCallId'])
+            self.assertEqual(starts[0]['toolCallId'], requested[0]['toolCallId'])
+            self.assertEqual(starts[0]['arguments'], requested[0]['arguments'])
+            self.assertFalse(results[0]['success'])
+            self.assertEqual(results[0]['error']['code'], 'denied')
+            self.assertNotIn('shellExecution', results[0])
+            self.assertFalse(any('approval' in row['type'] for row in denial),
+                             'no explicit approval record is established by this probe')
+
     def test_source_shaped_hashes_and_explicit_unknown_version(self):
         manifest = json.loads((ROOT / 'v1/manifest.json').read_text())
         self.assertEqual(manifest['version'], 1)
