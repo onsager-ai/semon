@@ -502,6 +502,68 @@ fn old_subagent_cursor_upgrades_before_resuming() {
 }
 
 #[test]
+fn repair_preserves_source_custody_and_replacement_ownership() {
+    let root = TestDir::new();
+    let files = subagent_fixture(root.path());
+    let history = root.path().join("history.jsonl");
+    let cursor = root.path().join("cursor.json");
+    let mut state = CursorState::default();
+    let mut store = TraceStore::open_in_memory().unwrap();
+    for file in &files {
+        process_file(file, &mut state, &mut store, &options(&cursor, &history)).unwrap();
+    }
+    let before = store.log(&LogFilter::default()).unwrap();
+    let dry = repair_subagent_keys(&state, &mut store, &history, "", true).unwrap();
+    assert_eq!(dry.groups_repaired, 1);
+    assert_eq!(before, store.log(&LogFilter::default()).unwrap());
+    repair_subagent_keys(&state, &mut store, &history, "", false).unwrap();
+    for file in &files {
+        let key = file.canonicalize().unwrap().to_string_lossy().into_owned();
+        assert_eq!(
+            store
+                .fetch_current_capture_source_raw(CARRIER, &key)
+                .unwrap(),
+            Some(fs::read(file).unwrap())
+        );
+    }
+    assert_eq!(before, store.log(&LogFilter::default()).unwrap());
+    fs::write(&files[1], b"{}\n").unwrap();
+    process_file(
+        &files[1],
+        &mut state,
+        &mut store,
+        &options(&cursor, &history),
+    )
+    .unwrap();
+    let mut cold = TraceStore::open_in_memory().unwrap();
+    let mut cold_state = CursorState::default();
+    for file in &files {
+        process_file(
+            file,
+            &mut cold_state,
+            &mut cold,
+            &options(&cursor, &history),
+        )
+        .unwrap();
+    }
+    assert_eq!(
+        store.log(&LogFilter::default()).unwrap(),
+        cold.log(&LogFilter::default()).unwrap()
+    );
+    let key = files[1]
+        .canonicalize()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    assert_eq!(
+        store
+            .fetch_current_capture_source_raw(CARRIER, &key)
+            .unwrap(),
+        Some(b"{}\n".to_vec())
+    );
+}
+
+#[test]
 fn repair_rebuilds_collided_store_and_skips_missing_group() {
     let root = TestDir::new();
     let files = subagent_fixture(root.path());

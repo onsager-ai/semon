@@ -191,6 +191,8 @@ CREATE TABLE IF NOT EXISTS capture_evidence_records (
     raw_record_id INTEGER NOT NULL REFERENCES raw_carrier_records(raw_record_id) ON DELETE CASCADE,
     PRIMARY KEY(generation_id, sequence)
 ) STRICT;
+CREATE INDEX IF NOT EXISTS capture_evidence_raw
+    ON capture_evidence_records(raw_record_id);
 "#;
 
 fn capture_source_digest(source_key: &str) -> String {
