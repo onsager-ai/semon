@@ -988,6 +988,69 @@ SOFTWARE.
     };
   }
 
+  // src/lib/panel.tsx
+  function PanelHeader({ heading, sub, close }) {
+    return /* @__PURE__ */ u2(S, { children: [
+      /* @__PURE__ */ u2("div", { class: "panel-t", children: heading }),
+      sub && /* @__PURE__ */ u2("div", { class: "panel-sub", children: sub }),
+      /* @__PURE__ */ u2("button", { class: "ibtn", type: "button", "aria-label": "Close", onClick: close, children: /* @__PURE__ */ u2("svg", { viewBox: "0 0 24 24", "aria-hidden": "true", fill: "none", stroke: "currentColor", "stroke-width": "1.8", "stroke-linecap": "round", "stroke-linejoin": "round", children: /* @__PURE__ */ u2("path", { d: "M6 6l12 12M18 6L6 18" }) }) })
+    ] });
+  }
+  function createPanelChrome(options, host2) {
+    const dialog = document.createElement("dialog");
+    dialog.className = "panel" + (options.className ? " " + options.className : "");
+    dialog.setAttribute("aria-label", options.label ?? options.title);
+    const header = document.createElement("div");
+    header.className = "panel-h";
+    const body = document.createElement("div");
+    body.className = "panel-b";
+    body.tabIndex = -1;
+    let disposed = false, shown = false;
+    const close = () => {
+      if (!disposed && dialog.open) dialog.close();
+    };
+    R(/* @__PURE__ */ u2(PanelHeader, { heading: options.title, sub: options.sub, close }), header);
+    dialog.append(header, body);
+    document.body.append(dialog);
+    const hold = (event) => {
+      if (!dialog.isConnected) {
+        destroy();
+        return;
+      }
+      if (!dialog.open) return;
+      if (!(event.target instanceof Node) || !body.contains(event.target) || body.scrollHeight <= body.clientHeight + 1) event.preventDefault();
+    };
+    const backdrop = (event) => {
+      if (event.target === dialog) close();
+    };
+    function destroy() {
+      if (disposed) return;
+      disposed = true;
+      dialog.removeEventListener("click", backdrop);
+      dialog.removeEventListener("close", destroy);
+      for (const type of ["wheel", "touchmove"]) document.removeEventListener(type, hold, { capture: true });
+      if (dialog.open) dialog.close();
+      R(null, header);
+      dialog.remove();
+      if (shown) host2.closed();
+    }
+    dialog.addEventListener("click", backdrop);
+    dialog.addEventListener("close", destroy);
+    return {
+      dialog,
+      body,
+      destroy,
+      show() {
+        if (disposed || shown || !dialog.isConnected) return;
+        dialog.showModal();
+        shown = true;
+        for (const type of ["wheel", "touchmove"]) document.addEventListener(type, hold, { capture: true, passive: false });
+        body.focus({ preventScroll: true });
+        host2.opened();
+      }
+    };
+  }
+
   // src/lib/index.ts
   installPropGuard();
 
@@ -3448,58 +3511,34 @@ SOFTWARE.
       syncJump();
     }, { passive: true });
     function panel(title, opts = {}) {
-      const d2 = el("dialog", "panel" + (opts.cls ? " " + opts.cls : ""));
-      d2.setAttribute("aria-label", opts.label ?? title);
-      const head = el("div", "panel-h");
-      head.append(el("div", "panel-t", title));
-      if (opts.sub) head.append(el("div", "panel-sub", opts.sub));
-      const close = btn("ibtn", null, "Close");
-      close.append(icon(I2.x));
-      close.addEventListener("click", () => d2.close());
-      head.append(close);
-      const body = el("div", "panel-b");
-      body.tabIndex = -1;
-      d2.append(head, body);
-      document.body.append(d2);
-      d2.addEventListener("click", (ev) => {
-        if (ev.target === d2) d2.close();
-      });
-      d2.addEventListener("close", () => {
-        d2.remove();
-        document.documentElement.classList.remove("panel-open");
-        opts.onClose?.();
-        if (viewerEl === d2) {
-          viewerEl = null;
-          if (history.state?.sheet) {
-            skipPop = true;
-            history.back();
-          } else if (pendingSessionOpen) {
-            const id = pendingSessionOpen;
-            pendingSessionOpen = null;
-            goSession(id);
+      const chrome = createPanelChrome({ title, className: opts.cls, label: opts.label, sub: opts.sub }, {
+        opened() {
+          viewerEl = chrome.dialog;
+          document.documentElement.classList.add("panel-open");
+          try {
+            history.pushState({ ...route, sheet: 1, scrollTop: currentScroll() }, "");
+          } catch {
           }
+        },
+        closed() {
+          const d2 = chrome.dialog;
+          document.documentElement.classList.remove("panel-open");
+          opts.onClose?.();
+          if (viewerEl === d2) {
+            viewerEl = null;
+            if (history.state?.sheet) {
+              skipPop = true;
+              history.back();
+            } else if (pendingSessionOpen) {
+              const id = pendingSessionOpen;
+              pendingSessionOpen = null;
+              goSession(id);
+            }
+          }
+          if (LIVE.pending) refresh();
         }
-        if (LIVE.pending) refresh();
       });
-      const hold = (e2) => {
-        if (!d2.open || !d2.isConnected) return;
-        if (!body.contains(e2.target) || body.scrollHeight <= body.clientHeight + 1) e2.preventDefault();
-      };
-      d2.addEventListener("close", () => {
-        for (const type of ["wheel", "touchmove"]) document.removeEventListener(type, hold, { capture: true });
-      });
-      const open = () => {
-        viewerEl = d2;
-        for (const type of ["wheel", "touchmove"]) document.addEventListener(type, hold, { capture: true, passive: false });
-        document.documentElement.classList.add("panel-open");
-        d2.showModal();
-        body.focus({ preventScroll: true });
-        try {
-          history.pushState({ ...route, sheet: 1, scrollTop: currentScroll() }, "");
-        } catch {
-        }
-      };
-      return { d: d2, body, show: open };
+      return { d: chrome.dialog, body: chrome.body, show: () => chrome.show() };
     }
     const RUNS_CAP = 5;
     const TRADEMARK_NOTICE = "Third-party trademarks are the property of their respective owners. Semon is not affiliated with or endorsed by these companies.";
