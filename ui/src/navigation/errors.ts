@@ -57,7 +57,8 @@ export function createErrorNavigation(host: ErrorNavigationHost) {
           ERR.k = at >= 0 ? at : !ERR.slots.length ? -1 : after >= 0 ? after : ERR.slots.length - 1;
           if (at < 0) ERR.slot = ERR.k >= 0 ? ERR.slots[ERR.k] : null;
         }
-      }).finally(() => { scope.releaseRequest(request); if (pending === request) pending = null; });
+      }).catch(error => { if (!request.signal.aborted && pending === request && ERR.gen === gen && errOn(sid)) throw error; })
+      .finally(() => { scope.releaseRequest(request); if (pending === request) pending = null; });
   }
   function stepErrors(delta: number) {
     if (!ERR.on || !ERR.slots.length) return;

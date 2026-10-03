@@ -16,7 +16,7 @@ export interface Session {
   tokens?: number[]; tokens_by_model?: Record<string, Usage>; cost?: Cost;
   activity?: [string, string, number, number?]; tool_calls?: Record<string, number>; signals?: Record<string, number>;
 }
-interface HandoffBase { id: string; from: string; to: string; at: number; status: HandoffStatus; brief?: string; done?: number; result?: string; target?: string; declined?: boolean }
+interface HandoffBase { id: string; from: string; to: string; at: number; status: HandoffStatus; brief: string; done?: number; result?: string; target?: string; declined?: boolean }
 export type Handoff = HandoffBase & (
   { kind: 'ask' | 'spawn' | 'relay' } |
   { kind: 'move'; fromMachine: string; toMachine: string } |
