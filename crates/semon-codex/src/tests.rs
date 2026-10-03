@@ -15,6 +15,15 @@ use super::*;
 
 static TEST_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
+#[test]
+fn source_shaped_namespace_fixture_has_cold_restart_and_raw_parity() {
+    compatibility_capture_parity(
+        include_bytes!("../../../tests/fixtures/compatibility/v1/namespace-codex.jsonl"),
+        "00000000-0000-4000-8000-000000000001",
+        1,
+    );
+}
+
 /// Source-shaped baseline: reopen both the durable cursor and SQLite after
 /// each complete line and each partial frame, then rebuild from retained raw.
 #[test]

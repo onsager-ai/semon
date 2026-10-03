@@ -51,6 +51,40 @@
         "Not a native harness capture",
         "No runtime lifecycle, approvals, fork or usage completeness claim"
       ]
+    },
+    {
+      "path": "namespace-claude.jsonl",
+      "sha256": "a5c232ae90b06091d4da6b377e1f04a60da07095b3a044d1a4401594d2478bf6",
+      "origin": "source-shaped synthetic",
+      "harness_version": null,
+      "build": null,
+      "os": "synthetic POSIX paths; no native OS claim",
+      "execution_mode": "saved-state parser only",
+      "storage_schema": "Claude existing saved record shape",
+      "home_override": "isolated temporary home passed directly to viewer/capture tests",
+      "source_reference": "semon main 7aa1b23e6dd84cff1ec82b9e64452360dc665fcd existing normalization and viewer; reproduced cross-harness same native ID loss with compiled CLI",
+      "expected": "separate cross-harness sessions and exact source-scoped same-call-id tool results; retained-byte/cold/restart/raw parity",
+      "limitations": [
+        "Not a native harness capture",
+        "No Native UUID collision frequency, billing or lifecycle claim"
+      ]
+    },
+    {
+      "path": "namespace-codex.jsonl",
+      "sha256": "cc3ffd81191c9e2c169ed842df8914a371185f369d42b34a745eb9f5db14796e",
+      "origin": "source-shaped synthetic",
+      "harness_version": null,
+      "build": null,
+      "os": "synthetic POSIX paths; no native OS claim",
+      "execution_mode": "saved-state parser only",
+      "storage_schema": "Codex existing saved record shape",
+      "home_override": "isolated temporary home passed directly to viewer/capture tests",
+      "source_reference": "semon main 7aa1b23e6dd84cff1ec82b9e64452360dc665fcd existing normalization and viewer; reproduced cross-harness same native ID loss with compiled CLI",
+      "expected": "separate cross-harness sessions and exact source-scoped same-call-id tool results; retained-byte/cold/restart/raw parity",
+      "limitations": [
+        "Not a native harness capture",
+        "No Native UUID collision frequency, billing or lifecycle claim"
+      ]
     }
   ]
 }
