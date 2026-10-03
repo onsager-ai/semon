@@ -42,7 +42,9 @@ The Rust and UI workflow files supply exact CI setup and aggregate semantics.
   docs/design/trace-identity-and-occurrences.md.
 - Forensic access/retention: docs/design/forensic-retention-and-exposure.md.
 - Harness changes: the affected adapter's fixtures and harness-compatibility skill.
-- Viewer changes: ui/README.md, tests/ui/README.md and viewer-verification skill.
+- Viewer changes: ui/README.md, docs/design/viewer-ownership.md,
+  tests/ui/README.md and viewer-verification skill. Viewer refactors must follow
+  the ownership contract and complete its refactoring review checklist.
 - Relay/protocol changes: docs/mirror-protocol.md and
   docs/encrypted-remote-sessions.md.
 

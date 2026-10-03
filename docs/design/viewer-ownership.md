@@ -144,3 +144,56 @@ page descendants, while the small page adapter handles only Rust fallback/native
 transitions. Native POST forms, CSP, safe links and the public mount/destroy API
 are unchanged. All page commits remain synchronous. See the validation record
 in `viewer-maintainability-validation.md` for equivalent size and gate evidence.
+
+## Refactoring contract
+
+This document is the canonical viewer refactoring contract. AGENTS.md and the
+viewer-verification workflow require it; they link here rather than duplicating
+the rules. Update the contract, affected tests and consumer evidence together
+when an intentional architectural change requires different ownership.
+
+| Rule | Reason and evidence |
+| --- | --- |
+| Composition constructs, connects and disposes owners; feature modules do not import or re-export it, even for types. Only the application mount imports composition. | A universal context recreates hidden coupling. Declare named types and narrow capabilities of actual feature owners. The architecture check rejects composition imports, including aliases and literal dynamic imports. |
+| Keep one authoritative owner for each mutable value. Borrow its tables or coherent projections instead of adding aliases, forwarding tables or another store/router/poller. | Replacement references must remain current. Review ownership changes and test interactions after replacement; strict types alone cannot prove that a port is appropriately narrow. |
+| Runtime module imports remain acyclic; intentional type-only interaction cycles are permitted. Use literal module paths. | Construction callbacks must resolve owners when invoked rather than capture unconstructed services. The architecture check uses TypeScript resolution and emitted imports, including re-exports and literal dynamic loads. |
+| Validate the entire model and auxiliary input before writing the raw baseline or normalized state; publish once after the accepted transaction is coherent. | Invalid input must not expose partial state. Keep rejection/coherence regression tests. Transcript projections borrow entries/ranges; avoid full transcript copies on updates. |
+| Check request, range, input and navigation identity before accepting asynchronous work. Dispose subscriptions and invalidate pending work during teardown. | Aborted, superseded or destroyed owners must not commit or notify. Retain late-response, paging and remount coverage. |
+| Assign exactly one owner to each DOM region. Viewer pages use the synchronous application commit boundary; native descendants stay host-owned. | Keyed controls, focus and scroll must survive ordinary updates. Measured geometry, native forms and independent embeddings retain documented adapters and explicit disposal. |
+| Keep state preparation, synchronous commit, measurement and guarded restoration in their named owners and documented order. | Async hook timing cannot replace focus/scroll guarantees. Retain held ordering, reader-input, opening-end and Back/Forward tests. |
+| Separate formatting from behavior, edit canonical sources and regenerate assets explicitly. Keep strict types, security, freshness, visuals and performance gates. | Readability changes should be reviewable independently. Preserve pinned tooling and blame exclusions; compare equivalent bundle costs rather than relaxing budgets. |
+| Verify consumers independently when shared contracts change. Final gitlink/revision pins must identify the same merged, verified source. | A passing source build does not establish independent consumer security, runtime uniqueness, native behavior or asset freshness. Record exact source/consumer revisions and applicable gate results. |
+
+`npm --prefix ui run check:architecture` checks authored TypeScript and JavaScript modules
+under `ui/src`, using the UI TypeScript configuration. Dependencies outside that
+source tree are outside its cycle graph; dependency/runtime uniqueness checks
+remain with the build. It does not prove atomicity, port cohesion, DOM ownership
+or teardown correctness: those require review and behavioral tests.
+
+The architecture check has no cycle allowlist or blanket suppression. Exceptions
+to other rules must name the affected owner/region, explain why the existing
+pattern cannot serve it, show lifecycle and consumer evidence, and update this
+contract through review. Existing measured/native/embedding adapters are listed
+in the ownership map above. Do not add arbitrary file-size or complexity quotas.
+
+## Refactoring review checklist
+
+Include this checklist's evidence in the PR; mark an item not applicable with a
+reason when that boundary is unchanged. Keep exact commands in their existing
+owning references rather than copying toolchain setup here.
+
+- Identify the state, DOM and effect owners before and after the change; record
+  changed capability ports and any intentional type-only interaction cycles.
+- Confirm one authoritative owner per value/region and no new universal context,
+  proxy table, duplicated router/poller or undocumented native-content mutation.
+- Show invalid/stale input rejection, coherent notification and disposal evidence
+  for changed transactions; verify replacement references stay current.
+- Show retained key/focus/scroll and synchronous measurement evidence for changed
+  rendering; cover relevant standalone, sidebar, native and independent mounts.
+- Run architecture, formatting, types, source security and deterministic/freshness
+  checks; select applicable lifecycle/browser/Rust suites and inspect their actual
+  aggregates. Record skipped coverage and blocked prerequisites honestly.
+- Compare equivalent bundle/performance costs when runtime code changes; review
+  visual diffs without loosening budgets or silently changing baselines.
+- Record independently verified consumer revisions/pins when shared contracts
+  change, and update this ownership map and any justified exception before merge.
