@@ -28,7 +28,7 @@ class RuntimeTests(unittest.TestCase):
         Provider.labels=LABELS
         Provider.state='running'
     def request(self,method='create',runtime=None,payload=None):
-        return dict(method=method,api_key='synthetic-secret',runtime=runtime,labels=LABELS,payload=payload or {})
+        return dict(method=method,api_key='synthetic-secret',runtime=runtime,labels=LABELS,payload=({'template':'base','timeout':3600,'keep_memory':True} if payload is None and method=='create' else payload or {}))
     def test_only_explicit_create_can_provision(self):
         result=worker.execute(self.request(),Provider)
         self.assertEqual(result['runtime'],'owned-runtime')
@@ -44,6 +44,10 @@ class RuntimeTests(unittest.TestCase):
                 raise TimeoutError('uncertain create')
         with self.assertRaises(TimeoutError):worker.execute(self.request(),Failing)
         self.assertEqual(len(Provider.calls),1)
+    def test_missing_or_invalid_profile_never_provisions(self):
+        for profile in ({}, {'template':'base','timeout':True,'keep_memory':True}, {'template':'base','timeout':3600,'keep_memory':'yes'}):
+            self.assertEqual(worker.execute(self.request(payload=profile),Provider),worker.UNKNOWN)
+        self.assertEqual(Provider.calls,[])
     def test_bound_create_is_refused(self):
         self.assertEqual(worker.execute(self.request(runtime='owned-runtime'),Provider),worker.UNKNOWN)
         self.assertEqual(Provider.calls,[])

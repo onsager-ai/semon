@@ -30,11 +30,16 @@ def execute(request, sandbox_class):
     key = request['api_key']
     method = request['method']
     payload = request['payload']
-    if method == 'qualify_profile':
-        if request['runtime'] is not None or payload != {}:
+    if method in ('create', 'qualify_profile'):
+        if (request['runtime'] is not None or not isinstance(payload, dict)
+                or set(payload) != {'template', 'timeout', 'keep_memory'}
+                or not isinstance(payload['template'], str) or not IDENTIFIER.fullmatch(payload['template'])
+                or type(payload['timeout']) is not int or not 1 <= payload['timeout'] <= 86400
+                or type(payload['keep_memory']) is not bool):
             return UNKNOWN
-        box = sandbox_class.create(template='base', metadata=request['labels'], secure=True,
-                                   timeout=300, lifecycle={'on_timeout': {'action': 'pause', 'keep_memory': True}},
+    if method == 'qualify_profile':
+        box = sandbox_class.create(template=payload['template'], metadata=request['labels'], secure=True,
+                                   timeout=payload['timeout'], lifecycle={'on_timeout': {'action': 'pause', 'keep_memory': payload['keep_memory']}},
                                    api_key=key, request_timeout=30)
         runtime = box.sandbox_id
         try:
@@ -52,7 +57,7 @@ def execute(request, sandbox_class):
             box.files.write(ROOT + '/retained', 'provider-profile-v1')
             box.pause(keep_memory=False)
             # Explicit qualification action only; runtime inspection never resumes.
-            box = sandbox_class.connect(runtime, api_key=key, timeout=300, on_resume='reboot', request_timeout=30)
+            box = sandbox_class.connect(runtime, api_key=key, timeout=payload['timeout'], on_resume='reboot', request_timeout=30)
             if box.files.read(ROOT + '/retained') != 'provider-profile-v1':
                 return UNKNOWN
             return {'status': 'profile_qualified', 'runtime': runtime, 'thread': None}
@@ -63,12 +68,10 @@ def execute(request, sandbox_class):
             if all(info.metadata.get(name) == value for name, value in request['labels'].items()):
                 box.kill()
     if method == 'create':
-        if request['runtime'] is not None or payload != {}:
-            return UNKNOWN
-        # Qualified host policy must explicitly enable this fixed bounded profile.
-        box = sandbox_class.create(template='base', metadata=request['labels'], secure=True,
-                                   timeout=3600, lifecycle={'on_timeout': {'action': 'pause',
-                                                                          'keep_memory': True}},
+        # The embedding chooses its qualified profile; generic transport has no hosted defaults.
+        box = sandbox_class.create(template=payload['template'], metadata=request['labels'], secure=True,
+                                   timeout=payload['timeout'], lifecycle={'on_timeout': {'action': 'pause',
+                                                                          'keep_memory': payload['keep_memory']}},
                                    api_key=key, request_timeout=30)
         return {'status': 'created', 'runtime': box.sandbox_id, 'thread': None}
     runtime = request['runtime']
