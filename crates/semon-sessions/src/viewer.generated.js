@@ -3005,34 +3005,62 @@ globalThis.__semonUIShared = __semonUIShared;
 
   // src/lib/localControl.tsx
   function visible(value) {
-    return String(value ?? "").replace(/[\u00ad\u202a-\u202e\u2066-\u2069]/g, (char) => "\\u" + char.charCodeAt(0).toString(16).padStart(4, "0"));
+    return String(value ?? "").replace(
+      /[\u00ad\u202a-\u202e\u2066-\u2069]/g,
+      (char) => "\\u" + char.charCodeAt(0).toString(16).padStart(4, "0")
+    );
   }
   function Question({ request, view }) {
     const [answers, setAnswers] = useState({});
     const params = request.payload.params;
     const questions = params && typeof params === "object" && !Array.isArray(params) ? params.questions : null;
     if (!Array.isArray(questions)) return /* @__PURE__ */ jsx("p", { children: "Unsupported native question. Answer in Codex." });
-    return /* @__PURE__ */ jsxs("form", { onSubmit: (event) => {
-      event.preventDefault();
-      const result = {};
-      for (const [id, value] of Object.entries(answers)) result[id] = [value];
-      view.answer(request, { answers: result });
-    }, children: [
-      questions.map((value) => {
-        if (!value || typeof value !== "object" || Array.isArray(value) || typeof value.id !== "string" || typeof value.question !== "string") return null;
-        const id = String(value.id), label = visible(value.question);
-        return /* @__PURE__ */ jsxs("label", { children: [
-          label,
-          /* @__PURE__ */ jsx("input", { "aria-label": label, value: answers[id] ?? "", list: "options-" + request.id + "-" + id, onInput: (event) => setAnswers({ ...answers, [id]: event.currentTarget.value }) }),
-          /* @__PURE__ */ jsx("datalist", { id: "options-" + request.id + "-" + id, children: Array.isArray(value.options) && value.options.map((option) => option && typeof option === "object" && !Array.isArray(option) && typeof option.label === "string" ? /* @__PURE__ */ jsx("option", { value: option.label }) : null) })
-        ] }, id);
-      }),
-      /* @__PURE__ */ jsx("button", { type: "submit", disabled: view.busy || view.uncertain || !view.snapshot.capabilities.questions || !!request.reason || request.state.state !== "open" || request.remainingMs === 0, children: "Answer" })
-    ] });
+    return /* @__PURE__ */ jsxs(
+      "form",
+      {
+        onSubmit: (event) => {
+          event.preventDefault();
+          const result = {};
+          for (const [id, value] of Object.entries(answers)) result[id] = [value];
+          view.answer(request, { answers: result });
+        },
+        children: [
+          questions.map((value) => {
+            if (!value || typeof value !== "object" || Array.isArray(value) || typeof value.id !== "string" || typeof value.question !== "string")
+              return null;
+            const id = String(value.id), label = visible(value.question);
+            return /* @__PURE__ */ jsxs("label", { children: [
+              label,
+              /* @__PURE__ */ jsx(
+                "input",
+                {
+                  "aria-label": label,
+                  value: answers[id] ?? "",
+                  list: "options-" + request.id + "-" + id,
+                  onInput: (event) => setAnswers({ ...answers, [id]: event.currentTarget.value })
+                }
+              ),
+              /* @__PURE__ */ jsx("datalist", { id: "options-" + request.id + "-" + id, children: Array.isArray(value.options) && value.options.map(
+                (option) => option && typeof option === "object" && !Array.isArray(option) && typeof option.label === "string" ? /* @__PURE__ */ jsx("option", { value: option.label }) : null
+              ) })
+            ] }, id);
+          }),
+          /* @__PURE__ */ jsx(
+            "button",
+            {
+              type: "submit",
+              disabled: view.busy || view.uncertain || !view.snapshot.capabilities.questions || !!request.reason || request.state.state !== "open" || request.remainingMs === 0,
+              children: "Answer"
+            }
+          )
+        ]
+      }
+    );
   }
   function Permission({ request }) {
     const p = request.payload.params;
-    if (!p || typeof p !== "object" || Array.isArray(p)) return /* @__PURE__ */ jsx("p", { children: "Exact request is no longer retained." });
+    if (!p || typeof p !== "object" || Array.isArray(p))
+      return /* @__PURE__ */ jsx("p", { children: "Exact request is no longer retained." });
     const item2 = request.payload.item;
     const changes = item2 && typeof item2 === "object" && !Array.isArray(item2) ? item2.changes : null;
     return /* @__PURE__ */ jsxs(Fragment2, { children: [
@@ -3043,10 +3071,12 @@ globalThis.__semonUIShared = __semonUIShared;
           visible(p.cwd)
         ] })
       ] }),
-      Array.isArray(changes) && changes.map((change) => change && typeof change === "object" && !Array.isArray(change) ? /* @__PURE__ */ jsxs("div", { children: [
-        /* @__PURE__ */ jsx("p", { children: visible(change.path) }),
-        /* @__PURE__ */ jsx("pre", { children: visible(change.diff) })
-      ] }) : null),
+      Array.isArray(changes) && changes.map(
+        (change) => change && typeof change === "object" && !Array.isArray(change) ? /* @__PURE__ */ jsxs("div", { children: [
+          /* @__PURE__ */ jsx("p", { children: visible(change.path) }),
+          /* @__PURE__ */ jsx("pre", { children: visible(change.diff) })
+        ] }) : null
+      ),
       typeof p.reason === "string" && /* @__PURE__ */ jsx("p", { children: visible(p.reason) }),
       typeof p.command !== "string" && !Array.isArray(changes) && /* @__PURE__ */ jsx("pre", { children: visible(JSON.stringify(request.payload, null, 2)) })
     ] });
@@ -3073,30 +3103,68 @@ globalThis.__semonUIShared = __semonUIShared;
           request.kind === "question" ? /* @__PURE__ */ jsx(Question, { request, view }) : /* @__PURE__ */ jsxs(Fragment2, { children: [
             /* @__PURE__ */ jsx(Permission, { request }),
             /* @__PURE__ */ jsxs("div", { children: [
-              /* @__PURE__ */ jsx("button", { type: "button", disabled, onClick: () => view.answer(request, { decision: "allow" }), children: "Allow once" }),
-              /* @__PURE__ */ jsx("button", { type: "button", disabled, onClick: () => view.answer(request, { decision: "deny" }), children: "Deny" })
+              /* @__PURE__ */ jsx(
+                "button",
+                {
+                  type: "button",
+                  disabled,
+                  onClick: () => view.answer(request, { decision: "allow" }),
+                  children: "Allow once"
+                }
+              ),
+              /* @__PURE__ */ jsx(
+                "button",
+                {
+                  type: "button",
+                  disabled,
+                  onClick: () => view.answer(request, { decision: "deny" }),
+                  children: "Deny"
+                }
+              )
             ] })
           ] })
         ] }, request.id);
       }),
-      /* @__PURE__ */ jsxs("form", { onSubmit: (event) => {
-        event.preventDefault();
-        view.send(text2);
-      }, children: [
-        /* @__PURE__ */ jsxs("label", { children: [
-          "Message to Codex",
-          /* @__PURE__ */ jsx("textarea", { value: text2, onInput: (event) => setText(event.currentTarget.value) })
-        ] }),
-        /* @__PURE__ */ jsx("button", { type: "submit", disabled: view.busy || view.uncertain || !(s.activeTurn ? s.capabilities.steer : s.capabilities.input) || !text2.trim(), children: s.activeTurn ? "Steer active turn" : "Send" }),
-        /* @__PURE__ */ jsx("button", { type: "button", disabled: view.busy || view.uncertain || !s.activeTurn || !s.capabilities.interrupt, onClick: () => view.interrupt(), children: "Interrupt active turn" }),
-        (!s.connected || view.uncertain) && /* @__PURE__ */ jsx("button", { type: "button", disabled: view.busy, onClick: () => view.reconnect(), children: "Reconnect" })
-      ] }),
+      /* @__PURE__ */ jsxs(
+        "form",
+        {
+          onSubmit: (event) => {
+            event.preventDefault();
+            view.send(text2);
+          },
+          children: [
+            /* @__PURE__ */ jsxs("label", { children: [
+              "Message to Codex",
+              /* @__PURE__ */ jsx("textarea", { value: text2, onInput: (event) => setText(event.currentTarget.value) })
+            ] }),
+            /* @__PURE__ */ jsx(
+              "button",
+              {
+                type: "submit",
+                disabled: view.busy || view.uncertain || !(s.activeTurn ? s.capabilities.steer : s.capabilities.input) || !text2.trim(),
+                children: s.activeTurn ? "Steer active turn" : "Send"
+              }
+            ),
+            /* @__PURE__ */ jsx(
+              "button",
+              {
+                type: "button",
+                disabled: view.busy || view.uncertain || !s.activeTurn || !s.capabilities.interrupt,
+                onClick: () => view.interrupt(),
+                children: "Interrupt active turn"
+              }
+            ),
+            (!s.connected || view.uncertain) && /* @__PURE__ */ jsx("button", { type: "button", disabled: view.busy, onClick: () => view.reconnect(), children: "Reconnect" })
+          ]
+        }
+      ),
       view.note && /* @__PURE__ */ jsx("p", { role: "status", children: view.note }),
       recent.length > 0 && /* @__PURE__ */ jsxs("details", { children: [
         /* @__PURE__ */ jsx("summary", { children: "Recent requests" }),
         /* @__PURE__ */ jsx("ul", { children: recent.map((r) => /* @__PURE__ */ jsxs("li", { children: [
           r.kind === "question" ? "Question" : "Permission",
-          " \xB7 ",
+          " \xB7",
+          " ",
           r.state.reason === "answered_or_cleared" ? "Answered or cleared" : r.state.reason ?? r.state.state
         ] }, r.id)) })
       ] })
@@ -6703,9 +6771,13 @@ globalThis.__semonUIShared = __semonUIShared;
   }
   function parseControl(value) {
     if (value == null) return null;
-    if (!record2(value) || typeof value.thread !== "string" || typeof value.generation !== "string" || !(value.activeTurn === null || typeof value.activeTurn === "string") || typeof value.connected !== "boolean" || !(value.reason === null || typeof value.reason === "string") || !record2(value.capabilities) || !["input", "steer", "interrupt", "commandApproval", "fileApproval", "questions"].every((key) => record2(value.capabilities) && typeof value.capabilities[key] === "boolean") || !Array.isArray(value.requests) || value.requests.length > 1280 || !record2(value.actions)) throw new Error("Invalid control snapshot");
+    if (!record2(value) || typeof value.thread !== "string" || typeof value.generation !== "string" || !(value.activeTurn === null || typeof value.activeTurn === "string") || typeof value.connected !== "boolean" || !(value.reason === null || typeof value.reason === "string") || !record2(value.capabilities) || !["input", "steer", "interrupt", "commandApproval", "fileApproval", "questions"].every(
+      (key) => record2(value.capabilities) && typeof value.capabilities[key] === "boolean"
+    ) || !Array.isArray(value.requests) || value.requests.length > 1280 || !record2(value.actions))
+      throw new Error("Invalid control snapshot");
     for (const request of value.requests) {
-      if (!record2(request) || typeof request.id !== "string" || !/^[0-9a-f]{32}$/.test(request.id) || !["permission", "question"].includes(String(request.kind)) || !record2(request.payload) || !(request.hash === null || typeof request.hash === "string" && /^[0-9a-f]{64}$/.test(request.hash)) || !record2(request.state) || typeof request.state.state !== "string" || !(request.reason === null || typeof request.reason === "string") || typeof request.remainingMs !== "number" || !Number.isFinite(request.remainingMs) || request.remainingMs < 0) throw new Error("Invalid control request");
+      if (!record2(request) || typeof request.id !== "string" || !/^[0-9a-f]{32}$/.test(request.id) || !["permission", "question"].includes(String(request.kind)) || !record2(request.payload) || !(request.hash === null || typeof request.hash === "string" && /^[0-9a-f]{64}$/.test(request.hash)) || !record2(request.state) || typeof request.state.state !== "string" || !(request.reason === null || typeof request.reason === "string") || typeof request.remainingMs !== "number" || !Number.isFinite(request.remainingMs) || request.remainingMs < 0)
+        throw new Error("Invalid control request");
     }
     return value;
   }
@@ -6738,7 +6810,13 @@ globalThis.__semonUIShared = __semonUIShared;
           expires: Date.now() + 25e3,
           ...extra
         };
-        const response = await fetch("/api/control", { method: "POST", credentials: "same-origin", headers: { "Content-Type": "application/json" }, body: JSON.stringify(command), signal: controller.signal });
+        const response = await fetch("/api/control", {
+          method: "POST",
+          credentials: "same-origin",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(command),
+          signal: controller.signal
+        });
         const receipt = await response.json();
         if (at !== revision) return;
         if (op === "reconnect" && response.ok) uncertain = false;
