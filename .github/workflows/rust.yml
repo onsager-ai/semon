@@ -60,7 +60,9 @@ jobs:
         run: cargo fmt --all --check
 
       - name: Verify CLI fixture provenance and exact tool joins
-        run: python3 -m unittest discover -s tests/spikes -p test_cli_fixtures.py -v
+        run: |
+          python3 -m unittest discover -s tests/spikes -p test_cli_fixtures.py -v
+          python3 -m unittest discover -s tests/spikes -p test_control_fixtures.py -v
 
       - name: Verify harness icon hashes
         run: cd assets/harnesses && sha256sum -c SHA256SUMS
