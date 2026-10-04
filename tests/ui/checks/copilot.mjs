@@ -72,6 +72,25 @@ export default async function copilotCheck(browser) {
             await page.click('#more-btn');
             await page.waitForFunction(() => document.querySelector('dialog.session-menu')?.open);
             assert.equal(await page.locator('dialog.session-menu .cost-big').textContent(), '—');
+            const mark = page.locator('dialog.session-menu .hicon[data-harness="copilot"]');
+            assert.equal(await mark.count(), 1);
+            assert.equal(
+              await mark.evaluate((el) => getComputedStyle(el).backgroundColor),
+              'rgb(255, 255, 255)',
+            );
+            await page.waitForFunction(() =>
+              [...document.querySelectorAll('dialog.session-menu .hicon img')].every(
+                (img) => img.complete && img.naturalWidth > 0,
+              ),
+            );
+            assert.equal(
+              await mark
+                .locator('img')
+                .first()
+                .evaluate((el) => getComputedStyle(el).filter),
+              'none',
+            );
+
             assert.match(
               await page.locator('dialog.session-menu .cost-note').first().textContent(),
               /Copilot usage is a cumulative saved snapshot.*unknown/,

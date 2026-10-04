@@ -535,6 +535,65 @@ fn synthetic_collection_measures_idle_and_growing_sources() {
     let cold = std::time::Instant::now();
     drain(&mut collector);
     let cold_ms = cold.elapsed().as_secs_f64() * 1000.0;
+    // Exercise Copilot source references across the public bounded paging API.
+    let options = root.opts(&home, "paged-view");
+    let core = ViewerCore::new(options.clone());
+    for path in &paths {
+        let id = path
+            .parent()
+            .unwrap()
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap();
+        let mut before = None;
+        let mut seen = std::collections::BTreeSet::new();
+        loop {
+            let query = format!(
+                "sid={id}{}",
+                before.map(|n| format!("&before={n}")).unwrap_or_default()
+            );
+            let reply = core.respond("GET", "/api/tx", &query, None);
+            assert_eq!(reply.status, 200);
+            let page: Value = serde_json::from_slice(&reply.body).unwrap();
+            let entries = page["entries"].as_array().unwrap();
+            assert!(!entries.is_empty() && entries.len() <= 200);
+            for entry in entries.iter().filter(|entry| entry["k"] == "u") {
+                assert!(seen.insert(entry["native"]["event_id"].as_str().unwrap().to_owned()));
+            }
+            let from = page["from"].as_u64().unwrap();
+            if from == 0 {
+                break;
+            }
+            before = Some(from);
+        }
+        assert_eq!(seen.len(), 250);
+        let mut query = semon_sessions::Query::new(options.clone());
+        let answer = query
+            .call_at("get_session", &json!({"id":id}), 1_791_072_000_000)
+            .unwrap();
+        assert_eq!(answer["session"]["copilot"]["version"], "1.0.91");
+        assert!(answer["session"]["copilot"]["usage"].is_null());
+        assert!(answer["session"]["tokens"].is_null());
+        let page = query
+            .call_at(
+                "read_transcript",
+                &json!({"id":id,"limit":7}),
+                1_791_072_000_000,
+            )
+            .unwrap();
+        assert_eq!(page["entries"].as_array().unwrap().len(), 7);
+        let input = format!(
+            "{}\n",
+            json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"get_session","arguments":{"id":id}}})
+        );
+        let mut output = Vec::new();
+        semon_sessions::serve_mcp(&mut query, input.as_bytes(), &mut output).unwrap();
+        let reply: Value = serde_json::from_slice(&output).unwrap();
+        let answer: Value =
+            serde_json::from_str(reply["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(answer["session"]["copilot"]["version"], "1.0.91");
+    }
     let cursor = fs::read(&state).unwrap();
     let idle = std::time::Instant::now();
     for _ in 0..20 {
