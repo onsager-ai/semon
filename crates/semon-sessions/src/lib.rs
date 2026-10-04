@@ -55,7 +55,9 @@ pub use union::{
 };
 mod remote;
 pub use remote::{RemoteLease, collect_remote};
-pub use viewer::{SECURITY_HEADERS, ServeOptions, ViewerReply, serve, serve_listener};
+pub use viewer::{
+    SECURITY_HEADERS, ServeOptions, ViewerReply, serve, serve_listener, serve_with_control,
+};
 
 #[derive(Clone, Debug)]
 pub struct Options {

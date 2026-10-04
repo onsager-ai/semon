@@ -1,0 +1,12 @@
+{
+  "installed": "@openai/codex@0.160.0 via npm; complete native Linux x86_64 package",
+  "source_tag": "rust-v0.160.0",
+  "source_commit": "a956835d020762cb2b570053af06f643a11c0ecc",
+  "alpha_failure": {
+    "version": "0.159.0-alpha.3",
+    "link": "runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/site-packages/certifi/cacert.pem",
+    "canonical_target": "/etc/ssl/certs/ca-certificates.crt",
+    "rule": "prepare_install rejects canonical package symlinks outside the root except the legacy codex -> bin/codex entrypoint"
+  },
+  "native_runtime": "Debian 13 Linux x86_64; bubblewrap namespaces plus seccomp socket/connect/io_uring and datagram-pair denial; anonymous Unix stream pairs supported; tool networking off"
+}

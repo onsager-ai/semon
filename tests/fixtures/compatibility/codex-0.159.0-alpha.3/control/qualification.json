@@ -1,0 +1,2409 @@
+{
+  "version": "codex-cli 0.159.0-alpha.3",
+  "binary_sha256": "981ade7b03926534c654fd718ced3a9f378b7b2841271e29156f939462d176e9",
+  "base_sha": "b0d4aaae483969aaad7bc92c1a79de5dab28dc48",
+  "provider": "synthetic localhost SSE; real native app-server; no model credentials",
+  "scope": "qualification only; foreground sessions are not default TUI attachment",
+  "local_control_go": false,
+  "probe_completed": true,
+  "cases": {
+    "default_daemon": {
+      "exit": 1,
+      "stdout": "",
+      "stderr": "Installing daemon from CLI version 0.159.0-alpha.3 into <FIXTURE>/home/packages/app-server-daemon...\nError: package link escapes its root\n",
+      "control_socket_exists": false
+    },
+    "default_tui": {
+      "exit": 1,
+      "terminal": "Installing daemon from CLI version 0.159.0-alpha.3 into <FIXTURE>/home/packages/app-server-daemon...\r\nError: package link escapes its root\r\nTo work without the background server, rerun the same command with --no-daemon (including resume or fork and its arguments).\r\n"
+    },
+    "observer_resume": {
+      "id": 102,
+      "result": {
+        "thread": {
+          "id": "01a1057b-0d1c-7fe1-a731-a2fa8b59fb63",
+          "environments": [
+            {
+              "environmentId": "local",
+              "cwd": "<FIXTURE>/work",
+              "runtimeWorkspaceRoots": [
+                "<FIXTURE>/work"
+              ]
+            }
+          ],
+          "extra": null,
+          "sessionId": "01a1057b-0d1c-7fe1-a731-a2fa8b59fb63",
+          "forkedFromId": null,
+          "parentThreadId": null,
+          "preview": "WARMUP_PROBE",
+          "ephemeral": false,
+          "section": null,
+          "sectionEnteredAt": null,
+          "projectId": null,
+          "historyMode": "paginated",
+          "modelProvider": "synthetic",
+          "model": "mock-model",
+          "reasoningEffort": null,
+          "createdAt": 1791093312,
+          "updatedAt": 1791093312,
+          "recencyAt": 1791093312,
+          "status": {
+            "type": "idle"
+          },
+          "path": "<FIXTURE>/home/sessions/2026/10/04/rollout-2026-10-04T05-55-12-01a1057b-0d1c-7fe1-a731-a2fa8b59fb63.jsonl",
+          "cwd": "<FIXTURE>/work",
+          "cliVersion": "0.159.0-alpha.3",
+          "originator": "semon_qualification",
+          "source": "vscode",
+          "canAcceptDirectInput": true,
+          "threadSource": null,
+          "agentNickname": null,
+          "agentRole": null,
+          "gitInfo": null,
+          "name": null,
+          "daybreakEnabled": null,
+          "turns": [
+            {
+              "id": "01a1057b-0d38-7b72-a3a8-a6a22a1db227",
+              "items": [
+                {
+                  "type": "userMessage",
+                  "id": "01a1057b-0d70-7f12-acc6-d55e214e31e2",
+                  "clientId": null,
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "WARMUP_PROBE",
+                      "text_elements": []
+                    }
+                  ]
+                },
+                {
+                  "type": "agentMessage",
+                  "id": "msg_fixture",
+                  "text": "SYNTHETIC_ACK",
+                  "phase": null,
+                  "memoryCitation": null,
+                  "delivery": null,
+                  "questions": null
+                }
+              ],
+              "itemsView": "full",
+              "status": "completed",
+              "error": null,
+              "startedAt": 1791093312,
+              "completedAt": 1791093312,
+              "durationMs": 80
+            }
+          ]
+        },
+        "model": "mock-model",
+        "modelProvider": "synthetic",
+        "serviceTier": null,
+        "disabledPluginIds": [],
+        "cwd": "<FIXTURE>/work",
+        "runtimeWorkspaceRoots": [
+          "<FIXTURE>/work"
+        ],
+        "instructionSources": [],
+        "approvalPolicy": "on-request",
+        "approvalsReviewer": "user",
+        "sandbox": {
+          "type": "readOnly",
+          "networkAccess": false
+        },
+        "activePermissionProfile": null,
+        "reasoningEffort": null,
+        "collaborationMode": {
+          "mode": "default",
+          "settings": {
+            "model": "mock-model",
+            "reasoning_effort": null,
+            "developer_instructions": null
+          }
+        },
+        "multiAgentMode": "explicitRequestOnly",
+        "initialTurnsPage": null,
+        "turnsBackwardsCursor": "{\"requestedThreadId\":\"01a1057b-0d1c-7fe1-a731-a2fa8b59fb63\",\"rolloutOrdinal\":1,\"includeAnchor\":true,\"scope\":{\"kind\":\"turns\"}}",
+        "itemsBackwardsCursor": "{\"requestedThreadId\":\"01a1057b-0d1c-7fe1-a731-a2fa8b59fb63\",\"rolloutOrdinal\":8,\"includeAnchor\":true,\"scope\":{\"kind\":\"itemsByCreatedAtOrdinal\"}}"
+      }
+    },
+    "approval_broadcast": {
+      "observer_received": true,
+      "same_frame": true,
+      "request_id": 0,
+      "thread_id": "01a1057b-0d1c-7fe1-a731-a2fa8b59fb63",
+      "turn_id": "01a1057b-0da0-7962-9192-5d079ae3895c",
+      "item_id": "call_fixture",
+      "command": "/bin/bash -lc 'printf SEMON_APPROVAL_PROBE'"
+    },
+    "pending_reconnect": {
+      "replayed": true,
+      "same_request": true,
+      "resume_succeeded": true
+    },
+    "stale_steer": {
+      "error": {
+        "code": -32600,
+        "message": "expected active turn id `stale-turn` but found `01a1057b-0da0-7962-9192-5d079ae3895c`"
+      },
+      "id": 103
+    },
+    "resolution": [
+      {
+        "method": "serverRequest/resolved",
+        "params": {
+          "threadId": "01a1057b-0d1c-7fe1-a731-a2fa8b59fb63",
+          "requestId": 0
+        },
+        "emittedAtMs": 1791093313016
+      },
+      {
+        "method": "serverRequest/resolved",
+        "params": {
+          "threadId": "01a1057b-0d1c-7fe1-a731-a2fa8b59fb63",
+          "requestId": 0
+        },
+        "emittedAtMs": 1791093313016
+      }
+    ],
+    "competing_answer": {
+      "type": "commandExecution",
+      "id": "call_fixture",
+      "pluginId": null,
+      "scriptPath": null,
+      "command": "/bin/bash -lc 'printf SEMON_APPROVAL_PROBE'",
+      "cwd": "<FIXTURE>/work",
+      "processId": null,
+      "source": "agent",
+      "status": "declined",
+      "commandActions": [
+        {
+          "type": "unknown",
+          "command": "printf SEMON_APPROVAL_PROBE"
+        }
+      ],
+      "aggregatedOutput": null,
+      "exitCode": null,
+      "durationMs": null
+    },
+    "turn_completed": "completed",
+    "interrupt_acceptance": {
+      "id": 104,
+      "result": {}
+    },
+    "interrupt_outcome": "interrupted",
+    "persisted_history": {
+      "id": 106,
+      "result": {
+        "thread": {
+          "id": "01a1057b-0d1c-7fe1-a731-a2fa8b59fb63",
+          "environments": [
+            {
+              "environmentId": "local",
+              "cwd": "<FIXTURE>/work",
+              "runtimeWorkspaceRoots": [
+                "<FIXTURE>/work"
+              ]
+            }
+          ],
+          "extra": null,
+          "sessionId": "01a1057b-0d1c-7fe1-a731-a2fa8b59fb63",
+          "forkedFromId": null,
+          "parentThreadId": null,
+          "preview": "WARMUP_PROBE",
+          "ephemeral": false,
+          "section": null,
+          "sectionEnteredAt": null,
+          "projectId": null,
+          "historyMode": "paginated",
+          "modelProvider": "synthetic",
+          "model": "mock-model",
+          "reasoningEffort": null,
+          "createdAt": 1791093312,
+          "updatedAt": 1791093313,
+          "recencyAt": 1791093313,
+          "status": {
+            "type": "idle"
+          },
+          "path": "<FIXTURE>/home/sessions/2026/10/04/rollout-2026-10-04T05-55-12-01a1057b-0d1c-7fe1-a731-a2fa8b59fb63.jsonl",
+          "cwd": "<FIXTURE>/work",
+          "cliVersion": "0.159.0-alpha.3",
+          "originator": "semon_qualification",
+          "source": "vscode",
+          "canAcceptDirectInput": true,
+          "threadSource": null,
+          "agentNickname": null,
+          "agentRole": null,
+          "gitInfo": null,
+          "name": null,
+          "daybreakEnabled": null,
+          "turns": [
+            {
+              "id": "01a1057b-0d38-7b72-a3a8-a6a22a1db227",
+              "items": [
+                {
+                  "type": "userMessage",
+                  "id": "01a1057b-0d70-7f12-acc6-d55e214e31e2",
+                  "clientId": null,
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "WARMUP_PROBE",
+                      "text_elements": []
+                    }
+                  ]
+                },
+                {
+                  "type": "agentMessage",
+                  "id": "msg_fixture",
+                  "text": "SYNTHETIC_ACK",
+                  "phase": null,
+                  "memoryCitation": null,
+                  "delivery": null,
+                  "questions": null
+                }
+              ],
+              "itemsView": "full",
+              "status": "completed",
+              "error": null,
+              "startedAt": 1791093312,
+              "completedAt": 1791093312,
+              "durationMs": 80
+            },
+            {
+              "id": "01a1057b-0da0-7962-9192-5d079ae3895c",
+              "items": [
+                {
+                  "type": "userMessage",
+                  "id": "01a1057b-0db8-7900-8882-f6b5b6faf1c6",
+                  "clientId": null,
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "SEMON_PROBE",
+                      "text_elements": []
+                    }
+                  ]
+                },
+                {
+                  "type": "agentMessage",
+                  "id": "msg_fixture",
+                  "text": "SYNTHETIC_ACK",
+                  "phase": null,
+                  "memoryCitation": null,
+                  "delivery": null,
+                  "questions": null
+                }
+              ],
+              "itemsView": "full",
+              "status": "completed",
+              "error": null,
+              "startedAt": 1791093312,
+              "completedAt": 1791093313,
+              "durationMs": 119
+            },
+            {
+              "id": "01a1057b-0e1d-7e21-92e5-1ab41e6bd5f1",
+              "items": [
+                {
+                  "type": "userMessage",
+                  "id": "01a1057b-0e32-7fd1-8c75-1fc988c44b6b",
+                  "clientId": null,
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "INTERRUPT_PROBE",
+                      "text_elements": []
+                    }
+                  ]
+                }
+              ],
+              "itemsView": "full",
+              "status": "interrupted",
+              "error": null,
+              "startedAt": 1791093313,
+              "completedAt": 1791093313,
+              "durationMs": 73
+            }
+          ]
+        }
+      }
+    },
+    "file_request": null,
+    "patch_not_written": true,
+    "question_request": null,
+    "question_turn": "completed",
+    "allow_once_outcome": {
+      "type": "commandExecution",
+      "id": "allow_fixture",
+      "pluginId": null,
+      "scriptPath": null,
+      "command": "/bin/bash -lc 'printf SEMON_APPROVAL_PROBE'",
+      "cwd": "<FIXTURE>/work",
+      "processId": "24700",
+      "source": "unifiedExecStartup",
+      "status": "completed",
+      "commandActions": [
+        {
+          "type": "unknown",
+          "command": "printf SEMON_APPROVAL_PROBE"
+        }
+      ],
+      "aggregatedOutput": "SEMON_APPROVAL_PROBE",
+      "exitCode": 0,
+      "durationMs": 0
+    },
+    "after_malformed": {
+      "id": 105,
+      "result": {
+        "thread": {
+          "id": "01a1057b-0d1c-7fe1-a731-a2fa8b59fb63",
+          "environments": [
+            {
+              "environmentId": "local",
+              "cwd": "<FIXTURE>/work",
+              "runtimeWorkspaceRoots": [
+                "<FIXTURE>/work"
+              ]
+            }
+          ],
+          "extra": null,
+          "sessionId": "01a1057b-0d1c-7fe1-a731-a2fa8b59fb63",
+          "forkedFromId": null,
+          "parentThreadId": null,
+          "preview": "WARMUP_PROBE",
+          "ephemeral": false,
+          "section": null,
+          "sectionEnteredAt": null,
+          "projectId": null,
+          "historyMode": "paginated",
+          "modelProvider": "synthetic",
+          "model": "mock-model",
+          "reasoningEffort": null,
+          "createdAt": 1791093312,
+          "updatedAt": 1791093319,
+          "recencyAt": 1791093319,
+          "status": {
+            "type": "idle"
+          },
+          "path": "<FIXTURE>/home/sessions/2026/10/04/rollout-2026-10-04T05-55-12-01a1057b-0d1c-7fe1-a731-a2fa8b59fb63.jsonl",
+          "cwd": "<FIXTURE>/work",
+          "cliVersion": "0.159.0-alpha.3",
+          "originator": "semon_qualification",
+          "source": "vscode",
+          "canAcceptDirectInput": true,
+          "threadSource": null,
+          "agentNickname": null,
+          "agentRole": null,
+          "gitInfo": null,
+          "name": null,
+          "daybreakEnabled": null,
+          "turns": []
+        }
+      }
+    },
+    "request_at_termination": {
+      "method": "item/commandExecution/requestApproval",
+      "id": 3,
+      "params": {
+        "kind": "command",
+        "threadId": "01a1057b-0d1c-7fe1-a731-a2fa8b59fb63",
+        "turnId": "01a1057b-2703-7012-8b8c-8ee3eab5f873",
+        "itemId": "termination_fixture",
+        "startedAtMs": 1791093319488,
+        "environmentId": "local",
+        "reason": "Termination fixture",
+        "command": "/bin/bash -lc 'printf SEMON_APPROVAL_PROBE'",
+        "cwd": "<FIXTURE>/work",
+        "commandActions": [
+          {
+            "type": "unknown",
+            "command": "printf SEMON_APPROVAL_PROBE"
+          }
+        ],
+        "proposedExecpolicyAmendment": [
+          "printf",
+          "SEMON_APPROVAL_PROBE"
+        ],
+        "availableDecisions": [
+          "accept",
+          {
+            "acceptWithExecpolicyAmendment": {
+              "execpolicy_amendment": [
+                "printf",
+                "SEMON_APPROVAL_PROBE"
+              ]
+            }
+          },
+          "cancel"
+        ]
+      }
+    },
+    "server_termination": {
+      "probe_error": "disconnected"
+    },
+    "synthetic_tool_feedback": [
+      {
+        "type": "function_call_output",
+        "id": "fco_01a1057b-0df9-7412-a796-b5acb22f216f",
+        "call_id": "call_fixture",
+        "output": "exec_command failed: CreateProcess { message: \"Rejected(\\\"rejected by user\\\")\" }"
+      },
+      {
+        "type": "function_call_output",
+        "id": "fco_01a1057b-0e5d-7800-891d-66383c0d7f30",
+        "call_id": "call_fixture",
+        "output": "Wall time: 0.1 seconds\naborted by user"
+      },
+      {
+        "type": "function_call_output",
+        "id": "fco_01a1057b-0eb8-78b1-9e57-9c57109e34a4",
+        "call_id": "patch_fixture",
+        "output": "unsupported call: apply_patch"
+      },
+      {
+        "type": "function_call_output",
+        "id": "fco_01a1057b-1a9f-7632-a48e-ebcb6b89077d",
+        "call_id": "call_fixture",
+        "output": "request_user_input is unavailable in Default mode"
+      },
+      {
+        "type": "function_call_output",
+        "id": "fco_01a1057b-26d9-7d22-a837-d28194b69d93",
+        "call_id": "allow_fixture",
+        "output": "Chunk ID: d79eea\nWall time: 0.0000 seconds\nProcess exited with code 0\nOriginal token count: 5\nOutput:\nSEMON_APPROVAL_PROBE"
+      }
+    ]
+  },
+  "frames": [
+    {
+      "client": "owner",
+      "direction": "send",
+      "frame": {
+        "id": 101,
+        "method": "initialize",
+        "params": {
+          "clientInfo": {
+            "name": "semon_qualification",
+            "version": "1"
+          },
+          "capabilities": {
+            "experimentalApi": true
+          }
+        }
+      }
+    },
+    {
+      "client": "owner",
+      "direction": "send",
+      "frame": {
+        "method": "initialized"
+      }
+    },
+    {
+      "client": "observer",
+      "direction": "send",
+      "frame": {
+        "id": 101,
+        "method": "initialize",
+        "params": {
+          "clientInfo": {
+            "name": "semon_qualification",
+            "version": "1"
+          },
+          "capabilities": {
+            "experimentalApi": true
+          }
+        }
+      }
+    },
+    {
+      "client": "observer",
+      "direction": "send",
+      "frame": {
+        "method": "initialized"
+      }
+    },
+    {
+      "client": "owner",
+      "direction": "send",
+      "frame": {
+        "id": 102,
+        "method": "thread/start",
+        "params": {
+          "cwd": "<FIXTURE>/work",
+          "approvalPolicy": "on-request",
+          "sandbox": "read-only"
+        }
+      }
+    },
+    {
+      "client": "owner",
+      "direction": "send",
+      "frame": {
+        "id": 103,
+        "method": "turn/start",
+        "params": {
+          "threadId": "01a1057b-0d1c-7fe1-a731-a2fa8b59fb63",
+          "input": [
+            {
+              "type": "text",
+              "text": "WARMUP_PROBE"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "client": "owner",
+      "direction": "receive",
+      "frame": {
+        "method": "turn/completed",
+        "params": {
+          "threadId": "01a1057b-0d1c-7fe1-a731-a2fa8b59fb63",
+          "turn": {
+            "id": "01a1057b-0d38-7b72-a3a8-a6a22a1db227",
+            "items": [
+              {
+                "type": "agentMessage",
+                "id": "msg_fixture",
+                "text": "SYNTHETIC_ACK",
+                "phase": null,
+                "memoryCitation": null,
+                "delivery": null,
+                "questions": null
+              }
+            ],
+            "itemsView": "summary",
+            "status": "completed",
+            "error": null,
+            "startedAt": 1791093312,
+            "completedAt": 1791093312,
+            "durationMs": 80
+          }
+        },
+        "emittedAtMs": 1791093312913
+      }
+    },
+    {
+      "client": "observer",
+      "direction": "send",
+      "frame": {
+        "id": 102,
+        "method": "thread/resume",
+        "params": {
+          "threadId": "01a1057b-0d1c-7fe1-a731-a2fa8b59fb63"
+        }
+      }
+    },
+    {
+      "client": "owner",
+      "direction": "send",
+      "frame": {
+        "id": 104,
+        "method": "turn/start",
+        "params": {
+          "threadId": "01a1057b-0d1c-7fe1-a731-a2fa8b59fb63",
+          "input": [
+            {
+              "type": "text",
+              "text": "SEMON_PROBE"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "client": "owner",
+      "direction": "receive",
+      "frame": {
+        "method": "item/started",
+        "params": {
+          "item": {
+            "type": "commandExecution",
+            "id": "call_fixture",
+            "pluginId": null,
+            "scriptPath": null,
+            "command": "/bin/bash -lc 'printf SEMON_APPROVAL_PROBE'",
+            "cwd": "<FIXTURE>/work",
+            "processId": null,
+            "source": "agent",
+            "status": "inProgress",
+            "commandActions": [
+              {
+                "type": "unknown",
+                "command": "printf SEMON_APPROVAL_PROBE"
+              }
+            ],
+            "aggregatedOutput": null,
+            "exitCode": null,
+            "durationMs": null
+          },
+          "threadId": "01a1057b-0d1c-7fe1-a731-a2fa8b59fb63",
+          "turnId": "01a1057b-0da0-7962-9192-5d079ae3895c",
+          "startedAtMs": 1791093313001
+        },
+        "emittedAtMs": 1791093313001
+      }
+    },
+    {
+      "client": "observer",
+      "direction": "receive",
+      "frame": {
+        "method": "item/started",
+        "params": {
+          "item": {
+            "type": "commandExecution",
+            "id": "call_fixture",
+            "pluginId": null,
+            "scriptPath": null,
+            "command": "/bin/bash -lc 'printf SEMON_APPROVAL_PROBE'",
+            "cwd": "<FIXTURE>/work",
+            "processId": null,
+            "source": "agent",
+            "status": "inProgress",
+            "commandActions": [
+              {
+                "type": "unknown",
+                "command": "printf SEMON_APPROVAL_PROBE"
+              }
+            ],
+            "aggregatedOutput": null,
+            "exitCode": null,
+            "durationMs": null
+          },
+          "threadId": "01a1057b-0d1c-7fe1-a731-a2fa8b59fb63",
+          "turnId": "01a1057b-0da0-7962-9192-5d079ae3895c",
+          "startedAtMs": 1791093313001
+        },
+        "emittedAtMs": 1791093313001
+      }
+    },
+    {
+      "client": "observer",
+      "direction": "receive",
+      "frame": {
+        "method": "item/commandExecution/requestApproval",
+        "id": 0,
+        "params": {
+          "kind": "command",
+          "threadId": "01a1057b-0d1c-7fe1-a731-a2fa8b59fb63",
+          "turnId": "01a1057b-0da0-7962-9192-5d079ae3895c",
+          "itemId": "call_fixture",
+          "startedAtMs": 1791093312999,
+          "environmentId": "local",
+          "reason": "Synthetic disposable approval probe",
+          "command": "/bin/bash -lc 'printf SEMON_APPROVAL_PROBE'",
+          "cwd": "<FIXTURE>/work",
+          "commandActions": [
+            {
+              "type": "unknown",
+              "command": "printf SEMON_APPROVAL_PROBE"
+            }
+          ],
+          "proposedExecpolicyAmendment": [
+            "printf",
+            "SEMON_APPROVAL_PROBE"
+          ],
+          "availableDecisions": [
+            "accept",
+            {
+              "acceptWithExecpolicyAmendment": {
+                "execpolicy_amendment": [
+                  "printf",
+                  "SEMON_APPROVAL_PROBE"
+                ]
+              }
+            },
+            "cancel"
+          ]
+        }
+      }
+    },
+    {
+      "client": "owner",
+      "direction": "receive",
+      "frame": {
+        "method": "item/commandExecution/requestApproval",
+        "id": 0,
+        "params": {
+          "kind": "command",
+          "threadId": "01a1057b-0d1c-7fe1-a731-a2fa8b59fb63",
+          "turnId": "01a1057b-0da0-7962-9192-5d079ae3895c",
+          "itemId": "call_fixture",
+          "startedAtMs": 1791093312999,
+          "environmentId": "local",
+          "reason": "Synthetic disposable approval probe",
+          "command": "/bin/bash -lc 'printf SEMON_APPROVAL_PROBE'",
+          "cwd": "<FIXTURE>/work",
+          "commandActions": [
+            {
+              "type": "unknown",
+              "command": "printf SEMON_APPROVAL_PROBE"
+            }
+          ],
+          "proposedExecpolicyAmendment": [
+            "printf",
+            "SEMON_APPROVAL_PROBE"
+          ],
+          "availableDecisions": [
+            "accept",
+            {
+              "acceptWithExecpolicyAmendment": {
+                "execpolicy_amendment": [
+                  "printf",
+                  "SEMON_APPROVAL_PROBE"
+                ]
+              }
+            },
+            "cancel"
+          ]
+        }
+      }
+    },
+    {
+      "client": "reconnected",
+      "direction": "send",
+      "frame": {
+        "id": 101,
+        "method": "initialize",
+        "params": {
+          "clientInfo": {
+            "name": "semon_qualification",
+            "version": "1"
+          },
+          "capabilities": {
+            "experimentalApi": true
+          }
+        }
+      }
+    },
+    {
+      "client": "reconnected",
+      "direction": "send",
+      "frame": {
+        "method": "initialized"
+      }
+    },
+    {
+      "client": "reconnected",
+      "direction": "send",
+      "frame": {
+        "id": 102,
+        "method": "thread/resume",
+        "params": {
+          "threadId": "01a1057b-0d1c-7fe1-a731-a2fa8b59fb63"
+        }
+      }
+    },
+    {
+      "client": "reconnected",
+      "direction": "receive",
+      "frame": {
+        "method": "item/commandExecution/requestApproval",
+        "id": 0,
+        "params": {
+          "kind": "command",
+          "threadId": "01a1057b-0d1c-7fe1-a731-a2fa8b59fb63",
+          "turnId": "01a1057b-0da0-7962-9192-5d079ae3895c",
+          "itemId": "call_fixture",
+          "startedAtMs": 1791093312999,
+          "environmentId": "local",
+          "reason": "Synthetic disposable approval probe",
+          "command": "/bin/bash -lc 'printf SEMON_APPROVAL_PROBE'",
+          "cwd": "<FIXTURE>/work",
+          "commandActions": [
+            {
+              "type": "unknown",
+              "command": "printf SEMON_APPROVAL_PROBE"
+            }
+          ],
+          "proposedExecpolicyAmendment": [
+            "printf",
+            "SEMON_APPROVAL_PROBE"
+          ],
+          "availableDecisions": [
+            "accept",
+            {
+              "acceptWithExecpolicyAmendment": {
+                "execpolicy_amendment": [
+                  "printf",
+                  "SEMON_APPROVAL_PROBE"
+                ]
+              }
+            },
+            "cancel"
+          ]
+        }
+      }
+    },
+    {
+      "client": "observer",
+      "direction": "send",
+      "frame": {
+        "id": 103,
+        "method": "turn/steer",
+        "params": {
+          "threadId": "01a1057b-0d1c-7fe1-a731-a2fa8b59fb63",
+          "expectedTurnId": "stale-turn",
+          "input": [
+            {
+              "type": "text",
+              "text": "MUST_NOT_APPEAR"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "client": "owner",
+      "direction": "send",
+      "frame": {
+        "id": 0,
+        "result": {
+          "decision": "decline"
+        }
+      }
+    },
+    {
+      "client": "observer",
+      "direction": "receive",
+      "frame": {
+        "method": "serverRequest/resolved",
+        "params": {
+          "threadId": "01a1057b-0d1c-7fe1-a731-a2fa8b59fb63",
+          "requestId": 0
+        },
+        "emittedAtMs": 1791093313016
+      }
+    },
+    {
+      "client": "owner",
+      "direction": "receive",
+      "frame": {
+        "method": "serverRequest/resolved",
+        "params": {
+          "threadId": "01a1057b-0d1c-7fe1-a731-a2fa8b59fb63",
+          "requestId": 0
+        },
+        "emittedAtMs": 1791093313016
+      }
+    },
+    {
+      "client": "observer",
+      "direction": "send",
+      "frame": {
+        "id": 0,
+        "result": {
+          "decision": "accept"
+        }
+      }
+    },
+    {
+      "client": "owner",
+      "direction": "receive",
+      "frame": {
+        "method": "item/completed",
+        "params": {
+          "item": {
+            "type": "commandExecution",
+            "id": "call_fixture",
+            "pluginId": null,
+            "scriptPath": null,
+            "command": "/bin/bash -lc 'printf SEMON_APPROVAL_PROBE'",
+            "cwd": "<FIXTURE>/work",
+            "processId": null,
+            "source": "agent",
+            "status": "declined",
+            "commandActions": [
+              {
+                "type": "unknown",
+                "command": "printf SEMON_APPROVAL_PROBE"
+              }
+            ],
+            "aggregatedOutput": null,
+            "exitCode": null,
+            "durationMs": null
+          },
+          "threadId": "01a1057b-0d1c-7fe1-a731-a2fa8b59fb63",
+          "turnId": "01a1057b-0da0-7962-9192-5d079ae3895c",
+          "completedAtMs": 1791093313016
+        },
+        "emittedAtMs": 1791093313016
+      }
+    },
+    {
+      "client": "observer",
+      "direction": "receive",
+      "frame": {
+        "method": "item/completed",
+        "params": {
+          "item": {
+            "type": "commandExecution",
+            "id": "call_fixture",
+            "pluginId": null,
+            "scriptPath": null,
+            "command": "/bin/bash -lc 'printf SEMON_APPROVAL_PROBE'",
+            "cwd": "<FIXTURE>/work",
+            "processId": null,
+            "source": "agent",
+            "status": "declined",
+            "commandActions": [
+              {
+                "type": "unknown",
+                "command": "printf SEMON_APPROVAL_PROBE"
+              }
+            ],
+            "aggregatedOutput": null,
+            "exitCode": null,
+            "durationMs": null
+          },
+          "threadId": "01a1057b-0d1c-7fe1-a731-a2fa8b59fb63",
+          "turnId": "01a1057b-0da0-7962-9192-5d079ae3895c",
+          "completedAtMs": 1791093313016
+        },
+        "emittedAtMs": 1791093313016
+      }
+    },
+    {
+      "client": "reconnected",
+      "direction": "receive",
+      "frame": {
+        "method": "serverRequest/resolved",
+        "params": {
+          "threadId": "01a1057b-0d1c-7fe1-a731-a2fa8b59fb63",
+          "requestId": 0
+        },
+        "emittedAtMs": 1791093313016
+      }
+    },
+    {
+      "client": "owner",
+      "direction": "receive",
+      "frame": {
+        "method": "turn/completed",
+        "params": {
+          "threadId": "01a1057b-0d1c-7fe1-a731-a2fa8b59fb63",
+          "turn": {
+            "id": "01a1057b-0da0-7962-9192-5d079ae3895c",
+            "items": [
+              {
+                "type": "agentMessage",
+                "id": "msg_fixture",
+                "text": "SYNTHETIC_ACK",
+                "phase": null,
+                "memoryCitation": null,
+                "delivery": null,
+                "questions": null
+              }
+            ],
+            "itemsView": "summary",
+            "status": "completed",
+            "error": null,
+            "startedAt": 1791093312,
+            "completedAt": 1791093313,
+            "durationMs": 119
+          }
+        },
+        "emittedAtMs": 1791093313051
+      }
+    },
+    {
+      "client": "observer",
+      "direction": "receive",
+      "frame": {
+        "method": "turn/completed",
+        "params": {
+          "threadId": "01a1057b-0d1c-7fe1-a731-a2fa8b59fb63",
+          "turn": {
+            "id": "01a1057b-0da0-7962-9192-5d079ae3895c",
+            "items": [
+              {
+                "type": "agentMessage",
+                "id": "msg_fixture",
+                "text": "SYNTHETIC_ACK",
+                "phase": null,
+                "memoryCitation": null,
+                "delivery": null,
+                "questions": null
+              }
+            ],
+            "itemsView": "summary",
+            "status": "completed",
+            "error": null,
+            "startedAt": 1791093312,
+            "completedAt": 1791093313,
+            "durationMs": 119
+          }
+        },
+        "emittedAtMs": 1791093313051
+      }
+    },
+    {
+      "client": "owner",
+      "direction": "send",
+      "frame": {
+        "id": 105,
+        "method": "turn/start",
+        "params": {
+          "threadId": "01a1057b-0d1c-7fe1-a731-a2fa8b59fb63",
+          "input": [
+            {
+              "type": "text",
+              "text": "INTERRUPT_PROBE"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "client": "reconnected",
+      "direction": "receive",
+      "frame": {
+        "method": "turn/completed",
+        "params": {
+          "threadId": "01a1057b-0d1c-7fe1-a731-a2fa8b59fb63",
+          "turn": {
+            "id": "01a1057b-0da0-7962-9192-5d079ae3895c",
+            "items": [
+              {
+                "type": "agentMessage",
+                "id": "msg_fixture",
+                "text": "SYNTHETIC_ACK",
+                "phase": null,
+                "memoryCitation": null,
+                "delivery": null,
+                "questions": null
+              }
+            ],
+            "itemsView": "summary",
+            "status": "completed",
+            "error": null,
+            "startedAt": 1791093312,
+            "completedAt": 1791093313,
+            "durationMs": 119
+          }
+        },
+        "emittedAtMs": 1791093313051
+      }
+    },
+    {
+      "client": "owner",
+      "direction": "receive",
+      "frame": {
+        "method": "item/started",
+        "params": {
+          "item": {
+            "type": "commandExecution",
+            "id": "call_fixture",
+            "pluginId": null,
+            "scriptPath": null,
+            "command": "/bin/bash -lc 'printf SEMON_APPROVAL_PROBE'",
+            "cwd": "<FIXTURE>/work",
+            "processId": null,
+            "source": "agent",
+            "status": "inProgress",
+            "commandActions": [
+              {
+                "type": "unknown",
+                "command": "printf SEMON_APPROVAL_PROBE"
+              }
+            ],
+            "aggregatedOutput": null,
+            "exitCode": null,
+            "durationMs": null
+          },
+          "threadId": "01a1057b-0d1c-7fe1-a731-a2fa8b59fb63",
+          "turnId": "01a1057b-0e1d-7e21-92e5-1ab41e6bd5f1",
+          "startedAtMs": 1791093313112
+        },
+        "emittedAtMs": 1791093313112
+      }
+    },
+    {
+      "client": "owner",
+      "direction": "receive",
+      "frame": {
+        "method": "item/commandExecution/requestApproval",
+        "id": 1,
+        "params": {
+          "kind": "command",
+          "threadId": "01a1057b-0d1c-7fe1-a731-a2fa8b59fb63",
+          "turnId": "01a1057b-0e1d-7e21-92e5-1ab41e6bd5f1",
+          "itemId": "call_fixture",
+          "startedAtMs": 1791093313111,
+          "environmentId": "local",
+          "reason": "Interrupt fixture",
+          "command": "/bin/bash -lc 'printf SEMON_APPROVAL_PROBE'",
+          "cwd": "<FIXTURE>/work",
+          "commandActions": [
+            {
+              "type": "unknown",
+              "command": "printf SEMON_APPROVAL_PROBE"
+            }
+          ],
+          "proposedExecpolicyAmendment": [
+            "printf",
+            "SEMON_APPROVAL_PROBE"
+          ],
+          "availableDecisions": [
+            "accept",
+            {
+              "acceptWithExecpolicyAmendment": {
+                "execpolicy_amendment": [
+                  "printf",
+                  "SEMON_APPROVAL_PROBE"
+                ]
+              }
+            },
+            "cancel"
+          ]
+        }
+      }
+    },
+    {
+      "client": "reconnected",
+      "direction": "receive",
+      "frame": {
+        "method": "item/started",
+        "params": {
+          "item": {
+            "type": "commandExecution",
+            "id": "call_fixture",
+            "pluginId": null,
+            "scriptPath": null,
+            "command": "/bin/bash -lc 'printf SEMON_APPROVAL_PROBE'",
+            "cwd": "<FIXTURE>/work",
+            "processId": null,
+            "source": "agent",
+            "status": "inProgress",
+            "commandActions": [
+              {
+                "type": "unknown",
+                "command": "printf SEMON_APPROVAL_PROBE"
+              }
+            ],
+            "aggregatedOutput": null,
+            "exitCode": null,
+            "durationMs": null
+          },
+          "threadId": "01a1057b-0d1c-7fe1-a731-a2fa8b59fb63",
+          "turnId": "01a1057b-0e1d-7e21-92e5-1ab41e6bd5f1",
+          "startedAtMs": 1791093313112
+        },
+        "emittedAtMs": 1791093313112
+      }
+    },
+    {
+      "client": "reconnected",
+      "direction": "receive",
+      "frame": {
+        "method": "item/commandExecution/requestApproval",
+        "id": 1,
+        "params": {
+          "kind": "command",
+          "threadId": "01a1057b-0d1c-7fe1-a731-a2fa8b59fb63",
+          "turnId": "01a1057b-0e1d-7e21-92e5-1ab41e6bd5f1",
+          "itemId": "call_fixture",
+          "startedAtMs": 1791093313111,
+          "environmentId": "local",
+          "reason": "Interrupt fixture",
+          "command": "/bin/bash -lc 'printf SEMON_APPROVAL_PROBE'",
+          "cwd": "<FIXTURE>/work",
+          "commandActions": [
+            {
+              "type": "unknown",
+              "command": "printf SEMON_APPROVAL_PROBE"
+            }
+          ],
+          "proposedExecpolicyAmendment": [
+            "printf",
+            "SEMON_APPROVAL_PROBE"
+          ],
+          "availableDecisions": [
+            "accept",
+            {
+              "acceptWithExecpolicyAmendment": {
+                "execpolicy_amendment": [
+                  "printf",
+                  "SEMON_APPROVAL_PROBE"
+                ]
+              }
+            },
+            "cancel"
+          ]
+        }
+      }
+    },
+    {
+      "client": "observer",
+      "direction": "receive",
+      "frame": {
+        "method": "item/started",
+        "params": {
+          "item": {
+            "type": "commandExecution",
+            "id": "call_fixture",
+            "pluginId": null,
+            "scriptPath": null,
+            "command": "/bin/bash -lc 'printf SEMON_APPROVAL_PROBE'",
+            "cwd": "<FIXTURE>/work",
+            "processId": null,
+            "source": "agent",
+            "status": "inProgress",
+            "commandActions": [
+              {
+                "type": "unknown",
+                "command": "printf SEMON_APPROVAL_PROBE"
+              }
+            ],
+            "aggregatedOutput": null,
+            "exitCode": null,
+            "durationMs": null
+          },
+          "threadId": "01a1057b-0d1c-7fe1-a731-a2fa8b59fb63",
+          "turnId": "01a1057b-0e1d-7e21-92e5-1ab41e6bd5f1",
+          "startedAtMs": 1791093313112
+        },
+        "emittedAtMs": 1791093313112
+      }
+    },
+    {
+      "client": "observer",
+      "direction": "receive",
+      "frame": {
+        "method": "item/commandExecution/requestApproval",
+        "id": 1,
+        "params": {
+          "kind": "command",
+          "threadId": "01a1057b-0d1c-7fe1-a731-a2fa8b59fb63",
+          "turnId": "01a1057b-0e1d-7e21-92e5-1ab41e6bd5f1",
+          "itemId": "call_fixture",
+          "startedAtMs": 1791093313111,
+          "environmentId": "local",
+          "reason": "Interrupt fixture",
+          "command": "/bin/bash -lc 'printf SEMON_APPROVAL_PROBE'",
+          "cwd": "<FIXTURE>/work",
+          "commandActions": [
+            {
+              "type": "unknown",
+              "command": "printf SEMON_APPROVAL_PROBE"
+            }
+          ],
+          "proposedExecpolicyAmendment": [
+            "printf",
+            "SEMON_APPROVAL_PROBE"
+          ],
+          "availableDecisions": [
+            "accept",
+            {
+              "acceptWithExecpolicyAmendment": {
+                "execpolicy_amendment": [
+                  "printf",
+                  "SEMON_APPROVAL_PROBE"
+                ]
+              }
+            },
+            "cancel"
+          ]
+        }
+      }
+    },
+    {
+      "client": "observer",
+      "direction": "send",
+      "frame": {
+        "id": 104,
+        "method": "turn/interrupt",
+        "params": {
+          "threadId": "01a1057b-0d1c-7fe1-a731-a2fa8b59fb63",
+          "turnId": "01a1057b-0e1d-7e21-92e5-1ab41e6bd5f1"
+        }
+      }
+    },
+    {
+      "client": "observer",
+      "direction": "receive",
+      "frame": {
+        "method": "turn/completed",
+        "params": {
+          "threadId": "01a1057b-0d1c-7fe1-a731-a2fa8b59fb63",
+          "turn": {
+            "id": "01a1057b-0e1d-7e21-92e5-1ab41e6bd5f1",
+            "items": [],
+            "itemsView": "notLoaded",
+            "status": "interrupted",
+            "error": null,
+            "startedAt": 1791093313,
+            "completedAt": 1791093313,
+            "durationMs": 73
+          }
+        },
+        "emittedAtMs": 1791093313130
+      }
+    },
+    {
+      "client": "observer",
+      "direction": "receive",
+      "frame": {
+        "method": "serverRequest/resolved",
+        "params": {
+          "threadId": "01a1057b-0d1c-7fe1-a731-a2fa8b59fb63",
+          "requestId": 1
+        },
+        "emittedAtMs": 1791093313130
+      }
+    },
+    {
+      "client": "owner",
+      "direction": "receive",
+      "frame": {
+        "method": "turn/completed",
+        "params": {
+          "threadId": "01a1057b-0d1c-7fe1-a731-a2fa8b59fb63",
+          "turn": {
+            "id": "01a1057b-0e1d-7e21-92e5-1ab41e6bd5f1",
+            "items": [],
+            "itemsView": "notLoaded",
+            "status": "interrupted",
+            "error": null,
+            "startedAt": 1791093313,
+            "completedAt": 1791093313,
+            "durationMs": 73
+          }
+        },
+        "emittedAtMs": 1791093313130
+      }
+    },
+    {
+      "client": "owner",
+      "direction": "receive",
+      "frame": {
+        "method": "serverRequest/resolved",
+        "params": {
+          "threadId": "01a1057b-0d1c-7fe1-a731-a2fa8b59fb63",
+          "requestId": 1
+        },
+        "emittedAtMs": 1791093313130
+      }
+    },
+    {
+      "client": "owner",
+      "direction": "send",
+      "frame": {
+        "id": 106,
+        "method": "thread/read",
+        "params": {
+          "threadId": "01a1057b-0d1c-7fe1-a731-a2fa8b59fb63",
+          "includeTurns": true
+        }
+      }
+    },
+    {
+      "client": "reconnected",
+      "direction": "receive",
+      "frame": {
+        "method": "turn/completed",
+        "params": {
+          "threadId": "01a1057b-0d1c-7fe1-a731-a2fa8b59fb63",
+          "turn": {
+            "id": "01a1057b-0e1d-7e21-92e5-1ab41e6bd5f1",
+            "items": [],
+            "itemsView": "notLoaded",
+            "status": "interrupted",
+            "error": null,
+            "startedAt": 1791093313,
+            "completedAt": 1791093313,
+            "durationMs": 73
+          }
+        },
+        "emittedAtMs": 1791093313130
+      }
+    },
+    {
+      "client": "reconnected",
+      "direction": "receive",
+      "frame": {
+        "method": "serverRequest/resolved",
+        "params": {
+          "threadId": "01a1057b-0d1c-7fe1-a731-a2fa8b59fb63",
+          "requestId": 1
+        },
+        "emittedAtMs": 1791093313130
+      }
+    },
+    {
+      "client": "owner",
+      "direction": "send",
+      "frame": {
+        "id": 107,
+        "method": "turn/start",
+        "params": {
+          "threadId": "01a1057b-0d1c-7fe1-a731-a2fa8b59fb63",
+          "input": [
+            {
+              "type": "text",
+              "text": "PATCH_PROBE"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "client": "owner",
+      "direction": "receive",
+      "frame": {
+        "method": "turn/completed",
+        "params": {
+          "threadId": "01a1057b-0d1c-7fe1-a731-a2fa8b59fb63",
+          "turn": {
+            "id": "01a1057b-0e76-7522-b6bb-fd8ee5d63314",
+            "items": [
+              {
+                "type": "agentMessage",
+                "id": "msg_fixture",
+                "text": "SYNTHETIC_ACK",
+                "phase": null,
+                "memoryCitation": null,
+                "delivery": null,
+                "questions": null
+              }
+            ],
+            "itemsView": "summary",
+            "status": "completed",
+            "error": null,
+            "startedAt": 1791093313,
+            "completedAt": 1791093313,
+            "durationMs": 97
+          }
+        },
+        "emittedAtMs": 1791093313243
+      }
+    },
+    {
+      "client": "observer",
+      "direction": "receive",
+      "frame": {
+        "method": "turn/completed",
+        "params": {
+          "threadId": "01a1057b-0d1c-7fe1-a731-a2fa8b59fb63",
+          "turn": {
+            "id": "01a1057b-0e76-7522-b6bb-fd8ee5d63314",
+            "items": [
+              {
+                "type": "agentMessage",
+                "id": "msg_fixture",
+                "text": "SYNTHETIC_ACK",
+                "phase": null,
+                "memoryCitation": null,
+                "delivery": null,
+                "questions": null
+              }
+            ],
+            "itemsView": "summary",
+            "status": "completed",
+            "error": null,
+            "startedAt": 1791093313,
+            "completedAt": 1791093313,
+            "durationMs": 97
+          }
+        },
+        "emittedAtMs": 1791093313243
+      }
+    },
+    {
+      "client": "reconnected",
+      "direction": "receive",
+      "frame": {
+        "method": "turn/completed",
+        "params": {
+          "threadId": "01a1057b-0d1c-7fe1-a731-a2fa8b59fb63",
+          "turn": {
+            "id": "01a1057b-0e76-7522-b6bb-fd8ee5d63314",
+            "items": [
+              {
+                "type": "agentMessage",
+                "id": "msg_fixture",
+                "text": "SYNTHETIC_ACK",
+                "phase": null,
+                "memoryCitation": null,
+                "delivery": null,
+                "questions": null
+              }
+            ],
+            "itemsView": "summary",
+            "status": "completed",
+            "error": null,
+            "startedAt": 1791093313,
+            "completedAt": 1791093313,
+            "durationMs": 97
+          }
+        },
+        "emittedAtMs": 1791093313243
+      }
+    },
+    {
+      "client": "owner",
+      "direction": "send",
+      "frame": {
+        "id": 108,
+        "method": "turn/start",
+        "params": {
+          "threadId": "01a1057b-0d1c-7fe1-a731-a2fa8b59fb63",
+          "input": [
+            {
+              "type": "text",
+              "text": "QUESTION_PROBE"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "client": "owner",
+      "direction": "receive",
+      "frame": {
+        "method": "turn/completed",
+        "params": {
+          "threadId": "01a1057b-0d1c-7fe1-a731-a2fa8b59fb63",
+          "turn": {
+            "id": "01a1057b-1a33-7640-9b97-f442d8d4d533",
+            "items": [
+              {
+                "type": "agentMessage",
+                "id": "msg_fixture",
+                "text": "SYNTHETIC_ACK",
+                "phase": null,
+                "memoryCitation": null,
+                "delivery": null,
+                "questions": null
+              }
+            ],
+            "itemsView": "summary",
+            "status": "completed",
+            "error": null,
+            "startedAt": 1791093316,
+            "completedAt": 1791093316,
+            "durationMs": 172
+          }
+        },
+        "emittedAtMs": 1791093316323
+      }
+    },
+    {
+      "client": "observer",
+      "direction": "receive",
+      "frame": {
+        "method": "turn/completed",
+        "params": {
+          "threadId": "01a1057b-0d1c-7fe1-a731-a2fa8b59fb63",
+          "turn": {
+            "id": "01a1057b-1a33-7640-9b97-f442d8d4d533",
+            "items": [
+              {
+                "type": "agentMessage",
+                "id": "msg_fixture",
+                "text": "SYNTHETIC_ACK",
+                "phase": null,
+                "memoryCitation": null,
+                "delivery": null,
+                "questions": null
+              }
+            ],
+            "itemsView": "summary",
+            "status": "completed",
+            "error": null,
+            "startedAt": 1791093316,
+            "completedAt": 1791093316,
+            "durationMs": 172
+          }
+        },
+        "emittedAtMs": 1791093316323
+      }
+    },
+    {
+      "client": "reconnected",
+      "direction": "receive",
+      "frame": {
+        "method": "turn/completed",
+        "params": {
+          "threadId": "01a1057b-0d1c-7fe1-a731-a2fa8b59fb63",
+          "turn": {
+            "id": "01a1057b-1a33-7640-9b97-f442d8d4d533",
+            "items": [
+              {
+                "type": "agentMessage",
+                "id": "msg_fixture",
+                "text": "SYNTHETIC_ACK",
+                "phase": null,
+                "memoryCitation": null,
+                "delivery": null,
+                "questions": null
+              }
+            ],
+            "itemsView": "summary",
+            "status": "completed",
+            "error": null,
+            "startedAt": 1791093316,
+            "completedAt": 1791093316,
+            "durationMs": 172
+          }
+        },
+        "emittedAtMs": 1791093316323
+      }
+    },
+    {
+      "client": "owner",
+      "direction": "send",
+      "frame": {
+        "id": 109,
+        "method": "turn/start",
+        "params": {
+          "threadId": "01a1057b-0d1c-7fe1-a731-a2fa8b59fb63",
+          "input": [
+            {
+              "type": "text",
+              "text": "ALLOW_ONCE_PROBE"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "client": "observer",
+      "direction": "receive",
+      "frame": {
+        "method": "item/started",
+        "params": {
+          "item": {
+            "type": "commandExecution",
+            "id": "allow_fixture",
+            "pluginId": null,
+            "scriptPath": null,
+            "command": "/bin/bash -lc 'printf SEMON_APPROVAL_PROBE'",
+            "cwd": "<FIXTURE>/work",
+            "processId": null,
+            "source": "agent",
+            "status": "inProgress",
+            "commandActions": [
+              {
+                "type": "unknown",
+                "command": "printf SEMON_APPROVAL_PROBE"
+              }
+            ],
+            "aggregatedOutput": null,
+            "exitCode": null,
+            "durationMs": null
+          },
+          "threadId": "01a1057b-0d1c-7fe1-a731-a2fa8b59fb63",
+          "turnId": "01a1057b-25f5-7101-88e0-6257df15726c",
+          "startedAtMs": 1791093319319
+        },
+        "emittedAtMs": 1791093319319
+      }
+    },
+    {
+      "client": "observer",
+      "direction": "receive",
+      "frame": {
+        "method": "item/commandExecution/requestApproval",
+        "id": 2,
+        "params": {
+          "kind": "command",
+          "threadId": "01a1057b-0d1c-7fe1-a731-a2fa8b59fb63",
+          "turnId": "01a1057b-25f5-7101-88e0-6257df15726c",
+          "itemId": "allow_fixture",
+          "startedAtMs": 1791093319319,
+          "environmentId": "local",
+          "reason": "Allow once fixture",
+          "command": "/bin/bash -lc 'printf SEMON_APPROVAL_PROBE'",
+          "cwd": "<FIXTURE>/work",
+          "commandActions": [
+            {
+              "type": "unknown",
+              "command": "printf SEMON_APPROVAL_PROBE"
+            }
+          ],
+          "proposedExecpolicyAmendment": [
+            "printf",
+            "SEMON_APPROVAL_PROBE"
+          ],
+          "availableDecisions": [
+            "accept",
+            {
+              "acceptWithExecpolicyAmendment": {
+                "execpolicy_amendment": [
+                  "printf",
+                  "SEMON_APPROVAL_PROBE"
+                ]
+              }
+            },
+            "cancel"
+          ]
+        }
+      }
+    },
+    {
+      "client": "reconnected",
+      "direction": "receive",
+      "frame": {
+        "method": "item/started",
+        "params": {
+          "item": {
+            "type": "commandExecution",
+            "id": "allow_fixture",
+            "pluginId": null,
+            "scriptPath": null,
+            "command": "/bin/bash -lc 'printf SEMON_APPROVAL_PROBE'",
+            "cwd": "<FIXTURE>/work",
+            "processId": null,
+            "source": "agent",
+            "status": "inProgress",
+            "commandActions": [
+              {
+                "type": "unknown",
+                "command": "printf SEMON_APPROVAL_PROBE"
+              }
+            ],
+            "aggregatedOutput": null,
+            "exitCode": null,
+            "durationMs": null
+          },
+          "threadId": "01a1057b-0d1c-7fe1-a731-a2fa8b59fb63",
+          "turnId": "01a1057b-25f5-7101-88e0-6257df15726c",
+          "startedAtMs": 1791093319319
+        },
+        "emittedAtMs": 1791093319319
+      }
+    },
+    {
+      "client": "reconnected",
+      "direction": "receive",
+      "frame": {
+        "method": "item/commandExecution/requestApproval",
+        "id": 2,
+        "params": {
+          "kind": "command",
+          "threadId": "01a1057b-0d1c-7fe1-a731-a2fa8b59fb63",
+          "turnId": "01a1057b-25f5-7101-88e0-6257df15726c",
+          "itemId": "allow_fixture",
+          "startedAtMs": 1791093319319,
+          "environmentId": "local",
+          "reason": "Allow once fixture",
+          "command": "/bin/bash -lc 'printf SEMON_APPROVAL_PROBE'",
+          "cwd": "<FIXTURE>/work",
+          "commandActions": [
+            {
+              "type": "unknown",
+              "command": "printf SEMON_APPROVAL_PROBE"
+            }
+          ],
+          "proposedExecpolicyAmendment": [
+            "printf",
+            "SEMON_APPROVAL_PROBE"
+          ],
+          "availableDecisions": [
+            "accept",
+            {
+              "acceptWithExecpolicyAmendment": {
+                "execpolicy_amendment": [
+                  "printf",
+                  "SEMON_APPROVAL_PROBE"
+                ]
+              }
+            },
+            "cancel"
+          ]
+        }
+      }
+    },
+    {
+      "client": "owner",
+      "direction": "receive",
+      "frame": {
+        "method": "item/started",
+        "params": {
+          "item": {
+            "type": "commandExecution",
+            "id": "allow_fixture",
+            "pluginId": null,
+            "scriptPath": null,
+            "command": "/bin/bash -lc 'printf SEMON_APPROVAL_PROBE'",
+            "cwd": "<FIXTURE>/work",
+            "processId": null,
+            "source": "agent",
+            "status": "inProgress",
+            "commandActions": [
+              {
+                "type": "unknown",
+                "command": "printf SEMON_APPROVAL_PROBE"
+              }
+            ],
+            "aggregatedOutput": null,
+            "exitCode": null,
+            "durationMs": null
+          },
+          "threadId": "01a1057b-0d1c-7fe1-a731-a2fa8b59fb63",
+          "turnId": "01a1057b-25f5-7101-88e0-6257df15726c",
+          "startedAtMs": 1791093319319
+        },
+        "emittedAtMs": 1791093319319
+      }
+    },
+    {
+      "client": "owner",
+      "direction": "receive",
+      "frame": {
+        "method": "item/commandExecution/requestApproval",
+        "id": 2,
+        "params": {
+          "kind": "command",
+          "threadId": "01a1057b-0d1c-7fe1-a731-a2fa8b59fb63",
+          "turnId": "01a1057b-25f5-7101-88e0-6257df15726c",
+          "itemId": "allow_fixture",
+          "startedAtMs": 1791093319319,
+          "environmentId": "local",
+          "reason": "Allow once fixture",
+          "command": "/bin/bash -lc 'printf SEMON_APPROVAL_PROBE'",
+          "cwd": "<FIXTURE>/work",
+          "commandActions": [
+            {
+              "type": "unknown",
+              "command": "printf SEMON_APPROVAL_PROBE"
+            }
+          ],
+          "proposedExecpolicyAmendment": [
+            "printf",
+            "SEMON_APPROVAL_PROBE"
+          ],
+          "availableDecisions": [
+            "accept",
+            {
+              "acceptWithExecpolicyAmendment": {
+                "execpolicy_amendment": [
+                  "printf",
+                  "SEMON_APPROVAL_PROBE"
+                ]
+              }
+            },
+            "cancel"
+          ]
+        }
+      }
+    },
+    {
+      "client": "owner",
+      "direction": "send",
+      "frame": {
+        "id": 2,
+        "result": {
+          "decision": "accept"
+        }
+      }
+    },
+    {
+      "client": "owner",
+      "direction": "receive",
+      "frame": {
+        "method": "serverRequest/resolved",
+        "params": {
+          "threadId": "01a1057b-0d1c-7fe1-a731-a2fa8b59fb63",
+          "requestId": 2
+        },
+        "emittedAtMs": 1791093319321
+      }
+    },
+    {
+      "client": "observer",
+      "direction": "receive",
+      "frame": {
+        "method": "serverRequest/resolved",
+        "params": {
+          "threadId": "01a1057b-0d1c-7fe1-a731-a2fa8b59fb63",
+          "requestId": 2
+        },
+        "emittedAtMs": 1791093319321
+      }
+    },
+    {
+      "client": "reconnected",
+      "direction": "receive",
+      "frame": {
+        "method": "serverRequest/resolved",
+        "params": {
+          "threadId": "01a1057b-0d1c-7fe1-a731-a2fa8b59fb63",
+          "requestId": 2
+        },
+        "emittedAtMs": 1791093319321
+      }
+    },
+    {
+      "client": "owner",
+      "direction": "receive",
+      "frame": {
+        "method": "item/completed",
+        "params": {
+          "item": {
+            "type": "commandExecution",
+            "id": "allow_fixture",
+            "pluginId": null,
+            "scriptPath": null,
+            "command": "/bin/bash -lc 'printf SEMON_APPROVAL_PROBE'",
+            "cwd": "<FIXTURE>/work",
+            "processId": "24700",
+            "source": "unifiedExecStartup",
+            "status": "completed",
+            "commandActions": [
+              {
+                "type": "unknown",
+                "command": "printf SEMON_APPROVAL_PROBE"
+              }
+            ],
+            "aggregatedOutput": "SEMON_APPROVAL_PROBE",
+            "exitCode": 0,
+            "durationMs": 0
+          },
+          "threadId": "01a1057b-0d1c-7fe1-a731-a2fa8b59fb63",
+          "turnId": "01a1057b-25f5-7101-88e0-6257df15726c",
+          "completedAtMs": 1791093319378
+        },
+        "emittedAtMs": 1791093319380
+      }
+    },
+    {
+      "client": "reconnected",
+      "direction": "receive",
+      "frame": {
+        "method": "item/completed",
+        "params": {
+          "item": {
+            "type": "commandExecution",
+            "id": "allow_fixture",
+            "pluginId": null,
+            "scriptPath": null,
+            "command": "/bin/bash -lc 'printf SEMON_APPROVAL_PROBE'",
+            "cwd": "<FIXTURE>/work",
+            "processId": "24700",
+            "source": "unifiedExecStartup",
+            "status": "completed",
+            "commandActions": [
+              {
+                "type": "unknown",
+                "command": "printf SEMON_APPROVAL_PROBE"
+              }
+            ],
+            "aggregatedOutput": "SEMON_APPROVAL_PROBE",
+            "exitCode": 0,
+            "durationMs": 0
+          },
+          "threadId": "01a1057b-0d1c-7fe1-a731-a2fa8b59fb63",
+          "turnId": "01a1057b-25f5-7101-88e0-6257df15726c",
+          "completedAtMs": 1791093319378
+        },
+        "emittedAtMs": 1791093319380
+      }
+    },
+    {
+      "client": "observer",
+      "direction": "receive",
+      "frame": {
+        "method": "item/completed",
+        "params": {
+          "item": {
+            "type": "commandExecution",
+            "id": "allow_fixture",
+            "pluginId": null,
+            "scriptPath": null,
+            "command": "/bin/bash -lc 'printf SEMON_APPROVAL_PROBE'",
+            "cwd": "<FIXTURE>/work",
+            "processId": "24700",
+            "source": "unifiedExecStartup",
+            "status": "completed",
+            "commandActions": [
+              {
+                "type": "unknown",
+                "command": "printf SEMON_APPROVAL_PROBE"
+              }
+            ],
+            "aggregatedOutput": "SEMON_APPROVAL_PROBE",
+            "exitCode": 0,
+            "durationMs": 0
+          },
+          "threadId": "01a1057b-0d1c-7fe1-a731-a2fa8b59fb63",
+          "turnId": "01a1057b-25f5-7101-88e0-6257df15726c",
+          "completedAtMs": 1791093319378
+        },
+        "emittedAtMs": 1791093319380
+      }
+    },
+    {
+      "client": "observer",
+      "direction": "receive",
+      "frame": {
+        "method": "turn/completed",
+        "params": {
+          "threadId": "01a1057b-0d1c-7fe1-a731-a2fa8b59fb63",
+          "turn": {
+            "id": "01a1057b-25f5-7101-88e0-6257df15726c",
+            "items": [
+              {
+                "type": "agentMessage",
+                "id": "msg_fixture",
+                "text": "SYNTHETIC_ACK",
+                "phase": null,
+                "memoryCitation": null,
+                "delivery": null,
+                "questions": null
+              }
+            ],
+            "itemsView": "summary",
+            "status": "completed",
+            "error": null,
+            "startedAt": 1791093319,
+            "completedAt": 1791093319,
+            "durationMs": 259
+          }
+        },
+        "emittedAtMs": 1791093319420
+      }
+    },
+    {
+      "client": "owner",
+      "direction": "receive",
+      "frame": {
+        "method": "turn/completed",
+        "params": {
+          "threadId": "01a1057b-0d1c-7fe1-a731-a2fa8b59fb63",
+          "turn": {
+            "id": "01a1057b-25f5-7101-88e0-6257df15726c",
+            "items": [
+              {
+                "type": "agentMessage",
+                "id": "msg_fixture",
+                "text": "SYNTHETIC_ACK",
+                "phase": null,
+                "memoryCitation": null,
+                "delivery": null,
+                "questions": null
+              }
+            ],
+            "itemsView": "summary",
+            "status": "completed",
+            "error": null,
+            "startedAt": 1791093319,
+            "completedAt": 1791093319,
+            "durationMs": 259
+          }
+        },
+        "emittedAtMs": 1791093319420
+      }
+    },
+    {
+      "client": "reconnected",
+      "direction": "receive",
+      "frame": {
+        "method": "turn/completed",
+        "params": {
+          "threadId": "01a1057b-0d1c-7fe1-a731-a2fa8b59fb63",
+          "turn": {
+            "id": "01a1057b-25f5-7101-88e0-6257df15726c",
+            "items": [
+              {
+                "type": "agentMessage",
+                "id": "msg_fixture",
+                "text": "SYNTHETIC_ACK",
+                "phase": null,
+                "memoryCitation": null,
+                "delivery": null,
+                "questions": null
+              }
+            ],
+            "itemsView": "summary",
+            "status": "completed",
+            "error": null,
+            "startedAt": 1791093319,
+            "completedAt": 1791093319,
+            "durationMs": 259
+          }
+        },
+        "emittedAtMs": 1791093319420
+      }
+    },
+    {
+      "client": "malformed",
+      "direction": "send",
+      "frame": {
+        "id": 101,
+        "method": "initialize",
+        "params": {
+          "clientInfo": {
+            "name": "semon_qualification",
+            "version": "1"
+          },
+          "capabilities": {
+            "experimentalApi": true
+          }
+        }
+      }
+    },
+    {
+      "client": "malformed",
+      "direction": "send",
+      "frame": {
+        "method": "initialized"
+      }
+    },
+    {
+      "client": "observer",
+      "direction": "send",
+      "frame": {
+        "id": 105,
+        "method": "thread/read",
+        "params": {
+          "threadId": "01a1057b-0d1c-7fe1-a731-a2fa8b59fb63",
+          "includeTurns": false
+        }
+      }
+    },
+    {
+      "client": "owner",
+      "direction": "send",
+      "frame": {
+        "id": 110,
+        "method": "turn/start",
+        "params": {
+          "threadId": "01a1057b-0d1c-7fe1-a731-a2fa8b59fb63",
+          "input": [
+            {
+              "type": "text",
+              "text": "TERMINATION_PROBE"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "client": "reconnected",
+      "direction": "receive",
+      "frame": {
+        "method": "item/started",
+        "params": {
+          "item": {
+            "type": "commandExecution",
+            "id": "termination_fixture",
+            "pluginId": null,
+            "scriptPath": null,
+            "command": "/bin/bash -lc 'printf SEMON_APPROVAL_PROBE'",
+            "cwd": "<FIXTURE>/work",
+            "processId": null,
+            "source": "agent",
+            "status": "inProgress",
+            "commandActions": [
+              {
+                "type": "unknown",
+                "command": "printf SEMON_APPROVAL_PROBE"
+              }
+            ],
+            "aggregatedOutput": null,
+            "exitCode": null,
+            "durationMs": null
+          },
+          "threadId": "01a1057b-0d1c-7fe1-a731-a2fa8b59fb63",
+          "turnId": "01a1057b-2703-7012-8b8c-8ee3eab5f873",
+          "startedAtMs": 1791093319488
+        },
+        "emittedAtMs": 1791093319488
+      }
+    },
+    {
+      "client": "observer",
+      "direction": "receive",
+      "frame": {
+        "method": "item/started",
+        "params": {
+          "item": {
+            "type": "commandExecution",
+            "id": "termination_fixture",
+            "pluginId": null,
+            "scriptPath": null,
+            "command": "/bin/bash -lc 'printf SEMON_APPROVAL_PROBE'",
+            "cwd": "<FIXTURE>/work",
+            "processId": null,
+            "source": "agent",
+            "status": "inProgress",
+            "commandActions": [
+              {
+                "type": "unknown",
+                "command": "printf SEMON_APPROVAL_PROBE"
+              }
+            ],
+            "aggregatedOutput": null,
+            "exitCode": null,
+            "durationMs": null
+          },
+          "threadId": "01a1057b-0d1c-7fe1-a731-a2fa8b59fb63",
+          "turnId": "01a1057b-2703-7012-8b8c-8ee3eab5f873",
+          "startedAtMs": 1791093319488
+        },
+        "emittedAtMs": 1791093319488
+      }
+    },
+    {
+      "client": "observer",
+      "direction": "receive",
+      "frame": {
+        "method": "item/commandExecution/requestApproval",
+        "id": 3,
+        "params": {
+          "kind": "command",
+          "threadId": "01a1057b-0d1c-7fe1-a731-a2fa8b59fb63",
+          "turnId": "01a1057b-2703-7012-8b8c-8ee3eab5f873",
+          "itemId": "termination_fixture",
+          "startedAtMs": 1791093319488,
+          "environmentId": "local",
+          "reason": "Termination fixture",
+          "command": "/bin/bash -lc 'printf SEMON_APPROVAL_PROBE'",
+          "cwd": "<FIXTURE>/work",
+          "commandActions": [
+            {
+              "type": "unknown",
+              "command": "printf SEMON_APPROVAL_PROBE"
+            }
+          ],
+          "proposedExecpolicyAmendment": [
+            "printf",
+            "SEMON_APPROVAL_PROBE"
+          ],
+          "availableDecisions": [
+            "accept",
+            {
+              "acceptWithExecpolicyAmendment": {
+                "execpolicy_amendment": [
+                  "printf",
+                  "SEMON_APPROVAL_PROBE"
+                ]
+              }
+            },
+            "cancel"
+          ]
+        }
+      }
+    },
+    {
+      "client": "owner",
+      "direction": "receive",
+      "frame": {
+        "method": "item/started",
+        "params": {
+          "item": {
+            "type": "commandExecution",
+            "id": "termination_fixture",
+            "pluginId": null,
+            "scriptPath": null,
+            "command": "/bin/bash -lc 'printf SEMON_APPROVAL_PROBE'",
+            "cwd": "<FIXTURE>/work",
+            "processId": null,
+            "source": "agent",
+            "status": "inProgress",
+            "commandActions": [
+              {
+                "type": "unknown",
+                "command": "printf SEMON_APPROVAL_PROBE"
+              }
+            ],
+            "aggregatedOutput": null,
+            "exitCode": null,
+            "durationMs": null
+          },
+          "threadId": "01a1057b-0d1c-7fe1-a731-a2fa8b59fb63",
+          "turnId": "01a1057b-2703-7012-8b8c-8ee3eab5f873",
+          "startedAtMs": 1791093319488
+        },
+        "emittedAtMs": 1791093319488
+      }
+    },
+    {
+      "client": "owner",
+      "direction": "receive",
+      "frame": {
+        "method": "item/commandExecution/requestApproval",
+        "id": 3,
+        "params": {
+          "kind": "command",
+          "threadId": "01a1057b-0d1c-7fe1-a731-a2fa8b59fb63",
+          "turnId": "01a1057b-2703-7012-8b8c-8ee3eab5f873",
+          "itemId": "termination_fixture",
+          "startedAtMs": 1791093319488,
+          "environmentId": "local",
+          "reason": "Termination fixture",
+          "command": "/bin/bash -lc 'printf SEMON_APPROVAL_PROBE'",
+          "cwd": "<FIXTURE>/work",
+          "commandActions": [
+            {
+              "type": "unknown",
+              "command": "printf SEMON_APPROVAL_PROBE"
+            }
+          ],
+          "proposedExecpolicyAmendment": [
+            "printf",
+            "SEMON_APPROVAL_PROBE"
+          ],
+          "availableDecisions": [
+            "accept",
+            {
+              "acceptWithExecpolicyAmendment": {
+                "execpolicy_amendment": [
+                  "printf",
+                  "SEMON_APPROVAL_PROBE"
+                ]
+              }
+            },
+            "cancel"
+          ]
+        }
+      }
+    },
+    {
+      "client": "reconnected",
+      "direction": "receive",
+      "frame": {
+        "method": "item/commandExecution/requestApproval",
+        "id": 3,
+        "params": {
+          "kind": "command",
+          "threadId": "01a1057b-0d1c-7fe1-a731-a2fa8b59fb63",
+          "turnId": "01a1057b-2703-7012-8b8c-8ee3eab5f873",
+          "itemId": "termination_fixture",
+          "startedAtMs": 1791093319488,
+          "environmentId": "local",
+          "reason": "Termination fixture",
+          "command": "/bin/bash -lc 'printf SEMON_APPROVAL_PROBE'",
+          "cwd": "<FIXTURE>/work",
+          "commandActions": [
+            {
+              "type": "unknown",
+              "command": "printf SEMON_APPROVAL_PROBE"
+            }
+          ],
+          "proposedExecpolicyAmendment": [
+            "printf",
+            "SEMON_APPROVAL_PROBE"
+          ],
+          "availableDecisions": [
+            "accept",
+            {
+              "acceptWithExecpolicyAmendment": {
+                "execpolicy_amendment": [
+                  "printf",
+                  "SEMON_APPROVAL_PROBE"
+                ]
+              }
+            },
+            "cancel"
+          ]
+        }
+      }
+    }
+  ]
+}
