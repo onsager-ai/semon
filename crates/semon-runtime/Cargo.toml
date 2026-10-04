@@ -1,0 +1,20 @@
+[package]
+name = "semon-runtime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "Durable logical-session and disposable-compute lifecycle contracts"
+
+[features]
+codex-process = ["dep:tokio", "dep:serde_json"]
+
+[dependencies]
+serde.workspace = true
+thiserror.workspace = true
+serde_json = { workspace = true, optional = true }
+tokio = { version = "1", features = ["process", "io-util", "time"], optional = true }
+
+[dev-dependencies]
+serde_json.workspace = true
+tokio = { version = "1", features = ["rt", "macros"] }
