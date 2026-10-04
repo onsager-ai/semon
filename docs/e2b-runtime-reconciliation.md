@@ -47,6 +47,20 @@ credentials after authorization, closes stdin, caps stdout, and enforces a
 25-second process deadline with cancellation/reaping. Inherited proxy and CA
 settings are preserved. This is not yet wired to a public route or coordinator.
 
+The optional `e2b-process` library feature supplies
+`e2b::process::InventoryWorker::inspect` for this protocol. The host supplies
+trusted absolute interpreter/worker paths and its coordinator-secret environment
+exclusions. The transport validates the persisted launch before spawning, sends
+the owner-resolved key only over stdin, closes the pipe explicitly, bounds stdout
+to 2 MiB/1,000 resources, and requires versioned, scope-matching output. Serialized
+request/response buffers zeroize on drop. SDK endpoint/debug/model credential
+variables are removed; Python uses isolated imports. Network guard/proxy/CA
+variables remain inherited. The caller's deadline is at most 25 seconds, with
+one additional second allowed for explicit reaping. Cancellation kills the child.
+Vendor stderr, exit errors and malformed output never enter diagnostics or become
+evidence of absence. Five process tests exercise roundtrip, scope/ownership,
+protocol/size failures, deadline, cancellation and fail-before-spawn behavior.
+
 The worker returns only its fixed protocol: `complete` with a sanitized resource
 list, `incomplete`, or `unavailable`. It makes no create/connect/pause/destroy or
 guest call. It lists at most 32 pages/1,000 resources with a 20-second aggregate
@@ -64,7 +78,7 @@ work or activating automatic pause. No such profile is enabled by this module.
 Tests cover reload after uncertain create, eventual visibility, inaccessible or
 incomplete inventories, paused adoption, conflicting metadata, duplicate
 resources, foreign deployments, bound-resource loss and withdrawn launch intent.
-Process transport integration, account/default-profile validation, bootstrap, private
+Hosted transport integration, account/default-profile validation, bootstrap, private
 guest credential delivery/writeback, pause/resume and real Hub ingestion/readback
 remain implementation and qualification work. Restore, export and deletion stay
 behind their independent gates; automatic policy remains Off.

@@ -82,3 +82,8 @@ jobs:
         run: |
           cargo clippy -p semon-runtime --all-targets --features codex-process --locked -- --no-deps -D warnings
           SEMON_TEST_COORDINATOR_SECRET=offline-fixture E2B_API_KEY=offline-fixture cargo test -p semon-runtime --features codex-process --locked
+
+      - name: E2B private inventory process checks
+        run: |
+          cargo clippy -p semon-runtime --all-targets --features e2b-process --locked -- --no-deps -D warnings
+          SEMON_TEST_COORDINATOR_SECRET=offline-fixture E2B_API_KEY=offline-fixture SEMON_TEST_NETWORK_GUARD=keep cargo test -p semon-runtime --features e2b-process --locked
