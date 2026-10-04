@@ -100,7 +100,7 @@ def execute(request, sandbox_class):
             return UNKNOWN
         # URL is data supplied by the embedding, never interpolated into a shell.
         box.files.write(ROOT + '/push-config.json', json.dumps({'url': payload['push_url']}))
-        box.files.write(ROOT + '/push.py', "import fcntl,json,subprocess\nwith open('push.lock','a') as lock:\n try: fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)\n except BlockingIOError: raise SystemExit(0)\n subprocess.run(['/home/user/.local/bin/semon','push','--to',json.load(open('push-config.json'))['url'],'--token-file','push-token','--watch'])\n")
+        box.files.write(ROOT + '/push.py', "import fcntl,json,subprocess\nwith open('push.lock','a') as lock:\n try: fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)\n except BlockingIOError: raise SystemExit(0)\n subprocess.run(['/home/user/.local/bin/semon','push','--to',json.load(open('push-config.json'))['url'],'--token-file','push-token','--codex-home','/home/user/.codex','--watch'])\n")
         box.commands.run(f'python3 {ROOT}/push.py >{ROOT}/push-error 2>&1', cwd=ROOT, background=True, timeout=0)
         box.commands.run(f'touch {ROOT}/bootstrapped; sync', timeout=10)
         return {'status': 'bootstrapped', 'runtime': runtime, 'thread': None}
