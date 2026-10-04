@@ -34,6 +34,7 @@ pub struct Codex {
 struct Live {
     thread: String,
     active: Option<String>,
+    last_turn: Option<Value>,
     generation: String,
     connected: bool,
     reason: Option<String>,
@@ -203,6 +204,10 @@ impl Codex {
             inner: Mutex::new(Live {
                 thread: id,
                 active,
+                last_turn: native["turns"]
+                    .as_array()
+                    .and_then(|turns| turns.last())
+                    .cloned(),
                 generation,
                 connected: true,
                 reason: None,
@@ -323,7 +328,7 @@ impl Codex {
         });
         let enabled = live.connected && self.writable;
         let requests: Vec<_> = self.store.snapshot(monotonic_ms()).requests.iter().filter(|r| r.session == live.thread).map(|r| json!({"id":r.id.to_string(),"kind":r.kind.as_str(),"payload":if r.payload.is_null(){json!({})}else{r.payload.clone()},"hash":r.payload_sha256,"state":r.state.to_json(),"reason":match &r.answerable {crate::Answerable::Yes=>None,crate::Answerable::No(reason)=>Some(reason)},"remainingMs":r.expires_ms.saturating_sub(monotonic_ms())})).collect();
-        json!({"thread":live.thread,"generation":live.generation,"activeTurn":live.active,"connected":live.connected,"capabilities":{"input":enabled,"steer":enabled,"interrupt":enabled,"commandApproval":enabled,"fileApproval":enabled,"questions":enabled},"reason":reason,"requests":requests,"actions":live.actions})
+        json!({"thread":live.thread,"generation":live.generation,"activeTurn":live.active,"lastTurn":live.last_turn,"connected":live.connected,"capabilities":{"input":enabled,"steer":enabled,"interrupt":enabled,"commandApproval":enabled,"fileApproval":enabled,"questions":enabled},"reason":reason,"requests":requests,"actions":live.actions})
     }
     fn queue(
         &self,
@@ -487,7 +492,7 @@ impl Codex {
         self.store
             .record_control(&json!({"event":"control_receipt","id":id,"receipt":receipt}));
     }
-    fn lost(&self) {
+    pub(crate) fn lost(&self) {
         let mut live = lock(&self.inner);
         live.connected = false;
         live.reason = Some(
@@ -516,6 +521,7 @@ impl Codex {
                 live.active = p["turn"]["id"].as_str().map(str::to_owned);
             }
             Some("turn/completed") => {
+                live.last_turn = Some(p["turn"].clone());
                 if p["turn"]["id"].as_str() == live.active.as_deref() {
                     live.active = None;
                 }
