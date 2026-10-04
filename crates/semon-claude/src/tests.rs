@@ -1628,6 +1628,7 @@ fn native_copied_usage_view_agrees_cold_incremental_and_retained_custody_rebuild
         claude_home: homes.join("claude"),
         claude_json: homes.join(".claude.json"),
         codex_home: homes.join("codex"),
+        copilot_home: homes.join("copilot"),
         proc_root: homes.join("proc"),
         cache: root.path().join("index/view.json"),
         all: true,

@@ -84,6 +84,7 @@ pub(crate) enum FactsSeen {
 pub(crate) struct Seen {
     pub(crate) claude: bool,
     pub(crate) codex: bool,
+    pub(crate) copilot: bool,
     pub(crate) facts: FactsSeen,
     /// The facts file is older than [`STALE_AFTER`].
     pub(crate) stale: bool,
@@ -148,6 +149,8 @@ impl ReceivedMachines {
                     .is_ok_and(|modified| modified + STALE_AFTER < now)
             });
             let seen = Seen {
+                copilot: !is_link(&root.join("copilot"))
+                    && !is_link(&root.join("copilot/session-state")),
                 claude: !is_link(&claude)
                     && !is_link(&claude.join("projects"))
                     && !is_link(&claude.join("sessions")),
@@ -195,6 +198,11 @@ impl ReceivedMachines {
             claude_json: nowhere.clone(),
             codex_home: if seen.codex {
                 root.join("codex")
+            } else {
+                nowhere.clone()
+            },
+            copilot_home: if seen.copilot {
+                root.join("copilot")
             } else {
                 nowhere.clone()
             },

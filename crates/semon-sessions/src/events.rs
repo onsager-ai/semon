@@ -61,15 +61,15 @@ thread_local! {
 /// v18: background Claude Bash calls retain their launch flag and terminal
 /// notifications retain their failure outcome.
 /// v19: ledgers verify the full consumed prefix instead of just two windows.
-const CACHE_VERSION: u32 = 21;
+const CACHE_VERSION: u32 = 22;
 
 /// The four token categories the model serves for an exact model id.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct ModelTokens {
-    pub(crate) input: u64,
-    pub(crate) output: u64,
-    pub(crate) cache_write: u64,
-    pub(crate) cache_read: u64,
+pub struct ModelTokens {
+    pub input: u64,
+    pub output: u64,
+    pub cache_write: u64,
+    pub cache_read: u64,
 }
 
 impl ModelTokens {
@@ -303,6 +303,7 @@ pub(crate) struct FileIndex {
     codex_tokens_by_model: BTreeMap<String, ModelTokens>,
     codex_usage_events: Vec<CodexUsageEvent>,
     codex_native_usage: Option<CodexNativeUsage>,
+    pub(crate) copilot: Option<crate::copilot::Index>,
     pub(crate) rate_limits: Option<RateLimits>,
 }
 
@@ -699,6 +700,13 @@ impl FileIndex {
     }
 
     pub(crate) fn tokens(&self, harness: &str) -> Tokens {
+        if harness == "copilot" {
+            return self
+                .copilot
+                .as_ref()
+                .and_then(|index| index.usage.as_ref())
+                .map_or_else(Tokens::default, |usage| usage.tokens.clone());
+        }
         if harness == "codex" {
             return self
                 .codex_native_usage
@@ -1522,7 +1530,9 @@ fn parse(file: &mut LogFile, from: u64, harness: &str, index: &mut FileIndex) ->
         PARSED.with(|parsed| parsed.set(parsed.get() + 1));
         match serde_json::from_slice::<Value>(&line) {
             Ok(record) if record.is_object() => {
-                if harness == "claude" {
+                if harness == "copilot" {
+                    copilot(index, &record, line_offset);
+                } else if harness == "claude" {
                     claude(index, &record, line_offset);
                 } else {
                     codex(index, &record, line_offset);
@@ -3515,6 +3525,244 @@ pub(crate) fn codex(summary: &mut FileIndex, record: &Value, offset: u64) {
             ),
             _ => {}
         },
+        _ => {}
+    }
+}
+
+/// Native Copilot records preserve exact physical event and call identities.
+fn copilot(summary: &mut FileIndex, record: &Value, offset: u64) {
+    let Some(identity) = field(record, "id").filter(|id| !id.is_empty()) else {
+        gap(summary, offset);
+        return;
+    };
+    let data = &record["data"];
+    if summary.copilot.is_none() {
+        if field(record, "type") != Some("session.start") {
+            return;
+        }
+        summary.copilot = Some(crate::copilot::Index {
+            version: field(data, "copilotVersion").unwrap_or("").to_owned(),
+            session_id: field(data, "sessionId").unwrap_or("").to_owned(),
+            ..Default::default()
+        });
+    }
+    if !summary
+        .copilot
+        .as_mut()
+        .expect("initialized")
+        .seen
+        .insert(identity.to_owned())
+    {
+        return;
+    }
+    let time = record_time(record);
+    if let Some(timestamp) = field(record, "timestamp")
+        && time.is_some()
+    {
+        let index = summary.copilot.as_mut().expect("initialized");
+        if index.first.is_none() {
+            index.first = Some(timestamp.into());
+        }
+        index.last = Some(timestamp.into());
+    }
+    activity(summary, time);
+    let event = Event {
+        o: offset,
+        t: time,
+        u: Some(identity.to_owned()),
+        ..Default::default()
+    };
+    match field(record, "type").unwrap_or("") {
+        "session.start" => {
+            summary.cwd = data
+                .get("context")
+                .and_then(|c| field(c, "cwd"))
+                .map(str::to_owned);
+            summary.entrypoint = Some("copilot-cli".into());
+            summary.last_model = field(data, "selectedModel").map(str::to_owned);
+            setting(
+                summary,
+                SignalKind::Model,
+                offset,
+                time,
+                field(data, "selectedModel"),
+            );
+            setting(
+                summary,
+                SignalKind::Effort,
+                offset,
+                time,
+                field(data, "reasoningEffort"),
+            );
+            summary.copilot.as_mut().expect("initialized").lifecycle = Some("session.start".into());
+        }
+        "session.resume" => {
+            summary.copilot.as_mut().expect("initialized").lifecycle = Some("session.resume".into())
+        }
+        "session.model_change" => {
+            let model = field(data, "newModel").or_else(|| field(data, "model"));
+            setting(summary, SignalKind::Model, offset, time, model);
+            if let Some(model) = model {
+                summary.last_model = Some(model.to_owned());
+            }
+        }
+        "user.message" => {
+            if field(data, "content").is_some() {
+                summary.events.push(Event {
+                    k: Kind::U,
+                    id: field(data, "messageId").map(str::to_owned),
+                    ..event
+                });
+            }
+        }
+        "assistant.message" => {
+            if let Some(model) = field(data, "model") {
+                summary.last_model = Some(model.into());
+                setting(summary, SignalKind::Model, offset, time, Some(model));
+            }
+            if field(data, "content").is_some_and(|text| !text.is_empty()) {
+                summary.events.push(Event {
+                    k: Kind::A,
+                    id: field(data, "messageId").map(str::to_owned),
+                    ..event.clone()
+                });
+            }
+            for (block, request) in data
+                .get("toolRequests")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .enumerate()
+            {
+                let id = field(request, "toolCallId").filter(|id| !id.is_empty());
+                if let Some(indices) = id.and_then(|id| summary.tool_ids.get(id)).cloned() {
+                    for index in indices {
+                        if let Some(event) = summary.event_mut(index) {
+                            event.r = None;
+                        }
+                    }
+                }
+                // Repeated native call ids are ambiguous, never resolved by proximity.
+                tool_event(
+                    summary,
+                    Event {
+                        k: Kind::Tool,
+                        b: block as u32,
+                        id: id.map(str::to_owned),
+                        n: field(request, "name").map(str::to_owned),
+                        ..event.clone()
+                    },
+                );
+            }
+        }
+        "tool.execution_start" => {
+            // A start is metadata for the assistant's exact request; no fabricated
+            // call from an orphan start or name/timing attribution.
+        }
+        "tool.execution_complete" => {
+            let Some(id) = field(data, "toolCallId") else {
+                return;
+            };
+            if summary
+                .tool_ids
+                .get(id)
+                .is_none_or(|indices| indices.len() != 1)
+            {
+                return;
+            }
+            let success = data.get("success").and_then(Value::as_bool);
+            let exit = data
+                .get("shellExecution")
+                .and_then(|s| s.get("exitCode"))
+                .and_then(Value::as_i64);
+            let denied = data.get("error").and_then(|e| field(e, "code")) == Some("denied");
+            let mut flags = if denied { DENIED } else { 0 };
+            if success.is_none()
+                || (summary
+                    .tool_ids
+                    .get(id)
+                    .and_then(|v| v.first())
+                    .and_then(|i| summary.events.get(*i))
+                    .and_then(|e| e.n.as_deref())
+                    == Some("bash")
+                    && exit.is_none()
+                    && success == Some(true))
+            {
+                flags |= UNKNOWN;
+            }
+            if denied {
+                note(
+                    summary,
+                    SignalKind::Denial,
+                    offset,
+                    time,
+                    "permission_denied".into(),
+                    call_index(summary, id),
+                );
+            }
+            resolve(summary, id, |_| Reply {
+                o: offset,
+                t: time,
+                e: success == Some(false) || exit.is_some_and(|code| code != 0),
+                f: flags,
+                ..Default::default()
+            });
+        }
+        "abort" => {
+            // No toolCallId: retain cancellation; pending calls remain unknown.
+            setting(
+                summary,
+                SignalKind::Interrupt,
+                offset,
+                time,
+                field(data, "reason"),
+            );
+        }
+        "session.compaction_complete" => {
+            note(
+                summary,
+                SignalKind::Compact,
+                offset,
+                time,
+                "manual".into(),
+                None,
+            );
+        }
+        "subagent.started" | "subagent.completed" => {
+            summary.extras.push(Event {
+                k: Kind::Harness,
+                n: field(record, "type").map(str::to_owned),
+                id: field(data, "toolCallId").map(str::to_owned),
+                ..event
+            });
+        }
+        "session.shutdown" => {
+            let index = summary.copilot.as_mut().expect("initialized");
+            index.lifecycle = Some("session.shutdown".into());
+            // Each shutdown replaces the preceding cumulative snapshot, including
+            // child usage. Never add agentMetrics or compaction metrics to it.
+            index.usage = crate::copilot::snapshot(data);
+            index.usage_source = Some(crate::copilot::Observation {
+                event_id: identity.into(),
+                offset,
+                timestamp: time,
+            });
+            index.usage_events = index
+                .usage
+                .as_ref()
+                .map(|usage| {
+                    usage
+                        .by_model
+                        .iter()
+                        .map(|(model, tokens)| CodexUsageEvent {
+                            model: model.clone(),
+                            tokens: tokens.clone(),
+                            timestamp: time,
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+        }
         _ => {}
     }
 }

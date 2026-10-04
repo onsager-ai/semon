@@ -37,6 +37,22 @@ export interface ClaudeUsageEvidence {
   fresh: TokenObservation | null;
   shared_owner: string | null;
 }
+export interface CopilotEvidence {
+  usage_source: { event_id: string; offset: number; timestamp: number | null } | null;
+  version: string;
+  schema: number;
+  usage: {
+    tokens: TokenObservation;
+    by_model: Record<
+      string,
+      { input: number; output: number; cache_read: number; cache_write: number }
+    >;
+    reasoning_by_model: Record<string, number>;
+  } | null;
+  lifecycle: string | null;
+  logical_parent: string | null;
+  approvals: string | null;
+}
 export interface Session {
   id: string;
   name: string;
@@ -82,6 +98,7 @@ export interface Session {
   tokens?: number[];
   tokens_by_model?: Record<string, Usage>;
   claude_usage?: ClaudeUsageEvidence;
+  copilot?: CopilotEvidence;
   cost?: Cost;
   activity?: [string, string, number, number?];
   tool_calls?: Record<string, number>;

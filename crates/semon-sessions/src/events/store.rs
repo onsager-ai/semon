@@ -45,7 +45,7 @@ use crate::{Tokens, facts::ReportedRunSnapshot};
 
 /// `PRAGMA user_version`: the shape of the tables. The parser's version is
 /// [`CACHE_VERSION`], kept in `meta`.
-const SCHEMA_VERSION: i64 = 3;
+const SCHEMA_VERSION: i64 = 4;
 
 /// How long a write waits for another process's transaction. Tests wait
 /// less, so the busy paths they drive stay quick.
@@ -91,7 +91,8 @@ CREATE TABLE IF NOT EXISTS files (
     codex_tokens TEXT NOT NULL,
     codex_tokens_by_model TEXT NOT NULL,
     rate_limits TEXT,
-    codex_native_usage TEXT
+    codex_native_usage TEXT,
+    copilot TEXT
 ) STRICT;
 CREATE TABLE IF NOT EXISTS events (
     file_id INTEGER NOT NULL,
@@ -202,14 +203,14 @@ DELETE FROM files;
 const FILE_COLUMNS: &str = "file_id, path, dev, ino, size, mtime_ns, resume_at, head_sha256, \
      tail_sha256, entrypoint, title, agent_name, last_model, failed, first_ms, last_ms, cwd, \
      branch, pending, tool_ids, yields, busy, links, codex_tokens, codex_tokens_by_model, \
-     rate_limits, codex_native_usage";
+     rate_limits, codex_native_usage, copilot";
 
 const PUT_FILE: &str = "INSERT INTO files (path, dev, ino, size, mtime_ns, resume_at, \
      head_sha256, tail_sha256, entrypoint, title, agent_name, last_model, failed, first_ms, \
      last_ms, cwd, branch, pending, tool_ids, yields, busy, links, codex_tokens, \
-     codex_tokens_by_model, rate_limits, codex_native_usage) \
+     codex_tokens_by_model, rate_limits, codex_native_usage, copilot) \
      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, \
-     ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26) \
+     ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27) \
      ON CONFLICT (path) DO UPDATE SET dev = excluded.dev, ino = excluded.ino, \
      size = excluded.size, mtime_ns = excluded.mtime_ns, resume_at = excluded.resume_at, \
      head_sha256 = excluded.head_sha256, tail_sha256 = excluded.tail_sha256, \
@@ -220,7 +221,7 @@ const PUT_FILE: &str = "INSERT INTO files (path, dev, ino, size, mtime_ns, resum
      tool_ids = excluded.tool_ids, yields = excluded.yields, busy = excluded.busy, \
      links = excluded.links, codex_tokens = excluded.codex_tokens, \
      codex_tokens_by_model = excluded.codex_tokens_by_model, \
-     rate_limits = excluded.rate_limits, codex_native_usage = excluded.codex_native_usage \
+     rate_limits = excluded.rate_limits, codex_native_usage = excluded.codex_native_usage, copilot = excluded.copilot \
      RETURNING file_id";
 
 const EVENT_COLUMNS: &str = "extra, seq, k, o, b, t, id, n, code_mode, code_mode_open, parent, \
@@ -1200,6 +1201,9 @@ fn init(connection: &mut Connection) -> rusqlite::Result<Init> {
                 "ALTER TABLE usage ADD COLUMN record_ids TEXT NOT NULL DEFAULT '[]'",
             )?;
         }
+        if (1..=3).contains(&schema) {
+            transaction.execute_batch("ALTER TABLE files ADD COLUMN copilot TEXT")?;
+        }
         transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     }
     let wiped = parser_version(&transaction)? != Some(CACHE_VERSION);
@@ -1463,6 +1467,10 @@ fn read_file(
         codex_tokens: from_json(23, &row.get::<_, String>(23)?)?,
         codex_tokens_by_model: from_json(24, &row.get::<_, String>(24)?)?,
         codex_usage_events,
+        copilot: row
+            .get::<_, Option<String>>(27)?
+            .map(|text| from_json(27, &text))
+            .transpose()?,
         codex_native_usage: row
             .get::<_, Option<String>>(26)?
             .map(|text| from_json(26, &text))
@@ -1649,6 +1657,7 @@ fn write_file(
         codex_tokens_by_model,
         codex_usage_events,
         codex_native_usage,
+        copilot,
         rate_limits,
     } = index;
     let Ledger {
@@ -1693,6 +1702,7 @@ fn write_file(
             json(codex_tokens_by_model)?,
             rate_limits,
             codex_native_usage.as_ref().map(json).transpose()?,
+            copilot.as_ref().map(json).transpose()?,
         ],
         |row| row.get(0),
     )?;
@@ -2205,6 +2215,7 @@ mod tests {
                 ("msg-2".to_owned(), MessageUsage::default()),
             ]),
             codex_native_usage: None,
+            copilot: None,
             codex_tokens: Tokens {
                 input: 17,
                 cached_input: 18,
@@ -2434,6 +2445,7 @@ mod tests {
             .connection
             .execute_batch(
                 "ALTER TABLE usage DROP COLUMN record_ids;
+             ALTER TABLE files DROP COLUMN copilot;
              ALTER TABLE files DROP COLUMN codex_native_usage;
              PRAGMA user_version = 1;
              UPDATE meta SET value = '19' WHERE key = 'cache_version';",
@@ -2466,7 +2478,7 @@ mod tests {
         store
             .write_one("a.jsonl", None, None, &ledger(1), &full())
             .unwrap();
-        store.connection.execute_batch("ALTER TABLE usage DROP COLUMN record_ids; PRAGMA user_version = 2; UPDATE meta SET value = '20' WHERE key = 'cache_version';").unwrap();
+        store.connection.execute_batch("ALTER TABLE files DROP COLUMN copilot; ALTER TABLE usage DROP COLUMN record_ids; PRAGMA user_version = 2; UPDATE meta SET value = '20' WHERE key = 'cache_version';").unwrap();
         drop(store);
         let (store, loaded) = opened(&path);
         assert!(loaded.files.is_empty());
@@ -2479,6 +2491,38 @@ mod tests {
             versions(&store.connection).unwrap(),
             (SCHEMA_VERSION, Some(CACHE_VERSION))
         );
+        store
+            .connection
+            .prepare("SELECT record_ids FROM usage")
+            .unwrap();
+    }
+
+    #[test]
+    fn schema_three_adds_copilot_and_preserves_reported_runs() {
+        let root = scratch("copilot-migration");
+        let path = root.join("index.sqlite3");
+        let (mut store, _) = opened(&path);
+        store.write_runs(&[run()], &stamp()).unwrap();
+        store
+            .write_one("a.jsonl", None, None, &ledger(1), &full())
+            .unwrap();
+        store.connection.execute_batch("ALTER TABLE files DROP COLUMN copilot; PRAGMA user_version = 3; UPDATE meta SET value = '21' WHERE key = 'cache_version';").unwrap();
+        drop(store);
+        let (store, loaded) = opened(&path);
+        assert!(loaded.files.is_empty());
+        assert_eq!(
+            format!("{:?}", loaded.reported_runs),
+            format!("{:?}", [run()])
+        );
+        assert_eq!(loaded.stamp, Some(stamp()));
+        assert_eq!(
+            versions(&store.connection).unwrap(),
+            (SCHEMA_VERSION, Some(CACHE_VERSION))
+        );
+        store
+            .connection
+            .prepare("SELECT copilot FROM files")
+            .unwrap();
         store
             .connection
             .prepare("SELECT record_ids FROM usage")

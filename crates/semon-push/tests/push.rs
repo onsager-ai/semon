@@ -47,6 +47,8 @@ struct Received {
     /// Refuse the token (401) for any append after this many successful
     /// ones.
     refuse_after: Option<u64>,
+    /// Commit one append and deliberately lose its acknowledgement.
+    drop_ack_once: bool,
 }
 
 struct Receiver {
@@ -110,6 +112,13 @@ fn receiver() -> Receiver {
             } else {
                 json_response(404, json!({}))
             };
+            if authorized
+                && url == "/v1/mirror/append"
+                && std::mem::take(&mut shared.lock().unwrap().drop_ack_once)
+            {
+                drop(request);
+                continue;
+            }
             let _ = request.respond(response);
         }
     });
@@ -199,6 +208,7 @@ impl Home {
         let options = Options {
             claude_home: root.join("claude"),
             codex_home: root.join("codex"),
+            copilot_home: root.join("copilot"),
             proc_root: root.join("proc"),
             cache: root.join("index.json"),
             ..Options::default()
@@ -1012,5 +1022,119 @@ fn copied_claude_usage_has_redacted_http_mirror_and_restart_parity() {
                 assert_eq!(actual.body, wanted.body);
             }
         }
+    }
+}
+
+#[test]
+fn copilot_redacted_mirror_survives_lost_ack_restart_partial_and_replacement() {
+    for version in ["1.0.90", "1.0.91"] {
+        let mut home = Home::new();
+        home.options.all = true;
+        let receiver = receiver();
+        let mirrored = Home::new();
+        let expected = Home::new();
+        let read = |name: &str| {
+            fs::read_to_string(
+                Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../tests/fixtures/compatibility")
+                    .join(format!("copilot-{version}/lifecycle/{name}.events.jsonl")),
+            )
+            .unwrap()
+            .replace("SEMON_SYNTHETIC_initial", "Bearer SECRETSECRETSECRETSECRET")
+        };
+        let initial = read("initial");
+        let resumed = read("resumed");
+        let header: serde_json::Value =
+            serde_json::from_str(initial.lines().next().unwrap()).unwrap();
+        let id = header["data"]["sessionId"].as_str().unwrap();
+        let path = format!("copilot/session-state/{id}/events.jsonl");
+        home.write(&path, &initial);
+        home.write(
+            "copilot/session-store.db",
+            "Bearer SECRETSECRETSECRETSECRET",
+        );
+        home.write(
+            &format!("copilot/session-state/{id}/workspace.yaml"),
+            "Bearer SECRETSECRETSECRETSECRET",
+        );
+        receiver.state.lock().unwrap().drop_ack_once = true;
+        assert!(
+            semon_push::push(&home.push_options(&receiver.url), false).is_err(),
+            "lost ACK is not acknowledged state"
+        );
+        assert_eq!(copy(&receiver, &path), redacted(&initial));
+        semon_push::push(&home.push_options(&receiver.url), false).unwrap();
+        assert!(
+            receiver.state.lock().unwrap().conflicts > 0,
+            "restart reconciles the committed unacknowledged prefix"
+        );
+        let partial = resumed.len() - resumed.lines().last().unwrap().len() / 2;
+        home.write(&path, &resumed[..partial]);
+        semon_push::push(&home.push_options(&receiver.url), false).unwrap();
+        assert!(copy(&receiver, &path).ends_with(b"\n"));
+        for source in [
+            &resumed,
+            &resumed.replace("SEMON_SYNTHETIC_resumed", "SEMON_SYNTHETIC_changed"),
+        ] {
+            home.write(&path, source);
+            semon_push::push(&home.push_options(&receiver.url), false).unwrap();
+            // A fresh Client/cursor-state load tests restart and duplicate replay.
+            semon_push::push(&home.push_options(&receiver.url), false).unwrap();
+            let (received, facts) = {
+                let state = receiver.state.lock().unwrap();
+                (state.files.clone(), state.facts.clone().unwrap())
+            };
+            assert_eq!(
+                received.len(),
+                1,
+                "only exact authoritative Copilot events may cross the wire"
+            );
+            assert_eq!(received[&path], redacted(source));
+            assert!(!String::from_utf8_lossy(&received[&path]).contains("SECRETSECRET"));
+            assert_eq!(fs::read_to_string(home.root.join(&path)).unwrap(), *source);
+            for (destination, bytes) in [
+                (&mirrored.root, received[&path].clone()),
+                (&expected.root, redacted(source)),
+            ] {
+                let file = destination.join(&path);
+                fs::create_dir_all(file.parent().unwrap()).unwrap();
+                fs::write(file, bytes).unwrap();
+            }
+            let configure = |home: &Home| {
+                let options = Options {
+                    all: true,
+                    facts: Some(home.root.join("facts.json")),
+                    ..home.options.clone()
+                };
+                semon_sessions::write_facts(options.facts.as_ref().unwrap(), &facts).unwrap();
+                options
+            };
+            let local = configure(&expected);
+            let remote = configure(&mirrored);
+            let now = 1_791_072_000_000;
+            assert_eq!(
+                semon_sessions::model_json_at(&local, now).unwrap(),
+                semon_sessions::model_json_at(&remote, now).unwrap()
+            );
+            let local = semon_sessions::ViewerCore::new(local);
+            let remote = semon_sessions::ViewerCore::new(remote);
+            for (route, query) in [
+                ("/api/tx", format!("sid={id}")),
+                ("/api/transcript", format!("harness=copilot&id={id}")),
+            ] {
+                let actual = remote.respond("GET", route, &query, None);
+                let wanted = local.respond("GET", route, &query, None);
+                assert_eq!(actual.status, 200);
+                assert_eq!(actual.body, wanted.body);
+            }
+        }
+        let retained = copy(&receiver, &path);
+        fs::remove_file(home.root.join(&path)).unwrap();
+        semon_push::push(&home.push_options(&receiver.url), false).unwrap();
+        assert_eq!(
+            copy(&receiver, &path),
+            retained,
+            "source deletion does not erase previously received viewing evidence"
+        );
     }
 }

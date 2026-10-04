@@ -778,7 +778,7 @@ fn local(error: io::Error) -> Failure {
 }
 
 fn open_input(path: &Path) -> io::Result<fs::File> {
-    let file = fs::File::open(path)?;
+    let file = semon_sessions::open_read_only_input(path)?;
     #[cfg(test)]
     INPUT_OPENS.with(|opens| {
         *opens.borrow_mut().entry(path.to_owned()).or_default() += 1;
@@ -1252,6 +1252,7 @@ mod tests {
                 claude_home: root.join("claude"),
                 claude_json: root.join(".claude.json"),
                 codex_home: root.join("codex"),
+                copilot_home: root.join("copilot"),
                 proc_root: root.join("proc"),
                 cache: root.join("index.json"),
                 all: true,
