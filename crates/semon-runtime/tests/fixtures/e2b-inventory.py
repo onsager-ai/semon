@@ -19,6 +19,18 @@ for name in ("SEMON_TEST_COORDINATOR_SECRET", "E2B_API_KEY", "E2B_ACCESS_TOKEN",
 if "SEMON_TEST_NETWORK_GUARD" in os.environ:
     assert os.environ["SEMON_TEST_NETWORK_GUARD"] == "keep"
 (root / "request-checked").touch()
+if request.get("method") == "validate_credential":
+    assert set(request["scope"]) == {"semon_deployment", "semon_owner"}
+    status = {"rejected": "credential_rejected", "unavailable": "unavailable"}.get(mode, "credential_valid")
+    response = {"version": 1, "status": status}
+    if mode == "validation_leak":
+        response["resources"] = []
+    if mode == "inventory_as_validation":
+        response = {"version": 1, "status": "complete", "resources": []}
+    if mode == "wrong_version":
+        response["version"] = 2
+    print(json.dumps(response))
+    sys.exit(0)
 if mode == "oversize":
     sys.stdout.write("x" * (3 * 1024 * 1024))
     time.sleep(60)
