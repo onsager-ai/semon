@@ -184,6 +184,75 @@ fn native_families_are_read_only_and_browsable_on_both_releases() {
             assert_eq!(roots.len(), 1);
             assert_eq!(roots[0].harness, "copilot");
             assert_eq!(roots[0].copilot.as_ref().unwrap().version, version);
+            // The same exact native fixture must agree through every ingestion
+            // route, including complete tool outcomes and relationship evidence.
+            let incremental = root.0.join("incremental-native");
+            let header_end = bytes.iter().position(|b| *b == b'\n').unwrap() + 1;
+            let split = header_end + (bytes.len() - header_end) / 2;
+            let partial = install(&incremental, &bytes[..split]);
+            let state = root.0.join("incremental-custody/state.json");
+            let db = root.0.join("incremental-custody/store.db");
+            let incremental_options = root.opts(&incremental, "incremental-view");
+            let mut capture = Collector::open(&incremental, &state, &db).unwrap();
+            drain(&mut capture);
+            model(&incremental_options);
+            drop(capture);
+            fs::write(&partial, &bytes).unwrap();
+            let mut capture = Collector::open(&incremental, &state, &db).unwrap();
+            drain(&mut capture);
+            let final_model = model(&incremental_options);
+            assert_eq!(
+                json["sessions"], final_model["sessions"],
+                "cold/incremental: {version}/{name}"
+            );
+            let retained = capture
+                .store
+                .fetch_current_capture_source_raw(CARRIER, &partial.to_string_lossy())
+                .unwrap()
+                .unwrap();
+            assert_eq!(retained, bytes);
+            let rebuild_home = root.0.join("rebuilt-native");
+            install(&rebuild_home, &retained);
+            let rebuild_options = root.opts(&rebuild_home, "rebuilt-view");
+            assert_eq!(
+                json["sessions"],
+                model(&rebuild_options)["sessions"],
+                "cold/retained: {version}/{name}"
+            );
+            assert_eq!(
+                c_log(&captured),
+                c_log(&capture),
+                "canonical identity/parents: {version}/{name}"
+            );
+            let mut rebuilt = Collector::open(
+                &rebuild_home,
+                &root.0.join("rebuilt-custody/state.json"),
+                &root.0.join("rebuilt-custody/store.db"),
+            )
+            .unwrap();
+            drain(&mut rebuilt);
+            assert_eq!(
+                c_log(&captured),
+                c_log(&rebuilt),
+                "retained canonical identities: {version}/{name}"
+            );
+            for route in ["/api/tx", "/api/transcript"] {
+                let query = if route == "/api/tx" {
+                    format!("sid={native_id}")
+                } else {
+                    format!("harness=copilot&id={native_id}")
+                };
+                let expected = core.respond("GET", route, &query, None);
+                assert_eq!(expected.status, 200);
+                for opts in [&incremental_options, &rebuild_options] {
+                    let actual = ViewerCore::new(opts.clone()).respond("GET", route, &query, None);
+                    assert_eq!(actual.status, 200);
+                    assert_eq!(
+                        actual.body, expected.body,
+                        "{route} text/results/errors: {version}/{name}"
+                    );
+                }
+            }
             assert_eq!(fs::read(path).unwrap(), bytes);
         }
     }
