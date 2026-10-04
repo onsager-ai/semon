@@ -22,7 +22,7 @@ class Tests(unittest.TestCase):
             def create(**kw):calls.append(kw);return SimpleNamespace(sandbox_id='vm-one')
         self.assertEqual(worker.managed(request(method='create'),SDK),{'id':'vm-one'})
         self.assertEqual(len(calls),1)
-        self.assertEqual(calls[0]['template'],'base');self.assertEqual(calls[0]['timeout'],900)
+        self.assertEqual(calls[0]['template'],'base');self.assertEqual(calls[0]['timeout'],900);self.assertEqual(calls[0]['retries'],0)
         self.assertNotIn('model_key',calls[0])
     def test_foreign_and_paused_resources_never_connect(self):
         for metadata,state in [({},'running'),(LABELS,'paused')]:
