@@ -75,5 +75,54 @@ class InventoryTests(unittest.TestCase):
         self.assertEqual(self.run_inventory([[]])[0], {"version": 1, "status": "complete", "resources": []})
 
 
+class ValidationTests(unittest.TestCase):
+    def request(self):
+        return {"version": 1, "method": "validate_credential", "scope": {"semon_deployment": "hub-prod", "semon_owner": "owner-1"}, "api_key": "synthetic-private-key"}
+
+    def run_validation(self, failure=None, request=None, clock=lambda: 0):
+        calls = []
+        class AuthError(Exception):
+            pass
+        class Paginator:
+            def next_items(self, **opts):
+                calls.append(opts)
+                if failure == "auth":
+                    raise AuthError("synthetic-key-in-error")
+                if isinstance(failure, Exception):
+                    raise failure
+                return [{"private": "must-not-relay"}]
+        class Sandbox:
+            @staticmethod
+            def list(**opts):
+                calls.append(opts)
+                return Paginator()
+        result = worker.validate_credential(request or self.request(), Sandbox, lambda **kw: kw, AuthError, clock)
+        return result, calls
+
+    def test_one_authenticated_page_has_no_resource_or_key_output(self):
+        result, calls = self.run_validation()
+        self.assertEqual(result, {"version": 1, "status": "credential_valid"})
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[0]["limit"], 1)
+        self.assertEqual(calls[0]["query"], {"metadata": self.request()["scope"]})
+
+    def test_auth_rejection_and_outage_are_distinct_and_sanitized(self):
+        for failure, status in [("auth", "credential_rejected"), (RuntimeError("private-vendor-error"), "unavailable")]:
+            self.assertEqual(self.run_validation(failure)[0], {"version": 1, "status": status})
+        forbidden = RuntimeError("private-vendor-permission-error")
+        forbidden.status_code = 403
+        self.assertEqual(self.run_validation(forbidden)[0]["status"], "credential_rejected")
+
+    def test_invalid_or_unsupported_requests_never_contact_sdk(self):
+        for key, value in [("method", "create"), ("api_key", ""), ("scope", {"semon_owner": "owner-1"}), ("version", True)]:
+            result, calls = self.run_validation(request=self.request() | {key: value})
+            self.assertEqual(result["status"], "unavailable")
+            self.assertEqual(calls, [])
+
+    def test_response_after_deadline_is_not_validated(self):
+        ticks = iter([0, 6])
+        self.assertEqual(self.run_validation(clock=lambda: next(ticks))[0]["status"], "unavailable")
+
+
 if __name__ == "__main__":
     unittest.main()
