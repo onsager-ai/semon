@@ -38,7 +38,7 @@ def inspect():
     with open(ROOT / 'launch.lock', 'a') as lock:
         try:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            status = receipt['status'] if receipt['status'] == 'completed' else 'delivery_unknown'
+            status = ('completed' if receipt.get('exit_code') == 0 else 'agent_failed') if receipt['status'] == 'completed' else 'delivery_unknown'
         except BlockingIOError:
             status = 'running' if receipt['status'] == 'running' else 'starting'
     thread = None

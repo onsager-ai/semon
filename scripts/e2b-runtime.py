@@ -114,7 +114,7 @@ def execute(request, sandbox_class):
         box.commands.run(f'python3 {ROOT}/guest.py launch >{ROOT}/supervisor-error 2>&1', background=True, timeout=0)
     result = box.commands.run(f'python3 {ROOT}/guest.py inspect', timeout=10)
     receipt = json.loads(result.stdout)
-    if receipt['status'] not in ('absent', 'starting', 'running', 'completed', 'delivery_unknown'):
+    if receipt['status'] not in ('absent', 'starting', 'running', 'completed', 'agent_failed', 'delivery_unknown'):
         return UNKNOWN
     return {'status': receipt['status'], 'runtime': runtime, 'thread': receipt['thread']}
 
