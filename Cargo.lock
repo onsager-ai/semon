@@ -1884,6 +1884,7 @@ name = "semon-claude"
 version = "0.1.0"
 dependencies = [
  "semon-codex",
+ "semon-sessions",
  "semon-store",
  "serde_json",
  "sha2 0.10.9",
@@ -1908,6 +1909,19 @@ dependencies = [
  "libc",
  "serde_json",
  "serde_json_canonicalizer",
+ "sha2 0.10.9",
+ "thiserror 2.0.19",
+]
+
+[[package]]
+name = "semon-copilot"
+version = "0.1.0"
+dependencies = [
+ "semon-push",
+ "semon-sessions",
+ "semon-store",
+ "serde",
+ "serde_json",
  "sha2 0.10.9",
  "thiserror 2.0.19",
 ]

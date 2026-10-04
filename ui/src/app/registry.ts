@@ -12,6 +12,11 @@ export const HARNESSES: Record<
     short: 'Codex',
     icon: { light: '/harness/codex-black.svg', dark: '/harness/codex.svg' },
   },
+  copilot: {
+    name: 'GitHub Copilot CLI',
+    short: 'Copilot',
+    icon: { light: '/harness/copilot.svg', dark: '/harness/copilot.svg' },
+  },
   opencode: {
     name: 'OpenCode',
     short: 'OpenCode',

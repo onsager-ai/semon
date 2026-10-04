@@ -67,6 +67,14 @@ pub(crate) struct Session {
     pub(crate) effort: Option<String>,
     pub(crate) tokens: [f64; 3],
     pub(crate) tokens_by_model: BTreeMap<String, events::ModelTokens>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) claude_usage: Option<crate::ClaudeUsageEvidence>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) copilot: Option<crate::copilot::CopilotEvidence>,
+    #[serde(skip)]
+    pub(crate) incomplete_usage_days: BTreeSet<i64>,
+    #[serde(skip)]
+    pub(crate) incomplete_usage_time: bool,
     pub(crate) cost: crate::pricing::Cost,
     pub(crate) reported_runs: Vec<ReportedRun>,
     pub(crate) cost_check: Vec<CostCheck>,
@@ -737,6 +745,12 @@ pub(crate) fn content_text(value: &Value) -> String {
 /// transcript shows them apart ([`attachments::refs`]), so the harness's
 /// `[Image #N]` placeholders for them, and Codex's `<image>` frames, go too.
 pub(crate) fn prompt_text(record: &Value) -> Option<String> {
+    if field(record, "type") == Some("user.message") {
+        return record
+            .get("data")
+            .and_then(|data| field(data, "content"))
+            .map(str::to_owned);
+    }
     let images = attachments::parts(record).is_some_and(attachments::has_image);
     let placeholders = |text: String| {
         if images {
@@ -794,6 +808,12 @@ fn block_of(record: &Value, block: usize) -> Option<&Value> {
 }
 
 pub(crate) fn assistant_text(record: &Value, block: usize) -> Option<String> {
+    if field(record, "type") == Some("assistant.message") {
+        return record
+            .get("data")
+            .and_then(|data| field(data, "content"))
+            .map(str::to_owned);
+    }
     if let Some(item) = block_of(record, block) {
         return field(item, "text").map(|text| text.trim().to_owned());
     }
@@ -813,6 +833,15 @@ pub(crate) fn assistant_text(record: &Value, block: usize) -> Option<String> {
 /// A tool call's input: a Claude `tool_use` block, or a Codex call's
 /// arguments parsed as JSON.
 pub(crate) fn tool_input(record: &Value, block: usize) -> Option<Value> {
+    if field(record, "type") == Some("assistant.message") {
+        return record
+            .get("data")?
+            .get("toolRequests")?
+            .as_array()?
+            .get(block)?
+            .get("arguments")
+            .cloned();
+    }
     if let Some(item) = block_of(record, block) {
         return item.get("input").cloned();
     }
@@ -994,6 +1023,7 @@ enum Role {
     Top { slug: String },
     Agent(AgentMeta),
     Codex(CodexMeta),
+    Copilot,
 }
 
 type FileRevision = events::FileRevision;
@@ -1013,7 +1043,9 @@ struct SourceFile {
 
 impl SourceFile {
     fn harness(&self) -> &'static str {
-        if matches!(self.role, Role::Codex(_)) {
+        if matches!(self.role, Role::Copilot) {
+            "copilot"
+        } else if matches!(self.role, Role::Codex(_)) {
             "codex"
         } else {
             "claude"
@@ -1143,7 +1175,7 @@ pub(crate) fn working_dirs(
         match &file.role {
             Role::Agent(meta) => cwds.extend(meta.cwd.clone()),
             Role::Codex(meta) => cwds.extend(meta.cwd.clone()),
-            Role::Top { .. } => {}
+            Role::Top { .. } | Role::Copilot => {}
         }
     }
     Ok(cwds)
@@ -1327,6 +1359,43 @@ fn scan(
             summary,
         });
     }
+    for input in crate::inputs::inputs(options)?
+        .into_iter()
+        .filter(|input| input.root == crate::inputs::InputRoot::Copilot)
+    {
+        let path = input.full_path(options);
+        if outside(&path) {
+            seen.insert(path.to_string_lossy().into_owned());
+            continue;
+        }
+        let id = input
+            .path
+            .split('/')
+            .nth(1)
+            .expect("allowlisted session identity")
+            .to_owned();
+        let Some(_) = crate::copilot::header(&path, &id)? else {
+            continue;
+        };
+        let stamp = stamp_of(&path);
+        let summary = events::scan_file(&path, "copilot", cache, dirty)?;
+        if cache.replaced(&path) {
+            texts.invalidate(&path);
+        }
+        texts.generation(&path, stamp);
+        seen.insert(path.to_string_lossy().into_owned());
+        files.push(SourceFile {
+            revision: cache.revision(&path).expect("scanned file"),
+            stamp,
+            id,
+            role: Role::Copilot,
+            first: summary.first,
+            last: summary.last,
+            marker: None,
+            path,
+            summary,
+        });
+    }
     cache.retain(&seen, dirty);
     cache.end_scan();
     texts
@@ -1433,6 +1502,7 @@ enum SessKind {
     Lineage,
     Agent,
     Codex,
+    Copilot,
     Stub,
 }
 
@@ -1492,6 +1562,7 @@ struct DescriptionInputs {
     baseline: String,
     names: BTreeSet<String>,
     reports: String,
+    shared_usage: crate::claude_usage::Shared,
     repos: Vec<(String, Option<Option<String>>)>,
     clock: Option<i64>,
 }
@@ -1541,6 +1612,7 @@ struct Builder<'a> {
     ids: HashMap<String, usize>,
     /// Events a copy-resume duplicated: skipped everywhere.
     copied: BTreeSet<Ref>,
+    shared_usage: BTreeMap<String, crate::claude_usage::Shared>,
     /// A subagent's send to `main`, and its receipt in the parent.
     progress: HashMap<Ref, Ref>,
 }
@@ -1613,6 +1685,7 @@ impl<'a> Builder<'a> {
             live_files: BTreeMap::new(),
             ids: HashMap::new(),
             copied: BTreeSet::new(),
+            shared_usage: BTreeMap::new(),
             progress: HashMap::new(),
         }
     }
@@ -1631,6 +1704,10 @@ impl<'a> Builder<'a> {
             effort: None,
             tokens: [0.0; 3],
             tokens_by_model: BTreeMap::new(),
+            claude_usage: None,
+            copilot: None,
+            incomplete_usage_days: BTreeSet::new(),
+            incomplete_usage_time: false,
             cost: crate::pricing::Cost::default(),
             reported_runs: Vec::new(),
             cost_check: Vec::new(),
@@ -1898,6 +1975,7 @@ impl<'a> Builder<'a> {
                             .and_then(|pid| run_of(pid, None));
                         ("codex-run", pid, alive, None, run)
                     }
+                    SessKind::Copilot => ("copilot-session", None, None, None, None),
                     SessKind::Stub => ("stub", None, None, None, None),
                 };
                 let facts = SessionFacts {
@@ -1911,7 +1989,13 @@ impl<'a> Builder<'a> {
                     run,
                     first: session.first,
                     last: session.last,
-                    tokens: (session.kind != SessKind::Stub).then(|| session.tokens.clone()),
+                    tokens: (session.kind != SessKind::Stub
+                        && session
+                            .out
+                            .copilot
+                            .as_ref()
+                            .is_none_or(|evidence| evidence.usage.is_some()))
+                    .then(|| session.tokens.clone()),
                     turns_truncated: session.files.iter().any(|file| {
                         self.files[*file]
                             .summary
@@ -1962,6 +2046,11 @@ impl<'a> Builder<'a> {
                         self.add_session(file.id.clone(), SessKind::Codex, vec![position], out);
                     self.sessions[index].alive = held.contains(&file.id);
                     self.sessions[index].busy = self.sessions[index].alive;
+                }
+                Role::Copilot => {
+                    let mut out = self.blank(String::new(), "copilot");
+                    out.kind = Some("Copilot CLI");
+                    self.add_session(file.id.clone(), SessKind::Copilot, vec![position], out);
                 }
                 Role::Top { .. } => {}
             }
@@ -2016,9 +2105,34 @@ impl<'a> Builder<'a> {
             }
         }
         self.order_events();
+        self.shared_usage = self.shared_claude_usage();
         for index in 0..self.sessions.len() {
             self.describe(index);
         }
+    }
+
+    fn shared_claude_usage(&self) -> BTreeMap<String, crate::claude_usage::Shared> {
+        let records: Vec<_> = self
+            .sessions
+            .iter()
+            .map(|session| {
+                let mut records = crate::claude_usage::Records::new();
+                for position in &session.files {
+                    let file = &self.files[*position];
+                    if file.harness() != "claude" {
+                        continue;
+                    }
+                    for (id, usage) in file.summary.usage() {
+                        records
+                            .entry(id.clone())
+                            .or_default()
+                            .extend(usage.record_ids.iter().cloned());
+                    }
+                }
+                (session.key.as_str(), records)
+            })
+            .collect();
+        crate::claude_usage::shared(records.iter().map(|(key, records)| (*key, records)))
     }
 
     fn describe(&mut self, index: usize) {
@@ -2033,7 +2147,7 @@ impl<'a> Builder<'a> {
             let cwd = match &file.role {
                 Role::Agent(meta) => meta.cwd.as_ref().or(file.summary.cwd.as_ref()),
                 Role::Codex(meta) => meta.cwd.as_ref().or(file.summary.cwd.as_ref()),
-                Role::Top { .. } => file.summary.cwd.as_ref(),
+                Role::Top { .. } | Role::Copilot => file.summary.cwd.as_ref(),
             };
             if let Some(cwd) = cwd {
                 repos.push((cwd.clone(), self.facts.recorded_repo(cwd)));
@@ -2056,6 +2170,11 @@ impl<'a> Builder<'a> {
             baseline: serde_json::to_string(&session.out).expect("session serializes"),
             names: session.names.clone(),
             reports: serde_json::to_string(&reports).expect("reports serialize"),
+            shared_usage: self
+                .shared_usage
+                .get(&session.key)
+                .cloned()
+                .unwrap_or_default(),
             clock: session
                 .files
                 .iter()
@@ -2150,7 +2269,13 @@ impl<'a> Builder<'a> {
                 tokens.input += used.input;
                 tokens.cached_input += used.cached_input;
                 tokens.output += used.output;
-                for (model, usage) in file.summary.codex_usage() {
+                let by_model = file
+                    .summary
+                    .copilot
+                    .as_ref()
+                    .and_then(|index| index.usage.as_ref())
+                    .map_or_else(|| file.summary.codex_usage(), |usage| &usage.by_model);
+                for (model, usage) in by_model {
                     tokens_by_model
                         .entry(model.clone())
                         .or_insert_with(events::ModelTokens::default)
@@ -2182,6 +2307,31 @@ impl<'a> Builder<'a> {
                 title.clone_from(&file.summary.agent_name);
             }
         }
+        let shared = self
+            .shared_usage
+            .get(&self.sessions[index].key)
+            .cloned()
+            .unwrap_or_default();
+        let usage_evidence = crate::claude_usage::evidence(
+            usage
+                .iter()
+                .map(|(id, used)| (id, &used.tokens, used.model.as_deref())),
+            &shared,
+        );
+        let mut incomplete_usage_days = BTreeSet::new();
+        let mut incomplete_usage_time = false;
+        for (id, used) in &usage {
+            if shared.contains_key(id) {
+                if let Some(time) = used.billing.timestamp {
+                    incomplete_usage_days.insert(
+                        time.div_euclid(crate::analytics::DAY_MS) * crate::analytics::DAY_MS,
+                    );
+                } else {
+                    incomplete_usage_time = true;
+                }
+            }
+        }
+        usage.retain(|id, _| !shared.contains_key(id));
         for used in usage.values() {
             tokens.input += used.tokens.input;
             tokens.cached_input += used.tokens.cached_input;
@@ -2198,6 +2348,12 @@ impl<'a> Builder<'a> {
         }
         let million = |value: u64| (value as f64 / 1e6 * 1000.0).round() / 1000.0;
         let (cwd, branch, fallback_model, fallback_name) = match &last_file.role {
+            Role::Copilot => (
+                last_file.summary.cwd.clone(),
+                None,
+                None,
+                "Copilot CLI".into(),
+            ),
             Role::Top { slug } => (
                 last_file.summary.cwd.clone(),
                 last_file.summary.branch.clone(),
@@ -2235,7 +2391,17 @@ impl<'a> Builder<'a> {
         } else {
             Vec::new()
         };
-        let cost = crate::pricing::calculate_cost(&billing_messages, &codex_events);
+        let mut cost = crate::pricing::calculate_cost(&billing_messages, &codex_events);
+        if usage_evidence.is_some() || harness == "copilot" {
+            cost.usd = None;
+        }
+        if harness == "copilot" {
+            cost.unpriced_models = tokens_by_model.keys().cloned().collect();
+            if cost.unpriced_models.is_empty() {
+                cost.unpriced_models
+                    .push(model.clone().unwrap_or_else(|| "unknown".into()));
+            }
+        }
         let mut reports: Vec<&ReportedRunSnapshot> = if harness == "claude" {
             self.reported_runs
                 .iter()
@@ -2272,12 +2438,14 @@ impl<'a> Builder<'a> {
                 lines_removed: run.last_lines_removed,
                 by_model: run.last_model_usage.clone(),
             });
-            cost_check.push(CostCheck {
-                start: run.last_start_time,
-                computed_usd: computed,
-                reported_usd: run.last_cost,
-                ok: crate::pricing::cost_check_ok(computed, run.last_cost),
-            });
+            if usage_evidence.is_none() {
+                cost_check.push(CostCheck {
+                    start: run.last_start_time,
+                    computed_usd: computed,
+                    reported_usd: run.last_cost,
+                    ok: crate::pricing::cost_check_ok(computed, run.last_cost),
+                });
+            }
         }
         let session = &mut self.sessions[index];
         session.names.extend(names);
@@ -2290,6 +2458,14 @@ impl<'a> Builder<'a> {
             _ => None,
         };
         out.tokens_by_model = tokens_by_model;
+        out.claude_usage = usage_evidence;
+        out.copilot = last_file
+            .summary
+            .copilot
+            .as_ref()
+            .map(|index| index.evidence());
+        out.incomplete_usage_days = incomplete_usage_days;
+        out.incomplete_usage_time = incomplete_usage_time;
         out.cost = cost;
         out.reported_runs = reported_runs;
         out.cost_check = cost_check;
@@ -2313,7 +2489,7 @@ impl<'a> Builder<'a> {
         out.repo = repo;
         if out.name.is_empty() {
             out.name = match session.kind {
-                SessKind::Lineage => title.unwrap_or(fallback_name),
+                SessKind::Lineage | SessKind::Copilot => title.unwrap_or(fallback_name),
                 _ => out
                     .branch
                     .clone()
@@ -4153,6 +4329,7 @@ impl<'a> Builder<'a> {
                         ToolState::Ok => Shown::Ok,
                         ToolState::Err => Shown::Err,
                         ToolState::Unknown => Shown::Unknown,
+                        ToolState::Pending if session.out.harness == "copilot" => Shown::Unknown,
                         ToolState::Pending if running => Shown::Live,
                         ToolState::Pending => Shown::Unfinished,
                     };
@@ -5449,7 +5626,7 @@ pub(crate) fn arg_summary(
 ) -> String {
     let get = |key: &str| field(input, key).map(str::to_owned);
     let summary = match name {
-        "Bash" | "shell" | "exec_command" | "local_shell" => {
+        "Bash" | "bash" | "shell" | "exec_command" | "local_shell" => {
             match input.get("command").or_else(|| input.get("cmd")) {
                 Some(Value::Array(parts)) => Some(
                     parts

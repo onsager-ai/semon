@@ -5,6 +5,8 @@ export const GROUPS = {
     'bar',
     'turns',
     'analytics',
+    'copied-usage',
+    'copilot',
     'runview',
     'signals',
     'models',

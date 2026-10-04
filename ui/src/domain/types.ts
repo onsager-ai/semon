@@ -22,6 +22,37 @@ export interface Cost {
   by_model?: Record<string, ModelCost>;
   by_day?: Record<string, number>;
 }
+export interface TokenObservation {
+  input: number;
+  cached_input: number;
+  output: number;
+  reasoning_output: number;
+  total: number;
+}
+export interface ClaudeUsageEvidence {
+  observed: TokenObservation;
+  exclusive: TokenObservation;
+  shared: Record<string, TokenObservation>;
+  shared_models: Record<string, string | null>;
+  fresh: TokenObservation | null;
+  shared_owner: string | null;
+}
+export interface CopilotEvidence {
+  usage_source: { event_id: string; offset: number; timestamp: number | null } | null;
+  version: string;
+  schema: number;
+  usage: {
+    tokens: TokenObservation;
+    by_model: Record<
+      string,
+      { input: number; output: number; cache_read: number; cache_write: number }
+    >;
+    reasoning_by_model: Record<string, number>;
+  } | null;
+  lifecycle: string | null;
+  logical_parent: string | null;
+  approvals: string | null;
+}
 export interface Session {
   id: string;
   name: string;
@@ -66,6 +97,8 @@ export interface Session {
   waiting_for?: string;
   tokens?: number[];
   tokens_by_model?: Record<string, Usage>;
+  claude_usage?: ClaudeUsageEvidence;
+  copilot?: CopilotEvidence;
   cost?: Cost;
   activity?: [string, string, number, number?];
   tool_calls?: Record<string, number>;

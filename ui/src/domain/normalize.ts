@@ -1,5 +1,16 @@
 import type { ModelWire } from '../lib/model';
-import type { Session, Cost, ModelCost, Usage, Handoff, Turn, TurnEnd } from './types';
+import type {
+  Session,
+  Cost,
+  ModelCost,
+  Usage,
+  Handoff,
+  Turn,
+  TurnEnd,
+  TokenObservation,
+  ClaudeUsageEvidence,
+  CopilotEvidence,
+} from './types';
 import {
   object,
   text,
@@ -41,6 +52,65 @@ function cost(value: unknown): Cost {
     split_unknown_messages: optional(v.split_unknown_messages, number),
     by_model: optional(v.by_model, (v) => dictionary(v, modelCost)),
     by_day: optional(v.by_day, numbers),
+  };
+}
+function tokenObservation(value: unknown): TokenObservation {
+  const v = object(value);
+  return {
+    input: number(v.input),
+    cached_input: number(v.cached_input),
+    output: number(v.output),
+    reasoning_output: number(v.reasoning_output),
+    total: number(v.total),
+  };
+}
+function claudeUsage(value: unknown): ClaudeUsageEvidence {
+  const v = object(value);
+  return {
+    observed: tokenObservation(v.observed),
+    exclusive: tokenObservation(v.exclusive),
+    shared: dictionary(v.shared, tokenObservation),
+    shared_models: dictionary(v.shared_models, (v) => (v == null ? null : text(v))),
+    fresh: v.fresh == null ? null : tokenObservation(v.fresh),
+    shared_owner: v.shared_owner == null ? null : text(v.shared_owner),
+  };
+}
+function copilot(value: unknown): CopilotEvidence {
+  const v = object(value);
+  const observed = v.usage == null ? null : object(v.usage);
+  return {
+    usage_source:
+      v.usage_source == null
+        ? null
+        : (() => {
+            const source = object(v.usage_source);
+            return {
+              event_id: text(source.event_id),
+              offset: number(source.offset),
+              timestamp: source.timestamp == null ? null : number(source.timestamp),
+            };
+          })(),
+    version: text(v.version),
+    schema: number(v.schema),
+    usage:
+      observed == null
+        ? null
+        : {
+            tokens: tokenObservation(observed.tokens),
+            by_model: dictionary(observed.by_model, (value) => {
+              const v = object(value);
+              return {
+                input: number(v.input),
+                output: number(v.output),
+                cache_read: number(v.cache_read),
+                cache_write: number(v.cache_write),
+              };
+            }),
+            reasoning_by_model: numbers(observed.reasoning_by_model),
+          },
+    lifecycle: v.lifecycle == null ? null : text(v.lifecycle),
+    logical_parent: v.logical_parent == null ? null : text(v.logical_parent),
+    approvals: v.approvals == null ? null : text(v.approvals),
   };
 }
 function activity(value: unknown): Session['activity'] {
@@ -119,6 +189,8 @@ export function parseSession(id: string, value: unknown): Session {
     waiting_for: optional(v.waiting_for, text),
     tokens: optional(v.tokens, (v) => array(v, number)),
     tokens_by_model: optional(v.tokens_by_model, (v) => dictionary(v, usage)),
+    claude_usage: optional(v.claude_usage, claudeUsage),
+    copilot: optional(v.copilot, copilot),
     cost: optional(v.cost, cost),
     activity: optional(v.activity, activity),
     tool_calls: optional(v.tool_calls, numbers),

@@ -85,6 +85,8 @@ function serve(dir, now) {
         path.join(dir, '.claude.json'),
         '--codex-home',
         path.join(dir, 'codex'),
+        '--copilot-home',
+        path.join(dir, 'copilot'),
         '--proc-root',
         path.join(dir, 'proc'),
         '--cache',
