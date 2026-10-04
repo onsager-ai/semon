@@ -13,6 +13,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 mod analytics;
+mod claude_usage;
+pub use claude_usage::ClaudeUsageEvidence;
 mod attachments;
 pub mod comparison;
 mod events;
@@ -184,6 +186,8 @@ pub struct Node {
     pub last_activity: Option<String>,
     pub last_activity_age_seconds: Option<u64>,
     pub tokens: Tokens,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claude_usage: Option<ClaudeUsageEvidence>,
     pub malformed_lines: u64,
     pub open_tools: Vec<ToolCall>,
     pub claude_link: Option<String>,
@@ -213,6 +217,7 @@ impl Node {
             last_activity: None,
             last_activity_age_seconds: None,
             tokens: Tokens::default(),
+            claude_usage: None,
             malformed_lines: 0,
             open_tools: Vec::new(),
             claude_link: None,
@@ -258,6 +263,10 @@ struct Summary {
     branch: Option<String>,
     models: BTreeSet<String>,
     usage_by_id: BTreeMap<String, Tokens>,
+    #[serde(default)]
+    usage_records: claude_usage::Records,
+    #[serde(default)]
+    usage_models: BTreeMap<String, String>,
     tools: BTreeMap<String, String>,
     closed_tools: BTreeSet<String>,
     codex_tokens: Tokens,
@@ -396,9 +405,9 @@ pub(crate) fn read_index(path: &Path) -> Index {
     fs::read(path)
         .ok()
         .and_then(|bytes| serde_json::from_slice::<Index>(&bytes).ok())
-        .filter(|index| index.version == 4)
+        .filter(|index| index.version == 5)
         .unwrap_or_else(|| Index {
-            version: 4,
+            version: 5,
             ..Index::default()
         })
 }
@@ -559,6 +568,18 @@ fn update_claude(summary: &mut Summary, record: &Value) {
         summary.models.insert(model.into());
     }
     if let (Some(id), Some(usage)) = (field(message, "id"), message.get("usage")) {
+        if field(record, "type") == Some("assistant")
+            && let Some(uuid) = field(record, "uuid")
+        {
+            summary
+                .usage_records
+                .entry(id.into())
+                .or_default()
+                .insert(uuid.into());
+        }
+        if let Some(model) = field(message, "model") {
+            summary.usage_models.insert(id.into(), model.into());
+        }
         let input = usage
             .get("input_tokens")
             .and_then(Value::as_u64)
@@ -1299,6 +1320,7 @@ pub(crate) fn collect_with_index(
         }
     }
 
+    apply_claude_usage(&mut flat, &summaries);
     if let Some(id) = &options.session {
         let key = if id.starts_with("claude:") || id.starts_with("codex:") {
             id.clone()
@@ -1421,6 +1443,9 @@ pub fn render_text(nodes: &[Node]) -> String {
             unlinked,
             malformed
         );
+        if node.claude_usage.is_some() {
+            line.push_str(" usage=exclusive-observations fresh=unknown copied-owner=unknown");
+        }
         if let Some(agent_type) = &node.agent_type {
             line.push_str(&format!(" agentType={agent_type}"));
         }
@@ -1472,6 +1497,27 @@ pub fn parse_duration(value: &str) -> Result<Duration, String> {
         .checked_mul(factor)
         .map(Duration::from_secs)
         .ok_or_else(|| format!("duration too large: {value}"))
+}
+
+fn apply_claude_usage(flat: &mut BTreeMap<String, Node>, summaries: &BTreeMap<String, Summary>) {
+    let shared = claude_usage::shared(
+        summaries
+            .iter()
+            .map(|(key, summary)| (key.as_str(), &summary.usage_records)),
+    );
+    for (key, ids) in shared {
+        if let (Some(node), Some(summary)) = (flat.get_mut(&key), summaries.get(&key))
+            && let Some(evidence) = claude_usage::evidence(
+                summary.usage_by_id.iter().map(|(id, tokens)| {
+                    (id, tokens, summary.usage_models.get(id).map(String::as_str))
+                }),
+                &ids,
+            )
+        {
+            node.tokens = evidence.exclusive.clone();
+            node.claude_usage = Some(evidence);
+        }
+    }
 }
 
 #[cfg(test)]

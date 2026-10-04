@@ -6144,3 +6144,69 @@ fn resumed_process_start_invalidates_cached_background_liveness() {
     assert!(!Arc::ptr_eq(&before.tx["root"], &after.tx["root"]));
     assert_equivalent(&after, &home.build(), NOW);
 }
+
+#[test]
+fn native_claude_copied_usage_keeps_observations_without_assigning_owner() {
+    let home = Home::new();
+    let parent = include_str!(
+        "../../../../tests/fixtures/compatibility/claude-2.1.288/lifecycle/resumed-transcript.jsonl"
+    );
+    let child = include_str!(
+        "../../../../tests/fixtures/compatibility/claude-2.1.288/lifecycle/forked-transcript.jsonl"
+    );
+    home.write("claude/projects/fixture/native-claude-parent.jsonl", parent);
+    let alone = home.build();
+    assert_eq!(
+        alone.sessions["native-claude-parent"].tokens_by_model["claude-sonnet-4-6"].input,
+        10
+    );
+    assert!(
+        alone.sessions["native-claude-parent"]
+            .claude_usage
+            .is_none()
+    );
+    let path = home.write("claude/projects/fixture/native-claude-child.jsonl", child);
+    let assert_evidence = |built: &Built| {
+        let parent = &built.sessions["native-claude-parent"];
+        let child = &built.sessions["native-claude-child"];
+        assert!(parent.parent.is_none() && child.parent.is_none());
+        let p = parent.claude_usage.as_ref().unwrap();
+        let c = child.claude_usage.as_ref().unwrap();
+        assert_eq!((p.observed.input, p.observed.output), (10, 6));
+        assert_eq!((c.observed.input, c.observed.output), (15, 9));
+        assert_eq!(p.exclusive, crate::Tokens::default());
+        assert_eq!((c.exclusive.input, c.exclusive.output), (5, 3));
+        assert_eq!(p.shared, c.shared);
+        assert_eq!(
+            p.shared.values().map(|t| t.input).sum::<u64>() + c.exclusive.input,
+            15
+        );
+        assert_eq!(
+            p.shared.values().map(|t| t.output).sum::<u64>() + c.exclusive.output,
+            9
+        );
+        assert!(p.fresh.is_none() && c.fresh.is_none());
+        assert!(p.shared_owner.is_none() && c.shared_owner.is_none());
+        assert!(parent.tokens_by_model.is_empty());
+        assert_eq!(child.tokens_by_model["claude-sonnet-4-6"].input, 5);
+        assert!(parent.cost.usd.is_none() && child.cost.usd.is_none());
+    };
+    assert_evidence(&home.build());
+    assert_evidence(&home.build()); // Durable SQLite restart.
+    let mut cold = home.options.clone();
+    cold.cache = home.root.join("cold/index.json");
+    assert_evidence(&home.build_at(&cold, NOW));
+    assert_eq!(fs::read_to_string(path).unwrap(), child);
+    // Removing the counterpart changes ownership availability, never invents
+    // lineage or remembers a now-unobservable original branch owner.
+    fs::remove_file(
+        home.root
+            .join("claude/projects/fixture/native-claude-child.jsonl"),
+    )
+    .unwrap();
+    assert!(
+        home.build().sessions["native-claude-parent"]
+            .claude_usage
+            .is_none()
+    );
+}

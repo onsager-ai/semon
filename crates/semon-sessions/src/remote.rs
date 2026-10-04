@@ -170,9 +170,9 @@ pub fn collect_remote(
     let mut index = read_regular_at_most(&path, 64 * 1024 * 1024)
         .ok()
         .and_then(|bytes| serde_json::from_slice::<RemoteIndex>(&bytes).ok())
-        .filter(|index| index.version == 2 && index.namespace == namespace)
+        .filter(|index| index.version == 3 && index.namespace == namespace)
         .unwrap_or(RemoteIndex {
-            version: 2,
+            version: 3,
             namespace,
             deletion_revision: String::new(),
             streams: BTreeMap::new(),
@@ -683,6 +683,30 @@ fn assemble(
                 .into();
             }
         }
+    }
+    let machines: BTreeSet<_> = index
+        .streams
+        .values()
+        .map(|entry| entry.machine.as_str())
+        .collect();
+    for machine in machines {
+        let summaries: BTreeMap<_, _> = index
+            .streams
+            .values()
+            .filter(|entry| entry.machine == machine && !entry.stream.starts_with("codex/"))
+            .map(|entry| {
+                let key = entry
+                    .stream
+                    .strip_prefix("subagents/agent-")
+                    .and_then(|name| name.strip_suffix(".jsonl"))
+                    .map_or_else(
+                        || format!("claude:{}", entry.session),
+                        |id| format!("claude:{}/agent:{id}", entry.session),
+                    );
+                (key, entry.summary.clone())
+            })
+            .collect();
+        apply_claude_usage(&mut flat, &summaries);
     }
     let keys: Vec<_> = if let Some(session) = &options.session {
         flat.keys()

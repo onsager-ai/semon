@@ -142,3 +142,28 @@ test('machine labels resolve collisions and time/count formatting retains the vi
   assert.equal(dur(0, 90061000, 0), '1d 1h');
   assert.equal(compactCount(12422228), '12.4M');
 });
+
+test('copied Claude observations retain evidence and unknown fresh totals', () => {
+  const tokens = { input: 10, output: 6, cached_input: 0, reasoning_output: 0, total: 16 };
+  const model = fixture();
+  model.sessions.s = session('Copied session', {
+    harness: 'claude',
+    cost: { usd: null },
+    tokens_by_model: {},
+    claude_usage: {
+      observed: tokens,
+      exclusive: { ...tokens, input: 0, output: 0, total: 0 },
+      shared: { exact: tokens },
+      shared_models: { exact: 'claude-model' },
+      fresh: null,
+      shared_owner: null,
+    },
+  });
+  const { normalized, domain: d } = domain(model);
+  assert.equal(normalized.sessions.s.claude_usage.fresh, null);
+  assert.equal(normalized.sessions.s.claude_usage.shared_owner, null);
+  assert.deepEqual(normalized.sessions.s.claude_usage.shared.exact, tokens);
+  assert.equal(d.costForSession('s').usd, null);
+  model.sessions.s.claude_usage.shared.exact.input = '<img>';
+  assert.throws(() => normalizeModel(model), /Invalid/);
+});
