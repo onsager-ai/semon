@@ -61,6 +61,66 @@ impl Fixture {
         }
         panic!("inventory fixture still running");
     }
+    async fn validate(
+        &self,
+        key: &str,
+        deployment: &str,
+    ) -> Result<CredentialValidation, ProcessError> {
+        let python = ["/usr/bin/python3", "/usr/local/bin/python3"]
+            .map(PathBuf::from)
+            .into_iter()
+            .find(|p| p.is_file())
+            .unwrap();
+        let worker = self.root.join("worker.py");
+        let exclusions = [OsString::from("SEMON_TEST_COORDINATOR_SECRET")];
+        InventoryWorker {
+            python: &python,
+            worker: &worker,
+            lifetime: Duration::from_secs(5),
+            environment_exclusions: &exclusions,
+        }
+        .validate_credential(key, deployment, &OwnerId::new("owner-1").unwrap())
+        .await
+    }
+}
+
+#[tokio::test]
+async fn basic_credential_validation_requires_no_fabricated_launch_and_returns_no_resources() {
+    for (mode, expected) in [
+        ("success", CredentialValidation::Accepted),
+        ("rejected", CredentialValidation::Rejected),
+        ("unavailable", CredentialValidation::Unavailable),
+    ] {
+        let f = Fixture::new(mode);
+        assert_eq!(
+            f.validate("synthetic-provider-only-key", "hub-prod").await,
+            Ok(expected)
+        );
+        assert!(f.root.join("request-checked").is_file());
+        f.assert_stopped().await;
+    }
+    for mode in [
+        "validation_leak",
+        "inventory_as_validation",
+        "wrong_version",
+    ] {
+        let f = Fixture::new(mode);
+        assert_eq!(
+            f.validate("synthetic-provider-only-key", "hub-prod").await,
+            Err(ProcessError::Protocol)
+        );
+        f.assert_stopped().await;
+    }
+    let f = Fixture::new("success");
+    assert_eq!(
+        f.validate("", "hub-prod").await,
+        Err(ProcessError::Configuration)
+    );
+    assert_eq!(
+        f.validate("synthetic-provider-only-key", "../hub").await,
+        Err(ProcessError::Configuration)
+    );
+    assert!(!f.root.join("pid").exists());
 }
 impl Drop for Fixture {
     fn drop(&mut self) {
