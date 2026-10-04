@@ -15,6 +15,7 @@
     "format:check": "node format.mjs",
     "hooks:install": "node hooks.mjs install",
     "hooks:remove": "node hooks.mjs remove",
+    "check:architecture": "node architecture-check.mjs",
     "check:design": "node design-check.mjs"
   },
   "dependencies": {
