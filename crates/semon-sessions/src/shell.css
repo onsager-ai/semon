@@ -31,6 +31,13 @@ a.nav-item[aria-current="page"] { color: var(--ink); }
 .field .error { color: var(--err); }
 .field + .field, .field + .btn-row { margin-top: 14px; }
 
+/* Native multiline fields and explicit consent keep the shared field tokens. */
+.field textarea { display: block; width: 100%; min-height: 120px; padding: 11px; border: 1px solid var(--line); border-radius: var(--r2); background: var(--sunken); color: var(--ink); font: 400 var(--fs-ui)/1.3 var(--mono); resize: vertical; }
+.field textarea:focus-visible { border-color: var(--accent); outline: 2px solid var(--accent); outline-offset: 1px; }
+.check-field { display: flex; align-items: center; gap: 12px; min-height: var(--tap); padding: 8px 0; cursor: pointer; }
+.check-field input { flex: none; width: 20px; height: 20px; accent-color: var(--ink); }
+@media (max-width: 760px) { .field textarea { font-size: 16px; } }
+
 /* Rows form an open list with separators only between neighboring items. */
 .rows { display: grid; min-width: 0; }
 .rows .row { display: grid; grid-template-columns: 10px minmax(0, 1fr) auto; align-items: center; gap: 0 10px; min-width: 0; padding: 12px 0; border-bottom: 1px solid var(--line); }
