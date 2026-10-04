@@ -1,0 +1,21 @@
+[package]
+name = "semon-ssh"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "Bounded SSH checks and explicitly authorized mirror bootstrap"
+
+[dependencies]
+base64 = "0.22"
+sha2.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tempfile = "3"
+tokio = { version = "1", features = ["process", "io-util", "time", "macros", "rt"] }
+zeroize = { version = "1", features = ["derive"] }
+
+[features]
+# Mandatory fixture environment when explicitly selected; no silent skips.
+real-ssh-tests = []
