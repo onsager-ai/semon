@@ -6,17 +6,22 @@ use crate::{Action, Compute, Desired, OperationId, OwnerId, Progress, RuntimeId,
 use std::collections::BTreeMap;
 use thiserror::Error;
 
+#[cfg(feature = "e2b-process")]
+pub mod process;
+
 /// Provider metadata contains stable identities, never prompts or credentials.
 pub type Labels = BTreeMap<String, String>;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Resource {
     pub id: RuntimeId,
     pub labels: Labels,
     pub state: ResourceState,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ResourceState {
     Running,
     Paused,

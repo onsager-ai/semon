@@ -8,12 +8,14 @@ description = "Durable logical-session and disposable-compute lifecycle contract
 
 [features]
 codex-process = ["dep:tokio", "dep:serde_json"]
+e2b-process = ["dep:tokio", "dep:serde_json", "dep:zeroize"]
 
 [dependencies]
 serde.workspace = true
 thiserror.workspace = true
 serde_json = { workspace = true, optional = true }
-tokio = { version = "1", features = ["process", "io-util", "time"], optional = true }
+tokio = { version = "1", features = ["process", "io-util", "time", "macros"], optional = true }
+zeroize = { version = "1", optional = true }
 
 [dev-dependencies]
 serde_json.workspace = true
