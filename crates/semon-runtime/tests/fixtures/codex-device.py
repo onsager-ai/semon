@@ -15,7 +15,7 @@ if "--version" in sys.argv:
     sys.exit(0)
 assert "--stdio" in sys.argv and "app-server" in sys.argv
 assert "OPENAI_API_KEY" not in os.environ and "CODEX_ACCESS_TOKEN" not in os.environ
-assert not any(key.startswith("SEMON_HUB_") for key in os.environ)
+assert "SEMON_TEST_COORDINATOR_SECRET" not in os.environ
 assert not any(key in os.environ for key in ("GH_TOKEN", "GITHUB_TOKEN", "E2B_API_KEY", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN"))
 home = Path(os.environ["CODEX_HOME"])
 (root / "pid").write_text(str(os.getpid()))

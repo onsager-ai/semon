@@ -9,7 +9,7 @@ use super::{
     State,
 };
 use serde_json::{Value, json};
-use std::{collections::VecDeque, path::Path, process::Stdio, time::Duration};
+use std::{collections::VecDeque, ffi::OsString, path::Path, process::Stdio, time::Duration};
 use thiserror::Error;
 use tokio::{
     io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
@@ -31,25 +31,12 @@ pub struct DeviceLogin {
     next_id: u64,
 }
 
-fn command(binary: &Path, home: &Path) -> Command {
+fn command(binary: &Path, home: &Path, environment_exclusions: &[OsString]) -> Command {
     let mut command = Command::new(binary);
-    // Preserve system networking/proxy/CA settings, but never give the auth
-    // subprocess Hub's database, vault, GitHub or compute credentials.
-    for (key, _) in std::env::vars_os() {
-        if key.to_str().is_some_and(|key| {
-            key.starts_with("SEMON_HUB_")
-                || matches!(
-                    key,
-                    "GH_TOKEN"
-                        | "GITHUB_TOKEN"
-                        | "E2B_API_KEY"
-                        | "AWS_ACCESS_KEY_ID"
-                        | "AWS_SECRET_ACCESS_KEY"
-                        | "AWS_SESSION_TOKEN"
-                )
-        }) {
-            command.env_remove(key);
-        }
+    // The embedding owns its environment policy. Preserve networking/proxy/CA
+    // settings while removing its declared coordinator secret variable names.
+    for key in environment_exclusions {
+        command.env_remove(key);
     }
     command
         .current_dir(home)
@@ -70,10 +57,13 @@ fn command(binary: &Path, home: &Path) -> Command {
 
 impl DeviceLogin {
     /// The deadline covers startup, device polling and account confirmation.
+    /// The embedding supplies its secret variable names in `environment_exclusions`.
+    /// This reusable driver has no knowledge of deployment configuration.
     pub async fn start(
         binary: &Path,
         home: &Path,
         lifetime: Duration,
+        environment_exclusions: &[OsString],
     ) -> Result<Self, ProcessError> {
         if !binary.is_absolute()
             || !home.is_absolute()
@@ -85,7 +75,9 @@ impl DeviceLogin {
         let deadline = Instant::now() + lifetime;
         let version = timeout(
             Duration::from_secs(5),
-            command(binary, home).arg("--version").output(),
+            command(binary, home, environment_exclusions)
+                .arg("--version")
+                .output(),
         )
         .await
         .map_err(|_| ProcessError::Timeout)?
@@ -95,7 +87,7 @@ impl DeviceLogin {
         {
             return Err(ProcessError::VersionMismatch);
         }
-        let mut child = command(binary, home)
+        let mut child = command(binary, home, environment_exclusions)
             .args(["app-server", "--stdio"])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())

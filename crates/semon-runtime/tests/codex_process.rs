@@ -26,7 +26,24 @@ impl Fixture {
         Self { root }
     }
     async fn start(&self, lifetime: Duration) -> Result<DeviceLogin, ProcessError> {
-        DeviceLogin::start(&self.root.join("codex"), &self.root.join("home"), lifetime).await
+        DeviceLogin::start(
+            &self.root.join("codex"),
+            &self.root.join("home"),
+            lifetime,
+            &[
+                "SEMON_TEST_COORDINATOR_SECRET",
+                "DATABASE_URL",
+                "PGPASSWORD",
+                "GH_TOKEN",
+                "GITHUB_TOKEN",
+                "E2B_API_KEY",
+                "AWS_ACCESS_KEY_ID",
+                "AWS_SECRET_ACCESS_KEY",
+                "AWS_SESSION_TOKEN",
+            ]
+            .map(std::ffi::OsString::from),
+        )
+        .await
     }
 }
 impl Drop for Fixture {
