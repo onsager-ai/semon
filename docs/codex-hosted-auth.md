@@ -58,6 +58,22 @@ process before dropping custody. Codex itself performs device polling and
 managed refresh. Keep exec/resume as the task driver; using app-server for
 onboarding does not require replacing it.
 
+## Managed refresh boundary
+
+The optional process driver also supports `refresh_chatgpt`: it runs only the
+pinned public `account/read {refreshToken: true}` route in an embedding-supplied
+isolated home. The exact generated `GetAccountParams` schema describes this as
+proactive normal managed refresh. No login, model request, token extraction or
+internal `chatgptAuthTokens` API is used. Account type and OpenAI authentication
+requirements must still match ChatGPT. The process is killed/reaped before the
+embedding reads the official opaque managed artifact, including on failure.
+
+The embedding must durably claim the sole refresh writer before starting Codex,
+commit the updated encrypted artifact before delivery, and reject stale results
+following reconnect/disconnect or runtime authority changes. A lost result may
+have rotated the old artifact; require explicit reconnect instead of replay.
+Offline rotation fixtures establish local protocol/custody behavior only.
+
 ## Hosted qualification remains blocked
 
 This execution environment has no configured E2B or OpenAI credential, no
