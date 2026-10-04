@@ -931,3 +931,86 @@ fn files_under(directory: &Path) -> Vec<PathBuf> {
     }
     files
 }
+
+#[test]
+fn copied_claude_usage_has_redacted_http_mirror_and_restart_parity() {
+    let mut home = Home::new();
+    home.options.all = true;
+    let receiver = receiver();
+    let mirrored = Home::new();
+    let expected = Home::new();
+    let secret = "sk-ant-api03-SECRETSECRETSECRETSECRET";
+    let files = [
+        (
+            "claude/projects/fixture/native-claude-parent.jsonl",
+            include_str!(
+                "../../../tests/fixtures/compatibility/claude-2.1.288/lifecycle/resumed-transcript.jsonl"
+            ),
+        ),
+        (
+            "claude/projects/fixture/native-claude-child.jsonl",
+            include_str!(
+                "../../../tests/fixtures/compatibility/claude-2.1.288/lifecycle/forked-transcript.jsonl"
+            ),
+        ),
+    ];
+    for (path, text) in files {
+        home.write(path, &text.replace("SYNTHETIC_CLAUDE_ACK", secret));
+    }
+    for _ in 0..2 {
+        semon_push::push(&home.push_options(&receiver.url), false).unwrap();
+        let (received, facts) = {
+            let state = receiver.state.lock().unwrap();
+            (state.files.clone(), state.facts.clone().unwrap())
+        };
+        for (path, bytes) in received {
+            assert!(!String::from_utf8_lossy(&bytes).contains(secret));
+            let destination = mirrored.root.join(&path);
+            fs::create_dir_all(destination.parent().unwrap()).unwrap();
+            fs::write(destination, bytes).unwrap();
+        }
+        for (path, _) in files {
+            let source = fs::read_to_string(home.root.join(path)).unwrap();
+            assert!(source.contains(secret));
+            let destination = expected.root.join(path);
+            fs::create_dir_all(destination.parent().unwrap()).unwrap();
+            fs::write(destination, redacted(&source)).unwrap();
+        }
+        let configure = |home: &Home| {
+            let options = semon_sessions::Options {
+                all: true,
+                facts: Some(home.root.join("facts.json")),
+                ..home.options.clone()
+            };
+            semon_sessions::write_facts(options.facts.as_ref().unwrap(), &facts).unwrap();
+            options
+        };
+        let local = configure(&expected);
+        let remote = configure(&mirrored);
+        let now = 1_791_072_000_000;
+        assert_eq!(
+            semon_sessions::model_json_at(&local, now).unwrap(),
+            semon_sessions::model_json_at(&remote, now).unwrap()
+        );
+        let json: serde_json::Value =
+            serde_json::from_str(&semon_sessions::model_json_at(&remote, now).unwrap()).unwrap();
+        assert_eq!(
+            json["sessions"]["native-claude-child"]["claude_usage"]["exclusive"]["input"],
+            5
+        );
+        assert!(json["sessions"]["native-claude-child"]["claude_usage"]["shared_owner"].is_null());
+        let core = semon_sessions::ViewerCore::new(remote);
+        let expected_core = semon_sessions::ViewerCore::new(local);
+        for id in ["native-claude-parent", "native-claude-child"] {
+            for (path, query) in [
+                ("/api/tx", format!("sid={id}")),
+                ("/api/transcript", format!("harness=claude&id={id}")),
+            ] {
+                let actual = core.respond("GET", path, &query, None);
+                let wanted = expected_core.respond("GET", path, &query, None);
+                assert_eq!(actual.status, 200);
+                assert_eq!(actual.body, wanted.body);
+            }
+        }
+    }
+}

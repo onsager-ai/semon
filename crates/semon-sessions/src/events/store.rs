@@ -45,7 +45,7 @@ use crate::{Tokens, facts::ReportedRunSnapshot};
 
 /// `PRAGMA user_version`: the shape of the tables. The parser's version is
 /// [`CACHE_VERSION`], kept in `meta`.
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 3;
 
 /// How long a write waits for another process's transaction. Tests wait
 /// less, so the busy paths they drive stay quick.
@@ -159,6 +159,7 @@ CREATE TABLE IF NOT EXISTS usage (
     billing_prompt_size INTEGER NOT NULL,
     billing_timestamp INTEGER,
     billing_split_unknown INTEGER NOT NULL,
+    record_ids TEXT NOT NULL,
     PRIMARY KEY (file_id, message_id)
 ) STRICT, WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS codex_usage (
@@ -241,16 +242,16 @@ const USAGE_COLUMNS: &str = "message_id, model, input, cached_input, output, rea
      total, model_input, model_output, model_cache_write, model_cache_read, billing_input, \
      billing_output, billing_cache_read, billing_cache_write_5m, billing_cache_write_1h, \
      billing_web_search_requests, billing_speed, billing_service_tier, billing_prompt_size, \
-     billing_timestamp, billing_split_unknown";
+     billing_timestamp, billing_split_unknown, record_ids";
 
 const PUT_USAGE: &str = "INSERT OR REPLACE INTO usage (file_id, message_id, model, input, \
      cached_input, output, reasoning_output, total, model_input, model_output, \
      model_cache_write, model_cache_read, billing_input, billing_output, billing_cache_read, \
      billing_cache_write_5m, billing_cache_write_1h, billing_web_search_requests, \
      billing_speed, billing_service_tier, billing_prompt_size, billing_timestamp, \
-     billing_split_unknown) \
+     billing_split_unknown, record_ids) \
      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, \
-     ?19, ?20, ?21, ?22, ?23)";
+     ?19, ?20, ?21, ?22, ?23, ?24)";
 
 const CODEX_USAGE_COLUMNS: &str = "seq, model, input, output, cache_write, cache_read, t";
 
@@ -1194,6 +1195,11 @@ fn init(connection: &mut Connection) -> rusqlite::Result<Init> {
         if schema == 1 {
             transaction.execute_batch("ALTER TABLE files ADD COLUMN codex_native_usage TEXT")?;
         }
+        if schema == 1 || schema == 2 {
+            transaction.execute_batch(
+                "ALTER TABLE usage ADD COLUMN record_ids TEXT NOT NULL DEFAULT '[]'",
+            )?;
+        }
         transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     }
     let wiped = parser_version(&transaction)? != Some(CACHE_VERSION);
@@ -1520,6 +1526,7 @@ fn read_event(row: &Row<'_>) -> rusqlite::Result<(bool, usize, Event)> {
 /// One `usage` row, selected as [`USAGE_COLUMNS`].
 fn read_usage(row: &Row<'_>) -> rusqlite::Result<(String, MessageUsage)> {
     let usage = MessageUsage {
+        record_ids: from_json(22, &row.get::<_, String>(22)?)?,
         model: row.get(1)?,
         tokens: Tokens {
             input: uint(row.get(2)?),
@@ -1880,6 +1887,7 @@ fn put_usage(
     usage: &MessageUsage,
 ) -> rusqlite::Result<()> {
     let MessageUsage {
+        record_ids,
         model,
         tokens:
             Tokens {
@@ -1935,6 +1943,7 @@ fn put_usage(
         int(*prompt_size),
         timestamp,
         split_unknown,
+        json(record_ids)?,
     ])?;
     Ok(())
 }
@@ -2163,6 +2172,7 @@ mod tests {
                 (
                     "msg-1".to_owned(),
                     MessageUsage {
+                        record_ids: std::collections::BTreeSet::from(["record-uuid".into()]),
                         model: Some("claude-test".to_owned()),
                         tokens: Tokens {
                             input: 1,
@@ -2423,7 +2433,8 @@ mod tests {
         store
             .connection
             .execute_batch(
-                "ALTER TABLE files DROP COLUMN codex_native_usage;
+                "ALTER TABLE usage DROP COLUMN record_ids;
+             ALTER TABLE files DROP COLUMN codex_native_usage;
              PRAGMA user_version = 1;
              UPDATE meta SET value = '19' WHERE key = 'cache_version';",
             )
@@ -2443,6 +2454,34 @@ mod tests {
         store
             .connection
             .prepare("SELECT codex_native_usage FROM files")
+            .unwrap();
+    }
+
+    #[test]
+    fn schema_two_rebuilds_assistant_uuids_and_preserves_reported_runs() {
+        let root = scratch("copied-usage-migration");
+        let path = root.join("index.sqlite3");
+        let (mut store, _) = opened(&path);
+        store.write_runs(&[run()], &stamp()).unwrap();
+        store
+            .write_one("a.jsonl", None, None, &ledger(1), &full())
+            .unwrap();
+        store.connection.execute_batch("ALTER TABLE usage DROP COLUMN record_ids; PRAGMA user_version = 2; UPDATE meta SET value = '20' WHERE key = 'cache_version';").unwrap();
+        drop(store);
+        let (store, loaded) = opened(&path);
+        assert!(loaded.files.is_empty());
+        assert_eq!(
+            format!("{:?}", loaded.reported_runs),
+            format!("{:?}", [run()])
+        );
+        assert_eq!(loaded.stamp, Some(stamp()));
+        assert_eq!(
+            versions(&store.connection).unwrap(),
+            (SCHEMA_VERSION, Some(CACHE_VERSION))
+        );
+        store
+            .connection
+            .prepare("SELECT record_ids FROM usage")
             .unwrap();
     }
 

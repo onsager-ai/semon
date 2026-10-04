@@ -68,6 +68,8 @@ pub(crate) struct Activity {
     pub(crate) errors: Option<usize>,
     /// API-equivalent cost per UTC day: the day's start (epoch ms) and USD.
     pub(crate) cost_by_day: Vec<(i64, f64)>,
+    pub(crate) incomplete_usage_days: BTreeSet<i64>,
+    pub(crate) incomplete_usage_time: bool,
     pub(crate) unpriced_models: Vec<String>,
     pub(crate) rate_limits: Option<RateLimits>,
     /// When each of its messages to you that still waits was sent: a
@@ -165,6 +167,8 @@ pub(crate) fn activity(
                     .filter_map(|(day, usd)| Some((day_start(day)?, *usd)))
                     .filter(|(day, _)| day + DAY_MS > since)
                     .collect(),
+                incomplete_usage_days: session.incomplete_usage_days.clone(),
+                incomplete_usage_time: session.incomplete_usage_time,
                 unpriced_models: session.cost.unpriced_models.clone(),
                 rate_limits: session.rate_limits.clone(),
                 waits: session
@@ -492,6 +496,7 @@ struct Cost {
     usd: Option<f64>,
     unpriced: Vec<String>,
     has_data: bool,
+    incomplete_usage: bool,
 }
 
 fn cost_in(activity: &Activity, (from, to): (i64, i64)) -> Cost {
@@ -501,16 +506,22 @@ fn cost_in(activity: &Activity, (from, to): (i64, i64)) -> Cost {
         .filter(|(day, _)| *day >= from && day + DAY_MS <= to)
         .map(|(_, usd)| *usd)
         .collect();
-    let has_data = !days.is_empty();
+    let incomplete_usage = activity.incomplete_usage_time
+        || activity
+            .incomplete_usage_days
+            .iter()
+            .any(|day| *day >= from && day + DAY_MS <= to);
+    let has_data = !days.is_empty() || incomplete_usage;
     let unpriced = if has_data {
         activity.unpriced_models.clone()
     } else {
         Vec::new()
     };
     Cost {
-        usd: unpriced.is_empty().then(|| days.iter().sum()),
+        usd: (unpriced.is_empty() && !incomplete_usage).then(|| days.iter().sum()),
         unpriced,
         has_data,
+        incomplete_usage,
     }
 }
 
@@ -567,7 +578,7 @@ fn period(rows: &[Live], from: i64, to: i64, days: i64) -> (Value, BTreeMap<Stri
     let (mut started, mut turns, mut tools, mut errors) = (0usize, 0usize, 0usize, 0usize);
     let mut waits = Vec::new();
     let mut waited: BTreeMap<String, i64> = BTreeMap::new();
-    let (mut usd, mut unpriced, mut has_data) = (0.0, BTreeSet::new(), false);
+    let (mut usd, mut unpriced, mut has_data, mut complete) = (0.0, BTreeSet::new(), false, true);
     let span = cost_span(to, days);
     for row in rows {
         let activity = row.activity();
@@ -599,6 +610,7 @@ fn period(rows: &[Live], from: i64, to: i64, days: i64) -> (Value, BTreeMap<Stri
         if cost.has_data {
             has_data = true;
             usd += cost.usd.unwrap_or(0.0);
+            complete &= !cost.incomplete_usage;
             unpriced.extend(cost.unpriced);
         }
     }
@@ -618,7 +630,7 @@ fn period(rows: &[Live], from: i64, to: i64, days: i64) -> (Value, BTreeMap<Stri
         "wait_ms": waits.iter().sum::<i64>(),
         "median_wait_ms": median,
         "longest_wait_ms": waits.last().copied().unwrap_or(0),
-        "cost": cost_json(Some(usd), &unpriced, has_data),
+        "cost": cost_json(complete.then_some(usd), &unpriced, has_data),
     });
     (figures, waited)
 }
@@ -641,6 +653,7 @@ struct Group {
     usd: f64,
     unpriced: BTreeSet<String>,
     sessions: usize,
+    incomplete_usage: bool,
 }
 
 #[cfg(test)]
@@ -705,6 +718,11 @@ pub(crate) fn answer(rows: &[Row], request: &Request, now: i64, version: &str) -
             || in_range(row.start, before, to)
             || row.busy.iter().any(|(a, b)| *a < to && *b > before)
             || row.turns.iter().any(|at| in_range(*at, before, to))
+            || row.incomplete_usage_time
+            || row
+                .incomplete_usage_days
+                .iter()
+                .any(|day| *day >= cost_from && *day < span.1)
             || row
                 .cost_by_day
                 .iter()
@@ -848,7 +866,15 @@ pub(crate) fn answer(rows: &[Row], request: &Request, now: i64, version: &str) -
                 })
             })
             .collect();
-        json!({ "from": span.0, "to": span.1, "days": bins, "unpriced_models": unpriced })
+        let mut cost =
+            json!({ "from": span.0, "to": span.1, "days": bins, "unpriced_models": unpriced });
+        if rows
+            .iter()
+            .any(|row| cost_in(row.activity(), span).incomplete_usage)
+        {
+            cost["incomplete_usage"] = json!(true);
+        }
+        cost
     });
 
     // Busy time and cost by repo, machine, and harness and model: every
@@ -870,6 +896,7 @@ pub(crate) fn answer(rows: &[Row], request: &Request, now: i64, version: &str) -
             entry.sessions += 1;
             if cost.has_data {
                 entry.usd += cost.usd.unwrap_or(0.0);
+                entry.incomplete_usage |= cost.incomplete_usage;
                 entry.unpriced.extend(cost.unpriced);
             }
         }
@@ -881,6 +908,9 @@ pub(crate) fn answer(rows: &[Row], request: &Request, now: i64, version: &str) -
                 fields["usd"] = json!(group.usd);
                 fields["unpriced_models"] = json!(group.unpriced);
                 fields["sessions"] = json!(group.sessions);
+                if group.incomplete_usage {
+                    fields["incomplete_usage"] = json!(true);
+                }
                 fields
             })
             .collect::<Vec<_>>()
@@ -1087,6 +1117,8 @@ mod tests {
             calls: Some(0),
             errors: Some(0),
             cost_by_day: Vec::new(),
+            incomplete_usage_days: BTreeSet::new(),
+            incomplete_usage_time: false,
             unpriced_models: Vec::new(),
             rate_limits: None,
             waits: Vec::new(),
@@ -1399,6 +1431,29 @@ mod tests {
         assert_eq!(week["cost"]["unpriced_models"], json!(["mystery"]));
         // Today alone has a price.
         assert_eq!(at("range=24h", &activity)["current"]["cost"]["usd"], 4.0);
+    }
+
+    #[test]
+    fn copied_usage_leaves_aggregate_cost_unknown_only_on_affected_days() {
+        let mut activity = fixture();
+        let affected = activity.get_mut("older").unwrap();
+        let cost_day = affected.cost_by_day.first().unwrap().0;
+        affected.incomplete_usage_days.insert(cost_day);
+        let week = at("range=7d", &activity);
+        assert!(week["current"]["cost"]["usd"].is_null());
+        assert_eq!(week["cost"]["incomplete_usage"], true);
+        assert!(
+            week["breakdown"]["repo"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|row| row["incomplete_usage"] == true)
+        );
+        assert_eq!(at("range=24h", &activity)["current"]["cost"]["usd"], 4.0);
+        // An unknown source timestamp cannot become a known zero-cost day.
+        let affected = activity.get_mut("older").unwrap();
+        affected.incomplete_usage_time = true;
+        assert!(at("range=24h", &activity)["current"]["cost"]["usd"].is_null());
     }
 
     #[test]

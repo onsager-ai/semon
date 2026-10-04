@@ -461,6 +461,9 @@ impl View {
             // The live process's run ids (RUN_VARIABLES only), or null.
             "run": facts.and_then(|facts| facts.run.clone()),
         });
+        if let Some(evidence) = session.get("claude_usage") {
+            row["claude_usage"] = evidence.clone();
+        }
         if let Some(signals) = session.get("signals") {
             row["signals"] = signals.clone();
         }
