@@ -50,6 +50,7 @@ import panelLifecycle from './panel-lifecycle.mjs';
 
 import signalsCheck from './signals.mjs';
 import copiedUsageCheck from './copied-usage.mjs';
+import copilotCheck from './copilot.mjs';
 
 const checks = [
   ['panel-lifecycle', panelLifecycle],
@@ -57,6 +58,7 @@ const checks = [
   ['runview', runView],
   ['signals', signalsCheck],
   ['copied-usage', copiedUsageCheck],
+  ['copilot', copilotCheck],
   ['viewer-backlog', backlogCheck],
   ['models', modelsCheck],
   ['stepnames', stepNamesCheck],

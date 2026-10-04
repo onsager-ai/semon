@@ -921,6 +921,11 @@ impl ViewerCore {
                     before.as_ref().map(|seen| seen.claude),
                 ),
                 ("codex", seen.codex, before.as_ref().map(|seen| seen.codex)),
+                (
+                    "copilot",
+                    seen.copilot,
+                    before.as_ref().map(|seen| seen.copilot),
+                ),
             ] {
                 if !readable && was != Some(false) {
                     eprintln!(
@@ -945,7 +950,8 @@ impl ViewerCore {
             let view = match old.remove(name) {
                 Some(view)
                     if view.options().claude_home == options.claude_home
-                        && view.options().codex_home == options.codex_home =>
+                        && view.options().codex_home == options.codex_home
+                        && view.options().copilot_home == options.copilot_home =>
                 {
                     view
                 }
@@ -1652,6 +1658,7 @@ mod tests {
                 claude_home,
                 claude_json: home.join(".claude.json"),
                 codex_home,
+                copilot_home: home.join("copilot"),
                 proc_root,
                 cache: home.join("cache"),
                 all: false,
@@ -1791,6 +1798,7 @@ mod tests {
             claude_home: root.join("claude"),
             claude_json: root.join(".claude.json"),
             codex_home: root.join("codex"),
+            copilot_home: root.join("copilot"),
             proc_root: root.join("proc"),
             cache: root.join("cache"),
             all: false,

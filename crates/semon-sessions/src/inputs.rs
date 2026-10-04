@@ -18,6 +18,7 @@ use crate::Options;
 pub enum InputRoot {
     Claude,
     Codex,
+    Copilot,
 }
 
 impl InputRoot {
@@ -25,6 +26,7 @@ impl InputRoot {
         match self {
             Self::Claude => "claude",
             Self::Codex => "codex",
+            Self::Copilot => "copilot",
         }
     }
 
@@ -32,6 +34,7 @@ impl InputRoot {
         match root {
             "claude" => Some(Self::Claude),
             "codex" => Some(Self::Codex),
+            "copilot" => Some(Self::Copilot),
             _ => None,
         }
     }
@@ -41,6 +44,7 @@ impl InputRoot {
         match self {
             Self::Claude => &options.claude_home,
             Self::Codex => &options.codex_home,
+            Self::Copilot => &options.copilot_home,
         }
     }
 }
@@ -110,6 +114,7 @@ pub fn is_input_path(root: &str, rel: &str) -> bool {
         }
         (InputRoot::Claude, ["projects", _]) => jsonl(name),
         (InputRoot::Codex, ["sessions" | "archived_sessions", .., _]) => jsonl(name),
+        (InputRoot::Copilot, ["session-state", _, "events.jsonl"]) => true,
         _ => false,
     }
 }
@@ -138,6 +143,7 @@ pub fn inputs(options: &Options) -> io::Result<Vec<Input>> {
         (InputRoot::Claude, "sessions"),
         (InputRoot::Codex, "sessions"),
         (InputRoot::Codex, "archived_sessions"),
+        (InputRoot::Copilot, "session-state"),
     ] {
         walk(
             root,

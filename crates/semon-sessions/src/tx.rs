@@ -36,7 +36,7 @@ pub(crate) const FULL_MAX: usize = 8 * 1024 * 1024;
 /// prompt's, see [`prompt_record`]).
 pub(crate) const LINE_MAX: u64 = FULL_MAX as u64 + 1024 * 1024;
 
-const SHELLS: [&str; 4] = ["Bash", "shell", "exec_command", "local_shell"];
+const SHELLS: [&str; 5] = ["Bash", "bash", "shell", "exec_command", "local_shell"];
 const TITLED_TOOLS: [&str; 1] = ["Bash"];
 const TITLE_MAX: usize = 160;
 const EDITS: [&str; 5] = ["Edit", "MultiEdit", "Write", "NotebookEdit", "apply_patch"];
@@ -581,6 +581,15 @@ fn running(ms: i64) -> String {
 }
 
 fn tool_name(record: &Value, block: usize) -> Option<String> {
+    if field(record, "type") == Some("assistant.message") {
+        return record
+            .get("data")?
+            .get("toolRequests")?
+            .as_array()?
+            .get(block)
+            .and_then(|request| field(request, "name"))
+            .map(str::to_owned);
+    }
     record
         .get("message")
         .and_then(|message| message.get("content"))
@@ -719,6 +728,14 @@ pub(crate) fn diff_rows(name: &str, input: &Value, budget: usize) -> Option<(Val
 /// A tool result's text: a Claude `tool_result` block, or a Codex call's
 /// output (its `output` field when the output is structured).
 pub(crate) fn result_text(record: &Value, block: usize) -> Option<String> {
+    if field(record, "type") == Some("tool.execution_complete") {
+        let data = record.get("data")?;
+        return data
+            .get("result")
+            .and_then(|result| field(result, "content"))
+            .or_else(|| data.get("error").and_then(|error| field(error, "message")))
+            .map(str::to_owned);
+    }
     if let Some(payload) = record.get("payload") {
         let output = payload.get("output")?;
         let structured = match output {
@@ -1437,7 +1454,7 @@ fn render(
 ) -> Option<Value> {
     let file = slot.file.as_deref();
     let mut record = || file.and_then(|file| lines.get(&file.path, slot.offset));
-    let entry = match &slot.kind {
+    let mut entry = match &slot.kind {
         // Your message is drawn from the model's ask, with the images its
         // line attaches.
         SlotKind::H(id) if model::is_ask(id) => {
@@ -1590,6 +1607,41 @@ fn render(
             now,
         ),
     };
+    if let Some(record) = file.and_then(|file| lines.get(&file.path, slot.offset))
+        && record.get("data").is_some()
+        && record.get("parentId").is_some()
+    {
+        let data = &record["data"];
+        let mut native = json!({"event_id":record["id"],"parent_event_id":record["parentId"]});
+        for (source, target) in [
+            ("messageId", "message_id"),
+            ("originatingMessageId", "originating_message_id"),
+            ("parentToolCallId", "parent_tool_call_id"),
+            ("interactionId", "interaction_id"),
+            ("turnId", "turn_id"),
+            ("toolCallId", "tool_call_id"),
+        ] {
+            native[target] = data.get(source).cloned().unwrap_or(Value::Null);
+        }
+        if let Some(request) = data
+            .get("toolRequests")
+            .and_then(Value::as_array)
+            .and_then(|requests| requests.get(slot.block as usize))
+            && matches!(slot.kind, SlotKind::Tool { .. })
+        {
+            native["tool_call_id"] = request["toolCallId"].clone();
+        }
+        if let SlotKind::Tool {
+            reply: Some(reply), ..
+        } = &slot.kind
+            && let Some(result) = file.and_then(|file| lines.get(&file.path, reply.o))
+        {
+            native["result_event_id"] = result["id"].clone();
+            native["protocol_success"] = result["data"]["success"].clone();
+            native["shell_exit_code"] = result["data"]["shellExecution"]["exitCode"].clone();
+        }
+        entry["native"] = native;
+    }
     Some(entry)
 }
 
@@ -2156,6 +2208,7 @@ mod tests {
                 claude_home: root.join("claude"),
                 claude_json: root.join(".claude.json"),
                 codex_home: root.join("codex"),
+                copilot_home: root.join("copilot"),
                 proc_root: root.join("proc"),
                 cache: root.join("index.json"),
                 all: true,
@@ -4861,6 +4914,7 @@ mod tests {
             claude_home: root.join("claude"),
             claude_json: root.join(".claude.json"),
             codex_home: root.join("codex"),
+            copilot_home: root.join("copilot"),
             proc_root: root.join("proc"),
             cache: root.join("tx-index.json"),
             all: false,

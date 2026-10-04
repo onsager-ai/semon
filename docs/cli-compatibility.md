@@ -2,7 +2,9 @@
 
 Tracking: #235, #236–242. Baseline audited at main
 `24e1932ef78238fdb13b5c1d11b61636695baf34` on 2026-10-03.
-Copilot CLI is the next adapter; OpenCode and Kiro remain deferred.
+Copilot CLI persisted-state implementation follows #285 and the supported-version
+contract in [copilot-cli.md](copilot-cli.md); OpenCode and Kiro remain deferred.
+The current implementation slice was reconciled through main #292 on 2026-10-04.
 
 ## Evidence contract
 

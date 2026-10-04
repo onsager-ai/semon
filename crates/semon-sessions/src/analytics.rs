@@ -511,7 +511,14 @@ fn cost_in(activity: &Activity, (from, to): (i64, i64)) -> Cost {
             .incomplete_usage_days
             .iter()
             .any(|day| *day >= from && day + DAY_MS <= to);
-    let has_data = !days.is_empty() || incomplete_usage;
+    let has_data = !days.is_empty()
+        || incomplete_usage
+        || (activity.harness == "copilot"
+            && (in_range(activity.start, from, to)
+                || activity
+                    .busy
+                    .iter()
+                    .any(|(start, end)| *start < to && *end >= from)));
     let unpriced = if has_data {
         activity.unpriced_models.clone()
     } else {
