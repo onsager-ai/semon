@@ -20,6 +20,7 @@ fn print_sample_model() {
         claude_home: root.join("claude"),
         claude_json: root.join(".claude.json"),
         codex_home: root.join("codex"),
+        copilot_home: root.join("copilot"),
         proc_root: root.join("proc"),
         cache: root.join("index.json"),
         all: false,

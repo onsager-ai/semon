@@ -20,6 +20,7 @@ body{margin:0}[hidden]{display:none!important}img{max-width:100%}
    Type: 12 caption, 13 secondary, 14 UI (15 on phones), 16 reading (the sans, at the reading size), 16/17 title, 22 figures.
    Space: 4 8 12 16 24 32. Radius: 6 10 14. Tap: 36 desktop, 44 phone. */
 :root {
+  --harness-mark-ground: #ffffff;
   --ground: #ffffff; --side: #f7f7f5; --sunken: #f1f2ef; --raised: #ffffff; --sk: #eceeea;
   --ink: #191d1b; --ink-2: #3d4440; --muted: #5d6561; --faint: #8a918d; --line: #e5e7e3; --line-2: #d3d7d2;
   --accent: var(--ink); --accent-soft: var(--sunken);
@@ -834,6 +835,8 @@ body:has(.jump-wrap:not([hidden])) .livenote { bottom: calc(68px + env(safe-area
 .hicon { display: inline-flex; flex: none; align-items: center; justify-content: center; box-sizing: border-box; width: var(--hi, 16px); height: var(--hi, 16px); padding: calc(var(--hi, 16px) / 8); border-radius: 4px; vertical-align: calc(var(--hi, 16px) * -.2); }
 .hicon.hi-sidebar { --hi: 14px; }
 .hicon.hi-lead { margin-inline-end: calc(var(--hi, 16px) * .4); }
+/* Preserve the official black Octicon; give its container a neutral light surface in both themes. */
+.hicon[data-harness="copilot"] { background: var(--harness-mark-ground); }
 .hicon img { display: block; width: 100%; height: 100%; object-fit: contain; pointer-events: none; -webkit-user-select: none; user-select: none; }
 .hicon .hi-dark { display: none; }
 @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) .hicon .hi-light { display: none; } :root:not([data-theme="light"]) .hicon .hi-dark { display: block; } }

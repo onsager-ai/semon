@@ -295,7 +295,7 @@ fn native_codex_fork_relay_uses_request_counts_and_rebuilds_old_summaries() {
     assert!(!fixture.cache().contains("SEMON_SYNTHETIC_FORK_CHILD"));
     assert_eq!(
         serde_json::from_str::<Value>(&fixture.cache()).unwrap()["version"],
-        2
+        3
     );
 }
 
@@ -463,4 +463,63 @@ fn encrypted_sidecars_supply_only_allowed_labels_and_exact_task_links() {
     fixture.transport.forked.set(true);
     let conflicted = fixture.collect();
     assert_eq!(conflicted[0].children[0].children[0].state, "unknown");
+}
+
+#[test]
+fn native_claude_copied_usage_remote_keeps_owner_unknown_after_restart() {
+    let fixture = Fixture::new();
+    for (session, text) in [
+        (
+            "native-claude-parent",
+            include_str!(
+                "../../../tests/fixtures/compatibility/claude-2.1.288/lifecycle/resumed-transcript.jsonl"
+            ),
+        ),
+        (
+            "native-claude-child",
+            include_str!(
+                "../../../tests/fixtures/compatibility/claude-2.1.288/lifecycle/forked-transcript.jsonl"
+            ),
+        ),
+    ] {
+        for line in text.lines() {
+            fixture.add(
+                session,
+                "main",
+                serde_json::from_str(line).unwrap(),
+                "machine-a",
+            );
+        }
+    }
+    for _ in 0..2 {
+        let nodes = fixture.collect();
+        let sessions = &nodes[0].children;
+        let p = sessions
+            .iter()
+            .find(|n| n.id == "native-claude-parent")
+            .unwrap();
+        let c = sessions
+            .iter()
+            .find(|n| n.id == "native-claude-child")
+            .unwrap();
+        assert_eq!((p.tokens.input, c.tokens.input), (0, 5));
+        assert_eq!(
+            p.claude_usage.as_ref().unwrap().shared,
+            c.claude_usage.as_ref().unwrap().shared
+        );
+        assert!(c.claude_usage.as_ref().unwrap().fresh.is_none());
+        assert!(c.claude_usage.as_ref().unwrap().shared_owner.is_none());
+    }
+}
+
+#[test]
+fn claude_usage_records_do_not_establish_cross_machine_copy_ownership() {
+    let fixture = Fixture::new();
+    let record = json!({"type":"assistant","uuid":"same-uuid","message":{"id":"same-api","model":"model","usage":{"input_tokens":5,"output_tokens":3},"content":[]}});
+    fixture.add("a", "main", record.clone(), "machine-a");
+    fixture.add("b", "main", record, "machine-b");
+    for machine in fixture.collect() {
+        assert_eq!(machine.children[0].tokens.input, 5);
+        assert!(machine.children[0].claude_usage.is_none());
+    }
 }

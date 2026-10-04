@@ -710,11 +710,13 @@ export function createAnalytics(host: AnalyticsHost) {
           ['codex', 'Codex'],
         ].map(([id, label]) => ({ id, label, mark: host.screenViews.harnessSnapshot(id) })),
         missing:
-          costMode && A.cost!.unpriced_models.length
-            ? 'no price for ' +
-              A.cost!.unpriced_models.join(', ') +
-              '; unpriced usage is omitted from bars.'
-            : undefined,
+          costMode && A.cost!.incomplete_usage
+            ? 'Copied usage is omitted from bars. Its original owner and the full cost are unknown.'
+            : costMode && A.cost!.unpriced_models.length
+              ? 'no price for ' +
+                A.cost!.unpriced_models.join(', ') +
+                '; unpriced usage is omitted from bars.'
+              : undefined,
       };
     };
     let models: ModelBand[] | undefined, allowance: AnalyticsSnapshot['allowance'];
@@ -884,10 +886,12 @@ export function createAnalytics(host: AnalyticsHost) {
             color:
               key === 'harness' ? (keyFor(g).startsWith('claude') ? 'claude' : 'codex') : undefined,
             hours: hoursText(g.ms),
-            cost: g.unpriced_models.length ? '—' : host.domain.asMoney(g.usd),
-            missing: g.unpriced_models.length
-              ? 'no price for ' + g.unpriced_models.join(', ')
-              : undefined,
+            cost: g.incomplete_usage || g.unpriced_models.length ? '—' : host.domain.asMoney(g.usd),
+            missing: g.incomplete_usage
+              ? 'copied usage; original owner unknown'
+              : g.unpriced_models.length
+                ? 'no price for ' + g.unpriced_models.join(', ')
+                : undefined,
           })),
         });
       }

@@ -33,6 +33,13 @@ pub const HARNESSES: &[HarnessDefinition] = &[
         icon_dark: "/harness/codex.svg",
     },
     HarnessDefinition {
+        id: "copilot",
+        name: "GitHub Copilot CLI",
+        short: "Copilot",
+        icon_light: "/harness/copilot.svg",
+        icon_dark: "/harness/copilot.svg",
+    },
+    HarnessDefinition {
         id: "opencode",
         name: "OpenCode",
         short: "OpenCode",
@@ -43,6 +50,10 @@ pub const HARNESSES: &[HarnessDefinition] = &[
 
 /// Served path → the unmodified SVG text.
 pub const HARNESS_ICONS: &[(&str, &str)] = &[
+    (
+        "/harness/copilot.svg",
+        include_str!("../../../assets/harnesses/copilot.svg"),
+    ),
     (
         "/harness/claude-code.svg",
         include_str!("../../../assets/harnesses/claude-code.svg"),
@@ -99,10 +110,12 @@ mod tests {
         for input_root in [
             crate::inputs::InputRoot::Claude,
             crate::inputs::InputRoot::Codex,
+            crate::inputs::InputRoot::Copilot,
         ] {
             let id = match input_root {
                 crate::inputs::InputRoot::Claude => "claude",
                 crate::inputs::InputRoot::Codex => "codex",
+                crate::inputs::InputRoot::Copilot => "copilot",
             };
             assert_eq!(crate::inputs::InputRoot::parse(id), Some(input_root));
             assert!(

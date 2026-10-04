@@ -63,6 +63,7 @@ const breakdown = shape({
   usd: number,
   sessions: number,
   unpriced_models: strings,
+  incomplete_usage: optional(boolean),
 });
 const tokens = shape({
   input: optional(number),
@@ -106,7 +107,9 @@ export const parseAnalytics = shape({
   longest_current_wait: nullable(busy),
   calls_unknown: number,
   agents: shape({ unit: text, columns: list(column) }),
-  cost: nullable(shape({ days: list(day), unpriced_models: strings })),
+  cost: nullable(
+    shape({ days: list(day), unpriced_models: strings, incomplete_usage: optional(boolean) }),
+  ),
   breakdown: shape({ repo: list(breakdown), machine: list(breakdown), model: list(breakdown) }),
   top: shape({ busy: list(busy), waited: list(busy), cost: list(priced) }),
   sessions: (v: unknown) => dictionary(v, shape({ name: text, harness: text })),

@@ -230,7 +230,15 @@ export function createScreenViews(host: ScreenViewsHost) {
       caption: kids.length
         ? 'this session and its ' + kids.length + (kids.length === 1 ? ' run' : ' runs')
         : 'this session',
-      note: COST_NOTE + (missing.length ? ' No price for ' + missing.join(', ') + '.' : ''),
+      note:
+        COST_NOTE +
+        ([s, ...kids].some((s) => s.claude_usage)
+          ? ' Copied usage is excluded. Its original owner and the fresh usage total are unknown.'
+          : '') +
+        ([s, ...kids].some((s) => s.copilot)
+          ? ' Copilot usage is a cumulative saved snapshot. Fresh usage and complete cost are unknown.'
+          : '') +
+        (missing.length ? ' No price for ' + missing.join(', ') + '.' : ''),
       details,
       mismatch,
       runs,
