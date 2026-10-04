@@ -7318,6 +7318,38 @@ globalThis.__semonUIShared = __semonUIShared;
       shared_owner: v.shared_owner == null ? null : text(v.shared_owner)
     };
   }
+  function copilot(value) {
+    const v = object2(value);
+    const observed = v.usage == null ? null : object2(v.usage);
+    return {
+      usage_source: v.usage_source == null ? null : (() => {
+        const source = object2(v.usage_source);
+        return {
+          event_id: text(source.event_id),
+          offset: number(source.offset),
+          timestamp: source.timestamp == null ? null : number(source.timestamp)
+        };
+      })(),
+      version: text(v.version),
+      schema: number(v.schema),
+      usage: observed == null ? null : {
+        tokens: tokenObservation(observed.tokens),
+        by_model: dictionary(observed.by_model, (value2) => {
+          const v2 = object2(value2);
+          return {
+            input: number(v2.input),
+            output: number(v2.output),
+            cache_read: number(v2.cache_read),
+            cache_write: number(v2.cache_write)
+          };
+        }),
+        reasoning_by_model: numbers(observed.reasoning_by_model)
+      },
+      lifecycle: v.lifecycle == null ? null : text(v.lifecycle),
+      logical_parent: v.logical_parent == null ? null : text(v.logical_parent),
+      approvals: v.approvals == null ? null : text(v.approvals)
+    };
+  }
   function activity(value) {
     if (!Array.isArray(value) || value.length < 3 || value.length > 4)
       throw new Error("Invalid activity");
@@ -7399,6 +7431,7 @@ globalThis.__semonUIShared = __semonUIShared;
       tokens: optional(v.tokens, (v2) => array(v2, number)),
       tokens_by_model: optional(v.tokens_by_model, (v2) => dictionary(v2, usage)),
       claude_usage: optional(v.claude_usage, claudeUsage),
+      copilot: optional(v.copilot, copilot),
       cost: optional(v.cost, cost),
       activity: optional(v.activity, activity),
       tool_calls: optional(v.tool_calls, numbers),
@@ -8021,6 +8054,11 @@ globalThis.__semonUIShared = __semonUIShared;
       name: "Codex",
       short: "Codex",
       icon: { light: "/harness/codex-black.svg", dark: "/harness/codex.svg" }
+    },
+    copilot: {
+      name: "GitHub Copilot CLI",
+      short: "Copilot",
+      icon: { light: "/harness/copilot.svg", dark: "/harness/copilot.svg" }
     },
     opencode: {
       name: "OpenCode",
@@ -11075,7 +11113,7 @@ globalThis.__semonUIShared = __semonUIShared;
       return {
         figure: host2.domain.costText(kids.length ? all : own),
         caption: kids.length ? "this session and its " + kids.length + (kids.length === 1 ? " run" : " runs") : "this session",
-        note: COST_NOTE + ([s, ...kids].some((s2) => s2.claude_usage) ? " Copied usage is excluded. Its original owner and the fresh usage total are unknown." : "") + (missing.length ? " No price for " + missing.join(", ") + "." : ""),
+        note: COST_NOTE + ([s, ...kids].some((s2) => s2.claude_usage) ? " Copied usage is excluded. Its original owner and the fresh usage total are unknown." : "") + ([s, ...kids].some((s2) => s2.copilot) ? " Copilot usage is a cumulative saved snapshot. Fresh usage and complete cost are unknown." : "") + (missing.length ? " No price for " + missing.join(", ") + "." : ""),
         details,
         mismatch,
         runs,

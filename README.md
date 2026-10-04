@@ -709,6 +709,16 @@ This does not change retention policy: nothing calls this automatically, and
 everything indefinitely by default. This adds a deliberate operator action,
 not a schedule.
 
+## Copilot CLI saved-state support
+
+Linux Copilot CLI 1.0.90/1.0.91 schema 1 sessions can be collected with
+`semon-copilot --watch` and browsed with `semon sessions --copilot-home PATH`.
+`COPILOT_HOME` supplies the default override. Copilot event files also participate
+in redacted `semon push`/receive and multi-machine viewing. Usage is a cumulative
+saved snapshot; missing outcomes, approvals, fresh usage and logical lineage stay
+unknown. Native homes are read-only. See [supported versions, commands and
+acceptance limitations](docs/copilot-cli.md).
+
 ## Periodic capture
 
 The existing systemd user-timer installer now builds and installs the Rust

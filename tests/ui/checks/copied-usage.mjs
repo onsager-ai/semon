@@ -10,7 +10,7 @@ import { served, reporter } from '../lib.mjs';
 
 const repo = fileURLToPath(new URL('../../../', import.meta.url));
 const now = 1_791_072_000_000;
-function start(root) {
+export function start(root) {
   const bin = process.env.SEMON_BIN ?? path.join(repo, 'target/debug/semon');
   const proc = spawn(
     bin,
@@ -25,6 +25,8 @@ function start(root) {
       path.join(root, '.claude.json'),
       '--codex-home',
       path.join(root, 'codex'),
+      '--copilot-home',
+      path.join(root, 'copilot'),
       '--proc-root',
       path.join(root, 'proc'),
       '--cache',

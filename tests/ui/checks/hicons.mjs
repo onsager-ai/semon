@@ -26,9 +26,15 @@ const FILES = {
   claude: ['claude-code.svg', 'claude-code.svg'],
   codex: ['codex-black.svg', 'codex.svg'],
   opencode: ['opencode-light.svg', 'opencode-dark.svg'],
+  copilot: ['copilot.svg', 'copilot.svg'],
 };
-const NAME = { claude: 'Claude Code', codex: 'Codex', opencode: 'OpenCode' };
-const SHORT = { claude: 'Claude', codex: 'Codex', opencode: 'OpenCode' };
+const NAME = {
+  claude: 'Claude Code',
+  codex: 'Codex',
+  opencode: 'OpenCode',
+  copilot: 'GitHub Copilot CLI',
+};
+const SHORT = { claude: 'Claude', codex: 'Codex', opencode: 'OpenCode', copilot: 'Copilot' };
 const NOTICE =
   'Third-party trademarks are the property of their respective owners. Semon is not affiliated with or endorsed by these companies.';
 
@@ -135,7 +141,11 @@ export default async function hiconsCheck(browser) {
     .trim()
     .split('\n')
     .map((line) => line.trim().split(/\s+/));
-  r.expect(sums.length === 5, 'SHA256SUMS lists ' + sums.length + ' files, not 5');
+  const expectedFiles = [...new Set(Object.values(FILES).flat())].sort();
+  r.expect(
+    JSON.stringify(sums.map(([, file]) => file).sort()) === JSON.stringify(expectedFiles),
+    'SHA256SUMS must contain exactly the six pinned harness assets: ' + expectedFiles.join(', '),
+  );
   const probe = await served(browser, { size: 'desktop' });
   results.served = {};
   for (const [want, file] of sums) {

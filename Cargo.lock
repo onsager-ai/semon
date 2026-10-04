@@ -1914,6 +1914,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "semon-copilot"
+version = "0.1.0"
+dependencies = [
+ "semon-push",
+ "semon-sessions",
+ "semon-store",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 2.0.19",
+]
+
+[[package]]
 name = "semon-push"
 version = "0.1.0"
 dependencies = [

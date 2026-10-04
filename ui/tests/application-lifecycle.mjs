@@ -30,6 +30,8 @@ for (const width of [390, 1280])
           join(scratch, '.claude.json'),
           '--codex-home',
           join(scratch, 'codex'),
+          '--copilot-home',
+          join(scratch, 'copilot'),
           '--proc-root',
           join(scratch, 'proc'),
           '--cache',
