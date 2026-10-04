@@ -2,6 +2,8 @@ import importlib.util
 from pathlib import Path
 from types import SimpleNamespace
 import unittest
+import tempfile
+import json
 
 spec=importlib.util.spec_from_file_location('runtime_worker',Path(__file__).parents[2]/'scripts/e2b-runtime.py')
 worker=importlib.util.module_from_spec(spec)
@@ -60,5 +62,15 @@ class RuntimeTests(unittest.TestCase):
             self.assertEqual(worker.execute(self.request(method,'owned-runtime'),Provider),worker.UNKNOWN)
             Provider.state='running'
         self.assertEqual(Provider.calls,[])
+
+class GuestReceiptTests(unittest.TestCase):
+    def test_completed_exit_and_pre_spawn_unknown_are_distinct(self):
+        spec=importlib.util.spec_from_file_location('guest',Path(__file__).parents[2]/'scripts/runtime-guest.py')
+        guest=importlib.util.module_from_spec(spec);spec.loader.exec_module(guest)
+        with tempfile.TemporaryDirectory() as root:
+            guest.ROOT=Path(root)
+            for receipt,expected in [({'status':'completed','exit_code':0},'completed'),({'status':'completed','exit_code':1},'agent_failed'),({'status':'accepted'},'delivery_unknown')]:
+                guest.write('receipt.json',receipt)
+                self.assertEqual(guest.inspect()['status'],expected)
 
 if __name__=='__main__':unittest.main()

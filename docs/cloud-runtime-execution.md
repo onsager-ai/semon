@@ -1,7 +1,7 @@
 # Explicit E2B execution transport (candidate)
 
 `e2b::execution` is a bounded private stdio transport. `scripts/e2b-runtime.py`
-uses E2B SDK 2.52.0 and the base profile to create compute, install the embedding's
+uses E2B SDK 2.52.0 and an explicit embedding-supplied profile to create compute, install the embedding's
 pinned Codex and Semon binaries, bootstrap Push, dispatch one initial task, and
 inspect a retained receipt. The embedding commits the call stage before invoking
 it, supplies owner-resolved credentials, checks current authority and generations,
@@ -18,14 +18,16 @@ again. Guest attachment uses the constructor after read-only running-state and
 metadata verification; it never uses `connect()` to resume as an inspection side
 effect.
 
-The fixed candidate profile is base, secure transport, one-hour timeout with
-retained-memory pause. This is a provider deadline, not a qualified application
+The embedding supplies template, timeout and retained-memory policy; the
+transport validates their shape and uses secure provider access. Hub’s candidate
+policy uses base and a one-hour timeout with retained-memory pause. This is a provider deadline, not a qualified application
 checkpoint or idle policy. No manual pause/resume, reconstruction, automatic
 lifecycle or multi-input inbox is implemented here. These remain the separate
-#253–#256 gates. Thread receipts establish launch identity, not arbitrary
+#253–#256 gates. Receipts distinguish a nonzero agent exit from successful completion.
+Thread receipts establish launch identity, not arbitrary
 exactly-once tool effects or current model health.
 
-`qualify_profile` is an explicit operator test action. It uses a five-minute
+`qualify_profile` is an explicit operator test action. It uses the embedding-supplied short timeout in a
 throwaway sandbox, verifies pinned binary installation, filesystem-only pause,
 explicit reboot and retained bytes, and cleans up only that owned test resource
 with no user task. It does not test model authentication or a production mirror
