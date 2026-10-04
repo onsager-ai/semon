@@ -25,6 +25,8 @@ pub struct LocalSession {
     /// Owner-only native socket, also usable by `codex --remote`.
     pub socket: PathBuf,
     process: Child,
+    command: Command,
+    credential_env: &'static str,
 }
 fn refuse(message: &str) -> io::Error {
     io::Error::new(io::ErrorKind::PermissionDenied, message)
@@ -90,6 +92,17 @@ impl LocalSession {
         workspace: &Path,
         state: &Path,
         config: Option<&Path>,
+    ) -> io::Result<Self> {
+        Self::launch_with_api_key(binary, workspace, state, config, None)
+    }
+    /// Private coordinator delivery; the credential is restricted to the model
+    /// process. It never enters the executor, manifest, or control journal.
+    pub fn launch_with_api_key(
+        binary: &Path,
+        workspace: &Path,
+        state: &Path,
+        config: Option<&Path>,
+        api_key: Option<&str>,
     ) -> io::Result<Self> {
         if !cfg!(all(target_os = "linux", target_arch = "x86_64")) {
             return Err(refuse(
@@ -308,7 +321,9 @@ impl LocalSession {
                             "provider credential must use a non-reserved _KEY or _TOKEN variable",
                         ));
                     }
-                    if let Some(value) = std::env::var_os(key) {
+                    if api_key.is_none()
+                        && let Some(value) = std::env::var_os(key)
+                    {
                         command.env(key, value);
                     }
                 }
@@ -323,9 +338,28 @@ impl LocalSession {
             "SSL_CERT_FILE",
             "SSL_CERT_DIR",
         ] {
+            if key == "OPENAI_API_KEY" && api_key.is_some() {
+                continue;
+            }
             if let Some(value) = std::env::var_os(key) {
                 command.env(key, value);
             }
+        }
+        let credential_env = if parsed.get("model_provider").and_then(toml::Value::as_str)
+            == Some("openai_chatgpt_plan")
+        {
+            "ACCESS_TOKEN"
+        } else {
+            "OPENAI_API_KEY"
+        };
+        if let Some(key) = api_key {
+            if key.is_empty() || key.len() > 4096 || key.bytes().any(|b| b.is_ascii_control()) {
+                return Err(refuse("invalid model credential"));
+            }
+            command
+                .env_remove("OPENAI_API_KEY")
+                .env_remove("ACCESS_TOKEN")
+                .env(credential_env, key);
         }
         let mut process = command
             .args([
@@ -390,7 +424,59 @@ impl LocalSession {
             home,
             socket,
             process,
+            command,
+            credential_env,
         })
+    }
+}
+impl LocalSession {
+    /// Explicit idle credential renewal through the same native driver and home.
+    /// Old native writes are never reconstructed or replayed. The caller owns
+    /// credential generation claims and must reconcile a lost renewal receipt.
+    pub fn renew_credential(&mut self, key: &str) -> io::Result<()> {
+        if key.is_empty() || key.len() > 4096 || key.bytes().any(|b| b.is_ascii_control()) {
+            return Err(refuse("invalid model credential"));
+        }
+        if !self.driver.snapshot()["activeTurn"].is_null() {
+            return Err(refuse(
+                "finish or explicitly end the active turn before credential renewal",
+            ));
+        }
+        let thread = self.driver.thread_id();
+        let store = self.driver.store.clone();
+        self.driver.lost();
+        self.end()?;
+        if self.socket.symlink_metadata().is_ok() {
+            fs::remove_file(&self.socket)?;
+        }
+        self.command
+            .env_remove("OPENAI_API_KEY")
+            .env_remove("ACCESS_TOKEN")
+            .env(self.credential_env, key);
+        self.process = self.command.spawn()?;
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !self.socket.exists() && Instant::now() < deadline {
+            if self.process.try_wait()?.is_some() {
+                return Err(refuse("native renewal exited"));
+            }
+            thread::sleep(Duration::from_millis(25));
+        }
+        self.driver = Codex::connect(
+            &self.socket,
+            Some(&thread),
+            None,
+            store,
+            Some(self.process.id()),
+        )?;
+        Ok(())
+    }
+    /// Stops the native server, leaving workspace, transcript and compute intact.
+    pub fn end(&mut self) -> io::Result<()> {
+        if self.process.try_wait()?.is_none() {
+            self.process.kill()?;
+        }
+        self.process.wait()?;
+        Ok(())
     }
 }
 impl Drop for LocalSession {
