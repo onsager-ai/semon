@@ -153,7 +153,7 @@ jobs:
         run: |
           serve() { # name port dir
             SEMON_TEST_NOW="$SEMON_NOW" setsid nohup target/debug/semon sessions --serve --listen "127.0.0.1:$2" \
-              --claude-home "$3/claude" --claude-json "$3/.claude.json" --codex-home "$3/codex" --proc-root "$3/proc" --cache "$3/index.json" \
+              --claude-home "$3/claude" --claude-json "$3/.claude.json" --codex-home "$3/codex" --copilot-home "$3/copilot" --proc-root "$3/proc" --cache "$3/index.json" \
               < /dev/null > "$RUNNER_TEMP/$1.log" 2>&1 &
             for _ in $(seq 1 100); do
               url=$(grep -m1 -o 'http://127.0.0.1:[0-9]*/?t=[0-9a-f]*' "$RUNNER_TEMP/$1.log" || true)
@@ -282,7 +282,7 @@ jobs:
           [ -n "$url" ] || { cat "$RUNNER_TEMP/receive.log"; exit 1; }
           XDG_STATE_HOME="$RUNNER_TEMP/push-state" SEMON_TEST_NOW="$SEMON_NOW" setsid nohup target/debug/semon push --watch \
             --to "$url" --token-file "$RUNNER_TEMP/recv.token" --state "$RUNNER_TEMP/push-state.json" \
-            --claude-home "$fixture_root/claude" --claude-json "$fixture_root/.claude.json" --codex-home "$fixture_root/codex" --proc-root "$fixture_root/proc" --cache "$RUNNER_TEMP/push-index.json" \
+            --claude-home "$fixture_root/claude" --claude-json "$fixture_root/.claude.json" --codex-home "$fixture_root/codex" --copilot-home "$fixture_root/copilot" --proc-root "$fixture_root/proc" --cache "$RUNNER_TEMP/push-index.json" \
             < /dev/null > "$RUNNER_TEMP/push.log" 2>&1 &
           SEMON_TEST_NOW="$SEMON_NOW" node tests/ui/pushed-parity.mjs --home "$fixture_root" --received "$recv" --scratch "$RUNNER_TEMP/pushed"
 
@@ -306,7 +306,7 @@ jobs:
           [ -d "$RUNNER_TEMP/recv/machines/laptop" ] || { echo "nothing was received"; exit 1; }
           reader="$RUNNER_TEMP/pushed/reader"
           SEMON_TEST_NOW="$SEMON_NOW" setsid nohup target/debug/semon sessions --serve --listen 127.0.0.1:8769 \
-            --machines "$RUNNER_TEMP/recv" --no-local --claude-home "$reader/claude" --claude-json "$reader/.claude.json" --codex-home "$reader/codex" \
+            --machines "$RUNNER_TEMP/recv" --no-local --claude-home "$reader/claude" --claude-json "$reader/.claude.json" --codex-home "$reader/codex" --copilot-home "$reader/copilot" \
             --proc-root "$reader/proc" --cache "$reader/serve-index.json" < /dev/null > "$RUNNER_TEMP/pushed-viewer.log" 2>&1 &
           for _ in $(seq 1 100); do
             url=$(grep -m1 -o 'http://127.0.0.1:[0-9]*/?t=[0-9a-f]*' "$RUNNER_TEMP/pushed-viewer.log" || true)

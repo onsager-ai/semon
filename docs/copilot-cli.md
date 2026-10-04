@@ -132,3 +132,15 @@ phone/desktop, light/dark, command failure, missing result, child-task browsing,
 unknown cost and live resume/restart coverage. No baseline or threshold was
 relaxed. Passing probes alone is not release acceptance; PR/check evidence and
 remaining limitations are recorded on #235 and the child issues.
+
+The synthetic collection regression also measures cold capture, metadata-only idle
+passes and append collection with four isolated sessions and 1,004 complete initial
+records. Run `cargo test --locked -p semon-copilot
+synthetic_collection_measures_idle_and_growing_sources -- --nocapture` (on one
+line) to reproduce the measurements. One local Linux run on 2026-10-04 measured
+639.47 ms cold capture, 0.051 ms mean idle pass over 20 passes, and 19.50 ms to
+collect four appends. These measurements depend on the host and workload; they
+are not performance gates or service guarantees. Watch adds a polling delay of
+up to two seconds before collection begins. The regression verifies an unchanged
+idle cursor and recovery when raw evidence is durable but the checkpoint still
+contains the previous offset.
