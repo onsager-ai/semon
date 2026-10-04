@@ -1128,5 +1128,13 @@ fn copilot_redacted_mirror_survives_lost_ack_restart_partial_and_replacement() {
                 assert_eq!(actual.body, wanted.body);
             }
         }
+        let retained = copy(&receiver, &path);
+        fs::remove_file(home.root.join(&path)).unwrap();
+        semon_push::push(&home.push_options(&receiver.url), false).unwrap();
+        assert_eq!(
+            copy(&receiver, &path),
+            retained,
+            "source deletion does not erase previously received viewing evidence"
+        );
     }
 }

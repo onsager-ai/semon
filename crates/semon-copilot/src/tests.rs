@@ -508,3 +508,56 @@ fn independent_machines_keep_native_calls_separate_and_copied_ids_refuse_ownersh
     assert_eq!(fs::read(ap).unwrap(), first);
     assert_eq!(fs::read(bp).unwrap(), second);
 }
+
+#[test]
+fn synthetic_collection_measures_idle_and_growing_sources() {
+    let root = Temp::new();
+    let home = root.0.join("native");
+    let sample = fixture("1.0.91", "headless-tools.events.jsonl");
+    let header: Value =
+        serde_json::from_slice(sample.split(|b| *b == b'\n').next().unwrap()).unwrap();
+    let mut paths = Vec::new();
+    for session in 0..4 {
+        let mut start = header.clone();
+        start["data"]["sessionId"] = json!(format!("synthetic-load-{session}"));
+        let mut bytes = serde_json::to_vec(&start).unwrap();
+        bytes.push(b'\n');
+        for record in 0..250 {
+            let event = json!({"id":format!("record-{record}"),"type":"user.message","parentId":null,"timestamp":"2026-10-03T12:00:00Z","data":{"content":"SEMON_SYNTHETIC_load"}});
+            serde_json::to_writer(&mut bytes, &event).unwrap();
+            bytes.push(b'\n');
+        }
+        paths.push(install(&home, &bytes));
+    }
+    let state = root.0.join("private/state.json");
+    let db = root.0.join("private/store.db");
+    let mut collector = Collector::open(&home, &state, &db).unwrap();
+    let cold = std::time::Instant::now();
+    drain(&mut collector);
+    let cold_ms = cold.elapsed().as_secs_f64() * 1000.0;
+    let cursor = fs::read(&state).unwrap();
+    let idle = std::time::Instant::now();
+    for _ in 0..20 {
+        assert_eq!(collector.collect().unwrap(), 0);
+    }
+    let idle_ms = idle.elapsed().as_secs_f64() * 1000.0 / 20.0;
+    assert_eq!(fs::read(&state).unwrap(), cursor);
+    for path in &paths {
+        let mut file = OpenOptions::new().append(true).open(path).unwrap();
+        writeln!(file, "{}", json!({"id":"appended-record","type":"user.message","parentId":"record-249","timestamp":"2026-10-03T12:01:00Z","data":{"content":"SEMON_SYNTHETIC_append"}})).unwrap();
+    }
+    let append = std::time::Instant::now();
+    assert_eq!(collector.collect().unwrap(), 4);
+    let append_ms = append.elapsed().as_secs_f64() * 1000.0;
+    let expected = c_log(&collector);
+    drop(collector);
+    // Simulate durable records committed while the checkpoint still contains the
+    // previous offset. Restart must reconcile custody before advancing it again.
+    fs::write(&state, cursor).unwrap();
+    let mut restarted = Collector::open(&home, &state, &db).unwrap();
+    drain(&mut restarted);
+    assert_eq!(c_log(&restarted), expected);
+    println!(
+        "synthetic saved-state measurement: 4 sessions / 1004 initial records; cold={cold_ms:.2}ms, idle_mean={idle_ms:.3}ms over 20 passes, four appends={append_ms:.2}ms; watch interval=2000ms; unchanged cursor preserved"
+    );
+}
