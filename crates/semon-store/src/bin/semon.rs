@@ -26,6 +26,7 @@ fn main() -> ExitCode {
 }
 
 enum Command {
+    Version,
     Ship(ShipArgs),
     Log(LogArgs),
     Forensic(ForensicArgs),
@@ -193,6 +194,7 @@ fn parse_args() -> Result<Command, String> {
     let mut arguments = env::args().skip(1);
     match arguments.next().as_deref() {
         Some("control") => Ok(Command::Control(arguments.collect())),
+        Some("--version") if arguments.next().is_none() => Ok(Command::Version),
         Some("sessions") => parse_sessions_args(arguments).map(Command::Sessions),
         Some("push") => parse_push_args(arguments).map(Command::Push),
         Some("receive") => parse_receive_args(arguments).map(Command::Receive),
@@ -820,6 +822,10 @@ fn parse_forget_args(mut arguments: impl Iterator<Item = String>) -> Result<Forg
 fn run(command: Command) -> Result<(), String> {
     match command {
         Command::Control(args) => run_control(args),
+        Command::Version => {
+            println!("semon {}", env!("CARGO_PKG_VERSION"));
+            Ok(())
+        }
         Command::Sessions(args) => run_sessions(args),
         Command::Push(args) => run_push(&args),
         Command::Receive(args) => run_receive(args),

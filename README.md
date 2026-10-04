@@ -766,3 +766,6 @@ They decrypt and verify bounded pages locally and persist metadata only, with
 machine roots, exact cross-harness links, lease liveness and incremental reads.
 See [encrypted remote session trees](docs/encrypted-remote-sessions.md) for
 identity enrollment, snapshots and the content boundary.
+
+Reusable SSH checks and mirror bootstrap for embedding applications are documented
+in [SSH bootstrap](docs/ssh-bootstrap.md). SSH enrollment grants no agent execution.

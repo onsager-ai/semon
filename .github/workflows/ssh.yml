@@ -1,0 +1,17 @@
+name: SSH qualification
+on:
+  pull_request:
+    paths:
+      - 'crates/semon-ssh/**'
+      - 'scripts/ssh-fixture.sh'
+      - 'tests/ssh/**'
+      - '.github/workflows/ssh.yml'
+permissions:
+  contents: read
+jobs:
+  openssh:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: dtolnay/rust-toolchain@stable
+      - run: scripts/ssh-fixture.sh cargo test -p semon-ssh --locked --features real-ssh-tests
