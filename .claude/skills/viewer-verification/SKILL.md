@@ -14,7 +14,10 @@ agent tools come from harness-operations, not this product verification workflow
 
 ## Prerequisites
 
-Read those references and tests/ui/lib.mjs. Use the workflow's Node version,
+Read those references, docs/design/viewer-ownership.md,
+docs/design/design-contract.md and tests/ui/lib.mjs.
+For refactors, follow the ownership contract and complete its review checklist.
+Use the workflow's Node version,
 locked dependencies, Chromium/fontconfig and test-clock binaries. Serve synthetic
 fixtures, never personal logs. Do not change host fonts to compensate for results.
 
@@ -22,7 +25,9 @@ fixtures, never personal logs. Do not change host fonts to compensate for result
 
 1. Identify affected screens, interactions and shared components. Select suites
    from the owning workflow and record the fixture cases/viewport/theme coverage.
-2. Edit canonical ui/src/ sources, not generated bundles. Follow ui/README.md's
+2. Edit canonical ui/src/ sources, not generated bundles. Run the architecture
+   check and verify ownership/dependency changes against the canonical contract.
+   Follow ui/README.md's
    build/regeneration and UI foundation commands. Verify type/security checks,
    deterministic bundle freshness and sizes before browser evidence.
 3. Prepare the tests/ui fixture servers and tooling using the workflow's exact
@@ -36,6 +41,8 @@ fixtures, never personal logs. Do not change host fonts to compensate for result
 
 ## Completion
 
-Report selected coverage, setup, commands/results, reviewed baseline changes,
+For refactors, record ownership/dependency changes, checklist evidence and any
+justified contract exceptions in the PR. Report selected coverage, setup,
+commands/results, reviewed baseline changes,
 source/bundle freshness and unrun/blocked suites. Keep generation commands and
 exact CI flags in their owning references rather than copying another toolchain.

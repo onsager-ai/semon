@@ -9,6 +9,9 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use thiserror::Error;
 
+#[cfg(feature = "codex-process")]
+pub mod process;
+
 pub const CODEX_VERSION: &str = "0.159.0-alpha.3";
 pub const LOGIN_START_METHOD: &str = "account/login/start";
 pub const LOGIN_COMPLETED_METHOD: &str = "account/login/completed";
