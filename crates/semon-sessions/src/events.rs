@@ -61,7 +61,7 @@ thread_local! {
 /// v18: background Claude Bash calls retain their launch flag and terminal
 /// notifications retain their failure outcome.
 /// v19: ledgers verify the full consumed prefix instead of just two windows.
-const CACHE_VERSION: u32 = 20;
+const CACHE_VERSION: u32 = 21;
 
 /// The four token categories the model serves for an exact model id.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -86,6 +86,8 @@ impl ModelTokens {
 /// separate for the model JSON.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub(crate) struct MessageUsage {
+    #[serde(default)]
+    pub(crate) record_ids: BTreeSet<String>,
     pub(crate) model: Option<String>,
     pub(crate) tokens: Tokens,
     pub(crate) model_tokens: ModelTokens,
@@ -2815,9 +2817,20 @@ fn claude_events(summary: &mut FileIndex, record: &Value, offset: u64) {
         if let Some(dirty) = &mut summary.dirty_rows {
             dirty.usage.insert(id.to_owned());
         }
+        let mut record_ids = summary
+            .usage_by_id
+            .get(id)
+            .map(|usage| usage.record_ids.clone())
+            .unwrap_or_default();
+        if field(record, "type") == Some("assistant")
+            && let Some(uuid) = field(record, "uuid")
+        {
+            record_ids.insert(uuid.to_owned());
+        }
         summary.usage_by_id.insert(
             id.to_owned(),
             MessageUsage {
+                record_ids,
                 model: field(message, "model").map(str::to_owned),
                 tokens: Tokens {
                     input: input + cache_write + cache_read,

@@ -1884,6 +1884,7 @@ name = "semon-claude"
 version = "0.1.0"
 dependencies = [
  "semon-codex",
+ "semon-sessions",
  "semon-store",
  "serde_json",
  "sha2 0.10.9",

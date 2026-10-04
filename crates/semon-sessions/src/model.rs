@@ -67,6 +67,12 @@ pub(crate) struct Session {
     pub(crate) effort: Option<String>,
     pub(crate) tokens: [f64; 3],
     pub(crate) tokens_by_model: BTreeMap<String, events::ModelTokens>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) claude_usage: Option<crate::ClaudeUsageEvidence>,
+    #[serde(skip)]
+    pub(crate) incomplete_usage_days: BTreeSet<i64>,
+    #[serde(skip)]
+    pub(crate) incomplete_usage_time: bool,
     pub(crate) cost: crate::pricing::Cost,
     pub(crate) reported_runs: Vec<ReportedRun>,
     pub(crate) cost_check: Vec<CostCheck>,
@@ -1492,6 +1498,7 @@ struct DescriptionInputs {
     baseline: String,
     names: BTreeSet<String>,
     reports: String,
+    shared_usage: crate::claude_usage::Shared,
     repos: Vec<(String, Option<Option<String>>)>,
     clock: Option<i64>,
 }
@@ -1541,6 +1548,7 @@ struct Builder<'a> {
     ids: HashMap<String, usize>,
     /// Events a copy-resume duplicated: skipped everywhere.
     copied: BTreeSet<Ref>,
+    shared_usage: BTreeMap<String, crate::claude_usage::Shared>,
     /// A subagent's send to `main`, and its receipt in the parent.
     progress: HashMap<Ref, Ref>,
 }
@@ -1613,6 +1621,7 @@ impl<'a> Builder<'a> {
             live_files: BTreeMap::new(),
             ids: HashMap::new(),
             copied: BTreeSet::new(),
+            shared_usage: BTreeMap::new(),
             progress: HashMap::new(),
         }
     }
@@ -1631,6 +1640,9 @@ impl<'a> Builder<'a> {
             effort: None,
             tokens: [0.0; 3],
             tokens_by_model: BTreeMap::new(),
+            claude_usage: None,
+            incomplete_usage_days: BTreeSet::new(),
+            incomplete_usage_time: false,
             cost: crate::pricing::Cost::default(),
             reported_runs: Vec::new(),
             cost_check: Vec::new(),
@@ -2016,9 +2028,34 @@ impl<'a> Builder<'a> {
             }
         }
         self.order_events();
+        self.shared_usage = self.shared_claude_usage();
         for index in 0..self.sessions.len() {
             self.describe(index);
         }
+    }
+
+    fn shared_claude_usage(&self) -> BTreeMap<String, crate::claude_usage::Shared> {
+        let records: Vec<_> = self
+            .sessions
+            .iter()
+            .map(|session| {
+                let mut records = crate::claude_usage::Records::new();
+                for position in &session.files {
+                    let file = &self.files[*position];
+                    if file.harness() != "claude" {
+                        continue;
+                    }
+                    for (id, usage) in file.summary.usage() {
+                        records
+                            .entry(id.clone())
+                            .or_default()
+                            .extend(usage.record_ids.iter().cloned());
+                    }
+                }
+                (session.key.as_str(), records)
+            })
+            .collect();
+        crate::claude_usage::shared(records.iter().map(|(key, records)| (*key, records)))
     }
 
     fn describe(&mut self, index: usize) {
@@ -2056,6 +2093,11 @@ impl<'a> Builder<'a> {
             baseline: serde_json::to_string(&session.out).expect("session serializes"),
             names: session.names.clone(),
             reports: serde_json::to_string(&reports).expect("reports serialize"),
+            shared_usage: self
+                .shared_usage
+                .get(&session.key)
+                .cloned()
+                .unwrap_or_default(),
             clock: session
                 .files
                 .iter()
@@ -2182,6 +2224,31 @@ impl<'a> Builder<'a> {
                 title.clone_from(&file.summary.agent_name);
             }
         }
+        let shared = self
+            .shared_usage
+            .get(&self.sessions[index].key)
+            .cloned()
+            .unwrap_or_default();
+        let usage_evidence = crate::claude_usage::evidence(
+            usage
+                .iter()
+                .map(|(id, used)| (id, &used.tokens, used.model.as_deref())),
+            &shared,
+        );
+        let mut incomplete_usage_days = BTreeSet::new();
+        let mut incomplete_usage_time = false;
+        for (id, used) in &usage {
+            if shared.contains_key(id) {
+                if let Some(time) = used.billing.timestamp {
+                    incomplete_usage_days.insert(
+                        time.div_euclid(crate::analytics::DAY_MS) * crate::analytics::DAY_MS,
+                    );
+                } else {
+                    incomplete_usage_time = true;
+                }
+            }
+        }
+        usage.retain(|id, _| !shared.contains_key(id));
         for used in usage.values() {
             tokens.input += used.tokens.input;
             tokens.cached_input += used.tokens.cached_input;
@@ -2235,7 +2302,10 @@ impl<'a> Builder<'a> {
         } else {
             Vec::new()
         };
-        let cost = crate::pricing::calculate_cost(&billing_messages, &codex_events);
+        let mut cost = crate::pricing::calculate_cost(&billing_messages, &codex_events);
+        if usage_evidence.is_some() {
+            cost.usd = None;
+        }
         let mut reports: Vec<&ReportedRunSnapshot> = if harness == "claude" {
             self.reported_runs
                 .iter()
@@ -2272,12 +2342,14 @@ impl<'a> Builder<'a> {
                 lines_removed: run.last_lines_removed,
                 by_model: run.last_model_usage.clone(),
             });
-            cost_check.push(CostCheck {
-                start: run.last_start_time,
-                computed_usd: computed,
-                reported_usd: run.last_cost,
-                ok: crate::pricing::cost_check_ok(computed, run.last_cost),
-            });
+            if usage_evidence.is_none() {
+                cost_check.push(CostCheck {
+                    start: run.last_start_time,
+                    computed_usd: computed,
+                    reported_usd: run.last_cost,
+                    ok: crate::pricing::cost_check_ok(computed, run.last_cost),
+                });
+            }
         }
         let session = &mut self.sessions[index];
         session.names.extend(names);
@@ -2290,6 +2362,9 @@ impl<'a> Builder<'a> {
             _ => None,
         };
         out.tokens_by_model = tokens_by_model;
+        out.claude_usage = usage_evidence;
+        out.incomplete_usage_days = incomplete_usage_days;
+        out.incomplete_usage_time = incomplete_usage_time;
         out.cost = cost;
         out.reported_runs = reported_runs;
         out.cost_check = cost_check;

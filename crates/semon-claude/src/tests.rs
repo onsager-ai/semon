@@ -1606,3 +1606,112 @@ fn replacement_retires_obsolete_source_projection_but_retains_raw() {
         }
     }
 }
+
+#[test]
+fn native_copied_usage_view_agrees_cold_incremental_and_retained_custody_rebuild() {
+    let root = TestDir::new();
+    let homes = root.path().join("native");
+    let project = homes.join("claude/projects/fixture");
+    fs::create_dir_all(&project).unwrap();
+    let parent = project.join("native-claude-parent.jsonl");
+    let child = project.join("native-claude-child.jsonl");
+    let initial = include_bytes!(
+        "../../../tests/fixtures/compatibility/claude-2.1.288/lifecycle/initial-transcript.jsonl"
+    );
+    let resumed = include_bytes!(
+        "../../../tests/fixtures/compatibility/claude-2.1.288/lifecycle/resumed-transcript.jsonl"
+    );
+    let forked = include_bytes!(
+        "../../../tests/fixtures/compatibility/claude-2.1.288/lifecycle/forked-transcript.jsonl"
+    );
+    let options = semon_sessions::Options {
+        claude_home: homes.join("claude"),
+        claude_json: homes.join(".claude.json"),
+        codex_home: homes.join("codex"),
+        proc_root: homes.join("proc"),
+        cache: root.path().join("index/view.json"),
+        all: true,
+        ..Default::default()
+    };
+    let now = 1_791_072_000_000;
+    let cursor = root.path().join("capture.json");
+    let database = root.path().join("capture.sqlite3");
+    fs::write(&parent, initial).unwrap();
+    let mut store = TraceStore::open(&database).unwrap();
+    process_file(
+        &parent,
+        &mut CursorState::default(),
+        &mut store,
+        &ProcessOptions::new(&cursor),
+    )
+    .unwrap();
+    semon_sessions::model_json_at(&options, now).unwrap();
+    drop(store);
+    fs::write(&parent, resumed).unwrap();
+    // Exercise a durable restart with only a half-frame of the copied file.
+    let half = forked.iter().position(|b| *b == b'\n').unwrap() / 2;
+    fs::write(&child, &forked[..half]).unwrap();
+    let mut store = TraceStore::open(&database).unwrap();
+    let mut state = load_state(&cursor).unwrap();
+    process_file(
+        &parent,
+        &mut state,
+        &mut store,
+        &ProcessOptions::new(&cursor),
+    )
+    .unwrap();
+    process_file(
+        &child,
+        &mut state,
+        &mut store,
+        &ProcessOptions::new(&cursor),
+    )
+    .unwrap();
+    semon_sessions::model_json_at(&options, now).unwrap();
+    drop(store);
+    fs::write(&child, forked).unwrap();
+    let mut store = TraceStore::open(&database).unwrap();
+    let mut state = load_state(&cursor).unwrap();
+    process_file(
+        &child,
+        &mut state,
+        &mut store,
+        &ProcessOptions::new(&cursor),
+    )
+    .unwrap();
+    let decode = |options: &semon_sessions::Options| -> Value {
+        serde_json::from_str(&semon_sessions::model_json_at(options, now).unwrap()).unwrap()
+    };
+    let warm = decode(&options);
+    let mut cold = options.clone();
+    cold.cache = root.path().join("cold/view.json");
+    assert_eq!(warm["sessions"], decode(&cold)["sessions"]);
+    let rebuilt_home = root.path().join("retained");
+    let rebuilt_project = rebuilt_home.join("claude/projects/fixture");
+    fs::create_dir_all(&rebuilt_project).unwrap();
+    for (path, expected) in [(&parent, resumed.as_slice()), (&child, forked.as_slice())] {
+        let key = path.canonicalize().unwrap().to_string_lossy().into_owned();
+        let retained = store
+            .fetch_current_capture_source_raw(CARRIER, &key)
+            .unwrap()
+            .unwrap();
+        assert_eq!(retained, expected);
+        fs::write(rebuilt_project.join(path.file_name().unwrap()), retained).unwrap();
+        assert_eq!(fs::read(path).unwrap(), expected);
+    }
+    let replay = semon_sessions::Options {
+        claude_home: rebuilt_home.join("claude"),
+        cache: root.path().join("replay/view.json"),
+        ..options.clone()
+    };
+    assert_eq!(warm["sessions"], decode(&replay)["sessions"]);
+    let p = &warm["sessions"]["native-claude-parent"]["claude_usage"];
+    let c = &warm["sessions"]["native-claude-child"]["claude_usage"];
+    assert_eq!(
+        p["observed"]["input"].as_u64().unwrap() + c["observed"]["input"].as_u64().unwrap(),
+        25
+    );
+    assert_eq!(p["shared"], c["shared"]);
+    assert_eq!(c["exclusive"]["input"], 5);
+    assert!(c["fresh"].is_null() && c["shared_owner"].is_null());
+}

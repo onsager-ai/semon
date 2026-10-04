@@ -301,3 +301,51 @@ The versioned `namespace-*` fixtures are source-shaped synthetic records, with
 unknown native versions. They demonstrate separate sessions with the same native
 ID and call ID, source-local results, and cold/restart/retained-raw capture parity.
 This is no claim about native UUID collision frequency or invented lineage.
+
+## Copied Claude usage accounting
+
+The pinned lifecycle fixture has two physical sessions. Summing their observed
+usage produces 25 input / 15 output tokens; the distinct assistant request
+records carry 15 / 9. The parent and fork share two exact assistant record UUIDs
+and API message IDs (10 / 6), while only the fork contains the third request
+(5 / 3). API IDs alone, similar content, timestamps and filenames do not
+establish copying. Multiple streamed blocks of one API request still count once.
+
+When exact records appear in different modeled Claude sessions on one machine,
+Semon excludes their shared usage from the primary token and model-token fields.
+Those fields describe **exclusive observations**, not a complete fresh-work total.
+Optional `claude_usage` evidence preserves `observed`, `exclusive`, shared usage
+under stable hashed request groups, and its recorded model attribution. `fresh`
+and `shared_owner` are explicitly null: the recordings do not establish original
+branch ownership. Do not add session observations to obtain fresh usage, assign
+shared requests to the first session, or infer a logical fork parent.
+
+For the lifecycle fixture the parent has no exclusive observation, the fork has
+5 / 3, and the shared pool has 10 / 6 once. Zero exclusive observations is not
+proof of zero fresh work. The original 10 / 6 and 15 / 9 remain inspectable.
+Conflicting reports remain separate source observations; grouping does not resolve
+their amount or ownership. A missing record UUID cannot establish copying.
+Copies on different machines are not grouped into an invented owner.
+
+The viewer, CLI tree, query/MCP and encrypted remote summaries carry the same
+accounting. Estimated complete session costs remain unknown for copied history;
+reported-run snapshots remain source evidence. Analytics omits shared usage from
+priced bars and labels their incompleteness, preserving unknown aggregate costs
+on affected days. Unaffected sessions and JSON field types are preserved. New
+fields are optional. The text-free viewer cache is schema 3/parser 21; local tree
+cache 5 and encrypted summary cache 3 rebuild older structural summaries without
+changing raw bytes, canonical traces or retained reported-run snapshots.
+
+Regression evidence uses the already hash-manifested native mock lifecycle
+recordings, not new personal-session data. `native_copied_usage_view_agrees_cold_incremental_and_retained_custody_rebuild`
+checks full session evidence over cold ingestion, half-frame interruption plus
+cursor/SQLite restart, and actual current-source raw custody replay. The sessions
+model, local tree and encrypted remote tests verify unknown ownership, distinct
+physical sessions, exact identities and restart behavior. Identity-negative tests
+reject an API ID without a matching UUID, a UUID without the same API ID, and
+cross-machine attribution. Existing continuation grouping stays unchanged.
+
+These are synthetic provider usage observations in native Linux Claude Code
+2.1.288 persistence, not billing assertions. Native logical fork lineage and
+unobserved ownership remain unknown. This repair supplies acceptance evidence
+for #236/#237; production Copilot acceptance still requires #239–242.

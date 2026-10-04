@@ -54,7 +54,7 @@ fn native_codex_fork_tree_reports_child_request_usage_without_inherited_counters
     );
     let current: Value =
         serde_json::from_slice(&fs::read(&fixture.options.cache).unwrap()).unwrap();
-    assert_eq!(current["version"], 4);
+    assert_eq!(current["version"], 5);
 }
 
 struct Fixture {
@@ -1158,4 +1158,37 @@ fn planted_secrets_never_reach_the_cache_and_reach_the_model_only_as_their_sessi
         .map(|(label, _)| *label)
         .collect();
     assert_eq!(seen, shown);
+}
+
+#[test]
+fn native_claude_copied_usage_tree_preserves_observed_and_unknown_owner() {
+    let fixture = Fixture::new();
+    fixture.write("claude/projects/fixture/native-claude-parent.jsonl", include_str!("../../../tests/fixtures/compatibility/claude-2.1.288/lifecycle/resumed-transcript.jsonl"));
+    fixture.write(
+        "claude/projects/fixture/native-claude-child.jsonl",
+        include_str!(
+            "../../../tests/fixtures/compatibility/claude-2.1.288/lifecycle/forked-transcript.jsonl"
+        ),
+    );
+    let mut options = fixture.options.clone();
+    options.all = true;
+    for _ in 0..2 {
+        let nodes = collect(&options).unwrap();
+        let parent = nodes
+            .iter()
+            .find(|n| n.id == "native-claude-parent")
+            .unwrap();
+        let child = nodes
+            .iter()
+            .find(|n| n.id == "native-claude-child")
+            .unwrap();
+        assert_eq!(parent.tokens.input, 0);
+        assert_eq!(child.tokens.input, 5);
+        let p = parent.claude_usage.as_ref().unwrap();
+        let c = child.claude_usage.as_ref().unwrap();
+        assert_eq!(p.observed.input + c.observed.input, 25);
+        assert_eq!(p.shared, c.shared);
+        assert!(p.fresh.is_none() && c.fresh.is_none());
+        assert!(p.shared_owner.is_none() && c.shared_owner.is_none());
+    }
 }
