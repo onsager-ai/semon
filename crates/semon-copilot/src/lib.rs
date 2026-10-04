@@ -254,11 +254,9 @@ impl Collector {
                             timestamp: time,
                             repo: "",
                             repo_source: RepoSource::None,
-                            parent_sequence: if block == 0 {
-                                parent
-                            } else {
-                                Some(sequence(saved.ordinal, block - 1))
-                            },
+                            // Sibling blocks share only the exact persisted
+                            // parentId. Array order is not an execution edge.
+                            parent_sequence: parent,
                             agent: None,
                             authored_by: *author,
                         },

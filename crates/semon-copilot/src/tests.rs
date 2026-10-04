@@ -132,6 +132,37 @@ fn native_families_are_read_only_and_browsable_on_both_releases() {
                     assert_eq!(tool["ok"], false);
                 }
             }
+            let mut captured = Collector::open(
+                &home,
+                &root.0.join("custody/state.json"),
+                &root.0.join("custody/store.db"),
+            )
+            .unwrap();
+            drain(&mut captured);
+            let occurrences = captured
+                .store
+                .log(&semon_store::LogFilter::default())
+                .unwrap();
+            for (ordinal, record) in records
+                .iter()
+                .enumerate()
+                .filter(|(_, record)| project(record).len() > 1)
+            {
+                let parent = record["parentId"]
+                    .as_str()
+                    .and_then(|id| records.iter().position(|record| record["id"] == id))
+                    .filter(|index| !project(&records[*index]).is_empty())
+                    .map(|index| sequence(index as u64, 0));
+                let siblings: Vec<_> = occurrences
+                    .iter()
+                    .filter(|row| row.sequence() / 1024 == ordinal as i64)
+                    .collect();
+                assert!(siblings.len() > 1);
+                assert!(
+                    siblings.iter().all(|row| row.parent_sequence() == parent),
+                    "sibling text/tool blocks must use only the exact persisted parentId: {version}/{name}"
+                );
+            }
             let expected = records
                 .iter()
                 .rev()
