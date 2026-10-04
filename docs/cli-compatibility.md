@@ -4,7 +4,9 @@ Tracking: #235, #236–242. Baseline audited at main
 `24e1932ef78238fdb13b5c1d11b61636695baf34` on 2026-10-03.
 Copilot CLI persisted-state implementation follows #285 and the supported-version
 contract in [copilot-cli.md](copilot-cli.md); OpenCode and Kiro remain deferred.
-The current implementation slice was reconciled through main #292 on 2026-10-04.
+The delivery in #297/#298 was reconciled through main #294 and the landed #297
+on 2026-10-04. The bounded supported contract is documented below; issue
+acceptance and final check evidence are tracked in #235.
 
 ## Evidence contract
 
@@ -47,11 +49,14 @@ unknown complete lines. The fixtures cover reversed results for overlapping
 same-name calls; this structural-store oracle does not establish full viewer
 transcript or usage correctness.
 
-The remaining acceptance corpus must cover archived discovery,
-continuation/fork/copied prefixes, compaction, denial/cancellation, concurrent
-sessions and machine namespaces. Existing truncation tests compare surviving
-occurrences only; they do not establish final-generation deletion semantics.
-Passing these initial tests does not close #236 or #237.
+The initial oracle is supplemented by the native/mock and source-shaped corpora
+described below: archived discovery, continuation/fork/copied prefixes,
+compaction, denial/cancellation, concurrent calls and machine namespaces. The
+replacement and source-custody tests verify current-revision replay while retaining
+older raw generations; deletion does not authorize pruning retained evidence.
+The initial structural tests alone do not establish viewer or release acceptance.
+The final copied-usage repair in #297 and persisted Copilot delivery in #298 add
+full-model, transcript, restart/rebuild and redacted mirror acceptance coverage.
 
 ## Initial Copilot observation
 
@@ -70,8 +75,9 @@ metrics accumulate across resume under synthetic mock usage; their native billin
 units remain unknown. See [the detailed probe](copilot-probe.md) for fixture
 provenance, interactive persistence, cancellation, manual compaction and the
 bounded go/no-go capability contract. Logical forks, persisted approval IDs,
-native mutation/retention and billing remain unknown. #238 is not yet accepted;
-production adapter work still depends on acceptance of #237 and #238.
+native mutation/retention and billing remain unknown. The bounded production
+adapter in #298 follows this probe contract; see [copilot-cli.md](copilot-cli.md)
+for collection, browsing, mirror behavior and the supported matrix.
 
 ## Versioned Claude and Codex native baselines
 

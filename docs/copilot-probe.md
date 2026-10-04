@@ -1,8 +1,10 @@
 # Copilot CLI persistence capability contract
 
 Tracking: #238 under #235. Probe result: **go for the bounded version-1 adapter
-contract below**. Production work remains gated on acceptance of #237 and #238;
-this document does not claim an implemented adapter.
+contract below**. The persisted-state adapter in #298 implements this bounded
+contract after the compatibility work in #297. This document records probe
+evidence; [copilot-cli.md](copilot-cli.md) owns the implemented supported matrix
+and collection, browsing and redacted viewing behavior.
 
 Pinned runtime: npm `@github/copilot` / `@github/copilot-linux-x64` 1.0.91,
 package build `216810c5`, Linux x86_64. The same offline probe also passes
@@ -190,7 +192,7 @@ evidence. A remote viewing copy follows the existing redaction contract and
 cannot be used as a recovery source. Unknown or malformed complete records must
 remain retained without inventing transferable semantics.
 
-## Provenance, confidence and remaining work
+## Provenance, confidence and planning record
 
 All four probe families (`copilot-offline.py`, `copilot-lifecycle.py`,
 `copilot-subagent.py`, `copilot-boundaries.py`) ran against both pinned binaries
@@ -202,14 +204,16 @@ real model quality or billing. Help establishes the default home; non-observed
 retention and platforms remain unknown. The offline fixture validator checks
 these saved artifacts and never launches a native harness.
 
-Re-estimate after the probe: historical discovery/indexing/paging and CLI/viewer
+The pre-implementation re-estimate was: historical discovery/indexing/paging and CLI/viewer
 integration (#239) 4–6 engineer-days; durable continuous collection and
 replacement parity (#240) 2–3; redacted mirror/allowlist/ACK parity (#241) 2–3;
 release matrix, security checks and documentation (#242) 1–2. Combined adapter
 work is 9–14 engineer-days, excluding remaining Claude/Codex baseline repairs.
 Reuse existing source custody, marker/link support and mirror transport; do not
 introduce a universal adapter framework or rewrite trace storage. These are
-planning estimates, not elapsed execution promises.
+planning estimates, not elapsed execution promises or remaining work. The
+implemented adapter and its acceptance coverage are documented in
+[copilot-cli.md](copilot-cli.md), with final landing/check evidence tracked in #235.
 
 No-go applies to claims of arbitrary-version/platform support, inferred logical
 forks or approvals, automatic native retention semantics, complete trajectories
