@@ -61,6 +61,17 @@ Vendor stderr, exit errors and malformed output never enter diagnostics or becom
 evidence of absence. Five process tests exercise roundtrip, scope/ownership,
 protocol/size failures, deadline, cancellation and fail-before-spawn behavior.
 
+`InventoryWorker::validate_credential` checks basic list-API access with one
+authenticated request before a launch exists. Its explicit `validate_credential`
+worker method is scoped to deployment/owner metadata and returns only
+`credential_valid`, `credential_rejected`, or `unavailable`; no account/resource
+information is returned. Official authentication errors and HTTP 403 deny the
+connection; outages/timeouts remain unavailable. This does not establish template,
+create, timeout or pause/resume entitlement. The host rechecks authority and its
+connection generation/claim before saving the result, and revalidates keys before
+provider use. Ten Python SDK-interface fixtures and six process tests cover both
+methods; these are offline protocol evidence, not real account qualification.
+
 The worker returns only its fixed protocol: `complete` with a sanitized resource
 list, `incomplete`, or `unavailable`. It makes no create/connect/pause/destroy or
 guest call. It lists at most 32 pages/1,000 resources with a 20-second aggregate
