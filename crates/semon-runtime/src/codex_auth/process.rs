@@ -14,7 +14,7 @@ use thiserror::Error;
 use tokio::{
     io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
     process::{Child, ChildStdin, ChildStdout, Command},
-    time::{Instant, timeout, timeout_at},
+    time::{Instant, timeout_at},
 };
 
 const MAX_FRAME: u64 = 65536;
@@ -65,6 +65,25 @@ impl DeviceLogin {
         lifetime: Duration,
         environment_exclusions: &[OsString],
     ) -> Result<Self, ProcessError> {
+        let mut login = Self::open(binary, home, lifetime, environment_exclusions).await?;
+        let response = login
+            .rpc("account/login/start", json!({"type":"chatgptDeviceCode"}))
+            .await?;
+        let response: LoginResponse =
+            serde_json::from_value(response).map_err(|_| ProcessError::Protocol)?;
+        login
+            .flow
+            .started(response)
+            .map_err(|_| ProcessError::Protocol)?;
+        Ok(login)
+    }
+
+    async fn open(
+        binary: &Path,
+        home: &Path,
+        lifetime: Duration,
+        environment_exclusions: &[OsString],
+    ) -> Result<Self, ProcessError> {
         if !binary.is_absolute()
             || !home.is_absolute()
             || lifetime.is_zero()
@@ -73,8 +92,8 @@ impl DeviceLogin {
             return Err(ProcessError::Configuration);
         }
         let deadline = Instant::now() + lifetime;
-        let version = timeout(
-            Duration::from_secs(5),
+        let version = timeout_at(
+            deadline.min(Instant::now() + Duration::from_secs(5)),
             command(binary, home, environment_exclusions)
                 .arg("--version")
                 .output(),
@@ -114,15 +133,6 @@ impl DeviceLogin {
         login
             .send(json!({"method":"initialized", "params":{}}))
             .await?;
-        let response = login
-            .rpc("account/login/start", json!({"type":"chatgptDeviceCode"}))
-            .await?;
-        let response: LoginResponse =
-            serde_json::from_value(response).map_err(|_| ProcessError::Protocol)?;
-        login
-            .flow
-            .started(response)
-            .map_err(|_| ProcessError::Protocol)?;
         Ok(login)
     }
 
@@ -239,6 +249,38 @@ impl DeviceLogin {
         }
         Ok(())
     }
+}
+
+/// Let the official pinned app-server refresh its managed ChatGPT artifact.
+/// The embedding supplies an isolated protected home containing its opaque
+/// auth.json and must read/persist it only after this process has stopped.
+/// This checks account presence and auth kind, not model access or entitlement.
+/// It never starts a login, extracts tokens, or falls back to API-key billing.
+pub async fn refresh_chatgpt(
+    binary: &Path,
+    home: &Path,
+    lifetime: Duration,
+    environment_exclusions: &[OsString],
+) -> Result<(), ProcessError> {
+    let mut process = DeviceLogin::open(binary, home, lifetime, environment_exclusions).await?;
+    let result = async {
+        let account: AccountRead = serde_json::from_value(
+            process
+                .rpc("account/read", json!({"refreshToken":true}))
+                .await?,
+        )
+        .map_err(|_| ProcessError::Protocol)?;
+        if !account.requires_openai_auth
+            || !matches!(account.account, Some(super::Account::ChatGpt))
+        {
+            return Err(ProcessError::AccountMismatch);
+        }
+        Ok(())
+    }
+    .await;
+    // Always kill/reap before the embedding takes custody, including rejection.
+    let stopped = process.shutdown().await;
+    result.and(stopped)
 }
 
 #[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]

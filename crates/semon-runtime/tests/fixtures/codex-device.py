@@ -64,7 +64,24 @@ for line in sys.stdin:
             if mode == "pending":
                 threading.Thread(target=approve, daemon=True).start()
     elif method == "account/read":
-        assert message["params"] == {"refreshToken": False}
-        emit({"id": message["id"], "result": {"account": {"type": "apiKey"} if mode == "account_api_key" else {"type": "chatgpt", "email": "fixture@example.test", "planType": "plus"}, "requiresOpenaiAuth": True}})
+        assert message["params"] == {"refreshToken": mode.startswith("refresh_")}
+        if mode.startswith("refresh_"):
+            assert (home / "auth.json").is_file()
+            if mode == "refresh_pending":
+                while not (root / "approve").exists():
+                    time.sleep(0.05)
+            if mode == "refresh_hang":
+                time.sleep(30)
+            if mode == "refresh_rejected":
+                emit({"id": message["id"], "error": {"message": "fixture-sensitive-refresh-error"}})
+                continue
+            if mode == "refresh_oversize":
+                print("x" * 65537, flush=True)
+                continue
+            (home / "auth.json").write_text(json.dumps({
+                "auth_mode": "chatgpt", "OPENAI_API_KEY": None,
+                "tokens": {"access_token": "fixture-rotated-access", "refresh_token": "fixture-rotated-refresh"},
+            }))
+        emit({"id": message["id"], "result": {"account": None if mode == "refresh_missing" else {"type": "apiKey"} if mode in ("account_api_key", "refresh_api_key") else {"type": "chatgpt", "email": "fixture@example.test", "planType": "plus"}, "requiresOpenaiAuth": mode != "refresh_auth_not_required"}})
     elif method != "initialized":
         raise AssertionError("Unexpected RPC: " + method)
