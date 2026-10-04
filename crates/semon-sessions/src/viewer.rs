@@ -584,6 +584,19 @@ impl Snapshot {
             &[".lock"],
             &mut watched,
         );
+        let copilot_root = options.copilot_home.join("session-state");
+        watched.insert(copilot_root.clone(), stamp(&copilot_root));
+        if let Ok(entries) = fs::read_dir(&copilot_root) {
+            for entry in entries
+                .flatten()
+                .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+            {
+                let dir = entry.path();
+                watched.insert(dir.clone(), stamp(&dir));
+                let file = dir.join("events.jsonl");
+                watched.insert(file.clone(), stamp(&file));
+            }
+        }
         watched.insert(options.claude_json.clone(), stamp(&options.claude_json));
         for path in paths {
             let path = PathBuf::from(path);
@@ -856,6 +869,15 @@ pub(crate) enum Reading {
 /// The session a transcript file holds, as the V1 routes name it: the
 /// harness, and the id (a Codex file's is read from its first line).
 fn transcript_key(options: &Options, path: &Path) -> Option<(String, String)> {
+    if path.starts_with(options.copilot_home.join("session-state")) {
+        let rel = path.strip_prefix(&options.copilot_home).ok()?.to_str()?;
+        if !crate::is_input_path("copilot", rel) {
+            return None;
+        }
+        let id = path.parent()?.file_name()?.to_str()?;
+        crate::copilot::header(path, id).ok()??;
+        return Some(("copilot".into(), id.into()));
+    }
     let harness = if path.starts_with(options.claude_home.join("projects")) {
         "claude"
     } else {
@@ -1724,7 +1746,7 @@ impl MachineView {
     }
 
     fn transcript_path(&self, harness: &str, id: &str) -> io::Result<Option<PathBuf>> {
-        if id.is_empty() || id.len() > 256 || !matches!(harness, "claude" | "codex") {
+        if id.is_empty() || id.len() > 256 || !matches!(harness, "claude" | "codex" | "copilot") {
             return Ok(None);
         }
         let key = (harness.to_owned(), id.to_owned());
@@ -1763,6 +1785,12 @@ impl MachineView {
             codex_paths
                 .into_iter()
                 .filter(|path| machine.codex_rollout_is_current(&self.options, path)),
+        );
+        paths.extend(
+            crate::inputs::inputs(&self.options)?
+                .into_iter()
+                .filter(|input| input.root == crate::inputs::InputRoot::Copilot)
+                .map(|input| input.full_path(&self.options)),
         );
         self.update_files(paths);
         Ok(lock(&self.files).paths.get(&key).cloned())
@@ -2211,6 +2239,21 @@ fn content_text(value: &Value) -> String {
 }
 
 fn expandable_text(record: &Value, harness: &str, block: usize) -> Option<String> {
+    if harness == "copilot" {
+        let data = &record["data"];
+        if field(record, "type") == Some("tool.execution_complete") {
+            return crate::tx::result_text(record, 0);
+        }
+        if block == 0 {
+            return field(data, "content").map(str::to_owned);
+        }
+        return data
+            .get("toolRequests")?
+            .as_array()?
+            .get(block - 1)?
+            .get("arguments")
+            .map(content_text);
+    }
     if harness == "claude" {
         let content = record.get("message")?.get("content")?;
         let item = if let Some(blocks) = content.as_array() {
@@ -2268,6 +2311,62 @@ fn entries(
     harness_message: bool,
 ) -> Vec<TranscriptEntry> {
     let mut result = Vec::new();
+    if harness == "copilot" {
+        let data = &record["data"];
+        match field(record, "type") {
+            Some("user.message" | "assistant.message") => {
+                if let Some(content) = field(data, "content").filter(|content| !content.is_empty())
+                {
+                    result.push(entry(
+                        (offset, 0),
+                        if field(record, "type") == Some("user.message") {
+                            "user"
+                        } else {
+                            "assistant"
+                        },
+                        content.into(),
+                        None,
+                        field(data, "messageId").map(str::to_owned),
+                        None,
+                        false,
+                    ));
+                }
+                if field(record, "type") == Some("assistant.message") {
+                    for (block, request) in data
+                        .get("toolRequests")
+                        .and_then(Value::as_array)
+                        .into_iter()
+                        .flatten()
+                        .enumerate()
+                    {
+                        result.push(entry(
+                            (offset, block + 1),
+                            "tool_use",
+                            request
+                                .get("arguments")
+                                .map(content_text)
+                                .unwrap_or_default(),
+                            field(request, "name").map(str::to_owned),
+                            field(request, "toolCallId").map(str::to_owned),
+                            None,
+                            true,
+                        ));
+                    }
+                }
+            }
+            Some("tool.execution_complete") => result.push(entry(
+                (offset, 0),
+                "tool_result",
+                crate::tx::result_text(record, 0).unwrap_or_default(),
+                None,
+                field(data, "toolCallId").map(str::to_owned),
+                None,
+                true,
+            )),
+            _ => {}
+        }
+        return result;
+    }
     if harness == "claude" {
         let Some(role) = field(record, "type").filter(|role| matches!(*role, "user" | "assistant"))
         else {
@@ -2842,6 +2941,7 @@ mod tests {
                 claude_home: root.join("claude"),
                 claude_json: root.join(".claude.json"),
                 codex_home: root.join("codex"),
+                copilot_home: root.join("copilot"),
                 proc_root: root.join("proc"),
                 cache: root.join("index.json"),
                 all: true,

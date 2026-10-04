@@ -6,6 +6,7 @@ export const GROUPS = {
     'turns',
     'analytics',
     'copied-usage',
+    'copilot',
     'runview',
     'signals',
     'models',

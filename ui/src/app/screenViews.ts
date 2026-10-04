@@ -235,6 +235,9 @@ export function createScreenViews(host: ScreenViewsHost) {
         ([s, ...kids].some((s) => s.claude_usage)
           ? ' Copied usage is excluded. Its original owner and the fresh usage total are unknown.'
           : '') +
+        ([s, ...kids].some((s) => s.copilot)
+          ? ' Copilot usage is a cumulative saved snapshot. Fresh usage and complete cost are unknown.'
+          : '') +
         (missing.length ? ' No price for ' + missing.join(', ') + '.' : ''),
       details,
       mismatch,
