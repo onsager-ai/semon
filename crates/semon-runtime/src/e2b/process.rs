@@ -29,6 +29,14 @@ pub enum OwnedInventory {
     Incomplete,
     Unavailable,
 }
+
+/// Basic list-API access only; does not qualify create/template/lifecycle support.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CredentialValidation {
+    Accepted,
+    Rejected,
+    Unavailable,
+}
 impl OwnedInventory {
     pub fn as_inventory(&self) -> Inventory<'_> {
         match self {
@@ -55,6 +63,8 @@ pub enum ProcessError {
 #[derive(Serialize)]
 struct Request<'a> {
     version: u8,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    method: Option<&'static str>,
     scope: std::collections::BTreeMap<&'static str, &'a str>,
     api_key: &'a str,
 }
@@ -71,10 +81,11 @@ enum Status {
     Complete,
     Incomplete,
     Unavailable,
+    CredentialValid,
+    CredentialRejected,
 }
 
-fn decode(bytes: &[u8]) -> Result<OwnedInventory, ProcessError> {
-    let response: Response = serde_json::from_slice(bytes).map_err(|_| ProcessError::Protocol)?;
+fn decode(response: Response) -> Result<OwnedInventory, ProcessError> {
     if response.version != 1 {
         return Err(ProcessError::Protocol);
     }
@@ -128,6 +139,7 @@ impl InventoryWorker<'_> {
         }
         let request = Request {
             version: 1,
+            method: None,
             api_key,
             scope: [
                 ("semon_deployment", deployment),
@@ -137,8 +149,65 @@ impl InventoryWorker<'_> {
             .into_iter()
             .collect(),
         };
+        let inventory = decode(self.execute(&request).await?)?;
+        if let OwnedInventory::Complete(resources) = &inventory
+            && resources.iter().any(|resource| {
+                request.scope.iter().any(|(key, value)| {
+                    resource.labels.get(*key).map(String::as_str) != Some(*value)
+                })
+            })
+        {
+            return Err(ProcessError::Protocol);
+        }
+        Ok(inventory)
+    }
+
+    /// Validate an owner's connection with one read-only list request. No durable
+    /// launch or compute is required. The host rechecks cookie, membership, scope
+    /// and connection generation before committing this result or making use of
+    /// the key. Account/template/create capabilities remain independently gated.
+    pub async fn validate_credential(
+        &self,
+        api_key: &str,
+        deployment: &str,
+        owner: &OwnerId,
+    ) -> Result<CredentialValidation, ProcessError> {
+        OwnerId::new(deployment).map_err(|_| ProcessError::Configuration)?;
+        let request = Request {
+            version: 1,
+            method: Some("validate_credential"),
+            api_key,
+            scope: [
+                ("semon_deployment", deployment),
+                ("semon_owner", owner.as_str()),
+            ]
+            .into_iter()
+            .collect(),
+        };
+        let response = self.execute(&request).await?;
+        if response.version != 1 || response.resources.is_some() {
+            return Err(ProcessError::Protocol);
+        }
+        match response.status {
+            Status::CredentialValid => Ok(CredentialValidation::Accepted),
+            Status::CredentialRejected => Ok(CredentialValidation::Rejected),
+            Status::Unavailable => Ok(CredentialValidation::Unavailable),
+            _ => Err(ProcessError::Protocol),
+        }
+    }
+
+    async fn execute(&self, request: &Request<'_>) -> Result<Response, ProcessError> {
+        if !self.python.is_absolute()
+            || !self.worker.is_absolute()
+            || request.api_key.is_empty()
+            || request.api_key.len() > 4096
+            || self.lifetime.is_zero()
+            || self.lifetime > Duration::from_secs(25)
+        {
+            return Err(ProcessError::Configuration);
+        }
         let input =
-            Zeroizing::new(serde_json::to_vec(&request).map_err(|_| ProcessError::Configuration)?);
+            Zeroizing::new(serde_json::to_vec(request).map_err(|_| ProcessError::Configuration)?);
         let deadline = Instant::now() + self.lifetime;
         let mut command = Command::new(self.python);
         for name in self.environment_exclusions {
@@ -196,17 +265,7 @@ impl InventoryWorker<'_> {
             if !status.success() {
                 return Err(ProcessError::Unavailable);
             }
-            let inventory = decode(&output)?;
-            if let OwnedInventory::Complete(resources) = &inventory
-                && resources.iter().any(|resource| {
-                    request.scope.iter().any(|(key, value)| {
-                        resource.labels.get(*key).map(String::as_str) != Some(*value)
-                    })
-                })
-            {
-                return Err(ProcessError::Protocol);
-            }
-            Ok(inventory)
+            serde_json::from_slice(&output).map_err(|_| ProcessError::Protocol)
         })
         .await
         .unwrap_or(Err(ProcessError::Timeout));

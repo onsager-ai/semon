@@ -67,6 +67,39 @@ def inventory(request, sandbox, query, clock=time.monotonic):
         return {"version": 1, "status": "unavailable"}
 
 
+def validate_credential(request, sandbox, query, authentication_error=(), clock=time.monotonic):
+    """Check list API access without provisioning or returning account resources.
+
+    This is basic connection validation, not template/create/lifecycle entitlement.
+    """
+    if (not isinstance(request, dict)
+            or set(request) != {"version", "method", "scope", "api_key"}
+            or type(request["version"]) is not int or request["version"] != 1
+            or request["method"] != "validate_credential"
+            or not isinstance(request["scope"], dict)
+            or set(request["scope"]) != {"semon_deployment", "semon_owner"}
+            or not all(identifier(value) for value in request["scope"].values())
+            or not isinstance(request["api_key"], str)
+            or not 1 <= len(request["api_key"]) <= 4096):
+        return {"version": 1, "status": "unavailable"}
+    deadline = clock() + 5
+    try:
+        paginator = sandbox.list(query=query(metadata=request["scope"]), limit=1,
+                                 api_key=request["api_key"], request_timeout=5)
+        # Exactly one authenticated request. Listing pagination/state is not
+        # interpreted as absence; resource and account data never join the result.
+        paginator.next_items(request_timeout=5)
+        if clock() >= deadline:
+            return {"version": 1, "status": "unavailable"}
+        return {"version": 1, "status": "credential_valid"}
+    except authentication_error:
+        return {"version": 1, "status": "credential_rejected"}
+    except Exception as error:
+        if getattr(error, "status_code", None) == 403:
+            return {"version": 1, "status": "credential_rejected"}
+        return {"version": 1, "status": "unavailable"}
+
+
 def main():
     result = {"version": 1, "status": "unavailable"}
     # SDK/vendor errors may contain request values; this worker emits only its
@@ -78,7 +111,11 @@ def main():
             raise ValueError("unsupported request or SDK")
         request = json.loads(raw)
         from e2b import Sandbox, SandboxQuery
-        result = inventory(request, Sandbox, SandboxQuery)
+        from e2b.exceptions import AuthenticationException
+        if isinstance(request, dict) and request.get("method") == "validate_credential":
+            result = validate_credential(request, Sandbox, SandboxQuery, AuthenticationException)
+        else:
+            result = inventory(request, Sandbox, SandboxQuery)
     except Exception:
         pass
     sys.stdout.write(json.dumps(result, separators=(",", ":")) + "\n")
