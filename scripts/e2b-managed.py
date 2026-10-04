@@ -33,7 +33,7 @@ def managed(request, sandbox):
     if method == "create":
         # One call only. Failure/timeout may have created compute.
         vm = sandbox.create(template="base", timeout=900, metadata=request["labels"],
-                            api_key=key, request_timeout=20)
+                            api_key=key, request_timeout=20, retries=0)
         return {"id": vm.sandbox_id}
     identifier = request.get("id")
     if not isinstance(identifier, str) or not IDENTIFIER.fullmatch(identifier):
@@ -43,7 +43,7 @@ def managed(request, sandbox):
         return {"error": "ownership_mismatch"}
     if getattr(info.state, "value", info.state) != "running":
         return {"error": "compute_not_running"}
-    vm = sandbox.connect(identifier, api_key=key, request_timeout=10)
+    vm = sandbox.connect(identifier, api_key=key, request_timeout=10, retries=0)
     if method == "bootstrap":
         # Artifact is an operator-reviewed immutable semon-guest build, verified
         # before use. No provider key or user prompt enters the command string.
