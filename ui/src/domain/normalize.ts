@@ -1,5 +1,15 @@
 import type { ModelWire } from '../lib/model';
-import type { Session, Cost, ModelCost, Usage, Handoff, Turn, TurnEnd } from './types';
+import type {
+  Session,
+  Cost,
+  ModelCost,
+  Usage,
+  Handoff,
+  Turn,
+  TurnEnd,
+  TokenObservation,
+  ClaudeUsageEvidence,
+} from './types';
 import {
   object,
   text,
@@ -41,6 +51,27 @@ function cost(value: unknown): Cost {
     split_unknown_messages: optional(v.split_unknown_messages, number),
     by_model: optional(v.by_model, (v) => dictionary(v, modelCost)),
     by_day: optional(v.by_day, numbers),
+  };
+}
+function tokenObservation(value: unknown): TokenObservation {
+  const v = object(value);
+  return {
+    input: number(v.input),
+    cached_input: number(v.cached_input),
+    output: number(v.output),
+    reasoning_output: number(v.reasoning_output),
+    total: number(v.total),
+  };
+}
+function claudeUsage(value: unknown): ClaudeUsageEvidence {
+  const v = object(value);
+  return {
+    observed: tokenObservation(v.observed),
+    exclusive: tokenObservation(v.exclusive),
+    shared: dictionary(v.shared, tokenObservation),
+    shared_models: dictionary(v.shared_models, (v) => (v == null ? null : text(v))),
+    fresh: v.fresh == null ? null : tokenObservation(v.fresh),
+    shared_owner: v.shared_owner == null ? null : text(v.shared_owner),
   };
 }
 function activity(value: unknown): Session['activity'] {
@@ -119,6 +150,7 @@ export function parseSession(id: string, value: unknown): Session {
     waiting_for: optional(v.waiting_for, text),
     tokens: optional(v.tokens, (v) => array(v, number)),
     tokens_by_model: optional(v.tokens_by_model, (v) => dictionary(v, usage)),
+    claude_usage: optional(v.claude_usage, claudeUsage),
     cost: optional(v.cost, cost),
     activity: optional(v.activity, activity),
     tool_calls: optional(v.tool_calls, numbers),

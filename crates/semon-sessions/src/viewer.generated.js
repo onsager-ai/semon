@@ -7297,6 +7297,27 @@ globalThis.__semonUIShared = __semonUIShared;
       by_day: optional(v.by_day, numbers)
     };
   }
+  function tokenObservation(value) {
+    const v = object2(value);
+    return {
+      input: number(v.input),
+      cached_input: number(v.cached_input),
+      output: number(v.output),
+      reasoning_output: number(v.reasoning_output),
+      total: number(v.total)
+    };
+  }
+  function claudeUsage(value) {
+    const v = object2(value);
+    return {
+      observed: tokenObservation(v.observed),
+      exclusive: tokenObservation(v.exclusive),
+      shared: dictionary(v.shared, tokenObservation),
+      shared_models: dictionary(v.shared_models, (v2) => v2 == null ? null : text(v2)),
+      fresh: v.fresh == null ? null : tokenObservation(v.fresh),
+      shared_owner: v.shared_owner == null ? null : text(v.shared_owner)
+    };
+  }
   function activity(value) {
     if (!Array.isArray(value) || value.length < 3 || value.length > 4)
       throw new Error("Invalid activity");
@@ -7377,6 +7398,7 @@ globalThis.__semonUIShared = __semonUIShared;
       waiting_for: optional(v.waiting_for, text),
       tokens: optional(v.tokens, (v2) => array(v2, number)),
       tokens_by_model: optional(v.tokens_by_model, (v2) => dictionary(v2, usage)),
+      claude_usage: optional(v.claude_usage, claudeUsage),
       cost: optional(v.cost, cost),
       activity: optional(v.activity, activity),
       tool_calls: optional(v.tool_calls, numbers),
@@ -8120,7 +8142,8 @@ globalThis.__semonUIShared = __semonUIShared;
     ms: number,
     usd: number,
     sessions: number,
-    unpriced_models: strings4
+    unpriced_models: strings4,
+    incomplete_usage: optional2(boolean)
   });
   var tokens = shape({
     input: optional2(number),
@@ -8164,7 +8187,9 @@ globalThis.__semonUIShared = __semonUIShared;
     longest_current_wait: nullable(busy),
     calls_unknown: number,
     agents: shape({ unit: text, columns: list(column) }),
-    cost: nullable(shape({ days: list(day), unpriced_models: strings4 })),
+    cost: nullable(
+      shape({ days: list(day), unpriced_models: strings4, incomplete_usage: optional2(boolean) })
+    ),
     breakdown: shape({ repo: list(breakdown), machine: list(breakdown), model: list(breakdown) }),
     top: shape({ busy: list(busy), waited: list(busy), cost: list(priced) }),
     sessions: (v) => dictionary(v, shape({ name: text, harness: text })),
@@ -8653,7 +8678,7 @@ globalThis.__semonUIShared = __semonUIShared;
             ["claude", "Claude"],
             ["codex", "Codex"]
           ].map(([id, label]) => ({ id, label, mark: host2.screenViews.harnessSnapshot(id) })),
-          missing: costMode && A.cost.unpriced_models.length ? "no price for " + A.cost.unpriced_models.join(", ") + "; unpriced usage is omitted from bars." : void 0
+          missing: costMode && A.cost.incomplete_usage ? "Copied usage is omitted from bars. Its original owner and the full cost are unknown." : costMode && A.cost.unpriced_models.length ? "no price for " + A.cost.unpriced_models.join(", ") + "; unpriced usage is omitted from bars." : void 0
         };
       };
       let models, allowance;
@@ -8761,8 +8786,8 @@ globalThis.__semonUIShared = __semonUIShared;
               width: widthOf(selected(g), max),
               color: key === "harness" ? keyFor(g).startsWith("claude") ? "claude" : "codex" : void 0,
               hours: hoursText(g.ms),
-              cost: g.unpriced_models.length ? "\u2014" : host2.domain.asMoney(g.usd),
-              missing: g.unpriced_models.length ? "no price for " + g.unpriced_models.join(", ") : void 0
+              cost: g.incomplete_usage || g.unpriced_models.length ? "\u2014" : host2.domain.asMoney(g.usd),
+              missing: g.incomplete_usage ? "copied usage; original owner unknown" : g.unpriced_models.length ? "no price for " + g.unpriced_models.join(", ") : void 0
             }))
           });
         }
@@ -11050,7 +11075,7 @@ globalThis.__semonUIShared = __semonUIShared;
       return {
         figure: host2.domain.costText(kids.length ? all : own),
         caption: kids.length ? "this session and its " + kids.length + (kids.length === 1 ? " run" : " runs") : "this session",
-        note: COST_NOTE + (missing.length ? " No price for " + missing.join(", ") + "." : ""),
+        note: COST_NOTE + ([s, ...kids].some((s2) => s2.claude_usage) ? " Copied usage is excluded. Its original owner and the fresh usage total are unknown." : "") + (missing.length ? " No price for " + missing.join(", ") + "." : ""),
         details,
         mismatch,
         runs,

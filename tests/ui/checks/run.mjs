@@ -49,12 +49,14 @@ import accountLifecycle from './account-lifecycle.mjs';
 import panelLifecycle from './panel-lifecycle.mjs';
 
 import signalsCheck from './signals.mjs';
+import copiedUsageCheck from './copied-usage.mjs';
 
 const checks = [
   ['panel-lifecycle', panelLifecycle],
   ['account-lifecycle', accountLifecycle],
   ['runview', runView],
   ['signals', signalsCheck],
+  ['copied-usage', copiedUsageCheck],
   ['viewer-backlog', backlogCheck],
   ['models', modelsCheck],
   ['stepnames', stepNamesCheck],
