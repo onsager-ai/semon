@@ -1,0 +1,145 @@
+[
+  {
+    "operation": "30700000000000000000000000000001",
+    "native_thread": "01a10a68-24dd-7f12-a33f-edd429c04cd7",
+    "dispatch_receipt_persisted": true,
+    "tool_call_count": 0,
+    "shell_success_observed": false,
+    "disabled_host_observed": false,
+    "native_turn_terminal_observed": true,
+    "native_process_absent": true,
+    "replayed": false
+  },
+  {
+    "operation": "30700000000000000000000000000002",
+    "native_thread": "01a10a68-d1e0-7922-89ff-767ec264aad3",
+    "dispatch_receipt_persisted": true,
+    "tool_call_count": 1,
+    "shell_success_observed": false,
+    "disabled_host_observed": false,
+    "native_turn_terminal_observed": true,
+    "native_process_absent": true,
+    "replayed": false
+  },
+  {
+    "operation": "30700000000000000000000000000003",
+    "native_thread": "01a10a6a-e653-75f2-9252-c8901f6b526f",
+    "dispatch_receipt_persisted": true,
+    "tool_call_count": 0,
+    "shell_success_observed": false,
+    "disabled_host_observed": false,
+    "native_turn_terminal_observed": true,
+    "native_process_absent": true,
+    "replayed": false
+  },
+  {
+    "operation": "30700000000000000000000000000004",
+    "native_thread": "01a10a6c-213e-7f10-9032-40b5dde90d49",
+    "dispatch_receipt_persisted": true,
+    "tool_call_count": 1,
+    "shell_success_observed": false,
+    "disabled_host_observed": false,
+    "native_turn_terminal_observed": false,
+    "native_process_absent": true,
+    "replayed": false
+  },
+  {
+    "operation": "30700000000000000000000000000005",
+    "native_thread": "01a10a6c-9dca-75a1-a67a-8cac7cd78777",
+    "dispatch_receipt_persisted": true,
+    "tool_call_count": 1,
+    "shell_success_observed": false,
+    "disabled_host_observed": false,
+    "native_turn_terminal_observed": false,
+    "native_process_absent": true,
+    "replayed": false
+  },
+  {
+    "operation": "30700000000000000000000000000006",
+    "native_thread": "01a10a6c-d73f-7a73-9a53-7a279524532c",
+    "dispatch_receipt_persisted": true,
+    "tool_call_count": 1,
+    "shell_success_observed": false,
+    "disabled_host_observed": false,
+    "native_turn_terminal_observed": true,
+    "native_process_absent": true,
+    "replayed": false
+  },
+  {
+    "operation": "30700000000000000000000000000007",
+    "native_thread": "01a10a6d-e487-77f2-b29b-880fb787fa13",
+    "dispatch_receipt_persisted": true,
+    "tool_call_count": 1,
+    "shell_success_observed": true,
+    "disabled_host_observed": false,
+    "native_turn_terminal_observed": true,
+    "native_process_absent": true,
+    "replayed": false
+  },
+  {
+    "operation": "30700000000000000000000000000008",
+    "native_thread": "01a10a6e-883a-7001-9517-57f56a3c14c6",
+    "dispatch_receipt_persisted": true,
+    "tool_call_count": 1,
+    "shell_success_observed": true,
+    "disabled_host_observed": false,
+    "native_turn_terminal_observed": true,
+    "native_process_absent": true,
+    "replayed": false
+  },
+  {
+    "operation": "30700000000000000000000000000009",
+    "native_thread": "01a10a70-48da-7951-9828-2e08a6741bf2",
+    "dispatch_receipt_persisted": true,
+    "tool_call_count": 0,
+    "shell_success_observed": false,
+    "disabled_host_observed": false,
+    "native_turn_terminal_observed": true,
+    "native_process_absent": true,
+    "replayed": false
+  },
+  {
+    "operation": "3070000000000000000000000000000a",
+    "native_thread": "01a10abf-3567-70f3-b75b-532bd2750982",
+    "dispatch_receipt_persisted": true,
+    "tool_call_count": 1,
+    "shell_success_observed": false,
+    "disabled_host_observed": true,
+    "native_turn_terminal_observed": true,
+    "native_process_absent": true,
+    "replayed": false
+  },
+  {
+    "operation": "3070000000000000000000000000000b",
+    "native_thread": "01a10abf-6332-73d0-a16a-d8f0df252ec5",
+    "dispatch_receipt_persisted": true,
+    "tool_call_count": 1,
+    "shell_success_observed": true,
+    "disabled_host_observed": false,
+    "native_turn_terminal_observed": true,
+    "native_process_absent": true,
+    "replayed": false
+  },
+  {
+    "operation": "3070000000000000000000000000000c",
+    "native_thread": "01a10ac2-cd41-7071-92b8-09b784cd3e08",
+    "dispatch_receipt_persisted": true,
+    "tool_call_count": 1,
+    "shell_success_observed": false,
+    "disabled_host_observed": true,
+    "native_turn_terminal_observed": true,
+    "native_process_absent": true,
+    "replayed": false
+  },
+  {
+    "operation": "3070000000000000000000000000000d",
+    "native_thread": "01a10ac2-d0e7-7e40-a30c-f7d343b563a5",
+    "dispatch_receipt_persisted": true,
+    "tool_call_count": 1,
+    "shell_success_observed": true,
+    "disabled_host_observed": false,
+    "native_turn_terminal_observed": true,
+    "native_process_absent": true,
+    "replayed": false
+  }
+]
