@@ -1,0 +1,1 @@
+{"name":"semon-managed-codex","private":true,"version":"0.0.0","dependencies":{"@openai/codex":"0.160.0","@openai/codex-linux-x64":"npm:@openai/codex@0.160.0-linux-x64"}}

@@ -100,21 +100,7 @@ pub fn reconcile_launch(
     {
         return Err(ReconcileError::InvalidLaunch);
     }
-    let labels: Labels = [
-        ("semon_version", "1".to_owned()),
-        ("semon_deployment", deployment.to_owned()),
-        ("semon_owner", session.binding().owner.as_str().to_owned()),
-        (
-            "semon_workspace",
-            session.binding().workspace.as_str().to_owned(),
-        ),
-        ("semon_session", session.id().as_str().to_owned()),
-        ("semon_operation", operation.as_str().to_owned()),
-        ("semon_epoch", op.epoch.to_string()),
-    ]
-    .into_iter()
-    .map(|(key, value)| (key.to_owned(), value))
-    .collect();
+    let labels = ownership_labels(deployment, session, operation)?;
     let Inventory::Complete(resources) = inventory else {
         return Ok(LaunchPlan::InspectAgain);
     };
@@ -167,4 +153,42 @@ pub fn reconcile_launch(
         epoch: op.epoch,
         labels,
     })
+}
+
+/// Exact provider ownership labels for an already persisted current attempt.
+/// Useful for private guest calls after launch completes; labels grant no authority.
+pub fn ownership_labels(
+    deployment: &str,
+    session: &Session,
+    operation: &OperationId,
+) -> Result<Labels, ReconcileError> {
+    OwnerId::new(deployment).map_err(|_| ReconcileError::InvalidLaunch)?;
+    session
+        .validate()
+        .map_err(|_| ReconcileError::InvalidLaunch)?;
+    let attempt = session
+        .attempts()
+        .last()
+        .ok_or(ReconcileError::InvalidLaunch)?;
+    if &attempt.operation != operation
+        || attempt.epoch != session.epoch()
+        || attempt.writer_excluded
+    {
+        return Err(ReconcileError::InvalidLaunch);
+    }
+    Ok([
+        ("semon_version", "1".to_owned()),
+        ("semon_deployment", deployment.to_owned()),
+        ("semon_owner", session.binding().owner.as_str().to_owned()),
+        (
+            "semon_workspace",
+            session.binding().workspace.as_str().to_owned(),
+        ),
+        ("semon_session", session.id().as_str().to_owned()),
+        ("semon_operation", operation.as_str().to_owned()),
+        ("semon_epoch", session.epoch().to_string()),
+    ]
+    .into_iter()
+    .map(|(key, value)| (key.to_owned(), value))
+    .collect())
 }

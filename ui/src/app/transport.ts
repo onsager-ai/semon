@@ -1,3 +1,4 @@
+import type { createLocalControl } from './localControl';
 import { parseModel } from '../lib/model';
 import type { ViewerModelStore } from '../state/model';
 import type { TranscriptStore } from '../state/transcript';
@@ -13,6 +14,7 @@ import type { ApplicationRoute } from '../navigation/routes';
 import type { PageDirection } from '../state/transcript';
 interface TransportHost {
   disposed: boolean;
+  controlOwner: Pick<ReturnType<typeof createLocalControl>, 'prepare' | 'adopt'>;
   scope: EffectScope;
   now: number;
   admin: { href: string; label: string } | null;
@@ -90,6 +92,7 @@ export function createTransport(host: TransportHost) {
     if (host.disposed) throw new DOMException('Viewer destroyed', 'AbortError');
     // Prepare every auxiliary field before the model owner changes its raw baseline.
     const m = parseModel(value);
+    const control = host.controlOwner.prepare(m.control);
     const marks = m.tx == null ? {} : dictionary(m.tx, text);
     const admin = m.admin == null ? null : object(m.admin);
     const nextAdmin =
@@ -103,6 +106,7 @@ export function createTransport(host: TransportHost) {
       host.viewerHost?.machinesPath ??
       (nav && typeof nav.machines === 'string' && safePath(nav.machines) ? nav.machines : null);
     host.modelStore.adopt(m, () => {
+      host.controlOwner.adopt(control);
       serverNow = m.now;
       fetchedAt = Date.now();
       TOK = marks;

@@ -14,11 +14,9 @@ exclusive supervisor lock, protected local receipt before spawn, prompt on stdin
 and public OpenAI provider selection. It does not enable automatic approval.
 A crash between receipt and spawn leaves delivery unknown. Neither this worker
 nor the supervisor replays that task. A lost create reply never authorizes create
-again. Guest attachment uses the constructor after read-only running-state and
-metadata verification; it never uses `connect()` to resume as an inspection side
-effect.
+again. Guest attachment reads the pinned SDK’s raw detail GET (the public info object omits the private guest token), verifies ownership and running state on that response, and supplies the complete keyword-only SDK constructor options. It never uses `connect()` to resume as an inspection side effect. Both execution transports share this path. All execution requests disable SDK retries; connection retries are disabled in the private worker too.
 
-The embedding supplies template, timeout and retained-memory policy; the
+The embedding supplies template, timeout and lifecycle policy; the managed native transport also requires this explicit profile rather than selecting hosted defaults. the
 transport validates their shape and uses secure provider access. Hub’s candidate
 policy uses base and a one-hour timeout with retained-memory pause. This is a provider deadline, not a qualified application
 checkpoint or idle policy. No manual pause/resume, reconstruction, automatic

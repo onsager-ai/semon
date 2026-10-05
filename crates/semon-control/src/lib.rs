@@ -1,8 +1,8 @@
-//! Two-way control, step 1: the pending-request model.
+//! Opt-in local Codex control and the shared pending-request model.
 //!
 //! This crate holds what the local Semon process knows about the questions
-//! and permission prompts that agents are waiting on, and nothing that talks
-//! to a harness, a browser or a socket. See `docs/design/two-way.md`:
+//! and permission prompts that agents are waiting on. The thin [`codex`] driver
+//! and isolated [`local`] launcher reuse those foundations. See `docs/design/two-way.md`:
 //!
 //! - [`canonical`] pins the payload encoding (RFC 8785, over the I-JSON safe
 //!   number range) whose SHA-256 an answer must carry.
@@ -19,7 +19,9 @@
 #![warn(missing_docs)]
 
 pub mod canonical;
+pub mod codex;
 mod journal;
+pub mod local;
 mod request;
 mod store;
 

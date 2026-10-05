@@ -17,7 +17,8 @@ use crate::{
     journal::Journal,
     request::{
         Answer, Answerable, Harness, Kind, LeftReason, MatchKey, NewRequest, PendingRequest,
-        RequestId, ResolvedReason, Source, State, single_choice_questions, truncated,
+        RequestId, ResolvedReason, Source, State, codex_questions, single_choice_questions,
+        truncated,
     },
 };
 
@@ -257,7 +258,11 @@ impl RequestStore {
                     inner.supersede(&new.session, key);
                 }
                 let question_problem = if new.kind == Kind::Question {
-                    single_choice_questions(&new.payload).err()
+                    if new.harness == Harness::Codex {
+                        codex_questions(&new.payload).err()
+                    } else {
+                        single_choice_questions(&new.payload).err()
+                    }
                 } else {
                     None
                 };
@@ -355,8 +360,8 @@ impl RequestStore {
         Ok(state)
     }
 
-    /// The harness confirmed Semon's delivered answer (Codex
-    /// `serverRequest/resolved`): a claimed request becomes `answered`.
+    /// An adapter independently confirmed Semon's delivered answer. Codex
+    /// `serverRequest/resolved` cannot establish this; use `resolve` instead.
     /// Returns the request's state, or `None` for an unknown id.
     pub fn confirm_delivery(&self, id: RequestId, now_ms: u64) -> Option<State> {
         let mut inner = self.lock();
@@ -412,6 +417,34 @@ impl RequestStore {
         let outcome = inner.tool_ran(session, key, now_ms);
         inner.prune(now_ms);
         outcome
+    }
+
+    /// A transport was lost: open requests close, but claimed writes remain uncertain.
+    pub fn connection_lost(&self, session: &str, now_ms: u64) {
+        let mut inner = self.lock();
+        for index in 0..inner.requests.len() {
+            if inner.requests[index].session != session {
+                continue;
+            }
+            match inner.requests[index].state {
+                State::Claimed { .. } => {
+                    inner.end_claim(index, State::Left(LeftReason::DeliveryUnknown), now_ms);
+                }
+                State::Open => {
+                    let wall = (inner.wall)();
+                    set_state(&mut inner.requests[index], State::Gone, now_ms, wall);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Records exact control dispatch intent/receipt in the existing private journal.
+    pub fn record_control(&self, line: &Value) -> bool {
+        let mut inner = self.lock();
+        let before = inner.journal_failures;
+        inner.write(line);
+        before == inner.journal_failures
     }
 
     /// The session ended: its open and claimed requests become `gone`.
@@ -559,15 +592,29 @@ fn encoded_len_floor(value: &Value, limit: usize) -> usize {
 fn answer_fits(request: &PendingRequest, answer: &Answer) -> bool {
     match (request.kind, answer) {
         (Kind::Permission, Answer::Allow | Answer::Deny { .. }) => true,
-        (Kind::Question, Answer::Questions(chosen)) => single_choice_questions(&request.payload)
-            .is_ok_and(|questions| {
+        (Kind::Question, Answer::CodexQuestions(chosen)) if request.harness == Harness::Codex => {
+            codex_questions(&request.payload).is_ok_and(|questions| {
+                chosen.len() == questions.len()
+                    && questions.iter().all(|(id, labels, other)| {
+                        chosen.get(id).is_some_and(|v| {
+                            v.len() == 1
+                                && !v[0].trim().is_empty()
+                                && v[0].len() <= 4096
+                                && (*other || labels.contains(&v[0]))
+                        })
+                    })
+            })
+        }
+        (Kind::Question, Answer::Questions(chosen)) if request.harness != Harness::Codex => {
+            single_choice_questions(&request.payload).is_ok_and(|questions| {
                 chosen.len() == questions.len()
                     && questions.iter().all(|question| {
                         chosen
                             .get(&question.text)
                             .is_some_and(|label| question.labels.contains(label))
                     })
-            }),
+            })
+        }
         _ => false,
     }
 }

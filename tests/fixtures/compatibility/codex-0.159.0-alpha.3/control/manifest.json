@@ -1,0 +1,32 @@
+{
+  "provenance": "real pinned native app-server and default TUI/daemon; synthetic localhost model",
+  "source_reference": {
+    "base_sha": "b0d4aaae483969aaad7bc92c1a79de5dab28dc48",
+    "probe_path": "tests/spikes/codex-control-alpha.py",
+    "probe_sha256": "fed738991acac62f0bfce8c2ca0a4420ba9590b842e91800e39cf8e61390cc8a"
+  },
+  "sanitization": "Disposable root replaced by <FIXTURE>; terminal ANSI removed; exact native IDs/payloads retained. Frame selection keeps all sent calls, approval/resolution/turn-completion notifications and command item events. Model feedback deduplicated by native output ID.",
+  "fixtures": [
+    {
+      "path": "qualification.json",
+      "fixture_sha256": "772a03a7ee13082f97077df1628dd7404763263079405bc061c637f6803d6f23"
+    },
+    {
+      "path": "ToolRequestUserInputParams.json",
+      "fixture_sha256": "fda15b62e7446105b59c8ed85c908abed2a47db70653e57c92c47a2f204fa77a"
+    },
+    {
+      "path": "ToolRequestUserInputResponse.json",
+      "fixture_sha256": "5073b245f741fa8ce62ec52e4dd1809b7831f9c4284c279a78abc9b171f8e3f2"
+    },
+    {
+      "path": "FileChangeRequestApprovalParams.json",
+      "fixture_sha256": "13848b26814c286ad6425a20d01c1691c86790e1f9e2529399677a8a22fe0d18"
+    },
+    {
+      "path": "ServerRequestResolvedNotification.json",
+      "fixture_sha256": "4f03d586a5af04edd912cad08cc97eceb658e7e06744565e6d41a93e04a55966"
+    }
+  ],
+  "schema_source": "Pinned binary app-server generate-json-schema --out <disposable schema directory>, with isolated CODEX_HOME. Schema evidence is not capability qualification."
+}

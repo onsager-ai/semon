@@ -1,3 +1,5 @@
+import { LocalControl } from './localControl';
+import type { ControlView } from './control';
 import { commitApplicationView } from './application-view';
 import { render } from 'preact';
 
@@ -146,6 +148,7 @@ export interface ActivityHost {
   committed(): void;
 }
 export interface HomeSnapshot {
+  control?: ControlView;
   waiting: number;
   working: number;
   up: number;
@@ -350,6 +353,7 @@ export function HomeView({ snapshot, host }: { snapshot: HomeSnapshot; host: Hom
           </span>
         </div>
       </div>
+      {snapshot.control && <LocalControl view={snapshot.control} />}
       <Section heading="Needs you" count={snapshot.waiting} />
       <div class="list">
         {snapshot.inbox.map((row) => (

@@ -1,3 +1,5 @@
+import { LocalControl } from './localControl';
+import type { ControlView } from './control';
 import { commitApplicationView } from './application-view';
 import { Component, Fragment, render } from 'preact';
 import type { ComponentChildren } from 'preact';
@@ -124,6 +126,7 @@ export interface FooterView {
   parent?: { id: string; turn?: string; name: string };
 }
 export interface SessionSnapshot {
+  control?: ControlView;
   id: string;
   name: string;
   blocks: readonly TranscriptBlock[];
@@ -782,6 +785,7 @@ export function renderSessionScreen(
             }}
           />
         </section>
+        {view.control && <LocalControl view={view.control} />}
         {view.footer && (
           <div class="session-foot">
             <span class={'stat ' + view.footer.state}>

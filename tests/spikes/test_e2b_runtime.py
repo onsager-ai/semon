@@ -36,6 +36,7 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(result['runtime'],'owned-runtime')
         self.assertEqual(len(Provider.calls),1)
         self.assertEqual(Provider.calls[0]['lifecycle']['on_timeout']['action'],'pause')
+        self.assertEqual(Provider.calls[0]['retries'],0)
         self.assertNotIn('envs',Provider.calls[0])
         self.assertNotIn('synthetic-secret',str(result))
     def test_create_is_never_retried_after_failure(self):

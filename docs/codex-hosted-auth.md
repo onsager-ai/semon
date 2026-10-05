@@ -1,4 +1,43 @@
-# Pinned hosted Codex authentication prerequisites (#249 / #252)
+# Codex authentication prerequisites (#249 / #252)
+
+## Current official route — October 4, 2026
+
+The selected targets remain user-provided API keys and personal ChatGPT sign-in;
+a user chooses one billing/authentication source. Working first-party Codex device
+login is not evidence of permission for a commercial hosted integration.
+
+The official **[Sign in with ChatGPT](https://developers.openai.com/siwc)**
+[quickstart](https://developers.openai.com/siwc/quickstart) currently limits commercial
+access to selected partners in a trial.
+[Client-ID registration](https://developers.openai.com/siwc/request-client-id) directs
+commercial applicants to the interest form. The
+[OSS token-sharing route](https://developers.openai.com/siwc/token-sharing-open-source)
+applies to open-source and locally hosted apps; paid or remotely hosted apps must
+complete the interest form. Plus/Pro entitlement and workspace permission still
+need validation. Documentation is current research, not a granted client ID or an
+authenticated inference test.
+
+The documented OSS flow uses PKCE, fresh state/nonce, a loopback callback, stable
+ext_agent_host_id and initial dynamic_agent_client registration; retain the issued
+oaiapp_clientid, validate token issuer/audience/nonce/expiry and granted scopes.
+Do not reuse the first-party device-flow client ID as a commercial OAuth client.
+The [app-server integration](https://developers.openai.com/siwc/token-sharing-open-source/codex-app-server)
+uses a normal provider env_key for ACCESS_TOKEN, the Responses API and externally
+owned refresh; it does not require internal chatgptAuthTokens. Its current recipe
+uses HTTP streaming, store:false and supports_websockets=false. Restart with renewed
+credentials and resume the native thread as documented. That is an authentication
+recipe, not permission to replay uncertain control writes. See also
+[self-hosted VMs](https://developers.openai.com/siwc/token-sharing-open-source/self-hosted-vms)
+and [preview limitations](https://developers.openai.com/siwc/token-sharing-open-source/preview-limitations).
+
+Hosted eligibility remains unqualified: obtain/verify the approved commercial
+client route, then independently test API-key and personal sign-in model access,
+refresh/revocation and secure custody. A successful device login or bundled model
+catalog cannot substitute for those tests. No auth source is silently dropped or
+substituted. Local control uses a fresh model-configured home and makes no hosted
+eligibility claim; personal sign-in onboarding is not added by that slice.
+
+## Retained alpha protocol evidence
 
 Measured 2026-10-03 against unmodified `@openai/codex@0.159.0-alpha.3`.
 This is local protocol evidence, not authenticated hosted-use qualification.
@@ -55,8 +94,9 @@ It commits/claims the exchange before starting login and does not restart an
 uncertain exchange blindly. A pending cancellation must use
 `account/login/cancel` with the retained loginId or terminate the isolated
 process before dropping custody. Codex itself performs device polling and
-managed refresh. Keep exec/resume as the task driver; using app-server for
-onboarding does not require replacing it.
+managed refresh. That historical onboarding plan kept exec/resume for tasks.
+The demonstrated interactive requirement now uses the single app-server driver
+in [the current design](design/two-way.md); batch probes/history remain separate.
 
 ## Managed refresh boundary
 
@@ -95,7 +135,7 @@ Business/Enterprise Codex access tokens are a separate eligible option under
 [the dedicated official token documentation](https://developers.openai.com/codex/enterprise/access-tokens/),
 subject to workspace permissions and actual entitlement. The pinned CLI exposes
 token entry, but this app-server subset does not invent a token wire method or
-qualify token lifecycle. Personal users follow device code; they do not need
+qualify token lifecycle. First-party CLI personal users can use device code; they do not need
 workspace-token entitlement. Device auth may require personal security settings
 or workspace permission. See [official authentication](https://developers.openai.com/codex/auth/)
 and [app-server documentation](https://developers.openai.com/codex/app-server/).
