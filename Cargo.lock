@@ -2070,6 +2070,7 @@ name = "semon-ssh"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
+ "semon-runtime",
  "serde",
  "serde_json",
  "sha2 0.10.9",
