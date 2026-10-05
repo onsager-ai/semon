@@ -1,0 +1,39 @@
+{
+  "version": "codex-cli 0.160.0",
+  "model": "openai/gpt-6-luna",
+  "provider": "synthetic localhost Responses; no live model qualification",
+  "operation": "30700000000000000000000000000010",
+  "tool_names": [
+    "exec",
+    "wait",
+    "request_user_input",
+    "request_user_input_async",
+    "sleep",
+    "followup_task",
+    "interrupt_agent",
+    "list_agents",
+    "send_message",
+    "spawn_agent",
+    "wait_agent"
+  ],
+  "standalone_instructions": false,
+  "command": "printf SHOULD_NOT_EXECUTE",
+  "shell_output": null,
+  "shell_exit": null,
+  "final_output": "CODE_MODE_HOST_DISABLED",
+  "credential_header_only": true,
+  "credential_excluded_from_executor_and_files": false,
+  "duplicate_prevented": true,
+  "shutdown_reaped": true,
+  "executor_schema": {
+    "type": "custom",
+    "name": "exec",
+    "format": {
+      "type": "grammar",
+      "syntax": "lark",
+      "definition": "\nstart: pragma_source | plain_source\npragma_source: PRAGMA_LINE NEWLINE SOURCE\nplain_source: SOURCE\n\nPRAGMA_LINE: /[ \\t]*\\/\\/ @exec:[^\\r\\n]*/\nNEWLINE: /\\r?\\n/\nSOURCE: /[\\s\\S]+/\n"
+    }
+  },
+  "controller_and_executor_processes_absent": true,
+  "runtime_error": "code-mode host is disabled"
+}
