@@ -1,3 +1,4 @@
+import type { ViewerHost } from '../viewer-host';
 import type { Account } from '../lib/account';
 import type { EffectScope } from '../app/effects';
 import type { createToolViews } from './toolViews';
@@ -12,6 +13,7 @@ import type { createNavigationView } from './navigationView';
 import type { AccountChromeHost } from '../lib';
 import { createAccountChrome, createShellChrome, setGeometry } from '../lib';
 interface AccountControlsHost {
+  viewerHost: ViewerHost | null;
   navigation: NavigationController;
   accountSheet: boolean;
   disposed: boolean;
@@ -101,6 +103,8 @@ export function createAccountControls(host: AccountControlsHost) {
     : createShellChrome({
         account: accountHost,
         navigate(destination) {
+          if (host.viewerHost?.nativeNavigation?.some((item) => item.key === destination.key))
+            return false;
           host.destination.go(host.navigation.historyRoute({ v: destination.key }, { v: 'home' }));
           return true;
         },
