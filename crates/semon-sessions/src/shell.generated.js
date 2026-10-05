@@ -107,11 +107,52 @@
     }
   };
 
+  // src/lib/composer.ts
+  function mountComposers(root = document) {
+    const composers = [...root.querySelectorAll(".sh-composer")];
+    const abort = new AbortController();
+    for (const composer of composers) {
+      const pickers = [...composer.querySelectorAll(".sh-picker")];
+      for (const picker of pickers) {
+        picker.addEventListener(
+          "toggle",
+          () => {
+            if (!picker.open) return;
+            for (const other of pickers) if (other !== picker) other.open = false;
+          },
+          { signal: abort.signal }
+        );
+      }
+      composer.addEventListener(
+        "keydown",
+        (event) => {
+          if (event.key !== "Escape") return;
+          const open = pickers.find((picker) => picker.open);
+          if (!open) return;
+          event.preventDefault();
+          event.stopPropagation();
+          open.open = false;
+          open.querySelector("summary")?.focus();
+        },
+        { signal: abort.signal }
+      );
+    }
+    return {
+      destroy() {
+        abort.abort();
+        for (const composer of composers)
+          for (const picker of composer.querySelectorAll(".sh-picker"))
+            picker.open = false;
+      }
+    };
+  }
+
   // src/app/native-shell.ts
   var current = null;
   function mountNativeShell(options = {}) {
     current?.destroy();
     const effects = new EffectScope();
+    const composers = mountComposers();
     let disposed = false;
     const dialogs = /* @__PURE__ */ new Set();
     let releaseChrome = () => {
@@ -339,6 +380,7 @@
       destroy() {
         if (disposed) return;
         disposed = true;
+        composers.destroy();
         effects.destroy();
         for (const button of copyTimers.keys()) {
           button.setAttribute("aria-label", button.dataset.copyLabel ?? "Copy");
