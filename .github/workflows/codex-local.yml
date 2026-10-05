@@ -24,10 +24,12 @@ jobs:
           npm --prefix tests/ui ci --no-audit --no-fund
           npm --prefix tests/ui exec -- playwright install --with-deps chromium
           cargo build --locked -p semon-store
+          cargo build --locked -p semon-control --example standalone-qualification
       - name: Real native attachment, product and authority tests
         run: |
           native="$RUNNER_TEMP/native/node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/bin/codex"
           mkdir -p "$RUNNER_TEMP/evidence"
+          "$RUNNER_TEMP/probe/bin/python" tests/spikes/codex-standalone.py --codex "$native" --driver target/debug/examples/standalone-qualification --operation 30700000000000000000000000000001 --output "$RUNNER_TEMP/evidence/standalone.json"
           "$RUNNER_TEMP/probe/bin/python" tests/spikes/codex-control.py --codex "$native" --output "$RUNNER_TEMP/evidence/qualification.json"
           "$RUNNER_TEMP/probe/bin/python" tests/spikes/codex-terminal.py --codex "$native" --output "$RUNNER_TEMP/evidence/terminal.json"
           "$RUNNER_TEMP/probe/bin/python" tests/spikes/codex-local.py --codex "$native" --semon target/debug/semon --browser tests/ui/local-control.mjs --tmux /usr/bin/tmux --output "$RUNNER_TEMP/evidence/local.json"
