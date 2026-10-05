@@ -41,6 +41,9 @@ or lost native evidence retain Unknown. Reconcile reads receipts and qualified
 native action evidence; a missing result is never evidence that dispatch failed.
 Accepted evidence can be applied with record_dispatch and committed through the
 same coordinator CAS. Acceptance proves dispatch, not completion of agent work.
+Execution reconstructed from OutcomeUnknown or Succeeded rejects dispatch locally;
+only a fresh InFlight intent can submit input. After an interrupted coordinator,
+inspect that InFlight intent first rather than assuming it was never sent.
 No automatic replay, writer takeover or replacement follows Unknown.
 
 One nonblocking enrollment writer lock covers all execution grants, dispatch,

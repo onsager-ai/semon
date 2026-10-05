@@ -55,6 +55,7 @@ pub struct ModelCredential(pub Zeroizing<String>);
 pub struct Execution {
     scope: Scope,
     input: Zeroizing<String>,
+    dispatch_fresh: bool,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "snake_case")]
@@ -141,6 +142,7 @@ impl Execution {
                 expires,
             },
             input: Zeroizing::new(operation.launch_input.clone().ok_or(Error::Invalid)?),
+            dispatch_fresh: operation.progress == Progress::InFlight,
         })
     }
     /// Apply only inspected dispatch evidence, then CAS the Session. This performs
@@ -309,6 +311,11 @@ impl Execution {
         key: &Credential,
         generation: &str,
     ) -> Result<Receipt, Error> {
+        // Reconstructing uncertain or completed coordinator work grants inspection,
+        // never a fresh side effect even if remote evidence is missing.
+        if !self.dispatch_fresh {
+            return Err(Error::Execution);
+        }
         self.call(
             target,
             pin,

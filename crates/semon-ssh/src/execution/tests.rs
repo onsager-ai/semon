@@ -171,6 +171,34 @@ async fn pinned_dispatch_receipts_lost_result_repair_revocation() {
     let enrollment = "00000000-0000-0000-0000-000000000001";
     let (target, pin, key) = fixture(enrollment).await;
     let e = execution("lost-reply", enrollment);
+    let mut uncertain = session("lost-reply");
+    uncertain
+        .operation_progress(
+            &OwnerId::new("owner").unwrap(),
+            1,
+            &OperationId::new("stable-operation").unwrap(),
+            Progress::OutcomeUnknown,
+        )
+        .unwrap();
+    let uncertain = Execution::new(
+        &uncertain,
+        &OwnerId::new("owner").unwrap(),
+        enrollment,
+        "11111111-1111-1111-1111-111111111111",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            + 120,
+    )
+    .unwrap();
+    assert_eq!(
+        uncertain
+            .dispatch(&target, &pin, &key, "synthetic-generation")
+            .await
+            .unwrap_err(),
+        Error::Execution
+    );
     assert_eq!(
         e.dispatch(&target, &pin, &key, "synthetic-generation")
             .await
