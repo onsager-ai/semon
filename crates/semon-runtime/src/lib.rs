@@ -232,6 +232,9 @@ impl Session {
             let mut s = self.clone();
             f(&mut s).map(|()| s)
         };
+        if matches(mutate(&|s| s.end_session(owner, epoch))) {
+            return Ok(());
+        }
         if matches(mutate(&|s| s.set_desired(owner, epoch, next.desired)))
             || matches(mutate(&|s| s.set_compute(owner, epoch, next.compute)))
             || matches(mutate(&|s| s.set_harness(owner, epoch, next.harness)))
@@ -320,6 +323,20 @@ impl Session {
         }
         self.changed()?;
         self.desired = next;
+        Ok(())
+    }
+    /// Record observed native shutdown without claiming compute destruction.
+    /// The embedding must verify shutdown before committing this mutation.
+    pub fn end_session(&mut self, owner: &OwnerId, epoch: u64) -> Result<(), Error> {
+        self.authorize(owner, epoch)?;
+        if !matches!(self.harness, Harness::Completed | Harness::Failed) {
+            return Err(Error::WriterNotExcluded);
+        }
+        self.changed()?;
+        if let Some(attempt) = self.attempts.last_mut() {
+            attempt.writer_excluded = true;
+        }
+        self.desired = Desired::Ended;
         Ok(())
     }
     pub fn operations(&self) -> &[Operation] {

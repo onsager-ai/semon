@@ -137,9 +137,9 @@ impl MatchKey {
 pub struct Source {
     /// The viewer window that sent it.
     pub window: String,
-    /// The TCP peer's process id.
+    /// Broker-reported process id; zero when unavailable (HTTP supplies no peer proof).
     pub peer_pid: u32,
-    /// The TCP peer's user id.
+    /// Broker-reported user id; never used as owner authority.
     pub peer_uid: u32,
 }
 
@@ -181,6 +181,8 @@ pub enum Answer {
     },
     /// Each question's text mapped to the label of the chosen option.
     Questions(BTreeMap<String, String>),
+    /// Codex question ids mapped to native answer arrays (one choice or free text).
+    CodexQuestions(BTreeMap<String, Vec<String>>),
 }
 
 impl Answer {
@@ -203,6 +205,7 @@ impl Answer {
             Self::Allow => json!({"decision": "allow"}),
             Self::Deny { message } => json!({"decision": "deny", "message": message}),
             Self::Questions(answers) => json!({"answers": answers}),
+            Self::CodexQuestions(answers) => json!({"answers": answers}),
         }
     }
 
@@ -216,6 +219,25 @@ impl Answer {
                 "decision": "deny",
                 "message": message.as_deref().map(|text| truncated(text, MAX_DENY_MESSAGE_BYTES)),
             }),
+            Self::CodexQuestions(answers) => {
+                let kept: serde_json::Map<String, Value> = answers
+                    .iter()
+                    .take(3)
+                    .map(|(id, values)| {
+                        (
+                            truncated(id, 256),
+                            json!(
+                                values
+                                    .iter()
+                                    .take(1)
+                                    .map(|v| truncated(v, 4096))
+                                    .collect::<Vec<_>>()
+                            ),
+                        )
+                    })
+                    .collect();
+                json!({"answers": kept, "answer_count": answers.len()})
+            }
             Self::Questions(answers) => {
                 let kept: serde_json::Map<String, Value> = answers
                     .iter()
@@ -309,6 +331,8 @@ pub enum ResolvedReason {
     DeniedOrInterruptedInTerminal,
     /// Another client answered it, as the harness reported.
     OtherClient,
+    /// Codex cleared the request; no winning client or decision is identified.
+    AnsweredOrCleared,
 }
 
 impl ResolvedReason {
@@ -317,6 +341,7 @@ impl ResolvedReason {
             Self::AllowedInTerminal => "allowed_in_terminal",
             Self::DeniedOrInterruptedInTerminal => "denied_or_interrupted_in_terminal",
             Self::OtherClient => "other_client",
+            Self::AnsweredOrCleared => "answered_or_cleared",
         }
     }
 }
@@ -494,4 +519,49 @@ pub struct PendingRequest {
     /// Whether the tool ran although a deny from the viewer was delivered
     /// (or its delivery was left unknown): the terminal allowed it first.
     pub tool_ran_after_deny: bool,
+}
+
+/// Validates the qualified subset of Codex's native question shape.
+pub(crate) fn codex_questions(payload: &Value) -> Result<Vec<(String, Vec<String>, bool)>, String> {
+    let items = payload
+        .pointer("/params/questions")
+        .and_then(Value::as_array)
+        .filter(|v| !v.is_empty() && v.len() <= 3)
+        .ok_or("invalid native questions")?;
+    let mut result = Vec::new();
+    for item in items {
+        let id = item["id"]
+            .as_str()
+            .filter(|s| !s.is_empty() && s.len() <= 256)
+            .ok_or("invalid question id")?;
+        if item["isSecret"].as_bool() != Some(false) {
+            return Err("secret questions must be answered in Codex".into());
+        }
+        if !item["question"].is_string() || result.iter().any(|(seen, _, _)| seen == id) {
+            return Err("invalid native question".into());
+        }
+        let other = item["isOther"]
+            .as_bool()
+            .ok_or("missing free-text capability")?;
+        let options = item["options"]
+            .as_array()
+            .ok_or("unqualified question options")?;
+        let mut labels = Vec::new();
+        for option in options {
+            let label = option["label"]
+                .as_str()
+                .filter(|s| !s.is_empty())
+                .ok_or("invalid option")?
+                .to_owned();
+            if labels.contains(&label) {
+                return Err("duplicate option".into());
+            }
+            labels.push(label);
+        }
+        if labels.is_empty() && !other {
+            return Err("question has no answers".into());
+        }
+        result.push((id.to_owned(), labels, other));
+    }
+    Ok(result)
 }

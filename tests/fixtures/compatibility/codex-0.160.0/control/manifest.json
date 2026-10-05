@@ -1,0 +1,63 @@
+{
+  "version": "0.160.0",
+  "base": "132dc2c",
+  "native_source": "rust-v0.160.0 at a956835d020762cb2b570053af06f643a11c0ecc",
+  "provenance": "Unmodified complete pinned npm native package. Real daemon, TUI, app-server, semon launcher/viewer and bwrap executor. Synthetic localhost Responses provider; no personal auth or paid inference. Rust/TypeScript mock tests are separate.",
+  "sanitization": "Disposable roots replaced by <FIXTURE>, executable by <CODEX_BIN>, owner cookie by <OWNER_TOKEN>; exact native identities/commands/diffs/results retained. Provider system instructions excluded.",
+  "sources": [
+    {
+      "path": "tests/spikes/codex-control.py",
+      "sha256": "650ee5698183cd1e2c60aa94058c3be4bf4f53cd773393a66085402cddb46f0e"
+    },
+    {
+      "path": "tests/spikes/codex-terminal.py",
+      "sha256": "0746e801cddeae9872eba0f01c1996e8df2904879e0e649c87a856bd2ad3c5a5"
+    },
+    {
+      "path": "tests/spikes/codex-local.py",
+      "sha256": "0e641011ee46762c3b4057e122b83541f2a0a90efd813ec3ca8970b8135fbcd0"
+    },
+    {
+      "path": "tests/ui/local-control.mjs",
+      "sha256": "10a834b6e9038df7c3ae38f8750b8766a794a31b15c23a688e2afb56ba2ee182"
+    }
+  ],
+  "fixtures": [
+    {
+      "path": "CommandExecutionRequestApprovalParams.json",
+      "sha256": "16a71816c2d66e319c2c4aa83dd636dfdc43c61e72b6d5475e421ce08d8e6558"
+    },
+    {
+      "path": "FileChangeRequestApprovalParams.json",
+      "sha256": "13848b26814c286ad6425a20d01c1691c86790e1f9e2529399677a8a22fe0d18"
+    },
+    {
+      "path": "ServerRequestResolvedNotification.json",
+      "sha256": "4f03d586a5af04edd912cad08cc97eceb658e7e06744565e6d41a93e04a55966"
+    },
+    {
+      "path": "ToolRequestUserInputParams.json",
+      "sha256": "fda15b62e7446105b59c8ed85c908abed2a47db70653e57c92c47a2f204fa77a"
+    },
+    {
+      "path": "ToolRequestUserInputResponse.json",
+      "sha256": "5073b245f741fa8ce62ec52e4dd1809b7831f9c4284c279a78abc9b171f8e3f2"
+    },
+    {
+      "path": "installation.json",
+      "sha256": "d5f59e93105404be450db394bbc1d960ac94924d176c5ae35589a46017d56327"
+    },
+    {
+      "path": "local.json",
+      "sha256": "83b7a2e24ad670ec284bd2c870a4b133a71e143108d0c67a7684425357c76d13"
+    },
+    {
+      "path": "qualification.json",
+      "sha256": "e813f5c8d5f0d6caf5dbe054e185aa6a71a3293480043ddd8b9319bad409ee3a"
+    },
+    {
+      "path": "terminal.json",
+      "sha256": "1f5af73a60b1d6c9cd7ccda448745c3e82cde931eb1f5f518072e5da1fcc0dc9"
+    }
+  ]
+}

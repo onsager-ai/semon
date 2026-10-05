@@ -4,7 +4,7 @@ import { build } from 'esbuild';
 const { outputFiles } = await build({
   stdin: {
     contents:
-      "export * from './src/state/viewUpdates';export * from './src/app/transport';export * from './src/state/model';export * from './src/state/transcript';export * from './src/state/transcript-wire';",
+      "export * from './src/app/localControl';export * from './src/state/viewUpdates';export * from './src/app/transport';export * from './src/state/model';export * from './src/state/transcript';export * from './src/state/transcript-wire';",
     resolveDir: new URL('..', import.meta.url).pathname,
   },
   bundle: true,
@@ -12,10 +12,16 @@ const { outputFiles } = await build({
   format: 'esm',
   platform: 'node',
 });
-const { ViewUpdates, createTransport, ViewerModelStore, TranscriptStore, parseTranscriptPage } =
-  await import(
-    'data:text/javascript;base64,' + Buffer.from(outputFiles[0].contents).toString('base64')
-  );
+const {
+  createLocalControl,
+  ViewUpdates,
+  createTransport,
+  ViewerModelStore,
+  TranscriptStore,
+  parseTranscriptPage,
+} = await import(
+  'data:text/javascript;base64,' + Buffer.from(outputFiles[0].contents).toString('base64')
+);
 const model = () => ({
   now: 1,
   version: 'v1',
@@ -197,6 +203,7 @@ test('accepted updates publish coherent revisions once; invalid auxiliary input 
   const host = {
     disposed: false,
     modelStore: graph,
+    controlOwner: createLocalControl({}, () => {}),
     transcripts: { entries: {}, marks: {}, spread() {} },
     viewerHost: null,
   };
@@ -212,6 +219,10 @@ test('accepted updates publish coherent revisions once; invalid auxiliary input 
   assert.equal(seen[0][3].label, 'Admin');
   const before = graph.sessions.s;
   assert.throws(() => transport.adopt({ ...model(), version: 'bad', tx: { s: 42 } }), /Invalid/);
+  assert.throws(
+    () => transport.adopt({ ...model(), control: { connected: true } }),
+    /Invalid control/,
+  );
   assert.equal(graph.sessions.s, before);
   assert.equal(seen.length, 1);
   assert.equal(graph.apply({ delta: 1, from: 'v1', version: 'v2' }).version, 'v2');

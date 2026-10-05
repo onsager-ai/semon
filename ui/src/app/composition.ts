@@ -1,3 +1,4 @@
+import { createLocalControl } from './localControl';
 import { createRenderTransaction } from './renderTransaction';
 import { ViewUpdates } from '../state/viewUpdates';
 import { createPageRoot } from './pageRoot';
@@ -47,6 +48,7 @@ import { createViewport } from './viewport';
 /** The document composition owns services; focused factories own behavior and mutable feature state. */
 export class ViewerComposition {
   readonly scope: EffectScope;
+  readonly controlOwner: ReturnType<typeof createLocalControl>;
   readonly dialogs: Map<HTMLDialogElement, { destroy(): void }>;
   disposed: boolean;
   readonly application: ViewerApplication;
@@ -139,6 +141,7 @@ export class ViewerComposition {
       destroy() {
         if (context.disposed) return;
         context.disposed = true;
+        context.controlOwner.destroy();
         context.updates.destroy();
         context.scope.destroy();
         context.liveModelOwner.liveController.destroy();
@@ -229,6 +232,9 @@ export class ViewerComposition {
     this.sentencesOwner = createSentences(context);
     this.isGap = (e: Entry) =>
       e.k === 'end' && /entries (not included|omitted)|^No activity/.test(e.text ?? '');
+    this.controlOwner = createLocalControl(this.scope, () =>
+      context.applicationRefreshOwner.refresh(),
+    );
     this.transportOwner = createTransport(context);
     this.cacheTx = (sid: string, entries: Entry[], meta: TranscriptMeta) =>
       context.transcripts.keep(sid, entries, meta, !!context.domain.originHandoff(sid));

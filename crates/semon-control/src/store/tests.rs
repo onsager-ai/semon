@@ -1687,3 +1687,83 @@ fn final_request_keeps_bounded_source_and_observed_wall_end_time() {
     assert_eq!(request.ended_wall_ms, Some(WALL));
     assert_eq!(request.ended_ms, Some(T0 + 1));
 }
+
+#[test]
+fn codex_answers_bind_native_question_ids_and_only_qualified_labels() {
+    let (store, _) = new_store("native-questions");
+    let payload = json!({"params":{"questions":[{"id":"q","question":"Choice?","isSecret":false,"isOther":false,"options":[{"label":"One"},{"label":"Two"}]}]}});
+    let id = store
+        .register(
+            NewRequest {
+                kind: Kind::Question,
+                payload,
+                ..unhooked("native")
+            },
+            T0,
+        )
+        .unwrap();
+    let adapter = Fake::new(Delivery::AwaitConfirmation);
+    let hash = digest(&store, id);
+    for answer in [
+        Answer::Allow,
+        Answer::Questions(BTreeMap::from([("Choice?".into(), "One".into())])),
+        Answer::CodexQuestions(BTreeMap::from([("q".into(), vec!["wrong".into()])])),
+        Answer::CodexQuestions(BTreeMap::from([(
+            "q".into(),
+            vec!["One".into(), "Two".into()],
+        )])),
+    ] {
+        assert!(
+            store
+                .answer(&adapter, id, answer, &hash, source("owner"), &|| T0 + 1)
+                .is_err()
+        );
+    }
+    assert_eq!(adapter.calls(), 0);
+    store
+        .answer(
+            &adapter,
+            id,
+            Answer::CodexQuestions(BTreeMap::from([("q".into(), vec!["One".into()])])),
+            &hash,
+            source("owner"),
+            &|| T0 + 2,
+        )
+        .unwrap();
+    assert!(matches!(state(&store, id, T0 + 2), State::Claimed { .. }));
+    store.resolve(id, ResolvedReason::AnsweredOrCleared, T0 + 3);
+    assert_eq!(
+        state(&store, id, T0 + 3),
+        State::Resolved(ResolvedReason::AnsweredOrCleared)
+    );
+    assert_eq!(adapter.calls(), 1);
+}
+
+#[test]
+fn native_secret_questions_are_read_only_and_lost_claims_are_unknown() {
+    let (store, path) = new_store("native-loss");
+    let secret = store.register(NewRequest { kind:Kind::Question,payload:json!({"params":{"questions":[{"id":"secret","question":"Password?","isSecret":true}]}}),..unhooked("native") },T0).unwrap();
+    assert!(matches!(
+        store.get(secret, T0).unwrap().answerable,
+        Answerable::No(_)
+    ));
+    let claim = store.register(unhooked("native"), T0).unwrap();
+    let open = store.register(unhooked("native"), T0).unwrap();
+    store
+        .answer(
+            &Fake::new(Delivery::AwaitConfirmation),
+            claim,
+            Answer::Allow,
+            &digest(&store, claim),
+            source("owner"),
+            &|| T0 + 1,
+        )
+        .unwrap();
+    store.connection_lost("native", T0 + 2);
+    assert_eq!(
+        state(&store, claim, T0 + 2),
+        State::Left(LeftReason::DeliveryUnknown)
+    );
+    assert_eq!(state(&store, open, T0 + 2), State::Gone);
+    assert!(events(&path).iter().any(|event| event == "answer"));
+}
