@@ -38,8 +38,9 @@ must test and explicitly repair. No reboot service or compute lifecycle is impli
 
 `semon push` and its documented mirror protocol remain the only ingestion path.
 Enrollment does not grant dispatch, pause, snapshot, restore or server deletion.
-Model authentication remains independent. Execution requires further coordinator
-receipt, reconciliation, writer-exclusion and credential-repair qualification.
+Model authentication remains independent. The separately authorized
+[execution receipt broker](ssh-execution.md) provides private-driver dispatch and
+inspection; native launch and hosted execution adoption remain qualification gates.
 
 Qualification:
 
