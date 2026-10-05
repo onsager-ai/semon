@@ -70,6 +70,8 @@ jobs:
           python3 -m venv "$RUNNER_TEMP/e2b-sdk"
           "$RUNNER_TEMP/e2b-sdk/bin/pip" install --require-hashes -r scripts/e2b-requirements.txt
           "$RUNNER_TEMP/e2b-sdk/bin/python" scripts/test-e2b-attach.py
+      - name: Verify standalone native schema and execution evidence
+        run: python3 -m unittest discover -s tests/spikes -p test_standalone_fixtures.py -v
 
       - name: Verify managed guest private SDK boundary without provider calls
         run: python3 scripts/test-e2b-managed.py
