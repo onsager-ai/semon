@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "manifest_sha256": "dce7ea6a751eefe1067f029a1ceaec5388b59d85e246b35ecc958475275d2a1b",
+  "manifest_sha256": "cd6e61d22bcdab38d056d7a069fe1e95b9fdc90d057476351e43f6434a9eb087",
   "block_sha256": "b759967ebb4046ebcf6ab7f53f8858120698a6a551ff973356bf46e00923b206",
   "resolved_skills": [
     "ci-triage",
