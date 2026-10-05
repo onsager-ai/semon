@@ -1,0 +1,2217 @@
+{
+  "version": "codex-cli 0.160.0",
+  "provider": "synthetic localhost; native terminal and app-server",
+  "cases": {
+    "default_turn": {
+      "id": 104,
+      "result": {
+        "turn": {
+          "id": "01a106de-3bb4-7033-98b3-2a92f97661c5",
+          "items": [],
+          "itemsView": "notLoaded",
+          "status": "inProgress",
+          "error": null,
+          "startedAt": null,
+          "completedAt": null,
+          "durationMs": null
+        }
+      }
+    },
+    "default_existing_terminal": {
+      "thread": "01a106de-39e1-7790-a243-946983d88e39",
+      "request": {
+        "method": "item/commandExecution/requestApproval",
+        "id": 0,
+        "params": {
+          "kind": "command",
+          "threadId": "01a106de-39e1-7790-a243-946983d88e39",
+          "turnId": "01a106de-3bb4-7033-98b3-2a92f97661c5",
+          "itemId": "call_fixture",
+          "startedAtMs": 1791116590210,
+          "environmentId": "local",
+          "reason": "Terminal attachment fixture",
+          "command": "/bin/bash -lc 'printf SEMON_APPROVAL_PROBE'",
+          "cwd": "<FIXTURE>/work",
+          "commandActions": [
+            {
+              "type": "unknown",
+              "command": "printf SEMON_APPROVAL_PROBE"
+            }
+          ],
+          "proposedExecpolicyAmendment": [
+            "printf",
+            "SEMON_APPROVAL_PROBE"
+          ],
+          "availableDecisions": [
+            "accept",
+            {
+              "acceptWithExecpolicyAmendment": {
+                "execpolicy_amendment": [
+                  "printf",
+                  "SEMON_APPROVAL_PROBE"
+                ]
+              }
+            },
+            "cancel"
+          ]
+        }
+      },
+      "terminal": "\u001b]10;?\u001b\\\u001b]11;?\u001b\\   >_ OpenAI Codex (v0.160.0)     loading   Nice terminal. Does it come in widescreen?  \u203a Ask Codex to do anything   ~/semon-terminal-m5qjbmew/work\u001b]0;work\u0007GPT-6.1-Soldefault\u00b7~/semon-terminal-m5qjbmew/work\u00b7\u2190foragents\u001bM\u001bM\u001bM\u001bM\u001bM\u001bM\u001bM\u001bM\u001bM\u001bM\u001bM\r\n\r\n  >_ OpenAI Codex (v0.160.0)\r\n     ~/semon-terminal-m5qjbmew/work\r\n\r\n  Nice terminal. Does it come in widescreen?\r\n\r\n  Tip: Maximize usage with GPT-6.1 Sol. Try it on complex work for near-Astra performance at a lower cost.\r\n\r\n\r\n\u203a TUI_WARMUP\r\n  \u203a Ask Codex to do anything   GPT-6.1-Sol default \u00b7 ~/semon-terminal-m5qjbmew/work \u00b7 \u2190 for agents \u001b]0;\u2819 work\u0007\u001b]0;work\u0007\u001b]0;\u2819 work\u0007 \u2022 Working (0s \u2022 esc to interrupt)  \u203a Ask Codex to do anything   GPT-6.1-Sol default \u00b7 ~/semon-terminal-m5qjbmew/work \u00b7 \u2190 for agents \u001b]0;\u2839 work\u0007\u001b]0;\u2839 \u2839 | work\u0007\u2839\u00b7 \u2190for agents\u001b]0;\u2838 \u2838 | work\u0007\u001bM\u001bM\r\n\r\n\u2022 SYNTHETIC_ACK  \u203a Ask Codex to do anything   GPT-6.1-Sol default \u00b7 ~/semon-terminal-m5qjbmew/work \u00b7 \u2839 \u00b7 \u2190 for agents \u2838\u001b]0;\u283c \u283c | work\u0007\u001b]0;\u283c | work\u0007\u001bM\u001bM\r\n\r\n  Worked for <1s \u2022 12:23\u283c \u001b]0;work\u0007\u2190foragents\u001b]0;\u283c work\u0007 \u2022 Working (0s \u2022 esc to interrupt)  \u203a Ask Codex to do anything   GPT-6.1-Sol default \u00b7 ~/semon-terminal-m5qjbmew/work \u00b7 \u2190 for agents \u001b]0;\u2834 work\u0007\u001b]0;\u2834 \u2834 | work\u0007\u001bM\u001bM\u001bM\u001bM\r\n\r\n\r\n\u203a DEFAULT_APPROVAL\r\n\u2834\u00b7 \u2190for agents \u001b]0;\u2826 \u2826 | work\u0007\u001b]0;[ ! ] Action Required | \u2827 | work\u0007\r\n\r\n\r\n\r\n\r\n\r\n\r\n \u2022 Running printf SEMON_APPROVAL_PROBE    Would you like to run the following command?   Environment: local   Reason: Terminal attachment fixture   $ printf SEMON_APPROVAL_PROBE  \u203a 1. Yes, proceed (y)                                                                                                     2. Yes, and don't ask again for commands that start with `printf SEMON_APPROVAL_PROBE` (p)  3. No, and tell Codex what to do differently (esc)   Press enter to confirm or esc to cancel                                                                               \u001b]0;[ ! ] Action Required | work\u0007"
+    },
+    "default_terminal_escape": {
+      "resolved": {
+        "method": "serverRequest/resolved",
+        "params": {
+          "threadId": "01a106de-39e1-7790-a243-946983d88e39",
+          "requestId": 0
+        },
+        "emittedAtMs": 1791116590269
+      },
+      "turn": {
+        "method": "turn/completed",
+        "params": {
+          "threadId": "01a106de-39e1-7790-a243-946983d88e39",
+          "turn": {
+            "id": "01a106de-3bb4-7033-98b3-2a92f97661c5",
+            "items": [],
+            "itemsView": "notLoaded",
+            "status": "interrupted",
+            "error": null,
+            "startedAt": 1791116590,
+            "completedAt": 1791116590,
+            "durationMs": 298
+          }
+        },
+        "emittedAtMs": 1791116590316
+      }
+    },
+    "remote_unix_terminal": {
+      "request": {
+        "method": "item/commandExecution/requestApproval",
+        "id": 0,
+        "params": {
+          "kind": "command",
+          "threadId": "01a106de-3e16-7d73-b31e-8dd94a702659",
+          "turnId": "01a106de-4083-77e0-a4ff-989bd7f656a4",
+          "itemId": "call_fixture",
+          "startedAtMs": 1791116591409,
+          "environmentId": "local",
+          "reason": "Shared server terminal fixture",
+          "command": "/bin/bash -lc 'printf SEMON_APPROVAL_PROBE'",
+          "cwd": "<FIXTURE>/work",
+          "commandActions": [
+            {
+              "type": "unknown",
+              "command": "printf SEMON_APPROVAL_PROBE"
+            }
+          ],
+          "proposedExecpolicyAmendment": [
+            "printf",
+            "SEMON_APPROVAL_PROBE"
+          ],
+          "availableDecisions": [
+            "accept",
+            {
+              "acceptWithExecpolicyAmendment": {
+                "execpolicy_amendment": [
+                  "printf",
+                  "SEMON_APPROVAL_PROBE"
+                ]
+              }
+            },
+            "cancel"
+          ]
+        }
+      },
+      "terminal": "\u001b]10;?\u001b\\\u001b]11;?\u001b\\   >_ OpenAI Codex (v0.160.0)     loading  Resuming session\u2026 \u203a Ask Codex to do anything   ~/semon-terminal-m5qjbmew/work\u001b]0;work\u0007  \u203a Ask Codex to do anything   GPT-6.1-Sol default \u00b7 ~/semon-terminal-m5qjbmew/work \u001bM\u001bM\u001bM\u001bM\u001bM\u001bM\u001bM\u001bM\u001bM\u001bM\u001bM\u001bM\u001bM\r\n\r\n  >_ OpenAI Codex (v0.160.0)\r\n     ~/semon-terminal-m5qjbmew/work\r\n\r\n  Tip: Use /title to choose what appears in your terminal\u2019s title.\r\n\r\n\r\n\u203a FOREGROUND_WARMUP\r\n\r\n\r\n\u2022 SYNTHETIC_ACK\r\n\r\n  Worked for <1s \u2022 12:23  \u203a Ask Codex to do anything   GPT-6.1-Sol default \u00b7 ~/semon-terminal-m5qjbmew/work \u001b]0;\u280b work\u0007 \u2022 Working (0s \u2022 esc to interrupt)  \u203a Ask Codex to do anything   GPT-6.1-Sol default \u00b7 ~/semon-terminal-m5qjbmew/work \u001b]0;\u2819 work\u0007\u001b]0;\u2819 \u2819 | work\u0007\u001bM\u001bM\u001bM\u001bM\r\n\r\n\r\n\u203a FOREGROUND_APPROVAL\r\n\u00b7\u2819 \u001b]0;\u2839 \u2839 | work\u0007\u001b]0;[ ! ] Action Required | \u2839 | work\u0007\r\n\r\n\r\n\r\n\r\n \u2022 Running printf SEMON_APPROVAL_PROBE    Would you like to run the following command?   Environment: local   Reason: Shared server terminal fixture   $ printf SEMON_APPROVAL_PROBE  \u203a 1. Yes, proceed (y)                                                                                                     2. Yes, and don't ask again for commands that start with `printf SEMON_APPROVAL_PROBE` (p)  3. No, and tell Codex what to do differently (esc)   Press enter to confirm or esc to cancel                                                                               "
+    },
+    "viewer_wins_then_terminal_late": {
+      "history": {
+        "id": 105,
+        "result": {
+          "thread": {
+            "id": "01a106de-3e16-7d73-b31e-8dd94a702659",
+            "environments": [
+              {
+                "environmentId": "local",
+                "cwd": "<FIXTURE>/work",
+                "runtimeWorkspaceRoots": [
+                  "<FIXTURE>/work"
+                ]
+              }
+            ],
+            "extra": null,
+            "sessionId": "01a106de-3e16-7d73-b31e-8dd94a702659",
+            "forkedFromId": null,
+            "parentThreadId": null,
+            "preview": "FOREGROUND_WARMUP",
+            "ephemeral": false,
+            "section": null,
+            "sectionEnteredAt": null,
+            "projectId": null,
+            "historyMode": "paginated",
+            "modelProvider": "synthetic",
+            "model": "gpt-6.1-sol",
+            "reasoningEffort": null,
+            "createdAt": 1791116590,
+            "updatedAt": 1791116591,
+            "recencyAt": 1791116591,
+            "status": {
+              "type": "idle"
+            },
+            "path": "<FIXTURE>/home/sessions/2026/10/04/rollout-2026-10-04T12-23-10-01a106de-3e16-7d73-b31e-8dd94a702659.jsonl",
+            "cwd": "<FIXTURE>/work",
+            "cliVersion": "0.160.0",
+            "originator": "semon_qualification",
+            "source": "vscode",
+            "canAcceptDirectInput": true,
+            "threadSource": null,
+            "agentNickname": null,
+            "agentRole": null,
+            "gitInfo": null,
+            "name": null,
+            "daybreakEnabled": null,
+            "turns": [
+              {
+                "id": "01a106de-3e39-7e12-b168-4b563a89aca6",
+                "items": [
+                  {
+                    "type": "userMessage",
+                    "id": "01a106de-3e61-74d2-97cd-caddd471c8bd",
+                    "clientId": null,
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "FOREGROUND_WARMUP",
+                        "text_elements": []
+                      }
+                    ]
+                  },
+                  {
+                    "type": "agentMessage",
+                    "id": "msg_fixture",
+                    "text": "SYNTHETIC_ACK",
+                    "phase": null,
+                    "memoryCitation": null,
+                    "delivery": null,
+                    "questions": null
+                  }
+                ],
+                "itemsView": "full",
+                "status": "completed",
+                "error": null,
+                "startedAt": 1791116590,
+                "completedAt": 1791116590,
+                "durationMs": 75
+              },
+              {
+                "id": "01a106de-4083-77e0-a4ff-989bd7f656a4",
+                "items": [
+                  {
+                    "type": "userMessage",
+                    "id": "01a106de-40ab-74b3-bf48-f9be3a8f4956",
+                    "clientId": null,
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "FOREGROUND_APPROVAL",
+                        "text_elements": []
+                      }
+                    ]
+                  },
+                  {
+                    "type": "agentMessage",
+                    "id": "msg_fixture",
+                    "text": "SYNTHETIC_ACK",
+                    "phase": null,
+                    "memoryCitation": null,
+                    "delivery": null,
+                    "questions": null
+                  }
+                ],
+                "itemsView": "full",
+                "status": "completed",
+                "error": null,
+                "startedAt": 1791116591,
+                "completedAt": 1791116591,
+                "durationMs": 348
+              }
+            ]
+          }
+        }
+      }
+    },
+    "completed": true
+  },
+  "frames": [
+    {
+      "client": "default-observer",
+      "direction": "send",
+      "frame": {
+        "id": 101,
+        "method": "initialize",
+        "params": {
+          "clientInfo": {
+            "name": "semon_qualification",
+            "version": "1"
+          },
+          "capabilities": {
+            "experimentalApi": true
+          }
+        }
+      }
+    },
+    {
+      "client": "default-observer",
+      "direction": "receive",
+      "frame": {
+        "id": 101,
+        "result": {
+          "userAgent": "codex-tui/0.160.0 (Debian 13.0.0; x86_64) xterm-256color (semon_qualification; 1)",
+          "codexHome": "<FIXTURE>/home",
+          "platformFamily": "unix",
+          "platformOs": "linux"
+        }
+      }
+    },
+    {
+      "client": "default-observer",
+      "direction": "receive",
+      "frame": {
+        "method": "remoteControl/status/changed",
+        "params": {
+          "status": "disabled",
+          "serverName": "af23e224fc5e",
+          "installationId": "f30e77ed-5ca6-4470-996c-196aaea5a182",
+          "environmentId": null
+        },
+        "emittedAtMs": 1791116589948
+      }
+    },
+    {
+      "client": "default-observer",
+      "direction": "send",
+      "frame": {
+        "method": "initialized"
+      }
+    },
+    {
+      "client": "default-observer",
+      "direction": "send",
+      "frame": {
+        "id": 102,
+        "method": "thread/list",
+        "params": {}
+      }
+    },
+    {
+      "client": "default-observer",
+      "direction": "receive",
+      "frame": {
+        "id": 102,
+        "result": {
+          "data": [
+            {
+              "id": "01a106de-39e1-7790-a243-946983d88e39",
+              "environments": [
+                {
+                  "environmentId": "local",
+                  "cwd": "<FIXTURE>/work",
+                  "runtimeWorkspaceRoots": [
+                    "<FIXTURE>/work"
+                  ]
+                }
+              ],
+              "extra": null,
+              "sessionId": "01a106de-39e1-7790-a243-946983d88e39",
+              "forkedFromId": null,
+              "parentThreadId": null,
+              "preview": "TUI_WARMUP",
+              "ephemeral": false,
+              "section": null,
+              "sectionEnteredAt": null,
+              "projectId": null,
+              "historyMode": "paginated",
+              "modelProvider": "synthetic",
+              "model": "gpt-6.1-sol",
+              "reasoningEffort": null,
+              "createdAt": 1791116589,
+              "updatedAt": 1791116589,
+              "recencyAt": 1791116589,
+              "status": {
+                "type": "active",
+                "activeFlags": []
+              },
+              "path": "<FIXTURE>/home/sessions/2026/10/04/rollout-2026-10-04T12-23-09-01a106de-39e1-7790-a243-946983d88e39.jsonl",
+              "cwd": "<FIXTURE>/work",
+              "cliVersion": "0.160.0",
+              "originator": "codex-tui",
+              "source": "vscode",
+              "canAcceptDirectInput": null,
+              "threadSource": null,
+              "agentNickname": null,
+              "agentRole": null,
+              "gitInfo": null,
+              "name": null,
+              "daybreakEnabled": null,
+              "turns": []
+            }
+          ],
+          "nextCursor": null,
+          "backwardsCursor": "2026-10-04T12:23:09.544Z"
+        }
+      }
+    },
+    {
+      "client": "default-observer",
+      "direction": "send",
+      "frame": {
+        "id": 103,
+        "method": "thread/resume",
+        "params": {
+          "threadId": "01a106de-39e1-7790-a243-946983d88e39"
+        }
+      }
+    },
+    {
+      "client": "default-observer",
+      "direction": "receive",
+      "frame": {
+        "method": "thread/status/changed",
+        "params": {
+          "threadId": "01a106de-39e1-7790-a243-946983d88e39",
+          "status": {
+            "type": "idle"
+          }
+        },
+        "emittedAtMs": 1791116589971
+      }
+    },
+    {
+      "client": "default-observer",
+      "direction": "receive",
+      "frame": {
+        "method": "deprecationNotice",
+        "params": {
+          "summary": "Full-history hydration is deprecated for paginated threads; use `excludeTurns: true`, then page with `thread/turns/list` and `thread/items/list`.",
+          "details": null
+        },
+        "emittedAtMs": 1791116589974
+      }
+    },
+    {
+      "client": "default-observer",
+      "direction": "receive",
+      "frame": {
+        "method": "thread/status/changed",
+        "params": {
+          "threadId": "01a106de-3afd-7ba2-9dd0-ba610bfa8a83",
+          "status": {
+            "type": "idle"
+          }
+        },
+        "emittedAtMs": 1791116589991
+      }
+    },
+    {
+      "client": "default-observer",
+      "direction": "receive",
+      "frame": {
+        "id": 103,
+        "result": {
+          "thread": {
+            "id": "01a106de-39e1-7790-a243-946983d88e39",
+            "environments": [
+              {
+                "environmentId": "local",
+                "cwd": "<FIXTURE>/work",
+                "runtimeWorkspaceRoots": [
+                  "<FIXTURE>/work"
+                ]
+              }
+            ],
+            "extra": null,
+            "sessionId": "01a106de-39e1-7790-a243-946983d88e39",
+            "forkedFromId": null,
+            "parentThreadId": null,
+            "preview": "TUI_WARMUP",
+            "ephemeral": false,
+            "section": null,
+            "sectionEnteredAt": null,
+            "projectId": null,
+            "historyMode": "paginated",
+            "modelProvider": "synthetic",
+            "model": "gpt-6.1-sol",
+            "reasoningEffort": null,
+            "createdAt": 1791116589,
+            "updatedAt": 1791116589,
+            "recencyAt": 1791116589,
+            "status": {
+              "type": "idle"
+            },
+            "path": "<FIXTURE>/home/sessions/2026/10/04/rollout-2026-10-04T12-23-09-01a106de-39e1-7790-a243-946983d88e39.jsonl",
+            "cwd": "<FIXTURE>/work",
+            "cliVersion": "0.160.0",
+            "originator": "codex-tui",
+            "source": "vscode",
+            "canAcceptDirectInput": true,
+            "threadSource": "user",
+            "agentNickname": null,
+            "agentRole": null,
+            "gitInfo": null,
+            "name": null,
+            "daybreakEnabled": null,
+            "turns": [
+              {
+                "id": "01a106de-3a59-7e30-9aa7-e3e6bbf6d23d",
+                "items": [
+                  {
+                    "type": "userMessage",
+                    "id": "01a106de-3abc-7491-8666-262c007797a1",
+                    "clientId": "e7ab08a1-8db5-41a9-8516-c0c9d869bc8b",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "TUI_WARMUP",
+                        "text_elements": []
+                      }
+                    ]
+                  },
+                  {
+                    "type": "agentMessage",
+                    "id": "msg_fixture",
+                    "text": "SYNTHETIC_ACK",
+                    "phase": null,
+                    "memoryCitation": null,
+                    "delivery": null,
+                    "questions": null
+                  }
+                ],
+                "itemsView": "full",
+                "status": "completed",
+                "error": null,
+                "startedAt": 1791116589,
+                "completedAt": 1791116589,
+                "durationMs": 293
+              }
+            ]
+          },
+          "model": "gpt-6.1-sol",
+          "modelProvider": "synthetic",
+          "serviceTier": "default",
+          "disabledPluginIds": [],
+          "cwd": "<FIXTURE>/work",
+          "runtimeWorkspaceRoots": [
+            "<FIXTURE>/work"
+          ],
+          "instructionSources": [],
+          "approvalPolicy": "on-request",
+          "approvalsReviewer": "user",
+          "sandbox": {
+            "type": "workspaceWrite",
+            "writableRoots": [],
+            "networkAccess": false,
+            "excludeTmpdirEnvVar": false,
+            "excludeSlashTmp": false
+          },
+          "activePermissionProfile": {
+            "id": ":workspace",
+            "extends": null
+          },
+          "reasoningEffort": null,
+          "collaborationMode": {
+            "mode": "default",
+            "settings": {
+              "model": "gpt-6.1-sol",
+              "reasoning_effort": null,
+              "developer_instructions": "# Collaboration Mode: Default\n\nYou are now in Default mode. Any previous instructions for other modes (e.g. Plan mode) are no longer active.\n\nYour active mode changes only when new developer instructions with a different `<collaboration_mode>...</collaboration_mode>` change it; user requests or tool descriptions do not change mode by themselves. Known mode names are Default and Plan.\n\n## request_user_input availability\n\nUse the `request_user_input` tool only when it is listed in the available tools for this turn.\n\nIn Default mode, strongly prefer making reasonable assumptions and executing the user's request rather than stopping to ask questions.\n\nUse the `request_user_input` tool only for optional questions where the answer would materially improve the quality of the work.\n\nIf `request_user_input` returns no answers, continue with best judgment instead of asking again or treating the turn as blocked.\n\nNever use the `request_user_input` tool for permission requests or permission-related escalations.\n\nIf explicit user input is required for another reason before progress can safely continue, do not use the `request_user_input` tool. Ask the user directly with one concise plain-text question instead. Never write a multiple choice question as a textual assistant message.\n"
+            }
+          },
+          "multiAgentMode": "explicitRequestOnly",
+          "initialTurnsPage": null,
+          "turnsBackwardsCursor": "{\"requestedThreadId\":\"01a106de-39e1-7790-a243-946983d88e39\",\"rolloutOrdinal\":1,\"includeAnchor\":true,\"scope\":{\"kind\":\"turns\"}}",
+          "itemsBackwardsCursor": "{\"requestedThreadId\":\"01a106de-39e1-7790-a243-946983d88e39\",\"rolloutOrdinal\":10,\"includeAnchor\":true,\"scope\":{\"kind\":\"itemsByCreatedAtOrdinal\"}}"
+        }
+      }
+    },
+    {
+      "client": "default-observer",
+      "direction": "receive",
+      "frame": {
+        "method": "thread/tokenUsage/updated",
+        "params": {
+          "threadId": "01a106de-39e1-7790-a243-946983d88e39",
+          "turnId": "01a106de-3a59-7e30-9aa7-e3e6bbf6d23d",
+          "tokenUsage": {
+            "total": {
+              "totalTokens": 8,
+              "inputTokens": 5,
+              "cachedInputTokens": 0,
+              "cacheWriteInputTokens": 0,
+              "outputTokens": 3,
+              "reasoningOutputTokens": 0
+            },
+            "last": {
+              "totalTokens": 8,
+              "inputTokens": 5,
+              "cachedInputTokens": 0,
+              "cacheWriteInputTokens": 0,
+              "outputTokens": 3,
+              "reasoningOutputTokens": 0
+            },
+            "modelContextWindow": 258400
+          }
+        },
+        "emittedAtMs": 1791116590001
+      }
+    },
+    {
+      "client": "default-observer",
+      "direction": "receive",
+      "frame": {
+        "method": "thread/goal/cleared",
+        "params": {
+          "threadId": "01a106de-39e1-7790-a243-946983d88e39"
+        },
+        "emittedAtMs": 1791116590002
+      }
+    },
+    {
+      "client": "default-observer",
+      "direction": "send",
+      "frame": {
+        "id": 104,
+        "method": "turn/start",
+        "params": {
+          "threadId": "01a106de-39e1-7790-a243-946983d88e39",
+          "input": [
+            {
+              "type": "text",
+              "text": "DEFAULT_APPROVAL"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "client": "default-observer",
+      "direction": "receive",
+      "frame": {
+        "id": 104,
+        "result": {
+          "turn": {
+            "id": "01a106de-3bb4-7033-98b3-2a92f97661c5",
+            "items": [],
+            "itemsView": "notLoaded",
+            "status": "inProgress",
+            "error": null,
+            "startedAt": null,
+            "completedAt": null,
+            "durationMs": null
+          }
+        }
+      }
+    },
+    {
+      "client": "default-observer",
+      "direction": "receive",
+      "frame": {
+        "method": "thread/status/changed",
+        "params": {
+          "threadId": "01a106de-39e1-7790-a243-946983d88e39",
+          "status": {
+            "type": "active",
+            "activeFlags": []
+          }
+        },
+        "emittedAtMs": 1791116590026
+      }
+    },
+    {
+      "client": "default-observer",
+      "direction": "receive",
+      "frame": {
+        "method": "turn/started",
+        "params": {
+          "threadId": "01a106de-39e1-7790-a243-946983d88e39",
+          "turn": {
+            "id": "01a106de-3bb4-7033-98b3-2a92f97661c5",
+            "items": [],
+            "itemsView": "notLoaded",
+            "status": "inProgress",
+            "error": null,
+            "startedAt": 1791116590,
+            "completedAt": null,
+            "durationMs": null
+          }
+        },
+        "emittedAtMs": 1791116590026
+      }
+    },
+    {
+      "client": "default-observer",
+      "direction": "receive",
+      "frame": {
+        "method": "item/started",
+        "params": {
+          "item": {
+            "type": "userMessage",
+            "id": "01a106de-3bea-7dc0-ade9-20b387b280f6",
+            "clientId": null,
+            "content": [
+              {
+                "type": "text",
+                "text": "DEFAULT_APPROVAL",
+                "text_elements": []
+              }
+            ]
+          },
+          "threadId": "01a106de-39e1-7790-a243-946983d88e39",
+          "turnId": "01a106de-3bb4-7033-98b3-2a92f97661c5",
+          "startedAtMs": 1791116590063
+        },
+        "emittedAtMs": 1791116590063
+      }
+    },
+    {
+      "client": "default-observer",
+      "direction": "receive",
+      "frame": {
+        "method": "item/completed",
+        "params": {
+          "item": {
+            "type": "userMessage",
+            "id": "01a106de-3bea-7dc0-ade9-20b387b280f6",
+            "clientId": null,
+            "content": [
+              {
+                "type": "text",
+                "text": "DEFAULT_APPROVAL",
+                "text_elements": []
+              }
+            ]
+          },
+          "threadId": "01a106de-39e1-7790-a243-946983d88e39",
+          "turnId": "01a106de-3bb4-7033-98b3-2a92f97661c5",
+          "completedAtMs": 1791116590063
+        },
+        "emittedAtMs": 1791116590073
+      }
+    },
+    {
+      "client": "default-observer",
+      "direction": "receive",
+      "frame": {
+        "method": "thread/started",
+        "params": {
+          "thread": {
+            "id": "01a106de-3c2c-7291-b234-13d4ff2e7371",
+            "environments": [],
+            "extra": null,
+            "sessionId": "01a106de-3c2c-7291-b234-13d4ff2e7371",
+            "forkedFromId": null,
+            "parentThreadId": null,
+            "preview": "",
+            "ephemeral": true,
+            "section": null,
+            "sectionEnteredAt": null,
+            "projectId": null,
+            "historyMode": "paginated",
+            "modelProvider": "synthetic",
+            "model": "gpt-6.1-sol",
+            "reasoningEffort": null,
+            "createdAt": 1791116590,
+            "updatedAt": 1791116590,
+            "recencyAt": 1791116590,
+            "status": {
+              "type": "idle"
+            },
+            "path": null,
+            "cwd": "<FIXTURE>/work",
+            "cliVersion": "0.160.0",
+            "originator": "codex-tui",
+            "source": "vscode",
+            "canAcceptDirectInput": true,
+            "threadSource": "thread_title",
+            "agentNickname": null,
+            "agentRole": null,
+            "gitInfo": null,
+            "name": null,
+            "daybreakEnabled": null,
+            "turns": []
+          }
+        },
+        "emittedAtMs": 1791116590159
+      }
+    },
+    {
+      "client": "default-observer",
+      "direction": "receive",
+      "frame": {
+        "method": "thread/status/changed",
+        "params": {
+          "threadId": "01a106de-3c2c-7291-b234-13d4ff2e7371",
+          "status": {
+            "type": "active",
+            "activeFlags": []
+          }
+        },
+        "emittedAtMs": 1791116590171
+      }
+    },
+    {
+      "client": "default-observer",
+      "direction": "receive",
+      "frame": {
+        "method": "thread/status/changed",
+        "params": {
+          "threadId": "01a106de-39e1-7790-a243-946983d88e39",
+          "status": {
+            "type": "active",
+            "activeFlags": [
+              "waitingOnApproval"
+            ]
+          }
+        },
+        "emittedAtMs": 1791116590210
+      }
+    },
+    {
+      "client": "default-observer",
+      "direction": "receive",
+      "frame": {
+        "method": "item/started",
+        "params": {
+          "item": {
+            "type": "commandExecution",
+            "id": "call_fixture",
+            "pluginId": null,
+            "scriptPath": null,
+            "command": "/bin/bash -lc 'printf SEMON_APPROVAL_PROBE'",
+            "cwd": "<FIXTURE>/work",
+            "processId": null,
+            "source": "agent",
+            "status": "inProgress",
+            "commandActions": [
+              {
+                "type": "unknown",
+                "command": "printf SEMON_APPROVAL_PROBE"
+              }
+            ],
+            "aggregatedOutput": null,
+            "exitCode": null,
+            "durationMs": null
+          },
+          "threadId": "01a106de-39e1-7790-a243-946983d88e39",
+          "turnId": "01a106de-3bb4-7033-98b3-2a92f97661c5",
+          "startedAtMs": 1791116590212
+        },
+        "emittedAtMs": 1791116590212
+      }
+    },
+    {
+      "client": "default-observer",
+      "direction": "receive",
+      "frame": {
+        "method": "item/commandExecution/requestApproval",
+        "id": 0,
+        "params": {
+          "kind": "command",
+          "threadId": "01a106de-39e1-7790-a243-946983d88e39",
+          "turnId": "01a106de-3bb4-7033-98b3-2a92f97661c5",
+          "itemId": "call_fixture",
+          "startedAtMs": 1791116590210,
+          "environmentId": "local",
+          "reason": "Terminal attachment fixture",
+          "command": "/bin/bash -lc 'printf SEMON_APPROVAL_PROBE'",
+          "cwd": "<FIXTURE>/work",
+          "commandActions": [
+            {
+              "type": "unknown",
+              "command": "printf SEMON_APPROVAL_PROBE"
+            }
+          ],
+          "proposedExecpolicyAmendment": [
+            "printf",
+            "SEMON_APPROVAL_PROBE"
+          ],
+          "availableDecisions": [
+            "accept",
+            {
+              "acceptWithExecpolicyAmendment": {
+                "execpolicy_amendment": [
+                  "printf",
+                  "SEMON_APPROVAL_PROBE"
+                ]
+              }
+            },
+            "cancel"
+          ]
+        }
+      }
+    },
+    {
+      "client": "default-observer",
+      "direction": "receive",
+      "frame": {
+        "method": "thread/status/changed",
+        "params": {
+          "threadId": "01a106de-3c2c-7291-b234-13d4ff2e7371",
+          "status": {
+            "type": "idle"
+          }
+        },
+        "emittedAtMs": 1791116590226
+      }
+    },
+    {
+      "client": "default-observer",
+      "direction": "receive",
+      "frame": {
+        "method": "serverRequest/resolved",
+        "params": {
+          "threadId": "01a106de-39e1-7790-a243-946983d88e39",
+          "requestId": 0
+        },
+        "emittedAtMs": 1791116590269
+      }
+    },
+    {
+      "client": "default-observer",
+      "direction": "receive",
+      "frame": {
+        "method": "item/completed",
+        "params": {
+          "item": {
+            "type": "commandExecution",
+            "id": "call_fixture",
+            "pluginId": null,
+            "scriptPath": null,
+            "command": "/bin/bash -lc 'printf SEMON_APPROVAL_PROBE'",
+            "cwd": "<FIXTURE>/work",
+            "processId": null,
+            "source": "agent",
+            "status": "declined",
+            "commandActions": [
+              {
+                "type": "unknown",
+                "command": "printf SEMON_APPROVAL_PROBE"
+              }
+            ],
+            "aggregatedOutput": null,
+            "exitCode": null,
+            "durationMs": null
+          },
+          "threadId": "01a106de-39e1-7790-a243-946983d88e39",
+          "turnId": "01a106de-3bb4-7033-98b3-2a92f97661c5",
+          "completedAtMs": 1791116590269
+        },
+        "emittedAtMs": 1791116590269
+      }
+    },
+    {
+      "client": "default-observer",
+      "direction": "receive",
+      "frame": {
+        "method": "thread/status/changed",
+        "params": {
+          "threadId": "01a106de-39e1-7790-a243-946983d88e39",
+          "status": {
+            "type": "active",
+            "activeFlags": []
+          }
+        },
+        "emittedAtMs": 1791116590269
+      }
+    },
+    {
+      "client": "default-observer",
+      "direction": "receive",
+      "frame": {
+        "method": "thread/tokenUsage/updated",
+        "params": {
+          "threadId": "01a106de-39e1-7790-a243-946983d88e39",
+          "turnId": "01a106de-3bb4-7033-98b3-2a92f97661c5",
+          "tokenUsage": {
+            "total": {
+              "totalTokens": 16,
+              "inputTokens": 10,
+              "cachedInputTokens": 0,
+              "cacheWriteInputTokens": 0,
+              "outputTokens": 6,
+              "reasoningOutputTokens": 0
+            },
+            "last": {
+              "totalTokens": 8,
+              "inputTokens": 5,
+              "cachedInputTokens": 0,
+              "cacheWriteInputTokens": 0,
+              "outputTokens": 3,
+              "reasoningOutputTokens": 0
+            },
+            "modelContextWindow": 258400
+          }
+        },
+        "emittedAtMs": 1791116590284
+      }
+    },
+    {
+      "client": "default-observer",
+      "direction": "receive",
+      "frame": {
+        "method": "account/rateLimits/updated",
+        "params": {
+          "rateLimits": {
+            "limitId": "codex",
+            "limitName": null,
+            "normalModelSlug": null,
+            "primary": null,
+            "secondary": null,
+            "credits": null,
+            "individualLimit": null,
+            "spendControlReached": null,
+            "planType": null,
+            "rateLimitReachedType": null
+          }
+        },
+        "emittedAtMs": 1791116590284
+      }
+    },
+    {
+      "client": "default-observer",
+      "direction": "receive",
+      "frame": {
+        "method": "thread/status/changed",
+        "params": {
+          "threadId": "01a106de-39e1-7790-a243-946983d88e39",
+          "status": {
+            "type": "idle"
+          }
+        },
+        "emittedAtMs": 1791116590316
+      }
+    },
+    {
+      "client": "default-observer",
+      "direction": "receive",
+      "frame": {
+        "method": "turn/completed",
+        "params": {
+          "threadId": "01a106de-39e1-7790-a243-946983d88e39",
+          "turn": {
+            "id": "01a106de-3bb4-7033-98b3-2a92f97661c5",
+            "items": [],
+            "itemsView": "notLoaded",
+            "status": "interrupted",
+            "error": null,
+            "startedAt": 1791116590,
+            "completedAt": 1791116590,
+            "durationMs": 298
+          }
+        },
+        "emittedAtMs": 1791116590316
+      }
+    },
+    {
+      "client": "foreground-owner",
+      "direction": "send",
+      "frame": {
+        "id": 101,
+        "method": "initialize",
+        "params": {
+          "clientInfo": {
+            "name": "semon_qualification",
+            "version": "1"
+          },
+          "capabilities": {
+            "experimentalApi": true
+          }
+        }
+      }
+    },
+    {
+      "client": "foreground-owner",
+      "direction": "receive",
+      "frame": {
+        "id": 101,
+        "result": {
+          "userAgent": "semon_qualification/0.160.0 (Debian 13.0.0; x86_64) xterm-256color (semon_qualification; 1)",
+          "codexHome": "<FIXTURE>/home",
+          "platformFamily": "unix",
+          "platformOs": "linux"
+        }
+      }
+    },
+    {
+      "client": "foreground-owner",
+      "direction": "receive",
+      "frame": {
+        "method": "remoteControl/status/changed",
+        "params": {
+          "status": "disabled",
+          "serverName": "af23e224fc5e",
+          "installationId": "f30e77ed-5ca6-4470-996c-196aaea5a182",
+          "environmentId": null
+        },
+        "emittedAtMs": 1791116590606
+      }
+    },
+    {
+      "client": "foreground-owner",
+      "direction": "send",
+      "frame": {
+        "method": "initialized"
+      }
+    },
+    {
+      "client": "foreground-owner",
+      "direction": "send",
+      "frame": {
+        "id": 102,
+        "method": "thread/start",
+        "params": {
+          "cwd": "<FIXTURE>/work",
+          "approvalPolicy": "on-request",
+          "sandbox": "read-only"
+        }
+      }
+    },
+    {
+      "client": "foreground-owner",
+      "direction": "receive",
+      "frame": {
+        "id": 102,
+        "result": {
+          "thread": {
+            "id": "01a106de-3e16-7d73-b31e-8dd94a702659",
+            "environments": [
+              {
+                "environmentId": "local",
+                "cwd": "<FIXTURE>/work",
+                "runtimeWorkspaceRoots": [
+                  "<FIXTURE>/work"
+                ]
+              }
+            ],
+            "extra": null,
+            "sessionId": "01a106de-3e16-7d73-b31e-8dd94a702659",
+            "forkedFromId": null,
+            "parentThreadId": null,
+            "preview": "",
+            "ephemeral": false,
+            "section": null,
+            "sectionEnteredAt": null,
+            "projectId": null,
+            "historyMode": "paginated",
+            "modelProvider": "synthetic",
+            "model": "gpt-6.1-sol",
+            "reasoningEffort": null,
+            "createdAt": 1791116590,
+            "updatedAt": 1791116590,
+            "recencyAt": 1791116590,
+            "status": {
+              "type": "idle"
+            },
+            "path": "<FIXTURE>/home/sessions/2026/10/04/rollout-2026-10-04T12-23-10-01a106de-3e16-7d73-b31e-8dd94a702659.jsonl",
+            "cwd": "<FIXTURE>/work",
+            "cliVersion": "0.160.0",
+            "originator": "semon_qualification",
+            "source": "vscode",
+            "canAcceptDirectInput": true,
+            "threadSource": null,
+            "agentNickname": null,
+            "agentRole": null,
+            "gitInfo": null,
+            "name": null,
+            "daybreakEnabled": null,
+            "turns": []
+          },
+          "model": "gpt-6.1-sol",
+          "modelProvider": "synthetic",
+          "serviceTier": null,
+          "disabledPluginIds": [],
+          "cwd": "<FIXTURE>/work",
+          "runtimeWorkspaceRoots": [
+            "<FIXTURE>/work"
+          ],
+          "instructionSources": [],
+          "approvalPolicy": "on-request",
+          "approvalsReviewer": "user",
+          "sandbox": {
+            "type": "readOnly",
+            "networkAccess": false
+          },
+          "activePermissionProfile": null,
+          "reasoningEffort": null,
+          "multiAgentMode": "explicitRequestOnly"
+        }
+      }
+    },
+    {
+      "client": "foreground-owner",
+      "direction": "receive",
+      "frame": {
+        "method": "thread/started",
+        "params": {
+          "thread": {
+            "id": "01a106de-3e16-7d73-b31e-8dd94a702659",
+            "environments": [
+              {
+                "environmentId": "local",
+                "cwd": "<FIXTURE>/work",
+                "runtimeWorkspaceRoots": [
+                  "<FIXTURE>/work"
+                ]
+              }
+            ],
+            "extra": null,
+            "sessionId": "01a106de-3e16-7d73-b31e-8dd94a702659",
+            "forkedFromId": null,
+            "parentThreadId": null,
+            "preview": "",
+            "ephemeral": false,
+            "section": null,
+            "sectionEnteredAt": null,
+            "projectId": null,
+            "historyMode": "paginated",
+            "modelProvider": "synthetic",
+            "model": "gpt-6.1-sol",
+            "reasoningEffort": null,
+            "createdAt": 1791116590,
+            "updatedAt": 1791116590,
+            "recencyAt": 1791116590,
+            "status": {
+              "type": "idle"
+            },
+            "path": "<FIXTURE>/home/sessions/2026/10/04/rollout-2026-10-04T12-23-10-01a106de-3e16-7d73-b31e-8dd94a702659.jsonl",
+            "cwd": "<FIXTURE>/work",
+            "cliVersion": "0.160.0",
+            "originator": "semon_qualification",
+            "source": "vscode",
+            "canAcceptDirectInput": true,
+            "threadSource": null,
+            "agentNickname": null,
+            "agentRole": null,
+            "gitInfo": null,
+            "name": null,
+            "daybreakEnabled": null,
+            "turns": []
+          }
+        },
+        "emittedAtMs": 1791116590644
+      }
+    },
+    {
+      "client": "foreground-owner",
+      "direction": "send",
+      "frame": {
+        "id": 103,
+        "method": "turn/start",
+        "params": {
+          "threadId": "01a106de-3e16-7d73-b31e-8dd94a702659",
+          "input": [
+            {
+              "type": "text",
+              "text": "FOREGROUND_WARMUP"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "client": "foreground-owner",
+      "direction": "receive",
+      "frame": {
+        "id": 103,
+        "result": {
+          "turn": {
+            "id": "01a106de-3e39-7e12-b168-4b563a89aca6",
+            "items": [],
+            "itemsView": "notLoaded",
+            "status": "inProgress",
+            "error": null,
+            "startedAt": null,
+            "completedAt": null,
+            "durationMs": null
+          }
+        }
+      }
+    },
+    {
+      "client": "foreground-owner",
+      "direction": "receive",
+      "frame": {
+        "method": "thread/status/changed",
+        "params": {
+          "threadId": "01a106de-3e16-7d73-b31e-8dd94a702659",
+          "status": {
+            "type": "active",
+            "activeFlags": []
+          }
+        },
+        "emittedAtMs": 1791116590672
+      }
+    },
+    {
+      "client": "foreground-owner",
+      "direction": "receive",
+      "frame": {
+        "method": "turn/started",
+        "params": {
+          "threadId": "01a106de-3e16-7d73-b31e-8dd94a702659",
+          "turn": {
+            "id": "01a106de-3e39-7e12-b168-4b563a89aca6",
+            "items": [],
+            "itemsView": "notLoaded",
+            "status": "inProgress",
+            "error": null,
+            "startedAt": 1791116590,
+            "completedAt": null,
+            "durationMs": null
+          }
+        },
+        "emittedAtMs": 1791116590672
+      }
+    },
+    {
+      "client": "foreground-owner",
+      "direction": "receive",
+      "frame": {
+        "method": "item/started",
+        "params": {
+          "item": {
+            "type": "userMessage",
+            "id": "01a106de-3e61-74d2-97cd-caddd471c8bd",
+            "clientId": null,
+            "content": [
+              {
+                "type": "text",
+                "text": "FOREGROUND_WARMUP",
+                "text_elements": []
+              }
+            ]
+          },
+          "threadId": "01a106de-3e16-7d73-b31e-8dd94a702659",
+          "turnId": "01a106de-3e39-7e12-b168-4b563a89aca6",
+          "startedAtMs": 1791116590691
+        },
+        "emittedAtMs": 1791116590691
+      }
+    },
+    {
+      "client": "foreground-owner",
+      "direction": "receive",
+      "frame": {
+        "method": "item/completed",
+        "params": {
+          "item": {
+            "type": "userMessage",
+            "id": "01a106de-3e61-74d2-97cd-caddd471c8bd",
+            "clientId": null,
+            "content": [
+              {
+                "type": "text",
+                "text": "FOREGROUND_WARMUP",
+                "text_elements": []
+              }
+            ]
+          },
+          "threadId": "01a106de-3e16-7d73-b31e-8dd94a702659",
+          "turnId": "01a106de-3e39-7e12-b168-4b563a89aca6",
+          "completedAtMs": 1791116590691
+        },
+        "emittedAtMs": 1791116590695
+      }
+    },
+    {
+      "client": "foreground-owner",
+      "direction": "receive",
+      "frame": {
+        "method": "item/started",
+        "params": {
+          "item": {
+            "type": "agentMessage",
+            "id": "msg_fixture",
+            "text": "SYNTHETIC_ACK",
+            "phase": null,
+            "memoryCitation": null,
+            "delivery": null,
+            "questions": null
+          },
+          "threadId": "01a106de-3e16-7d73-b31e-8dd94a702659",
+          "turnId": "01a106de-3e39-7e12-b168-4b563a89aca6",
+          "startedAtMs": 1791116590717
+        },
+        "emittedAtMs": 1791116590717
+      }
+    },
+    {
+      "client": "foreground-owner",
+      "direction": "receive",
+      "frame": {
+        "method": "item/completed",
+        "params": {
+          "item": {
+            "type": "agentMessage",
+            "id": "msg_fixture",
+            "text": "SYNTHETIC_ACK",
+            "phase": null,
+            "memoryCitation": null,
+            "delivery": null,
+            "questions": null
+          },
+          "threadId": "01a106de-3e16-7d73-b31e-8dd94a702659",
+          "turnId": "01a106de-3e39-7e12-b168-4b563a89aca6",
+          "completedAtMs": 1791116590717
+        },
+        "emittedAtMs": 1791116590719
+      }
+    },
+    {
+      "client": "foreground-owner",
+      "direction": "receive",
+      "frame": {
+        "method": "thread/tokenUsage/updated",
+        "params": {
+          "threadId": "01a106de-3e16-7d73-b31e-8dd94a702659",
+          "turnId": "01a106de-3e39-7e12-b168-4b563a89aca6",
+          "tokenUsage": {
+            "total": {
+              "totalTokens": 8,
+              "inputTokens": 5,
+              "cachedInputTokens": 0,
+              "cacheWriteInputTokens": 0,
+              "outputTokens": 3,
+              "reasoningOutputTokens": 0
+            },
+            "last": {
+              "totalTokens": 8,
+              "inputTokens": 5,
+              "cachedInputTokens": 0,
+              "cacheWriteInputTokens": 0,
+              "outputTokens": 3,
+              "reasoningOutputTokens": 0
+            },
+            "modelContextWindow": 258400
+          }
+        },
+        "emittedAtMs": 1791116590724
+      }
+    },
+    {
+      "client": "foreground-owner",
+      "direction": "receive",
+      "frame": {
+        "method": "account/rateLimits/updated",
+        "params": {
+          "rateLimits": {
+            "limitId": "codex",
+            "limitName": null,
+            "normalModelSlug": null,
+            "primary": null,
+            "secondary": null,
+            "credits": null,
+            "individualLimit": null,
+            "spendControlReached": null,
+            "planType": null,
+            "rateLimitReachedType": null
+          }
+        },
+        "emittedAtMs": 1791116590724
+      }
+    },
+    {
+      "client": "foreground-owner",
+      "direction": "receive",
+      "frame": {
+        "method": "thread/status/changed",
+        "params": {
+          "threadId": "01a106de-3e16-7d73-b31e-8dd94a702659",
+          "status": {
+            "type": "idle"
+          }
+        },
+        "emittedAtMs": 1791116590728
+      }
+    },
+    {
+      "client": "foreground-owner",
+      "direction": "receive",
+      "frame": {
+        "method": "turn/completed",
+        "params": {
+          "threadId": "01a106de-3e16-7d73-b31e-8dd94a702659",
+          "turn": {
+            "id": "01a106de-3e39-7e12-b168-4b563a89aca6",
+            "items": [
+              {
+                "type": "agentMessage",
+                "id": "msg_fixture",
+                "text": "SYNTHETIC_ACK",
+                "phase": null,
+                "memoryCitation": null,
+                "delivery": null,
+                "questions": null
+              }
+            ],
+            "itemsView": "summary",
+            "status": "completed",
+            "error": null,
+            "startedAt": 1791116590,
+            "completedAt": 1791116590,
+            "durationMs": 75
+          }
+        },
+        "emittedAtMs": 1791116590728
+      }
+    },
+    {
+      "client": "foreground-owner",
+      "direction": "receive",
+      "frame": {
+        "method": "thread/goal/cleared",
+        "params": {
+          "threadId": "01a106de-3e16-7d73-b31e-8dd94a702659"
+        },
+        "emittedAtMs": 1791116591175
+      }
+    },
+    {
+      "client": "foreground-owner",
+      "direction": "send",
+      "frame": {
+        "id": 104,
+        "method": "turn/start",
+        "params": {
+          "threadId": "01a106de-3e16-7d73-b31e-8dd94a702659",
+          "input": [
+            {
+              "type": "text",
+              "text": "FOREGROUND_APPROVAL"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "client": "foreground-owner",
+      "direction": "receive",
+      "frame": {
+        "id": 104,
+        "result": {
+          "turn": {
+            "id": "01a106de-4083-77e0-a4ff-989bd7f656a4",
+            "items": [],
+            "itemsView": "notLoaded",
+            "status": "inProgress",
+            "error": null,
+            "startedAt": null,
+            "completedAt": null,
+            "durationMs": null
+          }
+        }
+      }
+    },
+    {
+      "client": "foreground-owner",
+      "direction": "receive",
+      "frame": {
+        "method": "thread/status/changed",
+        "params": {
+          "threadId": "01a106de-3e16-7d73-b31e-8dd94a702659",
+          "status": {
+            "type": "active",
+            "activeFlags": []
+          }
+        },
+        "emittedAtMs": 1791116591244
+      }
+    },
+    {
+      "client": "foreground-owner",
+      "direction": "receive",
+      "frame": {
+        "method": "turn/started",
+        "params": {
+          "threadId": "01a106de-3e16-7d73-b31e-8dd94a702659",
+          "turn": {
+            "id": "01a106de-4083-77e0-a4ff-989bd7f656a4",
+            "items": [],
+            "itemsView": "notLoaded",
+            "status": "inProgress",
+            "error": null,
+            "startedAt": 1791116591,
+            "completedAt": null,
+            "durationMs": null
+          }
+        },
+        "emittedAtMs": 1791116591244
+      }
+    },
+    {
+      "client": "foreground-owner",
+      "direction": "receive",
+      "frame": {
+        "method": "item/started",
+        "params": {
+          "item": {
+            "type": "userMessage",
+            "id": "01a106de-40ab-74b3-bf48-f9be3a8f4956",
+            "clientId": null,
+            "content": [
+              {
+                "type": "text",
+                "text": "FOREGROUND_APPROVAL",
+                "text_elements": []
+              }
+            ]
+          },
+          "threadId": "01a106de-3e16-7d73-b31e-8dd94a702659",
+          "turnId": "01a106de-4083-77e0-a4ff-989bd7f656a4",
+          "startedAtMs": 1791116591285
+        },
+        "emittedAtMs": 1791116591286
+      }
+    },
+    {
+      "client": "foreground-owner",
+      "direction": "receive",
+      "frame": {
+        "method": "item/completed",
+        "params": {
+          "item": {
+            "type": "userMessage",
+            "id": "01a106de-40ab-74b3-bf48-f9be3a8f4956",
+            "clientId": null,
+            "content": [
+              {
+                "type": "text",
+                "text": "FOREGROUND_APPROVAL",
+                "text_elements": []
+              }
+            ]
+          },
+          "threadId": "01a106de-3e16-7d73-b31e-8dd94a702659",
+          "turnId": "01a106de-4083-77e0-a4ff-989bd7f656a4",
+          "completedAtMs": 1791116591285
+        },
+        "emittedAtMs": 1791116591294
+      }
+    },
+    {
+      "client": "foreground-owner",
+      "direction": "receive",
+      "frame": {
+        "method": "thread/status/changed",
+        "params": {
+          "threadId": "01a106de-3e16-7d73-b31e-8dd94a702659",
+          "status": {
+            "type": "active",
+            "activeFlags": [
+              "waitingOnApproval"
+            ]
+          }
+        },
+        "emittedAtMs": 1791116591409
+      }
+    },
+    {
+      "client": "foreground-owner",
+      "direction": "receive",
+      "frame": {
+        "method": "item/started",
+        "params": {
+          "item": {
+            "type": "commandExecution",
+            "id": "call_fixture",
+            "pluginId": null,
+            "scriptPath": null,
+            "command": "/bin/bash -lc 'printf SEMON_APPROVAL_PROBE'",
+            "cwd": "<FIXTURE>/work",
+            "processId": null,
+            "source": "agent",
+            "status": "inProgress",
+            "commandActions": [
+              {
+                "type": "unknown",
+                "command": "printf SEMON_APPROVAL_PROBE"
+              }
+            ],
+            "aggregatedOutput": null,
+            "exitCode": null,
+            "durationMs": null
+          },
+          "threadId": "01a106de-3e16-7d73-b31e-8dd94a702659",
+          "turnId": "01a106de-4083-77e0-a4ff-989bd7f656a4",
+          "startedAtMs": 1791116591411
+        },
+        "emittedAtMs": 1791116591411
+      }
+    },
+    {
+      "client": "foreground-owner",
+      "direction": "receive",
+      "frame": {
+        "method": "item/commandExecution/requestApproval",
+        "id": 0,
+        "params": {
+          "kind": "command",
+          "threadId": "01a106de-3e16-7d73-b31e-8dd94a702659",
+          "turnId": "01a106de-4083-77e0-a4ff-989bd7f656a4",
+          "itemId": "call_fixture",
+          "startedAtMs": 1791116591409,
+          "environmentId": "local",
+          "reason": "Shared server terminal fixture",
+          "command": "/bin/bash -lc 'printf SEMON_APPROVAL_PROBE'",
+          "cwd": "<FIXTURE>/work",
+          "commandActions": [
+            {
+              "type": "unknown",
+              "command": "printf SEMON_APPROVAL_PROBE"
+            }
+          ],
+          "proposedExecpolicyAmendment": [
+            "printf",
+            "SEMON_APPROVAL_PROBE"
+          ],
+          "availableDecisions": [
+            "accept",
+            {
+              "acceptWithExecpolicyAmendment": {
+                "execpolicy_amendment": [
+                  "printf",
+                  "SEMON_APPROVAL_PROBE"
+                ]
+              }
+            },
+            "cancel"
+          ]
+        }
+      }
+    },
+    {
+      "client": "foreground-owner",
+      "direction": "receive",
+      "frame": {
+        "method": "thread/started",
+        "params": {
+          "thread": {
+            "id": "01a106de-40fd-7022-89d7-a16b0b7ada07",
+            "environments": [],
+            "extra": null,
+            "sessionId": "01a106de-40fd-7022-89d7-a16b0b7ada07",
+            "forkedFromId": null,
+            "parentThreadId": null,
+            "preview": "",
+            "ephemeral": true,
+            "section": null,
+            "sectionEnteredAt": null,
+            "projectId": null,
+            "historyMode": "paginated",
+            "modelProvider": "synthetic",
+            "model": "gpt-6.1-sol",
+            "reasoningEffort": null,
+            "createdAt": 1791116591,
+            "updatedAt": 1791116591,
+            "recencyAt": 1791116591,
+            "status": {
+              "type": "idle"
+            },
+            "path": null,
+            "cwd": "<FIXTURE>/work",
+            "cliVersion": "0.160.0",
+            "originator": "semon_qualification",
+            "source": "vscode",
+            "canAcceptDirectInput": true,
+            "threadSource": "thread_title",
+            "agentNickname": null,
+            "agentRole": null,
+            "gitInfo": null,
+            "name": null,
+            "daybreakEnabled": null,
+            "turns": []
+          }
+        },
+        "emittedAtMs": 1791116591414
+      }
+    },
+    {
+      "client": "foreground-owner",
+      "direction": "receive",
+      "frame": {
+        "method": "thread/status/changed",
+        "params": {
+          "threadId": "01a106de-40fd-7022-89d7-a16b0b7ada07",
+          "status": {
+            "type": "active",
+            "activeFlags": []
+          }
+        },
+        "emittedAtMs": 1791116591446
+      }
+    },
+    {
+      "client": "foreground-owner",
+      "direction": "send",
+      "frame": {
+        "id": 0,
+        "result": {
+          "decision": "decline"
+        }
+      }
+    },
+    {
+      "client": "foreground-owner",
+      "direction": "receive",
+      "frame": {
+        "method": "serverRequest/resolved",
+        "params": {
+          "threadId": "01a106de-3e16-7d73-b31e-8dd94a702659",
+          "requestId": 0
+        },
+        "emittedAtMs": 1791116591464
+      }
+    },
+    {
+      "client": "foreground-owner",
+      "direction": "receive",
+      "frame": {
+        "method": "item/completed",
+        "params": {
+          "item": {
+            "type": "commandExecution",
+            "id": "call_fixture",
+            "pluginId": null,
+            "scriptPath": null,
+            "command": "/bin/bash -lc 'printf SEMON_APPROVAL_PROBE'",
+            "cwd": "<FIXTURE>/work",
+            "processId": null,
+            "source": "agent",
+            "status": "declined",
+            "commandActions": [
+              {
+                "type": "unknown",
+                "command": "printf SEMON_APPROVAL_PROBE"
+              }
+            ],
+            "aggregatedOutput": null,
+            "exitCode": null,
+            "durationMs": null
+          },
+          "threadId": "01a106de-3e16-7d73-b31e-8dd94a702659",
+          "turnId": "01a106de-4083-77e0-a4ff-989bd7f656a4",
+          "completedAtMs": 1791116591464
+        },
+        "emittedAtMs": 1791116591464
+      }
+    },
+    {
+      "client": "foreground-owner",
+      "direction": "receive",
+      "frame": {
+        "method": "thread/status/changed",
+        "params": {
+          "threadId": "01a106de-3e16-7d73-b31e-8dd94a702659",
+          "status": {
+            "type": "active",
+            "activeFlags": []
+          }
+        },
+        "emittedAtMs": 1791116591464
+      }
+    },
+    {
+      "client": "foreground-owner",
+      "direction": "receive",
+      "frame": {
+        "method": "thread/tokenUsage/updated",
+        "params": {
+          "threadId": "01a106de-3e16-7d73-b31e-8dd94a702659",
+          "turnId": "01a106de-4083-77e0-a4ff-989bd7f656a4",
+          "tokenUsage": {
+            "total": {
+              "totalTokens": 16,
+              "inputTokens": 10,
+              "cachedInputTokens": 0,
+              "cacheWriteInputTokens": 0,
+              "outputTokens": 6,
+              "reasoningOutputTokens": 0
+            },
+            "last": {
+              "totalTokens": 8,
+              "inputTokens": 5,
+              "cachedInputTokens": 0,
+              "cacheWriteInputTokens": 0,
+              "outputTokens": 3,
+              "reasoningOutputTokens": 0
+            },
+            "modelContextWindow": 258400
+          }
+        },
+        "emittedAtMs": 1791116591495
+      }
+    },
+    {
+      "client": "foreground-owner",
+      "direction": "receive",
+      "frame": {
+        "method": "account/rateLimits/updated",
+        "params": {
+          "rateLimits": {
+            "limitId": "codex",
+            "limitName": null,
+            "normalModelSlug": null,
+            "primary": null,
+            "secondary": null,
+            "credits": null,
+            "individualLimit": null,
+            "spendControlReached": null,
+            "planType": null,
+            "rateLimitReachedType": null
+          }
+        },
+        "emittedAtMs": 1791116591495
+      }
+    },
+    {
+      "client": "foreground-owner",
+      "direction": "receive",
+      "frame": {
+        "method": "thread/status/changed",
+        "params": {
+          "threadId": "01a106de-40fd-7022-89d7-a16b0b7ada07",
+          "status": {
+            "type": "idle"
+          }
+        },
+        "emittedAtMs": 1791116591506
+      }
+    },
+    {
+      "client": "foreground-owner",
+      "direction": "receive",
+      "frame": {
+        "method": "item/started",
+        "params": {
+          "item": {
+            "type": "agentMessage",
+            "id": "msg_fixture",
+            "text": "SYNTHETIC_ACK",
+            "phase": null,
+            "memoryCitation": null,
+            "delivery": null,
+            "questions": null
+          },
+          "threadId": "01a106de-3e16-7d73-b31e-8dd94a702659",
+          "turnId": "01a106de-4083-77e0-a4ff-989bd7f656a4",
+          "startedAtMs": 1791116591541
+        },
+        "emittedAtMs": 1791116591542
+      }
+    },
+    {
+      "client": "foreground-owner",
+      "direction": "receive",
+      "frame": {
+        "method": "item/completed",
+        "params": {
+          "item": {
+            "type": "agentMessage",
+            "id": "msg_fixture",
+            "text": "SYNTHETIC_ACK",
+            "phase": null,
+            "memoryCitation": null,
+            "delivery": null,
+            "questions": null
+          },
+          "threadId": "01a106de-3e16-7d73-b31e-8dd94a702659",
+          "turnId": "01a106de-4083-77e0-a4ff-989bd7f656a4",
+          "completedAtMs": 1791116591542
+        },
+        "emittedAtMs": 1791116591552
+      }
+    },
+    {
+      "client": "foreground-owner",
+      "direction": "receive",
+      "frame": {
+        "method": "thread/tokenUsage/updated",
+        "params": {
+          "threadId": "01a106de-3e16-7d73-b31e-8dd94a702659",
+          "turnId": "01a106de-4083-77e0-a4ff-989bd7f656a4",
+          "tokenUsage": {
+            "total": {
+              "totalTokens": 24,
+              "inputTokens": 15,
+              "cachedInputTokens": 0,
+              "cacheWriteInputTokens": 0,
+              "outputTokens": 9,
+              "reasoningOutputTokens": 0
+            },
+            "last": {
+              "totalTokens": 8,
+              "inputTokens": 5,
+              "cachedInputTokens": 0,
+              "cacheWriteInputTokens": 0,
+              "outputTokens": 3,
+              "reasoningOutputTokens": 0
+            },
+            "modelContextWindow": 258400
+          }
+        },
+        "emittedAtMs": 1791116591569
+      }
+    },
+    {
+      "client": "foreground-owner",
+      "direction": "receive",
+      "frame": {
+        "method": "account/rateLimits/updated",
+        "params": {
+          "rateLimits": {
+            "limitId": "codex",
+            "limitName": null,
+            "normalModelSlug": null,
+            "primary": null,
+            "secondary": null,
+            "credits": null,
+            "individualLimit": null,
+            "spendControlReached": null,
+            "planType": null,
+            "rateLimitReachedType": null
+          }
+        },
+        "emittedAtMs": 1791116591569
+      }
+    },
+    {
+      "client": "foreground-owner",
+      "direction": "receive",
+      "frame": {
+        "method": "thread/status/changed",
+        "params": {
+          "threadId": "01a106de-3e16-7d73-b31e-8dd94a702659",
+          "status": {
+            "type": "idle"
+          }
+        },
+        "emittedAtMs": 1791116591589
+      }
+    },
+    {
+      "client": "foreground-owner",
+      "direction": "receive",
+      "frame": {
+        "method": "turn/completed",
+        "params": {
+          "threadId": "01a106de-3e16-7d73-b31e-8dd94a702659",
+          "turn": {
+            "id": "01a106de-4083-77e0-a4ff-989bd7f656a4",
+            "items": [
+              {
+                "type": "agentMessage",
+                "id": "msg_fixture",
+                "text": "SYNTHETIC_ACK",
+                "phase": null,
+                "memoryCitation": null,
+                "delivery": null,
+                "questions": null
+              }
+            ],
+            "itemsView": "summary",
+            "status": "completed",
+            "error": null,
+            "startedAt": 1791116591,
+            "completedAt": 1791116591,
+            "durationMs": 348
+          }
+        },
+        "emittedAtMs": 1791116591589
+      }
+    },
+    {
+      "client": "foreground-owner",
+      "direction": "send",
+      "frame": {
+        "id": 105,
+        "method": "thread/read",
+        "params": {
+          "threadId": "01a106de-3e16-7d73-b31e-8dd94a702659",
+          "includeTurns": true
+        }
+      }
+    },
+    {
+      "client": "foreground-owner",
+      "direction": "receive",
+      "frame": {
+        "method": "deprecationNotice",
+        "params": {
+          "summary": "Full-history hydration is deprecated for paginated threads; omit `includeTurns` or set it to `false`, then page with `thread/turns/list` and `thread/items/list`.",
+          "details": null
+        },
+        "emittedAtMs": 1791116591600
+      }
+    },
+    {
+      "client": "foreground-owner",
+      "direction": "receive",
+      "frame": {
+        "id": 105,
+        "result": {
+          "thread": {
+            "id": "01a106de-3e16-7d73-b31e-8dd94a702659",
+            "environments": [
+              {
+                "environmentId": "local",
+                "cwd": "<FIXTURE>/work",
+                "runtimeWorkspaceRoots": [
+                  "<FIXTURE>/work"
+                ]
+              }
+            ],
+            "extra": null,
+            "sessionId": "01a106de-3e16-7d73-b31e-8dd94a702659",
+            "forkedFromId": null,
+            "parentThreadId": null,
+            "preview": "FOREGROUND_WARMUP",
+            "ephemeral": false,
+            "section": null,
+            "sectionEnteredAt": null,
+            "projectId": null,
+            "historyMode": "paginated",
+            "modelProvider": "synthetic",
+            "model": "gpt-6.1-sol",
+            "reasoningEffort": null,
+            "createdAt": 1791116590,
+            "updatedAt": 1791116591,
+            "recencyAt": 1791116591,
+            "status": {
+              "type": "idle"
+            },
+            "path": "<FIXTURE>/home/sessions/2026/10/04/rollout-2026-10-04T12-23-10-01a106de-3e16-7d73-b31e-8dd94a702659.jsonl",
+            "cwd": "<FIXTURE>/work",
+            "cliVersion": "0.160.0",
+            "originator": "semon_qualification",
+            "source": "vscode",
+            "canAcceptDirectInput": true,
+            "threadSource": null,
+            "agentNickname": null,
+            "agentRole": null,
+            "gitInfo": null,
+            "name": null,
+            "daybreakEnabled": null,
+            "turns": [
+              {
+                "id": "01a106de-3e39-7e12-b168-4b563a89aca6",
+                "items": [
+                  {
+                    "type": "userMessage",
+                    "id": "01a106de-3e61-74d2-97cd-caddd471c8bd",
+                    "clientId": null,
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "FOREGROUND_WARMUP",
+                        "text_elements": []
+                      }
+                    ]
+                  },
+                  {
+                    "type": "agentMessage",
+                    "id": "msg_fixture",
+                    "text": "SYNTHETIC_ACK",
+                    "phase": null,
+                    "memoryCitation": null,
+                    "delivery": null,
+                    "questions": null
+                  }
+                ],
+                "itemsView": "full",
+                "status": "completed",
+                "error": null,
+                "startedAt": 1791116590,
+                "completedAt": 1791116590,
+                "durationMs": 75
+              },
+              {
+                "id": "01a106de-4083-77e0-a4ff-989bd7f656a4",
+                "items": [
+                  {
+                    "type": "userMessage",
+                    "id": "01a106de-40ab-74b3-bf48-f9be3a8f4956",
+                    "clientId": null,
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "FOREGROUND_APPROVAL",
+                        "text_elements": []
+                      }
+                    ]
+                  },
+                  {
+                    "type": "agentMessage",
+                    "id": "msg_fixture",
+                    "text": "SYNTHETIC_ACK",
+                    "phase": null,
+                    "memoryCitation": null,
+                    "delivery": null,
+                    "questions": null
+                  }
+                ],
+                "itemsView": "full",
+                "status": "completed",
+                "error": null,
+                "startedAt": 1791116591,
+                "completedAt": 1791116591,
+                "durationMs": 348
+              }
+            ]
+          }
+        }
+      }
+    }
+  ],
+  "provider_calls": [
+    {
+      "model": "gpt-6.1-sol",
+      "output_feedback": []
+    },
+    {
+      "model": "gpt-6.1-sol",
+      "output_feedback": []
+    },
+    {
+      "model": "gpt-6.1-sol",
+      "output_feedback": []
+    },
+    {
+      "model": "gpt-6.1-sol",
+      "output_feedback": []
+    },
+    {
+      "model": "gpt-6.1-sol",
+      "output_feedback": []
+    },
+    {
+      "model": "gpt-6.1-sol",
+      "output_feedback": []
+    },
+    {
+      "model": "gpt-6.1-sol",
+      "output_feedback": []
+    },
+    {
+      "model": "gpt-6.1-sol",
+      "output_feedback": [
+        {
+          "type": "function_call_output",
+          "id": "fco_01a106de-4169-7b03-b951-7cf1e7895748",
+          "call_id": "call_fixture",
+          "output": "exec_command failed: CreateProcess { message: \"Rejected(\\\"rejected by user\\\")\" }"
+        }
+      ]
+    }
+  ],
+  "terminal_at_end": "\u001b]10;?\u001b\\\u001b]11;?\u001b\\   >_ OpenAI Codex (v0.160.0)     loading  Resuming session\u2026 \u203a Ask Codex to do anything   ~/semon-terminal-m5qjbmew/work\u001b]0;work\u0007  \u203a Ask Codex to do anything   GPT-6.1-Sol default \u00b7 ~/semon-terminal-m5qjbmew/work \u001bM\u001bM\u001bM\u001bM\u001bM\u001bM\u001bM\u001bM\u001bM\u001bM\u001bM\u001bM\u001bM\r\n\r\n  >_ OpenAI Codex (v0.160.0)\r\n     ~/semon-terminal-m5qjbmew/work\r\n\r\n  Tip: Use /title to choose what appears in your terminal\u2019s title.\r\n\r\n\r\n\u203a FOREGROUND_WARMUP\r\n\r\n\r\n\u2022 SYNTHETIC_ACK\r\n\r\n  Worked for <1s \u2022 12:23  \u203a Ask Codex to do anything   GPT-6.1-Sol default \u00b7 ~/semon-terminal-m5qjbmew/work \u001b]0;\u280b work\u0007 \u2022 Working (0s \u2022 esc to interrupt)  \u203a Ask Codex to do anything   GPT-6.1-Sol default \u00b7 ~/semon-terminal-m5qjbmew/work \u001b]0;\u2819 work\u0007\u001b]0;\u2819 \u2819 | work\u0007\u001bM\u001bM\u001bM\u001bM\r\n\r\n\r\n\u203a FOREGROUND_APPROVAL\r\n\u00b7\u2819 \u001b]0;\u2839 \u2839 | work\u0007\u001b]0;[ ! ] Action Required | \u2839 | work\u0007\r\n\r\n\r\n\r\n\r\n \u2022 Running printf SEMON_APPROVAL_PROBE    Would you like to run the following command?   Environment: local   Reason: Shared server terminal fixture   $ printf SEMON_APPROVAL_PROBE  \u203a 1. Yes, proceed (y)                                                                                                     2. Yes, and don't ask again for commands that start with `printf SEMON_APPROVAL_PROBE` (p)  3. No, and tell Codex what to do differently (esc)   Press enter to confirm or esc to cancel                                                                               \u001b]0;\u2839 \u2839 | work\u0007\u001bM\u001bM\u001bM\r\n\r\n\u2022 Ran printf SEMON_APPROVAL_PROBE\r\n  \u2514 (no output) \u2022 Working (0s \u2022 esc to interrupt)  \u203a Ask Codex to do anything   GPT-6.1-Sol default \u00b7 ~/semon-terminal-m5qjbmew/work \u00b7 \u2819 \u001b]0;\u2838 \u2838 | work\u0007 \u2022 Working (0s \u2022 esc to interrupt)  \u203a y    tab to queue message 100%contextleft\u001b]0;\u2838 work\u0007\u001bM\u001bM\r\n\r\n\u2022 SYNTHETIC_ACK  \u203a y    tab to queue message                                                                               100% context left \u001b]0;work\u0007\u001bM\u001bM\r\n\r\n  Worked for <1s \u2022 12:23GPT-6.1-Sol default \u00b7~/semon-terminal-m5qjbmew/work "
+}

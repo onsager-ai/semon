@@ -62,6 +62,18 @@ jobs:
       - name: Verify CLI fixture provenance and exact tool joins
         run: python3 -m unittest discover -s tests/spikes -p test_cli_fixtures.py -v
 
+      - name: Verify separate native Codex control evidence and provenance
+        run: python3 -m unittest discover -s tests/spikes -p test_control_fixtures.py -v
+
+      - name: Verify attachment against the actual pinned E2B SDK without provider calls
+        run: |
+          python3 -m venv "$RUNNER_TEMP/e2b-sdk"
+          "$RUNNER_TEMP/e2b-sdk/bin/pip" install --require-hashes -r scripts/e2b-requirements.txt
+          "$RUNNER_TEMP/e2b-sdk/bin/python" scripts/test-e2b-attach.py
+
+      - name: Verify managed guest private SDK boundary without provider calls
+        run: python3 scripts/test-e2b-managed.py
+
       - name: Verify bounded E2B inventory worker without provider calls
         run: python3 -m unittest discover -s tests/spikes -p 'test_e2b_*.py' -v
 

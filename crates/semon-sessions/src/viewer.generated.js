@@ -2989,6 +2989,188 @@ globalThis.__semonUIShared = __semonUIShared;
     };
   }
 
+  // shared-preact:preact/hooks
+  var useState = globalThis.__semonUIShared.hooks.useState;
+  var useEffect = globalThis.__semonUIShared.hooks.useEffect;
+  var useLayoutEffect = globalThis.__semonUIShared.hooks.useLayoutEffect;
+  var useReducer = globalThis.__semonUIShared.hooks.useReducer;
+  var useRef = globalThis.__semonUIShared.hooks.useRef;
+  var useMemo = globalThis.__semonUIShared.hooks.useMemo;
+  var useCallback = globalThis.__semonUIShared.hooks.useCallback;
+  var useContext = globalThis.__semonUIShared.hooks.useContext;
+  var useDebugValue = globalThis.__semonUIShared.hooks.useDebugValue;
+  var useErrorBoundary = globalThis.__semonUIShared.hooks.useErrorBoundary;
+  var useId = globalThis.__semonUIShared.hooks.useId;
+  var useImperativeHandle = globalThis.__semonUIShared.hooks.useImperativeHandle;
+
+  // src/lib/localControl.tsx
+  function visible(value) {
+    return String(value ?? "").replace(
+      /[\u00ad\u202a-\u202e\u2066-\u2069]/g,
+      (char) => "\\u" + char.charCodeAt(0).toString(16).padStart(4, "0")
+    );
+  }
+  function Question({ request, view }) {
+    const [answers, setAnswers] = useState({});
+    const params = request.payload.params;
+    const questions = params && typeof params === "object" && !Array.isArray(params) ? params.questions : null;
+    if (!Array.isArray(questions)) return /* @__PURE__ */ jsx("p", { children: "Unsupported native question. Answer in Codex." });
+    return /* @__PURE__ */ jsxs(
+      "form",
+      {
+        onSubmit: (event) => {
+          event.preventDefault();
+          const result = {};
+          for (const [id, value] of Object.entries(answers)) result[id] = [value];
+          view.answer(request, { answers: result });
+        },
+        children: [
+          questions.map((value) => {
+            if (!value || typeof value !== "object" || Array.isArray(value) || typeof value.id !== "string" || typeof value.question !== "string")
+              return null;
+            const id = String(value.id), label = visible(value.question);
+            return /* @__PURE__ */ jsxs("label", { children: [
+              label,
+              /* @__PURE__ */ jsx(
+                "input",
+                {
+                  "aria-label": label,
+                  value: answers[id] ?? "",
+                  list: "options-" + request.id + "-" + id,
+                  onInput: (event) => setAnswers({ ...answers, [id]: event.currentTarget.value })
+                }
+              ),
+              /* @__PURE__ */ jsx("datalist", { id: "options-" + request.id + "-" + id, children: Array.isArray(value.options) && value.options.map(
+                (option) => option && typeof option === "object" && !Array.isArray(option) && typeof option.label === "string" ? /* @__PURE__ */ jsx("option", { value: option.label }) : null
+              ) })
+            ] }, id);
+          }),
+          /* @__PURE__ */ jsx(
+            "button",
+            {
+              type: "submit",
+              disabled: view.busy || view.uncertain || !view.snapshot.capabilities.questions || !!request.reason || request.state.state !== "open" || request.remainingMs === 0,
+              children: "Answer"
+            }
+          )
+        ]
+      }
+    );
+  }
+  function Permission({ request }) {
+    const p = request.payload.params;
+    if (!p || typeof p !== "object" || Array.isArray(p))
+      return /* @__PURE__ */ jsx("p", { children: "Exact request is no longer retained." });
+    const item2 = request.payload.item;
+    const changes = item2 && typeof item2 === "object" && !Array.isArray(item2) ? item2.changes : null;
+    return /* @__PURE__ */ jsxs(Fragment2, { children: [
+      typeof p.command === "string" && /* @__PURE__ */ jsxs(Fragment2, { children: [
+        /* @__PURE__ */ jsx("pre", { children: visible(p.command) }),
+        /* @__PURE__ */ jsxs("p", { children: [
+          "Working directory: ",
+          visible(p.cwd)
+        ] })
+      ] }),
+      Array.isArray(changes) && changes.map(
+        (change) => change && typeof change === "object" && !Array.isArray(change) ? /* @__PURE__ */ jsxs("div", { children: [
+          /* @__PURE__ */ jsx("p", { children: visible(change.path) }),
+          /* @__PURE__ */ jsx("pre", { children: visible(change.diff) })
+        ] }) : null
+      ),
+      typeof p.reason === "string" && /* @__PURE__ */ jsx("p", { children: visible(p.reason) }),
+      typeof p.command !== "string" && !Array.isArray(changes) && /* @__PURE__ */ jsx("pre", { children: visible(JSON.stringify(request.payload, null, 2)) })
+    ] });
+  }
+  function LocalControl({ view }) {
+    const [text2, setText] = useState("");
+    const s = view.snapshot;
+    const pending = s.requests.filter((r) => r.state.state === "open" || r.state.state === "claimed");
+    const recent = s.requests.filter((r) => r.state.state !== "open" && r.state.state !== "claimed").slice(-10);
+    return /* @__PURE__ */ jsxs("section", { class: "local-control", "aria-label": "Local Codex control", children: [
+      /* @__PURE__ */ jsx("h2", { children: "Local Codex" }),
+      /* @__PURE__ */ jsxs("p", { children: [
+        s.connected ? "Connected" : "Disconnected",
+        s.activeTurn ? " \xB7 Active turn" : ""
+      ] }),
+      s.reason && /* @__PURE__ */ jsx("p", { children: s.reason }),
+      pending.map((request) => {
+        const supported = request.kind === "question" ? s.capabilities.questions : request.payload.method === "item/fileChange/requestApproval" ? s.capabilities.fileApproval : s.capabilities.commandApproval;
+        const disabled = view.busy || view.uncertain || !supported || !!request.reason || request.state.state !== "open" || request.remainingMs === 0;
+        return /* @__PURE__ */ jsxs("article", { children: [
+          /* @__PURE__ */ jsx("h3", { children: request.kind === "question" ? "Codex question" : "Codex permission" }),
+          request.reason && /* @__PURE__ */ jsx("p", { children: request.reason }),
+          request.state.state === "claimed" && /* @__PURE__ */ jsx("p", { children: "Response sent; waiting for Codex to answer or clear the request." }),
+          request.kind === "question" ? /* @__PURE__ */ jsx(Question, { request, view }) : /* @__PURE__ */ jsxs(Fragment2, { children: [
+            /* @__PURE__ */ jsx(Permission, { request }),
+            /* @__PURE__ */ jsxs("div", { children: [
+              /* @__PURE__ */ jsx(
+                "button",
+                {
+                  type: "button",
+                  disabled,
+                  onClick: () => view.answer(request, { decision: "allow" }),
+                  children: "Allow once"
+                }
+              ),
+              /* @__PURE__ */ jsx(
+                "button",
+                {
+                  type: "button",
+                  disabled,
+                  onClick: () => view.answer(request, { decision: "deny" }),
+                  children: "Deny"
+                }
+              )
+            ] })
+          ] })
+        ] }, request.id);
+      }),
+      /* @__PURE__ */ jsxs(
+        "form",
+        {
+          onSubmit: (event) => {
+            event.preventDefault();
+            view.send(text2);
+          },
+          children: [
+            /* @__PURE__ */ jsxs("label", { children: [
+              "Message to Codex",
+              /* @__PURE__ */ jsx("textarea", { value: text2, onInput: (event) => setText(event.currentTarget.value) })
+            ] }),
+            /* @__PURE__ */ jsx(
+              "button",
+              {
+                type: "submit",
+                disabled: view.busy || view.uncertain || !(s.activeTurn ? s.capabilities.steer : s.capabilities.input) || !text2.trim(),
+                children: s.activeTurn ? "Steer active turn" : "Send"
+              }
+            ),
+            /* @__PURE__ */ jsx(
+              "button",
+              {
+                type: "button",
+                disabled: view.busy || view.uncertain || !s.activeTurn || !s.capabilities.interrupt,
+                onClick: () => view.interrupt(),
+                children: "Interrupt active turn"
+              }
+            ),
+            (!s.connected || view.uncertain) && /* @__PURE__ */ jsx("button", { type: "button", disabled: view.busy, onClick: () => view.reconnect(), children: "Reconnect" })
+          ]
+        }
+      ),
+      view.note && /* @__PURE__ */ jsx("p", { role: "status", children: view.note }),
+      recent.length > 0 && /* @__PURE__ */ jsxs("details", { children: [
+        /* @__PURE__ */ jsx("summary", { children: "Recent requests" }),
+        /* @__PURE__ */ jsx("ul", { children: recent.map((r) => /* @__PURE__ */ jsxs("li", { children: [
+          r.kind === "question" ? "Question" : "Permission",
+          " \xB7",
+          " ",
+          r.state.reason === "answered_or_cleared" ? "Answered or cleared" : r.state.reason ?? r.state.state
+        ] }, r.id)) })
+      ] })
+    ] });
+  }
+
   // src/lib/application-view.tsx
   function ApplicationView({ children }) {
     return /* @__PURE__ */ jsx(Fragment2, { children });
@@ -3257,6 +3439,7 @@ globalThis.__semonUIShared = __semonUIShared;
           ] })
         ] })
       ] }),
+      snapshot.control && /* @__PURE__ */ jsx(LocalControl, { view: snapshot.control }),
       /* @__PURE__ */ jsx(Section, { heading: "Needs you", count: snapshot.waiting }),
       /* @__PURE__ */ jsxs("div", { class: "list", children: [
         snapshot.inbox.map((row) => /* @__PURE__ */ jsx(Inbox, { row, host: host2 }, row.id)),
@@ -3619,20 +3802,6 @@ globalThis.__semonUIShared = __semonUIShared;
       destroy: finish
     };
   }
-
-  // shared-preact:preact/hooks
-  var useState = globalThis.__semonUIShared.hooks.useState;
-  var useEffect = globalThis.__semonUIShared.hooks.useEffect;
-  var useLayoutEffect = globalThis.__semonUIShared.hooks.useLayoutEffect;
-  var useReducer = globalThis.__semonUIShared.hooks.useReducer;
-  var useRef = globalThis.__semonUIShared.hooks.useRef;
-  var useMemo = globalThis.__semonUIShared.hooks.useMemo;
-  var useCallback = globalThis.__semonUIShared.hooks.useCallback;
-  var useContext = globalThis.__semonUIShared.hooks.useContext;
-  var useDebugValue = globalThis.__semonUIShared.hooks.useDebugValue;
-  var useErrorBoundary = globalThis.__semonUIShared.hooks.useErrorBoundary;
-  var useId = globalThis.__semonUIShared.hooks.useId;
-  var useImperativeHandle = globalThis.__semonUIShared.hooks.useImperativeHandle;
 
   // src/lib/tool-details.tsx
   var isCommand = (name) => /^(Bash|shell|exec_command|local_shell)$/.test(name);
@@ -5514,10 +5683,10 @@ globalThis.__semonUIShared = __semonUIShared;
       owner.jump
     );
   }
-  function updateSessionJump(root, visible, count, busy2 = false) {
+  function updateSessionJump(root, visible2, count, busy2 = false) {
     const owner = owners.get(root);
     if (!owner) return;
-    owner.jumpVisible = visible;
+    owner.jumpVisible = visible2;
     owner.jumpCount = count;
     owner.jumpBusy = busy2;
     paintJump(owner);
@@ -5655,6 +5824,7 @@ globalThis.__semonUIShared = __semonUIShared;
               }
             )
           ] }),
+          view.control && /* @__PURE__ */ jsx(LocalControl, { view: view.control }),
           view.footer && /* @__PURE__ */ jsxs("div", { class: "session-foot", children: [
             /* @__PURE__ */ jsxs("span", { class: "stat " + view.footer.state, children: [
               view.footer.state === "work" ? /* @__PURE__ */ jsx("span", { class: "spin" }) : /* @__PURE__ */ jsx(
@@ -6191,14 +6361,14 @@ globalThis.__semonUIShared = __semonUIShared;
       turns: /* @__PURE__ */ new Map()
     };
     let disposed = false;
-    const visible = () => document.visibilityState === "visible", floorWait = () => Math.max(0, state2.started + 1e3 - performance.now());
+    const visible2 = () => document.visibilityState === "visible", floorWait = () => Math.max(0, state2.started + 1e3 - performance.now());
     function cancel() {
       if (state2.timer !== null) clearTimeout(state2.timer);
       state2.timer = null;
     }
     function schedule(ms) {
       cancel();
-      if (!disposed && !state2.ended && visible()) {
+      if (!disposed && !state2.ended && visible2()) {
         state2.due = performance.now() + ms;
         state2.timer = window.setTimeout(poll, ms);
       }
@@ -6214,7 +6384,7 @@ globalThis.__semonUIShared = __semonUIShared;
     }
     async function poll() {
       state2.timer = null;
-      if (disposed || state2.busy || state2.ended || !visible()) return;
+      if (disposed || state2.busy || state2.ended || !visible2()) return;
       state2.busy = true;
       state2.started = performance.now();
       state2.retry = false;
@@ -6247,7 +6417,7 @@ globalThis.__semonUIShared = __semonUIShared;
       }
     }
     function visibility() {
-      if (!visible()) cancel();
+      if (!visible2()) cancel();
       else if (state2.version && !state2.busy && !state2.timer)
         schedule(state2.delay > 2e3 ? state2.delay : 0);
     }
@@ -6311,17 +6481,17 @@ globalThis.__semonUIShared = __semonUIShared;
       document.adoptedStyleSheets = [...document.adoptedStyleSheets, sheet];
     }
     sheet.replaceSync("");
-    for (const [node, record2] of records) {
+    for (const [node, record4] of records) {
       if (!node.isConnected) {
         records.delete(node);
         continue;
       }
-      const declarations = [...record2.values].map(
+      const declarations = [...record4.values].map(
         ([slot, value]) => properties2[slot] + ":" + (slot === "intrinsicHeight" ? "auto " : "") + value + "px !important"
       ).join(";");
       if (declarations)
         sheet.insertRule(
-          '[data-semon-geometry="' + record2.id + '"]{' + declarations + "}",
+          '[data-semon-geometry="' + record4.id + '"]{' + declarations + "}",
           sheet.cssRules.length
         );
     }
@@ -6329,14 +6499,14 @@ globalThis.__semonUIShared = __semonUIShared;
   function setGeometry(node, slot, value) {
     if (!Object.hasOwn(properties2, slot) || value !== null && (!Number.isFinite(value) || Math.abs(value) > 1e8))
       throw new Error("Invalid host geometry");
-    let record2 = records.get(node);
-    if (!record2) {
-      record2 = { id: ++serial2, values: /* @__PURE__ */ new Map() };
-      records.set(node, record2);
-      node.dataset.semonGeometry = String(record2.id);
+    let record4 = records.get(node);
+    if (!record4) {
+      record4 = { id: ++serial2, values: /* @__PURE__ */ new Map() };
+      records.set(node, record4);
+      node.dataset.semonGeometry = String(record4.id);
     }
-    if (value === null) record2.values.delete(slot);
-    else record2.values.set(slot, value);
+    if (value === null) record4.values.delete(slot);
+    else record4.values.set(slot, value);
     paint();
     if (!observer) {
       observer = new MutationObserver(() => {
@@ -6346,10 +6516,10 @@ globalThis.__semonUIShared = __semonUIShared;
     }
   }
   function releaseGeometry(root, slots) {
-    for (const [node, record2] of records) {
+    for (const [node, record4] of records) {
       if (slots ? node === root : node === root || root.contains(node) || !node.isConnected) {
-        if (slots) for (const slot of slots) record2.values.delete(slot);
-        if (!slots || !record2.values.size) {
+        if (slots) for (const slot of slots) record4.values.delete(slot);
+        if (!slots || !record4.values.size) {
           records.delete(node);
           delete node.dataset.semonGeometry;
         }
@@ -6364,8 +6534,8 @@ globalThis.__semonUIShared = __semonUIShared;
       sheet = null;
     }
   }
-  function revealMeasuredTurn(node, visible) {
-    node.classList.toggle("semon-measuring-turn", visible);
+  function revealMeasuredTurn(node, visible2) {
+    node.classList.toggle("semon-measuring-turn", visible2);
   }
 
   // src/lib/routes.ts
@@ -6427,11 +6597,11 @@ globalThis.__semonUIShared = __semonUIShared;
       if (bytes > this.maxBytes) return;
       this.set(sid, { entries, meta, bytes });
       let sum = 0;
-      for (const record2 of this.values()) sum += record2.bytes;
-      for (const [id, record2] of this) {
+      for (const record4 of this.values()) sum += record4.bytes;
+      for (const [id, record4] of this) {
         if (this.size <= this.maxEntries && sum <= this.maxBytes) break;
         this.delete(id);
-        sum -= record2.bytes;
+        sum -= record4.bytes;
       }
     }
   };
@@ -6593,6 +6763,106 @@ globalThis.__semonUIShared = __semonUIShared;
   var host = null;
   function getViewerHost() {
     return host;
+  }
+
+  // src/lib/control.ts
+  function record2(value) {
+    return !!value && typeof value === "object" && !Array.isArray(value);
+  }
+  function parseControl(value) {
+    if (value == null) return null;
+    if (!record2(value) || typeof value.thread !== "string" || typeof value.generation !== "string" || !(value.activeTurn === null || typeof value.activeTurn === "string") || typeof value.connected !== "boolean" || !(value.reason === null || typeof value.reason === "string") || !record2(value.capabilities) || !["input", "steer", "interrupt", "commandApproval", "fileApproval", "questions"].every(
+      (key) => record2(value.capabilities) && typeof value.capabilities[key] === "boolean"
+    ) || !Array.isArray(value.requests) || value.requests.length > 1280 || !record2(value.actions))
+      throw new Error("Invalid control snapshot");
+    for (const request of value.requests) {
+      if (!record2(request) || typeof request.id !== "string" || !/^[0-9a-f]{32}$/.test(request.id) || !["permission", "question"].includes(String(request.kind)) || !record2(request.payload) || !(request.hash === null || typeof request.hash === "string" && /^[0-9a-f]{64}$/.test(request.hash)) || !record2(request.state) || typeof request.state.state !== "string" || !(request.reason === null || typeof request.reason === "string") || typeof request.remainingMs !== "number" || !Number.isFinite(request.remainingMs) || request.remainingMs < 0)
+        throw new Error("Invalid control request");
+    }
+    return value;
+  }
+
+  // src/app/localControl.ts
+  function record3(value) {
+    return !!value && typeof value === "object" && !Array.isArray(value);
+  }
+  function createLocalControl(scope, refresh) {
+    let current = null;
+    let busy2 = false;
+    let note = "";
+    let uncertain = false;
+    let revision = 0;
+    async function write(op, extra = {}) {
+      if (!current || busy2 || uncertain && op !== "reconnect") return;
+      const target = current;
+      const at = ++revision;
+      busy2 = true;
+      note = "Sending\u2026";
+      refresh();
+      const controller = scope.request();
+      try {
+        const command = {
+          id: crypto.randomUUID().replaceAll("-", ""),
+          op,
+          thread: target.thread,
+          generation: target.generation,
+          activeTurn: target.activeTurn,
+          expires: Date.now() + 25e3,
+          ...extra
+        };
+        const response = await fetch("/api/control", {
+          method: "POST",
+          credentials: "same-origin",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(command),
+          signal: controller.signal
+        });
+        const receipt = await response.json();
+        if (at !== revision) return;
+        if (op === "reconnect" && response.ok) uncertain = false;
+        if (!response.ok || record3(receipt) && receipt.error) {
+          note = record3(receipt) && typeof receipt.error === "string" ? receipt.error : "Control refused. Inspect the session before sending again.";
+          uncertain = uncertain || note.includes("unknown");
+        } else {
+          note = op === "answer" ? "Response sent. Codex resolution means answered or cleared; the winning client is unknown." : "Native request accepted. Inspect the session for its outcome.";
+        }
+      } catch {
+        if (at === revision) {
+          uncertain = true;
+          note = "Delivery unknown. Inspect Codex and reconnect; this request will not be resent.";
+        }
+      } finally {
+        scope.releaseRequest(controller);
+        if (at === revision) {
+          busy2 = false;
+          refresh();
+        }
+      }
+    }
+    function view(sid) {
+      if (!current || sid && sid !== current.thread) return void 0;
+      return {
+        snapshot: current,
+        busy: busy2,
+        uncertain,
+        note,
+        send: (text2) => void write("send", { text: text2 }),
+        interrupt: () => void write("interrupt"),
+        answer: (request, answer2) => void write("answer", { request: request.id, hash: request.hash, answer: answer2 }),
+        reconnect: () => void write("reconnect")
+      };
+    }
+    return {
+      prepare: parseControl,
+      adopt(value) {
+        current = value;
+      },
+      view,
+      destroy() {
+        ++revision;
+        current = null;
+      }
+    };
   }
 
   // src/app/renderTransaction.ts
@@ -9902,7 +10172,7 @@ globalThis.__semonUIShared = __semonUIShared;
       h2.kind === "toyou" ? h2.answers?.length : void 0,
       h2.declined ? 1 : 0
     ].join("|");
-    const visible = () => document.visibilityState === "visible";
+    const visible2 = () => document.visibilityState === "visible";
     const schedule = (ms) => liveController.schedule(ms);
     function ended(status2) {
       if (host2.disposed) return;
@@ -9951,7 +10221,7 @@ globalThis.__semonUIShared = __semonUIShared;
       LIVE,
       remember,
       schedule,
-      visible,
+      visible: visible2,
       ended,
       handKey,
       cardKeys,
@@ -11239,6 +11509,7 @@ globalThis.__semonUIShared = __semonUIShared;
       renderHomeScreen(
         page,
         {
+          control: host2.controlOwner.view(),
           waiting: open.length,
           working: running.length,
           up: upCount(),
@@ -11501,39 +11772,46 @@ globalThis.__semonUIShared = __semonUIShared;
       const raw = new Map(
         host2.transcriptView.transcriptEntries(host2.transcripts.entries[sid] ?? [], sid).map((e) => [e.slot != null ? sid + "#slot:" + e.slot : e.key, e])
       );
-      renderSessionScreen(page, host2.transcriptView.transcriptSnapshot(sid, opts), {
-        ...host2.sentencesOwner.sentenceHost,
-        committed: (...args) => host2.sessionChrome.observeTitle(...args),
-        trace: (...args) => host2.destination.goTrace(...args),
-        toolAll(key, label) {
-          const e = raw.get(key);
-          if (e?.k === "tool") {
-            const [ic, v] = host2.transcriptView.verb(e.name);
-            host2.toolViewsOwner.openStepViewer(e, v, ic, label);
-          }
+      renderSessionScreen(
+        page,
+        {
+          ...host2.transcriptView.transcriptSnapshot(sid, opts),
+          control: host2.controlOwner.view(sid)
         },
-        script(key) {
-          const e = raw.get(key);
-          if (e?.k === "tool") host2.toolViewsOwner.openScript(e);
-        },
-        image: (...args) => host2.toolViewsOwner.openImage(...args),
-        background(call, trigger) {
-          const target = trigger.closest('section[aria-label="Transcript"]')?.querySelector('.step[data-tid="' + CSS.escape(call) + '"]');
-          if (!target) return;
-          host2.viewport.stopOpeningEndPin();
-          for (let parent = target.parentElement; parent; parent = parent.parentElement) {
-            const toggle = host2.viewport.opener(parent);
-            if (toggle?.getAttribute("aria-expanded") === "false") toggle.click();
-          }
-          host2.sessionChrome.centre(target);
-          target.classList.add("flash");
-          host2.scope.timeout(() => target.classList.remove("flash"), 1500);
-        },
-        pager(button) {
-          host2.pagingOwner.loadPager(button, true);
-        },
-        jump: (...args) => host2.viewport.jumpToLatest(...args)
-      });
+        {
+          ...host2.sentencesOwner.sentenceHost,
+          committed: (...args) => host2.sessionChrome.observeTitle(...args),
+          trace: (...args) => host2.destination.goTrace(...args),
+          toolAll(key, label) {
+            const e = raw.get(key);
+            if (e?.k === "tool") {
+              const [ic, v] = host2.transcriptView.verb(e.name);
+              host2.toolViewsOwner.openStepViewer(e, v, ic, label);
+            }
+          },
+          script(key) {
+            const e = raw.get(key);
+            if (e?.k === "tool") host2.toolViewsOwner.openScript(e);
+          },
+          image: (...args) => host2.toolViewsOwner.openImage(...args),
+          background(call, trigger) {
+            const target = trigger.closest('section[aria-label="Transcript"]')?.querySelector('.step[data-tid="' + CSS.escape(call) + '"]');
+            if (!target) return;
+            host2.viewport.stopOpeningEndPin();
+            for (let parent = target.parentElement; parent; parent = parent.parentElement) {
+              const toggle = host2.viewport.opener(parent);
+              if (toggle?.getAttribute("aria-expanded") === "false") toggle.click();
+            }
+            host2.sessionChrome.centre(target);
+            target.classList.add("flash");
+            host2.scope.timeout(() => target.classList.remove("flash"), 1500);
+          },
+          pager(button) {
+            host2.pagingOwner.loadPager(button, true);
+          },
+          jump: (...args) => host2.viewport.jumpToLatest(...args)
+        }
+      );
     }
     const showsFooter = (s, origin) => origin ? s.state === "work" || s.state === "done" || s.state === "err" || origin.status === "done" || origin.status === "err" : !s.stub && !s.role && s.state in STATE;
     return {
@@ -12387,8 +12665,8 @@ globalThis.__semonUIShared = __semonUIShared;
         const nodes = [
           ...document.querySelectorAll("#page .turn[data-turn]")
         ].filter((n) => !n.closest(".cw-body"));
-        const visible = nodes.find((n) => n.getBoundingClientRect().bottom > top);
-        return host2.modelStore.turn.get(visible?.dataset.turn ?? "") ?? (host2.modelStore.turns[s.id] ?? []).at(-1);
+        const visible2 = nodes.find((n) => n.getBoundingClientRect().bottom > top);
+        return host2.modelStore.turn.get(visible2?.dataset.turn ?? "") ?? (host2.modelStore.turns[s.id] ?? []).at(-1);
       })();
       const actions = [], addAction = (key, text2, icon, className, note, checked, dot) => actions.push({ key, text: text2, icon, className, note, checked, dot });
       if (traceTurn?.out.length) addAction("trace", "Trace this turn", I.trace, "menu-trace");
@@ -13447,6 +13725,7 @@ globalThis.__semonUIShared = __semonUIShared;
     function adopt(value) {
       if (host2.disposed) throw new DOMException("Viewer destroyed", "AbortError");
       const m = parseModel(value);
+      const control = host2.controlOwner.prepare(m.control);
       const marks = m.tx == null ? {} : dictionary(m.tx, text);
       const admin = m.admin == null ? null : object2(m.admin);
       const nextAdmin = admin && typeof admin.href === "string" && safePath2(admin.href) ? { href: admin.href, label: text(admin.label) } : null;
@@ -13454,6 +13733,7 @@ globalThis.__semonUIShared = __semonUIShared;
       const nav = m.nav == null ? null : object2(m.nav);
       const machinesPath = host2.viewerHost?.machinesPath ?? (nav && typeof nav.machines === "string" && safePath2(nav.machines) ? nav.machines : null);
       host2.modelStore.adopt(m, () => {
+        host2.controlOwner.adopt(control);
         serverNow = m.now;
         fetchedAt = Date.now();
         TOK = marks;
@@ -13952,6 +14232,7 @@ globalThis.__semonUIShared = __semonUIShared;
   // src/app/composition.ts
   var ViewerComposition = class {
     scope;
+    controlOwner;
     dialogs;
     disposed;
     application;
@@ -14032,6 +14313,7 @@ globalThis.__semonUIShared = __semonUIShared;
         destroy() {
           if (context.disposed) return;
           context.disposed = true;
+          context.controlOwner.destroy();
           context.updates.destroy();
           context.scope.destroy();
           context.liveModelOwner.liveController.destroy();
@@ -14111,6 +14393,10 @@ globalThis.__semonUIShared = __semonUIShared;
       this.seenPersistenceOwner = createSeenPersistence(context);
       this.sentencesOwner = createSentences(context);
       this.isGap = (e) => e.k === "end" && /entries (not included|omitted)|^No activity/.test(e.text ?? "");
+      this.controlOwner = createLocalControl(
+        this.scope,
+        () => context.applicationRefreshOwner.refresh()
+      );
       this.transportOwner = createTransport(context);
       this.cacheTx = (sid, entries, meta) => context.transcripts.keep(sid, entries, meta, !!context.domain.originHandoff(sid));
       this.adoptCached = (r) => context.transcripts.adoptCached(r.id, r.turn);

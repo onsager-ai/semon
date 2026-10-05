@@ -1,3 +1,4 @@
+import type { createLocalControl } from './localControl';
 import { I } from './registry';
 import { HARNESSES } from './registry';
 import { STATE } from './registry';
@@ -39,6 +40,7 @@ import {
 import type { Hop } from '../lib/trace';
 type ToolEntry = Extract<Entry, { k: 'tool' }> & { full?: boolean; scriptLoaded?: boolean };
 interface ScreenViewsHost {
+  controlOwner: Pick<ReturnType<typeof createLocalControl>, 'view'>;
   darkTheme: () => boolean;
   ago: (t: number) => string;
   navigation: NavigationController;
@@ -418,6 +420,7 @@ export function createScreenViews(host: ScreenViewsHost) {
     renderHomeScreen(
       page,
       {
+        control: host.controlOwner.view(),
         waiting: open.length,
         working: running.length,
         up: upCount(),
@@ -749,45 +752,52 @@ export function createScreenViews(host: ScreenViewsHost) {
         .transcriptEntries(host.transcripts.entries[sid] ?? [], sid)
         .map((e) => [e.slot != null ? sid + '#slot:' + e.slot : e.key, e]),
     );
-    renderSessionScreen(page, host.transcriptView.transcriptSnapshot(sid, opts), {
-      ...host.sentencesOwner.sentenceHost,
-      committed: (...args: Parameters<typeof host.sessionChrome.observeTitle>) =>
-        host.sessionChrome.observeTitle(...args),
-      trace: (...args: Parameters<typeof host.destination.goTrace>) =>
-        host.destination.goTrace(...args),
-      toolAll(key, label) {
-        const e = raw.get(key);
-        if (e?.k === 'tool') {
-          const [ic, v] = host.transcriptView.verb(e.name);
-          host.toolViewsOwner.openStepViewer(e, v, ic, label);
-        }
+    renderSessionScreen(
+      page,
+      {
+        ...host.transcriptView.transcriptSnapshot(sid, opts),
+        control: host.controlOwner.view(sid),
       },
-      script(key) {
-        const e = raw.get(key);
-        if (e?.k === 'tool') host.toolViewsOwner.openScript(e);
+      {
+        ...host.sentencesOwner.sentenceHost,
+        committed: (...args: Parameters<typeof host.sessionChrome.observeTitle>) =>
+          host.sessionChrome.observeTitle(...args),
+        trace: (...args: Parameters<typeof host.destination.goTrace>) =>
+          host.destination.goTrace(...args),
+        toolAll(key, label) {
+          const e = raw.get(key);
+          if (e?.k === 'tool') {
+            const [ic, v] = host.transcriptView.verb(e.name);
+            host.toolViewsOwner.openStepViewer(e, v, ic, label);
+          }
+        },
+        script(key) {
+          const e = raw.get(key);
+          if (e?.k === 'tool') host.toolViewsOwner.openScript(e);
+        },
+        image: (...args: Parameters<typeof host.toolViewsOwner.openImage>) =>
+          host.toolViewsOwner.openImage(...args),
+        background(call, trigger) {
+          const target = trigger
+            .closest('section[aria-label="Transcript"]')
+            ?.querySelector<HTMLElement>('.step[data-tid="' + CSS.escape(call) + '"]');
+          if (!target) return;
+          host.viewport.stopOpeningEndPin();
+          for (let parent = target.parentElement; parent; parent = parent.parentElement) {
+            const toggle = host.viewport.opener(parent);
+            if (toggle?.getAttribute('aria-expanded') === 'false') toggle.click();
+          }
+          host.sessionChrome.centre(target);
+          target.classList.add('flash');
+          host.scope.timeout(() => target.classList.remove('flash'), 1500);
+        },
+        pager(button) {
+          host.pagingOwner.loadPager(button, true);
+        },
+        jump: (...args: Parameters<typeof host.viewport.jumpToLatest>) =>
+          host.viewport.jumpToLatest(...args),
       },
-      image: (...args: Parameters<typeof host.toolViewsOwner.openImage>) =>
-        host.toolViewsOwner.openImage(...args),
-      background(call, trigger) {
-        const target = trigger
-          .closest('section[aria-label="Transcript"]')
-          ?.querySelector<HTMLElement>('.step[data-tid="' + CSS.escape(call) + '"]');
-        if (!target) return;
-        host.viewport.stopOpeningEndPin();
-        for (let parent = target.parentElement; parent; parent = parent.parentElement) {
-          const toggle = host.viewport.opener(parent);
-          if (toggle?.getAttribute('aria-expanded') === 'false') toggle.click();
-        }
-        host.sessionChrome.centre(target);
-        target.classList.add('flash');
-        host.scope.timeout(() => target.classList.remove('flash'), 1500);
-      },
-      pager(button) {
-        host.pagingOwner.loadPager(button, true);
-      },
-      jump: (...args: Parameters<typeof host.viewport.jumpToLatest>) =>
-        host.viewport.jumpToLatest(...args),
-    });
+    );
   }
   // Whether a session page ends in its status line: a child's when it is running or has returned, any other session's always.
   // renderSession and patchSession share it.

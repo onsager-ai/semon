@@ -197,18 +197,38 @@ impl InventoryWorker<'_> {
     }
 
     async fn execute(&self, request: &Request<'_>) -> Result<Response, ProcessError> {
-        if !self.python.is_absolute()
-            || !self.worker.is_absolute()
-            || request.api_key.is_empty()
+        if request.api_key.is_empty()
             || request.api_key.len() > 4096
             || self.lifetime.is_zero()
             || self.lifetime > Duration::from_secs(25)
         {
             return Err(ProcessError::Configuration);
         }
+        let value = serde_json::to_value(request).map_err(|_| ProcessError::Configuration)?;
+        serde_json::from_value(self.private_call(&value, self.lifetime).await?)
+            .map_err(|_| ProcessError::Protocol)
+    }
+    /// Private coordinator-to-official-SDK transport. The embedding must commit
+    /// operation ownership and recheck authorization before any mutating call.
+    /// Input may contain selected credentials; never log or persist it.
+    pub async fn private_call(
+        &self,
+        request: &serde_json::Value,
+        lifetime: Duration,
+    ) -> Result<serde_json::Value, ProcessError> {
+        if !self.python.is_absolute()
+            || !self.worker.is_absolute()
+            || lifetime.is_zero()
+            || lifetime > Duration::from_secs(180)
+        {
+            return Err(ProcessError::Configuration);
+        }
         let input =
             Zeroizing::new(serde_json::to_vec(request).map_err(|_| ProcessError::Configuration)?);
-        let deadline = Instant::now() + self.lifetime;
+        if input.len() > 131072 {
+            return Err(ProcessError::Configuration);
+        }
+        let deadline = Instant::now() + lifetime;
         let mut command = Command::new(self.python);
         for name in self.environment_exclusions {
             command.env_remove(name);

@@ -6,8 +6,10 @@ worker never retries create or task dispatch. Inventory remains read-only in the
 separate inventory driver. A lost reply is unknown, never proof of absence.
 """
 import importlib.metadata
+import importlib.util
 import json
 import logging
+import os
 from pathlib import Path
 import re
 import sys
@@ -16,6 +18,10 @@ ROOT = '/home/user/.semon-runtime'
 BIN = '/home/user/.local/bin'
 UNKNOWN = {'status': 'unknown', 'runtime': None, 'thread': None}
 IDENTIFIER = re.compile(r'[A-Za-z0-9_.-]{1,128}\Z')
+_attachment = importlib.util.spec_from_file_location('e2b_attachment', Path(__file__).with_name('e2b-attach.py'))
+_module = importlib.util.module_from_spec(_attachment)
+_attachment.loader.exec_module(_module)
+attach_running = _module.attach_running
 
 
 def execute(request, sandbox_class):
@@ -40,10 +46,10 @@ def execute(request, sandbox_class):
     if method == 'qualify_profile':
         box = sandbox_class.create(template=payload['template'], metadata=request['labels'], secure=True,
                                    timeout=payload['timeout'], lifecycle={'on_timeout': {'action': 'pause', 'keep_memory': payload['keep_memory']}},
-                                   api_key=key, request_timeout=30)
+                                   api_key=key, request_timeout=30, retries=0)
         runtime = box.sandbox_id
         try:
-            info = sandbox_class.get_info(runtime, api_key=key, request_timeout=10)
+            info = sandbox_class.get_info(runtime, api_key=key, request_timeout=10, retries=0)
             if any(info.metadata.get(name) != value for name, value in request['labels'].items()):
                 return UNKNOWN
             box.commands.run(f'mkdir -p {BIN} {ROOT}', timeout=10)
@@ -57,14 +63,14 @@ def execute(request, sandbox_class):
             box.files.write(ROOT + '/retained', 'provider-profile-v1')
             box.pause(keep_memory=False)
             # Explicit qualification action only; runtime inspection never resumes.
-            box = sandbox_class.connect(runtime, api_key=key, timeout=payload['timeout'], on_resume='reboot', request_timeout=30)
+            box = sandbox_class.connect(runtime, api_key=key, timeout=payload['timeout'], on_resume='reboot', request_timeout=30, retries=0)
             if box.files.read(ROOT + '/retained') != 'provider-profile-v1':
                 return UNKNOWN
             return {'status': 'profile_qualified', 'runtime': runtime, 'thread': None}
         finally:
             # Only this throwaway qualification resource, with no accepted user
             # task/recovery data, is eligible for cleanup. Never clean user launches.
-            info = sandbox_class.get_info(runtime, api_key=key, request_timeout=10)
+            info = sandbox_class.get_info(runtime, api_key=key, request_timeout=10, retries=0)
             if all(info.metadata.get(name) == value for name, value in request['labels'].items()):
                 box.kill()
     if method == 'create':
@@ -72,17 +78,19 @@ def execute(request, sandbox_class):
         box = sandbox_class.create(template=payload['template'], metadata=request['labels'], secure=True,
                                    timeout=payload['timeout'], lifecycle={'on_timeout': {'action': 'pause',
                                                                           'keep_memory': payload['keep_memory']}},
-                                   api_key=key, request_timeout=30)
+                                   api_key=key, request_timeout=30, retries=0)
         return {'status': 'created', 'runtime': box.sandbox_id, 'thread': None}
     runtime = request['runtime']
     if not isinstance(runtime, str) or not IDENTIFIER.fullmatch(runtime) or runtime in ('.', '..'):
         return UNKNOWN
     # Constructor attaches without connect(), which could silently resume compute.
-    info = sandbox_class.get_info(runtime, api_key=key, request_timeout=10)
+    info = sandbox_class.get_info(runtime, api_key=key, request_timeout=10, retries=0)
     if (any(info.metadata.get(name) != value for name, value in request['labels'].items())
             or getattr(info.state, 'value', info.state) != 'running'):
         return UNKNOWN
-    box = sandbox_class(runtime, api_key=key, request_timeout=10)
+    box = attach_running(runtime, key, request['labels'], sandbox_class)
+    if box is None:
+        return UNKNOWN
     if method == 'inspect_bootstrap':
         result = box.commands.run(f'test -f {ROOT}/bootstrapped && echo bootstrapped', timeout=10)
         return {'status': 'bootstrapped' if result.stdout.strip() == 'bootstrapped' else 'unknown', 'runtime': runtime, 'thread': None}
@@ -120,6 +128,7 @@ def execute(request, sandbox_class):
 
 
 def main():
+    os.environ['E2B_CONNECTION_RETRIES'] = '0'
     logging.disable(logging.CRITICAL)
     result = UNKNOWN
     try:
