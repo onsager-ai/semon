@@ -6,7 +6,10 @@ permissions:
   contents: read
 jobs:
   native:
-    runs-on: ubuntu-latest
+    # The fixture requires unprivileged user/network namespaces. Newer Ubuntu
+    # runner AppArmor policy rejects the bwrap preflight; use a supported image
+    # instead of changing host policy or weakening the launcher's refusal.
+    runs-on: ubuntu-22.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
