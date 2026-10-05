@@ -60,10 +60,37 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 }
 fn process_stamp(pid: u32) -> io::Result<String> {
     let stat = fs::read_to_string(format!("/proc/{pid}/stat"))?;
-    stat.rsplit_once(')')
-        .and_then(|(_, rest)| rest.split_whitespace().nth(19))
+    let fields: Vec<_> = stat
+        .rsplit_once(')')
+        .ok_or_else(|| error("native server identity unavailable"))?
+        .1
+        .split_whitespace()
+        .collect();
+    // A killed child can retain its PID/start time until LocalSession reaps it.
+    // That identity must not authorize a new listener on a reused socket inode.
+    if matches!(fields.first(), Some(&"Z" | &"X" | &"x")) {
+        return Err(error("native server is no longer live"));
+    }
+    fields
+        .get(19)
+        .copied()
         .map(str::to_owned)
         .ok_or_else(|| error("native server identity unavailable"))
+}
+
+#[cfg(target_os = "linux")]
+fn verify_native_peer(stream: &UnixStream, pid: u32, uid: u32) -> io::Result<()> {
+    let credentials = rustix::net::sockopt::socket_peercred(stream)
+        .map_err(|_| error("native transport peer identity unavailable"))?;
+    if credentials.pid.as_raw_nonzero().get() as u32 != pid || credentials.uid.as_raw() != uid {
+        return Err(error("native transport peer is not the pinned controller"));
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn verify_native_peer(_: &UnixStream, _: u32, _: u32) -> io::Result<()> {
+    Err(error("native transport peer identity is not qualified"))
 }
 fn identity(socket: &Path) -> io::Result<String> {
     let metadata = fs::symlink_metadata(socket)?;
@@ -130,6 +157,9 @@ impl Codex {
         }
         let generation = format!("{}:{}", identity(&socket)?, RequestId::random()?);
         let stream = UnixStream::connect(&socket)?;
+        if let Some((pid, _)) = &server {
+            verify_native_peer(&stream, *pid, uid)?;
+        }
         stream.set_read_timeout(Some(Duration::from_millis(50)))?;
         stream.set_write_timeout(Some(Duration::from_secs(1)))?;
         let config = tungstenite::protocol::WebSocketConfig::default()
@@ -661,6 +691,71 @@ impl Adapter for Codex {
 mod tests {
     use super::*;
     use std::os::unix::{fs::PermissionsExt, net::UnixListener};
+    #[test]
+    fn a_zombie_controller_cannot_supply_live_authority() {
+        let mut child = std::process::Command::new("/usr/bin/sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        assert!(process_stamp(child.id()).is_ok());
+        child.kill().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        // Do not try_wait: the zombie/start-time case is the regression.
+        while process_stamp(child.id()).is_ok() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(5));
+        }
+        let dead = process_stamp(child.id());
+        child.wait().unwrap();
+        assert!(dead.is_err());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn socket_peer_must_match_the_exact_controller_not_just_owner_uid() {
+        let (stream, _) = UnixStream::pair().unwrap();
+        let uid = fs::metadata("/proc/self").unwrap().uid();
+        verify_native_peer(&stream, std::process::id(), uid).unwrap();
+        assert!(verify_native_peer(&stream, std::process::id() + 1, uid).is_err());
+        assert!(verify_native_peer(&stream, std::process::id(), uid.wrapping_add(1)).is_err());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_same_owner_replacement_receives_no_native_protocol_frames() {
+        let root = crate::journal::tests::scratch("native-peer-mismatch");
+        fs::create_dir_all(&root).unwrap();
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+        let path = root.join("replacement.sock");
+        let listener = UnixListener::bind(&path).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        let mut controller = std::process::Command::new("/usr/bin/sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        let store = Arc::new(RequestStore::new(
+            crate::Journal::open(&root.join("journal.jsonl")).unwrap(),
+        ));
+        let result = Codex::connect(
+            &path,
+            Some("retained-thread"),
+            None,
+            store,
+            Some(controller.id()),
+        );
+        controller.kill().unwrap();
+        controller.wait().unwrap();
+        let message = match result {
+            Err(error) => error.to_string(),
+            Ok(_) => panic!("replacement gained controller authority"),
+        };
+        assert!(message.contains("not the pinned controller"));
+        let (mut stream, _) = listener.accept().unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
+        use std::io::Read;
+        assert_eq!(stream.read(&mut [0]).unwrap(), 0);
+    }
     // Mock protocol regression, deliberately separate from checked-in real-native evidence.
     #[test]
     fn a_consumed_write_with_a_lost_reply_is_unknown_and_never_replayed() {
