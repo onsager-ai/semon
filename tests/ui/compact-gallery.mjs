@@ -80,6 +80,13 @@ try {
         path: path.join(out, `picker-${width}-${colorScheme}.png`),
         fullPage: true,
       });
+      if (width < 1000)
+        assert(
+          await page
+            .locator('.sh-picker-body select')
+            .first()
+            .evaluate((n) => n.getBoundingClientRect().height >= 44),
+        );
       await page.keyboard.press('Escape');
       assert.equal(await trigger.evaluate((n) => document.activeElement === n), true);
       assert.equal(await page.locator('.sh-picker[open]').count(), 0);
