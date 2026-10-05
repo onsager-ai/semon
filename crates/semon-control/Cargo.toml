@@ -16,3 +16,5 @@ serde_json.workspace = true
 serde_json_canonicalizer.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
+tungstenite = { version = "=0.28.0", default-features = false, features = ["handshake"] }
+toml = "=0.5.11"

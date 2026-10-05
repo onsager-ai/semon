@@ -1,0 +1,38 @@
+# Explicit native qualification, separate from offline fixture and mock regressions.
+name: Native local Codex control
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  native:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: 22.x
+      - name: Install pinned native package and probe prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bubblewrap tmux
+          npm install --prefix "$RUNNER_TEMP/native" @openai/codex@0.160.0
+          python3 -m venv "$RUNNER_TEMP/probe"
+          "$RUNNER_TEMP/probe/bin/pip" install -r tests/spikes/requirements-control.txt
+          npm --prefix tests/ui ci --no-audit --no-fund
+          npm --prefix tests/ui exec -- playwright install --with-deps chromium
+          cargo build --locked -p semon-store
+      - name: Real native attachment, product and authority tests
+        run: |
+          native="$RUNNER_TEMP/native/node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/bin/codex"
+          mkdir -p "$RUNNER_TEMP/evidence"
+          "$RUNNER_TEMP/probe/bin/python" tests/spikes/codex-control.py --codex "$native" --output "$RUNNER_TEMP/evidence/qualification.json"
+          "$RUNNER_TEMP/probe/bin/python" tests/spikes/codex-terminal.py --codex "$native" --output "$RUNNER_TEMP/evidence/terminal.json"
+          "$RUNNER_TEMP/probe/bin/python" tests/spikes/codex-local.py --codex "$native" --semon target/debug/semon --browser tests/ui/local-control.mjs --tmux /usr/bin/tmux --output "$RUNNER_TEMP/evidence/local.json"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: codex-local-evidence
+          path: ${{ runner.temp }}/evidence

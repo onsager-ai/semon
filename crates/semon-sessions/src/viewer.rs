@@ -334,8 +334,11 @@ const _: fn() = || {
 /// The loopback server around a [`ViewerCore`]: the per-run token and its
 /// cookie, the exact local Host check and GET only.
 struct Viewer {
+    control: Option<Mutex<Arc<semon_control::codex::Codex>>>,
+    bootstrap_used: Mutex<bool>,
     core: ViewerCore,
     token: String,
+    bootstrap: String,
     port: u16,
 }
 
@@ -688,7 +691,23 @@ pub fn serve_listener(options: ServeOptions, listener: std::net::TcpListener) ->
     serve_server(options, server)
 }
 
+/// Serves the existing local viewer with one opt-in native control connection.
+pub fn serve_with_control(
+    options: ServeOptions,
+    control: Arc<semon_control::codex::Codex>,
+) -> io::Result<()> {
+    let address = listen_addr(&options.listen)?;
+    let server = Server::http(address).map_err(io::Error::other)?;
+    serve_server_control(options, server, Some(control))
+}
 fn serve_server(options: ServeOptions, server: Server) -> io::Result<()> {
+    serve_server_control(options, server, None)
+}
+fn serve_server_control(
+    options: ServeOptions,
+    server: Server,
+    control: Option<Arc<semon_control::codex::Codex>>,
+) -> io::Result<()> {
     let port = server
         .server_addr()
         .to_ip()
@@ -701,13 +720,22 @@ fn serve_server(options: ServeOptions, server: Server) -> io::Result<()> {
     };
     // Reads answer from the last built model; a rebuild never holds one up.
     core.set_refresh(Refresh::Background);
+    let token = random_token()?;
+    let bootstrap = if control.is_some() {
+        random_token()?
+    } else {
+        token.clone()
+    };
     let viewer = Arc::new(Viewer {
         core,
-        token: random_token()?,
+        token,
+        bootstrap,
+        bootstrap_used: Mutex::new(false),
+        control: control.map(Mutex::new),
         port,
     });
     let server = Arc::new(server);
-    println!("http://127.0.0.1:{port}/?t={}", viewer.token);
+    println!("http://127.0.0.1:{port}/?t={}", viewer.bootstrap);
     // A few requests at once, so a long transcript page doesn't hold up a
     // poll. recv blocks; between requests only the refresh pool runs, and
     // it checks a machine only until IDLE_AFTER its last read.
@@ -835,11 +863,61 @@ fn authorized(request: &Request, query: &str, token: &str, port: u16) -> Option<
     (cookie || query_token).then_some(query_token)
 }
 
+fn control_reply(status: u16, value: Value) -> ViewerReply {
+    ViewerReply {
+        status,
+        content_type: "application/json; charset=utf-8",
+        body: value.to_string().into_bytes(),
+        etag: None,
+    }
+}
+fn control_authorized(request: &Request, token: &str, port: u16) -> bool {
+    let headers = request.headers();
+    if ["Host", "Origin", "Cookie", "Content-Type"]
+        .iter()
+        .any(|name| headers.iter().filter(|h| h.field.equiv(name)).count() != 1)
+    {
+        return false;
+    }
+    let host = request_header(request, "Host").unwrap_or("");
+    if host != format!("127.0.0.1:{port}") && host != format!("localhost:{port}") {
+        return false;
+    }
+    if request_header(request, "Origin") != Some(format!("http://{host}").as_str()) {
+        return false;
+    }
+    let tokens: Vec<_> = request_header(request, "Cookie")
+        .unwrap_or("")
+        .split(';')
+        .filter_map(|s| s.trim().strip_prefix("semon_session="))
+        .collect();
+    tokens == [token]
+}
+
 impl Viewer {
-    fn handle(&self, request: Request) {
+    fn handle(&self, mut request: Request) {
         let url = request.url().to_owned();
         let (path, query) = url.split_once('?').unwrap_or((&url, ""));
-        let Some(set_cookie) = authorized(&request, query, &self.token, self.port) else {
+        if request.method() == &Method::Post && path == "/api/control" {
+            let authorized =
+                self.control.is_some() && control_authorized(&request, &self.token, self.port);
+            let reply = if authorized {
+                self.control_write(&mut request)
+            } else {
+                control_reply(403, serde_json::json!({"error":"Forbidden"}))
+            };
+            respond(request, reply, None);
+            return;
+        }
+        let accepted = if self.control.is_some() {
+            // A spent URL nonce is not a cookie secret and never authorizes writes.
+            authorized(&request, "", &self.token, self.port).or_else(|| {
+                authorized(&request, query, &self.bootstrap, self.port).filter(|set| *set)
+            })
+        } else {
+            authorized(&request, query, &self.token, self.port)
+        };
+        let Some(set_cookie) = accepted else {
             let forbidden = ViewerReply {
                 status: 403,
                 content_type: "text/plain; charset=utf-8",
@@ -849,11 +927,94 @@ impl Viewer {
             respond(request, forbidden, None);
             return;
         };
+        if set_cookie && self.control.is_some() {
+            let mut used = self
+                .bootstrap_used
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            if *used {
+                respond(
+                    request,
+                    control_reply(
+                        403,
+                        serde_json::json!({"error":"Control bootstrap URL already used"}),
+                    ),
+                    None,
+                );
+                return;
+            }
+            *used = true;
+        }
         let if_none_match = request_header(&request, "If-None-Match").map(str::to_owned);
-        let reply = self
-            .core
-            .respond("GET", path, query, if_none_match.as_deref());
+        let reply = if let Some(control) = self.control.as_ref().filter(|_| path == "/api/model") {
+            // Full model while control is opted in. The existing poller owns both revisions.
+            let mut reply = self.core.respond("GET", path, "", None);
+            if reply.status == 200
+                && let Ok(mut model) = serde_json::from_slice::<Value>(&reply.body)
+            {
+                model["control"] = control
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .snapshot();
+                reply.body = serde_json::to_vec(&model).unwrap_or_default();
+                reply.etag = None;
+            }
+            reply
+        } else {
+            self.core
+                .respond("GET", path, query, if_none_match.as_deref())
+        };
         respond(request, reply, set_cookie.then_some(&self.token));
+    }
+    fn control_write(&self, request: &mut Request) -> ViewerReply {
+        if request_header(request, "Content-Type") != Some("application/json")
+            || request.body_length().is_none_or(|n| n > 65536)
+        {
+            return control_reply(400, serde_json::json!({"error":"Invalid control body"}));
+        }
+        let mut bytes = Vec::new();
+        if request
+            .as_reader()
+            .take(65537)
+            .read_to_end(&mut bytes)
+            .is_err()
+            || bytes.len() > 65536
+        {
+            return control_reply(400, serde_json::json!({"error":"Invalid control body"}));
+        }
+        let Ok(value) = serde_json::from_slice::<Value>(&bytes) else {
+            return control_reply(400, serde_json::json!({"error":"Invalid control JSON"}));
+        };
+        let owner = self.control.as_ref().unwrap();
+        let mut connection = owner.lock().unwrap_or_else(PoisonError::into_inner);
+        let driver = connection.clone();
+        if value["op"] == "reconnect" {
+            if value["generation"] != driver.snapshot()["generation"] {
+                return control_reply(409, serde_json::json!({"error":"Stale connection"}));
+            }
+            return match driver.reconnect() {
+                Ok(next) => {
+                    *connection = next;
+                    control_reply(200, serde_json::json!({"reconnected":true}))
+                }
+                Err(_) => control_reply(
+                    409,
+                    serde_json::json!({"error":"Native reconnect failed; no write replayed"}),
+                ),
+            };
+        }
+        drop(connection);
+        // HTTP has no Unix peer credentials. Zero means unknown, not root authority.
+        // Authority is the isolated executor plus exact authenticated browser transport.
+        let source = semon_control::Source {
+            window: "local-viewer".into(),
+            peer_pid: 0,
+            peer_uid: 0,
+        };
+        match driver.command(&value, source) {
+            Ok(receipt) => control_reply(200, receipt),
+            Err(error) => control_reply(409, serde_json::json!({"error":error.to_string()})),
+        }
     }
 }
 
@@ -3016,8 +3177,11 @@ mod tests {
         let server = Server::http("127.0.0.1:0").unwrap();
         let port = server.server_addr().to_ip().unwrap().port();
         let viewer = Viewer {
+            control: None,
+            bootstrap_used: Mutex::new(false),
             core: ViewerCore::new(fixture.options.clone()),
             token: "0123456789abcdef0123456789abcdef".into(),
+            bootstrap: "0123456789abcdef0123456789abcdef".into(),
             port,
         };
         let request = request.replace("PORT", &port.to_string());
