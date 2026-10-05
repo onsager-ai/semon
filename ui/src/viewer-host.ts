@@ -1,4 +1,4 @@
-import { safePath, type Account } from './lib';
+import { safePath, type Account, type ShellDestination } from './lib';
 /** Narrow document host port; the viewer remains the sole router/model poller. */
 export interface ViewerContent {
   element: HTMLElement;
@@ -6,6 +6,8 @@ export interface ViewerContent {
 }
 export interface ViewerHost {
   machinesPath: string;
+  /** Host-owned links use native navigation; shared chrome validates paths. */
+  nativeNavigation?: readonly ShellDestination[];
   /** A native administrative page uses shared chrome/Recent, with native destination links. */
   nativePage?: { title: string; nav: string };
   account?: unknown;
