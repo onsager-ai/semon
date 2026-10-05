@@ -52,6 +52,10 @@ def execute(request, sandbox_class):
             info = sandbox_class.get_info(runtime, api_key=key, request_timeout=10, retries=0)
             if any(info.metadata.get(name) != value for name, value in request['labels'].items()):
                 return UNKNOWN
+            attached = attach_running(runtime, key, request['labels'], sandbox_class)
+            if attached is None:
+                return UNKNOWN
+            box = attached
             box.commands.run(f'mkdir -p {BIN} {ROOT}', timeout=10)
             for name in ('codex', 'semon'):
                 with open('/usr/local/bin/' + name, 'rb') as binary:
@@ -64,6 +68,10 @@ def execute(request, sandbox_class):
             box.pause(keep_memory=False)
             # Explicit qualification action only; runtime inspection never resumes.
             box = sandbox_class.connect(runtime, api_key=key, timeout=payload['timeout'], on_resume='reboot', request_timeout=30, retries=0)
+            attached = attach_running(runtime, key, request['labels'], sandbox_class)
+            if attached is None:
+                return UNKNOWN
+            box = attached
             if box.files.read(ROOT + '/retained') != 'provider-profile-v1':
                 return UNKNOWN
             return {'status': 'profile_qualified', 'runtime': runtime, 'thread': None}
