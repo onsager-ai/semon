@@ -174,3 +174,16 @@ before changing ownership, ports, adoption or rendering. Run
 cycles in emitted runtime imports. Type-only feature cycles remain permitted;
 module paths must be literal so the graph can be checked. CI runs this check in
 the required UI foundation lane; unit tests verify rejection and acceptance cases.
+
+Opt-in native composers use `.sh-composer`, `.sh-composer-toolbar` and
+`.sh-picker` with host-owned textarea/details/form descendants.
+`mountComposers(root)` enhances Escape and mutually exclusive pickers and returns
+an idempotent teardown owner; `mountNativeShell` installs it once. Native details
+and forms remain the fallback. `.sh-compact` separates a 32px visible surface
+from 44px phone/coarse targets. The shared tooltip overlay reads `data-tip` from
+icon controls and stays outside the composer frame. Consumers supply names,
+selected values and all data/actions; no persistence or credential policy lives
+in this primitive. `ViewerHost.nativeNavigation` adds validated host-owned native
+links to the same shell, without extending the viewer router or poller.
+`tests/ui/compact-gallery.mjs` audits the new opt-in geometry and lifecycle;
+existing gallery baselines and thresholds are unchanged.

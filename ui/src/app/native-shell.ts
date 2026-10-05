@@ -1,4 +1,5 @@
 import { EffectScope } from './effects';
+import { mountComposers } from '../lib/composer';
 let current: { destroy(): void } | null = null;
 /** Native Rust pages keep their forms and fallback markup; this owner only adds enhancements. */
 export interface NativeShellOptions {
@@ -7,6 +8,7 @@ export interface NativeShellOptions {
 export function mountNativeShell(options: NativeShellOptions = {}) {
   current?.destroy();
   const effects = new EffectScope();
+  const composers = mountComposers();
   let disposed = false;
   const dialogs = new Set<HTMLDialogElement>();
 
@@ -267,6 +269,7 @@ export function mountNativeShell(options: NativeShellOptions = {}) {
     destroy() {
       if (disposed) return;
       disposed = true;
+      composers.destroy();
       effects.destroy();
       for (const button of copyTimers.keys()) {
         button.setAttribute('aria-label', button.dataset.copyLabel ?? 'Copy');
