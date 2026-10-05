@@ -1,3 +1,4 @@
+import type { ViewerHost } from '../viewer-host';
 import type { ViewerModelStore } from '../state/model';
 import type { NavigationController } from '../navigation/routes';
 import type { createBootstrap } from './bootstrap';
@@ -10,6 +11,7 @@ import type { ShellDestination } from '../lib';
 import { renderShellNavigation } from '../lib';
 import { HARNESS, I } from './registry';
 interface NavigationViewHost {
+  viewerHost: ViewerHost | null;
   $: <T extends HTMLElement = HTMLElement>(s: string, r?: ParentNode) => T;
   machinesPath: string | null;
   sidebarOnly: boolean;
@@ -63,6 +65,7 @@ export function createNavigationView(host: NavigationViewHost) {
         hot,
       });
     };
+    destinations.push(...(host.viewerHost?.nativeNavigation ?? []));
     item('home', 'Home', I.home, host.domain.inbox().length, true);
     item('sessions', 'Sessions', I.sessions);
     item('analytics', 'Analytics', I.chart);
@@ -77,6 +80,8 @@ export function createNavigationView(host: NavigationViewHost) {
       host.accountControlsOwner.shellChrome.update(destinations, host.layoutOwner.railMode);
     else
       renderShellNavigation(nav, destinations, (destination) => {
+        if (host.viewerHost?.nativeNavigation?.some((item) => item.key === destination.key))
+          return false;
         host.destination.go(host.navigation.historyRoute({ v: destination.key }, { v: 'home' }));
         return true;
       });
