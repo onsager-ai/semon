@@ -31,6 +31,20 @@ pub struct LocalSession {
 fn refuse(message: &str) -> io::Error {
     io::Error::new(io::ErrorKind::PermissionDenied, message)
 }
+// Native 0.160.0 model selectors outrank feature flags. A namespaced provider
+// model also matches the bundled catalog by suffix. Keep a launcher-owned,
+// offline catalog: the disabled host must never be advertised as functions.exec.
+fn standalone_catalog() -> serde_json::Value {
+    let mut catalog: serde_json::Value =
+        serde_json::from_str(include_str!("native/models-0.160.0.json"))
+            .expect("checked-in native model metadata");
+    for model in catalog["models"].as_array_mut().expect("native models") {
+        model["model_messages"] = json!({
+            "instructions_template": include_str!("native/prompt-0.160.0.md")
+        });
+    }
+    catalog
+}
 /// Fixed outer executor boundary. No host home, run/tmp brokers or owner procfs is mounted.
 /// Model networking stays in the owner app-server; tool networking is unavailable in this slice.
 pub fn executor_args(package: &Path, workspace: &Path) -> io::Result<Vec<String>> {
@@ -197,6 +211,8 @@ impl LocalSession {
         fs::DirBuilder::new().mode(0o700).create(&state)?;
         let home = state.join("home");
         fs::DirBuilder::new().mode(0o700).create(&home)?;
+        let catalog = home.join("standalone-models.json");
+        fs::write(&catalog, serde_json::to_vec(&standalone_catalog())?)?;
         let mut native_config = config
             .map(fs::read_to_string)
             .transpose()?
@@ -382,10 +398,16 @@ impl LocalSession {
                 "js_repl",
                 "--disable",
                 "multi_agent",
+                "--disable",
+                "multi_agent_v2",
+                "-c",
+                "agents.enabled=false",
                 "-c",
                 "shell_environment_policy.inherit=\"none\"",
                 "-c",
             ])
+            .arg(format!("model_catalog_json={}", json!(catalog)))
+            .arg("-c")
             .arg(format!(
                 "projects.{}.trust_level=\"untrusted\"",
                 json!(workspace)
@@ -483,5 +505,27 @@ impl Drop for LocalSession {
     fn drop(&mut self) {
         let _ = self.process.kill();
         let _ = self.process.wait();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn standalone_metadata_cannot_select_disabled_hosts_or_role_prompts() {
+        let catalog = standalone_catalog();
+        let models = catalog["models"].as_array().unwrap();
+        assert!(models.iter().any(|model| model["slug"] == "gpt-6-luna"));
+        for model in models {
+            assert_eq!(model["tool_mode"], "direct");
+            assert_eq!(model["multi_agent_version"], "disabled");
+            assert_eq!(model["experimental_supported_tools"], json!([]));
+            assert!(!model["use_responses_lite"].as_bool().unwrap());
+            let instructions = model["model_messages"].to_string();
+            assert!(!instructions.contains("functions.exec"));
+            assert!(!instructions.contains("multi_agent_role"));
+            assert!(instructions.contains("coding agent running in the Codex CLI"));
+        }
     }
 }
