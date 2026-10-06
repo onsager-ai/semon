@@ -118,6 +118,7 @@ export function createTransport(host: TransportHost) {
       for (const sid of Object.keys(host.transcripts.entries)) host.transcripts.spread(sid);
     });
     host.viewerHost?.modelAccount?.(account);
+    host.viewerHost?.modelNavigation?.(m);
     return m;
   }
   // Each loaded entry goes to its turn: an entry that starts a turn (or a page) names it. Its key, its turn and place in

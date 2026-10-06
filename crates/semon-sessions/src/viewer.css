@@ -1285,7 +1285,7 @@ html.viewer-open, html.viewer-open body { overflow: hidden; }
 }
 
 /* Local control shares the page commit owner; exact native payloads remain plain text. */
-.local-control { margin: var(--s5) 0; padding: var(--s4); border: 1px solid var(--line); border-radius: var(--r2); }
+.local-control { margin: var(--s5) 0; }
 .local-control h2, .local-control h3 { margin: var(--s2) 0; font-size: var(--fs-title); }
 .local-control p { font-size: var(--fs-ui); color: var(--ink-2); }
 .local-control article { border-top: 1px solid var(--line); padding: var(--s3) 0; }
@@ -1294,3 +1294,5 @@ html.viewer-open, html.viewer-open body { overflow: hidden; }
 .local-control input, .local-control textarea { display: block; width: 100%; color: var(--ink); background: var(--ground); border: 1px solid var(--line-2); border-radius: var(--r1); padding: var(--s2); font: inherit; min-height: var(--tap); }
 .local-control button { color: var(--ink); background: var(--ground); border: 1px solid var(--line-2); border-radius: var(--r1); font-size: var(--fs-ui); padding: var(--s2) var(--s3); margin: var(--s1); min-height: var(--tap); }
 .local-control button:disabled { opacity: .5; }
+.local-control button.primary { background: var(--accent); color: var(--ground); border-color: var(--accent); }
+.local-control textarea { min-height: 64px; resize: vertical; }

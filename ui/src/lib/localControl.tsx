@@ -105,17 +105,19 @@ function Permission({ request }: { request: ControlRequest }) {
 export function LocalControl({ view }: { view: ControlView }) {
   const [text, setText] = useState('');
   const s = view.snapshot;
+  const canSend =
+    !view.busy &&
+    !view.uncertain &&
+    s.connected &&
+    (s.activeTurn ? s.capabilities.steer : s.capabilities.input) &&
+    !!text.trim();
   const pending = s.requests.filter((r) => r.state.state === 'open' || r.state.state === 'claimed');
   const recent = s.requests
     .filter((r) => r.state.state !== 'open' && r.state.state !== 'claimed')
     .slice(-10);
   return (
-    <section class="local-control" aria-label="Local Codex control">
-      <h2>Local Codex</h2>
-      <p>
-        {s.connected ? 'Connected' : 'Disconnected'}
-        {s.activeTurn ? ' · Active turn' : ''}
-      </p>
+    <section class="local-control" aria-label="Conversation controls">
+      {!s.connected && <p role="status">Reconnecting to your session…</p>}
       {s.reason && <p>{s.reason}</p>}
       {pending.map((request) => {
         const supported =
@@ -165,33 +167,41 @@ export function LocalControl({ view }: { view: ControlView }) {
         );
       })}
       <form
-        onSubmit={(event) => {
+        onSubmit={async (event) => {
           event.preventDefault();
-          view.send(text);
+          if (!canSend) return;
+          const submitted = text;
+          if (await view.send(submitted))
+            setText((current) => (current === submitted ? '' : current));
         }}
       >
         <label>
-          Message to Codex
-          <textarea value={text} onInput={(event) => setText(event.currentTarget.value)} />
+          <textarea
+            aria-label="Message to Codex"
+            rows={2}
+            placeholder={s.activeTurn ? 'Add instructions for this turn…' : 'Ask a follow-up…'}
+            value={text}
+            onInput={(event) => setText(event.currentTarget.value)}
+            onKeyDown={(event) => {
+              if (canSend && event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
+                event.preventDefault();
+                event.currentTarget.form?.requestSubmit();
+              }
+            }}
+          />
         </label>
-        <button
-          type="submit"
-          disabled={
-            view.busy ||
-            view.uncertain ||
-            !(s.activeTurn ? s.capabilities.steer : s.capabilities.input) ||
-            !text.trim()
-          }
-        >
-          {s.activeTurn ? 'Steer active turn' : 'Send'}
+        <button type="submit" class="primary" disabled={!canSend}>
+          Send
         </button>
-        <button
-          type="button"
-          disabled={view.busy || view.uncertain || !s.activeTurn || !s.capabilities.interrupt}
-          onClick={() => view.interrupt()}
-        >
-          Interrupt active turn
-        </button>
+        {s.capabilities.interrupt && (
+          <button
+            type="button"
+            disabled={view.busy || view.uncertain || !s.activeTurn || !s.capabilities.interrupt}
+            onClick={() => view.interrupt()}
+          >
+            Interrupt active turn
+          </button>
+        )}
         {(!s.connected || view.uncertain) && (
           <button type="button" disabled={view.busy} onClick={() => view.reconnect()}>
             Reconnect

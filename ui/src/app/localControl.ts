@@ -13,8 +13,8 @@ export function createLocalControl(scope: EffectScope, refresh: () => void) {
   let note = '';
   let uncertain = false;
   let revision = 0;
-  async function write(op: string, extra: JsonObject = {}) {
-    if (!current || busy || (uncertain && op !== 'reconnect')) return;
+  async function write(op: string, extra: JsonObject = {}): Promise<boolean> {
+    if (!current || busy || (uncertain && op !== 'reconnect')) return false;
     const target = current;
     const at = ++revision;
     busy = true;
@@ -39,7 +39,7 @@ export function createLocalControl(scope: EffectScope, refresh: () => void) {
         signal: controller.signal,
       });
       const receipt: unknown = await response.json();
-      if (at !== revision) return;
+      if (at !== revision) return false;
       if (op === 'reconnect' && response.ok) uncertain = false;
       if (!response.ok || (record(receipt) && receipt.error)) {
         note =
@@ -47,17 +47,31 @@ export function createLocalControl(scope: EffectScope, refresh: () => void) {
             ? receipt.error
             : 'Control refused. Inspect the session before sending again.';
         uncertain = uncertain || note.includes('unknown');
+        return false;
       } else {
+        if (op === 'send') {
+          const snapshot = record(receipt) && record(receipt.snapshot) ? receipt.snapshot : null;
+          const action = snapshot && record(snapshot.actions) ? snapshot.actions[command.id] : null;
+          if (!record(action) || action.delivery !== 'accepted') {
+            uncertain = true;
+            note = 'Delivery unconfirmed. Inspect the session before sending again.';
+            return false;
+          }
+        }
         note =
-          op === 'answer'
-            ? 'Response sent. Codex resolution means answered or cleared; the winning client is unknown.'
-            : 'Native request accepted. Inspect the session for its outcome.';
+          op === 'send'
+            ? ''
+            : op === 'answer'
+              ? 'Response sent. Codex resolution means answered or cleared; the winning client is unknown.'
+              : 'Native request accepted. Inspect the session for its outcome.';
+        return true;
       }
     } catch {
       if (at === revision) {
         uncertain = true;
         note = 'Delivery unknown. Inspect Codex and reconnect; this request will not be resent.';
       }
+      return false;
     } finally {
       scope.releaseRequest(controller);
       if (at === revision) {
@@ -73,7 +87,7 @@ export function createLocalControl(scope: EffectScope, refresh: () => void) {
       busy,
       uncertain,
       note,
-      send: (text) => void write('send', { text }),
+      send: (text) => write('send', { text }),
       interrupt: () => void write('interrupt'),
       answer: (request, answer) =>
         void write('answer', { request: request.id, hash: request.hash, answer }),
