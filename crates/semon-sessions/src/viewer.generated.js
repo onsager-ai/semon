@@ -3086,6 +3086,7 @@ globalThis.__semonUIShared = __semonUIShared;
     const [text2, setText] = useState("");
     const s = view.snapshot;
     const canSend = !view.busy && !view.uncertain && s.connected && (s.activeTurn ? s.capabilities.steer : s.capabilities.input) && !!text2.trim();
+    const showStop = !!s.activeTurn && s.capabilities.interrupt && !text2.trim();
     const pending = s.requests.filter((r) => r.state.state === "open" || r.state.state === "claimed");
     const recent = s.requests.filter((r) => r.state.state !== "open" && r.state.state !== "claimed").slice(-10);
     return /* @__PURE__ */ jsxs("section", { class: "local-control", "aria-label": "Conversation controls", children: [
@@ -3126,6 +3127,9 @@ globalThis.__semonUIShared = __semonUIShared;
       /* @__PURE__ */ jsxs(
         "form",
         {
+          class: "sh-composer sh-composer-conversation",
+          "aria-label": "Send a follow-up",
+          "aria-busy": view.busy || void 0,
           onSubmit: async (event) => {
             event.preventDefault();
             if (!canSend) return;
@@ -3134,36 +3138,63 @@ globalThis.__semonUIShared = __semonUIShared;
               setText((current) => current === submitted ? "" : current);
           },
           children: [
-            /* @__PURE__ */ jsx("label", { children: /* @__PURE__ */ jsx(
+            /* @__PURE__ */ jsx(
               "textarea",
               {
+                class: "sh-composer-input",
                 "aria-label": "Message to Codex",
-                rows: 2,
-                placeholder: s.activeTurn ? "Add instructions for this turn\u2026" : "Ask a follow-up\u2026",
+                "aria-description": "Enter to send. Shift+Enter for a new line.",
+                rows: Math.min(6, Math.max(1, text2.split("\n").length)),
+                placeholder: s.activeTurn ? "Add instructions\u2026" : "Message Codex\u2026",
                 value: text2,
                 onInput: (event) => setText(event.currentTarget.value),
                 onKeyDown: (event) => {
-                  if (canSend && event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
+                  if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
                     event.preventDefault();
-                    event.currentTarget.form?.requestSubmit();
+                    if (canSend) event.currentTarget.form?.requestSubmit();
                   }
                 }
               }
-            ) }),
-            /* @__PURE__ */ jsx("button", { type: "submit", class: "primary", disabled: !canSend, children: "Send" }),
-            s.capabilities.interrupt && /* @__PURE__ */ jsx(
+            ),
+            /* @__PURE__ */ jsx(
               "button",
               {
-                type: "button",
-                disabled: view.busy || view.uncertain || !s.activeTurn || !s.capabilities.interrupt,
-                onClick: () => view.interrupt(),
-                children: "Interrupt active turn"
+                type: showStop ? "button" : "submit",
+                class: "ibtn sh-composer-send",
+                "aria-label": showStop ? "Stop response" : "Send",
+                "data-tip": showStop ? "Stop response" : "Send message",
+                disabled: showStop ? view.busy || view.uncertain : !canSend,
+                onClick: () => {
+                  if (showStop) view.interrupt();
+                },
+                children: view.busy ? /* @__PURE__ */ jsx("span", { class: "spin", "aria-hidden": "true" }) : /* @__PURE__ */ jsx(
+                  "svg",
+                  {
+                    viewBox: "0 0 24 24",
+                    fill: "none",
+                    stroke: "currentColor",
+                    "stroke-width": "2",
+                    "stroke-linecap": "round",
+                    "stroke-linejoin": "round",
+                    "aria-hidden": "true",
+                    children: showStop ? /* @__PURE__ */ jsx("rect", { x: "6", y: "6", width: "12", height: "12", rx: "2", fill: "currentColor", stroke: "none" }) : /* @__PURE__ */ jsx("path", { d: "M12 19V5m-6 6 6-6 6 6" })
+                  }
+                )
               }
-            ),
-            (!s.connected || view.uncertain) && /* @__PURE__ */ jsx("button", { type: "button", disabled: view.busy, onClick: () => view.reconnect(), children: "Reconnect" })
+            )
           ]
         }
       ),
+      (!s.connected || view.uncertain) && /* @__PURE__ */ jsx("div", { class: "local-control-actions", children: /* @__PURE__ */ jsx(
+        "button",
+        {
+          type: "button",
+          class: "btn sh-quiet",
+          disabled: view.busy,
+          onClick: () => view.reconnect(),
+          children: "Reconnect"
+        }
+      ) }),
       view.note && /* @__PURE__ */ jsx("p", { role: "status", children: view.note }),
       recent.length > 0 && /* @__PURE__ */ jsxs("details", { children: [
         /* @__PURE__ */ jsx("summary", { children: "Recent requests" }),
