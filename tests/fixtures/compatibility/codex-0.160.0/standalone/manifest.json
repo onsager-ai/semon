@@ -1,0 +1,38 @@
+{
+  "base": "52d177c26fdbc2a9cffa77a06276e09482800b67",
+  "native_source": "a956835d020762cb2b570053af06f643a11c0ecc",
+  "native_version": "0.160.0",
+  "native_binary_sha256": "12eb3e81114588aca3b7998f4f19e8997b056aca08e57a7ca7c8a3ec8c652aad",
+  "origin": "Complete pinned npm native Linux x86_64 package; real LocalSession, bubblewrap/seccomp executor and native Responses requests. Current corrected evidence uses capability-only adaptation and checks exact native model instruction preservation. Synthetic localhost provider and private sentinel credential delivered through stdin. Baseline and reconciliation remain historical evidence from the earlier profile; no live provider dispatch, SSH native launch or E2B deployment.",
+  "sanitization": "Only tool schemas, synthetic command/output, operation/thread identities and boolean evidence retained; native instruction text, private roots and HTTP auth headers excluded. Reconciliation checks each fresh state native listener process is absent without replay.",
+  "live_openrouter_qualified": false,
+  "native_ssh_qualified": false,
+  "sources": [
+    {
+      "path": "tests/spikes/codex-standalone.py",
+      "sha256": "c4175d6298bf474e3e435e1720dc178b5f9e0e8ea20ed7e42cb51579caa823e3"
+    },
+    {
+      "path": "crates/semon-control/examples/standalone-qualification.rs",
+      "sha256": "6717ed8a25688b7fc9ff5afb69f18e12fb66dedadf2c5fc3786ef033c670a88d"
+    },
+    {
+      "path": "crates/semon-control/src/local.rs",
+      "sha256": "5730c709de4b76d28ed87f507c014d534b3b3be86ee0526dd741cd371ad101ab"
+    }
+  ],
+  "fixtures": [
+    {
+      "path": "tests/fixtures/compatibility/codex-0.160.0/standalone/baseline.json",
+      "sha256": "e73adbf5b2f8c03d8d73995267034757558bd704d68b7f4d21a0bff2be7553ce"
+    },
+    {
+      "path": "tests/fixtures/compatibility/codex-0.160.0/standalone/corrected.json",
+      "sha256": "17dc1d5a4af18345a9627614be6fd05d5f0e21e6c3b980c2e9e8a9d2e98ecb54"
+    },
+    {
+      "path": "tests/fixtures/compatibility/codex-0.160.0/standalone/reconciliation.json",
+      "sha256": "fe6b7398bd594a08cada07eae8de0b37bba0c69407b5db4333148b847533ef22"
+    }
+  ]
+}

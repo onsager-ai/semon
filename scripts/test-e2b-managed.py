@@ -76,4 +76,34 @@ class Tests(unittest.TestCase):
             self.assertEqual(result,{'snapshot':{'thread':'native'}});self.assertEqual(seen,[payload])
             self.assertTrue(all(payload['text'] not in cmd and 'synthetic-provider' not in cmd for cmd in commands))
             self.assertFalse(list(Path(root).glob('request-*')))
+    def test_device_bootstrap_transports_opaque_auth_only_in_private_file(self):
+        artifact = json.dumps({'auth_mode':'chatgpt','OPENAI_API_KEY':None,
+            'tokens':{'access_token':'synthetic-access','refresh_token':'synthetic-refresh'}})
+        commands, files = [], {}
+        class Files:
+            def write(self,path,data,**kw): files[path]=data
+        class Commands:
+            def run(self,cmd,**kw):
+                commands.append(cmd)
+                return SimpleNamespace(exit_code=0,stdout='')
+        vm=SimpleNamespace(files=Files(),commands=Commands())
+        class SDK:
+            @staticmethod
+            def get_info(*args,**kw):return SimpleNamespace(metadata=LABELS,state='running')
+        value=request(method='bootstrap',id='vm-one',model_method='chatgpt_device_code',
+            auth_artifact=artifact,artifact_url='https://artifact.test/guest.tar.gz',
+            artifact_sha256='a'*64,push_token='synthetic-push',push_url='https://mirror.test/api/push')
+        with patch.object(worker,'attach_running',return_value=vm):
+            self.assertEqual(worker.managed(value,SDK),{'started':True})
+        launch=json.loads(files['/var/lib/semon/launch.json'])
+        self.assertEqual(launch['auth_artifact'],artifact)
+        self.assertIsNone(launch['api_key'])
+        self.assertTrue(all('synthetic-access' not in cmd and 'synthetic-refresh' not in cmd
+            and 'synthetic-push' not in cmd and 'synthetic-provider' not in cmd for cmd in commands))
+        self.assertIn('chmod 600 /var/lib/semon/launch.json',commands)
+        commands.clear();value['model_key']='mixed-key'
+        with patch.object(worker,'attach_running',return_value=vm):
+            self.assertEqual(worker.managed(value,SDK),{'error':'model_auth_required'})
+        self.assertEqual(commands,[])
+
 if __name__=='__main__':unittest.main()

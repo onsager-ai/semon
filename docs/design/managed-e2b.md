@@ -41,3 +41,20 @@ bindings or approved third-party client registration were available. Real bounde
 VM provisioning, completed inference for each method, reconnect/controller restart,
 stale authority, renewal/revocation and explicit provider cleanup remain release
 gates. No production flag or public remote control was activated.
+
+## Opaque personal ChatGPT custody
+
+The private managed transport accepts `chatgpt_device_code` as an explicit method.
+The coordinator owns durable writer/generation claims before delivering the
+bounded official `auth.json` string; the native launcher installs it in a fresh
+0600 model file outside executor mounts and pins file credential storage. API-key
+and personal-device billing cannot be mixed. Native refresh remains in the guest.
+Confirmed shutdown stops the native writer before returning its updated opaque
+artifact in a dedicated private response field, separate from snapshots and
+transcripts. Retry reads the protected shutdown evidence and does not launch or
+refresh again. The coordinator must authenticate and encrypt the return with
+owner/generation fencing; lost compute never permits stale token replay.
+
+Offline synthetic fixtures exercise shape refusal, private delivery, permissions,
+links and SDK transport. Actual account entitlement and live provider turns remain
+owner-authorized qualification, separate from these tests.

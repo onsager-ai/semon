@@ -2747,6 +2747,7 @@ globalThis.__semonUIShared = __semonUIShared;
         return;
       }
       if (!dialog.open) return;
+      if (event.target instanceof Element && event.target.closest("dialog") !== dialog) return;
       if (!(event.target instanceof Node) || !body.contains(event.target) || body.scrollHeight <= body.clientHeight + 1)
         event.preventDefault();
     };
@@ -8249,6 +8250,8 @@ globalThis.__semonUIShared = __semonUIShared;
     const shellChrome = host2.sidebarOnly ? null : createShellChrome({
       account: accountHost,
       navigate(destination) {
+        if (host2.viewerHost?.nativeNavigation?.some((item2) => item2.key === destination.key))
+          return false;
         host2.destination.go(host2.navigation.historyRoute({ v: destination.key }, { v: "home" }));
         return true;
       },
@@ -10467,6 +10470,7 @@ globalThis.__semonUIShared = __semonUIShared;
           hot
         });
       };
+      destinations.push(...host2.viewerHost?.nativeNavigation ?? []);
       item2("home", "Home", I.home, host2.domain.inbox().length, true);
       item2("sessions", "Sessions", I.sessions);
       item2("analytics", "Analytics", I.chart);
@@ -10481,6 +10485,8 @@ globalThis.__semonUIShared = __semonUIShared;
         host2.accountControlsOwner.shellChrome.update(destinations, host2.layoutOwner.railMode);
       else
         renderShellNavigation(nav, destinations, (destination) => {
+          if (host2.viewerHost?.nativeNavigation?.some((item3) => item3.key === destination.key))
+            return false;
           host2.destination.go(host2.navigation.historyRoute({ v: destination.key }, { v: "home" }));
           return true;
         });
