@@ -187,3 +187,11 @@ in this primitive. `ViewerHost.nativeNavigation` adds validated host-owned nativ
 links to the same shell, without extending the viewer router or poller.
 `tests/ui/compact-gallery.mjs` audits the new opt-in geometry and lifecycle;
 existing gallery baselines and thresholds are unchanged.
+
+Compact composer pickers adopt the existing `createPanelChrome` and shared
+`createSelect` owners. The native-shell lifetime owns their enhancement and
+teardown; the consumer retains named form controls and submission. Panels stay
+inside their original form, so settings and submitter overrides participate in
+native POST and FormData. A nested Select sheet owns its own scroll boundary.
+No-JS keeps styled native fields and details. Destroy restores host content and
+native fields before removing enhancement roots; remount cannot duplicate them.
