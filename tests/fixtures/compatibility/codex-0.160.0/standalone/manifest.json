@@ -18,7 +18,7 @@
     },
     {
       "path": "crates/semon-control/src/local.rs",
-      "sha256": "6f419cddf38eba5d3cb92a4d8f50e2fdb469f66c539fed92a92bc02e16e22baf"
+      "sha256": "5730c709de4b76d28ed87f507c014d534b3b3be86ee0526dd741cd371ad101ab"
     }
   ],
   "fixtures": [
@@ -28,7 +28,7 @@
     },
     {
       "path": "tests/fixtures/compatibility/codex-0.160.0/standalone/corrected.json",
-      "sha256": "93b275517f2827f1b5242fb824c81a2faab194c2cdb3e23e755d17dc8c211cdc"
+      "sha256": "17dc1d5a4af18345a9627614be6fd05d5f0e21e6c3b980c2e9e8a9d2e98ecb54"
     },
     {
       "path": "tests/fixtures/compatibility/codex-0.160.0/standalone/reconciliation.json",
