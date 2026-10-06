@@ -1833,6 +1833,7 @@ globalThis.__semonUIShared = __semonUIShared;
               }
             );
             composer.append(panel.dialog);
+            panel.body.classList.add("sh-composer-panel-body");
             panel.body.append(body);
             panel.show();
           },
