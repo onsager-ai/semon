@@ -25,19 +25,23 @@ operation `30700000000000000000000000000010`. Actual outbound input included
 `code-mode host is disabled`. The synthetic provider's final message reports that
 failure. Shell execution did not occur. The native process was stopped and reaped.
 
-The isolated launcher now owns a frozen catalog using native standalone fallback
-instructions, direct tools and disabled multi-agent selectors. It pins this
-catalog through a CLI override in its fresh owner home, keeps agents disabled,
+The isolated launcher exports the installed binary's bundled catalog offline
+and adapts only tool/multi-agent capability selectors. It preserves all native
+model instruction bundles. It pins this catalog through a CLI override in its fresh owner home, keeps agents disabled,
 and retains all existing code-mode disabling flags. Known models keep their
-limits/reasoning and shell/patch shapes. Live catalog changes cannot override
-this profile. See the [catalog provenance](../crates/semon-control/src/native/README.md).
+instructions, limits/reasoning and shell/patch shapes. The private session profile
+records native/effective catalog hashes and capability overrides. Live catalog
+changes cannot override this profile. See the [catalog provenance](../crates/semon-control/src/native/README.md).
 The native request uses standard Responses `tools`, rather than the bundled
 Responses-lite `additional_tools` format. User-supplied config still accepts only
 model/provider settings. Credential restart uses the same pinned command/home.
 
 ## What passed
 
-Corrected fresh operation `30700000000000000000000000000011` used actual
+The earlier fallback-profile evidence used fresh operation
+`30700000000000000000000000000011`. The current capability-only profile used
+fresh operation `31600000000000000000000000000022` and is verified by the native
+probe, which checks that outbound requests preserve the installed model's exact base instructions. Both use actual
 LocalSession, native Codex and its confined executor. A synthetic localhost
 Responses provider emitted the advertised direct `exec_command` call. Native
 executed a shell check, returned exit 0 and `SEMON_EXECUTED_307:42`, then persisted

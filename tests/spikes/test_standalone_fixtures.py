@@ -29,6 +29,14 @@ class StandaloneNativeEvidence(unittest.TestCase):
 
     def test_native_direct_schema_and_actual_execution(self):
         after = json.loads((ROOT/'corrected.json').read_text())
+        self.assertTrue(after['native_model_instructions_preserved'])
+        self.assertTrue(after['all_native_model_messages_preserved'])
+        profile = after['session_profile']
+        self.assertEqual(profile['instruction_source'], 'native debug models --bundled')
+        self.assertEqual(profile['profile'], 'standalone-direct-v1')
+        self.assertEqual(profile['native_version'], '0.160.0')
+        for key in ('native_catalog_sha256', 'effective_catalog_sha256'):
+            self.assertRegex(profile[key], r'^[a-f0-9]{64}$')
         schema = after['executor_schema']
         self.assertEqual(schema['type'], 'function')
         self.assertEqual(schema['name'], 'exec_command')
