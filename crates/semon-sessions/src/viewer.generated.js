@@ -3085,14 +3085,12 @@ globalThis.__semonUIShared = __semonUIShared;
   function LocalControl({ view }) {
     const [text2, setText] = useState("");
     const s = view.snapshot;
+    const canSend = !view.busy && !view.uncertain && s.connected && (s.activeTurn ? s.capabilities.steer : s.capabilities.input) && !!text2.trim();
+    const showStop = !!s.activeTurn && s.capabilities.interrupt && !text2.trim();
     const pending = s.requests.filter((r) => r.state.state === "open" || r.state.state === "claimed");
     const recent = s.requests.filter((r) => r.state.state !== "open" && r.state.state !== "claimed").slice(-10);
-    return /* @__PURE__ */ jsxs("section", { class: "local-control", "aria-label": "Local Codex control", children: [
-      /* @__PURE__ */ jsx("h2", { children: "Local Codex" }),
-      /* @__PURE__ */ jsxs("p", { children: [
-        s.connected ? "Connected" : "Disconnected",
-        s.activeTurn ? " \xB7 Active turn" : ""
-      ] }),
+    return /* @__PURE__ */ jsxs("section", { class: "local-control", "aria-label": "Conversation controls", children: [
+      !s.connected && /* @__PURE__ */ jsx("p", { role: "status", children: "Reconnecting to your session\u2026" }),
       s.reason && /* @__PURE__ */ jsx("p", { children: s.reason }),
       pending.map((request) => {
         const supported = request.kind === "question" ? s.capabilities.questions : request.payload.method === "item/fileChange/requestApproval" ? s.capabilities.fileApproval : s.capabilities.commandApproval;
@@ -3129,36 +3127,74 @@ globalThis.__semonUIShared = __semonUIShared;
       /* @__PURE__ */ jsxs(
         "form",
         {
-          onSubmit: (event) => {
+          class: "sh-composer sh-composer-conversation",
+          "aria-label": "Send a follow-up",
+          "aria-busy": view.busy || void 0,
+          onSubmit: async (event) => {
             event.preventDefault();
-            view.send(text2);
+            if (!canSend) return;
+            const submitted = text2;
+            if (await view.send(submitted))
+              setText((current) => current === submitted ? "" : current);
           },
           children: [
-            /* @__PURE__ */ jsxs("label", { children: [
-              "Message to Codex",
-              /* @__PURE__ */ jsx("textarea", { value: text2, onInput: (event) => setText(event.currentTarget.value) })
-            ] }),
             /* @__PURE__ */ jsx(
-              "button",
+              "textarea",
               {
-                type: "submit",
-                disabled: view.busy || view.uncertain || !(s.activeTurn ? s.capabilities.steer : s.capabilities.input) || !text2.trim(),
-                children: s.activeTurn ? "Steer active turn" : "Send"
+                class: "sh-composer-input",
+                "aria-label": "Message to Codex",
+                "aria-description": "Enter to send. Shift+Enter for a new line.",
+                rows: Math.min(6, Math.max(1, text2.split("\n").length)),
+                placeholder: s.activeTurn ? "Add instructions\u2026" : "Message Codex\u2026",
+                value: text2,
+                onInput: (event) => setText(event.currentTarget.value),
+                onKeyDown: (event) => {
+                  if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
+                    event.preventDefault();
+                    if (canSend) event.currentTarget.form?.requestSubmit();
+                  }
+                }
               }
             ),
             /* @__PURE__ */ jsx(
               "button",
               {
-                type: "button",
-                disabled: view.busy || view.uncertain || !s.activeTurn || !s.capabilities.interrupt,
-                onClick: () => view.interrupt(),
-                children: "Interrupt active turn"
+                type: showStop ? "button" : "submit",
+                class: "ibtn sh-composer-send",
+                "aria-label": showStop ? "Stop response" : "Send",
+                "data-tip": showStop ? "Stop response" : "Send message",
+                disabled: showStop ? view.busy || view.uncertain : !canSend,
+                onClick: () => {
+                  if (showStop) view.interrupt();
+                },
+                children: view.busy ? /* @__PURE__ */ jsx("span", { class: "spin", "aria-hidden": "true" }) : /* @__PURE__ */ jsx(
+                  "svg",
+                  {
+                    viewBox: "0 0 24 24",
+                    fill: "none",
+                    stroke: "currentColor",
+                    "stroke-width": "2",
+                    "stroke-linecap": "round",
+                    "stroke-linejoin": "round",
+                    "aria-hidden": "true",
+                    children: showStop ? /* @__PURE__ */ jsx("rect", { x: "6", y: "6", width: "12", height: "12", rx: "2", fill: "currentColor", stroke: "none" }) : /* @__PURE__ */ jsx("path", { d: "M12 19V5m-6 6 6-6 6 6" })
+                  }
+                )
               }
-            ),
-            (!s.connected || view.uncertain) && /* @__PURE__ */ jsx("button", { type: "button", disabled: view.busy, onClick: () => view.reconnect(), children: "Reconnect" })
+            )
           ]
         }
       ),
+      (!s.connected || view.uncertain) && /* @__PURE__ */ jsx("div", { class: "local-control-actions", children: /* @__PURE__ */ jsx(
+        "button",
+        {
+          type: "button",
+          class: "btn sh-quiet",
+          disabled: view.busy,
+          onClick: () => view.reconnect(),
+          children: "Reconnect"
+        }
+      ) }),
       view.note && /* @__PURE__ */ jsx("p", { role: "status", children: view.note }),
       recent.length > 0 && /* @__PURE__ */ jsxs("details", { children: [
         /* @__PURE__ */ jsx("summary", { children: "Recent requests" }),
@@ -6362,6 +6398,7 @@ globalThis.__semonUIShared = __semonUIShared;
       turns: /* @__PURE__ */ new Map()
     };
     let disposed = false;
+    let streamed = false;
     const visible2 = () => document.visibilityState === "visible", floorWait = () => Math.max(0, state2.started + 1e3 - performance.now());
     function cancel() {
       if (state2.timer !== null) clearTimeout(state2.timer);
@@ -6369,7 +6406,7 @@ globalThis.__semonUIShared = __semonUIShared;
     }
     function schedule(ms) {
       cancel();
-      if (!disposed && !state2.ended && visible2()) {
+      if (!disposed && !streamed && !state2.ended && visible2()) {
         state2.due = performance.now() + ms;
         state2.timer = window.setTimeout(poll, ms);
       }
@@ -6427,6 +6464,10 @@ globalThis.__semonUIShared = __semonUIShared;
     return {
       state: state2,
       schedule,
+      useStream() {
+        streamed = true;
+        cancel();
+      },
       stop() {
         state2.ended = true;
         cancel();
@@ -6794,7 +6835,7 @@ globalThis.__semonUIShared = __semonUIShared;
     let uncertain = false;
     let revision = 0;
     async function write(op, extra = {}) {
-      if (!current || busy2 || uncertain && op !== "reconnect") return;
+      if (!current || busy2 || uncertain && op !== "reconnect") return false;
       const target = current;
       const at = ++revision;
       busy2 = true;
@@ -6819,19 +6860,31 @@ globalThis.__semonUIShared = __semonUIShared;
           signal: controller.signal
         });
         const receipt = await response.json();
-        if (at !== revision) return;
+        if (at !== revision) return false;
         if (op === "reconnect" && response.ok) uncertain = false;
         if (!response.ok || record3(receipt) && receipt.error) {
           note = record3(receipt) && typeof receipt.error === "string" ? receipt.error : "Control refused. Inspect the session before sending again.";
           uncertain = uncertain || note.includes("unknown");
+          return false;
         } else {
-          note = op === "answer" ? "Response sent. Codex resolution means answered or cleared; the winning client is unknown." : "Native request accepted. Inspect the session for its outcome.";
+          if (op === "send") {
+            const snapshot = record3(receipt) && record3(receipt.snapshot) ? receipt.snapshot : null;
+            const action = snapshot && record3(snapshot.actions) ? snapshot.actions[command.id] : null;
+            if (!record3(action) || action.delivery !== "accepted") {
+              uncertain = true;
+              note = "Delivery unconfirmed. Inspect the session before sending again.";
+              return false;
+            }
+          }
+          note = op === "send" ? "" : op === "answer" ? "Response sent. Codex resolution means answered or cleared; the winning client is unknown." : "Native request accepted. Inspect the session for its outcome.";
+          return true;
         }
       } catch {
         if (at === revision) {
           uncertain = true;
           note = "Delivery unknown. Inspect Codex and reconnect; this request will not be resent.";
         }
+        return false;
       } finally {
         scope.releaseRequest(controller);
         if (at === revision) {
@@ -6847,7 +6900,7 @@ globalThis.__semonUIShared = __semonUIShared;
         busy: busy2,
         uncertain,
         note,
-        send: (text2) => void write("send", { text: text2 }),
+        send: (text2) => write("send", { text: text2 }),
         interrupt: () => void write("interrupt"),
         answer: (request, answer2) => void write("answer", { request: request.id, hash: request.hash, answer: answer2 }),
         reconnect: () => void write("reconnect")
@@ -10176,7 +10229,52 @@ globalThis.__semonUIShared = __semonUIShared;
       h2.declined ? 1 : 0
     ].join("|");
     const visible2 = () => document.visibilityState === "visible";
-    const schedule = (ms) => liveController.schedule(ms);
+    let stream = null;
+    let destroyed = false;
+    let streamNote = null;
+    function clearStreamNote() {
+      streamNote?.remove();
+      streamNote = null;
+    }
+    function showStreamNote() {
+      if (destroyed || host2.disposed || streamNote) return;
+      streamNote = createStatusNote("Reconnecting\u2026 Your conversation is retained.", "livenote");
+      document.body.append(streamNote);
+    }
+    let delivery = Promise.resolve();
+    const schedule = (ms) => {
+      const path = host2.viewerHost?.modelStream;
+      if (!path || typeof EventSource === "undefined") {
+        liveController.schedule(ms);
+        return;
+      }
+      if (stream || destroyed) return;
+      if (!path.startsWith("/") || path.startsWith("//") || /[\\\s]/.test(path))
+        throw new Error("Invalid live model stream");
+      stream = new EventSource(path);
+      liveController.useStream();
+      stream.addEventListener("open", clearStreamNote);
+      stream.addEventListener("error", showStreamNote);
+      stream.addEventListener("unavailable", showStreamNote);
+      stream.addEventListener("model", (event) => {
+        if (!(event instanceof MessageEvent)) return;
+        delivery = delivery.then(async () => {
+          if (destroyed || host2.disposed) return;
+          await host2.liveUpdates.update(JSON.parse(String(event.data)));
+          clearStreamNote();
+        }).catch(() => {
+          showStreamNote();
+        });
+      });
+      stream.addEventListener("ended", () => {
+        destroyed = true;
+        liveController.stop();
+        stream?.close();
+        stream = null;
+        clearStreamNote();
+        host2.viewerHost?.modelFailed?.(403);
+      });
+    };
     function ended(status2) {
       if (host2.disposed) return;
       liveController.stop();
@@ -10220,6 +10318,13 @@ globalThis.__semonUIShared = __semonUIShared;
       })
     );
     return {
+      destroy() {
+        destroyed = true;
+        clearStreamNote();
+        stream?.close();
+        stream = null;
+        liveController.destroy();
+      },
       liveController,
       LIVE,
       remember,
@@ -13751,6 +13856,7 @@ globalThis.__semonUIShared = __semonUIShared;
         for (const sid of Object.keys(host2.transcripts.entries)) host2.transcripts.spread(sid);
       });
       host2.viewerHost?.modelAccount?.(account);
+      host2.viewerHost?.modelNavigation?.(m);
       return m;
     }
     const spread = (sid) => host2.transcripts.spread(sid);
@@ -14322,7 +14428,7 @@ globalThis.__semonUIShared = __semonUIShared;
           context.controlOwner.destroy();
           context.updates.destroy();
           context.scope.destroy();
-          context.liveModelOwner.liveController.destroy();
+          context.liveModelOwner.destroy();
           context.navigation.destroy();
           context.transcripts.destroy();
           context.viewport.stopOpeningEndPin();

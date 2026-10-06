@@ -105,17 +105,20 @@ function Permission({ request }: { request: ControlRequest }) {
 export function LocalControl({ view }: { view: ControlView }) {
   const [text, setText] = useState('');
   const s = view.snapshot;
+  const canSend =
+    !view.busy &&
+    !view.uncertain &&
+    s.connected &&
+    (s.activeTurn ? s.capabilities.steer : s.capabilities.input) &&
+    !!text.trim();
+  const showStop = !!s.activeTurn && s.capabilities.interrupt && !text.trim();
   const pending = s.requests.filter((r) => r.state.state === 'open' || r.state.state === 'claimed');
   const recent = s.requests
     .filter((r) => r.state.state !== 'open' && r.state.state !== 'claimed')
     .slice(-10);
   return (
-    <section class="local-control" aria-label="Local Codex control">
-      <h2>Local Codex</h2>
-      <p>
-        {s.connected ? 'Connected' : 'Disconnected'}
-        {s.activeTurn ? ' · Active turn' : ''}
-      </p>
+    <section class="local-control" aria-label="Conversation controls">
+      {!s.connected && <p role="status">Reconnecting to your session…</p>}
       {s.reason && <p>{s.reason}</p>}
       {pending.map((request) => {
         const supported =
@@ -165,39 +168,75 @@ export function LocalControl({ view }: { view: ControlView }) {
         );
       })}
       <form
-        onSubmit={(event) => {
+        class="sh-composer sh-composer-conversation"
+        aria-label="Send a follow-up"
+        aria-busy={view.busy || undefined}
+        onSubmit={async (event) => {
           event.preventDefault();
-          view.send(text);
+          if (!canSend) return;
+          const submitted = text;
+          if (await view.send(submitted))
+            setText((current) => (current === submitted ? '' : current));
         }}
       >
-        <label>
-          Message to Codex
-          <textarea value={text} onInput={(event) => setText(event.currentTarget.value)} />
-        </label>
+        <textarea
+          class="sh-composer-input"
+          aria-label="Message to Codex"
+          aria-description="Enter to send. Shift+Enter for a new line."
+          rows={Math.min(6, Math.max(1, text.split('\n').length))}
+          placeholder={s.activeTurn ? 'Add instructions…' : 'Message Codex…'}
+          value={text}
+          onInput={(event) => setText(event.currentTarget.value)}
+          onKeyDown={(event) => {
+            if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
+              event.preventDefault();
+              if (canSend) event.currentTarget.form?.requestSubmit();
+            }
+          }}
+        />
         <button
-          type="submit"
-          disabled={
-            view.busy ||
-            view.uncertain ||
-            !(s.activeTurn ? s.capabilities.steer : s.capabilities.input) ||
-            !text.trim()
-          }
+          type={showStop ? 'button' : 'submit'}
+          class="ibtn sh-composer-send"
+          aria-label={showStop ? 'Stop response' : 'Send'}
+          data-tip={showStop ? 'Stop response' : 'Send message'}
+          disabled={showStop ? view.busy || view.uncertain : !canSend}
+          onClick={() => {
+            if (showStop) view.interrupt();
+          }}
         >
-          {s.activeTurn ? 'Steer active turn' : 'Send'}
+          {view.busy ? (
+            <span class="spin" aria-hidden="true" />
+          ) : (
+            <svg
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              aria-hidden="true"
+            >
+              {showStop ? (
+                <rect x="6" y="6" width="12" height="12" rx="2" fill="currentColor" stroke="none" />
+              ) : (
+                <path d="M12 19V5m-6 6 6-6 6 6" />
+              )}
+            </svg>
+          )}
         </button>
-        <button
-          type="button"
-          disabled={view.busy || view.uncertain || !s.activeTurn || !s.capabilities.interrupt}
-          onClick={() => view.interrupt()}
-        >
-          Interrupt active turn
-        </button>
-        {(!s.connected || view.uncertain) && (
-          <button type="button" disabled={view.busy} onClick={() => view.reconnect()}>
+      </form>
+      {(!s.connected || view.uncertain) && (
+        <div class="local-control-actions">
+          <button
+            type="button"
+            class="btn sh-quiet"
+            disabled={view.busy}
+            onClick={() => view.reconnect()}
+          >
             Reconnect
           </button>
-        )}
-      </form>
+        </div>
+      )}
       {view.note && <p role="status">{view.note}</p>}
       {recent.length > 0 && (
         <details>

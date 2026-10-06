@@ -45,19 +45,19 @@ pub const FAVICON_SVG: &str = include_str!("favicon.svg");
 /// served beside the viewer draws the same rows with [`NavLink::html`], so its drawer lists what the viewer's does, with
 /// the same labels and icons.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct NavLink {
+pub struct NavLink<'a> {
     /// The viewer's name for the destination: `home`, `sessions`, `analytics` or `machines`.
-    pub key: &'static str,
-    pub label: &'static str,
+    pub key: &'a str,
+    pub label: &'a str,
     /// The viewer's own path for it. An embedding page that serves a destination at another path links there instead.
-    pub path: &'static str,
+    pub path: &'a str,
     /// The icon's SVG path data, drawn in a 24 × 24 box.
-    pub icon: &'static str,
+    pub icon: &'a str,
 }
 
 /// The viewer's navigation, in its sidebar's order. A Rust test checks that the viewer's own script draws exactly these
 /// rows with these icons, so a change here or there that leaves the other behind fails the build.
-pub const NAV: [NavLink; 4] = [
+pub const NAV: [NavLink<'static>; 4] = [
     NavLink {
         key: "home",
         label: "Home",
@@ -84,14 +84,15 @@ pub const NAV: [NavLink; 4] = [
     },
 ];
 
-impl NavLink {
+impl NavLink<'_> {
     /// The row as a served page draws it: `<a class="nav-item">` with the viewer's 18 px icon and the label, marked
     /// `aria-current="page"` when `current`. `href` is escaped here.
     pub fn html(&self, href: &str, current: bool) -> String {
         format!(
-            "<a class=\"nav-item\" href=\"{href}\"{current}><svg class=\"icon\" viewBox=\"0 0 24 24\" fill=\"none\" \
+            "<a class=\"nav-item\" data-go=\"{key}\" href=\"{href}\"{current}><svg class=\"icon\" viewBox=\"0 0 24 24\" fill=\"none\" \
              stroke=\"currentColor\" stroke-width=\"1.8\" stroke-linecap=\"round\" stroke-linejoin=\"round\" \
              aria-hidden=\"true\"><path d=\"{icon}\"></path></svg><span>{label}</span></a>",
+            key = escape(self.key),
             href = escape(href),
             current = if current {
                 " aria-current=\"page\""
@@ -99,7 +100,7 @@ impl NavLink {
                 ""
             },
             icon = self.icon,
-            label = self.label,
+            label = escape(self.label),
         )
     }
 }

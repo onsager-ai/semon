@@ -80,3 +80,36 @@ test('unsupported or malformed live models never create write capabilities', () 
   ])
     assert.throws(() => owner.prepare(invalid));
 });
+test('follow-up delivery is confirmed before the composer may clear its draft', async () => {
+  const oldFetch = globalThis.fetch;
+  const calls = [];
+  const owner = createLocalControl(
+    { request: () => new AbortController(), releaseRequest: () => {} },
+    () => {},
+  );
+  owner.adopt(owner.prepare({ ...model(), activeTurn: null }));
+  try {
+    globalThis.fetch = async (_url, options) => {
+      const command = JSON.parse(options.body);
+      calls.push(command);
+      return {
+        ok: true,
+        json: async () => ({ snapshot: { actions: { [command.id]: { delivery: 'accepted' } } } }),
+      };
+    };
+    assert.equal(await owner.view('native').send('First follow-up'), true);
+    assert.equal(await owner.view('native').send('Second follow-up'), true);
+    assert.equal(calls.length, 2);
+    assert.notEqual(calls[0].id, calls[1].id);
+    globalThis.fetch = async () => ({
+      ok: true,
+      json: async () => ({ snapshot: { actions: {} } }),
+    });
+    assert.equal(await owner.view().send('Unconfirmed'), false);
+    assert.equal(owner.view().uncertain, true);
+    assert.equal(await owner.view().send('Never replay this'), false);
+  } finally {
+    owner.destroy();
+    globalThis.fetch = oldFetch;
+  }
+});

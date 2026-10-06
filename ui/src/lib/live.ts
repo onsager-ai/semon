@@ -39,6 +39,7 @@ export function createLiveController(host: LiveHost) {
     turns: new Map(),
   };
   let disposed = false;
+  let streamed = false;
   const visible = () => document.visibilityState === 'visible',
     floorWait = () => Math.max(0, state.started + 1000 - performance.now());
   function cancel() {
@@ -47,7 +48,7 @@ export function createLiveController(host: LiveHost) {
   }
   function schedule(ms: number) {
     cancel();
-    if (!disposed && !state.ended && visible()) {
+    if (!disposed && !streamed && !state.ended && visible()) {
       state.due = performance.now() + ms;
       state.timer = window.setTimeout(poll, ms);
     }
@@ -106,6 +107,10 @@ export function createLiveController(host: LiveHost) {
   return {
     state,
     schedule,
+    useStream() {
+      streamed = true;
+      cancel();
+    },
     stop() {
       state.ended = true;
       cancel();

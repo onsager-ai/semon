@@ -12,6 +12,9 @@ export interface ViewerHost {
   nativePage?: { title: string; nav: string };
   account?: unknown;
   modelAccount?(account: Account | null): void;
+  /** Host SSE models enter the existing validated model transaction. */
+  modelStream?: string;
+  modelNavigation?(model: unknown): void;
   /** Return true when the host has taken native recovery for a model failure. */
   modelFailed?(status: number): boolean;
   initialMachines?: ViewerContent;

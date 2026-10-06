@@ -5118,11 +5118,49 @@ mod tests {
     }
 
     #[test]
+    fn session_controls_bind_machine_keys_even_when_hostnames_collide() {
+        let first = machine("same-host", "first-session");
+        let second = machine("same-host", "second-session");
+        let core = ViewerCore::with_machines(vec![
+            ("first-key".into(), first.options.clone()),
+            ("second-key".into(), second.options.clone()),
+        ]);
+        assert_eq!(
+            core.session_machine_key("first-session")
+                .unwrap()
+                .as_deref(),
+            Some("first-key")
+        );
+        assert_eq!(
+            core.session_machine_key("second-session")
+                .unwrap()
+                .as_deref(),
+            Some("second-key")
+        );
+        assert_eq!(core.session_machine_key("missing").unwrap(), None);
+        let duplicate = machine("same-host", "first-session");
+        let ambiguous = ViewerCore::with_machines(vec![
+            ("first-key".into(), first.options.clone()),
+            ("duplicate-key".into(), duplicate.options.clone()),
+        ]);
+        assert_eq!(
+            ambiguous.session_machine_key("first-session").unwrap(),
+            None
+        );
+        core.close();
+        assert_eq!(core.session_machine_key("first-session").unwrap(), None);
+    }
+
+    #[test]
     fn one_machine_through_with_machines_is_todays_viewer_byte_for_byte() {
         let fixture = machine("laptop", "lane");
         let today = fixture.viewer();
         let mut core =
             ViewerCore::with_machines(vec![("some-key".into(), fixture.options.clone())]);
+        assert_eq!(
+            core.session_machine_key("lane").unwrap().as_deref(),
+            Some("some-key")
+        );
         // `--serve`'s mode answers the same bytes.
         let mut background =
             ViewerCore::with_machines(vec![("some-key".into(), fixture.options.clone())]);

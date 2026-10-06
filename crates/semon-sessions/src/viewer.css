@@ -1285,12 +1285,17 @@ html.viewer-open, html.viewer-open body { overflow: hidden; }
 }
 
 /* Local control shares the page commit owner; exact native payloads remain plain text. */
-.local-control { margin: var(--s5) 0; padding: var(--s4); border: 1px solid var(--line); border-radius: var(--r2); }
+.local-control { margin: var(--s3) 0 0; }
+.page:has(> .transcript):has(> .local-control) { display: flex; flex-direction: column; min-height: calc(100dvh - 56px); padding-bottom: calc(var(--s4) + env(safe-area-inset-bottom, 0px)); }
+.page:has(> .local-control) > .transcript { flex: 1 0 auto; align-content: start; }
+.page:has(> .transcript) > .local-control { position: sticky; bottom: calc(var(--s4) + env(safe-area-inset-bottom, 0px)); z-index: 7; padding-top: var(--s2); background: var(--ground); }
+.page:has(> .transcript) > .local-control:has(article), .page:has(> .transcript) > .local-control:has(details[open]) { position: static; }
+.local-control-actions { display: flex; align-items: center; gap: var(--s2); margin-top: var(--s2); }
 .local-control h2, .local-control h3 { margin: var(--s2) 0; font-size: var(--fs-title); }
 .local-control p { font-size: var(--fs-ui); color: var(--ink-2); }
 .local-control article { border-top: 1px solid var(--line); padding: var(--s3) 0; }
 .local-control pre { white-space: pre-wrap; overflow-wrap: anywhere; font-family: var(--mono); font-size: var(--fs-cap); max-height: 24rem; overflow: auto; background: var(--sunken); padding: var(--s3); }
 .local-control label { display: block; font-size: var(--fs-ui); margin: var(--s3) 0; }
-.local-control input, .local-control textarea { display: block; width: 100%; color: var(--ink); background: var(--ground); border: 1px solid var(--line-2); border-radius: var(--r1); padding: var(--s2); font: inherit; min-height: var(--tap); }
-.local-control button { color: var(--ink); background: var(--ground); border: 1px solid var(--line-2); border-radius: var(--r1); font-size: var(--fs-ui); padding: var(--s2) var(--s3); margin: var(--s1); min-height: var(--tap); }
+.local-control article input, .local-control article textarea { display: block; width: 100%; color: var(--ink); background: var(--ground); border: 1px solid var(--line-2); border-radius: var(--r1); padding: var(--s2); font: inherit; min-height: var(--tap); }
+.local-control article button { color: var(--ink); background: var(--ground); border: 1px solid var(--line-2); border-radius: var(--r1); font-size: var(--fs-ui); padding: var(--s2) var(--s3); margin: var(--s1); min-height: var(--tap); }
 .local-control button:disabled { opacity: .5; }
