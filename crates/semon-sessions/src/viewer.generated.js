@@ -2747,6 +2747,7 @@ globalThis.__semonUIShared = __semonUIShared;
         return;
       }
       if (!dialog.open) return;
+      if (event.target instanceof Element && event.target.closest("dialog") !== dialog) return;
       if (!(event.target instanceof Node) || !body.contains(event.target) || body.scrollHeight <= body.clientHeight + 1)
         event.preventDefault();
     };

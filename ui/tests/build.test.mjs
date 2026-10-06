@@ -22,6 +22,9 @@ test('production builds are deterministic and stale assets fail', async () => {
     await rm(dir, { recursive: true });
   }
   const shell = await buildNativeShell();
+  assert.match(shell.outputFiles[0].text, /Copyright \(c\) 2015-present Jason Miller/);
+  assert.match(shell.outputFiles[0].text, /if \(!globalThis.__semonUIShared\)/);
+  assert.equal((shell.outputFiles[0].text.match(/function createSelect\(/g) ?? []).length, 1);
   const shellDir = await mkdtemp(join(tmpdir(), 'semon-shell-'));
   try {
     const file = join(shellDir, 'shell.generated.js');

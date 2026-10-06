@@ -1,40 +1,111 @@
-/** Enhances host-owned native composers. Data, persistence and submit remain
- * with the consumer. Native details/textarea are the no-JS fallback. */
+import { createPanelChrome, type PanelChrome } from './panel';
+import { createSelect, type SelectController } from './select';
+
+/** Presentation only: the host retains form controls, values and submission. */
 export function mountComposers(root: ParentNode = document): { destroy(): void } {
-  const composers = [...root.querySelectorAll<HTMLElement>('.sh-composer')];
   const abort = new AbortController();
-  for (const composer of composers) {
-    const pickers = [...composer.querySelectorAll<HTMLDetailsElement>('.sh-picker')];
-    for (const picker of pickers) {
-      picker.addEventListener(
-        'toggle',
+  let destroyed = false;
+  const cleanups: (() => void)[] = [];
+  for (const composer of root.querySelectorAll<HTMLElement>('.sh-composer')) {
+    let panel: PanelChrome | null = null;
+    let disposed = false;
+    const selects: SelectController[] = [];
+    for (const native of composer.querySelectorAll<HTMLSelectElement>('.sh-picker select')) {
+      // Disabled/structured choices remain native until the shared select supports them.
+      if (native.disabled || native.multiple || native.querySelector('optgroup, option:disabled'))
+        continue;
+      const wasHidden = native.hidden;
+      const select = createSelect({
+        label: native.getAttribute('aria-label') ?? native.labels?.[0]?.textContent?.trim() ?? '',
+        value: native.value,
+        options: [...native.options].map((o) => ({ value: o.value, label: o.label })),
+        onChange(value) {
+          native.value = value;
+          native.dispatchEvent(new Event('change', { bubbles: true }));
+        },
+      });
+      native.hidden = true;
+      native.after(select.el);
+      selects.push(select);
+      native.addEventListener('change', () => select.setValue(native.value), {
+        signal: abort.signal,
+      });
+      native.form?.addEventListener(
+        'reset',
         () => {
-          if (!picker.open) return;
-          for (const other of pickers) if (other !== picker) other.open = false;
+          queueMicrotask(() => {
+            if (!disposed) select.setValue(native.value);
+          });
         },
         { signal: abort.signal },
       );
+      cleanups.push(() => {
+        select.destroy();
+        native.hidden = wasHidden;
+      });
     }
-    composer.addEventListener(
-      'keydown',
-      (event) => {
-        if (event.key !== 'Escape') return;
-        const open = pickers.find((picker) => picker.open);
-        if (!open) return;
-        event.preventDefault();
-        event.stopPropagation();
-        open.open = false;
-        open.querySelector<HTMLElement>('summary')?.focus();
-      },
-      { signal: abort.signal },
-    );
+    for (const picker of composer.querySelectorAll<HTMLDetailsElement>('.sh-picker')) {
+      const trigger = picker.querySelector<HTMLElement>('summary');
+      const body = picker.querySelector<HTMLElement>('.sh-picker-body');
+      const heading = body?.querySelector<HTMLElement>('h2');
+      if (
+        !trigger ||
+        !body ||
+        !heading ||
+        typeof HTMLDialogElement.prototype.showModal !== 'function'
+      )
+        continue;
+      trigger.setAttribute('aria-haspopup', 'dialog');
+      trigger.setAttribute('aria-expanded', 'false');
+      trigger.addEventListener(
+        'click',
+        (event) => {
+          event.preventDefault();
+          if (disposed || !trigger.isConnected) return;
+          panel?.destroy();
+          picker.open = true;
+          const hidden = heading.hidden;
+          heading.hidden = true;
+          trigger.setAttribute('aria-expanded', 'true');
+          panel = createPanelChrome(
+            { title: heading.textContent ?? '', className: 'sh-composer-panel' },
+            {
+              opened() {},
+              closed() {
+                for (const select of selects) select.close(false);
+                picker.append(body);
+                heading.hidden = hidden;
+                picker.open = false;
+                trigger.setAttribute('aria-expanded', 'false');
+                panel = null;
+                if (!disposed && trigger.isConnected) trigger.focus({ preventScroll: true });
+              },
+            },
+          );
+          // Keep all named controls inside their original form, including submit buttons.
+          composer.append(panel.dialog);
+          panel.body.append(body);
+          panel.show();
+        },
+        { signal: abort.signal },
+      );
+      cleanups.push(() => {
+        trigger.removeAttribute('aria-haspopup');
+        trigger.removeAttribute('aria-expanded');
+        picker.open = false;
+      });
+    }
+    cleanups.push(() => {
+      disposed = true;
+      panel?.destroy();
+    });
   }
   return {
     destroy() {
+      if (destroyed) return;
+      destroyed = true;
       abort.abort();
-      for (const composer of composers)
-        for (const picker of composer.querySelectorAll<HTMLDetailsElement>('.sh-picker'))
-          picker.open = false;
+      for (const cleanup of cleanups.reverse()) cleanup();
     },
   };
 }
