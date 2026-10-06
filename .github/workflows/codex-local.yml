@@ -35,7 +35,7 @@ jobs:
           "$RUNNER_TEMP/probe/bin/python" tests/spikes/codex-standalone.py --codex "$native" --driver target/debug/examples/standalone-qualification --operation 30700000000000000000000000000001 --output "$RUNNER_TEMP/evidence/standalone.json"
           "$RUNNER_TEMP/probe/bin/python" tests/spikes/codex-control.py --codex "$native" --output "$RUNNER_TEMP/evidence/qualification.json"
           "$RUNNER_TEMP/probe/bin/python" tests/spikes/codex-terminal.py --codex "$native" --output "$RUNNER_TEMP/evidence/terminal.json"
-          "$RUNNER_TEMP/probe/bin/python" tests/spikes/codex-local.py --codex "$native" --semon target/debug/semon --browser tests/ui/local-control.mjs --tmux /usr/bin/tmux --output "$RUNNER_TEMP/evidence/local.json"
+          "$RUNNER_TEMP/probe/bin/python" tests/spikes/codex-local.py --codex "$native" --semon target/debug/semon --browser tests/ui/conversation-control.mjs --tmux /usr/bin/tmux --output "$RUNNER_TEMP/evidence/local.json"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         if: always()
         with:

@@ -1,3 +1,4 @@
+// Current conversation UI; the recorded local-control.mjs probe remains immutable.
 // Real native fixture supplies the owner cookie and a pending patch request.
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -14,7 +15,7 @@ try {
   const page = await context.newPage();
   page.on('pageerror', (e) => errors.push(String(e)));
   await page.goto(base);
-  const panel = page.getByRole('region', { name: 'Local Codex control' });
+  const panel = page.getByRole('region', { name: 'Conversation controls' });
   await panel
     .getByRole('button', { name: 'Deny', exact: true })
     .filter({ visible: true })
@@ -56,7 +57,7 @@ try {
       ),
   );
   await page.reload();
-  await panel.getByRole('heading', { name: 'Local Codex', exact: true }).waitFor();
+  await panel.getByRole('textbox', { name: 'Message to Codex', exact: true }).waitFor();
   assert.deepEqual(errors, []);
   console.log(
     'Native patch denial through typed viewer; responsive screenshots; cookie refresh; resolved cards cannot answer',
