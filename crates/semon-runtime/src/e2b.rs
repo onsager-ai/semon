@@ -9,6 +9,9 @@ use thiserror::Error;
 #[cfg(feature = "e2b-process")]
 pub mod process;
 
+#[cfg(feature = "e2b-process")]
+pub mod execution;
+
 /// Provider metadata contains stable identities, never prompts or credentials.
 pub type Labels = BTreeMap<String, String>;
 
