@@ -2,7 +2,7 @@
   "version": "codex-cli 0.160.0",
   "model": "openai/gpt-6-luna",
   "provider": "synthetic localhost Responses; no live model qualification",
-  "operation": "31600000000000000000000000000022",
+  "operation": "31600000000000000000000000000023",
   "tool_names": [
     "exec_command",
     "write_stdin",

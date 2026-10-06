@@ -40,7 +40,7 @@ model/provider settings. Credential restart uses the same pinned command/home.
 
 The earlier fallback-profile evidence used fresh operation
 `30700000000000000000000000000011`. The current capability-only profile used
-fresh operation `31600000000000000000000000000022` and is verified by the native
+fresh operation `31600000000000000000000000000023` and is verified by the native
 probe, which checks that outbound requests preserve the installed model's exact base instructions. Both use actual
 LocalSession, native Codex and its confined executor. A synthetic localhost
 Responses provider emitted the advertised direct `exec_command` call. Native

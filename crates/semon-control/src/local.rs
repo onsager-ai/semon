@@ -8,8 +8,8 @@ use serde_json::json;
 use sha2::{Digest, Sha256};
 use std::{
     fs::{self, OpenOptions},
-    io::{self, Write},
-    os::unix::fs::{DirBuilderExt, PermissionsExt},
+    io::{self, Read, Write},
+    os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     sync::Arc,
@@ -152,6 +152,27 @@ impl LocalSession {
         config: Option<&Path>,
         api_key: Option<&str>,
     ) -> io::Result<Self> {
+        Self::launch_private(binary, workspace, state, config, api_key, None)
+    }
+    /// Opaque official ChatGPT file, delivered only to the trusted model home.
+    /// The caller must own the single refresh writer until confirmed shutdown.
+    pub fn launch_with_auth_artifact(
+        binary: &Path,
+        workspace: &Path,
+        state: &Path,
+        artifact: &[u8],
+    ) -> io::Result<Self> {
+        validate_auth_artifact(artifact)?;
+        Self::launch_private(binary, workspace, state, None, None, Some(artifact))
+    }
+    fn launch_private(
+        binary: &Path,
+        workspace: &Path,
+        state: &Path,
+        config: Option<&Path>,
+        api_key: Option<&str>,
+        artifact: Option<&[u8]>,
+    ) -> io::Result<Self> {
         if !cfg!(all(target_os = "linux", target_arch = "x86_64")) {
             return Err(refuse(
                 "local control requires qualified Linux namespace isolation",
@@ -245,6 +266,9 @@ impl LocalSession {
         fs::DirBuilder::new().mode(0o700).create(&state)?;
         let home = state.join("home");
         fs::DirBuilder::new().mode(0o700).create(&home)?;
+        if let Some(bytes) = artifact {
+            write_auth_artifact(&home, bytes, false)?;
+        }
         let catalog = home.join("standalone-models.json");
         fs::write(
             &catalog,
@@ -375,6 +399,7 @@ impl LocalSession {
                         ));
                     }
                     if api_key.is_none()
+                        && artifact.is_none()
                         && let Some(value) = std::env::var_os(key)
                     {
                         command.env(key, value);
@@ -391,7 +416,7 @@ impl LocalSession {
             "SSL_CERT_FILE",
             "SSL_CERT_DIR",
         ] {
-            if key == "OPENAI_API_KEY" && api_key.is_some() {
+            if key == "OPENAI_API_KEY" && (api_key.is_some() || artifact.is_some()) {
                 continue;
             }
             if let Some(value) = std::env::var_os(key) {
@@ -413,6 +438,12 @@ impl LocalSession {
                 .env_remove("OPENAI_API_KEY")
                 .env_remove("ACCESS_TOKEN")
                 .env(credential_env, key);
+        }
+        if artifact.is_some() {
+            command
+                .env_remove("OPENAI_API_KEY")
+                .env_remove("ACCESS_TOKEN");
+            command.arg("-c").arg("cli_auth_credentials_store=\"file\"");
         }
         let mut process = command
             .args([
@@ -501,6 +532,36 @@ impl LocalSession {
                 "finish or explicitly end the active turn before credential renewal",
             ));
         }
+        self.restart_with(|session| {
+            session
+                .command
+                .env_remove("OPENAI_API_KEY")
+                .env_remove("ACCESS_TOKEN")
+                .env(session.credential_env, key);
+            Ok(())
+        })
+    }
+    /// Replace opaque credentials only after stopping the old native writer.
+    pub fn renew_auth_artifact(&mut self, bytes: &[u8]) -> io::Result<()> {
+        validate_auth_artifact(bytes)?;
+        self.restart_with(|session| {
+            write_auth_artifact(&session.home, bytes, true)?;
+            session
+                .command
+                .env_remove("OPENAI_API_KEY")
+                .env_remove("ACCESS_TOKEN");
+            Ok(())
+        })
+    }
+    fn restart_with(
+        &mut self,
+        install: impl FnOnce(&mut Self) -> io::Result<()>,
+    ) -> io::Result<()> {
+        if !self.driver.snapshot()["activeTurn"].is_null() {
+            return Err(refuse(
+                "finish or end the active turn before credential renewal",
+            ));
+        }
         let thread = self.driver.thread_id();
         let store = self.driver.store.clone();
         self.driver.lost();
@@ -508,10 +569,7 @@ impl LocalSession {
         if self.socket.symlink_metadata().is_ok() {
             fs::remove_file(&self.socket)?;
         }
-        self.command
-            .env_remove("OPENAI_API_KEY")
-            .env_remove("ACCESS_TOKEN")
-            .env(self.credential_env, key);
+        install(self)?;
         self.process = self.command.spawn()?;
         let deadline = Instant::now() + Duration::from_secs(10);
         while !self.socket.exists() && Instant::now() < deadline {
@@ -538,6 +596,64 @@ impl LocalSession {
         Ok(())
     }
 }
+/// Read only after the native writer has been stopped by the coordinator.
+pub fn read_auth_artifact(home: &Path) -> io::Result<Vec<u8>> {
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(home.join("auth.json"))?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file()
+        || metadata.nlink() != 1
+        || metadata.uid() != fs::metadata(home)?.uid()
+        || metadata.permissions().mode() & 0o077 != 0
+        || metadata.len() > 32768
+    {
+        return Err(refuse("invalid private authentication artifact"));
+    }
+    let mut bytes = Vec::new();
+    file.take(32769).read_to_end(&mut bytes)?;
+    validate_auth_artifact(&bytes)?;
+    Ok(bytes)
+}
+/// Validate the auth kind and bound the official file without extracting tokens.
+pub fn validate_auth_artifact(bytes: &[u8]) -> io::Result<()> {
+    if bytes.is_empty() || bytes.len() > 32768 {
+        return Err(refuse("invalid authentication artifact size"));
+    }
+    let value: serde_json::Value =
+        serde_json::from_slice(bytes).map_err(|_| refuse("invalid authentication artifact"))?;
+    if !value["OPENAI_API_KEY"].is_null()
+        || value.get("auth_mode").is_some_and(|v| v != "chatgpt")
+        || !value["tokens"]
+            .as_object()
+            .is_some_and(|tokens| !tokens.is_empty())
+    {
+        return Err(refuse("ChatGPT authentication artifact required"));
+    }
+    Ok(())
+}
+fn write_auth_artifact(home: &Path, bytes: &[u8], replace: bool) -> io::Result<()> {
+    validate_auth_artifact(bytes)?;
+    let temp = home.join("auth.delivery.json");
+    let path = if replace {
+        &temp
+    } else {
+        &home.join("auth.json")
+    };
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)?;
+    file.write_all(bytes)?;
+    file.sync_all()?;
+    if replace {
+        fs::rename(temp, home.join("auth.json"))?;
+    }
+    Ok(())
+}
 impl Drop for LocalSession {
     fn drop(&mut self) {
         let _ = self.process.kill();
@@ -548,6 +664,41 @@ impl Drop for LocalSession {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn opaque_auth_is_private_bound_and_cannot_switch_to_api_billing() {
+        use std::os::unix::fs::symlink;
+        let root = crate::journal::tests::scratch("opaque-auth");
+        fs::DirBuilder::new().mode(0o700).create(&root).unwrap();
+        let artifact = include_bytes!("../../../tests/fixtures/codex-0.160.0/managed-auth.json");
+        write_auth_artifact(&root, artifact, false).unwrap();
+        assert_eq!(read_auth_artifact(&root).unwrap(), artifact);
+        assert_eq!(
+            fs::metadata(root.join("auth.json"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+        assert!(write_auth_artifact(&root, artifact, false).is_err());
+        for invalid in [
+            br#"{"OPENAI_API_KEY":"synthetic-key","tokens":{"access_token":"synthetic"}}"#
+                .as_slice(),
+            br#"{"auth_mode":"apikey","tokens":{"access_token":"synthetic"}}"#,
+            b"secret-not-json",
+        ] {
+            assert!(validate_auth_artifact(invalid).is_err());
+        }
+        assert!(validate_auth_artifact(&vec![b' '; 32769]).is_err());
+        fs::set_permissions(root.join("auth.json"), fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(read_auth_artifact(&root).is_err());
+        fs::remove_file(root.join("auth.json")).unwrap();
+        fs::write(root.join("other"), artifact).unwrap();
+        symlink(root.join("other"), root.join("auth.json")).unwrap();
+        assert!(read_auth_artifact(&root).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn standalone_capabilities_preserve_native_messages_and_metadata() {
