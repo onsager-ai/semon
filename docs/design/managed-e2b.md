@@ -1,10 +1,10 @@
-# Managed E2B guest (proposed, disabled)
+# Managed E2B guest transport
 
 The companion Hub design owns configuration, product behavior, validation and
-release gates: [Managed E2B Codex slice](https://github.com/onsager-ai/semon-hub/blob/codex/e2b-managed-slice/docs/managed-e2b.md).
-This core change stacks on **open** PR #301 (`32ab108`), whose app-server driver
-is the only interactive transport. It does not claim that #301 has landed or
-close the broader #248/#250/#251/#252 lifecycle roadmap.
+release gates: [Managed E2B Codex slice](https://github.com/onsager-ai/semon-hub/blob/main/docs/managed-e2b.md).
+The merged #301 app-server driver is the interactive transport. This implementation
+does not close the broader #248/#250/#251/#252 lifecycle roadmap or establish live
+provider qualification.
 
 `scripts/build-managed-artifact.sh OUTPUT_DIRECTORY` builds Semon controller and
 push executables plus the complete integrity-locked official Codex 0.160.0 Linux
@@ -12,7 +12,7 @@ package. It never publishes the artifact or deploys code. The private SDK worker
 requires exact 2.52.0 and carries credentials only over protected stdin/files.
 The provider key stays outside the guest. Fixed guest paths are `/workspace/project`
 and `/var/lib/semon/session/home`; create uses base/provider-default resources
-and a bounded 900-second VM deadline acknowledged by Hub before creation.
+and an explicit embedding-supplied VM deadline acknowledged by Hub before creation.
 
 The guest uses #301's namespace/syscall-confined native executor and root-only
 Unix controller socket. It starts one native thread and retains native identities

@@ -2,6 +2,8 @@
 //! The caller must resolve/authorize a destination before constructing a Target.
 //! No credential type implements Debug or Serialize. Dropping a future kills its
 //! child; stderr is classified locally and never returned as remote diagnostics.
+pub mod execution;
+
 use base64::{Engine, engine::general_purpose::STANDARD};
 use sha2::{Digest, Sha256};
 use std::{net::IpAddr, process::Stdio, time::Duration};
@@ -61,6 +63,12 @@ pub struct Credential(pub Zeroizing<String>);
 pub enum Error {
     #[error("Enter a valid target and an unencrypted SSH private key.")]
     Invalid,
+    #[error("Execution authority is missing, expired or revoked. Request separate authorization.")]
+    Authority,
+    #[error("The workspace writer is busy. Inspect the active operation before retrying.")]
+    WriterBusy,
+    #[error("Execution delivery is uncertain. Reconcile the existing operation; do not replay it.")]
+    Execution,
     #[error("The server could not be reached. Check its address, SSH port and firewall.")]
     Unreachable,
     #[error("The operation timed out. Check reachability and retry or repair setup.")]
@@ -154,6 +162,12 @@ async fn run(
             Err(Error::Authentication)
         } else if status.code() == Some(42) {
             Err(Error::Tooling)
+        } else if status.code() == Some(44) {
+            Err(Error::Authority)
+        } else if status.code() == Some(45) {
+            Err(Error::WriterBusy)
+        } else if status.code() == Some(46) {
+            Err(Error::Execution)
         } else if status.code() == Some(43) {
             Err(Error::Bootstrap)
         } else {
