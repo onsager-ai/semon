@@ -84,6 +84,7 @@ export function mountComposers(root: ParentNode = document): { destroy(): void }
           );
           // Keep all named controls inside their original form, including submit buttons.
           composer.append(panel.dialog);
+          panel.body.classList.add('sh-composer-panel-body');
           panel.body.append(body);
           panel.show();
         },

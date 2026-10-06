@@ -154,7 +154,7 @@ dialog.sheet > .btn-row { margin-top: 20px; }
 
 /* Composed settings use the same panel and Select owners as the viewer. */
 dialog.sh-composer-panel { background: var(--ground); }
-.sh-composer-panel .panel-b { padding: 16px; }
+.sh-composer-panel .sh-composer-panel-body { padding: 16px; }
 .sh-composer-panel .sh-picker-body { position: static; margin: 0; padding: 0; max-height: none; overflow: visible; border: 0; border-radius: 0; box-shadow: none; display: grid; gap: 16px; }
 .sh-composer-panel .sh-picker-body > [hidden] { display: none; }
 .sh-composer-panel .sh-picker-body p { margin: 0; color: var(--ink-2); line-height: 1.5; }
@@ -180,7 +180,7 @@ dialog.sh-composer-panel { background: var(--ground); }
 .sh-form-card .field input { border-color: var(--line-2); background: var(--ground); border-radius: 8px; }
 @media (min-width: 761px) { dialog.sh-composer-panel { width: min(440px, calc(100vw - 48px)); } }
 @media (max-width: 760px) {
-  .sh-composer-panel .panel-b { padding-bottom: calc(20px + env(safe-area-inset-bottom, 0px)); }
+  .sh-composer-panel .sh-composer-panel-body { padding-bottom: calc(20px + env(safe-area-inset-bottom, 0px)); }
   .sh-composer-panel .sh-picker-body > .btn { width: 100%; min-height: 44px; }
   .sh-form-card { padding: 16px; }
 }
