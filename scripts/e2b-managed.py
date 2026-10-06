@@ -5,8 +5,11 @@ The Hub owns durable create/dispatch claims. Unknown results are not retries.
 """
 import hashlib
 import importlib.metadata
+import importlib.util
 import json
 import logging
+import os
+from pathlib import Path
 import re
 import shlex
 import sys
@@ -14,6 +17,10 @@ import sys
 LABELS = {"semon_version", "semon_deployment", "semon_owner", "semon_workspace",
           "semon_session", "semon_operation", "semon_epoch"}
 IDENTIFIER = re.compile(r"[A-Za-z0-9_.-]{1,128}\Z")
+_attachment = importlib.util.spec_from_file_location('e2b_attachment', Path(__file__).with_name('e2b-attach.py'))
+_module = importlib.util.module_from_spec(_attachment)
+_attachment.loader.exec_module(_module)
+attach_running = _module.attach_running
 
 
 def owned(request, info):
@@ -31,27 +38,55 @@ def managed(request, sandbox):
     method = request.get("method")
     key = request["api_key"]
     if method == "create":
+        profile = request.get('profile')
+        if (not isinstance(profile, dict) or set(profile) != {'template', 'timeout', 'lifecycle'}
+                or not isinstance(profile['template'], str) or not IDENTIFIER.fullmatch(profile['template'])
+                or profile['template'] in ('.', '..')
+                or type(profile['timeout']) is not int or not 1 <= profile['timeout'] <= 86400
+                or not isinstance(profile['lifecycle'], dict) or set(profile['lifecycle']) != {'on_timeout'}):
+            return {"error": "invalid_profile"}
+        policy = profile['lifecycle']['on_timeout']
+        if (not isinstance(policy, dict)
+                or not (policy == {'action': 'kill'}
+                        or (set(policy) == {'action', 'keep_memory'} and policy['action'] == 'pause'
+                            and type(policy['keep_memory']) is bool))):
+            return {"error": "invalid_profile"}
         # One call only. Failure/timeout may have created compute.
-        vm = sandbox.create(template="base", timeout=900, metadata=request["labels"],
+        vm = sandbox.create(template=profile['template'], timeout=profile['timeout'],
+                            lifecycle=profile['lifecycle'], metadata=request["labels"],
                             api_key=key, request_timeout=20, retries=0)
         return {"id": vm.sandbox_id}
     identifier = request.get("id")
     if not isinstance(identifier, str) or not IDENTIFIER.fullmatch(identifier):
         return {"error": "invalid_request"}
-    info = sandbox.get_info(identifier, api_key=key, request_timeout=10)
+    info = sandbox.get_info(identifier, api_key=key, request_timeout=10, retries=0)
     if not owned(request, info):
         return {"error": "ownership_mismatch"}
     if getattr(info.state, "value", info.state) != "running":
         return {"error": "compute_not_running"}
-    vm = sandbox.connect(identifier, api_key=key, request_timeout=10, retries=0)
+    vm = attach_running(identifier, key, request['labels'], sandbox)
+    if vm is None:
+        return {"error": "compute_not_running_or_attachment_unavailable"}
     if method == "bootstrap":
         # Artifact is an operator-reviewed immutable semon-guest build, verified
         # before use. No provider key or user prompt enters the command string.
         url, digest = request.get("artifact_url", ""), request.get("artifact_sha256", "")
         if not url.startswith("https://") or not re.fullmatch(r"[0-9a-f]{64}", digest):
             return {"error": "artifact_not_configured"}
+        model_method = request.get("model_method")
         api_key = request.get("model_key")
-        if not isinstance(api_key, str) or not 1 <= len(api_key) <= 4096:
+        artifact = request.get("auth_artifact")
+        if model_method == 'chatgpt_device_code':
+            if api_key is not None or not isinstance(artifact, str) or not 1 <= len(artifact.encode()) <= 32768:
+                return {"error": "model_auth_required"}
+            auth = json.loads(artifact)
+            if (auth.get('OPENAI_API_KEY') is not None or auth.get('auth_mode', 'chatgpt') != 'chatgpt'
+                    or not isinstance(auth.get('tokens'), dict) or not auth['tokens']):
+                return {"error": "model_auth_required"}
+        elif model_method in ('openai_api_key', 'chatgpt_siwc'):
+            if artifact is not None or not isinstance(api_key, str) or not 1 <= len(api_key) <= 4096:
+                return {"error": "model_auth_required"}
+        else:
             return {"error": "model_auth_required"}
         # Never repeat bootstrap into an existing state after uncertainty. The
         # native launcher also refuses reused homes and unsupported isolation.
@@ -70,7 +105,7 @@ def managed(request, sandbox):
         if result.exit_code != 0:
             return {"error": "bootstrap_failed"}
         # Protected root-owned input file is never mounted in the executor.
-        payload = json.dumps({"api_key": api_key, "method": request.get("model_method")}, separators=(",", ":"))
+        payload = json.dumps({"api_key": api_key, "auth_artifact": artifact, "method": model_method}, separators=(",", ":"))
         vm.files.write("/var/lib/semon/launch.json", payload, user="root")
         vm.commands.run("chmod 600 /var/lib/semon/launch.json", user="root", timeout=10)
         vm.commands.run("exec 3< /var/lib/semon/launch.json; rm /var/lib/semon/launch.json; exec /opt/semon/guest <&3", user="root", background=True)
@@ -115,6 +150,7 @@ def managed(request, sandbox):
 
 
 def main():
+    os.environ['E2B_CONNECTION_RETRIES'] = '0'
     logging.disable(logging.CRITICAL)
     result = {"error": "provider_outcome_unknown"}
     try:

@@ -2,7 +2,7 @@
   "version": "codex-cli 0.160.0",
   "model": "openai/gpt-6-luna",
   "provider": "synthetic localhost Responses; no live model qualification",
-  "operation": "30700000000000000000000000000011",
+  "operation": "31600000000000000000000000000023",
   "tool_names": [
     "exec_command",
     "write_stdin",
@@ -14,6 +14,7 @@
     "update_goal"
   ],
   "standalone_instructions": true,
+  "native_model_instructions_preserved": true,
   "command": "test -z \"${OPENAI_API_KEY+x}\" && test -z \"${SEMON_PRIVATE_CANARY+x}\" && test ! -e /home/agent/.codex/config.toml && printf \"SEMON_EXECUTED_307:%s\" \"$((19+23))\"",
   "shell_output": "SEMON_EXECUTED_307:42",
   "shell_exit": 0,
@@ -22,6 +23,20 @@
   "credential_excluded_from_executor_and_files": true,
   "duplicate_prevented": true,
   "shutdown_reaped": true,
+  "all_native_model_messages_preserved": true,
+  "session_profile": {
+    "profile": "standalone-direct-v1",
+    "native_version": "0.160.0",
+    "instruction_source": "native debug models --bundled",
+    "native_catalog_sha256": "262dc36e0e7beb290aef8196bd59f42acf51647b8f7b68dafa533ae7742019e6",
+    "effective_catalog_sha256": "0041fe719975edb84e5efab85a0ce55ec330e93b8bbea7bb3047f7a8fdaa1caf",
+    "capability_overrides": {
+      "tool_mode": "direct",
+      "multi_agent_version": "disabled",
+      "experimental_supported_tools": [],
+      "use_responses_lite": false
+    }
+  },
   "executor_schema": {
     "type": "function",
     "name": "exec_command",
