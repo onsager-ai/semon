@@ -69,6 +69,8 @@ export function createPanelChrome(options: PanelOptions, host: PanelHost): Panel
       return;
     }
     if (!dialog.open) return;
+    // Nested shared select sheets own their own scroll boundary.
+    if (event.target instanceof Element && event.target.closest('dialog') !== dialog) return;
     if (
       !(event.target instanceof Node) ||
       !body.contains(event.target) ||
