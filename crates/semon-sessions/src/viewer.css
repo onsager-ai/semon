@@ -1296,6 +1296,6 @@ html.viewer-open, html.viewer-open body { overflow: hidden; }
 .local-control article { border-top: 1px solid var(--line); padding: var(--s3) 0; }
 .local-control pre { white-space: pre-wrap; overflow-wrap: anywhere; font-family: var(--mono); font-size: var(--fs-cap); max-height: 24rem; overflow: auto; background: var(--sunken); padding: var(--s3); }
 .local-control label { display: block; font-size: var(--fs-ui); margin: var(--s3) 0; }
-.local-control input, .local-control textarea:not(.sh-composer-input) { display: block; width: 100%; color: var(--ink); background: var(--ground); border: 1px solid var(--line-2); border-radius: var(--r1); padding: var(--s2); font: inherit; min-height: var(--tap); }
-.local-control button:not(.sh-compact):not(.btn):not(.ibtn) { color: var(--ink); background: var(--ground); border: 1px solid var(--line-2); border-radius: var(--r1); font-size: var(--fs-ui); padding: var(--s2) var(--s3); margin: var(--s1); min-height: var(--tap); }
+.local-control article input, .local-control article textarea { display: block; width: 100%; color: var(--ink); background: var(--ground); border: 1px solid var(--line-2); border-radius: var(--r1); padding: var(--s2); font: inherit; min-height: var(--tap); }
+.local-control article button { color: var(--ink); background: var(--ground); border: 1px solid var(--line-2); border-radius: var(--r1); font-size: var(--fs-ui); padding: var(--s2) var(--s3); margin: var(--s1); min-height: var(--tap); }
 .local-control button:disabled { opacity: .5; }
