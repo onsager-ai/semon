@@ -73,8 +73,20 @@ def managed(request, sandbox):
         url, digest = request.get("artifact_url", ""), request.get("artifact_sha256", "")
         if not url.startswith("https://") or not re.fullmatch(r"[0-9a-f]{64}", digest):
             return {"error": "artifact_not_configured"}
+        model_method = request.get("model_method")
         api_key = request.get("model_key")
-        if not isinstance(api_key, str) or not 1 <= len(api_key) <= 4096:
+        artifact = request.get("auth_artifact")
+        if model_method == 'chatgpt_device_code':
+            if api_key is not None or not isinstance(artifact, str) or not 1 <= len(artifact.encode()) <= 32768:
+                return {"error": "model_auth_required"}
+            auth = json.loads(artifact)
+            if (auth.get('OPENAI_API_KEY') is not None or auth.get('auth_mode', 'chatgpt') != 'chatgpt'
+                    or not isinstance(auth.get('tokens'), dict) or not auth['tokens']):
+                return {"error": "model_auth_required"}
+        elif model_method in ('openai_api_key', 'chatgpt_siwc'):
+            if artifact is not None or not isinstance(api_key, str) or not 1 <= len(api_key) <= 4096:
+                return {"error": "model_auth_required"}
+        else:
             return {"error": "model_auth_required"}
         # Never repeat bootstrap into an existing state after uncertainty. The
         # native launcher also refuses reused homes and unsupported isolation.
@@ -93,7 +105,7 @@ def managed(request, sandbox):
         if result.exit_code != 0:
             return {"error": "bootstrap_failed"}
         # Protected root-owned input file is never mounted in the executor.
-        payload = json.dumps({"api_key": api_key, "method": request.get("model_method")}, separators=(",", ":"))
+        payload = json.dumps({"api_key": api_key, "auth_artifact": artifact, "method": model_method}, separators=(",", ":"))
         vm.files.write("/var/lib/semon/launch.json", payload, user="root")
         vm.commands.run("chmod 600 /var/lib/semon/launch.json", user="root", timeout=10)
         vm.commands.run("exec 3< /var/lib/semon/launch.json; rm /var/lib/semon/launch.json; exec /opt/semon/guest <&3", user="root", background=True)
