@@ -14,6 +14,15 @@ it complements the existing title and figure roles. Phone and coarse-pointer
 controls use 44px targets. Product-specific layout does not require pixel-identical
 pages, but shared controls keep their appearance and interaction contract.
 
+Native application actions use `btn sh-compact` and `btn-row sh-actions` to match
+the viewer's compact density. Primary, danger and quiet states retain their
+existing meaning. The visible single-line surface is 32px; touch targets remain
+at least 44px, and long labels wrap within the viewport. Compact control links
+keep control styling in unvisited and visited states. Full-size controls remain
+available for deliberately distinct layouts, rather than being a native-page
+default. Hub enforces its compact choice in its authored-markup policy and
+rendered native-fallback audit; visual baseline matches alone do not prove parity.
+
 ## Enforced checks
 
 - `npm --prefix ui run check:design` parses production CSS. Token references must

@@ -143,6 +143,7 @@ jobs:
           node --test tests/ui/text-audit.test.mjs
           node tests/ui/gallery.mjs
           node tests/ui/compact-gallery.mjs
+          node tests/ui/native-controls.mjs
           node --test ui/tests/browser-lifecycle.mjs ui/tests/application-lifecycle.mjs ui/tests/native-shell-lifecycle.mjs
 
       - name: Write the sample fixtures

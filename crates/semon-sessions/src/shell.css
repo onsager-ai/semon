@@ -18,6 +18,22 @@
 @media (hover: hover) { .sh-compact:hover::before { background: var(--sunken); } .sh-compact.primary:hover::before { background: color-mix(in srgb, var(--ink) 88%, var(--ground)); } }
 @media (max-width: 760px), (any-pointer: coarse) { .sh-compact { width: 44px; height: 44px; } .sh-compact::before { inset-inline: 6px; } .sh-compact.sh-value { min-width: 44px; padding-inline: 14px; } }
 
+/* Native form controls opt into the same compact surface without losing their
+   button/link semantics, primary/danger states or disabled behavior. */
+.btn.sh-compact { width: auto; min-width: 32px; height: auto; min-height: 32px; padding: 6px var(--s2); border: 0; background: transparent; color: var(--ink-2); font-size: var(--fs-sm); white-space: normal; overflow-wrap: anywhere; }
+.btn.sh-compact::before { inset-block: 0; }
+.btn.sh-compact.primary { color: var(--ground); }
+.btn.sh-compact.danger { color: var(--err); }
+.btn.sh-compact.sh-quiet::before { border-color: transparent; background: transparent; }
+@media (hover: hover) {
+  .btn.sh-compact:hover { background: transparent; }
+  .btn.sh-compact.sh-quiet:hover::before { background: var(--sunken); }
+}
+@media (max-width: 760px), (any-pointer: coarse) {
+  .btn.sh-compact { min-width: 44px; min-height: 44px; padding: 12px 14px; }
+  .btn.sh-compact::before { inset-block: 6px; }
+}
+
 /* Reusable native composer: the host supplies forms, settings and action slots.
    Native details remain usable without JavaScript. Tooltips use the shared
    document overlay, outside the frame. No autofocus is installed. */
@@ -47,8 +63,8 @@
 /* Links inside shell content use the viewer's ink accent instead of the browser default, in both link and visited
    states. Anchors that stand in for the viewer's .nav-item button (the gallery and docs use <a>, the viewer uses
    <button>) drop the browser's underline and match the button's ink colours instead. */
-.page a:not(.btn), .signin a:not(.btn), .notice a:not(.btn), .sh-step a:not(.btn) { color: var(--accent); font-weight: 500; text-decoration: underline; text-underline-offset: 3px; }
-.page a:not(.btn):visited, .signin a:not(.btn):visited, .notice a:not(.btn):visited, .sh-step a:not(.btn):visited { color: var(--accent); font-weight: 500; }
+.page a:not(.btn):not(.sh-compact), .signin a:not(.btn):not(.sh-compact), .notice a:not(.btn):not(.sh-compact), .sh-step a:not(.btn):not(.sh-compact) { color: var(--accent); font-weight: 500; text-decoration: underline; text-underline-offset: 3px; }
+.page a:not(.btn):not(.sh-compact):visited, .signin a:not(.btn):not(.sh-compact):visited, .notice a:not(.btn):not(.sh-compact):visited, .sh-step a:not(.btn):not(.sh-compact):visited { color: var(--accent); font-weight: 500; }
 a.nav-item { text-decoration: none; color: var(--ink-2); }
 a.nav-item[aria-current="page"] { color: var(--ink); }
 
@@ -60,6 +76,11 @@ a.nav-item[aria-current="page"] { color: var(--ink); }
 .field .hint { color: var(--muted); }
 .field .error { color: var(--err); }
 .field + .field, .field + .btn-row { margin-top: 14px; }
+
+/* Compact actions wrap by content, including on phones. Full-width onboarding
+   and sign-in rows retain their default layout unless they opt in. */
+.btn-row.sh-actions { flex-direction: row; align-items: center; gap: var(--s2); }
+.btn-row.sh-actions > * { width: auto; max-width: 100%; }
 
 /* Native multiline fields and explicit consent keep the shared field tokens. */
 .field textarea { display: block; width: 100%; min-height: 120px; padding: 11px; border: 1px solid var(--line); border-radius: var(--r2); background: var(--sunken); color: var(--ink); font: 400 var(--fs-ui)/1.3 var(--mono); resize: vertical; }
