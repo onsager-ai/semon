@@ -1,6 +1,9 @@
 //! Private managed-guest bridge to the existing isolated app-server driver.
-//! No TCP listener, terminal exec/resume, or provider credential handling.
-use semon_control::{RequestId, Source, local::LocalSession};
+//! No TCP listener or terminal exec/resume. Credentials stay in private model custody.
+use semon_control::{
+    RequestId, Source,
+    local::{LocalSession, read_auth_artifact},
+};
 use serde_json::{Value, json};
 use std::{
     fs,
@@ -22,15 +25,15 @@ fn main() -> io::Result<()> {
     let mut input = request(io::stdin().lock())?;
     if !matches!(
         input["method"].as_str(),
-        Some("openai_api_key" | "chatgpt_siwc")
+        Some("openai_api_key" | "chatgpt_siwc" | "chatgpt_device_code")
     ) {
         return Err(io::Error::other("selected authentication method required"));
     }
-    let key = input["api_key"]
-        .as_str()
-        .ok_or_else(|| io::Error::other("API key required"))?
-        .to_owned();
+    let device = input["method"] == "chatgpt_device_code";
+    let key = input["api_key"].as_str().unwrap_or("").to_owned();
+    let artifact = input["auth_artifact"].as_str().unwrap_or("").to_owned();
     input["api_key"] = Value::Null;
+    input["auth_artifact"] = Value::Null;
     let config = if input["method"] == "chatgpt_siwc" {
         let path = Path::new("/var/lib/semon/model.toml");
         fs::write(
@@ -42,14 +45,30 @@ fn main() -> io::Result<()> {
     } else {
         None
     };
-    let mut session = LocalSession::launch_with_api_key(
-        Path::new("/opt/semon/codex/bin/codex"),
-        Path::new("/workspace/project"),
-        Path::new("/var/lib/semon/session"),
-        config,
-        Some(&key),
-    )?;
+    let mut session = if device {
+        if !key.is_empty() {
+            return Err(io::Error::other("mixed credential methods"));
+        }
+        LocalSession::launch_with_auth_artifact(
+            Path::new("/opt/semon/codex/bin/codex"),
+            Path::new("/workspace/project"),
+            Path::new("/var/lib/semon/session"),
+            artifact.as_bytes(),
+        )?
+    } else {
+        if !artifact.is_empty() {
+            return Err(io::Error::other("mixed credential methods"));
+        }
+        LocalSession::launch_with_api_key(
+            Path::new("/opt/semon/codex/bin/codex"),
+            Path::new("/workspace/project"),
+            Path::new("/var/lib/semon/session"),
+            config,
+            Some(&key),
+        )?
+    };
     drop(key);
+    drop(artifact);
     let ipc = "/var/lib/semon/control.sock";
     let listener = UnixListener::bind(ipc)?;
     fs::set_permissions(ipc, fs::Permissions::from_mode(0o600))?;
@@ -84,10 +103,21 @@ fn main() -> io::Result<()> {
                         .as_str()
                         .filter(|id| RequestId::parse(id).is_some())
                         .ok_or_else(|| io::Error::other("renewal identity required"))?;
-                    let key = value["model_key"]
-                        .as_str()
-                        .ok_or_else(|| io::Error::other("credential required"))?;
-                    session.renew_credential(key).and_then(|()| {
+                    let renewal = if device {
+                        if !value["model_key"].is_null() {
+                            return Err(io::Error::other("mixed credential methods"));
+                        }
+                        let artifact = value["auth_artifact"]
+                            .as_str()
+                            .ok_or_else(|| io::Error::other("authentication artifact required"))?;
+                        session.renew_auth_artifact(artifact.as_bytes())
+                    } else {
+                        let key = value["model_key"]
+                            .as_str()
+                            .ok_or_else(|| io::Error::other("credential required"))?;
+                        session.renew_credential(key)
+                    };
+                    renewal.and_then(|()| {
                         fs::write(
                             "/var/lib/semon/renewal.json",
                             json!({"id":id,"thread":session.driver.thread_id()}).to_string(),
@@ -127,9 +157,16 @@ fn main() -> io::Result<()> {
         }
         snapshot["approvalReason"] = json!("Managed-guest authority boundary is not qualified");
         if ended {
-            fs::write(
+            let mut evidence = json!({"ended":true,"thread":session.driver.thread_id()});
+            if device {
+                let bytes = read_auth_artifact(&session.home)?;
+                evidence["auth_artifact"] =
+                    json!(String::from_utf8(bytes).map_err(io::Error::other)?);
+            }
+            fs::write("/var/lib/semon/ended.json", evidence.to_string())?;
+            fs::set_permissions(
                 "/var/lib/semon/ended.json",
-                json!({"ended":true,"thread":session.driver.thread_id()}).to_string(),
+                fs::Permissions::from_mode(0o600),
             )?;
         }
         if let Some(actions) = snapshot["actions"].as_object_mut() {
@@ -145,12 +182,18 @@ fn main() -> io::Result<()> {
         {
             snapshot["renewalId"] = value["id"].clone();
         }
-        let response = match result {
+        let mut response = match result {
             Ok(receipt) => json!({"snapshot":snapshot,"receipt":receipt,"ended":ended}),
             Err(_) => {
                 json!({"snapshot":snapshot,"error":"Control unavailable or outcome unknown; inspect before sending again"})
             }
         };
+        if ended && device {
+            // Dedicated private response field. Never include this in a snapshot,
+            // transcript, control journal, mirror, or browser response.
+            let evidence: Value = serde_json::from_slice(&fs::read("/var/lib/semon/ended.json")?)?;
+            response["auth_artifact"] = evidence["auth_artifact"].clone();
+        }
         stream.write_all(response.to_string().as_bytes())?;
         if ended {
             break;

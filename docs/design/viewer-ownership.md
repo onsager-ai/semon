@@ -197,3 +197,19 @@ owning references rather than copying toolchain setup here.
   visual diffs without loosening budgets or silently changing baselines.
 - Record independently verified consumer revisions/pins when shared contracts
   change, and update this ownership map and any justified exception before merge.
+
+## Compact native composer adoption
+
+The opt-in composer remains a consumer-owned native form. Shared chrome owns
+compact geometry, responsive Panel/Select picker behavior, tooltip overlay and teardown;
+consumers own labels, authorized catalogs, persistence, readiness and submission.
+`mountNativeShell` mounts one `mountComposers` owner and destroys its listeners and
+open pickers. Picker content is a host-owned slot moved into a shared panel inside
+the original form. Named native selects stay the form value owners; shared Select
+notifies them with change events. Teardown restores the native controls and details.
+Native-shell bundles reuse the guarded shared runtime and Select history owner.
+It never reads credential fields or installs a submit controller.
+`ViewerHost.nativeNavigation` supplies native destinations through the existing
+navigation root; shared safe-path validation and native links apply. It creates
+no additional router, model store or poller. The compact gallery covers geometry,
+Escape/focus return and remount; Hub provides the real server/form adoption checks.

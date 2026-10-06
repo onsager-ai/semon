@@ -55,6 +55,7 @@ export {
 export { createViewerBar } from './viewer-bar';
 
 export { createSelect } from './select';
+export { mountComposers } from './composer';
 
 export { renderPlaceholder, createStatusNote } from './placeholder';
 

@@ -1,0 +1,101 @@
+{
+  "version": "codex-cli 0.160.0",
+  "model": "openai/gpt-6-luna",
+  "provider": "synthetic localhost Responses; no live model qualification",
+  "operation": "31600000000000000000000000000023",
+  "tool_names": [
+    "exec_command",
+    "write_stdin",
+    "request_user_input",
+    "apply_patch",
+    "view_image",
+    "get_goal",
+    "create_goal",
+    "update_goal"
+  ],
+  "standalone_instructions": true,
+  "native_model_instructions_preserved": true,
+  "command": "test -z \"${OPENAI_API_KEY+x}\" && test -z \"${SEMON_PRIVATE_CANARY+x}\" && test ! -e /home/agent/.codex/config.toml && printf \"SEMON_EXECUTED_307:%s\" \"$((19+23))\"",
+  "shell_output": "SEMON_EXECUTED_307:42",
+  "shell_exit": 0,
+  "final_output": "SEMON_EXECUTED_307:42",
+  "credential_header_only": true,
+  "credential_excluded_from_executor_and_files": true,
+  "duplicate_prevented": true,
+  "shutdown_reaped": true,
+  "all_native_model_messages_preserved": true,
+  "session_profile": {
+    "profile": "standalone-direct-v1",
+    "native_version": "0.160.0",
+    "instruction_source": "native debug models --bundled",
+    "native_catalog_sha256": "262dc36e0e7beb290aef8196bd59f42acf51647b8f7b68dafa533ae7742019e6",
+    "effective_catalog_sha256": "0041fe719975edb84e5efab85a0ce55ec330e93b8bbea7bb3047f7a8fdaa1caf",
+    "capability_overrides": {
+      "tool_mode": "direct",
+      "multi_agent_version": "disabled",
+      "experimental_supported_tools": [],
+      "use_responses_lite": false
+    }
+  },
+  "executor_schema": {
+    "type": "function",
+    "name": "exec_command",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "cmd": {
+          "type": "string",
+          "description": "Shell command to execute."
+        },
+        "justification": {
+          "type": "string",
+          "description": "User-facing approval question for `require_escalated`; omit otherwise."
+        },
+        "login": {
+          "type": "boolean",
+          "description": "True runs the shell with -l/-i semantics; false disables them. Defaults to true."
+        },
+        "max_output_tokens": {
+          "type": "number",
+          "description": "Output token budget. Defaults to 10000 tokens; larger requests may be capped by policy."
+        },
+        "prefix_rule": {
+          "type": "array",
+          "description": "Reusable approval prefix for `cmd`, only with `sandbox_permissions: \"require_escalated\"`; for example [\"git\", \"pull\"].",
+          "items": {
+            "type": "string"
+          }
+        },
+        "sandbox_permissions": {
+          "type": "string",
+          "description": "Per-command sandbox override. Defaults to `use_default`; use `require_escalated` for unsandboxed execution.",
+          "enum": [
+            "use_default",
+            "require_escalated"
+          ]
+        },
+        "shell": {
+          "type": "string",
+          "description": "Shell binary to launch. Defaults to the user's default shell."
+        },
+        "tty": {
+          "type": "boolean",
+          "description": "True allocates a PTY for the command; false or omitted uses plain pipes."
+        },
+        "workdir": {
+          "type": "string",
+          "description": "Working directory for the command. Defaults to the turn cwd."
+        },
+        "yield_time_ms": {
+          "type": "number",
+          "description": "Wait before yielding output. Defaults to 10000 ms; effective range is 250-30000 ms."
+        }
+      },
+      "required": [
+        "cmd"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "controller_and_executor_processes_absent": true
+}
