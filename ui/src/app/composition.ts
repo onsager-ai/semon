@@ -144,7 +144,7 @@ export class ViewerComposition {
         context.controlOwner.destroy();
         context.updates.destroy();
         context.scope.destroy();
-        context.liveModelOwner.liveController.destroy();
+        context.liveModelOwner.destroy();
         context.navigation.destroy();
         context.transcripts.destroy();
         context.viewport.stopOpeningEndPin();

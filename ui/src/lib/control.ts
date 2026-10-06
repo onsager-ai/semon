@@ -69,7 +69,7 @@ export interface ControlView {
   busy: boolean;
   uncertain: boolean;
   note: string;
-  send(text: string): void;
+  send(text: string): Promise<boolean>;
   interrupt(): void;
   answer(request: ControlRequest, answer: JsonObject): void;
   reconnect(): void;
