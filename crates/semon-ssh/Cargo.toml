@@ -4,9 +4,10 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish = false
-description = "Bounded SSH checks and explicitly authorized mirror bootstrap"
+description = "Pinned SSH onboarding and separately authorized private-driver receipts"
 
 [dependencies]
+semon-runtime = { path = "../semon-runtime" }
 base64 = "0.22"
 sha2.workspace = true
 serde.workspace = true
