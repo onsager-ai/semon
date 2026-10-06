@@ -66,6 +66,7 @@ class Provider(m.Provider):
     failures = []
     credential = 'synthetic-private-307-key'
     baseline = False
+    native_instructions = None
 
     def do_POST(self):
         try:
@@ -80,7 +81,21 @@ class Provider(m.Provider):
                 names = tool_names(outbound_tools(body))
                 outputs = [row for row in body['input'] if row.get('type') in ('function_call_output', 'custom_tool_call_output')]
                 if not self.baseline:
-                    assert 'functions.exec' not in text
+                    # Native base prose may mention functions.exec as a workflow
+                    # example. Assert preserved model instructions and actual
+                    # tool exposure instead of banning incidental text.
+                    strings = []
+                    def collect(value):
+                        if isinstance(value, str):
+                            strings.append(value)
+                        elif isinstance(value, dict):
+                            for child in value.values():
+                                collect(child)
+                        elif isinstance(value, list):
+                            for child in value:
+                                collect(child)
+                    collect(body)
+                    assert any(self.native_instructions in value for value in strings), 'native model instructions replaced'
                     assert '<multi_agent_role>' not in text
                     assert 'exec_command' in names, names
                     assert 'exec' not in names, names
@@ -130,6 +145,11 @@ def main():
     assert len(operation) == 32 and all(c in '0123456789abcdef' for c in operation)
     approval_operation = hashlib.sha256(('approval:'+operation).encode()).hexdigest()[:32]
     Provider.baseline = args.baseline
+    native_catalog_bytes = subprocess.check_output(
+        [args.codex, 'debug', 'models', '--bundled'], env={})
+    native_catalog = json.loads(native_catalog_bytes)
+    Provider.native_instructions = next(model['model_messages']['instructions_template']
+        for model in native_catalog['models'] if model['slug'] == 'gpt-6-luna')
     assert not native_processes(args.codex), 'fixture package already has live processes; reconcile first'
     provider = http.server.ThreadingHTTPServer(('127.0.0.1',0), Provider)
     threading.Thread(target=provider.serve_forever,daemon=True).start()
@@ -180,7 +200,18 @@ def main():
                 assert Provider.credential.encode() not in path.read_bytes(), 'credential in file: '+path.name
         assert Provider.credential not in stdout + stderr
         assert len(Provider.turn_calls) == 2, len(Provider.turn_calls)
-        report = {'version':m.PIN,'model':'openai/gpt-6-luna','provider':'synthetic localhost Responses; no live model qualification','operation':operation,'tool_names':tool_names(outbound_tools(Provider.turn_calls[0])),'standalone_instructions':True,'command':COMMAND,'shell_output':MARKER,'shell_exit':0,'final_output':MARKER,'credential_header_only':True,'credential_excluded_from_executor_and_files':True,'duplicate_prevented':True,'shutdown_reaped':True}
+        report = {'version':m.PIN,'model':'openai/gpt-6-luna','provider':'synthetic localhost Responses; no live model qualification','operation':operation,'tool_names':tool_names(outbound_tools(Provider.turn_calls[0])),'standalone_instructions':True,'native_model_instructions_preserved':True,'command':COMMAND,'shell_output':MARKER,'shell_exit':0,'final_output':MARKER,'credential_header_only':True,'credential_excluded_from_executor_and_files':True,'duplicate_prevented':True,'shutdown_reaped':True}
+        if not args.baseline:
+            profile = json.loads((state/'home'/'standalone-profile.json').read_text())
+            assert profile['instruction_source'] == 'native debug models --bundled'
+            assert profile['native_catalog_sha256'] == hashlib.sha256(native_catalog_bytes).hexdigest()
+            effective = json.loads((state/'home'/'standalone-models.json').read_text())
+            expected = json.loads(native_catalog_bytes)
+            for model in expected['models']:
+                model.update(profile['capability_overrides'])
+            assert effective == expected, 'native metadata changed beyond capability overrides'
+            report['all_native_model_messages_preserved'] = True
+            report['session_profile'] = profile
         executor = next(tool for tool in tool_specs(outbound_tools(Provider.turn_calls[0])) if tool.get('name') == ('exec' if args.baseline else 'exec_command'))
         report['executor_schema'] = {key: executor[key] for key in ('type', 'name', 'parameters', 'format') if key in executor}
         report['controller_and_executor_processes_absent'] = True
