@@ -83,7 +83,56 @@ export function createLiveModel(host: LiveModelHost) {
     ].join('|');
   // rendered route is owned by navigation; // the route the page shows
   const visible = () => document.visibilityState === 'visible';
-  const schedule = (ms: number) => liveController.schedule(ms);
+  let stream: EventSource | null = null;
+  let destroyed = false;
+  let streamNote: HTMLElement | null = null;
+  function clearStreamNote() {
+    streamNote?.remove();
+    streamNote = null;
+  }
+  function showStreamNote() {
+    if (destroyed || host.disposed || streamNote) return;
+    streamNote = createStatusNote('Reconnecting… Your conversation is retained.', 'livenote');
+    document.body.append(streamNote);
+  }
+  let delivery = Promise.resolve();
+  const schedule = (ms: number) => {
+    const path = host.viewerHost?.modelStream;
+    if (!path || typeof EventSource === 'undefined') {
+      liveController.schedule(ms);
+      return;
+    }
+    if (stream || destroyed) return;
+    if (!path.startsWith('/') || path.startsWith('//') || /[\\\s]/.test(path))
+      throw new Error('Invalid live model stream');
+    stream = new EventSource(path);
+    liveController.useStream();
+    stream.addEventListener('open', clearStreamNote);
+    stream.addEventListener('error', showStreamNote);
+    stream.addEventListener('unavailable', showStreamNote);
+    stream.addEventListener('model', (event) => {
+      if (!(event instanceof MessageEvent)) return;
+      // Serialize deliveries through the existing model/transcript owner; a
+      // stream never introduces a second cache, router or rendering pipeline.
+      delivery = delivery
+        .then(async () => {
+          if (destroyed || host.disposed) return;
+          await host.liveUpdates.update(JSON.parse(String(event.data)));
+          clearStreamNote();
+        })
+        .catch(() => {
+          showStreamNote();
+        });
+    });
+    stream.addEventListener('ended', () => {
+      destroyed = true;
+      liveController.stop();
+      stream?.close();
+      stream = null;
+      clearStreamNote();
+      host.viewerHost?.modelFailed?.(403);
+    });
+  };
   // An embedding page can cancel `semon:ended` to draw its own note in place of this one.
   function ended(status: number) {
     if (host.disposed) return;
@@ -141,6 +190,13 @@ export function createLiveModel(host: LiveModelHost) {
     );
 
   return {
+    destroy() {
+      destroyed = true;
+      clearStreamNote();
+      stream?.close();
+      stream = null;
+      liveController.destroy();
+    },
     liveController,
     LIVE,
     remember,

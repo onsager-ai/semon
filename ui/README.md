@@ -136,6 +136,17 @@ roots/dialogs, and cancels document listeners, timers and animation frames.
 `ui/tests/application-lifecycle.mjs` exercises fixture-backed standalone, sidebar
 and native document replacement with deliberately late model responses.
 
+Hosts may set `ViewerHost.modelStream` to a same-origin SSE endpoint. `model`
+events contain full model JSON and enter the existing validated model/transcript
+transaction; `unavailable` shows a reconnecting notice, and `ended` closes the
+stream and calls `modelFailed(403)`. EventSource reconnects interrupted streams.
+The application owns and closes this connection on teardown; stream mode disables
+the browser polling timer. Hosts without this port retain the existing poller.
+`modelNavigation` receives an accepted model for host-owned navigation updates.
+Rust hosts can call `ViewerCore::session_machine_key` to bind controls to a
+caller's mirror key rather than a displayed hostname. Missing or ambiguous
+session IDs return no owner; the model JSON format stays unchanged.
+
 ## Formatting and local hooks
 
 Run `npm --prefix ui run format` for authored UI TypeScript, build/test MJS and
