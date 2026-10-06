@@ -159,6 +159,9 @@ authored standalone UI styles in this scope. Rust keeps its rustfmt gate.
 Install hooks explicitly from the repository root with
 `npm --prefix ui run hooks:install`; remove with `npm --prefix ui run hooks:remove`.
 Installation is repository-local and refuses existing hooks/configuration. The
+hook first checks the staged UI scope. Empty, Rust/docs-only and UI deletion-only
+commits need neither Node nor UI dependencies. Relevant UI changes require the
+pinned local tooling and fail with an actionable setup message when it is missing.
 pre-commit check reads staged blobs, supports partial staging, renames and spaces,
 and never writes files, stages content, installs dependencies or uses the network.
 On failure, format your source and stage only the intended changes. Deletions
