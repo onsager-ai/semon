@@ -5,6 +5,55 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 
+test('hook skips empty, Rust/docs-only and deleted UI changes without Node or Prettier', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'semon-hook-scope-'));
+  const run = (cmd, args, options = {}) =>
+    spawnSync(cmd, args, { cwd: root, encoding: 'utf8', ...options });
+  const git = (...args) => {
+    const result = run('git', args);
+    assert.equal(result.status, 0, result.stderr);
+  };
+  try {
+    await mkdir(join(root, '.githooks'));
+    await mkdir(join(root, 'ui/src'), { recursive: true });
+    await mkdir(join(root, 'bin'));
+    await copyFile(
+      new URL('../../.githooks/pre-commit', import.meta.url),
+      join(root, '.githooks/pre-commit'),
+    );
+    const gitPath = spawnSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).stdout.trim();
+    await symlink(gitPath, join(root, 'bin/git'));
+    const hook = () =>
+      run('/bin/sh', ['.githooks/pre-commit'], {
+        env: { ...process.env, PATH: join(root, 'bin') },
+      });
+    git('init');
+    git('config', 'user.email', 'test@example.invalid');
+    git('config', 'user.name', 'Test');
+    await writeFile(join(root, 'ui/src/deleted.ts'), 'const value = 1;\n');
+    git('add', '.');
+    git('commit', '-m', 'fixture');
+    assert.equal(hook().status, 0);
+    await writeFile(join(root, 'README.md'), 'Documentation\n');
+    await writeFile(join(root, 'lib.rs'), 'fn main() {}\n');
+    git('add', 'README.md', 'lib.rs');
+    assert.equal(hook().status, 0);
+    git('rm', 'ui/src/deleted.ts');
+    assert.equal(hook().status, 0);
+    await mkdir(join(root, 'ui/src'), { recursive: true });
+    await writeFile(join(root, 'ui/src/a space.tsx'), 'const value=2\n');
+    git('add', 'ui/src/a space.tsx');
+    const required = hook();
+    assert.equal(required.status, 1);
+    assert.match(required.stderr, /Install Node 22\+/);
+    const missingDependencies = run('/bin/sh', ['.githooks/pre-commit']);
+    assert.equal(missingDependencies.status, 1);
+    assert.match(missingDependencies.stderr, /npm --prefix ui ci/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test('staged checks preserve partial staging, spaces, renames/deletions and existing hooks', async () => {
   const root = await mkdtemp(join(tmpdir(), 'semon-format-'));
   const run = (cmd, args) => spawnSync(cmd, args, { cwd: root, encoding: 'utf8' });
