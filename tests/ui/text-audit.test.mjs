@@ -23,3 +23,20 @@ test('rendered text audit catches size, contrast and different copies; ignores h
     await browser.close();
   }
 });
+
+test('rendered text audit measures a compact surface only where it covers the text', async () => {
+  const browser = await launch();
+  try {
+    const page = await browser.newPage();
+    await page.setContent(
+      '<style>body{background:#fff;font:14px sans-serif}.compact{position:relative;isolation:isolate;display:inline-block;padding:12px;color:#fff}.compact::before{content:"";position:absolute;z-index:-1;inset:6px;background:#191d1b}.low{color:#191d1b}.miss::before{width:2px}</style><button class="compact">Readable compact</button><button class="compact low">Low contrast compact</button><button class="compact miss">Uncovered text</button>',
+    );
+    const result = await auditText(page);
+    assert.equal(result.lowCount, 2);
+    assert.ok(result.low.some((row) => row.text === 'Low contrast compact'));
+    assert.ok(result.low.some((row) => row.text === 'Uncovered text'));
+    assert.ok(!result.low.some((row) => row.text === 'Readable compact'));
+  } finally {
+    await browser.close();
+  }
+});
