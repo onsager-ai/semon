@@ -17,10 +17,35 @@ export async function auditText(page) {
         ? [0, 1, 2].map((i) => (top[i] * top[3] + under[i] * under[3] * (1 - top[3])) / a).concat(a)
         : [0, 0, 0, 0];
     };
-    const backdrop = (node) => {
+    const backdrop = (node, textBox) => {
       const layers = [];
-      for (let e = node; e; e = e.parentElement)
+      for (let e = node; e; e = e.parentElement) {
+        // Compact controls paint their visible surface behind the text with a
+        // positioned pseudo-element, inside a larger transparent touch target.
+        // Count it only when it actually covers this text's rendered bounds.
+        const style = getComputedStyle(e);
+        const surface = getComputedStyle(e, '::before');
+        if (
+          style.isolation === 'isolate' &&
+          surface.content !== 'none' &&
+          surface.position === 'absolute' &&
+          Number(surface.zIndex) < 0
+        ) {
+          const box = e.getBoundingClientRect();
+          const left = box.left + e.clientLeft + parseFloat(surface.left);
+          const top = box.top + e.clientTop + parseFloat(surface.top);
+          const right = left + parseFloat(surface.width);
+          const bottom = top + parseFloat(surface.height);
+          if (
+            textBox.left >= left &&
+            textBox.right <= right &&
+            textBox.top >= top &&
+            textBox.bottom <= bottom
+          )
+            layers.push(rgba(surface.backgroundColor));
+        }
         layers.push(rgba(getComputedStyle(e).backgroundColor));
+      }
       let c = rgba(
         getComputedStyle(document.documentElement).getPropertyValue('--ground') || '#fff',
       );
@@ -81,7 +106,9 @@ export async function auditText(page) {
           : '');
       // Different instances can have different surfaces. Do not deduplicate solely
       // by class and text, or a compliant copy could hide a failing one.
-      const bg = backdrop(e),
+      const textRange = document.createRange();
+      textRange.selectNodeContents(node);
+      const bg = backdrop(e, textRange.getBoundingClientRect()),
         fg0 = rgba(cs.color),
         fg = over([fg0[0], fg0[1], fg0[2], fg0[3] * opacityOf(e)], bg);
       const key = [name, text.slice(0, 24), size, weight, ...bg, ...fg].join('|');
