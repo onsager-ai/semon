@@ -13,7 +13,7 @@ const out = path.resolve(process.env.SEMON_UI_OUT ?? 'out', 'compact-gallery');
 fs.mkdirSync(out, { recursive: true });
 const svg =
   '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M4 18h16M8 3v6M16 15v6" stroke="currentColor" fill="none"></path></svg>';
-const html = `<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="stylesheet" href="/viewer.css"><link rel="stylesheet" href="/shell.css"><script src="/gallery.js" defer></script></head><body><main class="page"><h1>Compact composer</h1><form class="sh-composer"><textarea aria-label="Task" placeholder="What would you like to work on?"></textarea><div class="sh-composer-toolbar"><details class="sh-picker"><summary class="sh-compact" aria-label="Model: a long catalog model label; effort: high" data-tip="Model: a long catalog model label; effort: high">${svg}</summary><div class="sh-picker-body"><h2>Model and effort</h2><label class="field">Model<select><option>A long catalog model label with additional account qualification detail</option></select></label></div></details><details class="sh-picker"><summary class="sh-compact sh-value" aria-label="Approval permissions" data-tip="Approval permissions">${svg}Managed</summary><div class="sh-picker-body"><h2>Approval permissions</h2><p>Read-only pending independent qualification.</p></div></details><button class="sh-compact sh-composer-send primary" disabled aria-label="Review launch">${svg}</button></div></form><p><button id="remount" class="btn">Remount</button></p></main></body></html>`;
+const html = `<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="stylesheet" href="/viewer.css"><link rel="stylesheet" href="/shell.css"><link rel="stylesheet" href="/select.css"><script src="/gallery.js" defer></script></head><body><main class="page"><h1>Compact composer</h1><form class="sh-composer"><textarea aria-label="Task" placeholder="What would you like to work on?"></textarea><div class="sh-composer-toolbar"><details class="sh-picker"><summary class="sh-compact" aria-label="Model: a long catalog model label; effort: high" data-tip="Model: a long catalog model label; effort: high">${svg}</summary><div class="sh-picker-body"><h2>Model and effort</h2><label class="field">Model<select name="model" aria-label="Model"><option value="default">A long catalog model label with additional account qualification detail</option><option value="second">Second qualified model</option></select></label></div></details><details class="sh-picker"><summary class="sh-compact sh-value" aria-label="Approval permissions" data-tip="Approval permissions">${svg}Managed</summary><div class="sh-picker-body"><h2>Approval permissions</h2><p>Read-only pending independent qualification.</p></div></details><button class="sh-compact sh-composer-send primary" disabled aria-label="Review launch">${svg}</button></div></form><p><button id="remount" class="btn">Remount</button></p></main></body></html>`;
 const browser = await launch();
 try {
   for (const width of [390, 820, 1280])
@@ -30,7 +30,7 @@ try {
         const file =
           name === '/gallery.js'
             ? output
-            : ['viewer.css', 'shell.css'].includes(name.slice(1))
+            : ['viewer.css', 'shell.css', 'select.css'].includes(name.slice(1))
               ? path.join(root, 'crates/semon-sessions/src', name.slice(1))
               : name.startsWith('/fonts/')
                 ? path.join(
@@ -80,19 +80,34 @@ try {
         path: path.join(out, `picker-${width}-${colorScheme}.png`),
         fullPage: true,
       });
+      await page.getByRole('combobox').click();
+      await page.getByRole('option', { name: 'Second qualified model' }).click();
+      assert.equal(await page.locator('select[name=model]').inputValue(), 'second');
+      assert.equal(
+        await page.locator('form').evaluate((n) => new FormData(n).get('model')),
+        'second',
+      );
+      if (width === 390) {
+        await page.getByRole('combobox').click();
+        await page.goBack();
+        await page.locator('dialog.sh-select-sheet').waitFor({ state: 'detached' });
+        assert(await page.locator('dialog.sh-composer-panel').isVisible());
+      }
       if (width < 1000)
         assert(
           await page
-            .locator('.sh-picker-body select')
+            .locator('.sh-select-trigger')
             .first()
             .evaluate((n) => n.getBoundingClientRect().height >= 44),
         );
       await page.keyboard.press('Escape');
+      await page.locator('.sh-picker[open]').waitFor({ state: 'detached' });
       assert.equal(await trigger.evaluate((n) => document.activeElement === n), true);
       assert.equal(await page.locator('.sh-picker[open]').count(), 0);
       await page.getByRole('button', { name: 'Remount' }).click();
       await trigger.click();
       await page.keyboard.press('Escape');
+      await page.locator('.sh-picker[open]').waitFor({ state: 'detached' });
       assert.equal(await page.locator('.sh-picker[open]').count(), 0);
       await context.close();
     }

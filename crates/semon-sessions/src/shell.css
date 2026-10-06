@@ -151,3 +151,43 @@ dialog.sheet > .btn-row { margin-top: 20px; }
   .btn, .field input, dialog.sheet button { min-height: 44px; }
   .field input { height: 44px; font-size: 16px; }
 }
+
+/* Composed settings use the same panel and Select owners as the viewer. */
+dialog.sh-composer-panel { background: var(--ground); }
+.sh-composer-panel .sh-composer-panel-body { padding: 16px; }
+.sh-composer-panel .sh-picker-body { position: static; margin: 0; padding: 0; max-height: none; overflow: visible; border: 0; border-radius: 0; box-shadow: none; display: grid; gap: 16px; }
+.sh-composer-panel .sh-picker-body > [hidden] { display: none; }
+.sh-composer-panel .sh-picker-body p { margin: 0; color: var(--ink-2); line-height: 1.5; }
+.sh-composer-panel .field + .field { margin-top: 0; }
+.sh-composer-panel .sh-select-label { display: none; }
+.sh-composer-panel .sh-select-trigger { min-height: 44px; padding-inline: 12px; font-size: var(--fs-ui); }
+.sh-composer-panel .sh-select-pop { z-index: 6; }
+.sh-composer-panel .sh-select-option { min-height: 44px; padding-block: 8px; }
+.sh-composer-panel .sh-select-option-text { white-space: normal; overflow-wrap: anywhere; }
+.sh-setting-summary { display: grid; gap: 0; margin: 0; padding: 4px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--sunken); }
+.sh-setting-summary > div { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; padding-block: 10px; }
+.sh-setting-summary > div + div { border-top: 1px solid var(--line); }
+.sh-setting-summary dt { color: var(--muted); font-size: var(--fs-sm); }
+.sh-setting-summary dd { margin: 0; color: var(--ink); font-size: var(--fs-sm); text-align: right; overflow-wrap: anywhere; }
+.sh-picker-body select { appearance: none; min-height: 44px; border: 1px solid var(--line-2); border-radius: 8px; padding: 10px 12px; }
+.sh-picker-body select[hidden] { display: none; }
+.sh-form-card { padding: 20px; border: 1px solid var(--line); border-radius: 12px; background: var(--ground); }
+.sh-form-card h2 { margin: 0 0 12px; font: 500 var(--fs-ui)/1.4 var(--sans); }
+.sh-form-card p { color: var(--ink-2); font-size: var(--fs-sm); line-height: 1.6; }
+.sh-form-card form + form { padding-top: 20px; margin-top: 20px; border-top: 1px solid var(--line); }
+.sh-form-card form > .btn { margin-top: 16px; }
+.sh-form-card .field input { border-color: var(--line-2); background: var(--ground); border-radius: 8px; }
+@media (min-width: 761px) { dialog.sh-composer-panel { width: min(440px, calc(100vw - 48px)); } }
+@media (max-width: 760px) {
+  .sh-composer-panel .sh-composer-panel-body { padding-bottom: calc(20px + env(safe-area-inset-bottom, 0px)); }
+  .sh-composer-panel .sh-picker-body > .btn { width: 100%; min-height: 44px; }
+  .sh-form-card { padding: 16px; }
+}
+.sh-setting-summary dt { flex: none; max-width: 42%; }
+.sh-setting-summary dd { min-width: 0; }
+.sh-form-card .check-field input[type="checkbox"] { appearance: none; display: grid; place-content: center; width: 20px; height: 20px; margin: 0; border: 1px solid var(--line-2); border-radius: 4px; background: var(--ground); color: var(--ground); }
+.sh-form-card .check-field input[type="checkbox"]::after { content: ""; width: 10px; height: 6px; margin-bottom: 3px; border-left: 2px solid currentColor; border-bottom: 2px solid currentColor; transform: rotate(-45deg); opacity: 0; }
+.sh-form-card .check-field input[type="checkbox"]:checked { background: var(--ink); border-color: var(--ink); }
+.sh-form-card .check-field input[type="checkbox"]:checked::after { opacity: 1; }
+.sh-form-card .check-field input[type="checkbox"]:focus-visible { outline: 2px solid var(--ink); outline-offset: 3px; }
+@media (forced-colors: active) { .sh-form-card .check-field input[type="checkbox"] { appearance: auto; } .sh-form-card .check-field input[type="checkbox"]::after { content: none; } }
