@@ -1097,11 +1097,19 @@ mod tests {
         };
         assert_eq!(receiver.facts("laptop", &later).status, 200);
         assert_eq!(semon_sessions::read_facts(&path).unwrap(), later);
-        let leftovers: Vec<_> = fs::read_dir(receiver.machine_dir("laptop"))
+        let mut leftovers: Vec<_> = fs::read_dir(receiver.machine_dir("laptop"))
             .unwrap()
             .map(|entry| entry.unwrap().file_name())
             .collect();
-        assert_eq!(leftovers, [FACTS_FILE], "no temporary file is left");
+        leftovers.sort();
+        #[cfg(unix)]
+        let expected = [FACTS_FILE, "facts.json.sources.sqlite"].as_slice();
+        #[cfg(not(unix))]
+        let expected = [FACTS_FILE].as_slice();
+        assert_eq!(
+            leftovers, expected,
+            "only the original and derived projection remain"
+        );
     }
 
     #[test]
