@@ -16,6 +16,12 @@ export function createLocalControl(scope: EffectScope, refresh: () => void) {
   let selection = 0;
   async function write(op: string, extra: JsonObject = {}): Promise<boolean> {
     if (!current || busy || (uncertain && op !== 'reconnect')) return false;
+    if (
+      op === 'send' &&
+      (!current.connected ||
+        !(current.activeTurn ? current.capabilities.steer : current.capabilities.input))
+    )
+      return false;
     const target = current;
     const at = ++revision;
     busy = true;

@@ -6987,6 +6987,8 @@ globalThis.__semonUIShared = __semonUIShared;
     let selection = 0;
     async function write(op, extra = {}) {
       if (!current || busy2 || uncertain && op !== "reconnect") return false;
+      if (op === "send" && (!current.connected || !(current.activeTurn ? current.capabilities.steer : current.capabilities.input)))
+        return false;
       const target = current;
       const at = ++revision;
       busy2 = true;
