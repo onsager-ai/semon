@@ -1,17 +1,16 @@
 import { array, boolean, number, object, text } from '../domain/validate';
 
-export type CatalogFreshness = 'cached' | 'stale' | 'incomplete' | 'unavailable';
-export interface CatalogSourceReference {
-  source: {
-    root: string;
-    path: string;
-    native_id: string;
-    offset: number;
-    prefix_sha256: number[];
-    tail_sha256: number[];
-  };
-  state: CatalogFreshness;
-}
+import type {
+  CatalogFreshness,
+  CatalogSourceReference,
+  CatalogSessionIdentity,
+} from '../domain/catalog';
+export type {
+  CatalogFreshness,
+  CatalogSourceReference,
+  CatalogSessionIdentity,
+} from '../domain/catalog';
+
 /** Metadata is a partial read view, independent of runtime status and model deltas. */
 export interface CatalogSession {
   key: string;
@@ -151,5 +150,43 @@ export function parseCatalogPage(value: unknown): CatalogPage {
     },
     items,
     next_cursor: next,
+  };
+}
+
+/** Preserve explicit ambiguity; do not resolve controls from a first source. */
+export function parseCatalogIdentity(value: unknown): CatalogSessionIdentity {
+  const row = object(value),
+    refs = array(row.source_refs, sourceReference),
+    nativeIds = strings(row.native_ids),
+    nativeId = nullable(row.native_id, text),
+    ids = new Set(refs.map((ref) => ref.source.native_id)),
+    generation = text(row.generation),
+    state = object(row.freshness),
+    sourceKey = text(row.source_key),
+    catalogKey = text(row.catalog_key),
+    harness = text(row.harness);
+  if (
+    !catalogKey ||
+    !harness ||
+    !/^[0-9a-f]{64}$/i.test(generation) ||
+    nativeIds.some((id) => !id) ||
+    ids.has('') ||
+    new Set(nativeIds).size !== nativeIds.length ||
+    ids.size !== nativeIds.length ||
+    nativeIds.some((id) => !ids.has(id)) ||
+    (nativeId !== null && (ids.size !== 1 || !ids.has(nativeId)))
+  )
+    throw new Error('Invalid catalog identity');
+  return {
+    source_key: sourceKey,
+    catalog_key: catalogKey,
+    harness,
+    native_id: nativeId,
+    native_ids: nativeIds,
+    source_refs: refs,
+    machine_label: nullable(row.machine_label, text),
+    generation,
+    observed_at: nullable(row.observed_at, integer),
+    freshness: { state: freshness(state.state) },
   };
 }
