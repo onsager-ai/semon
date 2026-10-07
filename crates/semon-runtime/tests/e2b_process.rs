@@ -308,11 +308,12 @@ async fn completed_launch_has_owned_observations_without_reopening_create_author
         .unwrap();
     let python = PathBuf::from("/usr/bin/python3");
     let worker = fixture.root.join("worker.py");
+    let exclusions = [OsString::from("SEMON_TEST_COORDINATOR_SECRET")];
     let inventory = InventoryWorker {
         python: &python,
         worker: &worker,
         lifetime: Duration::from_secs(5),
-        environment_exclusions: &[],
+        environment_exclusions: &exclusions,
     };
     assert!(matches!(
         inventory
