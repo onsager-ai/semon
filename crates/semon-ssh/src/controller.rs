@@ -129,8 +129,31 @@ pub async fn observe(
     launch: &str,
     binding: &Binding,
 ) -> Result<Launch, Error> {
+    observe_inner(target, pin, key, enrollment, launch, binding, false).await
+}
+/// Permanently stop the exact installed launch. This cannot install, authorize
+/// execution, extend a lease or replay input. Exclusion still requires reaping.
+pub async fn stop(
+    target: &Target,
+    pin: &HostKey,
+    key: &Credential,
+    enrollment: &str,
+    launch: &str,
+    binding: &Binding,
+) -> Result<Launch, Error> {
+    observe_inner(target, pin, key, enrollment, launch, binding, true).await
+}
+async fn observe_inner(
+    target: &Target,
+    pin: &HostKey,
+    key: &Credential,
+    enrollment: &str,
+    launch: &str,
+    binding: &Binding,
+    stop: bool,
+) -> Result<Launch, Error> {
     target.validate()?;
-    let input=serde_json::to_vec(&serde_json::json!({"version":1,"method":"observe","enrollment":enrollment,"launch":launch,"binding":binding})).map_err(|_|Error::Invalid)?;
+    let input=serde_json::to_vec(&serde_json::json!({"version":1,"method":if stop{"stop"}else{"observe"},"authorize_stop":stop,"enrollment":enrollment,"launch":launch,"binding":binding})).map_err(|_|Error::Invalid)?;
     let script = format!(
         "{}\n{}",
         include_str!("controller-observe.py"),

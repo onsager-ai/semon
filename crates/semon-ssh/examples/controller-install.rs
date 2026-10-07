@@ -23,6 +23,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // This exclusively created local fixture's key is the authorized host. An
     // application must retain its independently verified pin instead.
     let pin = discover(&target).await?;
+    if value["action"] == "capture" {
+        let binary = std::fs::read(value["mirror"].as_str().ok_or("mirror required")?)?;
+        let result = semon_ssh::bootstrap_native_receiver(
+            &target,
+            &pin,
+            &key,
+            semon_ssh::Bootstrap {
+                operation: value["enrollment"].as_str().ok_or("enrollment required")?,
+                destination: value["destination"]
+                    .as_str()
+                    .ok_or("destination required")?,
+                token: value["token"].as_str().ok_or("token required")?,
+                binary: &binary,
+            },
+            value["receiver"].as_str().ok_or("receiver required")?,
+        )
+        .await?;
+        println!("{}", serde_json::json!({"running":result.running}));
+        return Ok(());
+    }
     let binary = std::fs::read(value["controller"].as_str().ok_or("controller required")?)?;
     let result = controller::install(
         &target,

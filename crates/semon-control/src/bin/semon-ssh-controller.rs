@@ -252,6 +252,10 @@ fn main() -> io::Result<()> {
     listener.set_nonblocking(true)?;
     let mut cause = "expired";
     loop {
+        if root.join("execution-stop.json").exists() {
+            cause = "execution_revoked";
+            break;
+        }
         if Instant::now() >= deadline || now() >= expires {
             break;
         }

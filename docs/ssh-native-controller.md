@@ -18,7 +18,7 @@ controller artifact/version. Its delivered bytes are integrity checked before
 installation. This slice supports the OpenAI API-key method; other native
 credential methods require separate evidence and never silently change billing.
 
-Installation binds an existing stable mirror enrollment to one immutable launch
+Installation binds an persisted stable mirror enrollment to one immutable launch
 identity and application binding. It creates a fresh private workspace/home,
 refuses reused launch state and unsafe paths, and delegates native startup to
 `LocalSession`. Its namespace and seccomp probes must both pass; there is no
@@ -35,6 +35,10 @@ home. `controller::observe` performs bounded read-only inspection without model
 credentials: running requires a matching connected native snapshot, ended requires
 an independent reaping receipt, and missing/unavailable proof remains unknown.
 The application still rechecks current SSH/application authority on reads.
+After installation, `bootstrap_native_receiver` watches only that enrollment's
+fresh native home. It requires an immutable installation claim and does not
+start or authorize a native process; ordinary mirror bootstrap keeps its existing
+host-history behavior.
 
 An independent Linux subreaper supervisor owns a maximum five-minute lifetime.
 Both controller and supervisor use monotonic bounds; a stalled IPC peer cannot

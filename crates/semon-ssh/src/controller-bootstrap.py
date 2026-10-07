@@ -26,7 +26,7 @@ try:
     raw=sys.stdin.buffer.read(24*1024*1024+1)
     if len(raw)>24*1024*1024: fail()
     request=json.loads(raw)
-    if request['version']!=1 or request['method'] not in ('openai_api_key','observe'): fail()
+    if request['version']!=1 or request['method'] not in ('openai_api_key','observe','stop'): fail()
     if request['method']=='openai_api_key' and request.get('authorize_execution') is not True: fail()
     uuid=r'[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}'
     if not re.fullmatch(uuid,request['enrollment']) or not re.fullmatch(r'[0-9a-f]{32}',request['launch']): fail()
@@ -35,15 +35,22 @@ try:
     for key in ('owner','workspace','connection','session','model_connection'):
         if not isinstance(binding[key],str) or not re.fullmatch(r'[A-Za-z0-9_.-]{1,128}',binding[key]) or binding[key] in ('.','..'): fail()
     if any(type(binding[key]) is not int or binding[key]<1 for key in ('model_generation','epoch')): fail()
-    if request['method']!='observe' and (type(request['expires']) is not int or not time.time()<request['expires']<=time.time()+301): fail()
+    if request['method']=='openai_api_key' and (type(request['expires']) is not int or not time.time()<request['expires']<=time.time()+301): fail()
     root=pathlib.Path.home()/'.local'/'state'/'semon-ssh'/request['enrollment']
     for path in reversed((root,*root.parents)):
         if path.is_symlink(): fail()
         if path.is_relative_to(pathlib.Path.home()):
+            if not path.exists(): continue
             meta=path.lstat()
             if meta.st_uid!=os.getuid() or meta.st_mode&0o022: fail()
+    if request['method']=='openai_api_key': root.mkdir(parents=True,mode=0o700,exist_ok=True)
     private(root,True)
-    if request['method']=='observe':
+    if request['method'] in ('observe','stop'):
+        if request['method']=='stop':
+            installed=read(root/'controller-install.json')
+            if request.get('authorize_stop') is not True or installed['launch']!=request['launch'] or installed['binding']!=binding: fail()
+            tombstone=root/'execution-stop.json'
+            if not tombstone.exists(): atomic(tombstone,{'launch':request['launch'],'binding':binding,'revoked':True})
         print(json.dumps(observe(root,request)));sys.exit(0)
     lock=os.open(root/'installation.lock',os.O_CREAT|os.O_RDWR|os.O_NOFOLLOW,0o600)
     private(root/'installation.lock')
