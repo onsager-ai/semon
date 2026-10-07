@@ -246,3 +246,121 @@ With this option, content reads use `content=1`; content streams include their
 accepted `since` revision. Hosts must preserve conditional content reads while
 serving native status independently. The existing model/control transaction
 continues unchanged for hosts without this option.
+
+Catalog consumers may instead use `catalogControlStream` with the accepted
+`CatalogSelectionStore` port. Requests and snapshots carry exact
+`{source_key, catalog_key, native_id, harness}` identities. Canonical catalog
+routes and native session IDs remain distinct; the observer never derives
+native identity from a route, display hostname, or source-reference order.
+Missing or ambiguous native identity opens no status stream and grants no
+control authority. Hosts validate the selected catalog source and independently
+recheck runtime custody and authorization. Catalog selection does not fall back
+to workspace model resolution. The scoped observer retains the same snapshot,
+heartbeat, retry and teardown semantics described above.
+
+The catalog read consumers are separate from the complete workspace graph.
+`CatalogCapabilities` validates an explicit `catalog-v1` advertisement; unsupported
+search, ordering, union, attachment, relationship and large-record capabilities
+are not inferred from cached metadata. A recognized contract with selected
+transcripts still unavailable must remain a bounded pending view, rather than
+starting a concurrent workspace model read.
+
+`CatalogTranscriptStore` accepts only issued requests for the current selected
+source and canonical session. Each page has a half-open native slot range,
+projection generation, stable entry identities and original source provenance.
+Explicit `after=0` includes the first slot; omitting `after` requests the latest
+`limit` entries. Pages from different generations cannot mix, and an inconsistent
+overlap is rejected before any retained range changes. A stale projection needs
+explicit resynchronization of the requested ranges. Slot numbers address ranges;
+entry identities preserve renderer ownership across projection versions.
+Bootstrap probes `/api/session-capabilities` before creating its content owner.
+A missing endpoint (404) preserves complete-model compatibility. An advertised
+`catalog-v1` contract creates an independent catalog application: metadata list
+and Recent rows come from the requested machine page with explicit
+`scope=retained_history`, and native transcript
+reads use only the selected canonical session and requested ranges. The bounded
+owner never requests `/api/model`, `/api/tx`, `/api/tool` or `/api/image`.
+`?compat=1` is an explicit workspace-history compatibility surface; it is never
+an automatic response to failed bounded reads.
+
+The first consumer supports machine-scoped latest-activity order and exact
+harness/repository filters. Full text search, source union, a complete graph,
+attachments and full native result expansion remain unavailable. Capability
+advertisements are rechecked independently, and selected transcripts that are
+still unavailable show a pending view. Native actions preserve original text
+while explaining incomplete relationship context. Source/facts/native selection
+observations remain separate from runtime authority. Retired native selection
+is valid retained-history metadata; it never supplies current control authority.
+The observer accepts only the independent current-scope `/api/session-identity`
+response. A transcript's historical identity cannot enter that selection store.
+
+Session roots and requested ranges are retained during navigation. Unchanged
+range observations update metadata without walking transcript blocks. Stale
+projection recovery builds the latest page and previously requested ranges in a
+separate store, then commits them together. The shared renderer retains stable
+entry keys, expansion state, control drafts and reading anchors. Permanent
+failures remain visible; transient observations use owned bounded requests and
+capped retries. Native status continues through the existing scoped observer,
+independently from content revisions. Native administrative embedding pages
+retain their explicitly configured compatibility owner.
+
+The browser contract uses synthetic source payloads and the actual shared
+renderers; it does not establish production body-span, archive, host authorization
+or connection-to-session integration performance. Those require the matching
+backend capability/projection producer and recorded artifact revisions.
+
+When `selected_entry` is advertised and a native entry includes a qualified string
+field descriptor, its recorded text can be loaded one chunk at a time through
+`/api/session-entry`. Each chunk is checked against the selected source, canonical
+session, projection generation, native slot, field name and original provenance.
+The first accepted chunk replaces the preview; subsequent actions append only the
+next bounded chunk. Loaded text is retained across navigation and projection
+changes, with an explicit reload action after a change. Unsupported formats and
+failed reads remain visible; this path never requests the compatibility tool,
+image or transcript endpoints. Source observation failures retain previously
+loaded useful bodies while marking their entry observation incomplete.
+Status snapshots may include a typed `runtime` observation on the existing native
+control snapshot: `{state, phase, freshness, reconnectable}` and optional
+`presence`, `observedAt`, `observationError`, `updating`. Durable session phase,
+compute presence and observation freshness are separate. Non-active states
+carry disabled native capabilities. Ended and failed states have explicit
+presentation; they retain the composer and its draft and do not advertise native
+reconnect. A final end invalidates pending command receipts without replay.
+
+Selected catalog read intent also has a separate readonly runtime presentation.
+`SessionSnapshot.runtime` carries observation and delivery freshness without native
+capabilities, credentials or reconnect authority. `updateSessionRuntime` updates
+only the existing session owner's runtime leaf, including before transcript or
+current native identity is available. Failed observations retain the last durable
+phase with a stale indicator. Native controls keep their separate authority and
+draft ownership. The focused browser contract poisons transcript block traversal
+while applying final and stale runtime updates and verifies retained input focus.
+
+The current native projection recipe is version 5 (the public API envelope stays
+version 1). Range and field decoders reject other projection versions. Native
+field descriptors and chunks may declare one or two string-encoding layers;
+source byte limits follow that declaration, and decoded text remains bounded.
+A metadata-only source chooser handles the initial machine-scope requirement
+through `/api/session-sources`, retaining exact source keys even when labels
+match. It never loads a complete model to discover sources. The same owner retains source-keyed session roots, recorded ranges, expanded
+fields, drafts, filters and page cursors across a source change. Its Sources
+destination temporarily clears native and readonly runtime selection while
+reading only source metadata; exact capability validation activates the next
+source. Browser back and forward restore the corresponding source and session. The sole local CLI source uses
+the nonempty catalog alias `local`.
+
+Live range refresh preserves older reading anchors. Following the latest output
+scrolls only the selected view, while the shared toolbar Jump action resumes
+following deliberately. Sidebar collapse and native drafts survive session
+switches. The optional real producer check is `ui/tests/catalog-served.mjs`: set
+`SEMON_CATALOG_SERVED_BIN` to a matching test-clock executable and record its
+source revision with `SEMON_CATALOG_SERVED_SOURCE`; the test uses the embedded matching UI bundle (set
+`SEMON_CATALOG_SERVED_UI_OVERRIDE=1` only for an explicitly recorded consumer overlay) and checks cold first content, bounded selected reads and
+retained return without compatibility endpoint requests. This is integration
+evidence for its documented synthetic workload, not a general latency budget.
+
+Recipe 5 binds every qualified source-byte read to the original source before
+and after the read. Previous recipe headers remain unavailable until rebuilt;
+selected ranges still resynchronize through generation checks. Non-success JSON
+reads cancel their unread response body while retaining the HTTP status, so a
+retired request cannot keep its error transport open.

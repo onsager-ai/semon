@@ -144,7 +144,16 @@ jobs:
           node tests/ui/gallery.mjs
           node tests/ui/compact-gallery.mjs
           node tests/ui/native-controls.mjs
-          node --test ui/tests/browser-lifecycle.mjs ui/tests/application-lifecycle.mjs ui/tests/native-shell-lifecycle.mjs ui/tests/recovery-browser.mjs ui/tests/control-observation-browser.mjs
+          node --test ui/tests/browser-lifecycle.mjs ui/tests/application-lifecycle.mjs ui/tests/native-shell-lifecycle.mjs ui/tests/recovery-browser.mjs ui/tests/control-observation-browser.mjs ui/tests/catalog-viewer-browser.mjs ui/tests/runtime-leaf-browser.mjs ui/tests/jump-toolbar.mjs
+
+      - name: Actual default catalog producer, keyboard and visual geometry
+        if: matrix.suite == 'interaction'
+        env:
+          SEMON_CATALOG_SERVED_BIN: ${{ github.workspace }}/target/debug/semon
+          SEMON_CATALOG_SERVED_SOURCE: ${{ github.sha }}
+          SEMON_CATALOG_SERVED_EVIDENCE: ${{ github.workspace }}/tests/ui/out/catalog-default.json
+          SEMON_CATALOG_VISUAL_OUT: ${{ github.workspace }}/tests/ui/out/catalog-default
+        run: node --test ui/tests/catalog-served.mjs
 
       - name: Write the sample fixtures
         run: |

@@ -14,6 +14,7 @@ import type { ApplicationRoute } from '../navigation/routes';
 import { NavigationController } from '../navigation/routes';
 import { ViewerModelStore } from '../state/model';
 import { TranscriptStore } from '../state/transcript';
+import { CatalogSelectionStore } from '../state/catalog-selection';
 import type { ViewerHost } from '../viewer-host';
 import { createAccountControls } from './accountControls';
 import { createAnalytics } from './analytics';
@@ -56,6 +57,7 @@ export class ViewerComposition {
   readonly application: ViewerApplication;
   now: number;
   readonly updates = new ViewUpdates();
+  readonly catalogSelectionStore = new CatalogSelectionStore();
   readonly modelStore: ViewerModelStore;
   admin: { href: string; label: string } | null;
   account: Account | null;
@@ -129,6 +131,11 @@ export class ViewerComposition {
   readonly applicationRefreshOwner: ReturnType<typeof createApplicationRefresh>;
   readonly viewport: ReturnType<typeof createViewport>;
   readonly tickerOwner: ReturnType<typeof createTicker>;
+  get catalogSelection():
+    | Pick<CatalogSelectionStore, 'selectedIdentity' | 'subscribe'>
+    | undefined {
+    return this.viewerHost?.catalogControlStream ? this.catalogSelectionStore : undefined;
+  }
   constructor(host: ViewerHost | null, onDestroyed: (owner: ViewerApplication) => void) {
     const context = this;
     this.scope = new EffectScope();
@@ -144,6 +151,7 @@ export class ViewerComposition {
         if (context.disposed) return;
         context.disposed = true;
         context.controlObservationOwner.destroy();
+        context.catalogSelectionStore.destroy();
         context.controlOwner.destroy();
         context.updates.destroy();
         context.scope.destroy();
@@ -236,7 +244,8 @@ export class ViewerComposition {
     this.isGap = (e: Entry) =>
       e.k === 'end' && /entries (not included|omitted)|^No activity/.test(e.text ?? '');
     this.controlOwner = createLocalControl(this.scope, () => {
-      if (context.viewerHost?.controlStream) context.applicationRefreshOwner.controls();
+      if (context.viewerHost?.controlStream || context.viewerHost?.catalogControlStream)
+        context.applicationRefreshOwner.controls();
       else context.applicationRefreshOwner.refresh();
     });
     this.transportOwner = createTransport(context);

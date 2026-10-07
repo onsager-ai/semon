@@ -400,3 +400,21 @@ test('selected hosted streams bind both runtimes and reject callbacks after navi
       'projection-changed',
     ]);
   }));
+
+test('explicit compatibility reader remains selected across navigation and reload URLs', async () =>
+  fixture(async (page) => {
+    const urls = await page.evaluate(() => {
+      history.replaceState(null, '', '/sessions?compat=1');
+      const owner = Recovery.createBootstrap({
+        modelStore: {
+          sessions: { s: { harness: 'codex' } },
+          machines: {},
+          turn: new Map(),
+        },
+      });
+      return [owner.urlOf({ v: 'session', id: 's', turn: 't' }), owner.urlOf({ v: 'home' })];
+    });
+    assert.equal(new URL(urls[0], 'http://recovery.test').searchParams.get('compat'), '1');
+    assert.equal(new URL(urls[0], 'http://recovery.test').searchParams.get('turn'), 't');
+    assert.equal(new URL(urls[1], 'http://recovery.test').searchParams.get('compat'), '1');
+  }));

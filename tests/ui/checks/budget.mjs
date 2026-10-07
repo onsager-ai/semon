@@ -347,7 +347,7 @@ async function open(browser, vp, run) {
 }
 
 const url = (server, where) =>
-  `${server.base}${where}${where.includes('?') ? '&' : '?'}t=${server.token}`;
+  `${server.base}${where}${where.includes('?') ? '&' : '?'}t=${server.token}&compat=1`;
 const scrollTop = (page) =>
   page.evaluate(() => {
     (matchMedia('(max-width: 760px)').matches
@@ -673,7 +673,7 @@ async function runSize(browser, vp, warnings) {
     fixture.cwd = path.join(fixtureDir, 'work', 'aster');
     server = await serve(fixtureDir, fixture.now);
     // The server's first read of the homes builds its index; that isn't what a screen is measured on.
-    const warm = await fetch(`${server.base}/api/model?t=${server.token}`);
+    const warm = await fetch(`${server.base}/api/model?t=${server.token}&compat=1`);
     if (!warm.ok) throw new Error(`/api/model answered ${warm.status}`);
     await warm.arrayBuffer();
     for (const [name, run] of Object.entries(scenarios)) {

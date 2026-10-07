@@ -118,7 +118,7 @@ async function servedExtra(browser, { size = 'phone', dark = false } = {}) {
       ? r.continue()
       : r.abort(),
   );
-  await page.goto(base + '/?t=' + token, { waitUntil: 'load' });
+  await page.goto(base + '/?t=' + token + '&compat=1', { waitUntil: 'load' });
   await settled(page);
   return page;
 }

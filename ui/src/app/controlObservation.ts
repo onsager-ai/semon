@@ -4,29 +4,63 @@ import type { ViewerModelStore } from '../state/model';
 import type { ViewUpdates } from '../state/viewUpdates';
 import type { ViewerHost } from '../viewer-host';
 import type { createLocalControl } from './localControl';
+import type { CatalogSessionIdentity } from '../domain/catalog';
 interface ControlObservationHost {
   scope: EffectScope;
   navigation: NavigationController;
   modelStore: Pick<ViewerModelStore, 'sessions'>;
   updates: ViewUpdates;
   viewerHost: ViewerHost | null;
+  catalogSelection?: {
+    selectedIdentity(): CatalogSessionIdentity | null;
+    subscribe(listener: () => void): () => void;
+  };
   controlOwner: Pick<ReturnType<typeof createLocalControl>, 'prepare' | 'observe' | 'unavailable'>;
 }
 /** Navigation-owned native status; never adopts or rebuilds a content model. */
 export function createControlObservation(host: ControlObservationHost) {
-  if (!host.viewerHost?.controlStream) return { destroy() {} };
+  if (!host.viewerHost?.controlStream && !host.viewerHost?.catalogControlStream)
+    return { destroy() {} };
   let stream: EventSource | null = null;
   let identity = '';
   let timer: number | undefined;
   let deadline: number | undefined;
   let delay = 1000;
   let disposed = false;
-  function selected() {
+  function selected(): {
+    path: string | undefined;
+    params: Record<string, string>;
+    thread: string;
+  } {
     const route = host.navigation.route;
+    if (host.catalogSelection) {
+      const selected = host.catalogSelection.selectedIdentity();
+      const accepted =
+        route.v === 'session' &&
+        selected?.catalog_key === route.id &&
+        selected.owner_qualification !== 'provisional' &&
+        selected.read_scope !== 'retained_history'
+          ? selected
+          : null;
+      return {
+        path: accepted?.native_id ? host.viewerHost?.catalogControlStream : undefined,
+        params: accepted
+          ? {
+              source_key: accepted.source_key,
+              catalog_key: accepted.catalog_key,
+              native_id: accepted.native_id ?? '',
+              harness: accepted.harness,
+            }
+          : {},
+        thread: accepted?.native_id ?? '',
+      };
+    }
     const session = route.v === 'session' ? host.modelStore.sessions[route.id] : undefined;
+    const thread = session && route.v === 'session' ? route.id : '';
     return {
-      selected: session ? (route.v === 'session' ? route.id : '') : '',
-      machine: session?.machine ?? '',
+      path: host.viewerHost?.controlStream,
+      params: { selected: thread, machine: session?.machine ?? '' },
+      thread,
     };
   }
   function cancel() {
@@ -38,14 +72,14 @@ export function createControlObservation(host: ControlObservationHost) {
   function connect() {
     if (disposed) return;
     cancel();
-    const path = host.viewerHost?.controlStream;
+    const scope = selected();
+    identity = JSON.stringify(scope);
+    const path = scope.path;
     if (!path || typeof EventSource === 'undefined') return;
     if (!path.startsWith('/') || path.startsWith('//') || /[\\\s]/.test(path))
       throw new Error('Invalid control stream');
-    const scope = selected();
-    identity = JSON.stringify(scope);
     const current = new EventSource(
-      path + (path.includes('?') ? '&' : '?') + new URLSearchParams(scope),
+      path + (path.includes('?') ? '&' : '?') + new URLSearchParams(scope.params),
     );
     stream = current;
     let revision = '';
@@ -83,21 +117,21 @@ export function createControlObservation(host: ControlObservationHost) {
           typeof value.revision !== 'string' ||
           value.revision.length < 1 ||
           value.revision.length > 128 ||
-          !('selected' in value) ||
-          value.selected !== scope.selected ||
-          !('machine' in value) ||
-          value.machine !== scope.machine ||
+          !Object.entries(scope.params).every(
+            ([key, expected]) =>
+              key in value && (value as Record<string, unknown>)[key] === expected,
+          ) ||
           !('control' in value)
         )
           throw new Error('Control identity changed');
         const control = host.controlOwner.prepare(value.control);
-        if (control && control.thread !== scope.selected) throw new Error('Control thread changed');
+        if (control && control.thread !== scope.thread) throw new Error('Control thread changed');
         heartbeat();
         delay = 1000;
         if (revision === value.revision) return;
         revision = value.revision;
-        host.viewerHost?.modelNavigation?.(value);
-        if (control || !scope.selected) host.controlOwner.observe(control);
+        if (!host.catalogSelection) host.viewerHost?.modelNavigation?.(value);
+        if (control || !scope.thread) host.controlOwner.observe(control);
         else host.controlOwner.unavailable();
       } catch {
         recover();
@@ -111,12 +145,14 @@ export function createControlObservation(host: ControlObservationHost) {
   }
   const route = host.navigation.subscribeRoute(changed);
   const model = host.updates.subscribe(changed);
+  const catalog = host.catalogSelection?.subscribe(changed);
   connect();
   return {
     destroy() {
       disposed = true;
       route();
       model();
+      catalog?.();
       cancel();
     },
   };
