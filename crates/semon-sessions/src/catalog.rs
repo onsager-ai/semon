@@ -2516,6 +2516,52 @@ mod tests {
     }
 
     #[test]
+    fn successive_scoped_batches_preserve_unrelated_durable_source_membership() {
+        let fixture = Fixture::new();
+        let inputs: Vec<_> = ["one", "two"]
+            .into_iter()
+            .map(|id| {
+                fixture.source(id);
+                crate::inputs::Input {
+                    root: crate::inputs::InputRoot::Claude,
+                    path: format!("projects/project/{id}.jsonl"),
+                }
+            })
+            .collect();
+        let mut cache = EventCache::open_scoped(&fixture.options.cache).unwrap();
+        let first = crate::model::prepare_sources(
+            &fixture.options,
+            &mut cache,
+            &inputs,
+            crate::model::now_ms(),
+        )
+        .unwrap();
+        assert_eq!(
+            cache.publish_partial_catalog(&first).unwrap(),
+            crate::events::Outcome::Written
+        );
+        let second = crate::model::prepare_sources(
+            &fixture.options,
+            &mut cache,
+            &inputs[..1],
+            crate::model::now_ms(),
+        )
+        .unwrap();
+        assert_eq!(
+            cache.publish_partial_catalog(&second).unwrap(),
+            crate::events::Outcome::Written
+        );
+        let connection = Connection::open(EventCache::path(&fixture.options.cache)).unwrap();
+        let count: i64 = connection
+            .query_row("SELECT COUNT(*) FROM files", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 2);
+        assert_eq!(cache.paths().count(), 2);
+        let body = fixture.body("sid=two").1;
+        assert_eq!(body["items"][0]["freshness"]["state"], "cached");
+    }
+
+    #[test]
     fn scoped_publication_rejects_newer_dirty_claim_and_keeps_unrelated_work() {
         let fixture = Fixture::new();
         fixture.source("selected");
