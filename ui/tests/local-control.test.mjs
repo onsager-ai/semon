@@ -227,6 +227,9 @@ test('runtime presence, observation freshness and availability are validated sep
   for (const invalid of [
     { ...disabled, connected: true },
     { ...disabled, runtime: { ...runtime, reconnectable: true } },
+    { ...disabled, runtime: { ...runtime, state: ['ended'] } },
+    { ...disabled, runtime: { ...runtime, freshness: ['stale'] } },
+    { ...disabled, runtime: { ...runtime, presence: ['active'] } },
     { ...disabled, runtime: { ...runtime, presence: 'guessed' } },
     { ...disabled, runtime: { ...runtime, observedAt: 'invalid' } },
     { ...disabled, runtime: { ...runtime, observationError: 'x'.repeat(513) } },

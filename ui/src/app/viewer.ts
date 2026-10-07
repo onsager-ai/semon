@@ -1,6 +1,7 @@
 import { getViewerHost, type ViewerHost } from '../viewer-host';
 import { ViewerComposition } from './composition';
 import { createCatalogViewer } from './catalogViewer';
+import { createCatalogSources } from './catalogSources';
 import { parseCatalogCapabilities } from '../state/catalog-capabilities';
 import { requestJson } from '../lib/model';
 import { EffectScope } from './effects';
@@ -45,7 +46,10 @@ export function mountViewerApplication(
         '/api/session-capabilities' + (params.size ? '?' + params : ''),
         request.signal,
       );
-      if (!disposed) owner = createCatalogViewer(parseCatalogCapabilities(value), host);
+      const capabilities = parseCatalogCapabilities(value);
+      if (source !== null && capabilities.source_key !== source)
+        throw new Error('Source capability identity does not match this selection');
+      if (!disposed) owner = createCatalogViewer(capabilities, host);
     } catch (error) {
       if (disposed) return;
       const status = error && typeof error === 'object' && 'status' in error ? error.status : 0;
@@ -53,6 +57,18 @@ export function mountViewerApplication(
       // contract remains independent of global reads, including failed observations.
       if (status === 404) {
         legacy();
+        return;
+      }
+      if (status === 400 && !new URLSearchParams(location.search).has('machine')) {
+        owner = createCatalogSources(host, (key) => {
+          if (disposed) return;
+          owner?.destroy();
+          owner = null;
+          const url = new URL(location.href);
+          url.searchParams.set('machine', key);
+          history.replaceState(null, '', url.pathname + url.search + url.hash);
+          void chooseReader();
+        });
         return;
       }
       const root = document.querySelector<HTMLElement>('#page');
