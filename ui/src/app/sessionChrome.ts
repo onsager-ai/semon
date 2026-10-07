@@ -23,6 +23,7 @@ import type { createApplicationRefresh } from './applicationRefresh';
 import type { createScreenViews } from './screenViews';
 import { render as releaseRoot } from 'preact';
 import { shortModel } from '../domain/format';
+import { resumeCommand } from '../domain/resume';
 import type { Entry, Session } from '../domain/types';
 import type { BarLabel, HarnessMark, MenuAction, MenuDetail } from '../lib';
 import {
@@ -609,9 +610,8 @@ export function createSessionChrome(host: SessionChromeHost) {
         dot?: string,
       ) => actions.push({ key, text, icon, className, note, checked, dot });
     if (traceTurn?.out.length) addAction('trace', 'Trace this turn', I.trace, 'menu-trace');
-    const command =
-      s.harness === 'codex' ? 'codex resume ' + s.id : 'claude --resume ' + (s.sessionId ?? s.id);
-    addAction('copy', 'Copy resume command', I.copy);
+    const command = resumeCommand(s);
+    if (command !== null) addAction('copy', 'Copy resume command', I.copy);
     if (s.harness === 'claude') addAction('external', 'Open in claude.ai', I.ext);
     if (!host.phone.matches)
       addAction('wide', 'Wide transcript', I.wide, undefined, undefined, host.layoutOwner.wideMode);
@@ -673,7 +673,7 @@ export function createSessionChrome(host: SessionChromeHost) {
       body,
       {
         actions,
-        command,
+        command: command ?? '',
         path: host.phone.matches
           ? host.domain.lineageOf(s.id).map((a) => ({
               id: a.id,
