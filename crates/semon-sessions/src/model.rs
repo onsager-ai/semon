@@ -5750,7 +5750,10 @@ pub(crate) fn build(
     #[cfg(test)]
     {
         BUILDS.with(|builds| builds.set(builds.get() + 1));
-        AFTER_SCAN.with(|hook| hook.borrow_mut().take().map(|hook| hook()));
+        let hook = AFTER_SCAN.with(|hook| hook.borrow_mut().take());
+        if let Some(hook) = hook {
+            hook();
+        }
     }
     let pids;
     let lock_pids;

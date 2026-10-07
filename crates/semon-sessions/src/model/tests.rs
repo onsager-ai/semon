@@ -6493,3 +6493,28 @@ fn interrupted_catalog_publication_retains_one_generation_and_recovers_on_restar
     assert_ne!(before.0, recovered.0);
     assert!(recovered.1.iter().all(|row| row.last == Some(at(0, 1))));
 }
+
+#[test]
+fn a_slow_catalog_builder_cannot_overwrite_newer_committed_source_generation() {
+    let home = Home::new();
+    home.top("root", &[human("root", ts(0, 0), "prompt")]);
+    home.build();
+    let options = home.options.clone();
+    let path = home.root.join("claude/projects/-work-proj/root.jsonl");
+    AFTER_SCAN.with(|hook| {
+        *hook.borrow_mut() = Some(Box::new(move || {
+            let mut file = fs::OpenOptions::new().append(true).open(path).unwrap();
+            writeln!(
+                file,
+                "{}",
+                assistant("root", ts(0, 1), vec![text("new answer")])
+            )
+            .unwrap();
+            model_json_at(&options, NOW).unwrap();
+        }));
+    });
+    let older = home.build();
+    assert_eq!(older.sessions["root"].last, at(0, 0));
+    let (_, catalog) = read_catalog(&home);
+    assert_eq!(catalog[0].last, Some(at(0, 1)));
+}

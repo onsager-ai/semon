@@ -107,3 +107,18 @@ selected sources under the current configured roots: a persisted path or a
 catalog generation is never authorization. Background full refresh still runs
 the existing global builder; dirty-lineage refresh and bounded transcript/detail
 reads remain subsequent work.
+
+
+Name provenance audit: the description builder uses native metadata only
+(`customTitle`/`agentName` log records, agent `.meta.json`
+`description`/`agentType`, Codex `agent_nickname`/guardian kind, or a PID record's
+explicit `name`), followed by repository/branch/file-slug labels. It never
+extracts a name from the first user message, a prompt, an answer or a tool body.
+The persisted allowlist is captured at the description boundary, before any
+handoff/transcript body reads. Native label metadata is retained as metadata;
+the related transcript body is always reread through its source reference.
+
+Catalog publication verifies source membership and each committed ledger's
+complete-prefix identity inside its transaction. If another builder has added,
+removed or advanced a source, publication returns conflict and retains the
+newer catalog rather than rolling back its generation.
