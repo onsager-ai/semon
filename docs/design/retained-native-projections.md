@@ -35,7 +35,7 @@ pre-eviction guard. It never creates an index, reads bodies, opens the global
 EventCache or builds a model. It checks exact allowlisted path mappings, the
 supported recipe version, per-session source digest and complete publication
 marker. It prefers current observations, then qualified retained observations;
-ambiguous references, missing headers and unsupported/stale versions return
+pending source observations, ambiguous references, missing headers and unsupported/stale versions return
 not-ready. At most eight owner metadata records are considered. Their source
 vectors are necessary relationship context for the selected source.
 
