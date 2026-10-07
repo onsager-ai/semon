@@ -390,11 +390,29 @@ impl SessionSourceReader for Composite<'_> {
         offset: u64,
         max: usize,
     ) -> io::Result<crate::SessionSourceRange> {
-        if source.immutable_generation.as_deref().zip(expected).is_some_and(|(pinned, expected)|pinned!=expected) { return Err(io::Error::other("immutable source generation changed")); }
-        let expected=source.immutable_generation.as_deref().or(expected);
-        if source.immutable_generation.is_some() || matches!(self.mode, SessionSourceReadMode::ProviderOnly) {
-            let range=self.provider.unwrap_or(self.local).read_range(source,expected,offset,max)?;
-            if source.immutable_generation.as_deref().is_some_and(|generation|range.generation!=generation) { return Err(io::Error::other("immutable source generation changed")); }
+        if source
+            .immutable_generation
+            .as_deref()
+            .zip(expected)
+            .is_some_and(|(pinned, expected)| pinned != expected)
+        {
+            return Err(io::Error::other("immutable source generation changed"));
+        }
+        let expected = source.immutable_generation.as_deref().or(expected);
+        if source.immutable_generation.is_some()
+            || matches!(self.mode, SessionSourceReadMode::ProviderOnly)
+        {
+            let range = self
+                .provider
+                .unwrap_or(self.local)
+                .read_range(source, expected, offset, max)?;
+            if source
+                .immutable_generation
+                .as_deref()
+                .is_some_and(|generation| range.generation != generation)
+            {
+                return Err(io::Error::other("immutable source generation changed"));
+            }
             return Ok(range);
         }
         match self.local.read_range(source, expected, offset, max) {
@@ -457,7 +475,7 @@ impl SessionSourceReader for Local<'_> {
             };
             #[cfg(not(unix))]
             let identity = (0, 0);
-            (Some(identity.0),Some(identity.1)) == (source.dev, source.ino)
+            (Some(identity.0), Some(identity.1)) == (source.dev, source.ino)
                 && source
                     .changed_ns
                     .is_some_and(|token| Some(token) == crate::events::change_time_ns(metadata))
@@ -1018,5 +1036,91 @@ fn render_field(
             "The selected immutable field range is unavailable. Resynchronize the session before retrying.",
             true,
         ),
+    }
+}
+
+#[cfg(test)]
+mod immutable_origin_tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    struct Original {
+        generation: String,
+        expected: Mutex<Vec<Option<String>>>,
+    }
+    impl SessionSourceReader for Original {
+        fn read_range(
+            &self,
+            _: &SessionSourceRef,
+            expected: Option<&str>,
+            offset: u64,
+            _: usize,
+        ) -> io::Result<crate::SessionSourceRange> {
+            self.expected
+                .lock()
+                .unwrap()
+                .push(expected.map(str::to_owned));
+            Ok(crate::SessionSourceRange {
+                generation: self.generation.clone(),
+                length: 3,
+                offset,
+                bytes: Arc::from(b"old".as_slice()),
+                cached: false,
+            })
+        }
+    }
+    #[test]
+    fn immutable_original_never_uses_local_path_and_requires_pinned_generation() {
+        let generation = "ab".repeat(32);
+        let source = SessionSourceRef {
+            root: "claude".into(),
+            path: "projects/p/session.jsonl".into(),
+            native_id: "session".into(),
+            offset: 3,
+            prefix_sha256: [1; 32],
+            tail_sha256: [2; 32],
+            immutable_generation: Some(generation.clone()),
+        };
+        let local = Local {
+            sources: &BTreeMap::new(),
+            references: &BTreeMap::new(),
+        };
+        let provider = Original {
+            generation: generation.clone(),
+            expected: Mutex::new(Vec::new()),
+        };
+        let mixed = Composite {
+            local: &local,
+            provider: Some(&provider),
+            mode: SessionSourceReadMode::LocalThenProvider,
+        };
+        assert_eq!(
+            &*mixed.read_range(&source, None, 0, 3).unwrap().bytes,
+            b"old"
+        );
+        assert_eq!(
+            *provider.expected.lock().unwrap(),
+            vec![Some(generation.clone())]
+        );
+        assert!(mixed.read_range(&source, Some("other"), 0, 3).is_err());
+        assert_eq!(provider.expected.lock().unwrap().len(), 1);
+        let wrong = Original {
+            generation: "cd".repeat(32),
+            expected: Mutex::new(Vec::new()),
+        };
+        let mixed = Composite {
+            local: &local,
+            provider: Some(&wrong),
+            mode: SessionSourceReadMode::LocalThenProvider,
+        };
+        assert!(mixed.read_range(&source, None, 0, 3).is_err());
+    }
+    #[test]
+    fn legacy_source_physical_metadata_round_trips_without_invented_immutable_origin() {
+        let metadata = json!({"path":"/native/session.jsonl","native_id":"session","dev":5,"ino":6,"size":3,"modified_ns":7,"changed_ns":8,"offset":3,"prefix_sha256":vec![1;32],"tail_sha256":vec![2;32]});
+        let source: CatalogSource = serde_json::from_value(metadata.clone()).unwrap();
+        assert_eq!(source.dev, Some(5));
+        assert!(source.immutable_generation.is_none());
+        assert_eq!(serde_json::to_value(source).unwrap(), metadata);
     }
 }

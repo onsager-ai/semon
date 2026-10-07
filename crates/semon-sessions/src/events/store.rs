@@ -1222,8 +1222,12 @@ impl SqliteStore {
                     ledger.tail,
                     ledger.stat.changed_ns,
                 ) != (
-                    source.dev.ok_or_else(||StoreError::Data("native source lacks local observation".into()))?,
-                    source.ino.ok_or_else(||StoreError::Data("native source lacks local observation".into()))?,
+                    source.dev.ok_or_else(|| {
+                        StoreError::Data("native source lacks local observation".into())
+                    })?,
+                    source.ino.ok_or_else(|| {
+                        StoreError::Data("native source lacks local observation".into())
+                    })?,
                     source.offset,
                     source.prefix_sha256,
                     source.tail_sha256,

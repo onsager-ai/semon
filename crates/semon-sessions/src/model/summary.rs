@@ -183,11 +183,46 @@ pub(super) fn catalog(builder: &Builder<'_>, handoffs: &[Handoff]) -> Vec<Catalo
             .iter()
             .map(|position| {
                 let file = &builder.files[*position];
-                let (dev,ino,offset,prefix_sha256,tail_sha256,changed_ns,modified_ns,immutable_generation)=if let Some((dev,ino,offset,prefix,tail,changed))=file.revision {
-                    (Some(dev),Some(ino),offset,prefix,tail,changed,file.stamp.map(|stamp|stamp.modified_ns),None)
+                let (
+                    dev,
+                    ino,
+                    offset,
+                    prefix_sha256,
+                    tail_sha256,
+                    changed_ns,
+                    modified_ns,
+                    immutable_generation,
+                ) = if let Some((dev, ino, offset, prefix, tail, changed)) = file.revision {
+                    (
+                        Some(dev),
+                        Some(ino),
+                        offset,
+                        prefix,
+                        tail,
+                        changed,
+                        file.stamp.map(|stamp| stamp.modified_ns),
+                        None,
+                    )
                 } else {
-                    let source=file.immutable.expect("source must have a qualified observation");
-                    (None,None,source.consumed,source.prefix,source.tail,None,None,Some(source.generation.iter().map(|byte|format!("{byte:02x}")).collect()))
+                    let source = file
+                        .immutable
+                        .expect("source must have a qualified observation");
+                    (
+                        None,
+                        None,
+                        source.consumed,
+                        source.prefix,
+                        source.tail,
+                        None,
+                        None,
+                        Some(
+                            source
+                                .generation
+                                .iter()
+                                .map(|byte| format!("{byte:02x}"))
+                                .collect(),
+                        ),
+                    )
                 };
                 CatalogSource {
                     path: file.path.clone(),
