@@ -76,7 +76,29 @@ fn read(
     query: &str,
     provider: Option<&dyn SessionSourceReader>,
 ) -> Result<ViewerReply, Box<dyn std::error::Error>> {
+    for name in ["sid", "limit", "after", "generation", "scope"] {
+        if query_value(query, name).is_some_and(|value| decoded(value).is_none()) {
+            return Ok(catalog::error(
+                400,
+                "invalid_arguments",
+                "Invalid query encoding.",
+                false,
+            ));
+        }
+    }
     let argument = |name| query_value(query, name).and_then(decoded);
+    let history = match argument("scope").as_deref() {
+        None | Some("current") => false,
+        Some("retained_history") => true,
+        _ => {
+            return Ok(catalog::error(
+                400,
+                "invalid_arguments",
+                "Unknown read scope.",
+                false,
+            ));
+        }
+    };
     let Some(key) = argument("sid") else {
         return Ok(catalog::error(
             400,
@@ -108,7 +130,12 @@ fn read(
             false,
         ));
     }
-    let identity = match catalog::session_catalog_identity(options, source_key, &key) {
+    let selected_identity = if history {
+        catalog::session_catalog_history_identity(options, source_key, &key)
+    } else {
+        catalog::session_catalog_identity(options, source_key, &key)
+    };
+    let identity = match selected_identity {
         Ok(Some(identity)) => identity,
         Ok(None) => {
             return Ok(catalog::error(
@@ -139,7 +166,15 @@ fn read(
     let metadata = catalog::session_catalog_page(
         options,
         source_key,
-        &format!("sid={}", crate::viewer::percent_encode(&key)),
+        &format!(
+            "sid={}&scope={}",
+            crate::viewer::percent_encode(&key),
+            if history {
+                "retained_history"
+            } else {
+                "current"
+            }
+        ),
     );
     if metadata.status != 200 {
         return Ok(metadata);
