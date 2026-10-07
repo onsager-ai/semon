@@ -61,3 +61,19 @@ The answer is 200 when it is stored. A receiver that hasn't had facts for a whil
 ## Sealed copies on the receiver
 
 A receiver may seal an idle copy to save space (`semon_sessions::sealed`). Its bytes up to its last complete line go into zstd segments in `<file>.seal/`, and that range is punched out of the copy as a hole. The copy keeps its path, inode, length and modified time, so every offset, length and `head_sha256` in this protocol stays what it was. Anything that reads a copy's bytes, the receiver's own 409 hash included, reads them through `sealed::LogFile`. Appends land after the sealed range as plain bytes, and a later seal adds a segment. A `replace` renames a fresh file over the copy, and the next seal retires the old segments.
+
+## SSH setup and receiver checkpoints
+
+SSH hosts that can reconnect to a different logical mirror receiver should use
+`semon_ssh::bootstrap_for_receiver` with its stable receiver identity. The same
+identity preserves checkpoints through credential rotation and explicit setup
+repair. A new receiver identity partitions the private XDG state directory, so
+unchanged original history is uploaded to the new receiver even when its URL is
+unchanged. Previous checkpoints and captured records are retained.
+
+Setup checks and terminates only its verified owned watcher when the receiver,
+destination, or credential changes. It waits for that watcher lock before starting
+another process. Receiver identities contain no credentials. The existing
+`bootstrap` entry point remains source compatible for callers whose logical
+receiver does not change. Mirror setup starts transport only; it does not imply
+native harness execution, session resume, or environment recovery.
