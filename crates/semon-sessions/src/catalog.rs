@@ -30,6 +30,132 @@ pub struct SessionSourceRef {
     pub tail_sha256: [u8; 32],
 }
 
+/// Observation of a source in a cached catalog projection. This is neither
+/// runtime health nor authorization to mutate the native session.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CatalogSourceObservation {
+    pub source: SessionSourceRef,
+    pub state: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CatalogFreshness {
+    pub state: String,
+}
+
+/// Scoped cached identity, resolved without global event/model construction.
+/// A nullable native_id preserves ambiguity in multi-native continuations.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CatalogSessionIdentity {
+    pub source_key: String,
+    pub catalog_key: String,
+    pub harness: String,
+    pub native_id: Option<String>,
+    pub native_ids: Vec<String>,
+    pub source_refs: Vec<CatalogSourceObservation>,
+    pub machine_label: Option<String>,
+    pub generation: String,
+    pub observed_at: Option<i64>,
+    pub freshness: CatalogFreshness,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CatalogIdentityError {
+    InvalidArguments,
+    Unavailable,
+    ScopeChanged,
+}
+impl std::fmt::Display for CatalogIdentityError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::InvalidArguments => "Invalid scoped catalog identity arguments.",
+            Self::Unavailable => "The selected catalog observation is unavailable.",
+            Self::ScopeChanged => "The configured native source authority changed.",
+        })
+    }
+}
+impl std::error::Error for CatalogIdentityError {}
+
+/// The host selects authorized options and its stable source_key. Missing keys
+/// are distinct from unavailable observations. Source roots and current native
+/// manifests are validated exactly as for the paged catalog; no source bodies
+/// are read. Cached identity alone grants no control or provider authority.
+pub fn session_catalog_identity(
+    options: &Options,
+    source_key: &str,
+    canonical_catalog_key: &str,
+) -> Result<Option<CatalogSessionIdentity>, CatalogIdentityError> {
+    use CatalogIdentityError::{InvalidArguments, ScopeChanged, Unavailable};
+    if source_key.is_empty()
+        || source_key.len() > 4096
+        || canonical_catalog_key.is_empty()
+        || canonical_catalog_key.len() > 4096
+    {
+        return Err(InvalidArguments);
+    }
+    let request = Request {
+        limit: 1,
+        sid: Some(canonical_catalog_key.to_owned()),
+        harness: None,
+        repo: None,
+        cursor: None,
+    };
+    let reply = read_page(options, source_key, &request).map_err(|_| Unavailable)?;
+    let body: Value = serde_json::from_slice(&reply.body).map_err(|_| Unavailable)?;
+    match reply.status {
+        404 => return Ok(None),
+        200 => {}
+        _ if body["error"]["code"] == "catalog_scope_changed" => return Err(ScopeChanged),
+        _ => return Err(Unavailable),
+    }
+    #[derive(Deserialize)]
+    struct Item {
+        key: String,
+        harness: String,
+        native_ids: Vec<String>,
+        source_refs: Vec<CatalogSourceObservation>,
+        freshness: CatalogFreshness,
+    }
+    let item: Item = serde_json::from_value(body["items"][0].clone()).map_err(|_| Unavailable)?;
+    let native_ids: Vec<String> = item
+        .source_refs
+        .iter()
+        .map(|reference| reference.source.native_id.clone())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    if item.key != canonical_catalog_key
+        || native_ids.is_empty()
+        || native_ids.iter().any(String::is_empty)
+        || item.native_ids != native_ids
+    {
+        return Err(Unavailable);
+    }
+    let generation = body["generation"].as_str().ok_or(Unavailable)?.to_owned();
+    if generation.len() != 64 || !generation.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(Unavailable);
+    }
+    let observed_at = body["observed_at"].as_i64();
+    if observed_at.is_some_and(|time| !(0..=9_007_199_254_740_991).contains(&time)) {
+        return Err(Unavailable);
+    }
+    Ok(Some(CatalogSessionIdentity {
+        source_key: source_key.to_owned(),
+        catalog_key: item.key,
+        harness: item.harness,
+        native_id: (native_ids.len() == 1).then(|| native_ids[0].clone()),
+        native_ids,
+        source_refs: item.source_refs,
+        machine_label: body["machine_info"]["label"].as_str().map(str::to_owned),
+        generation,
+        observed_at,
+        freshness: item.freshness,
+    }))
+}
+
 /// Read a configured machine's published metadata page without constructing a
 /// ViewerCore or opening its event cache. The host authenticates the caller and
 /// chooses `options` and its stable `machine` key before calling this function.
@@ -415,7 +541,25 @@ fn read_page(
         None
     };
     transaction.commit()?;
-    let facts = crate::facts::MachineFacts::of(options);
+    // The legacy model tolerates absent facts/old source selection. Focused
+    // observations must retain that absence rather than invent current facts.
+    let recorded = options
+        .facts
+        .as_ref()
+        .and_then(|path| crate::read_facts(path).ok())
+        .filter(|facts| facts.version == crate::FACTS_VERSION);
+    let facts_known = options.facts.is_none() || recorded.is_some();
+    let codex_selection_known = options.facts.is_none()
+        || recorded
+            .as_ref()
+            .is_some_and(|facts| facts.codex_rollouts.is_some());
+    let facts = match recorded {
+        Some(facts) => crate::facts::MachineFacts::Recorded(Box::new(facts)),
+        None if options.facts.is_none() => crate::facts::MachineFacts::Local,
+        None => crate::facts::MachineFacts::Recorded(Box::default()),
+    };
+    let machine_label = facts_known.then(|| facts.hostname(options));
+    let mut page_state = if facts_known { "cached" } else { "unavailable" };
     let mut items = Vec::with_capacity(selected.len());
     for row in selected {
         let mut refs = Vec::new();
@@ -457,15 +601,25 @@ fn read_page(
             };
             refs.push(json!({"source":reference,"state":state}));
         }
-        let state = if states.iter().all(|state| *state == "unavailable") {
+        let state = if !facts_known || states.iter().all(|state| *state == "unavailable") {
             "unavailable"
-        } else if states.contains(&"unavailable") || states.contains(&"incomplete") {
+        } else if states.contains(&"unavailable")
+            || states.contains(&"incomplete")
+            || (row.harness == "codex" && !codex_selection_known)
+        {
             "incomplete"
         } else if states.contains(&"stale") {
             "stale"
         } else {
             "cached"
         };
+        if page_state != "unavailable" {
+            if matches!(state, "unavailable" | "incomplete") {
+                page_state = "incomplete";
+            } else if state == "stale" && page_state == "cached" {
+                page_state = "stale";
+            }
+        }
         let mut item = serde_json::to_value(row)?;
         item.as_object_mut()
             .expect("catalog row object")
@@ -477,10 +631,10 @@ fn read_page(
     Ok(reply(
         200,
         json!({"api":1,"machine":machine,"generation":generation,"observed_at":observed_at,
-        "machine_info":{"key":machine,"label":facts.hostname(options),"freshness":"cached"},
+        "machine_info":{"key":machine,"label":machine_label,"freshness":if facts_known { "cached" } else { "unavailable" }},
         "capabilities":{"pagination":true,"filters":["harness","repo"],"order":"last_desc_key_asc",
             "full_text_search":false,"selected_session_lookup":true,"runtime_status":false,"global_union":false},
-        "freshness":"cached","items":items,"next_cursor":next}),
+        "freshness":page_state,"items":items,"next_cursor":next}),
     ))
 }
 
@@ -571,6 +725,118 @@ mod tests {
             "cursor={}",
             crate::viewer::percent_encode(cursor.as_str().unwrap())
         )
+    }
+
+    #[test]
+    fn scoped_catalog_identity_preserves_native_ambiguity_and_source_authority() {
+        let fixture = Fixture::new();
+        fixture.publish(2);
+        crate::events::CACHE_READS.with(|reads| reads.set(0));
+        let selected = session_catalog_identity(&fixture.options, "stable-source", "session-00000")
+            .unwrap()
+            .unwrap();
+        assert_eq!(selected.source_key, "stable-source");
+        assert_eq!(selected.native_id.as_deref(), Some("session-00000"));
+        assert_eq!(selected.freshness.state, "cached");
+        assert_eq!(selected.source_refs.len(), 1);
+        assert_eq!(selected.machine_label.as_deref(), Some("synthetic-catalog"));
+        assert!(
+            session_catalog_identity(&fixture.options, "stable-source", "missing")
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            session_catalog_identity(&fixture.options, "", "session-00000"),
+            Err(CatalogIdentityError::InvalidArguments)
+        );
+        let connection = Connection::open(EventCache::path(&fixture.options.cache)).unwrap();
+        let read = |key: &str| -> Value {
+            let text: String = connection
+                .query_row(
+                    "SELECT metadata FROM session_catalog WHERE session_key=?1",
+                    [key],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            serde_json::from_str(&text).unwrap()
+        };
+        // Model a published multi-native continuation using two valid scoped
+        // source ledgers. No arbitrary first native target may become authority.
+        let mut row = read("session-00000");
+        let second = read("session-00001");
+        row["sources"]
+            .as_array_mut()
+            .unwrap()
+            .extend(second["sources"].as_array().unwrap().iter().cloned());
+        row["native_ids"] = json!(["session-00000", "session-00001"]);
+        connection
+            .execute(
+                "UPDATE session_catalog SET metadata=?1 WHERE session_key='session-00000'",
+                [row.to_string()],
+            )
+            .unwrap();
+        let ambiguous =
+            session_catalog_identity(&fixture.options, "stable-source", "session-00000")
+                .unwrap()
+                .unwrap();
+        assert_eq!(ambiguous.native_id, None);
+        assert_eq!(ambiguous.native_ids, ["session-00000", "session-00001"]);
+        fs::remove_file(
+            fixture
+                .options
+                .claude_home
+                .join("projects/project/session-00000.jsonl"),
+        )
+        .unwrap();
+        let missing = session_catalog_identity(&fixture.options, "stable-source", "session-00000")
+            .unwrap()
+            .unwrap();
+        assert_eq!(missing.freshness.state, "incomplete");
+        assert_eq!(missing.source_refs[0].state, "unavailable");
+        let mut changed = fixture.options.clone();
+        changed.claude_home = fixture.root.join("different-root");
+        assert_eq!(
+            session_catalog_identity(&changed, "stable-source", "session-00000"),
+            Err(CatalogIdentityError::ScopeChanged)
+        );
+        crate::events::CACHE_READS.with(|reads| assert_eq!(reads.get(), 0));
+    }
+
+    #[test]
+    fn focused_catalog_preserves_missing_facts_and_unknown_native_manifest() {
+        let fixture = Fixture::new();
+        let relative = "sessions/2026/10/01/rollout-codex-session.jsonl";
+        let path = fixture.options.codex_home.join(relative);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, format!("{}\n", json!({"type":"session_meta","timestamp":"2026-10-01T00:00:00Z","payload":{"id":"codex-session","cwd":"/synthetic/project"}}))).unwrap();
+        fixture.publish(1);
+        let facts_path = fixture.options.facts.as_ref().unwrap();
+        let mut facts = crate::read_facts(facts_path).unwrap();
+        let read = || session_catalog_identity(&fixture.options, "stable-source", "codex-session");
+        // Legacy None means unknown selection, not current source authority.
+        assert!(facts.codex_rollouts.is_none());
+        assert_eq!(read().unwrap().unwrap().freshness.state, "incomplete");
+        facts.codex_rollouts = Some(std::collections::BTreeSet::from([relative.to_owned()]));
+        crate::write_facts(facts_path, &facts).unwrap();
+        assert_eq!(read().unwrap().unwrap().freshness.state, "cached");
+        facts.codex_rollouts = Some(std::collections::BTreeSet::new());
+        crate::write_facts(facts_path, &facts).unwrap();
+        assert_eq!(read(), Err(CatalogIdentityError::ScopeChanged));
+        fs::write(facts_path, b"corrupt facts").unwrap();
+        let corrupt = read().unwrap().unwrap();
+        assert_eq!(corrupt.freshness.state, "unavailable");
+        assert_eq!(corrupt.machine_label, None);
+        assert_eq!(corrupt.source_refs[0].state, "cached");
+        assert_eq!(
+            fixture.body("sid=session-00000").1["items"][0]["freshness"]["state"],
+            "unavailable"
+        );
+        fs::remove_file(facts_path).unwrap();
+        assert_eq!(read().unwrap().unwrap().freshness.state, "unavailable");
+        crate::write_facts(facts_path, &facts).unwrap();
+        facts.version = 999;
+        crate::write_facts(facts_path, &facts).unwrap();
+        assert_eq!(read().unwrap().unwrap().freshness.state, "unavailable");
     }
 
     #[test]

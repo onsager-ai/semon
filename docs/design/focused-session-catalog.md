@@ -113,3 +113,30 @@ bounded transcript/source range reads, archive adapters, required relationship
 context, text filtering, coherent global union pagination and bounded background
 publication are separate pending work. Existing compatibility behavior remains
 available. No issue acceptance criterion is closed solely by this endpoint.
+
+### Scoped identity for selected clients
+
+`session_catalog_identity(options, source_key, canonical_catalog_key)` is a typed
+primary-key lookup over the same catalog snapshot and source-scope validation as
+`/api/sessions?sid=...`. Hosts choose the authorized configuration and stable
+source key. It returns `None` only for an absent selected key; invalid arguments,
+unavailable observations and changed configured source authority are separate
+errors. Error text contains no native paths or provider details.
+
+`CatalogSessionIdentity` carries the source and catalog keys, harness, native
+IDs, logical source observations, cached machine label, generation, nullable
+observation timestamp and `{state}` freshness. `native_id` is populated only
+when all source references identify one distinct native session. A continuation
+with multiple native IDs retains them and returns `native_id: null`; clients
+must not choose the first ID as a control target. Source disappearance remains
+visible. This cached identity supplies neither runtime readiness nor mutation
+authority. No global event-cache/model construction or source-body read occurs.
+
+Recorded facts and native source-selection observations remain independent of
+source-byte availability. Missing, malformed or unsupported recorded facts make
+the composite catalog/identity observation unavailable and its machine label
+unknown; retained source bytes can still be inspected. A legacy Codex facts file
+without a rollout manifest makes that selected identity incomplete. An explicit
+empty manifest selects no current native sources. The compatibility model's
+legacy facts fallback is unchanged. Clients must disable native controls when
+composite identity observation is incomplete or unavailable.
