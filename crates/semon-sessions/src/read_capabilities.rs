@@ -8,6 +8,7 @@ use serde_json::json;
 #[derive(Clone, Copy, Debug, Default)]
 pub struct SessionReadEndpoints {
     pub selected_identity: bool,
+    pub native_resolution: bool,
     pub selected_transcript: bool,
     pub selected_entry: bool,
 }
@@ -31,7 +32,7 @@ pub fn session_catalog_capabilities(
         status:200,
         content_type:"application/json; charset=utf-8",
         body:json!({"api":1,"read_contract":"catalog-v1","source_key":source_key,
-            "selected_identity":endpoints.selected_identity,"selected_transcript":endpoints.selected_transcript,
+            "native_resolution":endpoints.native_resolution,"selected_identity":endpoints.selected_identity,"selected_transcript":endpoints.selected_transcript,
             "selected_entry":endpoints.selected_entry,"pagination":true,"relationship_context":false,
             "large_native_records":false,"attachment":false,"global_union":false,"full_text_search":false,
             "filters":["harness","repo"],"order":"last_desc_key_asc"}).to_string().into_bytes(),
