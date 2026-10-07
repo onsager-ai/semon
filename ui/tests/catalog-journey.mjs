@@ -153,7 +153,7 @@ try {
     );
     await page.getByRole('button', { name: 'Load earlier records' }).first().click();
     await response;
-    await page.locator('[aria-busy="true"]').waitFor({ state: 'detached' });
+    await page.waitForFunction(() => document.querySelectorAll('[aria-busy="true"]').length === 0);
     earlierMs = performance.now() - started;
   }
   const earlier = await sample();
