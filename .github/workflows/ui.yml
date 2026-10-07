@@ -127,6 +127,12 @@ jobs:
           cache: npm
           cache-dependency-path: tests/ui/package-lock.json
 
+      # Keep signed Ubuntu packages; avoid the intermittently unreachable Azure mirror.
+      - name: Configure Ubuntu browser dependency mirrors
+        run: |
+          printf '%s\n' 'https://archive.ubuntu.com/ubuntu' | sudo tee /etc/apt/apt-mirrors.txt >/dev/null
+          printf '%s\n' 'https://security.ubuntu.com/ubuntu' | sudo tee /etc/apt/apt-mirrors-security.txt >/dev/null
+
       - name: Install the check tooling and Chromium
         working-directory: tests/ui
         run: |
