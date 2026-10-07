@@ -45,7 +45,12 @@ mod native_field;
 mod read_capabilities;
 mod source_inventory;
 pub use source_inventory::SessionSourceInventory;
+mod history_producer;
 mod history_projection;
+pub use history_producer::{
+    HistoryProjectionEvidence, HistorySourceDescriptor, HistorySourcePublication,
+    HistorySourceReader, publish_immutable_history_source,
+};
 mod received;
 mod refresh;
 mod repo;

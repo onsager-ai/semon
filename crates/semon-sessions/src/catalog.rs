@@ -962,11 +962,11 @@ fn read_page(
         }
         let is_codex = row.harness == "codex";
         let partial_summary = partial_history.contains(&row.key);
-        let mut item = serde_json::to_value(row)?;
+        let mut item = serde_json::to_value(&row)?;
         if partial_summary {
             // Body provenance can include retained sources; current summary
             // metrics have not rebuilt those sources' usage contributions.
-            item["summary_context"] = json!({"state":"incomplete","scope":"current_observation"});
+            item["summary_context"] = json!({"state":"incomplete","scope":if row.sources.iter().all(|source|source.immutable_generation.is_some()) {"selected_immutable_original"} else {"current_observation"}});
         }
 
         item.as_object_mut()

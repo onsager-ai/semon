@@ -941,6 +941,167 @@ impl IndexStore for SqliteStore {
         result
     }
 
+    fn publish_immutable_history(
+        &mut self,
+        publication: &crate::slot_projection::Publication<'_>,
+        expected_generation: Option<&str>,
+    ) -> Result<Outcome, StoreError> {
+        use sha2::{Digest, Sha256};
+        let rows = publication.rows;
+        let projections = publication
+            .transcripts
+            .ok_or_else(|| StoreError::Data("immutable original lacks recipes".into()))?;
+        if rows.len() != 1
+            || projections.len() != 1
+            || rows[0].sources.len() != 1
+            || rows[0].key != projections[0].key
+            || projections[0].slots.len() > 4096
+        {
+            return Err(StoreError::Data(
+                "immutable original projection budget or context".into(),
+            ));
+        }
+        let source = &rows[0].sources[0];
+        if source.immutable_generation.is_none()
+            || source.dev.is_some()
+            || source.ino.is_some()
+            || source.modified_ns.is_some()
+            || source.changed_ns.is_some()
+        {
+            return Err(StoreError::Data(
+                "immutable original provenance is not provider-only".into(),
+            ));
+        }
+        let mut row = rows[0].clone();
+        row.lifecycle = crate::model::summary::CatalogLifecycle::Retained;
+        let metadata = json(&row).map_err(failure)?;
+        if metadata.len() > 1048576 {
+            return Err(StoreError::Data(
+                "immutable original metadata exceeds budget".into(),
+            ));
+        }
+        let slots: Vec<_> = projections[0]
+            .slots
+            .iter()
+            .map(json)
+            .collect::<Result<_, _>>()
+            .map_err(failure)?;
+        let source_generation = crate::retention::source_generation(&row.sources)
+            .map_err(|error| StoreError::Data(error.to_string()))?;
+        let slot_generation = format!(
+            "{:x}",
+            Sha256::digest(
+                json(&(
+                    crate::slot_projection::VERSION,
+                    &source_generation,
+                    &slots,
+                    true
+                ))
+                .map_err(failure)?
+                .as_bytes()
+            )
+        );
+        self.connection
+            .busy_timeout(Duration::ZERO)
+            .map_err(failure)?;
+        let result = (|| {
+            let tx = self
+                .connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(failure)?;
+            if !current(&tx).map_err(failure)? {
+                return Ok(Outcome::Stale);
+            }
+            let previous: Option<String> = tx
+                .query_row(
+                    "SELECT value FROM meta WHERE key='catalog_generation'",
+                    [],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(failure)?;
+            if previous.as_deref() != expected_generation {
+                return Ok(Outcome::Conflict);
+            }
+            let existing:Option<String>=tx.query_row("SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata ELSE NULL END FROM session_catalog WHERE session_key=?1",[&row.key],|row|row.get(0)).optional().map_err(failure)?;
+            if let Some(existing) = existing {
+                if existing == metadata {
+                    let ready:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM session_history_projections WHERE session_key=?1 AND version=?2 AND generation=?3 AND source_generation=?4)",params![row.key,crate::slot_projection::VERSION,slot_generation,source_generation],|row|row.get(0)).map_err(failure)?;
+                    if ready {
+                        return Ok(Outcome::Written);
+                    }
+                }
+                return Ok(Outcome::Conflict);
+            }
+            let pending:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM session_catalog_invalidations WHERE source_path=?1)",[source.path.to_string_lossy().as_ref()],|row|row.get(0)).map_err(failure)?;
+            if pending {
+                return Ok(Outcome::Conflict);
+            }
+            let mut epoch: i64 = tx
+                .query_row(
+                    "SELECT CAST(value AS INTEGER) FROM meta WHERE key='catalog_publication_epoch'",
+                    [],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(failure)?
+                .unwrap_or(0);
+            epoch = epoch
+                .checked_add(1)
+                .ok_or_else(|| StoreError::Data("catalog publication epoch overflow".into()))?;
+            let generation = format!(
+                "{:x}",
+                Sha256::digest(
+                    json(&(previous, epoch, &metadata, &slot_generation))
+                        .map_err(failure)?
+                        .as_bytes()
+                )
+            );
+            tx.execute("INSERT INTO session_catalog(session_key,lifecycle,last_ms,harness,repo,parent_key,metadata) VALUES(?1,'retained',?2,?3,?4,?5,?6)",params![row.key,row.last,row.harness,row.repo,row.parent,metadata]).map_err(failure)?;
+            tx.execute("INSERT INTO session_catalog_sources(session_key,lifecycle,harness,native_id,source_path) VALUES(?1,'retained',?2,?3,?4)",params![row.key,row.harness,source.native_id,source.path.to_string_lossy()]).map_err(failure)?;
+            tx.execute(
+                "INSERT INTO session_history_catalog(session_key,metadata) VALUES(?1,?2)",
+                params![row.key, metadata],
+            )
+            .map_err(failure)?;
+            tx.execute("INSERT INTO session_history_projections(session_key,generation,source_generation,version,total,incomplete) VALUES(?1,?2,?3,?4,?5,1)",params![row.key,slot_generation,source_generation,crate::slot_projection::VERSION,slots.len() as i64]).map_err(failure)?;
+            for (index, slot) in slots.iter().enumerate() {
+                tx.execute(
+                    "INSERT INTO session_history_slots(session_key,slot,metadata) VALUES(?1,?2,?3)",
+                    params![row.key, index as i64, slot],
+                )
+                .map_err(failure)?;
+            }
+            for (key, value) in [
+                (
+                    "catalog_version",
+                    crate::model::summary::CATALOG_VERSION.to_string(),
+                ),
+                ("catalog_generation", generation.clone()),
+                ("catalog_publication_epoch", epoch.to_string()),
+                ("catalog_observed_at", crate::model::now_ms().to_string()),
+                ("slot_projection_catalog_generation", generation),
+            ] {
+                tx.execute(
+                    "INSERT OR REPLACE INTO meta(key,value) VALUES(?1,?2)",
+                    params![key, value],
+                )
+                .map_err(failure)?;
+            }
+            tx.execute(
+                "INSERT OR IGNORE INTO meta(key,value) VALUES('catalog_completeness','complete')",
+                [],
+            )
+            .map_err(failure)?;
+            tx.commit().map_err(failure)?;
+            Ok(Outcome::Written)
+        })();
+        self.connection
+            .busy_timeout(BUSY_TIMEOUT)
+            .map_err(failure)?;
+        result
+    }
+
     fn session_catalog_generation(&self) -> Result<Option<String>, StoreError> {
         self.connection
             .query_row(
@@ -1235,6 +1396,11 @@ impl SqliteStore {
                 ) {
                     return Ok(Outcome::Conflict);
                 }
+            }
+            if !crate::history_projection::immutable_origins_compatible(&transaction, publication)
+                .map_err(failure)?
+            {
+                return Ok(Outcome::Conflict);
             }
             crate::history_projection::publish(&transaction, publication).map_err(failure)?;
             let previous_version: Option<String> = transaction
