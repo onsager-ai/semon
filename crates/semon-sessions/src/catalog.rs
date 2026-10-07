@@ -1740,6 +1740,98 @@ mod tests {
     }
 
     #[test]
+    fn native_turn_context_signals_have_distinct_stable_current_and_history_entries() {
+        let fixture = Fixture::new();
+        let relative = "sessions/2026/10/01/rollout-signal-session.jsonl";
+        let path = fixture.options.codex_home.join(relative);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let records = [
+            json!({"type":"session_meta","timestamp":"2026-10-01T00:00:00Z","payload":{"id":"signal-session","cwd":"/synthetic/project"}}),
+            json!({"type":"turn_context","timestamp":"2026-10-01T00:00:01Z","payload":{"model":"gpt-6-luna","approval_policy":"on-request","sandbox_policy":{"type":"workspace-write"}}}),
+        ];
+        fs::write(
+            &path,
+            records
+                .iter()
+                .map(|row| format!("{row}\n"))
+                .collect::<String>(),
+        )
+        .unwrap();
+        let facts_path = fixture.options.facts.as_ref().unwrap();
+        let mut facts = crate::read_facts(facts_path).unwrap();
+        facts.codex_rollouts = Some(std::collections::BTreeSet::from([relative.to_owned()]));
+        crate::write_facts(facts_path, &facts).unwrap();
+        fixture.publish(0);
+        let read = |scope: &str| {
+            let reply = crate::session_transcript_range(
+                &fixture.options,
+                "source",
+                &format!("sid=signal-session&scope={scope}&after=0&limit=100"),
+                None,
+            );
+            assert_eq!(reply.status, 200);
+            serde_json::from_slice::<Value>(&reply.body).unwrap()
+        };
+        let current = read("current");
+        let signals = |page: &Value| -> Vec<Value> {
+            page["entries"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|entry| entry["k"] == "signal")
+                .cloned()
+                .collect()
+        };
+        let first = signals(&current);
+        assert_eq!(first.len(), 3);
+        assert_eq!(
+            first
+                .iter()
+                .map(|entry| entry["entry_id"].as_str().unwrap())
+                .collect::<std::collections::BTreeSet<_>>()
+                .len(),
+            3
+        );
+        assert!(
+            first
+                .iter()
+                .all(|entry| entry["provenance"]["offset"] == first[0]["provenance"]["offset"])
+        );
+        assert_eq!(first, signals(&read("retained_history")));
+        let connection = Connection::open(EventCache::path(&fixture.options.cache)).unwrap();
+        let stored: String = connection.query_row("SELECT generation FROM session_slot_projections WHERE session_key='signal-session'", [], |row| row.get(0)).unwrap();
+        assert_ne!(current["projection"]["generation"], stored);
+        assert_eq!(
+            crate::session_transcript_range(
+                &fixture.options,
+                "source",
+                &format!("sid=signal-session&generation={stored}"),
+                None
+            )
+            .status,
+            409
+        );
+        fixture.publish(20);
+        assert_eq!(first, signals(&read("current")));
+        // Partial source retirement merges retained recipes by their original
+        // identity; distinct signals must not collapse during that merge.
+        fs::remove_file(path).unwrap();
+        fixture.publish(20);
+        let retained = signals(&read("retained_history"));
+        assert_eq!(retained.len(), 3);
+        assert_eq!(
+            first
+                .iter()
+                .map(|entry| &entry["entry_id"])
+                .collect::<Vec<_>>(),
+            retained
+                .iter()
+                .map(|entry| &entry["entry_id"])
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
     fn selected_slot_ranges_are_native_bounded_and_stable_across_unrelated_history() {
         let fixture = Fixture::new();
         let path = fixture.source("selected");
