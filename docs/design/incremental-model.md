@@ -42,7 +42,7 @@ join work and constructing the current model still use the existing build path.
 
 ## Persisted descriptions (#320, first slice)
 
-SQLite schema 6 adds `session_descriptions`, one versioned row per session key.
+SQLite schema 7 adds `session_descriptions`, one versioned row per session key.
 The payload is an explicit typed allowlist: source paths and complete-line
 ledger identities, names/labels, native history metadata, usage and cost,
 repository/branch, invariant timestamps and recorded busy intervals. It never
@@ -161,3 +161,28 @@ No guest artifact was used. UI connection/session integration, cold focused list
 pages under increasing unrelated history and multi-machine/archive journeys
 require the consuming query/UI/host workstreams; this evidence does not stand
 in for those gates.
+
+
+### Indexed native identity and relationship lookups
+
+Catalog version 2 / SQLite schema 7 adds a scalar `parent_key` index and a
+`session_catalog_sources` mapping from `(harness, native_id)` to physical
+source-backed session keys. Several source aliases may resolve to one owner;
+several owners remain explicit ambiguity, never a uniqueness overwrite or a
+first-match choice. The mapping records source paths and identities only.
+Exact session-key reads already use the catalog primary key.
+
+Native ownership and parent/child queries no longer need to scan/parse every
+row's JSON arrays. The `(harness, native_id, session_key)` covering index serves
+ownership; `(parent_key, last_ms DESC, session_key ASC)` serves child pages.
+Source mappings update only for changed rows (or a version migration), and
+retired mappings disappear in the same transaction as catalog row retirement.
+The catalog derivation version participates in the generation hash, so migration
+invalidates earlier cursors even when stable display metadata is unchanged.
+
+A schema-6 catalog remains stored through additive migration. Version-2 readers
+must wait for the next successful complete publication before assuming the new
+indexes are populated. Source authority and generation CAS remain identical;
+these indexes grant no archive access, native operation authority or source
+body access. Substring text search is not implemented by this slice and retains
+its separate query-contract/measurement workstream.

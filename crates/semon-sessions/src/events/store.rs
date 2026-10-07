@@ -1,8 +1,9 @@
 //! The event index persisted in SQLite: `sessions-index.sqlite3`, beside the
 //! V1 metadata cache (step a1 of `docs/design/derived-store.md`).
 //!
-//! It holds what [`FileIndex`] holds and nothing more: kinds, offsets, ids,
-//! counts, flags and short tags, never message text (risk:secret). Every
+//! It holds the metadata represented by [`FileIndex`], versioned stable session
+//! descriptions and a focused-read catalog: kinds, offsets, ids, counts, flags
+//! and native metadata, never message or tool text (risk:secret). Every
 //! file's change commits in one `BEGIN IMMEDIATE` transaction together with
 //! its ledger row, so a file's resume offset never runs ahead of its rows,
 //! and a writer re-reads the ledger inside that transaction, so two
@@ -45,7 +46,7 @@ use crate::{Tokens, facts::ReportedRunSnapshot};
 
 /// `PRAGMA user_version`: the shape of the tables. The parser's version is
 /// [`CACHE_VERSION`], kept in `meta`.
-const SCHEMA_VERSION: i64 = 6;
+const SCHEMA_VERSION: i64 = 7;
 
 /// How long a write waits for another process's transaction. Tests wait
 /// less, so the busy paths they drive stay quick.
@@ -65,12 +66,22 @@ CREATE TABLE IF NOT EXISTS session_catalog (
     last_ms INTEGER NOT NULL,
     harness TEXT NOT NULL,
     repo TEXT,
+    parent_key TEXT,
     metadata TEXT NOT NULL
 ) STRICT;
 CREATE INDEX IF NOT EXISTS session_catalog_order ON session_catalog(last_ms DESC, session_key ASC);
 CREATE INDEX IF NOT EXISTS session_catalog_harness ON session_catalog(harness, last_ms DESC, session_key ASC);
 CREATE INDEX IF NOT EXISTS session_catalog_repo ON session_catalog(repo, last_ms DESC, session_key ASC);
 CREATE INDEX IF NOT EXISTS session_catalog_harness_repo ON session_catalog(harness, repo, last_ms DESC, session_key ASC);
+CREATE INDEX IF NOT EXISTS session_catalog_parent ON session_catalog(parent_key, last_ms DESC, session_key ASC);
+CREATE TABLE IF NOT EXISTS session_catalog_sources (
+    session_key TEXT NOT NULL,
+    harness TEXT NOT NULL,
+    native_id TEXT NOT NULL,
+    source_path TEXT NOT NULL,
+    PRIMARY KEY(session_key, source_path)
+) STRICT, WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS session_catalog_native ON session_catalog_sources(harness, native_id, session_key);
 CREATE TABLE IF NOT EXISTS session_descriptions (
     session_key TEXT PRIMARY KEY,
     version INTEGER NOT NULL,
@@ -210,6 +221,7 @@ CREATE TABLE IF NOT EXISTS reported_runs (
 /// changes. `reported_runs` isn't among them: its source keeps only the
 /// last run, so it can't be rebuilt.
 const DERIVED: &str = "
+DELETE FROM session_catalog_sources;
 DELETE FROM session_catalog;
 DELETE FROM meta WHERE key IN ('catalog_version', 'catalog_generation', 'catalog_observed_at');
 DELETE FROM session_descriptions;
@@ -844,7 +856,7 @@ impl IndexStore for SqliteStore {
             .map_err(failure)?;
         let generation = format!(
             "{:x}",
-            Sha256::digest(json(&metadata).map_err(failure)?.as_bytes())
+            Sha256::digest(format!("{version}|{}", json(&metadata).map_err(failure)?).as_bytes())
         );
         self.connection
             .busy_timeout(Duration::ZERO)
@@ -919,19 +931,39 @@ impl IndexStore for SqliteStore {
                     let mut member = transaction
                         .prepare("INSERT INTO catalog_members VALUES (?1)")
                         .map_err(failure)?;
-                    let mut put = transaction.prepare("INSERT INTO session_catalog (session_key, last_ms, harness, repo, metadata) VALUES (?1, ?2, ?3, ?4, ?5) ON CONFLICT(session_key) DO UPDATE SET last_ms=excluded.last_ms, harness=excluded.harness, repo=excluded.repo, metadata=excluded.metadata WHERE session_catalog.metadata != excluded.metadata").map_err(failure)?;
+                    let mut put = transaction.prepare("INSERT INTO session_catalog (session_key, last_ms, harness, repo, parent_key, metadata) VALUES (?1, ?2, ?3, ?4, ?5, ?6) ON CONFLICT(session_key) DO UPDATE SET last_ms=excluded.last_ms, harness=excluded.harness, repo=excluded.repo, parent_key=excluded.parent_key, metadata=excluded.metadata WHERE session_catalog.metadata != excluded.metadata OR session_catalog.parent_key IS NOT excluded.parent_key").map_err(failure)?;
+                    let mut remove_sources = transaction
+                        .prepare("DELETE FROM session_catalog_sources WHERE session_key=?1")
+                        .map_err(failure)?;
+                    let mut put_source = transaction.prepare("INSERT INTO session_catalog_sources(session_key,harness,native_id,source_path) VALUES (?1,?2,?3,?4)").map_err(failure)?;
                     for (row, metadata) in rows.iter().zip(&metadata) {
                         member.execute([&row.key]).map_err(failure)?;
-                        put.execute(params![
-                            row.key,
-                            row.last.unwrap_or(0),
-                            row.harness,
-                            row.repo,
-                            metadata
-                        ])
-                        .map_err(failure)?;
+                        let changed = put
+                            .execute(params![
+                                row.key,
+                                row.last.unwrap_or(0),
+                                row.harness,
+                                row.repo,
+                                row.parent,
+                                metadata
+                            ])
+                            .map_err(failure)?;
+                        if changed > 0 || previous_version.as_deref() != Some(&version) {
+                            remove_sources.execute([&row.key]).map_err(failure)?;
+                            for source in &row.sources {
+                                put_source
+                                    .execute(params![
+                                        row.key,
+                                        row.harness,
+                                        source.native_id,
+                                        source.path.to_string_lossy()
+                                    ])
+                                    .map_err(failure)?;
+                            }
+                        }
                     }
                 }
+                transaction.execute("DELETE FROM session_catalog_sources WHERE session_key NOT IN (SELECT session_key FROM catalog_members)", []).map_err(failure)?;
                 transaction.execute("DELETE FROM session_catalog WHERE session_key NOT IN (SELECT session_key FROM catalog_members)", []).map_err(failure)?;
                 transaction.execute("INSERT OR REPLACE INTO meta(key,value) VALUES ('catalog_generation',?1),('catalog_version',?2)", params![generation, version]).map_err(failure)?;
             }
@@ -1391,6 +1423,9 @@ fn init(connection: &mut Connection) -> rusqlite::Result<Init> {
         return Ok(Init::Newer);
     }
     if schema < SCHEMA_VERSION {
+        if schema == 6 {
+            transaction.execute_batch("ALTER TABLE session_catalog ADD COLUMN parent_key TEXT")?;
+        }
         transaction.execute_batch(SCHEMA)?;
         if schema == 1 {
             transaction.execute_batch("ALTER TABLE files ADD COLUMN codex_native_usage TEXT")?;
