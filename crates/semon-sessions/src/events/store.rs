@@ -1,8 +1,9 @@
 //! The event index persisted in SQLite: `sessions-index.sqlite3`, beside the
 //! V1 metadata cache (step a1 of `docs/design/derived-store.md`).
 //!
-//! It holds what [`FileIndex`] holds and nothing more: kinds, offsets, ids,
-//! counts, flags and short tags, never message text (risk:secret). Every
+//! It holds the metadata represented by [`FileIndex`], versioned stable session
+//! descriptions and a focused-read catalog: kinds, offsets, ids, counts, flags
+//! and native metadata, never message or tool text (risk:secret). Every
 //! file's change commits in one `BEGIN IMMEDIATE` transaction together with
 //! its ledger row, so a file's resume offset never runs ahead of its rows,
 //! and a writer re-reads the ledger inside that transaction, so two
@@ -45,7 +46,7 @@ use crate::{Tokens, facts::ReportedRunSnapshot};
 
 /// `PRAGMA user_version`: the shape of the tables. The parser's version is
 /// [`CACHE_VERSION`], kept in `meta`.
-const SCHEMA_VERSION: i64 = 7;
+const SCHEMA_VERSION: i64 = 9;
 
 /// How long a write waits for another process's transaction. Tests wait
 /// less, so the busy paths they drive stay quick.
@@ -81,6 +82,13 @@ CREATE TABLE IF NOT EXISTS session_catalog_sources (
     PRIMARY KEY(session_key, source_path)
 ) STRICT, WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS session_catalog_native ON session_catalog_sources(harness, native_id, session_key);
+CREATE INDEX IF NOT EXISTS session_catalog_source_path ON session_catalog_sources(source_path, session_key);
+CREATE TABLE IF NOT EXISTS session_catalog_invalidations (
+    source_path TEXT PRIMARY KEY,
+    revision INTEGER NOT NULL,
+    reason TEXT NOT NULL CHECK(reason IN ('changed', 'removed')),
+    observed_at INTEGER NOT NULL
+) STRICT, WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS session_descriptions (
     session_key TEXT PRIMARY KEY,
     version INTEGER NOT NULL,
@@ -163,6 +171,13 @@ CREATE TABLE IF NOT EXISTS signals (
     v INTEGER,
     PRIMARY KEY (file_id, seq)
 ) STRICT, WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS usage_identity (
+    file_id INTEGER NOT NULL,
+    message_id TEXT NOT NULL,
+    record_uuid TEXT NOT NULL,
+    PRIMARY KEY(file_id, message_id, record_uuid)
+) STRICT, WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS usage_identity_peers ON usage_identity(message_id, record_uuid, file_id);
 CREATE TABLE IF NOT EXISTS usage (
     file_id INTEGER NOT NULL,
     message_id TEXT NOT NULL,
@@ -220,12 +235,14 @@ CREATE TABLE IF NOT EXISTS reported_runs (
 /// changes. `reported_runs` isn't among them: its source keeps only the
 /// last run, so it can't be rebuilt.
 const DERIVED: &str = "
+DELETE FROM session_catalog_invalidations;
 DELETE FROM session_catalog_sources;
 DELETE FROM session_catalog;
 DELETE FROM meta WHERE key IN ('catalog_version', 'catalog_generation', 'catalog_observed_at');
 DELETE FROM session_descriptions;
 DELETE FROM events;
 DELETE FROM signals;
+DELETE FROM usage_identity;
 DELETE FROM usage;
 DELETE FROM codex_usage;
 DELETE FROM files;
@@ -972,6 +989,12 @@ impl IndexStore for SqliteStore {
                     [crate::model::now_ms().to_string()],
                 )
                 .map_err(failure)?;
+            // A complete publication validated every committed ledger and
+            // source membership while holding the write transaction. Only now
+            // can outstanding source observations be acknowledged atomically.
+            transaction
+                .execute("DELETE FROM session_catalog_invalidations", [])
+                .map_err(failure)?;
             transaction.commit().map_err(failure)?;
             Ok(Outcome::Written)
         })();
@@ -1014,6 +1037,32 @@ impl IndexStore for SqliteStore {
     ) -> Result<Option<Vec<ReportedRunSnapshot>>, StoreError> {
         self.write_runs(runs, stamp).map_err(failure)
     }
+}
+
+/// Source observation work survives a process restart. The journal contains
+/// paths and observation facts only, never source bodies or runtime liveness.
+/// Its revision prevents a future bounded worker from acknowledging newer
+/// observations than the revision that worker claimed.
+fn invalidate_catalog_source(
+    transaction: &Transaction<'_>,
+    path: &str,
+    reason: &str,
+) -> rusqlite::Result<()> {
+    // Keep the counter after acknowledgement. Resetting per-path revisions
+    // would let an old claim mistake a later observation for its own (ABA).
+    transaction.execute(
+        "INSERT INTO meta(key,value) VALUES ('catalog_source_revision','1')
+         ON CONFLICT(key) DO UPDATE SET value=CAST(CAST(meta.value AS INTEGER)+1 AS TEXT)",
+        [],
+    )?;
+    transaction.execute(
+        "INSERT INTO session_catalog_invalidations(source_path,revision,reason,observed_at)
+         VALUES (?1,CAST((SELECT value FROM meta WHERE key='catalog_source_revision') AS INTEGER),?2,?3)
+         ON CONFLICT(source_path) DO UPDATE SET revision=excluded.revision,
+         reason=excluded.reason, observed_at=excluded.observed_at",
+        params![path, reason, crate::model::now_ms()],
+    )?;
+    Ok(())
 }
 
 enum Unopened {
@@ -1186,6 +1235,7 @@ impl SqliteStore {
             ..super::DirtyRows::default()
         };
         write_file(&transaction, path, ledger, changes.unwrap_or(&full), index)?;
+        invalidate_catalog_source(&transaction, path, "changed")?;
         transaction.commit()?;
         Ok(Outcome::Written)
     }
@@ -1208,7 +1258,13 @@ impl SqliteStore {
                 (Err(error), _) => return Err(error),
             }
             // By path, never decoding the row: an undecodable one goes too.
-            for table in ["events", "signals", "usage", "codex_usage"] {
+            for table in [
+                "events",
+                "signals",
+                "usage_identity",
+                "usage",
+                "codex_usage",
+            ] {
                 transaction.execute(
                     &format!(
                         "DELETE FROM {table} WHERE file_id IN \
@@ -1218,6 +1274,7 @@ impl SqliteStore {
                 )?;
             }
             transaction.execute("DELETE FROM files WHERE path = ?1", [path])?;
+            invalidate_catalog_source(&transaction, path, "removed")?;
         }
         transaction.commit()?;
         Ok(Outcome::Written)
@@ -1436,6 +1493,18 @@ fn init(connection: &mut Connection) -> rusqlite::Result<Init> {
         }
         if (1..=3).contains(&schema) {
             transaction.execute_batch("ALTER TABLE files ADD COLUMN copilot TEXT")?;
+        }
+        if (4..=8).contains(&schema) {
+            // Existing record identities are metadata, not source bodies.
+            // Corrupt usage JSON remains unreadable and is rebuilt from source
+            // by the existing loader; it must not block additive migration.
+            transaction.execute_batch("INSERT INTO usage_identity(file_id,message_id,record_uuid)
+                SELECT usage.file_id,usage.message_id,identity.value FROM usage,
+                json_each(CASE WHEN json_valid(usage.record_ids) THEN
+                    CASE WHEN json_type(usage.record_ids)='array' THEN usage.record_ids ELSE '[]' END
+                    ELSE '[]' END) AS identity
+                WHERE identity.type='text'
+                ON CONFLICT DO NOTHING;")?;
         }
         transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     }
@@ -1826,7 +1895,13 @@ fn read_runs(connection: &Connection) -> rusqlite::Result<Vec<ReportedRunSnapsho
 
 /// Deletes a file's child rows, keeping its `files` row and id.
 fn clear(transaction: &Transaction<'_>, file_id: i64) -> rusqlite::Result<()> {
-    for table in ["events", "signals", "usage", "codex_usage"] {
+    for table in [
+        "events",
+        "signals",
+        "usage_identity",
+        "usage",
+        "codex_usage",
+    ] {
         transaction.execute(
             &format!("DELETE FROM {table} WHERE file_id = ?1"),
             [file_id],
@@ -1989,9 +2064,18 @@ fn write_file(
     )?;
 
     let mut put = transaction.prepare(PUT_USAGE)?;
+    let mut put_identity = transaction
+        .prepare("INSERT INTO usage_identity(file_id,message_id,record_uuid) VALUES (?1,?2,?3)")?;
     for id in &changes.usage {
+        transaction.execute(
+            "DELETE FROM usage_identity WHERE file_id=?1 AND message_id=?2",
+            params![file_id, id],
+        )?;
         if let Some(usage) = usage_by_id.get(id) {
             put_usage(&mut put, file_id, id, usage)?;
+            for uuid in &usage.record_ids {
+                put_identity.execute(params![file_id, id, uuid])?;
+            }
         } else {
             transaction.execute(
                 "DELETE FROM usage WHERE file_id = ?1 AND message_id = ?2",
@@ -2547,6 +2631,236 @@ mod tests {
             None
         );
         assert_eq!(tightened(&store("/tmp/idx.sqlite3"), state), None);
+    }
+
+    #[test]
+    fn catalog_invalidation_is_atomic_durable_and_conflict_checked() {
+        let root = scratch("catalog-invalidations");
+        let path = root.join("index.sqlite3");
+        let (mut store, _) = opened(&path);
+        let invalidation = |store: &SqliteStore| {
+            store.connection.query_row(
+                "SELECT revision,reason FROM session_catalog_invalidations WHERE source_path='a.jsonl'",
+                [], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+            ).optional().unwrap()
+        };
+        store
+            .write_one("a.jsonl", None, None, &ledger(1), &full())
+            .unwrap();
+        assert_eq!(invalidation(&store), Some((1, "changed".into())));
+        drop(store);
+        let (mut store, _) = opened(&path);
+        assert_eq!(invalidation(&store), Some((1, "changed".into())));
+        assert_eq!(
+            store
+                .write_one("a.jsonl", None, None, &ledger(2), &full())
+                .unwrap(),
+            Outcome::Conflict
+        );
+        assert_eq!(invalidation(&store), Some((1, "changed".into())));
+        store.connection.execute_batch("CREATE TEMP TRIGGER fail_observation BEFORE UPDATE ON session_catalog_invalidations BEGIN SELECT RAISE(ABORT,'interrupted'); END;").unwrap();
+        assert!(
+            store
+                .write_one("a.jsonl", Some(&ledger(1)), None, &ledger(2), &full())
+                .is_err()
+        );
+        assert_eq!(store.read_one("a.jsonl").unwrap().unwrap().0, ledger(1));
+        assert_eq!(invalidation(&store), Some((1, "changed".into())));
+        store
+            .connection
+            .execute_batch("DROP TRIGGER fail_observation")
+            .unwrap();
+        store
+            .write_one(
+                "a.jsonl",
+                Some(&ledger(1)),
+                Some(&full()),
+                &ledger(2),
+                &full(),
+            )
+            .unwrap();
+        assert_eq!(invalidation(&store), Some((2, "changed".into())));
+        store
+            .remove(&[("a.jsonl".into(), Some(ledger(1)))])
+            .unwrap();
+        assert_eq!(invalidation(&store), Some((2, "changed".into())));
+        store
+            .remove(&[("a.jsonl".into(), Some(ledger(2)))])
+            .unwrap();
+        assert_eq!(invalidation(&store), Some((3, "removed".into())));
+        assert!(store.read_one("a.jsonl").unwrap().is_none());
+        drop(store);
+        let (mut store, _) = opened(&path);
+        assert_eq!(invalidation(&store), Some((3, "removed".into())));
+        // Acknowledging work never reuses a revision for later observations.
+        store
+            .connection
+            .execute("DELETE FROM session_catalog_invalidations", [])
+            .unwrap();
+        store
+            .write_one("a.jsonl", None, None, &ledger(3), &full())
+            .unwrap();
+        assert_eq!(invalidation(&store), Some((4, "changed".into())));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn usage_identity_peers_require_message_and_record_and_update_atomically() {
+        let root = scratch("usage-identities");
+        let path = root.join("index.sqlite3");
+        let (mut store, _) = opened(&path);
+        let index = |message: &str, uuid: &str| {
+            let mut index = full();
+            index.usage_by_id = BTreeMap::from([(
+                message.into(),
+                MessageUsage {
+                    record_ids: BTreeSet::from([uuid.into()]),
+                    ..MessageUsage::default()
+                },
+            )]);
+            index
+        };
+        let peers = |store: &SqliteStore| {
+            store
+                .connection
+                .prepare(
+                    "SELECT files.path FROM usage_identity
+                JOIN files USING(file_id) WHERE message_id='api' AND record_uuid='record'
+                ORDER BY files.path",
+                )
+                .unwrap()
+                .query_map([], |row| row.get::<_, String>(0))
+                .unwrap()
+                .map(Result::unwrap)
+                .collect::<Vec<_>>()
+        };
+        for (name, message, uuid) in [
+            ("a", "api", "record"),
+            ("b", "api", "record"),
+            ("c", "api", "bridge"),
+            ("other-record", "api", "different"),
+            ("other-api", "different", "record"),
+        ] {
+            let mut source = index(message, uuid);
+            if name == "b" {
+                source
+                    .usage_by_id
+                    .get_mut("api")
+                    .unwrap()
+                    .record_ids
+                    .insert("bridge".into());
+            }
+            store
+                .write_one(name, None, None, &ledger(1), &source)
+                .unwrap();
+        }
+        assert_eq!(peers(&store), ["a", "b"]);
+        let closure_sql = "WITH RECURSIVE related(file_id) AS (
+            SELECT file_id FROM files WHERE path='a'
+            UNION SELECT peer.file_id FROM related
+            JOIN usage_identity mine ON mine.file_id=related.file_id
+            JOIN usage_identity peer ON peer.message_id=mine.message_id AND peer.record_uuid=mine.record_uuid
+            LIMIT ?1) SELECT path FROM related JOIN files USING(file_id) ORDER BY path";
+        let closure = |limit| {
+            store
+                .connection
+                .prepare(closure_sql)
+                .unwrap()
+                .query_map([limit], |row| row.get::<_, String>(0))
+                .unwrap()
+                .map(Result::unwrap)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(closure(4), ["a", "b", "c"]);
+        // A worker must treat the extra row as overflow, never complete context.
+        assert_eq!(closure(2).len(), 2);
+        let plan: String = store.connection.query_row(
+            "EXPLAIN QUERY PLAN SELECT file_id FROM usage_identity WHERE message_id=?1 AND record_uuid=?2",
+            ["api", "record"], |row| row.get(3),
+        ).unwrap();
+        assert!(
+            plan.contains("COVERING INDEX usage_identity_peers"),
+            "{plan}"
+        );
+        store.connection.execute_batch("CREATE TEMP TRIGGER fail_identity BEFORE INSERT ON usage_identity BEGIN SELECT RAISE(ABORT,'interrupted'); END;").unwrap();
+        assert!(
+            store
+                .write_one(
+                    "b",
+                    Some(&ledger(1)),
+                    None,
+                    &ledger(2),
+                    &index("api", "replacement")
+                )
+                .is_err()
+        );
+        assert_eq!(peers(&store), ["a", "b"]);
+        assert_eq!(store.read_one("b").unwrap().unwrap().0, ledger(1));
+        store
+            .connection
+            .execute_batch("DROP TRIGGER fail_identity")
+            .unwrap();
+        store
+            .write_one(
+                "b",
+                Some(&ledger(1)),
+                Some(&index("api", "record")),
+                &ledger(2),
+                &index("api", "replacement"),
+            )
+            .unwrap();
+        assert_eq!(peers(&store), ["a"]);
+        store.remove(&[("a".into(), Some(ledger(1)))]).unwrap();
+        assert!(peers(&store).is_empty());
+        drop(store);
+        let (store, _) = opened(&path);
+        assert!(peers(&store).is_empty());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn schema_eight_backfills_exact_usage_identity_without_reading_source_bodies() {
+        let root = scratch("usage-identity-migration");
+        let path = root.join("index.sqlite3");
+        let (mut store, _) = opened(&path);
+        store.write_runs(&[run()], &stamp()).unwrap();
+        store
+            .write_one("a", None, None, &ledger(1), &full())
+            .unwrap();
+        store
+            .write_one("damaged", None, None, &ledger(1), &full())
+            .unwrap();
+        store.connection.execute("UPDATE usage SET record_ids='not json' WHERE file_id=(SELECT file_id FROM files WHERE path='damaged')", []).unwrap();
+        store
+            .connection
+            .execute_batch("DROP TABLE usage_identity; PRAGMA user_version=8;")
+            .unwrap();
+        drop(store);
+        let (store, loaded) = opened(&path);
+        assert_eq!(loaded.files.len(), 1);
+        let expected: i64 = store
+            .connection
+            .query_row("SELECT COUNT(*) FROM usage_identity", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(expected, 1);
+        let identity: (String, String) = store
+            .connection
+            .query_row(
+                "SELECT message_id,record_uuid FROM usage_identity",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(identity.1, "record-uuid");
+        assert_eq!(
+            store
+                .connection
+                .query_row("SELECT COUNT(*) FROM reported_runs", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
