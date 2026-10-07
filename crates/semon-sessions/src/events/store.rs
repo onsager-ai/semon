@@ -335,6 +335,63 @@ pub(super) fn open(path: &Path, legacy: &Path) -> Result<(Box<dyn IndexStore>, L
     Ok((Box::new(store), loaded))
 }
 
+/// Load only the selected native sources in the caller's existing read snapshot.
+/// This never opens a writable store, imports legacy data, walks roots or prunes
+/// source membership. Catalog identities and event ledgers must agree exactly.
+#[cfg(test)]
+pub(super) fn read_selected(
+    connection: &Connection,
+    sources: &[crate::model::summary::CatalogSource],
+    native_ids: &std::collections::BTreeSet<String>,
+) -> rusqlite::Result<Loaded> {
+    if !current(connection)? {
+        return Err(rusqlite::Error::InvalidQuery);
+    }
+    let mut readers = Readers::new(connection)?;
+    let mut statement =
+        connection.prepare(&format!("SELECT {FILE_COLUMNS} FROM files WHERE path=?1"))?;
+    let mut loaded = Loaded::default();
+    let mut seen = std::collections::BTreeMap::new();
+    for source in sources {
+        if let Some(previous) = seen.insert(&source.path, source) {
+            if previous != source {
+                return Err(rusqlite::Error::InvalidQuery);
+            }
+            continue;
+        }
+        let path = source.path.to_str().ok_or(rusqlite::Error::InvalidQuery)?;
+        let mut rows = statement.query([path])?;
+        let row = rows.next()?.ok_or(rusqlite::Error::InvalidQuery)?;
+        let (path, ledger, index) = read_file(&mut readers, row)?;
+        if (
+            ledger.stat.dev,
+            ledger.stat.ino,
+            ledger.offset,
+            ledger.prefix,
+            ledger.tail,
+        ) != (
+            source.dev,
+            source.ino,
+            source.offset,
+            source.prefix_sha256,
+            source.tail_sha256,
+        ) {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        loaded.files.push((path, ledger, index));
+    }
+    let mut runs = connection.prepare(&format!(
+        "SELECT {RUN_COLUMNS} FROM reported_runs WHERE session_id=?1 ORDER BY start"
+    ))?;
+    for id in native_ids {
+        let mut rows = runs.query([id])?;
+        while let Some(row) = rows.next()? {
+            loaded.reported_runs.push(read_run(row)?);
+        }
+    }
+    Ok(loaded)
+}
+
 /// The `meta` key recording when a retired JSON event cache that couldn't
 /// be read was set aside (epoch ms). A readable one needs no marker: it is
 /// imported whenever it is found, and removed.
@@ -1849,20 +1906,24 @@ fn read_runs(connection: &Connection) -> rusqlite::Result<Vec<ReportedRunSnapsho
     let mut rows = statement.query([])?;
     let mut runs = Vec::new();
     while let Some(row) = rows.next()? {
-        runs.push(ReportedRunSnapshot {
-            last_session_id: row.get(0)?,
-            last_start_time: row.get(1)?,
-            last_cost: row.get(2)?,
-            last_duration: row.get::<_, Option<i64>>(3)?.map(uint),
-            last_api_duration: row.get::<_, Option<i64>>(4)?.map(uint),
-            last_tool_duration: row.get::<_, Option<i64>>(5)?.map(uint),
-            last_lines_added: row.get::<_, Option<i64>>(6)?.map(uint),
-            last_lines_removed: row.get::<_, Option<i64>>(7)?.map(uint),
-            last_model_usage: from_json(8, &row.get::<_, String>(8)?)?,
-            capture_at: row.get(9)?,
-        });
+        runs.push(read_run(row)?);
     }
     Ok(runs)
+}
+
+fn read_run(row: &Row<'_>) -> rusqlite::Result<ReportedRunSnapshot> {
+    Ok(ReportedRunSnapshot {
+        last_session_id: row.get(0)?,
+        last_start_time: row.get(1)?,
+        last_cost: row.get(2)?,
+        last_duration: row.get::<_, Option<i64>>(3)?.map(uint),
+        last_api_duration: row.get::<_, Option<i64>>(4)?.map(uint),
+        last_tool_duration: row.get::<_, Option<i64>>(5)?.map(uint),
+        last_lines_added: row.get::<_, Option<i64>>(6)?.map(uint),
+        last_lines_removed: row.get::<_, Option<i64>>(7)?.map(uint),
+        last_model_usage: from_json(8, &row.get::<_, String>(8)?)?,
+        capture_at: row.get(9)?,
+    })
 }
 
 // ---- Writing -------------------------------------------------------------------------------

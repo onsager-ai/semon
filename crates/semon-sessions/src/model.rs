@@ -1183,6 +1183,7 @@ pub(crate) fn working_dirs(
         &mut Texts::default(),
         cutoff,
         &MachineFacts::Local,
+        None,
     )?;
     let mut cwds = BTreeSet::new();
     for file in &files {
@@ -1220,7 +1221,19 @@ fn scan(
     texts: &mut Texts,
     cutoff: Option<i64>,
     machine: &MachineFacts,
+    selected: Option<&[crate::inputs::Input]>,
 ) -> io::Result<(Vec<SourceFile>, BTreeSet<String>, std::time::Duration)> {
+    if selected.is_some_and(|inputs| {
+        inputs.iter().any(|input| {
+            !crate::is_input_path(input.root.as_str(), &input.path)
+                || !input.path.ends_with(".jsonl")
+        })
+    }) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "selected native input is outside the log allowlist",
+        ));
+    }
     cache.begin_scan();
     let projects = options.claude_home.join("projects");
     let mut files = Vec::new();
@@ -1230,7 +1243,16 @@ fn scan(
         cutoff.is_some_and(|cutoff| modified_ms(path).is_some_and(|modified| modified < cutoff))
     };
     let mut paths = Vec::new();
-    file_list(&projects, &mut paths, "jsonl")?;
+    if let Some(selected) = selected {
+        paths.extend(
+            selected
+                .iter()
+                .filter(|input| input.root == crate::inputs::InputRoot::Claude)
+                .map(|input| input.full_path(options)),
+        );
+    } else {
+        file_list(&projects, &mut paths, "jsonl")?;
+    }
     for path in paths {
         if outside(&path) {
             seen.insert(path.to_string_lossy().into_owned());
@@ -1314,8 +1336,17 @@ fn scan(
         });
     }
     let mut paths = Vec::new();
-    for root in crate::inputs::codex_rollout_dirs(options) {
-        file_list(&root, &mut paths, "jsonl")?;
+    if let Some(selected) = selected {
+        paths.extend(
+            selected
+                .iter()
+                .filter(|input| input.root == crate::inputs::InputRoot::Codex)
+                .map(|input| input.full_path(options)),
+        );
+    } else {
+        for root in crate::inputs::codex_rollout_dirs(options) {
+            file_list(&root, &mut paths, "jsonl")?;
+        }
     }
     paths.retain(|path| machine.codex_rollout_is_current(options, path));
     for path in paths {
@@ -1374,7 +1405,12 @@ fn scan(
             summary,
         });
     }
-    for input in crate::inputs::inputs(options)?
+    let inputs = if let Some(selected) = selected {
+        selected.to_vec()
+    } else {
+        crate::inputs::inputs(options)?
+    };
+    for input in inputs
         .into_iter()
         .filter(|input| input.root == crate::inputs::InputRoot::Copilot)
     {
@@ -5724,6 +5760,20 @@ pub(crate) fn build(
     texts: &mut Texts,
     now: i64,
 ) -> io::Result<Built> {
+    build_sources(options, cache, dirty, texts, now, None)
+}
+
+/// Native projection over an explicit, authorized source closure. Request-local
+/// caches have no writable store. Discovery and publication remain separate;
+/// callers must not claim missing relationship context as a complete graph.
+pub(crate) fn build_sources(
+    options: &Options,
+    cache: &mut EventCache,
+    dirty: &mut bool,
+    texts: &mut Texts,
+    now: i64,
+    selected: Option<&[crate::inputs::Input]>,
+) -> io::Result<Built> {
     let catalog_base = cache.session_catalog_generation();
     let mut timings = Vec::with_capacity(18);
     macro_rules! timed {
@@ -5742,7 +5792,7 @@ pub(crate) fn build(
     let window_start = scan_cutoff(options, now);
     let (files, skipped, index_clone) = timed!(
         "scan",
-        scan(options, cache, dirty, texts, window_start, &facts)?
+        scan(options, cache, dirty, texts, window_start, &facts, selected)?
     );
     timings.push((
         "index_clone",
@@ -5866,7 +5916,8 @@ pub(crate) fn build(
         .collect();
     // A scan-window build is intentionally incomplete: it cannot replace a
     // source-complete catalog. Publication itself is delayed until success.
-    let catalog = (!options.scan_window).then(|| summary::catalog(&builder, &handoffs));
+    let catalog =
+        (selected.is_none() && !options.scan_window).then(|| summary::catalog(&builder, &handoffs));
     // Analytics reads a month and the month before it, whatever the model's
     // window: taken from every session before the window trims them.
     let activity = crate::analytics::activity(&sessions, &tx, &turns, &handoffs, now);
@@ -6121,7 +6172,9 @@ pub(crate) fn build(
     if let Some(catalog) = catalog {
         cache.publish_session_catalog(&catalog, catalog_base.as_deref());
     }
-    cache.publish_session_descriptions();
+    if selected.is_none() {
+        cache.publish_session_descriptions();
+    }
     Ok(built)
 }
 

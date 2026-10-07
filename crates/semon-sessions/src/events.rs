@@ -1015,6 +1015,18 @@ enum Base {
 }
 
 impl EventCache {
+    /// A read-only request-local cache of selected source generations. The
+    /// caller keeps catalog metadata and these ledgers in one SQLite snapshot.
+    /// No store is attached, so native projection cannot mutate global rows.
+    #[cfg(test)]
+    pub(crate) fn from_selected(
+        connection: &rusqlite::Connection,
+        sources: &[crate::model::summary::CatalogSource],
+        native_ids: &BTreeSet<String>,
+    ) -> rusqlite::Result<Self> {
+        store::read_selected(connection, sources, native_ids).map(Self::from_loaded)
+    }
+
     /// The store beside V1's metadata cache: `sessions-index.json` gives
     /// `sessions-index.sqlite3`. `semon sessions`, `--watch` and `--json`
     /// never open it.
