@@ -45,6 +45,137 @@ pub struct CatalogFreshness {
     pub state: String,
 }
 
+/// A metadata-only match between one published native source and its current
+/// consumed-prefix ledger. This observation grants no archive or control access.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SessionSourceProof {
+    pub source: SessionSourceRef,
+    pub dev: u64,
+    pub ino: u64,
+    pub size: u64,
+    pub modified_ns: u128,
+    pub freshness: CatalogFreshness,
+}
+
+/// Resolve an exact configured source path using indexed metadata reads only.
+/// The host must validate the source identity again while copying its bytes.
+pub fn session_source_proof(
+    options: &Options,
+    root: &str,
+    path: &str,
+) -> Result<Option<SessionSourceProof>, CatalogIdentityError> {
+    use CatalogIdentityError::{InvalidArguments, Unavailable};
+    if !crate::is_input_path(root, path) || path.len() > 4096 {
+        return Err(InvalidArguments);
+    }
+    let home = match root {
+        "claude" => &options.claude_home,
+        "codex" => &options.codex_home,
+        "copilot" => &options.copilot_home,
+        _ => return Err(InvalidArguments),
+    };
+    // Recorded roots/native manifests must remain observable. Missing facts
+    // cannot be treated as permission to reuse a formerly selected rollout.
+    let current = options
+        .facts
+        .as_ref()
+        .map(|file| {
+            crate::facts::source_authority::CurrentSources::open(file).map_err(|_| Unavailable)
+        })
+        .transpose()?;
+    if current.as_ref().is_some_and(|source| {
+        !source.facts_known() || (root == "codex" && !source.selection_known())
+    }) {
+        return Err(Unavailable);
+    }
+    let absolute = home.join(path);
+    let absolute = absolute.to_str().ok_or(InvalidArguments)?;
+    let read = || -> Result<Option<SessionSourceProof>, Box<dyn std::error::Error>> {
+        let mut connection = Connection::open_with_flags(
+            EventCache::path(&options.cache),
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )?;
+        connection.busy_timeout(Duration::from_millis(100))?;
+        let transaction = connection.transaction()?;
+        let encoded: Option<(String, Option<String>)> = transaction.query_row(
+            "SELECT c.session_key,CASE WHEN length(CAST(c.metadata AS BLOB))<=1048576 THEN c.metadata ELSE NULL END FROM session_catalog_sources s JOIN session_catalog c ON c.session_key=s.session_key WHERE s.source_path=?1 ORDER BY s.session_key LIMIT 1",
+            [absolute], |row| Ok((row.get(0)?, row.get(1)?)),
+        ).optional()?;
+        let Some((key, encoded)) = encoded else {
+            return Ok(None);
+        };
+        let encoded = encoded.ok_or_else(|| io::Error::other("source metadata bound"))?;
+        // Decode only the selected relationship metadata, never a native body.
+        if encoded.len() > 1024 * 1024 {
+            return Err(io::Error::other("source metadata bound").into());
+        }
+        let row: CatalogRow = serde_json::from_str(&encoded)?;
+        if row.key != key || row.harness != root || row.sources.len() > 64 {
+            return Err(io::Error::other("source mapping changed").into());
+        }
+        let source = row
+            .sources
+            .iter()
+            .find(|source| source.path.to_str() == Some(absolute))
+            .ok_or_else(|| io::Error::other("source mapping absent"))?;
+        type Revision = (u64, u64, u64, [u8; 16], u64, [u8; 32], [u8; 32]);
+        let revision: Option<Revision> = transaction.query_row(
+            "SELECT dev,ino,size,mtime_ns,resume_at,head_sha256,tail_sha256 FROM files WHERE path=?1",
+            [absolute], |row| Ok((row.get::<_,i64>(0)? as u64,row.get::<_,i64>(1)? as u64,row.get::<_,i64>(2)? as u64,row.get(3)?,row.get::<_,i64>(4)? as u64,row.get(5)?,row.get(6)?)),
+        ).optional()?;
+        if revision
+            != Some((
+                source.dev,
+                source.ino,
+                source.size,
+                source.modified_ns.to_be_bytes(),
+                source.offset,
+                source.prefix_sha256,
+                source.tail_sha256,
+            ))
+        {
+            return Err(io::Error::other("source ledger changed").into());
+        }
+        let generation: String = transaction.query_row(
+            "SELECT value FROM meta WHERE key='catalog_generation'",
+            [],
+            |row| row.get(0),
+        )?;
+        transaction.commit()?;
+        // Reuse the catalog's current-root/native-selection validation. A
+        // publication race fails closed rather than mixing catalog generations.
+        let identity = session_catalog_identity(options, "source-proof", &key)?
+            .ok_or_else(|| io::Error::other("source catalog changed"))?;
+        let observed = identity
+            .source_refs
+            .iter()
+            .find(|observed| observed.source.root == root && observed.source.path == path)
+            .ok_or_else(|| io::Error::other("source scope changed"))?;
+        if identity.generation != generation
+            || !matches!(observed.state.as_str(), "cached" | "incomplete")
+            || observed.source.native_id != source.native_id
+            || observed.source.offset != source.offset
+            || observed.source.prefix_sha256 != source.prefix_sha256
+        {
+            return Err(io::Error::other("source observation changed").into());
+        }
+        if let Some(current) = &current {
+            current.validate()?;
+        }
+        Ok(Some(SessionSourceProof {
+            source: observed.source.clone(),
+            dev: source.dev,
+            ino: source.ino,
+            size: source.size,
+            modified_ns: source.modified_ns,
+            freshness: CatalogFreshness {
+                state: observed.state.clone(),
+            },
+        }))
+    };
+    read().map_err(|_| Unavailable)
+}
+
 /// Scoped cached identity, resolved without global event/model construction.
 /// A nullable native_id preserves ambiguity in multi-native continuations.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -541,7 +672,23 @@ fn read_page(
         None
     };
     transaction.commit()?;
-    let facts = crate::facts::MachineFacts::of(options);
+    // The legacy model tolerates absent facts/old source selection. Focused
+    // observations must retain that absence rather than invent current facts.
+    let recorded = options
+        .facts
+        .as_ref()
+        .and_then(|path| crate::facts::source_authority::CurrentSources::open(path).ok());
+    let facts_known =
+        options.facts.is_none() || recorded.as_ref().is_some_and(|source| source.facts_known());
+    let codex_selection_known = options.facts.is_none()
+        || recorded
+            .as_ref()
+            .is_some_and(|source| source.selection_known());
+    let machine_label = match &options.facts {
+        None => Some(crate::facts::MachineFacts::Local.hostname(options)),
+        Some(_) => recorded.as_ref().and_then(|source| source.hostname()),
+    };
+    let mut page_state = if facts_known { "cached" } else { "unavailable" };
     let mut items = Vec::with_capacity(selected.len());
     for row in selected {
         let mut refs = Vec::new();
@@ -563,7 +710,26 @@ fn read_page(
                     true,
                 ));
             };
-            if row.harness == "codex" && !facts.codex_rollout_is_current(options, &source.path) {
+            let retired = if row.harness == "codex" {
+                match recorded
+                    .as_ref()
+                    .map(|snapshot| snapshot.codex_current(&relative))
+                    .transpose()
+                {
+                    Ok(current) => current.flatten() == Some(false),
+                    Err(_) => {
+                        return Ok(error(
+                            503,
+                            "catalog_scope_changed",
+                            "Source observation changed during this read. Retry with the current catalog.",
+                            true,
+                        ));
+                    }
+                }
+            } else {
+                false
+            };
+            if retired {
                 return Ok(error(
                     503,
                     "catalog_scope_changed",
@@ -583,15 +749,25 @@ fn read_page(
             };
             refs.push(json!({"source":reference,"state":state}));
         }
-        let state = if states.iter().all(|state| *state == "unavailable") {
+        let state = if !facts_known || states.iter().all(|state| *state == "unavailable") {
             "unavailable"
-        } else if states.contains(&"unavailable") || states.contains(&"incomplete") {
+        } else if states.contains(&"unavailable")
+            || states.contains(&"incomplete")
+            || (row.harness == "codex" && !codex_selection_known)
+        {
             "incomplete"
         } else if states.contains(&"stale") {
             "stale"
         } else {
             "cached"
         };
+        if page_state != "unavailable" {
+            if matches!(state, "unavailable" | "incomplete") {
+                page_state = "incomplete";
+            } else if state == "stale" && page_state == "cached" {
+                page_state = "stale";
+            }
+        }
         let mut item = serde_json::to_value(row)?;
         item.as_object_mut()
             .expect("catalog row object")
@@ -600,13 +776,24 @@ fn read_page(
         item["freshness"] = json!({"state":state});
         items.push(item);
     }
+    if recorded
+        .as_ref()
+        .is_some_and(|source| source.validate().is_err())
+    {
+        return Ok(error(
+            503,
+            "catalog_scope_changed",
+            "Source observation changed during this read. Retry with the current catalog.",
+            true,
+        ));
+    }
     Ok(reply(
         200,
         json!({"api":1,"machine":machine,"generation":generation,"observed_at":observed_at,
-        "machine_info":{"key":machine,"label":facts.hostname(options),"freshness":"cached"},
+        "machine_info":{"key":machine,"label":machine_label,"freshness":if facts_known { "cached" } else { "unavailable" }},
         "capabilities":{"pagination":true,"filters":["harness","repo"],"order":"last_desc_key_asc",
             "full_text_search":false,"selected_session_lookup":true,"runtime_status":false,"global_union":false},
-        "freshness":"cached","items":items,"next_cursor":next}),
+        "freshness":page_state,"items":items,"next_cursor":next}),
     ))
 }
 
@@ -700,6 +887,136 @@ mod tests {
     }
 
     #[test]
+    fn exact_source_proof_requires_current_native_mapping_and_consumed_ledger() {
+        let fixture = Fixture::new();
+        fixture.publish(100);
+        let path = "projects/project/session-00000.jsonl";
+        let proof = session_source_proof(&fixture.options, "claude", path)
+            .unwrap()
+            .unwrap();
+        assert_eq!(proof.source.native_id, "session-00000");
+        assert_eq!(proof.source.offset, proof.size);
+        assert_eq!(proof.freshness.state, "cached");
+        assert!(
+            session_source_proof(&fixture.options, "claude", "projects/project/missing.jsonl")
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            session_source_proof(&fixture.options, "claude", "../bad.jsonl"),
+            Err(CatalogIdentityError::InvalidArguments)
+        );
+        let connection = Connection::open(EventCache::path(&fixture.options.cache)).unwrap();
+        let plan: String = connection.query_row("EXPLAIN QUERY PLAN SELECT session_key FROM session_catalog_sources WHERE source_path=?1 ORDER BY session_key LIMIT 1",[fixture.options.claude_home.join(path).to_str().unwrap()],|row|row.get(3)).unwrap();
+        assert!(plan.contains("session_catalog_source_path"), "{plan}");
+        // Ledger progress without catalog publication must not reuse its former
+        // native mapping or manufacture a proof for a new consumed boundary.
+        connection
+            .execute(
+                "UPDATE files SET resume_at=resume_at-1 WHERE path=?1",
+                [fixture.options.claude_home.join(path).to_str().unwrap()],
+            )
+            .unwrap();
+        assert_eq!(
+            session_source_proof(&fixture.options, "claude", path),
+            Err(CatalogIdentityError::Unavailable)
+        );
+        connection
+            .execute(
+                "UPDATE files SET resume_at=resume_at+1 WHERE path=?1",
+                [fixture.options.claude_home.join(path).to_str().unwrap()],
+            )
+            .unwrap();
+        fs::remove_file(fixture.options.facts.as_ref().unwrap()).unwrap();
+        assert_eq!(
+            session_source_proof(&fixture.options, "claude", path),
+            Err(CatalogIdentityError::Unavailable)
+        );
+    }
+
+    #[test]
+    fn exact_source_proof_retains_incomplete_prefix_and_rejects_source_replacement() {
+        use sha2::Digest;
+        let fixture = Fixture::new();
+        let native = fixture.source("partial");
+        let complete = fs::read(&native).unwrap();
+        let mut bytes = complete.clone();
+        bytes.extend_from_slice(b"{\"type\":\"user\"");
+        fs::write(&native, &bytes).unwrap();
+        let core = ViewerCore::new(fixture.options.clone());
+        core.warm().unwrap();
+        core.close();
+        let proof =
+            session_source_proof(&fixture.options, "claude", "projects/project/partial.jsonl")
+                .unwrap()
+                .unwrap();
+        assert_eq!(proof.source.offset, complete.len() as u64);
+        assert_eq!(proof.size, bytes.len() as u64);
+        assert_eq!(proof.freshness.state, "incomplete");
+        assert_eq!(
+            proof.source.prefix_sha256,
+            <[u8; 32]>::from(sha2::Sha256::digest(&complete))
+        );
+        let replacement = native.with_extension("replacement");
+        fs::write(&replacement, &bytes).unwrap();
+        fs::rename(replacement, native).unwrap();
+        assert_eq!(
+            session_source_proof(&fixture.options, "claude", "projects/project/partial.jsonl"),
+            Err(CatalogIdentityError::Unavailable)
+        );
+    }
+
+    #[test]
+    fn exact_source_proof_work_stays_fixed_as_unrelated_native_manifest_grows() {
+        let fixture = Fixture::new();
+        fixture.publish(1);
+        let mut facts = crate::read_facts(fixture.options.facts.as_ref().unwrap()).unwrap();
+        let mut steps = Vec::new();
+        for count in [100, 20_000] {
+            facts.codex_rollouts = Some(
+                (0..count)
+                    .map(|index| format!("sessions/{index:08}.jsonl"))
+                    .collect(),
+            );
+            crate::write_facts(fixture.options.facts.as_ref().unwrap(), &facts).unwrap();
+            SQL_STEPS.with(|value| value.set(0));
+            let proof = session_source_proof(
+                &fixture.options,
+                "claude",
+                "projects/project/session-00000.jsonl",
+            )
+            .unwrap()
+            .unwrap();
+            assert_eq!(proof.source.native_id, "session-00000");
+            steps.push(SQL_STEPS.with(|value| value.get()));
+            let mut samples = Vec::new();
+            for _ in 0..31 {
+                let start = std::time::Instant::now();
+                assert!(
+                    session_source_proof(
+                        &fixture.options,
+                        "claude",
+                        "projects/project/session-00000.jsonl"
+                    )
+                    .unwrap()
+                    .is_some()
+                );
+                samples.push(start.elapsed().as_micros());
+            }
+            samples.sort_unstable();
+            eprintln!(
+                "exact source proof manifest={count} facts_bytes={} median_us={} samples=31",
+                fs::metadata(fixture.options.facts.as_ref().unwrap())
+                    .unwrap()
+                    .len(),
+                samples[15]
+            );
+        }
+        assert_eq!(steps[0], steps[1]);
+        eprintln!("exact source proof selected catalog VM steps={steps:?}");
+    }
+
+    #[test]
     fn scoped_catalog_identity_preserves_native_ambiguity_and_source_authority() {
         let fixture = Fixture::new();
         fixture.publish(2);
@@ -772,6 +1089,43 @@ mod tests {
             Err(CatalogIdentityError::ScopeChanged)
         );
         crate::events::CACHE_READS.with(|reads| assert_eq!(reads.get(), 0));
+    }
+
+    #[test]
+    fn focused_catalog_preserves_missing_facts_and_unknown_native_manifest() {
+        let fixture = Fixture::new();
+        let relative = "sessions/2026/10/01/rollout-codex-session.jsonl";
+        let path = fixture.options.codex_home.join(relative);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, format!("{}\n", json!({"type":"session_meta","timestamp":"2026-10-01T00:00:00Z","payload":{"id":"codex-session","cwd":"/synthetic/project"}}))).unwrap();
+        fixture.publish(1);
+        let facts_path = fixture.options.facts.as_ref().unwrap();
+        let mut facts = crate::read_facts(facts_path).unwrap();
+        let read = || session_catalog_identity(&fixture.options, "stable-source", "codex-session");
+        // Legacy None means unknown selection, not current source authority.
+        assert!(facts.codex_rollouts.is_none());
+        assert_eq!(read().unwrap().unwrap().freshness.state, "incomplete");
+        facts.codex_rollouts = Some(std::collections::BTreeSet::from([relative.to_owned()]));
+        crate::write_facts(facts_path, &facts).unwrap();
+        assert_eq!(read().unwrap().unwrap().freshness.state, "cached");
+        facts.codex_rollouts = Some(std::collections::BTreeSet::new());
+        crate::write_facts(facts_path, &facts).unwrap();
+        assert_eq!(read(), Err(CatalogIdentityError::ScopeChanged));
+        fs::write(facts_path, b"corrupt facts").unwrap();
+        let corrupt = read().unwrap().unwrap();
+        assert_eq!(corrupt.freshness.state, "unavailable");
+        assert_eq!(corrupt.machine_label, None);
+        assert_eq!(corrupt.source_refs[0].state, "cached");
+        assert_eq!(
+            fixture.body("sid=session-00000").1["items"][0]["freshness"]["state"],
+            "unavailable"
+        );
+        fs::remove_file(facts_path).unwrap();
+        assert_eq!(read().unwrap().unwrap().freshness.state, "unavailable");
+        crate::write_facts(facts_path, &facts).unwrap();
+        facts.version = 999;
+        crate::write_facts(facts_path, &facts).unwrap();
+        assert_eq!(read().unwrap().unwrap().freshness.state, "unavailable");
     }
 
     #[test]
