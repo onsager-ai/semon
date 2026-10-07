@@ -723,6 +723,72 @@ mod tests {
     }
 
     #[test]
+    fn selected_native_index_and_scoped_builder_preserve_membership_and_oracle() {
+        let fixture = Fixture::new();
+        fixture.publish(3);
+        let connection = Connection::open(EventCache::path(&fixture.options.cache)).unwrap();
+        let transaction = connection.unchecked_transaction().unwrap();
+        let metadata = rows(&transaction, &Request::parse("sid=session-00000").unwrap()).unwrap();
+        let source = &metadata[0];
+        let ids = source.native_ids.iter().cloned().collect();
+        let mut selected = EventCache::from_selected(&transaction, &source.sources, &ids).unwrap();
+        assert_eq!(selected.paths().count(), 1);
+        let paths: Vec<_> = source
+            .sources
+            .iter()
+            .map(|source| crate::inputs::Input {
+                root: crate::inputs::InputRoot::parse(&metadata[0].harness).unwrap(),
+                path: source_relative(&fixture.options, &metadata[0].harness, source).unwrap(),
+            })
+            .collect();
+        let now = crate::model::now_ms();
+        let mut all = EventCache::open(&fixture.options.cache);
+        let full = crate::model::build(
+            &fixture.options,
+            &mut all,
+            &mut false,
+            &mut crate::model::Texts::default(),
+            now,
+        )
+        .unwrap();
+        let built = crate::model::build_sources(
+            &fixture.options,
+            &mut selected,
+            &mut false,
+            &mut crate::model::Texts::default(),
+            now,
+            Some(&paths),
+        )
+        .unwrap();
+        assert_eq!(built.sessions.len(), 1);
+        assert_eq!(
+            serde_json::to_value(&built.sessions[&source.key]).unwrap(),
+            serde_json::to_value(&full.sessions[&source.key]).unwrap()
+        );
+        assert_eq!(
+            crate::tx::page(&built, &source.key, &crate::tx::Anchor::Last, now).unwrap(),
+            crate::tx::page(&full, &source.key, &crate::tx::Anchor::Last, now).unwrap()
+        );
+        assert_eq!(selected.paths().count(), 1);
+        let files: i64 = connection
+            .query_row("SELECT count(*) FROM files", [], |row| row.get(0))
+            .unwrap();
+        let catalog: i64 = connection
+            .query_row("SELECT count(*) FROM session_catalog", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(
+            (files, catalog),
+            (3, 3),
+            "scoped native projection must not prune unrelated global rows"
+        );
+        let mut conflicting = source.sources.clone();
+        conflicting[0].offset += 1;
+        assert!(EventCache::from_selected(&transaction, &conflicting, &ids).is_err());
+        conflicting.push(source.sources[0].clone());
+        assert!(EventCache::from_selected(&transaction, &conflicting, &ids).is_err());
+    }
+
+    #[test]
     fn focused_catalog_demand_publishes_without_waiting_for_an_initial_model() {
         let fixture = Fixture::new();
         fixture.source("first");
