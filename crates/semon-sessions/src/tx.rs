@@ -92,10 +92,12 @@ fn read_sized(path: &Path, offset: u64) -> (Option<Value>, u64) {
     if read.is_err() || size > LINE_MAX {
         return (None, size);
     }
-    (
-        serde_json::from_slice(&bytes).ok().filter(Value::is_object),
-        size,
-    )
+    (parse_native_record(&bytes), size)
+}
+
+/// Shared native JSON object parser for local and provider-backed source lines.
+pub(crate) fn parse_native_record(bytes: &[u8]) -> Option<Value> {
+    serde_json::from_slice(bytes).ok().filter(Value::is_object)
 }
 
 /// Source lines read for one page: a line holding several blocks, or a call
