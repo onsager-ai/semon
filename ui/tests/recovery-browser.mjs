@@ -297,3 +297,106 @@ test('stream events received during snapshot recovery cannot overwrite the resyn
     assert.equal(await page.locator('.livenote').count(), 0);
     await page.evaluate(() => live.destroy());
   }));
+
+test('selected hosted streams bind both runtimes and reject callbacks after navigation', async () =>
+  fixture(async (page) => {
+    await page.evaluate(() => {
+      window.sources = [];
+      window.EventSource = class extends EventTarget {
+        constructor(url) {
+          super();
+          this.url = url;
+          this.closed = false;
+          sources.push(this);
+        }
+        close() {
+          this.closed = true;
+        }
+      };
+      window.applied = [];
+      window.readPaths = [];
+      let route = { v: 'session', id: 'a' };
+      const listeners = new Set();
+      window.nav = {
+        get route() {
+          return route;
+        },
+        set route(value) {
+          route = value;
+          for (const fn of listeners) fn();
+        },
+        subscribeRoute(fn) {
+          listeners.add(fn);
+          return () => listeners.delete(fn);
+        },
+      };
+      window.selectedSessions = { a: { machine: 'machine-a' }, b: { machine: 'machine-b' } };
+      window.live = Recovery.createLiveModel({
+        navigation: nav,
+        disposed: false,
+        viewerHost: { modelStream: '/events', selectedModel: true },
+        modelStore: { sessions: selectedSessions },
+        $: (s) => document.querySelector(s),
+        transportOwner: {
+          enc: encodeURIComponent,
+          api: async (path) => {
+            readPaths.push(path);
+            return { version: 'recovered-b' };
+          },
+        },
+        liveUpdates: {
+          applyModelDelta: (x) => x,
+          update: async (x) => {
+            if (x.newMachine) selectedSessions.b.machine = x.newMachine;
+            applied.push(x.version);
+          },
+        },
+      });
+      live.LIVE.version = 'v1';
+      live.schedule(0);
+      sources[0].dispatchEvent(new MessageEvent('model', { data: '{"version":"old-queued"}' }));
+      nav.route = { v: 'session', id: 'b' };
+      sources[0].dispatchEvent(new MessageEvent('model', { data: '{"version":"old-late"}' }));
+      sources[0].dispatchEvent(new Event('ended'));
+      sources[1].dispatchEvent(new MessageEvent('model', { data: '{"version":"selected-b"}' }));
+    });
+    assert.deepEqual(await page.evaluate(() => sources.map((s) => s.url)), [
+      '/events?selected=a&machine=machine-a',
+      '/events?selected=b&machine=machine-b',
+    ]);
+    assert.equal(await page.evaluate(() => sources[0].closed), true);
+    assert.deepEqual(await page.evaluate(() => applied), ['selected-b']);
+    await page.evaluate(() => sources[1].dispatchEvent(new Event('unavailable')));
+    await page.clock.runFor(1100);
+    assert.deepEqual(await page.evaluate(() => readPaths), [
+      '/api/model?delta=1&selected=b&machine=machine-b',
+    ]);
+    assert.deepEqual(await page.evaluate(() => applied), ['selected-b', 'recovered-b']);
+    await page.evaluate(() =>
+      sources[1].dispatchEvent(
+        new MessageEvent('model', {
+          data: '{"version":"projection-changed","newMachine":"renamed-b"}',
+        }),
+      ),
+    );
+    assert.equal(await page.evaluate(() => sources.length), 3);
+    assert.equal(await page.evaluate(() => sources[2].url), '/events?selected=b&machine=renamed-b');
+    await page.evaluate(() =>
+      sources[1].dispatchEvent(
+        new MessageEvent('model', {
+          data: '{"version":"late-projection"}',
+        }),
+      ),
+    );
+    await page.evaluate(() => {
+      live.destroy();
+      nav.route = { v: 'session', id: 'a' };
+      sources[1].dispatchEvent(new MessageEvent('model', { data: '{"version":"destroyed"}' }));
+    });
+    assert.equal(await page.evaluate(() => sources.length), 3);
+    assert.deepEqual(await page.evaluate(() => applied), [
+      'selected-b',
+      'recovered-b',
+      'projection-changed',
+    ]);
+  }));
