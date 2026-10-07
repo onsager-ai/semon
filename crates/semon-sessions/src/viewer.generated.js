@@ -15898,7 +15898,7 @@ globalThis.__semonUIShared = __semonUIShared;
     let sourcesOpen = false, sourcesEpoch = 0, sourceItems = [], sourceCursor = null, sourcesUpdating = false, sourcesNote = "", sourcesRetryDelay = 1e3;
     const cacheKey = (key) => JSON.stringify([capabilities.source_key, key]);
     const account = parseAccount(viewerHost?.account);
-    let wide = false, rail = document.querySelector(".app")?.classList.contains("rail") ?? false, chromeTitle = null, chromeSession = false;
+    let wide = document.querySelector("#page")?.classList.contains("wide-mode") ?? false, rail = document.querySelector(".app")?.classList.contains("rail") ?? false, chromeTitle = null, chromeSession = false;
     const shell = createShellChrome({
       account: {
         place(widget, trigger) {
@@ -16843,7 +16843,7 @@ globalThis.__semonUIShared = __semonUIShared;
     const scope = new EffectScope();
     let disposed = false, epoch = 0, items = [], cursor = null, updating = false, note = "", retry, delay = 1e3;
     const account = parseAccount(host2?.account);
-    let wide = false;
+    let wide = document.querySelector("#page")?.classList.contains("wide-mode") ?? false, rail = document.querySelector(".app")?.classList.contains("rail") ?? false;
     const shell = createShellChrome({
       account: {
         place(widget, trigger) {
@@ -16871,19 +16871,32 @@ globalThis.__semonUIShared = __semonUIShared;
       drawerClosed() {
       },
       railChanged() {
+        rail = !rail;
+        shell.update(
+          [
+            {
+              key: "sessions",
+              label: "Sessions",
+              href: "/sessions",
+              icon: I.sessions,
+              current: true
+            }
+          ],
+          rail
+        );
       }
     });
     shell.mount(document.querySelector(".app"));
     shell.update(
       [{ key: "sessions", label: "Sessions", href: "/sessions", icon: I.sessions, current: true }],
-      false
+      rail
     );
     const title = document.createElement("div");
     title.className = "ttl";
     title.textContent = "Choose a machine";
     function wideChange() {
       wide = !wide;
-      document.querySelector(".app")?.classList.toggle("wide-mode", wide);
+      document.querySelector("#page")?.classList.toggle("wide-mode", wide);
       shell.account.updateWide(wide);
     }
     shell.topbar({
