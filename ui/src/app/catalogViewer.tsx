@@ -285,6 +285,7 @@ export function createCatalogViewer(
       if (disposed || epoch !== listEpoch) return;
       if (
         next.machine !== capabilities.source_key ||
+        next.read_scope !== 'retained_history' ||
         (append && page?.generation !== next.generation)
       )
         throw new Error('History changed; refresh this list before loading another page.');
@@ -582,7 +583,10 @@ export function createCatalogViewer(
   }
   async function resynchronize(view: SelectedView) {
     const candidate = new CatalogTranscriptStore();
-    candidate.select({ source_key: capabilities.source_key, catalog_key: view.key });
+    candidate.select(
+      { source_key: capabilities.source_key, catalog_key: view.key },
+      'retained_history',
+    );
     const read = async (after: number | null, limit: number) => {
       const ticket = candidate.request(after, limit),
         p = params();
@@ -713,7 +717,7 @@ export function createCatalogViewer(
     let view = selected.get(key);
     if (!view) {
       const store = new CatalogTranscriptStore();
-      store.select({ source_key: capabilities.source_key, catalog_key: key });
+      store.select({ source_key: capabilities.source_key, catalog_key: key }, 'retained_history');
       view = {
         key,
         root: document.createElement('div'),
