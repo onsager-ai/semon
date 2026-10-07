@@ -113,3 +113,38 @@ test('follow-up delivery is confirmed before the composer may clear its draft', 
     globalThis.fetch = oldFetch;
   }
 });
+
+test('selection invalidates old control handles and late command receipts', async () => {
+  const oldFetch = globalThis.fetch;
+  let release;
+  let writes = 0;
+  globalThis.fetch = async () => {
+    writes++;
+    return new Promise((resolve) => {
+      release = () => resolve({ ok: true, json: async () => ({}) });
+    });
+  };
+  const owner = createLocalControl(
+    { request: () => new AbortController(), releaseRequest() {} },
+    () => {},
+  );
+  try {
+    owner.observe(owner.prepare(model()));
+    const old = owner.view('native');
+    const pending = old.send('previous session');
+    owner.observe(null);
+    owner.observe(owner.prepare({ ...model(), thread: 'selected-next', generation: 'next' }));
+    assert.equal(await old.send('never switch its destination'), false);
+    assert.equal(writes, 1);
+    release();
+    assert.equal(await pending, false);
+    assert.equal(owner.view('selected-next').busy, false);
+    assert.equal(owner.view('selected-next').uncertain, false);
+    assert.equal(owner.view('selected-next').note, '');
+    owner.unavailable();
+    assert.equal(owner.view('selected-next').snapshot.capabilities.input, false);
+  } finally {
+    owner.destroy();
+    globalThis.fetch = oldFetch;
+  }
+});

@@ -5152,6 +5152,19 @@ mod tests {
             Some("second-key")
         );
         assert_eq!(core.session_machine_key("missing").unwrap(), None);
+        let identity = core
+            .session_view_identity("first-session")
+            .unwrap()
+            .unwrap();
+        assert_eq!(identity.0, "first-key");
+        let model: serde_json::Value =
+            serde_json::from_slice(&core.respond("GET", "/api/model", "", None).body).unwrap();
+        assert_eq!(
+            model["sessions"]["first-session"]["machine"].as_str(),
+            Some(identity.1.as_str())
+        );
+        assert_eq!(core.session_view_identity("missing").unwrap(), None);
+
         let duplicate = machine("same-host", "first-session");
         let ambiguous = ViewerCore::with_machines(vec![
             ("first-key".into(), first.options.clone()),

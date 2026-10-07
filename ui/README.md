@@ -229,3 +229,20 @@ inside their original form, so settings and submitter overrides participate in
 native POST and FormData. A nested Select sheet owns its own scroll boundary.
 No-JS keeps styled native fields and details. Destroy restores host content and
 native fields before removing enhancement roots; remount cannot duplicate them.
+
+A host may provide `controlStream`, a same-origin SSE status resource separate
+from its content model. The Viewer sends `selected` (native session ID) and
+`machine` (projected presentation identity). Hosts resolve the authoritative
+source and recheck custody and access for every delivery. The `control` event
+contains `{selected, machine, revision, control}`; `control` uses the existing
+validated native snapshot contract or null. Additional fields may be passed to
+`modelNavigation`. Revisions identify complete status snapshots independently
+of content. Each new subscription starts with a snapshot; unchanged observations
+send `heartbeat` at least every 30 seconds. `unavailable` and transport errors
+trigger owned capped retries; `ended` clears the old authority. Absent or stale
+status disables native capabilities while retaining a current draft.
+
+With this option, content reads use `content=1`; content streams include their
+accepted `since` revision. Hosts must preserve conditional content reads while
+serving native status independently. The existing model/control transaction
+continues unchanged for hosts without this option.
