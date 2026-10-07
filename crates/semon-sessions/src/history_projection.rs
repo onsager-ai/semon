@@ -40,6 +40,39 @@ pub(crate) fn catalog(connection: &Connection, key: &str) -> rusqlite::Result<Op
     }
 }
 
+/// Same-path immutable originals need a versioned recipe binding before a new
+/// local observation can replace them. Preserve the published original rather
+/// than silently dropping its History recipe or rebinding it to different bytes.
+pub(crate) fn immutable_origins_compatible(
+    tx: &Transaction<'_>,
+    publication: &Publication<'_>,
+) -> rusqlite::Result<bool> {
+    for row in publication.rows {
+        let Some(metadata) = catalog(tx, &row.key)? else {
+            continue;
+        };
+        let old: CatalogRow = decode(&metadata)?;
+        let current: BTreeMap<_, _> = row
+            .sources
+            .iter()
+            .map(|source| (&source.path, source))
+            .collect();
+        if old
+            .sources
+            .iter()
+            .filter(|source| source.immutable_generation.is_some())
+            .any(|source| {
+                current
+                    .get(&source.path)
+                    .is_some_and(|observed| *observed != source)
+            })
+        {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
 /// Must run inside the same source/membership/revision-CAS transaction, before
 /// current rows or recipes are overwritten. No source body is copied or read.
 pub(crate) fn publish(tx: &Transaction<'_>, publication: &Publication<'_>) -> rusqlite::Result<()> {

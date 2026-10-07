@@ -539,6 +539,8 @@ const REPO_CACHE_MAX: usize = 512;
 #[derive(Default)]
 pub(crate) struct Texts {
     memo: HashMap<TextKey, (Option<String>, u64)>,
+    verified_bytes: HashMap<PathBuf, Arc<[u8]>>,
+    immutable_generations: HashMap<PathBuf, ([u8; 32], u64)>,
     bytes: usize,
     tick: u64,
     generations: HashMap<PathBuf, (Stamp, u64)>,
@@ -604,6 +606,36 @@ impl Texts {
         self.next_generation
     }
 
+    fn source_generation(&mut self, file: &SourceFile) -> u64 {
+        if let Some(stamp) = file.stamp {
+            return self.generation(&file.path, stamp);
+        }
+        let immutable = file
+            .immutable
+            .expect("source must have a qualified observation");
+        if let Some((generation, number)) = self.immutable_generations.get(&file.path)
+            && *generation == immutable.generation
+        {
+            return *number;
+        }
+        self.next_generation += 1;
+        self.immutable_generations.insert(
+            file.path.clone(),
+            (immutable.generation, self.next_generation),
+        );
+        self.next_generation
+    }
+
+    fn read_record(&self, file: &SourceFile, offset: u64) -> Option<Value> {
+        if file.immutable.is_none() {
+            return read_line(&file.path, offset);
+        }
+        let bytes = self.verified_bytes.get(&file.path)?;
+        let rest = bytes.get(usize::try_from(offset).ok()?..)?;
+        let end = rest.iter().position(|byte| *byte == b'\n')?;
+        crate::tx::parse_native_record(rest.get(..=end)?)
+    }
+
     fn read(
         &mut self,
         file: &SourceFile,
@@ -614,7 +646,7 @@ impl Texts {
     ) -> Option<String> {
         let key = TextKey {
             path: file.path.clone(),
-            generation: self.generation(&file.path, file.stamp),
+            generation: self.source_generation(file),
             offset,
             block,
             what: what.to_owned(),
@@ -624,7 +656,8 @@ impl Texts {
             *used = self.tick;
             return value.clone();
         }
-        let value = read_line(&file.path, offset)
+        let value = self
+            .read_record(file, offset)
             .and_then(|record| extract(&record, block as usize))
             .map(|text| {
                 // `json:` values are built capped, and must stay whole.
@@ -1045,10 +1078,20 @@ enum Role {
 
 type FileRevision = events::FileRevision;
 
+#[derive(Clone, Copy)]
+pub(crate) struct ImmutableSource {
+    pub(crate) generation: [u8; 32],
+    pub(crate) length: u64,
+    pub(crate) consumed: u64,
+    pub(crate) prefix: [u8; 32],
+    pub(crate) tail: [u8; 32],
+}
+
 struct SourceFile {
-    revision: FileRevision,
+    revision: Option<FileRevision>,
+    immutable: Option<ImmutableSource>,
     path: PathBuf,
-    stamp: Stamp,
+    stamp: Option<Stamp>,
     id: String,
     role: Role,
     summary: Arc<FileIndex>,
@@ -1059,6 +1102,13 @@ struct SourceFile {
 }
 
 impl SourceFile {
+    fn logical_length(&self) -> u64 {
+        self.stamp
+            .map(|stamp| stamp.size)
+            .or_else(|| self.immutable.map(|source| source.length))
+            .expect("source must have a qualified observation")
+    }
+
     fn harness(&self) -> &'static str {
         if matches!(self.role, Role::Copilot) {
             "copilot"
@@ -1331,8 +1381,9 @@ fn scan(
         texts.generation(&path, stamp);
         seen.insert(path.to_string_lossy().into_owned());
         files.push(SourceFile {
-            revision: cache.revision(&path).expect("scanned file has a ledger"),
-            stamp,
+            revision: cache.revision(&path),
+            immutable: None,
+            stamp: Some(stamp),
             id: id.to_owned(),
             first: summary.first,
             last: summary.last,
@@ -1385,9 +1436,10 @@ fn scan(
         texts.generation(&path, stamp);
         seen.insert(path.to_string_lossy().into_owned());
         files.push(SourceFile {
-            revision: cache.revision(&path).expect("scanned file has a ledger"),
+            revision: cache.revision(&path),
+            immutable: None,
             marker: texts.marker(&path, stamp),
-            stamp,
+            stamp: Some(stamp),
             id,
             first: summary.first,
             last: summary.last,
@@ -1443,8 +1495,9 @@ fn scan(
         texts.generation(&path, stamp);
         seen.insert(path.to_string_lossy().into_owned());
         files.push(SourceFile {
-            revision: cache.revision(&path).expect("scanned file"),
-            stamp,
+            revision: cache.revision(&path),
+            immutable: None,
+            stamp: Some(stamp),
             id,
             role: Role::Copilot,
             first: summary.first,
@@ -1696,7 +1749,7 @@ impl<'a> Builder<'a> {
             slot_files: files
                 .iter()
                 .map(|file| {
-                    let generation = texts.generation(&file.path, file.stamp);
+                    let generation = texts.source_generation(file);
                     let cached =
                         texts
                             .prompt_caches
@@ -2205,7 +2258,15 @@ impl<'a> Builder<'a> {
         let mut repos = Vec::new();
         for position in &session.files {
             let file = &self.files[*position];
-            files.push((file.path.clone(), file.revision));
+            if let Some(revision) = file.revision {
+                files.push((file.path.clone(), revision));
+            }
+            if let Some(immutable) = file.immutable {
+                metadata.push(format!(
+                    "immutable:{:?}:{}",
+                    immutable.generation, immutable.length
+                ));
+            }
             metadata.push(format!("{:?}", file.role));
             let cwd = match &file.role {
                 Role::Agent(meta) => meta.cwd.as_ref().or(file.summary.cwd.as_ref()),
@@ -4120,12 +4181,20 @@ impl<'a> Builder<'a> {
         let mut files: Vec<_> = session
             .files
             .iter()
-            .map(|file| {
+            .filter_map(|file| {
                 let source = &self.files[*file];
-                (source.path.clone(), source.revision)
+                source
+                    .revision
+                    .map(|revision| (source.path.clone(), revision))
             })
             .collect();
         files.sort_by(|a, b| a.0.cmp(&b.0));
+        let mut links = links;
+        links.extend(session.files.iter().filter_map(|index| {
+            self.files[*index]
+                .immutable
+                .map(|source| format!("immutable:{:?}:{}", source.generation, source.length))
+        }));
         let mut background_liveness: Vec<_> = session
             .files
             .iter()
@@ -5783,7 +5852,18 @@ pub(crate) fn build_sources(
     now: i64,
     selected: Option<&[crate::inputs::Input]>,
 ) -> io::Result<Built> {
-    build_sources_inner(options, cache, dirty, texts, now, selected, None)
+    build_sources_inner(
+        options,
+        cache,
+        dirty,
+        texts,
+        now,
+        NativeBuildSources {
+            selected,
+            immutable_files: None,
+        },
+        None,
+    )
 }
 
 /// Native producer output captured before compatibility-window trimming.
@@ -5821,21 +5901,31 @@ pub(crate) fn prepare_sources(
         &mut false,
         &mut Texts::default(),
         now,
-        Some(inputs),
+        NativeBuildSources {
+            selected: Some(inputs),
+            immutable_files: None,
+        },
         Some(&mut prepared),
     )?;
     prepared.ok_or_else(|| io::Error::other("native producer did not capture projection"))
 }
 
+#[derive(Default)]
+struct NativeBuildSources<'a> {
+    selected: Option<&'a [crate::inputs::Input]>,
+    immutable_files: Option<Vec<SourceFile>>,
+}
 fn build_sources_inner(
     options: &Options,
     cache: &mut EventCache,
     dirty: &mut bool,
     texts: &mut Texts,
     now: i64,
-    selected: Option<&[crate::inputs::Input]>,
+    sources: NativeBuildSources<'_>,
     mut prepared: Option<&mut Option<PreparedSources>>,
 ) -> io::Result<Built> {
+    let selected = sources.selected;
+    let immutable_files = sources.immutable_files;
     let catalog_base = cache.session_catalog_generation();
     let mut timings = Vec::with_capacity(18);
     macro_rules! timed {
@@ -5850,11 +5940,20 @@ fn build_sources_inner(
         }};
     }
 
-    let facts = MachineFacts::of(options);
+    let immutable = immutable_files.is_some();
+    let facts = if immutable {
+        MachineFacts::Recorded(Box::default())
+    } else {
+        MachineFacts::of(options)
+    };
     let window_start = scan_cutoff(options, now);
     let (files, skipped, index_clone) = timed!(
         "scan",
-        scan(options, cache, dirty, texts, window_start, &facts, selected)?
+        if let Some(files) = immutable_files {
+            (files, BTreeSet::new(), std::time::Duration::ZERO)
+        } else {
+            scan(options, cache, dirty, texts, window_start, &facts, selected)?
+        }
     );
     timings.push((
         "index_clone",
@@ -5868,7 +5967,7 @@ fn build_sources_inner(
             hook();
         }
     }
-    let claims = if prepared.is_some() {
+    let claims = if prepared.is_some() && !immutable {
         cache.catalog_claims(
             &files
                 .iter()
@@ -5886,8 +5985,16 @@ fn build_sources_inner(
     let offline_since;
     let groups;
     timed!("facts", {
-        pids = pid_files(options, &facts);
-        lock_pids = facts.codex_lock_pids(options);
+        pids = if immutable {
+            Vec::new()
+        } else {
+            pid_files(options, &facts)
+        };
+        lock_pids = if immutable {
+            Some(Default::default())
+        } else {
+            facts.codex_lock_pids(options)
+        };
         held = lock_pids
             .iter()
             .flat_map(|locks| locks.keys().cloned())
@@ -6000,9 +6107,13 @@ fn build_sources_inner(
     // source-complete catalog. Publication itself is delayed until success.
     let catalog = ((!options.scan_window && selected.is_none()) || prepared.is_some())
         .then(|| summary::catalog(&builder, &handoffs));
-    let slot_projections = catalog
-        .as_ref()
-        .map(|rows| crate::slot_projection::capture(&tx, rows));
+    let slot_projections = catalog.as_ref().map(|rows| {
+        if immutable {
+            crate::slot_projection::capture_verified(&tx, rows, &builder.texts.verified_bytes)
+        } else {
+            crate::slot_projection::capture(&tx, rows)
+        }
+    });
     // Analytics reads a month and the month before it, whatever the model's
     // window: taken from every session before the window trims them.
     let activity = crate::analytics::activity(&sessions, &tx, &turns, &handoffs, now);
@@ -6145,7 +6256,7 @@ fn build_sources_inner(
     let busy = BTreeMap::from([(machine.clone(), all_busy)]);
     let file_sizes: HashMap<&Path, u64> = files
         .iter()
-        .map(|file| (file.path.as_path(), file.stamp.size))
+        .map(|file| (file.path.as_path(), file.logical_length()))
         .collect();
     let marks: BTreeMap<&str, String> = tx
         .iter()
@@ -6215,7 +6326,7 @@ fn build_sources_inner(
     // paths or times, keep it the same for the same content.
     let lengths: Vec<String> = files
         .iter()
-        .map(|file| file.stamp.size.to_string())
+        .map(|file| file.logical_length().to_string())
         .collect();
     let version = format!(
         "{:016x}",
@@ -6278,3 +6389,124 @@ fn build_sources_inner(
 
 #[cfg(test)]
 mod tests;
+
+/// Producer-only shared native builder over one independently verified original.
+/// No local discovery, process facts, native selection or source ledger is fabricated.
+pub(crate) fn prepare_immutable_source(
+    options: &Options,
+    input: &crate::inputs::Input,
+    bytes: Arc<[u8]>,
+    immutable: ImmutableSource,
+) -> io::Result<PreparedSources> {
+    const RECORD_MAX: usize = 16 * 1024 * 1024;
+    let mut summary = FileIndex::default();
+    let mut id = None::<String>;
+    let mut meta = Value::Null;
+    let harness = input.root.as_str();
+    let mut offset = 0usize;
+    for (records, line) in bytes[..usize::try_from(immutable.consumed)
+        .map_err(|_| io::Error::other("original prefix length"))?]
+        .split_inclusive(|byte| *byte == b'\n')
+        .enumerate()
+    {
+        if line.len() > RECORD_MAX || records >= 4096 {
+            return Err(io::Error::other(
+                "immutable native original exceeds producer record budget",
+            ));
+        }
+        match crate::tx::parse_native_record(line) {
+            Some(record) => {
+                let native = if harness == "claude" {
+                    record
+                        .get("sessionId")
+                        .or_else(|| record.get("session_id"))
+                        .and_then(Value::as_str)
+                } else if offset == 0 && record["type"] == "session_meta" {
+                    meta = record["payload"].clone();
+                    meta.get("id").and_then(Value::as_str)
+                } else {
+                    None
+                };
+                if let Some(native) = native {
+                    if native.is_empty()
+                        || native.len() > 4096
+                        || native.chars().any(char::is_control)
+                        || id.as_deref().is_some_and(|previous| previous != native)
+                    {
+                        return Err(io::Error::other(
+                            "immutable original native identity is ambiguous",
+                        ));
+                    }
+                    id = Some(native.to_owned());
+                }
+                if harness == "claude" {
+                    events::claude(&mut summary, &record, offset as u64);
+                } else {
+                    events::codex(&mut summary, &record, offset as u64);
+                }
+            }
+            None => events::gap(&mut summary, offset as u64),
+        }
+        if summary.events.len() + summary.extras.len() + summary.signals.len() > 4096 {
+            return Err(io::Error::other(
+                "immutable native original exceeds event budget",
+            ));
+        }
+        offset += line.len();
+    }
+    let id =
+        id.ok_or_else(|| io::Error::other("immutable original lacks native identity metadata"))?;
+    let role = if harness == "claude" {
+        let components: Vec<_> = input.path.split('/').collect();
+        if components.len() != 3 || components[0] != "projects" {
+            return Err(io::Error::other(
+                "immutable Claude subagent context is unsupported",
+            ));
+        }
+        Role::Top {
+            slug: components[1].into(),
+        }
+    } else {
+        Role::Codex(CodexMeta {
+            history: CodexHistory::from_meta(&meta),
+            parent_thread: field(&meta, "parent_thread_id").map(str::to_owned),
+            nickname: field(&meta, "agent_nickname").map(str::to_owned),
+            path: field(&meta, "agent_path").map(str::to_owned),
+            cwd: field(&meta, "cwd").map(str::to_owned),
+            branch: meta
+                .get("git")
+                .and_then(|git| field(git, "branch"))
+                .map(str::to_owned),
+            guardian_review: false,
+        })
+    };
+    let path = input.full_path(options);
+    let source = SourceFile {
+        revision: None,
+        immutable: Some(immutable),
+        stamp: None,
+        id,
+        role,
+        first: summary.first,
+        last: summary.last,
+        summary: Arc::new(summary),
+        marker: None,
+        path: path.clone(),
+    };
+    let mut texts = Texts::default();
+    texts.verified_bytes.insert(path, bytes);
+    let mut captured = None;
+    build_sources_inner(
+        options,
+        &mut EventCache::default(),
+        &mut false,
+        &mut texts,
+        now_ms(),
+        NativeBuildSources {
+            selected: Some(std::slice::from_ref(input)),
+            immutable_files: Some(vec![source]),
+        },
+        Some(&mut captured),
+    )?;
+    captured.ok_or_else(|| io::Error::other("immutable native producer did not capture projection"))
+}

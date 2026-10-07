@@ -153,10 +153,15 @@ pub(crate) struct CatalogRow {
 pub(crate) struct CatalogSource {
     pub(crate) path: PathBuf,
     pub(crate) native_id: String,
-    pub(crate) dev: u64,
-    pub(crate) ino: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) dev: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) ino: Option<u64>,
     pub(crate) size: u64,
-    pub(crate) modified_ns: u128,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) modified_ns: Option<u128>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) immutable_generation: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) changed_ns: Option<i128>,
     pub(crate) offset: u64,
@@ -178,14 +183,55 @@ pub(super) fn catalog(builder: &Builder<'_>, handoffs: &[Handoff]) -> Vec<Catalo
             .iter()
             .map(|position| {
                 let file = &builder.files[*position];
-                let (dev, ino, offset, prefix_sha256, tail_sha256, changed_ns) = file.revision;
+                let (
+                    dev,
+                    ino,
+                    offset,
+                    prefix_sha256,
+                    tail_sha256,
+                    changed_ns,
+                    modified_ns,
+                    immutable_generation,
+                ) = if let Some((dev, ino, offset, prefix, tail, changed)) = file.revision {
+                    (
+                        Some(dev),
+                        Some(ino),
+                        offset,
+                        prefix,
+                        tail,
+                        changed,
+                        file.stamp.map(|stamp| stamp.modified_ns),
+                        None,
+                    )
+                } else {
+                    let source = file
+                        .immutable
+                        .expect("source must have a qualified observation");
+                    (
+                        None,
+                        None,
+                        source.consumed,
+                        source.prefix,
+                        source.tail,
+                        None,
+                        None,
+                        Some(
+                            source
+                                .generation
+                                .iter()
+                                .map(|byte| format!("{byte:02x}"))
+                                .collect(),
+                        ),
+                    )
+                };
                 CatalogSource {
                     path: file.path.clone(),
                     native_id: file.id.clone(),
                     dev,
                     ino,
-                    size: file.stamp.size,
-                    modified_ns: file.stamp.modified_ns,
+                    size: file.logical_length(),
+                    modified_ns,
+                    immutable_generation,
                     changed_ns,
                     offset,
                     prefix_sha256,
