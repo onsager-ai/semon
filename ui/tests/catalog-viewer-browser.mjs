@@ -338,6 +338,27 @@ for (const width of [390, 1280])
         );
         await page.getByRole('button', { name: 'Reload recorded text', exact: true }).waitFor();
         assert.equal(requests.filter((p) => p.startsWith('/api/session-entry')).length, 2);
+        await page.getByRole('button', { name: /Jump to bottom/ }).click();
+        await page.waitForFunction(
+          () => document.querySelector('#page > div')?.getAttribute('aria-busy') === 'false',
+        );
+        await page.locator('#page textarea').focus();
+        nativeGeneration = 'd';
+        nativeTotal = 67;
+        await page.clock.runFor(3100);
+        await page.locator('#page [data-entry-key="one:66"]').waitFor({ state: 'attached' });
+        assert.equal(await page.locator('#page textarea').inputValue(), 'Retained native draft');
+        assert.equal(
+          await page.evaluate((node) => node === document.activeElement, draftNode),
+          true,
+        );
+        const endGap = await page.evaluate(() => {
+          const main = document.querySelector('#main');
+          return innerWidth <= 760
+            ? document.documentElement.scrollHeight - scrollY - innerHeight
+            : main.scrollHeight - main.scrollTop - main.clientHeight;
+        });
+        assert.ok(endGap < 2, 'Deliberate live following must reach the new end; gap=' + endGap);
         assert.equal(
           requests.some((p) => /^\/api\/(model|tool|image|tx)/.test(p)),
           false,
