@@ -18,6 +18,29 @@ test(
       { encoding: 'utf8' },
     );
     assert.equal(fixture.status, 0, fixture.stderr);
+    const searchFixture = process.env.SEMON_CATALOG_SERVED_REQUIRE_SEARCH === '1';
+    if (searchFixture) {
+      const project = join(home, 'claude', 'projects', 'metadata-search');
+      await mkdir(project, { recursive: true });
+      for (let index = 0; index <= 600; index++) {
+        const id = index === 600 ? 'metadata-needle' : `metadata-decoy-${index}`;
+        await writeFile(
+          join(project, id + '.jsonl'),
+          JSON.stringify({
+            type: 'user',
+            sessionId: id,
+            uuid: id + '-user',
+            timestamp: new Date(
+              Number(fixture.stdout.trim()) - (index === 600 ? 3 : 2) * 86400000,
+            ).toISOString(),
+            message: {
+              role: 'user',
+              content: index === 600 ? 'abcXYZabc' : 'abc abcX bcXY cXYZ XYZa YZab Zabc',
+            },
+          }) + '\n',
+        );
+      }
+    }
     const paths = await readdir(join(home, 'claude'), { recursive: true });
     const backlog = paths.find((path) => path.endsWith('/backlog.jsonl'));
     assert.ok(backlog, 'Native long conversation fixture is missing');
@@ -235,6 +258,52 @@ test(
       const search = page.getByRole('textbox', { name: 'Search session details', exact: true });
       if (process.env.SEMON_CATALOG_SERVED_REQUIRE_SEARCH === '1') await search.waitFor();
       if (await search.count()) {
+        if (searchFixture) {
+          // A complete source index makes this a candidate-budget continuation,
+          // rather than the separately visible background-discovery condition.
+          await page.waitForFunction(
+            () =>
+              !document
+                .querySelector('#page')
+                ?.textContent?.includes('More sessions are being discovered.'),
+            null,
+            { timeout: 60000 },
+          );
+          const firstSearch = page.waitForResponse((response) => {
+            const requested = new URL(response.url());
+            return (
+              requested.pathname === '/api/sessions' &&
+              requested.searchParams.get('q') === 'abcXYZabc' &&
+              !requested.searchParams.has('cursor') &&
+              response.status() === 200
+            );
+          });
+          await search.fill('abcXYZabc');
+          await search.press('Tab');
+          const firstPage = await (await firstSearch).json();
+          assert.equal(firstPage.search.index_complete, true);
+          assert.equal(firstPage.search.partial, true);
+          assert.equal(firstPage.search.candidates, 512);
+          assert.deepEqual(firstPage.items, []);
+          assert.ok(firstPage.next_cursor);
+          await page
+            .getByText(
+              'Search checked a bounded part of the index. Load more sessions to continue looking for matches.',
+            )
+            .waitFor();
+          assert.equal(
+            await page
+              .getByText('No recorded sessions match these filters.', { exact: true })
+              .count(),
+            0,
+          );
+          const more = page.getByRole('button', { name: 'Load more sessions', exact: true });
+          await more.focus();
+          await page.keyboard.press('Enter');
+          await page.locator('#page [data-id="metadata-needle"]').waitFor();
+          assert.equal(await search.inputValue(), 'abcXYZabc');
+          metadataSearch.push({ query: 'abcXYZabc', partialContinuation: true, candidates: 512 });
+        }
         for (const [query, expected] of [
           ['backlog', true],
           ['Actual native scalar field.', false],
