@@ -5497,8 +5497,8 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
-    /// Sealing keeps the log's stat and bytes: the ledger shares or resumes
-    /// as before, reading the sealed range through its segments.
+    /// Sealing keeps logical bytes and modification time, but changes ctime.
+    /// Revalidate the consumed prefix through segments without reparsing rows.
     #[cfg(target_os = "linux")]
     #[test]
     fn the_ledger_resumes_across_a_seal() {
@@ -5523,14 +5523,14 @@ mod tests {
         assert_eq!(ledger_trace(), ["replace"]);
         let unsealed = cold(&log);
 
-        // Sealed: the same stat, so shared as it is, in this process or a
-        // new one, and a cold read finds the same index.
+        // Sealed: revalidate the changed physical generation, then share the
+        // updated ledger on restart. A cold read finds the same logical index.
         assert!(crate::sealed::seal(&log, 1, u64::MAX).unwrap().punched);
         ledger_trace();
         let before = parsed();
         scan(&mut cache);
         scan(&mut EventCache::open(&v1));
-        assert_eq!(ledger_trace(), ["unchanged", "unchanged"]);
+        assert_eq!(ledger_trace(), ["append", "unchanged"]);
         assert_eq!(parsed(), before);
         assert_eq!(cold(&log), unsealed);
 
@@ -5545,7 +5545,7 @@ mod tests {
         assert_eq!(parsed(), before + 2);
         assert_eq!(stored(&v1, &log), cold(&log));
 
-        // Sealed again, the new lines too: still unchanged.
+        // Sealed again: another physical generation, with no new logical rows.
         assert!(
             crate::sealed::seal(&log, 1, u64::MAX)
                 .unwrap()
@@ -5553,8 +5553,10 @@ mod tests {
                 .is_some()
         );
         ledger_trace();
+        let before = parsed();
         scan(&mut cache);
-        assert_eq!(ledger_trace(), ["unchanged"]);
+        assert_eq!(ledger_trace(), ["append"]);
+        assert_eq!(parsed(), before);
         fs::remove_dir_all(root).unwrap();
     }
 
