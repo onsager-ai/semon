@@ -144,6 +144,8 @@ test('selection invalidates old control handles and late command receipts', asyn
     owner.unavailable();
     assert.equal(owner.view('native').snapshot.capabilities.input, false);
     assert.equal(await owner.view('native').send('cannot send through stale observation'), false);
+    owner.view('native').interrupt();
+    owner.view('native').answer({ id: 'a'.repeat(32), hash: null }, {});
     assert.equal(writes, 1);
   } finally {
     owner.destroy();
@@ -151,51 +153,84 @@ test('selection invalidates old control handles and late command receipts', asyn
   }
 });
 
-test('final owned runtime status invalidates pending receipts and reconnect authority', async () => {
-  const oldFetch = globalThis.fetch;
-  let release,
-    writes = 0;
-  globalThis.fetch = async (_url, options) => {
-    writes++;
-    const command = JSON.parse(options.body);
-    return new Promise((resolve) => {
-      release = () =>
-        resolve({
-          ok: true,
-          json: async () => ({ snapshot: { actions: { [command.id]: { delivery: 'accepted' } } } }),
-        });
-    });
+for (const method of ['observe', 'adopt'])
+  test(`final runtime ${method} invalidates pending receipts and reconnect authority`, async () => {
+    const oldFetch = globalThis.fetch;
+    let release,
+      writes = 0;
+    globalThis.fetch = async (_url, options) => {
+      writes++;
+      const command = JSON.parse(options.body);
+      return new Promise((resolve) => {
+        release = () =>
+          resolve({
+            ok: true,
+            json: async () => ({
+              snapshot: { actions: { [command.id]: { delivery: 'accepted' } } },
+            }),
+          });
+      });
+    };
+    const owner = createLocalControl(
+      { request: () => new AbortController(), releaseRequest() {} },
+      () => {},
+    );
+    try {
+      owner.observe(owner.prepare(model()));
+      const pending = owner.view().send('retained draft');
+      owner[method](
+        owner.prepare({
+          ...model(),
+          connected: false,
+          runtime: { state: 'ended', phase: 'ended', freshness: 'current', reconnectable: false },
+          capabilities: Object.fromEntries(
+            Object.keys(model().capabilities).map((key) => [key, false]),
+          ),
+        }),
+      );
+      release();
+      assert.equal(await pending, false);
+      assert.equal(owner.view().busy, false);
+      owner.view().reconnect();
+      assert.equal(writes, 1);
+      assert.throws(() =>
+        owner.prepare({
+          ...model(),
+          runtime: { state: 'unknown', phase: 'ended', freshness: 'current', reconnectable: true },
+        }),
+      );
+    } finally {
+      owner.destroy();
+      globalThis.fetch = oldFetch;
+    }
+  });
+
+test('runtime presence, observation freshness and availability are validated separately', () => {
+  const owner = createLocalControl({}, () => {});
+  const runtime = {
+    state: 'ended',
+    phase: 'ended',
+    freshness: 'stale',
+    reconnectable: false,
+    presence: 'active',
+    observedAt: '2026-10-07T10:00:00.000Z',
+    observationError: null,
+    updating: false,
   };
-  const owner = createLocalControl(
-    { request: () => new AbortController(), releaseRequest() {} },
-    () => {},
-  );
-  try {
-    owner.observe(owner.prepare(model()));
-    const pending = owner.view().send('retained draft');
-    owner.observe(
-      owner.prepare({
-        ...model(),
-        connected: false,
-        runtime: { state: 'ended', phase: 'ended', freshness: 'current', reconnectable: false },
-        capabilities: Object.fromEntries(
-          Object.keys(model().capabilities).map((key) => [key, false]),
-        ),
-      }),
-    );
-    release();
-    assert.equal(await pending, false);
-    assert.equal(owner.view().busy, false);
-    owner.view().reconnect();
-    assert.equal(writes, 1);
-    assert.throws(() =>
-      owner.prepare({
-        ...model(),
-        runtime: { state: 'unknown', phase: 'ended', freshness: 'current', reconnectable: true },
-      }),
-    );
-  } finally {
-    owner.destroy();
-    globalThis.fetch = oldFetch;
-  }
+  const disabled = {
+    ...model(),
+    connected: false,
+    capabilities: Object.fromEntries(Object.keys(model().capabilities).map((key) => [key, false])),
+    runtime,
+  };
+  assert.equal(owner.prepare(disabled).runtime.presence, 'active');
+  for (const invalid of [
+    { ...disabled, connected: true },
+    { ...disabled, runtime: { ...runtime, reconnectable: true } },
+    { ...disabled, runtime: { ...runtime, presence: 'guessed' } },
+    { ...disabled, runtime: { ...runtime, observedAt: 'invalid' } },
+    { ...disabled, runtime: { ...runtime, observationError: 'x'.repeat(513) } },
+    { ...disabled, runtime: { ...runtime, updating: 'yes' } },
+  ])
+    assert.throws(() => owner.prepare(invalid));
 });
