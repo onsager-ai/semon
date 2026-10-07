@@ -342,12 +342,17 @@ export function createLiveUpdates(host: LiveUpdatesHost) {
         return r;
       },
       (err) => {
+        if (err?.status === 403) throw err;
         if (host.liveModelOwner.LIVE.late === sid) {
           if (++host.liveModelOwner.LIVE.lateTries >= LATE_TRIES) {
             host.liveModelOwner.LIVE.late = null;
             console.warn(
               'semon: gave up reloading the transcript of ' + sid + ' after its origin arrived',
             );
+            // This observation has exhausted its own bounded retries. Keep the
+            // transcript explicitly stale, but let unrelated model/status reads
+            // resume instead of extending generic recovery backoff indefinitely.
+            return { cut: null, reload: true };
           } else host.liveModelOwner.LIVE.retry = true;
         }
         throw err;

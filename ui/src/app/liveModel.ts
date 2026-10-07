@@ -54,7 +54,7 @@ export function createLiveModel(host: LiveModelHost) {
         const response = await host.transportOwner.api(
           modelPath(
             recovering
-              ? '/api/model?delta=1'
+              ? '/api/model?delta=1&since='
               : '/api/model?delta=1&since=' +
                   host.transportOwner.enc(LIVE.late ? '' : (LIVE.version ?? '')),
             selected,
@@ -75,7 +75,7 @@ export function createLiveModel(host: LiveModelHost) {
           model = host.liveUpdates.applyModelDelta(response);
         } catch {
           model = await host.transportOwner.api(
-            modelPath('/api/model?delta=1', selected),
+            modelPath('/api/model?delta=1&since=', selected),
             request.signal,
           );
           if (destroyed || host.disposed || request.signal.aborted || selected !== selection())
