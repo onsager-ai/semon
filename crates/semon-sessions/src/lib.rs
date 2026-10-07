@@ -14,12 +14,14 @@ use serde_json::Value;
 
 mod analytics;
 mod catalog;
+mod catalog_observer;
 pub use catalog::{
     CatalogFreshness, CatalogIdentityError, CatalogReadScope, CatalogSessionIdentity,
     CatalogSourceObservation, SessionSourceProof, SessionSourceRef,
     session_catalog_history_identity, session_catalog_identity, session_catalog_page,
     session_source_proof,
 };
+pub use catalog_observer::SessionCatalogObserver;
 mod claude_usage;
 pub mod copilot;
 pub use claude_usage::ClaudeUsageEvidence;

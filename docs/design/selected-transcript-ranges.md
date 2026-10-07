@@ -138,3 +138,19 @@ The received-directory compatibility mode still discovers machine metadata in
 `follow()` on each request. Removing that directory-wide discovery from the cold
 and warm journey remains separate work; this registry does not claim that mode
 is bounded by the returned page.
+
+### Producer demand without a ViewerCore
+
+A host retains `SessionCatalogObserver` per configured source and calls `changed()`
+after an authorized native push, including when no browser exists. Focused reads
+may call `demand()` to queue initial or recovery observation. Both use the existing
+bounded refresh pool, coalescing and publication revision checks; neither call
+waits for a native history build. `close()` stops and drains work before source
+configuration or custody is replaced. The host owns the observer lifetime and
+must authorize options before construction.
+
+The existing producer still observes the complete selected machine in the
+background. This activation seam does not qualify bounded dirty dependency
+recomputation, nor does it initialize unrelated machine models. First useful
+content before an initial projection exists remains explicitly updating or
+unavailable until that publication completes.
