@@ -1,0 +1,148 @@
+{
+  "source_revision": "733524fad75290d05aae887faa0c00263b11c6f7",
+  "bundle": "0e8f41c04320954b89c972f135144b4ac199591b62604d650f44581f540765ed",
+  "source_key": "local",
+  "catalog_key": "backlog",
+  "phase": "persisted-restart",
+  "coldMs": 247.85726300000005,
+  "filterMs": 77.61222099999998,
+  "selectedMs": 136.17117099999996,
+  "earlierMs": 86.44698299999993,
+  "fieldMs": 174.758147,
+  "warmMs": 73.81264199999987,
+  "before": {
+    "domNodes": 3,
+    "entries": 0,
+    "rows": 0,
+    "Nodes": 8,
+    "LayoutDuration": 0,
+    "ScriptDuration": 0,
+    "TaskDuration": 2e-05,
+    "JSHeapUsedSize": 534364
+  },
+  "cold": {
+    "domNodes": 890,
+    "entries": 0,
+    "rows": 60,
+    "Nodes": 1368,
+    "LayoutDuration": 0.047655,
+    "ScriptDuration": 0.003809,
+    "TaskDuration": 0.152685,
+    "JSHeapUsedSize": 4041880
+  },
+  "filtered": {
+    "domNodes": 891,
+    "entries": 0,
+    "rows": 60,
+    "Nodes": 1376,
+    "LayoutDuration": 0.054559,
+    "ScriptDuration": 0.006875,
+    "TaskDuration": 0.18806,
+    "JSHeapUsedSize": 4568052
+  },
+  "selected": {
+    "domNodes": 1120,
+    "entries": 60,
+    "rows": 0,
+    "Nodes": 2305,
+    "LayoutDuration": 0.064593,
+    "ScriptDuration": 0.013809,
+    "TaskDuration": 0.254029,
+    "JSHeapUsedSize": 4640340
+  },
+  "earlier": {
+    "domNodes": 1655,
+    "entries": 120,
+    "rows": 0,
+    "Nodes": 3025,
+    "LayoutDuration": 0.066481,
+    "ScriptDuration": 0.014943,
+    "TaskDuration": 0.306918,
+    "JSHeapUsedSize": 7729556
+  },
+  "warm": {
+    "domNodes": 1654,
+    "entries": 120,
+    "rows": 0,
+    "Nodes": 3553,
+    "LayoutDuration": 0.104702,
+    "ScriptDuration": 0.032476,
+    "TaskDuration": 0.49905,
+    "JSHeapUsedSize": 26658204
+  },
+  "requests": [
+    "/api/session-capabilities?machine=local",
+    "/api/sessions?machine=local&scope=retained_history&limit=60",
+    "/api/sessions?machine=local&scope=retained_history&limit=60&harness=claude",
+    "/api/session-identity?machine=local&sid=backlog",
+    "/api/session-transcript?machine=local&scope=retained_history&sid=backlog&limit=60",
+    "/api/session-transcript?machine=local&scope=retained_history&sid=backlog&limit=60&after=353&generation=5733d59a27ce3a7bd67d4e7f40a41c095006aaf9c510ccd8ec15013fa9b2fb2c",
+    "/api/session-identity?machine=local&sid=backlog",
+    "/api/session-entry?machine=local&scope=retained_history&sid=backlog&after=472&limit=1&generation=5733d59a27ce3a7bd67d4e7f40a41c095006aaf9c510ccd8ec15013fa9b2fb2c&field_chunk=0",
+    "/api/session-entry?machine=local&scope=retained_history&sid=backlog&after=472&limit=1&generation=5733d59a27ce3a7bd67d4e7f40a41c095006aaf9c510ccd8ec15013fa9b2fb2c&field_chunk=1",
+    "/api/session-identity?machine=local&sid=backlog"
+  ],
+  "responses": [
+    {
+      "path": "/api/session-capabilities",
+      "status": 200,
+      "bytes": 362,
+      "serverResponseMs": 1.3599999999999999
+    },
+    {
+      "path": "/api/sessions",
+      "status": 200,
+      "bytes": 65458,
+      "serverResponseMs": 44.683
+    },
+    {
+      "path": "/api/sessions",
+      "status": 200,
+      "bytes": 63409,
+      "serverResponseMs": 42.235
+    },
+    {
+      "path": "/api/session-transcript",
+      "status": 200,
+      "bytes": 56371,
+      "serverResponseMs": 36.705999999999996
+    },
+    {
+      "path": "/api/session-identity",
+      "status": 200,
+      "bytes": 884,
+      "serverResponseMs": 5.279999999999999
+    },
+    {
+      "path": "/api/session-transcript",
+      "status": 200,
+      "bytes": 52373,
+      "serverResponseMs": 32.986
+    },
+    {
+      "path": "/api/session-identity",
+      "status": 200,
+      "bytes": 884,
+      "serverResponseMs": 3.092
+    },
+    {
+      "path": "/api/session-entry",
+      "status": 200,
+      "bytes": 67817,
+      "serverResponseMs": 11.995
+    },
+    {
+      "path": "/api/session-entry",
+      "status": 200,
+      "bytes": 46778,
+      "serverResponseMs": 11.728
+    },
+    {
+      "path": "/api/session-identity",
+      "status": 200,
+      "bytes": 884,
+      "serverResponseMs": 2.423
+    }
+  ],
+  "errors": []
+}

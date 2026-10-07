@@ -1,0 +1,148 @@
+{
+  "source_revision": "733524fad75290d05aae887faa0c00263b11c6f7",
+  "bundle": "0e8f41c04320954b89c972f135144b4ac199591b62604d650f44581f540765ed",
+  "source_key": "local",
+  "catalog_key": "backlog",
+  "phase": "persisted-restart",
+  "coldMs": 154.05783200000008,
+  "filterMs": 60.127235999999925,
+  "selectedMs": 153.24484700000005,
+  "earlierMs": 69.12599499999999,
+  "fieldMs": 256.79960399999993,
+  "warmMs": 82.73693300000014,
+  "before": {
+    "domNodes": 3,
+    "entries": 0,
+    "rows": 0,
+    "Nodes": 8,
+    "LayoutDuration": 0,
+    "ScriptDuration": 0,
+    "TaskDuration": 2.1e-05,
+    "JSHeapUsedSize": 534364
+  },
+  "cold": {
+    "domNodes": 890,
+    "entries": 0,
+    "rows": 60,
+    "Nodes": 1368,
+    "LayoutDuration": 0.043073,
+    "ScriptDuration": 0.006371,
+    "TaskDuration": 0.130003,
+    "JSHeapUsedSize": 4071820
+  },
+  "filtered": {
+    "domNodes": 891,
+    "entries": 0,
+    "rows": 60,
+    "Nodes": 1376,
+    "LayoutDuration": 0.048703,
+    "ScriptDuration": 0.008876,
+    "TaskDuration": 0.159178,
+    "JSHeapUsedSize": 4545108
+  },
+  "selected": {
+    "domNodes": 1120,
+    "entries": 60,
+    "rows": 0,
+    "Nodes": 2305,
+    "LayoutDuration": 0.05503,
+    "ScriptDuration": 0.016247,
+    "TaskDuration": 0.221165,
+    "JSHeapUsedSize": 4617248
+  },
+  "earlier": {
+    "domNodes": 1655,
+    "entries": 120,
+    "rows": 0,
+    "Nodes": 3025,
+    "LayoutDuration": 0.057141,
+    "ScriptDuration": 0.017525,
+    "TaskDuration": 0.272711,
+    "JSHeapUsedSize": 7742796
+  },
+  "warm": {
+    "domNodes": 1654,
+    "entries": 120,
+    "rows": 0,
+    "Nodes": 3553,
+    "LayoutDuration": 0.103127,
+    "ScriptDuration": 0.034472,
+    "TaskDuration": 0.488277,
+    "JSHeapUsedSize": 26346884
+  },
+  "requests": [
+    "/api/session-capabilities?machine=local",
+    "/api/sessions?machine=local&scope=retained_history&limit=60",
+    "/api/sessions?machine=local&scope=retained_history&limit=60&harness=claude",
+    "/api/session-identity?machine=local&sid=backlog",
+    "/api/session-transcript?machine=local&scope=retained_history&sid=backlog&limit=60",
+    "/api/session-transcript?machine=local&scope=retained_history&sid=backlog&limit=60&after=353&generation=68e5bdc81b656d2edded6cf3ff74bde996defe9ef6ac1886345bbd38b5ae1797",
+    "/api/session-identity?machine=local&sid=backlog",
+    "/api/session-entry?machine=local&scope=retained_history&sid=backlog&after=472&limit=1&generation=68e5bdc81b656d2edded6cf3ff74bde996defe9ef6ac1886345bbd38b5ae1797&field_chunk=0",
+    "/api/session-entry?machine=local&scope=retained_history&sid=backlog&after=472&limit=1&generation=68e5bdc81b656d2edded6cf3ff74bde996defe9ef6ac1886345bbd38b5ae1797&field_chunk=1",
+    "/api/session-identity?machine=local&sid=backlog"
+  ],
+  "responses": [
+    {
+      "path": "/api/session-capabilities",
+      "status": 200,
+      "bytes": 362,
+      "serverResponseMs": 0.724
+    },
+    {
+      "path": "/api/sessions",
+      "status": 200,
+      "bytes": 65451,
+      "serverResponseMs": 29.705000000000002
+    },
+    {
+      "path": "/api/sessions",
+      "status": 200,
+      "bytes": 63379,
+      "serverResponseMs": 31.505000000000003
+    },
+    {
+      "path": "/api/session-transcript",
+      "status": 200,
+      "bytes": 56749,
+      "serverResponseMs": 35.055
+    },
+    {
+      "path": "/api/session-identity",
+      "status": 200,
+      "bytes": 890,
+      "serverResponseMs": 5.159
+    },
+    {
+      "path": "/api/session-transcript",
+      "status": 200,
+      "bytes": 52751,
+      "serverResponseMs": 31.393
+    },
+    {
+      "path": "/api/session-identity",
+      "status": 200,
+      "bytes": 890,
+      "serverResponseMs": 4.46
+    },
+    {
+      "path": "/api/session-entry",
+      "status": 200,
+      "bytes": 67835,
+      "serverResponseMs": 12.909
+    },
+    {
+      "path": "/api/session-entry",
+      "status": 200,
+      "bytes": 46796,
+      "serverResponseMs": 13.899000000000001
+    },
+    {
+      "path": "/api/session-identity",
+      "status": 200,
+      "bytes": 890,
+      "serverResponseMs": 2.115
+    }
+  ],
+  "errors": []
+}
