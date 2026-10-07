@@ -5936,6 +5936,12 @@ globalThis.__semonUIShared = __semonUIShared;
     state2.paint();
     host2.committed();
   }
+  function updateSessionControl(root, control) {
+    const owner = owners.get(root);
+    if (!owner || owner.disposed) return;
+    owner.snapshot = { ...owner.snapshot, control };
+    owner.paint();
+  }
   function updateSessionPager(root, view) {
     const owner = owners.get(root);
     if (!owner || owner.snapshot.id !== view.sid) return;
@@ -6835,6 +6841,105 @@ globalThis.__semonUIShared = __semonUIShared;
     return host;
   }
 
+  // src/app/controlObservation.ts
+  function createControlObservation(host2) {
+    if (!host2.viewerHost?.controlStream) return { destroy() {
+    } };
+    let stream = null;
+    let identity2 = "";
+    let timer;
+    let deadline;
+    let delay = 1e3;
+    let disposed = false;
+    function selected() {
+      const route2 = host2.navigation.route;
+      const session = route2.v === "session" ? host2.modelStore.sessions[route2.id] : void 0;
+      return {
+        selected: session ? route2.v === "session" ? route2.id : "" : "",
+        machine: session?.machine ?? ""
+      };
+    }
+    function cancel() {
+      stream?.close();
+      stream = null;
+      host2.scope.clearTimeout(timer);
+      host2.scope.clearTimeout(deadline);
+    }
+    function connect() {
+      if (disposed) return;
+      cancel();
+      const path = host2.viewerHost?.controlStream;
+      if (!path || typeof EventSource === "undefined") return;
+      if (!path.startsWith("/") || path.startsWith("//") || /[\\\s]/.test(path))
+        throw new Error("Invalid control stream");
+      const scope = selected();
+      identity2 = JSON.stringify(scope);
+      const current = new EventSource(
+        path + (path.includes("?") ? "&" : "?") + new URLSearchParams(scope)
+      );
+      stream = current;
+      let revision = "";
+      const valid = () => !disposed && stream === current && identity2 === JSON.stringify(selected());
+      const recover = () => {
+        if (!valid()) return;
+        cancel();
+        host2.controlOwner.unavailable();
+        timer = host2.scope.timeout(connect, delay);
+        delay = Math.min(15e3, delay * 2);
+      };
+      const heartbeat = () => {
+        if (!valid()) return;
+        host2.scope.clearTimeout(deadline);
+        deadline = host2.scope.timeout(recover, 3e4);
+      };
+      heartbeat();
+      current.addEventListener("heartbeat", heartbeat);
+      current.addEventListener("error", recover);
+      current.addEventListener("unavailable", recover);
+      current.addEventListener("ended", () => {
+        if (!valid()) return;
+        cancel();
+        host2.controlOwner.observe(null);
+      });
+      current.addEventListener("control", (event) => {
+        if (!valid() || !(event instanceof MessageEvent)) return;
+        try {
+          if (String(event.data).length > 3e5) throw new Error("Control snapshot too large");
+          const value = JSON.parse(String(event.data));
+          if (!value || typeof value !== "object" || !("revision" in value) || typeof value.revision !== "string" || value.revision.length < 1 || value.revision.length > 128 || !("selected" in value) || value.selected !== scope.selected || !("machine" in value) || value.machine !== scope.machine || !("control" in value))
+            throw new Error("Control identity changed");
+          const control = host2.controlOwner.prepare(value.control);
+          if (control && control.thread !== scope.selected) throw new Error("Control thread changed");
+          heartbeat();
+          delay = 1e3;
+          if (revision === value.revision) return;
+          revision = value.revision;
+          host2.viewerHost?.modelNavigation?.(value);
+          if (control || !scope.selected) host2.controlOwner.observe(control);
+          else host2.controlOwner.unavailable();
+        } catch {
+          recover();
+        }
+      });
+    }
+    function changed() {
+      if (JSON.stringify(selected()) === identity2) return;
+      host2.controlOwner.observe(null);
+      connect();
+    }
+    const route = host2.navigation.subscribeRoute(changed);
+    const model2 = host2.updates.subscribe(changed);
+    connect();
+    return {
+      destroy() {
+        disposed = true;
+        route();
+        model2();
+        cancel();
+      }
+    };
+  }
+
   // src/lib/control.ts
   function record2(value) {
     return !!value && typeof value === "object" && !Array.isArray(value);
@@ -6923,21 +7028,51 @@ globalThis.__semonUIShared = __semonUIShared;
     }
     function view(sid) {
       if (!current || sid && sid !== current.thread) return void 0;
+      const target = current;
+      const send = (op, extra = {}) => current?.thread === target.thread && current.generation === target.generation ? write(op, extra) : Promise.resolve(false);
       return {
         snapshot: current,
         busy: busy2,
         uncertain,
         note,
-        send: (text2) => write("send", { text: text2 }),
-        interrupt: () => void write("interrupt"),
-        answer: (request, answer2) => void write("answer", { request: request.id, hash: request.hash, answer: answer2 }),
-        reconnect: () => void write("reconnect")
+        send: (text2) => send("send", { text: text2 }),
+        interrupt: () => void send("interrupt"),
+        answer: (request, answer2) => void send("answer", { request: request.id, hash: request.hash, answer: answer2 }),
+        reconnect: () => void send("reconnect")
       };
     }
     return {
       prepare: parseControl,
       adopt(value) {
         current = value;
+      },
+      unavailable() {
+        if (!current) return;
+        current = {
+          ...current,
+          connected: false,
+          capabilities: {
+            ...current.capabilities,
+            input: false,
+            steer: false,
+            interrupt: false,
+            commandApproval: false,
+            fileApproval: false,
+            questions: false
+          },
+          reason: "Current connection status is unavailable. Reconnecting\u2026"
+        };
+        refresh();
+      },
+      observe(value) {
+        if (current?.thread !== value?.thread) {
+          ++revision;
+          busy2 = false;
+          uncertain = false;
+          note = "";
+        }
+        current = value;
+        refresh();
       },
       view,
       destroy() {
@@ -9404,7 +9539,20 @@ globalThis.__semonUIShared = __semonUIShared;
       if (!st.bottom && n) host2.liveModelOwner.LIVE.fresh += n;
       host2.viewport.syncJump();
     }
-    return { refresh };
+    function controls() {
+      if (host2.disposed) return;
+      if (host2.toolViewsOwner.viewerEl || host2.accountControlsOwner.accountChrome.open) {
+        host2.liveModelOwner.LIVE.pending = true;
+        return;
+      }
+      host2.navigationViewOwner.renderNav();
+      const route = host2.navigation.route;
+      if (host2.sidebarOnly || route.v !== "session" || host2.navigation.rendered !== route) return;
+      const anchor = host2.viewport.capture();
+      updateSessionControl(host2.$("#page"), host2.controlOwner.view(route.id));
+      host2.viewport.restore(anchor, anchor.bottom);
+    }
+    return { refresh, controls };
   }
 
   // src/app/bootstrap.ts
@@ -9431,7 +9579,7 @@ globalThis.__semonUIShared = __semonUIShared;
       if (host2.disposed || loading) return;
       host2.scope.clearTimeout(retryTimer);
       loading = true;
-      host2.transportOwner.api("/api/model?delta=1").then(async (m) => {
+      host2.transportOwner.api("/api/model?delta=1" + (host2.viewerHost?.controlStream ? "&content=1" : "")).then(async (m) => {
         if (host2.disposed) return;
         const adopted = host2.transportOwner.adopt(m);
         host2.liveModelOwner.LIVE.version = adopted.version;
@@ -10241,7 +10389,7 @@ globalThis.__semonUIShared = __semonUIShared;
       return "&selected=" + host2.transportOwner.enc(route.id) + (session ? "&machine=" + host2.transportOwner.enc(session.machine) : "");
     }
     function modelPath(path, selected = selection()) {
-      return path + selected;
+      return path + selected + (host2.viewerHost?.controlStream ? "&content=1" : "");
     }
     const liveController = createLiveController({
       async poll() {
@@ -10364,8 +10512,12 @@ globalThis.__semonUIShared = __semonUIShared;
       streamSelection = selected;
       if (!path.startsWith("/") || path.startsWith("//") || /[\\\s]/.test(path))
         throw new Error("Invalid live model stream");
+      const streamQuery = [
+        selected.slice(1),
+        host2.viewerHost?.controlStream ? "content=1&since=" + host2.transportOwner.enc(LIVE.version ?? "") : ""
+      ].filter(Boolean).join("&");
       const current = new EventSource(
-        path + (selected ? path.includes("?") ? selected : "?" + selected.slice(1) : "")
+        path + (streamQuery ? (path.includes("?") ? "&" : "?") + streamQuery : "")
       );
       stream = current;
       liveController.useStream();
@@ -14015,7 +14167,7 @@ globalThis.__semonUIShared = __semonUIShared;
       const nav = m.nav == null ? null : object2(m.nav);
       const machinesPath = host2.viewerHost?.machinesPath ?? (nav && typeof nav.machines === "string" && safePath2(nav.machines) ? nav.machines : null);
       host2.modelStore.adopt(m, () => {
-        host2.controlOwner.adopt(control);
+        if (!host2.viewerHost?.controlStream) host2.controlOwner.adopt(control);
         serverNow = m.now;
         fetchedAt = Date.now();
         TOK = marks;
@@ -14515,6 +14667,7 @@ globalThis.__semonUIShared = __semonUIShared;
   // src/app/composition.ts
   var ViewerComposition = class {
     scope;
+    controlObservationOwner;
     controlOwner;
     dialogs;
     disposed;
@@ -14596,6 +14749,7 @@ globalThis.__semonUIShared = __semonUIShared;
         destroy() {
           if (context.disposed) return;
           context.disposed = true;
+          context.controlObservationOwner.destroy();
           context.controlOwner.destroy();
           context.updates.destroy();
           context.scope.destroy();
@@ -14676,10 +14830,10 @@ globalThis.__semonUIShared = __semonUIShared;
       this.seenPersistenceOwner = createSeenPersistence(context);
       this.sentencesOwner = createSentences(context);
       this.isGap = (e) => e.k === "end" && /entries (not included|omitted)|^No activity/.test(e.text ?? "");
-      this.controlOwner = createLocalControl(
-        this.scope,
-        () => context.applicationRefreshOwner.refresh()
-      );
+      this.controlOwner = createLocalControl(this.scope, () => {
+        if (context.viewerHost?.controlStream) context.applicationRefreshOwner.controls();
+        else context.applicationRefreshOwner.refresh();
+      });
       this.transportOwner = createTransport(context);
       this.cacheTx = (sid, entries, meta) => context.transcripts.keep(sid, entries, meta, !!context.domain.originHandoff(sid));
       this.adoptCached = (r) => context.transcripts.adoptCached(r.id, r.turn);
@@ -14734,6 +14888,7 @@ globalThis.__semonUIShared = __semonUIShared;
       this.liveModelOwner = createLiveModel(context);
       this.liveUpdates = createLiveUpdates(context);
       this.applicationRefreshOwner = createApplicationRefresh(context);
+      this.controlObservationOwner = createControlObservation(context);
       this.viewport = createViewport(context);
       this.tickerOwner = createTicker(context);
       if (context.sidebarOnly) {
