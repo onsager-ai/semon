@@ -172,6 +172,7 @@ interface SessionOwner {
   paint(): void;
   controls: (() => void) | null;
   runtime: (() => void) | null;
+  pagers: Partial<Record<'before' | 'after', () => void>>;
   measure(): void;
   change(key: string): void;
 }
@@ -230,6 +231,53 @@ class SessionRuntime extends Component<{ owner: SessionOwner }> {
         {value.reason && <p>{screenText(value.reason)}</p>}
         {observation?.observationError && <p>{screenText(observation.observationError)}</p>}
       </section>
+    );
+  }
+}
+class SessionPager extends Component<{ owner: SessionOwner; where: 'before' | 'after' }> {
+  componentDidMount() {
+    this.props.owner.pagers[this.props.where] = () => this.forceUpdate();
+  }
+  componentWillUnmount() {
+    delete this.props.owner.pagers[this.props.where];
+  }
+  render() {
+    const { owner, where } = this.props,
+      view = owner.snapshot[where];
+    if (!view) {
+      const started = where === 'before' ? owner.snapshot.started : undefined;
+      return started ? (
+        <div class="divider started">
+          <span class="dv-text">
+            <span class="dv-lead">{started.lead}</span>
+            <span class="dv-machine" data-tip={started.machine} data-tip-clipped="">
+              {screenText(started.machine)}
+            </span>
+          </span>
+        </div>
+      ) : null;
+    }
+    return (
+      <div class="list">
+        <button
+          class="more"
+          type="button"
+          data-load-earlier={where === 'before' ? '' : undefined}
+          data-pager-sid={view.sid}
+          data-pager-where={where}
+          disabled={view.disabled}
+          aria-busy={view.busy || undefined}
+          onClick={(event) => {
+            if (event.currentTarget.isConnected && !owner.disposed)
+              owner.host.pager(event.currentTarget);
+          }}
+        >
+          {view.busy && <span class="spin" aria-hidden="true" />}
+          <span class="pager-label" aria-live="polite">
+            {screenText(view.text)}
+          </span>
+        </button>
+      </div>
     );
   }
 }
@@ -731,6 +779,7 @@ export function renderSessionScreen(
       paint() {},
       controls: null,
       runtime: null,
+      pagers: {},
       measure() {},
       change() {},
       observer: new ResizeObserver(() => {}),
@@ -784,29 +833,6 @@ export function renderSessionScreen(
         state.revisions.set(block.turn.id, (state.revisions.get(block.turn.id) ?? 0) + 1);
     state.paint();
   };
-  function pager(view: PagerView) {
-    return (
-      <div key={view.where} class="list">
-        <button
-          class="more"
-          type="button"
-          data-load-earlier={view.where === 'before' ? '' : undefined}
-          data-pager-sid={view.sid}
-          data-pager-where={view.where}
-          disabled={view.disabled}
-          aria-busy={view.busy || undefined}
-          onClick={(event) => {
-            if (event.currentTarget.isConnected) state.host.pager(event.currentTarget);
-          }}
-        >
-          {view.busy && <span class="spin" aria-hidden="true" />}
-          <span class="pager-label" aria-live="polite">
-            {screenText(view.text)}
-          </span>
-        </button>
-      </div>
-    );
-  }
   state.paint = () => {
     if (state.disposed) return;
     const held =
@@ -829,18 +855,7 @@ export function renderSessionScreen(
             </p>
           )}
           <div class="turns">
-            {view.before
-              ? pager(view.before)
-              : view.started && (
-                  <div class="divider started">
-                    <span class="dv-text">
-                      <span class="dv-lead">{view.started.lead}</span>
-                      <span class="dv-machine" data-tip={view.started.machine} data-tip-clipped="">
-                        {screenText(view.started.machine)}
-                      </span>
-                    </span>
-                  </div>
-                )}
+            <SessionPager owner={state} where="before" />
             {state.blocks.map((block) =>
               block.kind === 'turn' ? (
                 <Turn
@@ -857,7 +872,7 @@ export function renderSessionScreen(
                 </Fragment>
               ),
             )}
-            {view.after && pager(view.after)}
+            <SessionPager owner={state} where="after" />
             {view.empty && <p class="empty">{screenText(view.empty)}</p>}
           </div>
           <div
@@ -956,7 +971,7 @@ export function updateSessionPager(root: HTMLElement, view: PagerView) {
   const owner = owners.get(root);
   if (!owner || owner.snapshot.id !== view.sid) return;
   owner.snapshot = { ...owner.snapshot, [view.where]: view };
-  owner.paint();
+  owner.pagers[view.where]?.();
 }
 
 export function updateSessionClock(
