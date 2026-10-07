@@ -16950,6 +16950,7 @@ globalThis.__semonUIShared = __semonUIShared;
           newCount: 0,
           lastTotal: null
         };
+        view.root.className = "catalog-session";
         selected.set(cacheKey(key2), view);
       }
       active = view;
