@@ -69,24 +69,24 @@ function digest(value: unknown) {
     throw new Error('Invalid catalog source digest');
   return bytes;
 }
-function sourceReference(value: unknown): CatalogSourceReference {
-  const row = object(value),
-    source = object(row.source),
+export function parseCatalogSource(value: unknown): CatalogSourceReference['source'] {
+  const source = object(value),
     offset = integer(source.offset);
   if (offset < 0) throw new Error('Invalid catalog source offset');
   return {
-    source: {
-      root: text(source.root),
-      path: text(source.path),
-      native_id: text(source.native_id),
-      offset,
-      prefix_sha256: digest(source.prefix_sha256),
-      tail_sha256: digest(source.tail_sha256),
-    },
-    state: freshness(row.state),
+    root: text(source.root),
+    path: text(source.path),
+    native_id: text(source.native_id),
+    offset,
+    prefix_sha256: digest(source.prefix_sha256),
+    tail_sha256: digest(source.tail_sha256),
   };
 }
-function session(value: unknown): CatalogSession {
+function sourceReference(value: unknown): CatalogSourceReference {
+  const row = object(value);
+  return { source: parseCatalogSource(row.source), state: freshness(row.state) };
+}
+export function parseCatalogSession(value: unknown): CatalogSession {
   const row = object(value),
     cost = object(row.cost),
     state = object(row.freshness),
@@ -119,7 +119,7 @@ export function parseCatalogPage(value: unknown): CatalogPage {
     info = object(page.machine_info),
     capabilities = object(page.capabilities),
     generation = text(page.generation),
-    items = array(page.items, session),
+    items = array(page.items, parseCatalogSession),
     next = nullable(page.next_cursor, text);
   if (
     page.api !== 1 ||
