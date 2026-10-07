@@ -66,3 +66,57 @@ Current coherent publication still builds all background native histories; dirty
 component publication remains a separate dependency. Metadata-only q/global
 union pagination are also unfinished. This slice does not satisfy all #319
 acceptance criteria or claim a complete default Viewer journey.
+
+## Qualified string fields
+
+Recipe version 2 indexes plain Claude user, assistant and thinking strings during
+complete observation. It stores only an allowlisted field pointer, scalar-safe
+raw offsets/checkpoints and native event identity. It does not persist body text.
+Structured user content with multiple blocks, attachments, Codex records and tool
+formatting wrappers remain unsupported by this field path.
+
+Selected previews decode at most 4 KiB of text from at most 4 KiB + 11 raw bytes.
+A clipped entry exposes `field: {name: "text", chunks, complete}`. The scoped
+`/api/session-entry` endpoint requires `sid`, `after`, `limit=1`, the observed
+projection `generation`, and a `field_chunk` ordinal. Each ordinal addresses one
+persisted scalar-safe checkpoint interval, capped at 64 KiB + 11 raw bytes and
+128 KiB decoded text. It never reads or decodes earlier field bytes. A generation
+change returns the normal 409 resynchronization response; unqualified fields
+return 422 and unavailable source ranges return 503.
+
+`selected_entry` advertises this qualified endpoint; `large_native_records`
+remains false because native formats outside this allowlist remain incomplete.
+Producer indexing still rereads qualified source records during a complete
+rebuild, and repeated slots can duplicate producer parsing. This work is outside
+the bounded request path and remains a measured background-refresh concern.
+
+## Common tool fields and host dispatch
+
+Recipe version 3 adds string Claude `tool_result.content` and Codex
+`function_call_output.output` (including an object with a string `output`). A
+qualified result field feeds the shared native tool renderer; the small native
+call supplies its name, argument preview and recorded outcome. Call context that
+exceeds the request record budget remains visibly incomplete. Codex formatting
+frames, provider truncation markers and embedded JSON strings that require
+another decoding layer remain unqualified pending the producer mapping contract.
+The result descriptor and expansion response use `field.name: "out"`.
+
+Native slot UUIDs are persisted as metadata so a failed byte observation retains
+entry identity and provenance. Useful already-loaded content can remain visible
+with its incomplete observation overlay. The bounded response also reports
+`content_observation` separately from local source/facts/native-selection
+freshness. Its source generation hashes fingerprint opaque reader generation
+identifiers, rather than purporting to hash returned content.
+
+Hosts can opt into `session_transcript_range_with_mode` or
+`session_entry_field_with_mode` with `LocalThenProvider`. Only a missing original
+local source falls through to the request-owned provider. A changed/replaced
+local source, permission denial or missing/corrupt sealed segment must resynchronize
+and does not silently fall through. The host must authorize before and after the
+complete call because its callback is not invoked for qualified local bytes.
+Default provider-only behavior remains available.
+
+`session_catalog_capabilities` and `SessionReadEndpoints` provide pure capability
+advertisement for an already-authorized source without creating a ViewerCore or
+restoring/discovering sources. The public default Viewer exposes the stable
+catalog-only `local` source alias; legacy internal identities remain unchanged.
