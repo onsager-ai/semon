@@ -15836,7 +15836,7 @@ globalThis.__semonUIShared = __semonUIShared;
     let disposed = false, page = null, items = [], cursor = null, listEpoch = 0, updating = false, note = "", harness = "", repo = "", active = null;
     const selected = /* @__PURE__ */ new Map();
     const account = parseAccount(viewerHost?.account);
-    let wide = false, chromeTitle = null, chromeSession = false;
+    let wide = false, rail = document.querySelector(".app")?.classList.contains("rail") ?? false, chromeTitle = null, chromeSession = false;
     const shell = createShellChrome({
       account: {
         place(widget, trigger) {
@@ -15866,6 +15866,8 @@ globalThis.__semonUIShared = __semonUIShared;
       drawerClosed() {
       },
       railChanged() {
+        rail = !rail;
+        chrome();
       }
     });
     shell.mount(document.querySelector(".app"));
@@ -15975,7 +15977,7 @@ globalThis.__semonUIShared = __semonUIShared;
             (destination) => destination.key !== "sessions"
           )
         ],
-        false
+        rail
       );
       if (chromeTitle !== name || chromeSession !== !!active) {
         chromeTitle = name;

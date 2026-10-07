@@ -81,6 +81,7 @@ export function createCatalogViewer(
   const selected = new Map<string, SelectedView>();
   const account = parseAccount(viewerHost?.account);
   let wide = false,
+    rail = document.querySelector('.app')?.classList.contains('rail') ?? false,
     chromeTitle: string | null = null,
     chromeSession = false;
   const shell = createShellChrome({
@@ -107,7 +108,10 @@ export function createCatalogViewer(
     },
     drawerOpened() {},
     drawerClosed() {},
-    railChanged() {},
+    railChanged() {
+      rail = !rail;
+      chrome();
+    },
   });
   shell.mount(document.querySelector<HTMLElement>('.app')!);
   const root = shell.slots.content,
@@ -224,7 +228,7 @@ export function createCatalogViewer(
           (destination) => destination.key !== 'sessions',
         ),
       ],
-      false,
+      rail,
     );
     if (chromeTitle !== name || chromeSession !== !!active) {
       chromeTitle = name;
