@@ -1844,7 +1844,7 @@ fn ledger_row(connection: &Connection, path: &str) -> rusqlite::Result<Option<(i
                             ino: uint(row.get(2)?),
                             size: uint(row.get(3)?),
                             modified_ns: u128::from_be_bytes(row.get(4)?),
-                            changed_ns: row.get::<_,Option<[u8;16]>>(7)?.map(i128::from_be_bytes),
+                            changed_ns: row.get::<_,Option<[u8;16]>>(8)?.map(i128::from_be_bytes),
                         },
                         offset: uint(row.get(5)?),
                         prefix: row.get(6)?,
