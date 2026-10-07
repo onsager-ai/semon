@@ -15,6 +15,7 @@ use serde_json::Value;
 mod analytics;
 mod catalog;
 mod catalog_observer;
+mod catalog_search;
 pub use catalog::{
     CatalogFreshness, CatalogIdentityError, CatalogOwnerQualification, CatalogReadScope,
     CatalogSessionIdentity, CatalogSourceObservation, SessionSourceProof, SessionSourceRef,
