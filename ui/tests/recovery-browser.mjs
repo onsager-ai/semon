@@ -26,8 +26,8 @@ async function fixture(run) {
       }),
     );
     await page.goto('http://recovery.test/s/codex/s?turn=t#anchor');
-    await page.clock.install();
-    await page.clock.pauseAt(new Date());
+    await page.clock.install({ time: new Date('2026-10-07T00:00:00Z') });
+    await page.clock.pauseAt(new Date('2026-10-07T00:01:00Z'));
     await page.addScriptTag({ content: bundle.outputFiles[0].text });
     await run(page);
   } finally {
