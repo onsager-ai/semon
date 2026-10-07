@@ -51,7 +51,10 @@ export interface ViewerBarHost {
 export function createViewerBar() {
   const title = document.createElement('div'),
     actions = document.createElement('div'),
-    mode = document.createElement('div');
+    mode = document.createElement('div'),
+    jumpTarget = document.createElement('div');
+  jumpTarget.className = 'jump-wrap';
+  jumpTarget.hidden = true;
   title.className = 'ttl';
   actions.className = 'viewer-bar-actions';
   mode.className = 'viewer-bar-mode';
@@ -163,54 +166,66 @@ export function createViewerBar() {
       title,
     );
     render(
-      view.mode === 'normal' ? (
-        view.analytics ? (
-          <div class="analytics-range" role="group" aria-label="Analytics range">
-            {[
-              [1, '24 h'],
-              [7, '7 d'],
-              [30, '30 d'],
-            ].map(([days, label]) => (
+      <>
+        {view.session && !view.trace && (
+          <span
+            class="viewer-jump"
+            ref={(node) => {
+              if (node && jumpTarget.parentNode !== node) node.append(jumpTarget);
+            }}
+          />
+        )}
+        {view.mode === 'normal' ? (
+          view.analytics ? (
+            <div class="analytics-range" role="group" aria-label="Analytics range">
+              {[
+                [1, '24 h'],
+                [7, '7 d'],
+                [30, '30 d'],
+              ].map(([days, label]) => (
+                <button
+                  key={days}
+                  type="button"
+                  data-e={'analytics-range:' + days}
+                  aria-pressed={view.days === days}
+                  onClick={(event) => active(event.currentTarget, () => host.range(Number(days)))}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+          ) : view.session ? (
+            <>
+              {!view.trace && (
+                <button
+                  key={'find:' + view.session}
+                  class="ibtn"
+                  type="button"
+                  id="find-btn"
+                  aria-label="Find and filter"
+                  onClick={(event) => active(event.currentTarget, host.find)}
+                >
+                  {icon('search')}
+                </button>
+              )}
               <button
-                key={days}
-                type="button"
-                data-e={'analytics-range:' + days}
-                aria-pressed={view.days === days}
-                onClick={(event) => active(event.currentTarget, () => host.range(Number(days)))}
-              >
-                {label}
-              </button>
-            ))}
-          </div>
-        ) : view.session ? (
-          <>
-            {!view.trace && (
-              <button
-                key={'find:' + view.session}
+                key={'more:' + view.session}
                 class="ibtn"
                 type="button"
-                id="find-btn"
-                aria-label="Find and filter"
-                onClick={(event) => active(event.currentTarget, host.find)}
+                id="more-btn"
+                aria-label="Session menu: details, cost and actions"
+                aria-haspopup="dialog"
+                aria-expanded="false"
+                onClick={(event) =>
+                  active(event.currentTarget, () => host.menu(event.currentTarget))
+                }
               >
-                {icon('search')}
+                {icon('more')}
               </button>
-            )}
-            <button
-              key={'more:' + view.session}
-              class="ibtn"
-              type="button"
-              id="more-btn"
-              aria-label="Session menu: details, cost and actions"
-              aria-haspopup="dialog"
-              aria-expanded="false"
-              onClick={(event) => active(event.currentTarget, () => host.menu(event.currentTarget))}
-            >
-              {icon('more')}
-            </button>
-          </>
-        ) : null
-      ) : null,
+            </>
+          ) : null
+        ) : null}
+      </>,
       actions,
     );
     render(
@@ -324,6 +339,7 @@ export function createViewerBar() {
   }
   return {
     update,
+    jumpTarget,
     destroy() {
       if (disposed) return;
       disposed = true;

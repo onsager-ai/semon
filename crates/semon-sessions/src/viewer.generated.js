@@ -756,6 +756,7 @@ var __semonUIShared = (() => {
   }
   var serial2 = 0;
   var sheet = null;
+  var pendingOpen = null;
   var swallow = 0;
   var sheetList = null;
   var touchY = 0;
@@ -763,21 +764,25 @@ var __semonUIShared = (() => {
   var phone = () => window.matchMedia("(max-width: 760px)").matches;
   function orphaned() {
     if (!sheetList || sheetList.isConnected) return false;
-    lock(null);
-    sheet = null;
+    if (sheet) sheet.orphaned();
+    else lock(null);
     return true;
   }
   function refuse(event) {
     if (orphaned() || !sheetList) return;
+    if (event instanceof TouchEvent && event.touches.length > 1) return;
     if (event instanceof TouchEvent && event.type === "touchstart") {
       touchY = event.touches[0]?.clientY ?? 0;
       return;
     }
+    const nextTouchY = event instanceof TouchEvent ? event.touches[0]?.clientY ?? touchY : touchY;
+    const touchDelta = touchY - nextTouchY;
+    touchY = nextTouchY;
     if (!(event.target instanceof Node) || !sheetList.contains(event.target)) {
       event.preventDefault();
       return;
     }
-    const room = sheetList.scrollHeight - sheetList.clientHeight, delta = event instanceof WheelEvent ? event.deltaY : event instanceof TouchEvent ? touchY - (event.touches[0]?.clientY ?? touchY) : 0;
+    const room = sheetList.scrollHeight - sheetList.clientHeight, delta = event instanceof WheelEvent ? event.deltaY : event instanceof TouchEvent ? touchDelta : 0;
     if (room <= 1 || delta > 0 && sheetList.scrollTop >= room - 1 || delta < 0 && sheetList.scrollTop <= 0)
       event.preventDefault();
   }
@@ -988,6 +993,10 @@ var __semonUIShared = (() => {
     function openList() {
       if (opened || disposed || !root.isConnected) return;
       const asSheet = phone() && typeof HTMLDialogElement.prototype.showModal === "function";
+      if (asSheet && swallow) {
+        pendingOpen = openList;
+        return;
+      }
       query = "";
       opened = { sheet: asSheet, search: options.length > searchAbove };
       paintTrigger();
@@ -1017,9 +1026,11 @@ var __semonUIShared = (() => {
         lock(list);
         try {
           history.pushState({ ...history.state, shSelect: n3 }, "");
-          swallow = 0;
           opened.entry = true;
           sheet = {
+            orphaned() {
+              close(false);
+            },
             popped() {
               if (opened) opened.entry = false;
               close();
@@ -1056,7 +1067,7 @@ var __semonUIShared = (() => {
         }
         lock(null);
         sheet = null;
-        if (was.entry) {
+        if (was.entry && history.state?.shSelect === n3) {
           swallow++;
           history.back();
         }
@@ -1205,6 +1216,7 @@ var __semonUIShared = (() => {
       },
       destroy() {
         if (disposed) return;
+        if (pendingOpen === openList) pendingOpen = null;
         close(false);
         disposed = true;
         if (sizing !== null) cancelAnimationFrame(sizing);
@@ -1244,6 +1256,11 @@ var __semonUIShared = (() => {
     window.addEventListener("popstate", (event) => {
       if (swallow) {
         swallow--;
+        if (!swallow && pendingOpen) {
+          const open = pendingOpen;
+          pendingOpen = null;
+          queueMicrotask(open);
+        }
         event.stopImmediatePropagation();
         return;
       }
@@ -2154,7 +2171,7 @@ globalThis.__semonUIShared = __semonUIShared;
     const account = createAccountChrome(host2.account);
     const phone = window.matchMedia("(max-width: 760px)");
     let app = null, sidebar, head, nav, bar, scrim;
-    let recent, content;
+    let recent, content2;
     let desktopAccount = null, phoneAccount = null;
     let lead = null, destroyed = false, sx = null;
     let destinations = [], rail = false;
@@ -2287,7 +2304,7 @@ globalThis.__semonUIShared = __semonUIShared;
       account,
       get slots() {
         ready();
-        return { recent, content };
+        return { recent, content: content2 };
       },
       get drawerOpen() {
         return !!app && document.body.classList.contains("drawer-open");
@@ -2323,7 +2340,7 @@ globalThis.__semonUIShared = __semonUIShared;
         bar = required("#topbar");
         scrim = required("#scrim");
         recent = required("#side-list");
-        content = required("#page");
+        content2 = required("#page");
         app = container;
         paintHead();
         listen(scrim, "click", () => closeDrawer());
@@ -3082,16 +3099,22 @@ globalThis.__semonUIShared = __semonUIShared;
       typeof p.command !== "string" && !Array.isArray(changes) && /* @__PURE__ */ jsx("pre", { children: visible(JSON.stringify(request.payload, null, 2)) })
     ] });
   }
-  function LocalControl({ view }) {
+  function LocalControl({
+    view,
+    runtimeObserved = false
+  }) {
     const [text2, setText] = useState("");
     const s = view.snapshot;
-    const canSend = !view.busy && !view.uncertain && s.connected && (s.activeTurn ? s.capabilities.steer : s.capabilities.input) && !!text2.trim();
+    const canWrite = !view.busy && !view.uncertain && s.connected && (s.activeTurn ? s.capabilities.steer : s.capabilities.input);
+    const canSend = canWrite && !!text2.trim();
     const showStop = !!s.activeTurn && s.capabilities.interrupt && !text2.trim();
     const pending = s.requests.filter((r) => r.state.state === "open" || r.state.state === "claimed");
     const recent = s.requests.filter((r) => r.state.state !== "open" && r.state.state !== "claimed").slice(-10);
     return /* @__PURE__ */ jsxs("section", { class: "local-control", "aria-label": "Conversation controls", children: [
-      !s.connected && /* @__PURE__ */ jsx("p", { role: "status", children: "Reconnecting to your session\u2026" }),
+      !s.connected && /* @__PURE__ */ jsx("p", { role: "status", children: runtimeObserved ? "Native session controls are unavailable." : s.runtime?.state === "ended" ? "This session has ended." : s.runtime?.state === "failed" ? "This environment needs attention." : s.runtime?.state === "disconnected" ? "This environment is disconnected." : s.runtime?.state === "unavailable" ? "Runtime state is unavailable." : "Reconnecting to your session\u2026" }),
       s.reason && /* @__PURE__ */ jsx("p", { children: s.reason }),
+      s.runtime && s.runtime.freshness !== "current" && /* @__PURE__ */ jsx("p", { role: "status", children: s.runtime.freshness === "updating" ? "Checking the environment\u2026" : s.runtime.freshness === "stale" ? "Last environment observation is stale." : "Current environment observation is unavailable." }),
+      s.runtime?.observationError && /* @__PURE__ */ jsx("p", { children: s.runtime.observationError }),
       pending.map((request) => {
         const supported = request.kind === "question" ? s.capabilities.questions : request.payload.method === "item/fileChange/requestApproval" ? s.capabilities.fileApproval : s.capabilities.commandApproval;
         const disabled = view.busy || view.uncertain || !supported || !!request.reason || request.state.state !== "open" || request.remainingMs === 0;
@@ -3132,8 +3155,8 @@ globalThis.__semonUIShared = __semonUIShared;
           "aria-busy": view.busy || void 0,
           onSubmit: async (event) => {
             event.preventDefault();
-            if (!canSend) return;
-            const submitted = text2;
+            const submitted = event.currentTarget.querySelector("textarea")?.value ?? text2;
+            if (!canWrite || !submitted.trim()) return;
             if (await view.send(submitted))
               setText((current) => current === submitted ? "" : current);
           },
@@ -3151,7 +3174,8 @@ globalThis.__semonUIShared = __semonUIShared;
                 onKeyDown: (event) => {
                   if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
                     event.preventDefault();
-                    if (canSend) event.currentTarget.form?.requestSubmit();
+                    if (canWrite && event.currentTarget.value.trim())
+                      event.currentTarget.form?.requestSubmit();
                   }
                 }
               }
@@ -3185,7 +3209,7 @@ globalThis.__semonUIShared = __semonUIShared;
           ]
         }
       ),
-      (!s.connected || view.uncertain) && /* @__PURE__ */ jsx("div", { class: "local-control-actions", children: /* @__PURE__ */ jsx(
+      (!s.connected || view.uncertain) && view.canReconnect !== false && s.runtime?.reconnectable !== false && /* @__PURE__ */ jsx("div", { class: "local-control-actions", children: /* @__PURE__ */ jsx(
         "button",
         {
           type: "button",
@@ -4519,7 +4543,7 @@ globalThis.__semonUIShared = __semonUIShared;
     return /* @__PURE__ */ jsx("span", { class: "cost-info", tabIndex: 0, role: "img", "aria-label": text2, "data-tip": text2, children: /* @__PURE__ */ jsx(Glyph, { path: COST_INFO, className: "" }) });
   }
   function Row({ row, open, widthClass }) {
-    const content = /* @__PURE__ */ jsxs(Fragment2, { children: [
+    const content2 = /* @__PURE__ */ jsxs(Fragment2, { children: [
       /* @__PURE__ */ jsx("span", { class: "session-name", children: screenText(row.name) }),
       /* @__PURE__ */ jsxs("span", { class: "hlabel", children: [
         row.mark && /* @__PURE__ */ jsx(Harness, { mark: row.mark, lead: false }),
@@ -4541,9 +4565,9 @@ globalThis.__semonUIShared = __semonUIShared;
           event.preventDefault();
           open();
         },
-        children: content
+        children: content2
       }
-    ) : /* @__PURE__ */ jsx("button", { class: cls, type: "button", onClick: open, children: content }) : /* @__PURE__ */ jsx("div", { class: cls, children: content });
+    ) : /* @__PURE__ */ jsx("button", { class: cls, type: "button", onClick: open, children: content2 }) : /* @__PURE__ */ jsx("div", { class: cls, children: content2 });
   }
   function renderAnalyticsScreen(root, snapshot, host2) {
     let layout = states.get(root);
@@ -5357,7 +5381,90 @@ globalThis.__semonUIShared = __semonUIShared;
 
   // src/lib/transcript.tsx
   var owners = /* @__PURE__ */ new WeakMap();
-  var identity = (entry) => entry.entryKey ?? entry.key ?? "";
+  var SessionControls = class extends Component {
+    componentDidMount() {
+      this.props.owner.controls = () => this.forceUpdate();
+    }
+    componentWillUnmount() {
+      this.props.owner.controls = null;
+    }
+    render() {
+      const view = this.props.owner.snapshot.control;
+      return view ? /* @__PURE__ */ jsx(LocalControl, { view, runtimeObserved: !!this.props.owner.snapshot.runtime }) : null;
+    }
+  };
+  var SessionRuntime = class extends Component {
+    componentDidMount() {
+      this.props.owner.runtime = () => this.forceUpdate();
+    }
+    componentWillUnmount() {
+      this.props.owner.runtime = null;
+    }
+    render() {
+      const value = this.props.owner.snapshot.runtime;
+      if (!value) return null;
+      const observation = value.observation;
+      return /* @__PURE__ */ jsxs("section", { class: "local-control", "aria-label": "Environment status", children: [
+        /* @__PURE__ */ jsx("p", { role: "status", children: observation ? {
+          active: "Environment is active.",
+          disconnected: "Environment is disconnected.",
+          failed: "Environment needs attention.",
+          ended: "This session has ended.",
+          unavailable: "Runtime state is unavailable."
+        }[observation.state] : "Runtime state is unavailable." }),
+        observation?.phase && /* @__PURE__ */ jsxs("p", { children: [
+          "Phase: ",
+          screenText(observation.phase)
+        ] }),
+        observation?.presence && /* @__PURE__ */ jsxs("p", { children: [
+          "Compute presence: ",
+          screenText(observation.presence)
+        ] }),
+        (value.delivery !== "current" || observation?.freshness !== "current") && /* @__PURE__ */ jsx("p", { role: "status", children: value.delivery === "updating" || observation?.freshness === "updating" ? "Checking the environment\u2026" : value.delivery === "stale" || observation?.freshness === "stale" ? "Last environment observation is stale." : "Current environment observation is unavailable." }),
+        value.reason && /* @__PURE__ */ jsx("p", { children: screenText(value.reason) }),
+        observation?.observationError && /* @__PURE__ */ jsx("p", { children: screenText(observation.observationError) })
+      ] });
+    }
+  };
+  var SessionPager = class extends Component {
+    componentDidMount() {
+      this.props.owner.pagers[this.props.where] = () => this.forceUpdate();
+    }
+    componentWillUnmount() {
+      delete this.props.owner.pagers[this.props.where];
+    }
+    render() {
+      const { owner, where } = this.props, view = owner.snapshot[where];
+      if (!view) {
+        const started = where === "before" ? owner.snapshot.started : void 0;
+        return started ? /* @__PURE__ */ jsx("div", { class: "divider started", children: /* @__PURE__ */ jsxs("span", { class: "dv-text", children: [
+          /* @__PURE__ */ jsx("span", { class: "dv-lead", children: started.lead }),
+          /* @__PURE__ */ jsx("span", { class: "dv-machine", "data-tip": started.machine, "data-tip-clipped": "", children: screenText(started.machine) })
+        ] }) }) : null;
+      }
+      return /* @__PURE__ */ jsx("div", { class: "list", children: /* @__PURE__ */ jsxs(
+        "button",
+        {
+          class: "more",
+          type: "button",
+          "data-load-earlier": where === "before" ? "" : void 0,
+          "data-pager-sid": view.sid,
+          "data-pager-where": where,
+          disabled: view.disabled,
+          "aria-busy": view.busy || void 0,
+          onClick: (event) => {
+            if (event.currentTarget.isConnected && !owner.disposed)
+              owner.host.pager(event.currentTarget);
+          },
+          children: [
+            view.busy && /* @__PURE__ */ jsx("span", { class: "spin", "aria-hidden": "true" }),
+            /* @__PURE__ */ jsx("span", { class: "pager-label", "aria-live": "polite", children: screenText(view.text) })
+          ]
+        }
+      ) });
+    }
+  };
+  var identity = (entry2) => entry2.entryKey ?? entry2.key ?? "";
   function State({ state: state2, label, text: text2 }) {
     return /* @__PURE__ */ jsxs("span", { class: "state " + state2, children: [
       state2 === "work" ? /* @__PURE__ */ jsx("span", { class: "spin" }) : /* @__PURE__ */ jsx("span", { class: "dot " + state2, role: "img", "aria-label": label, "data-tip": label }),
@@ -5373,21 +5480,21 @@ globalThis.__semonUIShared = __semonUIShared;
       values.length === 1 ? values[0] : /* @__PURE__ */ jsx("ol", { children: values.map((value, i) => /* @__PURE__ */ jsx("li", { children: screenText(value) }, i)) })
     ] }) });
   }
-  function Entry({ entry, owner }) {
-    const key = identity(entry), open = owner.open.has(key), active = (action) => {
+  function Entry({ entry: entry2, owner }) {
+    const key = identity(entry2), open = owner.open.has(key), active = (action) => {
       if (!owner.disposed) action();
     };
-    switch (entry.kind) {
+    switch (entry2.kind) {
       case "message":
         return /* @__PURE__ */ jsxs(
           "div",
           {
-            class: entry.flavor === "incoming" ? "bubble in" : "msg " + entry.flavor,
-            "data-e": entry.key,
-            "data-entry-key": entry.entryKey,
-            "data-h": entry.handoff,
+            class: entry2.flavor === "incoming" ? "bubble in" : "msg " + entry2.flavor,
+            "data-e": entry2.key,
+            "data-entry-key": entry2.entryKey,
+            "data-h": entry2.handoff,
             children: [
-              entry.images?.length ? /* @__PURE__ */ jsx("div", { class: "attach-row", children: entry.images.map(
+              entry2.images?.length ? /* @__PURE__ */ jsx("div", { class: "attach-row", children: entry2.images.map(
                 (image2, i) => image2.unavailable || owner.failedImages.has(key + ":" + image2.url) ? /* @__PURE__ */ jsx("span", { class: "attach-na", children: "Image not available" }, i) : /* @__PURE__ */ jsx(
                   "button",
                   {
@@ -5418,42 +5525,56 @@ globalThis.__semonUIShared = __semonUIShared;
                   i
                 )
               ) }) : null,
-              (!entry.images?.length || entry.text) && /* @__PURE__ */ jsx(Markdown, { text: entry.text })
+              (!entry2.images?.length || entry2.text) && /* @__PURE__ */ jsx(Markdown, { text: entry2.text })
             ]
           }
         );
       case "thought":
-        return entry.mode === "pending" ? /* @__PURE__ */ jsxs("div", { class: "think-pending", "data-e": entry.key, "data-entry-key": entry.entryKey, children: [
+        return entry2.mode === "pending" ? /* @__PURE__ */ jsxs("div", { class: "think-pending", "data-e": entry2.key, "data-entry-key": entry2.entryKey, children: [
           /* @__PURE__ */ jsx("span", { class: "spin" }),
           /* @__PURE__ */ jsx("span", { children: "Thinking\u2026" })
         ] }) : /* @__PURE__ */ jsxs(
           "div",
           {
-            class: "thought" + (entry.mode === "masked" ? " masked" : ""),
-            "data-e": entry.key,
-            "data-entry-key": entry.entryKey,
+            class: "thought" + (entry2.mode === "masked" ? " masked" : ""),
+            "data-e": entry2.key,
+            "data-entry-key": entry2.entryKey,
             children: [
-              /* @__PURE__ */ jsx("div", { class: "think-label", children: screenText(entry.label ?? "") }),
-              entry.mode === "readable" && /* @__PURE__ */ jsx(Markdown, { text: entry.text ?? "", className: "think-text" })
+              /* @__PURE__ */ jsx("div", { class: "think-label", children: screenText(entry2.label ?? "") }),
+              entry2.mode === "readable" && /* @__PURE__ */ jsx(Markdown, { text: entry2.text ?? "", className: "think-text" })
             ]
           }
         );
       case "label":
-        return /* @__PURE__ */ jsx("div", { class: entry.className, "data-e": entry.key, "data-entry-key": entry.entryKey, children: screenText(entry.text) });
+        return /* @__PURE__ */ jsxs("div", { class: entry2.className, "data-e": entry2.key, "data-entry-key": entry2.entryKey, children: [
+          screenText(entry2.text),
+          entry2.action && /* @__PURE__ */ jsx(
+            "button",
+            {
+              type: "button",
+              class: "link",
+              disabled: entry2.action.busy,
+              onClick: (event) => {
+                if (event.currentTarget.isConnected) active(() => entry2.action?.run());
+              },
+              children: screenText(entry2.action.label)
+            }
+          )
+        ] });
       case "tool":
         return /* @__PURE__ */ jsx(
           "div",
           {
-            class: entry.step.className,
-            "data-e": entry.key,
-            "data-entry-key": entry.entryKey,
-            "data-tid": entry.step.tid,
-            "data-live": entry.step.sid,
-            "data-since": entry.step.since,
+            class: entry2.step.className,
+            "data-e": entry2.key,
+            "data-entry-key": entry2.entryKey,
+            "data-tid": entry2.step.tid,
+            "data-live": entry2.step.sid,
+            "data-since": entry2.step.since,
             children: /* @__PURE__ */ jsx(
               ToolStepContents,
               {
-                snapshot: entry.step,
+                snapshot: entry2.step,
                 expanded: open,
                 mounted: owner.mounted.has(key),
                 toggle: () => active(() => {
@@ -5475,28 +5596,28 @@ globalThis.__semonUIShared = __semonUIShared;
           }
         );
       case "background": {
-        const content = /* @__PURE__ */ jsxs(Fragment2, { children: [
+        const content2 = /* @__PURE__ */ jsxs(Fragment2, { children: [
           /* @__PURE__ */ jsx(Glyph, { path: "M4 17l5-5-5-5M12 19h8", className: "" }),
-          /* @__PURE__ */ jsx("span", { class: "bg-label", children: screenText(entry.label) })
+          /* @__PURE__ */ jsx("span", { class: "bg-label", children: screenText(entry2.label) })
         ] });
         return /* @__PURE__ */ jsx(
           "div",
           {
-            class: "step bgend" + (entry.failed ? " err" : ""),
-            "data-e": entry.key,
-            "data-entry-key": entry.entryKey,
-            children: entry.loaded ? /* @__PURE__ */ jsx(
+            class: "step bgend" + (entry2.failed ? " err" : ""),
+            "data-e": entry2.key,
+            "data-entry-key": entry2.entryKey,
+            children: entry2.loaded ? /* @__PURE__ */ jsx(
               "button",
               {
                 class: "bg-line",
                 type: "button",
                 onClick: (event) => {
                   if (event.currentTarget.isConnected)
-                    owner.host.background(entry.call, event.currentTarget);
+                    owner.host.background(entry2.call, event.currentTarget);
                 },
-                children: content
+                children: content2
               }
-            ) : /* @__PURE__ */ jsx("div", { class: "bg-line", children: content })
+            ) : /* @__PURE__ */ jsx("div", { class: "bg-line", children: content2 })
           }
         );
       }
@@ -5504,12 +5625,12 @@ globalThis.__semonUIShared = __semonUIShared;
         const steps = /* @__PURE__ */ jsx(
           "div",
           {
-            class: "steps" + (entry.lone ? " lone" : ""),
-            hidden: entry.summary.length > 0 && !open,
-            children: entry.entries.map((item2, i) => /* @__PURE__ */ jsx(Entry, { entry: item2, owner }, identity(item2) || i))
+            class: "steps" + (entry2.lone ? " lone" : ""),
+            hidden: entry2.summary.length > 0 && !open,
+            children: entry2.entries.map((item2, i) => /* @__PURE__ */ jsx(Entry, { entry: item2, owner }, identity(item2) || i))
           }
         );
-        return !entry.summary.length ? steps : /* @__PURE__ */ jsxs("div", { class: "tgroup", "data-e": entry.key, "data-entry-key": entry.entryKey, children: [
+        return !entry2.summary.length ? steps : /* @__PURE__ */ jsxs("div", { class: "tgroup", "data-e": entry2.key, "data-entry-key": entry2.entryKey, children: [
           /* @__PURE__ */ jsxs(
             "button",
             {
@@ -5523,13 +5644,13 @@ globalThis.__semonUIShared = __semonUIShared;
                 owner.change(key);
               },
               children: [
-                entry.running ? /* @__PURE__ */ jsx("span", { class: "spin" }) : /* @__PURE__ */ jsx(Glyph, { path: entry.stack, className: "" }),
-                /* @__PURE__ */ jsx("span", { class: "tt" + (entry.background ? " bgsum" : ""), children: entry.summary.map(
+                entry2.running ? /* @__PURE__ */ jsx("span", { class: "spin" }) : /* @__PURE__ */ jsx(Glyph, { path: entry2.stack, className: "" }),
+                /* @__PURE__ */ jsx("span", { class: "tt" + (entry2.background ? " bgsum" : ""), children: entry2.summary.map(
                   (part, i) => part.className ? /* @__PURE__ */ jsx("span", { class: part.className, children: screenText(part.text) }, i) : part.text
                 ) }),
-                entry.failed > 0 && /* @__PURE__ */ jsx("span", { class: "tf", children: screenText("\xB7 " + entry.failed + " failed") }),
-                entry.running && /* @__PURE__ */ jsx("span", { class: "tl tick", children: entry.clockTick ? "\xB7 running " + entry.running : screenText("\xB7 running " + entry.running) }),
-                /* @__PURE__ */ jsx(Glyph, { path: entry.chevron, className: "chev" })
+                entry2.failed > 0 && /* @__PURE__ */ jsx("span", { class: "tf", children: screenText("\xB7 " + entry2.failed + " failed") }),
+                entry2.running && /* @__PURE__ */ jsx("span", { class: "tl tick", children: entry2.clockTick ? "\xB7 running " + entry2.running : screenText("\xB7 running " + entry2.running) }),
+                /* @__PURE__ */ jsx(Glyph, { path: entry2.chevron, className: "chev" })
               ]
             }
           ),
@@ -5541,9 +5662,9 @@ globalThis.__semonUIShared = __semonUIShared;
           "div",
           {
             class: "child-card",
-            "data-e": entry.key,
-            "data-entry-key": entry.entryKey,
-            "data-h": entry.handoff,
+            "data-e": entry2.key,
+            "data-entry-key": entry2.entryKey,
+            "data-h": entry2.handoff,
             children: [
               /* @__PURE__ */ jsxs("span", { class: "cc-head", children: [
                 /* @__PURE__ */ jsx(
@@ -5551,37 +5672,37 @@ globalThis.__semonUIShared = __semonUIShared;
                   {
                     class: "cc-name who-link",
                     type: "button",
-                    "aria-label": "Open " + entry.name,
+                    "aria-label": "Open " + entry2.name,
                     onClick: (event) => {
-                      if (event.currentTarget.isConnected) owner.host.session(entry.id, entry.turn);
+                      if (event.currentTarget.isConnected) owner.host.session(entry2.id, entry2.turn);
                     },
-                    children: screenText(entry.name)
+                    children: screenText(entry2.name)
                   }
                 ),
-                /* @__PURE__ */ jsx(State, { state: entry.state, label: entry.stateLabel, text: entry.stateLabel }),
-                /* @__PURE__ */ jsx(Glyph, { path: entry.chevron, className: "chev" })
+                /* @__PURE__ */ jsx(State, { state: entry2.state, label: entry2.stateLabel, text: entry2.stateLabel }),
+                /* @__PURE__ */ jsx(Glyph, { path: entry2.chevron, className: "chev" })
               ] }),
               /* @__PURE__ */ jsxs("span", { class: "cc-meta", children: [
-                entry.mark && /* @__PURE__ */ jsx(Harness, { mark: entry.mark }),
-                screenText(entry.meta)
+                entry2.mark && /* @__PURE__ */ jsx(Harness, { mark: entry2.mark }),
+                screenText(entry2.meta)
               ] }),
-              /* @__PURE__ */ jsx("span", { class: "cc-brief", children: /* @__PURE__ */ jsx(Inline, { text: entry.brief }) }),
-              entry.result ? /* @__PURE__ */ jsxs("span", { class: "cc-result" + (entry.failed ? " err" : ""), children: [
-                /* @__PURE__ */ jsx("span", { class: "rl", children: entry.failed ? "Result: " : "Returned: " }),
-                /* @__PURE__ */ jsx(Inline, { text: entry.result })
-              ] }) : entry.activity && /* @__PURE__ */ jsxs("span", { class: "cc-now", children: [
+              /* @__PURE__ */ jsx("span", { class: "cc-brief", children: /* @__PURE__ */ jsx(Inline, { text: entry2.brief }) }),
+              entry2.result ? /* @__PURE__ */ jsxs("span", { class: "cc-result" + (entry2.failed ? " err" : ""), children: [
+                /* @__PURE__ */ jsx("span", { class: "rl", children: entry2.failed ? "Result: " : "Returned: " }),
+                /* @__PURE__ */ jsx(Inline, { text: entry2.result })
+              ] }) : entry2.activity && /* @__PURE__ */ jsxs("span", { class: "cc-now", children: [
                 /* @__PURE__ */ jsx("span", { class: "spin" }),
-                /* @__PURE__ */ jsx("span", { children: screenText(entry.activity[0]) }),
-                /* @__PURE__ */ jsx("code", { children: entry.activity[1] })
+                /* @__PURE__ */ jsx("span", { children: screenText(entry2.activity[0]) }),
+                /* @__PURE__ */ jsx("code", { children: entry2.activity[1] })
               ] }),
-              entry.trace && /* @__PURE__ */ jsx(
+              entry2.trace && /* @__PURE__ */ jsx(
                 "button",
                 {
                   class: "link cc-run",
                   type: "button",
-                  "aria-label": entry.traceLabel,
+                  "aria-label": entry2.traceLabel,
                   onClick: (event) => {
-                    if (event.currentTarget.isConnected) owner.host.trace(entry.trace);
+                    if (event.currentTarget.isConnected) owner.host.trace(entry2.trace);
                   },
                   children: "Run view"
                 }
@@ -5593,15 +5714,15 @@ globalThis.__semonUIShared = __semonUIShared;
         return /* @__PURE__ */ jsxs(
           "div",
           {
-            class: entry.className,
-            "data-e": entry.key,
-            "data-entry-key": entry.entryKey,
-            "data-h": entry.handoff,
+            class: entry2.className,
+            "data-e": entry2.key,
+            "data-entry-key": entry2.entryKey,
+            "data-h": entry2.handoff,
             children: [
               /* @__PURE__ */ jsxs("div", { class: "ev-head", children: [
-                /* @__PURE__ */ jsx(Glyph, { path: entry.icon, className: "" }),
-                /* @__PURE__ */ jsx("span", { class: "ln", children: /* @__PURE__ */ jsx(Sentence, { parts: entry.parts, host: owner.host }) }),
-                /* @__PURE__ */ jsx("span", { class: "tm", children: entry.time })
+                /* @__PURE__ */ jsx(Glyph, { path: entry2.icon, className: "" }),
+                /* @__PURE__ */ jsx("span", { class: "ln", children: /* @__PURE__ */ jsx(Sentence, { parts: entry2.parts, host: owner.host }) }),
+                /* @__PURE__ */ jsx("span", { class: "tm", children: entry2.time })
               ] }),
               /* @__PURE__ */ jsx(
                 "div",
@@ -5610,7 +5731,7 @@ globalThis.__semonUIShared = __semonUIShared;
                   ref: (node) => {
                     if (node) owner.clamps.set(key, node);
                   },
-                  children: /* @__PURE__ */ jsx(Inline, { text: entry.brief })
+                  children: /* @__PURE__ */ jsx(Inline, { text: entry2.brief })
                 }
               ),
               /* @__PURE__ */ jsx(
@@ -5630,12 +5751,12 @@ globalThis.__semonUIShared = __semonUIShared;
                   children: open ? "Show less" : "Show more"
                 }
               ),
-              entry.result && /* @__PURE__ */ jsxs("div", { class: "ev-result", children: [
-                /* @__PURE__ */ jsx("span", { class: "rl", children: entry.resultLabel }),
-                /* @__PURE__ */ jsx(Inline, { text: entry.result })
+              entry2.result && /* @__PURE__ */ jsxs("div", { class: "ev-result", children: [
+                /* @__PURE__ */ jsx("span", { class: "rl", children: entry2.resultLabel }),
+                /* @__PURE__ */ jsx(Inline, { text: entry2.result })
               ] }),
-              entry.answers && /* @__PURE__ */ jsx("div", { class: "ev-result answer" + (entry.answers.length ? "" : " none"), children: /* @__PURE__ */ jsx(Answer, { values: entry.answers }) }),
-              entry.waiting && /* @__PURE__ */ jsx(State, { state: "wait", label: entry.stateLabel, text: "Waiting on you" })
+              entry2.answers && /* @__PURE__ */ jsx("div", { class: "ev-result answer" + (entry2.answers.length ? "" : " none"), children: /* @__PURE__ */ jsx(Answer, { values: entry2.answers }) }),
+              entry2.waiting && /* @__PURE__ */ jsx(State, { state: "wait", label: entry2.stateLabel, text: "Waiting on you" })
             ]
           }
         );
@@ -5653,7 +5774,7 @@ globalThis.__semonUIShared = __semonUIShared;
           /* @__PURE__ */ jsx(Sentence, { parts: view.header.parts, host: owner.host }),
           /* @__PURE__ */ jsx("span", { class: "tm", children: view.header.time })
         ] }),
-        !view.bare && /* @__PURE__ */ jsx("div", { class: "tx", children: view.entries.map((entry, i) => /* @__PURE__ */ jsx(Entry, { entry, owner }, identity(entry) || i)) }),
+        !view.bare && /* @__PURE__ */ jsx("div", { class: "tx", children: view.entries.map((entry2, i) => /* @__PURE__ */ jsx(Entry, { entry: entry2, owner }, identity(entry2) || i)) }),
         (view.error || view.trace) && /* @__PURE__ */ jsxs("div", { class: "turn-end", children: [
           view.error && /* @__PURE__ */ jsx(State, { state: "err", label: view.stateLabel, text: view.error }),
           view.trace && /* @__PURE__ */ jsxs(
@@ -5707,12 +5828,14 @@ globalThis.__semonUIShared = __semonUIShared;
           type: "button",
           id: "jump-bottom",
           "aria-label": owner.jumpCount ? "Jump to bottom; " + owner.jumpCount + " new entries" : "Jump to bottom of transcript",
+          "data-tip": owner.jumpCount ? owner.jumpCount + " new entries \xB7 Jump to latest" : "Jump to latest",
+          "data-count": owner.jumpCount > 0 ? owner.jumpCount > 99 ? "99+" : String(owner.jumpCount) : void 0,
           disabled: owner.jumpBusy,
           onClick: (event) => {
             if (event.currentTarget.isConnected) owner.host.jump();
           },
           children: [
-            owner.jumpCount > 0 && /* @__PURE__ */ jsx("span", { class: "new-count", children: owner.jumpCount + " new" }),
+            owner.jumpCount > 0 && /* @__PURE__ */ jsx("span", { class: "new-count sr-only", children: owner.jumpCount + " new" }),
             /* @__PURE__ */ jsx(Glyph, { path: "M12 4v15M5 12l7 7 7-7", className: "" })
           ]
         }
@@ -5720,9 +5843,13 @@ globalThis.__semonUIShared = __semonUIShared;
       owner.jump
     );
   }
-  function updateSessionJump(root, visible2, count, busy2 = false) {
+  function updateSessionJump(root, visible2, count, busy2 = false, target) {
     const owner = owners.get(root);
     if (!owner) return;
+    if (target && owner.jump !== target) {
+      if (owner.jump) render(null, owner.jump);
+      owner.jump = target;
+    }
     owner.jumpVisible = visible2;
     owner.jumpCount = count;
     owner.jumpBusy = busy2;
@@ -5753,6 +5880,9 @@ globalThis.__semonUIShared = __semonUIShared;
         jumpBusy: false,
         paint() {
         },
+        controls: null,
+        runtime: null,
+        pagers: {},
         measure() {
         },
         change() {
@@ -5773,7 +5903,7 @@ globalThis.__semonUIShared = __semonUIShared;
             else state3.clipped.delete(key);
             changed = true;
             for (const block of state3.blocks)
-              if (block.kind === "turn" && block.turn.entries.some((entry) => identity(entry) === key))
+              if (block.kind === "turn" && block.turn.entries.some((entry2) => identity(entry2) === key))
                 state3.revisions.set(block.turn.id, (state3.revisions.get(block.turn.id) ?? 0) + 1);
           }
         }
@@ -5785,7 +5915,10 @@ globalThis.__semonUIShared = __semonUIShared;
         state3.disposed = true;
         state3.observer.disconnect();
         cancelAnimationFrame(state3.frame);
-        if (state3.jump) render(null, state3.jump);
+        if (state3.jump) {
+          render(null, state3.jump);
+          state3.jump.hidden = true;
+        }
         owners.delete(root);
       });
     }
@@ -5796,32 +5929,11 @@ globalThis.__semonUIShared = __semonUIShared;
     state2.change = (key) => {
       for (const block of state2.blocks)
         if (block.kind === "turn" && block.turn.entries.some(
-          (entry) => identity(entry) === key || entry.kind === "group" && entry.entries.some((item2) => identity(item2) === key)
+          (entry2) => identity(entry2) === key || entry2.kind === "group" && entry2.entries.some((item2) => identity(item2) === key)
         ))
           state2.revisions.set(block.turn.id, (state2.revisions.get(block.turn.id) ?? 0) + 1);
       state2.paint();
     };
-    function pager(view) {
-      return /* @__PURE__ */ jsx("div", { class: "list", children: /* @__PURE__ */ jsxs(
-        "button",
-        {
-          class: "more",
-          type: "button",
-          "data-load-earlier": view.where === "before" ? "" : void 0,
-          "data-pager-sid": view.sid,
-          "data-pager-where": view.where,
-          disabled: view.disabled,
-          "aria-busy": view.busy || void 0,
-          onClick: (event) => {
-            if (event.currentTarget.isConnected) state2.host.pager(event.currentTarget);
-          },
-          children: [
-            view.busy && /* @__PURE__ */ jsx("span", { class: "spin", "aria-hidden": "true" }),
-            /* @__PURE__ */ jsx("span", { class: "pager-label", "aria-live": "polite", children: screenText(view.text) })
-          ]
-        }
-      ) }, view.where);
-    }
     state2.paint = () => {
       if (state2.disposed) return;
       const held = document.activeElement instanceof HTMLElement && document.activeElement.closest(".session-foot") ? document.activeElement : null, heldKind = held?.dataset.foot;
@@ -5831,11 +5943,9 @@ globalThis.__semonUIShared = __semonUIShared;
         /* @__PURE__ */ jsxs(Fragment2, { children: [
           /* @__PURE__ */ jsx("div", { class: "ph sr", children: /* @__PURE__ */ jsx("h1", { children: screenText(view.name) }) }),
           /* @__PURE__ */ jsxs("section", { class: "transcript", "aria-label": "Transcript", children: [
+            view.observation && /* @__PURE__ */ jsx("p", { class: "empty", role: "status", "data-transcript-observation": "", children: screenText(view.observation) }),
             /* @__PURE__ */ jsxs("div", { class: "turns", children: [
-              view.before ? pager(view.before) : view.started && /* @__PURE__ */ jsx("div", { class: "divider started", children: /* @__PURE__ */ jsxs("span", { class: "dv-text", children: [
-                /* @__PURE__ */ jsx("span", { class: "dv-lead", children: view.started.lead }),
-                /* @__PURE__ */ jsx("span", { class: "dv-machine", "data-tip": view.started.machine, "data-tip-clipped": "", children: screenText(view.started.machine) })
-              ] }) }),
+              /* @__PURE__ */ jsx(SessionPager, { owner: state2, where: "before" }),
               state2.blocks.map(
                 (block) => block.kind === "turn" ? /* @__PURE__ */ jsx(
                   Turn,
@@ -5845,23 +5955,14 @@ globalThis.__semonUIShared = __semonUIShared;
                     revision: state2.revisions.get(block.turn.id) ?? 0
                   },
                   block.turn.id
-                ) : /* @__PURE__ */ jsx(Fragment, { children: block.entries.map((entry, i) => /* @__PURE__ */ jsx(Entry, { entry, owner: state2 }, identity(entry) || block.key + i)) }, block.key)
+                ) : /* @__PURE__ */ jsx(Fragment, { children: block.entries.map((entry2, i) => /* @__PURE__ */ jsx(Entry, { entry: entry2, owner: state2 }, identity(entry2) || block.key + i)) }, block.key)
               ),
-              view.after && pager(view.after),
+              /* @__PURE__ */ jsx(SessionPager, { owner: state2, where: "after" }),
               view.empty && /* @__PURE__ */ jsx("p", { class: "empty", children: screenText(view.empty) })
-            ] }),
-            /* @__PURE__ */ jsx(
-              "div",
-              {
-                class: "jump-wrap",
-                ref: (node) => {
-                  state2.jump = node;
-                  paintJump(state2);
-                }
-              }
-            )
+            ] })
           ] }),
-          view.control && /* @__PURE__ */ jsx(LocalControl, { view: view.control }),
+          /* @__PURE__ */ jsx(SessionRuntime, { owner: state2 }),
+          /* @__PURE__ */ jsx(SessionControls, { owner: state2 }),
           view.footer && /* @__PURE__ */ jsxs("div", { class: "session-foot", children: [
             /* @__PURE__ */ jsxs("span", { class: "stat " + view.footer.state, children: [
               view.footer.state === "work" ? /* @__PURE__ */ jsx("span", { class: "spin" }) : /* @__PURE__ */ jsx(
@@ -5918,11 +6019,25 @@ globalThis.__semonUIShared = __semonUIShared;
     state2.paint();
     host2.committed();
   }
+  function updateSessionControl(root, control) {
+    const owner = owners.get(root);
+    if (!owner || owner.disposed) return;
+    owner.snapshot = { ...owner.snapshot, control };
+    owner.controls?.();
+  }
+  function updateSessionRuntime(root, runtime) {
+    const owner = owners.get(root);
+    if (!owner || owner.disposed) return;
+    const hadRuntime = !!owner.snapshot.runtime;
+    owner.snapshot = { ...owner.snapshot, runtime };
+    owner.runtime?.();
+    if (hadRuntime !== !!runtime) owner.controls?.();
+  }
   function updateSessionPager(root, view) {
     const owner = owners.get(root);
     if (!owner || owner.snapshot.id !== view.sid) return;
     owner.snapshot = { ...owner.snapshot, [view.where]: view };
-    owner.paint();
+    owner.pagers[view.where]?.();
   }
   function updateSessionClock(root, now, starts) {
     const owner = owners.get(root);
@@ -5931,27 +6046,27 @@ globalThis.__semonUIShared = __semonUIShared;
       const n = Math.max(0, Math.floor((now - since) / 1e3));
       return n < 60 ? n + "s" : Math.floor(n / 60) + "m " + n % 60 + "s";
     };
-    function update(entry) {
-      if (entry.kind === "tool" && entry.step.running && entry.step.sid) {
-        const since = entry.step.since ?? starts[entry.step.sid];
-        if (!Number.isFinite(since)) return entry;
-        const text2 = elapsed(since), step = entry.step;
+    function update(entry2) {
+      if (entry2.kind === "tool" && entry2.step.running && entry2.step.sid) {
+        const since = entry2.step.since ?? starts[entry2.step.sid];
+        if (!Number.isFinite(since)) return entry2;
+        const text2 = elapsed(since), step = entry2.step;
         const status2 = step.background ? step.status : text2, backgroundStatus = step.background ? "running " + text2 : step.backgroundStatus;
-        return status2 === step.status && backgroundStatus === step.backgroundStatus ? entry : { ...entry, step: { ...step, status: status2, backgroundStatus } };
+        return status2 === step.status && backgroundStatus === step.backgroundStatus ? entry2 : { ...entry2, step: { ...step, status: status2, backgroundStatus } };
       }
-      if (entry.kind === "group") {
-        const entries = entry.entries.map((item2) => update(item2)), since = entries.filter(
+      if (entry2.kind === "group") {
+        const entries = entry2.entries.map((item2) => update(item2)), since = entries.filter(
           (item2) => item2.kind === "tool" && item2.step.running && !!item2.step.sid
         ).map((item2) => item2.step.since ?? starts[item2.step.sid]).filter((value) => value !== void 0 && Number.isFinite(value));
-        const running = since.length ? elapsed(Math.min(...since)) : entry.running;
-        return running === entry.running && entries.every((item2, i) => item2 === entry.entries[i]) ? entry : { ...entry, entries, running, clockTick: true };
+        const running = since.length ? elapsed(Math.min(...since)) : entry2.running;
+        return running === entry2.running && entries.every((item2, i) => item2 === entry2.entries[i]) ? entry2 : { ...entry2, entries, running, clockTick: true };
       }
-      return entry;
+      return entry2;
     }
     let changed = false;
     owner.blocks = owner.blocks.map((block) => {
       const previous = block.kind === "turn" ? block.turn.entries : block.entries, entries = previous.map(update);
-      if (entries.every((entry, i) => entry === previous[i])) return block;
+      if (entries.every((entry2, i) => entry2 === previous[i])) return block;
       changed = true;
       return block.kind === "turn" ? { ...block, turn: { ...block.turn, entries } } : { ...block, entries };
     });
@@ -5963,7 +6078,9 @@ globalThis.__semonUIShared = __semonUIShared;
 
   // src/lib/viewer-bar.tsx
   function createViewerBar() {
-    const title = document.createElement("div"), actions = document.createElement("div"), mode = document.createElement("div");
+    const title = document.createElement("div"), actions = document.createElement("div"), mode = document.createElement("div"), jumpTarget = document.createElement("div");
+    jumpTarget.className = "jump-wrap";
+    jumpTarget.hidden = true;
     title.className = "ttl";
     actions.className = "viewer-bar-actions";
     mode.className = "viewer-bar-mode";
@@ -6042,48 +6159,59 @@ globalThis.__semonUIShared = __semonUIShared;
         title
       );
       render(
-        view.mode === "normal" ? view.analytics ? /* @__PURE__ */ jsx("div", { class: "analytics-range", role: "group", "aria-label": "Analytics range", children: [
-          [1, "24 h"],
-          [7, "7 d"],
-          [30, "30 d"]
-        ].map(([days, label]) => /* @__PURE__ */ jsx(
-          "button",
-          {
-            type: "button",
-            "data-e": "analytics-range:" + days,
-            "aria-pressed": view.days === days,
-            onClick: (event) => active(event.currentTarget, () => host2.range(Number(days))),
-            children: label
-          },
-          days
-        )) }) : view.session ? /* @__PURE__ */ jsxs(Fragment2, { children: [
-          !view.trace && /* @__PURE__ */ jsx(
-            "button",
+        /* @__PURE__ */ jsxs(Fragment2, { children: [
+          view.session && !view.trace && /* @__PURE__ */ jsx(
+            "span",
             {
-              class: "ibtn",
-              type: "button",
-              id: "find-btn",
-              "aria-label": "Find and filter",
-              onClick: (event) => active(event.currentTarget, host2.find),
-              children: icon("search")
-            },
-            "find:" + view.session
+              class: "viewer-jump",
+              ref: (node) => {
+                if (node && jumpTarget.parentNode !== node) node.append(jumpTarget);
+              }
+            }
           ),
-          /* @__PURE__ */ jsx(
+          view.mode === "normal" ? view.analytics ? /* @__PURE__ */ jsx("div", { class: "analytics-range", role: "group", "aria-label": "Analytics range", children: [
+            [1, "24 h"],
+            [7, "7 d"],
+            [30, "30 d"]
+          ].map(([days, label]) => /* @__PURE__ */ jsx(
             "button",
             {
-              class: "ibtn",
               type: "button",
-              id: "more-btn",
-              "aria-label": "Session menu: details, cost and actions",
-              "aria-haspopup": "dialog",
-              "aria-expanded": "false",
-              onClick: (event) => active(event.currentTarget, () => host2.menu(event.currentTarget)),
-              children: icon("more")
+              "data-e": "analytics-range:" + days,
+              "aria-pressed": view.days === days,
+              onClick: (event) => active(event.currentTarget, () => host2.range(Number(days))),
+              children: label
             },
-            "more:" + view.session
-          )
-        ] }) : null : null,
+            days
+          )) }) : view.session ? /* @__PURE__ */ jsxs(Fragment2, { children: [
+            !view.trace && /* @__PURE__ */ jsx(
+              "button",
+              {
+                class: "ibtn",
+                type: "button",
+                id: "find-btn",
+                "aria-label": "Find and filter",
+                onClick: (event) => active(event.currentTarget, host2.find),
+                children: icon("search")
+              },
+              "find:" + view.session
+            ),
+            /* @__PURE__ */ jsx(
+              "button",
+              {
+                class: "ibtn",
+                type: "button",
+                id: "more-btn",
+                "aria-label": "Session menu: details, cost and actions",
+                "aria-haspopup": "dialog",
+                "aria-expanded": "false",
+                onClick: (event) => active(event.currentTarget, () => host2.menu(event.currentTarget)),
+                children: icon("more")
+              },
+              "more:" + view.session
+            )
+          ] }) : null : null
+        ] }),
         actions
       );
       render(
@@ -6203,6 +6331,7 @@ globalThis.__semonUIShared = __semonUIShared;
     }
     return {
       update,
+      jumpTarget,
       destroy() {
         if (disposed) return;
         disposed = true;
@@ -6399,6 +6528,7 @@ globalThis.__semonUIShared = __semonUIShared;
     };
     let disposed = false;
     let streamed = false;
+    let recovering = false;
     const visible2 = () => document.visibilityState === "visible", floorWait = () => Math.max(0, state2.started + 1e3 - performance.now());
     function cancel() {
       if (state2.timer !== null) clearTimeout(state2.timer);
@@ -6406,7 +6536,7 @@ globalThis.__semonUIShared = __semonUIShared;
     }
     function schedule(ms) {
       cancel();
-      if (!disposed && !streamed && !state2.ended && visible2()) {
+      if (!disposed && (!streamed || recovering) && !state2.ended && visible2()) {
         state2.due = performance.now() + ms;
         state2.timer = window.setTimeout(poll, ms);
       }
@@ -6440,10 +6570,6 @@ globalThis.__semonUIShared = __semonUIShared;
         } else if (status2 === 403) host2.ended(403);
         else {
           state2.delay = Math.min(3e4, state2.delay * 2);
-          if (status2 === void 0)
-            window.setTimeout(() => {
-              throw error;
-            });
         }
       } finally {
         state2.busy = false;
@@ -6464,6 +6590,19 @@ globalThis.__semonUIShared = __semonUIShared;
     return {
       state: state2,
       schedule,
+      recover() {
+        if (disposed || state2.ended) return;
+        recovering = true;
+        if (!state2.busy && state2.timer === null) schedule(floorWait());
+      },
+      synchronized() {
+        recovering = false;
+        state2.delay = 2e3;
+        if (streamed) cancel();
+      },
+      get recovering() {
+        return recovering;
+      },
       useStream() {
         streamed = true;
         cancel();
@@ -6632,8 +6771,8 @@ globalThis.__semonUIShared = __semonUIShared;
     keep(sid, entries, meta) {
       this.delete(sid);
       let weight = 0;
-      for (const entry of entries)
-        for (const value of Object.values(entry))
+      for (const entry2 of entries)
+        for (const value of Object.values(entry2))
           weight += typeof value === "string" ? value.length : value && typeof value === "object" ? JSON.stringify(value).length : 4;
       const bytes = weight * 2;
       if (bytes > this.maxBytes) return;
@@ -6713,7 +6852,7 @@ globalThis.__semonUIShared = __semonUIShared;
           if (state2.busy || state2.failed) continue;
           const observer2 = new IntersectionObserver(
             (entries) => {
-              if (observers.get(button) === observer2 && entries.some((entry) => entry.isIntersecting))
+              if (observers.get(button) === observer2 && entries.some((entry2) => entry2.isIntersecting))
                 void load(button, false);
             },
             {
@@ -6807,6 +6946,126 @@ globalThis.__semonUIShared = __semonUIShared;
     return host;
   }
 
+  // src/app/controlObservation.ts
+  function createControlObservation(host2) {
+    if (!host2.viewerHost?.controlStream && !host2.viewerHost?.catalogControlStream)
+      return { destroy() {
+      } };
+    let stream = null;
+    let identity2 = "";
+    let timer;
+    let deadline;
+    let delay = 1e3;
+    let disposed = false;
+    function selected() {
+      const route2 = host2.navigation.route;
+      if (host2.catalogSelection) {
+        const selected2 = host2.catalogSelection.selectedIdentity();
+        const accepted = route2.v === "session" && selected2?.catalog_key === route2.id ? selected2 : null;
+        return {
+          path: accepted?.native_id ? host2.viewerHost?.catalogControlStream : void 0,
+          params: accepted ? {
+            source_key: accepted.source_key,
+            catalog_key: accepted.catalog_key,
+            native_id: accepted.native_id ?? "",
+            harness: accepted.harness
+          } : {},
+          thread: accepted?.native_id ?? ""
+        };
+      }
+      const session = route2.v === "session" ? host2.modelStore.sessions[route2.id] : void 0;
+      const thread = session && route2.v === "session" ? route2.id : "";
+      return {
+        path: host2.viewerHost?.controlStream,
+        params: { selected: thread, machine: session?.machine ?? "" },
+        thread
+      };
+    }
+    function cancel() {
+      stream?.close();
+      stream = null;
+      host2.scope.clearTimeout(timer);
+      host2.scope.clearTimeout(deadline);
+    }
+    function connect() {
+      if (disposed) return;
+      cancel();
+      const scope = selected();
+      identity2 = JSON.stringify(scope);
+      const path = scope.path;
+      if (!path || typeof EventSource === "undefined") return;
+      if (!path.startsWith("/") || path.startsWith("//") || /[\\\s]/.test(path))
+        throw new Error("Invalid control stream");
+      const current = new EventSource(
+        path + (path.includes("?") ? "&" : "?") + new URLSearchParams(scope.params)
+      );
+      stream = current;
+      let revision = "";
+      const valid = () => !disposed && stream === current && identity2 === JSON.stringify(selected());
+      const recover = () => {
+        if (!valid()) return;
+        cancel();
+        host2.controlOwner.unavailable();
+        timer = host2.scope.timeout(connect, delay);
+        delay = Math.min(15e3, delay * 2);
+      };
+      const heartbeat = () => {
+        if (!valid()) return;
+        host2.scope.clearTimeout(deadline);
+        deadline = host2.scope.timeout(recover, 3e4);
+      };
+      heartbeat();
+      current.addEventListener("heartbeat", heartbeat);
+      current.addEventListener("error", recover);
+      current.addEventListener("unavailable", recover);
+      current.addEventListener("ended", () => {
+        if (!valid()) return;
+        cancel();
+        host2.controlOwner.observe(null);
+      });
+      current.addEventListener("control", (event) => {
+        if (!valid() || !(event instanceof MessageEvent)) return;
+        try {
+          if (String(event.data).length > 3e5) throw new Error("Control snapshot too large");
+          const value = JSON.parse(String(event.data));
+          if (!value || typeof value !== "object" || !("revision" in value) || typeof value.revision !== "string" || value.revision.length < 1 || value.revision.length > 128 || !Object.entries(scope.params).every(
+            ([key, expected]) => key in value && value[key] === expected
+          ) || !("control" in value))
+            throw new Error("Control identity changed");
+          const control = host2.controlOwner.prepare(value.control);
+          if (control && control.thread !== scope.thread) throw new Error("Control thread changed");
+          heartbeat();
+          delay = 1e3;
+          if (revision === value.revision) return;
+          revision = value.revision;
+          if (!host2.catalogSelection) host2.viewerHost?.modelNavigation?.(value);
+          if (control || !scope.thread) host2.controlOwner.observe(control);
+          else host2.controlOwner.unavailable();
+        } catch {
+          recover();
+        }
+      });
+    }
+    function changed() {
+      if (JSON.stringify(selected()) === identity2) return;
+      host2.controlOwner.observe(null);
+      connect();
+    }
+    const route = host2.navigation.subscribeRoute(changed);
+    const model2 = host2.updates.subscribe(changed);
+    const catalog = host2.catalogSelection?.subscribe(changed);
+    connect();
+    return {
+      destroy() {
+        disposed = true;
+        route();
+        model2();
+        catalog?.();
+        cancel();
+      }
+    };
+  }
+
   // src/lib/control.ts
   function record2(value) {
     return !!value && typeof value === "object" && !Array.isArray(value);
@@ -6817,6 +7076,16 @@ globalThis.__semonUIShared = __semonUIShared;
       (key) => record2(value.capabilities) && typeof value.capabilities[key] === "boolean"
     ) || !Array.isArray(value.requests) || value.requests.length > 1280 || !record2(value.actions))
       throw new Error("Invalid control snapshot");
+    if (value.runtime !== void 0 && (!record2(value.runtime) || typeof value.runtime.state !== "string" || !["active", "disconnected", "failed", "ended", "unavailable"].includes(
+      String(value.runtime.state)
+    ) || typeof value.runtime.phase !== "string" || value.runtime.phase.length > 64 || typeof value.runtime.freshness !== "string" || !["current", "updating", "stale", "unavailable"].includes(value.runtime.freshness) || typeof value.runtime.reconnectable !== "boolean"))
+      throw new Error("Invalid runtime status");
+    if (record2(value.runtime) && (value.runtime.presence !== void 0 && (typeof value.runtime.presence !== "string" || !["active", "absent", "paused", "transitioning", "failed", "unknown"].includes(
+      String(value.runtime.presence)
+    )) || value.runtime.observedAt !== void 0 && value.runtime.observedAt !== null && (typeof value.runtime.observedAt !== "string" || value.runtime.observedAt.length > 64 || !Number.isFinite(Date.parse(value.runtime.observedAt))) || value.runtime.observationError !== void 0 && value.runtime.observationError !== null && (typeof value.runtime.observationError !== "string" || value.runtime.observationError.length > 512) || value.runtime.updating !== void 0 && typeof value.runtime.updating !== "boolean" || value.runtime.state !== "active" && (value.runtime.reconnectable || value.connected || ["input", "steer", "interrupt", "commandApproval", "fileApproval", "questions"].some(
+      (key) => record2(value.capabilities) && value.capabilities[key] === true
+    ))))
+      throw new Error("Invalid runtime authority");
     for (const request of value.requests) {
       if (!record2(request) || typeof request.id !== "string" || !/^[0-9a-f]{32}$/.test(request.id) || !["permission", "question"].includes(String(request.kind)) || !record2(request.payload) || !(request.hash === null || typeof request.hash === "string" && /^[0-9a-f]{64}$/.test(request.hash)) || !record2(request.state) || typeof request.state.state !== "string" || !(request.reason === null || typeof request.reason === "string") || typeof request.remainingMs !== "number" || !Number.isFinite(request.remainingMs) || request.remainingMs < 0)
         throw new Error("Invalid control request");
@@ -6834,8 +7103,24 @@ globalThis.__semonUIShared = __semonUIShared;
     let note = "";
     let uncertain = false;
     let revision = 0;
+    let selection = 0;
     async function write(op, extra = {}) {
       if (!current || busy2 || uncertain && op !== "reconnect") return false;
+      if (op === "send" && (!current.connected || !(current.activeTurn ? current.capabilities.steer : current.capabilities.input)))
+        return false;
+      if (op === "reconnect" && current.runtime?.reconnectable === false) return false;
+      if (op !== "reconnect" && !current.connected) return false;
+      if (op === "interrupt" && !current.capabilities.interrupt) return false;
+      if (op === "answer") {
+        const request = current.requests.find(
+          (request2) => request2.id === extra.request && request2.hash === extra.hash
+        );
+        if (!request || request.state.state !== "open") return false;
+        const supported = request.kind === "question" ? current.capabilities.questions : request.payload.method === "item/fileChange/requestApproval" ? current.capabilities.fileApproval : current.capabilities.commandApproval;
+        if (!supported) return false;
+      }
+      if (op === "send" && (!current.connected || !(current.activeTurn ? current.capabilities.steer : current.capabilities.input)))
+        return false;
       const target = current;
       const at = ++revision;
       busy2 = true;
@@ -6895,24 +7180,64 @@ globalThis.__semonUIShared = __semonUIShared;
     }
     function view(sid) {
       if (!current || sid && sid !== current.thread) return void 0;
+      const target = current;
+      const selected = selection;
+      const send = (op, extra = {}) => selection === selected && current?.thread === target.thread && current.generation === target.generation ? write(op, extra) : Promise.resolve(false);
       return {
         snapshot: current,
         busy: busy2,
         uncertain,
         note,
-        send: (text2) => write("send", { text: text2 }),
-        interrupt: () => void write("interrupt"),
-        answer: (request, answer2) => void write("answer", { request: request.id, hash: request.hash, answer: answer2 }),
-        reconnect: () => void write("reconnect")
+        send: (text2) => send("send", { text: text2 }),
+        interrupt: () => void send("interrupt"),
+        answer: (request, answer2) => void send("answer", { request: request.id, hash: request.hash, answer: answer2 }),
+        reconnect: () => void send("reconnect")
       };
+    }
+    function apply(value) {
+      if (current?.thread !== value?.thread) {
+        ++selection;
+        ++revision;
+        busy2 = false;
+        uncertain = false;
+        note = "";
+      }
+      if (value?.runtime?.state === "ended" && current?.runtime?.state !== "ended") {
+        ++revision;
+        busy2 = false;
+        note = "";
+      }
+      current = value;
     }
     return {
       prepare: parseControl,
-      adopt(value) {
-        current = value;
+      adopt: apply,
+      unavailable() {
+        if (!current) return;
+        current = {
+          ...current,
+          connected: false,
+          capabilities: {
+            ...current.capabilities,
+            input: false,
+            steer: false,
+            interrupt: false,
+            commandApproval: false,
+            fileApproval: false,
+            questions: false
+          },
+          runtime: current.runtime ? { ...current.runtime, freshness: "stale" } : void 0,
+          reason: current.runtime?.state === "ended" || current.runtime?.state === "failed" ? current.reason : "Current connection status is unavailable. Reconnecting\u2026"
+        };
+        refresh();
+      },
+      observe(value) {
+        apply(value);
+        refresh();
       },
       view,
       destroy() {
+        ++selection;
         ++revision;
         current = null;
       }
@@ -7424,7 +7749,19 @@ globalThis.__semonUIShared = __semonUIShared;
       this.content = initial;
     }
     host;
-    route = { v: "home" };
+    currentRoute = { v: "home" };
+    routeListeners = /* @__PURE__ */ new Set();
+    get route() {
+      return this.currentRoute;
+    }
+    set route(value) {
+      this.currentRoute = value;
+      for (const listener of this.routeListeners) listener();
+    }
+    subscribeRoute(listener) {
+      this.routeListeners.add(listener);
+      return () => this.routeListeners.delete(listener);
+    }
     rendered = null;
     content;
     nativePending = null;
@@ -7444,13 +7781,13 @@ globalThis.__semonUIShared = __semonUIShared;
       const request = new AbortController();
       this.nativePending = request;
       this.host.loadMachines(request.signal).then(
-        (content) => {
+        (content2) => {
           if (this.disposed || request.signal.aborted || this.nativePending !== request) {
-            content.destroy();
+            content2.destroy();
             return;
           }
           this.nativePending = null;
-          ready(content);
+          ready(content2);
         },
         () => {
           if (!this.disposed && !request.signal.aborted && this.nativePending === request) {
@@ -7525,6 +7862,7 @@ globalThis.__semonUIShared = __semonUIShared;
       return out;
     }
     destroy() {
+      this.routeListeners.clear();
       if (this.disposed) return;
       this.disposed = true;
       this.cancelNative();
@@ -8132,12 +8470,12 @@ globalThis.__semonUIShared = __semonUIShared;
     spread(sid) {
       for (const turn2 of this.host.turns(sid)) turn2.entries = [];
       let turn, pre = 0;
-      for (const entry of this.entries[sid] ?? []) {
-        if (entry.turn) turn = this.host.turn(entry.turn);
+      for (const entry2 of this.entries[sid] ?? []) {
+        if (entry2.turn) turn = this.host.turn(entry2.turn);
         if (turn && turn.sid === sid) {
-          entry.key = turn.id + "#" + turn.entries.length;
-          turn.entries.push(entry);
-        } else entry.key = sid + "#" + pre++;
+          entry2.key = turn.id + "#" + turn.entries.length;
+          turn.entries.push(entry2);
+        } else entry2.key = sid + "#" + pre++;
       }
     }
     clearPaging(sid) {
@@ -8172,7 +8510,7 @@ globalThis.__semonUIShared = __semonUIShared;
         );
         if (this.disposed || controller.signal.aborted || direction && (this.meta[sid] !== range || (direction === "before" ? this.meta[sid]?.from : this.meta[sid]?.to) !== boundary))
           return;
-        const page = parseTranscriptPage(response), entries = page.entries.map((entry) => this.host.entry({ ...entry, sid })), meta = this.meta[sid];
+        const page = parseTranscriptPage(response), entries = page.entries.map((entry2) => this.host.entry({ ...entry2, sid })), meta = this.meta[sid];
         if (direction === "before" && meta) {
           this.entries[sid] = entries.concat(this.entries[sid]);
           meta.from = page.from;
@@ -8247,6 +8585,200 @@ globalThis.__semonUIShared = __semonUIShared;
       this.staleBriefs.clear();
       for (const id of Object.keys(this.entries)) delete this.entries[id];
       for (const id of Object.keys(this.meta)) delete this.meta[id];
+    }
+  };
+
+  // src/state/catalog-wire.ts
+  var nullable = (value, parse) => value === null ? null : parse(value);
+  var strings4 = (value) => array(value, text);
+  function integer(value) {
+    const parsed = number(value);
+    if (!Number.isSafeInteger(parsed)) throw new Error("Invalid catalog integer");
+    return parsed;
+  }
+  function freshness(value) {
+    if (value === "cached" || value === "stale" || value === "incomplete" || value === "unavailable")
+      return value;
+    throw new Error("Invalid catalog freshness");
+  }
+  function readScope(value) {
+    if (value === void 0 || value === "current") return "current";
+    if (value === "retained_history") return value;
+    throw new Error("Invalid catalog read scope");
+  }
+  function nativeSelection(value) {
+    return value === "retired" ? value : freshness(value);
+  }
+  function observations(row) {
+    return {
+      facts_observation: row.facts_observation === void 0 ? void 0 : { state: freshness(object2(row.facts_observation).state) },
+      native_selection: row.native_selection === void 0 ? void 0 : row.native_selection === null ? null : { state: nativeSelection(object2(row.native_selection).state) }
+    };
+  }
+  function digest(value) {
+    const bytes = array(value, integer);
+    if (bytes.length !== 32 || bytes.some((byte) => byte < 0 || byte > 255))
+      throw new Error("Invalid catalog source digest");
+    return bytes;
+  }
+  function parseCatalogSource(value) {
+    const source = object2(value), offset = integer(source.offset);
+    if (offset < 0) throw new Error("Invalid catalog source offset");
+    return {
+      root: text(source.root),
+      path: text(source.path),
+      native_id: text(source.native_id),
+      offset,
+      prefix_sha256: digest(source.prefix_sha256),
+      tail_sha256: digest(source.tail_sha256)
+    };
+  }
+  function sourceReference(value) {
+    const row = object2(value);
+    return { source: parseCatalogSource(row.source), state: freshness(row.state) };
+  }
+  function parseCatalogSession(value) {
+    const row = object2(value), cost2 = object2(row.cost), state2 = object2(row.freshness), tokens2 = array(row.tokens, number);
+    if (tokens2.length !== 3 || tokens2.some((token) => token < 0))
+      throw new Error("Invalid catalog tokens");
+    return {
+      key: text(row.key),
+      name: text(row.name),
+      harness: text(row.harness),
+      kind: text(row.kind),
+      native_ids: strings4(row.native_ids),
+      parent: nullable(row.parent, text),
+      parent_source: nullable(row.parent_source, text),
+      repo: nullable(row.repo, text),
+      branch: nullable(row.branch, text),
+      model: text(row.model),
+      effort: nullable(row.effort, text),
+      start: nullable(row.start, integer),
+      last: nullable(row.last, integer),
+      tokens: tokens2,
+      cost: { usd: nullable(cost2.usd, number), unpriced_models: strings4(cost2.unpriced_models) },
+      source_refs: array(row.source_refs, sourceReference),
+      freshness: { state: freshness(state2.state) },
+      ...observations(row)
+    };
+  }
+  function parseCatalogPage(value) {
+    const page = object2(value), machine2 = text(page.machine), info = object2(page.machine_info), capabilities = object2(page.capabilities), generation = text(page.generation), items = array(page.items, parseCatalogSession), next = nullable(page.next_cursor, text);
+    if (page.api !== 1 || page.freshness !== "cached" || info.key !== machine2 || info.freshness !== "cached" || !/^[0-9a-f]{64}$/i.test(generation) || items.length > 100 || new Set(items.map((item2) => item2.key)).size !== items.length || next !== null && (!next || next.length > 8192))
+      throw new Error("Invalid catalog page");
+    return {
+      api: 1,
+      machine: machine2,
+      read_scope: readScope(page.read_scope),
+      machine_info: { key: machine2, label: text(info.label), freshness: "cached" },
+      generation,
+      observed_at: nullable(page.observed_at, integer),
+      freshness: "cached",
+      capabilities: {
+        pagination: boolean(capabilities.pagination),
+        filters: strings4(capabilities.filters),
+        order: text(capabilities.order),
+        full_text_search: boolean(capabilities.full_text_search),
+        selected_session_lookup: boolean(capabilities.selected_session_lookup),
+        runtime_status: boolean(capabilities.runtime_status),
+        global_union: boolean(capabilities.global_union)
+      },
+      items,
+      next_cursor: next
+    };
+  }
+  function parseCatalogIdentity(value) {
+    const row = object2(value), refs = array(row.source_refs, sourceReference), nativeIds = strings4(row.native_ids), nativeId = nullable(row.native_id, text), ids = new Set(refs.map((ref) => ref.source.native_id)), generation = text(row.generation), state2 = object2(row.freshness), sourceKey = text(row.source_key), catalogKey = text(row.catalog_key), harness = text(row.harness);
+    if (!sourceKey || !catalogKey || !harness || !/^[0-9a-f]{64}$/i.test(generation) || nativeIds.some((id) => !id) || ids.has("") || new Set(nativeIds).size !== nativeIds.length || ids.size !== nativeIds.length || nativeIds.some((id) => !ids.has(id)) || nativeId !== null && (ids.size !== 1 || !ids.has(nativeId)))
+      throw new Error("Invalid catalog identity");
+    return {
+      source_key: sourceKey,
+      read_scope: readScope(row.read_scope),
+      catalog_key: catalogKey,
+      harness,
+      native_id: nativeId,
+      native_ids: nativeIds,
+      source_refs: refs,
+      machine_label: nullable(row.machine_label, text),
+      generation,
+      observed_at: nullable(row.observed_at, integer),
+      freshness: { state: freshness(state2.state) },
+      ...observations(row)
+    };
+  }
+
+  // src/state/catalog-selection.ts
+  var CatalogSelectionStore = class {
+    epoch = 0;
+    disposed = false;
+    pending = null;
+    scope = null;
+    identity = null;
+    listeners = /* @__PURE__ */ new Set();
+    begin(scope) {
+      if (this.disposed) throw new Error("Catalog selection is destroyed");
+      if (typeof scope.source_key !== "string" || !scope.source_key || typeof scope.catalog_key !== "string" || !scope.catalog_key)
+        throw new Error("Invalid catalog selection");
+      const request = Object.freeze({
+        source_key: scope.source_key,
+        catalog_key: scope.catalog_key,
+        epoch: ++this.epoch
+      });
+      this.pending = request;
+      if (this.scope?.source_key !== scope.source_key || this.scope?.catalog_key !== scope.catalog_key)
+        this.scope = Object.freeze({ source_key: scope.source_key, catalog_key: scope.catalog_key });
+      this.identity = null;
+      this.changed();
+      return request;
+    }
+    accept(request, value) {
+      if (request !== this.pending || request.epoch !== this.epoch) return false;
+      const identity2 = parseCatalogIdentity(value);
+      if (identity2.read_scope !== "current" || identity2.native_selection?.state === "retired")
+        throw new Error("Historical identity cannot supply current catalog authority");
+      if (identity2.source_key !== request.source_key || identity2.catalog_key !== request.catalog_key)
+        throw new Error("Catalog selection scope mismatch");
+      for (const ref of identity2.source_refs) {
+        Object.freeze(ref.source.prefix_sha256);
+        Object.freeze(ref.source.tail_sha256);
+        Object.freeze(ref.source);
+        Object.freeze(ref);
+      }
+      Object.freeze(identity2.source_refs);
+      Object.freeze(identity2.native_ids);
+      Object.freeze(identity2.freshness);
+      if (identity2.facts_observation) Object.freeze(identity2.facts_observation);
+      if (identity2.native_selection) Object.freeze(identity2.native_selection);
+      this.identity = Object.freeze(identity2);
+      this.changed();
+      return true;
+    }
+    selectedIdentity() {
+      return this.identity;
+    }
+    /** Read intent survives a failed current identity check; it grants no native authority. */
+    selectedScope() {
+      return this.scope;
+    }
+    subscribe(listener) {
+      if (this.disposed) throw new Error("Catalog selection is destroyed");
+      this.listeners.add(listener);
+      return () => this.listeners.delete(listener);
+    }
+    clear() {
+      ++this.epoch;
+      this.pending = null;
+      this.scope = null;
+      this.identity = null;
+      this.changed();
+    }
+    destroy() {
+      this.disposed = true;
+      this.listeners.clear();
+      this.clear();
+    }
+    changed() {
+      for (const listener of [...this.listeners]) listener();
     }
   };
 
@@ -8464,10 +8996,10 @@ globalThis.__semonUIShared = __semonUIShared;
     };
   }
   var list = (parse) => (value) => array(value, parse);
-  var nullable = (parse) => (value) => value == null ? null : parse(value);
+  var nullable2 = (parse) => (value) => value == null ? null : parse(value);
   var optional2 = (parse) => (value) => value == null ? void 0 : parse(value);
-  var strings4 = list(text);
-  var money = shape({ usd: nullable(number), unpriced_models: strings4 });
+  var strings5 = list(text);
+  var money = shape({ usd: nullable2(number), unpriced_models: strings5 });
   var period = shape({
     agent_ms: number,
     started: number,
@@ -8481,7 +9013,7 @@ globalThis.__semonUIShared = __semonUIShared;
     cost: money
   });
   var busy = shape({ sid: text, ms: number });
-  var priced = shape({ sid: text, usd: nullable(number), unpriced_models: strings4 });
+  var priced = shape({ sid: text, usd: nullable2(number), unpriced_models: strings5 });
   var column = shape({
     from: number,
     to: number,
@@ -8499,14 +9031,14 @@ globalThis.__semonUIShared = __semonUIShared;
     more: number
   });
   var breakdown = shape({
-    repo: optional2(nullable(text)),
+    repo: optional2(nullable2(text)),
     machine: optional2(text),
     harness: optional2(text),
     model: optional2(text),
     ms: number,
     usd: number,
     sessions: number,
-    unpriced_models: strings4,
+    unpriced_models: strings5,
     incomplete_usage: optional2(boolean)
   });
   var tokens = shape({
@@ -8517,26 +9049,26 @@ globalThis.__semonUIShared = __semonUIShared;
   });
   var item = shape({
     sid: text,
-    models: optional2(strings4),
-    cost_usd: nullable(number),
-    pr_url: nullable(text)
+    models: optional2(strings5),
+    cost_usd: nullable2(number),
+    pr_url: nullable2(text)
   });
   var model = shape({
     model: text,
     band: text,
     n: number,
     small_sample: boolean,
-    first_pass_acceptance: nullable(number),
+    first_pass_acceptance: nullable2(number),
     acceptance_n: number,
-    median_review_rounds: nullable(number),
+    median_review_rounds: nullable2(number),
     review_rounds_n: number,
-    median_red_ci_heads: nullable(number),
+    median_red_ci_heads: nullable2(number),
     red_ci_n: number,
-    median_model_ms: nullable(number),
+    median_model_ms: nullable2(number),
     model_time_n: number,
-    median_cost_usd: nullable(number),
+    median_cost_usd: nullable2(number),
     cost_n: number,
-    allowance_per_million_input: nullable(number),
+    allowance_per_million_input: nullable2(number),
     allowance_n: number,
     tokens,
     tokens_n: number,
@@ -8548,11 +9080,11 @@ globalThis.__semonUIShared = __semonUIShared;
     version: text,
     current: period,
     previous: period,
-    longest_current_wait: nullable(busy),
+    longest_current_wait: nullable2(busy),
     calls_unknown: number,
     agents: shape({ unit: text, columns: list(column) }),
-    cost: nullable(
-      shape({ days: list(day), unpriced_models: strings4, incomplete_usage: optional2(boolean) })
+    cost: nullable2(
+      shape({ days: list(day), unpriced_models: strings5, incomplete_usage: optional2(boolean) })
     ),
     breakdown: shape({ repo: list(breakdown), machine: list(breakdown), model: list(breakdown) }),
     top: shape({ busy: list(busy), waited: list(busy), cost: list(priced) }),
@@ -8560,13 +9092,13 @@ globalThis.__semonUIShared = __semonUIShared;
     models: optional2(
       shape({ groups: list(model), unknown_reasons: (v) => dictionary(v, text) })
     ),
-    allowance: nullable(
+    allowance: nullable2(
       shape({
         recorded_at: number,
         windows: list(shape({ minutes: number, used_percent: number, resets_at: number }))
       })
     ),
-    facets: shape({ repo: list(nullable(text)), machine: strings4, harness: strings4, model: strings4 })
+    facets: shape({ repo: list(nullable2(text)), machine: strings5, harness: strings5, model: strings5 })
   });
 
   // src/app/analytics.ts
@@ -9363,7 +9895,20 @@ globalThis.__semonUIShared = __semonUIShared;
       if (!st.bottom && n) host2.liveModelOwner.LIVE.fresh += n;
       host2.viewport.syncJump();
     }
-    return { refresh };
+    function controls() {
+      if (host2.disposed) return;
+      if (host2.toolViewsOwner.viewerEl || host2.accountControlsOwner.accountChrome.open) {
+        host2.liveModelOwner.LIVE.pending = true;
+        return;
+      }
+      host2.navigationViewOwner.renderNav();
+      const route = host2.navigation.route;
+      if (host2.sidebarOnly || route.v !== "session" || host2.navigation.rendered !== route) return;
+      const anchor = host2.viewport.capture();
+      updateSessionControl(host2.$("#page"), host2.controlOwner.view(route.id));
+      host2.viewport.restore(anchor, anchor.bottom);
+    }
+    return { refresh, controls };
   }
 
   // src/app/bootstrap.ts
@@ -9383,84 +9928,95 @@ globalThis.__semonUIShared = __semonUIShared;
       }
     };
     const urlOf = (r) => routeUrl(r, routeModel), routeOf = (location2) => parseRoute(location2, routeModel);
+    let retryDelay = 1e3;
+    let retryTimer;
+    let loading = false;
     function boot() {
-      host2.transportOwner.api("/api/model?delta=1").then(
-        (m) => {
-          const adopted = host2.transportOwner.adopt(m);
-          host2.liveModelOwner.LIVE.version = adopted.version;
-          host2.liveModelOwner.remember(adopted);
-          if (host2.sidebarOnly || host2.nativePage) {
-            if (host2.nativePage)
-              host2.navigation.route = host2.navigation.historyRoute(
-                { v: host2.nativePage.nav },
-                { v: "home" }
-              );
-            host2.documentRendererOwner.render();
-            host2.liveModelOwner.schedule(2e3);
-            return;
-          }
-          host2.navigation.route = routeOf(location);
-          if (host2.navigation.route.v === "sessions")
-            host2.query = (new URLSearchParams(location.search).get("q") ?? "").trim();
-          if (host2.navigation.route.v === "machines" && host2.machinesPath && !host2.viewerHost) {
-            location.assign(host2.machinesPath);
-            return;
-          }
-          try {
-            history.replaceState(
-              { ...host2.navigation.route, scrollTop: 0 },
-              "",
-              urlOf(host2.navigation.route) + (host2.navigation.route.v === "session" ? location.hash : host2.navigation.route.v === "sessions" && host2.query ? "?q=" + host2.transportOwner.enc(host2.query) : "")
+      if (host2.disposed || loading) return;
+      host2.scope.clearTimeout(retryTimer);
+      loading = true;
+      host2.transportOwner.api(
+        "/api/model?delta=1" + (host2.viewerHost?.controlStream || host2.viewerHost?.catalogControlStream ? "&content=1" : "")
+      ).then(async (m) => {
+        if (host2.disposed) return;
+        const adopted = host2.transportOwner.adopt(m);
+        host2.liveModelOwner.LIVE.version = adopted.version;
+        host2.liveModelOwner.remember(adopted);
+        if (host2.sidebarOnly || host2.nativePage) {
+          if (host2.nativePage)
+            host2.navigation.route = host2.navigation.historyRoute(
+              { v: host2.nativePage.nav },
+              { v: "home" }
             );
-          } catch {
-          }
-          const done = () => {
-            host2.documentRendererOwner.render();
-            if (host2.navigation.route.v === "session" && ("turn" in host2.navigation.route ? host2.navigation.route.turn : void 0)) {
-              host2.destination.revealTurn(
-                ("turn" in host2.navigation.route ? host2.navigation.route.turn : void 0) ?? "",
-                true
-              );
-              if (location.hash)
-                host2.scope.frame(
-                  () => host2.scope.frame(
-                    (...args) => host2.destination.revealEntryHash(...args)
-                  )
-                );
-            } else if (host2.navigation.route.v === "session" && location.hash)
-              host2.destination.revealEntryHash();
-            else if (host2.navigation.route.v === "session") {
-              host2.destination.openSessionAtEnd();
-              host2.viewport.syncJump();
-            } else host2.historyScrollOwner.quietTop();
-            host2.liveModelOwner.schedule(2e3);
-            host2.scope.interval(
-              (...args) => host2.tickerOwner.ticker(...args),
-              1e3
-            );
-          };
-          const initialRoute = host2.navigation.route, p = host2.transportOwner.load(initialRoute);
-          if (p)
-            p.then(() => {
-              done();
-            }, done);
-          else {
-            done();
-          }
-        },
-        (err) => {
-          if (host2.disposed) return;
-          if (host2.viewerHost?.modelFailed?.(err?.status ?? 0)) return;
-          if (host2.viewerHost) {
-            console.warn("semon: model unavailable", err.status);
-            return;
-          }
-          renderPlaceholder(
-            host2.$(host2.sidebarOnly ? "#lanes" : "#page"),
-            "Couldn't load the sessions: " + err.message
-          );
+          host2.documentRendererOwner.render();
+          host2.liveModelOwner.schedule(2e3);
+          return;
         }
-      );
+        host2.navigation.route = routeOf(location);
+        if (host2.navigation.route.v === "sessions")
+          host2.query = (new URLSearchParams(location.search).get("q") ?? "").trim();
+        if (host2.navigation.route.v === "machines" && host2.machinesPath && !host2.viewerHost) {
+          location.assign(host2.machinesPath);
+          return;
+        }
+        try {
+          history.replaceState(
+            { ...host2.navigation.route, scrollTop: 0 },
+            "",
+            urlOf(host2.navigation.route) + (host2.navigation.route.v === "session" ? location.hash : host2.navigation.route.v === "sessions" && host2.query ? "?q=" + host2.transportOwner.enc(host2.query) : "")
+          );
+        } catch {
+        }
+        const done = () => {
+          host2.documentRendererOwner.render();
+          if (host2.navigation.route.v === "session" && ("turn" in host2.navigation.route ? host2.navigation.route.turn : void 0)) {
+            host2.destination.revealTurn(
+              ("turn" in host2.navigation.route ? host2.navigation.route.turn : void 0) ?? "",
+              true
+            );
+            if (location.hash)
+              host2.scope.frame(
+                () => host2.scope.frame(
+                  (...args) => host2.destination.revealEntryHash(...args)
+                )
+              );
+          } else if (host2.navigation.route.v === "session" && location.hash)
+            host2.destination.revealEntryHash();
+          else if (host2.navigation.route.v === "session") {
+            host2.destination.openSessionAtEnd();
+            host2.viewport.syncJump();
+          } else host2.historyScrollOwner.quietTop();
+          host2.liveModelOwner.schedule(2e3);
+          host2.scope.interval(
+            (...args) => host2.tickerOwner.ticker(...args),
+            1e3
+          );
+        };
+        const initialRoute = host2.navigation.route, p = host2.transportOwner.load(initialRoute);
+        if (p) {
+          try {
+            await p;
+          } catch (error) {
+            if (host2.disposed || host2.navigation.route !== initialRoute) return;
+            throw error;
+          }
+        }
+        if (!host2.disposed && host2.navigation.route === initialRoute) done();
+      }).catch((err) => {
+        if (host2.disposed) return;
+        if (host2.viewerHost?.modelFailed?.(err?.status ?? 0)) return;
+        if (err?.status !== 403) {
+          retryTimer = host2.scope.timeout(boot, retryDelay);
+          retryDelay = Math.min(3e4, retryDelay * 2);
+        }
+        if (host2.viewerHost) return;
+        renderPlaceholder(
+          host2.$(host2.sidebarOnly ? "#lanes" : "#page"),
+          "Couldn't load the sessions: " + err.message + (err?.status === 403 ? ". Reload with an authorized URL." : ". Retrying automatically\u2026")
+        );
+      }).finally(() => {
+        loading = false;
+      });
     }
     return { routeModel, urlOf, routeOf, boot };
   }
@@ -9543,7 +10099,7 @@ globalThis.__semonUIShared = __semonUIShared;
         host2.accountControlsOwner.closeAccountMenu(true, true);
         host2.navigation.loadNative(
           r,
-          (content) => go(r, fromHistory, true, content),
+          (content2) => go(r, fromHistory, true, content2),
           () => {
             if (host2.viewerHost) location.assign(host2.viewerHost.machinesPath);
           }
@@ -10181,30 +10737,82 @@ globalThis.__semonUIShared = __semonUIShared;
 
   // src/app/liveModel.ts
   function createLiveModel(host2) {
+    let streamSequence = 0;
+    let activeRead = null;
+    function selection() {
+      if (!host2.viewerHost?.selectedModel) return "";
+      const route = host2.navigation.route;
+      if (route.v !== "session") return "";
+      const session = host2.modelStore.sessions[route.id];
+      return "&selected=" + host2.transportOwner.enc(route.id) + (session ? "&machine=" + host2.transportOwner.enc(session.machine) : "");
+    }
+    function modelPath(path, selected = selection()) {
+      return path + selected + (host2.viewerHost?.controlStream || host2.viewerHost?.catalogControlStream ? "&content=1" : "");
+    }
     const liveController = createLiveController({
       async poll() {
-        const response = await host2.transportOwner.api(
-          "/api/model?delta=1&since=" + host2.transportOwner.enc(LIVE.late ? "" : LIVE.version ?? ""),
-          void 0,
-          true
-        );
-        if (!response) return;
-        let model2;
-        try {
-          model2 = host2.liveUpdates.applyModelDelta(response);
-        } catch {
-          await host2.transportOwner.api("/api/model?delta=1").then(
-            (...args) => host2.liveUpdates.update(...args)
+        const recovering = liveController.recovering;
+        const work = delivery.then(async () => {
+          if (destroyed || host2.disposed) return;
+          const sequence = streamSequence;
+          const selected = selection();
+          const request = new AbortController();
+          activeRead = request;
+          const response = await host2.transportOwner.api(
+            modelPath(
+              recovering ? "/api/model?delta=1&since=" : "/api/model?delta=1&since=" + host2.transportOwner.enc(LIVE.late ? "" : LIVE.version ?? ""),
+              selected
+            ),
+            request.signal,
+            !recovering
           );
-          return;
+          if (!response || destroyed || host2.disposed || request.signal.aborted || selected !== selection())
+            return;
+          let model2;
+          try {
+            model2 = host2.liveUpdates.applyModelDelta(response);
+          } catch {
+            model2 = await host2.transportOwner.api(
+              modelPath("/api/model?delta=1&since=", selected),
+              request.signal
+            );
+            if (destroyed || host2.disposed || request.signal.aborted || selected !== selection())
+              return;
+          }
+          await host2.liveUpdates.update(model2, recovering);
+          if (stream && selected !== selection()) schedule(0);
+          if (activeRead === request) activeRead = null;
+          if (recovering && !destroyed && !host2.disposed) {
+            if (sequence === streamSequence) {
+              liveController.synchronized();
+              clearStreamNote();
+            } else LIVE.again = true;
+          }
+        });
+        delivery = work.catch(() => {
+        });
+        try {
+          await work;
+        } catch (error) {
+          showStreamNote();
+          liveController.recover();
+          throw error;
         }
-        await host2.liveUpdates.update(model2);
       },
-      failed(error) {
-        return !!host2.viewerHost?.modelFailed?.(error instanceof ApiError ? error.status : 0);
-      },
+      failed,
       ended
     });
+    function failed(error) {
+      const handled = !!host2.viewerHost?.modelFailed?.(error instanceof ApiError ? error.status : 0);
+      if (handled) {
+        liveController.stop();
+        destroyed = true;
+        stream?.close();
+        stream = null;
+        clearStreamNote();
+      }
+      return handled;
+    }
     const LIVE = liveController.state;
     const remember = (_m) => {
       LIVE.turns = new Map(
@@ -10230,6 +10838,8 @@ globalThis.__semonUIShared = __semonUIShared;
     ].join("|");
     const visible2 = () => document.visibilityState === "visible";
     let stream = null;
+    let streamSelection = "";
+    let started = false;
     let destroyed = false;
     let streamNote = null;
     function clearStreamNote() {
@@ -10243,30 +10853,63 @@ globalThis.__semonUIShared = __semonUIShared;
     }
     let delivery = Promise.resolve();
     const schedule = (ms) => {
+      started = true;
+      const selected = selection();
       const path = host2.viewerHost?.modelStream;
       if (!path || typeof EventSource === "undefined") {
         liveController.schedule(ms);
         return;
       }
-      if (stream || destroyed) return;
+      if (destroyed) return;
+      if (stream && streamSelection === selected) return;
+      if (stream) {
+        stream.close();
+        activeRead?.abort();
+        streamSequence++;
+      }
+      streamSelection = selected;
       if (!path.startsWith("/") || path.startsWith("//") || /[\\\s]/.test(path))
         throw new Error("Invalid live model stream");
-      stream = new EventSource(path);
+      const streamQuery = [
+        selected.slice(1),
+        host2.viewerHost?.controlStream || host2.viewerHost?.catalogControlStream ? "content=1&since=" + host2.transportOwner.enc(LIVE.version ?? "") : ""
+      ].filter(Boolean).join("&");
+      const current = new EventSource(
+        path + (streamQuery ? (path.includes("?") ? "&" : "?") + streamQuery : "")
+      );
+      stream = current;
       liveController.useStream();
-      stream.addEventListener("open", clearStreamNote);
-      stream.addEventListener("error", showStreamNote);
-      stream.addEventListener("unavailable", showStreamNote);
-      stream.addEventListener("model", (event) => {
-        if (!(event instanceof MessageEvent)) return;
+      current.addEventListener("open", () => {
+        if (stream !== current || selection() !== selected || destroyed) return;
+        if (streamNote) liveController.recover();
+      });
+      const recover = () => {
+        if (stream !== current || selection() !== selected || destroyed) return;
+        showStreamNote();
+        liveController.recover();
+      };
+      current.addEventListener("error", recover);
+      current.addEventListener("unavailable", recover);
+      current.addEventListener("model", (event) => {
+        if (!(event instanceof MessageEvent) || destroyed || host2.disposed || stream !== current || selection() !== selected)
+          return;
+        streamSequence++;
+        if (liveController.recovering) return;
         delivery = delivery.then(async () => {
-          if (destroyed || host2.disposed) return;
+          if (destroyed || host2.disposed || liveController.recovering || stream !== current || selection() !== selected)
+            return;
           await host2.liveUpdates.update(JSON.parse(String(event.data)));
+          if (selected !== selection()) schedule(0);
           clearStreamNote();
-        }).catch(() => {
-          showStreamNote();
+        }).catch((error) => {
+          if (failed(error)) return;
+          if (error instanceof ApiError && error.status === 403) ended(403);
+          else recover();
         });
       });
-      stream.addEventListener("ended", () => {
+      current.addEventListener("ended", () => {
+        if (stream !== current || selection() !== selected || destroyed) return;
+        activeRead?.abort();
         destroyed = true;
         liveController.stop();
         stream?.close();
@@ -10275,9 +10918,24 @@ globalThis.__semonUIShared = __semonUIShared;
         host2.viewerHost?.modelFailed?.(403);
       });
     };
+    const unsubscribeRoute = host2.viewerHost?.selectedModel ? host2.navigation.subscribeRoute(() => {
+      if (!started || destroyed) return;
+      if (stream) schedule(0);
+      else {
+        activeRead?.abort();
+        LIVE.again = true;
+        liveController.schedule(0);
+      }
+    }) : () => {
+    };
     function ended(status2) {
       if (host2.disposed) return;
+      activeRead?.abort();
       liveController.stop();
+      destroyed = true;
+      stream?.close();
+      stream = null;
+      clearStreamNote();
       if (host2.$(".livenote, .livenote-side")) return;
       if (!window.dispatchEvent(
         new CustomEvent("semon:ended", { cancelable: true, detail: { status: status2 } })
@@ -10290,9 +10948,7 @@ globalThis.__semonUIShared = __semonUIShared;
       if (host2.sidebarOnly) host2.$("#lanes").after(n);
       else document.body.append(n);
     }
-    const soft = (p) => p.catch((e) => {
-      if (e instanceof ApiError && (e.status === 403 || e.status === 0)) throw e;
-    });
+    const soft = (p) => p;
     const viewed = () => {
       const v = /* @__PURE__ */ new Set();
       if (host2.navigation.route.v === "session")
@@ -10319,6 +10975,9 @@ globalThis.__semonUIShared = __semonUIShared;
     );
     return {
       destroy() {
+        unsubscribeRoute();
+        activeRead?.abort();
+        activeRead = null;
         destroyed = true;
         clearStreamNote();
         stream?.close();
@@ -10342,7 +11001,7 @@ globalThis.__semonUIShared = __semonUIShared;
   function createLiveUpdates(host2) {
     let generation = 0;
     const applyModelDelta = (value) => host2.modelStore.apply(value);
-    function update(value) {
+    function update(value, resynchronize = false) {
       if (host2.disposed) return Promise.resolve();
       const m = applyModelDelta(value);
       const oldH = new Map(
@@ -10382,7 +11041,7 @@ globalThis.__semonUIShared = __semonUIShared;
         [...newCards].filter(([id, k]) => oldCards.has(id) && oldCards.get(id) !== k).map(([id]) => id)
       );
       const view = host2.liveModelOwner.viewed(), grown = /* @__PURE__ */ new Set(), cuts = /* @__PURE__ */ new Map(), patched = /* @__PURE__ */ new Map();
-      let full = Object.values(host2.modelStore.sessions).some(
+      let full = resynchronize || Object.values(host2.modelStore.sessions).some(
         (x) => names.has(x.id) && names.get(x.id) !== x.name
       );
       for (const sid of Object.keys(host2.transcripts.entries)) {
@@ -10537,12 +11196,14 @@ globalThis.__semonUIShared = __semonUIShared;
           return r;
         },
         (err) => {
+          if (err?.status === 403) throw err;
           if (host2.liveModelOwner.LIVE.late === sid) {
             if (++host2.liveModelOwner.LIVE.lateTries >= LATE_TRIES) {
               host2.liveModelOwner.LIVE.late = null;
               console.warn(
                 "semon: gave up reloading the transcript of " + sid + " after its origin arrived"
               );
+              return { cut: null, reload: true };
             } else host2.liveModelOwner.LIVE.retry = true;
           }
           throw err;
@@ -10801,14 +11462,14 @@ globalThis.__semonUIShared = __semonUIShared;
       },
       commit(r, where, manual) {
         const box = host2.viewport.scroller(), top = host2.phone.matches ? 0 : box.getBoundingClientRect().top, st = host2.viewport.capture();
-        const entry = [
+        const entry2 = [
           ...host2.$("#page").querySelectorAll(".turns [data-e][data-entry-key]:not(.tgroup)")
         ].find((n) => {
           const rect = n.getBoundingClientRect();
           return rect.height && rect.top >= top;
         });
         st.paging = {
-          anchor: entry ? { key: entry.dataset.entryKey, off: entry.getBoundingClientRect().top - top } : null,
+          anchor: entry2 ? { key: entry2.dataset.entryKey, off: entry2.getBoundingClientRect().top - top } : null,
           height: box.scrollHeight,
           before: where === "before"
         };
@@ -12065,6 +12726,23 @@ globalThis.__semonUIShared = __semonUIShared;
     return { sentenceHost, sentenceSnapshot };
   }
 
+  // src/domain/resume.ts
+  function resumeCommand(session) {
+    const id = session.sessionId ?? session.id;
+    if (!id.trim() || id.startsWith("-") || /[\0\r\n]/.test(id)) return null;
+    const argument = /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(id) ? id : "'" + id.replaceAll("'", `'"'"'`) + "'";
+    switch (session.harness) {
+      case "claude":
+        return "claude --resume " + argument;
+      case "codex":
+        return "codex resume " + argument;
+      case "copilot":
+        return "copilot --resume=" + argument;
+      default:
+        return null;
+    }
+  }
+
   // src/navigation/errors.ts
   function createErrorNavigation(host2) {
     const {
@@ -12432,7 +13110,7 @@ globalThis.__semonUIShared = __semonUIShared;
         onWideChange: () => host2.layoutOwner.setWideMode(!host2.layoutOwner.wideMode)
       } : null;
       const mode = s && errOn(s.id) ? "errors" : s && host2.findOpen ? "find" : "normal";
-      const content = viewerBar.update(
+      const content2 = viewerBar.update(
         {
           mode,
           name: title,
@@ -12526,7 +13204,7 @@ globalThis.__semonUIShared = __semonUIShared;
         ) : void 0
       };
       host2.accountControlsOwner.shellChrome?.topbar(
-        mode === "normal" ? { titleSlot: content.titleSlot, actions: [content.actions], session: !!s, lead, account } : { mode: [content.mode], session: true, account, accountTarget: content.accountTarget }
+        mode === "normal" ? { titleSlot: content2.titleSlot, actions: [content2.actions], session: !!s, lead, account } : { mode: [content2.mode], session: true, account, accountTarget: content2.accountTarget }
       );
       if (s && mode === "normal")
         host2.scope.frame(() => {
@@ -12781,8 +13459,8 @@ globalThis.__semonUIShared = __semonUIShared;
       })();
       const actions = [], addAction = (key, text2, icon, className, note, checked, dot) => actions.push({ key, text: text2, icon, className, note, checked, dot });
       if (traceTurn?.out.length) addAction("trace", "Trace this turn", I.trace, "menu-trace");
-      const command = s.harness === "codex" ? "codex resume " + s.id : "claude --resume " + (s.sessionId ?? s.id);
-      addAction("copy", "Copy resume command", I.copy);
+      const command = resumeCommand(s);
+      if (command !== null) addAction("copy", "Copy resume command", I.copy);
       if (s.harness === "claude") addAction("external", "Open in claude.ai", I.ext);
       if (!host2.phone.matches)
         addAction("wide", "Wide transcript", I.wide, void 0, void 0, host2.layoutOwner.wideMode);
@@ -12837,7 +13515,7 @@ globalThis.__semonUIShared = __semonUIShared;
         body,
         {
           actions,
-          command,
+          command: command ?? "",
           path: host2.phone.matches ? host2.domain.lineageOf(s.id).map((a) => ({
             id: a.id,
             name: a.name,
@@ -13090,9 +13768,9 @@ globalThis.__semonUIShared = __semonUIShared;
   // src/app/toolLoader.ts
   function createToolLoader(host2) {
     function parseToolDetail(data) {
-      const entry = parseEntry({ ...data, k: "tool", name: "", arg: "", ok: true });
-      if (entry.k !== "tool") throw new Error("Invalid tool details");
-      return entry;
+      const entry2 = parseEntry({ ...data, k: "tool", name: "", arg: "", ok: true });
+      if (entry2.k !== "tool") throw new Error("Invalid tool details");
+      return entry2;
     }
     function fullOf(e) {
       return Promise.all(
@@ -13535,7 +14213,7 @@ globalThis.__semonUIShared = __semonUIShared;
       const owner = opts.only ? new Map(
         (host2.modelStore.turns[sid] ?? []).flatMap((t) => t.entries.map((e) => [e.key, t.id]))
       ) : null;
-      const content = (values) => values.some((v) => v.kind !== "label" || v.className === "harness-note");
+      const content2 = (values) => values.some((v) => v.kind !== "label" || v.className === "harness-note");
       const closeTurn = () => {
         flush();
         if (!currentTurn.value) {
@@ -13549,7 +14227,7 @@ globalThis.__semonUIShared = __semonUIShared;
           if (t.out.length) view.trace = t.id;
         }
         view.entries = tx;
-        if (!filtering || content(tx)) blocks2.push({ kind: "turn", turn: view });
+        if (!filtering || content2(tx)) blocks2.push({ kind: "turn", turn: view });
         currentTurn.value = null;
         tx = [];
         masked = false;
@@ -13641,7 +14319,7 @@ globalThis.__semonUIShared = __semonUIShared;
               failed: e.state === "failed",
               label: "Background command " + word + " \xB7 " + (e.label ?? ""),
               call: e.call,
-              loaded: entries.some((entry) => entry.k === "tool" && entry.tid === e.call)
+              loaded: entries.some((entry2) => entry2.k === "tool" && entry2.tid === e.call)
             },
             e
           );
@@ -13773,6 +14451,7 @@ globalThis.__semonUIShared = __semonUIShared;
       return {
         id: sid,
         name: s.name,
+        observation: host2.transcripts.staleBriefs.has(sid) ? "This conversation changed at its source. The saved transcript is incomplete; reopen this session to update it." : void 0,
         blocks: blocks2,
         order: (host2.modelStore.turns[sid] ?? []).map((t) => t.id),
         dirty: opts.only,
@@ -13782,7 +14461,7 @@ globalThis.__semonUIShared = __semonUIShared;
           lead: "Started " + host2.clock(s.start) + " on\xA0",
           machine: host2.modelStore.machines[s.movedFrom ?? s.machine]
         } : void 0,
-        empty: !opts.only && !blocks2.some((b) => content(b.kind === "turn" ? b.turn.entries : b.entries)) ? host2.find ? "Nothing matches \u201C" + host2.find + "\u201D." : "Nothing to show with these filters." : void 0,
+        empty: !opts.only && !blocks2.some((b) => content2(b.kind === "turn" ? b.turn.entries : b.entries)) ? host2.find ? "Nothing matches \u201C" + host2.find + "\u201D." : "Nothing to show with these filters." : void 0,
         footer: host2.screenViews.showsFooter(s, origin) ? host2.toolViewsOwner.footerSnapshot(s, origin) : void 0
       };
     }
@@ -13815,6 +14494,7 @@ globalThis.__semonUIShared = __semonUIShared;
     async function api(path, signal, unchanged = false) {
       if (host2.disposed) throw new DOMException("Viewer destroyed", "AbortError");
       const controller = host2.scope.request(), release = () => host2.scope.releaseRequest(controller);
+      const deadline = host2.scope.timeout(() => controller.abort(), 15e3);
       try {
         const response = await requestJson(
           path,
@@ -13824,6 +14504,7 @@ globalThis.__semonUIShared = __semonUIShared;
         if (host2.disposed) throw new DOMException("Viewer destroyed", "AbortError");
         return response;
       } finally {
+        host2.scope.clearTimeout(deadline);
         release();
       }
     }
@@ -13844,7 +14525,8 @@ globalThis.__semonUIShared = __semonUIShared;
       const nav = m.nav == null ? null : object2(m.nav);
       const machinesPath = host2.viewerHost?.machinesPath ?? (nav && typeof nav.machines === "string" && safePath2(nav.machines) ? nav.machines : null);
       host2.modelStore.adopt(m, () => {
-        host2.controlOwner.adopt(control);
+        if (!(host2.viewerHost?.controlStream || host2.viewerHost?.catalogControlStream))
+          host2.controlOwner.adopt(control);
         serverNow = m.now;
         fetchedAt = Date.now();
         TOK = marks;
@@ -14256,7 +14938,8 @@ globalThis.__semonUIShared = __semonUIShared;
         host2.$("#page"),
         gap > 80 || !!newer,
         host2.liveModelOwner.LIVE.fresh + newer,
-        jumpBusy
+        jumpBusy,
+        host2.sessionChrome.viewerBar.jumpTarget
       );
     }
     function clearNewEntries() {
@@ -14344,12 +15027,14 @@ globalThis.__semonUIShared = __semonUIShared;
   // src/app/composition.ts
   var ViewerComposition = class {
     scope;
+    controlObservationOwner;
     controlOwner;
     dialogs;
     disposed;
     application;
     now;
     updates = new ViewUpdates();
+    catalogSelectionStore = new CatalogSelectionStore();
     modelStore;
     admin;
     account;
@@ -14416,6 +15101,9 @@ globalThis.__semonUIShared = __semonUIShared;
     applicationRefreshOwner;
     viewport;
     tickerOwner;
+    get catalogSelection() {
+      return this.viewerHost?.catalogControlStream ? this.catalogSelectionStore : void 0;
+    }
     constructor(host2, onDestroyed) {
       const context = this;
       this.scope = new EffectScope();
@@ -14425,6 +15113,8 @@ globalThis.__semonUIShared = __semonUIShared;
         destroy() {
           if (context.disposed) return;
           context.disposed = true;
+          context.controlObservationOwner.destroy();
+          context.catalogSelectionStore.destroy();
           context.controlOwner.destroy();
           context.updates.destroy();
           context.scope.destroy();
@@ -14505,10 +15195,11 @@ globalThis.__semonUIShared = __semonUIShared;
       this.seenPersistenceOwner = createSeenPersistence(context);
       this.sentencesOwner = createSentences(context);
       this.isGap = (e) => e.k === "end" && /entries (not included|omitted)|^No activity/.test(e.text ?? "");
-      this.controlOwner = createLocalControl(
-        this.scope,
-        () => context.applicationRefreshOwner.refresh()
-      );
+      this.controlOwner = createLocalControl(this.scope, () => {
+        if (context.viewerHost?.controlStream || context.viewerHost?.catalogControlStream)
+          context.applicationRefreshOwner.controls();
+        else context.applicationRefreshOwner.refresh();
+      });
       this.transportOwner = createTransport(context);
       this.cacheTx = (sid, entries, meta) => context.transcripts.keep(sid, entries, meta, !!context.domain.originHandoff(sid));
       this.adoptCached = (r) => context.transcripts.adoptCached(r.id, r.turn);
@@ -14563,6 +15254,7 @@ globalThis.__semonUIShared = __semonUIShared;
       this.liveModelOwner = createLiveModel(context);
       this.liveUpdates = createLiveUpdates(context);
       this.applicationRefreshOwner = createApplicationRefresh(context);
+      this.controlObservationOwner = createControlObservation(context);
       this.viewport = createViewport(context);
       this.tickerOwner = createTicker(context);
       if (context.sidebarOnly) {
@@ -14583,15 +15275,1848 @@ globalThis.__semonUIShared = __semonUIShared;
     }
   };
 
+  // src/state/catalog-capabilities.ts
+  function parseCatalogCapabilities(value) {
+    const row = object2(value), filters = array(row.filters, text), sourceKey = text(row.source_key);
+    if (row.api !== 1 || row.read_contract !== "catalog-v1" || !sourceKey || row.pagination !== true || row.order !== "last_desc_key_asc" || row.full_text_search !== false || row.global_union !== false || filters.some((filter) => filter !== "harness" && filter !== "repo") || new Set(filters).size !== filters.length)
+      throw new Error("Unsupported catalog read contract");
+    return {
+      api: 1,
+      read_contract: "catalog-v1",
+      source_key: sourceKey,
+      selected_transcript: boolean(row.selected_transcript),
+      selected_identity: boolean(row.selected_identity),
+      selected_entry: boolean(row.selected_entry),
+      attachment: boolean(row.attachment),
+      relationship_context: boolean(row.relationship_context),
+      large_native_records: boolean(row.large_native_records),
+      pagination: true,
+      filters,
+      order: "last_desc_key_asc",
+      full_text_search: false,
+      global_union: false
+    };
+  }
+
+  // src/state/catalog-transcript-wire.ts
+  function ordinal(value) {
+    const v = number(value);
+    if (!Number.isSafeInteger(v) || v < 0) throw new Error("Invalid catalog transcript ordinal");
+    return v;
+  }
+  function entry(value) {
+    const row = object2(value), provenance = object2(row.provenance), entryId = text(row.entry_id), slot = ordinal(row.slot), parsed = parseEntry(row);
+    if (!entryId) throw new Error("Invalid catalog entry identity");
+    let field;
+    if (row.field !== void 0) {
+      const reference = object2(row.field);
+      if (reference.name !== "text" && reference.name !== "out")
+        throw new Error("Unsupported native text field");
+      const layers = reference.layers ?? 1;
+      if (layers !== 1 && layers !== 2) throw new Error("Unsupported native field encoding");
+      field = {
+        layers,
+        name: reference.name,
+        chunks: ordinal(reference.chunks),
+        complete: boolean(reference.complete)
+      };
+    }
+    let freshness2;
+    if (row.freshness !== void 0) {
+      const state2 = object2(row.freshness).state;
+      if (state2 !== "cached" && state2 !== "stale" && state2 !== "incomplete" && state2 !== "unavailable")
+        throw new Error("Invalid catalog entry freshness");
+      freshness2 = { state: state2 };
+    }
+    parsed.key = entryId;
+    parsed.slot = slot;
+    return {
+      entry_id: entryId,
+      slot,
+      entry: parsed,
+      clipped: row.clipped === void 0 ? void 0 : boolean(row.clipped),
+      field,
+      freshness: freshness2,
+      native_action_text: parsed.k === "h" ? text(row.text) : void 0,
+      provenance: {
+        source: parseCatalogSource(provenance.source),
+        native_event_id: provenance.native_event_id === null ? null : text(provenance.native_event_id),
+        offset: ordinal(provenance.offset),
+        block: ordinal(provenance.block)
+      }
+    };
+  }
+  function parseCatalogTranscriptPage(value) {
+    const row = object2(value);
+    if (!Array.isArray(row.entries) || row.entries.length > 100)
+      throw new Error("Invalid catalog transcript page size");
+    const identity2 = parseCatalogIdentity(row.identity), session = parseCatalogSession(row.session), projection = object2(row.projection), range = object2(row.range), context = object2(row.relationship_context), generation = text(projection.generation), total = ordinal(projection.total), first = ordinal(range.first), end = ordinal(range.end), next = range.next === null ? null : ordinal(range.next), entries = array(row.entries, entry), state2 = object2(row.freshness).state;
+    if (row.api !== 1 || projection.version !== 4 || !/^[0-9a-f]{64}$/i.test(generation) || session.key !== identity2.catalog_key || session.harness !== identity2.harness || end < first || end > total || end - first > 100 || entries.length !== end - first || next !== (end < total ? end : null) || entries.some((item2, i) => item2.slot !== first + i) || new Set(entries.map((item2) => item2.entry_id)).size !== entries.length || context.state !== "incomplete" || !Array.isArray(context.handoffs) || context.handoffs.length !== 0 || state2 !== "cached" && state2 !== "stale" && state2 !== "incomplete" && state2 !== "unavailable")
+      throw new Error("Invalid catalog transcript page");
+    return {
+      api: 1,
+      identity: identity2,
+      session,
+      projection: { version: 4, generation, total },
+      range: { first, end, next },
+      entries,
+      freshness: { state: state2 },
+      relationship_context: {
+        state: "incomplete",
+        turn_ids: array(context.turn_ids, text),
+        handoffs: []
+      }
+    };
+  }
+
+  // src/state/catalog-transcript.ts
+  function content(item2) {
+    const { freshness: freshness2, ...body } = item2;
+    return JSON.stringify(body);
+  }
+  function emptyObservedBody(item2) {
+    const entry2 = item2.entry;
+    return entry2.k === "tool" ? !entry2.out : entry2.k === "h" ? !item2.native_action_text : (entry2.k === "u" || entry2.k === "a" || entry2.k === "think") && !entry2.text;
+  }
+  var CatalogTranscriptStore = class {
+    epoch = 0;
+    contentVersion = 0;
+    get revision() {
+      return this.contentVersion;
+    }
+    scope = null;
+    readScope = "current";
+    disposed = false;
+    requests = /* @__PURE__ */ new Set();
+    pages = [];
+    listeners = /* @__PURE__ */ new Set();
+    select(scope, readScope2 = "current") {
+      if (this.disposed) throw new Error("Catalog transcript is destroyed");
+      if (typeof scope.source_key !== "string" || !scope.source_key || typeof scope.catalog_key !== "string" || !scope.catalog_key || readScope2 !== "current" && readScope2 !== "retained_history")
+        throw new Error("Invalid catalog transcript scope");
+      ++this.epoch;
+      ++this.contentVersion;
+      this.scope = { ...scope };
+      this.readScope = readScope2;
+      this.requests.clear();
+      this.pages = [];
+      this.changed();
+    }
+    request(after = null, limit = 60) {
+      if (this.disposed || !this.scope) throw new Error("No selected catalog transcript");
+      if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100 || after !== null && (!Number.isSafeInteger(after) || after < 0))
+        throw new Error("Invalid catalog transcript range");
+      const request = Object.freeze({
+        ...this.scope,
+        epoch: this.epoch,
+        after,
+        limit,
+        generation: this.pages[0]?.projection.generation ?? null,
+        read_scope: this.readScope
+      });
+      this.requests.add(request);
+      return request;
+    }
+    accept(request, value) {
+      if (this.disposed || !this.requests.has(request) || request.epoch !== this.epoch) return false;
+      const page = parseCatalogTranscriptPage(value);
+      const generation = this.pages[0]?.projection.generation ?? request.generation;
+      const first = request.after === null ? Math.max(0, page.projection.total - request.limit) : Math.min(request.after, page.projection.total);
+      if (page.identity.source_key !== request.source_key || page.identity.catalog_key !== request.catalog_key || page.identity.read_scope !== request.read_scope || page.range.first !== first || page.range.end !== Math.min(first + request.limit, page.projection.total) || generation !== null && page.projection.generation !== generation)
+        throw new Error("Catalog transcript response does not match the requested range");
+      const sameRange = this.pages.find(
+        (old) => old.range.first === page.range.first && old.range.end === page.range.end
+      );
+      if (sameRange && sameRange.projection.total === page.projection.total && JSON.stringify(sameRange.entries) === JSON.stringify(page.entries)) {
+        this.requests.delete(request);
+        this.pages[this.pages.indexOf(sameRange)] = page;
+        return true;
+      }
+      const existing = /* @__PURE__ */ new Map(), ids = /* @__PURE__ */ new Map();
+      for (const loaded of this.pages) {
+        if (loaded.projection.total !== page.projection.total)
+          throw new Error("Catalog transcript total changed within a projection");
+        for (const item2 of loaded.entries) {
+          existing.set(item2.slot, item2);
+          ids.set(item2.entry_id, item2.slot);
+        }
+      }
+      page.entries = page.entries.map((item2) => {
+        const old = existing.get(item2.slot);
+        if (old && item2.freshness?.state === "incomplete" && emptyObservedBody(item2) && old.entry_id === item2.entry_id && old.entry.k === item2.entry.k && JSON.stringify(old.provenance) === JSON.stringify(item2.provenance))
+          return { ...old, freshness: item2.freshness };
+        return item2;
+      });
+      for (const item2 of page.entries) {
+        const old = existing.get(item2.slot);
+        if (ids.has(item2.entry_id) && ids.get(item2.entry_id) !== item2.slot || old && content(old) !== content(item2))
+          throw new Error("Catalog transcript entry changed within a projection");
+      }
+      if (sameRange && JSON.stringify(sameRange.entries) === JSON.stringify(page.entries)) {
+        this.requests.delete(request);
+        this.pages[this.pages.indexOf(sameRange)] = page;
+        return true;
+      }
+      const observed = new Map(page.entries.map((item2) => [item2.slot, item2]));
+      this.requests.delete(request);
+      this.pages = [
+        ...this.pages.filter((old) => old.range.first !== first || old.range.end !== page.range.end).map((old) => ({
+          ...old,
+          entries: old.entries.map((item2) => observed.get(item2.slot) ?? item2)
+        })),
+        page
+      ].sort((a, b) => a.range.first - b.range.first);
+      ++this.contentVersion;
+      this.changed();
+      return true;
+    }
+    reject(request) {
+      this.requests.delete(request);
+    }
+    selectedPage() {
+      return this.pages.at(-1) ?? null;
+    }
+    loadedRanges() {
+      const ranges = [];
+      for (const page of this.pages) {
+        const last = ranges.at(-1);
+        if (last && page.range.first <= last.end) last.end = Math.max(last.end, page.range.end);
+        else ranges.push({ first: page.range.first, end: page.range.end });
+      }
+      return ranges;
+    }
+    entries() {
+      const bySlot = /* @__PURE__ */ new Map();
+      for (const page of this.pages)
+        for (const item2 of page.entries) if (!bySlot.has(item2.slot)) bySlot.set(item2.slot, item2);
+      return [...bySlot.values()].sort((a, b) => a.slot - b.slot);
+    }
+    subscribe(listener) {
+      if (this.disposed) throw new Error("Catalog transcript is destroyed");
+      this.listeners.add(listener);
+      return () => this.listeners.delete(listener);
+    }
+    destroy() {
+      this.disposed = true;
+      ++this.epoch;
+      this.requests.clear();
+      this.pages = [];
+      this.scope = null;
+      this.listeners.clear();
+    }
+    changed() {
+      for (const listener of [...this.listeners]) listener();
+    }
+  };
+
+  // src/lib/catalog.tsx
+  function renderCatalogList(root, snapshot, host2) {
+    render(
+      /* @__PURE__ */ jsxs(Fragment2, { children: [
+        /* @__PURE__ */ jsxs("div", { class: "ph", children: [
+          /* @__PURE__ */ jsx("h1", { children: "Sessions" }),
+          /* @__PURE__ */ jsxs("p", { class: "sub", children: [
+            screenText(snapshot.sourceLabel),
+            " \xB7 Cached history"
+          ] })
+        ] }),
+        /* @__PURE__ */ jsxs(
+          "form",
+          {
+            class: "catalog-filters facet-filters",
+            onSubmit: (event) => {
+              event.preventDefault();
+            },
+            children: [
+              /* @__PURE__ */ jsxs("label", { class: "search", children: [
+                "Harness",
+                " ",
+                /* @__PURE__ */ jsx(
+                  "input",
+                  {
+                    "aria-label": "Harness",
+                    value: snapshot.harness,
+                    onChange: (event) => host2.filter("harness", event.currentTarget.value.trim())
+                  }
+                )
+              ] }),
+              /* @__PURE__ */ jsxs("label", { class: "search", children: [
+                "Repository",
+                " ",
+                /* @__PURE__ */ jsx(
+                  "input",
+                  {
+                    "aria-label": "Repository",
+                    value: snapshot.repo,
+                    onChange: (event) => host2.filter("repo", event.currentTarget.value.trim())
+                  }
+                )
+              ] })
+            ]
+          }
+        ),
+        /* @__PURE__ */ jsx("p", { class: "catalog-note", children: "Sorted by latest recorded activity. Text search and history across sources are unavailable." }),
+        snapshot.note && /* @__PURE__ */ jsxs("p", { class: "catalog-note", role: "status", children: [
+          snapshot.note,
+          " ",
+          /* @__PURE__ */ jsx("button", { type: "button", class: "link", onClick: () => host2.retry(), children: "Retry" })
+        ] }),
+        snapshot.updating && /* @__PURE__ */ jsx("p", { class: "catalog-note", role: "status", children: "Updating history\u2026" }),
+        /* @__PURE__ */ jsx("div", { class: "session-list", children: snapshot.items.map((item2) => /* @__PURE__ */ jsxs(
+          "button",
+          {
+            class: "nrow",
+            type: "button",
+            "data-session-row": "list",
+            "data-id": item2.key,
+            onClick: () => host2.session(item2),
+            children: [
+              /* @__PURE__ */ jsxs("span", { class: "session-row-main srow-main", children: [
+                /* @__PURE__ */ jsx("span", { class: "nm", children: screenText(item2.name) }),
+                /* @__PURE__ */ jsx("span", { class: "ag", children: item2.freshness.state })
+              ] }),
+              /* @__PURE__ */ jsx("span", { class: "session-row-meta srow-meta for", children: screenText(
+                [item2.harness, item2.repo, item2.branch, item2.model].filter(Boolean).join(" \xB7 ")
+              ) })
+            ]
+          },
+          item2.key
+        )) }),
+        /* @__PURE__ */ jsx("p", { class: "catalog-note", children: /* @__PURE__ */ jsx("a", { class: "link", href: snapshot.compatibilityHref, children: "Open compatibility view (loads workspace history)" }) }),
+        !snapshot.updating && !snapshot.items.length && !snapshot.note && /* @__PURE__ */ jsx("p", { class: "catalog-note", children: "No recorded sessions match these filters." }),
+        snapshot.more && /* @__PURE__ */ jsx("button", { class: "link", type: "button", disabled: snapshot.updating, onClick: () => host2.more(), children: "Load more sessions" })
+      ] }),
+      root
+    );
+  }
+
+  // src/lib/runtimeObservation.ts
+  function parseRuntimeObservation(value) {
+    if (!value || typeof value !== "object" || Array.isArray(value))
+      throw new Error("Invalid readonly runtime observation");
+    const row = value;
+    if (typeof row.state !== "string" || !["active", "disconnected", "failed", "ended", "unavailable"].includes(row.state) || typeof row.phase !== "string" || row.phase.length > 64 || typeof row.freshness !== "string" || !["current", "updating", "stale", "unavailable"].includes(row.freshness) || row.presence !== void 0 && (typeof row.presence !== "string" || !["active", "absent", "paused", "transitioning", "failed", "unknown"].includes(
+      row.presence
+    )) || row.observedAt !== void 0 && row.observedAt !== null && (typeof row.observedAt !== "string" || row.observedAt.length > 64 || !Number.isFinite(Date.parse(row.observedAt))) || row.observationError !== void 0 && row.observationError !== null && (typeof row.observationError !== "string" || row.observationError.length > 512) || row.updating !== void 0 && typeof row.updating !== "boolean")
+      throw new Error("Invalid readonly runtime observation");
+    return Object.freeze({
+      state: row.state,
+      phase: row.phase,
+      freshness: row.freshness,
+      ...row.presence === void 0 ? {} : { presence: row.presence },
+      ...row.observedAt === void 0 ? {} : { observedAt: row.observedAt },
+      ...row.observationError === void 0 ? {} : { observationError: row.observationError },
+      ...row.updating === void 0 ? {} : { updating: row.updating }
+    });
+  }
+
+  // src/app/runtimeObservation.ts
+  function createRuntimeObservation(host2) {
+    let disposed = false;
+    let stream = null;
+    let cleanups2 = [];
+    let ticket = 0;
+    let key = "";
+    let frame = null;
+    let timer;
+    let deadline;
+    let delay = 1e3;
+    const listeners = /* @__PURE__ */ new Set();
+    const selected = () => {
+      const selected2 = host2.catalogRuntimeSelection?.selectedScope();
+      const route = host2.navigation.route;
+      return route.v === "session" && selected2?.catalog_key === route.id ? selected2 : null;
+    };
+    const selectionKey = (scope) => scope ? JSON.stringify([scope.source_key, scope.catalog_key]) : "";
+    function publish(value) {
+      frame = value ? Object.freeze(value) : null;
+      for (const listener of listeners) listener();
+    }
+    function cancel() {
+      ++ticket;
+      for (const cleanup of cleanups2) cleanup();
+      cleanups2 = [];
+      stream?.close();
+      stream = null;
+      host2.scope.clearTimeout(timer);
+      timer = void 0;
+      host2.scope.clearTimeout(deadline);
+      deadline = void 0;
+    }
+    function disconnected(reason, permanent = false) {
+      cancel();
+      if (frame)
+        publish({
+          ...frame,
+          delivery: permanent ? "unavailable" : frame.observation ? "stale" : "unavailable",
+          reason
+        });
+      if (!permanent) {
+        const generation = ticket;
+        timer = host2.scope.timeout(() => {
+          if (!disposed && generation === ticket) connect();
+        }, delay);
+        delay = Math.min(15e3, delay * 2);
+      }
+    }
+    function connect() {
+      if (disposed) return;
+      cancel();
+      const scope = selected();
+      const path = host2.viewerHost?.catalogRuntimeStream;
+      key = selectionKey(scope);
+      if (!scope || !path || !safePath(path)) {
+        publish(null);
+        return;
+      }
+      if (!frame || selectionKey(frame) !== key)
+        publish({
+          ...scope,
+          revision: null,
+          observation: null,
+          reason: "Checking environment status\u2026",
+          delivery: "updating"
+        });
+      else publish({ ...frame, delivery: "updating" });
+      const generation = ticket;
+      const query = new URLSearchParams({
+        source_key: scope.source_key,
+        catalog_key: scope.catalog_key
+      });
+      let current;
+      try {
+        current = new EventSource(path + (path.includes("?") ? "&" : "?") + query);
+      } catch {
+        disconnected("Environment status is unavailable. Retrying.");
+        return;
+      }
+      stream = current;
+      const valid = () => !disposed && ticket === generation && stream === current && key === selectionKey(selected());
+      const recover = () => {
+        if (valid()) disconnected("Environment status updates were interrupted. Retrying.");
+      };
+      const heartbeat = () => {
+        if (!valid()) return;
+        host2.scope.clearTimeout(deadline);
+        deadline = host2.scope.timeout(recover, 3e4);
+      };
+      function listen(type, listener) {
+        current.addEventListener(type, listener);
+        cleanups2.push(() => current.removeEventListener(type, listener));
+      }
+      heartbeat();
+      listen("heartbeat", heartbeat);
+      listen("error", recover);
+      listen("unavailable", recover);
+      listen("ended", () => {
+        if (valid())
+          disconnected(
+            "Access changed. Sign in or select an authorized workspace to inspect status.",
+            true
+          );
+      });
+      listen("runtime", (event) => {
+        if (!valid() || !(event instanceof MessageEvent)) return;
+        try {
+          if (String(event.data).length > 16384) throw new Error("Runtime status too large");
+          const value = JSON.parse(String(event.data));
+          if (!value || typeof value !== "object" || Array.isArray(value))
+            throw new Error("Invalid runtime envelope");
+          const row = value;
+          if (row.source_key !== scope.source_key || row.catalog_key !== scope.catalog_key || typeof row.revision !== "string" || !/^[0-9a-f]{64}$/.test(row.revision) || !(row.reason === null || row.reason === void 0 || typeof row.reason === "string" && row.reason.length <= 512) || row.runtime === void 0)
+            throw new Error("Runtime selection changed");
+          const observation = row.runtime === null ? null : parseRuntimeObservation(row.runtime);
+          heartbeat();
+          delay = 1e3;
+          if (frame?.revision === row.revision && frame.delivery === "current") return;
+          publish({
+            ...scope,
+            revision: row.revision,
+            observation,
+            reason: typeof row.reason === "string" ? row.reason : null,
+            delivery: "current"
+          });
+        } catch {
+          recover();
+        }
+      });
+    }
+    const reselect = () => {
+      const next = selectionKey(selected());
+      if (next === key) return;
+      cancel();
+      key = next;
+      delay = 1e3;
+      publish(null);
+      connect();
+    };
+    const unsubscribe = host2.catalogRuntimeSelection?.subscribe(reselect) ?? (() => {
+    });
+    const unnavigate = host2.navigation.subscribeRoute(reselect);
+    host2.scope.listen(document, "semon:refresh", () => {
+      delay = 1e3;
+      connect();
+    });
+    connect();
+    return {
+      view: () => frame,
+      subscribe(listener) {
+        if (disposed) return () => {
+        };
+        listeners.add(listener);
+        return () => listeners.delete(listener);
+      },
+      destroy() {
+        if (disposed) return;
+        disposed = true;
+        cancel();
+        unsubscribe();
+        unnavigate();
+        listeners.clear();
+        frame = null;
+      }
+    };
+  }
+
+  // src/app/catalogTranscriptView.ts
+  function catalogTranscriptBlocks(entries, fieldView) {
+    return entries.map((item2) => {
+      const { entry_id, native_action_text, clipped, freshness: freshness2 } = item2, field = fieldView?.(item2), entry2 = field?.text === void 0 ? item2.entry : item2.entry.k === "tool" ? { ...item2.entry, out: field.text } : { ...item2.entry, text: field.text };
+      const views = [];
+      let notice = 0;
+      const label = (text2) => views.push({
+        kind: "label",
+        key: entry_id + ":notice:" + notice++,
+        className: "vnote",
+        text: text2
+      });
+      if (entry2.k === "u" || entry2.k === "a")
+        views.push({
+          kind: "message",
+          key: entry_id,
+          entryKey: entry_id,
+          flavor: entry2.k === "u" ? "user" : "assistant",
+          text: entry2.text
+        });
+      else if (entry2.k === "think")
+        views.push({
+          kind: "thought",
+          key: entry_id,
+          entryKey: entry_id,
+          mode: entry2.text ? "readable" : entry2.pending ? "pending" : "masked",
+          text: entry2.text
+        });
+      else if (entry2.k === "tool") {
+        const { more, script, scriptText, scriptTruncated, scriptFailed, ...preview2 } = entry2;
+        views.push({
+          kind: "tool",
+          key: entry_id,
+          entryKey: entry_id,
+          step: {
+            className: "step" + (entry2.ok === false ? " err" : ""),
+            key: entry_id,
+            entryKey: entry_id,
+            running: false,
+            background: false,
+            waiting: false,
+            label: entry2.title ?? entry2.arg,
+            named: !!entry2.title,
+            verb: entry2.name,
+            status: entry2.unfinished ? "Result not recorded" : entry2.exit == null ? null : "exit " + entry2.exit,
+            icon: I.run,
+            chevron: I.chev,
+            data: preview2
+          }
+        });
+        if (more?.length || script || scriptText || scriptTruncated || scriptFailed)
+          label("Full result unavailable for this source. The recorded preview is shown.");
+      } else if (entry2.k === "h") {
+        label("Native action \xB7 related session context is incomplete");
+        views.push({
+          kind: "message",
+          key: entry_id,
+          entryKey: entry_id,
+          flavor: "incoming",
+          text: native_action_text ?? ""
+        });
+      } else if (entry2.k === "end") label(entry2.text ?? "Native session end recorded");
+      else if (entry2.k === "bgend") label(entry2.label ?? entry2.state);
+      else if (entry2.k === "harness") label(entry2.label);
+      else if (entry2.k === "signal")
+        label("Native " + entry2.signal.kind + (entry2.signal.tag ? " \xB7 " + entry2.signal.tag : ""));
+      if (field) {
+        views.push({
+          kind: "label",
+          key: entry_id + ":field",
+          className: "vnote",
+          text: field.note,
+          action: field.action
+        });
+      } else if (clipped) label("Recorded text preview. The complete source text is not loaded.");
+      if (freshness2 && freshness2.state !== "cached")
+        label(
+          "Source observation is " + freshness2.state + ". Previously loaded content is retained."
+        );
+      if (entry2.img?.length) label("Attachments unavailable for this source.");
+      return { kind: "loose", key: entry_id, entries: views };
+    });
+  }
+
+  // src/state/catalog-field-wire.ts
+  function parseCatalogField(value, request) {
+    const row = object2(value), identity2 = parseCatalogIdentity(row.identity), projection = object2(row.projection), field = object2(row.field), provenance = object2(row.provenance), source = parseCatalogSource(provenance.source), chunk = number(field.chunk), next = field.next === null ? null : number(field.next), complete = boolean(field.complete), body = text(row.text), sourceBytes = number(object2(row.observation).source_bytes), layers = field.layers ?? 1;
+    const sourceLimit = layers === 2 ? 65607 : 65547;
+    if (row.api !== 1 || identity2.read_scope !== "retained_history" || identity2.source_key !== request.source_key || identity2.catalog_key !== request.catalog_key || projection.version !== 4 || projection.generation !== request.generation || row.slot !== request.entry.slot || field.name !== request.entry.field?.name || layers !== 1 && layers !== 2 || layers !== (request.entry.field?.layers ?? 1) || chunk !== request.chunk || !Number.isSafeInteger(chunk) || chunk < 0 || next !== (complete ? null : chunk + 1) || !request.entry.field || chunk >= request.entry.field.chunks || complete !== (chunk + 1 === request.entry.field.chunks) || object2(row.freshness).state !== "cached" || !Number.isSafeInteger(sourceBytes) || sourceBytes < 0 || sourceBytes > sourceLimit || new TextEncoder().encode(body).byteLength > 131072 || JSON.stringify(source) !== JSON.stringify(request.entry.provenance.source) || provenance.offset !== request.entry.provenance.offset || provenance.block !== request.entry.provenance.block || provenance.native_event_id !== request.entry.provenance.native_event_id)
+      throw new Error("Native field chunk does not match the selected source projection");
+    return { text: body, next, complete };
+  }
+
+  // src/state/catalog-sources.ts
+  function parseCatalogSources(value) {
+    const row = object2(value);
+    if (row.api !== 1 || !Array.isArray(row.items) || row.items.length > 100)
+      throw new Error("Invalid source inventory");
+    const items = array(row.items, (value2) => {
+      const item2 = object2(value2), source_key = text(item2.source_key), label = text(item2.label);
+      if (!source_key || !label) throw new Error("Invalid source identity");
+      return { source_key, label };
+    });
+    if (new Set(items.map((item2) => item2.source_key)).size !== items.length)
+      throw new Error("Repeated source inventory identity");
+    const cursor = row.next_cursor === null ? null : text(row.next_cursor);
+    if (cursor === "") throw new Error("Invalid source inventory cursor");
+    return { api: 1, items, next_cursor: cursor };
+  }
+
+  // src/lib/catalogSources.tsx
+  function renderCatalogSources(root, view, host2) {
+    render(
+      /* @__PURE__ */ jsxs(Fragment2, { children: [
+        /* @__PURE__ */ jsxs("div", { class: "ph", children: [
+          /* @__PURE__ */ jsx("h1", { children: "Choose a machine" }),
+          /* @__PURE__ */ jsx("p", { class: "sub", children: "Browse recorded history from one authorized source." })
+        ] }),
+        view.note && /* @__PURE__ */ jsxs("p", { class: "catalog-note", role: "status", children: [
+          screenText(view.note),
+          " ",
+          /* @__PURE__ */ jsx("button", { class: "link", type: "button", onClick: () => host2.retry(), children: "Retry" })
+        ] }),
+        view.updating && /* @__PURE__ */ jsx("p", { class: "catalog-note", role: "status", children: "Loading machines\u2026" }),
+        /* @__PURE__ */ jsx("div", { class: "session-list", children: view.items.map((item2) => /* @__PURE__ */ jsx(
+          "button",
+          {
+            class: "nrow",
+            type: "button",
+            "data-source-key": item2.source_key,
+            onClick: () => host2.select(item2.source_key),
+            children: /* @__PURE__ */ jsx("span", { class: "nm", children: screenText(item2.label) })
+          },
+          item2.source_key
+        )) }),
+        !view.items.length && !view.updating && !view.note && /* @__PURE__ */ jsx("p", { class: "catalog-note", children: "No authorized recorded sources are available." }),
+        view.more && /* @__PURE__ */ jsx("button", { class: "link", type: "button", disabled: view.updating, onClick: () => host2.more(), children: "Load more machines" }),
+        /* @__PURE__ */ jsx("p", { class: "catalog-note", children: "This source list contains names and keys only. History across sources and text search are unavailable." }),
+        /* @__PURE__ */ jsxs("p", { class: "catalog-note", children: [
+          /* @__PURE__ */ jsx("a", { class: "link", href: view.machinesHref, children: "Manage machines" }),
+          " \xB7 ",
+          /* @__PURE__ */ jsx("a", { class: "link", href: "/sessions?compat=1", children: "Open compatibility view (loads workspace history)" })
+        ] })
+      ] }),
+      root
+    );
+  }
+
+  // src/app/catalogViewer.tsx
+  function createCatalogViewer(capabilities, viewerHost) {
+    const scope = new EffectScope(), selection = new CatalogSelectionStore(), navigation = new NavigationController({}), updates = new ViewUpdates();
+    let listRetry, listRetryDelay = 1e3;
+    let disposed = false, page = null, items = [], cursor = null, listEpoch = 0, updating = false, note = "", harness = "", repo = "", active = null;
+    const selected = /* @__PURE__ */ new Map();
+    const sourceViews = /* @__PURE__ */ new Map();
+    let sourcesOpen = false, sourcesEpoch = 0, sourceItems = [], sourceCursor = null, sourcesUpdating = false, sourcesNote = "", sourcesRetryDelay = 1e3;
+    const cacheKey = (key) => JSON.stringify([capabilities.source_key, key]);
+    const account = parseAccount(viewerHost?.account);
+    let wide = document.querySelector("#page")?.classList.contains("wide-mode") ?? false, rail = document.querySelector(".app")?.classList.contains("rail") ?? false, chromeTitle = null, chromeSession = false;
+    const shell = createShellChrome({
+      account: {
+        place(widget, trigger) {
+          const at = trigger.getBoundingClientRect();
+          setGeometry(widget, "accountLeft", at.left);
+          setGeometry(widget, "accountWidth", at.width);
+          setGeometry(widget, "accountBottom", Math.max(0, innerHeight - at.top + 6));
+        },
+        opened() {
+        },
+        closed() {
+        },
+        navigate() {
+          return false;
+        },
+        submit() {
+          return false;
+        }
+      },
+      navigate(destination) {
+        if (destination.key === "sources") {
+          void showSources();
+          return true;
+        }
+        if (destination.key !== "sessions") return false;
+        sourcesOpen = false;
+        goList();
+        return true;
+      },
+      drawerOpened() {
+      },
+      drawerClosed() {
+      },
+      railChanged() {
+        rail = !rail;
+        chrome();
+      }
+    });
+    shell.mount(document.querySelector(".app"));
+    const root = shell.slots.content, title = document.createElement("div"), jumpActions = document.createElement("div"), jumpSlot = document.createElement("span"), jumpTarget = document.createElement("div");
+    title.className = "ttl";
+    jumpActions.className = "viewer-bar-actions";
+    jumpSlot.className = "viewer-jump";
+    jumpTarget.className = "jump-wrap";
+    jumpTarget.hidden = true;
+    jumpSlot.append(jumpTarget);
+    jumpActions.append(jumpSlot);
+    const recent = createRecentRenderer(shell.slots.recent, {
+      open(key) {
+        void goSession(key);
+      },
+      toggle() {
+      },
+      all() {
+      },
+      fewer() {
+      }
+    });
+    const control = createLocalControl(scope, () => {
+      if (!active) return;
+      updateSessionControl(active.root, controlFor(active));
+    });
+    function controlFor(view) {
+      const identity2 = selection.selectedIdentity();
+      const current = active === view && identity2?.catalog_key === view.key && identity2.native_id ? control.view(identity2.native_id) : void 0;
+      if (current) view.lastControl = current;
+      const runtime = runtimeFor(view)?.observation, terminal = runtime && runtime.state !== "active";
+      if (current && !terminal || !view.lastControl) return current;
+      const previous = current ?? view.lastControl;
+      return {
+        ...previous,
+        busy: false,
+        uncertain: true,
+        canReconnect: false,
+        snapshot: {
+          ...previous.snapshot,
+          connected: false,
+          reason: terminal ? "Native controls are unavailable for this environment state." : "Current connection status is unavailable.",
+          capabilities: {
+            ...previous.snapshot.capabilities,
+            input: false,
+            steer: false,
+            interrupt: false,
+            commandApproval: false,
+            fileApproval: false,
+            questions: false
+          }
+        },
+        send: () => Promise.resolve(false),
+        interrupt() {
+        },
+        answer() {
+        },
+        reconnect() {
+        }
+      };
+    }
+    const observation = createControlObservation({
+      scope,
+      navigation,
+      updates,
+      viewerHost,
+      catalogSelection: selection,
+      controlOwner: control,
+      modelStore: {
+        get sessions() {
+          throw new Error("Catalog status cannot access the complete model");
+        }
+      }
+    });
+    const runtimeObservation = createRuntimeObservation({
+      scope,
+      navigation,
+      viewerHost,
+      catalogRuntimeSelection: selection
+    });
+    function runtimeFor(view) {
+      const frame = runtimeObservation.view();
+      return frame?.source_key === capabilities.source_key && frame.catalog_key === view.key ? frame : void 0;
+    }
+    const removeRuntimeListener = runtimeObservation.subscribe(() => {
+      if (!active) return;
+      updateSessionRuntime(active.root, runtimeFor(active));
+      updateSessionControl(active.root, controlFor(active));
+    });
+    const api = async (path) => {
+      const controller = scope.request(), deadline = scope.timeout(() => controller.abort(), 15e3);
+      try {
+        return await requestJson(path, controller.signal);
+      } finally {
+        scope.clearTimeout(deadline);
+        scope.releaseRequest(controller);
+      }
+    };
+    const currentParams = () => new URLSearchParams({ machine: capabilities.source_key });
+    const params = () => new URLSearchParams({ machine: capabilities.source_key, scope: "retained_history" });
+    function chrome() {
+      const name = sourcesOpen ? "Choose a machine" : active?.meta?.name ?? (active ? "Session" : "Sessions");
+      shell.update(
+        [
+          {
+            key: "sessions",
+            label: "Sessions",
+            href: "/sessions",
+            icon: I.sessions,
+            current: !sourcesOpen
+          },
+          {
+            key: "sources",
+            label: "Sources",
+            href: "/sessions?choose_source=1",
+            icon: I.sessions,
+            current: sourcesOpen
+          },
+          ...(viewerHost?.nativeNavigation ?? []).filter(
+            (destination) => destination.key !== "sessions"
+          )
+        ],
+        rail
+      );
+      if (chromeTitle !== name || chromeSession !== !!active) {
+        chromeTitle = name;
+        chromeSession = !!active;
+        title.textContent = name;
+        shell.topbar({
+          titleSlot: title,
+          actions: active ? [jumpActions] : [],
+          session: !!active,
+          lead: { label: "Open menu", icon: I.menu },
+          account: account ? {
+            account,
+            compact: false,
+            wide,
+            onWideChange() {
+              wide = !wide;
+              root.classList.toggle("wide-mode", wide);
+              shell.account.updateWide(wide);
+            }
+          } : null
+        });
+        shell.drawerAccount(account ? { account, compact: true, wide, onWideChange() {
+        } } : null);
+      }
+      recent.update({
+        empty: !items.length,
+        items: items.slice(0, 60).map((item2) => ({
+          id: item2.key,
+          name: item2.name,
+          label: item2.name,
+          state: "",
+          stateLabel: "Cached history",
+          age: item2.freshness.state,
+          model: item2.model,
+          modelTip: item2.model,
+          fields: [],
+          current: active?.key === item2.key ? "page" : void 0,
+          rail: false,
+          open: false,
+          depth: 0,
+          stuck: false
+        }))
+      });
+    }
+    function drawList() {
+      if (disposed || active || sourcesOpen) return;
+      chrome();
+      renderCatalogList(
+        root,
+        {
+          items,
+          sourceLabel: page?.machine_info.label ?? (capabilities.source_key || "This source"),
+          updating,
+          note,
+          harness,
+          repo,
+          more: cursor !== null,
+          compatibilityHref: "/sessions?compat=1" + (capabilities.source_key ? "&machine=" + encodeURIComponent(capabilities.source_key) : "")
+        },
+        {
+          session(item2) {
+            void goSession(
+              item2.key,
+              items.find((row) => row.key === item2.key)
+            );
+          },
+          filter(field, value) {
+            if (field === "harness") harness = value;
+            else repo = value;
+            void loadList(false);
+          },
+          more() {
+            void loadList(true);
+          },
+          retry() {
+            void loadList(false);
+          }
+        }
+      );
+    }
+    async function loadList(append) {
+      if (disposed || append && updating) return;
+      scope.clearTimeout(listRetry);
+      const epoch = ++listEpoch, p = params();
+      p.set("limit", "60");
+      if (harness) p.set("harness", harness);
+      if (repo) p.set("repo", repo);
+      if (append && cursor !== null) p.set("cursor", cursor);
+      updating = true;
+      note = "";
+      drawList();
+      try {
+        const next = parseCatalogPage(await api("/api/sessions?" + p));
+        if (disposed || epoch !== listEpoch) return;
+        if (next.machine !== capabilities.source_key || next.read_scope !== "retained_history" || append && page?.generation !== next.generation)
+          throw new Error("History changed; refresh this list before loading another page.");
+        if (append && next.items.some((item2) => items.some((old) => old.key === item2.key)))
+          throw new Error("History page repeated a session. Refresh this list.");
+        listRetryDelay = 1e3;
+        page = next;
+        cursor = next.next_cursor;
+        items = append ? [...items, ...next.items] : next.items;
+        updating = false;
+        drawList();
+        chrome();
+      } catch (error) {
+        if (disposed || epoch !== listEpoch) return;
+        updating = false;
+        if (append && error && typeof error === "object" && "status" in error && error.status === 409) {
+          void loadList(false);
+          return;
+        }
+        note = readError(error);
+        drawList();
+        if (retryable(error)) {
+          listRetry = scope.timeout(() => void loadList(append), listRetryDelay);
+          listRetryDelay = Math.min(8e3, listRetryDelay * 2);
+        }
+      }
+    }
+    function readError(error) {
+      if (!(error && typeof error === "object" && "status" in error) && !(error instanceof Error && error.name === "AbortError"))
+        return "The source returned an invalid history view. Retry after checking this source.";
+      const status2 = error && typeof error === "object" && "status" in error ? error.status : 0;
+      if (status2 === 401 || status2 === 403)
+        return "Authorization is required to read this source. Reconnect your account and retry.";
+      if (status2 === 400) return "The requested filter or range is unsupported by this source.";
+      if (status2 === 404) return "This recorded session is unavailable from the selected source.";
+      if (status2 === 409) return "Recorded history changed. Resynchronizing\u2026";
+      if (status2 === 503) return "The source is updating or temporarily unavailable. Retrying\u2026";
+      if (status2 === 0) return "Source observation is unavailable. Retrying\u2026";
+      return "History could not be read. Retry after checking your connection.";
+    }
+    function retryable(error) {
+      if (!(error && typeof error === "object" && "status" in error))
+        return error instanceof Error && error.name === "AbortError";
+      const status2 = error && typeof error === "object" && "status" in error ? error.status : 0;
+      return status2 === 0 || status2 === 429 || status2 === 500 || status2 === 502 || status2 === 503 || status2 === 504;
+    }
+    function preserveScroll() {
+      if (active)
+        active.scroll = window.matchMedia("(max-width: 760px)").matches ? window.scrollY : document.querySelector("#main").scrollTop;
+    }
+    function goList(push = true) {
+      sourcesOpen = false;
+      preserveScroll();
+      active = null;
+      selection.clear();
+      navigation.route = { v: "sessions" };
+      if (push)
+        history.pushState(
+          null,
+          "",
+          "/sessions" + (capabilities.source_key ? "?machine=" + encodeURIComponent(capabilities.source_key) : "")
+        );
+      root.replaceChildren();
+      drawList();
+      shell.closeDrawer(true);
+    }
+    function drawSelected(view) {
+      if (disposed || active !== view) return;
+      const current = view.store.selectedPage(), identity2 = selection.selectedIdentity();
+      if (!current) {
+        renderSessionScreen(
+          view.root,
+          {
+            id: view.key,
+            name: view.meta?.name ?? "Session",
+            control: controlFor(view),
+            runtime: runtimeFor(view),
+            blocks: [],
+            order: [],
+            observation: "Recorded history is updating",
+            empty: view.note || (capabilities.selected_transcript ? "Loading recorded session\u2026" : "Recorded transcript is updating. The source refresh will appear automatically.")
+          },
+          {
+            committed() {
+            },
+            trace() {
+            },
+            session(key) {
+              void goSession(key);
+            },
+            machine() {
+            },
+            sender() {
+            },
+            toolAll() {
+            },
+            script() {
+            },
+            image() {
+            },
+            background() {
+            },
+            jump() {
+            },
+            pager() {
+            }
+          }
+        );
+        return;
+      }
+      if (view.lastTotal !== null && !view.following && current.projection.total > view.lastTotal)
+        view.newCount += current.projection.total - view.lastTotal;
+      view.lastTotal = current.projection.total;
+      if (view.renderedRevision === view.store.revision && view.renderedNote === view.note) {
+        updateSessionControl(view.root, controlFor(view));
+        updateSessionRuntime(view.root, runtimeFor(view));
+        syncJump(view);
+        if ((view.store.loadedRanges()[0]?.first ?? 0) > 0)
+          updateSessionPager(view.root, {
+            sid: view.key,
+            where: "before",
+            text: "Load earlier records",
+            disabled: view.loading,
+            busy: view.loading
+          });
+        return;
+      }
+      view.renderedRevision = view.store.revision;
+      view.renderedNote = view.note;
+      const anchor = [...view.root.querySelectorAll("[data-entry-key]")].find(
+        (node) => node.getBoundingClientRect().bottom > (window.matchMedia("(max-width: 760px)").matches ? 0 : document.querySelector("#main").getBoundingClientRect().top)
+      );
+      const anchorTop = anchor?.getBoundingClientRect().top;
+      renderSessionScreen(
+        view.root,
+        {
+          id: view.key,
+          name: view.meta?.name ?? "Session",
+          control: controlFor(view),
+          runtime: runtimeFor(view),
+          observation: view.note || {
+            cached: "Cached history",
+            stale: "Stale history",
+            incomplete: "History is incomplete",
+            unavailable: "Source history is unavailable"
+          }[current.freshness.state] + " \xB7 related session context is incomplete",
+          blocks: catalogTranscriptBlocks(view.store.entries(), (entry2) => fieldView(view, entry2)),
+          order: view.store.entries().map((item2) => item2.entry_id),
+          before: (view.store.loadedRanges()[0]?.first ?? 0) > 0 ? {
+            sid: view.key,
+            where: "before",
+            text: "Load earlier records",
+            disabled: view.loading,
+            busy: view.loading
+          } : void 0,
+          empty: "No native records in this range."
+        },
+        {
+          committed() {
+          },
+          trace() {
+          },
+          session(key) {
+            void goSession(key);
+          },
+          machine() {
+          },
+          sender() {
+          },
+          toolAll() {
+            view.note = "Full result unavailable for this source. The recorded preview is shown.";
+            drawSelected(view);
+          },
+          script() {
+          },
+          image() {
+          },
+          background() {
+          },
+          jump() {
+            jumpLatest(view);
+          },
+          pager() {
+            void loadSelected(view, Math.max(0, view.store.loadedRanges()[0].first - 60));
+          }
+        }
+      );
+      const main = document.querySelector("#main");
+      if (view.following) {
+        view.opening = false;
+        scrollEnd();
+      } else if (anchor?.isConnected && anchorTop !== void 0) {
+        const shift = anchor.getBoundingClientRect().top - anchorTop;
+        if (window.matchMedia("(max-width: 760px)").matches) window.scrollBy(0, shift);
+        else main.scrollTop += shift;
+      } else if (view.opening) {
+        view.opening = false;
+        if (window.matchMedia("(max-width: 760px)").matches)
+          window.scrollTo(0, document.documentElement.scrollHeight);
+        else main.scrollTop = main.scrollHeight;
+      }
+      syncJump(view);
+    }
+    function scrollEnd() {
+      if (window.matchMedia("(max-width: 760px)").matches)
+        window.scrollTo(0, document.documentElement.scrollHeight);
+      else {
+        const main = document.querySelector("#main");
+        main.scrollTop = main.scrollHeight;
+      }
+    }
+    function syncJump(view) {
+      if (active !== view || disposed) return;
+      updateSessionJump(view.root, !view.following, view.newCount, false, jumpTarget);
+    }
+    function jumpLatest(view) {
+      if (active !== view || disposed) return;
+      view.following = true;
+      view.newCount = 0;
+      syncJump(view);
+      scrollEnd();
+      void loadSelected(view).finally(() => {
+        if (active === view && !disposed) scrollEnd();
+      });
+    }
+    function fieldView(view, entry2) {
+      if (!entry2.clipped || !entry2.field) return null;
+      const progress = view.fields.get(entry2.entry_id), generation = view.store.selectedPage().projection.generation, changed = progress && progress.generation !== generation;
+      return {
+        text: progress?.text,
+        note: changed ? "Source projection changed. Previously loaded text is retained. " : progress?.note || (progress?.next === null ? "Complete recorded text loaded." : progress?.text === void 0 ? "Recorded text preview. " : "Part of the recorded text is loaded. "),
+        action: capabilities.selected_entry ? {
+          label: progress?.loading ? "Loading text\u2026" : changed ? "Reload recorded text" : progress?.text === void 0 ? "Load recorded text" : "Load more text",
+          busy: !!progress?.loading,
+          run() {
+            void loadField(view, entry2);
+          }
+        } : void 0,
+        ...progress?.next === null && !changed ? { action: void 0 } : {}
+      };
+    }
+    async function loadField(view, entry2) {
+      if (disposed || view.sourceKey !== capabilities.source_key || !capabilities.selected_entry || !entry2.field)
+        return;
+      const generation = view.store.selectedPage()?.projection.generation;
+      if (!generation) return;
+      let progress = view.fields.get(entry2.entry_id);
+      if (progress?.loading) return;
+      if (!progress || progress.generation !== generation) {
+        progress = { generation, next: 0, loading: false, note: "" };
+        view.fields.set(entry2.entry_id, progress);
+      }
+      if (progress.next === null) return;
+      const chunk = progress.next, p = params(), pending = progress;
+      p.set("sid", view.key);
+      p.set("after", String(entry2.slot));
+      p.set("limit", "1");
+      p.set("generation", generation);
+      p.set("field_chunk", String(chunk));
+      pending.loading = true;
+      pending.note = "";
+      view.renderedRevision = -1;
+      drawSelected(view);
+      try {
+        const value = await api("/api/session-entry?" + p);
+        if (disposed || view.fields.get(entry2.entry_id) !== pending) return;
+        if (view.store.selectedPage()?.projection.generation !== generation) {
+          pending.note = "Source projection changed. Reload recorded text. ";
+          return;
+        }
+        const field = parseCatalogField(value, {
+          source_key: capabilities.source_key,
+          catalog_key: view.key,
+          generation,
+          entry: entry2,
+          chunk
+        });
+        pending.text = (chunk === 0 ? "" : pending.text ?? "") + field.text;
+        pending.next = field.next;
+      } catch (error) {
+        if (disposed) return;
+        pending.note = error && typeof error === "object" && "status" in error && error.status === 422 ? "Complete text is unavailable for this native format. " : readError(error) + " ";
+        if (error && typeof error === "object" && "status" in error && error.status === 409)
+          void loadSelected(view);
+      } finally {
+        pending.loading = false;
+        if (!disposed) {
+          view.renderedRevision = -1;
+          drawSelected(view);
+        }
+      }
+    }
+    async function resynchronize(view) {
+      const candidate = new CatalogTranscriptStore();
+      candidate.select(
+        { source_key: capabilities.source_key, catalog_key: view.key },
+        "retained_history"
+      );
+      const read = async (after, limit) => {
+        const ticket = candidate.request(after, limit), p = params();
+        p.set("sid", view.key);
+        p.set("limit", String(limit));
+        if (after !== null) p.set("after", String(after));
+        if (ticket.generation !== null) p.set("generation", ticket.generation);
+        candidate.accept(ticket, await api("/api/session-transcript?" + p));
+      };
+      try {
+        await read(null, 60);
+        const total = candidate.selectedPage().projection.total;
+        for (const range of view.store.loadedRanges())
+          for (let after = range.first; after < Math.min(range.end, total); after += 100)
+            await read(after, Math.min(100, Math.min(range.end, total) - after));
+        if (disposed) {
+          candidate.destroy();
+          return;
+        }
+        view.store.destroy();
+        view.store = candidate;
+        view.renderedRevision = -1;
+        view.meta = candidate.selectedPage().session;
+        view.note = "";
+        view.retryDelay = 1e3;
+        if (active === view) {
+          void loadIdentity(view);
+        }
+      } catch (error) {
+        candidate.destroy();
+        throw error;
+      }
+    }
+    async function loadSelected(view, after = null) {
+      if (view.loading && !disposed && capabilities.selected_transcript) {
+        if (view.queuedAfter === void 0 || after !== null) view.queuedAfter = after;
+        return;
+      }
+      if (disposed || view.sourceKey !== capabilities.source_key || !capabilities.selected_transcript) {
+        drawSelected(view);
+        return;
+      }
+      if (after !== null) view.following = false;
+      scope.clearTimeout(view.retry);
+      const request = view.store.request(after), p = params();
+      p.set("sid", view.key);
+      p.set("limit", String(request.limit));
+      if (after !== null) p.set("after", String(after));
+      if (request.generation !== null) p.set("generation", request.generation);
+      view.loading = true;
+      view.root.setAttribute("aria-busy", "true");
+      view.note = "";
+      drawSelected(view);
+      try {
+        const value = await api("/api/session-transcript?" + p);
+        if (disposed) return;
+        if (view.store.accept(request, value)) {
+          view.retryDelay = 1e3;
+          const current = view.store.selectedPage();
+          const previousName = view.meta?.name;
+          view.meta = current.session;
+          if (active === view) {
+            void loadIdentity(view);
+            if (previousName !== view.meta.name) chrome();
+          }
+        }
+      } catch (error) {
+        if (disposed) return;
+        view.store.reject(request);
+        if (error && typeof error === "object" && "status" in error && error.status === 409) {
+          view.note = "Recorded history changed. Resynchronizing\u2026";
+          try {
+            await resynchronize(view);
+            return;
+          } catch (failure) {
+            error = failure;
+          }
+        }
+        view.note = readError(error);
+        if (retryable(error) || error && typeof error === "object" && "status" in error && error.status === 409) {
+          view.retry = scope.timeout(() => void loadSelected(view, after), view.retryDelay);
+          view.retryDelay = Math.min(8e3, view.retryDelay * 2);
+        }
+      } finally {
+        view.loading = false;
+        if (!disposed) view.root.setAttribute("aria-busy", "false");
+        drawSelected(view);
+        const queued = view.queuedAfter;
+        view.queuedAfter = void 0;
+        if (!disposed && active === view && queued !== void 0) void loadSelected(view, queued);
+      }
+    }
+    async function loadIdentity(view) {
+      if (disposed || view.sourceKey !== capabilities.source_key || view.identityLoading || !view.ticket || !capabilities.selected_identity)
+        return;
+      const ticket = view.ticket, p = currentParams();
+      p.set("sid", view.key);
+      view.identityLoading = true;
+      let invalidated = false;
+      try {
+        const reply = object2(await api("/api/session-identity?" + p));
+        if (reply.api !== 1) throw new Error("Unsupported source identity response");
+        if (active === view && selection.accept(ticket, reply.identity)) drawSelected(view);
+      } catch (error) {
+        if (disposed || active !== view || ticket !== view.ticket) return;
+        if (error && typeof error === "object" && "status" in error && [401, 403, 404].includes(Number(error.status)) || error instanceof Error && error.message === "Historical identity cannot supply current catalog authority") {
+          invalidated = true;
+          view.ticket = selection.begin({
+            source_key: capabilities.source_key,
+            catalog_key: view.key
+          });
+        }
+        view.note = error && typeof error === "object" && "status" in error && error.status === 404 ? "Current native session selection is unavailable. Retained history remains readable." : readError(error);
+        drawSelected(view);
+      } finally {
+        view.identityLoading = false;
+        if (!disposed && active === view && !invalidated && view.ticket !== ticket)
+          scope.timeout(() => void loadIdentity(view), 1e3);
+      }
+    }
+    async function goSession(key, meta, push = true) {
+      if (disposed) return;
+      preserveScroll();
+      sourcesOpen = false;
+      let view = selected.get(cacheKey(key));
+      if (!view) {
+        const store = new CatalogTranscriptStore();
+        store.select({ source_key: capabilities.source_key, catalog_key: key }, "retained_history");
+        view = {
+          sourceKey: capabilities.source_key,
+          key,
+          root: document.createElement("div"),
+          store,
+          meta: meta ?? null,
+          scroll: 0,
+          loading: false,
+          note: "",
+          opening: true,
+          identityLoading: false,
+          retryDelay: 1e3,
+          renderedRevision: -1,
+          renderedNote: "",
+          fields: /* @__PURE__ */ new Map(),
+          following: true,
+          newCount: 0,
+          lastTotal: null
+        };
+        selected.set(cacheKey(key), view);
+      }
+      active = view;
+      view.ticket = selection.begin({ source_key: capabilities.source_key, catalog_key: key });
+      navigation.route = { v: "session", id: key };
+      render(null, root);
+      root.replaceChildren(view.root);
+      chrome();
+      shell.closeDrawer(true);
+      if (push)
+        history.pushState(
+          null,
+          "",
+          "/s/" + encodeURIComponent(view.meta?.harness ?? "native") + "/" + encodeURIComponent(key) + (capabilities.source_key ? "?machine=" + encodeURIComponent(capabilities.source_key) : "")
+        );
+      drawSelected(view);
+      if (view.store.selectedPage()) {
+        void loadIdentity(view);
+        if (window.matchMedia("(max-width: 760px)").matches) window.scrollTo(0, view.scroll);
+        else document.querySelector("#main").scrollTop = view.scroll;
+      } else {
+        void loadIdentity(view);
+        if (capabilities.selected_transcript) await loadSelected(view);
+      }
+    }
+    async function recheckCapabilities() {
+      const observedSource = capabilities.source_key;
+      try {
+        const next = parseCatalogCapabilities(
+          await api("/api/session-capabilities?" + currentParams())
+        );
+        if (disposed || observedSource !== capabilities.source_key) return;
+        if (next.source_key !== capabilities.source_key)
+          throw new Error("Source selection changed. Choose the source again.");
+        const ready = !capabilities.selected_transcript && next.selected_transcript;
+        Object.assign(capabilities, next);
+        if (active) void loadIdentity(active);
+        if (ready && active && !active.store.selectedPage()) void loadSelected(active);
+      } catch (error) {
+        if (disposed) return;
+        if (active && !active.store.selectedPage()) {
+          active.note = readError(error);
+          drawSelected(active);
+        }
+      } finally {
+        if (!disposed) scope.timeout(() => void recheckCapabilities(), 8e3);
+      }
+    }
+    function drawSources() {
+      if (disposed || !sourcesOpen) return;
+      chrome();
+      renderCatalogSources(
+        root,
+        {
+          items: sourceItems,
+          updating: sourcesUpdating,
+          note: sourcesNote,
+          more: sourceCursor !== null,
+          machinesHref: viewerHost?.machinesPath ?? "/machines?compat=1"
+        },
+        {
+          select(key) {
+            if (sourceItems.some((item2) => item2.source_key === key)) void switchSource(key);
+          },
+          more() {
+            void loadSources(true);
+          },
+          retry() {
+            void loadSources(false);
+          }
+        }
+      );
+    }
+    async function loadSources(append) {
+      if (disposed || !sourcesOpen || sourcesUpdating) return;
+      const epoch = ++sourcesEpoch, p = new URLSearchParams({ limit: "60" });
+      if (append && sourceCursor !== null) p.set("cursor", sourceCursor);
+      sourcesUpdating = true;
+      sourcesNote = "";
+      drawSources();
+      try {
+        const next = parseCatalogSources(await api("/api/session-sources?" + p));
+        if (disposed || !sourcesOpen || epoch !== sourcesEpoch) return;
+        if (append && next.items.some((item2) => sourceItems.some((old) => old.source_key === item2.source_key)))
+          throw new Error("Source page repeated a machine");
+        sourceItems = append ? [...sourceItems, ...next.items] : next.items;
+        sourceCursor = next.next_cursor;
+        sourcesRetryDelay = 1e3;
+      } catch (error) {
+        if (disposed || !sourcesOpen || epoch !== sourcesEpoch) return;
+        sourcesNote = readError(error);
+        if (retryable(error)) {
+          scope.timeout(() => {
+            if (sourcesOpen && epoch === sourcesEpoch) void loadSources(append);
+          }, sourcesRetryDelay);
+          sourcesRetryDelay = Math.min(8e3, sourcesRetryDelay * 2);
+        }
+      } finally {
+        if (!disposed && epoch === sourcesEpoch) {
+          sourcesUpdating = false;
+          drawSources();
+        }
+      }
+    }
+    function saveSource() {
+      preserveScroll();
+      sourceViews.set(capabilities.source_key, {
+        page,
+        items,
+        cursor,
+        harness,
+        repo,
+        selectedKey: active?.key ?? null
+      });
+    }
+    async function showSources() {
+      if (disposed) return;
+      if (!sourcesOpen) saveSource();
+      ++listEpoch;
+      scope.clearTimeout(listRetry);
+      active = null;
+      selection.clear();
+      navigation.route = { v: "sessions" };
+      sourcesOpen = true;
+      root.replaceChildren();
+      shell.closeDrawer(true);
+      drawSources();
+      if (!sourceItems.length) await loadSources(false);
+    }
+    async function switchSource(key, push = true) {
+      if (disposed) return;
+      const epoch = ++sourcesEpoch;
+      sourcesUpdating = true;
+      sourcesNote = "";
+      drawSources();
+      try {
+        const next = parseCatalogCapabilities(
+          await api("/api/session-capabilities?" + new URLSearchParams({ machine: key }))
+        );
+        if (disposed || epoch !== sourcesEpoch) return;
+        if (next.source_key !== key)
+          throw new Error("Source capability identity does not match this selection");
+        if (!sourcesOpen) saveSource();
+        ++listEpoch;
+        scope.clearTimeout(listRetry);
+        selection.clear();
+        Object.assign(capabilities, next);
+        const retained = sourceViews.get(key);
+        page = retained?.page ?? null;
+        items = retained?.items ?? [];
+        cursor = retained?.cursor ?? null;
+        harness = retained?.harness ?? "";
+        repo = retained?.repo ?? "";
+        updating = false;
+        note = "";
+        sourcesOpen = false;
+        active = null;
+        if (push && retained?.selectedKey) await goSession(retained.selectedKey, void 0, false);
+        else goList(false);
+        const url = retained?.selectedKey ? "/s/" + encodeURIComponent(
+          selected.get(cacheKey(retained.selectedKey))?.meta?.harness ?? "native"
+        ) + "/" + encodeURIComponent(retained.selectedKey) : "/sessions";
+        if (push) history.pushState(null, "", url + "?" + new URLSearchParams({ machine: key }));
+        else fromLocation();
+        void loadList(false);
+      } catch (error) {
+        if (disposed || epoch !== sourcesEpoch) return;
+        sourcesNote = readError(error);
+      } finally {
+        if (!disposed && epoch === sourcesEpoch) {
+          sourcesUpdating = false;
+          drawSources();
+        }
+      }
+    }
+    function fromLocation() {
+      if (new URLSearchParams(location.search).get("choose_source") === "1") {
+        void showSources();
+        return;
+      }
+      const machine2 = new URLSearchParams(location.search).get("machine");
+      if (machine2 && machine2 !== capabilities.source_key) {
+        void showSources();
+        void switchSource(machine2, false);
+        return;
+      }
+      const parts = location.pathname.split("/").filter(Boolean);
+      if (parts[0] === "s" && parts[2]) {
+        try {
+          void goSession(decodeURIComponent(parts[2]), void 0, false);
+        } catch {
+          goList(false);
+        }
+      } else goList(false);
+    }
+    scope.listen(window, "popstate", fromLocation);
+    const readingScroll = () => {
+      if (!active) return;
+      const main = document.querySelector("#main"), gap = window.matchMedia("(max-width: 760px)").matches ? document.documentElement.scrollHeight - window.scrollY - window.innerHeight : main.scrollHeight - main.scrollTop - main.clientHeight;
+      active.following = gap <= 80;
+      if (active.following) active.newCount = 0;
+      syncJump(active);
+    };
+    scope.listen(window, "scroll", readingScroll, { passive: true });
+    scope.listen(document.querySelector("#main"), "scroll", readingScroll, {
+      passive: true
+    });
+    scope.listen(document, "keydown", (event) => {
+      if (event.key === "Escape") shell.closeDrawer();
+    });
+    fromLocation();
+    void loadList(false);
+    scope.timeout(() => void recheckCapabilities(), 8e3);
+    scope.interval(() => {
+      if (active && capabilities.selected_transcript && active.store.selectedPage() && document.visibilityState === "visible")
+        void loadSelected(active);
+    }, 3e3);
+    return {
+      destroy() {
+        if (disposed) return;
+        disposed = true;
+        ++listEpoch;
+        observation.destroy();
+        removeRuntimeListener();
+        runtimeObservation.destroy();
+        scope.destroy();
+        selection.destroy();
+        navigation.destroy();
+        control.destroy();
+        updates.destroy();
+        for (const view of selected.values()) {
+          view.store.destroy();
+          releaseScreen(view.root);
+          render(null, view.root);
+        }
+        recent.destroy();
+        render(null, root);
+        shell.destroy();
+        selected.clear();
+      }
+    };
+  }
+
+  // src/app/catalogSources.ts
+  function createCatalogSources(host2, select) {
+    const scope = new EffectScope();
+    let disposed = false, epoch = 0, items = [], cursor = null, updating = false, note = "", retry, delay = 1e3;
+    const account = parseAccount(host2?.account);
+    let wide = document.querySelector("#page")?.classList.contains("wide-mode") ?? false, rail = document.querySelector(".app")?.classList.contains("rail") ?? false;
+    const shell = createShellChrome({
+      account: {
+        place(widget, trigger) {
+          const at = trigger.getBoundingClientRect();
+          setGeometry(widget, "accountLeft", at.left);
+          setGeometry(widget, "accountWidth", at.width);
+          setGeometry(widget, "accountBottom", Math.max(0, innerHeight - at.top + 6));
+        },
+        opened() {
+        },
+        closed() {
+        },
+        navigate() {
+          return false;
+        },
+        submit() {
+          return false;
+        }
+      },
+      navigate() {
+        return false;
+      },
+      drawerOpened() {
+      },
+      drawerClosed() {
+      },
+      railChanged() {
+        rail = !rail;
+        shell.update(
+          [
+            {
+              key: "sessions",
+              label: "Sessions",
+              href: "/sessions",
+              icon: I.sessions,
+              current: true
+            }
+          ],
+          rail
+        );
+      }
+    });
+    shell.mount(document.querySelector(".app"));
+    shell.update(
+      [{ key: "sessions", label: "Sessions", href: "/sessions", icon: I.sessions, current: true }],
+      rail
+    );
+    const title = document.createElement("div");
+    title.className = "ttl";
+    title.textContent = "Choose a machine";
+    function wideChange() {
+      wide = !wide;
+      document.querySelector("#page")?.classList.toggle("wide-mode", wide);
+      shell.account.updateWide(wide);
+    }
+    shell.topbar({
+      titleSlot: title,
+      lead: { label: "Open menu", icon: I.menu },
+      account: account ? { account, compact: false, wide, onWideChange: wideChange } : null
+    });
+    shell.drawerAccount(account ? { account, compact: true, wide, onWideChange: wideChange } : null);
+    const root = shell.slots.content;
+    function draw() {
+      if (disposed) return;
+      renderCatalogSources(
+        root,
+        {
+          items,
+          updating,
+          note,
+          more: cursor !== null,
+          machinesHref: host2?.machinesPath ?? "/machines?compat=1"
+        },
+        {
+          select(key) {
+            if (!disposed && items.some((item2) => item2.source_key === key)) select(key);
+          },
+          more() {
+            void load(true);
+          },
+          retry() {
+            void load(false);
+          }
+        }
+      );
+    }
+    async function load(append) {
+      if (disposed || append && updating) return;
+      scope.clearTimeout(retry);
+      const ticket = ++epoch, request = scope.request(), deadline = scope.timeout(() => request.abort(), 15e3), params = new URLSearchParams({ limit: "60" });
+      if (append && cursor !== null) params.set("cursor", cursor);
+      updating = true;
+      note = "";
+      draw();
+      try {
+        const page = parseCatalogSources(
+          await requestJson("/api/session-sources?" + params, request.signal)
+        );
+        if (disposed || ticket !== epoch) return;
+        if (append && page.items.some((item2) => items.some((old) => old.source_key === item2.source_key)))
+          throw Error("Source inventory repeated a machine");
+        items = append ? [...items, ...page.items] : page.items;
+        cursor = page.next_cursor;
+        delay = 1e3;
+      } catch (error) {
+        if (disposed || ticket !== epoch) return;
+        const status2 = error && typeof error === "object" && "status" in error ? Number(error.status) : 0;
+        const transient = error && typeof error === "object" && "status" in error || error instanceof Error && error.name === "AbortError";
+        note = !transient ? "The source returned an invalid inventory. Check this source and retry." : status2 === 401 || status2 === 403 ? "Authorization is required to browse these machines." : status2 === 404 ? "Bounded source discovery is unavailable. Choose a machine from its management page." : status2 === 400 ? "The source inventory cursor is unavailable. Refresh this list." : "Source inventory is unavailable. Retrying\u2026";
+        if (append && status2 === 400) {
+          void load(false);
+          return;
+        }
+        if (transient && (status2 === 0 || [429, 500, 502, 503, 504].includes(status2))) {
+          retry = scope.timeout(() => void load(append), delay);
+          delay = Math.min(8e3, delay * 2);
+        }
+      } finally {
+        scope.clearTimeout(deadline);
+        scope.releaseRequest(request);
+        if (!disposed && ticket === epoch) {
+          updating = false;
+          draw();
+        }
+      }
+    }
+    scope.listen(document, "keydown", (event) => {
+      if (event.key === "Escape") shell.closeDrawer();
+    });
+    scope.listen(window, "focus", () => void load(false));
+    void load(false);
+    return {
+      destroy() {
+        if (disposed) return;
+        disposed = true;
+        ++epoch;
+        scope.destroy();
+        render(null, root);
+        shell.destroy();
+      }
+    };
+  }
+
   // src/app/viewer.ts
   var mounted = null;
   function mountViewerApplication(host2 = getViewerHost()) {
     mounted?.destroy();
-    const composition = new ViewerComposition(host2, (owner) => {
-      if (mounted === owner) mounted = null;
-    });
-    mounted = composition.application;
-    return composition.application;
+    const scope = new EffectScope();
+    let disposed = false, owner = null, retryDelay = 1e3, choosing = false;
+    const application = {
+      destroy() {
+        if (disposed) return;
+        disposed = true;
+        scope.destroy();
+        owner?.destroy();
+        if (mounted === application) mounted = null;
+      }
+    };
+    mounted = application;
+    function legacy() {
+      if (disposed) return;
+      owner = new ViewerComposition(host2, () => {
+      }).application;
+    }
+    async function chooseReader() {
+      if (disposed || owner || choosing) return;
+      choosing = true;
+      const request = scope.request(), deadline = scope.timeout(() => request.abort(), 15e3);
+      try {
+        const params = new URLSearchParams();
+        const source = new URLSearchParams(location.search).get("machine");
+        if (source !== null) params.set("machine", source);
+        const value = await requestJson(
+          "/api/session-capabilities" + (params.size ? "?" + params : ""),
+          request.signal
+        );
+        const capabilities = parseCatalogCapabilities(value);
+        if (source !== null && capabilities.source_key !== source)
+          throw new Error("Source capability identity does not match this selection");
+        if (!disposed) owner = createCatalogViewer(capabilities, host2);
+      } catch (error) {
+        if (disposed) return;
+        const status2 = error && typeof error === "object" && "status" in error ? error.status : 0;
+        if (status2 === 404) {
+          legacy();
+          return;
+        }
+        if (status2 === 400 && !new URLSearchParams(location.search).has("machine")) {
+          owner = createCatalogSources(host2, (key) => {
+            if (disposed) return;
+            owner?.destroy();
+            owner = null;
+            const url = new URL(location.href);
+            url.searchParams.set("machine", key);
+            history.replaceState(null, "", url.pathname + url.search + url.hash);
+            void chooseReader();
+          });
+          return;
+        }
+        const root = document.querySelector("#page");
+        if (root) {
+          const notice = document.createElement("p");
+          notice.className = "catalog-note";
+          notice.setAttribute("role", "status");
+          notice.textContent = status2 === 401 || status2 === 403 ? "Authorization is required to read this source." : status2 === 400 ? "Choose a machine to browse its recorded history." : "Session history is unavailable. Reconnecting\u2026";
+          const machines = document.createElement("a");
+          machines.className = "link";
+          machines.href = host2?.machinesPath ?? "/machines?compat=1";
+          machines.textContent = "Choose a machine";
+          const compatibility = document.createElement("a");
+          compatibility.className = "link";
+          compatibility.href = "/sessions?compat=1";
+          compatibility.textContent = "Open compatibility view (loads workspace history)";
+          const actions = document.createElement("p");
+          actions.className = "catalog-note";
+          actions.append(machines, document.createTextNode(" \xB7 "), compatibility);
+          root.replaceChildren(notice, actions);
+        }
+        if (status2 !== 400 && status2 !== 401 && status2 !== 403) {
+          scope.timeout(() => void chooseReader(), retryDelay);
+          retryDelay = Math.min(8e3, retryDelay * 2);
+        }
+      } finally {
+        choosing = false;
+        scope.clearTimeout(deadline);
+        scope.releaseRequest(request);
+      }
+    }
+    if (new URLSearchParams(location.search).get("compat") === "1" || host2?.nativePage || document.querySelector(".app")?.dataset.viewer === "sidebar")
+      legacy();
+    else {
+      void chooseReader();
+      scope.listen(window, "focus", () => void chooseReader());
+    }
+    return application;
   }
 
   // src/viewer.ts

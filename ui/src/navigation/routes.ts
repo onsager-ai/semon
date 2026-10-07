@@ -17,7 +17,19 @@ export interface NavigationHost {
 }
 /** Owns route tokens, destination requests and native-content lifetime. */
 export class NavigationController {
-  route: ApplicationRoute = { v: 'home' };
+  private currentRoute: ApplicationRoute = { v: 'home' };
+  private readonly routeListeners = new Set<() => void>();
+  get route() {
+    return this.currentRoute;
+  }
+  set route(value: ApplicationRoute) {
+    this.currentRoute = value;
+    for (const listener of this.routeListeners) listener();
+  }
+  subscribeRoute(listener: () => void) {
+    this.routeListeners.add(listener);
+    return () => this.routeListeners.delete(listener);
+  }
   rendered: ApplicationRoute | null = null;
   content: ViewerContent | null;
   private nativePending: AbortController | null = null;
@@ -159,6 +171,7 @@ export class NavigationController {
     return out;
   }
   destroy() {
+    this.routeListeners.clear();
     if (this.disposed) return;
     this.disposed = true;
     this.cancelNative();

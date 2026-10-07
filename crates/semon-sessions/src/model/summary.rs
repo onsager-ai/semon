@@ -157,6 +157,8 @@ pub(crate) struct CatalogSource {
     pub(crate) ino: u64,
     pub(crate) size: u64,
     pub(crate) modified_ns: u128,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) changed_ns: Option<i128>,
     pub(crate) offset: u64,
     pub(crate) prefix_sha256: [u8; 32],
     pub(crate) tail_sha256: [u8; 32],
@@ -176,7 +178,7 @@ pub(super) fn catalog(builder: &Builder<'_>, handoffs: &[Handoff]) -> Vec<Catalo
             .iter()
             .map(|position| {
                 let file = &builder.files[*position];
-                let (dev, ino, offset, prefix_sha256, tail_sha256) = file.revision;
+                let (dev, ino, offset, prefix_sha256, tail_sha256, changed_ns) = file.revision;
                 CatalogSource {
                     path: file.path.clone(),
                     native_id: file.id.clone(),
@@ -184,6 +186,7 @@ pub(super) fn catalog(builder: &Builder<'_>, handoffs: &[Handoff]) -> Vec<Catalo
                     ino,
                     size: file.stamp.size,
                     modified_ns: file.stamp.modified_ns,
+                    changed_ns,
                     offset,
                     prefix_sha256,
                     tail_sha256,

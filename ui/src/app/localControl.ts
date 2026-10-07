@@ -13,8 +13,38 @@ export function createLocalControl(scope: EffectScope, refresh: () => void) {
   let note = '';
   let uncertain = false;
   let revision = 0;
+  let selection = 0;
   async function write(op: string, extra: JsonObject = {}): Promise<boolean> {
     if (!current || busy || (uncertain && op !== 'reconnect')) return false;
+    if (
+      op === 'send' &&
+      (!current.connected ||
+        !(current.activeTurn ? current.capabilities.steer : current.capabilities.input))
+    )
+      return false;
+    if (op === 'reconnect' && current.runtime?.reconnectable === false) return false;
+    if (op !== 'reconnect' && !current.connected) return false;
+    if (op === 'interrupt' && !current.capabilities.interrupt) return false;
+    if (op === 'answer') {
+      const request = current.requests.find(
+        (request) => request.id === extra.request && request.hash === extra.hash,
+      );
+      if (!request || request.state.state !== 'open') return false;
+      const supported =
+        request.kind === 'question'
+          ? current.capabilities.questions
+          : request.payload.method === 'item/fileChange/requestApproval'
+            ? current.capabilities.fileApproval
+            : current.capabilities.commandApproval;
+      if (!supported) return false;
+    }
+
+    if (
+      op === 'send' &&
+      (!current.connected ||
+        !(current.activeTurn ? current.capabilities.steer : current.capabilities.input))
+    )
+      return false;
     const target = current;
     const at = ++revision;
     busy = true;
@@ -82,25 +112,73 @@ export function createLocalControl(scope: EffectScope, refresh: () => void) {
   }
   function view(sid?: string): ControlView | undefined {
     if (!current || (sid && sid !== current.thread)) return undefined;
+    const target = current;
+    const selected = selection;
+    const send = (op: string, extra: JsonObject = {}) =>
+      selection === selected &&
+      current?.thread === target.thread &&
+      current.generation === target.generation
+        ? write(op, extra)
+        : Promise.resolve(false);
     return {
       snapshot: current,
       busy,
       uncertain,
       note,
-      send: (text) => write('send', { text }),
-      interrupt: () => void write('interrupt'),
+      send: (text) => send('send', { text }),
+      interrupt: () => void send('interrupt'),
       answer: (request, answer) =>
-        void write('answer', { request: request.id, hash: request.hash, answer }),
-      reconnect: () => void write('reconnect'),
+        void send('answer', { request: request.id, hash: request.hash, answer }),
+      reconnect: () => void send('reconnect'),
     };
+  }
+  function apply(value: ControlSnapshot | null) {
+    if (current?.thread !== value?.thread) {
+      ++selection;
+      ++revision;
+      busy = false;
+      uncertain = false;
+      note = '';
+    }
+    if (value?.runtime?.state === 'ended' && current?.runtime?.state !== 'ended') {
+      ++revision;
+      busy = false;
+      note = '';
+    }
+    current = value;
   }
   return {
     prepare: parseControl,
-    adopt(value: ControlSnapshot | null) {
-      current = value;
+    adopt: apply,
+    unavailable() {
+      if (!current) return;
+      current = {
+        ...current,
+        connected: false,
+        capabilities: {
+          ...current.capabilities,
+          input: false,
+          steer: false,
+          interrupt: false,
+          commandApproval: false,
+          fileApproval: false,
+          questions: false,
+        },
+        runtime: current.runtime ? { ...current.runtime, freshness: 'stale' } : undefined,
+        reason:
+          current.runtime?.state === 'ended' || current.runtime?.state === 'failed'
+            ? current.reason
+            : 'Current connection status is unavailable. Reconnecting…',
+      };
+      refresh();
+    },
+    observe(value: ControlSnapshot | null) {
+      apply(value);
+      refresh();
     },
     view,
     destroy() {
+      ++selection;
       ++revision;
       current = null;
     },

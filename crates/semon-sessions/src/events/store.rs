@@ -46,7 +46,7 @@ use crate::{Tokens, facts::ReportedRunSnapshot};
 
 /// `PRAGMA user_version`: the shape of the tables. The parser's version is
 /// [`CACHE_VERSION`], kept in `meta`.
-const SCHEMA_VERSION: i64 = 11;
+const SCHEMA_VERSION: i64 = 14;
 
 /// How long a write waits for another process's transaction. Tests wait
 /// less, so the busy paths they drive stay quick.
@@ -129,6 +129,7 @@ CREATE TABLE IF NOT EXISTS files (
     ino INTEGER NOT NULL,
     size INTEGER NOT NULL,
     mtime_ns BLOB NOT NULL,
+    ctime_ns BLOB,
     resume_at INTEGER NOT NULL,
     head_sha256 BLOB NOT NULL,
     tail_sha256 BLOB NOT NULL,
@@ -274,14 +275,14 @@ DELETE FROM files;
 const FILE_COLUMNS: &str = "file_id, path, dev, ino, size, mtime_ns, resume_at, head_sha256, \
      tail_sha256, entrypoint, title, agent_name, last_model, failed, first_ms, last_ms, cwd, \
      branch, pending, tool_ids, yields, busy, links, codex_tokens, codex_tokens_by_model, \
-     rate_limits, codex_native_usage, copilot";
+     rate_limits, codex_native_usage, copilot, ctime_ns";
 
 const PUT_FILE: &str = "INSERT INTO files (path, dev, ino, size, mtime_ns, resume_at, \
      head_sha256, tail_sha256, entrypoint, title, agent_name, last_model, failed, first_ms, \
      last_ms, cwd, branch, pending, tool_ids, yields, busy, links, codex_tokens, \
-     codex_tokens_by_model, rate_limits, codex_native_usage, copilot) \
+     codex_tokens_by_model, rate_limits, codex_native_usage, copilot, ctime_ns) \
      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, \
-     ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27) \
+     ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28) \
      ON CONFLICT (path) DO UPDATE SET dev = excluded.dev, ino = excluded.ino, \
      size = excluded.size, mtime_ns = excluded.mtime_ns, resume_at = excluded.resume_at, \
      head_sha256 = excluded.head_sha256, tail_sha256 = excluded.tail_sha256, \
@@ -292,7 +293,7 @@ const PUT_FILE: &str = "INSERT INTO files (path, dev, ino, size, mtime_ns, resum
      tool_ids = excluded.tool_ids, yields = excluded.yields, busy = excluded.busy, \
      links = excluded.links, codex_tokens = excluded.codex_tokens, \
      codex_tokens_by_model = excluded.codex_tokens_by_model, \
-     rate_limits = excluded.rate_limits, codex_native_usage = excluded.codex_native_usage, copilot = excluded.copilot \
+     rate_limits = excluded.rate_limits, codex_native_usage = excluded.codex_native_usage, copilot = excluded.copilot, ctime_ns = excluded.ctime_ns \
      RETURNING file_id";
 
 const EVENT_COLUMNS: &str = "extra, seq, k, o, b, t, id, n, code_mode, code_mode_open, parent, \
@@ -1006,6 +1007,7 @@ impl IndexStore for SqliteStore {
                     return Ok(Outcome::Conflict);
                 }
             }
+            crate::history_projection::publish(&transaction, publication).map_err(failure)?;
             let previous_version: Option<String> = transaction
                 .query_row(
                     "SELECT value FROM meta WHERE key = 'catalog_version'",
@@ -1024,9 +1026,9 @@ impl IndexStore for SqliteStore {
                         .map_err(failure)?;
                     let mut put = transaction.prepare("INSERT INTO session_catalog (session_key, lifecycle, last_ms, harness, repo, parent_key, metadata) VALUES (?1, 'current', ?2, ?3, ?4, ?5, ?6) ON CONFLICT(session_key) DO UPDATE SET lifecycle='current', last_ms=excluded.last_ms, harness=excluded.harness, repo=excluded.repo, parent_key=excluded.parent_key, metadata=excluded.metadata WHERE session_catalog.lifecycle != 'current' OR session_catalog.metadata != excluded.metadata OR session_catalog.parent_key IS NOT excluded.parent_key").map_err(failure)?;
                     let mut remove_sources = transaction
-                        .prepare("DELETE FROM session_catalog_sources WHERE session_key=?1")
+                        .prepare("UPDATE session_catalog_sources SET lifecycle='retained' WHERE session_key=?1")
                         .map_err(failure)?;
-                    let mut put_source = transaction.prepare("INSERT INTO session_catalog_sources(session_key,harness,native_id,source_path) VALUES (?1,?2,?3,?4)").map_err(failure)?;
+                    let mut put_source = transaction.prepare("INSERT INTO session_catalog_sources(session_key,harness,native_id,source_path) VALUES (?1,?2,?3,?4) ON CONFLICT(session_key,source_path) DO UPDATE SET lifecycle='current',harness=excluded.harness,native_id=excluded.native_id").map_err(failure)?;
                     for (row, metadata) in rows.iter().zip(&metadata) {
                         member.execute([&row.key]).map_err(failure)?;
                         let changed = put
@@ -1057,17 +1059,23 @@ impl IndexStore for SqliteStore {
                 transaction.execute("UPDATE session_catalog SET lifecycle='retained', metadata=CASE WHEN json_valid(metadata) THEN json_set(metadata,'$.lifecycle','retained') ELSE metadata END WHERE lifecycle='current' AND session_key NOT IN (SELECT session_key FROM catalog_members)", []).map_err(failure)?;
                 transaction.execute("UPDATE session_catalog_sources SET lifecycle='retained' WHERE lifecycle='current' AND session_key NOT IN (SELECT session_key FROM catalog_members)", []).map_err(failure)?;
             }
+            transaction.execute("UPDATE session_history_catalog SET metadata=json_set(metadata,'$.lifecycle','retained') WHERE session_key NOT IN (SELECT session_key FROM catalog_members)",[]).map_err(failure)?;
             let generation = {
                 let mut digest = Sha256::new();
                 digest.update(version.as_bytes());
-                let mut statement = transaction
-                    .prepare("SELECT metadata FROM session_catalog ORDER BY session_key")
-                    .map_err(failure)?;
-                let mut values = statement.query([]).map_err(failure)?;
-                while let Some(row) = values.next().map_err(failure)? {
-                    let metadata: String = row.get(0).map_err(failure)?;
-                    digest.update((metadata.len() as u64).to_le_bytes());
-                    digest.update(metadata.as_bytes());
+                for table in ["session_catalog", "session_history_catalog"] {
+                    digest.update(table.as_bytes());
+                    let mut statement = transaction
+                        .prepare(&format!(
+                            "SELECT metadata FROM {table} ORDER BY session_key"
+                        ))
+                        .map_err(failure)?;
+                    let mut values = statement.query([]).map_err(failure)?;
+                    while let Some(row) = values.next().map_err(failure)? {
+                        let metadata: String = row.get(0).map_err(failure)?;
+                        digest.update((metadata.len() as u64).to_le_bytes());
+                        digest.update(metadata.as_bytes());
+                    }
                 }
                 format!("{:x}", digest.finalize())
             };
@@ -1648,6 +1656,15 @@ fn init(connection: &mut Connection) -> rusqlite::Result<Init> {
         return Ok(Init::Newer);
     }
     if schema < SCHEMA_VERSION {
+        if schema != 0
+            && !transaction.query_row(
+                "SELECT EXISTS(SELECT 1 FROM pragma_table_info('files') WHERE name='ctime_ns')",
+                [],
+                |row| row.get::<_, bool>(0),
+            )?
+        {
+            transaction.execute_batch("ALTER TABLE files ADD COLUMN ctime_ns BLOB")?;
+        }
         if schema == 6 {
             transaction.execute_batch("ALTER TABLE session_catalog ADD COLUMN parent_key TEXT")?;
         }
@@ -1661,6 +1678,7 @@ fn init(connection: &mut Connection) -> rusqlite::Result<Init> {
             transaction.execute_batch("ALTER TABLE session_slot_projections ADD COLUMN source_generation TEXT")?;
         }
         transaction.execute_batch(SCHEMA)?;
+        transaction.execute_batch(crate::history_projection::SCHEMA)?;
         if schema == 1 {
             transaction.execute_batch("ALTER TABLE files ADD COLUMN codex_native_usage TEXT")?;
         }
@@ -1822,7 +1840,7 @@ fn gap(what: &str) -> rusqlite::Error {
 fn ledger_row(connection: &Connection, path: &str) -> rusqlite::Result<Option<(i64, Ledger)>> {
     connection
         .query_row(
-            "SELECT file_id, dev, ino, size, mtime_ns, resume_at, head_sha256, tail_sha256 \
+            "SELECT file_id, dev, ino, size, mtime_ns, resume_at, head_sha256, tail_sha256, ctime_ns \
              FROM files WHERE path = ?1",
             [path],
             |row| {
@@ -1834,6 +1852,7 @@ fn ledger_row(connection: &Connection, path: &str) -> rusqlite::Result<Option<(i
                             ino: uint(row.get(2)?),
                             size: uint(row.get(3)?),
                             modified_ns: u128::from_be_bytes(row.get(4)?),
+                            changed_ns: row.get::<_,Option<[u8;16]>>(8)?.map(i128::from_be_bytes),
                         },
                         offset: uint(row.get(5)?),
                         prefix: row.get(6)?,
@@ -1885,6 +1904,7 @@ fn read_file(
             ino: uint(row.get(3)?),
             size: uint(row.get(4)?),
             modified_ns: u128::from_be_bytes(row.get(5)?),
+            changed_ns: row.get::<_, Option<[u8; 16]>>(28)?.map(i128::from_be_bytes),
         },
         offset: uint(row.get(6)?),
         prefix: row.get(7)?,
@@ -2177,6 +2197,7 @@ fn write_file(
                 ino,
                 size,
                 modified_ns,
+                changed_ns,
             },
         offset,
         prefix,
@@ -2213,6 +2234,7 @@ fn write_file(
             rate_limits,
             codex_native_usage.as_ref().map(json).transpose()?,
             copilot.as_ref().map(json).transpose()?,
+            changed_ns.map(i128::to_be_bytes),
         ],
         |row| row.get(0),
     )?;
@@ -2585,6 +2607,7 @@ mod tests {
                 ino: 2,
                 size: 3 + u64::from(n),
                 modified_ns: u128::MAX - u128::from(n),
+                changed_ns: Some(i128::MIN + i128::from(n)),
             },
             offset: 3,
             prefix: [n; 32],
@@ -3181,6 +3204,33 @@ mod tests {
                 .unwrap();
             assert_eq!(rows, 0, "{table}");
         }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn schema_thirteen_preserves_sources_without_inventing_change_time() {
+        let root = scratch("change-time-migration");
+        let path = root.join("index.sqlite3");
+        let (mut store, _) = opened(&path);
+        store
+            .write_one("original.jsonl", None, None, &ledger(1), &full())
+            .unwrap();
+        store
+            .connection
+            .execute_batch("ALTER TABLE files DROP COLUMN ctime_ns; PRAGMA user_version = 13;")
+            .unwrap();
+        drop(store);
+        let (store, _) = opened(&path);
+        let (migrated, original) = store.read_one("original.jsonl").unwrap().unwrap();
+        let mut expected = ledger(1);
+        expected.stat.changed_ns = None;
+        assert_eq!(migrated, expected);
+        assert_eq!(format!("{original:?}"), format!("{:?}", full()));
+        assert_eq!(
+            versions(&store.connection).unwrap(),
+            (SCHEMA_VERSION, Some(CACHE_VERSION))
+        );
+        drop(store);
         fs::remove_dir_all(root).unwrap();
     }
 

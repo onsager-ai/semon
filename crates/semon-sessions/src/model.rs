@@ -591,7 +591,9 @@ impl Texts {
             && seen.dev == stamp.dev
             && seen.ino == stamp.ino
             && (stamp.size > seen.size
-                || (stamp.size == seen.size && stamp.modified_ns == seen.modified_ns))
+                || (stamp.size == seen.size
+                    && stamp.modified_ns == seen.modified_ns
+                    && stamp.changed_ns == seen.changed_ns))
         {
             *seen = stamp;
             return *number;
@@ -1094,6 +1096,7 @@ struct Stamp {
     ino: u64,
     size: u64,
     modified_ns: u128,
+    changed_ns: Option<i128>,
 }
 
 fn stamp_of(path: &Path) -> Stamp {
@@ -1108,6 +1111,7 @@ fn stamp_of(path: &Path) -> Stamp {
         dev,
         ino,
         size: meta.len(),
+        changed_ns: events::change_time_ns(&meta),
         modified_ns: meta
             .modified()
             .ok()
@@ -2262,12 +2266,12 @@ impl<'a> Builder<'a> {
                 persisted.apply(&mut self.sessions[index]);
             } else {
                 self.describe_uncached(index);
-                if inputs.clock.is_none() {
-                    let json = serde_json::to_string(&summary::Summary::of(
-                        &self.sessions[index],
-                        &inputs,
-                    ))
-                    .expect("metadata summary serializes");
+                // Persistence is optional: unsupported native path encodings
+                // must not turn a usable in-memory description into a panic.
+                if inputs.clock.is_none()
+                    && let Ok(json) =
+                        serde_json::to_string(&summary::Summary::of(&self.sessions[index], &inputs))
+                {
                     self.cache.save_session_description(
                         &key,
                         summary::VERSION,

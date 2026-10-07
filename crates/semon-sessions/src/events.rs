@@ -210,7 +210,7 @@ pub(crate) struct RateLimits {
     pub(crate) windows: Vec<RateLimitWindow>,
 }
 
-pub(crate) type FileRevision = (u64, u64, u64, [u8; 32], [u8; 32]);
+pub(crate) type FileRevision = (u64, u64, u64, [u8; 32], [u8; 32], Option<i128>);
 
 /// Rows touched while parsing, plus the append boundary of each table.
 /// This is transient write metadata, never persisted with the index.
@@ -731,6 +731,7 @@ pub(crate) struct Stat {
     pub(crate) ino: u64,
     pub(crate) size: u64,
     pub(crate) modified_ns: u128,
+    pub(crate) changed_ns: Option<i128>,
 }
 
 impl Stat {
@@ -753,7 +754,22 @@ impl Stat {
             ino,
             size: metadata.len(),
             modified_ns,
+            changed_ns: change_time_ns(metadata),
         })
+    }
+}
+
+/// Filesystem change time fences metadata-identical rewrites without reading
+/// source bodies. None means this platform/legacy observation cannot prove it.
+pub(crate) fn change_time_ns(metadata: &fs::Metadata) -> Option<i128> {
+    #[cfg(unix)]
+    {
+        Some(i128::from(metadata.ctime()) * 1_000_000_000 + i128::from(metadata.ctime_nsec()))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = metadata;
+        None
     }
 }
 
@@ -1090,6 +1106,7 @@ impl EventCache {
                     ledger.offset,
                     ledger.prefix,
                     ledger.tail,
+                    ledger.stat.changed_ns,
                 )
             })
     }

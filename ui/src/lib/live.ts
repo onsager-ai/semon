@@ -40,6 +40,7 @@ export function createLiveController(host: LiveHost) {
   };
   let disposed = false;
   let streamed = false;
+  let recovering = false;
   const visible = () => document.visibilityState === 'visible',
     floorWait = () => Math.max(0, state.started + 1000 - performance.now());
   function cancel() {
@@ -48,7 +49,7 @@ export function createLiveController(host: LiveHost) {
   }
   function schedule(ms: number) {
     cancel();
-    if (!disposed && !streamed && !state.ended && visible()) {
+    if (!disposed && (!streamed || recovering) && !state.ended && visible()) {
       state.due = performance.now() + ms;
       state.timer = window.setTimeout(poll, ms);
     }
@@ -83,10 +84,8 @@ export function createLiveController(host: LiveHost) {
       } else if (status === 403) host.ended(403);
       else {
         state.delay = Math.min(30000, state.delay * 2);
-        if (status === undefined)
-          window.setTimeout(() => {
-            throw error;
-          });
+        // Read/application failures are retried by this owner; do not create
+        // an unhandled asynchronous exception alongside recovery.
       }
     } finally {
       state.busy = false;
@@ -107,6 +106,19 @@ export function createLiveController(host: LiveHost) {
   return {
     state,
     schedule,
+    recover() {
+      if (disposed || state.ended) return;
+      recovering = true;
+      if (!state.busy && state.timer === null) schedule(floorWait());
+    },
+    synchronized() {
+      recovering = false;
+      state.delay = 2000;
+      if (streamed) cancel();
+    },
+    get recovering() {
+      return recovering;
+    },
     useStream() {
       streamed = true;
       cancel();

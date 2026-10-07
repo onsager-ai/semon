@@ -56,3 +56,36 @@ activation. The production per-request renderer registration, versioned
 persistent transcript slot projection, indexed range loading, source/relationship
 resolution and full native page/tool oracle comparisons remain pending. A full
 selected FileIndex decode must not become the normal per-page fallback.
+
+## Exact-path consumed-prefix proof
+
+`session_source_proof(options, root, relative_path)` resolves one configured
+native source through the indexed published source-path mapping and its current
+file ledger. It decodes at most one selected relationship metadata row (1 MiB,
+64 source references), compares the full device/inode/size/modification and
+consumed-offset/prefix/tail revision, then reuses scoped catalog validation for
+current native selection. Publication races, unavailable facts, changed roots,
+missing source metadata and stale ledger/native mappings fail closed. The API
+returns no native body and does not reopen or rebuild the event cache.
+
+The result is an observation, not custody or permission to read an archive. A
+host archiving source bytes can use it as a candidate, verify that file identity
+still matches before and after copying, and hash the recorded consumed boundary
+while streaming the actual immutable generation. Private host provenance and
+access policy remain outside Semon. Missing proof for an older archived partial
+source remains explicit until its original bytes can be qualified.
+
+The proof helper uses the versioned `CurrentSources` facts index for header and
+current native-selection validation. It does not deserialize the full recorded
+manifest in its read path. Its before/after facts identity check and catalog
+publication-generation check both fail closed on replacement.
+
+A fixed one-source proof workload on 2026-10-07 increased unrelated native
+manifest entries from 100 to 20,000 (recorded facts 2,750 to 520,150 bytes). Across
+31 warm samples, complete helper median latency was 1,428 to 1,453 microseconds;
+selected catalog query VM steps remained 20. The source-path query is separately
+asserted to use `session_catalog_source_path`; indexed facts lookup scaling is
+qualified by `facts::source_authority` tests. These measurements concern a
+metadata proof helper, not first parsed transcript content or a browser journey.
+Reproduce with `cargo test --locked -p semon-sessions
+exact_source_proof_work_stays_fixed -- --nocapture`.

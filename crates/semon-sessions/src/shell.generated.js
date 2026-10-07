@@ -756,6 +756,7 @@ var __semonUIShared = (() => {
   }
   var serial2 = 0;
   var sheet = null;
+  var pendingOpen = null;
   var swallow = 0;
   var sheetList = null;
   var touchY = 0;
@@ -763,21 +764,25 @@ var __semonUIShared = (() => {
   var phone = () => window.matchMedia("(max-width: 760px)").matches;
   function orphaned() {
     if (!sheetList || sheetList.isConnected) return false;
-    lock(null);
-    sheet = null;
+    if (sheet) sheet.orphaned();
+    else lock(null);
     return true;
   }
   function refuse(event) {
     if (orphaned() || !sheetList) return;
+    if (event instanceof TouchEvent && event.touches.length > 1) return;
     if (event instanceof TouchEvent && event.type === "touchstart") {
       touchY = event.touches[0]?.clientY ?? 0;
       return;
     }
+    const nextTouchY = event instanceof TouchEvent ? event.touches[0]?.clientY ?? touchY : touchY;
+    const touchDelta = touchY - nextTouchY;
+    touchY = nextTouchY;
     if (!(event.target instanceof Node) || !sheetList.contains(event.target)) {
       event.preventDefault();
       return;
     }
-    const room = sheetList.scrollHeight - sheetList.clientHeight, delta = event instanceof WheelEvent ? event.deltaY : event instanceof TouchEvent ? touchY - (event.touches[0]?.clientY ?? touchY) : 0;
+    const room = sheetList.scrollHeight - sheetList.clientHeight, delta = event instanceof WheelEvent ? event.deltaY : event instanceof TouchEvent ? touchDelta : 0;
     if (room <= 1 || delta > 0 && sheetList.scrollTop >= room - 1 || delta < 0 && sheetList.scrollTop <= 0)
       event.preventDefault();
   }
@@ -988,6 +993,10 @@ var __semonUIShared = (() => {
     function openList() {
       if (opened || disposed || !root.isConnected) return;
       const asSheet = phone() && typeof HTMLDialogElement.prototype.showModal === "function";
+      if (asSheet && swallow) {
+        pendingOpen = openList;
+        return;
+      }
       query = "";
       opened = { sheet: asSheet, search: options.length > searchAbove };
       paintTrigger();
@@ -1017,9 +1026,11 @@ var __semonUIShared = (() => {
         lock(list);
         try {
           history.pushState({ ...history.state, shSelect: n3 }, "");
-          swallow = 0;
           opened.entry = true;
           sheet = {
+            orphaned() {
+              close(false);
+            },
             popped() {
               if (opened) opened.entry = false;
               close();
@@ -1056,7 +1067,7 @@ var __semonUIShared = (() => {
         }
         lock(null);
         sheet = null;
-        if (was.entry) {
+        if (was.entry && history.state?.shSelect === n3) {
           swallow++;
           history.back();
         }
@@ -1205,6 +1216,7 @@ var __semonUIShared = (() => {
       },
       destroy() {
         if (disposed) return;
+        if (pendingOpen === openList) pendingOpen = null;
         close(false);
         disposed = true;
         if (sizing !== null) cancelAnimationFrame(sizing);
@@ -1244,6 +1256,11 @@ var __semonUIShared = (() => {
     window.addEventListener("popstate", (event) => {
       if (swallow) {
         swallow--;
+        if (!swallow && pendingOpen) {
+          const open = pendingOpen;
+          pendingOpen = null;
+          queueMicrotask(open);
+        }
         event.stopImmediatePropagation();
         return;
       }
@@ -1860,6 +1877,73 @@ globalThis.__semonUIShared = __semonUIShared;
     };
   }
 
+  // src/lib/account.ts
+  var safePath = (href) => typeof href === "string" && href.startsWith("/") && !href.startsWith("//") && !href.includes("\\") && !/[\u0000-\u001f\u007f-\u009f]/.test(href) && href.length <= 512;
+
+  // src/lib/richtext.tsx
+  function externalUrl(value) {
+    if (typeof value !== "string" || !/^https?:\/\//i.test(value)) return false;
+    try {
+      return /^https?:$/.test(new URL(value).protocol);
+    } catch {
+      return false;
+    }
+  }
+
+  // src/lib/security.ts
+  var installed = false;
+  function installPropGuard() {
+    if (installed) return;
+    installed = true;
+    const previous = options.vnode;
+    options.vnode = (vnode) => {
+      previous?.(vnode);
+      if (typeof vnode.type === "string") {
+        for (const key of Object.keys(vnode.props)) {
+          if (["dangerouslySetInnerHTML", "style", "title"].includes(key))
+            throw new Error(`Forbidden DOM prop: ${key}`);
+          const value = vnode.props[key];
+          const externalLink = key === "href" && vnode.type === "a" && externalUrl(value) && vnode.props.target === "_blank" && vnode.props.rel === "noopener noreferrer";
+          if (["href", "src", "action"].includes(key) && value != null && !safePath(value) && !externalLink)
+            throw new Error(`Unsafe DOM path: ${key}`);
+          if (/^on/i.test(key) && typeof value === "string")
+            throw new Error(`Inline DOM handler: ${key}`);
+        }
+      }
+    };
+  }
+
+  // shared-preact:preact/hooks
+  var useState = globalThis.__semonUIShared.hooks.useState;
+  var useEffect = globalThis.__semonUIShared.hooks.useEffect;
+  var useLayoutEffect = globalThis.__semonUIShared.hooks.useLayoutEffect;
+  var useReducer = globalThis.__semonUIShared.hooks.useReducer;
+  var useRef = globalThis.__semonUIShared.hooks.useRef;
+  var useMemo = globalThis.__semonUIShared.hooks.useMemo;
+  var useCallback = globalThis.__semonUIShared.hooks.useCallback;
+  var useContext = globalThis.__semonUIShared.hooks.useContext;
+  var useDebugValue = globalThis.__semonUIShared.hooks.useDebugValue;
+  var useErrorBoundary = globalThis.__semonUIShared.hooks.useErrorBoundary;
+  var useId = globalThis.__semonUIShared.hooks.useId;
+  var useImperativeHandle = globalThis.__semonUIShared.hooks.useImperativeHandle;
+
+  // src/lib/screens.tsx
+  var screenText = (text) => text.replace(/ · /g, "\u2009 \xB7 \u2009").replace(/^· /, "\xB7\u2009 ");
+
+  // src/lib/placeholder.tsx
+  function createStatusNote(text, className, role = "status") {
+    const root = document.createElement("div");
+    root.className = "viewer-status-slot";
+    render(
+      /* @__PURE__ */ jsx("p", { class: className, role, children: screenText(text) }),
+      root
+    );
+    return root;
+  }
+
+  // src/lib/index.ts
+  installPropGuard();
+
   // src/app/native-shell.ts
   var current = null;
   function mountNativeShell(options2 = {}) {
@@ -2063,31 +2147,80 @@ globalThis.__semonUIShared = __semonUIShared;
       const url = element.dataset.poll;
       if (!url) return;
       const deadline = Date.now() + 30 * 60 * 1e3;
-      let pending = false;
-      const request = effects.request();
+      let active = null;
+      let stopped = false;
+      const originalLabel = element.getAttribute("aria-label");
+      let status = null;
+      const note = (message) => {
+        if (status && element.getAttribute("aria-label") === message) return;
+        element.setAttribute("aria-label", message);
+        status?.remove();
+        status = createStatusNote(message, "sub");
+        element.after(status);
+      };
+      const stop = () => {
+        stopped = true;
+        effects.clearInterval(interval);
+        effects.clearTimeout(expiry);
+        active?.abort();
+        active = null;
+        observer.disconnect();
+      };
+      const observer = new MutationObserver(() => {
+        if (!element.isConnected) stop();
+      });
+      observer.observe(document, { childList: true, subtree: true });
+      effects.own(() => {
+        stop();
+        status?.remove();
+        if (originalLabel === null) element.removeAttribute("aria-label");
+        else element.setAttribute("aria-label", originalLabel);
+      });
       const interval = effects.interval(async () => {
-        if (!element.isConnected || Date.now() >= deadline) {
-          effects.clearInterval(interval);
+        if (stopped || !element.isConnected || Date.now() >= deadline) {
+          if (!stopped && element.isConnected && Date.now() >= deadline)
+            note("Status checking expired. Return to this page to check again.");
+          stop();
           return;
         }
-        if (pending) return;
-        pending = true;
+        if (active) return;
+        const request = effects.request();
+        active = request;
+        const timeout = effects.timeout(() => request.abort(), 1e4);
+        let abort;
         try {
-          const response = await fetch(url, {
-            signal: request.signal,
-            credentials: "same-origin",
-            cache: "no-store"
-          });
-          if (!disposed && element.isConnected && Date.now() < deadline && response.status === 200) {
-            effects.clearInterval(interval);
+          const response = await Promise.race([
+            fetch(url, {
+              signal: request.signal,
+              credentials: "same-origin",
+              cache: "no-store"
+            }),
+            new Promise((_resolve, reject) => {
+              abort = () => reject(new DOMException("Status request cancelled", "AbortError"));
+              request.signal.addEventListener("abort", abort, { once: true });
+            })
+          ]);
+          if (!disposed && !stopped && !request.signal.aborted && element.isConnected && Date.now() < deadline && response.status === 200) {
+            stop();
             window.location.assign(element.dataset.pollGo || "/");
-          }
+          } else if (!stopped) note("Waiting for completion; checking again automatically.");
         } catch {
+          if (!disposed && !stopped)
+            note("Status temporarily unavailable; checking again automatically.");
         } finally {
-          pending = false;
+          if (abort) request.signal.removeEventListener("abort", abort);
+          effects.clearTimeout(timeout);
+          effects.releaseRequest(request);
+          if (active === request) active = null;
         }
       }, 3e3);
-      effects.timeout(() => effects.clearInterval(interval), 30 * 60 * 1e3);
+      const expiry = effects.timeout(
+        () => {
+          note("Status checking expired. Return to this page to check again.");
+          stop();
+        },
+        30 * 60 * 1e3
+      );
     });
     const controller = {
       destroy() {

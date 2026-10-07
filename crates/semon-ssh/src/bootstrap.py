@@ -43,10 +43,25 @@ try:
         fcntl.flock(watch, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError:
         busy = True
-    if busy and (d / 'token').read_bytes() != p['token'].encode():
-        # Re-enrollment after disconnect must not keep using an old token.
+    receiver = p.get('receiver_identity')
+    if receiver is not None:
+        assert isinstance(receiver, str) and 0 < len(receiver.encode()) <= 256
+    prior = json.loads((d / 'receipt').read_text()) if busy else {}
+    capture_native = p.get('capture_native',False)
+    assert type(capture_native) is bool
+    if capture_native:
+        claim = d / 'controller-install.json'
+        assert not claim.is_symlink() and claim.stat().st_uid == os.getuid() and not claim.stat().st_mode & 0o077
+        native_home = d / 'session' / 'home'
+        for path in (native_home,*native_home.parents):
+            if path == d: break
+            assert not path.is_symlink() and path.stat().st_uid == os.getuid() and not path.stat().st_mode & 0o077
+    changed_receiver = prior.get('receiver') != receiver or prior.get('destination') != p['destination'] or prior.get('capture_native',False) != capture_native
+    if busy and ((d / 'token').read_bytes() != p['token'].encode() or changed_receiver):
+        # Credential rotation keeps one logical receiver checkpoint. A new
+        # receiver or destination must not leave the old watcher publishing.
         # Validate the process identity before signalling our own watch group.
-        receipt = json.loads((d / 'receipt').read_text())
+        receipt = prior
         pid = receipt['pid']
         stat = pathlib.Path('/proc/' + str(pid) + '/stat').read_text().rsplit(')', 1)[1].split()
         assert stat[19] == receipt['start'] and int(stat[3]) == pid
@@ -68,13 +83,27 @@ try:
         assert result.returncode == 0
     write('token', p['token'].encode(), 0o600)
     import shlex
+    state_export = ''
+    if receiver is not None:
+        # Keep prior checkpoints intact. URL alone cannot identify a receiver;
+        # a newly enrolled receiver needs the unchanged original history too.
+        state_home = d / 'receiver-state' / hashlib.sha256(receiver.encode()).hexdigest()
+        for directory in (state_home.parent, state_home):
+            if directory.is_symlink():
+                raise ValueError('unsafe state directory')
+            directory.mkdir(mode=0o700, exist_ok=True)
+            if directory.stat().st_uid != os.getuid() or directory.stat().st_mode & 0o077:
+                raise ValueError('unsafe state permissions')
+        state_export = 'export XDG_STATE_HOME=' + shlex.quote(str(state_home)) + '\n'
     cmd = [str(d / 'semon'), 'push', '--to', p['destination'], '--token-file', str(d / 'token'), '--watch']
-    write('run', ('#!/bin/sh\nexec flock -n ' + shlex.quote(str(d / 'watch.lock')) + ' ' + shlex.join(cmd) + '\n').encode(), 0o700)
+    if capture_native:
+        cmd.extend(['--codex-home',str(native_home)])
+    write('run', ('#!/bin/sh\n' + state_export + 'exec flock -n ' + shlex.quote(str(d / 'watch.lock')) + ' ' + shlex.join(cmd) + '\n').encode(), 0o700)
     if not busy:
         fcntl.flock(watch, fcntl.LOCK_UN)
         process = subprocess.Popen(['nohup', str(d / 'run')], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True, close_fds=True)
         stat = pathlib.Path('/proc/' + str(process.pid) + '/stat').read_text().rsplit(')', 1)[1].split()
-        write('receipt', json.dumps({'pid': process.pid, 'start': stat[19], 'boot': pathlib.Path('/proc/sys/kernel/random/boot_id').read_text()}).encode(), 0o600)
+        write('receipt', json.dumps({'pid': process.pid, 'start': stat[19], 'boot': pathlib.Path('/proc/sys/kernel/random/boot_id').read_text(), 'receiver': receiver, 'destination': p['destination'], 'capture_native':capture_native}).encode(), 0o600)
         time.sleep(0.5)
         try:
             fcntl.flock(watch, fcntl.LOCK_EX | fcntl.LOCK_NB)
