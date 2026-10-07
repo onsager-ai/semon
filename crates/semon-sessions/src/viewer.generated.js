@@ -6839,8 +6839,9 @@ globalThis.__semonUIShared = __semonUIShared;
 
   // src/app/controlObservation.ts
   function createControlObservation(host2) {
-    if (!host2.viewerHost?.controlStream) return { destroy() {
-    } };
+    if (!host2.viewerHost?.controlStream && !host2.viewerHost?.catalogControlStream)
+      return { destroy() {
+      } };
     let stream = null;
     let identity2 = "";
     let timer;
@@ -6849,10 +6850,26 @@ globalThis.__semonUIShared = __semonUIShared;
     let disposed = false;
     function selected() {
       const route2 = host2.navigation.route;
+      if (host2.catalogSelection) {
+        const selected2 = host2.catalogSelection.selectedIdentity();
+        const accepted = route2.v === "session" && selected2?.catalog_key === route2.id ? selected2 : null;
+        return {
+          path: accepted?.native_id ? host2.viewerHost?.catalogControlStream : void 0,
+          params: accepted ? {
+            source_key: accepted.source_key,
+            catalog_key: accepted.catalog_key,
+            native_id: accepted.native_id ?? "",
+            harness: accepted.harness
+          } : {},
+          thread: accepted?.native_id ?? ""
+        };
+      }
       const session = route2.v === "session" ? host2.modelStore.sessions[route2.id] : void 0;
+      const thread = session && route2.v === "session" ? route2.id : "";
       return {
-        selected: session ? route2.v === "session" ? route2.id : "" : "",
-        machine: session?.machine ?? ""
+        path: host2.viewerHost?.controlStream,
+        params: { selected: thread, machine: session?.machine ?? "" },
+        thread
       };
     }
     function cancel() {
@@ -6864,14 +6881,14 @@ globalThis.__semonUIShared = __semonUIShared;
     function connect() {
       if (disposed) return;
       cancel();
-      const path = host2.viewerHost?.controlStream;
+      const scope = selected();
+      identity2 = JSON.stringify(scope);
+      const path = scope.path;
       if (!path || typeof EventSource === "undefined") return;
       if (!path.startsWith("/") || path.startsWith("//") || /[\\\s]/.test(path))
         throw new Error("Invalid control stream");
-      const scope = selected();
-      identity2 = JSON.stringify(scope);
       const current = new EventSource(
-        path + (path.includes("?") ? "&" : "?") + new URLSearchParams(scope)
+        path + (path.includes("?") ? "&" : "?") + new URLSearchParams(scope.params)
       );
       stream = current;
       let revision = "";
@@ -6902,16 +6919,18 @@ globalThis.__semonUIShared = __semonUIShared;
         try {
           if (String(event.data).length > 3e5) throw new Error("Control snapshot too large");
           const value = JSON.parse(String(event.data));
-          if (!value || typeof value !== "object" || !("revision" in value) || typeof value.revision !== "string" || value.revision.length < 1 || value.revision.length > 128 || !("selected" in value) || value.selected !== scope.selected || !("machine" in value) || value.machine !== scope.machine || !("control" in value))
+          if (!value || typeof value !== "object" || !("revision" in value) || typeof value.revision !== "string" || value.revision.length < 1 || value.revision.length > 128 || !Object.entries(scope.params).every(
+            ([key, expected]) => key in value && value[key] === expected
+          ) || !("control" in value))
             throw new Error("Control identity changed");
           const control = host2.controlOwner.prepare(value.control);
-          if (control && control.thread !== scope.selected) throw new Error("Control thread changed");
+          if (control && control.thread !== scope.thread) throw new Error("Control thread changed");
           heartbeat();
           delay = 1e3;
           if (revision === value.revision) return;
           revision = value.revision;
-          host2.viewerHost?.modelNavigation?.(value);
-          if (control || !scope.selected) host2.controlOwner.observe(control);
+          if (!host2.catalogSelection) host2.viewerHost?.modelNavigation?.(value);
+          if (control || !scope.thread) host2.controlOwner.observe(control);
           else host2.controlOwner.unavailable();
         } catch {
           recover();
@@ -6925,12 +6944,14 @@ globalThis.__semonUIShared = __semonUIShared;
     }
     const route = host2.navigation.subscribeRoute(changed);
     const model2 = host2.updates.subscribe(changed);
+    const catalog = host2.catalogSelection?.subscribe(changed);
     connect();
     return {
       destroy() {
         disposed = true;
         route();
         model2();
+        catalog?.();
         cancel();
       }
     };
@@ -6963,6 +6984,7 @@ globalThis.__semonUIShared = __semonUIShared;
     let note = "";
     let uncertain = false;
     let revision = 0;
+    let selection = 0;
     async function write(op, extra = {}) {
       if (!current || busy2 || uncertain && op !== "reconnect") return false;
       const target = current;
@@ -7025,7 +7047,8 @@ globalThis.__semonUIShared = __semonUIShared;
     function view(sid) {
       if (!current || sid && sid !== current.thread) return void 0;
       const target = current;
-      const send = (op, extra = {}) => current?.thread === target.thread && current.generation === target.generation ? write(op, extra) : Promise.resolve(false);
+      const selected = selection;
+      const send = (op, extra = {}) => selection === selected && current?.thread === target.thread && current.generation === target.generation ? write(op, extra) : Promise.resolve(false);
       return {
         snapshot: current,
         busy: busy2,
@@ -7062,6 +7085,7 @@ globalThis.__semonUIShared = __semonUIShared;
       },
       observe(value) {
         if (current?.thread !== value?.thread) {
+          ++selection;
           ++revision;
           busy2 = false;
           uncertain = false;
@@ -7072,6 +7096,7 @@ globalThis.__semonUIShared = __semonUIShared;
       },
       view,
       destroy() {
+        ++selection;
         ++revision;
         current = null;
       }
@@ -9575,7 +9600,9 @@ globalThis.__semonUIShared = __semonUIShared;
       if (host2.disposed || loading) return;
       host2.scope.clearTimeout(retryTimer);
       loading = true;
-      host2.transportOwner.api("/api/model?delta=1" + (host2.viewerHost?.controlStream ? "&content=1" : "")).then(async (m) => {
+      host2.transportOwner.api(
+        "/api/model?delta=1" + (host2.viewerHost?.controlStream || host2.viewerHost?.catalogControlStream ? "&content=1" : "")
+      ).then(async (m) => {
         if (host2.disposed) return;
         const adopted = host2.transportOwner.adopt(m);
         host2.liveModelOwner.LIVE.version = adopted.version;
@@ -10385,7 +10412,7 @@ globalThis.__semonUIShared = __semonUIShared;
       return "&selected=" + host2.transportOwner.enc(route.id) + (session ? "&machine=" + host2.transportOwner.enc(session.machine) : "");
     }
     function modelPath(path, selected = selection()) {
-      return path + selected + (host2.viewerHost?.controlStream ? "&content=1" : "");
+      return path + selected + (host2.viewerHost?.controlStream || host2.viewerHost?.catalogControlStream ? "&content=1" : "");
     }
     const liveController = createLiveController({
       async poll() {
@@ -10510,7 +10537,7 @@ globalThis.__semonUIShared = __semonUIShared;
         throw new Error("Invalid live model stream");
       const streamQuery = [
         selected.slice(1),
-        host2.viewerHost?.controlStream ? "content=1&since=" + host2.transportOwner.enc(LIVE.version ?? "") : ""
+        host2.viewerHost?.controlStream || host2.viewerHost?.catalogControlStream ? "content=1&since=" + host2.transportOwner.enc(LIVE.version ?? "") : ""
       ].filter(Boolean).join("&");
       const current = new EventSource(
         path + (streamQuery ? (path.includes("?") ? "&" : "?") + streamQuery : "")
@@ -14146,7 +14173,8 @@ globalThis.__semonUIShared = __semonUIShared;
       const nav = m.nav == null ? null : object2(m.nav);
       const machinesPath = host2.viewerHost?.machinesPath ?? (nav && typeof nav.machines === "string" && safePath2(nav.machines) ? nav.machines : null);
       host2.modelStore.adopt(m, () => {
-        if (!host2.viewerHost?.controlStream) host2.controlOwner.adopt(control);
+        if (!(host2.viewerHost?.controlStream || host2.viewerHost?.catalogControlStream))
+          host2.controlOwner.adopt(control);
         serverNow = m.now;
         fetchedAt = Date.now();
         TOK = marks;
@@ -14810,7 +14838,8 @@ globalThis.__semonUIShared = __semonUIShared;
       this.sentencesOwner = createSentences(context);
       this.isGap = (e) => e.k === "end" && /entries (not included|omitted)|^No activity/.test(e.text ?? "");
       this.controlOwner = createLocalControl(this.scope, () => {
-        if (context.viewerHost?.controlStream) context.applicationRefreshOwner.controls();
+        if (context.viewerHost?.controlStream || context.viewerHost?.catalogControlStream)
+          context.applicationRefreshOwner.controls();
         else context.applicationRefreshOwner.refresh();
       });
       this.transportOwner = createTransport(context);
