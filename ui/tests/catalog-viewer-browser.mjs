@@ -721,3 +721,84 @@ test('partial catalog discovery refresh retains uncommitted filter focus and the
     await browser.close();
   }
 });
+
+test('archive source hint waits for a parsed canonical session without native authority or global restore', async () => {
+  const browser = await chromium.launch();
+  try {
+    const page = await browser.newPage(),
+      requests = [];
+    let polls = 0;
+    await page.route('http://catalog.test/**', (route) => {
+      const u = new URL(route.request().url());
+      requests.push(u.pathname + u.search);
+      if (u.pathname === '/api/session-capabilities')
+        return route.fulfill({ json: { ...capabilities(true), source_candidates: true } });
+      if (u.pathname === '/api/sessions')
+        return route.fulfill({ json: list(u.searchParams.has('sid') ? [meta('parsed')] : []) });
+      if (u.pathname === '/api/session-source-candidates')
+        return route.fulfill({
+          json: {
+            api: 1,
+            source_key: 'source',
+            items: [
+              {
+                candidate_key: 'candidate',
+                source: { root: 'claude', path: 'archived.jsonl' },
+                native_name_hint: 'Old native name hint',
+                generation: 'c'.repeat(64),
+                archive_observed_at: null,
+              },
+            ],
+            next_cursor: null,
+          },
+        });
+      if (u.pathname === '/api/session-source-candidate') {
+        polls++;
+        return route.fulfill({
+          json: {
+            api: 1,
+            source_key: 'source',
+            candidate_key: 'candidate',
+            generation: 'c'.repeat(64),
+            state: polls === 1 ? 'updating' : 'ready',
+            catalog_key: polls === 1 ? null : 'parsed',
+            retryable: true,
+            reason: null,
+          },
+        });
+      }
+      if (u.pathname === '/api/session-transcript')
+        return route.fulfill({ json: transcript('parsed', u.searchParams, 3) });
+      if (u.pathname === '/api/session-identity')
+        return route.fulfill({ status: 404, json: { error: 'Current authority unavailable' } });
+      return route.fulfill({
+        contentType: u.pathname === '/viewer.css' ? 'text/css' : 'text/html',
+        body: u.pathname === '/viewer.css' ? css : html,
+      });
+    });
+    await page.goto('http://catalog.test/sessions');
+    await page.addScriptTag({ content: outputFiles[0].text });
+    await page.evaluate(() => (window.app = CatalogViewer.mountViewerApplication()));
+    const hint = page.getByRole('button', { name: /Old native name hint/ });
+    await hint.waitFor();
+    assert.equal(await page.locator('[data-id="candidate"]').count(), 0);
+    assert.equal(
+      requests.some((path) => path.startsWith('/api/session-identity')),
+      false,
+    );
+    await hint.click();
+    await page
+      .getByText('Recorded source is being indexed. Its session will open automatically.')
+      .waitFor();
+    await page.getByText('Original parsed record 0', { exact: true }).waitFor();
+    assert.equal(new URL(page.url()).pathname, '/s/claude/parsed');
+    assert.ok(polls >= 2);
+    assert.equal(
+      requests.some((path) => /^\/api\/(model|tool|tx|image)(\?|$)/.test(path)),
+      false,
+    );
+    await page.evaluate(() => app.destroy());
+  } finally {
+    await browser.close();
+  }
+});
