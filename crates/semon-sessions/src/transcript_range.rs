@@ -576,7 +576,7 @@ fn render(
                 crate::slot_projection::Recipe::Tool { .. } => "tool",
                 _ => return Err(invalid()),
             };
-            let mut entry = json!({"k":kind,"field":{"name":field.kind.name(),"chunks":field.checkpoints.len().saturating_sub(1),"complete":complete},"clipped":!complete});
+            let mut entry = json!({"k":kind,"field":{"name":field.kind.name(),"layers":field.layers,"chunks":field.checkpoints.len().saturating_sub(1),"complete":complete},"clipped":!complete});
             entry[field.kind.name()] = json!(text);
             Ok(entry)
         })();
@@ -981,7 +981,7 @@ fn render_field(
             200,
             json!({"api":1,"identity":selection.identity,
             "projection":{"version":VERSION,"generation":selection.generation},"slot":selection.first,
-            "field":{"name":field.kind.name(),"chunk":chunk,"next":(!complete).then_some(chunk+1),"complete":complete},
+            "field":{"name":field.kind.name(),"layers":field.layers,"chunk":chunk,"next":(!complete).then_some(chunk+1),"complete":complete},
             "text":text,"freshness":{"state":"cached"},"content_observation":content,"provenance":{"source":references.get(&file.path),"offset":field.record_offset,"block":field.block,"native_event_id":field.native_event_id},"observation":{"source_bytes":bytes}}),
         ),
         Err(_) => catalog::error(
