@@ -6316,7 +6316,7 @@ fn schema_four_upgrade_preserves_event_indices_and_observed_runs() {
     let version: i64 = connection
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 7);
+    assert_eq!(version, 8);
 }
 
 #[test]
@@ -6491,6 +6491,14 @@ fn interrupted_catalog_publication_retains_one_generation_and_recovers_on_restar
         })
         .unwrap();
     assert_eq!(aliases, 2);
+    let pending: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM session_catalog_invalidations",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(pending, 2);
     connection
         .execute_batch("DROP TRIGGER interrupt_catalog")
         .unwrap();
@@ -6498,6 +6506,53 @@ fn interrupted_catalog_publication_retains_one_generation_and_recovers_on_restar
     let recovered = read_catalog(&home);
     assert_ne!(before.0, recovered.0);
     assert!(recovered.1.iter().all(|row| row.last == Some(at(0, 1))));
+    let pending: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM session_catalog_invalidations",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(pending, 0);
+}
+
+#[test]
+fn source_disappearance_stays_pending_until_catalog_retirement_commits() {
+    let home = Home::new();
+    home.top("root", &[human("root", ts(0, 0), "prompt")]);
+    home.build();
+    let before = read_catalog(&home).0;
+    let connection =
+        rusqlite::Connection::open(home.options.cache.with_extension("sqlite3")).unwrap();
+    connection.execute_batch("CREATE TRIGGER interrupt_retirement BEFORE DELETE ON session_catalog BEGIN SELECT RAISE(ABORT,'interrupted'); END;").unwrap();
+    let source = home.root.join("claude/projects/-work-proj/root.jsonl");
+    fs::remove_file(&source).unwrap();
+    let built = home.build();
+    assert!(!built.sessions.contains_key("root"));
+    assert_eq!(before, read_catalog(&home).0);
+    let reason: String = connection
+        .query_row(
+            "SELECT reason FROM session_catalog_invalidations WHERE source_path=?1",
+            [source.to_string_lossy().as_ref()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(reason, "removed");
+    connection
+        .execute_batch("DROP TRIGGER interrupt_retirement")
+        .unwrap();
+    home.build();
+    let (generation, rows) = read_catalog(&home);
+    assert_ne!(before, generation);
+    assert!(rows.is_empty());
+    let pending: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM session_catalog_invalidations",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(pending, 0);
 }
 
 #[test]
