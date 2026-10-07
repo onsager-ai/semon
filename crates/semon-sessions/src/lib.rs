@@ -42,7 +42,9 @@ mod refresh;
 mod repo;
 pub mod sealed;
 pub mod shell;
+mod source_reader;
 mod tx;
+pub use source_reader::{SESSION_SOURCE_CHUNK_MAX, SessionSourceRange, SessionSourceReader};
 mod union;
 mod viewer;
 pub use facts::{
