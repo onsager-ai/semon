@@ -5385,7 +5385,7 @@ globalThis.__semonUIShared = __semonUIShared;
       const value = this.props.owner.snapshot.runtime;
       if (!value) return null;
       const observation = value.observation;
-      return /* @__PURE__ */ jsxs("section", { class: "local-control", "aria-label": "Environment status", children: [
+      return /* @__PURE__ */ jsxs("section", { class: "local-control runtime-observation", "aria-label": "Environment status", children: [
         /* @__PURE__ */ jsx("p", { role: "status", children: observation ? {
           active: "Environment is active.",
           disconnected: "Environment is disconnected.",
@@ -16909,6 +16909,7 @@ globalThis.__semonUIShared = __semonUIShared;
           newCount: 0,
           lastTotal: null
         };
+        view.root.className = "page catalog-session";
         selected.set(cacheKey(key2), view);
       }
       active = view;

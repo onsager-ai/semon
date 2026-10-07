@@ -443,6 +443,8 @@ dialog.panel::backdrop { background: color-mix(in srgb, #000 40%, transparent); 
 
 .page { max-width: 760px; margin: 0 auto; padding: 8px var(--gutter) 88px; display: grid; grid-template-columns: minmax(0, 1fr); gap: 24px; align-content: start; }
 .page.wide-mode { max-width: 1400px; }
+.page:has(> .catalog-session) { display: block; padding: 0; }
+.page.wide-mode > .catalog-session { max-width: none; }
 .page > * { min-width: 0; }
 /* Visually hidden: the same title is already in the top bar, but screen readers keep a page heading. */
 .ph h1 { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
@@ -1289,9 +1291,9 @@ html.viewer-open, html.viewer-open body { overflow: hidden; }
 
 /* Local control shares the page commit owner; exact native payloads remain plain text. */
 .local-control { margin: var(--s3) 0 0; }
-.page:has(> .transcript):has(> .local-control) { display: flex; flex-direction: column; min-height: calc(100dvh - 56px); padding-bottom: calc(var(--s4) + env(safe-area-inset-bottom, 0px)); }
-.page:has(> .local-control) > .transcript { flex: 1 0 auto; align-content: start; }
-.page:has(> .transcript) > .local-control { position: sticky; bottom: calc(var(--s4) + env(safe-area-inset-bottom, 0px)); z-index: 7; padding-top: var(--s2); background: var(--ground); }
+.page:has(> .transcript):has(> .local-control:not(.runtime-observation)) { display: flex; flex-direction: column; min-height: calc(100dvh - 56px); padding-bottom: calc(var(--s4) + env(safe-area-inset-bottom, 0px)); }
+.page:has(> .local-control:not(.runtime-observation)) > .transcript { flex: 1 0 auto; align-content: start; }
+.page:has(> .transcript) > .local-control:not(.runtime-observation) { position: sticky; bottom: calc(var(--s4) + env(safe-area-inset-bottom, 0px)); z-index: 7; padding-top: var(--s2); background: var(--ground); }
 .page:has(> .transcript) > .local-control:has(article), .page:has(> .transcript) > .local-control:has(details[open]) { position: static; }
 .local-control-actions { display: flex; align-items: center; gap: var(--s2); margin-top: var(--s2); }
 .local-control h2, .local-control h3 { margin: var(--s2) 0; font-size: var(--fs-title); }

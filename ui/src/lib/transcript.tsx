@@ -205,7 +205,7 @@ class SessionRuntime extends Component<{ owner: SessionOwner }> {
     if (!value) return null;
     const observation = value.observation;
     return (
-      <section class="local-control" aria-label="Environment status">
+      <section class="local-control runtime-observation" aria-label="Environment status">
         <p role="status">
           {observation
             ? {
