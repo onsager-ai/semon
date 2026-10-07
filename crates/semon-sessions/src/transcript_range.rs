@@ -390,11 +390,12 @@ impl SessionSourceReader for Composite<'_> {
         offset: u64,
         max: usize,
     ) -> io::Result<crate::SessionSourceRange> {
-        if matches!(self.mode, SessionSourceReadMode::ProviderOnly) {
-            return self
-                .provider
-                .unwrap_or(self.local)
-                .read_range(source, expected, offset, max);
+        if source.immutable_generation.as_deref().zip(expected).is_some_and(|(pinned, expected)|pinned!=expected) { return Err(io::Error::other("immutable source generation changed")); }
+        let expected=source.immutable_generation.as_deref().or(expected);
+        if source.immutable_generation.is_some() || matches!(self.mode, SessionSourceReadMode::ProviderOnly) {
+            let range=self.provider.unwrap_or(self.local).read_range(source,expected,offset,max)?;
+            if source.immutable_generation.as_deref().is_some_and(|generation|range.generation!=generation) { return Err(io::Error::other("immutable source generation changed")); }
+            return Ok(range);
         }
         match self.local.read_range(source, expected, offset, max) {
             Err(error)
@@ -456,7 +457,7 @@ impl SessionSourceReader for Local<'_> {
             };
             #[cfg(not(unix))]
             let identity = (0, 0);
-            identity == (source.dev, source.ino)
+            (Some(identity.0),Some(identity.1)) == (source.dev, source.ino)
                 && source
                     .changed_ns
                     .is_some_and(|token| Some(token) == crate::events::change_time_ns(metadata))
@@ -466,7 +467,7 @@ impl SessionSourceReader for Local<'_> {
                     .ok()
                     .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
                     .map(|time| time.as_nanos())
-                    == Some(source.modified_ns)
+                    == source.modified_ns
         };
         if !check(&file.metadata()?) {
             return Err(invalid());

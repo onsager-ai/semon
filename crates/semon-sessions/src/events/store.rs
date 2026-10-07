@@ -415,8 +415,8 @@ pub(super) fn read_selected(
             ledger.prefix,
             ledger.tail,
         ) != (
-            source.dev,
-            source.ino,
+            source.dev.ok_or(rusqlite::Error::InvalidQuery)?,
+            source.ino.ok_or(rusqlite::Error::InvalidQuery)?,
             source.offset,
             source.prefix_sha256,
             source.tail_sha256,
@@ -1222,8 +1222,8 @@ impl SqliteStore {
                     ledger.tail,
                     ledger.stat.changed_ns,
                 ) != (
-                    source.dev,
-                    source.ino,
+                    source.dev.ok_or_else(||StoreError::Data("native source lacks local observation".into()))?,
+                    source.ino.ok_or_else(||StoreError::Data("native source lacks local observation".into()))?,
                     source.offset,
                     source.prefix_sha256,
                     source.tail_sha256,

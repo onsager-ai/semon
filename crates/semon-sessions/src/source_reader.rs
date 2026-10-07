@@ -171,6 +171,7 @@ mod tests {
             offset: length as u64,
             prefix_sha256: [1; 32],
             tail_sha256: [2; 32],
+            immutable_generation:None,
         }
     }
     #[test]
