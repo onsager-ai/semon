@@ -108,7 +108,8 @@ export function createTransport(host: TransportHost) {
       host.viewerHost?.machinesPath ??
       (nav && typeof nav.machines === 'string' && safePath(nav.machines) ? nav.machines : null);
     host.modelStore.adopt(m, () => {
-      if (!host.viewerHost?.controlStream) host.controlOwner.adopt(control);
+      if (!(host.viewerHost?.controlStream || host.viewerHost?.catalogControlStream))
+        host.controlOwner.adopt(control);
       serverNow = m.now;
       fetchedAt = Date.now();
       TOK = marks;
