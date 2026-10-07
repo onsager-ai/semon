@@ -256,6 +256,7 @@ for (const width of [390, 1280])
             path: process.env.SEMON_CATALOG_OUT + '/list-' + width + '-' + colorScheme + '.png',
           });
         }
+        if (width === 1280) await page.getByRole('button', { name: 'Collapse sidebar' }).click();
         await page.locator('#page [data-id="one"]').click();
         await page.locator('#page [data-entry-key="one:5"]').waitFor();
         const original = await page.evaluateHandle(() =>
@@ -288,6 +289,13 @@ for (const width of [390, 1280])
         await page.evaluate(() => document.querySelector('#nav a, #nav button')?.click());
         await page.locator('#page [data-id="two"]').click();
         await page.locator('#page [data-entry-key="two:5"]').waitFor();
+        if (width === 1280) {
+          assert.equal(
+            await page.locator('.app').evaluate((node) => node.classList.contains('rail')),
+            true,
+          );
+          await page.getByRole('button', { name: 'Expand sidebar' }).waitFor();
+        }
         await page.evaluate(() => document.querySelector('#nav a, #nav button')?.click());
         await page.locator('#page [data-id="one"]').click();
         assert.equal(
