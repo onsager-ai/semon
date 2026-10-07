@@ -147,6 +147,9 @@ async function checkLongSessionOpenEnd(page) {
       jumpHidden: document.querySelector('.jump-wrap')?.hidden ?? true,
     };
   });
+  await page.screenshot({
+    path: path.join(ENV.out, 'perf-open-at-end-' + page.viewportSize().width + '.png'),
+  });
   const main = await page.locator('#main').boundingBox();
   await page.mouse.move(main ? main.x + Math.min(main.width / 2, 200) : 195, 300);
   await page.mouse.wheel(0, await page.evaluate(() => -innerHeight * 2));
