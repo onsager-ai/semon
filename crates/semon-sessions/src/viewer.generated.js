@@ -8609,13 +8609,17 @@ globalThis.__semonUIShared = __semonUIShared;
   function parseCatalogSource(value) {
     const source = object2(value), offset = integer(source.offset);
     if (offset < 0) throw new Error("Invalid catalog source offset");
+    const immutable = source.immutable_generation;
+    if (immutable !== void 0 && immutable !== null && (typeof immutable !== "string" || !/^[0-9a-f]{64}$/.test(immutable)))
+      throw new Error("Invalid immutable source generation");
     return {
       root: text(source.root),
       path: text(source.path),
       native_id: text(source.native_id),
       offset,
       prefix_sha256: digest(source.prefix_sha256),
-      tail_sha256: digest(source.tail_sha256)
+      tail_sha256: digest(source.tail_sha256),
+      ...source.immutable_generation === void 0 ? {} : { immutable_generation: immutable }
     };
   }
   function sourceReference(value) {
