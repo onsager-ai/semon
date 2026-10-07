@@ -23,6 +23,16 @@ pub(crate) struct NativeField {
     pub(crate) native_event_id: Option<String>,
 }
 
+impl NativeField {
+    pub(crate) fn scalar_slack(&self) -> usize {
+        if self.layers == 2 {
+            json_string::JSON_STRING_LAYERED_SCALAR_SLACK
+        } else {
+            11
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 pub(crate) enum NativeFieldKind {
     Text,
