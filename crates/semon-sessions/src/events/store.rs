@@ -45,7 +45,7 @@ use crate::{Tokens, facts::ReportedRunSnapshot};
 
 /// `PRAGMA user_version`: the shape of the tables. The parser's version is
 /// [`CACHE_VERSION`], kept in `meta`.
-const SCHEMA_VERSION: i64 = 4;
+const SCHEMA_VERSION: i64 = 5;
 
 /// How long a write waits for another process's transaction. Tests wait
 /// less, so the busy paths they drive stay quick.
@@ -60,6 +60,12 @@ const BUSY_TIMEOUT: Duration = if cfg!(test) {
 const JOURNAL_SIZE_LIMIT: i64 = 64 * 1024 * 1024;
 
 const SCHEMA: &str = "
+CREATE TABLE IF NOT EXISTS session_descriptions (
+    session_key TEXT PRIMARY KEY,
+    version INTEGER NOT NULL,
+    inputs TEXT NOT NULL,
+    description TEXT NOT NULL
+) STRICT;
 CREATE TABLE IF NOT EXISTS meta (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
@@ -193,6 +199,7 @@ CREATE TABLE IF NOT EXISTS reported_runs (
 /// changes. `reported_runs` isn't among them: its source keeps only the
 /// last run, so it can't be rebuilt.
 const DERIVED: &str = "
+DELETE FROM session_descriptions;
 DELETE FROM events;
 DELETE FROM signals;
 DELETE FROM usage;
@@ -749,6 +756,54 @@ fn failure(error: rusqlite::Error) -> StoreError {
 impl IndexStore for SqliteStore {
     fn describe(&self) -> String {
         self.path.display().to_string()
+    }
+
+    fn session_description(
+        &self,
+        key: &str,
+        version: u32,
+        inputs: &str,
+    ) -> Result<Option<String>, StoreError> {
+        if !current(&self.connection).map_err(failure)? {
+            return Ok(None);
+        }
+        self.connection.query_row(
+            "SELECT description FROM session_descriptions WHERE session_key = ?1 AND version = ?2 AND inputs = ?3",
+            params![key, version, inputs], |row| row.get(0),
+        ).optional().map_err(failure)
+    }
+
+    fn save_session_descriptions(
+        &mut self,
+        descriptions: &[(String, u32, String, String)],
+    ) -> Result<Outcome, StoreError> {
+        // Optional reuse must not add another writer-lock wait to startup or
+        // refresh. A contended publication is safely retried by a later build.
+        self.connection
+            .busy_timeout(Duration::ZERO)
+            .map_err(failure)?;
+        let result = (|| {
+            let transaction = self
+                .connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(failure)?;
+            if !current(&transaction).map_err(failure)? {
+                return Ok(Outcome::Stale);
+            }
+            {
+                let mut put = transaction.prepare("INSERT OR REPLACE INTO session_descriptions (session_key, version, inputs, description) VALUES (?1, ?2, ?3, ?4)").map_err(failure)?;
+                for (key, version, inputs, description) in descriptions {
+                    put.execute(params![key, version, inputs, description])
+                        .map_err(failure)?;
+                }
+            }
+            transaction.commit().map_err(failure)?;
+            Ok(Outcome::Written)
+        })();
+        self.connection
+            .busy_timeout(BUSY_TIMEOUT)
+            .map_err(failure)?;
+        result
     }
 
     fn ledger(&self, path: &str) -> Result<Option<Ledger>, StoreError> {
@@ -2637,5 +2692,55 @@ mod tests {
             .collect();
         assert_eq!(paths, ["b.jsonl"]);
         fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod summary_tests {
+    use super::*;
+
+    #[test]
+    fn interrupted_summary_batch_publishes_no_partial_generation() {
+        let path = std::env::temp_dir().join(format!(
+            "semon-summary-rollback-{}.sqlite3",
+            std::process::id()
+        ));
+        let (mut store, _) =
+            SqliteStore::attempt(&path, None).unwrap_or_else(|error| panic!("{error}"));
+        let rows = vec![("first".into(), 1, "inputs".into(), "old".into())];
+        store.save_session_descriptions(&rows).unwrap();
+        store.connection.execute_batch("CREATE TEMP TRIGGER interrupt_summary BEFORE INSERT ON session_descriptions WHEN NEW.session_key = 'second' BEGIN SELECT RAISE(ABORT, 'interrupted'); END;").unwrap();
+        let batch = vec![
+            ("first".into(), 1, "inputs".into(), "new".into()),
+            ("second".into(), 1, "inputs".into(), "new".into()),
+        ];
+        assert!(store.save_session_descriptions(&batch).is_err());
+        assert_eq!(
+            store
+                .session_description("first", 1, "inputs")
+                .unwrap()
+                .as_deref(),
+            Some("old")
+        );
+        assert_eq!(
+            store.session_description("second", 1, "inputs").unwrap(),
+            None
+        );
+        drop(store);
+        let (store, _) =
+            SqliteStore::attempt(&path, None).unwrap_or_else(|error| panic!("{error}"));
+        assert_eq!(
+            store
+                .session_description("first", 1, "inputs")
+                .unwrap()
+                .as_deref(),
+            Some("old")
+        );
+        assert_eq!(
+            store.session_description("second", 1, "inputs").unwrap(),
+            None
+        );
+        drop(store);
+        fs::remove_file(path).unwrap();
     }
 }

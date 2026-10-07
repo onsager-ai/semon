@@ -1,6 +1,6 @@
 # The derived store: persisting what Semon derives from the logs
 
-Status: design only (Marvin, 2026-09-29: "Write the design (Recommended)"). Nothing here is implemented. Each step in [the plan](#9-the-plan-in-pr-sized-steps) needs a go that names it.
+Status: historical design, reconciled for #320. The event SQLite store, incremental ledgers and in-memory session reuse are implemented; the first persisted description slice is documented in [incremental-model.md](incremental-model.md). The remaining Phase B/shadow-serving plan below is proposed, not a current implementation inventory. The Product Foundation task authorizes the scoped implementation work; this design grants no additional scope.
 
 Read at `c4ec3f5`, with #104 (refresh pool) and #105 (server-side analytics) read from their open branches. Claims marked *measured* were measured on 2026-09-29; claims marked *inference* were not.
 
