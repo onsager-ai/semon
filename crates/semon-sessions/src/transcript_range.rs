@@ -264,13 +264,20 @@ fn read(
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .optional()?;
-    let Some((generation, version, total)) = projection else {
+    let Some((stored_generation, version, total)) = projection else {
         return Ok(unavailable());
     };
     let total = usize::try_from(total)?;
     if version != VERSION {
         return Ok(unavailable());
     }
+    // Entry identity distinguishes signals expanded from one native record.
+    // Fence pre-fix loaded ranges without rewriting retained source recipes.
+    use sha2::{Digest, Sha256};
+    let generation = format!(
+        "{:x}",
+        Sha256::digest(format!("signal-entry-identity-v2|{stored_generation}").as_bytes())
+    );
     if argument("generation").is_some_and(|expected| expected != generation) {
         return Ok(stale());
     }
@@ -771,22 +778,22 @@ fn render(
                 .unwrap_or_else(|| slot.offset.to_string());
             // Generation is observation state, never part of entry identity.
             use sha2::{Digest, Sha256};
-            entry["entry_id"] = json!(format!(
-                "{:x}",
-                Sha256::digest(
-                    format!(
-                        "{}|{}|{}|{}|{}|{}|{}",
-                        selection.identity.source_key,
-                        selection.identity.catalog_key,
-                        reference.native_id,
-                        reference.path,
-                        position,
-                        slot.block,
-                        entry["k"].as_str().unwrap_or("unknown")
-                    )
-                    .as_bytes()
-                )
-            ));
+            let mut identity = format!(
+                "{}|{}|{}|{}|{}|{}|{}",
+                selection.identity.source_key,
+                selection.identity.catalog_key,
+                reference.native_id,
+                reference.path,
+                position,
+                slot.block,
+                entry["k"].as_str().unwrap_or("unknown")
+            );
+            if let crate::slot_projection::Recipe::Signal { signal } =
+                &selection.slots[index].recipe
+            {
+                identity.push_str(&format!("|{:?}", signal.kind));
+            }
+            entry["entry_id"] = json!(format!("{:x}", Sha256::digest(identity.as_bytes())));
             entry["provenance"] = json!({"source":reference,"native_event_id":native_event_id,"offset":slot.offset,"block":slot.block});
         }
         if entry.get("entry_id").is_none() {
