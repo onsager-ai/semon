@@ -14,6 +14,7 @@ import type { ApplicationRoute } from '../navigation/routes';
 import { NavigationController } from '../navigation/routes';
 import { ViewerModelStore } from '../state/model';
 import { TranscriptStore } from '../state/transcript';
+import { CatalogSelectionStore } from '../state/catalog-selection';
 import type { ViewerHost } from '../viewer-host';
 import { createAccountControls } from './accountControls';
 import { createAnalytics } from './analytics';
@@ -56,6 +57,7 @@ export class ViewerComposition {
   readonly application: ViewerApplication;
   now: number;
   readonly updates = new ViewUpdates();
+  readonly catalogSelectionStore = new CatalogSelectionStore();
   readonly modelStore: ViewerModelStore;
   admin: { href: string; label: string } | null;
   account: Account | null;
@@ -144,6 +146,7 @@ export class ViewerComposition {
         if (context.disposed) return;
         context.disposed = true;
         context.controlObservationOwner.destroy();
+        context.catalogSelectionStore.destroy();
         context.controlOwner.destroy();
         context.updates.destroy();
         context.scope.destroy();
