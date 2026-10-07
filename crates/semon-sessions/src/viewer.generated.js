@@ -3082,7 +3082,10 @@ globalThis.__semonUIShared = __semonUIShared;
       typeof p.command !== "string" && !Array.isArray(changes) && /* @__PURE__ */ jsx("pre", { children: visible(JSON.stringify(request.payload, null, 2)) })
     ] });
   }
-  function LocalControl({ view }) {
+  function LocalControl({
+    view,
+    runtimeObserved = false
+  }) {
     const [text2, setText] = useState("");
     const s = view.snapshot;
     const canSend = !view.busy && !view.uncertain && s.connected && (s.activeTurn ? s.capabilities.steer : s.capabilities.input) && !!text2.trim();
@@ -3090,7 +3093,7 @@ globalThis.__semonUIShared = __semonUIShared;
     const pending = s.requests.filter((r) => r.state.state === "open" || r.state.state === "claimed");
     const recent = s.requests.filter((r) => r.state.state !== "open" && r.state.state !== "claimed").slice(-10);
     return /* @__PURE__ */ jsxs("section", { class: "local-control", "aria-label": "Conversation controls", children: [
-      !s.connected && /* @__PURE__ */ jsx("p", { role: "status", children: s.runtime?.state === "ended" ? "This session has ended." : s.runtime?.state === "failed" ? "This environment needs attention." : s.runtime?.state === "disconnected" ? "This environment is disconnected." : s.runtime?.state === "unavailable" ? "Runtime state is unavailable." : "Reconnecting to your session\u2026" }),
+      !s.connected && /* @__PURE__ */ jsx("p", { role: "status", children: runtimeObserved ? "Native session controls are unavailable." : s.runtime?.state === "ended" ? "This session has ended." : s.runtime?.state === "failed" ? "This environment needs attention." : s.runtime?.state === "disconnected" ? "This environment is disconnected." : s.runtime?.state === "unavailable" ? "Runtime state is unavailable." : "Reconnecting to your session\u2026" }),
       s.reason && /* @__PURE__ */ jsx("p", { children: s.reason }),
       s.runtime && s.runtime.freshness !== "current" && /* @__PURE__ */ jsx("p", { role: "status", children: s.runtime.freshness === "updating" ? "Checking the environment\u2026" : s.runtime.freshness === "stale" ? "Last environment observation is stale." : "Current environment observation is unavailable." }),
       s.runtime?.observationError && /* @__PURE__ */ jsx("p", { children: s.runtime.observationError }),
@@ -5368,7 +5371,40 @@ globalThis.__semonUIShared = __semonUIShared;
     }
     render() {
       const view = this.props.owner.snapshot.control;
-      return view ? /* @__PURE__ */ jsx(LocalControl, { view }) : null;
+      return view ? /* @__PURE__ */ jsx(LocalControl, { view, runtimeObserved: !!this.props.owner.snapshot.runtime }) : null;
+    }
+  };
+  var SessionRuntime = class extends Component {
+    componentDidMount() {
+      this.props.owner.runtime = () => this.forceUpdate();
+    }
+    componentWillUnmount() {
+      this.props.owner.runtime = null;
+    }
+    render() {
+      const value = this.props.owner.snapshot.runtime;
+      if (!value) return null;
+      const observation = value.observation;
+      return /* @__PURE__ */ jsxs("section", { class: "local-control", "aria-label": "Environment status", children: [
+        /* @__PURE__ */ jsx("p", { role: "status", children: observation ? {
+          active: "Environment is active.",
+          disconnected: "Environment is disconnected.",
+          failed: "Environment needs attention.",
+          ended: "This session has ended.",
+          unavailable: "Runtime state is unavailable."
+        }[observation.state] : "Runtime state is unavailable." }),
+        observation?.phase && /* @__PURE__ */ jsxs("p", { children: [
+          "Phase: ",
+          screenText(observation.phase)
+        ] }),
+        observation?.presence && /* @__PURE__ */ jsxs("p", { children: [
+          "Compute presence: ",
+          screenText(observation.presence)
+        ] }),
+        (value.delivery !== "current" || observation?.freshness !== "current") && /* @__PURE__ */ jsx("p", { role: "status", children: value.delivery === "updating" || observation?.freshness === "updating" ? "Checking the environment\u2026" : value.delivery === "stale" || observation?.freshness === "stale" ? "Last environment observation is stale." : "Current environment observation is unavailable." }),
+        value.reason && /* @__PURE__ */ jsx("p", { children: screenText(value.reason) }),
+        observation?.observationError && /* @__PURE__ */ jsx("p", { children: screenText(observation.observationError) })
+      ] });
     }
   };
   var identity = (entry2) => entry2.entryKey ?? entry2.key ?? "";
@@ -5782,6 +5818,7 @@ globalThis.__semonUIShared = __semonUIShared;
         paint() {
         },
         controls: null,
+        runtime: null,
         measure() {
         },
         change() {
@@ -5891,6 +5928,7 @@ globalThis.__semonUIShared = __semonUIShared;
               }
             )
           ] }),
+          /* @__PURE__ */ jsx(SessionRuntime, { owner: state2 }),
           /* @__PURE__ */ jsx(SessionControls, { owner: state2 }),
           view.footer && /* @__PURE__ */ jsxs("div", { class: "session-foot", children: [
             /* @__PURE__ */ jsxs("span", { class: "stat " + view.footer.state, children: [

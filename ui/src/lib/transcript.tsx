@@ -1,5 +1,6 @@
 import { LocalControl } from './localControl';
 import type { ControlView } from './control';
+import type { RuntimeObservationView } from './runtimeObservation';
 import { commitApplicationView } from './application-view';
 import { Component, Fragment, render } from 'preact';
 import type { ComponentChildren } from 'preact';
@@ -128,6 +129,7 @@ export interface FooterView {
 }
 export interface SessionSnapshot {
   control?: ControlView;
+  runtime?: RuntimeObservationView;
   id: string;
   name: string;
   observation?: string;
@@ -169,6 +171,7 @@ interface SessionOwner {
   jumpBusy: boolean;
   paint(): void;
   controls: (() => void) | null;
+  runtime: (() => void) | null;
   measure(): void;
   change(key: string): void;
 }
@@ -183,7 +186,51 @@ class SessionControls extends Component<{ owner: SessionOwner }> {
   }
   render() {
     const view = this.props.owner.snapshot.control;
-    return view ? <LocalControl view={view} /> : null;
+    return view ? (
+      <LocalControl view={view} runtimeObserved={!!this.props.owner.snapshot.runtime} />
+    ) : null;
+  }
+}
+/** Durable status stays observable even when no current native control identity exists. */
+class SessionRuntime extends Component<{ owner: SessionOwner }> {
+  componentDidMount() {
+    this.props.owner.runtime = () => this.forceUpdate();
+  }
+  componentWillUnmount() {
+    this.props.owner.runtime = null;
+  }
+  render() {
+    const value = this.props.owner.snapshot.runtime;
+    if (!value) return null;
+    const observation = value.observation;
+    return (
+      <section class="local-control" aria-label="Environment status">
+        <p role="status">
+          {observation
+            ? {
+                active: 'Environment is active.',
+                disconnected: 'Environment is disconnected.',
+                failed: 'Environment needs attention.',
+                ended: 'This session has ended.',
+                unavailable: 'Runtime state is unavailable.',
+              }[observation.state]
+            : 'Runtime state is unavailable.'}
+        </p>
+        {observation?.phase && <p>Phase: {screenText(observation.phase)}</p>}
+        {observation?.presence && <p>Compute presence: {screenText(observation.presence)}</p>}
+        {(value.delivery !== 'current' || observation?.freshness !== 'current') && (
+          <p role="status">
+            {value.delivery === 'updating' || observation?.freshness === 'updating'
+              ? 'Checking the environment…'
+              : value.delivery === 'stale' || observation?.freshness === 'stale'
+                ? 'Last environment observation is stale.'
+                : 'Current environment observation is unavailable.'}
+          </p>
+        )}
+        {value.reason && <p>{screenText(value.reason)}</p>}
+        {observation?.observationError && <p>{screenText(observation.observationError)}</p>}
+      </section>
+    );
   }
 }
 
@@ -683,6 +730,7 @@ export function renderSessionScreen(
       jumpBusy: false,
       paint() {},
       controls: null,
+      runtime: null,
       measure() {},
       change() {},
       observer: new ResizeObserver(() => {}),
@@ -820,6 +868,7 @@ export function renderSessionScreen(
             }}
           />
         </section>
+        <SessionRuntime owner={state} />
         <SessionControls owner={state} />
         {view.footer && (
           <div class="session-foot">
@@ -890,6 +939,17 @@ export function updateSessionControl(root: HTMLElement, control: ControlView | u
   if (!owner || owner.disposed) return;
   owner.snapshot = { ...owner.snapshot, control };
   owner.controls?.();
+}
+export function updateSessionRuntime(
+  root: HTMLElement,
+  runtime: RuntimeObservationView | undefined,
+) {
+  const owner = owners.get(root);
+  if (!owner || owner.disposed) return;
+  const hadRuntime = !!owner.snapshot.runtime;
+  owner.snapshot = { ...owner.snapshot, runtime };
+  owner.runtime?.();
+  if (hadRuntime !== !!runtime) owner.controls?.();
 }
 
 export function updateSessionPager(root: HTMLElement, view: PagerView) {
