@@ -52,7 +52,34 @@ pub fn session_transcript_range(
     query: &str,
     reader: Option<&dyn SessionSourceReader>,
 ) -> ViewerReply {
-    match read(options, source_key, query, reader) {
+    session_transcript_range_with_mode(
+        options,
+        source_key,
+        query,
+        reader,
+        SessionSourceReadMode::ProviderOnly,
+    )
+}
+
+/// Provider-only preserves the callback boundary for every requested range.
+/// LocalThenProvider is an explicit host opt-in for mixed live/archived sources.
+/// The host must authorize the complete read before and after this call, because
+/// its provider callback is not invoked for available qualified local bytes.
+#[derive(Clone, Copy, Debug, Default)]
+pub enum SessionSourceReadMode {
+    #[default]
+    ProviderOnly,
+    LocalThenProvider,
+}
+
+pub fn session_transcript_range_with_mode(
+    options: &Options,
+    source_key: &str,
+    query: &str,
+    reader: Option<&dyn SessionSourceReader>,
+    mode: SessionSourceReadMode,
+) -> ViewerReply {
+    match read(options, source_key, query, reader, mode) {
         Ok(reply) => reply,
         Err(_) => unavailable(),
     }
@@ -75,6 +102,7 @@ fn read(
     source_key: &str,
     query: &str,
     provider: Option<&dyn SessionSourceReader>,
+    mode: SessionSourceReadMode,
 ) -> Result<ViewerReply, Box<dyn std::error::Error>> {
     for name in [
         "sid",
@@ -298,9 +326,9 @@ fn read(
                 false,
             ));
         }
-        return Ok(render_field(options, selection, provider, chunk));
+        return Ok(render_field(options, selection, provider, chunk, mode));
     }
-    Ok(render(options, selection, provider))
+    Ok(render(options, selection, provider, mode))
 }
 
 fn stale() -> ViewerReply {
@@ -314,6 +342,49 @@ fn stale() -> ViewerReply {
     body["resynchronize"] = json!(true);
     reply.body = body.to_string().into_bytes();
     reply
+}
+
+#[derive(Debug)]
+struct MissingLocalSource;
+impl std::fmt::Display for MissingLocalSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("selected local source is absent")
+    }
+}
+impl std::error::Error for MissingLocalSource {}
+
+struct Composite<'a> {
+    local: &'a Local<'a>,
+    provider: Option<&'a dyn SessionSourceReader>,
+    mode: SessionSourceReadMode,
+}
+impl SessionSourceReader for Composite<'_> {
+    fn read_range(
+        &self,
+        source: &SessionSourceRef,
+        expected: Option<&str>,
+        offset: u64,
+        max: usize,
+    ) -> io::Result<crate::SessionSourceRange> {
+        if matches!(self.mode, SessionSourceReadMode::ProviderOnly) {
+            return self
+                .provider
+                .unwrap_or(self.local)
+                .read_range(source, expected, offset, max);
+        }
+        match self.local.read_range(source, expected, offset, max) {
+            Err(error)
+                if error
+                    .get_ref()
+                    .is_some_and(|error| error.is::<MissingLocalSource>()) =>
+            {
+                self.provider
+                    .ok_or(error)?
+                    .read_range(source, expected, offset, max)
+            }
+            result => result,
+        }
+    }
 }
 
 struct Local<'a> {
@@ -334,6 +405,13 @@ impl SessionSourceReader for Local<'_> {
             .find_map(|(path, known)| (known == reference).then_some(path))
             .ok_or_else(invalid)?;
         let source = self.sources.get(path).ok_or_else(invalid)?;
+        let mut file = crate::sealed::LogFile::open(path).map_err(|error| {
+            if error.kind() == io::ErrorKind::NotFound {
+                io::Error::new(io::ErrorKind::NotFound, MissingLocalSource)
+            } else {
+                error
+            }
+        })?;
         let generation: String = source
             .prefix_sha256
             .iter()
@@ -346,7 +424,6 @@ impl SessionSourceReader for Local<'_> {
         {
             return Err(invalid());
         }
-        let mut file = crate::sealed::LogFile::open(path)?;
         let check = |metadata: &std::fs::Metadata| {
             #[cfg(unix)]
             let identity = {
@@ -394,6 +471,7 @@ fn render(
     options: &Options,
     selection: Selection,
     provider: Option<&dyn SessionSourceReader>,
+    mode: SessionSourceReadMode,
 ) -> ViewerReply {
     let references: BTreeMap<PathBuf, SessionSourceRef> = selection
         .identity
@@ -414,12 +492,18 @@ fn render(
         sources: &selection.sources,
         references: &references,
     };
-    let reader = provider.unwrap_or(&local);
+    let composite = Composite {
+        local: &local,
+        provider,
+        mode,
+    };
+    let reader: &dyn SessionSourceReader = &composite;
     let mut bytes_left = PAGE_SOURCE_BYTES;
     let mut requests_left = PAGE_SOURCE_REQUESTS;
-    let mut generations = BTreeMap::<PathBuf, (String, u64)>::new();
+    let mut generations = BTreeMap::<PathBuf, (String, u64, bool)>::new();
     let mut fetched = 0usize;
     let mut field_previews = BTreeMap::new();
+    let mut field_records = BTreeMap::new();
     for absolute in selection.first..selection.end {
         let saved = &selection.slots[absolute - selection.start];
         let Some(field) = &saved.field else {
@@ -430,8 +514,14 @@ fn render(
         };
         let result = (|| -> io::Result<Value> {
             let reference = references.get(&file.path).ok_or_else(invalid)?;
-            let at = saved.offset.checked_add(field.start).ok_or_else(invalid)?;
-            let end = saved.offset.checked_add(field.end).ok_or_else(invalid)?;
+            let at = field
+                .record_offset
+                .checked_add(field.start)
+                .ok_or_else(invalid)?;
+            let end = field
+                .record_offset
+                .checked_add(field.end)
+                .ok_or_else(invalid)?;
             if at > end
                 || end > reference.offset
                 || field.checkpoints.first() != Some(&field.start)
@@ -468,7 +558,8 @@ fn render(
                 fetched += part.bytes.len();
                 generations
                     .entry(file.path.clone())
-                    .or_insert((part.generation, part.length));
+                    .and_modify(|known| known.2 &= part.cached)
+                    .or_insert((part.generation, part.length, part.cached));
                 let chunk = crate::json_string::decode_json_string_chunk(
                     &part.bytes,
                     at + part.bytes.len() as u64 == end,
@@ -481,15 +572,49 @@ fn render(
                 crate::slot_projection::Recipe::U => "u",
                 crate::slot_projection::Recipe::A => "a",
                 crate::slot_projection::Recipe::Think => "think",
+                crate::slot_projection::Recipe::Tool { .. } => "tool",
                 _ => return Err(invalid()),
             };
-            Ok(
-                json!({"k":kind,"text":text,"field":{"name":"text","chunks":field.checkpoints.len().saturating_sub(1),"complete":complete},"clipped":!complete}),
-            )
+            let mut entry = json!({"k":kind,"field":{"name":field.kind.name(),"chunks":field.checkpoints.len().saturating_sub(1),"complete":complete},"clipped":!complete});
+            entry[field.kind.name()] = json!(text);
+            Ok(entry)
         })();
+        if let Ok(preview) = &result
+            && preview["k"] == "tool"
+        {
+            use crate::native_field::NativeFieldKind;
+            let record = match field.kind {
+                NativeFieldKind::ClaudeResult => {
+                    let mut blocks = vec![Value::Null; field.block as usize + 1];
+                    blocks[field.block as usize] =
+                        json!({"type":"tool_result","content":preview["out"]});
+                    json!({"uuid":field.native_event_id,"message":{"content":blocks}})
+                }
+                NativeFieldKind::CodexResult => {
+                    json!({"payload":{"type":"function_call_output","output":preview["out"]}})
+                }
+                NativeFieldKind::CodexResultObject => {
+                    json!({"payload":{"type":"function_call_output","output":{"output":preview["out"]}}})
+                }
+                NativeFieldKind::Text => return unavailable(),
+            };
+            let known = field_records
+                .entry((file.path.clone(), field.record_offset))
+                .or_insert_with(|| record.clone());
+            if matches!(field.kind, NativeFieldKind::ClaudeResult)
+                && let Some(blocks) = known["message"]["content"].as_array_mut()
+            {
+                blocks.resize(blocks.len().max(field.block as usize + 1), Value::Null);
+                blocks[field.block as usize] =
+                    record["message"]["content"][field.block as usize].clone();
+            }
+        }
         field_previews.insert(absolute, result);
     }
     let mut read = |path: &Path, offset: u64| -> io::Result<(Option<Value>, u64)> {
+        if let Some(record) = field_records.get(&(path.to_owned(), offset)) {
+            return Ok((Some(record.clone()), 0));
+        }
         let reference = references.get(path).ok_or_else(invalid)?;
         if offset >= reference.offset {
             return Err(invalid());
@@ -523,7 +648,8 @@ fn render(
             }
             generations
                 .entry(path.to_owned())
-                .or_insert((part.generation, part.length));
+                .and_modify(|known| known.2 &= part.cached)
+                .or_insert((part.generation, part.length, part.cached));
             bytes_left -= part.bytes.len();
             fetched += part.bytes.len();
             if let Some(newline) = part.bytes.iter().position(|byte| *byte == b'\n') {
@@ -546,7 +672,17 @@ fn render(
         let before = lines.failures;
         let field_preview = field_previews.remove(&absolute);
         let field_failed = field_preview.as_ref().is_some_and(Result::is_err);
-        let mut entry = if let Some(preview) = field_preview {
+        let tool_preview = field_preview
+            .as_ref()
+            .and_then(|value| value.as_ref().ok())
+            .filter(|value| value["k"] == "tool")
+            .cloned();
+        let mut entry = if let Some(preview) = field_preview.filter(|_| {
+            !matches!(
+                selection.slots[index].recipe,
+                crate::slot_projection::Recipe::Tool { .. }
+            )
+        }) {
             preview.unwrap_or_else(|_| {
                 let kind = match selection.slots[index].recipe {
                     crate::slot_projection::Recipe::U => "u",
@@ -572,6 +708,13 @@ fn render(
             .unwrap_or_else(|| json!({"k":"end"}))
         };
 
+        if let Some(preview) = tool_preview {
+            entry["field"] = preview["field"].clone();
+            let clipped =
+                preview["clipped"] == true || entry["out"].as_str() != preview["out"].as_str();
+            entry["field"]["complete"] = json!(!clipped);
+            entry["clipped"] = json!(clipped);
+        }
         entry["slot"] = json!(absolute);
         let incomplete = field_failed || lines.failures > before;
         if incomplete {
@@ -585,11 +728,16 @@ fn render(
         if let Some(file) = slot.file.as_ref()
             && let Some(reference) = references.get(&file.path)
         {
-            let native_event_id = selection.slots[index]
-                .field
-                .as_ref()
-                .and_then(|field| field.native_event_id.clone())
-                .or_else(|| lines.native_event_id(&file.path, slot.offset));
+            let native_event_id = selection.slots[index].native_event_id.clone().or_else(|| {
+                selection.slots[index]
+                    .field
+                    .as_ref()
+                    .filter(|field| {
+                        matches!(field.kind, crate::native_field::NativeFieldKind::Text)
+                    })
+                    .and_then(|field| field.native_event_id.clone())
+                    .or_else(|| lines.native_event_id(&file.path, slot.offset))
+            });
             let position = native_event_id
                 .clone()
                 .unwrap_or_else(|| slot.offset.to_string());
@@ -638,12 +786,22 @@ fn render(
     } else {
         selection.identity.freshness.state.as_str()
     };
+    use sha2::{Digest, Sha256};
+    let content_sources:Vec<_>=generations.iter().filter_map(|(path,(generation,length,cached))|references.get(path).map(|source|
+        json!({"source":source,"generation_hash":format!("{:x}",Sha256::digest(generation.as_bytes())),"length":length,"cached":cached}))).collect();
+    let content_state = if failures > 0 || incomplete_entries > 0 {
+        "incomplete"
+    } else if generations.values().any(|source| !source.2) {
+        "available"
+    } else {
+        "cached"
+    };
     reply(
         200,
         json!({"api":1,"identity":selection.identity,"session":selection.session,
         "projection":{"version":VERSION,"generation":selection.generation,"total":selection.total},
         "range":{"first":selection.first,"end":selection.end,"next":(selection.end<selection.total).then_some(selection.end)},
-        "entries":entries,"freshness":{"state":state},
+        "entries":entries,"freshness":{"state":state},"content_observation":{"state":content_state,"sources":content_sources},
         "relationship_context":{"state":"incomplete","turn_ids":turn_ids,"handoffs":[]},
         "limits":{"source_bytes":PAGE_SOURCE_BYTES,"source_requests":PAGE_SOURCE_REQUESTS,"record_bytes":RECORD_BYTES},
         "observation":{"source_bytes":fetched,"incomplete_entries":incomplete_entries}}),
@@ -660,6 +818,22 @@ pub fn session_entry_field(
     query: &str,
     reader: Option<&dyn SessionSourceReader>,
 ) -> ViewerReply {
+    session_entry_field_with_mode(
+        options,
+        source_key,
+        query,
+        reader,
+        SessionSourceReadMode::ProviderOnly,
+    )
+}
+
+pub fn session_entry_field_with_mode(
+    options: &Options,
+    source_key: &str,
+    query: &str,
+    reader: Option<&dyn SessionSourceReader>,
+    mode: SessionSourceReadMode,
+) -> ViewerReply {
     if query_value(query, "field_chunk").is_none() || query_value(query, "after").is_none() {
         return catalog::error(
             400,
@@ -668,7 +842,7 @@ pub fn session_entry_field(
             false,
         );
     }
-    session_transcript_range(options, source_key, query, reader)
+    session_transcript_range_with_mode(options, source_key, query, reader, mode)
 }
 
 fn render_field(
@@ -676,6 +850,7 @@ fn render_field(
     selection: Selection,
     provider: Option<&dyn SessionSourceReader>,
     chunk: usize,
+    mode: SessionSourceReadMode,
 ) -> ViewerReply {
     let saved = &selection.slots[selection.first - selection.start];
     let (Some(field), Some(file)) = (&saved.field, &saved.file) else {
@@ -718,7 +893,12 @@ fn render_field(
         sources: &selection.sources,
         references: &references,
     };
-    let reader = provider.unwrap_or(&local);
+    let composite = Composite {
+        local: &local,
+        provider,
+        mode,
+    };
+    let reader: &dyn SessionSourceReader = &composite;
     let result = (|| -> io::Result<(String, bool, usize)> {
         let reference = references.get(&file.path).ok_or_else(invalid)?;
         if field.checkpoints.first() != Some(&field.start)
@@ -735,8 +915,8 @@ fn render_field(
             .checkpoints
             .get(chunk.checked_add(1).ok_or_else(invalid)?)
             .ok_or_else(invalid)?;
-        let at = saved.offset.checked_add(start).ok_or_else(invalid)?;
-        let end = saved.offset.checked_add(end).ok_or_else(invalid)?;
+        let at = field.record_offset.checked_add(start).ok_or_else(invalid)?;
+        let end = field.record_offset.checked_add(end).ok_or_else(invalid)?;
         if at >= end || end > reference.offset {
             return Err(invalid());
         }
@@ -778,15 +958,19 @@ fn render_field(
         if !decoded.complete || decoded.consumed != bytes.len() {
             return Err(invalid());
         }
-        Ok((decoded.text, end == saved.offset + field.end, bytes.len()))
+        Ok((
+            decoded.text,
+            end == field.record_offset + field.end,
+            bytes.len(),
+        ))
     })();
     match result {
         Ok((text, complete, bytes)) => reply(
             200,
             json!({"api":1,"identity":selection.identity,
             "projection":{"version":VERSION,"generation":selection.generation},"slot":selection.first,
-            "field":{"name":"text","chunk":chunk,"next":(!complete).then_some(chunk+1),"complete":complete},
-            "text":text,"freshness":{"state":"cached"},"observation":{"source_bytes":bytes}}),
+            "field":{"name":field.kind.name(),"chunk":chunk,"next":(!complete).then_some(chunk+1),"complete":complete},
+            "text":text,"freshness":{"state":"cached"},"provenance":{"source":references.get(&file.path),"offset":field.record_offset,"block":field.block,"native_event_id":field.native_event_id},"observation":{"source_bytes":bytes}}),
         ),
         Err(_) => catalog::error(
             503,

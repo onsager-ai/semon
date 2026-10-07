@@ -4,7 +4,7 @@ use crate::model::{Background, BgEnd, Shown, SignalData, Slot, SlotFile, SlotKin
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, path::PathBuf, sync::Arc};
 
-pub(crate) const VERSION: u32 = 2;
+pub(crate) const VERSION: u32 = 3;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -136,6 +136,8 @@ pub(crate) struct SavedSlot {
     pub(crate) first: bool,
     #[serde(default)]
     pub(crate) field: Option<crate::native_field::NativeField>,
+    #[serde(default)]
+    pub(crate) native_event_id: Option<String>,
 }
 impl SavedSlot {
     fn capture(slot: &Slot) -> Self {
@@ -229,7 +231,22 @@ impl SavedSlot {
         let field = slot.file.as_ref().and_then(|file| {
             crate::native_field::capture(&file.path, slot.offset, slot.block, &recipe)
         });
+        let native_event_id = field
+            .as_ref()
+            .filter(|field| matches!(field.kind, crate::native_field::NativeFieldKind::Text))
+            .and_then(|field| field.native_event_id.clone())
+            .or_else(|| {
+                let file = slot.file.as_ref()?;
+                let record = crate::tx::read_record(&file.path, slot.offset)?;
+                record
+                    .get("uuid")
+                    .or_else(|| record.get("id"))
+                    .and_then(|value| value.as_str())
+                    .filter(|value| !value.is_empty() && value.len() <= 4096)
+                    .map(str::to_owned)
+            });
         Self {
+            native_event_id,
             field,
             recipe,
             file: slot.file.as_deref().map(File::capture),
