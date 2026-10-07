@@ -46,7 +46,7 @@ use crate::{Tokens, facts::ReportedRunSnapshot};
 
 /// `PRAGMA user_version`: the shape of the tables. The parser's version is
 /// [`CACHE_VERSION`], kept in `meta`.
-const SCHEMA_VERSION: i64 = 15;
+const SCHEMA_VERSION: i64 = 16;
 
 /// How long a write waits for another process's transaction. Tests wait
 /// less, so the busy paths they drive stay quick.
@@ -1233,6 +1233,30 @@ impl SqliteStore {
                 }
             }
             crate::history_projection::publish(&transaction, publication).map_err(failure)?;
+            let search_version: Option<String> = transaction
+                .query_row(
+                    "SELECT value FROM meta WHERE key='search_version'",
+                    [],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(failure)?;
+            let initialize_search =
+                search_version.as_deref() != Some(crate::catalog_search::VERSION);
+            let search_backfill: Option<String> = transaction
+                .query_row(
+                    "SELECT value FROM meta WHERE key='search_backfill_complete'",
+                    [],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(failure)?;
+            let rebuild_search =
+                claims.is_none() && (initialize_search || search_backfill.as_deref() != Some("1"));
+            if initialize_search {
+                transaction.execute_batch("DELETE FROM session_search_postings; DELETE FROM session_search_counts; DELETE FROM session_search_documents; UPDATE session_search_coverage SET incomplete=0;").map_err(failure)?;
+                transaction.execute("INSERT OR REPLACE INTO meta(key,value) VALUES('search_backfill_complete','0')",[]).map_err(failure)?;
+            }
             let previous_version: Option<String> = transaction
                 .query_row(
                     "SELECT value FROM meta WHERE key = 'catalog_version'",
@@ -1266,6 +1290,25 @@ impl SqliteStore {
                                 metadata
                             ])
                             .map_err(failure)?;
+                        if !rebuild_search
+                            && (changed > 0
+                                || initialize_search
+                                || !crate::catalog_search::row_present(&transaction, &row.key)
+                                    .map_err(failure)?)
+                        {
+                            crate::catalog_search::publish_row(
+                                &transaction,
+                                crate::CatalogReadScope::Current,
+                                row,
+                            )
+                            .map_err(failure)?;
+                            crate::catalog_search::publish_row(
+                                &transaction,
+                                crate::CatalogReadScope::RetainedHistory,
+                                row,
+                            )
+                            .map_err(failure)?;
+                        }
                         if changed > 0 || previous_version.as_deref() != Some(&version) {
                             remove_sources.execute([&row.key]).map_err(failure)?;
                             for source in &row.sources {
@@ -1296,6 +1339,42 @@ impl SqliteStore {
             } else {
                 for key in &affected {
                     transaction.execute("UPDATE session_history_catalog SET metadata=json_set(metadata,'$.lifecycle','retained') WHERE session_key=?1 AND session_key NOT IN (SELECT session_key FROM catalog_members)",[key]).map_err(failure)?;
+                }
+            }
+            if rebuild_search {
+                transaction.execute_batch("DELETE FROM session_search_postings; DELETE FROM session_search_counts; DELETE FROM session_search_documents; UPDATE session_search_coverage SET incomplete=0;").map_err(failure)?;
+                let mut statement = transaction
+                    .prepare("SELECT metadata FROM session_catalog ORDER BY session_key")
+                    .map_err(failure)?;
+                let mut encoded = statement.query([]).map_err(failure)?;
+                while let Some(value) = encoded.next().map_err(failure)? {
+                    let encoded: String = value.get(0).map_err(failure)?;
+                    let row: crate::model::summary::CatalogRow = serde_json::from_str(&encoded)
+                        .map_err(|_| failure(rusqlite::Error::InvalidQuery))?;
+                    if row.lifecycle == crate::model::summary::CatalogLifecycle::Current {
+                        crate::catalog_search::publish_row(
+                            &transaction,
+                            crate::CatalogReadScope::Current,
+                            &row,
+                        )
+                        .map_err(failure)?;
+                    }
+                    crate::catalog_search::publish_row(
+                        &transaction,
+                        crate::CatalogReadScope::RetainedHistory,
+                        &row,
+                    )
+                    .map_err(failure)?;
+                }
+            }
+            if rebuild_search {
+                transaction.execute("INSERT OR REPLACE INTO meta(key,value) VALUES('search_backfill_complete','1')",[]).map_err(failure)?;
+            }
+            if claims.is_none() {
+                crate::catalog_search::retire_missing(&transaction).map_err(failure)?;
+            } else {
+                for key in &affected {
+                    crate::catalog_search::retire_key(&transaction, key).map_err(failure)?;
                 }
             }
             let generation = {
@@ -1423,6 +1502,33 @@ impl SqliteStore {
                     )
                     .map_err(failure)?;
             }
+            for scope in ["current", "retained_history"] {
+                let incomplete: i64 = transaction
+                    .query_row(
+                        "SELECT incomplete FROM session_search_coverage WHERE read_scope=?1",
+                        [scope],
+                        |row| row.get(0),
+                    )
+                    .map_err(failure)?;
+                transaction
+                    .execute(
+                        "INSERT OR REPLACE INTO meta(key,value) VALUES(?1,?2)",
+                        params![format!("search_generation_{scope}"), generation],
+                    )
+                    .map_err(failure)?;
+                transaction
+                    .execute(
+                        "INSERT OR REPLACE INTO meta(key,value) VALUES(?1,?2)",
+                        params![format!("search_incomplete_{scope}"), incomplete.to_string()],
+                    )
+                    .map_err(failure)?;
+            }
+            transaction
+                .execute(
+                    "INSERT OR REPLACE INTO meta(key,value) VALUES('search_version',?1)",
+                    [crate::catalog_search::VERSION],
+                )
+                .map_err(failure)?;
             // A complete publication validated every committed ledger and
             // source membership while holding the write transaction. Only now
             // can outstanding source observations be acknowledged atomically.
@@ -1903,6 +2009,7 @@ fn init(connection: &mut Connection) -> rusqlite::Result<Init> {
         }
         transaction.execute_batch(SCHEMA)?;
         transaction.execute_batch(crate::history_projection::SCHEMA)?;
+        transaction.execute_batch(crate::catalog_search::SCHEMA)?;
         if schema == 1 {
             transaction.execute_batch("ALTER TABLE files ADD COLUMN codex_native_usage TEXT")?;
         }

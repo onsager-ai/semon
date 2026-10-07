@@ -301,6 +301,7 @@ fn catalog_identity(
         sid: Some(canonical_catalog_key.to_owned()),
         harness: None,
         repo: None,
+        q: None,
         cursor: None,
     };
     let reply = read_page(options, source_key, &request).map_err(|_| Unavailable)?;
@@ -390,6 +391,8 @@ struct Cursor {
     machine: String,
     harness: Option<String>,
     repo: Option<String>,
+    #[serde(default)]
+    q: Option<String>,
     last: i64,
     key: String,
 }
@@ -400,6 +403,7 @@ pub(crate) struct Request {
     sid: Option<String>,
     harness: Option<String>,
     repo: Option<String>,
+    q: Option<String>,
     cursor: Option<Cursor>,
 }
 
@@ -426,13 +430,27 @@ impl Request {
             error(
                 400,
                 "invalid_arguments",
-                "Use limit=1..100 and valid harness, repo and cursor parameters.",
+                "Use limit=1..100, valid source filters, and a bounded metadata query or cursor.",
                 false,
             )
         };
-        let parameter = |key| match query_value(query, key) {
-            None => Ok(None),
-            Some(value) => decoded(value).map(Some).ok_or_else(invalid),
+        if query.len() > 64 * 1024 {
+            return Err(invalid());
+        }
+        let parameter = |key| {
+            if query
+                .split('&')
+                .filter(|part| part.split('=').next() == Some(key))
+                .take(2)
+                .count()
+                > 1
+            {
+                return Err(invalid());
+            }
+            match query_value(query, key) {
+                None => Ok(None),
+                Some(value) => decoded(value).map(Some).ok_or_else(invalid),
+            }
         };
         let scope = match parameter("scope")?.as_deref() {
             None | Some("current") => CatalogReadScope::Current,
@@ -445,14 +463,10 @@ impl Request {
         if !(1..=MAX_LIMIT).contains(&limit) {
             return Err(invalid());
         }
-        if parameter("q")?.is_some() {
-            return Err(error(
-                400,
-                "unsupported_filter",
-                "Full-text search is not available on this catalog endpoint.",
-                false,
-            ));
-        }
+        let q = parameter("q")?
+            .map(|value| crate::catalog_search::normalize_query(&value).ok_or_else(invalid))
+            .transpose()?
+            .filter(|query| !query.is_empty());
         let sid = parameter("sid")?;
         if sid
             .as_ref()
@@ -492,7 +506,8 @@ impl Request {
                 Ok(cursor)
             })
             .transpose()?;
-        if sid.is_some() && (harness.is_some() || repo.is_some() || cursor.is_some()) {
+        if sid.is_some() && (harness.is_some() || repo.is_some() || q.is_some() || cursor.is_some())
+        {
             return Err(invalid());
         }
         Ok(Self {
@@ -501,6 +516,7 @@ impl Request {
             sid,
             harness,
             repo,
+            q,
             cursor,
         })
     }
@@ -699,6 +715,7 @@ fn read_page(
             || cursor.machine != machine
             || cursor.harness != request.harness
             || cursor.repo != request.repo
+            || cursor.q != request.q
     }) {
         return Ok(error(
             400,
@@ -740,7 +757,49 @@ fn read_page(
         ));
     }
     let observed_at = meta("catalog_observed_at")?.and_then(|value| value.parse::<i64>().ok());
-    let mut selected = rows(&transaction, request)?;
+    let (mut selected, search_next, search_report) = if let Some(query) = &request.q {
+        let scope = crate::catalog_search::scope_key(request.scope);
+        if meta("search_version")?.as_deref() != Some(crate::catalog_search::VERSION)
+            || meta(&format!("search_generation_{scope}"))?.as_deref() != Some(generation.as_str())
+        {
+            return Ok(error(
+                503,
+                "search_unavailable",
+                "The metadata search projection is unavailable. Retry after background publication.",
+                true,
+            ));
+        }
+        let collection_complete = match meta("catalog_completeness")?.as_deref() {
+            None | Some("complete") => true,
+            Some("partial") => false,
+            _ => return Err(io::Error::other("catalog completeness unavailable").into()),
+        };
+        let complete = collection_complete
+            && meta("search_backfill_complete")?.as_deref() == Some("1")
+            && meta(&format!("search_incomplete_{scope}"))?.as_deref() == Some("0");
+        let after = request
+            .cursor
+            .as_ref()
+            .map(|cursor| crate::catalog_search::Position {
+                last: cursor.last,
+                key: cursor.key.clone(),
+            });
+        let found = crate::catalog_search::read(
+            &transaction,
+            crate::catalog_search::Query {
+                scope: request.scope,
+                query,
+                harness: request.harness.as_deref(),
+                repo: request.repo.as_deref(),
+                after,
+                limit: request.limit,
+                index_complete: complete,
+            },
+        )?;
+        (found.rows, found.next, Some(found.report))
+    } else {
+        (rows(&transaction, request)?, None, None)
+    };
     let has_history = transaction.query_row(
         "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='session_history_catalog')",
         [],
@@ -800,7 +859,19 @@ fn read_page(
     if more {
         selected.pop();
     }
-    let next = if more {
+    let next = if let Some(position) = search_next {
+        Some(serde_json::to_string(&Cursor {
+            scope: request.scope,
+            version: 1,
+            generation: generation.clone(),
+            machine: machine.to_owned(),
+            harness: request.harness.clone(),
+            repo: request.repo.clone(),
+            q: request.q.clone(),
+            last: position.last,
+            key: position.key,
+        })?)
+    } else if more {
         selected
             .last()
             .map(|row| {
@@ -811,6 +882,7 @@ fn read_page(
                     machine: machine.to_owned(),
                     harness: request.harness.clone(),
                     repo: request.repo.clone(),
+                    q: request.q.clone(),
                     last: row.last.unwrap_or(0),
                     key: row.key.clone(),
                 })
@@ -960,13 +1032,20 @@ fn read_page(
             true,
         ));
     }
+    if search_report
+        .as_ref()
+        .is_some_and(|report| report.partial || !report.index_complete)
+        && page_state == "cached"
+    {
+        page_state = "incomplete";
+    }
     Ok(reply(
         200,
         json!({"api":1,"machine":machine,"read_scope":request.scope,"generation":generation,"observed_at":observed_at,
         "machine_info":{"key":machine,"label":machine_label,"freshness":if facts_known { "cached" } else { "unavailable" }},
-        "capabilities":{"pagination":true,"filters":["harness","repo"],"order":"last_desc_key_asc",
+        "capabilities":{"pagination":true,"metadata_search":true,"filters":["harness","repo","q"],"order":"last_desc_key_asc",
             "full_text_search":false,"selected_session_lookup":true,"runtime_status":false,"global_union":false},
-        "completeness":{"state":completeness},"freshness":if completeness == "partial" { "updating" } else { page_state },"items":items,"next_cursor":next}),
+        "completeness":{"state":completeness},"freshness":if completeness == "partial" { "updating" } else { page_state },"items":items,"next_cursor":next,"search":search_report.map(|report|json!({"semantics":"unicode_lowercase_substring","fields":["name","key","repo","branch","model","harness"],"partial":report.partial,"candidates":report.candidates,"index_complete":report.index_complete,"candidate_budget":crate::catalog_search::MAX_CANDIDATES,"byte_budget":crate::catalog_search::MAX_SCAN_BYTES}))}),
     ))
 }
 
@@ -1258,7 +1337,7 @@ mod tests {
                 connection
                     .query_row("PRAGMA user_version", [], |row| row.get::<_, u32>(0))
                     .unwrap(),
-                15
+                16
             );
         }
     }
@@ -2409,10 +2488,22 @@ mod tests {
         assert_eq!(selected["items"][0]["key"], "session-00008");
         assert_eq!(fixture.body("sid=absent").0, 404);
         assert_eq!(fixture.body("sid=session-00008&harness=claude").0, 400);
-        assert_eq!(
-            fixture.body("q=prompt").1["error"]["code"],
-            "unsupported_filter"
+        let (status, searched) = fixture.body("q=session-00008");
+        assert_eq!(status, 200, "{searched}");
+        assert_eq!(searched["items"].as_array().unwrap().len(), 1);
+        assert_eq!(searched["items"][0]["key"], "session-00008");
+        assert_eq!(searched["search"]["partial"], false);
+        assert_eq!(fixture.body("q=session&q=other").0, 400);
+        assert_eq!(fixture.body("q=bad%0Aquery").0, 400);
+        assert_eq!(fixture.body("q=%GG").0, 400);
+        assert_eq!(fixture.body("sid=session-00008&q=session").0, 400);
+        assert!(
+            fixture.body("q=missing").1["items"]
+                .as_array()
+                .unwrap()
+                .is_empty()
         );
+        assert!(fixture.body("limit=1").1["search"].is_null());
         assert_eq!(
             fixture.body("harness=claude&repo=project").1["items"]
                 .as_array()
@@ -2789,6 +2880,7 @@ mod tests {
             sid: None,
             harness: Some("claude".into()),
             repo: Some("project".into()),
+            q: None,
             cursor: Some(Cursor {
                 scope: CatalogReadScope::Current,
                 version: 1,
@@ -2796,6 +2888,7 @@ mod tests {
                 machine: "".into(),
                 harness: Some("claude".into()),
                 repo: Some("project".into()),
+                q: None,
                 last: row.last.unwrap_or(0),
                 key: "session-19000".into(),
             }),
