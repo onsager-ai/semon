@@ -8647,7 +8647,7 @@ globalThis.__semonUIShared = __semonUIShared;
   }
   function parseCatalogIdentity(value) {
     const row = object2(value), refs = array(row.source_refs, sourceReference), nativeIds = strings4(row.native_ids), nativeId = nullable(row.native_id, text), ids = new Set(refs.map((ref) => ref.source.native_id)), generation = text(row.generation), state2 = object2(row.freshness), sourceKey = text(row.source_key), catalogKey = text(row.catalog_key), harness = text(row.harness);
-    if (!catalogKey || !harness || !/^[0-9a-f]{64}$/i.test(generation) || nativeIds.some((id) => !id) || ids.has("") || new Set(nativeIds).size !== nativeIds.length || ids.size !== nativeIds.length || nativeIds.some((id) => !ids.has(id)) || nativeId !== null && (ids.size !== 1 || !ids.has(nativeId)))
+    if (!sourceKey || !catalogKey || !harness || !/^[0-9a-f]{64}$/i.test(generation) || nativeIds.some((id) => !id) || ids.has("") || new Set(nativeIds).size !== nativeIds.length || ids.size !== nativeIds.length || nativeIds.some((id) => !ids.has(id)) || nativeId !== null && (ids.size !== 1 || !ids.has(nativeId)))
       throw new Error("Invalid catalog identity");
     return {
       source_key: sourceKey,
@@ -8675,7 +8675,7 @@ globalThis.__semonUIShared = __semonUIShared;
     listeners = /* @__PURE__ */ new Set();
     begin(scope) {
       if (this.disposed) throw new Error("Catalog selection is destroyed");
-      if (typeof scope.source_key !== "string" || typeof scope.catalog_key !== "string" || !scope.catalog_key)
+      if (typeof scope.source_key !== "string" || !scope.source_key || typeof scope.catalog_key !== "string" || !scope.catalog_key)
         throw new Error("Invalid catalog selection");
       const request = Object.freeze({
         source_key: scope.source_key,
@@ -15217,13 +15217,13 @@ globalThis.__semonUIShared = __semonUIShared;
 
   // src/state/catalog-capabilities.ts
   function parseCatalogCapabilities(value) {
-    const row = object2(value), filters = array(row.filters, text);
-    if (row.api !== 1 || row.read_contract !== "catalog-v1" || row.pagination !== true || row.order !== "last_desc_key_asc" || row.full_text_search !== false || row.global_union !== false || filters.some((filter) => filter !== "harness" && filter !== "repo") || new Set(filters).size !== filters.length)
+    const row = object2(value), filters = array(row.filters, text), sourceKey = text(row.source_key);
+    if (row.api !== 1 || row.read_contract !== "catalog-v1" || !sourceKey || row.pagination !== true || row.order !== "last_desc_key_asc" || row.full_text_search !== false || row.global_union !== false || filters.some((filter) => filter !== "harness" && filter !== "repo") || new Set(filters).size !== filters.length)
       throw new Error("Unsupported catalog read contract");
     return {
       api: 1,
       read_contract: "catalog-v1",
-      source_key: text(row.source_key),
+      source_key: sourceKey,
       selected_transcript: boolean(row.selected_transcript),
       selected_identity: boolean(row.selected_identity),
       selected_entry: boolean(row.selected_entry),
@@ -15329,7 +15329,7 @@ globalThis.__semonUIShared = __semonUIShared;
     listeners = /* @__PURE__ */ new Set();
     select(scope, readScope2 = "current") {
       if (this.disposed) throw new Error("Catalog transcript is destroyed");
-      if (typeof scope.source_key !== "string" || typeof scope.catalog_key !== "string" || !scope.catalog_key || readScope2 !== "current" && readScope2 !== "retained_history")
+      if (typeof scope.source_key !== "string" || !scope.source_key || typeof scope.catalog_key !== "string" || !scope.catalog_key || readScope2 !== "current" && readScope2 !== "retained_history")
         throw new Error("Invalid catalog transcript scope");
       ++this.epoch;
       ++this.contentVersion;

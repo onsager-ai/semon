@@ -38,6 +38,7 @@ test('catalog identity has its own selection epoch and no graph/runtime defaults
   const store = new CatalogSelectionStore();
   for (const scope of [
     { source_key: 1, catalog_key: 'session' },
+    { source_key: '', catalog_key: 'session' },
     { source_key: 'source', catalog_key: 42 },
     { source_key: 'source', catalog_key: '' },
   ])

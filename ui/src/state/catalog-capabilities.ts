@@ -18,10 +18,12 @@ export interface CatalogCapabilities {
 /** Unknown contracts must not be normalized into either complete graph or bounded authority. */
 export function parseCatalogCapabilities(value: unknown): CatalogCapabilities {
   const row = object(value),
-    filters = array(row.filters, text);
+    filters = array(row.filters, text),
+    sourceKey = text(row.source_key);
   if (
     row.api !== 1 ||
     row.read_contract !== 'catalog-v1' ||
+    !sourceKey ||
     row.pagination !== true ||
     row.order !== 'last_desc_key_asc' ||
     row.full_text_search !== false ||
@@ -33,7 +35,7 @@ export function parseCatalogCapabilities(value: unknown): CatalogCapabilities {
   return {
     api: 1,
     read_contract: 'catalog-v1',
-    source_key: text(row.source_key),
+    source_key: sourceKey,
     selected_transcript: boolean(row.selected_transcript),
     selected_identity: boolean(row.selected_identity),
     selected_entry: boolean(row.selected_entry),
