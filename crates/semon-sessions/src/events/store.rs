@@ -46,7 +46,7 @@ use crate::{Tokens, facts::ReportedRunSnapshot};
 
 /// `PRAGMA user_version`: the shape of the tables. The parser's version is
 /// [`CACHE_VERSION`], kept in `meta`.
-const SCHEMA_VERSION: i64 = 16;
+const SCHEMA_VERSION: i64 = 17;
 
 /// How long a write waits for another process's transaction. Tests wait
 /// less, so the busy paths they drive stay quick.
@@ -89,11 +89,11 @@ CREATE INDEX IF NOT EXISTS session_catalog_harness ON session_catalog(harness, l
 CREATE INDEX IF NOT EXISTS session_catalog_repo ON session_catalog(repo, last_ms DESC, session_key ASC);
 CREATE INDEX IF NOT EXISTS session_catalog_harness_repo ON session_catalog(harness, repo, last_ms DESC, session_key ASC);
 CREATE INDEX IF NOT EXISTS session_catalog_parent ON session_catalog(parent_key, last_ms DESC, session_key ASC);
-CREATE INDEX IF NOT EXISTS session_catalog_current_order ON session_catalog(lifecycle, last_ms DESC, session_key ASC);
-CREATE INDEX IF NOT EXISTS session_catalog_current_harness ON session_catalog(lifecycle, harness, last_ms DESC, session_key ASC);
-CREATE INDEX IF NOT EXISTS session_catalog_current_repo ON session_catalog(lifecycle, repo, last_ms DESC, session_key ASC);
-CREATE INDEX IF NOT EXISTS session_catalog_current_harness_repo ON session_catalog(lifecycle, harness, repo, last_ms DESC, session_key ASC);
-CREATE INDEX IF NOT EXISTS session_catalog_current_parent ON session_catalog(lifecycle, parent_key, last_ms DESC, session_key ASC);
+CREATE INDEX IF NOT EXISTS session_catalog_current_order ON session_catalog(last_ms DESC, session_key ASC) WHERE lifecycle='current';
+CREATE INDEX IF NOT EXISTS session_catalog_current_harness ON session_catalog(harness, last_ms DESC, session_key ASC) WHERE lifecycle='current';
+CREATE INDEX IF NOT EXISTS session_catalog_current_repo ON session_catalog(repo, last_ms DESC, session_key ASC) WHERE lifecycle='current';
+CREATE INDEX IF NOT EXISTS session_catalog_current_harness_repo ON session_catalog(harness, repo, last_ms DESC, session_key ASC) WHERE lifecycle='current';
+CREATE INDEX IF NOT EXISTS session_catalog_current_parent ON session_catalog(parent_key, last_ms DESC, session_key ASC) WHERE lifecycle='current';
 CREATE TABLE IF NOT EXISTS session_catalog_sources (
     session_key TEXT NOT NULL,
     lifecycle TEXT NOT NULL DEFAULT 'current' CHECK(lifecycle IN ('current','retained')),
@@ -2006,6 +2006,18 @@ fn init(connection: &mut Connection) -> rusqlite::Result<Init> {
         }
         if schema==10 && !transaction.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info('session_slot_projections') WHERE name='source_generation')",[],|row|row.get::<_,bool>(0))? {
             transaction.execute_batch("ALTER TABLE session_slot_projections ADD COLUMN source_generation TEXT")?;
+        }
+        // Earlier schemas used lifecycle-prefixed indexes containing retained rows.
+        // Replace only the Current list trees; history/source lookup indexes
+        // still support both lifecycle states and keep their existing authority.
+        if (11..17).contains(&schema) {
+            transaction.execute_batch(
+                "DROP INDEX IF EXISTS session_catalog_current_order;
+                DROP INDEX IF EXISTS session_catalog_current_harness;
+                DROP INDEX IF EXISTS session_catalog_current_repo;
+                DROP INDEX IF EXISTS session_catalog_current_harness_repo;
+                DROP INDEX IF EXISTS session_catalog_current_parent;",
+            )?;
         }
         transaction.execute_batch(SCHEMA)?;
         transaction.execute_batch(crate::history_projection::SCHEMA)?;

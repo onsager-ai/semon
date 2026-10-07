@@ -1394,7 +1394,7 @@ export default async function (browser) {
       'a middle page has Load earlier above and Load later below: ' + JSON.stringify(P.deep.pager),
     );
     r.expect(
-      P.deep.url === '/s/claude/backlog?turn=' + encodeURIComponent(older.id),
+      P.deep.url === '/s/claude/backlog?turn=' + encodeURIComponent(older.id) + '&compat=1',
       'the URL keeps the turn: ' + P.deep.url,
     );
     for (let k = 0; k < 5 && (await pager(page)).some((b) => b.text === 'Load later'); k++) {
@@ -1977,9 +1977,12 @@ export default async function (browser) {
     await blocked.waitForFunction(
       () => document.querySelector('#topbar .t')?.textContent === 'Home',
     );
-    await blocked.goto(ENV.extraBase + '/s/claude/result-card?t=' + ENV.extraToken, {
-      waitUntil: 'load',
-    });
+    await blocked.goto(
+      compatibilityUrl(ENV.extraBase + '/s/claude/result-card?t=' + ENV.extraToken),
+      {
+        waitUntil: 'load',
+      },
+    );
     await blocked.waitForFunction(() => !!document.querySelector('.turns .event'));
     r.expect(
       blocked.errors.length === 0,

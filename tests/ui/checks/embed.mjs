@@ -28,7 +28,7 @@
 // Screenshots of the open menu, at 1280 and 390 in light and dark, are written to out/embed/.
 import fs from 'node:fs';
 import path from 'node:path';
-import { ENV, context, settled, reporter, closePage } from '../lib.mjs';
+import { ENV, context, settled, reporter, closePage, compatibilityUrl } from '../lib.mjs';
 
 const OUT = path.join(ENV.out, 'embed');
 fs.mkdirSync(OUT, { recursive: true });
@@ -138,7 +138,7 @@ async function open(
     }
     return route.continue();
   });
-  await page.goto(ENV.base + at + '?t=' + ENV.token, { waitUntil: 'load' });
+  await page.goto(compatibilityUrl(ENV.base + at + '?t=' + ENV.token), { waitUntil: 'load' });
   if (!state.bootGate) await settled(page);
   return page;
 }
