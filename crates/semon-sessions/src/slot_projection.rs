@@ -179,6 +179,7 @@ impl SavedSlot {
     fn capture(
         slot: &Slot,
         sources: &BTreeMap<PathBuf, &crate::model::summary::CatalogSource>,
+        verified: Option<&std::collections::HashMap<PathBuf, Arc<[u8]>>>,
     ) -> Self {
         let recipe = match &slot.kind {
             SlotKind::H(id) => Recipe::H { id: id.clone() },
@@ -268,7 +269,25 @@ impl SavedSlot {
             SlotKind::NoActivity => Recipe::NoActivity,
         };
         let field = slot.file.as_ref().and_then(|file| {
-            crate::native_field::capture(sources.get(&file.path)?, slot.offset, slot.block, &recipe)
+            if let Some(verified) = verified {
+                let (offset, block) = match &recipe {
+                    Recipe::Tool {
+                        reply: Some(reply),
+                        item: None,
+                        ..
+                    } => (reply.o, reply.b),
+                    _ => (slot.offset, slot.block),
+                };
+                let bytes = verified_record(verified.get(&file.path)?, offset)?;
+                crate::native_field::capture_from_verified_record(bytes, offset, block, &recipe)
+            } else {
+                crate::native_field::capture(
+                    sources.get(&file.path)?,
+                    slot.offset,
+                    slot.block,
+                    &recipe,
+                )
+            }
         });
         let native_event_id = field
             .as_ref()
@@ -276,9 +295,17 @@ impl SavedSlot {
             .and_then(|field| field.native_event_id.clone())
             .or_else(|| {
                 let file = slot.file.as_ref()?;
-                let bytes =
-                    crate::native_field::read_source_record(sources.get(&file.path)?, slot.offset)?;
-                let record = crate::tx::parse_native_record(&bytes)?;
+                let record = if let Some(verified) = verified {
+                    crate::tx::parse_native_record(verified_record(
+                        verified.get(&file.path)?,
+                        slot.offset,
+                    )?)?
+                } else {
+                    crate::tx::parse_native_record(&crate::native_field::read_source_record(
+                        sources.get(&file.path)?,
+                        slot.offset,
+                    )?)?
+                };
                 record
                     .get("uuid")
                     .or_else(|| record.get("id"))
@@ -415,7 +442,7 @@ pub(crate) fn capture(
             slots: transcript
                 .slots
                 .iter()
-                .map(|slot| SavedSlot::capture(slot, &sources))
+                .map(|slot| SavedSlot::capture(slot, &sources, None))
                 .collect(),
         })
         .collect()
@@ -425,4 +452,32 @@ pub(crate) fn capture(
 pub(crate) struct Publication<'a> {
     pub(crate) rows: &'a [crate::model::summary::CatalogRow],
     pub(crate) transcripts: Option<&'a [Projection]>,
+}
+
+fn verified_record(bytes: &[u8], offset: u64) -> Option<&[u8]> {
+    let rest = bytes.get(usize::try_from(offset).ok()?..)?;
+    let end = rest.iter().position(|byte| *byte == b'\n')?;
+    rest.get(..=end)
+}
+pub(crate) fn capture_verified(
+    transcripts: &BTreeMap<String, Arc<Transcript>>,
+    rows: &[crate::model::summary::CatalogRow],
+    verified: &std::collections::HashMap<PathBuf, Arc<[u8]>>,
+) -> Vec<Projection> {
+    let sources = rows
+        .iter()
+        .flat_map(|row| &row.sources)
+        .map(|source| (source.path.clone(), source))
+        .collect();
+    transcripts
+        .iter()
+        .map(|(key, transcript)| Projection {
+            key: key.clone(),
+            slots: transcript
+                .slots
+                .iter()
+                .map(|slot| SavedSlot::capture(slot, &sources, Some(verified)))
+                .collect(),
+        })
+        .collect()
 }

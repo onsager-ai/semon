@@ -5852,7 +5852,18 @@ pub(crate) fn build_sources(
     now: i64,
     selected: Option<&[crate::inputs::Input]>,
 ) -> io::Result<Built> {
-    build_sources_inner(options, cache, dirty, texts, now, selected, None)
+    build_sources_inner(
+        options,
+        cache,
+        dirty,
+        texts,
+        now,
+        NativeBuildSources {
+            selected,
+            immutable_files: None,
+        },
+        None,
+    )
 }
 
 /// Native producer output captured before compatibility-window trimming.
@@ -5890,21 +5901,31 @@ pub(crate) fn prepare_sources(
         &mut false,
         &mut Texts::default(),
         now,
-        Some(inputs),
+        NativeBuildSources {
+            selected: Some(inputs),
+            immutable_files: None,
+        },
         Some(&mut prepared),
     )?;
     prepared.ok_or_else(|| io::Error::other("native producer did not capture projection"))
 }
 
+#[derive(Default)]
+struct NativeBuildSources<'a> {
+    selected: Option<&'a [crate::inputs::Input]>,
+    immutable_files: Option<Vec<SourceFile>>,
+}
 fn build_sources_inner(
     options: &Options,
     cache: &mut EventCache,
     dirty: &mut bool,
     texts: &mut Texts,
     now: i64,
-    selected: Option<&[crate::inputs::Input]>,
+    sources: NativeBuildSources<'_>,
     mut prepared: Option<&mut Option<PreparedSources>>,
 ) -> io::Result<Built> {
+    let selected = sources.selected;
+    let immutable_files = sources.immutable_files;
     let catalog_base = cache.session_catalog_generation();
     let mut timings = Vec::with_capacity(18);
     macro_rules! timed {
@@ -5919,11 +5940,20 @@ fn build_sources_inner(
         }};
     }
 
-    let facts = MachineFacts::of(options);
+    let immutable = immutable_files.is_some();
+    let facts = if immutable {
+        MachineFacts::Recorded(Box::default())
+    } else {
+        MachineFacts::of(options)
+    };
     let window_start = scan_cutoff(options, now);
     let (files, skipped, index_clone) = timed!(
         "scan",
-        scan(options, cache, dirty, texts, window_start, &facts, selected)?
+        if let Some(files) = immutable_files {
+            (files, BTreeSet::new(), std::time::Duration::ZERO)
+        } else {
+            scan(options, cache, dirty, texts, window_start, &facts, selected)?
+        }
     );
     timings.push((
         "index_clone",
@@ -5937,7 +5967,7 @@ fn build_sources_inner(
             hook();
         }
     }
-    let claims = if prepared.is_some() {
+    let claims = if prepared.is_some() && !immutable {
         cache.catalog_claims(
             &files
                 .iter()
@@ -5955,8 +5985,16 @@ fn build_sources_inner(
     let offline_since;
     let groups;
     timed!("facts", {
-        pids = pid_files(options, &facts);
-        lock_pids = facts.codex_lock_pids(options);
+        pids = if immutable {
+            Vec::new()
+        } else {
+            pid_files(options, &facts)
+        };
+        lock_pids = if immutable {
+            Some(Default::default())
+        } else {
+            facts.codex_lock_pids(options)
+        };
         held = lock_pids
             .iter()
             .flat_map(|locks| locks.keys().cloned())
@@ -6069,9 +6107,13 @@ fn build_sources_inner(
     // source-complete catalog. Publication itself is delayed until success.
     let catalog = ((!options.scan_window && selected.is_none()) || prepared.is_some())
         .then(|| summary::catalog(&builder, &handoffs));
-    let slot_projections = catalog
-        .as_ref()
-        .map(|rows| crate::slot_projection::capture(&tx, rows));
+    let slot_projections = catalog.as_ref().map(|rows| {
+        if immutable {
+            crate::slot_projection::capture_verified(&tx, rows, &builder.texts.verified_bytes)
+        } else {
+            crate::slot_projection::capture(&tx, rows)
+        }
+    });
     // Analytics reads a month and the month before it, whatever the model's
     // window: taken from every session before the window trims them.
     let activity = crate::analytics::activity(&sessions, &tx, &turns, &handoffs, now);
@@ -6347,3 +6389,124 @@ fn build_sources_inner(
 
 #[cfg(test)]
 mod tests;
+
+/// Producer-only shared native builder over one independently verified original.
+/// No local discovery, process facts, native selection or source ledger is fabricated.
+pub(crate) fn prepare_immutable_source(
+    options: &Options,
+    input: &crate::inputs::Input,
+    bytes: Arc<[u8]>,
+    immutable: ImmutableSource,
+) -> io::Result<PreparedSources> {
+    const RECORD_MAX: usize = 16 * 1024 * 1024;
+    let mut summary = FileIndex::default();
+    let mut id = None::<String>;
+    let mut meta = Value::Null;
+    let harness = input.root.as_str();
+    let mut offset = 0usize;
+    for (records, line) in bytes[..usize::try_from(immutable.consumed)
+        .map_err(|_| io::Error::other("original prefix length"))?]
+        .split_inclusive(|byte| *byte == b'\n')
+        .enumerate()
+    {
+        if line.len() > RECORD_MAX || records >= 4096 {
+            return Err(io::Error::other(
+                "immutable native original exceeds producer record budget",
+            ));
+        }
+        match crate::tx::parse_native_record(line) {
+            Some(record) => {
+                let native = if harness == "claude" {
+                    record
+                        .get("sessionId")
+                        .or_else(|| record.get("session_id"))
+                        .and_then(Value::as_str)
+                } else if offset == 0 && record["type"] == "session_meta" {
+                    meta = record["payload"].clone();
+                    meta.get("id").and_then(Value::as_str)
+                } else {
+                    None
+                };
+                if let Some(native) = native {
+                    if native.is_empty()
+                        || native.len() > 4096
+                        || native.chars().any(char::is_control)
+                        || id.as_deref().is_some_and(|previous| previous != native)
+                    {
+                        return Err(io::Error::other(
+                            "immutable original native identity is ambiguous",
+                        ));
+                    }
+                    id = Some(native.to_owned());
+                }
+                if harness == "claude" {
+                    events::claude(&mut summary, &record, offset as u64);
+                } else {
+                    events::codex(&mut summary, &record, offset as u64);
+                }
+            }
+            None => events::gap(&mut summary, offset as u64),
+        }
+        if summary.events.len() + summary.extras.len() + summary.signals.len() > 4096 {
+            return Err(io::Error::other(
+                "immutable native original exceeds event budget",
+            ));
+        }
+        offset += line.len();
+    }
+    let id =
+        id.ok_or_else(|| io::Error::other("immutable original lacks native identity metadata"))?;
+    let role = if harness == "claude" {
+        let components: Vec<_> = input.path.split('/').collect();
+        if components.len() != 3 || components[0] != "projects" {
+            return Err(io::Error::other(
+                "immutable Claude subagent context is unsupported",
+            ));
+        }
+        Role::Top {
+            slug: components[1].into(),
+        }
+    } else {
+        Role::Codex(CodexMeta {
+            history: CodexHistory::from_meta(&meta),
+            parent_thread: field(&meta, "parent_thread_id").map(str::to_owned),
+            nickname: field(&meta, "agent_nickname").map(str::to_owned),
+            path: field(&meta, "agent_path").map(str::to_owned),
+            cwd: field(&meta, "cwd").map(str::to_owned),
+            branch: meta
+                .get("git")
+                .and_then(|git| field(git, "branch"))
+                .map(str::to_owned),
+            guardian_review: false,
+        })
+    };
+    let path = input.full_path(options);
+    let source = SourceFile {
+        revision: None,
+        immutable: Some(immutable),
+        stamp: None,
+        id,
+        role,
+        first: summary.first,
+        last: summary.last,
+        summary: Arc::new(summary),
+        marker: None,
+        path: path.clone(),
+    };
+    let mut texts = Texts::default();
+    texts.verified_bytes.insert(path, bytes);
+    let mut captured = None;
+    build_sources_inner(
+        options,
+        &mut EventCache::default(),
+        &mut false,
+        &mut texts,
+        now_ms(),
+        NativeBuildSources {
+            selected: Some(std::slice::from_ref(input)),
+            immutable_files: Some(vec![source]),
+        },
+        Some(&mut captured),
+    )?;
+    captured.ok_or_else(|| io::Error::other("immutable native producer did not capture projection"))
+}
