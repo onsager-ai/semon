@@ -436,6 +436,12 @@ pub(crate) fn save_index(path: &Path, index: &Index) -> io::Result<()> {
 /// Writes a cache file buffered, to a private temporary file renamed over the
 /// old one, so a reader never sees a half-written cache.
 pub(crate) fn save_json(path: &Path, value: &impl Serialize) -> io::Result<()> {
+    save_json_file(path, value).map(drop)
+}
+
+/// Keep the descriptor of the exact published bytes for derived-view custody.
+/// Looking up the path after rename could instead observe another writer's file.
+pub(crate) fn save_json_file(path: &Path, value: &impl Serialize) -> io::Result<fs::File> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -462,8 +468,9 @@ pub(crate) fn save_json(path: &Path, value: &impl Serialize) -> io::Result<()> {
         let _ = fs::remove_file(&temporary);
         return Err(error);
     }
-    drop(writer);
-    fs::rename(&temporary, path)
+    let file = writer.into_inner().map_err(|error| error.into_error())?;
+    fs::rename(&temporary, path)?;
+    Ok(file)
 }
 
 fn summarize(
