@@ -1397,6 +1397,12 @@ impl ViewerCore {
     /// are presentation labels; embedders use this key to bind native controls.
     /// Missing or ambiguous native IDs never select a writable destination.
     pub fn session_machine_key(&self, id: &str) -> io::Result<Option<String>> {
+        Ok(self.session_view_identity(id)?.map(|(source, _)| source))
+    }
+
+    /// Authoritative source key and projected presentation machine for a served session.
+    /// Ambiguous native identities never select a source.
+    pub fn session_view_identity(&self, id: &str) -> io::Result<Option<(String, String)>> {
         let Some(_entered) = self.open.enter() else {
             return Ok(None);
         };
@@ -1409,7 +1415,7 @@ impl ViewerCore {
         Ok(plan
             .owners
             .get(id)
-            .map(|(index, _)| views[*index].0.clone()))
+            .map(|(index, _)| (views[*index].0.clone(), plan.machine_ids[*index].clone())))
     }
 
     /// Every machine's model, under the caller's refresh policy, with how the core serves

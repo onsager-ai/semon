@@ -39,7 +39,7 @@ export function createLiveModel(host: LiveModelHost) {
     );
   }
   function modelPath(path: string, selected = selection()) {
-    return path + selected;
+    return path + selected + (host.viewerHost?.controlStream ? '&content=1' : '');
   }
   const liveController = createLiveController({
     async poll() {
@@ -178,8 +178,16 @@ export function createLiveModel(host: LiveModelHost) {
     streamSelection = selected;
     if (!path.startsWith('/') || path.startsWith('//') || /[\\\s]/.test(path))
       throw new Error('Invalid live model stream');
+    const streamQuery = [
+      selected.slice(1),
+      host.viewerHost?.controlStream
+        ? 'content=1&since=' + host.transportOwner.enc(LIVE.version ?? '')
+        : '',
+    ]
+      .filter(Boolean)
+      .join('&');
     const current = new EventSource(
-      path + (selected ? (path.includes('?') ? selected : '?' + selected.slice(1)) : ''),
+      path + (streamQuery ? (path.includes('?') ? '&' : '?') + streamQuery : ''),
     );
     stream = current;
     liveController.useStream();

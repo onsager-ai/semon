@@ -5,9 +5,13 @@ import type { createAccountControls } from './accountControls';
 import type { createLiveModel } from './liveModel';
 import type { createDocumentRenderer } from './documentRenderer';
 import type { createViewport } from './viewport';
-import { setGeometry } from '../lib';
+import { setGeometry, updateSessionControl } from '../lib';
+import type { createLocalControl } from './localControl';
+import type { createNavigationView } from './navigationView';
 interface ApplicationRefreshHost {
   disposed: boolean;
+  controlOwner: Pick<ReturnType<typeof createLocalControl>, 'view'>;
+  navigationViewOwner: Pick<ReturnType<typeof createNavigationView>, 'renderNav'>;
   $: <T extends HTMLElement = HTMLElement>(s: string, r?: ParentNode) => T;
   toolViewsOwner: ReturnType<typeof createToolViews>;
   sidebarOnly: boolean;
@@ -68,5 +72,18 @@ export function createApplicationRefresh(host: ApplicationRefreshHost) {
 
   // View state. A block's identity: its class and keys, or its own text when it has no key (a section heading).
 
-  return { refresh };
+  function controls() {
+    if (host.disposed) return;
+    if (host.toolViewsOwner.viewerEl || host.accountControlsOwner.accountChrome.open) {
+      host.liveModelOwner.LIVE.pending = true;
+      return;
+    }
+    host.navigationViewOwner.renderNav();
+    const route = host.navigation.route;
+    if (host.sidebarOnly || route.v !== 'session' || host.navigation.rendered !== route) return;
+    const anchor = host.viewport.capture();
+    updateSessionControl(host.$('#page'), host.controlOwner.view(route.id));
+    host.viewport.restore(anchor, anchor.bottom);
+  }
+  return { refresh, controls };
 }

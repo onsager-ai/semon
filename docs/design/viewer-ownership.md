@@ -227,3 +227,10 @@ authoritative native source binding and authorization; the projected machine id
 is only a consistency guard. Initial boot is unselected until its model supplies
 route context. Controls cannot carry authority merely because a client supplied
 a session or machine candidate.
+
+An embedding host may opt into a separate `controlStream`. The composition owns
+one navigation-scoped status observer and disposes it with the Viewer. Its
+snapshots update the existing local control owner and cached Session screen;
+they never adopt a model or prepare transcript blocks. Native status, transport
+freshness and content revisions remain distinct. Selection changes invalidate
+queued status callbacks and clear authority from the previous selection.

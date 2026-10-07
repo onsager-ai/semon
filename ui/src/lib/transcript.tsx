@@ -855,6 +855,14 @@ export function renderSessionScreen(
   host.committed();
 }
 
+/** Update only native controls; retain parsed blocks, keyed turns and input ownership. */
+export function updateSessionControl(root: HTMLElement, control: ControlView | undefined) {
+  const owner = owners.get(root);
+  if (!owner || owner.disposed) return;
+  owner.snapshot = { ...owner.snapshot, control };
+  owner.paint();
+}
+
 export function updateSessionPager(root: HTMLElement, view: PagerView) {
   const owner = owners.get(root);
   if (!owner || owner.snapshot.id !== view.sid) return;

@@ -369,7 +369,7 @@ test('selected hosted streams bind both runtimes and reject callbacks after navi
     await page.evaluate(() => sources[1].dispatchEvent(new Event('unavailable')));
     await page.clock.runFor(1100);
     assert.deepEqual(await page.evaluate(() => readPaths), [
-      '/api/model?delta=1&selected=b&machine=machine-b',
+      '/api/model?delta=1&since=&selected=b&machine=machine-b',
     ]);
     assert.deepEqual(await page.evaluate(() => applied), ['selected-b', 'recovered-b']);
     await page.evaluate(() =>
