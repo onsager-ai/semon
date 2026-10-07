@@ -15,6 +15,7 @@ use serde_json::Value;
 mod analytics;
 mod catalog;
 mod catalog_observer;
+mod native_resolution;
 pub use catalog::{
     CatalogFreshness, CatalogIdentityError, CatalogOwnerQualification, CatalogReadScope,
     CatalogSessionIdentity, CatalogSourceObservation, SessionSourceProof, SessionSourceRef,
@@ -22,6 +23,9 @@ pub use catalog::{
     session_source_proof,
 };
 pub use catalog_observer::SessionCatalogObserver;
+pub use native_resolution::{
+    CatalogNativeResolution, CatalogNativeResolutionState, session_catalog_resolve_native,
+};
 mod claude_usage;
 pub mod copilot;
 pub use claude_usage::ClaudeUsageEvidence;
