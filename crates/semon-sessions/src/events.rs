@@ -877,7 +877,7 @@ pub(crate) trait IndexStore: Send {
     /// Replaces one complete source-validated metadata catalog atomically.
     fn publish_session_catalog(
         &mut self,
-        rows: &[crate::model::summary::CatalogRow],
+        publication: &crate::slot_projection::Publication<'_>,
         expected_generation: Option<&str>,
     ) -> Result<Outcome, StoreError>;
 
@@ -1015,6 +1015,18 @@ enum Base {
 }
 
 impl EventCache {
+    /// A read-only request-local cache of selected source generations. The
+    /// caller keeps catalog metadata and these ledgers in one SQLite snapshot.
+    /// No store is attached, so native projection cannot mutate global rows.
+    #[cfg(test)]
+    pub(crate) fn from_selected(
+        connection: &rusqlite::Connection,
+        sources: &[crate::model::summary::CatalogSource],
+        native_ids: &BTreeSet<String>,
+    ) -> rusqlite::Result<Self> {
+        store::read_selected(connection, sources, native_ids).map(Self::from_loaded)
+    }
+
     /// The store beside V1's metadata cache: `sessions-index.json` gives
     /// `sessions-index.sqlite3`. `semon sessions`, `--watch` and `--json`
     /// never open it.
@@ -1130,16 +1142,31 @@ impl EventCache {
             .flatten()
     }
 
+    #[cfg(test)]
     pub(crate) fn publish_session_catalog(
         &mut self,
         rows: &[crate::model::summary::CatalogRow],
+        expected_generation: Option<&str>,
+    ) {
+        self.publish_session_projection(
+            &crate::slot_projection::Publication {
+                rows,
+                transcripts: None,
+            },
+            expected_generation,
+        );
+    }
+
+    pub(crate) fn publish_session_projection(
+        &mut self,
+        publication: &crate::slot_projection::Publication<'_>,
         expected_generation: Option<&str>,
     ) {
         if !self.busy
             && self.unpersisted.is_empty()
             && let Some(store) = self.store.as_mut()
         {
-            let _ = store.publish_session_catalog(rows, expected_generation);
+            let _ = store.publish_session_catalog(publication, expected_generation);
         }
     }
 
