@@ -1,11 +1,25 @@
 import type { CatalogTranscriptEntry } from '../state/catalog-transcript-wire';
 import type { TranscriptBlock, EntryView } from '../lib/transcript';
 import { I } from './registry';
+export interface CatalogFieldView {
+  text?: string;
+  note: string;
+  action?: { label: string; busy: boolean; run(): void };
+}
 /** Native source records can be readable before relationship context is complete. */
 export function catalogTranscriptBlocks(
   entries: readonly CatalogTranscriptEntry[],
+  fieldView?: (entry: CatalogTranscriptEntry) => CatalogFieldView | null,
 ): TranscriptBlock[] {
-  return entries.map(({ entry: entry, entry_id, native_action_text, clipped, freshness }) => {
+  return entries.map((item) => {
+    const { entry_id, native_action_text, clipped, freshness } = item,
+      field = fieldView?.(item),
+      entry =
+        field?.text === undefined
+          ? item.entry
+          : item.entry.k === 'tool'
+            ? { ...item.entry, out: field.text }
+            : { ...item.entry, text: field.text };
     const views: EntryView[] = [];
     let notice = 0;
     const label = (text: string) =>
@@ -75,7 +89,15 @@ export function catalogTranscriptBlocks(
     else if (entry.k === 'harness') label(entry.label);
     else if (entry.k === 'signal')
       label('Native ' + entry.signal.kind + (entry.signal.tag ? ' · ' + entry.signal.tag : ''));
-    if (clipped) label('Recorded text preview. The complete source text is not loaded.');
+    if (field) {
+      views.push({
+        kind: 'label',
+        key: entry_id + ':field',
+        className: 'vnote',
+        text: field.note,
+        action: field.action,
+      });
+    } else if (clipped) label('Recorded text preview. The complete source text is not loaded.');
     if (freshness && freshness.state !== 'cached')
       label(
         'Source observation is ' + freshness.state + '. Previously loaded content is retained.',
