@@ -133,16 +133,16 @@ test('selection invalidates old control handles and late command receipts', asyn
     const old = owner.view('native');
     const pending = old.send('previous session');
     owner.observe(null);
-    owner.observe(owner.prepare({ ...model(), thread: 'selected-next', generation: 'next' }));
+    owner.observe(owner.prepare({ ...model(), thread: 'native', generation: 'generation' }));
     assert.equal(await old.send('never switch its destination'), false);
     assert.equal(writes, 1);
     release();
     assert.equal(await pending, false);
-    assert.equal(owner.view('selected-next').busy, false);
-    assert.equal(owner.view('selected-next').uncertain, false);
-    assert.equal(owner.view('selected-next').note, '');
+    assert.equal(owner.view('native').busy, false);
+    assert.equal(owner.view('native').uncertain, false);
+    assert.equal(owner.view('native').note, '');
     owner.unavailable();
-    assert.equal(owner.view('selected-next').snapshot.capabilities.input, false);
+    assert.equal(owner.view('native').snapshot.capabilities.input, false);
   } finally {
     owner.destroy();
     globalThis.fetch = oldFetch;
