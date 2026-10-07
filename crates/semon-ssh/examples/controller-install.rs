@@ -70,7 +70,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     .await?;
     println!(
         "{}",
-        serde_json::json!({"launch":result.launch,"state":result.state,"thread":result.thread})
+        serde_json::json!({"launch":result.launch,"state":result.state,"thread":result.thread,"snapshotObserved":result.snapshot.as_ref().is_some_and(|s|s["thread"].as_str()==result.thread.as_deref())})
     );
     Ok(())
 }

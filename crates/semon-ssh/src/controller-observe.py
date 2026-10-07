@@ -26,5 +26,6 @@ def observe(root,request):
             snap=json.loads(response)['snapshot']
             if snap.get('thread')==result['thread'] and snap.get('connected') is True:
                 result['state']='running'
+                if len(json.dumps(snap).encode())<=262144: result['snapshot']=snap
     except Exception: pass
     return result
