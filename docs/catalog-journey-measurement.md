@@ -102,3 +102,27 @@ stops, and never writes tokens into the evidence. It records the binary hash and
 server counters. The browser driver bounds response evidence capture, preserves
 required exact field assertions, and reports unavailable optional body sizes
 instead of manufacturing them.
+
+## Projection recipe five replay
+
+A subsequent matched source `2d4487a23ca70f0094f8dea79db81d9af9b78791`
+replays the worst-case workload twice (first import and persisted restart),
+without changing the fixture shape or intercepting the bundle. CLI SHA256
+`2d5f599e05dff4c4ff7c8f2bc84eb1c864ca9aee870313079fde313529724326` and
+embedded UI SHA256
+`168c95189c6ba5cced2f01121192b03907b412cbae9cc56f25f6e5073dc6c295`.
+These qualify the actual native field/relationship projection recipe five and
+current UI against the complete journey; they do not claim first-import savings.
+
+| Added sessions | State | First list ms | Filter ms | Select ms | Earlier ms | Field ms | Return ms | Peak RSS MiB | CPU s | rchar MB |
+| ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+|2048|First import|15601|88|139|108|335|67|253.5|14.63|508.7|
+|2048|Persisted restart|231|86|142|113|283|76|59.6|1.39|69.7|
+
+Both runs verify the complete original scalar, retained original entry DOM,
+zero legacy query requests and zero page errors. The selected 60-record DOM
+contains 1124 nodes in both cases. This standalone readonly fixture provides no
+native composer; focused draft retention and switching between source owners
+remain separate UI qualification lanes. The full selected-machine import and
+background read limitation remains. Raw evidence is in
+[the recipe-five directory](measurements/catalog-journey-2d4487a/).
