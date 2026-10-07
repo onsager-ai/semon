@@ -1644,6 +1644,7 @@ export default async function (browser) {
       'a short code-mode operation shows Command and Output without the session-root directory: ' +
         JSON.stringify(data.detailLabels),
     );
+    await page.screenshot({ path: path.join(ENV.out, 'extras-code-mode-expanded.png') });
     await page.locator('.step > .out:not([hidden]) .viewscript').click();
     await page.waitForSelector('dialog.panel.full[open]');
     R.codeMode.script = await page.locator('dialog.panel.full pre.script').textContent();
