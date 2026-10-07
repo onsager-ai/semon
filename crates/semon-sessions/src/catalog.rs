@@ -197,6 +197,15 @@ pub enum CatalogReadScope {
     RetainedHistory,
 }
 
+/// Completeness of native lineage identity, independent of runtime authority.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CatalogOwnerQualification {
+    #[default]
+    Qualified,
+    Provisional,
+}
+
 /// Scoped cached identity, resolved without global event/model construction.
 /// A nullable native_id preserves ambiguity in multi-native continuations.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -207,6 +216,8 @@ pub struct CatalogSessionIdentity {
     pub catalog_key: String,
     pub harness: String,
     pub native_id: Option<String>,
+    #[serde(default)]
+    pub owner_qualification: CatalogOwnerQualification,
     pub native_ids: Vec<String>,
     pub source_refs: Vec<CatalogSourceObservation>,
     pub machine_label: Option<String>,
@@ -310,6 +321,7 @@ fn catalog_identity(
         facts_observation: CatalogFreshness,
         native_selection: Option<CatalogFreshness>,
     }
+    let provisional = body["completeness"]["state"] == "partial";
     let item: Item = serde_json::from_value(body["items"][0].clone()).map_err(|_| Unavailable)?;
     let native_ids: Vec<String> = item
         .source_refs
@@ -338,7 +350,12 @@ fn catalog_identity(
         read_scope: scope,
         catalog_key: item.key,
         harness: item.harness,
-        native_id: (native_ids.len() == 1).then(|| native_ids[0].clone()),
+        native_id: (!provisional && native_ids.len() == 1).then(|| native_ids[0].clone()),
+        owner_qualification: if provisional {
+            CatalogOwnerQualification::Provisional
+        } else {
+            CatalogOwnerQualification::Qualified
+        },
         native_ids,
         source_refs: item.source_refs,
         machine_label: body["machine_info"]["label"].as_str().map(str::to_owned),
@@ -768,6 +785,17 @@ fn read_page(
             false,
         ));
     }
+    let completeness: String = transaction
+        .query_row(
+            "SELECT value FROM meta WHERE key='catalog_completeness'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?
+        .unwrap_or_else(|| "complete".into());
+    if !matches!(completeness.as_str(), "partial" | "complete") {
+        return Err(io::Error::other("catalog completeness is invalid").into());
+    }
     let more = selected.len() > request.limit;
     if more {
         selected.pop();
@@ -938,7 +966,7 @@ fn read_page(
         "machine_info":{"key":machine,"label":machine_label,"freshness":if facts_known { "cached" } else { "unavailable" }},
         "capabilities":{"pagination":true,"filters":["harness","repo"],"order":"last_desc_key_asc",
             "full_text_search":false,"selected_session_lookup":true,"runtime_status":false,"global_union":false},
-        "freshness":page_state,"items":items,"next_cursor":next}),
+        "completeness":{"state":completeness},"freshness":if completeness == "partial" { "updating" } else { page_state },"items":items,"next_cursor":next}),
     ))
 }
 
@@ -1230,7 +1258,7 @@ mod tests {
                 connection
                     .query_row("PRAGMA user_version", [], |row| row.get::<_, u32>(0))
                     .unwrap(),
-                14
+                15
             );
         }
     }
@@ -2485,6 +2513,148 @@ mod tests {
             !EventCache::path(&empty.options.cache).exists(),
             "a read-only catalog miss must not create an index"
         );
+    }
+
+    #[test]
+    fn scoped_publication_rejects_newer_dirty_claim_and_keeps_unrelated_work() {
+        let fixture = Fixture::new();
+        fixture.source("selected");
+        let input = crate::inputs::Input {
+            root: crate::inputs::InputRoot::Claude,
+            path: "projects/project/selected.jsonl".into(),
+        };
+        let mut cache = EventCache::open_scoped(&fixture.options.cache).unwrap();
+        let prepared = crate::model::prepare_sources(
+            &fixture.options,
+            &mut cache,
+            std::slice::from_ref(&input),
+            crate::model::now_ms(),
+        )
+        .unwrap();
+        let connection = Connection::open(EventCache::path(&fixture.options.cache)).unwrap();
+        connection
+            .execute(
+                "UPDATE session_catalog_invalidations SET revision=revision+1 WHERE source_path=?1",
+                [input.full_path(&fixture.options).to_string_lossy().as_ref()],
+            )
+            .unwrap();
+        assert_eq!(
+            cache.publish_partial_catalog(&prepared).unwrap(),
+            crate::events::Outcome::Conflict
+        );
+        assert_eq!(fixture.body("").0, 503);
+        connection
+            .execute(
+                "INSERT INTO session_catalog_invalidations VALUES ('unrelated',999,'changed',0)",
+                [],
+            )
+            .unwrap();
+        let prepared = crate::model::prepare_sources(
+            &fixture.options,
+            &mut cache,
+            &[input],
+            crate::model::now_ms(),
+        )
+        .unwrap();
+        assert_eq!(
+            cache.publish_partial_catalog(&prepared).unwrap(),
+            crate::events::Outcome::Written
+        );
+        let pending: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM session_catalog_invalidations WHERE source_path='unrelated'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            pending, 1,
+            "partial publication cannot ACK another source's work"
+        );
+    }
+
+    #[test]
+    fn cold_scoped_native_publication_is_visible_before_unrelated_source_reads() {
+        for unrelated in [0, 2048] {
+            let fixture = Fixture::new();
+            let inputs: Vec<_> = (0..60)
+                .map(|n| {
+                    let id = format!("selected-{n:05}");
+                    fixture.source(&id);
+                    crate::inputs::Input {
+                        root: crate::inputs::InputRoot::Claude,
+                        path: format!("projects/project/{id}.jsonl"),
+                    }
+                })
+                .collect();
+            for n in 0..unrelated {
+                fixture.source(&format!("unrelated-{n:05}"));
+            }
+            let mut cache = EventCache::open_scoped(&fixture.options.cache).unwrap();
+            assert_eq!(cache.paths().count(), 0);
+            assert!(
+                crate::model::prepare_sources(
+                    &fixture.options,
+                    &mut cache,
+                    &vec![inputs[0].clone(); 65],
+                    crate::model::now_ms()
+                )
+                .is_err()
+            );
+            assert_eq!(
+                cache.paths().count(),
+                0,
+                "over-budget source batches must fail before indexing"
+            );
+            let start = std::time::Instant::now();
+            let prepared = crate::model::prepare_sources(
+                &fixture.options,
+                &mut cache,
+                &inputs,
+                crate::model::now_ms(),
+            )
+            .unwrap();
+            assert_eq!(prepared.rows.len(), 60);
+            assert_eq!(
+                cache.publish_partial_catalog(&prepared).unwrap(),
+                crate::events::Outcome::Written
+            );
+            let (status, body) = fixture.body("limit=60");
+            assert_eq!(status, 200);
+            assert_eq!(body["items"].as_array().unwrap().len(), 60);
+            assert_eq!(body["completeness"]["state"], "partial");
+            assert_eq!(body["freshness"], "updating");
+            assert_eq!(cache.paths().count(), 60);
+            let connection = Connection::open(EventCache::path(&fixture.options.cache)).unwrap();
+            let observed: i64 = connection
+                .query_row("SELECT COUNT(*) FROM files", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(
+                observed, 60,
+                "unrelated native sources must remain unobserved before first page"
+            );
+            let identity = session_catalog_identity(&fixture.options, "source", "selected-00000")
+                .unwrap()
+                .unwrap();
+            assert_eq!(identity.native_id, None);
+            assert_eq!(
+                identity.owner_qualification,
+                CatalogOwnerQualification::Provisional
+            );
+            assert!(
+                session_catalog_history_identity(&fixture.options, "source", "selected-00000")
+                    .unwrap()
+                    .is_some()
+            );
+            eprintln!(
+                "scoped-cold-first-page unrelated={unrelated} elapsed_us={} bytes={} native_sources={observed}",
+                start.elapsed().as_micros(),
+                serde_json::to_vec(&body).unwrap().len()
+            );
+            // A fresh lazy producer restores no global file indexes or runs.
+            let reopened = EventCache::open_scoped(&fixture.options.cache).unwrap();
+            assert_eq!(reopened.paths().count(), 0);
+        }
     }
 
     #[test]
