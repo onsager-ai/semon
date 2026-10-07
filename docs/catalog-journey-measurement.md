@@ -15,13 +15,13 @@ No generated bundle was intercepted or replaced. Chromium/Playwright runs
 against real native fixture files, the CLI HTTP server and public query routes.
 There is no provider or guest runtime artifact in this standalone workload.
 
-The existing native fixture contains55 sessions across harnesses; the selected
-Claude conversation has473 records after adding a110029-byte scalar.64 fixed
-older Claude sessions fill the first60-row page, and0/256/2048 additional older
-sessions each contain8 records and about28KiB. Requested source `local`, first
-page60, selected `backlog`, latest transcript60, earlier transcript60 and scalar
-remain fixed. Input Claude files total109/365/2157 and2.54/9.82/60.80MB. All
-six cases have60 list rows,60 initial entries and120 after loading earlier.
+The existing native fixture contains 55 sessions across harnesses; the selected
+Claude conversation has 473 records after adding a 110029-byte scalar. 64 fixed
+older Claude sessions fill the first60-row page, and 0/256/2048 additional older
+sessions each contain 8 records and about 28 KiB. Requested source `local`, first
+page 60, selected `backlog`, latest transcript 60, earlier transcript 60 and scalar
+remain fixed. Input Claude files total 109/365/2157 and 2.54/9.82/60.80MB. All
+six cases have 60 list rows, 60 initial entries and 120 after loading earlier.
 Fixture directories have different path lengths, explaining small provenance
 response-size differences.
 
@@ -45,7 +45,7 @@ legacy model/tool/image/tx requests.
 
 These are six individual samples, not percentiles. Earlier diagnostic replays
 also exposed the same first-import growth; they are excluded from this table.
-Wall time includes actual initial503 recovery before publication. The comparison
+Wall time includes actual initial 503 recovery before publication. The comparison
 is before versus after persistent publication using identical code, not a
 historical before/after software speedup claim. No earlier matched legacy
 binary+UI complete-journey baseline was established by this experiment.
@@ -60,20 +60,20 @@ binary+UI complete-journey baseline was established by this experiment.
 |2048|Persisted restart|56.6|1.18|68.7|0.00|
 
 Linux `/proc` samples include asynchronous producer work, not just endpoint
-latency; CPU uses100 clock ticks/second. `rchar` counts reads served through the
+latency; CPU uses 100 clock ticks/second. `rchar` counts reads served through the
 page cache, including SQLite work, rather than physical disk traffic. RSS is
-sampled every50ms and is not a retained-live-heap measurement. Work continues
-through evidence collection. For first-import cases, canceled initial503 response
+sampled every 50 ms and is not a retained-live-heap measurement. Work continues
+through evidence collection. For first-import cases, canceled initial 503 response
 bodies remained unavailable to Playwright and are explicitly recorded as
-`bytes:null`, `body_unavailable`. The bounded6s optional body capture can extend
+`bytes:null`, `body_unavailable`. The bounded 6 s optional body capture can extend
 server observation after the last user action; the per-action DOM timings above
 do not include that evidence wait. There is no byte/RSS budget claim.
 
 Successful first-list responses are64.8–64.9KB, selected ranges55.7–56.2KB,
-and scalar chunk responses67.8KB/46.8KB. The selected60-record DOM has1120
-nodes at every workload; selected JS heap is approximately4–5MiB, cumulative
-script time14–28ms and layout time55–65ms. After120 entries and field expansion,
-visible DOM has1654 nodes. Uncollected JS heap varies with garbage collection,
+and scalar chunk responses 67.8 KB/46.8 KB. The selected60-record DOM has 1120
+nodes at every workload; selected JS heap is approximately 4–5 MiB, cumulative
+script time 14–28 ms and layout time 55–65 ms. After 120 entries and field expansion,
+visible DOM has 1654 nodes. Uncollected JS heap varies with garbage collection,
 so it is not a memory ceiling. Full CDP/task/heap/node and response evidence is
 in [the raw measurement directory](measurements/catalog-journey-733524f/).
 
@@ -97,7 +97,7 @@ python3 scripts/catalog-journey.py \
 ```
 
 The runner retains synthetic data/evidence, rejects reused fixture directories,
-keeps ephemeral authorization manifests mode0600, removes them when each server
+keeps ephemeral authorization manifests mode 0600, removes them when each server
 stops, and never writes tokens into the evidence. It records the binary hash and
 server counters. The browser driver bounds response evidence capture, preserves
 required exact field assertions, and reports unavailable optional body sizes
