@@ -8,6 +8,11 @@ export interface RuntimeObservation {
   observationError?: string | null;
   updating?: boolean;
 }
+export interface RuntimeObservationView {
+  observation: RuntimeObservation | null;
+  reason: string | null;
+  delivery: 'updating' | 'current' | 'stale' | 'unavailable';
+}
 export function parseRuntimeObservation(value: unknown): RuntimeObservation {
   if (!value || typeof value !== 'object' || Array.isArray(value))
     throw new Error('Invalid readonly runtime observation');

@@ -102,7 +102,13 @@ function Permission({ request }: { request: ControlRequest }) {
     </>
   );
 }
-export function LocalControl({ view }: { view: ControlView }) {
+export function LocalControl({
+  view,
+  runtimeObserved = false,
+}: {
+  view: ControlView;
+  runtimeObserved?: boolean;
+}) {
   const [text, setText] = useState('');
   const s = view.snapshot;
   const canSend =
@@ -120,15 +126,17 @@ export function LocalControl({ view }: { view: ControlView }) {
     <section class="local-control" aria-label="Conversation controls">
       {!s.connected && (
         <p role="status">
-          {s.runtime?.state === 'ended'
-            ? 'This session has ended.'
-            : s.runtime?.state === 'failed'
-              ? 'This environment needs attention.'
-              : s.runtime?.state === 'disconnected'
-                ? 'This environment is disconnected.'
-                : s.runtime?.state === 'unavailable'
-                  ? 'Runtime state is unavailable.'
-                  : 'Reconnecting to your session…'}
+          {runtimeObserved
+            ? 'Native session controls are unavailable.'
+            : s.runtime?.state === 'ended'
+              ? 'This session has ended.'
+              : s.runtime?.state === 'failed'
+                ? 'This environment needs attention.'
+                : s.runtime?.state === 'disconnected'
+                  ? 'This environment is disconnected.'
+                  : s.runtime?.state === 'unavailable'
+                    ? 'Runtime state is unavailable.'
+                    : 'Reconnecting to your session…'}
         </p>
       )}
       {s.reason && <p>{s.reason}</p>}

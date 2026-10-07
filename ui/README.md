@@ -326,3 +326,12 @@ compute presence and observation freshness are separate. Non-active states
 carry disabled native capabilities. Ended and failed states have explicit
 presentation; they retain the composer and its draft and do not advertise native
 reconnect. A final end invalidates pending command receipts without replay.
+
+Selected catalog read intent also has a separate readonly runtime presentation.
+`SessionSnapshot.runtime` carries observation and delivery freshness without native
+capabilities, credentials or reconnect authority. `updateSessionRuntime` updates
+only the existing session owner's runtime leaf, including before transcript or
+current native identity is available. Failed observations retain the last durable
+phase with a stale indicator. Native controls keep their separate authority and
+draft ownership. The focused browser contract poisons transcript block traversal
+while applying final and stale runtime updates and verifies retained input focus.
