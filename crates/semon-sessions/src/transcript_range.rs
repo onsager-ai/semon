@@ -900,7 +900,7 @@ fn render_field(
         mode,
     };
     let reader: &dyn SessionSourceReader = &composite;
-    let result = (|| -> io::Result<(String, bool, usize)> {
+    let result = (|| -> io::Result<(String, bool, usize, Value)> {
         let reference = references.get(&file.path).ok_or_else(invalid)?;
         if field.checkpoints.first() != Some(&field.start)
             || field.checkpoints.last() != Some(&field.end)
@@ -926,6 +926,7 @@ fn render_field(
         let mut bytes = Vec::with_capacity((end - at) as usize);
         let mut generation = None::<String>;
         let mut length = None;
+        let mut cached = true;
         for _ in 0..32 {
             let offset = at + bytes.len() as u64;
             if offset == end {
@@ -946,6 +947,7 @@ fn render_field(
             {
                 return Err(invalid());
             }
+            cached &= part.cached;
             generation = Some(part.generation);
             length = Some(part.length);
             bytes.extend_from_slice(&part.bytes);
@@ -962,19 +964,25 @@ fn render_field(
         if !decoded.complete || decoded.consumed != bytes.len() {
             return Err(invalid());
         }
+        use sha2::{Digest, Sha256};
+        let generation = generation.ok_or_else(invalid)?;
+        let content = json!({"state":if cached {"cached"} else {"available"},"sources":[{
+            "source":reference,"generation_hash":format!("{:x}", Sha256::digest(generation.as_bytes())),
+            "length":length,"cached":cached}]});
         Ok((
             decoded.text,
             end == field.record_offset + field.end,
             bytes.len(),
+            content,
         ))
     })();
     match result {
-        Ok((text, complete, bytes)) => reply(
+        Ok((text, complete, bytes, content)) => reply(
             200,
             json!({"api":1,"identity":selection.identity,
             "projection":{"version":VERSION,"generation":selection.generation},"slot":selection.first,
             "field":{"name":field.kind.name(),"chunk":chunk,"next":(!complete).then_some(chunk+1),"complete":complete},
-            "text":text,"freshness":{"state":"cached"},"provenance":{"source":references.get(&file.path),"offset":field.record_offset,"block":field.block,"native_event_id":field.native_event_id},"observation":{"source_bytes":bytes}}),
+            "text":text,"freshness":{"state":"cached"},"content_observation":content,"provenance":{"source":references.get(&file.path),"offset":field.record_offset,"block":field.block,"native_event_id":field.native_event_id},"observation":{"source_bytes":bytes}}),
         ),
         Err(_) => catalog::error(
             503,

@@ -1919,6 +1919,14 @@ mod tests {
                 assert_eq!(reply.status, 200);
                 let part: Value = serde_json::from_slice(&reply.body).unwrap();
                 assert_eq!(part["field"]["name"], "out");
+                assert_eq!(part["content_observation"]["state"], "available");
+                assert_eq!(
+                    part["content_observation"]["sources"][0]["generation_hash"]
+                        .as_str()
+                        .unwrap()
+                        .len(),
+                    64
+                );
                 expanded.push_str(part["text"].as_str().unwrap());
             }
             assert_eq!(expanded, body);
