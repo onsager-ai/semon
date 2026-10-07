@@ -1112,6 +1112,9 @@ impl ViewerCore {
         };
         self.follow();
         let views = self.views();
+        if path == "/api/sessions" {
+            return self.catalog(&views, query);
+        }
         if views.is_empty() {
             return text(404, "Not found");
         }
@@ -1163,6 +1166,60 @@ impl ViewerCore {
                 since.as_deref(),
                 query_value(query, "delta") == Some("1"),
             );
+        }
+        reply
+    }
+
+    /// Focused lists are scoped by the embedder's stable machine key. A
+    /// hostname is a label, and never selects a source access boundary.
+    fn catalog(&self, views: &Views, query: &str) -> ViewerReply {
+        let request = match crate::catalog::Request::parse(query) {
+            Ok(request) => request,
+            Err(reply) => return reply,
+        };
+        let machine = match query_value(query, "machine") {
+            Some(value) => match decoded(value) {
+                Some(machine) => machine,
+                None => {
+                    return crate::catalog::error(
+                        400,
+                        "invalid_arguments",
+                        "The machine key must be valid UTF-8.",
+                        false,
+                    );
+                }
+            },
+            None if views.len() == 1 => views[0].0.clone(),
+            None => {
+                return crate::catalog::error(
+                    400,
+                    "machine_scope_required",
+                    "Select a stable machine key for this focused session list.",
+                    false,
+                );
+            }
+        };
+        let matches: Vec<_> = views.iter().filter(|(key, _)| *key == machine).collect();
+        let [(key, view)] = matches.as_slice() else {
+            return crate::catalog::error(
+                if matches.is_empty() { 404 } else { 409 },
+                "machine_scope_unavailable",
+                "The selected machine key is missing or ambiguous.",
+                false,
+            );
+        };
+        // Record demand without waiting for an initial model build. The
+        // configured background coordinator performs coherent observation;
+        // OnRead callers retain their explicit warm()/api/model contract.
+        let refresh_error = view.note_catalog_read().err();
+        let mut reply = crate::catalog::page(view.options(), key, request);
+        if let Ok(mut body) = serde_json::from_slice::<Value>(&reply.body) {
+            body["refresh"] = match refresh_error {
+                Some(_) => json!({"state":"unavailable","retryable":true}),
+                None if self.refresh == Refresh::OnRead => json!({"state":"manual"}),
+                None => json!({"state":"updating"}),
+            };
+            reply.body = body.to_string().into_bytes();
         }
         reply
     }
