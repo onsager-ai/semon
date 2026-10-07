@@ -2154,7 +2154,7 @@ globalThis.__semonUIShared = __semonUIShared;
     const account = createAccountChrome(host2.account);
     const phone = window.matchMedia("(max-width: 760px)");
     let app = null, sidebar, head, nav, bar, scrim;
-    let recent, content;
+    let recent, content2;
     let desktopAccount = null, phoneAccount = null;
     let lead = null, destroyed = false, sx = null;
     let destinations = [], rail = false;
@@ -2287,7 +2287,7 @@ globalThis.__semonUIShared = __semonUIShared;
       account,
       get slots() {
         ready();
-        return { recent, content };
+        return { recent, content: content2 };
       },
       get drawerOpen() {
         return !!app && document.body.classList.contains("drawer-open");
@@ -2323,7 +2323,7 @@ globalThis.__semonUIShared = __semonUIShared;
         bar = required("#topbar");
         scrim = required("#scrim");
         recent = required("#side-list");
-        content = required("#page");
+        content2 = required("#page");
         app = container;
         paintHead();
         listen(scrim, "click", () => closeDrawer());
@@ -4521,7 +4521,7 @@ globalThis.__semonUIShared = __semonUIShared;
     return /* @__PURE__ */ jsx("span", { class: "cost-info", tabIndex: 0, role: "img", "aria-label": text2, "data-tip": text2, children: /* @__PURE__ */ jsx(Glyph, { path: COST_INFO, className: "" }) });
   }
   function Row({ row, open, widthClass }) {
-    const content = /* @__PURE__ */ jsxs(Fragment2, { children: [
+    const content2 = /* @__PURE__ */ jsxs(Fragment2, { children: [
       /* @__PURE__ */ jsx("span", { class: "session-name", children: screenText(row.name) }),
       /* @__PURE__ */ jsxs("span", { class: "hlabel", children: [
         row.mark && /* @__PURE__ */ jsx(Harness, { mark: row.mark, lead: false }),
@@ -4543,9 +4543,9 @@ globalThis.__semonUIShared = __semonUIShared;
           event.preventDefault();
           open();
         },
-        children: content
+        children: content2
       }
-    ) : /* @__PURE__ */ jsx("button", { class: cls, type: "button", onClick: open, children: content }) : /* @__PURE__ */ jsx("div", { class: cls, children: content });
+    ) : /* @__PURE__ */ jsx("button", { class: cls, type: "button", onClick: open, children: content2 }) : /* @__PURE__ */ jsx("div", { class: cls, children: content2 });
   }
   function renderAnalyticsScreen(root, snapshot, host2) {
     let layout = states.get(root);
@@ -5489,7 +5489,7 @@ globalThis.__semonUIShared = __semonUIShared;
           }
         );
       case "background": {
-        const content = /* @__PURE__ */ jsxs(Fragment2, { children: [
+        const content2 = /* @__PURE__ */ jsxs(Fragment2, { children: [
           /* @__PURE__ */ jsx(Glyph, { path: "M4 17l5-5-5-5M12 19h8", className: "" }),
           /* @__PURE__ */ jsx("span", { class: "bg-label", children: screenText(entry2.label) })
         ] });
@@ -5508,9 +5508,9 @@ globalThis.__semonUIShared = __semonUIShared;
                   if (event.currentTarget.isConnected)
                     owner.host.background(entry2.call, event.currentTarget);
                 },
-                children: content
+                children: content2
               }
-            ) : /* @__PURE__ */ jsx("div", { class: "bg-line", children: content })
+            ) : /* @__PURE__ */ jsx("div", { class: "bg-line", children: content2 })
           }
         );
       }
@@ -7672,13 +7672,13 @@ globalThis.__semonUIShared = __semonUIShared;
       const request = new AbortController();
       this.nativePending = request;
       this.host.loadMachines(request.signal).then(
-        (content) => {
+        (content2) => {
           if (this.disposed || request.signal.aborted || this.nativePending !== request) {
-            content.destroy();
+            content2.destroy();
             return;
           }
           this.nativePending = null;
-          ready(content);
+          ready(content2);
         },
         () => {
           if (!this.disposed && !request.signal.aborted && this.nativePending === request) {
@@ -9990,7 +9990,7 @@ globalThis.__semonUIShared = __semonUIShared;
         host2.accountControlsOwner.closeAccountMenu(true, true);
         host2.navigation.loadNative(
           r,
-          (content) => go(r, fromHistory, true, content),
+          (content2) => go(r, fromHistory, true, content2),
           () => {
             if (host2.viewerHost) location.assign(host2.viewerHost.machinesPath);
           }
@@ -12984,7 +12984,7 @@ globalThis.__semonUIShared = __semonUIShared;
         onWideChange: () => host2.layoutOwner.setWideMode(!host2.layoutOwner.wideMode)
       } : null;
       const mode = s && errOn(s.id) ? "errors" : s && host2.findOpen ? "find" : "normal";
-      const content = viewerBar.update(
+      const content2 = viewerBar.update(
         {
           mode,
           name: title,
@@ -13078,7 +13078,7 @@ globalThis.__semonUIShared = __semonUIShared;
         ) : void 0
       };
       host2.accountControlsOwner.shellChrome?.topbar(
-        mode === "normal" ? { titleSlot: content.titleSlot, actions: [content.actions], session: !!s, lead, account } : { mode: [content.mode], session: true, account, accountTarget: content.accountTarget }
+        mode === "normal" ? { titleSlot: content2.titleSlot, actions: [content2.actions], session: !!s, lead, account } : { mode: [content2.mode], session: true, account, accountTarget: content2.accountTarget }
       );
       if (s && mode === "normal")
         host2.scope.frame(() => {
@@ -14087,7 +14087,7 @@ globalThis.__semonUIShared = __semonUIShared;
       const owner = opts.only ? new Map(
         (host2.modelStore.turns[sid] ?? []).flatMap((t) => t.entries.map((e) => [e.key, t.id]))
       ) : null;
-      const content = (values) => values.some((v) => v.kind !== "label" || v.className === "harness-note");
+      const content2 = (values) => values.some((v) => v.kind !== "label" || v.className === "harness-note");
       const closeTurn = () => {
         flush();
         if (!currentTurn.value) {
@@ -14101,7 +14101,7 @@ globalThis.__semonUIShared = __semonUIShared;
           if (t.out.length) view.trace = t.id;
         }
         view.entries = tx;
-        if (!filtering || content(tx)) blocks2.push({ kind: "turn", turn: view });
+        if (!filtering || content2(tx)) blocks2.push({ kind: "turn", turn: view });
         currentTurn.value = null;
         tx = [];
         masked = false;
@@ -14335,7 +14335,7 @@ globalThis.__semonUIShared = __semonUIShared;
           lead: "Started " + host2.clock(s.start) + " on\xA0",
           machine: host2.modelStore.machines[s.movedFrom ?? s.machine]
         } : void 0,
-        empty: !opts.only && !blocks2.some((b) => content(b.kind === "turn" ? b.turn.entries : b.entries)) ? host2.find ? "Nothing matches \u201C" + host2.find + "\u201D." : "Nothing to show with these filters." : void 0,
+        empty: !opts.only && !blocks2.some((b) => content2(b.kind === "turn" ? b.turn.entries : b.entries)) ? host2.find ? "Nothing matches \u201C" + host2.find + "\u201D." : "Nothing to show with these filters." : void 0,
         footer: host2.screenViews.showsFooter(s, origin) ? host2.toolViewsOwner.footerSnapshot(s, origin) : void 0
       };
     }
@@ -15183,12 +15183,20 @@ globalThis.__semonUIShared = __semonUIShared;
     let field;
     if (row.field !== void 0) {
       const reference = object2(row.field);
-      if (reference.name !== "text") throw new Error("Unsupported native text field");
+      if (reference.name !== "text" && reference.name !== "out")
+        throw new Error("Unsupported native text field");
       field = {
-        name: "text",
+        name: reference.name,
         chunks: ordinal(reference.chunks),
         complete: boolean(reference.complete)
       };
+    }
+    let freshness2;
+    if (row.freshness !== void 0) {
+      const state2 = object2(row.freshness).state;
+      if (state2 !== "cached" && state2 !== "stale" && state2 !== "incomplete" && state2 !== "unavailable")
+        throw new Error("Invalid catalog entry freshness");
+      freshness2 = { state: state2 };
     }
     parsed.key = entryId;
     parsed.slot = slot;
@@ -15198,6 +15206,7 @@ globalThis.__semonUIShared = __semonUIShared;
       entry: parsed,
       clipped: row.clipped === void 0 ? void 0 : boolean(row.clipped),
       field,
+      freshness: freshness2,
       native_action_text: parsed.k === "h" ? text(row.text) : void 0,
       provenance: {
         source: parseCatalogSource(provenance.source),
@@ -15231,6 +15240,14 @@ globalThis.__semonUIShared = __semonUIShared;
   }
 
   // src/state/catalog-transcript.ts
+  function content(item2) {
+    const { freshness: freshness2, ...body } = item2;
+    return JSON.stringify(body);
+  }
+  function emptyObservedBody(item2) {
+    const entry2 = item2.entry;
+    return entry2.k === "tool" ? !entry2.out : entry2.k === "h" ? !item2.native_action_text : (entry2.k === "u" || entry2.k === "a" || entry2.k === "think") && !entry2.text;
+  }
   var CatalogTranscriptStore = class {
     epoch = 0;
     contentVersion = 0;
@@ -15291,14 +15308,29 @@ globalThis.__semonUIShared = __semonUIShared;
           ids.set(item2.entry_id, item2.slot);
         }
       }
+      page.entries = page.entries.map((item2) => {
+        const old = existing.get(item2.slot);
+        if (old && item2.freshness?.state === "incomplete" && emptyObservedBody(item2) && old.entry_id === item2.entry_id && old.entry.k === item2.entry.k && JSON.stringify(old.provenance) === JSON.stringify(item2.provenance))
+          return { ...old, freshness: item2.freshness };
+        return item2;
+      });
       for (const item2 of page.entries) {
         const old = existing.get(item2.slot);
-        if (ids.has(item2.entry_id) && ids.get(item2.entry_id) !== item2.slot || old && JSON.stringify(old) !== JSON.stringify(item2))
+        if (ids.has(item2.entry_id) && ids.get(item2.entry_id) !== item2.slot || old && content(old) !== content(item2))
           throw new Error("Catalog transcript entry changed within a projection");
       }
+      if (sameRange && JSON.stringify(sameRange.entries) === JSON.stringify(page.entries)) {
+        this.requests.delete(request);
+        this.pages[this.pages.indexOf(sameRange)] = page;
+        return true;
+      }
+      const observed = new Map(page.entries.map((item2) => [item2.slot, item2]));
       this.requests.delete(request);
       this.pages = [
-        ...this.pages.filter((old) => old.range.first !== first || old.range.end !== page.range.end),
+        ...this.pages.filter((old) => old.range.first !== first || old.range.end !== page.range.end).map((old) => ({
+          ...old,
+          entries: old.entries.map((item2) => observed.get(item2.slot) ?? item2)
+        })),
         page
       ].sort((a, b) => a.range.first - b.range.first);
       ++this.contentVersion;
@@ -15427,7 +15459,7 @@ globalThis.__semonUIShared = __semonUIShared;
 
   // src/app/catalogTranscriptView.ts
   function catalogTranscriptBlocks(entries) {
-    return entries.map(({ entry: entry2, entry_id, native_action_text, clipped }) => {
+    return entries.map(({ entry: entry2, entry_id, native_action_text, clipped, freshness: freshness2 }) => {
       const views = [];
       let notice = 0;
       const label = (text2) => views.push({
@@ -15491,6 +15523,10 @@ globalThis.__semonUIShared = __semonUIShared;
       else if (entry2.k === "signal")
         label("Native " + entry2.signal.kind + (entry2.signal.tag ? " \xB7 " + entry2.signal.tag : ""));
       if (clipped) label("Recorded text preview. The complete source text is not loaded.");
+      if (freshness2 && freshness2.state !== "cached")
+        label(
+          "Source observation is " + freshness2.state + ". Previously loaded content is retained."
+        );
       if (entry2.img?.length) label("Attachments unavailable for this source.");
       return { kind: "loose", key: entry_id, entries: views };
     });

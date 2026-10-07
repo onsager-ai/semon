@@ -18,7 +18,8 @@ export interface CatalogTranscriptEntry {
   entry: Entry;
   native_action_text?: string;
   clipped?: boolean;
-  field?: { name: 'text'; chunks: number; complete: boolean };
+  field?: { name: 'text' | 'out'; chunks: number; complete: boolean };
+  freshness?: { state: CatalogFreshness };
   provenance: {
     source: CatalogSourceReference['source'];
     native_event_id: string | null;
@@ -52,12 +53,25 @@ function entry(value: unknown): CatalogTranscriptEntry {
   let field: CatalogTranscriptEntry['field'];
   if (row.field !== undefined) {
     const reference = object(row.field);
-    if (reference.name !== 'text') throw new Error('Unsupported native text field');
+    if (reference.name !== 'text' && reference.name !== 'out')
+      throw new Error('Unsupported native text field');
     field = {
-      name: 'text',
+      name: reference.name,
       chunks: ordinal(reference.chunks),
       complete: boolean(reference.complete),
     };
+  }
+  let freshness: CatalogTranscriptEntry['freshness'];
+  if (row.freshness !== undefined) {
+    const state = object(row.freshness).state;
+    if (
+      state !== 'cached' &&
+      state !== 'stale' &&
+      state !== 'incomplete' &&
+      state !== 'unavailable'
+    )
+      throw new Error('Invalid catalog entry freshness');
+    freshness = { state };
   }
   parsed.key = entryId;
   parsed.slot = slot;
@@ -67,6 +81,7 @@ function entry(value: unknown): CatalogTranscriptEntry {
     entry: parsed,
     clipped: row.clipped === undefined ? undefined : boolean(row.clipped),
     field,
+    freshness,
     native_action_text: parsed.k === 'h' ? text(row.text) : undefined,
     provenance: {
       source: parseCatalogSource(provenance.source),
