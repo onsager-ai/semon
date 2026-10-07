@@ -8452,6 +8452,121 @@ globalThis.__semonUIShared = __semonUIShared;
     }
   };
 
+  // src/state/catalog-wire.ts
+  var nullable = (value, parse) => value === null ? null : parse(value);
+  var strings4 = (value) => array(value, text);
+  function integer(value) {
+    const parsed = number(value);
+    if (!Number.isSafeInteger(parsed)) throw new Error("Invalid catalog integer");
+    return parsed;
+  }
+  function freshness(value) {
+    if (value === "cached" || value === "stale" || value === "incomplete" || value === "unavailable")
+      return value;
+    throw new Error("Invalid catalog freshness");
+  }
+  function digest(value) {
+    const bytes = array(value, integer);
+    if (bytes.length !== 32 || bytes.some((byte) => byte < 0 || byte > 255))
+      throw new Error("Invalid catalog source digest");
+    return bytes;
+  }
+  function sourceReference(value) {
+    const row = object2(value), source = object2(row.source), offset = integer(source.offset);
+    if (offset < 0) throw new Error("Invalid catalog source offset");
+    return {
+      source: {
+        root: text(source.root),
+        path: text(source.path),
+        native_id: text(source.native_id),
+        offset,
+        prefix_sha256: digest(source.prefix_sha256),
+        tail_sha256: digest(source.tail_sha256)
+      },
+      state: freshness(row.state)
+    };
+  }
+  function parseCatalogIdentity(value) {
+    const row = object2(value), refs = array(row.source_refs, sourceReference), nativeIds = strings4(row.native_ids), nativeId = nullable(row.native_id, text), ids = new Set(refs.map((ref) => ref.source.native_id)), generation = text(row.generation), state2 = object2(row.freshness), sourceKey = text(row.source_key), catalogKey = text(row.catalog_key), harness = text(row.harness);
+    if (!catalogKey || !harness || !/^[0-9a-f]{64}$/i.test(generation) || nativeIds.some((id) => !id) || ids.has("") || new Set(nativeIds).size !== nativeIds.length || ids.size !== nativeIds.length || nativeIds.some((id) => !ids.has(id)) || nativeId !== null && (ids.size !== 1 || !ids.has(nativeId)))
+      throw new Error("Invalid catalog identity");
+    return {
+      source_key: sourceKey,
+      catalog_key: catalogKey,
+      harness,
+      native_id: nativeId,
+      native_ids: nativeIds,
+      source_refs: refs,
+      machine_label: nullable(row.machine_label, text),
+      generation,
+      observed_at: nullable(row.observed_at, integer),
+      freshness: { state: freshness(state2.state) }
+    };
+  }
+
+  // src/state/catalog-selection.ts
+  var CatalogSelectionStore = class {
+    epoch = 0;
+    disposed = false;
+    pending = null;
+    identity = null;
+    listeners = /* @__PURE__ */ new Set();
+    begin(scope) {
+      if (this.disposed) throw new Error("Catalog selection is destroyed");
+      if (typeof scope.source_key !== "string" || typeof scope.catalog_key !== "string" || !scope.catalog_key)
+        throw new Error("Invalid catalog selection");
+      const request = Object.freeze({
+        source_key: scope.source_key,
+        catalog_key: scope.catalog_key,
+        epoch: ++this.epoch
+      });
+      this.pending = request;
+      this.identity = null;
+      this.changed();
+      return request;
+    }
+    accept(request, value) {
+      if (request !== this.pending || request.epoch !== this.epoch) return false;
+      const identity2 = parseCatalogIdentity(value);
+      if (identity2.source_key !== request.source_key || identity2.catalog_key !== request.catalog_key)
+        throw new Error("Catalog selection scope mismatch");
+      for (const ref of identity2.source_refs) {
+        Object.freeze(ref.source.prefix_sha256);
+        Object.freeze(ref.source.tail_sha256);
+        Object.freeze(ref.source);
+        Object.freeze(ref);
+      }
+      Object.freeze(identity2.source_refs);
+      Object.freeze(identity2.native_ids);
+      Object.freeze(identity2.freshness);
+      this.identity = Object.freeze(identity2);
+      this.changed();
+      return true;
+    }
+    selectedIdentity() {
+      return this.identity;
+    }
+    subscribe(listener) {
+      if (this.disposed) throw new Error("Catalog selection is destroyed");
+      this.listeners.add(listener);
+      return () => this.listeners.delete(listener);
+    }
+    clear() {
+      ++this.epoch;
+      this.pending = null;
+      this.identity = null;
+      this.changed();
+    }
+    destroy() {
+      this.disposed = true;
+      this.listeners.clear();
+      this.clear();
+    }
+    changed() {
+      for (const listener of [...this.listeners]) listener();
+    }
+  };
+
   // src/app/accountControls.ts
   function createAccountControls(host2) {
     const accountHost = {
@@ -8666,10 +8781,10 @@ globalThis.__semonUIShared = __semonUIShared;
     };
   }
   var list = (parse) => (value) => array(value, parse);
-  var nullable = (parse) => (value) => value == null ? null : parse(value);
+  var nullable2 = (parse) => (value) => value == null ? null : parse(value);
   var optional2 = (parse) => (value) => value == null ? void 0 : parse(value);
-  var strings4 = list(text);
-  var money = shape({ usd: nullable(number), unpriced_models: strings4 });
+  var strings5 = list(text);
+  var money = shape({ usd: nullable2(number), unpriced_models: strings5 });
   var period = shape({
     agent_ms: number,
     started: number,
@@ -8683,7 +8798,7 @@ globalThis.__semonUIShared = __semonUIShared;
     cost: money
   });
   var busy = shape({ sid: text, ms: number });
-  var priced = shape({ sid: text, usd: nullable(number), unpriced_models: strings4 });
+  var priced = shape({ sid: text, usd: nullable2(number), unpriced_models: strings5 });
   var column = shape({
     from: number,
     to: number,
@@ -8701,14 +8816,14 @@ globalThis.__semonUIShared = __semonUIShared;
     more: number
   });
   var breakdown = shape({
-    repo: optional2(nullable(text)),
+    repo: optional2(nullable2(text)),
     machine: optional2(text),
     harness: optional2(text),
     model: optional2(text),
     ms: number,
     usd: number,
     sessions: number,
-    unpriced_models: strings4,
+    unpriced_models: strings5,
     incomplete_usage: optional2(boolean)
   });
   var tokens = shape({
@@ -8719,26 +8834,26 @@ globalThis.__semonUIShared = __semonUIShared;
   });
   var item = shape({
     sid: text,
-    models: optional2(strings4),
-    cost_usd: nullable(number),
-    pr_url: nullable(text)
+    models: optional2(strings5),
+    cost_usd: nullable2(number),
+    pr_url: nullable2(text)
   });
   var model = shape({
     model: text,
     band: text,
     n: number,
     small_sample: boolean,
-    first_pass_acceptance: nullable(number),
+    first_pass_acceptance: nullable2(number),
     acceptance_n: number,
-    median_review_rounds: nullable(number),
+    median_review_rounds: nullable2(number),
     review_rounds_n: number,
-    median_red_ci_heads: nullable(number),
+    median_red_ci_heads: nullable2(number),
     red_ci_n: number,
-    median_model_ms: nullable(number),
+    median_model_ms: nullable2(number),
     model_time_n: number,
-    median_cost_usd: nullable(number),
+    median_cost_usd: nullable2(number),
     cost_n: number,
-    allowance_per_million_input: nullable(number),
+    allowance_per_million_input: nullable2(number),
     allowance_n: number,
     tokens,
     tokens_n: number,
@@ -8750,11 +8865,11 @@ globalThis.__semonUIShared = __semonUIShared;
     version: text,
     current: period,
     previous: period,
-    longest_current_wait: nullable(busy),
+    longest_current_wait: nullable2(busy),
     calls_unknown: number,
     agents: shape({ unit: text, columns: list(column) }),
-    cost: nullable(
-      shape({ days: list(day), unpriced_models: strings4, incomplete_usage: optional2(boolean) })
+    cost: nullable2(
+      shape({ days: list(day), unpriced_models: strings5, incomplete_usage: optional2(boolean) })
     ),
     breakdown: shape({ repo: list(breakdown), machine: list(breakdown), model: list(breakdown) }),
     top: shape({ busy: list(busy), waited: list(busy), cost: list(priced) }),
@@ -8762,13 +8877,13 @@ globalThis.__semonUIShared = __semonUIShared;
     models: optional2(
       shape({ groups: list(model), unknown_reasons: (v) => dictionary(v, text) })
     ),
-    allowance: nullable(
+    allowance: nullable2(
       shape({
         recorded_at: number,
         windows: list(shape({ minutes: number, used_percent: number, resets_at: number }))
       })
     ),
-    facets: shape({ repo: list(nullable(text)), machine: strings4, harness: strings4, model: strings4 })
+    facets: shape({ repo: list(nullable2(text)), machine: strings5, harness: strings5, model: strings5 })
   });
 
   // src/app/analytics.ts
@@ -14701,6 +14816,7 @@ globalThis.__semonUIShared = __semonUIShared;
     application;
     now;
     updates = new ViewUpdates();
+    catalogSelectionStore = new CatalogSelectionStore();
     modelStore;
     admin;
     account;
@@ -14777,6 +14893,7 @@ globalThis.__semonUIShared = __semonUIShared;
           if (context.disposed) return;
           context.disposed = true;
           context.controlObservationOwner.destroy();
+          context.catalogSelectionStore.destroy();
           context.controlOwner.destroy();
           context.updates.destroy();
           context.scope.destroy();

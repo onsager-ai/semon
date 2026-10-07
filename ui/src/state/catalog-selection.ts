@@ -10,10 +10,12 @@ export interface CatalogSelectionRequest extends CatalogSelectionScope {
 /** Owns selected source identity independently of a complete graph/model baseline. */
 export class CatalogSelectionStore {
   private epoch = 0;
+  private disposed = false;
   private pending: CatalogSelectionRequest | null = null;
   private identity: CatalogSessionIdentity | null = null;
   private readonly listeners = new Set<() => void>();
   begin(scope: CatalogSelectionScope): CatalogSelectionRequest {
+    if (this.disposed) throw new Error('Catalog selection is destroyed');
     if (
       typeof scope.source_key !== 'string' ||
       typeof scope.catalog_key !== 'string' ||
@@ -53,6 +55,7 @@ export class CatalogSelectionStore {
     return this.identity;
   }
   subscribe(listener: () => void): () => void {
+    if (this.disposed) throw new Error('Catalog selection is destroyed');
     this.listeners.add(listener);
     return () => this.listeners.delete(listener);
   }
@@ -61,6 +64,11 @@ export class CatalogSelectionStore {
     this.pending = null;
     this.identity = null;
     this.changed();
+  }
+  destroy(): void {
+    this.disposed = true;
+    this.listeners.clear();
+    this.clear();
   }
   private changed(): void {
     for (const listener of [...this.listeners]) listener();
