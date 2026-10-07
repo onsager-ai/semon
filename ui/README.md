@@ -336,7 +336,7 @@ phase with a stale indicator. Native controls keep their separate authority and
 draft ownership. The focused browser contract poisons transcript block traversal
 while applying final and stale runtime updates and verifies retained input focus.
 
-The current native projection recipe is version 4 (the public API envelope stays
+The current native projection recipe is version 5 (the public API envelope stays
 version 1). Range and field decoders reject other projection versions. Native
 field descriptors and chunks may declare one or two string-encoding layers;
 source byte limits follow that declaration, and decoded text remains bounded.
@@ -358,3 +358,9 @@ source revision with `SEMON_CATALOG_SERVED_SOURCE`; the test uses the embedded m
 `SEMON_CATALOG_SERVED_UI_OVERRIDE=1` only for an explicitly recorded consumer overlay) and checks cold first content, bounded selected reads and
 retained return without compatibility endpoint requests. This is integration
 evidence for its documented synthetic workload, not a general latency budget.
+
+Recipe 5 binds every qualified source-byte read to the original source before
+and after the read. Previous recipe headers remain unavailable until rebuilt;
+selected ranges still resynchronize through generation checks. Non-success JSON
+reads cancel their unread response body while retaining the HTTP status, so a
+retired request cannot keep its error transport open.
