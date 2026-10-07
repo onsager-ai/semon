@@ -273,5 +273,38 @@ Explicit `after=0` includes the first slot; omitting `after` requests the latest
 overlap is rejected before any retained range changes. A stale projection needs
 explicit resynchronization of the requested ranges. Slot numbers address ranges;
 entry identities preserve renderer ownership across projection versions.
-These contracts are preparation: the existing bootstrap remains the complete
-model compatibility path until the catalog application consumer is connected.
+Bootstrap probes `/api/session-capabilities` before creating its content owner.
+A missing endpoint (404) preserves complete-model compatibility. An advertised
+`catalog-v1` contract creates an independent catalog application: metadata list
+and Recent rows come from the requested machine page with explicit
+`scope=retained_history`, and native transcript
+reads use only the selected canonical session and requested ranges. The bounded
+owner never requests `/api/model`, `/api/tx`, `/api/tool` or `/api/image`.
+`?compat=1` is an explicit workspace-history compatibility surface; it is never
+an automatic response to failed bounded reads.
+
+The first consumer supports machine-scoped latest-activity order and exact
+harness/repository filters. Full text search, source union, a complete graph,
+attachments and full native result expansion remain unavailable. Capability
+advertisements are rechecked independently, and selected transcripts that are
+still unavailable show a pending view. Native actions preserve original text
+while explaining incomplete relationship context. Source/facts/native selection
+observations remain separate from runtime authority. Retired native selection
+is valid retained-history metadata; it never supplies current control authority.
+The observer accepts only the independent current-scope `/api/session-identity`
+response. A transcript's historical identity cannot enter that selection store.
+
+Session roots and requested ranges are retained during navigation. Unchanged
+range observations update metadata without walking transcript blocks. Stale
+projection recovery builds the latest page and previously requested ranges in a
+separate store, then commits them together. The shared renderer retains stable
+entry keys, expansion state, control drafts and reading anchors. Permanent
+failures remain visible; transient observations use owned bounded requests and
+capped retries. Native status continues through the existing scoped observer,
+independently from content revisions. Native administrative embedding pages
+retain their explicitly configured compatibility owner.
+
+The browser contract uses synthetic source payloads and the actual shared
+renderers; it does not establish production body-span, archive, host authorization
+or connection-to-session integration performance. Those require the matching
+backend capability/projection producer and recorded artifact revisions.
