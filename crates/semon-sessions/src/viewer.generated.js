@@ -1827,15 +1827,15 @@ globalThis.__semonUIShared = __semonUIShared;
     options.vnode = (vnode) => {
       previous?.(vnode);
       if (typeof vnode.type === "string") {
-        for (const key of Object.keys(vnode.props)) {
-          if (["dangerouslySetInnerHTML", "style", "title"].includes(key))
-            throw new Error(`Forbidden DOM prop: ${key}`);
-          const value = vnode.props[key];
-          const externalLink = key === "href" && vnode.type === "a" && externalUrl(value) && vnode.props.target === "_blank" && vnode.props.rel === "noopener noreferrer";
-          if (["href", "src", "action"].includes(key) && value != null && !safePath(value) && !externalLink)
-            throw new Error(`Unsafe DOM path: ${key}`);
-          if (/^on/i.test(key) && typeof value === "string")
-            throw new Error(`Inline DOM handler: ${key}`);
+        for (const key2 of Object.keys(vnode.props)) {
+          if (["dangerouslySetInnerHTML", "style", "title"].includes(key2))
+            throw new Error(`Forbidden DOM prop: ${key2}`);
+          const value = vnode.props[key2];
+          const externalLink = key2 === "href" && vnode.type === "a" && externalUrl(value) && vnode.props.target === "_blank" && vnode.props.rel === "noopener noreferrer";
+          if (["href", "src", "action"].includes(key2) && value != null && !safePath(value) && !externalLink)
+            throw new Error(`Unsafe DOM path: ${key2}`);
+          if (/^on/i.test(key2) && typeof value === "string")
+            throw new Error(`Inline DOM handler: ${key2}`);
         }
       }
     };
@@ -2105,7 +2105,7 @@ globalThis.__semonUIShared = __semonUIShared;
   }
   function svg(path, stroke = "1.8") {
     const node = document.createElementNS(NS, "svg");
-    for (const [key, value] of Object.entries({
+    for (const [key2, value] of Object.entries({
       viewBox: "0 0 24 24",
       "aria-hidden": "true",
       fill: "none",
@@ -2114,7 +2114,7 @@ globalThis.__semonUIShared = __semonUIShared;
       "stroke-linecap": "round",
       "stroke-linejoin": "round"
     }))
-      node.setAttribute(key, value);
+      node.setAttribute(key2, value);
     const p = document.createElementNS(NS, "path");
     p.setAttribute("d", path);
     node.append(p);
@@ -3729,18 +3729,18 @@ globalThis.__semonUIShared = __semonUIShared;
           ["project", "Project"],
           ["machine", "Machine"],
           ["harness", "Harness"]
-        ].map(([key, label]) => /* @__PURE__ */ jsx(
+        ].map(([key2, label]) => /* @__PURE__ */ jsx(
           "button",
           {
             type: "button",
-            "data-g": key,
-            "aria-pressed": snapshot.groupBy === key,
+            "data-g": key2,
+            "aria-pressed": snapshot.groupBy === key2,
             onClick: (event) => {
-              if (event.currentTarget.isConnected) host2.group(key);
+              if (event.currentTarget.isConnected) host2.group(key2);
             },
             children: label
           },
-          key
+          key2
         )) }),
         snapshot.showReviews && /* @__PURE__ */ jsx("div", { class: "groupby", role: "group", "aria-label": "Session visibility", children: /* @__PURE__ */ jsx(
           "button",
@@ -4516,14 +4516,14 @@ globalThis.__semonUIShared = __semonUIShared;
         if (disposed) throw new Error("Measured layout is destroyed");
         if (!properties.includes(property) || !Number.isFinite(value) || Math.abs(value) > 1e8 || !["px", "%"].includes(unit))
           throw new Error("Invalid measured geometry");
-        const key = property + ":" + value + unit, existing = rules.get(key);
+        const key2 = property + ":" + value + unit, existing = rules.get(key2);
         if (existing) return existing;
         const name = prefix + rules.size;
         sheet2.insertRule(
           "." + name + "{" + property + ":" + value + unit + "}",
           sheet2.cssRules.length
         );
-        rules.set(key, name);
+        rules.set(key2, name);
         return name;
       },
       destroy() {
@@ -4741,16 +4741,16 @@ globalThis.__semonUIShared = __semonUIShared;
             /* @__PURE__ */ jsx("div", { class: "analytics-bd-bar", children: /* @__PURE__ */ jsx("div", { class: "analytics-measure", role: "group", "aria-label": "Breakdown bar measure", children: [
               ["hours", "Agent-hours"],
               ["cost", "API-equivalent cost"]
-            ].map(([key, label]) => /* @__PURE__ */ jsx(
+            ].map(([key2, label]) => /* @__PURE__ */ jsx(
               "button",
               {
                 type: "button",
-                "data-measure": key,
-                "aria-pressed": snapshot.measure === key,
-                onClick: () => active(() => host2.measure(key)),
+                "data-measure": key2,
+                "aria-pressed": snapshot.measure === key2,
+                onClick: () => active(() => host2.measure(key2)),
                 children: label
               },
-              key
+              key2
             )) }) }),
             /* @__PURE__ */ jsx("div", { class: "analytics-breakdowns", children: snapshot.breakdowns.map((group) => /* @__PURE__ */ jsxs("section", { class: "analytics-panel", children: [
               /* @__PURE__ */ jsx("h3", { children: group.heading }),
@@ -5035,13 +5035,13 @@ globalThis.__semonUIShared = __semonUIShared;
     owner.measure = () => {
       if (owner.disposed || !root.isConnected) return;
       let changed = false;
-      for (const [key, pair] of owner.briefs) {
-        if (owner.open.has(key) || !pair.node.clientHeight) continue;
+      for (const [key2, pair] of owner.briefs) {
+        if (owner.open.has(key2) || !pair.node.clientHeight) continue;
         const clipped = pair.node.scrollHeight > pair.node.clientHeight + 1;
-        if (owner.clipped.has(key) !== clipped) {
+        if (owner.clipped.has(key2) !== clipped) {
           changed = true;
-          if (clipped) owner.clipped.add(key);
-          else owner.clipped.delete(key);
+          if (clipped) owner.clipped.add(key2);
+          else owner.clipped.delete(key2);
         }
       }
       if (changed) {
@@ -5481,7 +5481,7 @@ globalThis.__semonUIShared = __semonUIShared;
     ] }) });
   }
   function Entry({ entry: entry2, owner }) {
-    const key = identity(entry2), open = owner.open.has(key), active = (action) => {
+    const key2 = identity(entry2), open = owner.open.has(key2), active = (action) => {
       if (!owner.disposed) action();
     };
     switch (entry2.kind) {
@@ -5495,7 +5495,7 @@ globalThis.__semonUIShared = __semonUIShared;
             "data-h": entry2.handoff,
             children: [
               entry2.images?.length ? /* @__PURE__ */ jsx("div", { class: "attach-row", children: entry2.images.map(
-                (image2, i) => image2.unavailable || owner.failedImages.has(key + ":" + image2.url) ? /* @__PURE__ */ jsx("span", { class: "attach-na", children: "Image not available" }, i) : /* @__PURE__ */ jsx(
+                (image2, i) => image2.unavailable || owner.failedImages.has(key2 + ":" + image2.url) ? /* @__PURE__ */ jsx("span", { class: "attach-na", children: "Image not available" }, i) : /* @__PURE__ */ jsx(
                   "button",
                   {
                     class: "attach",
@@ -5516,8 +5516,8 @@ globalThis.__semonUIShared = __semonUIShared;
                         height: image2.height,
                         src: image2.url,
                         onError: () => active(() => {
-                          owner.failedImages.add(key + ":" + image2.url);
-                          owner.change(key);
+                          owner.failedImages.add(key2 + ":" + image2.url);
+                          owner.change(key2);
                         })
                       }
                     )
@@ -5576,19 +5576,19 @@ globalThis.__semonUIShared = __semonUIShared;
               {
                 snapshot: entry2.step,
                 expanded: open,
-                mounted: owner.mounted.has(key),
+                mounted: owner.mounted.has(key2),
                 toggle: () => active(() => {
-                  owner.mounted.add(key);
-                  if (open) owner.open.delete(key);
-                  else owner.open.add(key);
-                  owner.change(key);
+                  owner.mounted.add(key2);
+                  if (open) owner.open.delete(key2);
+                  else owner.open.add(key2);
+                  owner.change(key2);
                 }),
                 host: {
                   all(label) {
-                    owner.host.toolAll(key, label);
+                    owner.host.toolAll(key2, label);
                   },
                   script() {
-                    owner.host.script(key);
+                    owner.host.script(key2);
                   }
                 }
               }
@@ -5639,9 +5639,9 @@ globalThis.__semonUIShared = __semonUIShared;
               "aria-expanded": open,
               onClick: (event) => {
                 if (!event.currentTarget.isConnected) return;
-                if (open) owner.open.delete(key);
-                else owner.open.add(key);
-                owner.change(key);
+                if (open) owner.open.delete(key2);
+                else owner.open.add(key2);
+                owner.change(key2);
               },
               children: [
                 entry2.running ? /* @__PURE__ */ jsx("span", { class: "spin" }) : /* @__PURE__ */ jsx(Glyph, { path: entry2.stack, className: "" }),
@@ -5727,9 +5727,9 @@ globalThis.__semonUIShared = __semonUIShared;
               /* @__PURE__ */ jsx(
                 "div",
                 {
-                  class: "ev-text" + (open ? " open" : owner.clipped.has(key) ? " clipped" : ""),
+                  class: "ev-text" + (open ? " open" : owner.clipped.has(key2) ? " clipped" : ""),
                   ref: (node) => {
-                    if (node) owner.clamps.set(key, node);
+                    if (node) owner.clamps.set(key2, node);
                   },
                   children: /* @__PURE__ */ jsx(Inline, { text: entry2.brief })
                 }
@@ -5739,14 +5739,14 @@ globalThis.__semonUIShared = __semonUIShared;
                 {
                   class: "link ev-more",
                   type: "button",
-                  hidden: !owner.clipped.has(key) && !open,
+                  hidden: !owner.clipped.has(key2) && !open,
                   "aria-expanded": open,
                   onClick: (event) => {
                     event.stopPropagation();
                     if (!event.currentTarget.isConnected) return;
-                    if (open) owner.open.delete(key);
-                    else owner.open.add(key);
-                    owner.change(key);
+                    if (open) owner.open.delete(key2);
+                    else owner.open.add(key2);
+                    owner.change(key2);
                   },
                   children: open ? "Show less" : "Show more"
                 }
@@ -5895,15 +5895,15 @@ globalThis.__semonUIShared = __semonUIShared;
       state3.measure = () => {
         if (state3.disposed) return;
         let changed = false;
-        for (const [key, node] of state3.clamps) {
-          if (!node.isConnected || state3.open.has(key) || !node.clientHeight) continue;
+        for (const [key2, node] of state3.clamps) {
+          if (!node.isConnected || state3.open.has(key2) || !node.clientHeight) continue;
           const clipped = node.scrollHeight > node.clientHeight + 1;
-          if (state3.clipped.has(key) !== clipped) {
-            if (clipped) state3.clipped.add(key);
-            else state3.clipped.delete(key);
+          if (state3.clipped.has(key2) !== clipped) {
+            if (clipped) state3.clipped.add(key2);
+            else state3.clipped.delete(key2);
             changed = true;
             for (const block of state3.blocks)
-              if (block.kind === "turn" && block.turn.entries.some((entry2) => identity(entry2) === key))
+              if (block.kind === "turn" && block.turn.entries.some((entry2) => identity(entry2) === key2))
                 state3.revisions.set(block.turn.id, (state3.revisions.get(block.turn.id) ?? 0) + 1);
           }
         }
@@ -5926,10 +5926,10 @@ globalThis.__semonUIShared = __semonUIShared;
     state2.host = host2;
     state2.blocks = mergeBlocks(state2.blocks, snapshot);
     state2.snapshot = snapshot;
-    state2.change = (key) => {
+    state2.change = (key2) => {
       for (const block of state2.blocks)
         if (block.kind === "turn" && block.turn.entries.some(
-          (entry2) => identity(entry2) === key || entry2.kind === "group" && entry2.entries.some((item2) => identity(item2) === key)
+          (entry2) => identity(entry2) === key2 || entry2.kind === "group" && entry2.entries.some((item2) => identity(item2) === key2)
         ))
           state2.revisions.set(block.turn.id, (state2.revisions.get(block.turn.id) ?? 0) + 1);
       state2.paint();
@@ -6008,11 +6008,11 @@ globalThis.__semonUIShared = __semonUIShared;
       );
       if (heldKind && held && !held.isConnected)
         (root.querySelector('[data-foot="' + CSS.escape(heldKind) + '"]') ?? root.querySelector('[data-foot="time"]'))?.focus({ preventScroll: true });
-      for (const [key, node] of state2.clamps) {
+      for (const [key2, node] of state2.clamps) {
         if (node.isConnected) state2.observer.observe(node);
         else {
           state2.observer.unobserve(node);
-          state2.clamps.delete(key);
+          state2.clamps.delete(key2);
         }
       }
     };
@@ -6267,20 +6267,20 @@ globalThis.__semonUIShared = __semonUIShared;
             ["steps", "Steps", void 0],
             ...view.failed ? [["failures", "Failed steps", view.failed]] : [],
             ...view.signals ? [["signals", "Signals", view.signals]] : []
-          ].map(([key, label, count]) => /* @__PURE__ */ jsxs(
+          ].map(([key2, label, count]) => /* @__PURE__ */ jsxs(
             "button",
             {
               class: "chip",
               type: "button",
-              "data-filter": key,
-              "aria-pressed": view.filter === key,
-              onClick: (event) => active(event.currentTarget, () => host2.filter(String(key))),
+              "data-filter": key2,
+              "aria-pressed": view.filter === key2,
+              onClick: (event) => active(event.currentTarget, () => host2.filter(String(key2))),
               children: [
                 /* @__PURE__ */ jsx("span", { children: label }),
                 count !== void 0 && /* @__PURE__ */ jsx("span", { class: "n", children: count })
               ]
             },
-            key
+            key2
           )) })
         ] }) : view.mode === "errors" ? /* @__PURE__ */ jsxs(
           "div",
@@ -6922,7 +6922,7 @@ globalThis.__semonUIShared = __semonUIShared;
     }
     return rows.length - tails.length;
   }
-  function orderRows(scope, key, items, compare, {
+  function orderRows(scope, key2, items, compare, {
     must = null,
     limit = Infinity,
     quiet = false,
@@ -6930,8 +6930,8 @@ globalThis.__semonUIShared = __semonUIShared;
   } = {}) {
     const sorted = [...items].sort(compare), by = new Map(items.map((row) => [row.id, row]));
     let ids = sorted.map((row) => row.id);
-    if (scope.keep && !quiet && !(seed && !scope.prev.has(key))) {
-      const existed = scope.prev.has(key), old = (scope.prev.get(key) ?? []).filter((id) => by.has(id)), have = new Set(old), fresh = sorted.filter((row) => !have.has(row.id)), up = fresh.filter((row) => must?.has(row.id) || scope.calm && existed);
+    if (scope.keep && !quiet && !(seed && !scope.prev.has(key2))) {
+      const existed = scope.prev.has(key2), old = (scope.prev.get(key2) ?? []).filter((id) => by.has(id)), have = new Set(old), fresh = sorted.filter((row) => !have.has(row.id)), up = fresh.filter((row) => must?.has(row.id) || scope.calm && existed);
       ids = [...up.map((row) => row.id), ...old];
       const shown = ids.slice(0, limit), inShown = new Set(shown), top = new Set(sorted.slice(0, limit).map((row) => row.id)), held = fresh.filter((row) => top.has(row.id) && !up.includes(row)).length;
       scope.n += held + sorted.slice(0, limit).filter((row) => have.has(row.id) && !inShown.has(row.id)).length + moves(
@@ -6939,7 +6939,7 @@ globalThis.__semonUIShared = __semonUIShared;
         compare
       );
     }
-    scope.lists.set(key, ids);
+    scope.lists.set(key2, ids);
     return ids.map((id) => by.get(id));
   }
 
@@ -7035,7 +7035,7 @@ globalThis.__semonUIShared = __semonUIShared;
           if (String(event.data).length > 3e5) throw new Error("Control snapshot too large");
           const value = JSON.parse(String(event.data));
           if (!value || typeof value !== "object" || !("revision" in value) || typeof value.revision !== "string" || value.revision.length < 1 || value.revision.length > 128 || !Object.entries(scope.params).every(
-            ([key, expected]) => key in value && value[key] === expected
+            ([key2, expected]) => key2 in value && value[key2] === expected
           ) || !("control" in value))
             throw new Error("Control identity changed");
           const control = host2.controlOwner.prepare(value.control);
@@ -7079,7 +7079,7 @@ globalThis.__semonUIShared = __semonUIShared;
   function parseControl(value) {
     if (value == null) return null;
     if (!record2(value) || typeof value.thread !== "string" || typeof value.generation !== "string" || !(value.activeTurn === null || typeof value.activeTurn === "string") || typeof value.connected !== "boolean" || !(value.reason === null || typeof value.reason === "string") || !record2(value.capabilities) || !["input", "steer", "interrupt", "commandApproval", "fileApproval", "questions"].every(
-      (key) => record2(value.capabilities) && typeof value.capabilities[key] === "boolean"
+      (key2) => record2(value.capabilities) && typeof value.capabilities[key2] === "boolean"
     ) || !Array.isArray(value.requests) || value.requests.length > 1280 || !record2(value.actions))
       throw new Error("Invalid control snapshot");
     if (value.runtime !== void 0 && (!record2(value.runtime) || typeof value.runtime.state !== "string" || !["active", "disconnected", "failed", "ended", "unavailable"].includes(
@@ -7089,7 +7089,7 @@ globalThis.__semonUIShared = __semonUIShared;
     if (record2(value.runtime) && (value.runtime.presence !== void 0 && (typeof value.runtime.presence !== "string" || !["active", "absent", "paused", "transitioning", "failed", "unknown"].includes(
       String(value.runtime.presence)
     )) || value.runtime.observedAt !== void 0 && value.runtime.observedAt !== null && (typeof value.runtime.observedAt !== "string" || value.runtime.observedAt.length > 64 || !Number.isFinite(Date.parse(value.runtime.observedAt))) || value.runtime.observationError !== void 0 && value.runtime.observationError !== null && (typeof value.runtime.observationError !== "string" || value.runtime.observationError.length > 512) || value.runtime.updating !== void 0 && typeof value.runtime.updating !== "boolean" || value.runtime.state !== "active" && (value.runtime.reconnectable || value.connected || ["input", "steer", "interrupt", "commandApproval", "fileApproval", "questions"].some(
-      (key) => record2(value.capabilities) && value.capabilities[key] === true
+      (key2) => record2(value.capabilities) && value.capabilities[key2] === true
     ))))
       throw new Error("Invalid runtime authority");
     for (const request of value.requests) {
@@ -7336,23 +7336,23 @@ globalThis.__semonUIShared = __semonUIShared;
   // src/app/routeControls.ts
   function createRouteControls(navigation) {
     const SLOTS = /* @__PURE__ */ new Map();
-    function slot(key, box, build) {
-      let s = SLOTS.get(key);
+    function slot(key2, box, build) {
+      let s = SLOTS.get(key2);
       if (!s || s.route !== navigation.route || s.box !== box || !box.contains(s.el)) {
         s?.ctx.destroy?.();
         const ctx = { sync() {
         }, onChange() {
         } };
         s = { route: navigation.route, box, ctx, el: build(ctx) };
-        SLOTS.set(key, s);
+        SLOTS.set(key2, s);
       }
       return s;
     }
     function retain(route) {
-      for (const [key, control] of SLOTS)
+      for (const [key2, control] of SLOTS)
         if (control.route !== route) {
           control.ctx.destroy?.();
-          SLOTS.delete(key);
+          SLOTS.delete(key2);
         }
     }
     return {
@@ -7572,9 +7572,9 @@ globalThis.__semonUIShared = __semonUIShared;
       }
       return t;
     }
-    const countOf = (s, key) => {
+    const countOf = (s, key2) => {
       const m = TXM[s.id];
-      return (m && m.to >= m.total ? m[key] : void 0) ?? s[key] ?? m?.[key] ?? null;
+      return (m && m.to >= m.total ? m[key2] : void 0) ?? s[key2] ?? m?.[key2] ?? null;
     };
     const callsText = (calls) => (calls == null ? "\u2014" : calls) + (calls === 1 ? " tool call" : " tool calls");
     let childrenCache = null;
@@ -7618,7 +7618,7 @@ globalThis.__semonUIShared = __semonUIShared;
     ];
     const asMoney = (usd) => "$" + usd.toFixed(2), shortMoney = (usd) => "$" + usd.toFixed(1);
     const usageTotal = (s) => Object.values(s.tokens_by_model ?? {}).reduce(
-      (sum, usage2) => sum + TOTAL_TOKEN_KINDS.reduce((n, key) => n + (Number(usage2[key]) || 0), 0),
+      (sum, usage2) => sum + TOTAL_TOKEN_KINDS.reduce((n, key2) => n + (Number(usage2[key2]) || 0), 0),
       0
     );
     function costForSessions(sessions) {
@@ -7645,10 +7645,10 @@ globalThis.__semonUIShared = __semonUIShared;
           );
           if (model2.usd == null) current.usd = null;
           else if (current.usd != null) current.usd += Number(model2.usd) || 0;
-          for (const [key, amount] of Object.entries(model2.tokens ?? {}))
-            current.tokens[key] = (current.tokens[key] ?? 0) + (Number(amount) || 0);
-          for (const [key, amount] of Object.entries(model2.usd_by_kind ?? {}))
-            current.usd_by_kind[key] = (current.usd_by_kind[key] ?? 0) + (Number(amount) || 0);
+          for (const [key2, amount] of Object.entries(model2.tokens ?? {}))
+            current.tokens[key2] = (current.tokens[key2] ?? 0) + (Number(amount) || 0);
+          for (const [key2, amount] of Object.entries(model2.usd_by_kind ?? {}))
+            current.usd_by_kind[key2] = (current.usd_by_kind[key2] ?? 0) + (Number(amount) || 0);
           total.by_model[modelId] = current;
         }
       }
@@ -8669,15 +8669,15 @@ globalThis.__semonUIShared = __semonUIShared;
     };
   }
   function parseCatalogPage(value) {
-    const page = object2(value), machine2 = text(page.machine), info = object2(page.machine_info), capabilities = object2(page.capabilities), generation = text(page.generation), items = array(page.items, parseCatalogSession), next = nullable(page.next_cursor, text), completeness = page.completeness === void 0 ? "complete" : object2(page.completeness).state, collectionFreshness = page.freshness === "updating" ? "updating" : freshness(page.freshness);
-    if (page.api !== 1 || completeness !== "partial" && completeness !== "complete" || collectionFreshness === "updating" && completeness !== "partial" || info.key !== machine2 || info.freshness !== "cached" || !/^[0-9a-f]{64}$/i.test(generation) || items.length > 100 || new Set(items.map((item2) => item2.key)).size !== items.length || next !== null && (!next || next.length > 8192))
+    const page = object2(value), machine2 = text(page.machine), info = object2(page.machine_info), capabilities = object2(page.capabilities), generation2 = text(page.generation), items = array(page.items, parseCatalogSession), next = nullable(page.next_cursor, text), completeness = page.completeness === void 0 ? "complete" : object2(page.completeness).state, collectionFreshness = page.freshness === "updating" ? "updating" : freshness(page.freshness);
+    if (page.api !== 1 || completeness !== "partial" && completeness !== "complete" || collectionFreshness === "updating" && completeness !== "partial" || info.key !== machine2 || info.freshness !== "cached" || !/^[0-9a-f]{64}$/i.test(generation2) || items.length > 100 || new Set(items.map((item2) => item2.key)).size !== items.length || next !== null && (!next || next.length > 8192))
       throw new Error("Invalid catalog page");
     return {
       api: 1,
       machine: machine2,
       read_scope: readScope(page.read_scope),
       machine_info: { key: machine2, label: text(info.label), freshness: "cached" },
-      generation,
+      generation: generation2,
       observed_at: nullable(page.observed_at, integer),
       freshness: collectionFreshness,
       completeness: { state: completeness },
@@ -8695,8 +8695,8 @@ globalThis.__semonUIShared = __semonUIShared;
     };
   }
   function parseCatalogIdentity(value) {
-    const row = object2(value), refs = array(row.source_refs, sourceReference), nativeIds = strings4(row.native_ids), nativeId = nullable(row.native_id, text), ids = new Set(refs.map((ref) => ref.source.native_id)), generation = text(row.generation), state2 = object2(row.freshness), sourceKey = text(row.source_key), catalogKey = text(row.catalog_key), harness = text(row.harness);
-    if (!sourceKey || !catalogKey || !harness || !/^[0-9a-f]{64}$/i.test(generation) || nativeIds.some((id) => !id) || ids.has("") || new Set(nativeIds).size !== nativeIds.length || ids.size !== nativeIds.length || nativeIds.some((id) => !ids.has(id)) || nativeId !== null && (ids.size !== 1 || !ids.has(nativeId)))
+    const row = object2(value), refs = array(row.source_refs, sourceReference), nativeIds = strings4(row.native_ids), nativeId = nullable(row.native_id, text), ids = new Set(refs.map((ref) => ref.source.native_id)), generation2 = text(row.generation), state2 = object2(row.freshness), sourceKey = text(row.source_key), catalogKey = text(row.catalog_key), harness = text(row.harness);
+    if (!sourceKey || !catalogKey || !harness || !/^[0-9a-f]{64}$/i.test(generation2) || nativeIds.some((id) => !id) || ids.has("") || new Set(nativeIds).size !== nativeIds.length || ids.size !== nativeIds.length || nativeIds.some((id) => !ids.has(id)) || nativeId !== null && (ids.size !== 1 || !ids.has(nativeId)))
       throw new Error("Invalid catalog identity");
     return {
       source_key: sourceKey,
@@ -8707,7 +8707,7 @@ globalThis.__semonUIShared = __semonUIShared;
       native_ids: nativeIds,
       source_refs: refs,
       machine_label: nullable(row.machine_label, text),
-      generation,
+      generation: generation2,
       observed_at: nullable(row.observed_at, integer),
       freshness: { state: freshness(state2.state) },
       ...observations(row)
@@ -8997,7 +8997,7 @@ globalThis.__semonUIShared = __semonUIShared;
   function shape(fields) {
     return (value) => {
       const source = object2(value), parsed = Object.fromEntries(
-        Object.entries(fields).map(([key, parse]) => [key, parse(source[key])])
+        Object.entries(fields).map(([key2, parse]) => [key2, parse(source[key2])])
       );
       return parsed;
     };
@@ -9126,9 +9126,9 @@ globalThis.__semonUIShared = __semonUIShared;
         q.push(
           "repo=" + (host2.sessionFilters.repo === "__none__" ? "" : host2.transportOwner.enc(host2.sessionFilters.repo))
         );
-      for (const key of ["machine", "harness", "model"])
-        if (host2.sessionFilters[key])
-          q.push(key + "=" + host2.transportOwner.enc(host2.sessionFilters[key]));
+      for (const key2 of ["machine", "harness", "model"])
+        if (host2.sessionFilters[key2])
+          q.push(key2 + "=" + host2.transportOwner.enc(host2.sessionFilters[key2]));
       return q.join("&");
     }
     const analyticsData = () => AN.answers.get(analyticsQuery())?.data ?? null;
@@ -9138,9 +9138,9 @@ globalThis.__semonUIShared = __semonUIShared;
         AN.againAsked ||= askedByUser;
         return AN.inflight;
       }
-      const key = analyticsQuery(), kept = AN.answers.get(key);
+      const key2 = analyticsQuery(), kept = AN.answers.get(key2);
       const controller = host2.scope.request();
-      const asked = fetch("/api/analytics?" + key, {
+      const asked = fetch("/api/analytics?" + key2, {
         signal: controller.signal,
         credentials: "same-origin",
         headers: kept?.etag ? { "If-None-Match": kept.etag } : {}
@@ -9161,8 +9161,8 @@ globalThis.__semonUIShared = __semonUIShared;
         return r.json().then((value) => {
           if (host2.disposed) return false;
           const data = parseAnalytics(value);
-          AN.answers.delete(key);
-          AN.answers.set(key, { etag, data });
+          AN.answers.delete(key2);
+          AN.answers.set(key2, { etag, data });
           while (AN.answers.size > AN_KEEP) AN.answers.delete(AN.answers.keys().next().value);
           const changed = AN.error != null || kept?.etag !== etag;
           AN.error = null;
@@ -9233,13 +9233,13 @@ globalThis.__semonUIShared = __semonUIShared;
       });
     const nameOfSid = (A, sid) => host2.modelStore.sessions[sid]?.name ?? A.sessions[sid]?.name ?? sid;
     const harnessOfSid = (A, sid) => host2.modelStore.sessions[sid]?.harness ?? A.sessions[sid]?.harness ?? "";
-    const sessionFacetValue = (s, key) => key === "repo" ? s.repo ?? "__none__" : key === "model" ? s.model ?? s.modelId ?? "Unknown model" : s[key] ?? "";
+    const sessionFacetValue = (s, key2) => key2 === "repo" ? s.repo ?? "__none__" : key2 === "model" ? s.model ?? s.modelId ?? "Unknown model" : s[key2] ?? "";
     function matchesSessionFacets(s) {
       return Object.keys(host2.sessionFilters).every(
-        (key) => !host2.sessionFilters[key] || sessionFacetValue(s, key) === host2.sessionFilters[key]
+        (key2) => !host2.sessionFilters[key2] || sessionFacetValue(s, key2) === host2.sessionFilters[key2]
       );
     }
-    const rangeFacet = (key) => host2.navigation.route.v !== "analytics" ? [] : (analyticsData()?.facets?.[key] ?? []).map((v) => v ?? "__none__");
+    const rangeFacet = (key2) => host2.navigation.route.v !== "analytics" ? [] : (analyticsData()?.facets?.[key2] ?? []).map((v) => v ?? "__none__");
     const FACETS = [
       [
         "repo",
@@ -9297,11 +9297,11 @@ globalThis.__semonUIShared = __semonUIShared;
           select(label, value, onChange2) {
             return createSelect({ label, value, options: [], onChange: onChange2 });
           },
-          change(key, value) {
-            host2.sessionFilters[key] = value;
+          change(key2, value) {
+            host2.sessionFilters[key2] = value;
           },
-          cleared(key) {
-            host2.sessionFilters[key] = "";
+          cleared(key2) {
+            host2.sessionFilters[key2] = "";
             ctx.sync();
             ctx.onChange();
           },
@@ -9339,17 +9339,17 @@ globalThis.__semonUIShared = __semonUIShared;
             } else if (host2.liveModelOwner.LIVE.pending) host2.applicationRefreshOwner.refresh();
           },
           clear() {
-            for (const key of Object.keys(host2.sessionFilters))
-              host2.sessionFilters[key] = "";
+            for (const key2 of Object.keys(host2.sessionFilters))
+              host2.sessionFilters[key2] = "";
           }
         });
         ctx.destroy = () => control.destroy();
         ctx.sync = () => control.update(
-          FACETS.map(([key, label, allLabel, valuesOf, showValue]) => {
-            const current = host2.sessionFilters[key], values = valuesOf().filter((value) => value !== ""), gone = current !== "" && !values.includes(current);
+          FACETS.map(([key2, label, allLabel, valuesOf, showValue]) => {
+            const current = host2.sessionFilters[key2], values = valuesOf().filter((value) => value !== ""), gone = current !== "" && !values.includes(current);
             if (gone) values.push(current);
             return {
-              key,
+              key: key2,
               label,
               value: current,
               display: showValue(current),
@@ -9505,10 +9505,10 @@ globalThis.__semonUIShared = __semonUIShared;
       const widthOf = (measure, max) => Math.max(measure ? 2 : 0, measure / max * 100);
       const makeChart = (costMode) => {
         if (!A) throw new Error("Analytics model unavailable");
-        const key = costMode ? "cost" : "agents", W = chartWidth(), left = costMode ? 46 : 40, right = W - 4;
+        const key2 = costMode ? "cost" : "agents", W = chartWidth(), left = costMode ? 46 : 40, right = W - 4;
         if (costMode && !A.cost)
           return {
-            key,
+            key: key2,
             heading: "Cost over time",
             info: host2.recentNavigation.COST_TIP,
             empty: "Cost is recorded per UTC day, so there is no hourly series. Pick 7 d or 30 d for a daily chart.",
@@ -9547,7 +9547,7 @@ globalThis.__semonUIShared = __semonUIShared;
             grid.push({ y: 151 - 139 * n / max, label: hLabel(n) });
         const step = (right - left) / Math.max(1, raw.length), barWidth = Math.max(2, step * 0.64);
         const bins = raw.map((bin, i) => {
-          const id = key + ":" + i, total = bin.claude + bin.codex, when = host2.clock(bin.a) + "\u2013" + host2.clock(bin.b), tip = when + ": " + hLabel(total);
+          const id = key2 + ":" + i, total = bin.claude + bin.codex, when = host2.clock(bin.a) + "\u2013" + host2.clock(bin.b), tip = when + ": " + hLabel(total);
           slices.set(id, { bin, costMode });
           return {
             key: id,
@@ -9565,7 +9565,7 @@ globalThis.__semonUIShared = __semonUIShared;
           };
         });
         return {
-          key,
+          key: key2,
           heading: costMode ? "Cost over time" : "Agents at work",
           info: costMode ? host2.recentNavigation.COST_TIP : void 0,
           sub: costMode ? "API-equivalent cost per UTC day \xB7 today so far \xB7 stacked by harness" : "Agent-hours " + A.agents.unit + " \xB7 stacked by harness",
@@ -9669,25 +9669,25 @@ globalThis.__semonUIShared = __semonUIShared;
           wait ? nameOfSid(A, wait.sid) + " has waited on you for " + timeText(wait.ms) : "No session is waiting on you"
         );
         charts.push(makeChart(false), makeChart(true));
-        for (const [key, title, groups] of [
+        for (const [key2, title, groups] of [
           ["repo", "By repo", A.breakdown.repo],
           ["machine", "By machine", A.breakdown.machine],
           ["harness", "By harness and model", A.breakdown.model]
         ]) {
-          const keyFor = (g) => key === "repo" ? g.repo ?? "__none__" : key === "machine" ? g.machine ?? "" : g.harness + "\0" + g.model;
-          const labelFor = (id) => key === "repo" ? id === "__none__" ? "No repo (roles)" : id : key === "machine" ? host2.modelStore.machines[id] ?? id : (HARNESS[id.split("\0")[0]] ?? id.split("\0")[0]) + " \xB7 " + shortModel(id.split("\0")[1]);
+          const keyFor = (g) => key2 === "repo" ? g.repo ?? "__none__" : key2 === "machine" ? g.machine ?? "" : g.harness + "\0" + g.model;
+          const labelFor = (id) => key2 === "repo" ? id === "__none__" ? "No repo (roles)" : id : key2 === "machine" ? host2.modelStore.machines[id] ?? id : (HARNESS[id.split("\0")[0]] ?? id.split("\0")[0]) + " \xB7 " + shortModel(id.split("\0")[1]);
           const selected = (g) => host2.analyticsMeasure === "cost" ? g.usd : g.ms, rows = [...groups].sort(
             (a, b) => selected(b) - selected(a) || labelFor(keyFor(a)).localeCompare(labelFor(keyFor(b)))
           ), max = Math.max(1, ...rows.map(selected));
           breakdowns.push({
-            key,
+            key: key2,
             heading: title,
             rows: rows.map((g) => ({
               key: keyFor(g),
               name: labelFor(keyFor(g)),
               count: g.sessions + (g.sessions === 1 ? " session" : " sessions"),
               width: widthOf(selected(g), max),
-              color: key === "harness" ? keyFor(g).startsWith("claude") ? "claude" : "codex" : void 0,
+              color: key2 === "harness" ? keyFor(g).startsWith("claude") ? "claude" : "codex" : void 0,
               hours: hoursText(g.ms),
               cost: g.incomplete_usage || g.unpriced_models.length ? "\u2014" : host2.domain.asMoney(g.usd),
               missing: g.incomplete_usage ? "copied usage; original owner unknown" : g.unpriced_models.length ? "no price for " + g.unpriced_models.join(", ") : void 0
@@ -9749,11 +9749,11 @@ globalThis.__semonUIShared = __semonUIShared;
               heading: band === "unknown" ? "Unknown difficulty" : band[0].toUpperCase() + band.slice(1),
               width: W,
               rows: rows.map((g) => {
-                const key = band + "\0" + g.model;
-                modelGroups.set(key, g);
+                const key2 = band + "\0" + g.model;
+                modelGroups.set(key2, g);
                 const tokens2 = g.tokens ?? {};
                 return {
-                  key,
+                  key: key2,
                   name: shortModel(g.model),
                   tip: g.model,
                   count: g.n + (g.small_sample ? " \xB7 small sample" : ""),
@@ -9836,11 +9836,11 @@ globalThis.__semonUIShared = __semonUIShared;
             host2.documentRendererOwner.render();
             host2.historyScrollOwner.restoreScroll(top);
           },
-          breakdown(group, key) {
-            if (group === "repo") host2.sessionFilters.repo = key;
-            else if (group === "machine") host2.sessionFilters.machine = key;
+          breakdown(group, key2) {
+            if (group === "repo") host2.sessionFilters.repo = key2;
+            else if (group === "machine") host2.sessionFilters.machine = key2;
             else {
-              const [harness, model2] = key.split("\0");
+              const [harness, model2] = key2.split("\0");
               host2.sessionFilters.harness = harness ?? "";
               host2.sessionFilters.model = model2 ?? "";
             }
@@ -9848,14 +9848,14 @@ globalThis.__semonUIShared = __semonUIShared;
             host2.groupBy = "recent";
             host2.destination.go({ v: "sessions" });
           },
-          slice(key) {
-            const slice = slices.get(key);
+          slice(key2) {
+            const slice = slices.get(key2);
             if (!slice || !A) return;
             const { bin, costMode } = slice;
             openAnalyticsSlice(A, bin.a, bin.b, bin.sessions, bin.more, costMode);
           },
-          model(key) {
-            const model2 = modelGroups.get(key);
+          model(key2) {
+            const model2 = modelGroups.get(key2);
             if (model2) openModelItems(model2);
           }
         }
@@ -10290,14 +10290,14 @@ globalThis.__semonUIShared = __semonUIShared;
     function revealEntryHash() {
       host2.pagingOwner.resetPagerInput();
       if (!location.hash) return;
-      let key = "";
+      let key2 = "";
       try {
-        key = decodeURIComponent(location.hash.slice(1));
+        key2 = decodeURIComponent(location.hash.slice(1));
       } catch {
-        key = location.hash.slice(1);
+        key2 = location.hash.slice(1);
       }
-      const target = document.getElementById(key) ?? [...document.querySelectorAll("[data-e]")].find((n) => n.dataset.e === key) ?? [...document.querySelectorAll(".turn[data-turn]")].find(
-        (n) => n.dataset.turn === key
+      const target = document.getElementById(key2) ?? [...document.querySelectorAll("[data-e]")].find((n) => n.dataset.e === key2) ?? [...document.querySelectorAll(".turn[data-turn]")].find(
+        (n) => n.dataset.turn === key2
       );
       if (!target) return;
       const place = () => {
@@ -11013,7 +11013,7 @@ globalThis.__semonUIShared = __semonUIShared;
 
   // src/app/liveUpdates.ts
   function createLiveUpdates(host2) {
-    let generation = 0;
+    let generation2 = 0;
     const applyModelDelta = (value) => host2.modelStore.apply(value);
     function update(value, resynchronize = false) {
       if (host2.disposed) return Promise.resolve();
@@ -11026,7 +11026,7 @@ globalThis.__semonUIShared = __semonUIShared;
       );
       const hadOrigin = host2.navigation.route.v === "session" && !!host2.modelStore.sessions["id" in host2.navigation.route ? host2.navigation.route.id : ""] && !!host2.domain.originHandoff("id" in host2.navigation.route ? host2.navigation.route.id : "");
       host2.transportOwner.adopt(m);
-      const revision = ++generation;
+      const revision = ++generation2;
       host2.liveModelOwner.remember(m);
       for (const sid of host2.transcripts.staleBriefs)
         if (!host2.modelStore.sessions[sid]) host2.transcripts.staleBriefs.delete(sid);
@@ -11106,7 +11106,7 @@ globalThis.__semonUIShared = __semonUIShared;
             )
           );
       return chain.then(() => {
-        if (host2.disposed || revision !== generation) return;
+        if (host2.disposed || revision !== generation2) return;
         host2.liveModelOwner.LIVE.version = m.version;
         host2.applicationRefreshOwner.refresh(
           full ? null : dirtyTurns(cuts, grown, changedH, oldT, changedCards, patched)
@@ -11609,8 +11609,8 @@ globalThis.__semonUIShared = __semonUIShared;
       const listed = sorted.filter((c) => keep.has(c.id)), hidden = kids.length - listed.length;
       if (!hidden && expandedAll === parent.id) expandedAll = null;
       const full = hidden > 0 && !rail && (expandedAll === parent.id || expandedUnder.has(parent.id));
-      const key = (full ? "a:" : "k:") + parent.id, unseen = !!sideOrder?.keep && open && !full && !sideOrder.reseed && sideOrder.seen.has(parent.id) && !sideOrder.prev.has(key);
-      const shown = sideOrder ? host2.orderingControlsOwner.orderList(sideOrder, key, full ? sorted : listed, byRank, {
+      const key2 = (full ? "a:" : "k:") + parent.id, unseen = !!sideOrder?.keep && open && !full && !sideOrder.reseed && sideOrder.seen.has(parent.id) && !sideOrder.prev.has(key2);
+      const shown = sideOrder ? host2.orderingControlsOwner.orderList(sideOrder, key2, full ? sorted : listed, byRank, {
         must: /* @__PURE__ */ new Set([...current ? [current] : [], ...ancestors, ...expandedPath]),
         quiet: !open,
         seed: full || sideOrder.reseed || !sideOrder.seen.has(parent.id)
@@ -12568,15 +12568,15 @@ globalThis.__semonUIShared = __semonUIShared;
           ...host2.sentencesOwner.sentenceHost,
           committed: (...args) => host2.sessionChrome.observeTitle(...args),
           trace: (...args) => host2.destination.goTrace(...args),
-          toolAll(key, label) {
-            const e = raw.get(key);
+          toolAll(key2, label) {
+            const e = raw.get(key2);
             if (e?.k === "tool") {
               const [ic, v] = host2.transcriptView.verb(e.name);
               host2.toolViewsOwner.openStepViewer(e, v, ic, label);
             }
           },
-          script(key) {
-            const e = raw.get(key);
+          script(key2) {
+            const e = raw.get(key2);
             if (e?.k === "tool") host2.toolViewsOwner.openScript(e);
           },
           image: (...args) => host2.toolViewsOwner.openImage(...args),
@@ -13020,7 +13020,7 @@ globalThis.__semonUIShared = __semonUIShared;
       if (!sid) return;
       const saved = ERR.saved, range = ERR.range, m = TXM[sid];
       dropErrors();
-      const generation = ERR.gen;
+      const generation2 = ERR.gen;
       let p = Promise.resolve(void 0);
       if (range && m && TX[sid] && (m.from !== range.m.from || m.to < range.m.to)) {
         TX[sid] = range.tx;
@@ -13030,7 +13030,7 @@ globalThis.__semonUIShared = __semonUIShared;
           p = tail(sid).catch(() => null);
       }
       p.then(() => {
-        if (navigation.route.v !== "session" || navigation.route.id !== sid || ERR.on || ERR.gen !== generation)
+        if (navigation.route.v !== "session" || navigation.route.id !== sid || ERR.on || ERR.gen !== generation2)
           return;
         render2();
         if (saved) restore(saved);
@@ -13179,12 +13179,12 @@ globalThis.__semonUIShared = __semonUIShared;
             host2.find = value.toLowerCase();
             host2.documentRendererOwner.render();
           },
-          filter(key) {
-            if (key === "failures" || key === "signals") {
-              s && openErrors(s.id, key === "signals" ? "signals" : "errors");
+          filter(key2) {
+            if (key2 === "failures" || key2 === "signals") {
+              s && openErrors(s.id, key2 === "signals" ? "signals" : "errors");
               return;
             }
-            host2.show = key === "messages" ? { messages: true, tools: false, thinking: false } : key === "steps" ? { messages: false, tools: true, thinking: false } : { ...host2.allVisibility };
+            host2.show = key2 === "messages" ? { messages: true, tools: false, thinking: false } : key2 === "steps" ? { messages: false, tools: true, thinking: false } : { ...host2.allVisibility };
             host2.documentRendererOwner.render();
           },
           menu(trigger, runs) {
@@ -13305,7 +13305,7 @@ globalThis.__semonUIShared = __semonUIShared;
     };
     const sessionLine = (s) => {
       const failed = host2.domain.countOf(s, "errors") ?? 0, runs = host2.domain.descendantsOf(s.id, host2.domain.sessionChildren()), cost2 = runs.length ? host2.domain.costForSessions([s, ...runs]) : host2.domain.costForSession(s.id), labels = [];
-      const add = (key, text2, tip, drop, extra = {}) => labels.push({ key, text: text2, tip: tip ?? void 0, drop, ...extra });
+      const add = (key2, text2, tip, drop, extra = {}) => labels.push({ key: key2, text: text2, tip: tip ?? void 0, drop, ...extra });
       add("state", STATE[s.state], void 0, 0, {
         className: "state " + s.state,
         state: s.state,
@@ -13471,7 +13471,7 @@ globalThis.__semonUIShared = __semonUIShared;
         const visible2 = nodes.find((n) => n.getBoundingClientRect().bottom > top);
         return host2.modelStore.turn.get(visible2?.dataset.turn ?? "") ?? (host2.modelStore.turns[s.id] ?? []).at(-1);
       })();
-      const actions = [], addAction = (key, text2, icon, className, note, checked, dot) => actions.push({ key, text: text2, icon, className, note, checked, dot });
+      const actions = [], addAction = (key2, text2, icon, className, note, checked, dot) => actions.push({ key: key2, text: text2, icon, className, note, checked, dot });
       if (traceTurn?.out.length) addAction("trace", "Trace this turn", I.trace, "menu-trace");
       const command = resumeCommand(s);
       if (command !== null) addAction("copy", "Copy resume command", I.copy);
@@ -13550,15 +13550,15 @@ globalThis.__semonUIShared = __semonUIShared;
             host2.pendingSessionOpen = id;
             d.close();
           },
-          action(key) {
-            if (key === "trace" && traceTurn) {
+          action(key2) {
+            if (key2 === "trace" && traceTurn) {
               host2.afterPop = () => host2.destination.goTrace(traceTurn.id);
               d.close();
-            } else if (key === "wide") host2.layoutOwner.setWideMode(!host2.layoutOwner.wideMode);
-            else if (key === "signals" || key === "errors") {
+            } else if (key2 === "wide") host2.layoutOwner.setWideMode(!host2.layoutOwner.wideMode);
+            else if (key2 === "signals" || key2 === "errors") {
               d.close();
-              s && openErrors(s.id, key === "signals" ? "signals" : "errors");
-            } else if (key === "runs")
+              s && openErrors(s.id, key2 === "signals" ? "signals" : "errors");
+            } else if (key2 === "runs")
               body.querySelector(".runs")?.scrollIntoView({ block: "start" });
           }
         }
@@ -13638,12 +13638,12 @@ globalThis.__semonUIShared = __semonUIShared;
           project: (s) => s.repo ?? "No repo (roles)",
           harness: (s) => HARNESS[s.harness]
         };
-        const key = keysOf[host2.groupBy] ?? ((s) => s.name);
-        const keys = [...new Set(lanes.map(key))].sort(
+        const key2 = keysOf[host2.groupBy] ?? ((s) => s.name);
+        const keys = [...new Set(lanes.map(key2))].sort(
           (a, b) => Number(a.startsWith("No repo")) - Number(b.startsWith("No repo")) || a.localeCompare(b)
         );
         groups = keys.map((k) => {
-          const rows2 = lanes.filter((s) => key(s) === k);
+          const rows2 = lanes.filter((s) => key2(s) === k);
           return [
             k,
             host2.orderingControlsOwner.orderList(
@@ -15289,6 +15289,58 @@ globalThis.__semonUIShared = __semonUIShared;
     }
   };
 
+  // src/state/catalog-source-candidates.ts
+  var nullableText = (v) => v === null ? null : text(v);
+  function key(v) {
+    const value = text(v);
+    if (!value || value.length > 8192) throw new Error("Invalid source candidate identity");
+    return value;
+  }
+  function generation(v) {
+    const value = text(v);
+    if (!/^[a-f0-9]{64}$/.test(value)) throw new Error("Invalid source candidate generation");
+    return value;
+  }
+  function parseCatalogSourceCandidates(v) {
+    const row = object2(v);
+    const items = array(row.items, (value) => {
+      const candidate = object2(value), source = object2(candidate.source), path = text(source.path), root = text(source.root);
+      const observed = candidate.archive_observed_at === null ? null : number(candidate.archive_observed_at);
+      if (!root || !path || path.length > 4096 || path.startsWith("/") || path.includes("\\") || path.includes("\0") || path.split("/").includes("..") || observed !== null && (!Number.isSafeInteger(observed) || observed < 0))
+        throw new Error("Invalid archive source hint");
+      return {
+        candidate_key: key(candidate.candidate_key),
+        source: { root, path },
+        native_name_hint: nullableText(candidate.native_name_hint),
+        generation: generation(candidate.generation),
+        archive_observed_at: observed
+      };
+    });
+    if (row.api !== 1 || items.length > 60 || new Set(items.map((item2) => item2.candidate_key)).size !== items.length)
+      throw new Error("Invalid source candidate page");
+    return {
+      api: 1,
+      source_key: key(row.source_key),
+      items,
+      next_cursor: row.next_cursor === null ? null : key(row.next_cursor)
+    };
+  }
+  function parseCatalogSourceCandidateProgress(v) {
+    const row = object2(v), catalogKey = row.catalog_key === null ? null : key(row.catalog_key);
+    if (row.api !== 1 || !["updating", "ready", "unavailable"].includes(text(row.state)) || row.state === "ready" !== (catalogKey !== null))
+      throw new Error("Invalid source candidate progress");
+    return {
+      api: 1,
+      source_key: key(row.source_key),
+      candidate_key: key(row.candidate_key),
+      generation: generation(row.generation),
+      state: row.state,
+      catalog_key: catalogKey,
+      retryable: boolean(row.retryable),
+      reason: nullableText(row.reason)
+    };
+  }
+
   // src/state/catalog-capabilities.ts
   function parseCatalogCapabilities(value) {
     const row = object2(value), filters = array(row.filters, text), sourceKey = text(row.source_key);
@@ -15301,6 +15353,7 @@ globalThis.__semonUIShared = __semonUIShared;
       selected_transcript: boolean(row.selected_transcript),
       selected_identity: boolean(row.selected_identity),
       selected_entry: boolean(row.selected_entry),
+      source_candidates: row.source_candidates === void 0 ? false : boolean(row.source_candidates),
       attachment: boolean(row.attachment),
       relationship_context: boolean(row.relationship_context),
       large_native_records: boolean(row.large_native_records),
@@ -15364,14 +15417,14 @@ globalThis.__semonUIShared = __semonUIShared;
     const row = object2(value);
     if (!Array.isArray(row.entries) || row.entries.length > 100)
       throw new Error("Invalid catalog transcript page size");
-    const identity2 = parseCatalogIdentity(row.identity), session = parseCatalogSession(row.session), projection = object2(row.projection), range = object2(row.range), context = object2(row.relationship_context), generation = text(projection.generation), total = ordinal(projection.total), first = ordinal(range.first), end = ordinal(range.end), next = range.next === null ? null : ordinal(range.next), entries = array(row.entries, entry), state2 = object2(row.freshness).state;
-    if (row.api !== 1 || projection.version !== 5 || !/^[0-9a-f]{64}$/i.test(generation) || session.key !== identity2.catalog_key || session.harness !== identity2.harness || end < first || end > total || end - first > 100 || entries.length !== end - first || next !== (end < total ? end : null) || entries.some((item2, i) => item2.slot !== first + i) || new Set(entries.map((item2) => item2.entry_id)).size !== entries.length || context.state !== "incomplete" || !Array.isArray(context.handoffs) || context.handoffs.length !== 0 || state2 !== "cached" && state2 !== "stale" && state2 !== "incomplete" && state2 !== "unavailable")
+    const identity2 = parseCatalogIdentity(row.identity), session = parseCatalogSession(row.session), projection = object2(row.projection), range = object2(row.range), context = object2(row.relationship_context), generation2 = text(projection.generation), total = ordinal(projection.total), first = ordinal(range.first), end = ordinal(range.end), next = range.next === null ? null : ordinal(range.next), entries = array(row.entries, entry), state2 = object2(row.freshness).state;
+    if (row.api !== 1 || projection.version !== 5 || !/^[0-9a-f]{64}$/i.test(generation2) || session.key !== identity2.catalog_key || session.harness !== identity2.harness || end < first || end > total || end - first > 100 || entries.length !== end - first || next !== (end < total ? end : null) || entries.some((item2, i) => item2.slot !== first + i) || new Set(entries.map((item2) => item2.entry_id)).size !== entries.length || context.state !== "incomplete" || !Array.isArray(context.handoffs) || context.handoffs.length !== 0 || state2 !== "cached" && state2 !== "stale" && state2 !== "incomplete" && state2 !== "unavailable")
       throw new Error("Invalid catalog transcript page");
     return {
       api: 1,
       identity: identity2,
       session,
-      projection: { version: 5, generation, total },
+      projection: { version: 5, generation: generation2, total },
       range: { first, end, next },
       entries,
       freshness: { state: state2 },
@@ -15434,9 +15487,9 @@ globalThis.__semonUIShared = __semonUIShared;
     accept(request, value) {
       if (this.disposed || !this.requests.has(request) || request.epoch !== this.epoch) return false;
       const page = parseCatalogTranscriptPage(value);
-      const generation = this.pages[0]?.projection.generation ?? request.generation;
+      const generation2 = this.pages[0]?.projection.generation ?? request.generation;
       const first = request.after === null ? Math.max(0, page.projection.total - request.limit) : Math.min(request.after, page.projection.total);
-      if (page.identity.source_key !== request.source_key || page.identity.catalog_key !== request.catalog_key || page.identity.read_scope !== request.read_scope || page.range.first !== first || page.range.end !== Math.min(first + request.limit, page.projection.total) || generation !== null && page.projection.generation !== generation)
+      if (page.identity.source_key !== request.source_key || page.identity.catalog_key !== request.catalog_key || page.identity.read_scope !== request.read_scope || page.range.first !== first || page.range.end !== Math.min(first + request.limit, page.projection.total) || generation2 !== null && page.projection.generation !== generation2)
         throw new Error("Catalog transcript response does not match the requested range");
       const sameRange = this.pages.find(
         (old) => old.range.first === page.range.first && old.range.end === page.range.end
@@ -15578,6 +15631,46 @@ globalThis.__semonUIShared = __semonUIShared;
           /* @__PURE__ */ jsx("button", { type: "button", class: "link", onClick: () => host2.retry(), children: "Retry" })
         ] }),
         snapshot.updating && /* @__PURE__ */ jsx("p", { class: "catalog-note", role: "status", children: "Updating history\u2026" }),
+        (snapshot.candidates?.length || snapshot.candidateNote || snapshot.candidateUpdating) && /* @__PURE__ */ jsxs("section", { "aria-label": "Archived sources awaiting sessions", children: [
+          /* @__PURE__ */ jsx("h2", { children: "Archived sources" }),
+          /* @__PURE__ */ jsx("p", { class: "catalog-note", children: "These recorded sources have not been indexed as sessions yet. Open a source to read it." }),
+          snapshot.candidateNote && /* @__PURE__ */ jsxs("p", { class: "catalog-note", role: "status", children: [
+            snapshot.candidateNote,
+            " ",
+            /* @__PURE__ */ jsx("button", { class: "link", type: "button", onClick: () => host2.candidateRetry?.(), children: "Retry archived sources" })
+          ] }),
+          snapshot.candidateUpdating && /* @__PURE__ */ jsx("p", { class: "catalog-note", role: "status", children: "Preparing recorded session\u2026" }),
+          snapshot.candidates?.map((candidate) => /* @__PURE__ */ jsxs(
+            "button",
+            {
+              class: "nrow",
+              type: "button",
+              disabled: snapshot.candidateUpdating,
+              onClick: () => host2.candidate?.(candidate),
+              children: [
+                /* @__PURE__ */ jsxs("span", { class: "session-row-main srow-main", children: [
+                  /* @__PURE__ */ jsx("span", { class: "nm", children: screenText(candidate.native_name_hint ?? candidate.source.path) }),
+                  /* @__PURE__ */ jsx("span", { class: "ag", children: "Source hint" })
+                ] }),
+                /* @__PURE__ */ jsxs("span", { class: "session-row-meta srow-meta for", children: [
+                  screenText(candidate.source.root + " \xB7 " + candidate.source.path),
+                  candidate.archive_observed_at === null ? " \xB7 Archive verification time unknown" : " \xB7 Archive verified " + new Date(candidate.archive_observed_at).toISOString()
+                ] })
+              ]
+            },
+            candidate.candidate_key
+          )),
+          snapshot.candidatesMore && /* @__PURE__ */ jsx(
+            "button",
+            {
+              class: "link",
+              type: "button",
+              disabled: snapshot.candidateUpdating,
+              onClick: () => host2.candidateMore?.(),
+              children: "Load more archived sources"
+            }
+          )
+        ] }),
         /* @__PURE__ */ jsx("div", { class: "session-list", children: snapshot.items.map((item2) => /* @__PURE__ */ jsxs(
           "button",
           {
@@ -15599,7 +15692,7 @@ globalThis.__semonUIShared = __semonUIShared;
           item2.key
         )) }),
         /* @__PURE__ */ jsx("p", { class: "catalog-note", children: /* @__PURE__ */ jsx("a", { class: "link", href: snapshot.compatibilityHref, children: "Open compatibility view (loads workspace history)" }) }),
-        !snapshot.updating && !snapshot.items.length && !snapshot.note && !snapshot.discovering && /* @__PURE__ */ jsx("p", { class: "catalog-note", children: "No recorded sessions match these filters." }),
+        !snapshot.updating && !snapshot.items.length && !snapshot.note && !snapshot.discovering && !snapshot.candidates?.length && !snapshot.candidateUpdating && /* @__PURE__ */ jsx("p", { class: "catalog-note", children: "No recorded sessions match these filters." }),
         snapshot.more && /* @__PURE__ */ jsx("button", { class: "link", type: "button", disabled: snapshot.updating, onClick: () => host2.more(), children: "Load more sessions" })
       ] }),
       root
@@ -15632,7 +15725,7 @@ globalThis.__semonUIShared = __semonUIShared;
     let stream = null;
     let cleanups2 = [];
     let ticket = 0;
-    let key = "";
+    let key2 = "";
     let frame = null;
     let timer;
     let deadline;
@@ -15668,9 +15761,9 @@ globalThis.__semonUIShared = __semonUIShared;
           reason
         });
       if (!permanent) {
-        const generation = ticket;
+        const generation2 = ticket;
         timer = host2.scope.timeout(() => {
-          if (!disposed && generation === ticket) connect();
+          if (!disposed && generation2 === ticket) connect();
         }, delay);
         delay = Math.min(15e3, delay * 2);
       }
@@ -15680,12 +15773,12 @@ globalThis.__semonUIShared = __semonUIShared;
       cancel();
       const scope = selected();
       const path = host2.viewerHost?.catalogRuntimeStream;
-      key = selectionKey(scope);
+      key2 = selectionKey(scope);
       if (!scope || !path || !safePath(path)) {
         publish(null);
         return;
       }
-      if (!frame || selectionKey(frame) !== key)
+      if (!frame || selectionKey(frame) !== key2)
         publish({
           ...scope,
           revision: null,
@@ -15694,7 +15787,7 @@ globalThis.__semonUIShared = __semonUIShared;
           delivery: "updating"
         });
       else publish({ ...frame, delivery: "updating" });
-      const generation = ticket;
+      const generation2 = ticket;
       const query = new URLSearchParams({
         source_key: scope.source_key,
         catalog_key: scope.catalog_key
@@ -15707,7 +15800,7 @@ globalThis.__semonUIShared = __semonUIShared;
         return;
       }
       stream = current;
-      const valid = () => !disposed && ticket === generation && stream === current && key === selectionKey(selected());
+      const valid = () => !disposed && ticket === generation2 && stream === current && key2 === selectionKey(selected());
       const recover = () => {
         if (valid()) disconnected("Environment status updates were interrupted. Retrying.");
       };
@@ -15759,9 +15852,9 @@ globalThis.__semonUIShared = __semonUIShared;
     }
     const reselect = () => {
       const next = selectionKey(selected());
-      if (next === key) return;
+      if (next === key2) return;
       cancel();
-      key = next;
+      key2 = next;
       delay = 1e3;
       publish(null);
       connect();
@@ -15947,10 +16040,11 @@ globalThis.__semonUIShared = __semonUIShared;
     const scope = new EffectScope(), selection = new CatalogSelectionStore(), navigation = new NavigationController({}), updates = new ViewUpdates();
     let listRetry, listRetryDelay = 1e3;
     let disposed = false, page = null, items = [], cursor = null, listEpoch = 0, updating = false, note = "", harness = "", repo = "", active = null;
+    let candidates = [], candidateCursor = null, candidateLoaded = false, candidateUpdating = false, candidateNote = "", candidateEpoch = 0, candidateTimer;
     const selected = /* @__PURE__ */ new Map();
     const sourceViews = /* @__PURE__ */ new Map();
     let sourcesOpen = false, sourcesEpoch = 0, sourceItems = [], sourceCursor = null, sourcesUpdating = false, sourcesNote = "", sourcesRetryDelay = 1e3;
-    const cacheKey = (key) => JSON.stringify([capabilities.source_key, key]);
+    const cacheKey = (key2) => JSON.stringify([capabilities.source_key, key2]);
     const account = parseAccount(viewerHost?.account);
     let wide = document.querySelector("#page")?.classList.contains("wide-mode") ?? false, rail = document.querySelector(".app")?.classList.contains("rail") ?? false, chromeTitle = null, chromeSession = false;
     const shell = createShellChrome({
@@ -16001,8 +16095,8 @@ globalThis.__semonUIShared = __semonUIShared;
     jumpSlot.append(jumpTarget);
     jumpActions.append(jumpSlot);
     const recent = createRecentRenderer(shell.slots.recent, {
-      open(key) {
-        void goSession(key);
+      open(key2) {
+        void goSession(key2);
       },
       toggle() {
       },
@@ -16159,12 +16253,23 @@ globalThis.__semonUIShared = __semonUIShared;
     function drawList() {
       if (disposed || active || sourcesOpen) return;
       chrome();
+      const focused = document.activeElement;
+      const draft = focused instanceof HTMLInputElement && root.contains(focused) ? {
+        node: focused,
+        value: focused.value,
+        start: focused.selectionStart,
+        end: focused.selectionEnd
+      } : null;
       renderCatalogList(
         root,
         {
           items,
           sourceLabel: page?.machine_info.label ?? (capabilities.source_key || "This source"),
           updating,
+          candidates,
+          candidatesMore: candidateCursor !== null,
+          candidateUpdating,
+          candidateNote,
           discovering: page?.completeness.state === "partial",
           observation: {
             cached: "Cached history",
@@ -16186,7 +16291,17 @@ globalThis.__semonUIShared = __semonUIShared;
               items.find((row) => row.key === item2.key)
             );
           },
+          candidate(item2) {
+            void prepareCandidate(item2);
+          },
+          candidateMore() {
+            void loadCandidates(true);
+          },
+          candidateRetry() {
+            void loadCandidates(false);
+          },
           filter(field, value) {
+            cancelCandidate();
             if (field === "harness") harness = value;
             else repo = value;
             void loadList(false);
@@ -16199,6 +16314,11 @@ globalThis.__semonUIShared = __semonUIShared;
           }
         }
       );
+      if (draft?.node.isConnected && document.activeElement === draft.node) {
+        draft.node.value = draft.value;
+        if (draft.start !== null && draft.end !== null)
+          draft.node.setSelectionRange(draft.start, draft.end);
+      }
     }
     async function loadList(append) {
       if (disposed || append && updating) return;
@@ -16220,6 +16340,7 @@ globalThis.__semonUIShared = __semonUIShared;
           throw new Error("History page repeated a session. Refresh this list.");
         listRetryDelay = 1e3;
         page = next;
+        if (capabilities.source_candidates && !candidateLoaded) void loadCandidates(false);
         cursor = next.next_cursor;
         items = append ? [...items, ...next.items] : next.items;
         updating = false;
@@ -16252,6 +16373,100 @@ globalThis.__semonUIShared = __semonUIShared;
         }
       }
     }
+    function cancelCandidate() {
+      candidateEpoch++;
+      scope.clearTimeout(candidateTimer);
+      candidateUpdating = false;
+    }
+    async function loadCandidates(append) {
+      if (!capabilities.source_candidates || disposed || append && candidateUpdating) return;
+      cancelCandidate();
+      const epoch = candidateEpoch, sourceKey = capabilities.source_key;
+      candidateLoaded = true;
+      candidateUpdating = true;
+      candidateNote = "";
+      drawList();
+      const p = new URLSearchParams({ machine: sourceKey, limit: "60" });
+      if (append && candidateCursor) p.set("cursor", candidateCursor);
+      try {
+        const result = parseCatalogSourceCandidates(await api("/api/session-source-candidates?" + p));
+        if (disposed || epoch !== candidateEpoch || sourceKey !== capabilities.source_key) return;
+        if (result.source_key !== sourceKey || append && result.items.some(
+          (item2) => candidates.some((old) => old.candidate_key === item2.candidate_key)
+        ))
+          throw new Error("Invalid archive source scope");
+        candidates = append ? [...candidates, ...result.items] : result.items;
+        candidateCursor = result.next_cursor;
+      } catch (error) {
+        if (disposed || epoch !== candidateEpoch) return;
+        candidateNote = readError(error);
+      } finally {
+        if (!disposed && epoch === candidateEpoch) {
+          candidateUpdating = false;
+          drawList();
+        }
+      }
+    }
+    async function prepareCandidate(candidate) {
+      cancelCandidate();
+      const epoch = candidateEpoch, sourceKey = capabilities.source_key;
+      candidateUpdating = true;
+      candidateNote = "";
+      drawList();
+      let delay = 1e3;
+      const poll = async () => {
+        if (disposed || epoch !== candidateEpoch || sourceKey !== capabilities.source_key) return;
+        try {
+          const p = new URLSearchParams({
+            machine: sourceKey,
+            candidate: candidate.candidate_key,
+            generation: candidate.generation
+          });
+          const result = parseCatalogSourceCandidateProgress(
+            await api("/api/session-source-candidate?" + p)
+          );
+          if (disposed || epoch !== candidateEpoch || sourceKey !== capabilities.source_key) return;
+          if (result.source_key !== sourceKey || result.candidate_key !== candidate.candidate_key || result.generation !== candidate.generation)
+            throw new Error("Archive source changed; resynchronize source hints");
+          if (result.state === "ready") {
+            const metadata = parseCatalogPage(
+              await api(
+                "/api/sessions?" + new URLSearchParams({
+                  machine: sourceKey,
+                  scope: "retained_history",
+                  sid: result.catalog_key
+                })
+              )
+            );
+            if (disposed || epoch !== candidateEpoch || sourceKey !== capabilities.source_key) return;
+            if (metadata.machine !== sourceKey || metadata.read_scope !== "retained_history" || metadata.items.length !== 1 || metadata.items[0].key !== result.catalog_key)
+              throw new Error("Parsed archive session identity is unavailable");
+            candidateUpdating = false;
+            await goSession(result.catalog_key, metadata.items[0]);
+            return;
+          }
+          candidateNote = result.reason ?? (result.state === "updating" ? "Recorded source is being indexed. Its session will open automatically." : "This archived source cannot currently be read.");
+          if (result.state === "unavailable" && !result.retryable) {
+            candidateUpdating = false;
+            drawList();
+            return;
+          }
+          drawList();
+          candidateTimer = scope.timeout(() => void poll(), delay);
+          delay = Math.min(delay * 2, 8e3);
+        } catch (error) {
+          if (disposed || epoch !== candidateEpoch) return;
+          candidateNote = readError(error);
+          candidateUpdating = retryable(error);
+          drawList();
+          if (candidateUpdating) {
+            candidateTimer = scope.timeout(() => void poll(), delay);
+            delay = Math.min(delay * 2, 8e3);
+          }
+        }
+      };
+      await poll();
+    }
     function readError(error) {
       if (!(error && typeof error === "object" && "status" in error) && !(error instanceof Error && error.name === "AbortError"))
         return "The source returned an invalid history view. Retry after checking this source.";
@@ -16276,6 +16491,7 @@ globalThis.__semonUIShared = __semonUIShared;
         active.scroll = window.matchMedia("(max-width: 760px)").matches ? window.scrollY : document.querySelector("#main").scrollTop;
     }
     function goList(push = true) {
+      cancelCandidate();
       sourcesOpen = false;
       preserveScroll();
       active = null;
@@ -16314,8 +16530,8 @@ globalThis.__semonUIShared = __semonUIShared;
             },
             trace() {
             },
-            session(key) {
-              void goSession(key);
+            session(key2) {
+              void goSession(key2);
             },
             machine() {
             },
@@ -16389,8 +16605,8 @@ globalThis.__semonUIShared = __semonUIShared;
           },
           trace() {
           },
-          session(key) {
-            void goSession(key);
+          session(key2) {
+            void goSession(key2);
           },
           machine() {
           },
@@ -16454,7 +16670,7 @@ globalThis.__semonUIShared = __semonUIShared;
     }
     function fieldView(view, entry2) {
       if (!entry2.clipped || !entry2.field) return null;
-      const progress = view.fields.get(entry2.entry_id), generation = view.store.selectedPage().projection.generation, changed = progress && progress.generation !== generation;
+      const progress = view.fields.get(entry2.entry_id), generation2 = view.store.selectedPage().projection.generation, changed = progress && progress.generation !== generation2;
       return {
         text: progress?.text,
         note: changed ? "Source projection changed. Previously loaded text is retained. " : progress?.note || (progress?.next === null ? "Complete recorded text loaded." : progress?.text === void 0 ? "Recorded text preview. " : "Part of the recorded text is loaded. "),
@@ -16471,12 +16687,12 @@ globalThis.__semonUIShared = __semonUIShared;
     async function loadField(view, entry2) {
       if (disposed || view.sourceKey !== capabilities.source_key || !capabilities.selected_entry || !entry2.field)
         return;
-      const generation = view.store.selectedPage()?.projection.generation;
-      if (!generation) return;
+      const generation2 = view.store.selectedPage()?.projection.generation;
+      if (!generation2) return;
       let progress = view.fields.get(entry2.entry_id);
       if (progress?.loading) return;
-      if (!progress || progress.generation !== generation) {
-        progress = { generation, next: 0, loading: false, note: "" };
+      if (!progress || progress.generation !== generation2) {
+        progress = { generation: generation2, next: 0, loading: false, note: "" };
         view.fields.set(entry2.entry_id, progress);
       }
       if (progress.next === null) return;
@@ -16484,7 +16700,7 @@ globalThis.__semonUIShared = __semonUIShared;
       p.set("sid", view.key);
       p.set("after", String(entry2.slot));
       p.set("limit", "1");
-      p.set("generation", generation);
+      p.set("generation", generation2);
       p.set("field_chunk", String(chunk));
       pending.loading = true;
       pending.note = "";
@@ -16493,14 +16709,14 @@ globalThis.__semonUIShared = __semonUIShared;
       try {
         const value = await api("/api/session-entry?" + p);
         if (disposed || view.fields.get(entry2.entry_id) !== pending) return;
-        if (view.store.selectedPage()?.projection.generation !== generation) {
+        if (view.store.selectedPage()?.projection.generation !== generation2) {
           pending.note = "Source projection changed. Reload recorded text. ";
           return;
         }
         const field = parseCatalogField(value, {
           source_key: capabilities.source_key,
           catalog_key: view.key,
-          generation,
+          generation: generation2,
           entry: entry2,
           chunk
         });
@@ -16644,17 +16860,18 @@ globalThis.__semonUIShared = __semonUIShared;
           scope.timeout(() => void loadIdentity(view), 1e3);
       }
     }
-    async function goSession(key, meta, push = true) {
+    async function goSession(key2, meta, push = true) {
       if (disposed) return;
+      cancelCandidate();
       preserveScroll();
       sourcesOpen = false;
-      let view = selected.get(cacheKey(key));
+      let view = selected.get(cacheKey(key2));
       if (!view) {
         const store = new CatalogTranscriptStore();
-        store.select({ source_key: capabilities.source_key, catalog_key: key }, "retained_history");
+        store.select({ source_key: capabilities.source_key, catalog_key: key2 }, "retained_history");
         view = {
           sourceKey: capabilities.source_key,
-          key,
+          key: key2,
           root: document.createElement("div"),
           store,
           meta: meta ?? null,
@@ -16671,11 +16888,11 @@ globalThis.__semonUIShared = __semonUIShared;
           newCount: 0,
           lastTotal: null
         };
-        selected.set(cacheKey(key), view);
+        selected.set(cacheKey(key2), view);
       }
       active = view;
-      view.ticket = selection.begin({ source_key: capabilities.source_key, catalog_key: key });
-      navigation.route = { v: "session", id: key };
+      view.ticket = selection.begin({ source_key: capabilities.source_key, catalog_key: key2 });
+      navigation.route = { v: "session", id: key2 };
       render(null, root);
       root.replaceChildren(view.root);
       chrome();
@@ -16684,7 +16901,7 @@ globalThis.__semonUIShared = __semonUIShared;
         history.pushState(
           null,
           "",
-          "/s/" + encodeURIComponent(view.meta?.harness ?? "native") + "/" + encodeURIComponent(key) + (capabilities.source_key ? "?machine=" + encodeURIComponent(capabilities.source_key) : "")
+          "/s/" + encodeURIComponent(view.meta?.harness ?? "native") + "/" + encodeURIComponent(key2) + (capabilities.source_key ? "?machine=" + encodeURIComponent(capabilities.source_key) : "")
         );
       drawSelected(view);
       if (view.store.selectedPage()) {
@@ -16708,6 +16925,8 @@ globalThis.__semonUIShared = __semonUIShared;
           throw new Error("Source selection changed. Choose the source again.");
         const ready = !capabilities.selected_transcript && next.selected_transcript;
         Object.assign(capabilities, next);
+        if (next.source_candidates && !candidateLoaded && !active && !sourcesOpen)
+          void loadCandidates(false);
         if (active) void loadIdentity(active);
         if (ready && active && !active.store.selectedPage()) void loadSelected(active);
       } catch (error) {
@@ -16734,8 +16953,8 @@ globalThis.__semonUIShared = __semonUIShared;
           machinesHref: viewerHost?.machinesPath ?? "/machines?compat=1"
         },
         {
-          select(key) {
-            if (sourceItems.some((item2) => item2.source_key === key)) void switchSource(key);
+          select(key2) {
+            if (sourceItems.some((item2) => item2.source_key === key2)) void switchSource(key2);
           },
           more() {
             void loadSources(true);
@@ -16789,6 +17008,7 @@ globalThis.__semonUIShared = __semonUIShared;
       });
     }
     async function showSources() {
+      cancelCandidate();
       if (disposed) return;
       if (!sourcesOpen) saveSource();
       ++listEpoch;
@@ -16802,7 +17022,7 @@ globalThis.__semonUIShared = __semonUIShared;
       drawSources();
       if (!sourceItems.length) await loadSources(false);
     }
-    async function switchSource(key, push = true) {
+    async function switchSource(key2, push = true) {
       if (disposed) return;
       const epoch = ++sourcesEpoch;
       sourcesUpdating = true;
@@ -16810,20 +17030,25 @@ globalThis.__semonUIShared = __semonUIShared;
       drawSources();
       try {
         const next = parseCatalogCapabilities(
-          await api("/api/session-capabilities?" + new URLSearchParams({ machine: key }))
+          await api("/api/session-capabilities?" + new URLSearchParams({ machine: key2 }))
         );
         if (disposed || epoch !== sourcesEpoch) return;
-        if (next.source_key !== key)
+        if (next.source_key !== key2)
           throw new Error("Source capability identity does not match this selection");
         if (!sourcesOpen) saveSource();
         ++listEpoch;
         scope.clearTimeout(listRetry);
         selection.clear();
         Object.assign(capabilities, next);
-        const retained = sourceViews.get(key);
+        const retained = sourceViews.get(key2);
         page = retained?.page ?? null;
         items = retained?.items ?? [];
         cursor = retained?.cursor ?? null;
+        cancelCandidate();
+        candidates = [];
+        candidateCursor = null;
+        candidateLoaded = false;
+        candidateNote = "";
         harness = retained?.harness ?? "";
         repo = retained?.repo ?? "";
         updating = false;
@@ -16835,7 +17060,7 @@ globalThis.__semonUIShared = __semonUIShared;
         const url = retained?.selectedKey ? "/s/" + encodeURIComponent(
           selected.get(cacheKey(retained.selectedKey))?.meta?.harness ?? "native"
         ) + "/" + encodeURIComponent(retained.selectedKey) : "/sessions";
-        if (push) history.pushState(null, "", url + "?" + new URLSearchParams({ machine: key }));
+        if (push) history.pushState(null, "", url + "?" + new URLSearchParams({ machine: key2 }));
         else fromLocation();
         void loadList(false);
       } catch (error) {
@@ -16996,8 +17221,8 @@ globalThis.__semonUIShared = __semonUIShared;
           machinesHref: host2?.machinesPath ?? "/machines?compat=1"
         },
         {
-          select(key) {
-            if (!disposed && items.some((item2) => item2.source_key === key)) select(key);
+          select(key2) {
+            if (!disposed && items.some((item2) => item2.source_key === key2)) select(key2);
           },
           more() {
             void load(true);
@@ -17110,12 +17335,12 @@ globalThis.__semonUIShared = __semonUIShared;
           return;
         }
         if (status2 === 400 && !new URLSearchParams(location.search).has("machine")) {
-          owner = createCatalogSources(host2, (key) => {
+          owner = createCatalogSources(host2, (key2) => {
             if (disposed) return;
             owner?.destroy();
             owner = null;
             const url = new URL(location.href);
-            url.searchParams.set("machine", key);
+            url.searchParams.set("machine", key2);
             history.replaceState(null, "", url.pathname + url.search + url.hash);
             void chooseReader();
           });
