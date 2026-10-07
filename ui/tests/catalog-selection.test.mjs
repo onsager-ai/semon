@@ -36,6 +36,12 @@ const identity = (key = 'session', ids = ['native']) => ({
 });
 test('catalog identity has its own selection epoch and no graph/runtime defaults', () => {
   const store = new CatalogSelectionStore();
+  for (const scope of [
+    { source_key: 1, catalog_key: 'session' },
+    { source_key: 'source', catalog_key: 42 },
+    { source_key: 'source', catalog_key: '' },
+  ])
+    assert.throws(() => store.begin(scope));
   let changes = 0;
   const unsubscribe = store.subscribe(() => changes++);
   const first = store.begin({ source_key: 'source', catalog_key: 'session' });
