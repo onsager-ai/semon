@@ -53,7 +53,7 @@ var __semonUIShared = (() => {
     preact: () => preact_module_exports
   });
 
-  // node_modules/preact/dist/preact.module.js
+  // ../../semon-catalog-ui/ui/node_modules/preact/dist/preact.module.js
   var preact_module_exports = {};
   __export(preact_module_exports, {
     Component: () => C,
@@ -364,7 +364,7 @@ var __semonUIShared = (() => {
     return n3.__v.__b - l4.__v.__b;
   }, H.__r = 0, f = Math.random().toString(8), c = "__d" + f, a = "__a" + f, s = /(PointerCapture)$|Capture$/i, h = 0, p = V(false), v = V(true), y = 0;
 
-  // node_modules/preact/hooks/dist/hooks.module.js
+  // ../../semon-catalog-ui/ui/node_modules/preact/hooks/dist/hooks.module.js
   var hooks_module_exports = {};
   __export(hooks_module_exports, {
     useCallback: () => q2,
@@ -566,7 +566,7 @@ var __semonUIShared = (() => {
     return "function" == typeof t4 ? t4(n3) : t4;
   }
 
-  // node_modules/preact/jsx-runtime/dist/jsxRuntime.module.js
+  // ../../semon-catalog-ui/ui/node_modules/preact/jsx-runtime/dist/jsxRuntime.module.js
   var jsxRuntime_module_exports = {};
   __export(jsxRuntime_module_exports, {
     Fragment: () => S,
