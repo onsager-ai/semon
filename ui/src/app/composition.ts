@@ -131,6 +131,11 @@ export class ViewerComposition {
   readonly applicationRefreshOwner: ReturnType<typeof createApplicationRefresh>;
   readonly viewport: ReturnType<typeof createViewport>;
   readonly tickerOwner: ReturnType<typeof createTicker>;
+  get catalogSelection():
+    | Pick<CatalogSelectionStore, 'selectedIdentity' | 'subscribe'>
+    | undefined {
+    return this.viewerHost?.catalogControlStream ? this.catalogSelectionStore : undefined;
+  }
   constructor(host: ViewerHost | null, onDestroyed: (owner: ViewerApplication) => void) {
     const context = this;
     this.scope = new EffectScope();
