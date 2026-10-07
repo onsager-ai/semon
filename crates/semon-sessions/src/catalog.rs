@@ -541,7 +541,25 @@ fn read_page(
         None
     };
     transaction.commit()?;
-    let facts = crate::facts::MachineFacts::of(options);
+    // The legacy model tolerates absent facts/old source selection. Focused
+    // observations must retain that absence rather than invent current facts.
+    let recorded = options
+        .facts
+        .as_ref()
+        .and_then(|path| crate::read_facts(path).ok())
+        .filter(|facts| facts.version == crate::FACTS_VERSION);
+    let facts_known = options.facts.is_none() || recorded.is_some();
+    let codex_selection_known = options.facts.is_none()
+        || recorded
+            .as_ref()
+            .is_some_and(|facts| facts.codex_rollouts.is_some());
+    let facts = match recorded {
+        Some(facts) => crate::facts::MachineFacts::Recorded(Box::new(facts)),
+        None if options.facts.is_none() => crate::facts::MachineFacts::Local,
+        None => crate::facts::MachineFacts::Recorded(Box::default()),
+    };
+    let machine_label = facts_known.then(|| facts.hostname(options));
+    let mut page_state = if facts_known { "cached" } else { "unavailable" };
     let mut items = Vec::with_capacity(selected.len());
     for row in selected {
         let mut refs = Vec::new();
@@ -583,15 +601,25 @@ fn read_page(
             };
             refs.push(json!({"source":reference,"state":state}));
         }
-        let state = if states.iter().all(|state| *state == "unavailable") {
+        let state = if !facts_known || states.iter().all(|state| *state == "unavailable") {
             "unavailable"
-        } else if states.contains(&"unavailable") || states.contains(&"incomplete") {
+        } else if states.contains(&"unavailable")
+            || states.contains(&"incomplete")
+            || (row.harness == "codex" && !codex_selection_known)
+        {
             "incomplete"
         } else if states.contains(&"stale") {
             "stale"
         } else {
             "cached"
         };
+        if page_state != "unavailable" {
+            if matches!(state, "unavailable" | "incomplete") {
+                page_state = "incomplete";
+            } else if state == "stale" && page_state == "cached" {
+                page_state = "stale";
+            }
+        }
         let mut item = serde_json::to_value(row)?;
         item.as_object_mut()
             .expect("catalog row object")
@@ -603,10 +631,10 @@ fn read_page(
     Ok(reply(
         200,
         json!({"api":1,"machine":machine,"generation":generation,"observed_at":observed_at,
-        "machine_info":{"key":machine,"label":facts.hostname(options),"freshness":"cached"},
+        "machine_info":{"key":machine,"label":machine_label,"freshness":if facts_known { "cached" } else { "unavailable" }},
         "capabilities":{"pagination":true,"filters":["harness","repo"],"order":"last_desc_key_asc",
             "full_text_search":false,"selected_session_lookup":true,"runtime_status":false,"global_union":false},
-        "freshness":"cached","items":items,"next_cursor":next}),
+        "freshness":page_state,"items":items,"next_cursor":next}),
     ))
 }
 
@@ -772,6 +800,43 @@ mod tests {
             Err(CatalogIdentityError::ScopeChanged)
         );
         crate::events::CACHE_READS.with(|reads| assert_eq!(reads.get(), 0));
+    }
+
+    #[test]
+    fn focused_catalog_preserves_missing_facts_and_unknown_native_manifest() {
+        let fixture = Fixture::new();
+        let relative = "sessions/2026/10/01/rollout-codex-session.jsonl";
+        let path = fixture.options.codex_home.join(relative);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, format!("{}\n", json!({"type":"session_meta","timestamp":"2026-10-01T00:00:00Z","payload":{"id":"codex-session","cwd":"/synthetic/project"}}))).unwrap();
+        fixture.publish(1);
+        let facts_path = fixture.options.facts.as_ref().unwrap();
+        let mut facts = crate::read_facts(facts_path).unwrap();
+        let read = || session_catalog_identity(&fixture.options, "stable-source", "codex-session");
+        // Legacy None means unknown selection, not current source authority.
+        assert!(facts.codex_rollouts.is_none());
+        assert_eq!(read().unwrap().unwrap().freshness.state, "incomplete");
+        facts.codex_rollouts = Some(std::collections::BTreeSet::from([relative.to_owned()]));
+        crate::write_facts(facts_path, &facts).unwrap();
+        assert_eq!(read().unwrap().unwrap().freshness.state, "cached");
+        facts.codex_rollouts = Some(std::collections::BTreeSet::new());
+        crate::write_facts(facts_path, &facts).unwrap();
+        assert_eq!(read(), Err(CatalogIdentityError::ScopeChanged));
+        fs::write(facts_path, b"corrupt facts").unwrap();
+        let corrupt = read().unwrap().unwrap();
+        assert_eq!(corrupt.freshness.state, "unavailable");
+        assert_eq!(corrupt.machine_label, None);
+        assert_eq!(corrupt.source_refs[0].state, "cached");
+        assert_eq!(
+            fixture.body("sid=session-00000").1["items"][0]["freshness"]["state"],
+            "unavailable"
+        );
+        fs::remove_file(facts_path).unwrap();
+        assert_eq!(read().unwrap().unwrap().freshness.state, "unavailable");
+        crate::write_facts(facts_path, &facts).unwrap();
+        facts.version = 999;
+        crate::write_facts(facts_path, &facts).unwrap();
+        assert_eq!(read().unwrap().unwrap().freshness.state, "unavailable");
     }
 
     #[test]
