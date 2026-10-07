@@ -100,10 +100,14 @@ pub(crate) fn parse_native_record(bytes: &[u8]) -> Option<Value> {
     serde_json::from_slice(bytes).ok().filter(Value::is_object)
 }
 
+type NativeLineReader<'a> = dyn FnMut(&Path, u64) -> io::Result<(Option<Value>, u64)> + 'a;
+
 /// Source lines read for one page: a line holding several blocks, or a call
 /// and its result, is read once. Only the last few lines are kept.
 #[derive(Default)]
-pub(crate) struct Lines {
+pub(crate) struct Lines<'a> {
+    provider: Option<&'a mut NativeLineReader<'a>>,
+    pub(crate) failures: usize,
     recent: VecDeque<(LineKey, Option<Rc<Value>>)>,
     /// Bytes read from source files so far.
     pub(crate) bytes: u64,
@@ -112,8 +116,28 @@ pub(crate) struct Lines {
 /// A source line: its file and byte offset.
 type LineKey = (PathBuf, u64);
 
-impl Lines {
+impl<'a> Lines<'a> {
+    pub(crate) fn provider(reader: &'a mut NativeLineReader<'a>) -> Self {
+        Self {
+            provider: Some(reader),
+            ..Self::default()
+        }
+    }
     const KEEP: usize = 16;
+
+    pub(crate) fn native_event_id(&self, path: &Path, offset: u64) -> Option<String> {
+        let record = self
+            .recent
+            .iter()
+            .find(|((seen, at), _)| seen == path && *at == offset)?
+            .1
+            .as_ref()?;
+        ["uuid", "id"]
+            .iter()
+            .find_map(|key| record.get(key).and_then(Value::as_str))
+            .filter(|id| !id.is_empty() && id.len() <= 4096)
+            .map(str::to_owned)
+    }
 
     fn get(&mut self, path: &Path, offset: u64) -> Option<Rc<Value>> {
         if let Some((_, record)) = self
@@ -121,9 +145,22 @@ impl Lines {
             .iter()
             .find(|((seen, at), _)| *at == offset && seen == path)
         {
+            if record.is_none() && self.provider.is_some() {
+                self.failures += 1;
+            }
             return record.clone();
         }
-        let (record, size) = read_sized(path, offset);
+        let (record, size) = if let Some(provider) = self.provider.as_mut() {
+            match provider(path, offset) {
+                Ok(result) => result,
+                Err(_) => {
+                    self.failures += 1;
+                    (None, 0)
+                }
+            }
+        } else {
+            read_sized(path, offset)
+        };
         self.bytes += size;
         let record = record.map(Rc::new);
         if self.recent.len() == Self::KEEP {
@@ -943,7 +980,6 @@ fn background_state(status: &str, exit: Option<i64>) -> &'static str {
 }
 
 fn background_fields(
-    _built: &Built,
     lines: &mut Lines,
     bg: &model::Background,
     start: Option<i64>,
@@ -1444,11 +1480,16 @@ fn operation_entry(
     Some(Value::Object(entry))
 }
 
+pub(crate) struct RenderContext<'a> {
+    pub(crate) home: Option<&'a str>,
+    pub(crate) harness: Option<&'a str>,
+    pub(crate) bounded: bool,
+}
+
 /// One slot as a `TX` entry; `None` for a slot with nothing to show.
-fn render(
-    built: &Built,
+pub(crate) fn render(
+    context: &RenderContext<'_>,
     lines: &mut Lines,
-    sid: &str,
     slots: &[Slot],
     slot: &Slot,
     index: usize,
@@ -1462,7 +1503,11 @@ fn render(
         SlotKind::H(id) if model::is_ask(id) => {
             let record = prompt_record(lines, file, slot.offset);
             with_images(
-                json!({"k": "h", "id": id}),
+                if context.bounded {
+                    json!({"k":"h","id":id,"text":cap(&record.as_deref().and_then(prompt_text).unwrap_or_default(), MSG_MAX)})
+                } else {
+                    json!({"k": "h", "id": id})
+                },
                 record.as_deref(),
                 file,
                 slot.offset,
@@ -1489,10 +1534,7 @@ fn render(
             if !text.trim().is_empty() {
                 entry["text"] = json!(cap(text.trim(), MSG_MAX));
             }
-            if built
-                .sessions
-                .get(sid)
-                .is_some_and(|session| session.harness == "claude")
+            if context.harness == Some("claude")
                 && let Some(secs) = thought_secs(slots, index)
             {
                 entry["secs"] = json!(secs);
@@ -1528,12 +1570,7 @@ fn render(
             let label = field(&input, "description")
                 .map(str::to_owned)
                 .unwrap_or_else(|| {
-                    arg_summary(
-                        "Bash",
-                        &input,
-                        source_file.cwd.as_deref(),
-                        built.home.as_deref(),
-                    )
+                    arg_summary("Bash", &input, source_file.cwd.as_deref(), context.home)
                 });
             let mut entry = json!({
                 "k": "bgend", "call": call, "state": background_state(status, exit), "label": clip(&label, PREVIEW_MAX).0,
@@ -1561,11 +1598,11 @@ fn render(
                 reply.as_ref(),
                 *item,
                 now,
-                built.home.as_deref(),
+                context.home,
             );
             if let Some(bg) = bg {
                 entry["tid"] = json!(bg.tid);
-                entry["bg"] = background_fields(built, lines, bg, slot.t, now);
+                entry["bg"] = background_fields(lines, bg, slot.t, now);
             }
             entry
         }
@@ -1652,6 +1689,9 @@ fn render(
 /// that long, and its text and images still show.
 fn prompt_record(lines: &mut Lines, file: Option<&SlotFile>, offset: u64) -> Option<Rc<Value>> {
     let file = file?;
+    if lines.provider.is_some() {
+        return lines.get(&file.path, offset);
+    }
     let (record, bytes) = file.prompts.record(&file.path, offset)?;
     lines.bytes += bytes;
     Some(Rc::new(record))
@@ -1849,7 +1889,18 @@ pub(crate) fn page_limited(
     let mut bytes = 0;
     let (mut low, mut high) = (from, from);
     let mut take = |index: usize, picked: &mut Vec<(usize, Value)>| -> bool {
-        let Some(entry) = render(built, &mut lines, sid, slots, &slots[index], index, now) else {
+        let Some(entry) = render(
+            &RenderContext {
+                home: built.home.as_deref(),
+                harness: built.sessions.get(sid).map(|session| session.harness),
+                bounded: false,
+            },
+            &mut lines,
+            slots,
+            &slots[index],
+            index,
+            now,
+        ) else {
             return true;
         };
         let size = entry.to_string().len() + 1;
