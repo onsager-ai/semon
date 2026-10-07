@@ -5193,7 +5193,7 @@ pub(crate) enum SlotKind {
 }
 
 /// Content-free signal metadata. Source event indices never leave the model.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, serde::Deserialize)]
 pub(crate) struct SignalData {
     pub(crate) kind: events::SignalKind,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -5918,6 +5918,9 @@ pub(crate) fn build_sources(
     // source-complete catalog. Publication itself is delayed until success.
     let catalog =
         (selected.is_none() && !options.scan_window).then(|| summary::catalog(&builder, &handoffs));
+    let slot_projections = catalog
+        .as_ref()
+        .map(|_| crate::slot_projection::capture(&tx));
     // Analytics reads a month and the month before it, whatever the model's
     // window: taken from every session before the window trims them.
     let activity = crate::analytics::activity(&sessions, &tx, &turns, &handoffs, now);
@@ -6170,7 +6173,13 @@ pub(crate) fn build_sources(
         u32::try_from(post_started.elapsed().as_millis()).unwrap_or(u32::MAX),
     ));
     if let Some(catalog) = catalog {
-        cache.publish_session_catalog(&catalog, catalog_base.as_deref());
+        cache.publish_session_projection(
+            &crate::slot_projection::Publication {
+                rows: &catalog,
+                transcripts: slot_projections.as_deref(),
+            },
+            catalog_base.as_deref(),
+        );
     }
     if selected.is_none() {
         cache.publish_session_descriptions();
