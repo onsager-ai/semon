@@ -531,7 +531,7 @@ fn render(
             }
             let max = usize::try_from(end - at)
                 .unwrap_or(usize::MAX)
-                .min(READ_CHUNK + 11)
+                .min(READ_CHUNK + crate::json_string::JSON_STRING_LAYERED_SCALAR_SLACK)
                 .min(bytes_left);
             if max == 0 && at != end || requests_left == 0 {
                 return Err(invalid());
@@ -560,8 +560,9 @@ fn render(
                     .entry(file.path.clone())
                     .and_modify(|known| known.2 &= part.cached)
                     .or_insert((part.generation, part.length, part.cached));
-                let chunk = crate::json_string::decode_json_string_chunk(
+                let chunk = crate::json_string::decode_json_string_layered_chunk(
                     &part.bytes,
+                    field.layers,
                     at + part.bytes.len() as u64 == end,
                     READ_CHUNK,
                 )?;
@@ -905,7 +906,9 @@ fn render_field(
             || field.checkpoints.last() != Some(&field.end)
             || !field.checkpoints.windows(2).all(|pair| {
                 pair[0] < pair[1]
-                    && pair[1] - pair[0] <= crate::json_string::JSON_STRING_CHECKPOINT_BYTES + 11
+                    && pair[1] - pair[0]
+                        <= crate::json_string::JSON_STRING_CHECKPOINT_BYTES
+                            + crate::json_string::JSON_STRING_LAYERED_SCALAR_SLACK as u64
             })
         {
             return Err(invalid());
@@ -950,8 +953,9 @@ fn render_field(
         if at + bytes.len() as u64 != end {
             return Err(invalid());
         }
-        let decoded = crate::json_string::decode_json_string_chunk(
+        let decoded = crate::json_string::decode_json_string_layered_chunk(
             &bytes,
+            field.layers,
             true,
             crate::json_string::JSON_STRING_CHUNK_DECODED_MAX,
         )?;
