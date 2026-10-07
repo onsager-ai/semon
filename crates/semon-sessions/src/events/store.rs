@@ -3208,6 +3208,33 @@ mod tests {
     }
 
     #[test]
+    fn schema_thirteen_preserves_sources_without_inventing_change_time() {
+        let root = scratch("change-time-migration");
+        let path = root.join("index.sqlite3");
+        let (mut store, _) = opened(&path);
+        store
+            .write_one("original.jsonl", None, None, &ledger(1), &full())
+            .unwrap();
+        store
+            .connection
+            .execute_batch("ALTER TABLE files DROP COLUMN ctime_ns; PRAGMA user_version = 13;")
+            .unwrap();
+        drop(store);
+        let (store, _) = opened(&path);
+        let (migrated, original) = store.read_one("original.jsonl").unwrap().unwrap();
+        let mut expected = ledger(1);
+        expected.stat.changed_ns = None;
+        assert_eq!(migrated, expected);
+        assert_eq!(format!("{original:?}"), format!("{:?}", full()));
+        assert_eq!(
+            versions(&store.connection).unwrap(),
+            (SCHEMA_VERSION, Some(CACHE_VERSION))
+        );
+        drop(store);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn schema_one_migrates_native_usage_without_losing_reported_runs() {
         let root = scratch("native-usage-migration");
         let path = root.join("index.sqlite3");
