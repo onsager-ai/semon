@@ -74,13 +74,13 @@ export default async function copilotCheck(browser) {
             assert.ok(await page.locator("section[aria-label='Transcript']").count());
             await page.click('#more-btn');
             await page.waitForFunction(() => document.querySelector('dialog.session-menu')?.open);
-            await page.getByRole('button', { name: 'Copy resume command', exact: true }).click();
+            await page.getByRole('menuitem', { name: 'Copy resume command', exact: true }).click();
             await page.waitForFunction(
               async (expected) => (await navigator.clipboard.readText()) === expected,
               'copilot --resume=' + fixture.id,
             );
             assert.equal(
-              await page.getByRole('button', { name: 'Copied', exact: true }).count(),
+              await page.getByRole('menuitem', { name: 'Copied', exact: true }).count(),
               1,
             );
             assert.equal(await page.locator('dialog.session-menu .cost-big').textContent(), '—');
