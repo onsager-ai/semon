@@ -1116,6 +1116,7 @@ impl ViewerCore {
             path,
             "/api/sessions"
                 | "/api/session-transcript"
+                | "/api/session-entry"
                 | "/api/session-capabilities"
                 | "/api/session-identity"
         ) {
@@ -1266,10 +1267,11 @@ impl ViewerCore {
             "/api/session-transcript" => {
                 crate::session_transcript_range(view.options(), key, query, None)
             }
+            "/api/session-entry" => crate::session_entry_field(view.options(), key, query, None),
             "/api/session-capabilities" => {
                 let body = json!({"api":1,"read_contract":"catalog-v1","source_key":key,
                     "selected_identity":true,"selected_transcript":true,"pagination":true,"relationship_context":false,
-                    "large_native_records":false,"selected_entry":false,"attachment":false,"global_union":false,"full_text_search":false,
+                    "large_native_records":false,"selected_entry":true,"attachment":false,"global_union":false,"full_text_search":false,
                     "filters":["harness","repo"],"order":"last_desc_key_asc"});
                 ViewerReply {
                     status: 200,

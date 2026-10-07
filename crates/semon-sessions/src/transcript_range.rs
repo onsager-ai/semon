@@ -76,7 +76,14 @@ fn read(
     query: &str,
     provider: Option<&dyn SessionSourceReader>,
 ) -> Result<ViewerReply, Box<dyn std::error::Error>> {
-    for name in ["sid", "limit", "after", "generation", "scope"] {
+    for name in [
+        "sid",
+        "limit",
+        "after",
+        "generation",
+        "scope",
+        "field_chunk",
+    ] {
         if query_value(query, name).is_some_and(|value| decoded(value).is_none()) {
             return Ok(catalog::error(
                 400,
@@ -274,6 +281,25 @@ fn read(
         slots,
         sources,
     };
+    if let Some(chunk) = argument("field_chunk") {
+        let Ok(chunk) = chunk.parse::<usize>() else {
+            return Ok(catalog::error(
+                400,
+                "invalid_arguments",
+                "Invalid field chunk.",
+                false,
+            ));
+        };
+        if argument("generation").is_none() || selection.end != selection.first + 1 {
+            return Ok(catalog::error(
+                400,
+                "invalid_arguments",
+                "Field reads require generation, after and limit=1.",
+                false,
+            ));
+        }
+        return Ok(render_field(options, selection, provider, chunk));
+    }
     Ok(render(options, selection, provider))
 }
 
@@ -393,6 +419,76 @@ fn render(
     let mut requests_left = PAGE_SOURCE_REQUESTS;
     let mut generations = BTreeMap::<PathBuf, (String, u64)>::new();
     let mut fetched = 0usize;
+    let mut field_previews = BTreeMap::new();
+    for absolute in selection.first..selection.end {
+        let saved = &selection.slots[absolute - selection.start];
+        let Some(field) = &saved.field else {
+            continue;
+        };
+        let Some(file) = &saved.file else {
+            continue;
+        };
+        let result = (|| -> io::Result<Value> {
+            let reference = references.get(&file.path).ok_or_else(invalid)?;
+            let at = saved.offset.checked_add(field.start).ok_or_else(invalid)?;
+            let end = saved.offset.checked_add(field.end).ok_or_else(invalid)?;
+            if at > end
+                || end > reference.offset
+                || field.checkpoints.first() != Some(&field.start)
+                || field.checkpoints.last() != Some(&field.end)
+            {
+                return Err(invalid());
+            }
+            let max = usize::try_from(end - at)
+                .unwrap_or(usize::MAX)
+                .min(READ_CHUNK + 11)
+                .min(bytes_left);
+            if max == 0 && at != end || requests_left == 0 {
+                return Err(invalid());
+            }
+            let mut text = String::new();
+            let mut complete = at == end;
+            if max > 0 {
+                requests_left -= 1;
+                let known = generations.get(&file.path);
+                let part =
+                    reader.read_range(reference, known.map(|known| known.0.as_str()), at, max)?;
+                if part.offset != at
+                    || part.bytes.is_empty()
+                    || part.bytes.len() > max
+                    || part.length < reference.offset
+                    || part.generation.is_empty()
+                    || part.generation.len() > 4096
+                    || known
+                        .is_some_and(|known| known.0 != part.generation || known.1 != part.length)
+                {
+                    return Err(invalid());
+                }
+                bytes_left -= part.bytes.len();
+                fetched += part.bytes.len();
+                generations
+                    .entry(file.path.clone())
+                    .or_insert((part.generation, part.length));
+                let chunk = crate::json_string::decode_json_string_chunk(
+                    &part.bytes,
+                    at + part.bytes.len() as u64 == end,
+                    READ_CHUNK,
+                )?;
+                text = chunk.text;
+                complete = chunk.complete && at + chunk.consumed as u64 == end;
+            }
+            let kind = match saved.recipe {
+                crate::slot_projection::Recipe::U => "u",
+                crate::slot_projection::Recipe::A => "a",
+                crate::slot_projection::Recipe::Think => "think",
+                _ => return Err(invalid()),
+            };
+            Ok(
+                json!({"k":kind,"text":text,"field":{"name":"text","chunks":field.checkpoints.len().saturating_sub(1),"complete":complete},"clipped":!complete}),
+            )
+        })();
+        field_previews.insert(absolute, result);
+    }
     let mut read = |path: &Path, offset: u64| -> io::Result<(Option<Value>, u64)> {
         let reference = references.get(path).ok_or_else(invalid)?;
         if offset >= reference.offset {
@@ -448,21 +544,36 @@ fn render(
         let index = absolute - selection.start;
         let slot = &slots[index];
         let before = lines.failures;
-        let mut entry = crate::tx::render(
-            &crate::tx::RenderContext {
-                home: None,
-                harness: Some(&selection.identity.harness),
-                bounded: true,
-            },
-            &mut lines,
-            &slots,
-            slot,
-            index,
-            crate::model::now_ms(),
-        )
-        .unwrap_or_else(|| json!({"k":"end"}));
+        let field_preview = field_previews.remove(&absolute);
+        let field_failed = field_preview.as_ref().is_some_and(Result::is_err);
+        let mut entry = if let Some(preview) = field_preview {
+            preview.unwrap_or_else(|_| {
+                let kind = match selection.slots[index].recipe {
+                    crate::slot_projection::Recipe::U => "u",
+                    crate::slot_projection::Recipe::A => "a",
+                    crate::slot_projection::Recipe::Think => "think",
+                    _ => "end",
+                };
+                json!({"k":kind,"text":""})
+            })
+        } else {
+            crate::tx::render(
+                &crate::tx::RenderContext {
+                    home: None,
+                    harness: Some(&selection.identity.harness),
+                    bounded: true,
+                },
+                &mut lines,
+                &slots,
+                slot,
+                index,
+                crate::model::now_ms(),
+            )
+            .unwrap_or_else(|| json!({"k":"end"}))
+        };
+
         entry["slot"] = json!(absolute);
-        let incomplete = lines.failures > before;
+        let incomplete = field_failed || lines.failures > before;
         if incomplete {
             incomplete_entries += 1;
         }
@@ -474,7 +585,11 @@ fn render(
         if let Some(file) = slot.file.as_ref()
             && let Some(reference) = references.get(&file.path)
         {
-            let native_event_id = lines.native_event_id(&file.path, slot.offset);
+            let native_event_id = selection.slots[index]
+                .field
+                .as_ref()
+                .and_then(|field| field.native_event_id.clone())
+                .or_else(|| lines.native_event_id(&file.path, slot.offset));
             let position = native_event_id
                 .clone()
                 .unwrap_or_else(|| slot.offset.to_string());
@@ -518,7 +633,7 @@ fn render(
     }
     let failures = lines.failures;
     drop(lines);
-    let state = if failures > 0 {
+    let state = if failures > 0 || incomplete_entries > 0 {
         "incomplete"
     } else {
         selection.identity.freshness.state.as_str()
@@ -533,4 +648,151 @@ fn render(
         "limits":{"source_bytes":PAGE_SOURCE_BYTES,"source_requests":PAGE_SOURCE_REQUESTS,"record_bytes":RECORD_BYTES},
         "observation":{"source_bytes":fetched,"incomplete_entries":incomplete_entries}}),
     )
+}
+
+/// Selected native string expansion. The range query must supply `after`,
+/// `limit=1`, the observed projection `generation`, and `field_chunk` ordinal.
+/// Each ordinal names a persisted scalar checkpoint; no arbitrary byte cursor
+/// or prefix replay is accepted.
+pub fn session_entry_field(
+    options: &Options,
+    source_key: &str,
+    query: &str,
+    reader: Option<&dyn SessionSourceReader>,
+) -> ViewerReply {
+    if query_value(query, "field_chunk").is_none() || query_value(query, "after").is_none() {
+        return catalog::error(
+            400,
+            "invalid_arguments",
+            "A selected slot and field chunk are required.",
+            false,
+        );
+    }
+    session_transcript_range(options, source_key, query, reader)
+}
+
+fn render_field(
+    options: &Options,
+    selection: Selection,
+    provider: Option<&dyn SessionSourceReader>,
+    chunk: usize,
+) -> ViewerReply {
+    let saved = &selection.slots[selection.first - selection.start];
+    let (Some(field), Some(file)) = (&saved.field, &saved.file) else {
+        return catalog::error(
+            422,
+            "field_unsupported",
+            "This native entry has no qualified string field projection.",
+            false,
+        );
+    };
+    if chunk
+        .checked_add(1)
+        .is_none_or(|next| next >= field.checkpoints.len())
+    {
+        return catalog::error(
+            400,
+            "invalid_arguments",
+            "The field chunk is outside this projection.",
+            false,
+        );
+    }
+    let references: BTreeMap<PathBuf, SessionSourceRef> = selection
+        .identity
+        .source_refs
+        .iter()
+        .filter_map(|observation| {
+            let root = match observation.source.root.as_str() {
+                "claude" => &options.claude_home,
+                "codex" => &options.codex_home,
+                "copilot" => &options.copilot_home,
+                _ => return None,
+            };
+            Some((
+                root.join(&observation.source.path),
+                observation.source.clone(),
+            ))
+        })
+        .collect();
+    let local = Local {
+        sources: &selection.sources,
+        references: &references,
+    };
+    let reader = provider.unwrap_or(&local);
+    let result = (|| -> io::Result<(String, bool, usize)> {
+        let reference = references.get(&file.path).ok_or_else(invalid)?;
+        if field.checkpoints.first() != Some(&field.start)
+            || field.checkpoints.last() != Some(&field.end)
+            || !field.checkpoints.windows(2).all(|pair| {
+                pair[0] < pair[1]
+                    && pair[1] - pair[0] <= crate::json_string::JSON_STRING_CHECKPOINT_BYTES + 11
+            })
+        {
+            return Err(invalid());
+        }
+        let start = *field.checkpoints.get(chunk).ok_or_else(invalid)?;
+        let end = *field
+            .checkpoints
+            .get(chunk.checked_add(1).ok_or_else(invalid)?)
+            .ok_or_else(invalid)?;
+        let at = saved.offset.checked_add(start).ok_or_else(invalid)?;
+        let end = saved.offset.checked_add(end).ok_or_else(invalid)?;
+        if at >= end || end > reference.offset {
+            return Err(invalid());
+        }
+        let mut bytes = Vec::with_capacity((end - at) as usize);
+        let mut generation = None::<String>;
+        let mut length = None;
+        for _ in 0..32 {
+            let offset = at + bytes.len() as u64;
+            if offset == end {
+                break;
+            }
+            let max = usize::try_from(end - offset).map_err(|_| invalid())?;
+            let part = reader.read_range(reference, generation.as_deref(), offset, max)?;
+            if part.offset != offset
+                || part.bytes.is_empty()
+                || part.bytes.len() > max
+                || part.length < reference.offset
+                || part.generation.is_empty()
+                || part.generation.len() > 4096
+                || generation
+                    .as_ref()
+                    .is_some_and(|known| *known != part.generation)
+                || length.is_some_and(|known| known != part.length)
+            {
+                return Err(invalid());
+            }
+            generation = Some(part.generation);
+            length = Some(part.length);
+            bytes.extend_from_slice(&part.bytes);
+        }
+        if at + bytes.len() as u64 != end {
+            return Err(invalid());
+        }
+        let decoded = crate::json_string::decode_json_string_chunk(
+            &bytes,
+            true,
+            crate::json_string::JSON_STRING_CHUNK_DECODED_MAX,
+        )?;
+        if !decoded.complete || decoded.consumed != bytes.len() {
+            return Err(invalid());
+        }
+        Ok((decoded.text, end == saved.offset + field.end, bytes.len()))
+    })();
+    match result {
+        Ok((text, complete, bytes)) => reply(
+            200,
+            json!({"api":1,"identity":selection.identity,
+            "projection":{"version":VERSION,"generation":selection.generation},"slot":selection.first,
+            "field":{"name":"text","chunk":chunk,"next":(!complete).then_some(chunk+1),"complete":complete},
+            "text":text,"freshness":{"state":"cached"},"observation":{"source_bytes":bytes}}),
+        ),
+        Err(_) => catalog::error(
+            503,
+            "field_unavailable",
+            "The selected immutable field range is unavailable. Resynchronize the session before retrying.",
+            true,
+        ),
+    }
 }

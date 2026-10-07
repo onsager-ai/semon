@@ -4,7 +4,7 @@ use crate::model::{Background, BgEnd, Shown, SignalData, Slot, SlotFile, SlotKin
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, path::PathBuf, sync::Arc};
 
-pub(crate) const VERSION: u32 = 1;
+pub(crate) const VERSION: u32 = 2;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -134,6 +134,8 @@ pub(crate) struct SavedSlot {
     pub(crate) t: Option<i64>,
     pub(crate) turn: Option<String>,
     pub(crate) first: bool,
+    #[serde(default)]
+    pub(crate) field: Option<crate::native_field::NativeField>,
 }
 impl SavedSlot {
     fn capture(slot: &Slot) -> Self {
@@ -224,7 +226,11 @@ impl SavedSlot {
             },
             SlotKind::NoActivity => Recipe::NoActivity,
         };
+        let field = slot.file.as_ref().and_then(|file| {
+            crate::native_field::capture(&file.path, slot.offset, slot.block, &recipe)
+        });
         Self {
+            field,
             recipe,
             file: slot.file.as_deref().map(File::capture),
             offset: slot.offset,
