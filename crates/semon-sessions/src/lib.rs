@@ -14,7 +14,9 @@ use serde_json::Value;
 
 mod analytics;
 mod catalog;
+mod catalog_changes;
 mod catalog_observer;
+pub use catalog_changes::{CatalogChange, CatalogChangePage, session_catalog_changes};
 mod catalog_search;
 pub use catalog::{
     CatalogFreshness, CatalogIdentityError, CatalogOwnerQualification, CatalogReadScope,
