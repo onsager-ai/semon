@@ -1,5 +1,5 @@
 import { spawn, spawnSync } from 'node:child_process';
-import { mkdtemp, writeFile, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, writeFile, readFile, rm, readdir, appendFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import assert from 'node:assert/strict';
@@ -17,6 +17,25 @@ test(
       { encoding: 'utf8' },
     );
     assert.equal(fixture.status, 0, fixture.stderr);
+    const paths = await readdir(join(home, 'claude'), { recursive: true });
+    const backlog = paths.find((path) => path.endsWith('/backlog.jsonl'));
+    assert.ok(backlog, 'Native long conversation fixture is missing');
+    const scalar = 'Actual native scalar field.\n\n' + 'Recorded source text. '.repeat(5000);
+    await appendFile(
+      join(home, 'claude', backlog),
+      JSON.stringify({
+        type: 'assistant',
+        sessionId: 'backlog',
+        uuid: 'semon-served-scalar',
+        timestamp: new Date(Number(fixture.stdout.trim()) - 1000).toISOString(),
+        message: {
+          role: 'assistant',
+          content: [{ type: 'text', text: scalar }],
+          model: 'claude-sonnet-5',
+          usage: { input_tokens: 0, output_tokens: 0 },
+        },
+      }) + '\n',
+    );
     const server = spawn(
       process.env.SEMON_CATALOG_SERVED_BIN,
       [
@@ -57,7 +76,8 @@ test(
       const page = await browser.newPage({ viewport: { width: 1280, height: 860 } }),
         errors = [],
         requests = [],
-        responses = [];
+        responses = [],
+        fieldTexts = [];
       page.on('pageerror', (e) => errors.push(e.message));
       page.on('request', (r) => {
         if (new URL(r.url()).pathname.startsWith('/api/'))
@@ -70,6 +90,10 @@ test(
           try {
             body = await r.text();
           } catch {}
+          if (new URL(r.url()).pathname === '/api/session-entry' && r.status() === 200) {
+            const field = JSON.parse(body);
+            fieldTexts[field.field.chunk] = field.text;
+          }
           responses.push({
             path: new URL(r.url()).pathname,
             status: r.status(),
@@ -78,12 +102,16 @@ test(
           });
         }
       });
-      await page.route('**/viewer.js', async (route) =>
-        route.fulfill({
-          contentType: 'text/javascript',
-          body: await readFile(join(root, 'crates/semon-sessions/src/viewer.generated.js'), 'utf8'),
-        }),
-      );
+      if (process.env.SEMON_CATALOG_SERVED_UI_OVERRIDE === '1')
+        await page.route('**/viewer.js', async (route) =>
+          route.fulfill({
+            contentType: 'text/javascript',
+            body: await readFile(
+              join(root, 'crates/semon-sessions/src/viewer.generated.js'),
+              'utf8',
+            ),
+          }),
+        );
       const start = performance.now();
       await page.goto(url[1] + '/?t=' + url[2]);
       await page.locator('#page [data-id]').first().waitFor({ timeout: 60000 });
@@ -93,6 +121,19 @@ test(
       await page.locator('#page [data-id="backlog"]').click();
       await page.locator('#page [data-entry-key]').first().waitFor({ timeout: 60000 });
       const selected = performance.now() - selectedStart;
+      const preview = page.getByRole('button', { name: 'Load recorded text', exact: true });
+      await preview.waitFor();
+      const fieldStart = performance.now();
+      await preview.click();
+      await page.getByRole('button', { name: 'Load more text', exact: true }).waitFor();
+      await page.getByRole('button', { name: 'Load more text', exact: true }).click();
+      await page.getByText('Complete recorded text loaded.', { exact: true }).waitFor();
+      const fieldMs = performance.now() - fieldStart;
+      assert.equal(fieldTexts.join(''), scalar);
+      assert.equal(
+        (await page.locator('#page').innerText()).match(/Recorded source text\./g)?.length,
+        5000,
+      );
       const first = await page
         .locator('#page [data-entry-key]')
         .first()
@@ -118,6 +159,8 @@ test(
         firstListMs: firstList,
         selectedMs: selected,
         warmSwitchMs: warm,
+        fieldMs,
+        scalarBytes: Buffer.byteLength(scalar),
         key,
         firstEntry: first,
         requests,
