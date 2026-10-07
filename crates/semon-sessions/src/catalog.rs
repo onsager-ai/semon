@@ -1802,20 +1802,31 @@ mod tests {
 
     #[test]
     fn native_tool_outputs_use_bounded_string_fields_and_preserve_call_context() {
-        for harness in ["claude", "codex"] {
+        for harness in [
+            "claude",
+            "claude-block",
+            "codex",
+            "codex-encoded",
+            "codex-object",
+        ] {
             let fixture = Fixture::new();
             let body = "native tool output line \"quoted\" \n".repeat(15000);
-            let key = if harness == "claude" {
+            let key = if harness.starts_with("claude") {
                 "claude-tools"
             } else {
                 "codex-tools"
             };
-            let (path, records) = if harness == "claude" {
+            let (path, records) = if harness.starts_with("claude") {
+                let content = if harness == "claude-block" {
+                    json!([{"type":"text","text":body}])
+                } else {
+                    json!(body)
+                };
                 (
                     fixture.source(key),
                     vec![
                         json!({"type":"assistant","sessionId":key,"uuid":"native-call","parentUuid":key,"timestamp":"2026-10-01T00:00:01Z","message":{"role":"assistant","content":[{"type":"tool_use","id":"native-tool","name":"Bash","input":{"command":"printf fixture"}}]}}),
-                        json!({"type":"user","sessionId":key,"uuid":"native-result","parentUuid":"native-call","timestamp":"2026-10-01T00:00:02Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"native-tool","content":body}]}}),
+                        json!({"type":"user","sessionId":key,"uuid":"native-result","parentUuid":"native-call","timestamp":"2026-10-01T00:00:02Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"native-tool","content":content}]}}),
                     ],
                 )
             } else {
@@ -1827,12 +1838,19 @@ mod tests {
                 facts.codex_rollouts =
                     Some(std::collections::BTreeSet::from([relative.to_owned()]));
                 crate::write_facts(facts_path, &facts).unwrap();
+                let output = match harness {
+                    "codex-encoded" => {
+                        json!(json!({"output":body,"metadata":{"exit_code":0}}).to_string())
+                    }
+                    "codex-object" => json!({"output":body,"metadata":{"exit_code":0}}),
+                    _ => json!(body),
+                };
                 (
                     path,
                     vec![
                         json!({"type":"session_meta","timestamp":"2026-10-01T00:00:00Z","payload":{"id":key,"cwd":"/synthetic/project"}}),
                         json!({"type":"response_item","timestamp":"2026-10-01T00:00:01Z","payload":{"type":"function_call","name":"exec_command","call_id":"native-tool","arguments":"{\"cmd\":\"printf fixture\"}"}}),
-                        json!({"type":"response_item","timestamp":"2026-10-01T00:00:02Z","payload":{"type":"function_call_output","call_id":"native-tool","output":body}}),
+                        json!({"type":"response_item","timestamp":"2026-10-01T00:00:02Z","payload":{"type":"function_call_output","call_id":"native-tool","output":output}}),
                     ],
                 )
             };
