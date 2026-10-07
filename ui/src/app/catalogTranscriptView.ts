@@ -5,7 +5,7 @@ import { I } from './registry';
 export function catalogTranscriptBlocks(
   entries: readonly CatalogTranscriptEntry[],
 ): TranscriptBlock[] {
-  return entries.map(({ entry: entry, entry_id, native_action_text, clipped }) => {
+  return entries.map(({ entry: entry, entry_id, native_action_text, clipped, freshness }) => {
     const views: EntryView[] = [];
     let notice = 0;
     const label = (text: string) =>
@@ -76,6 +76,10 @@ export function catalogTranscriptBlocks(
     else if (entry.k === 'signal')
       label('Native ' + entry.signal.kind + (entry.signal.tag ? ' · ' + entry.signal.tag : ''));
     if (clipped) label('Recorded text preview. The complete source text is not loaded.');
+    if (freshness && freshness.state !== 'cached')
+      label(
+        'Source observation is ' + freshness.state + '. Previously loaded content is retained.',
+      );
     if (entry.img?.length) label('Attachments unavailable for this source.');
     return { kind: 'loose', key: entry_id, entries: views };
   });

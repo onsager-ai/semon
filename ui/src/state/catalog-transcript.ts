@@ -4,6 +4,18 @@ import {
   type CatalogTranscriptPage,
   type CatalogTranscriptEntry,
 } from './catalog-transcript-wire';
+function content(item: CatalogTranscriptEntry): string {
+  const { freshness, ...body } = item;
+  return JSON.stringify(body);
+}
+function emptyObservedBody(item: CatalogTranscriptEntry): boolean {
+  const entry = item.entry;
+  return entry.k === 'tool'
+    ? !entry.out
+    : entry.k === 'h'
+      ? !item.native_action_text
+      : (entry.k === 'u' || entry.k === 'a' || entry.k === 'think') && !entry.text;
+}
 export interface CatalogRangeRequest extends CatalogSelectionScope {
   readonly epoch: number;
   readonly after: number | null;
@@ -98,17 +110,42 @@ export class CatalogTranscriptStore {
         ids.set(item.entry_id, item.slot);
       }
     }
+    page.entries = page.entries.map((item) => {
+      const old = existing.get(item.slot);
+      // Failed source verification must remain visible without erasing useful retained content.
+      if (
+        old &&
+        item.freshness?.state === 'incomplete' &&
+        emptyObservedBody(item) &&
+        old.entry_id === item.entry_id &&
+        old.entry.k === item.entry.k &&
+        JSON.stringify(old.provenance) === JSON.stringify(item.provenance)
+      )
+        return { ...old, freshness: item.freshness };
+      return item;
+    });
     for (const item of page.entries) {
       const old = existing.get(item.slot);
       if (
         (ids.has(item.entry_id) && ids.get(item.entry_id) !== item.slot) ||
-        (old && JSON.stringify(old) !== JSON.stringify(item))
+        (old && content(old) !== content(item))
       )
         throw new Error('Catalog transcript entry changed within a projection');
     }
+    if (sameRange && JSON.stringify(sameRange.entries) === JSON.stringify(page.entries)) {
+      this.requests.delete(request);
+      this.pages[this.pages.indexOf(sameRange)] = page;
+      return true;
+    }
+    const observed = new Map(page.entries.map((item) => [item.slot, item]));
     this.requests.delete(request);
     this.pages = [
-      ...this.pages.filter((old) => old.range.first !== first || old.range.end !== page.range.end),
+      ...this.pages
+        .filter((old) => old.range.first !== first || old.range.end !== page.range.end)
+        .map((old) => ({
+          ...old,
+          entries: old.entries.map((item) => observed.get(item.slot) ?? item),
+        })),
       page,
     ].sort((a, b) => a.range.first - b.range.first);
     ++this.contentVersion;
