@@ -15,3 +15,20 @@ and backoff, then verifies that key through the typed retained-history metadata
 endpoint before opening the parsed session. Ambiguous sources remain unavailable
 with an explanation. Source changes, selection changes and disposal invalidate
 late deliveries. No complete-model restore or control authority is inferred.
+
+Partial discovery reports collection `completeness: {state: 'partial'}` and
+`freshness: 'updating'`. Source metadata remains readable while the native owner
+is provisional. A typed identity may declare `owner_qualification: 'provisional'`
+but must carry `native_id: null`; provenance and declared native IDs remain
+available for explanation. Both the native observer and control presentation
+reject provisional and historical authority. Independent read-only runtime phase
+observation remains available.
+
+Metadata search requires explicit `metadata_search: true` and the advertised `q`
+filter. Literal user input is URL-encoded once and normalized by the server. The
+result documents Unicode lowercase substring matching over names, keys,
+repositories, branches, models and harnesses, with at most 512 candidates and
+2 MiB verification per request. Budget-limited results can be empty with a
+continuation cursor. The Viewer presents that partial scan separately from an
+incomplete index, retains the query across source switches, and never falls back
+to full transcript or cross-source search.

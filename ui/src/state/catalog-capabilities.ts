@@ -7,6 +7,7 @@ export interface CatalogCapabilities {
   selected_identity: boolean;
   selected_entry: boolean;
   source_candidates: boolean;
+  metadata_search: boolean;
   attachment: boolean;
   relationship_context: boolean;
   large_native_records: boolean;
@@ -20,7 +21,8 @@ export interface CatalogCapabilities {
 export function parseCatalogCapabilities(value: unknown): CatalogCapabilities {
   const row = object(value),
     filters = array(row.filters, text),
-    sourceKey = text(row.source_key);
+    sourceKey = text(row.source_key),
+    metadataSearch = row.metadata_search === undefined ? false : boolean(row.metadata_search);
   if (
     row.api !== 1 ||
     row.read_contract !== 'catalog-v1' ||
@@ -29,7 +31,10 @@ export function parseCatalogCapabilities(value: unknown): CatalogCapabilities {
     row.order !== 'last_desc_key_asc' ||
     row.full_text_search !== false ||
     row.global_union !== false ||
-    filters.some((filter) => filter !== 'harness' && filter !== 'repo') ||
+    metadataSearch !== filters.includes('q') ||
+    filters.some(
+      (filter) => filter !== 'harness' && filter !== 'repo' && !(metadataSearch && filter === 'q'),
+    ) ||
     new Set(filters).size !== filters.length
   )
     throw new Error('Unsupported catalog read contract');
@@ -41,6 +46,7 @@ export function parseCatalogCapabilities(value: unknown): CatalogCapabilities {
     selected_identity: boolean(row.selected_identity),
     selected_entry: boolean(row.selected_entry),
     source_candidates: row.source_candidates === undefined ? false : boolean(row.source_candidates),
+    metadata_search: metadataSearch,
     attachment: boolean(row.attachment),
     relationship_context: boolean(row.relationship_context),
     large_native_records: boolean(row.large_native_records),

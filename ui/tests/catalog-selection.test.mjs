@@ -166,3 +166,16 @@ test('readonly scope exists before authority and remains stable through failed i
   store.destroy();
   assert.equal(store.selectedScope(), null);
 });
+
+test('provisional identity retains read provenance without native control authority', () => {
+  const store = new CatalogSelectionStore(),
+    ticket = store.begin({ source_key: 'source', catalog_key: 'session' });
+  const provisional = { ...identity(), owner_qualification: 'provisional', native_id: null };
+  assert.equal(store.accept(ticket, provisional), true);
+  assert.equal(store.selectedIdentity().native_id, null);
+  assert.deepEqual(store.selectedIdentity().native_ids, ['native']);
+  assert.equal(store.selectedScope().catalog_key, 'session');
+  const next = store.begin({ source_key: 'source', catalog_key: 'session' });
+  assert.throws(() => store.accept(next, { ...provisional, native_id: 'native' }));
+  assert.throws(() => store.accept(next, { ...provisional, owner_qualification: 'unknown' }));
+});
