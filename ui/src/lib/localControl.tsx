@@ -255,18 +255,20 @@ export function LocalControl({
           )}
         </button>
       </form>
-      {(!s.connected || view.uncertain) && s.runtime?.reconnectable !== false && (
-        <div class="local-control-actions">
-          <button
-            type="button"
-            class="btn sh-quiet"
-            disabled={view.busy}
-            onClick={() => view.reconnect()}
-          >
-            Reconnect
-          </button>
-        </div>
-      )}
+      {(!s.connected || view.uncertain) &&
+        view.canReconnect !== false &&
+        s.runtime?.reconnectable !== false && (
+          <div class="local-control-actions">
+            <button
+              type="button"
+              class="btn sh-quiet"
+              disabled={view.busy}
+              onClick={() => view.reconnect()}
+            >
+              Reconnect
+            </button>
+          </div>
+        )}
       {view.note && <p role="status">{view.note}</p>}
       {recent.length > 0 && (
         <details>

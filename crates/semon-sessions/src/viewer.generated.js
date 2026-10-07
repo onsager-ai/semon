@@ -53,7 +53,7 @@ var __semonUIShared = (() => {
     preact: () => preact_module_exports
   });
 
-  // ../../semon-catalog-ui/ui/node_modules/preact/dist/preact.module.js
+  // node_modules/preact/dist/preact.module.js
   var preact_module_exports = {};
   __export(preact_module_exports, {
     Component: () => C,
@@ -364,7 +364,7 @@ var __semonUIShared = (() => {
     return n3.__v.__b - l4.__v.__b;
   }, H.__r = 0, f = Math.random().toString(8), c = "__d" + f, a = "__a" + f, s = /(PointerCapture)$|Capture$/i, h = 0, p = V(false), v = V(true), y = 0;
 
-  // ../../semon-catalog-ui/ui/node_modules/preact/hooks/dist/hooks.module.js
+  // node_modules/preact/hooks/dist/hooks.module.js
   var hooks_module_exports = {};
   __export(hooks_module_exports, {
     useCallback: () => q2,
@@ -566,7 +566,7 @@ var __semonUIShared = (() => {
     return "function" == typeof t4 ? t4(n3) : t4;
   }
 
-  // ../../semon-catalog-ui/ui/node_modules/preact/jsx-runtime/dist/jsxRuntime.module.js
+  // node_modules/preact/jsx-runtime/dist/jsxRuntime.module.js
   var jsxRuntime_module_exports = {};
   __export(jsxRuntime_module_exports, {
     Fragment: () => S,
@@ -3207,7 +3207,7 @@ globalThis.__semonUIShared = __semonUIShared;
           ]
         }
       ),
-      (!s.connected || view.uncertain) && s.runtime?.reconnectable !== false && /* @__PURE__ */ jsx("div", { class: "local-control-actions", children: /* @__PURE__ */ jsx(
+      (!s.connected || view.uncertain) && view.canReconnect !== false && s.runtime?.reconnectable !== false && /* @__PURE__ */ jsx("div", { class: "local-control-actions", children: /* @__PURE__ */ jsx(
         "button",
         {
           type: "button",
@@ -6022,6 +6022,14 @@ globalThis.__semonUIShared = __semonUIShared;
     if (!owner || owner.disposed) return;
     owner.snapshot = { ...owner.snapshot, control };
     owner.controls?.();
+  }
+  function updateSessionRuntime(root, runtime) {
+    const owner = owners.get(root);
+    if (!owner || owner.disposed) return;
+    const hadRuntime = !!owner.snapshot.runtime;
+    owner.snapshot = { ...owner.snapshot, runtime };
+    owner.runtime?.();
+    if (hadRuntime !== !!runtime) owner.controls?.();
   }
   function updateSessionPager(root, view) {
     const owner = owners.get(root);
@@ -15575,6 +15583,194 @@ globalThis.__semonUIShared = __semonUIShared;
     );
   }
 
+  // src/lib/runtimeObservation.ts
+  function parseRuntimeObservation(value) {
+    if (!value || typeof value !== "object" || Array.isArray(value))
+      throw new Error("Invalid readonly runtime observation");
+    const row = value;
+    if (!["active", "disconnected", "failed", "ended", "unavailable"].includes(String(row.state)) || typeof row.phase !== "string" || row.phase.length > 64 || !["current", "updating", "stale", "unavailable"].includes(String(row.freshness)) || row.presence !== void 0 && !["active", "absent", "paused", "transitioning", "failed", "unknown"].includes(
+      String(row.presence)
+    ) || row.observedAt !== void 0 && row.observedAt !== null && (typeof row.observedAt !== "string" || row.observedAt.length > 64 || !Number.isFinite(Date.parse(row.observedAt))) || row.observationError !== void 0 && row.observationError !== null && (typeof row.observationError !== "string" || row.observationError.length > 512) || row.updating !== void 0 && typeof row.updating !== "boolean")
+      throw new Error("Invalid readonly runtime observation");
+    return Object.freeze({
+      state: row.state,
+      phase: row.phase,
+      freshness: row.freshness,
+      ...row.presence === void 0 ? {} : { presence: row.presence },
+      ...row.observedAt === void 0 ? {} : { observedAt: row.observedAt },
+      ...row.observationError === void 0 ? {} : { observationError: row.observationError },
+      ...row.updating === void 0 ? {} : { updating: row.updating }
+    });
+  }
+
+  // src/app/runtimeObservation.ts
+  function createRuntimeObservation(host2) {
+    let disposed = false;
+    let stream = null;
+    let cleanups2 = [];
+    let ticket = 0;
+    let key = "";
+    let frame = null;
+    let timer;
+    let deadline;
+    let delay = 1e3;
+    const listeners = /* @__PURE__ */ new Set();
+    const selected = () => {
+      const selected2 = host2.catalogRuntimeSelection?.selectedScope();
+      const route = host2.navigation.route;
+      return route.v === "session" && selected2?.catalog_key === route.id ? selected2 : null;
+    };
+    const selectionKey = (scope) => scope ? JSON.stringify([scope.source_key, scope.catalog_key]) : "";
+    function publish(value) {
+      frame = value ? Object.freeze(value) : null;
+      for (const listener of listeners) listener();
+    }
+    function cancel() {
+      ++ticket;
+      for (const cleanup of cleanups2) cleanup();
+      cleanups2 = [];
+      stream?.close();
+      stream = null;
+      host2.scope.clearTimeout(timer);
+      timer = void 0;
+      host2.scope.clearTimeout(deadline);
+      deadline = void 0;
+    }
+    function disconnected(reason, permanent = false) {
+      cancel();
+      if (frame)
+        publish({
+          ...frame,
+          delivery: permanent ? "unavailable" : frame.observation ? "stale" : "unavailable",
+          reason
+        });
+      if (!permanent) {
+        const generation = ticket;
+        timer = host2.scope.timeout(() => {
+          if (!disposed && generation === ticket) connect();
+        }, delay);
+        delay = Math.min(15e3, delay * 2);
+      }
+    }
+    function connect() {
+      if (disposed) return;
+      cancel();
+      const scope = selected();
+      const path = host2.viewerHost?.catalogRuntimeStream;
+      key = selectionKey(scope);
+      if (!scope || !path || !safePath(path)) {
+        publish(null);
+        return;
+      }
+      if (!frame || selectionKey(frame) !== key)
+        publish({
+          ...scope,
+          revision: null,
+          observation: null,
+          reason: "Checking environment status\u2026",
+          delivery: "updating"
+        });
+      else publish({ ...frame, delivery: "updating" });
+      const generation = ticket;
+      const query = new URLSearchParams({
+        source_key: scope.source_key,
+        catalog_key: scope.catalog_key
+      });
+      let current;
+      try {
+        current = new EventSource(path + (path.includes("?") ? "&" : "?") + query);
+      } catch {
+        disconnected("Environment status is unavailable. Retrying.");
+        return;
+      }
+      stream = current;
+      const valid = () => !disposed && ticket === generation && stream === current && key === selectionKey(selected());
+      const recover = () => {
+        if (valid()) disconnected("Environment status updates were interrupted. Retrying.");
+      };
+      const heartbeat = () => {
+        if (!valid()) return;
+        host2.scope.clearTimeout(deadline);
+        deadline = host2.scope.timeout(recover, 3e4);
+      };
+      function listen(type, listener) {
+        current.addEventListener(type, listener);
+        cleanups2.push(() => current.removeEventListener(type, listener));
+      }
+      heartbeat();
+      listen("heartbeat", heartbeat);
+      listen("error", recover);
+      listen("unavailable", recover);
+      listen("ended", () => {
+        if (valid())
+          disconnected(
+            "Access changed. Sign in or select an authorized workspace to inspect status.",
+            true
+          );
+      });
+      listen("runtime", (event) => {
+        if (!valid() || !(event instanceof MessageEvent)) return;
+        try {
+          if (String(event.data).length > 16384) throw new Error("Runtime status too large");
+          const value = JSON.parse(String(event.data));
+          if (!value || typeof value !== "object" || Array.isArray(value))
+            throw new Error("Invalid runtime envelope");
+          const row = value;
+          if (row.source_key !== scope.source_key || row.catalog_key !== scope.catalog_key || typeof row.revision !== "string" || !/^[0-9a-f]{64}$/.test(row.revision) || !(row.reason === null || row.reason === void 0 || typeof row.reason === "string" && row.reason.length <= 512) || row.runtime === void 0)
+            throw new Error("Runtime selection changed");
+          const observation = row.runtime === null ? null : parseRuntimeObservation(row.runtime);
+          heartbeat();
+          delay = 1e3;
+          if (frame?.revision === row.revision && frame.delivery === "current") return;
+          publish({
+            ...scope,
+            revision: row.revision,
+            observation,
+            reason: typeof row.reason === "string" ? row.reason : null,
+            delivery: "current"
+          });
+        } catch {
+          recover();
+        }
+      });
+    }
+    const reselect = () => {
+      const next = selectionKey(selected());
+      if (next === key) return;
+      cancel();
+      key = next;
+      delay = 1e3;
+      publish(null);
+      connect();
+    };
+    const unsubscribe = host2.catalogRuntimeSelection?.subscribe(reselect) ?? (() => {
+    });
+    const unnavigate = host2.navigation.subscribeRoute(reselect);
+    host2.scope.listen(document, "semon:refresh", () => {
+      delay = 1e3;
+      connect();
+    });
+    connect();
+    return {
+      view: () => frame,
+      subscribe(listener) {
+        if (disposed) return () => {
+        };
+        listeners.add(listener);
+        return () => listeners.delete(listener);
+      },
+      destroy() {
+        if (disposed) return;
+        disposed = true;
+        cancel();
+        unsubscribe();
+        unnavigate();
+        listeners.clear();
+        frame = null;
+      }
+    };
+  }
+
   // src/app/catalogTranscriptView.ts
   function catalogTranscriptBlocks(entries, fieldView) {
     return entries.map((item2) => {
@@ -15722,23 +15918,24 @@ globalThis.__semonUIShared = __semonUIShared;
     });
     const control = createLocalControl(scope, () => {
       if (!active) return;
-      const identity2 = selection.selectedIdentity();
       updateSessionControl(active.root, controlFor(active));
     });
     function controlFor(view) {
       const identity2 = selection.selectedIdentity();
       const current = active === view && identity2?.catalog_key === view.key && identity2.native_id ? control.view(identity2.native_id) : void 0;
       if (current) view.lastControl = current;
-      if (current || !view.lastControl) return current;
-      const previous = view.lastControl;
+      const runtime = runtimeFor(view)?.observation, terminal = runtime && runtime.state !== "active";
+      if (current && !terminal || !view.lastControl) return current;
+      const previous = current ?? view.lastControl;
       return {
         ...previous,
         busy: false,
         uncertain: true,
+        canReconnect: false,
         snapshot: {
           ...previous.snapshot,
           connected: false,
-          reason: "Current connection status is unavailable.",
+          reason: terminal ? "Native controls are unavailable for this environment state." : "Current connection status is unavailable.",
           capabilities: {
             ...previous.snapshot.capabilities,
             input: false,
@@ -15770,6 +15967,21 @@ globalThis.__semonUIShared = __semonUIShared;
           throw new Error("Catalog status cannot access the complete model");
         }
       }
+    });
+    const runtimeObservation = createRuntimeObservation({
+      scope,
+      navigation,
+      viewerHost,
+      catalogRuntimeSelection: selection
+    });
+    function runtimeFor(view) {
+      const frame = runtimeObservation.view();
+      return frame?.source_key === capabilities.source_key && frame.catalog_key === view.key ? frame : void 0;
+    }
+    const removeRuntimeListener = runtimeObservation.subscribe(() => {
+      if (!active) return;
+      updateSessionRuntime(active.root, runtimeFor(active));
+      updateSessionControl(active.root, controlFor(active));
     });
     const api = async (path) => {
       const controller = scope.request(), deadline = scope.timeout(() => controller.abort(), 15e3);
@@ -15959,6 +16171,7 @@ globalThis.__semonUIShared = __semonUIShared;
             id: view.key,
             name: view.meta?.name ?? "Session",
             control: controlFor(view),
+            runtime: runtimeFor(view),
             blocks: [],
             order: [],
             observation: "Recorded history is updating",
@@ -15994,6 +16207,7 @@ globalThis.__semonUIShared = __semonUIShared;
       }
       if (view.renderedRevision === view.store.revision && view.renderedNote === view.note) {
         updateSessionControl(view.root, controlFor(view));
+        updateSessionRuntime(view.root, runtimeFor(view));
         if ((view.store.loadedRanges()[0]?.first ?? 0) > 0)
           updateSessionPager(view.root, {
             sid: view.key,
@@ -16016,6 +16230,7 @@ globalThis.__semonUIShared = __semonUIShared;
           id: view.key,
           name: view.meta?.name ?? "Session",
           control: controlFor(view),
+          runtime: runtimeFor(view),
           observation: view.note || {
             cached: "Cached history",
             stale: "Stale history",
@@ -16350,6 +16565,8 @@ globalThis.__semonUIShared = __semonUIShared;
         disposed = true;
         ++listEpoch;
         observation.destroy();
+        removeRuntimeListener();
+        runtimeObservation.destroy();
         scope.destroy();
         selection.destroy();
         navigation.destroy();

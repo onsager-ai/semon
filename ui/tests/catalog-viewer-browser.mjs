@@ -371,8 +371,7 @@ test('temporary boot failure and pending projection recover without starting glo
         return route.fulfill({ json: capabilities(ready) });
       }
       if (p === '/api/sessions') return route.fulfill({ json: list([meta('one')]) });
-      if (p === '/api/session-identity')
-        return route.fulfill({ json: { api: 1, identity: identity('one') } });
+      if (p === '/api/session-identity') return route.fulfill({ status: 404, body: '' });
       if (p === '/api/session-transcript') {
         if (++rangeReads === 1) return route.fulfill({ status: 503, body: '' });
         return route.fulfill({ json: transcript('one', url.searchParams) });
@@ -386,11 +385,52 @@ test('temporary boot failure and pending projection recover without starting glo
     await page.clock.install({ time: new Date('2026-10-07T00:00:00Z') });
     await page.clock.pauseAt(new Date('2026-10-07T00:01:00Z'));
     await page.addScriptTag({ content: outputFiles[0].text });
-    await page.evaluate(() => (window.app = CatalogViewer.mountViewerApplication()));
+    await page.evaluate(() => {
+      window.runtimeStreams = [];
+      window.EventSource = class extends EventTarget {
+        constructor(path) {
+          super();
+          this.closed = false;
+          runtimeStreams.push(this);
+          const scope = Object.fromEntries(new URL(path, location.href).searchParams);
+          queueMicrotask(() =>
+            this.dispatchEvent(
+              new MessageEvent('runtime', {
+                data: JSON.stringify({
+                  ...scope,
+                  revision: 'd'.repeat(64),
+                  runtime: {
+                    state: 'ended',
+                    phase: 'released',
+                    freshness: 'current',
+                    presence: 'absent',
+                  },
+                  reason: null,
+                }),
+              }),
+            ),
+          );
+        }
+        close() {
+          this.closed = true;
+        }
+      };
+      window.app = CatalogViewer.mountViewerApplication({
+        machinesPath: '/machines',
+        catalogRuntimeStream: '/catalog/runtime',
+        loadMachines: async () => {
+          throw Error('No global inventory');
+        },
+      });
+    });
     await page.getByText('Session history is unavailable.', { exact: false }).waitFor();
     await page.clock.runFor(1100);
     await page.locator('#page [data-id="one"]').click();
-    await page.getByText('Recorded transcript is updating.', { exact: false }).waitFor();
+    await page.getByText('This session has ended.', { exact: true }).waitFor();
+    await page
+      .getByText('Current native session selection is unavailable.', { exact: false })
+      .waitFor();
+    assert.equal(await page.locator('textarea').count(), 0);
     assert.equal(
       requests.some((p) => p === '/api/model' || p === '/api/session-transcript'),
       false,
@@ -402,11 +442,13 @@ test('temporary boot failure and pending projection recover without starting glo
       .waitFor();
     await page.clock.runFor(1100);
     await page.locator('#page [data-entry-key="one:5"]').waitFor();
+    await page.getByText('This session has ended.', { exact: true }).waitFor();
     assert.equal(requests.includes('/api/model'), false);
     await page.evaluate(() => app.destroy());
     const afterDestroy = requests.length;
     await page.clock.runFor(30000);
     assert.equal(requests.length, afterDestroy);
+    assert.equal(await page.evaluate(() => runtimeStreams.every((stream) => stream.closed)), true);
   } finally {
     await browser.close();
   }

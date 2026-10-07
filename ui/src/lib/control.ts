@@ -113,6 +113,7 @@ export function parseControl(value: unknown): ControlSnapshot | null {
   return value as unknown as ControlSnapshot;
 }
 export interface ControlView {
+  canReconnect?: boolean;
   snapshot: ControlSnapshot;
   busy: boolean;
   uncertain: boolean;
