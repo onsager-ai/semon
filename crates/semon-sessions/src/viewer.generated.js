@@ -5470,7 +5470,21 @@ globalThis.__semonUIShared = __semonUIShared;
           }
         );
       case "label":
-        return /* @__PURE__ */ jsx("div", { class: entry2.className, "data-e": entry2.key, "data-entry-key": entry2.entryKey, children: screenText(entry2.text) });
+        return /* @__PURE__ */ jsxs("div", { class: entry2.className, "data-e": entry2.key, "data-entry-key": entry2.entryKey, children: [
+          screenText(entry2.text),
+          entry2.action && /* @__PURE__ */ jsx(
+            "button",
+            {
+              type: "button",
+              class: "link",
+              disabled: entry2.action.busy,
+              onClick: (event) => {
+                if (event.currentTarget.isConnected) active(() => entry2.action?.run());
+              },
+              children: screenText(entry2.action.label)
+            }
+          )
+        ] });
       case "tool":
         return /* @__PURE__ */ jsx(
           "div",
@@ -15506,8 +15520,9 @@ globalThis.__semonUIShared = __semonUIShared;
   }
 
   // src/app/catalogTranscriptView.ts
-  function catalogTranscriptBlocks(entries) {
-    return entries.map(({ entry: entry2, entry_id, native_action_text, clipped, freshness: freshness2 }) => {
+  function catalogTranscriptBlocks(entries, fieldView) {
+    return entries.map((item2) => {
+      const { entry_id, native_action_text, clipped, freshness: freshness2 } = item2, field = fieldView?.(item2), entry2 = field?.text === void 0 ? item2.entry : item2.entry.k === "tool" ? { ...item2.entry, out: field.text } : { ...item2.entry, text: field.text };
       const views = [];
       let notice = 0;
       const label = (text2) => views.push({
@@ -15570,7 +15585,15 @@ globalThis.__semonUIShared = __semonUIShared;
       else if (entry2.k === "harness") label(entry2.label);
       else if (entry2.k === "signal")
         label("Native " + entry2.signal.kind + (entry2.signal.tag ? " \xB7 " + entry2.signal.tag : ""));
-      if (clipped) label("Recorded text preview. The complete source text is not loaded.");
+      if (field) {
+        views.push({
+          kind: "label",
+          key: entry_id + ":field",
+          className: "vnote",
+          text: field.note,
+          action: field.action
+        });
+      } else if (clipped) label("Recorded text preview. The complete source text is not loaded.");
       if (freshness2 && freshness2.state !== "cached")
         label(
           "Source observation is " + freshness2.state + ". Previously loaded content is retained."
@@ -15578,6 +15601,14 @@ globalThis.__semonUIShared = __semonUIShared;
       if (entry2.img?.length) label("Attachments unavailable for this source.");
       return { kind: "loose", key: entry_id, entries: views };
     });
+  }
+
+  // src/state/catalog-field-wire.ts
+  function parseCatalogField(value, request) {
+    const row = object2(value), identity2 = parseCatalogIdentity(row.identity), projection = object2(row.projection), field = object2(row.field), provenance = object2(row.provenance), source = parseCatalogSource(provenance.source), chunk = number(field.chunk), next = field.next === null ? null : number(field.next), complete = boolean(field.complete), body = text(row.text), sourceBytes = number(object2(row.observation).source_bytes);
+    if (row.api !== 1 || identity2.read_scope !== "retained_history" || identity2.source_key !== request.source_key || identity2.catalog_key !== request.catalog_key || projection.version !== 1 || projection.generation !== request.generation || row.slot !== request.entry.slot || field.name !== request.entry.field?.name || chunk !== request.chunk || !Number.isSafeInteger(chunk) || chunk < 0 || next !== (complete ? null : chunk + 1) || !request.entry.field || chunk >= request.entry.field.chunks || complete !== (chunk + 1 === request.entry.field.chunks) || object2(row.freshness).state !== "cached" || !Number.isSafeInteger(sourceBytes) || sourceBytes < 0 || sourceBytes > 65547 || new TextEncoder().encode(body).byteLength > 65547 || JSON.stringify(source) !== JSON.stringify(request.entry.provenance.source) || provenance.offset !== request.entry.provenance.offset || provenance.block !== request.entry.provenance.block || provenance.native_event_id !== request.entry.provenance.native_event_id)
+      throw new Error("Native field chunk does not match the selected source projection");
+    return { text: body, next, complete };
   }
 
   // src/app/catalogViewer.tsx
@@ -15935,7 +15966,7 @@ globalThis.__semonUIShared = __semonUIShared;
             incomplete: "History is incomplete",
             unavailable: "Source history is unavailable"
           }[current.freshness.state] + " \xB7 related session context is incomplete",
-          blocks: catalogTranscriptBlocks(view.store.entries()),
+          blocks: catalogTranscriptBlocks(view.store.entries(), (entry2) => fieldView(view, entry2)),
           order: view.store.entries().map((item2) => item2.entry_id),
           before: (view.store.loadedRanges()[0]?.first ?? 0) > 0 ? {
             sid: view.key,
@@ -15985,6 +16016,72 @@ globalThis.__semonUIShared = __semonUIShared;
         if (window.matchMedia("(max-width: 760px)").matches)
           window.scrollTo(0, document.documentElement.scrollHeight);
         else main.scrollTop = main.scrollHeight;
+      }
+    }
+    function fieldView(view, entry2) {
+      if (!entry2.clipped || !entry2.field) return null;
+      const progress = view.fields.get(entry2.entry_id), generation = view.store.selectedPage().projection.generation, changed = progress && progress.generation !== generation;
+      return {
+        text: progress?.text,
+        note: changed ? "Source projection changed. Previously loaded text is retained. " : progress?.note || (progress?.next === null ? "Complete recorded text loaded." : progress?.text === void 0 ? "Recorded text preview. " : "Part of the recorded text is loaded. "),
+        action: capabilities.selected_entry ? {
+          label: progress?.loading ? "Loading text\u2026" : changed ? "Reload recorded text" : progress?.text === void 0 ? "Load recorded text" : "Load more text",
+          busy: !!progress?.loading,
+          run() {
+            void loadField(view, entry2);
+          }
+        } : void 0,
+        ...progress?.next === null && !changed ? { action: void 0 } : {}
+      };
+    }
+    async function loadField(view, entry2) {
+      if (disposed || !capabilities.selected_entry || !entry2.field) return;
+      const generation = view.store.selectedPage()?.projection.generation;
+      if (!generation) return;
+      let progress = view.fields.get(entry2.entry_id);
+      if (progress?.loading) return;
+      if (!progress || progress.generation !== generation) {
+        progress = { generation, next: 0, loading: false, note: "" };
+        view.fields.set(entry2.entry_id, progress);
+      }
+      if (progress.next === null) return;
+      const chunk = progress.next, p = params(), pending = progress;
+      p.set("sid", view.key);
+      p.set("after", String(entry2.slot));
+      p.set("limit", "1");
+      p.set("generation", generation);
+      p.set("field_chunk", String(chunk));
+      pending.loading = true;
+      pending.note = "";
+      view.renderedRevision = -1;
+      drawSelected(view);
+      try {
+        const value = await api("/api/session-entry?" + p);
+        if (disposed || view.fields.get(entry2.entry_id) !== pending) return;
+        if (view.store.selectedPage()?.projection.generation !== generation) {
+          pending.note = "Source projection changed. Reload recorded text. ";
+          return;
+        }
+        const field = parseCatalogField(value, {
+          source_key: capabilities.source_key,
+          catalog_key: view.key,
+          generation,
+          entry: entry2,
+          chunk
+        });
+        pending.text = (chunk === 0 ? "" : pending.text ?? "") + field.text;
+        pending.next = field.next;
+      } catch (error) {
+        if (disposed) return;
+        pending.note = error && typeof error === "object" && "status" in error && error.status === 422 ? "Complete text is unavailable for this native format. " : readError(error) + " ";
+        if (error && typeof error === "object" && "status" in error && error.status === 409)
+          void loadSelected(view);
+      } finally {
+        pending.loading = false;
+        if (!disposed) {
+          view.renderedRevision = -1;
+          drawSelected(view);
+        }
       }
     }
     async function resynchronize(view) {
@@ -16117,7 +16214,8 @@ globalThis.__semonUIShared = __semonUIShared;
           identityLoading: false,
           retryDelay: 1e3,
           renderedRevision: -1,
-          renderedNote: ""
+          renderedNote: "",
+          fields: /* @__PURE__ */ new Map()
         };
         selected.set(key, view);
       }

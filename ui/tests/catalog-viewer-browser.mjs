@@ -110,6 +110,9 @@ function transcript(key, p, total = 65, generation = 'b') {
     entries: Array.from({ length: end - first }, (_, i) => ({
       k: 'a',
       text: 'Original ' + key + ' record ' + (first + i),
+      ...(first + i === 6
+        ? { clipped: true, field: { name: 'text', chunks: 2, complete: false } }
+        : {}),
       slot: first + i,
       entry_id: key + ':' + (first + i),
       provenance: { source: source(key), native_event_id: null, offset: first + i, block: 0 },
@@ -146,7 +149,24 @@ for (const width of [390, 1280])
           if (u.pathname === '/viewer.css')
             return route.fulfill({ contentType: 'text/css', body: css });
           if (u.pathname === '/api/session-capabilities')
-            return route.fulfill({ json: capabilities(true) });
+            return route.fulfill({ json: { ...capabilities(true), selected_entry: true } });
+          if (u.pathname === '/api/session-entry') {
+            const chunk = Number(u.searchParams.get('field_chunk')),
+              key = u.searchParams.get('sid');
+            return route.fulfill({
+              json: {
+                api: 1,
+                identity: { ...identity(key), read_scope: 'retained_history' },
+                projection: { version: 1, generation: nativeGeneration.repeat(64) },
+                slot: 6,
+                field: { name: 'text', chunk, next: chunk === 0 ? 1 : null, complete: chunk === 1 },
+                text: chunk === 0 ? 'First native text chunk ' : 'and final native text chunk.',
+                freshness: { state: 'cached' },
+                provenance: { source: source(key), offset: 6, block: 0, native_event_id: null },
+                observation: { source_bytes: 28 },
+              },
+            });
+          }
           if (u.pathname === '/api/session-identity')
             return route.fulfill({
               json: { api: 1, identity: identity(u.searchParams.get('sid')) },
@@ -245,6 +265,23 @@ for (const width of [390, 1280])
         await draft.fill('Retained native draft');
         await draft.focus();
         const draftNode = await draft.elementHandle();
+        await page.getByRole('button', { name: 'Load recorded text', exact: true }).click();
+        await page.getByRole('button', { name: 'Load more text', exact: true }).waitFor();
+        assert.match(
+          await page.locator('#page [data-entry-key="one:6"]').innerText(),
+          /First native text chunk/,
+        );
+        assert.doesNotMatch(
+          await page.locator('#page [data-entry-key="one:6"]').innerText(),
+          /Original one record 6/,
+        );
+        await page.getByRole('button', { name: 'Load more text', exact: true }).click();
+        await page.getByText('Complete recorded text loaded.', { exact: true }).waitFor();
+        assert.match(
+          await page.locator('#page [data-entry-key="one:6"]').innerText(),
+          /and final native text chunk/,
+        );
+        assert.equal(await draft.inputValue(), 'Retained native draft');
         await page.getByRole('button', { name: 'Load earlier records' }).first().click();
         await page.locator('#page [data-entry-key="one:0"]').waitFor();
         assert.equal(await draft.inputValue(), 'Retained native draft');
@@ -295,6 +332,12 @@ for (const width of [390, 1280])
           .locator('#page [data-entry-key="one:0"]')
           .evaluate((node) => node.getBoundingClientRect().top);
         assert.ok(Math.abs(anchorBefore - anchorAfter) < 2);
+        assert.match(
+          await page.locator('#page [data-entry-key="one:6"]').innerText(),
+          /and final native text chunk/,
+        );
+        await page.getByRole('button', { name: 'Reload recorded text', exact: true }).waitFor();
+        assert.equal(requests.filter((p) => p.startsWith('/api/session-entry')).length, 2);
         assert.equal(
           requests.some((p) => /^\/api\/(model|tool|image|tx)/.test(p)),
           false,
@@ -311,33 +354,59 @@ for (const width of [390, 1280])
         await browser.close();
       }
     });
-test('recognized pending contract shows useful metadata without starting global content', async () => {
+test('temporary boot failure and pending projection recover without starting global content', async () => {
   const browser = await chromium.launch();
   try {
     const page = await browser.newPage(),
       requests = [];
+    let capabilityReads = 0,
+      ready = false,
+      rangeReads = 0;
     await page.route('http://catalog.test/**', (route) => {
-      const p = new URL(route.request().url()).pathname;
+      const url = new URL(route.request().url()),
+        p = url.pathname;
       requests.push(p);
-      if (p === '/api/session-capabilities') return route.fulfill({ json: capabilities(false) });
+      if (p === '/api/session-capabilities') {
+        if (++capabilityReads === 1) return route.fulfill({ status: 503, body: '' });
+        return route.fulfill({ json: capabilities(ready) });
+      }
       if (p === '/api/sessions') return route.fulfill({ json: list([meta('one')]) });
       if (p === '/api/session-identity')
         return route.fulfill({ json: { api: 1, identity: identity('one') } });
+      if (p === '/api/session-transcript') {
+        if (++rangeReads === 1) return route.fulfill({ status: 503, body: '' });
+        return route.fulfill({ json: transcript('one', url.searchParams) });
+      }
       return route.fulfill({
         contentType: p === '/viewer.css' ? 'text/css' : 'text/html',
         body: p === '/viewer.css' ? css : html,
       });
     });
     await page.goto('http://catalog.test/sessions');
+    await page.clock.install({ time: new Date('2026-10-07T00:00:00Z') });
+    await page.clock.pauseAt(new Date('2026-10-07T00:01:00Z'));
     await page.addScriptTag({ content: outputFiles[0].text });
     await page.evaluate(() => (window.app = CatalogViewer.mountViewerApplication()));
+    await page.getByText('Session history is unavailable.', { exact: false }).waitFor();
+    await page.clock.runFor(1100);
     await page.locator('#page [data-id="one"]').click();
     await page.getByText('Recorded transcript is updating.', { exact: false }).waitFor();
     assert.equal(
       requests.some((p) => p === '/api/model' || p === '/api/session-transcript'),
       false,
     );
+    ready = true;
+    await page.clock.runFor(8100);
+    await page
+      .getByText('The source is updating or temporarily unavailable.', { exact: false })
+      .waitFor();
+    await page.clock.runFor(1100);
+    await page.locator('#page [data-entry-key="one:5"]').waitFor();
+    assert.equal(requests.includes('/api/model'), false);
     await page.evaluate(() => app.destroy());
+    const afterDestroy = requests.length;
+    await page.clock.runFor(30000);
+    assert.equal(requests.length, afterDestroy);
   } finally {
     await browser.close();
   }
