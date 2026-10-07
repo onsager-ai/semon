@@ -171,7 +171,13 @@ export async function requestJson(
     throw new ApiError(error instanceof Error ? error.message : 'No response', 0);
   }
   if (unchanged && response.status === 304) return null;
-  if (!response.ok)
+  if (!response.ok) {
+    // Error readers need only the status. Release an unread body rather than
+    // leaving its transport alive after the caller retires its deadline.
+    try {
+      void response.body?.cancel().catch(() => {});
+    } catch {}
     throw new ApiError(response.status + ' ' + response.statusText, response.status);
+  }
   return response.json() as Promise<unknown>;
 }
