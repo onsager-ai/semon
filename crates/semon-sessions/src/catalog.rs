@@ -1436,6 +1436,76 @@ mod tests {
     }
 
     #[test]
+    fn source_observer_upgrades_old_recipes_without_a_source_append() {
+        let fixture = Fixture::new();
+        fixture.publish(1);
+        let before = crate::session_transcript_range(
+            &fixture.options,
+            "source",
+            "sid=session-00000&after=0&limit=1",
+            None,
+        );
+        assert_eq!(before.status, 200);
+        let before: Value = serde_json::from_slice(&before.body).unwrap();
+        let connection = Connection::open(EventCache::path(&fixture.options.cache)).unwrap();
+        let ledger: (i64, Vec<u8>) = connection
+            .query_row(
+                "SELECT resume_at,head_sha256 FROM files LIMIT 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        connection.execute("UPDATE session_slot_projections SET version=3,generation=?1 WHERE session_key='session-00000'",["0".repeat(64)]).unwrap();
+        connection.execute("UPDATE session_slots SET metadata=json_remove(metadata,'$.field.layers') WHERE session_key='session-00000'",[]).unwrap();
+        let unavailable = crate::session_transcript_range(
+            &fixture.options,
+            "source",
+            "sid=session-00000&after=0&limit=1",
+            None,
+        );
+        assert_eq!(unavailable.status, 503);
+        let observer = crate::SessionCatalogObserver::new(fixture.options.clone());
+        observer.demand().unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let reply = crate::session_transcript_range(
+                &fixture.options,
+                "source",
+                "sid=session-00000&after=0&limit=1",
+                None,
+            );
+            if reply.status == 200 {
+                let after: Value = serde_json::from_slice(&reply.body).unwrap();
+                assert_eq!(after["projection"]["version"], 4);
+                assert_eq!(
+                    after["entries"][0]["entry_id"],
+                    before["entries"][0]["entry_id"]
+                );
+                assert_eq!(
+                    after["entries"][0]["provenance"],
+                    before["entries"][0]["provenance"]
+                );
+                assert_eq!(after["entries"][0]["field"]["layers"], 1);
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "unchanged-source recipe upgrade did not complete"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        observer.close();
+        let after: (i64, Vec<u8>) = connection
+            .query_row(
+                "SELECT resume_at,head_sha256 FROM files LIMIT 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(after, ledger);
+    }
+
+    #[test]
     fn source_observer_publishes_first_push_without_a_viewer_core() {
         let fixture = Fixture::new();
         fixture.source("first-push");
