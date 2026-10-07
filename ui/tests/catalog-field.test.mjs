@@ -43,7 +43,7 @@ function body() {
       observed_at: null,
       freshness: { state: 'cached' },
     },
-    projection: { version: 1, generation: request.generation },
+    projection: { version: 4, generation: request.generation },
     slot: 2,
     field: { name: 'out', chunk: 0, next: 1, complete: false },
     text: 'First native result chunk',
@@ -66,10 +66,20 @@ test('native field chunks bind source, canonical session, projection, slot, fiel
     next: null,
     complete: true,
   });
+  const layeredRequest = structuredClone(request);
+  layeredRequest.entry.field.layers = 2;
+  const layered = body();
+  layered.field.layers = 2;
+  layered.observation.source_bytes = 65607;
+  assert.equal(parseCatalogField(layered, layeredRequest).text, layered.text);
+  layered.observation.source_bytes = 65608;
+  assert.throws(() => parseCatalogField(layered, layeredRequest));
   for (const change of [
     (p) => (p.identity.source_key = 'other'),
     (p) => (p.identity.catalog_key = 'other'),
     (p) => (p.identity.read_scope = 'current'),
+    (p) => (p.projection.version = 1),
+    (p) => (p.projection.version = 5),
     (p) => (p.projection.generation = 'c'.repeat(64)),
     (p) => (p.slot = 3),
     (p) => (p.field.name = 'text'),
@@ -80,7 +90,9 @@ test('native field chunks bind source, canonical session, projection, slot, fiel
     (p) => (p.provenance.source.native_id = 'other'),
     (p) => (p.freshness.state = 'incomplete'),
     (p) => (p.observation.source_bytes = 65548),
-    (p) => (p.text = 'x'.repeat(65548)),
+    (p) => (p.text = 'x'.repeat(131073)),
+    (p) => (p.field.layers = 2),
+    (p) => (p.field.layers = 3),
   ]) {
     const p = body();
     change(p);

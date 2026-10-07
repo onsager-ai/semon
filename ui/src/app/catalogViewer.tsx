@@ -32,7 +32,10 @@ import { catalogTranscriptBlocks } from './catalogTranscriptView';
 import type { CatalogTranscriptEntry } from '../state/catalog-transcript-wire';
 import { parseCatalogField } from '../state/catalog-field-wire';
 import { I } from './registry';
+import { parseCatalogSources, type CatalogSourceItem } from '../state/catalog-sources';
+import { renderCatalogSources } from '../lib/catalogSources';
 interface SelectedView {
+  sourceKey: string;
   key: string;
   root: HTMLElement;
   store: CatalogTranscriptStore;
@@ -79,8 +82,28 @@ export function createCatalogViewer(
     repo = '',
     active: SelectedView | null = null;
   const selected = new Map<string, SelectedView>();
+  const sourceViews = new Map<
+    string,
+    {
+      page: CatalogPage | null;
+      items: CatalogSession[];
+      cursor: string | null;
+      harness: string;
+      repo: string;
+      selectedKey: string | null;
+    }
+  >();
+  let sourcesOpen = false,
+    sourcesEpoch = 0,
+    sourceItems: CatalogSourceItem[] = [],
+    sourceCursor: string | null = null,
+    sourcesUpdating = false,
+    sourcesNote = '',
+    sourcesRetryDelay = 1000;
+  const cacheKey = (key: string) => JSON.stringify([capabilities.source_key, key]);
   const account = parseAccount(viewerHost?.account);
   let wide = false,
+    rail = document.querySelector('.app')?.classList.contains('rail') ?? false,
     chromeTitle: string | null = null,
     chromeSession = false;
   const shell = createShellChrome({
@@ -101,13 +124,21 @@ export function createCatalogViewer(
       },
     },
     navigate(destination) {
+      if (destination.key === 'sources') {
+        void showSources();
+        return true;
+      }
       if (destination.key !== 'sessions') return false;
+      sourcesOpen = false;
       goList();
       return true;
     },
     drawerOpened() {},
     drawerClosed() {},
-    railChanged() {},
+    railChanged() {
+      rail = !rail;
+      chrome();
+    },
   });
   shell.mount(document.querySelector<HTMLElement>('.app')!);
   const root = shell.slots.content,
@@ -216,15 +247,30 @@ export function createCatalogViewer(
   const params = () =>
     new URLSearchParams({ machine: capabilities.source_key, scope: 'retained_history' });
   function chrome() {
-    const name = active?.meta?.name ?? (active ? 'Session' : 'Sessions');
+    const name = sourcesOpen
+      ? 'Choose a machine'
+      : (active?.meta?.name ?? (active ? 'Session' : 'Sessions'));
     shell.update(
       [
-        { key: 'sessions', label: 'Sessions', href: '/sessions', icon: I.sessions, current: true },
+        {
+          key: 'sessions',
+          label: 'Sessions',
+          href: '/sessions',
+          icon: I.sessions,
+          current: !sourcesOpen,
+        },
+        {
+          key: 'sources',
+          label: 'Sources',
+          href: '/sessions?choose_source=1',
+          icon: I.sessions,
+          current: sourcesOpen,
+        },
         ...(viewerHost?.nativeNavigation ?? []).filter(
           (destination) => destination.key !== 'sessions',
         ),
       ],
-      false,
+      rail,
     );
     if (chromeTitle !== name || chromeSession !== !!active) {
       chromeTitle = name;
@@ -271,7 +317,7 @@ export function createCatalogViewer(
     });
   }
   function drawList() {
-    if (disposed || active) return;
+    if (disposed || active || sourcesOpen) return;
     chrome();
     renderCatalogList(
       root,
@@ -397,6 +443,7 @@ export function createCatalogViewer(
         : document.querySelector<HTMLElement>('#main')!.scrollTop;
   }
   function goList(push = true) {
+    sourcesOpen = false;
     preserveScroll();
     active = null;
     selection.clear();
@@ -604,7 +651,13 @@ export function createCatalogViewer(
     };
   }
   async function loadField(view: SelectedView, entry: CatalogTranscriptEntry) {
-    if (disposed || !capabilities.selected_entry || !entry.field) return;
+    if (
+      disposed ||
+      view.sourceKey !== capabilities.source_key ||
+      !capabilities.selected_entry ||
+      !entry.field
+    )
+      return;
     const generation = view.store.selectedPage()?.projection.generation;
     if (!generation) return;
     let progress = view.fields.get(entry.entry_id);
@@ -702,7 +755,11 @@ export function createCatalogViewer(
       if (view.queuedAfter === undefined || after !== null) view.queuedAfter = after;
       return;
     }
-    if (disposed || !capabilities.selected_transcript) {
+    if (
+      disposed ||
+      view.sourceKey !== capabilities.source_key ||
+      !capabilities.selected_transcript
+    ) {
       drawSelected(view);
       return;
     }
@@ -761,7 +818,14 @@ export function createCatalogViewer(
     }
   }
   async function loadIdentity(view: SelectedView) {
-    if (disposed || view.identityLoading || !view.ticket || !capabilities.selected_identity) return;
+    if (
+      disposed ||
+      view.sourceKey !== capabilities.source_key ||
+      view.identityLoading ||
+      !view.ticket ||
+      !capabilities.selected_identity
+    )
+      return;
     const ticket = view.ticket,
       p = currentParams();
     p.set('sid', view.key);
@@ -801,11 +865,13 @@ export function createCatalogViewer(
   async function goSession(key: string, meta?: CatalogSession, push = true) {
     if (disposed) return;
     preserveScroll();
-    let view = selected.get(key);
+    sourcesOpen = false;
+    let view = selected.get(cacheKey(key));
     if (!view) {
       const store = new CatalogTranscriptStore();
       store.select({ source_key: capabilities.source_key, catalog_key: key }, 'retained_history');
       view = {
+        sourceKey: capabilities.source_key,
         key,
         root: document.createElement('div'),
         store,
@@ -823,7 +889,7 @@ export function createCatalogViewer(
         newCount: 0,
         lastTotal: null,
       };
-      selected.set(key, view);
+      selected.set(cacheKey(key), view);
     }
     active = view;
     view.ticket = selection.begin({ source_key: capabilities.source_key, catalog_key: key });
@@ -855,11 +921,12 @@ export function createCatalogViewer(
     }
   }
   async function recheckCapabilities() {
+    const observedSource = capabilities.source_key;
     try {
       const next = parseCatalogCapabilities(
         await api('/api/session-capabilities?' + currentParams()),
       );
-      if (disposed) return;
+      if (disposed || observedSource !== capabilities.source_key) return;
       if (next.source_key !== capabilities.source_key)
         throw new Error('Source selection changed. Choose the source again.');
       const ready = !capabilities.selected_transcript && next.selected_transcript;
@@ -876,7 +943,153 @@ export function createCatalogViewer(
       if (!disposed) scope.timeout(() => void recheckCapabilities(), 8000);
     }
   }
+  function drawSources() {
+    if (disposed || !sourcesOpen) return;
+    chrome();
+    renderCatalogSources(
+      root,
+      {
+        items: sourceItems,
+        updating: sourcesUpdating,
+        note: sourcesNote,
+        more: sourceCursor !== null,
+        machinesHref: viewerHost?.machinesPath ?? '/machines?compat=1',
+      },
+      {
+        select(key) {
+          if (sourceItems.some((item) => item.source_key === key)) void switchSource(key);
+        },
+        more() {
+          void loadSources(true);
+        },
+        retry() {
+          void loadSources(false);
+        },
+      },
+    );
+  }
+  async function loadSources(append: boolean) {
+    if (disposed || !sourcesOpen || sourcesUpdating) return;
+    const epoch = ++sourcesEpoch,
+      p = new URLSearchParams({ limit: '60' });
+    if (append && sourceCursor !== null) p.set('cursor', sourceCursor);
+    sourcesUpdating = true;
+    sourcesNote = '';
+    drawSources();
+    try {
+      const next = parseCatalogSources(await api('/api/session-sources?' + p));
+      if (disposed || !sourcesOpen || epoch !== sourcesEpoch) return;
+      if (
+        append &&
+        next.items.some((item) => sourceItems.some((old) => old.source_key === item.source_key))
+      )
+        throw new Error('Source page repeated a machine');
+      sourceItems = append ? [...sourceItems, ...next.items] : next.items;
+      sourceCursor = next.next_cursor;
+      sourcesRetryDelay = 1000;
+    } catch (error) {
+      if (disposed || !sourcesOpen || epoch !== sourcesEpoch) return;
+      sourcesNote = readError(error);
+      if (retryable(error)) {
+        scope.timeout(() => {
+          if (sourcesOpen && epoch === sourcesEpoch) void loadSources(append);
+        }, sourcesRetryDelay);
+        sourcesRetryDelay = Math.min(8000, sourcesRetryDelay * 2);
+      }
+    } finally {
+      if (!disposed && epoch === sourcesEpoch) {
+        sourcesUpdating = false;
+        drawSources();
+      }
+    }
+  }
+  function saveSource() {
+    preserveScroll();
+    sourceViews.set(capabilities.source_key, {
+      page,
+      items,
+      cursor,
+      harness,
+      repo,
+      selectedKey: active?.key ?? null,
+    });
+  }
+  async function showSources() {
+    if (disposed) return;
+    if (!sourcesOpen) saveSource();
+    ++listEpoch;
+    scope.clearTimeout(listRetry);
+    active = null;
+    selection.clear();
+    navigation.route = { v: 'sessions' };
+    sourcesOpen = true;
+    root.replaceChildren();
+    shell.closeDrawer(true);
+    drawSources();
+    if (!sourceItems.length) await loadSources(false);
+  }
+  async function switchSource(key: string, push = true) {
+    if (disposed) return;
+    const epoch = ++sourcesEpoch;
+    sourcesUpdating = true;
+    sourcesNote = '';
+    drawSources();
+    try {
+      const next = parseCatalogCapabilities(
+        await api('/api/session-capabilities?' + new URLSearchParams({ machine: key })),
+      );
+      if (disposed || epoch !== sourcesEpoch) return;
+      if (next.source_key !== key)
+        throw new Error('Source capability identity does not match this selection');
+      if (!sourcesOpen) saveSource();
+      ++listEpoch;
+      scope.clearTimeout(listRetry);
+      selection.clear();
+      Object.assign(capabilities, next);
+      const retained = sourceViews.get(key);
+      page = retained?.page ?? null;
+      items = retained?.items ?? [];
+      cursor = retained?.cursor ?? null;
+      harness = retained?.harness ?? '';
+      repo = retained?.repo ?? '';
+      updating = false;
+      note = '';
+      sourcesOpen = false;
+      active = null;
+      if (push && retained?.selectedKey) await goSession(retained.selectedKey, undefined, false);
+      else goList(false);
+      const url = retained?.selectedKey
+        ? '/s/' +
+          encodeURIComponent(
+            selected.get(cacheKey(retained.selectedKey))?.meta?.harness ?? 'native',
+          ) +
+          '/' +
+          encodeURIComponent(retained.selectedKey)
+        : '/sessions';
+      if (push) history.pushState(null, '', url + '?' + new URLSearchParams({ machine: key }));
+      else fromLocation();
+      void loadList(false);
+    } catch (error) {
+      if (disposed || epoch !== sourcesEpoch) return;
+      sourcesNote = readError(error);
+    } finally {
+      if (!disposed && epoch === sourcesEpoch) {
+        sourcesUpdating = false;
+        drawSources();
+      }
+    }
+  }
   function fromLocation() {
+    if (new URLSearchParams(location.search).get('choose_source') === '1') {
+      void showSources();
+      return;
+    }
+    const machine = new URLSearchParams(location.search).get('machine');
+    if (machine && machine !== capabilities.source_key) {
+      void showSources();
+      void switchSource(machine, false);
+      return;
+    }
     const parts = location.pathname.split('/').filter(Boolean);
     if (parts[0] === 's' && parts[2]) {
       try {
