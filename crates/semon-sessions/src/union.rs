@@ -1241,6 +1241,10 @@ impl ViewerCore {
         } else {
             None
         };
+        // The original single-machine Viewer uses an empty internal key.
+        // Its additive catalog contract has a stable explicit local alias.
+        // This never derives source authority from hostnames or session ids.
+        let local_alias = views.len() == 1 && views[0].0.is_empty();
         let machine = match query_value(query, "machine") {
             Some(value) => match decoded(value) {
                 Some(machine) => machine,
@@ -1253,6 +1257,7 @@ impl ViewerCore {
                     );
                 }
             },
+            None if local_alias => "local".to_owned(),
             None if views.len() == 1 => views[0].0.clone(),
             None => {
                 return crate::catalog::error(
@@ -1263,7 +1268,16 @@ impl ViewerCore {
                 );
             }
         };
-        let matches: Vec<_> = views.iter().filter(|(key, _)| *key == machine).collect();
+        let matches: Vec<_> = views
+            .iter()
+            .filter(|(key, _)| {
+                if local_alias {
+                    machine == "local"
+                } else {
+                    *key == machine
+                }
+            })
+            .collect();
         let [(key, view)] = matches.as_slice() else {
             return crate::catalog::error(
                 if matches.is_empty() { 404 } else { 409 },
@@ -1272,6 +1286,7 @@ impl ViewerCore {
                 false,
             );
         };
+        let key = if local_alias { "local" } else { key.as_str() };
         // Record demand without waiting for an initial model build. The
         // configured background coordinator performs coherent observation;
         // OnRead callers retain their explicit warm()/api/model contract.
@@ -1321,18 +1336,14 @@ impl ViewerCore {
                 crate::session_transcript_range(view.options(), key, query, None)
             }
             "/api/session-entry" => crate::session_entry_field(view.options(), key, query, None),
-            "/api/session-capabilities" => {
-                let body = json!({"api":1,"read_contract":"catalog-v1","source_key":key,
-                    "selected_identity":true,"selected_transcript":true,"pagination":true,"relationship_context":false,
-                    "large_native_records":false,"selected_entry":true,"attachment":false,"global_union":false,"full_text_search":false,
-                    "filters":["harness","repo"],"order":"last_desc_key_asc"});
-                ViewerReply {
-                    status: 200,
-                    content_type: "application/json; charset=utf-8",
-                    body: body.to_string().into_bytes(),
-                    etag: None,
-                }
-            }
+            "/api/session-capabilities" => crate::session_catalog_capabilities(
+                key,
+                crate::SessionReadEndpoints {
+                    selected_identity: true,
+                    selected_transcript: true,
+                    selected_entry: true,
+                },
+            ),
             _ => crate::catalog::page(
                 view.options(),
                 key,
