@@ -61,6 +61,10 @@ pub struct Launch {
     /// True only after independent supervisor descendant-reaping proof.
     #[serde(default)]
     pub writer_excluded: bool,
+    /// Bounded owner-only native status, when currently observed. Command text
+    /// is redacted; capabilities still require the embedding’s effective policy.
+    #[serde(default)]
+    pub snapshot: Option<serde_json::Value>,
 }
 /// Install the controller into an existing mirror enrollment and start its
 /// independent supervisor. No compute is created, replaced, paused or deleted.
@@ -100,7 +104,7 @@ pub async fn install(
     let output = run(
         files.command(target, &command),
         &input,
-        4096,
+        270336,
         Duration::from_secs(40),
     )
     .await?;
@@ -164,7 +168,7 @@ async fn observe_inner(
     let output = run(
         files.command(target, &command),
         &input,
-        4096,
+        270336,
         Duration::from_secs(10),
     )
     .await?;

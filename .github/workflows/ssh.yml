@@ -32,6 +32,10 @@ jobs:
           cargo build -p semon-control --bin semon-ssh-controller -p semon-ssh --example controller-install --locked
           cargo build -p semon-store --bin semon --locked
           python3 tests/ssh/test_controller_supervisor.py
+      - name: Install pinned offline probe dependencies
+        run: |
+          python3 -m venv "$RUNNER_TEMP/native-probe"
+          "$RUNNER_TEMP/native-probe/bin/pip" install -r tests/spikes/requirements-control.txt
       - name: Verify complete pinned native package
         run: |
           mkdir "$RUNNER_TEMP/native-package"
@@ -41,4 +45,4 @@ jobs:
           rm "$RUNNER_TEMP/native-package.tar.gz"
       - name: Real native SSH dispatch and captured-history readback
         run: |
-          SEMON_CODEX_PACKAGE="$RUNNER_TEMP/native-package" SEMON_SSH_BINARY="$PWD/target/debug/semon" scripts/ssh-native-fixture.sh python3 tests/spikes/ssh-native-controller.py --installer "$PWD/target/debug/examples/controller-install" --controller "$PWD/target/debug/semon-ssh-controller" --codex "$RUNNER_TEMP/native-package/bin/codex" --output "$RUNNER_TEMP/native-controller-report.json"
+          SEMON_CODEX_PACKAGE="$RUNNER_TEMP/native-package" SEMON_SSH_BINARY="$PWD/target/debug/semon" scripts/ssh-native-fixture.sh "$RUNNER_TEMP/native-probe/bin/python" tests/spikes/ssh-native-controller.py --installer "$PWD/target/debug/examples/controller-install" --controller "$PWD/target/debug/semon-ssh-controller" --codex "$RUNNER_TEMP/native-package/bin/codex" --output "$RUNNER_TEMP/native-controller-report.json"
