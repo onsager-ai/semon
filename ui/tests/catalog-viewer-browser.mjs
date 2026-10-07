@@ -660,3 +660,64 @@ for (const width of [390, 1280])
       await browser.close();
     }
   });
+
+test('partial catalog discovery refresh retains uncommitted filter focus and then completes', async () => {
+  const browser = await chromium.launch();
+  try {
+    const page = await browser.newPage();
+    let reads = 0;
+    await page.route('http://catalog.test/**', (route) => {
+      const path = new URL(route.request().url()).pathname;
+      if (path === '/api/session-capabilities') return route.fulfill({ json: capabilities(false) });
+      if (path === '/api/sessions') {
+        reads++;
+        return route.fulfill({
+          json: {
+            api: 1,
+            machine: 'source',
+            read_scope: 'retained_history',
+            machine_info: { key: 'source', label: 'Source', freshness: 'cached' },
+            generation: 'a'.repeat(64),
+            observed_at: null,
+            freshness: reads === 1 ? 'updating' : 'cached',
+            completeness: { state: reads === 1 ? 'partial' : 'complete' },
+            capabilities: {
+              pagination: true,
+              filters: ['harness', 'repo'],
+              order: 'last_desc_key_asc',
+              full_text_search: false,
+              selected_session_lookup: true,
+              runtime_status: false,
+              global_union: false,
+            },
+            items: [meta('one')],
+            next_cursor: null,
+          },
+        });
+      }
+      return route.fulfill({
+        contentType: path === '/viewer.css' ? 'text/css' : 'text/html',
+        body: path === '/viewer.css' ? css : html,
+      });
+    });
+    await page.goto('http://catalog.test/sessions');
+    await page.addScriptTag({ content: outputFiles[0].text });
+    await page.evaluate(() => (window.app = CatalogViewer.mountViewerApplication()));
+    await page.getByText('More sessions are being discovered. This list is incomplete.').waitFor();
+    const harness = page.getByRole('textbox', { name: 'Harness', exact: true });
+    await harness.fill('uncommitted');
+    await page.waitForTimeout(1500);
+    assert.equal(reads, 1);
+    assert.equal(await harness.inputValue(), 'uncommitted');
+    assert.equal(await harness.evaluate((node) => document.activeElement === node), true);
+    await harness.press('Tab');
+    await page
+      .getByText('More sessions are being discovered. This list is incomplete.')
+      .waitFor({ state: 'hidden' });
+    assert.equal(await harness.inputValue(), 'uncommitted');
+    assert.ok(reads >= 2);
+    await page.evaluate(() => app.destroy());
+  } finally {
+    await browser.close();
+  }
+});

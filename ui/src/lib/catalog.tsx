@@ -13,6 +13,8 @@ export interface CatalogListSnapshot {
   items: readonly CatalogListItem[];
   sourceLabel: string;
   updating: boolean;
+  observation?: string;
+  discovering?: boolean;
   note: string;
   harness: string;
   repo: string;
@@ -35,7 +37,9 @@ export function renderCatalogList(
     <>
       <div class="ph">
         <h1>Sessions</h1>
-        <p class="sub">{screenText(snapshot.sourceLabel)} · Cached history</p>
+        <p class="sub">
+          {screenText(snapshot.sourceLabel)} · {snapshot.observation ?? 'Cached history'}
+        </p>
       </div>
       <form
         class="catalog-filters facet-filters"
@@ -63,6 +67,11 @@ export function renderCatalogList(
       <p class="catalog-note">
         Sorted by latest recorded activity. Text search and history across sources are unavailable.
       </p>
+      {snapshot.discovering && (
+        <p class="catalog-note" role="status">
+          More sessions are being discovered. This list is incomplete.
+        </p>
+      )}
       {snapshot.note && (
         <p class="catalog-note" role="status">
           {snapshot.note}{' '}
@@ -103,7 +112,7 @@ export function renderCatalogList(
           Open compatibility view (loads workspace history)
         </a>
       </p>
-      {!snapshot.updating && !snapshot.items.length && !snapshot.note && (
+      {!snapshot.updating && !snapshot.items.length && !snapshot.note && !snapshot.discovering && (
         <p class="catalog-note">No recorded sessions match these filters.</p>
       )}
       {snapshot.more && (
