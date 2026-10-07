@@ -1112,6 +1112,31 @@ impl ViewerCore {
         true
     }
 
+    /// Reuse this core's asynchronous producer for an exact configured source.
+    /// This uses the published configuration index; it performs no received
+    /// directory discovery, model construction or native body reads. Hosts
+    /// authorize source custody first and call invalidate() after a push.
+    /// False means absent/ambiguous, closed, or compatibility OnRead mode;
+    /// hosts may then use a source-scoped SessionCatalogObserver instead.
+    pub fn demand_catalog_source(&self, source_key: &str) -> io::Result<bool> {
+        let Some(_entered) = self.open.enter() else {
+            return Ok(false);
+        };
+        if self.refresh == Refresh::OnRead {
+            return Ok(false);
+        }
+        let views = self.views();
+        let inventory = self.source_inventory(&views);
+        if !inventory.valid() {
+            return Ok(false);
+        }
+        let Some(index) = inventory.index(source_key) else {
+            return Ok(false);
+        };
+        views[index].1.note_catalog_read()?;
+        Ok(true)
+    }
+
     /// Stops the core for good, and returns once it no longer reads or
     /// writes any file: calls in progress and each machine's background
     /// rebuild have finished, and every later call answers 404 without
