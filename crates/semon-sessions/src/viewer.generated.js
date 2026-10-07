@@ -16855,9 +16855,13 @@ globalThis.__semonUIShared = __semonUIShared;
         const reply = object2(await api("/api/session-identity?" + p));
         if (reply.api !== 1) throw new Error("Unsupported source identity response");
         if (active === view && selection.accept(ticket, reply.identity)) {
-          if (selection.selectedIdentity()?.owner_qualification === "provisional")
+          const identity2 = selection.selectedIdentity();
+          if (identity2?.owner_qualification === "provisional")
             view.note = "Session identity is provisional while history is being discovered. Native controls are unavailable.";
-          else if (view.note.startsWith("Session identity is provisional")) view.note = "";
+          else if (identity2?.harness === "codex" && identity2.native_selection && identity2.native_selection.state !== "cached")
+            view.note = "Native Codex session selection is not currently observed. Controls are unavailable; retained history remains readable.";
+          else if (view.note.startsWith("Session identity is provisional") || view.note.startsWith("Native Codex session selection"))
+            view.note = "";
           drawSelected(view);
         }
       } catch (error) {

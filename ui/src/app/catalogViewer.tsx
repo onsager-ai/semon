@@ -1033,10 +1033,22 @@ export function createCatalogViewer(
       const reply = object(await api('/api/session-identity?' + p));
       if (reply.api !== 1) throw new Error('Unsupported source identity response');
       if (active === view && selection.accept(ticket, reply.identity)) {
-        if (selection.selectedIdentity()?.owner_qualification === 'provisional')
+        const identity = selection.selectedIdentity();
+        if (identity?.owner_qualification === 'provisional')
           view.note =
             'Session identity is provisional while history is being discovered. Native controls are unavailable.';
-        else if (view.note.startsWith('Session identity is provisional')) view.note = '';
+        else if (
+          identity?.harness === 'codex' &&
+          identity.native_selection &&
+          identity.native_selection.state !== 'cached'
+        )
+          view.note =
+            'Native Codex session selection is not currently observed. Controls are unavailable; retained history remains readable.';
+        else if (
+          view.note.startsWith('Session identity is provisional') ||
+          view.note.startsWith('Native Codex session selection')
+        )
+          view.note = '';
         drawSelected(view);
       }
     } catch (error) {
