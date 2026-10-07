@@ -229,6 +229,50 @@ test(
           await context.close();
         }
       }
+      const metadataSearch = [];
+      await page.evaluate(() => document.querySelector('#nav a,#nav button')?.click());
+      await page.locator('#page [data-id="backlog"]').waitFor();
+      const search = page.getByRole('textbox', { name: 'Search session details', exact: true });
+      if (process.env.SEMON_CATALOG_SERVED_REQUIRE_SEARCH === '1') await search.waitFor();
+      if (await search.count()) {
+        for (const [query, expected] of [
+          ['backlog', true],
+          ['Actual native scalar field.', false],
+          ['', true],
+        ]) {
+          const started = performance.now();
+          const response = page.waitForResponse((response) => {
+            const requested = new URL(response.url());
+            return (
+              requested.pathname === '/api/sessions' &&
+              requested.searchParams.get('q') === (query || null) &&
+              response.status() === 200
+            );
+          });
+          await search.fill(query);
+          await search.press('Tab');
+          const body = await (await response).json();
+          if (expected) await page.locator('#page [data-id="backlog"]').waitFor();
+          else {
+            await page
+              .getByText('No recorded sessions match these filters.', { exact: true })
+              .waitFor();
+            assert.equal(await page.locator('#page [data-id]').count(), 0);
+          }
+          assert.equal(await search.inputValue(), query);
+          assert.equal(
+            body.search?.semantics ?? null,
+            query ? 'unicode_lowercase_substring' : null,
+          );
+          metadataSearch.push({ query, ms: performance.now() - started, rows: body.items.length });
+        }
+      }
+      await page.locator('#page [data-id="backlog"]').click();
+      await page.getByText('Complete recorded text loaded.', { exact: true }).waitFor();
+      assert.equal(
+        (await page.locator('#page').innerText()).match(/Recorded source text\./g)?.length,
+        5000,
+      );
       // Losing the observed native source must remain visible without erasing useful
       // previously loaded history or issuing a complete-model restoration request.
       const retainedEntry = await page.locator('#page [data-entry-key]').first().elementHandle();
@@ -254,6 +298,7 @@ test(
       const evidence = {
         source: process.env.SEMON_CATALOG_SERVED_SOURCE ?? 'unrecorded',
         visual,
+        metadataSearch,
         firstListMs: firstList,
         selectedMs: selected,
         warmSwitchMs: warm,
