@@ -19,6 +19,7 @@ export interface CatalogSessionIdentity {
   catalog_key: string;
   harness: string;
   native_id: string | null;
+  owner_qualification?: 'qualified' | 'provisional';
   native_ids: string[];
   source_refs: CatalogSourceReference[];
   machine_label: string | null;
