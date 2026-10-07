@@ -7030,6 +7030,16 @@ globalThis.__semonUIShared = __semonUIShared;
     async function write(op, extra = {}) {
       if (!current || busy2 || uncertain && op !== "reconnect") return false;
       if (op === "reconnect" && current.runtime?.reconnectable === false) return false;
+      if (op !== "reconnect" && !current.connected) return false;
+      if (op === "interrupt" && !current.capabilities.interrupt) return false;
+      if (op === "answer") {
+        const request = current.requests.find(
+          (request2) => request2.id === extra.request && request2.hash === extra.hash
+        );
+        if (!request || request.state.state !== "open") return false;
+        const supported = request.kind === "question" ? current.capabilities.questions : request.payload.method === "item/fileChange/requestApproval" ? current.capabilities.fileApproval : current.capabilities.commandApproval;
+        if (!supported) return false;
+      }
       if (op === "send" && (!current.connected || !(current.activeTurn ? current.capabilities.steer : current.capabilities.input)))
         return false;
       const target = current;
@@ -7105,11 +7115,24 @@ globalThis.__semonUIShared = __semonUIShared;
         reconnect: () => void send("reconnect")
       };
     }
+    function apply(value) {
+      if (current?.thread !== value?.thread) {
+        ++selection;
+        ++revision;
+        busy2 = false;
+        uncertain = false;
+        note = "";
+      }
+      if (value?.runtime?.state === "ended" && current?.runtime?.state !== "ended") {
+        ++revision;
+        busy2 = false;
+        note = "";
+      }
+      current = value;
+    }
     return {
       prepare: parseControl,
-      adopt(value) {
-        current = value;
-      },
+      adopt: apply,
       unavailable() {
         if (!current) return;
         current = {
@@ -7130,19 +7153,7 @@ globalThis.__semonUIShared = __semonUIShared;
         refresh();
       },
       observe(value) {
-        if (current?.thread !== value?.thread) {
-          ++selection;
-          ++revision;
-          busy2 = false;
-          uncertain = false;
-          note = "";
-        }
-        if (value?.runtime?.state === "ended" && current?.runtime?.state !== "ended") {
-          ++revision;
-          busy2 = false;
-          note = "";
-        }
-        current = value;
+        apply(value);
         refresh();
       },
       view,
