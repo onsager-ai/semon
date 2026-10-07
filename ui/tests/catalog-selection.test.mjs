@@ -105,3 +105,17 @@ test('selection subscribers cannot turn an old begin into a newer ticket', () =>
   assert.equal(store.selectedIdentity(), null);
   unsubscribe();
 });
+
+test('catalog selection lifetime invalidates outstanding replies and subscriptions', () => {
+  const store = new CatalogSelectionStore();
+  let changes = 0;
+  store.subscribe(() => changes++);
+  const request = store.begin({ source_key: 'source', catalog_key: 'session' });
+  store.destroy();
+  assert.equal(store.accept(request, identity()), false);
+  assert.equal(store.selectedIdentity(), null);
+  assert.equal(changes, 1);
+  assert.throws(() => store.begin({ source_key: 'source', catalog_key: 'session' }));
+  assert.throws(() => store.subscribe(() => {}));
+  store.destroy();
+});
