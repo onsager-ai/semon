@@ -131,3 +131,12 @@ with multiple native IDs retains them and returns `native_id: null`; clients
 must not choose the first ID as a control target. Source disappearance remains
 visible. This cached identity supplies neither runtime readiness nor mutation
 authority. No global event-cache/model construction or source-body read occurs.
+
+Recorded facts and native source-selection observations remain independent of
+source-byte availability. Missing, malformed or unsupported recorded facts make
+the composite catalog/identity observation unavailable and its machine label
+unknown; retained source bytes can still be inspected. A legacy Codex facts file
+without a rollout manifest makes that selected identity incomplete. An explicit
+empty manifest selects no current native sources. The compatibility model's
+legacy facts fallback is unchanged. Clients must disable native controls when
+composite identity observation is incomplete or unavailable.
