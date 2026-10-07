@@ -18,6 +18,8 @@ export interface ViewerHost {
   selectedModel?: boolean;
   /** Separate bounded status snapshots, independent of content model revisions. */
   controlStream?: string;
+  /** Exact catalog/source status; identity comes from the accepted Viewer selection owner. */
+  catalogControlStream?: string;
   modelNavigation?(model: unknown): void;
   /** Return true when the host has taken native recovery for a model failure. */
   modelFailed?(status: number): boolean;
