@@ -119,3 +119,49 @@ test('catalog selection lifetime invalidates outstanding replies and subscriptio
   assert.throws(() => store.subscribe(() => {}));
   store.destroy();
 });
+test('retained or retired native identities cannot grant current controls; byte loss stays separate', () => {
+  const store = new CatalogSelectionStore(),
+    ticket = store.begin({ source_key: 'source', catalog_key: 'session' });
+  assert.throws(
+    () => store.accept(ticket, { ...identity(), read_scope: 'retained_history' }),
+    /current catalog authority/,
+  );
+  assert.throws(
+    () => store.accept(ticket, { ...identity(), native_selection: { state: 'retired' } }),
+    /current catalog authority/,
+  );
+  assert.equal(store.selectedIdentity(), null);
+  const unavailable = identity();
+  unavailable.freshness = { state: 'unavailable' };
+  unavailable.source_refs[0].state = 'unavailable';
+  unavailable.facts_observation = { state: 'cached' };
+  unavailable.native_selection = { state: 'cached' };
+  assert.equal(store.accept(ticket, unavailable), true);
+  assert.equal(store.selectedIdentity().freshness.state, 'unavailable');
+  assert.equal(store.selectedIdentity().facts_observation.state, 'cached');
+  assert.ok(Object.isFrozen(store.selectedIdentity().facts_observation));
+  assert.ok(Object.isFrozen(store.selectedIdentity().native_selection));
+  store.destroy();
+});
+test('readonly scope exists before authority and remains stable through failed identity rechecks', () => {
+  const store = new CatalogSelectionStore();
+  assert.equal(store.selectedScope(), null);
+  const first = store.begin({ source_key: 'source', catalog_key: 'session' });
+  const scope = store.selectedScope();
+  assert.deepEqual(scope, { source_key: 'source', catalog_key: 'session' });
+  assert.ok(Object.isFrozen(scope));
+  store.accept(first, identity());
+  const retry = store.begin(scope);
+  assert.equal(store.selectedIdentity(), null);
+  assert.equal(store.selectedScope(), scope);
+  assert.throws(() => store.accept(retry, { ...identity(), read_scope: 'retained_history' }));
+  assert.equal(store.selectedScope(), scope);
+  store.begin({ source_key: 'other-source', catalog_key: 'session' });
+  assert.notEqual(store.selectedScope(), scope);
+  assert.equal(store.accept(retry, identity()), false);
+  store.clear();
+  assert.equal(store.selectedScope(), null);
+  store.begin(scope);
+  store.destroy();
+  assert.equal(store.selectedScope(), null);
+});

@@ -1,4 +1,4 @@
-import { array, number, object, text } from '../domain/validate';
+import { array, boolean, number, object, text } from '../domain/validate';
 import type { Entry } from '../domain/types';
 import type {
   CatalogSessionIdentity,
@@ -17,6 +17,8 @@ export interface CatalogTranscriptEntry {
   slot: number;
   entry: Entry;
   native_action_text?: string;
+  clipped?: boolean;
+  field?: { name: 'text'; chunks: number; complete: boolean };
   provenance: {
     source: CatalogSourceReference['source'];
     native_event_id: string | null;
@@ -47,12 +49,24 @@ function entry(value: unknown): CatalogTranscriptEntry {
     slot = ordinal(row.slot),
     parsed = parseEntry(row);
   if (!entryId) throw new Error('Invalid catalog entry identity');
+  let field: CatalogTranscriptEntry['field'];
+  if (row.field !== undefined) {
+    const reference = object(row.field);
+    if (reference.name !== 'text') throw new Error('Unsupported native text field');
+    field = {
+      name: 'text',
+      chunks: ordinal(reference.chunks),
+      complete: boolean(reference.complete),
+    };
+  }
   parsed.key = entryId;
   parsed.slot = slot;
   return {
     entry_id: entryId,
     slot,
     entry: parsed,
+    clipped: row.clipped === undefined ? undefined : boolean(row.clipped),
+    field,
     native_action_text: parsed.k === 'h' ? text(row.text) : undefined,
     provenance: {
       source: parseCatalogSource(provenance.source),
