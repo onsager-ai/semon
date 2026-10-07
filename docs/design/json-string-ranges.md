@@ -40,3 +40,24 @@ checkpoint segment independently decodes to the same complete-field oracle.
 These are field-decoder bounds, not measured end-to-end Viewer budgets. SQL
 publication, bounded provider access and native tool rendering must integrate
 these descriptors before a complete large-result journey can claim those bounds.
+
+A helper-only measurement on the shared Linux workspace used 31 paired warm
+iterations in an unoptimized Rust executable. The baseline parses the complete
+native record with `serde_json::Value`; the bounded case decodes 4096 bytes from
+a late checkpoint with 32768 bytes supplied. The field contains plain ASCII;
+the correctness test above separately qualifies escaped/non-ASCII boundaries.
+Index production, provider I/O, SQL, server responses and browser rendering are
+excluded. Other integration builds shared the host, so tail timings are noisy.
+
+| Original record bytes | Full parse median / p95 µs | Chunk median / p95 µs | Chunk output allocation |
+| ---: | ---: | ---: | ---: |
+| 1,048,601 | 21,334 / 36,468 | 142 / 7,726 | 4,096 bytes |
+| 16,777,241 | 216,948 / 633,754 | 106 / 709 | 4,096 bytes |
+
+Both paths returned identical requested text. Full parsing necessarily visits
+1 or 16 MiB of body and materializes that complete string; the chunk decodes
+4096 raw ASCII bytes with constant output allocation. This comparison motivates
+using indexed spans, without claiming an end-to-end latency budget or a process
+RSS reduction. Measurement source/output were retained as
+`/tmp/semon-json-string-bench.rs` and `/tmp/semon-json-string-bench.log` in the
+integration workspace; the implementation revision was `1d1d803`.
