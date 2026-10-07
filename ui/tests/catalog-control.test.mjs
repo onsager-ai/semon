@@ -119,6 +119,12 @@ test('catalog status uses accepted exact scope without legacy model access or al
     assert.equal(adopted, null);
     assert.equal(streams[1].closed, true);
     assert.equal(streams.length, 2, 'ambiguous native identity opened legacy fallback');
+    selected = { ...selected, native_id: 'native', owner_qualification: 'provisional' };
+    selectionChanged();
+    assert.equal(streams.length, 2, 'provisional typed port opened native control stream');
+    selected = { ...selected, owner_qualification: 'qualified', read_scope: 'retained_history' };
+    selectionChanged();
+    assert.equal(streams.length, 2, 'history typed port opened native control stream');
     selected = null;
     selectionChanged();
     assert.equal(streams.length, 2);

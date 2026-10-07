@@ -6967,7 +6967,7 @@ globalThis.__semonUIShared = __semonUIShared;
       const route2 = host2.navigation.route;
       if (host2.catalogSelection) {
         const selected2 = host2.catalogSelection.selectedIdentity();
-        const accepted = route2.v === "session" && selected2?.catalog_key === route2.id ? selected2 : null;
+        const accepted = route2.v === "session" && selected2?.catalog_key === route2.id && selected2.owner_qualification !== "provisional" && selected2.read_scope !== "retained_history" ? selected2 : null;
         return {
           path: accepted?.native_id ? host2.viewerHost?.catalogControlStream : void 0,
           params: accepted ? {
@@ -8668,6 +8668,23 @@ globalThis.__semonUIShared = __semonUIShared;
       ...observations(row)
     };
   }
+  function searchObservation(value) {
+    if (value === void 0 || value === null) return null;
+    const row = object2(value), fields = strings4(row.fields), candidates = integer(row.candidates);
+    if (row.semantics !== "unicode_lowercase_substring" || fields.length !== 6 || new Set(fields).size !== 6 || fields.some(
+      (field) => !["name", "key", "repo", "branch", "model", "harness"].includes(field)
+    ) || row.candidate_budget !== 512 || row.byte_budget !== 2097152 || candidates < 0 || candidates > 512)
+      throw new Error("Unsupported metadata search observation");
+    return {
+      semantics: "unicode_lowercase_substring",
+      fields,
+      partial: boolean(row.partial),
+      candidates,
+      index_complete: boolean(row.index_complete),
+      candidate_budget: 512,
+      byte_budget: 2097152
+    };
+  }
   function parseCatalogPage(value) {
     const page = object2(value), machine2 = text(page.machine), info = object2(page.machine_info), capabilities = object2(page.capabilities), generation2 = text(page.generation), items = array(page.items, parseCatalogSession), next = nullable(page.next_cursor, text), completeness = page.completeness === void 0 ? "complete" : object2(page.completeness).state, collectionFreshness = page.freshness === "updating" ? "updating" : freshness(page.freshness);
     if (page.api !== 1 || completeness !== "partial" && completeness !== "complete" || collectionFreshness === "updating" && completeness !== "partial" || info.key !== machine2 || info.freshness !== "cached" || !/^[0-9a-f]{64}$/i.test(generation2) || items.length > 100 || new Set(items.map((item2) => item2.key)).size !== items.length || next !== null && (!next || next.length > 8192))
@@ -8691,12 +8708,13 @@ globalThis.__semonUIShared = __semonUIShared;
         global_union: boolean(capabilities.global_union)
       },
       items,
-      next_cursor: next
+      next_cursor: next,
+      search: searchObservation(page.search)
     };
   }
   function parseCatalogIdentity(value) {
-    const row = object2(value), refs = array(row.source_refs, sourceReference), nativeIds = strings4(row.native_ids), nativeId = nullable(row.native_id, text), ids = new Set(refs.map((ref) => ref.source.native_id)), generation2 = text(row.generation), state2 = object2(row.freshness), sourceKey = text(row.source_key), catalogKey = text(row.catalog_key), harness = text(row.harness);
-    if (!sourceKey || !catalogKey || !harness || !/^[0-9a-f]{64}$/i.test(generation2) || nativeIds.some((id) => !id) || ids.has("") || new Set(nativeIds).size !== nativeIds.length || ids.size !== nativeIds.length || nativeIds.some((id) => !ids.has(id)) || nativeId !== null && (ids.size !== 1 || !ids.has(nativeId)))
+    const row = object2(value), refs = array(row.source_refs, sourceReference), nativeIds = strings4(row.native_ids), nativeId = nullable(row.native_id, text), ids = new Set(refs.map((ref) => ref.source.native_id)), generation2 = text(row.generation), state2 = object2(row.freshness), sourceKey = text(row.source_key), catalogKey = text(row.catalog_key), harness = text(row.harness), qualification = row.owner_qualification;
+    if (qualification !== void 0 && qualification !== "qualified" && qualification !== "provisional" || qualification === "provisional" && nativeId !== null || !sourceKey || !catalogKey || !harness || !/^[0-9a-f]{64}$/i.test(generation2) || nativeIds.some((id) => !id) || ids.has("") || new Set(nativeIds).size !== nativeIds.length || ids.size !== nativeIds.length || nativeIds.some((id) => !ids.has(id)) || nativeId !== null && (ids.size !== 1 || !ids.has(nativeId)))
       throw new Error("Invalid catalog identity");
     return {
       source_key: sourceKey,
@@ -8704,6 +8722,7 @@ globalThis.__semonUIShared = __semonUIShared;
       catalog_key: catalogKey,
       harness,
       native_id: nativeId,
+      owner_qualification: qualification,
       native_ids: nativeIds,
       source_refs: refs,
       machine_label: nullable(row.machine_label, text),
@@ -15343,8 +15362,10 @@ globalThis.__semonUIShared = __semonUIShared;
 
   // src/state/catalog-capabilities.ts
   function parseCatalogCapabilities(value) {
-    const row = object2(value), filters = array(row.filters, text), sourceKey = text(row.source_key);
-    if (row.api !== 1 || row.read_contract !== "catalog-v1" || !sourceKey || row.pagination !== true || row.order !== "last_desc_key_asc" || row.full_text_search !== false || row.global_union !== false || filters.some((filter) => filter !== "harness" && filter !== "repo") || new Set(filters).size !== filters.length)
+    const row = object2(value), filters = array(row.filters, text), sourceKey = text(row.source_key), metadataSearch = row.metadata_search === void 0 ? false : boolean(row.metadata_search);
+    if (row.api !== 1 || row.read_contract !== "catalog-v1" || !sourceKey || row.pagination !== true || row.order !== "last_desc_key_asc" || row.full_text_search !== false || row.global_union !== false || metadataSearch !== filters.includes("q") || filters.some(
+      (filter) => filter !== "harness" && filter !== "repo" && !(metadataSearch && filter === "q")
+    ) || new Set(filters).size !== filters.length)
       throw new Error("Unsupported catalog read contract");
     return {
       api: 1,
@@ -15354,6 +15375,7 @@ globalThis.__semonUIShared = __semonUIShared;
       selected_identity: boolean(row.selected_identity),
       selected_entry: boolean(row.selected_entry),
       source_candidates: row.source_candidates === void 0 ? false : boolean(row.source_candidates),
+      metadata_search: metadataSearch,
       attachment: boolean(row.attachment),
       relationship_context: boolean(row.relationship_context),
       large_native_records: boolean(row.large_native_records),
@@ -15596,6 +15618,18 @@ globalThis.__semonUIShared = __semonUIShared;
               event.preventDefault();
             },
             children: [
+              snapshot.metadataSearch && /* @__PURE__ */ jsxs("label", { class: "search", children: [
+                "Search session details",
+                " ",
+                /* @__PURE__ */ jsx(
+                  "input",
+                  {
+                    "aria-label": "Search session details",
+                    value: snapshot.query ?? "",
+                    onChange: (event) => host2.filter("q", event.currentTarget.value)
+                  }
+                )
+              ] }, "q"),
               /* @__PURE__ */ jsxs("label", { class: "search", children: [
                 "Harness",
                 " ",
@@ -15607,7 +15641,7 @@ globalThis.__semonUIShared = __semonUIShared;
                     onChange: (event) => host2.filter("harness", event.currentTarget.value.trim())
                   }
                 )
-              ] }),
+              ] }, "harness"),
               /* @__PURE__ */ jsxs("label", { class: "search", children: [
                 "Repository",
                 " ",
@@ -15619,11 +15653,17 @@ globalThis.__semonUIShared = __semonUIShared;
                     onChange: (event) => host2.filter("repo", event.currentTarget.value.trim())
                   }
                 )
-              ] })
+              ] }, "repo")
             ]
           }
         ),
-        /* @__PURE__ */ jsx("p", { class: "catalog-note", children: "Sorted by latest recorded activity. Text search and history across sources are unavailable." }),
+        /* @__PURE__ */ jsxs("p", { class: "catalog-note", children: [
+          "Sorted by latest recorded activity.",
+          " ",
+          snapshot.metadataSearch ? "Search includes names, IDs, repositories, branches, models and harnesses. Conversation text and history across sources are unavailable." : "Text search and history across sources are unavailable."
+        ] }),
+        snapshot.searchPartial && /* @__PURE__ */ jsx("p", { class: "catalog-note", role: "status", children: "Search checked a bounded part of the index. Load more sessions to continue looking for matches." }),
+        snapshot.searchIndexIncomplete && /* @__PURE__ */ jsx("p", { class: "catalog-note", role: "status", children: "Search is incomplete while recorded sessions are being indexed." }),
         snapshot.discovering && /* @__PURE__ */ jsx("p", { class: "catalog-note", role: "status", children: "More sessions are being discovered. This list is incomplete." }),
         snapshot.note && /* @__PURE__ */ jsxs("p", { class: "catalog-note", role: "status", children: [
           snapshot.note,
@@ -15692,7 +15732,7 @@ globalThis.__semonUIShared = __semonUIShared;
           item2.key
         )) }),
         /* @__PURE__ */ jsx("p", { class: "catalog-note", children: /* @__PURE__ */ jsx("a", { class: "link", href: snapshot.compatibilityHref, children: "Open compatibility view (loads workspace history)" }) }),
-        !snapshot.updating && !snapshot.items.length && !snapshot.note && !snapshot.discovering && !snapshot.candidates?.length && !snapshot.candidateUpdating && /* @__PURE__ */ jsx("p", { class: "catalog-note", children: "No recorded sessions match these filters." }),
+        !snapshot.updating && !snapshot.items.length && !snapshot.note && !snapshot.discovering && !snapshot.searchIndexIncomplete && !snapshot.searchPartial && !snapshot.candidates?.length && !snapshot.candidateUpdating && /* @__PURE__ */ jsx("p", { class: "catalog-note", children: "No recorded sessions match these filters." }),
         snapshot.more && /* @__PURE__ */ jsx("button", { class: "link", type: "button", disabled: snapshot.updating, onClick: () => host2.more(), children: "Load more sessions" })
       ] }),
       root
@@ -16039,7 +16079,7 @@ globalThis.__semonUIShared = __semonUIShared;
   function createCatalogViewer(capabilities, viewerHost) {
     const scope = new EffectScope(), selection = new CatalogSelectionStore(), navigation = new NavigationController({}), updates = new ViewUpdates();
     let listRetry, listRetryDelay = 1e3;
-    let disposed = false, page = null, items = [], cursor = null, listEpoch = 0, updating = false, note = "", harness = "", repo = "", active = null;
+    let disposed = false, page = null, items = [], cursor = null, listEpoch = 0, updating = false, note = "", harness = "", repo = "", query = "", active = null;
     let candidates = [], candidateCursor = null, candidateLoaded = false, candidateUpdating = false, candidateNote = "", candidateEpoch = 0, candidateTimer;
     const selected = /* @__PURE__ */ new Map();
     const sourceViews = /* @__PURE__ */ new Map();
@@ -16111,7 +16151,7 @@ globalThis.__semonUIShared = __semonUIShared;
     });
     function controlFor(view) {
       const identity2 = selection.selectedIdentity();
-      const current = active === view && identity2?.catalog_key === view.key && identity2.native_id ? control.view(identity2.native_id) : void 0;
+      const current = active === view && identity2?.catalog_key === view.key && identity2.owner_qualification !== "provisional" && identity2.native_id ? control.view(identity2.native_id) : void 0;
       if (current) view.lastControl = current;
       const runtime = runtimeFor(view)?.observation, terminal = runtime && runtime.state !== "active";
       if (current && !terminal || !view.lastControl) return current;
@@ -16281,6 +16321,10 @@ globalThis.__semonUIShared = __semonUIShared;
           note,
           harness,
           repo,
+          query,
+          metadataSearch: capabilities.metadata_search,
+          searchPartial: page?.search?.partial ?? false,
+          searchIndexIncomplete: page?.search ? !page.search.index_complete : false,
           more: cursor !== null,
           compatibilityHref: "/sessions?compat=1" + (capabilities.source_key ? "&machine=" + encodeURIComponent(capabilities.source_key) : "")
         },
@@ -16303,6 +16347,7 @@ globalThis.__semonUIShared = __semonUIShared;
           filter(field, value) {
             cancelCandidate();
             if (field === "harness") harness = value;
+            else if (field === "q") query = value;
             else repo = value;
             void loadList(false);
           },
@@ -16327,6 +16372,7 @@ globalThis.__semonUIShared = __semonUIShared;
       p.set("limit", "60");
       if (harness) p.set("harness", harness);
       if (repo) p.set("repo", repo);
+      if (query && capabilities.metadata_search) p.set("q", query);
       if (append && cursor !== null) p.set("cursor", cursor);
       updating = true;
       note = "";
@@ -16334,7 +16380,7 @@ globalThis.__semonUIShared = __semonUIShared;
       try {
         const next = parseCatalogPage(await api("/api/sessions?" + p));
         if (disposed || epoch !== listEpoch) return;
-        if (next.machine !== capabilities.source_key || next.read_scope !== "retained_history" || append && page?.generation !== next.generation)
+        if (query && capabilities.metadata_search && next.search === null || next.machine !== capabilities.source_key || next.read_scope !== "retained_history" || append && page?.generation !== next.generation)
           throw new Error("History changed; refresh this list before loading another page.");
         if (append && next.items.some((item2) => items.some((old) => old.key === item2.key)))
           throw new Error("History page repeated a session. Refresh this list.");
@@ -16346,7 +16392,7 @@ globalThis.__semonUIShared = __semonUIShared;
         updating = false;
         drawList();
         chrome();
-        if (next.completeness.state === "partial" && items.length <= 60) {
+        if ((next.completeness.state === "partial" || next.search?.index_complete === false) && items.length <= 60) {
           const refresh = () => {
             if (disposed || epoch !== listEpoch || active || sourcesOpen) return;
             const focused = document.activeElement;
@@ -16842,7 +16888,12 @@ globalThis.__semonUIShared = __semonUIShared;
       try {
         const reply = object2(await api("/api/session-identity?" + p));
         if (reply.api !== 1) throw new Error("Unsupported source identity response");
-        if (active === view && selection.accept(ticket, reply.identity)) drawSelected(view);
+        if (active === view && selection.accept(ticket, reply.identity)) {
+          if (selection.selectedIdentity()?.owner_qualification === "provisional")
+            view.note = "Session identity is provisional while history is being discovered. Native controls are unavailable.";
+          else if (view.note.startsWith("Session identity is provisional")) view.note = "";
+          drawSelected(view);
+        }
       } catch (error) {
         if (disposed || active !== view || ticket !== view.ticket) return;
         if (error && typeof error === "object" && "status" in error && [401, 403, 404].includes(Number(error.status)) || error instanceof Error && error.message === "Historical identity cannot supply current catalog authority") {
@@ -17004,6 +17055,7 @@ globalThis.__semonUIShared = __semonUIShared;
         cursor,
         harness,
         repo,
+        query,
         selectedKey: active?.key ?? null
       });
     }
@@ -17051,6 +17103,7 @@ globalThis.__semonUIShared = __semonUIShared;
         candidateNote = "";
         harness = retained?.harness ?? "";
         repo = retained?.repo ?? "";
+        query = retained?.query ?? "";
         updating = false;
         note = "";
         sourcesOpen = false;

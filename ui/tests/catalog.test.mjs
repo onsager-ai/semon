@@ -107,3 +107,32 @@ test('catalog discovery completeness stays distinct from row freshness and nativ
   assert.throws(() => parseCatalogPage({ ...partial, completeness: { state: 'complete' } }));
   assert.throws(() => parseCatalogPage({ ...partial, completeness: { state: 'unknown' } }));
 });
+
+test('metadata search exposes bounded partial scan and independent index coverage', () => {
+  const observation = {
+    semantics: 'unicode_lowercase_substring',
+    fields: ['name', 'key', 'repo', 'branch', 'model', 'harness'],
+    partial: true,
+    candidates: 512,
+    index_complete: false,
+    candidate_budget: 512,
+    byte_budget: 2097152,
+  };
+  const parsed = parseCatalogPage({ ...page(), search: observation, items: [] });
+  assert.equal(parsed.search.partial, true);
+  assert.equal(parsed.search.index_complete, false);
+  assert.equal(parseCatalogPage(page()).search, null);
+  assert.throws(() => parseCatalogPage({ ...page(), search: { ...observation, candidates: 513 } }));
+  assert.throws(() =>
+    parseCatalogPage({
+      ...page(),
+      search: {
+        ...observation,
+        fields: ['native_ids', 'key', 'repo', 'branch', 'model', 'harness'],
+      },
+    }),
+  );
+  assert.throws(() =>
+    parseCatalogPage({ ...page(), search: { ...observation, byte_budget: Infinity } }),
+  );
+});

@@ -25,6 +25,10 @@ export interface CatalogListSnapshot {
   note: string;
   harness: string;
   repo: string;
+  query?: string;
+  metadataSearch?: boolean;
+  searchPartial?: boolean;
+  searchIndexIncomplete?: boolean;
   more: boolean;
   compatibilityHref: string;
   candidates?: readonly CatalogSourceCandidate[];
@@ -34,7 +38,7 @@ export interface CatalogListSnapshot {
 }
 export interface CatalogListHost {
   session(item: CatalogListItem): void;
-  filter(field: 'harness' | 'repo', value: string): void;
+  filter(field: 'harness' | 'repo' | 'q', value: string): void;
   more(): void;
   retry(): void;
   candidate?(candidate: CatalogSourceCandidate): void;
@@ -61,7 +65,17 @@ export function renderCatalogList(
           event.preventDefault();
         }}
       >
-        <label class="search">
+        {snapshot.metadataSearch && (
+          <label class="search" key="q">
+            Search session details{' '}
+            <input
+              aria-label="Search session details"
+              value={snapshot.query ?? ''}
+              onChange={(event) => host.filter('q', event.currentTarget.value)}
+            />
+          </label>
+        )}
+        <label class="search" key="harness">
           Harness{' '}
           <input
             aria-label="Harness"
@@ -69,7 +83,7 @@ export function renderCatalogList(
             onChange={(event) => host.filter('harness', event.currentTarget.value.trim())}
           />
         </label>
-        <label class="search">
+        <label class="search" key="repo">
           Repository{' '}
           <input
             aria-label="Repository"
@@ -79,8 +93,22 @@ export function renderCatalogList(
         </label>
       </form>
       <p class="catalog-note">
-        Sorted by latest recorded activity. Text search and history across sources are unavailable.
+        Sorted by latest recorded activity.{' '}
+        {snapshot.metadataSearch
+          ? 'Search includes names, IDs, repositories, branches, models and harnesses. Conversation text and history across sources are unavailable.'
+          : 'Text search and history across sources are unavailable.'}
       </p>
+      {snapshot.searchPartial && (
+        <p class="catalog-note" role="status">
+          Search checked a bounded part of the index. Load more sessions to continue looking for
+          matches.
+        </p>
+      )}
+      {snapshot.searchIndexIncomplete && (
+        <p class="catalog-note" role="status">
+          Search is incomplete while recorded sessions are being indexed.
+        </p>
+      )}
       {snapshot.discovering && (
         <p class="catalog-note" role="status">
           More sessions are being discovered. This list is incomplete.
@@ -183,6 +211,8 @@ export function renderCatalogList(
         !snapshot.items.length &&
         !snapshot.note &&
         !snapshot.discovering &&
+        !snapshot.searchIndexIncomplete &&
+        !snapshot.searchPartial &&
         !snapshot.candidates?.length &&
         !snapshot.candidateUpdating && (
           <p class="catalog-note">No recorded sessions match these filters.</p>
