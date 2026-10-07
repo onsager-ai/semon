@@ -1639,6 +1639,7 @@ mod tests {
         struct Provider {
             bytes: Vec<u8>,
             changed: bool,
+            cached: bool,
             calls: std::sync::atomic::AtomicUsize,
         }
         impl crate::SessionSourceReader for Provider {
@@ -1673,13 +1674,14 @@ mod tests {
                     bytes: std::sync::Arc::from(
                         &self.bytes[offset..offset.saturating_add(max).min(self.bytes.len())],
                     ),
-                    cached: true,
+                    cached: self.cached,
                 })
             }
         }
         let provider = Provider {
             bytes: bytes.clone(),
             changed: false,
+            cached: true,
             calls: std::sync::atomic::AtomicUsize::new(0),
         };
         crate::events::CACHE_READS.with(|reads| reads.set(0));
@@ -1696,9 +1698,39 @@ mod tests {
         assert_eq!(body["entries"][1]["freshness"]["state"], "cached");
         assert_eq!(provider.calls.load(Ordering::Relaxed), 2);
         assert!(!path.exists());
+        assert_eq!(body["content_observation"]["state"], "cached");
+        let fresh = Provider {
+            bytes: bytes.clone(),
+            changed: false,
+            cached: false,
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        };
+        let reply = crate::session_transcript_range(
+            &fixture.options,
+            "source",
+            "sid=archived&after=0&limit=2",
+            Some(&fresh),
+        );
+        assert_eq!(reply.status, 200);
+        let fresh_body: Value = serde_json::from_slice(&reply.body).unwrap();
+        assert_eq!(fresh_body["content_observation"]["state"], "available");
+        assert_eq!(fresh_body["identity"]["freshness"]["state"], "unavailable");
+        let generation = fresh_body["projection"]["generation"].as_str().unwrap();
+        let reply = crate::session_entry_field(
+            &fixture.options,
+            "source",
+            &format!("sid=archived&after=1&limit=1&generation={generation}&field_chunk=0"),
+            Some(&fresh),
+        );
+        assert_eq!(reply.status, 200);
+        let field: Value = serde_json::from_slice(&reply.body).unwrap();
+        assert_eq!(field["text"], "retained native answer");
+        assert_eq!(field["content_observation"]["state"], "available");
+        assert_eq!(field["field"]["layers"], 1);
         let changed = Provider {
             bytes,
             changed: true,
+            cached: true,
             calls: std::sync::atomic::AtomicUsize::new(0),
         };
         let reply = crate::session_transcript_range(
@@ -1926,7 +1958,11 @@ mod tests {
                 assert_eq!(reply.status, 200);
                 let part: Value = serde_json::from_slice(&reply.body).unwrap();
                 assert_eq!(part["field"]["name"], "out");
-                assert_eq!(part["content_observation"]["state"], "available");
+                assert_eq!(
+                    part["field"]["layers"],
+                    if harness == "codex-encoded" { 2 } else { 1 }
+                );
+                assert_eq!(part["content_observation"]["state"], "cached");
                 assert_eq!(
                     part["content_observation"]["sources"][0]["generation_hash"]
                         .as_str()
