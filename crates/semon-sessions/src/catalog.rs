@@ -54,6 +54,7 @@ pub struct SessionSourceProof {
     pub ino: u64,
     pub size: u64,
     pub modified_ns: u128,
+    pub changed_ns: Option<i128>,
     pub freshness: CatalogFreshness,
 }
 
@@ -98,7 +99,7 @@ pub fn session_source_proof(
         connection.busy_timeout(Duration::from_millis(100))?;
         let transaction = connection.transaction()?;
         let encoded: Option<(String, Option<String>)> = transaction.query_row(
-            "SELECT c.session_key,CASE WHEN length(CAST(c.metadata AS BLOB))<=1048576 THEN c.metadata ELSE NULL END FROM session_catalog_sources s JOIN session_catalog c ON c.session_key=s.session_key WHERE s.source_path=?1 ORDER BY s.session_key LIMIT 1",
+            "SELECT c.session_key,CASE WHEN length(CAST(c.metadata AS BLOB))<=1048576 THEN c.metadata ELSE NULL END FROM session_catalog_sources s INDEXED BY session_catalog_current_source_path JOIN session_catalog c ON c.session_key=s.session_key WHERE s.lifecycle='current' AND s.source_path=?1 ORDER BY s.session_key LIMIT 1",
             [absolute], |row| Ok((row.get(0)?, row.get(1)?)),
         ).optional()?;
         let Some((key, encoded)) = encoded else {
@@ -118,10 +119,19 @@ pub fn session_source_proof(
             .iter()
             .find(|source| source.path.to_str() == Some(absolute))
             .ok_or_else(|| io::Error::other("source mapping absent"))?;
-        type Revision = (u64, u64, u64, [u8; 16], u64, [u8; 32], [u8; 32]);
+        type Revision = (
+            u64,
+            u64,
+            u64,
+            [u8; 16],
+            u64,
+            [u8; 32],
+            [u8; 32],
+            Option<[u8; 16]>,
+        );
         let revision: Option<Revision> = transaction.query_row(
-            "SELECT dev,ino,size,mtime_ns,resume_at,head_sha256,tail_sha256 FROM files WHERE path=?1",
-            [absolute], |row| Ok((row.get::<_,i64>(0)? as u64,row.get::<_,i64>(1)? as u64,row.get::<_,i64>(2)? as u64,row.get(3)?,row.get::<_,i64>(4)? as u64,row.get(5)?,row.get(6)?)),
+            "SELECT dev,ino,size,mtime_ns,resume_at,head_sha256,tail_sha256,ctime_ns FROM files WHERE path=?1",
+            [absolute], |row| Ok((row.get::<_,i64>(0)? as u64,row.get::<_,i64>(1)? as u64,row.get::<_,i64>(2)? as u64,row.get(3)?,row.get::<_,i64>(4)? as u64,row.get(5)?,row.get(6)?,row.get(7)?)),
         ).optional()?;
         if revision
             != Some((
@@ -132,6 +142,7 @@ pub fn session_source_proof(
                 source.offset,
                 source.prefix_sha256,
                 source.tail_sha256,
+                source.changed_ns.map(i128::to_be_bytes),
             ))
         {
             return Err(io::Error::other("source ledger changed").into());
@@ -168,6 +179,7 @@ pub fn session_source_proof(
             ino: source.ino,
             size: source.size,
             modified_ns: source.modified_ns,
+            changed_ns: source.changed_ns,
             freshness: CatalogFreshness {
                 state: observed.state.clone(),
             },
@@ -632,6 +644,9 @@ fn source_state(source: &CatalogSource) -> &'static str {
         .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
         .map(|time| time.as_nanos());
     if identity == (source.dev, source.ino)
+        && source
+            .changed_ns
+            .is_some_and(|token| Some(token) == crate::events::change_time_ns(&metadata))
         && metadata.len() == source.size
         && modified == Some(source.modified_ns)
     {
@@ -1684,6 +1699,80 @@ mod tests {
                 .unwrap()
                 .is_some()
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn restored_mtime_rewrite_invalidates_local_ranges_and_rebuilds_observation() {
+        use std::io::Write;
+        let fixture = Fixture::new();
+        fixture.publish(1);
+        let path = fixture
+            .options
+            .claude_home
+            .join("projects/project/session-00000.jsonl");
+        let before = fs::metadata(&path).unwrap();
+        let original = fs::read_to_string(&path).unwrap();
+        let rewritten = original.replace("synthetic prompt", "rewritten prompt");
+        assert_eq!(original.len(), rewritten.len());
+        let old = crate::session_transcript_range(
+            &fixture.options,
+            "source",
+            "sid=session-00000&after=0&limit=1",
+            None,
+        );
+        let old: Value = serde_json::from_slice(&old.body).unwrap();
+        assert_eq!(old["entries"][0]["text"], "synthetic prompt");
+        let mut file = fs::OpenOptions::new().write(true).open(&path).unwrap();
+        file.write_all(rewritten.as_bytes()).unwrap();
+        file.set_times(fs::FileTimes::new().set_modified(before.modified().unwrap()))
+            .unwrap();
+        let after = fs::metadata(&path).unwrap();
+        use std::os::unix::fs::MetadataExt;
+        assert_eq!(
+            (
+                before.dev(),
+                before.ino(),
+                before.len(),
+                before.modified().unwrap()
+            ),
+            (
+                after.dev(),
+                after.ino(),
+                after.len(),
+                after.modified().unwrap()
+            )
+        );
+        assert_ne!(
+            crate::events::change_time_ns(&before),
+            crate::events::change_time_ns(&after)
+        );
+        let stale = session_catalog_identity(&fixture.options, "source", "session-00000")
+            .unwrap()
+            .unwrap();
+        assert_eq!(stale.source_refs[0].state, "stale");
+        let range = crate::session_transcript_range(
+            &fixture.options,
+            "source",
+            "sid=session-00000&after=0&limit=1",
+            None,
+        );
+        let range: Value = serde_json::from_slice(&range.body).unwrap();
+        assert_eq!(range["freshness"]["state"], "incomplete");
+        assert!(!range.to_string().contains("rewritten prompt"));
+        let core = ViewerCore::new(fixture.options.clone());
+        core.warm().unwrap();
+        core.close();
+        let fresh = crate::session_transcript_range(
+            &fixture.options,
+            "source",
+            "sid=session-00000&after=0&limit=1",
+            None,
+        );
+        let fresh: Value = serde_json::from_slice(&fresh.body).unwrap();
+        assert_eq!(fresh["entries"][0]["text"], "rewritten prompt");
+        assert_eq!(fresh["freshness"]["state"], "cached");
+        assert_ne!(fresh["generation"], old["generation"]);
     }
 
     #[test]

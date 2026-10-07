@@ -591,7 +591,9 @@ impl Texts {
             && seen.dev == stamp.dev
             && seen.ino == stamp.ino
             && (stamp.size > seen.size
-                || (stamp.size == seen.size && stamp.modified_ns == seen.modified_ns))
+                || (stamp.size == seen.size
+                    && stamp.modified_ns == seen.modified_ns
+                    && stamp.changed_ns == seen.changed_ns))
         {
             *seen = stamp;
             return *number;
@@ -1094,6 +1096,7 @@ struct Stamp {
     ino: u64,
     size: u64,
     modified_ns: u128,
+    changed_ns: Option<i128>,
 }
 
 fn stamp_of(path: &Path) -> Stamp {
@@ -1108,6 +1111,7 @@ fn stamp_of(path: &Path) -> Stamp {
         dev,
         ino,
         size: meta.len(),
+        changed_ns: events::change_time_ns(&meta),
         modified_ns: meta
             .modified()
             .ok()

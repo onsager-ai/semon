@@ -295,6 +295,9 @@ impl SessionSourceReader for Local<'_> {
             #[cfg(not(unix))]
             let identity = (0, 0);
             identity == (source.dev, source.ino)
+                && source
+                    .changed_ns
+                    .is_some_and(|token| Some(token) == crate::events::change_time_ns(metadata))
                 && metadata.len() == source.size
                 && metadata
                     .modified()
