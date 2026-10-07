@@ -45,6 +45,130 @@ pub struct CatalogFreshness {
     pub state: String,
 }
 
+/// A metadata-only match between one published native source and its current
+/// consumed-prefix ledger. This observation grants no archive or control access.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SessionSourceProof {
+    pub source: SessionSourceRef,
+    pub dev: u64,
+    pub ino: u64,
+    pub size: u64,
+    pub modified_ns: u128,
+    pub freshness: CatalogFreshness,
+}
+
+/// Resolve an exact configured source path using indexed metadata reads only.
+/// The host must validate the source identity again while copying its bytes.
+pub fn session_source_proof(
+    options: &Options,
+    root: &str,
+    path: &str,
+) -> Result<Option<SessionSourceProof>, CatalogIdentityError> {
+    use CatalogIdentityError::{InvalidArguments, Unavailable};
+    if !crate::is_input_path(root, path) || path.len() > 4096 {
+        return Err(InvalidArguments);
+    }
+    let home = match root {
+        "claude" => &options.claude_home,
+        "codex" => &options.codex_home,
+        "copilot" => &options.copilot_home,
+        _ => return Err(InvalidArguments),
+    };
+    // Recorded roots/native manifests must remain observable. Missing facts
+    // cannot be treated as permission to reuse a formerly selected rollout.
+    if options.facts.as_ref().is_some_and(|file| {
+        !crate::read_facts(file).is_ok_and(|facts| {
+            facts.version == crate::FACTS_VERSION
+                && (root != "codex" || facts.codex_rollouts.is_some())
+        })
+    }) {
+        return Err(Unavailable);
+    }
+    let absolute = home.join(path);
+    let absolute = absolute.to_str().ok_or(InvalidArguments)?;
+    let read = || -> Result<Option<SessionSourceProof>, Box<dyn std::error::Error>> {
+        let mut connection = Connection::open_with_flags(
+            EventCache::path(&options.cache),
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )?;
+        connection.busy_timeout(Duration::from_millis(100))?;
+        let transaction = connection.transaction()?;
+        let encoded: Option<(String, Option<String>)> = transaction.query_row(
+            "SELECT c.session_key,CASE WHEN length(CAST(c.metadata AS BLOB))<=1048576 THEN c.metadata ELSE NULL END FROM session_catalog_sources s JOIN session_catalog c ON c.session_key=s.session_key WHERE s.source_path=?1 ORDER BY s.session_key LIMIT 1",
+            [absolute], |row| Ok((row.get(0)?, row.get(1)?)),
+        ).optional()?;
+        let Some((key, encoded)) = encoded else {
+            return Ok(None);
+        };
+        let encoded = encoded.ok_or_else(|| io::Error::other("source metadata bound"))?;
+        // Decode only the selected relationship metadata, never a native body.
+        if encoded.len() > 1024 * 1024 {
+            return Err(io::Error::other("source metadata bound").into());
+        }
+        let row: CatalogRow = serde_json::from_str(&encoded)?;
+        if row.key != key || row.harness != root || row.sources.len() > 64 {
+            return Err(io::Error::other("source mapping changed").into());
+        }
+        let source = row
+            .sources
+            .iter()
+            .find(|source| source.path.to_str() == Some(absolute))
+            .ok_or_else(|| io::Error::other("source mapping absent"))?;
+        type Revision = (u64, u64, u64, [u8; 16], u64, [u8; 32], [u8; 32]);
+        let revision: Option<Revision> = transaction.query_row(
+            "SELECT dev,ino,size,mtime_ns,resume_at,head_sha256,tail_sha256 FROM files WHERE path=?1",
+            [absolute], |row| Ok((row.get::<_,i64>(0)? as u64,row.get::<_,i64>(1)? as u64,row.get::<_,i64>(2)? as u64,row.get(3)?,row.get::<_,i64>(4)? as u64,row.get(5)?,row.get(6)?)),
+        ).optional()?;
+        if revision
+            != Some((
+                source.dev,
+                source.ino,
+                source.size,
+                source.modified_ns.to_be_bytes(),
+                source.offset,
+                source.prefix_sha256,
+                source.tail_sha256,
+            ))
+        {
+            return Err(io::Error::other("source ledger changed").into());
+        }
+        let generation: String = transaction.query_row(
+            "SELECT value FROM meta WHERE key='catalog_generation'",
+            [],
+            |row| row.get(0),
+        )?;
+        transaction.commit()?;
+        // Reuse the catalog's current-root/native-selection validation. A
+        // publication race fails closed rather than mixing catalog generations.
+        let identity = session_catalog_identity(options, "source-proof", &key)?
+            .ok_or_else(|| io::Error::other("source catalog changed"))?;
+        let observed = identity
+            .source_refs
+            .iter()
+            .find(|observed| observed.source.root == root && observed.source.path == path)
+            .ok_or_else(|| io::Error::other("source scope changed"))?;
+        if identity.generation != generation
+            || !matches!(observed.state.as_str(), "cached" | "incomplete")
+            || observed.source.native_id != source.native_id
+            || observed.source.offset != source.offset
+            || observed.source.prefix_sha256 != source.prefix_sha256
+        {
+            return Err(io::Error::other("source observation changed").into());
+        }
+        Ok(Some(SessionSourceProof {
+            source: observed.source.clone(),
+            dev: source.dev,
+            ino: source.ino,
+            size: source.size,
+            modified_ns: source.modified_ns,
+            freshness: CatalogFreshness {
+                state: observed.state.clone(),
+            },
+        }))
+    };
+    read().map_err(|_| Unavailable)
+}
+
 /// Scoped cached identity, resolved without global event/model construction.
 /// A nullable native_id preserves ambiguity in multi-native continuations.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -770,6 +894,86 @@ mod tests {
             "cursor={}",
             crate::viewer::percent_encode(cursor.as_str().unwrap())
         )
+    }
+
+    #[test]
+    fn exact_source_proof_requires_current_native_mapping_and_consumed_ledger() {
+        let fixture = Fixture::new();
+        fixture.publish(100);
+        let path = "projects/project/session-00000.jsonl";
+        let proof = session_source_proof(&fixture.options, "claude", path)
+            .unwrap()
+            .unwrap();
+        assert_eq!(proof.source.native_id, "session-00000");
+        assert_eq!(proof.source.offset, proof.size);
+        assert_eq!(proof.freshness.state, "cached");
+        assert!(
+            session_source_proof(&fixture.options, "claude", "projects/project/missing.jsonl")
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            session_source_proof(&fixture.options, "claude", "../bad.jsonl"),
+            Err(CatalogIdentityError::InvalidArguments)
+        );
+        let connection = Connection::open(EventCache::path(&fixture.options.cache)).unwrap();
+        let plan: String = connection.query_row("EXPLAIN QUERY PLAN SELECT session_key FROM session_catalog_sources WHERE source_path=?1 ORDER BY session_key LIMIT 1",[fixture.options.claude_home.join(path).to_str().unwrap()],|row|row.get(3)).unwrap();
+        assert!(plan.contains("session_catalog_source_path"), "{plan}");
+        // Ledger progress without catalog publication must not reuse its former
+        // native mapping or manufacture a proof for a new consumed boundary.
+        connection
+            .execute(
+                "UPDATE files SET resume_at=resume_at-1 WHERE path=?1",
+                [fixture.options.claude_home.join(path).to_str().unwrap()],
+            )
+            .unwrap();
+        assert_eq!(
+            session_source_proof(&fixture.options, "claude", path),
+            Err(CatalogIdentityError::Unavailable)
+        );
+        connection
+            .execute(
+                "UPDATE files SET resume_at=resume_at+1 WHERE path=?1",
+                [fixture.options.claude_home.join(path).to_str().unwrap()],
+            )
+            .unwrap();
+        fs::remove_file(fixture.options.facts.as_ref().unwrap()).unwrap();
+        assert_eq!(
+            session_source_proof(&fixture.options, "claude", path),
+            Err(CatalogIdentityError::Unavailable)
+        );
+    }
+
+    #[test]
+    fn exact_source_proof_retains_incomplete_prefix_and_rejects_source_replacement() {
+        use sha2::Digest;
+        let fixture = Fixture::new();
+        let native = fixture.source("partial");
+        let complete = fs::read(&native).unwrap();
+        let mut bytes = complete.clone();
+        bytes.extend_from_slice(b"{\"type\":\"user\"");
+        fs::write(&native, &bytes).unwrap();
+        let core = ViewerCore::new(fixture.options.clone());
+        core.warm().unwrap();
+        core.close();
+        let proof =
+            session_source_proof(&fixture.options, "claude", "projects/project/partial.jsonl")
+                .unwrap()
+                .unwrap();
+        assert_eq!(proof.source.offset, complete.len() as u64);
+        assert_eq!(proof.size, bytes.len() as u64);
+        assert_eq!(proof.freshness.state, "incomplete");
+        assert_eq!(
+            proof.source.prefix_sha256,
+            <[u8; 32]>::from(sha2::Sha256::digest(&complete))
+        );
+        let replacement = native.with_extension("replacement");
+        fs::write(&replacement, &bytes).unwrap();
+        fs::rename(replacement, native).unwrap();
+        assert_eq!(
+            session_source_proof(&fixture.options, "claude", "projects/project/partial.jsonl"),
+            Err(CatalogIdentityError::Unavailable)
+        );
     }
 
     #[test]

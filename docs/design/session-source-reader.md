@@ -56,3 +56,21 @@ activation. The production per-request renderer registration, versioned
 persistent transcript slot projection, indexed range loading, source/relationship
 resolution and full native page/tool oracle comparisons remain pending. A full
 selected FileIndex decode must not become the normal per-page fallback.
+
+## Exact-path consumed-prefix proof
+
+`session_source_proof(options, root, relative_path)` resolves one configured
+native source through the indexed published source-path mapping and its current
+file ledger. It decodes at most one selected relationship metadata row (1 MiB,
+64 source references), compares the full device/inode/size/modification and
+consumed-offset/prefix/tail revision, then reuses scoped catalog validation for
+current native selection. Publication races, unavailable facts, changed roots,
+missing source metadata and stale ledger/native mappings fail closed. The API
+returns no native body and does not reopen or rebuild the event cache.
+
+The result is an observation, not custody or permission to read an archive. A
+host archiving source bytes can use it as a candidate, verify that file identity
+still matches before and after copying, and hash the recorded consumed boundary
+while streaming the actual immutable generation. Private host provenance and
+access policy remain outside Semon. Missing proof for an older archived partial
+source remains explicit until its original bytes can be qualified.

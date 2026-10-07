@@ -16,7 +16,8 @@ mod analytics;
 mod catalog;
 pub use catalog::{
     CatalogFreshness, CatalogIdentityError, CatalogSessionIdentity, CatalogSourceObservation,
-    SessionSourceRef, session_catalog_identity, session_catalog_page,
+    SessionSourceProof, SessionSourceRef, session_catalog_identity, session_catalog_page,
+    session_source_proof,
 };
 mod claude_usage;
 pub mod copilot;
