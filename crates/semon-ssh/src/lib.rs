@@ -2,6 +2,7 @@
 //! The caller must resolve/authorize a destination before constructing a Target.
 //! No credential type implements Debug or Serialize. Dropping a future kills its
 //! child; stderr is classified locally and never returned as remote diagnostics.
+pub mod controller;
 pub mod execution;
 
 use base64::{Engine, engine::general_purpose::STANDARD};
