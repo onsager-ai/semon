@@ -28,6 +28,9 @@ pub struct SessionSourceRef {
     pub offset: u64,
     pub prefix_sha256: [u8; 32],
     pub tail_sha256: [u8; 32],
+    /// Full logical SHA for an explicitly immutable provider original.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub immutable_generation: Option<String>,
 }
 
 /// Observation of a source in a cached catalog projection. This is neither
@@ -119,6 +122,7 @@ pub fn session_source_proof(
             .iter()
             .find(|source| source.path.to_str() == Some(absolute))
             .ok_or_else(|| io::Error::other("source mapping absent"))?;
+        if source.immutable_generation.is_some() { return Err(io::Error::other("immutable history source has no current local proof").into()); }
         type Revision = (
             u64,
             u64,
@@ -135,10 +139,10 @@ pub fn session_source_proof(
         ).optional()?;
         if revision
             != Some((
-                source.dev,
-                source.ino,
+                source.dev.ok_or_else(||io::Error::other("source has no local revision"))?,
+                source.ino.ok_or_else(||io::Error::other("source has no local revision"))?,
                 source.size,
-                source.modified_ns.to_be_bytes(),
+                source.modified_ns.ok_or_else(||io::Error::other("source has no local revision"))?.to_be_bytes(),
                 source.offset,
                 source.prefix_sha256,
                 source.tail_sha256,
@@ -175,10 +179,10 @@ pub fn session_source_proof(
         }
         Ok(Some(SessionSourceProof {
             source: observed.source.clone(),
-            dev: source.dev,
-            ino: source.ino,
+            dev: source.dev.ok_or_else(||io::Error::other("source has no local revision"))?,
+            ino: source.ino.ok_or_else(||io::Error::other("source has no local revision"))?,
             size: source.size,
-            modified_ns: source.modified_ns,
+            modified_ns: source.modified_ns.ok_or_else(||io::Error::other("source has no local revision"))?,
             changed_ns: source.changed_ns,
             freshness: CatalogFreshness {
                 state: observed.state.clone(),
@@ -321,8 +325,9 @@ fn catalog_identity(
         facts_observation: CatalogFreshness,
         native_selection: Option<CatalogFreshness>,
     }
-    let provisional = body["completeness"]["state"] == "partial";
+    let mut provisional = body["completeness"]["state"] == "partial";
     let item: Item = serde_json::from_value(body["items"][0].clone()).map_err(|_| Unavailable)?;
+    provisional |= item.source_refs.iter().any(|reference|reference.source.immutable_generation.is_some());
     let native_ids: Vec<String> = item
         .source_refs
         .iter()
@@ -642,6 +647,7 @@ fn source_relative(options: &Options, harness: &str, source: &CatalogSource) -> 
 }
 
 fn source_state(source: &CatalogSource) -> &'static str {
+    if source.immutable_generation.is_some() { return "unavailable"; }
     let Ok(file) = crate::sealed::LogFile::open(&source.path) else {
         return "unavailable";
     };
@@ -660,12 +666,12 @@ fn source_state(source: &CatalogSource) -> &'static str {
         .ok()
         .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
         .map(|time| time.as_nanos());
-    if identity == (source.dev, source.ino)
+    if (Some(identity.0),Some(identity.1)) == (source.dev, source.ino)
         && source
             .changed_ns
             .is_some_and(|token| Some(token) == crate::events::change_time_ns(&metadata))
         && metadata.len() == source.size
-        && modified == Some(source.modified_ns)
+        && modified == source.modified_ns
     {
         if source.size > source.offset {
             "incomplete"
@@ -855,6 +861,7 @@ fn read_page(
             ));
         }
         for source in &row.sources {
+            if source.immutable_generation.is_none() && (source.dev.is_none() || source.ino.is_none() || source.modified_ns.is_none()) { return Err(io::Error::other("source physical provenance is incomplete").into()); }
             let Some(relative) = source_relative(options, &row.harness, source) else {
                 return Ok(error(
                     503,
@@ -900,6 +907,7 @@ fn read_page(
                 offset: source.offset,
                 prefix_sha256: source.prefix_sha256,
                 tail_sha256: source.tail_sha256,
+                immutable_generation: source.immutable_generation.clone(),
             };
             refs.push(json!({"source":reference,"state":state}));
         }

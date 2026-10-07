@@ -185,6 +185,7 @@ pub fn source_projection_ready(
                 offset: source.offset,
                 prefix_sha256: source.prefix_sha256,
                 tail_sha256: source.tail_sha256,
+                immutable_generation: source.immutable_generation.clone(),
             };
             if reference.native_id.is_empty()
                 || result

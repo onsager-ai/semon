@@ -539,6 +539,8 @@ const REPO_CACHE_MAX: usize = 512;
 #[derive(Default)]
 pub(crate) struct Texts {
     memo: HashMap<TextKey, (Option<String>, u64)>,
+    verified_bytes: HashMap<PathBuf,Arc<[u8]>>,
+    immutable_generations: HashMap<PathBuf,([u8;32],u64)> ,
     bytes: usize,
     tick: u64,
     generations: HashMap<PathBuf, (Stamp, u64)>,
@@ -604,6 +606,23 @@ impl Texts {
         self.next_generation
     }
 
+    fn source_generation(&mut self,file:&SourceFile)->u64 {
+        if let Some(stamp)=file.stamp { return self.generation(&file.path,stamp); }
+        let immutable=file.immutable.expect("source must have a qualified observation");
+        if let Some((generation,number))=self.immutable_generations.get(&file.path) && *generation==immutable.generation { return *number; }
+        self.next_generation+=1;
+        self.immutable_generations.insert(file.path.clone(),(immutable.generation,self.next_generation));
+        self.next_generation
+    }
+
+    fn read_record(&self,file:&SourceFile,offset:u64)->Option<Value> {
+        if file.immutable.is_none() { return read_line(&file.path,offset); }
+        let bytes=self.verified_bytes.get(&file.path)?;
+        let rest=bytes.get(usize::try_from(offset).ok()?..)?;
+        let end=rest.iter().position(|byte|*byte==b'\n')?;
+        crate::tx::parse_native_record(rest.get(..=end)?)
+    }
+
     fn read(
         &mut self,
         file: &SourceFile,
@@ -614,7 +633,7 @@ impl Texts {
     ) -> Option<String> {
         let key = TextKey {
             path: file.path.clone(),
-            generation: self.generation(&file.path, file.stamp),
+            generation: self.source_generation(file),
             offset,
             block,
             what: what.to_owned(),
@@ -624,7 +643,7 @@ impl Texts {
             *used = self.tick;
             return value.clone();
         }
-        let value = read_line(&file.path, offset)
+        let value = self.read_record(file,offset)
             .and_then(|record| extract(&record, block as usize))
             .map(|text| {
                 // `json:` values are built capped, and must stay whole.
@@ -1045,10 +1064,20 @@ enum Role {
 
 type FileRevision = events::FileRevision;
 
+#[derive(Clone, Copy)]
+pub(crate) struct ImmutableSource {
+    pub(crate) generation: [u8;32],
+    pub(crate) length: u64,
+    pub(crate) consumed: u64,
+    pub(crate) prefix: [u8;32],
+    pub(crate) tail: [u8;32],
+}
+
 struct SourceFile {
-    revision: FileRevision,
+    revision: Option<FileRevision>,
+    immutable: Option<ImmutableSource>,
     path: PathBuf,
-    stamp: Stamp,
+    stamp: Option<Stamp>,
     id: String,
     role: Role,
     summary: Arc<FileIndex>,
@@ -1059,6 +1088,8 @@ struct SourceFile {
 }
 
 impl SourceFile {
+    fn logical_length(&self)->u64 { self.stamp.map(|stamp|stamp.size).or_else(||self.immutable.map(|source|source.length)).expect("source must have a qualified observation") }
+
     fn harness(&self) -> &'static str {
         if matches!(self.role, Role::Copilot) {
             "copilot"
@@ -1331,8 +1362,9 @@ fn scan(
         texts.generation(&path, stamp);
         seen.insert(path.to_string_lossy().into_owned());
         files.push(SourceFile {
-            revision: cache.revision(&path).expect("scanned file has a ledger"),
-            stamp,
+            revision: cache.revision(&path),
+            immutable: None,
+            stamp: Some(stamp),
             id: id.to_owned(),
             first: summary.first,
             last: summary.last,
@@ -1385,9 +1417,10 @@ fn scan(
         texts.generation(&path, stamp);
         seen.insert(path.to_string_lossy().into_owned());
         files.push(SourceFile {
-            revision: cache.revision(&path).expect("scanned file has a ledger"),
+            revision: cache.revision(&path),
+            immutable: None,
             marker: texts.marker(&path, stamp),
-            stamp,
+            stamp: Some(stamp),
             id,
             first: summary.first,
             last: summary.last,
@@ -1443,8 +1476,9 @@ fn scan(
         texts.generation(&path, stamp);
         seen.insert(path.to_string_lossy().into_owned());
         files.push(SourceFile {
-            revision: cache.revision(&path).expect("scanned file"),
-            stamp,
+            revision: cache.revision(&path),
+            immutable: None,
+            stamp: Some(stamp),
             id,
             role: Role::Copilot,
             first: summary.first,
@@ -1694,7 +1728,7 @@ impl<'a> Builder<'a> {
             slot_files: files
                 .iter()
                 .map(|file| {
-                    let generation = texts.generation(&file.path, file.stamp);
+                    let generation = texts.source_generation(file);
                     let cached =
                         texts
                             .prompt_caches
@@ -2203,7 +2237,8 @@ impl<'a> Builder<'a> {
         let mut repos = Vec::new();
         for position in &session.files {
             let file = &self.files[*position];
-            files.push((file.path.clone(), file.revision));
+            if let Some(revision)=file.revision { files.push((file.path.clone(),revision)); }
+            if let Some(immutable)=file.immutable { metadata.push(format!("immutable:{:?}:{}",immutable.generation,immutable.length)); }
             metadata.push(format!("{:?}", file.role));
             let cwd = match &file.role {
                 Role::Agent(meta) => meta.cwd.as_ref().or(file.summary.cwd.as_ref()),
@@ -4118,12 +4153,14 @@ impl<'a> Builder<'a> {
         let mut files: Vec<_> = session
             .files
             .iter()
-            .map(|file| {
+            .filter_map(|file| {
                 let source = &self.files[*file];
-                (source.path.clone(), source.revision)
+                source.revision.map(|revision|(source.path.clone(),revision))
             })
             .collect();
         files.sort_by(|a, b| a.0.cmp(&b.0));
+        let mut links=links;
+        links.extend(session.files.iter().filter_map(|index|self.files[*index].immutable.map(|source|format!("immutable:{:?}:{}",source.generation,source.length))));
         let mut background_liveness: Vec<_> = session
             .files
             .iter()
@@ -6143,7 +6180,7 @@ fn build_sources_inner(
     let busy = BTreeMap::from([(machine.clone(), all_busy)]);
     let file_sizes: HashMap<&Path, u64> = files
         .iter()
-        .map(|file| (file.path.as_path(), file.stamp.size))
+        .map(|file| (file.path.as_path(), file.logical_length()))
         .collect();
     let marks: BTreeMap<&str, String> = tx
         .iter()
@@ -6213,7 +6250,7 @@ fn build_sources_inner(
     // paths or times, keep it the same for the same content.
     let lengths: Vec<String> = files
         .iter()
-        .map(|file| file.stamp.size.to_string())
+        .map(|file| file.logical_length().to_string())
         .collect();
     let version = format!(
         "{:016x}",
