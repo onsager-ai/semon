@@ -3,6 +3,9 @@ on:
   pull_request:
     paths:
       - 'crates/semon-ssh/**'
+      - 'crates/semon-control/**'
+      - 'scripts/ssh-native-fixture.sh'
+      - 'tests/spikes/ssh-native-controller.py'
       - 'scripts/ssh-fixture.sh'
       - 'tests/ssh/**'
       - '.github/workflows/ssh.yml'
@@ -15,3 +18,27 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - uses: dtolnay/rust-toolchain@stable
       - run: scripts/ssh-fixture.sh cargo test -p semon-ssh --locked --features real-ssh-tests
+
+  native-controller:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build controlled fixture artifacts
+        env:
+          CARGO_INCREMENTAL: 0
+          CARGO_PROFILE_DEV_DEBUG: 0
+        run: |
+          cargo build -p semon-control --bin semon-ssh-controller -p semon-ssh --example controller-install --locked
+          cargo build -p semon-store --bin semon --locked
+          python3 tests/ssh/test_controller_supervisor.py
+      - name: Verify complete pinned native package
+        run: |
+          mkdir "$RUNNER_TEMP/native-package"
+          curl --fail --location --retry 2 --output "$RUNNER_TEMP/native-package.tar.gz" https://github.com/openai/codex/releases/download/rust-v0.160.0/codex-package-x86_64-unknown-linux-musl.tar.gz
+          printf '%s  %s\n' 4fcc47ab57f52ff75363951a8761146cd10c8288bd86fed45487dbb204a16b71 "$RUNNER_TEMP/native-package.tar.gz" | sha256sum --check
+          tar -xzf "$RUNNER_TEMP/native-package.tar.gz" -C "$RUNNER_TEMP/native-package"
+          rm "$RUNNER_TEMP/native-package.tar.gz"
+      - name: Real native SSH dispatch and captured-history readback
+        run: |
+          SEMON_CODEX_PACKAGE="$RUNNER_TEMP/native-package" SEMON_SSH_BINARY="$PWD/target/debug/semon" scripts/ssh-native-fixture.sh python3 tests/spikes/ssh-native-controller.py --installer "$PWD/target/debug/examples/controller-install" --controller "$PWD/target/debug/semon-ssh-controller" --codex "$RUNNER_TEMP/native-package/bin/codex" --output "$RUNNER_TEMP/native-controller-report.json"

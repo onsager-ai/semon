@@ -2,6 +2,7 @@
 //! The caller must resolve/authorize a destination before constructing a Target.
 //! No credential type implements Debug or Serialize. Dropping a future kills its
 //! child; stderr is classified locally and never returned as remote diagnostics.
+pub mod controller;
 pub mod execution;
 
 use base64::{Engine, engine::general_purpose::STANDARD};
@@ -331,7 +332,7 @@ pub async fn bootstrap(
     credential: &Credential,
     setup: Bootstrap<'_>,
 ) -> Result<Setup, Error> {
-    bootstrap_inner(target, key, credential, setup, None).await
+    bootstrap_inner(target, key, credential, setup, None, false).await
 }
 /// Scope mirror checkpoints to the stable logical receiver. Reuse this identity
 /// for credential rotation/repair; choose a new identity for a new receiver even
@@ -349,7 +350,41 @@ pub async fn bootstrap_for_receiver(
     {
         return Err(Error::Invalid);
     }
-    bootstrap_inner(target, key, credential, setup, Some(receiver_identity)).await
+    bootstrap_inner(
+        target,
+        key,
+        credential,
+        setup,
+        Some(receiver_identity),
+        false,
+    )
+    .await
+}
+/// Capture the already installed controller's fresh native home into its stable
+/// receiver. This does not start, resume or authorize native execution. The
+/// remote bootstrap requires an existing immutable controller installation.
+pub async fn bootstrap_native_receiver(
+    target: &Target,
+    key: &HostKey,
+    credential: &Credential,
+    setup: Bootstrap<'_>,
+    receiver_identity: &str,
+) -> Result<Setup, Error> {
+    if receiver_identity.is_empty()
+        || receiver_identity.len() > 256
+        || receiver_identity.bytes().any(|b| b.is_ascii_control())
+    {
+        return Err(Error::Invalid);
+    }
+    bootstrap_inner(
+        target,
+        key,
+        credential,
+        setup,
+        Some(receiver_identity),
+        true,
+    )
+    .await
 }
 async fn bootstrap_inner(
     target: &Target,
@@ -357,6 +392,7 @@ async fn bootstrap_inner(
     credential: &Credential,
     setup: Bootstrap<'_>,
     receiver_identity: Option<&str>,
+    capture_native: bool,
 ) -> Result<Setup, Error> {
     target.validate()?;
     if setup.operation.len() != 36
@@ -371,7 +407,7 @@ async fn bootstrap_inner(
         return Err(Error::Invalid);
     }
     let files = PrivateFiles::new(key, credential)?;
-    let input=Zeroizing::new(serde_json::to_vec(&serde_json::json!({"version":1,"operation":setup.operation,"receiver_identity":receiver_identity,"destination":setup.destination,"token":setup.token,"binary":STANDARD.encode(setup.binary),"sha256":format!("{:x}",Sha256::digest(setup.binary))})).map_err(|_|Error::Invalid)?);
+    let input=Zeroizing::new(serde_json::to_vec(&serde_json::json!({"version":1,"operation":setup.operation,"receiver_identity":receiver_identity,"capture_native":capture_native,"destination":setup.destination,"token":setup.token,"binary":STANDARD.encode(setup.binary),"sha256":format!("{:x}",Sha256::digest(setup.binary))})).map_err(|_|Error::Invalid)?);
     let script = include_str!("bootstrap.py");
     let command = format!("python3 -c '{}'", script.replace('\'', "'\\''"));
     let out = run(
