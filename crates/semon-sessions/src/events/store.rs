@@ -1057,7 +1057,7 @@ impl IndexStore for SqliteStore {
                         .as_bytes()
                 )
             );
-            tx.execute("INSERT INTO session_catalog(session_key,lifecycle,last_ms,harness,repo,parent_key,metadata) VALUES(?1,'retained',?2,?3,?4,?5,?6)",params![row.key,row.last,row.harness,row.repo,row.parent,metadata]).map_err(failure)?;
+            tx.execute("INSERT INTO session_catalog(session_key,lifecycle,last_ms,harness,repo,parent_key,metadata) VALUES(?1,'retained',?2,?3,?4,?5,?6)",params![row.key,row.last.unwrap_or(0),row.harness,row.repo,row.parent,metadata]).map_err(failure)?;
             tx.execute("INSERT INTO session_catalog_sources(session_key,lifecycle,harness,native_id,source_path) VALUES(?1,'retained',?2,?3,?4)",params![row.key,row.harness,source.native_id,source.path.to_string_lossy()]).map_err(failure)?;
             tx.execute(
                 "INSERT INTO session_history_catalog(session_key,metadata) VALUES(?1,?2)",
