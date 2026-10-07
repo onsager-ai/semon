@@ -16406,11 +16406,6 @@ globalThis.__semonUIShared = __semonUIShared;
         if ((next.completeness.state === "partial" || next.search?.index_complete === false) && items.length <= 60) {
           const refresh = () => {
             if (disposed || epoch !== listEpoch || active || sourcesOpen) return;
-            const focused = document.activeElement;
-            if (focused instanceof HTMLElement && root.contains(focused) && focused.matches("input,textarea,select")) {
-              listRetry = scope.timeout(refresh, 1e3);
-              return;
-            }
             void loadList(false);
           };
           listRetry = scope.timeout(refresh, 1e3);

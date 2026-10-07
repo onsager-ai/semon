@@ -669,7 +669,7 @@ for (const width of [390, 1280])
     }
   });
 
-test('partial catalog discovery refresh retains uncommitted filter focus and then completes', async () => {
+test('partial catalog discovery completes while retaining uncommitted filter focus', async () => {
   const browser = await chromium.launch();
   try {
     const page = await browser.newPage();
@@ -714,16 +714,19 @@ test('partial catalog discovery refresh retains uncommitted filter focus and the
     await page.getByText('More sessions are being discovered. This list is incomplete.').waitFor();
     const harness = page.getByRole('textbox', { name: 'Harness', exact: true });
     await harness.fill('uncommitted');
-    await page.waitForTimeout(1500);
-    assert.equal(reads, 1);
-    assert.equal(await harness.inputValue(), 'uncommitted');
-    assert.equal(await harness.evaluate((node) => document.activeElement === node), true);
-    await harness.press('Tab');
+    await harness.evaluate((node) => node.setSelectionRange(2, 7));
     await page
       .getByText('More sessions are being discovered. This list is incomplete.')
       .waitFor({ state: 'hidden' });
     assert.equal(await harness.inputValue(), 'uncommitted');
+    assert.equal(await harness.evaluate((node) => document.activeElement === node), true);
+    assert.deepEqual(
+      await harness.evaluate((node) => [node.selectionStart, node.selectionEnd]),
+      [2, 7],
+    );
     assert.ok(reads >= 2);
+    await harness.press('Tab');
+    assert.equal(await harness.inputValue(), 'uncommitted');
     await page.evaluate(() => app.destroy());
   } finally {
     await browser.close();

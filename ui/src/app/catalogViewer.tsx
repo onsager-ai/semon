@@ -461,15 +461,8 @@ export function createCatalogViewer(
       ) {
         const refresh = () => {
           if (disposed || epoch !== listEpoch || active || sourcesOpen) return;
-          const focused = document.activeElement;
-          if (
-            focused instanceof HTMLElement &&
-            root.contains(focused) &&
-            focused.matches('input,textarea,select')
-          ) {
-            listRetry = scope.timeout(refresh, 1000);
-            return;
-          }
+          // drawList preserves the focused filter's draft and selection while
+          // provisional discovery advances; focus must not stall publication.
           void loadList(false);
         };
         listRetry = scope.timeout(refresh, 1000);
