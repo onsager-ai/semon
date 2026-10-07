@@ -5497,7 +5497,7 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
-    /// Sealing keeps logical bytes and modification time, but changes ctime.
+    /// Punching keeps logical bytes and modification time, but changes ctime.
     /// Revalidate the consumed prefix through segments without reparsing rows.
     #[cfg(target_os = "linux")]
     #[test]
@@ -5545,17 +5545,15 @@ mod tests {
         assert_eq!(parsed(), before + 2);
         assert_eq!(stored(&v1, &log), cold(&log));
 
-        // Sealed again: another physical generation, with no new logical rows.
-        assert!(
-            crate::sealed::seal(&log, 1, u64::MAX)
-                .unwrap()
-                .added
-                .is_some()
-        );
+        // A small new segment does not punch the log again: the physical
+        // generation and logical rows both remain unchanged.
+        let sealed = crate::sealed::seal(&log, 1, u64::MAX).unwrap();
+        assert!(sealed.added.is_some());
+        assert!(!sealed.punched);
         ledger_trace();
         let before = parsed();
         scan(&mut cache);
-        assert_eq!(ledger_trace(), ["append"]);
+        assert_eq!(ledger_trace(), ["unchanged"]);
         assert_eq!(parsed(), before);
         fs::remove_dir_all(root).unwrap();
     }
