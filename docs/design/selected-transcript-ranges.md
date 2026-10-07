@@ -184,3 +184,11 @@ is published. The archived-provider oracle captures the original native bytes,
 refuses recapture from a replacement, then reads the original generation after
 local deletion and a reopened full observation. Original cached provenance stays
 visible independently of returned provider content freshness.
+
+Migration limit: the unchanged-source upgrade oracle covers locally available
+sources. A previously archived source with an older recipe header cannot yet
+rebuild version 5 through the read-only provider callback. Its original history
+and provenance remain retained, but the bounded transcript endpoint reports an
+unsupported projection until a selected, generation-qualified producer rebuild
+exists. The required follow-up is a request-authorized provider-backed rebuild of
+that selected source; restoring unrelated history is not a qualified solution.
