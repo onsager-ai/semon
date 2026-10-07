@@ -167,3 +167,20 @@ with one text block also use their exact string span. Multi-block synthesis,
 structured non-string fields and native cuts remain unsupported rather than
 falling back to complete records. Version 3 recipes must be rebuilt before this
 new reader accepts them.
+
+### Producer generation guard (recipe version 5)
+
+Native field spans and native event IDs are captured only from an opened source
+whose device, inode, size, modification time and change time match the original
+catalog ledger observation both before and after the record read. Unknown change
+time refuses capture. The producer reads a complete line within the consumed
+prefix and retains its 32 MiB record ceiling; it does not index unread trailing
+bytes. A replacement between event parsing and field indexing cannot attach new
+spans or IDs to an older immutable source generation.
+
+Version 5 invalidates earlier unguarded recipes. A source observer can rebuild
+unchanged native sources; readers report unavailable until the supported header
+is published. The archived-provider oracle captures the original native bytes,
+refuses recapture from a replacement, then reads the original generation after
+local deletion and a reopened full observation. Original cached provenance stays
+visible independently of returned provider content freshness.

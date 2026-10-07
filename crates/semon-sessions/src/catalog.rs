@@ -1639,7 +1639,46 @@ mod tests {
         .unwrap()
         .unwrap();
         assert_eq!(ready.lifecycle, "current");
+        // Simulate a rewrite after ledger observation but before producer field
+        // capture. The original generation must never receive new-file spans
+        // or UUIDs; the immutable original below remains provider-readable.
+        let connection = Connection::open(EventCache::path(&fixture.options.cache)).unwrap();
+        let metadata: String = connection
+            .query_row(
+                "SELECT metadata FROM session_catalog WHERE session_key='archived'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let row: CatalogRow = serde_json::from_str(&metadata).unwrap();
+        let original = &row.sources[0];
+        assert!(
+            crate::native_field::capture(original, 0, 0, &crate::slot_projection::Recipe::U)
+                .is_some()
+        );
+        assert!(crate::native_field::read_source_record(original, 0).is_some());
+        let mut unqualified = original.clone();
+        unqualified.changed_ns = None;
+        assert!(crate::native_field::read_source_record(&unqualified, 0).is_none());
+        let mut partial = original.clone();
+        partial.offset = bytes.iter().position(|byte| *byte == b'\n').unwrap() as u64;
+        assert!(crate::native_field::read_source_record(&partial, 0).is_none());
         fs::remove_file(&path).unwrap();
+        fs::write(
+            &path,
+            format!(
+                "{}\n",
+                json!({"uuid":"replacement", "message":{"content":"replacement ".repeat(400)}})
+            ),
+        )
+        .unwrap();
+        assert!(
+            crate::native_field::capture(original, 0, 0, &crate::slot_projection::Recipe::U)
+                .is_none()
+        );
+        assert!(crate::native_field::read_source_record(original, 0).is_none());
+        fs::remove_file(&path).unwrap();
+        drop(connection);
         // A closed/reopened background model retires the native index. History
         // metadata and immutable native recipe generation must survive it.
         let reopened = ViewerCore::new(fixture.options.clone());
@@ -1821,7 +1860,10 @@ mod tests {
             );
             if reply.status == 200 {
                 let after: Value = serde_json::from_slice(&reply.body).unwrap();
-                assert_eq!(after["projection"]["version"], 4);
+                assert_eq!(
+                    after["projection"]["version"],
+                    crate::slot_projection::VERSION
+                );
                 assert_eq!(
                     after["entries"][0]["entry_id"],
                     before["entries"][0]["entry_id"]
