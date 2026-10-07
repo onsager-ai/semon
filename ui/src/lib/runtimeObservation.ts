@@ -18,14 +18,17 @@ export function parseRuntimeObservation(value: unknown): RuntimeObservation {
     throw new Error('Invalid readonly runtime observation');
   const row = value as Record<string, unknown>;
   if (
-    !['active', 'disconnected', 'failed', 'ended', 'unavailable'].includes(String(row.state)) ||
+    typeof row.state !== 'string' ||
+    !['active', 'disconnected', 'failed', 'ended', 'unavailable'].includes(row.state) ||
     typeof row.phase !== 'string' ||
     row.phase.length > 64 ||
-    !['current', 'updating', 'stale', 'unavailable'].includes(String(row.freshness)) ||
+    typeof row.freshness !== 'string' ||
+    !['current', 'updating', 'stale', 'unavailable'].includes(row.freshness) ||
     (row.presence !== undefined &&
-      !['active', 'absent', 'paused', 'transitioning', 'failed', 'unknown'].includes(
-        String(row.presence),
-      )) ||
+      (typeof row.presence !== 'string' ||
+        !['active', 'absent', 'paused', 'transitioning', 'failed', 'unknown'].includes(
+          row.presence,
+        ))) ||
     (row.observedAt !== undefined &&
       row.observedAt !== null &&
       (typeof row.observedAt !== 'string' ||
