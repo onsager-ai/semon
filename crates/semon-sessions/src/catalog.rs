@@ -1236,6 +1236,20 @@ mod tests {
             .unwrap();
         assert_eq!(ready.projection_version, crate::slot_projection::VERSION);
         let connection = Connection::open(EventCache::path(&fixture.options.cache)).unwrap();
+        connection.execute("INSERT INTO session_catalog_invalidations(source_path,revision,reason,observed_at) VALUES(?1,1,'changed',0)", [fixture.options.claude_home.join(relative).to_str().unwrap()]).unwrap();
+        assert!(
+            crate::source_projection_ready(&fixture.options, "claude", relative)
+                .unwrap()
+                .is_none()
+        );
+        connection
+            .execute("DELETE FROM session_catalog_invalidations", [])
+            .unwrap();
+        assert!(
+            crate::source_projection_ready(&fixture.options, "claude", relative)
+                .unwrap()
+                .is_some()
+        );
         let hash:String=connection.query_row("SELECT source_generation FROM session_slot_projections WHERE session_key='session-00000'",[],|row|row.get(0)).unwrap();
         connection
             .execute(

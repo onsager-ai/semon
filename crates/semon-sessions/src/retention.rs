@@ -123,6 +123,19 @@ pub fn source_projection_ready(
             else {
                 return Ok(None);
             };
+            // A recipe can still describe a coherent old prefix while a newer
+            // source observation awaits publication. Preserve it for history,
+            // but do not qualify another local eviction during that interval.
+            for dependency in &row.sources {
+                let pending: bool = transaction.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM session_catalog_invalidations WHERE source_path=?1)",
+                    [dependency.path.to_str().ok_or(InvalidArguments)?],
+                    |row| row.get(0),
+                ).map_err(|_| Unavailable)?;
+                if pending {
+                    return Ok(None);
+                }
+            }
             let expected = source_generation(&row.sources).map_err(|_| Unavailable)?;
             if version != Some(crate::slot_projection::VERSION)
                 || source_hash.as_deref() != Some(expected.as_str())
