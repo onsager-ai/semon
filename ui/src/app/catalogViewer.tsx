@@ -921,12 +921,14 @@ export function createCatalogViewer(
     }
   }
   async function recheckCapabilities() {
-    const observedSource = capabilities.source_key;
+    const observedSource = capabilities.source_key,
+      observedEpoch = sourcesEpoch;
     try {
       const next = parseCatalogCapabilities(
         await api('/api/session-capabilities?' + currentParams()),
       );
-      if (disposed || observedSource !== capabilities.source_key) return;
+      if (disposed || observedEpoch !== sourcesEpoch || observedSource !== capabilities.source_key)
+        return;
       if (next.source_key !== capabilities.source_key)
         throw new Error('Source selection changed. Choose the source again.');
       const ready = !capabilities.selected_transcript && next.selected_transcript;
@@ -934,7 +936,8 @@ export function createCatalogViewer(
       if (active) void loadIdentity(active);
       if (ready && active && !active.store.selectedPage()) void loadSelected(active);
     } catch (error) {
-      if (disposed) return;
+      if (disposed || observedEpoch !== sourcesEpoch || observedSource !== capabilities.source_key)
+        return;
       if (active && !active.store.selectedPage()) {
         active.note = readError(error);
         drawSelected(active);
