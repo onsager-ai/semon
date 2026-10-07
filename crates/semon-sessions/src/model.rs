@@ -24,7 +24,7 @@ use std::os::unix::fs::MetadataExt;
 
 use serde::{Deserialize, Serialize};
 
-mod summary;
+pub(crate) mod summary;
 use serde_json::Value;
 
 use crate::{
@@ -439,6 +439,19 @@ impl Handoff {
             ambiguous: false,
         }
     }
+}
+
+/// The compatibility model and focused catalog use the same logged-parent rule.
+fn session_parent(sid: &str, session: &Session, handoffs: &[Handoff]) -> Option<String> {
+    handoffs
+        .iter()
+        .find(|handoff| {
+            (handoff.kind == "spawn" || handoff.kind == "relay")
+                && handoff.to.as_deref() == Some(sid)
+                && handoff.from.as_str() != sid
+                && (handoff.kind == "spawn" || session.kind == Some("Relayed") || !session.lane)
+        })
+        .map(|handoff| handoff.from.clone())
 }
 
 pub(crate) fn now_ms() -> i64 {
@@ -5847,6 +5860,9 @@ pub(crate) fn build(
         .iter()
         .map(|session| (session.key.clone(), session.out.clone()))
         .collect();
+    // A scan-window build is intentionally incomplete: it cannot replace a
+    // source-complete catalog. Publication itself is delayed until success.
+    let catalog = (!options.scan_window).then(|| summary::catalog(&builder, &handoffs));
     // Analytics reads a month and the month before it, whatever the model's
     // window: taken from every session before the window trims them.
     let activity = crate::analytics::activity(&sessions, &tx, &turns, &handoffs, now);
@@ -5930,15 +5946,7 @@ pub(crate) fn build(
     // Match the approved mockup's parentOf rule against the same handoffs
     // and session flags the client receives.
     for (sid, session) in &mut sessions {
-        session.parent = handoffs
-            .iter()
-            .find(|handoff| {
-                (handoff.kind == "spawn" || handoff.kind == "relay")
-                    && handoff.to.as_deref() == Some(sid.as_str())
-                    && handoff.from.as_str() != sid.as_str()
-                    && (handoff.kind == "spawn" || session.kind == Some("Relayed") || !session.lane)
-            })
-            .map(|handoff| handoff.from.clone());
+        session.parent = session_parent(sid, session, &handoffs);
     }
     let order: HashMap<&str, usize> = {
         let mut keys: Vec<(&str, i64)> = sessions
@@ -6106,6 +6114,9 @@ pub(crate) fn build(
         "post",
         u32::try_from(post_started.elapsed().as_millis()).unwrap_or(u32::MAX),
     ));
+    if let Some(catalog) = catalog {
+        cache.publish_session_catalog(&catalog);
+    }
     cache.publish_session_descriptions();
     Ok(built)
 }

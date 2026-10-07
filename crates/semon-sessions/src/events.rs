@@ -871,6 +871,12 @@ pub(crate) trait IndexStore: Send {
         descriptions: &[(String, u32, String, String)],
     ) -> Result<Outcome, StoreError>;
 
+    /// Replaces one complete source-validated metadata catalog atomically.
+    fn publish_session_catalog(
+        &mut self,
+        rows: &[crate::model::summary::CatalogRow],
+    ) -> Result<Outcome, StoreError>;
+
     /// `path`'s ledger as committed now.
     fn ledger(&self, path: &str) -> Result<Option<Ledger>, StoreError>;
 
@@ -1109,6 +1115,15 @@ impl EventCache {
         {
             // A failed cache publication never changes the serving snapshot.
             let _ = store.save_session_descriptions(&descriptions);
+        }
+    }
+
+    pub(crate) fn publish_session_catalog(&mut self, rows: &[crate::model::summary::CatalogRow]) {
+        if !self.busy
+            && self.unpersisted.is_empty()
+            && let Some(store) = self.store.as_mut()
+        {
+            let _ = store.publish_session_catalog(rows);
         }
     }
 
