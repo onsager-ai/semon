@@ -105,7 +105,7 @@ function transcript(key, p, total = 65, generation = 'b') {
     api: 1,
     identity: { ...identity(key), read_scope: 'retained_history' },
     session: meta(key),
-    projection: { version: 1, generation: generation.repeat(64), total },
+    projection: { version: 4, generation: generation.repeat(64), total },
     range: { first, end, next: end < total ? end : null },
     entries: Array.from({ length: end - first }, (_, i) => ({
       k: 'a',
@@ -157,7 +157,7 @@ for (const width of [390, 1280])
               json: {
                 api: 1,
                 identity: { ...identity(key), read_scope: 'retained_history' },
-                projection: { version: 1, generation: nativeGeneration.repeat(64) },
+                projection: { version: 4, generation: nativeGeneration.repeat(64) },
                 slot: 6,
                 field: { name: 'text', chunk, next: chunk === 0 ? 1 : null, complete: chunk === 1 },
                 text: chunk === 0 ? 'First native text chunk ' : 'and final native text chunk.',
