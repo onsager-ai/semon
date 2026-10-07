@@ -246,3 +246,14 @@ With this option, content reads use `content=1`; content streams include their
 accepted `since` revision. Hosts must preserve conditional content reads while
 serving native status independently. The existing model/control transaction
 continues unchanged for hosts without this option.
+
+Catalog consumers may instead use `catalogControlStream` with the accepted
+`CatalogSelectionStore` port. Requests and snapshots carry exact
+`{source_key, catalog_key, native_id, harness}` identities. Canonical catalog
+routes and native session IDs remain distinct; the observer never derives
+native identity from a route, display hostname, or source-reference order.
+Missing or ambiguous native identity opens no status stream and grants no
+control authority. Hosts validate the selected catalog source and independently
+recheck runtime custody and authorization. Catalog selection does not fall back
+to workspace model resolution. The scoped observer retains the same snapshot,
+heartbeat, retry and teardown semantics described above.

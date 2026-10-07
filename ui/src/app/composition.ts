@@ -239,7 +239,8 @@ export class ViewerComposition {
     this.isGap = (e: Entry) =>
       e.k === 'end' && /entries (not included|omitted)|^No activity/.test(e.text ?? '');
     this.controlOwner = createLocalControl(this.scope, () => {
-      if (context.viewerHost?.controlStream) context.applicationRefreshOwner.controls();
+      if (context.viewerHost?.controlStream || context.viewerHost?.catalogControlStream)
+        context.applicationRefreshOwner.controls();
       else context.applicationRefreshOwner.refresh();
     });
     this.transportOwner = createTransport(context);

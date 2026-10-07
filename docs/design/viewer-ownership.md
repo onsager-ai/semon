@@ -234,3 +234,10 @@ snapshots update the existing local control owner and cached Session screen;
 they never adopt a model or prepare transcript blocks. Native status, transport
 freshness and content revisions remain distinct. Selection changes invalidate
 queued status callbacks and clear authority from the previous selection.
+
+Catalog status consumes the accepted selection owner's narrow typed identity
+accessor and subscription. The host contributes only a static
+`catalogControlStream` path. An unresolved, superseded or multi-native catalog
+selection cannot enter the legacy observer or select a native destination.
+Returning to the same native thread invalidates handles from a previous
+selection epoch, even when the native generation remains unchanged.

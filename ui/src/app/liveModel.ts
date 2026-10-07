@@ -39,7 +39,11 @@ export function createLiveModel(host: LiveModelHost) {
     );
   }
   function modelPath(path: string, selected = selection()) {
-    return path + selected + (host.viewerHost?.controlStream ? '&content=1' : '');
+    return (
+      path +
+      selected +
+      (host.viewerHost?.controlStream || host.viewerHost?.catalogControlStream ? '&content=1' : '')
+    );
   }
   const liveController = createLiveController({
     async poll() {
@@ -180,7 +184,7 @@ export function createLiveModel(host: LiveModelHost) {
       throw new Error('Invalid live model stream');
     const streamQuery = [
       selected.slice(1),
-      host.viewerHost?.controlStream
+      host.viewerHost?.controlStream || host.viewerHost?.catalogControlStream
         ? 'content=1&since=' + host.transportOwner.enc(LIVE.version ?? '')
         : '',
     ]
