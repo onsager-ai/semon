@@ -407,10 +407,13 @@ dialog.panel::backdrop { background: color-mix(in srgb, #000 40%, transparent); 
 .turn-end .link { margin-left: auto; }
 
 /* Jump to the latest: centred over the transcript column, sticky at its foot. */
-.jump-wrap { position: sticky; bottom: calc(16px + env(safe-area-inset-bottom, 0px)); z-index: 6; height: 0; display: flex; justify-content: center; pointer-events: none; }
-.jump { pointer-events: auto; transform: translateY(-100%); display: inline-flex; align-items: center; gap: 6px; height: 40px; min-width: 40px; border: 1px solid var(--line-2); border-radius: 20px; background: var(--raised); padding: 0 12px; color: var(--ink-2); font-size: var(--fs-sm); font-weight: 500; box-shadow: 0 4px 14px color-mix(in srgb, #000 12%, transparent); }
+.viewer-jump, .jump-wrap { display: contents; }
+.jump { position: relative; display: inline-flex; align-items: center; justify-content: center; width: 40px; height: 40px; flex: none; border: 0; border-radius: 8px; background: transparent; padding: 0; color: var(--ink-2); }
 .jump svg { width: 18px; height: 18px; }
-@media (max-width: 760px) { .jump { height: 44px; min-width: 44px; border-radius: 22px; } .out .io .link, .viewer-b .vs .link { min-height: 44px; margin: -12px 0; } }
+.jump[data-count]::after { content: attr(data-count); position: absolute; top: 0; right: 0; min-width: 14px; padding: 0 2px; border-radius: 4px; background: var(--sunken); color: var(--ink-2); font-size: var(--fs-cap); line-height: var(--lh-cap); font-weight: 600; }
+@media (hover: hover) { .jump:hover { background: var(--sunken); } }
+
+@media (max-width: 760px) { .jump { height: 44px; width: 44px; } .out .io .link, .viewer-b .vs .link { min-height: 44px; margin: -12px 0; } }
 
 .viewer-b pre { margin: 0; padding: 10px 12px; border-radius: var(--r2); background: var(--sunken); font: 12.5px/1.5 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; color: var(--ink-2); }
 .viewer-b pre.in { color: var(--ink); }
@@ -772,7 +775,7 @@ dialog.viewer::backdrop { background: rgb(0 0 0 / .45); }
 .livenote { position: fixed; z-index: 6; left: 50%; bottom: calc(16px + env(safe-area-inset-bottom, 0px)); transform: translateX(-50%); width: max-content; max-width: calc(100vw - 32px); margin: 0; padding: 8px 14px; border: 1px solid var(--line); border-radius: 10px; background: var(--sunken); color: var(--muted); font-size: var(--fs-sm); text-align: center; }
 /* The jump button floats on the same axis: while it shows, the note sits above it (16px offset + 40px button + 12px). */
 /* While the jump button shows, the note sits above it. */
-body:has(.jump-wrap:not([hidden])) .livenote { bottom: calc(68px + env(safe-area-inset-bottom, 0px)); }
+
 @media (min-width: 761px) { .livenote { left: calc(50% + 148px); max-width: calc(100vw - 296px - 32px); } }
 
 /* ---- Approved viewer UX: compact metadata, session tree and reading controls --------------------- */
