@@ -300,6 +300,7 @@ impl Refresh {
 /// [`ViewerCore::close`] stops it before the files it reads are removed.
 pub struct ViewerCore {
     views: RwLock<Arc<Views>>,
+    source_inventory: Mutex<Option<(Weak<Views>, Arc<crate::SessionSourceInventory>)>>,
     received: Option<Received>,
     /// What [`ViewerCore::respond`] serves in the model when a call
     /// doesn't pass its own ([`ViewerCore::respond_with`]).
@@ -314,6 +315,8 @@ pub struct ViewerCore {
     /// `/api/analytics`' answers, kept until the model changes.
     analytics: Mutex<analytics::Cache>,
     model_history: Mutex<crate::model_delta::History>,
+    /// One metadata-only ownership projection of immutable machine snapshots.
+    ownership: Mutex<Option<Ownership>>,
 }
 
 /// The embedding server's own values in `/api/model`, which can differ per
@@ -442,6 +445,7 @@ impl Drop for Entered<'_> {
 }
 
 /// Which machine answers for each session id the union serves.
+#[derive(Debug, PartialEq, Eq)]
 struct Plan {
     /// Each machine's id in the union, in order: its hostname, or
     /// `<hostname>~<key>` when an earlier machine has that hostname.
@@ -458,6 +462,55 @@ struct Plan {
     /// received machine. `usize::MAX` without received machines.
     droppable: usize,
     version: String,
+}
+
+/// A cache key is the exact snapshot, machine key/order and copy policy, not
+/// just the transport version: a replacement may leave its displayed JSON
+/// unchanged while changing source ownership. Weak refs cannot keep an old
+/// model, transcript index or source generation alive.
+struct Ownership {
+    snapshots: Vec<(String, Weak<Built>)>,
+    plan: Arc<Plan>,
+}
+
+impl Ownership {
+    fn matches(&self, views: &Views, models: &[Arc<Built>], droppable: usize) -> bool {
+        self.plan.droppable == droppable
+            && self.snapshots.len() == views.len()
+            && models.len() == views.len()
+            && self.snapshots.iter().zip(views).zip(models).all(
+                |(((key, snapshot), (current_key, _)), model)| {
+                    key == current_key && snapshot.ptr_eq(&Arc::downgrade(model))
+                },
+            )
+    }
+
+    /// Bound both structural entries and retained string bytes. Oversized
+    /// workspaces keep the existing uncached behavior; admission is never an
+    /// excuse to evict sessions or change ambiguity handling.
+    fn admissible(views: &Views, plan: &Plan) -> bool {
+        let entries = plan.owners.len()
+            + plan.conflicts.len()
+            + plan.dropped.iter().map(BTreeSet::len).sum::<usize>();
+        if views.len() > 4096 || entries > 100_000 {
+            return false;
+        }
+        let bytes = views.iter().map(|(key, _)| key.len()).sum::<usize>()
+            + plan.machine_ids.iter().map(String::len).sum::<usize>()
+            + plan
+                .owners
+                .iter()
+                .map(|(id, (_, own))| id.len() + own.len())
+                .sum::<usize>()
+            + plan.conflicts.iter().map(String::len).sum::<usize>()
+            + plan
+                .dropped
+                .iter()
+                .flat_map(|ids| ids.iter())
+                .map(String::len)
+                .sum::<usize>();
+        bytes <= 8 * 1024 * 1024
+    }
 }
 
 /// Which machine answers for a session id.
@@ -809,13 +862,16 @@ impl ViewerCore {
     /// order is kept: the first machine is the model's `machine`. With one
     /// machine this is [`ViewerCore::new`], byte for byte.
     pub fn with_machines(machines: Vec<(String, Options)>) -> Self {
+        let views = Arc::new(
+            machines
+                .into_iter()
+                .map(|(key, options)| (key, MachineView::new(options)))
+                .collect::<Views>(),
+        );
+        let inventory = Self::configured_source_inventory(&views);
         Self {
-            views: RwLock::new(Arc::new(
-                machines
-                    .into_iter()
-                    .map(|(key, options)| (key, MachineView::new(options)))
-                    .collect(),
-            )),
+            views: RwLock::new(views.clone()),
+            source_inventory: Mutex::new(Some((Arc::downgrade(&views), inventory))),
             received: None,
             extras: Extras::default(),
             refresh: Refresh::OnRead,
@@ -824,6 +880,7 @@ impl ViewerCore {
             retired: Mutex::default(),
             analytics: Mutex::default(),
             model_history: Mutex::default(),
+            ownership: Mutex::default(),
         }
     }
 
@@ -854,6 +911,36 @@ impl ViewerCore {
     /// The machines served now.
     fn views(&self) -> Arc<Views> {
         read_lock(&self.views).clone()
+    }
+
+    /// Build configured source metadata once per views snapshot. No native
+    /// model, facts, source bodies or health checks participate in this index.
+    fn source_inventory(&self, views: &Arc<Views>) -> Arc<crate::SessionSourceInventory> {
+        let mut cached = lock(&self.source_inventory);
+        if let Some((snapshot, inventory)) = cached.as_ref()
+            && snapshot
+                .upgrade()
+                .is_some_and(|old| Arc::ptr_eq(&old, views))
+        {
+            return inventory.clone();
+        }
+        let inventory = Self::configured_source_inventory(views);
+        *cached = Some((Arc::downgrade(views), inventory.clone()));
+        inventory
+    }
+
+    fn configured_source_inventory(views: &Views) -> Arc<crate::SessionSourceInventory> {
+        let local = views.len() == 1 && views[0].0.is_empty();
+        Arc::new(crate::SessionSourceInventory::new(views.iter().map(
+            |(key, _)| {
+                let key = if local {
+                    "local".to_owned()
+                } else {
+                    key.clone()
+                };
+                (key.clone(), key)
+            },
+        )))
     }
 
     /// Each machine's view, in order: for tests that read its hooks.
@@ -1025,6 +1112,31 @@ impl ViewerCore {
         true
     }
 
+    /// Reuse this core's asynchronous producer for an exact configured source.
+    /// This uses the published configuration index; it performs no received
+    /// directory discovery, model construction or native body reads. Hosts
+    /// authorize source custody first and call invalidate() after a push.
+    /// False means absent/ambiguous, closed, or compatibility OnRead mode;
+    /// hosts may then use a source-scoped SessionCatalogObserver instead.
+    pub fn demand_catalog_source(&self, source_key: &str) -> io::Result<bool> {
+        let Some(_entered) = self.open.enter() else {
+            return Ok(false);
+        };
+        if self.refresh == Refresh::OnRead {
+            return Ok(false);
+        }
+        let views = self.views();
+        let inventory = self.source_inventory(&views);
+        if !inventory.valid() {
+            return Ok(false);
+        }
+        let Some(index) = inventory.index(source_key) else {
+            return Ok(false);
+        };
+        views[index].1.note_catalog_read()?;
+        Ok(true)
+    }
+
     /// Stops the core for good, and returns once it no longer reads or
     /// writes any file: calls in progress and each machine's background
     /// rebuild have finished, and every later call answers 404 without
@@ -1112,12 +1224,17 @@ impl ViewerCore {
         };
         self.follow();
         let views = self.views();
+        if path == "/api/session-sources" {
+            return self.source_inventory(&views).page(query);
+        }
         if matches!(
             path,
             "/api/sessions"
                 | "/api/session-transcript"
+                | "/api/session-entry"
                 | "/api/session-capabilities"
                 | "/api/session-identity"
+                | "/api/session-resolve"
         ) {
             return self.catalog(&views, path, query);
         }
@@ -1178,7 +1295,7 @@ impl ViewerCore {
 
     /// Focused lists are scoped by the embedder's stable machine key. A
     /// hostname is a label, and never selects a source access boundary.
-    fn catalog(&self, views: &Views, path: &str, query: &str) -> ViewerReply {
+    fn catalog(&self, views: &Arc<Views>, path: &str, query: &str) -> ViewerReply {
         let request = if path == "/api/sessions" {
             match crate::catalog::Request::parse(query) {
                 Ok(request) => Some(request),
@@ -1187,6 +1304,10 @@ impl ViewerCore {
         } else {
             None
         };
+        // The original single-machine Viewer uses an empty internal key.
+        // Its additive catalog contract has a stable explicit local alias.
+        // This never derives source authority from hostnames or session ids.
+        let local_alias = views.len() == 1 && views[0].0.is_empty();
         let machine = match query_value(query, "machine") {
             Some(value) => match decoded(value) {
                 Some(machine) => machine,
@@ -1199,6 +1320,7 @@ impl ViewerCore {
                     );
                 }
             },
+            None if local_alias => "local".to_owned(),
             None if views.len() == 1 => views[0].0.clone(),
             None => {
                 return crate::catalog::error(
@@ -1209,7 +1331,18 @@ impl ViewerCore {
                 );
             }
         };
-        let matches: Vec<_> = views.iter().filter(|(key, _)| *key == machine).collect();
+        let inventory = self.source_inventory(views);
+        let matches: Vec<_> = if inventory.valid() {
+            inventory
+                .index(&machine)
+                .map(|index| &views[index])
+                .into_iter()
+                .collect()
+        } else {
+            // Invalid configurations retain the legacy explicit ambiguity
+            // refusal. Valid configured inventories use indexed lookup.
+            views.iter().filter(|(key, _)| *key == machine).collect()
+        };
         let [(key, view)] = matches.as_slice() else {
             return crate::catalog::error(
                 if matches.is_empty() { 404 } else { 409 },
@@ -1218,11 +1351,13 @@ impl ViewerCore {
                 false,
             );
         };
+        let key = if local_alias { "local" } else { key.as_str() };
         // Record demand without waiting for an initial model build. The
         // configured background coordinator performs coherent observation;
         // OnRead callers retain their explicit warm()/api/model contract.
         let refresh_error = view.note_catalog_read().err();
         let mut reply = match path {
+            "/api/session-resolve" => crate::native_resolution::page(view.options(), key, query),
             "/api/session-identity" => {
                 let sid = query_value(query, "sid").and_then(decoded);
                 match sid
@@ -1266,18 +1401,16 @@ impl ViewerCore {
             "/api/session-transcript" => {
                 crate::session_transcript_range(view.options(), key, query, None)
             }
-            "/api/session-capabilities" => {
-                let body = json!({"api":1,"read_contract":"catalog-v1","source_key":key,
-                    "selected_identity":true,"selected_transcript":true,"pagination":true,"relationship_context":false,
-                    "large_native_records":false,"selected_entry":false,"attachment":false,"global_union":false,"full_text_search":false,
-                    "filters":["harness","repo"],"order":"last_desc_key_asc"});
-                ViewerReply {
-                    status: 200,
-                    content_type: "application/json; charset=utf-8",
-                    body: body.to_string().into_bytes(),
-                    etag: None,
-                }
-            }
+            "/api/session-entry" => crate::session_entry_field(view.options(), key, query, None),
+            "/api/session-capabilities" => crate::session_catalog_capabilities(
+                key,
+                crate::SessionReadEndpoints {
+                    selected_identity: true,
+                    native_resolution: true,
+                    selected_transcript: true,
+                    selected_entry: true,
+                },
+            ),
             _ => crate::catalog::page(
                 view.options(),
                 key,
@@ -1298,12 +1431,12 @@ impl ViewerCore {
     /// Every machine's model, read as `read` says, and the union's plan.
     /// Each model is read once, so an answer comes from one snapshot of
     /// each.
-    fn refresh_at(&self, views: &Views, read: Reading) -> io::Result<(Vec<Arc<Built>>, Plan)> {
+    fn refresh_at(&self, views: &Views, read: Reading) -> io::Result<(Vec<Arc<Built>>, Arc<Plan>)> {
         let models = views
             .iter()
             .map(|(_, view)| view.built(read))
             .collect::<io::Result<Vec<_>>>()?;
-        let plan = plan(&parts(views, &models), self.droppable());
+        let plan = self.ownership_plan(views, &models);
         if let Some(received) = &self.received {
             let mut following = lock(&received.following);
             for ((name, _), dropped) in views.iter().zip(&plan.dropped).skip(received.fixed) {
@@ -1319,6 +1452,34 @@ impl ViewerCore {
             }
         }
         Ok((models, plan))
+    }
+
+    fn ownership_plan(&self, views: &Views, models: &[Arc<Built>]) -> Arc<Plan> {
+        let droppable = self.droppable();
+        {
+            let cached = lock(&self.ownership);
+            if let Some(cached) = cached
+                .as_ref()
+                .filter(|cache| cache.matches(views, models, droppable))
+            {
+                return cached.plan.clone();
+            }
+        }
+        // Do not block readers of a cached generation while a new generation
+        // is planned. Concurrent misses can duplicate work, but each returned
+        // plan belongs to that caller's exact snapshots. A late older admission
+        // only causes a miss on the next read, never an incorrect match.
+        let plan = Arc::new(plan(&parts(views, models), droppable));
+        let admission = Ownership::admissible(views, &plan).then(|| Ownership {
+            snapshots: views
+                .iter()
+                .zip(models)
+                .map(|((key, _), model)| (key.clone(), Arc::downgrade(model)))
+                .collect(),
+            plan: plan.clone(),
+        });
+        *lock(&self.ownership) = admission;
+        plan
     }
 
     /// The first view whose ids an earlier view's win over: the first
@@ -1525,6 +1686,12 @@ impl ViewerCore {
     /// are presentation labels; embedders use this key to bind native controls.
     /// Missing or ambiguous native IDs never select a writable destination.
     pub fn session_machine_key(&self, id: &str) -> io::Result<Option<String>> {
+        Ok(self.session_view_identity(id)?.map(|(source, _)| source))
+    }
+
+    /// Authoritative source key and projected presentation machine for a served session.
+    /// Ambiguous native identities never select a source.
+    pub fn session_view_identity(&self, id: &str) -> io::Result<Option<(String, String)>> {
         let Some(_entered) = self.open.enter() else {
             return Ok(None);
         };
@@ -1537,7 +1704,7 @@ impl ViewerCore {
         Ok(plan
             .owners
             .get(id)
-            .map(|(index, _)| views[*index].0.clone()))
+            .map(|(index, _)| (views[*index].0.clone(), plan.machine_ids[*index].clone())))
     }
 
     /// Every machine's model, under the caller's refresh policy, with how the core serves
@@ -1547,7 +1714,7 @@ impl ViewerCore {
         let views = self.views();
         let (models, machine_ids) = if views.len() > 1 {
             let (models, plan) = self.refresh_at(&views, read)?;
-            (models, plan.machine_ids)
+            (models, plan.machine_ids.clone())
         } else {
             let models = views
                 .iter()
@@ -1672,7 +1839,7 @@ impl ViewerCore {
             // One machine is served as the machine itself, no id renamed.
             Some(models) if views.len() == 1 => has_page(&models[0], &segments),
             Some(models) => {
-                let plan = plan(&parts(views, &models), self.droppable());
+                let plan = self.ownership_plan(views, &models);
                 union_has_page(&plan, &models, &segments)
             }
         };
@@ -1758,6 +1925,178 @@ fn union_has_page(plan: &Plan, models: &[Arc<Built>], parts: &[&str]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ownership_projection_tracks_exact_snapshots_and_union_policy() {
+        let root = std::env::temp_dir().join(format!(
+            "semon-ownership-{}-{}",
+            std::process::id(),
+            model::now_ms()
+        ));
+        let options = |key: &str| {
+            let home = root.join(key);
+            let proc_root = home.join("proc");
+            std::fs::create_dir_all(&proc_root).unwrap();
+            std::fs::write(proc_root.join("locks"), "").unwrap();
+            Options {
+                claude_home: home.join("claude"),
+                claude_json: home.join(".claude.json"),
+                codex_home: home.join("codex"),
+                copilot_home: home.join("copilot"),
+                proc_root,
+                cache: home.join("cache"),
+                all: true,
+                since: std::time::Duration::from_secs(86400),
+                session: None,
+                facts: None,
+                scan_window: false,
+            }
+        };
+        let first = options("first");
+        let second = options("second");
+        let write = |options: &Options, name: &str| {
+            let projects = options.claude_home.join("projects/project");
+            std::fs::create_dir_all(&projects).unwrap();
+            std::fs::write(
+                projects.join(format!("{name}.jsonl")),
+                format!(
+                    "{}\n",
+                    json!({
+                        "type":"user","sessionId":name,"uuid":name,"parentUuid":null,
+                        "cwd":"/synthetic/project","timestamp":"2026-10-01T00:00:00Z",
+                        "message":{"role":"user","content":"synthetic prompt"}
+                    })
+                ),
+            )
+            .unwrap();
+        };
+        write(&first, "shared");
+        write(&second, "shared");
+        let mut core = ViewerCore::with_machines(vec![
+            ("first".into(), first),
+            ("second".into(), second.clone()),
+        ]);
+        core.set_refresh(Refresh::OnInvalidate);
+        let views = core.views();
+        let (models, original) = core.refresh_at(&views, Reading::Served).unwrap();
+        assert_eq!(*original, plan(&parts(&views, &models), core.droppable()));
+        assert!(original.conflicts.contains("shared"));
+        assert!(Arc::ptr_eq(
+            &original,
+            &core.ownership_plan(&views, &models)
+        ));
+        assert!(matches!(
+            core.owner_in(&views, "shared", Reading::Served).unwrap(),
+            Owner::Conflict
+        ));
+
+        // Key changes, reordering, and removal must not use an old mapping,
+        // even while every underlying source snapshot is still unchanged.
+        let mut renamed = (*views).clone();
+        renamed[1].0 = "renamed".into();
+        let renamed_plan = core.ownership_plan(&renamed, &models);
+        assert!(!Arc::ptr_eq(&original, &renamed_plan));
+        assert_eq!(
+            *renamed_plan,
+            plan(&parts(&renamed, &models), core.droppable())
+        );
+        let mut reordered = renamed.clone();
+        reordered.reverse();
+        let mut reversed_models = models.clone();
+        reversed_models.reverse();
+        let reversed = core.ownership_plan(&reordered, &reversed_models);
+        assert_eq!(
+            *reversed,
+            plan(&parts(&reordered, &reversed_models), core.droppable())
+        );
+        assert_eq!(
+            *core.ownership_plan(&reordered[..1].to_vec(), &reversed_models[..1]),
+            plan(
+                &parts(&reordered[..1].to_vec(), &reversed_models[..1]),
+                core.droppable()
+            )
+        );
+
+        // A received copy gives way to the fixed machine; it never inherits
+        // the conflict policy of the same snapshots served as fixed machines.
+        let copies = Ownership {
+            snapshots: views
+                .iter()
+                .zip(&models)
+                .map(|((key, _), model)| (key.clone(), Arc::downgrade(model)))
+                .collect(),
+            plan: Arc::new(plan(&parts(&views, &models), 1)),
+        };
+        assert!(copies.plan.conflicts.is_empty());
+        assert!(copies.plan.dropped[1].contains("shared"));
+        assert!(copies.matches(&views, &models, 1));
+        assert!(!copies.matches(&views, &models, core.droppable()));
+
+        // Replacing identical bytes invalidates the exact snapshot even if
+        // its transport version stays identical; the source generation moved.
+        write(&second, "shared");
+        assert!(core.warm_machine("second").unwrap());
+        let (rewritten_models, rewritten) = core.refresh_at(&views, Reading::Served).unwrap();
+        assert!(!Arc::ptr_eq(&original, &rewritten));
+        assert_eq!(
+            *rewritten,
+            plan(&parts(&views, &rewritten_models), core.droppable())
+        );
+        assert_eq!(original.version, rewritten.version);
+        drop(rewritten_models);
+
+        // Removal and a newly observed native session change authority.
+        std::fs::remove_file(second.claude_home.join("projects/project/shared.jsonl")).unwrap();
+        write(&second, "replacement");
+        assert!(core.warm_machine("second").unwrap());
+        let (new_models, updated) = core.refresh_at(&views, Reading::Served).unwrap();
+        assert!(!Arc::ptr_eq(&original, &updated));
+        assert_eq!(
+            *updated,
+            plan(&parts(&views, &new_models), core.droppable())
+        );
+        assert!(updated.conflicts.is_empty());
+        assert_eq!(
+            core.session_machine_key("replacement").unwrap().as_deref(),
+            Some("second")
+        );
+        assert!(Arc::ptr_eq(
+            &updated,
+            &core.ownership_plan(&views, &new_models)
+        ));
+
+        // Only metadata survives in the cache. It cannot pin either source
+        // generation or transcript indices after the views are discarded.
+        let cached = lock(&core.ownership).take().unwrap();
+        drop(models);
+        drop(new_models);
+        drop(reversed_models);
+        drop(renamed);
+        drop(reordered);
+        drop(views);
+        core.close();
+        drop(core);
+        assert!(
+            cached
+                .snapshots
+                .iter()
+                .all(|(_, model)| model.upgrade().is_none())
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn ownership_projection_refuses_oversized_cache_admission() {
+        let mut projection = plan(&[], usize::MAX);
+        assert!(Ownership::admissible(&vec![], &projection));
+        projection.conflicts.insert("x".repeat(8 * 1024 * 1024 + 1));
+        assert!(!Ownership::admissible(&vec![], &projection));
+        projection.conflicts.clear();
+        projection
+            .conflicts
+            .extend((0..100_001).map(|index| index.to_string()));
+        assert!(!Ownership::admissible(&vec![], &projection));
+    }
 
     #[test]
     fn an_admin_link_is_a_same_origin_path_with_a_label() {

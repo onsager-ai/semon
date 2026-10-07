@@ -81,6 +81,42 @@ export default async function sidebarFocus(browser) {
         .evaluateAll((rows) => rows.every((r) => getComputedStyle(r).position !== 'sticky')),
       'rail rows never pin',
     );
+    await page.setViewportSize({ width: 1280, height: 420 });
+    for (const scheme of ['light', 'dark']) {
+      await page.emulateMedia({ colorScheme: scheme });
+      // A rail toggle changes the app grid over 180 ms. Sample its complete hit
+      // area after that actual transition, rather than a transient logo overlap.
+      await page.locator('.app').evaluate(async (app) => {
+        getComputedStyle(app).gridTemplateColumns;
+        await Promise.all(app.getAnimations().map((animation) => animation.finished));
+      });
+      const hit = await page.locator('#rail-toggle').evaluate((button) => {
+        const rect = button.getBoundingClientRect();
+        return {
+          rect: { left: rect.left, right: rect.right, top: rect.top, bottom: rect.bottom },
+          hits: [
+            [rect.left + rect.width / 2, rect.top + rect.height / 2],
+            [rect.left + 1, rect.top + rect.height / 2],
+            [rect.right - 1, rect.top + rect.height / 2],
+          ].map(([x, y]) => {
+            const element = document.elementFromPoint(x, y);
+            return {
+              owned: button.contains(element),
+              tag: element?.tagName,
+              id: element?.id,
+              className: element?.getAttribute('class'),
+            };
+          }),
+        };
+      });
+      assert(
+        hit.hits.every((point) => point.owned),
+        scheme + ': short-window rail toggle must own its hit area: ' + JSON.stringify(hit),
+      );
+      const before = await page.locator('#rail-toggle').getAttribute('aria-expanded');
+      await page.locator('#rail-toggle').click();
+      assert.notEqual(await page.locator('#rail-toggle').getAttribute('aria-expanded'), before);
+    }
     assert.equal(page.errors.length, 0, page.errors.join(' | '));
   } finally {
     await page.unrouteAll({ behavior: 'ignoreErrors' });

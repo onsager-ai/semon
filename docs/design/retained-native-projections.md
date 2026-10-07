@@ -18,7 +18,7 @@ can inspect past identity without gaining current control authority.
 
 Current list indexes are partial B-trees (`WHERE lifecycle='current'`) ordered
 by their filter and keyset keys. Retained rows do not enter those trees; schema
-12 replaces schema 11's lifecycle-prefixed list indexes without rebinding rows.
+17 replaces earlier schemas' lifecycle-prefixed list indexes without rebinding rows.
 Separate unprefixed indexes support history across both observation
 states. Current exact-key lookup remains a primary-key operation. Source maps
 carry the same lifecycle and have indexed current native/path lookups. Default

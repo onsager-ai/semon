@@ -210,7 +210,7 @@ pub(crate) struct RateLimits {
     pub(crate) windows: Vec<RateLimitWindow>,
 }
 
-pub(crate) type FileRevision = (u64, u64, u64, [u8; 32], [u8; 32]);
+pub(crate) type FileRevision = (u64, u64, u64, [u8; 32], [u8; 32], Option<i128>);
 
 /// Rows touched while parsing, plus the append boundary of each table.
 /// This is transient write metadata, never persisted with the index.
@@ -731,6 +731,7 @@ pub(crate) struct Stat {
     pub(crate) ino: u64,
     pub(crate) size: u64,
     pub(crate) modified_ns: u128,
+    pub(crate) changed_ns: Option<i128>,
 }
 
 impl Stat {
@@ -753,7 +754,22 @@ impl Stat {
             ino,
             size: metadata.len(),
             modified_ns,
+            changed_ns: change_time_ns(metadata),
         })
+    }
+}
+
+/// Filesystem change time fences metadata-identical rewrites without reading
+/// source bodies. None means this platform/legacy observation cannot prove it.
+pub(crate) fn change_time_ns(metadata: &fs::Metadata) -> Option<i128> {
+    #[cfg(unix)]
+    {
+        Some(i128::from(metadata.ctime()) * 1_000_000_000 + i128::from(metadata.ctime_nsec()))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = metadata;
+        None
     }
 }
 
@@ -881,6 +897,14 @@ pub(crate) trait IndexStore: Send {
         expected_generation: Option<&str>,
     ) -> Result<Outcome, StoreError>;
 
+    fn publish_partial_catalog(
+        &mut self,
+        publication: &crate::slot_projection::Publication<'_>,
+        expected_generation: Option<&str>,
+        claims: &[(String, Option<i64>)],
+    ) -> Result<Outcome, StoreError>;
+    fn catalog_claims(&self, paths: &[String]) -> Result<Vec<(String, Option<i64>)>, StoreError>;
+
     /// `path`'s ledger as committed now.
     fn ledger(&self, path: &str) -> Result<Option<Ledger>, StoreError>;
 
@@ -898,6 +922,14 @@ pub(crate) trait IndexStore: Send {
         ledger: &Ledger,
         index: &FileIndex,
     ) -> Result<Outcome, StoreError>;
+
+    /// Exact native identities whose historical reported runs a scoped build needs.
+    fn select_reported_runs(
+        &mut self,
+        ids: &BTreeSet<String>,
+    ) -> Result<Vec<crate::facts::ReportedRunSnapshot>, StoreError>;
+
+    fn file_ledgers(&self) -> Result<Vec<(String, Option<Ledger>)>, StoreError>;
 
     /// Drops files' rows. A file given with a ledger loses its rows only if
     /// they are still at that ledger, so a file this process failed to read
@@ -929,6 +961,8 @@ pub(crate) struct EventCache {
     reported_runs: BTreeMap<String, BTreeMap<i64, crate::facts::ReportedRunSnapshot>>,
     claude_json_stamp: Option<ReportedFileStamp>,
     store: Option<Box<dyn IndexStore>>,
+    scoped: bool,
+    retention_base: Vec<(String, Option<Ledger>)>,
     /// The V1 cache the store sits beside, when this index has one.
     v1_cache: Option<PathBuf>,
     /// Without a store: when opening it is tried again.
@@ -1065,6 +1099,81 @@ impl EventCache {
         cache
     }
 
+    /// Writable producer cache with lazy, exact-path FileIndex loads. Never falls
+    /// back to a full restore or an in-memory producer after an open failure.
+    pub(crate) fn open_scoped(v1_cache: &Path) -> Result<Self, String> {
+        let (store, loaded) =
+            store::open_scoped(&Self::path(v1_cache), &Self::legacy_path(v1_cache))?;
+        let mut cache = Self::from_loaded(loaded);
+        cache.store = Some(store);
+        cache.scoped = true;
+        Ok(cache)
+    }
+
+    /// Only the complete compatibility/background scan owns disappearance
+    /// reconciliation. Capture ledger metadata before discovery so a concurrent
+    /// newly committed source cannot be mistaken for a disappeared source.
+    pub(crate) fn begin_full_scan(&mut self) -> io::Result<()> {
+        if self.scoped {
+            self.retention_base = self
+                .store
+                .as_ref()
+                .ok_or_else(|| io::Error::other("scoped producer store unavailable"))?
+                .file_ledgers()
+                .map_err(|error| io::Error::other(error.to_string()))?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn is_scoped(&self) -> bool {
+        self.scoped
+    }
+
+    pub(crate) fn select_reported_runs(&mut self, ids: &BTreeSet<String>) -> io::Result<()> {
+        let runs = self
+            .store
+            .as_mut()
+            .ok_or_else(|| io::Error::other("scoped producer store unavailable"))?
+            .select_reported_runs(ids)
+            .map_err(|error| io::Error::other(error.to_string()))?;
+        self.set_reported_runs(runs);
+        Ok(())
+    }
+
+    pub(crate) fn catalog_claims(
+        &self,
+        paths: &[String],
+    ) -> io::Result<Vec<(String, Option<i64>)>> {
+        self.store
+            .as_ref()
+            .ok_or_else(|| io::Error::other("scoped producer store unavailable"))?
+            .catalog_claims(paths)
+            .map_err(|error| io::Error::other(error.to_string()))
+    }
+
+    pub(crate) fn publish_partial_catalog(
+        &mut self,
+        prepared: &crate::model::PreparedSources,
+    ) -> io::Result<Outcome> {
+        if self.busy || !self.unpersisted.is_empty() {
+            return Err(io::Error::other(
+                "native producer sources not durably observed",
+            ));
+        }
+        self.store
+            .as_mut()
+            .ok_or_else(|| io::Error::other("scoped producer store unavailable"))?
+            .publish_partial_catalog(
+                &crate::slot_projection::Publication {
+                    rows: &prepared.rows,
+                    transcripts: Some(&prepared.transcripts),
+                },
+                prepared.base_generation.as_deref(),
+                &prepared.claims,
+            )
+            .map_err(|error| io::Error::other(error.to_string()))
+    }
+
     /// Ends a scan, and with it the refresh: the store gets its writes again.
     pub(crate) fn end_scan(&mut self) {
         self.busy = false;
@@ -1090,6 +1199,7 @@ impl EventCache {
                     ledger.offset,
                     ledger.prefix,
                     ledger.tail,
+                    ledger.stat.changed_ns,
                 )
             })
     }
@@ -1373,12 +1483,19 @@ impl EventCache {
 
     /// Drops files that are gone, so the index doesn't grow without bound.
     pub(crate) fn retain(&mut self, seen: &BTreeSet<String>, dirty: &mut bool) {
-        let gone: Vec<(String, Option<Ledger>)> = self
+        let mut gone: Vec<(String, Option<Ledger>)> = self
             .files
             .iter()
             .filter(|(path, _)| !seen.contains(*path))
             .map(|(path, entry)| (path.clone(), Some(entry.ledger.clone())))
             .collect();
+        gone.extend(
+            std::mem::take(&mut self.retention_base)
+                .into_iter()
+                .filter(|(path, _)| !seen.contains(path)),
+        );
+        gone.sort_by(|a, b| a.0.cmp(&b.0));
+        gone.dedup_by(|a, b| a.0 == b.0);
         for (path, _) in &gone {
             self.files.remove(path);
             self.unpersisted.remove(path);
@@ -5480,8 +5597,8 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
-    /// Sealing keeps the log's stat and bytes: the ledger shares or resumes
-    /// as before, reading the sealed range through its segments.
+    /// Punching keeps logical bytes and modification time, but changes ctime.
+    /// Revalidate the consumed prefix through segments without reparsing rows.
     #[cfg(target_os = "linux")]
     #[test]
     fn the_ledger_resumes_across_a_seal() {
@@ -5506,14 +5623,14 @@ mod tests {
         assert_eq!(ledger_trace(), ["replace"]);
         let unsealed = cold(&log);
 
-        // Sealed: the same stat, so shared as it is, in this process or a
-        // new one, and a cold read finds the same index.
+        // Sealed: revalidate the changed physical generation, then share the
+        // updated ledger on restart. A cold read finds the same logical index.
         assert!(crate::sealed::seal(&log, 1, u64::MAX).unwrap().punched);
         ledger_trace();
         let before = parsed();
         scan(&mut cache);
         scan(&mut EventCache::open(&v1));
-        assert_eq!(ledger_trace(), ["unchanged", "unchanged"]);
+        assert_eq!(ledger_trace(), ["append", "unchanged"]);
         assert_eq!(parsed(), before);
         assert_eq!(cold(&log), unsealed);
 
@@ -5528,16 +5645,16 @@ mod tests {
         assert_eq!(parsed(), before + 2);
         assert_eq!(stored(&v1, &log), cold(&log));
 
-        // Sealed again, the new lines too: still unchanged.
-        assert!(
-            crate::sealed::seal(&log, 1, u64::MAX)
-                .unwrap()
-                .added
-                .is_some()
-        );
+        // A small new segment does not punch the log again: the physical
+        // generation and logical rows both remain unchanged.
+        let sealed = crate::sealed::seal(&log, 1, u64::MAX).unwrap();
+        assert!(sealed.added.is_some());
+        assert!(!sealed.punched);
         ledger_trace();
+        let before = parsed();
         scan(&mut cache);
         assert_eq!(ledger_trace(), ["unchanged"]);
+        assert_eq!(parsed(), before);
         fs::remove_dir_all(root).unwrap();
     }
 

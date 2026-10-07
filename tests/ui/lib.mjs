@@ -62,6 +62,14 @@ export async function context(browser, { size = 'phone', dark = false, viewport 
   });
 }
 
+// These existing suites exercise the complete-model compatibility surface.
+// Default catalog coverage owns its own bounded producer/browser fixtures.
+export function compatibilityUrl(value) {
+  const url = new URL(value);
+  url.searchParams.set('compat', '1');
+  return url.href;
+}
+
 // A page on the served viewer at `path` (such as "/" or "/s/claude/harbor"), signed in with the token. Only the served
 // origin is reachable. `page.errors` collects page errors. `extras: true` opens the extras fixture's server.
 export async function served(browser, opts = {}) {
@@ -85,7 +93,9 @@ export async function served(browser, opts = {}) {
       : r.abort(),
   );
   await page.goto(
-    base + (opts.path ?? '/') + ((opts.path ?? '/').includes('?') ? '&' : '?') + 't=' + token,
+    compatibilityUrl(
+      base + (opts.path ?? '/') + ((opts.path ?? '/').includes('?') ? '&' : '?') + 't=' + token,
+    ),
     { waitUntil: 'load' },
   );
   await settled(page);

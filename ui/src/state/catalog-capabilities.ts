@@ -1,0 +1,59 @@
+import { boolean, object, text, array } from '../domain/validate';
+export interface CatalogCapabilities {
+  api: 1;
+  read_contract: 'catalog-v1';
+  source_key: string;
+  selected_transcript: boolean;
+  selected_identity: boolean;
+  selected_entry: boolean;
+  source_candidates: boolean;
+  metadata_search: boolean;
+  attachment: boolean;
+  relationship_context: boolean;
+  large_native_records: boolean;
+  pagination: true;
+  filters: string[];
+  order: 'last_desc_key_asc';
+  full_text_search: false;
+  global_union: false;
+}
+/** Unknown contracts must not be normalized into either complete graph or bounded authority. */
+export function parseCatalogCapabilities(value: unknown): CatalogCapabilities {
+  const row = object(value),
+    filters = array(row.filters, text),
+    sourceKey = text(row.source_key),
+    metadataSearch = row.metadata_search === undefined ? false : boolean(row.metadata_search);
+  if (
+    row.api !== 1 ||
+    row.read_contract !== 'catalog-v1' ||
+    !sourceKey ||
+    row.pagination !== true ||
+    row.order !== 'last_desc_key_asc' ||
+    row.full_text_search !== false ||
+    row.global_union !== false ||
+    metadataSearch !== filters.includes('q') ||
+    filters.some(
+      (filter) => filter !== 'harness' && filter !== 'repo' && !(metadataSearch && filter === 'q'),
+    ) ||
+    new Set(filters).size !== filters.length
+  )
+    throw new Error('Unsupported catalog read contract');
+  return {
+    api: 1,
+    read_contract: 'catalog-v1',
+    source_key: sourceKey,
+    selected_transcript: boolean(row.selected_transcript),
+    selected_identity: boolean(row.selected_identity),
+    selected_entry: boolean(row.selected_entry),
+    source_candidates: row.source_candidates === undefined ? false : boolean(row.source_candidates),
+    metadata_search: metadataSearch,
+    attachment: boolean(row.attachment),
+    relationship_context: boolean(row.relationship_context),
+    large_native_records: boolean(row.large_native_records),
+    pagination: true,
+    filters,
+    order: 'last_desc_key_asc',
+    full_text_search: false,
+    global_union: false,
+  };
+}

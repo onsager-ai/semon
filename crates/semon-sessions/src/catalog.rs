@@ -45,6 +45,149 @@ pub struct CatalogFreshness {
     pub state: String,
 }
 
+/// A metadata-only match between one published native source and its current
+/// consumed-prefix ledger. This observation grants no archive or control access.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SessionSourceProof {
+    pub source: SessionSourceRef,
+    pub dev: u64,
+    pub ino: u64,
+    pub size: u64,
+    pub modified_ns: u128,
+    pub changed_ns: Option<i128>,
+    pub freshness: CatalogFreshness,
+}
+
+/// Resolve an exact configured source path using indexed metadata reads only.
+/// The host must validate the source identity again while copying its bytes.
+pub fn session_source_proof(
+    options: &Options,
+    root: &str,
+    path: &str,
+) -> Result<Option<SessionSourceProof>, CatalogIdentityError> {
+    use CatalogIdentityError::{InvalidArguments, Unavailable};
+    if !crate::is_input_path(root, path) || path.len() > 4096 {
+        return Err(InvalidArguments);
+    }
+    let home = match root {
+        "claude" => &options.claude_home,
+        "codex" => &options.codex_home,
+        "copilot" => &options.copilot_home,
+        _ => return Err(InvalidArguments),
+    };
+    // Recorded roots/native manifests must remain observable. Missing facts
+    // cannot be treated as permission to reuse a formerly selected rollout.
+    let current = options
+        .facts
+        .as_ref()
+        .map(|file| {
+            crate::facts::source_authority::CurrentSources::open(file).map_err(|_| Unavailable)
+        })
+        .transpose()?;
+    if current.as_ref().is_some_and(|source| {
+        !source.facts_known() || (root == "codex" && !source.selection_known())
+    }) {
+        return Err(Unavailable);
+    }
+    let absolute = home.join(path);
+    let absolute = absolute.to_str().ok_or(InvalidArguments)?;
+    let read = || -> Result<Option<SessionSourceProof>, Box<dyn std::error::Error>> {
+        let mut connection = Connection::open_with_flags(
+            EventCache::path(&options.cache),
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )?;
+        connection.busy_timeout(Duration::from_millis(100))?;
+        let transaction = connection.transaction()?;
+        let encoded: Option<(String, Option<String>)> = transaction.query_row(
+            "SELECT c.session_key,CASE WHEN length(CAST(c.metadata AS BLOB))<=1048576 THEN c.metadata ELSE NULL END FROM session_catalog_sources s INDEXED BY session_catalog_current_source_path JOIN session_catalog c ON c.session_key=s.session_key WHERE s.lifecycle='current' AND s.source_path=?1 ORDER BY s.session_key LIMIT 1",
+            [absolute], |row| Ok((row.get(0)?, row.get(1)?)),
+        ).optional()?;
+        let Some((key, encoded)) = encoded else {
+            return Ok(None);
+        };
+        let encoded = encoded.ok_or_else(|| io::Error::other("source metadata bound"))?;
+        // Decode only the selected relationship metadata, never a native body.
+        if encoded.len() > 1024 * 1024 {
+            return Err(io::Error::other("source metadata bound").into());
+        }
+        let row: CatalogRow = serde_json::from_str(&encoded)?;
+        if row.key != key || row.harness != root || row.sources.len() > 64 {
+            return Err(io::Error::other("source mapping changed").into());
+        }
+        let source = row
+            .sources
+            .iter()
+            .find(|source| source.path.to_str() == Some(absolute))
+            .ok_or_else(|| io::Error::other("source mapping absent"))?;
+        type Revision = (
+            u64,
+            u64,
+            u64,
+            [u8; 16],
+            u64,
+            [u8; 32],
+            [u8; 32],
+            Option<[u8; 16]>,
+        );
+        let revision: Option<Revision> = transaction.query_row(
+            "SELECT dev,ino,size,mtime_ns,resume_at,head_sha256,tail_sha256,ctime_ns FROM files WHERE path=?1",
+            [absolute], |row| Ok((row.get::<_,i64>(0)? as u64,row.get::<_,i64>(1)? as u64,row.get::<_,i64>(2)? as u64,row.get(3)?,row.get::<_,i64>(4)? as u64,row.get(5)?,row.get(6)?,row.get(7)?)),
+        ).optional()?;
+        if revision
+            != Some((
+                source.dev,
+                source.ino,
+                source.size,
+                source.modified_ns.to_be_bytes(),
+                source.offset,
+                source.prefix_sha256,
+                source.tail_sha256,
+                source.changed_ns.map(i128::to_be_bytes),
+            ))
+        {
+            return Err(io::Error::other("source ledger changed").into());
+        }
+        let generation: String = transaction.query_row(
+            "SELECT value FROM meta WHERE key='catalog_generation'",
+            [],
+            |row| row.get(0),
+        )?;
+        transaction.commit()?;
+        // Reuse the catalog's current-root/native-selection validation. A
+        // publication race fails closed rather than mixing catalog generations.
+        let identity = session_catalog_identity(options, "source-proof", &key)?
+            .ok_or_else(|| io::Error::other("source catalog changed"))?;
+        let observed = identity
+            .source_refs
+            .iter()
+            .find(|observed| observed.source.root == root && observed.source.path == path)
+            .ok_or_else(|| io::Error::other("source scope changed"))?;
+        if identity.generation != generation
+            || !matches!(observed.state.as_str(), "cached" | "incomplete")
+            || observed.source.native_id != source.native_id
+            || observed.source.offset != source.offset
+            || observed.source.prefix_sha256 != source.prefix_sha256
+        {
+            return Err(io::Error::other("source observation changed").into());
+        }
+        if let Some(current) = &current {
+            current.validate()?;
+        }
+        Ok(Some(SessionSourceProof {
+            source: observed.source.clone(),
+            dev: source.dev,
+            ino: source.ino,
+            size: source.size,
+            modified_ns: source.modified_ns,
+            changed_ns: source.changed_ns,
+            freshness: CatalogFreshness {
+                state: observed.state.clone(),
+            },
+        }))
+    };
+    read().map_err(|_| Unavailable)
+}
+
 /// Read intent is separate from native control/source-selection authority.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -52,6 +195,15 @@ pub enum CatalogReadScope {
     #[default]
     Current,
     RetainedHistory,
+}
+
+/// Completeness of native lineage identity, independent of runtime authority.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CatalogOwnerQualification {
+    #[default]
+    Qualified,
+    Provisional,
 }
 
 /// Scoped cached identity, resolved without global event/model construction.
@@ -64,6 +216,8 @@ pub struct CatalogSessionIdentity {
     pub catalog_key: String,
     pub harness: String,
     pub native_id: Option<String>,
+    #[serde(default)]
+    pub owner_qualification: CatalogOwnerQualification,
     pub native_ids: Vec<String>,
     pub source_refs: Vec<CatalogSourceObservation>,
     pub machine_label: Option<String>,
@@ -147,6 +301,7 @@ fn catalog_identity(
         sid: Some(canonical_catalog_key.to_owned()),
         harness: None,
         repo: None,
+        q: None,
         cursor: None,
     };
     let reply = read_page(options, source_key, &request).map_err(|_| Unavailable)?;
@@ -167,6 +322,7 @@ fn catalog_identity(
         facts_observation: CatalogFreshness,
         native_selection: Option<CatalogFreshness>,
     }
+    let provisional = body["completeness"]["state"] == "partial";
     let item: Item = serde_json::from_value(body["items"][0].clone()).map_err(|_| Unavailable)?;
     let native_ids: Vec<String> = item
         .source_refs
@@ -195,7 +351,12 @@ fn catalog_identity(
         read_scope: scope,
         catalog_key: item.key,
         harness: item.harness,
-        native_id: (native_ids.len() == 1).then(|| native_ids[0].clone()),
+        native_id: (!provisional && native_ids.len() == 1).then(|| native_ids[0].clone()),
+        owner_qualification: if provisional {
+            CatalogOwnerQualification::Provisional
+        } else {
+            CatalogOwnerQualification::Qualified
+        },
         native_ids,
         source_refs: item.source_refs,
         machine_label: body["machine_info"]["label"].as_str().map(str::to_owned),
@@ -230,6 +391,8 @@ struct Cursor {
     machine: String,
     harness: Option<String>,
     repo: Option<String>,
+    #[serde(default)]
+    q: Option<String>,
     last: i64,
     key: String,
 }
@@ -240,6 +403,7 @@ pub(crate) struct Request {
     sid: Option<String>,
     harness: Option<String>,
     repo: Option<String>,
+    q: Option<String>,
     cursor: Option<Cursor>,
 }
 
@@ -266,13 +430,27 @@ impl Request {
             error(
                 400,
                 "invalid_arguments",
-                "Use limit=1..100 and valid harness, repo and cursor parameters.",
+                "Use limit=1..100, valid source filters, and a bounded metadata query or cursor.",
                 false,
             )
         };
-        let parameter = |key| match query_value(query, key) {
-            None => Ok(None),
-            Some(value) => decoded(value).map(Some).ok_or_else(invalid),
+        if query.len() > 64 * 1024 {
+            return Err(invalid());
+        }
+        let parameter = |key| {
+            if query
+                .split('&')
+                .filter(|part| part.split('=').next() == Some(key))
+                .take(2)
+                .count()
+                > 1
+            {
+                return Err(invalid());
+            }
+            match query_value(query, key) {
+                None => Ok(None),
+                Some(value) => decoded(value).map(Some).ok_or_else(invalid),
+            }
         };
         let scope = match parameter("scope")?.as_deref() {
             None | Some("current") => CatalogReadScope::Current,
@@ -285,14 +463,10 @@ impl Request {
         if !(1..=MAX_LIMIT).contains(&limit) {
             return Err(invalid());
         }
-        if parameter("q")?.is_some() {
-            return Err(error(
-                400,
-                "unsupported_filter",
-                "Full-text search is not available on this catalog endpoint.",
-                false,
-            ));
-        }
+        let q = parameter("q")?
+            .map(|value| crate::catalog_search::normalize_query(&value).ok_or_else(invalid))
+            .transpose()?
+            .filter(|query| !query.is_empty());
         let sid = parameter("sid")?;
         if sid
             .as_ref()
@@ -332,7 +506,8 @@ impl Request {
                 Ok(cursor)
             })
             .transpose()?;
-        if sid.is_some() && (harness.is_some() || repo.is_some() || cursor.is_some()) {
+        if sid.is_some() && (harness.is_some() || repo.is_some() || q.is_some() || cursor.is_some())
+        {
             return Err(invalid());
         }
         Ok(Self {
@@ -341,6 +516,7 @@ impl Request {
             sid,
             harness,
             repo,
+            q,
             cursor,
         })
     }
@@ -501,6 +677,9 @@ fn source_state(source: &CatalogSource) -> &'static str {
         .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
         .map(|time| time.as_nanos());
     if identity == (source.dev, source.ino)
+        && source
+            .changed_ns
+            .is_some_and(|token| Some(token) == crate::events::change_time_ns(&metadata))
         && metadata.len() == source.size
         && modified == Some(source.modified_ns)
     {
@@ -536,6 +715,7 @@ fn read_page(
             || cursor.machine != machine
             || cursor.harness != request.harness
             || cursor.repo != request.repo
+            || cursor.q != request.q
     }) {
         return Ok(error(
             400,
@@ -577,7 +757,85 @@ fn read_page(
         ));
     }
     let observed_at = meta("catalog_observed_at")?.and_then(|value| value.parse::<i64>().ok());
-    let mut selected = rows(&transaction, request)?;
+    let (mut selected, search_next, search_report) = if let Some(query) = &request.q {
+        let scope = crate::catalog_search::scope_key(request.scope);
+        if meta("search_version")?.as_deref() != Some(crate::catalog_search::VERSION)
+            || meta(&format!("search_generation_{scope}"))?.as_deref() != Some(generation.as_str())
+        {
+            return Ok(error(
+                503,
+                "search_unavailable",
+                "The metadata search projection is unavailable. Retry after background publication.",
+                true,
+            ));
+        }
+        let collection_complete = match meta("catalog_completeness")?.as_deref() {
+            None | Some("complete") => true,
+            Some("partial") => false,
+            _ => return Err(io::Error::other("catalog completeness unavailable").into()),
+        };
+        let complete = collection_complete
+            && meta("search_backfill_complete")?.as_deref() == Some("1")
+            && meta(&format!("search_incomplete_{scope}"))?.as_deref() == Some("0");
+        let after = request
+            .cursor
+            .as_ref()
+            .map(|cursor| crate::catalog_search::Position {
+                last: cursor.last,
+                key: cursor.key.clone(),
+            });
+        let found = crate::catalog_search::read(
+            &transaction,
+            crate::catalog_search::Query {
+                scope: request.scope,
+                query,
+                harness: request.harness.as_deref(),
+                repo: request.repo.as_deref(),
+                after,
+                limit: request.limit,
+                index_complete: complete,
+            },
+        )?;
+        (found.rows, found.next, Some(found.report))
+    } else {
+        (rows(&transaction, request)?, None, None)
+    };
+    let has_history = transaction.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='session_history_catalog')",
+        [],
+        |row| row.get::<_, bool>(0),
+    )?;
+    let mut partial_history = std::collections::BTreeSet::new();
+    if has_history {
+        for row in &selected {
+            if transaction.query_row(
+                "SELECT EXISTS(SELECT 1 FROM session_history_catalog WHERE session_key=?1)",
+                [&row.key],
+                |row| row.get::<_, bool>(0),
+            )? {
+                partial_history.insert(row.key.clone());
+            }
+        }
+    }
+
+    if request.scope == CatalogReadScope::RetainedHistory {
+        for current in &mut selected {
+            if let Some(metadata) = crate::history_projection::catalog(&transaction, &current.key)?
+            {
+                let history: CatalogRow = serde_json::from_str(&metadata)?;
+                // History extends source context only; current indexed fields
+                // remain the list ordering/filter and native selection oracle.
+                if history.key != current.key
+                    || history.harness != current.harness
+                    || history.last != current.last
+                    || history.repo != current.repo
+                {
+                    return Err(io::Error::other("history catalog context changed").into());
+                }
+                *current = history;
+            }
+        }
+    }
     if request.sid.is_some() && selected.is_empty() {
         return Ok(error(
             404,
@@ -586,11 +844,34 @@ fn read_page(
             false,
         ));
     }
+    let completeness: String = transaction
+        .query_row(
+            "SELECT value FROM meta WHERE key='catalog_completeness'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?
+        .unwrap_or_else(|| "complete".into());
+    if !matches!(completeness.as_str(), "partial" | "complete") {
+        return Err(io::Error::other("catalog completeness is invalid").into());
+    }
     let more = selected.len() > request.limit;
     if more {
         selected.pop();
     }
-    let next = if more {
+    let next = if let Some(position) = search_next {
+        Some(serde_json::to_string(&Cursor {
+            scope: request.scope,
+            version: 1,
+            generation: generation.clone(),
+            machine: machine.to_owned(),
+            harness: request.harness.clone(),
+            repo: request.repo.clone(),
+            q: request.q.clone(),
+            last: position.last,
+            key: position.key,
+        })?)
+    } else if more {
         selected
             .last()
             .map(|row| {
@@ -601,6 +882,7 @@ fn read_page(
                     machine: machine.to_owned(),
                     harness: request.harness.clone(),
                     repo: request.repo.clone(),
+                    q: request.q.clone(),
                     last: row.last.unwrap_or(0),
                     key: row.key.clone(),
                 })
@@ -717,7 +999,14 @@ fn read_page(
             }
         }
         let is_codex = row.harness == "codex";
+        let partial_summary = partial_history.contains(&row.key);
         let mut item = serde_json::to_value(row)?;
+        if partial_summary {
+            // Body provenance can include retained sources; current summary
+            // metrics have not rebuilt those sources' usage contributions.
+            item["summary_context"] = json!({"state":"incomplete","scope":"current_observation"});
+        }
+
         item.as_object_mut()
             .expect("catalog row object")
             .remove("sources");
@@ -743,13 +1032,20 @@ fn read_page(
             true,
         ));
     }
+    if search_report
+        .as_ref()
+        .is_some_and(|report| report.partial || !report.index_complete)
+        && page_state == "cached"
+    {
+        page_state = "incomplete";
+    }
     Ok(reply(
         200,
         json!({"api":1,"machine":machine,"read_scope":request.scope,"generation":generation,"observed_at":observed_at,
         "machine_info":{"key":machine,"label":machine_label,"freshness":if facts_known { "cached" } else { "unavailable" }},
-        "capabilities":{"pagination":true,"filters":["harness","repo"],"order":"last_desc_key_asc",
+        "capabilities":{"pagination":true,"metadata_search":true,"filters":["harness","repo","q"],"order":"last_desc_key_asc",
             "full_text_search":false,"selected_session_lookup":true,"runtime_status":false,"global_union":false},
-        "freshness":page_state,"items":items,"next_cursor":next}),
+        "completeness":{"state":completeness},"freshness":if completeness == "partial" { "updating" } else { page_state },"items":items,"next_cursor":next,"search":search_report.map(|report|json!({"semantics":"unicode_lowercase_substring","fields":["name","key","repo","branch","model","harness"],"partial":report.partial,"candidates":report.candidates,"index_complete":report.index_complete,"candidate_budget":crate::catalog_search::MAX_CANDIDATES,"byte_budget":crate::catalog_search::MAX_SCAN_BYTES}))}),
     ))
 }
 
@@ -843,6 +1139,54 @@ mod tests {
     }
 
     #[test]
+    fn exact_source_proof_requires_current_native_mapping_and_consumed_ledger() {
+        let fixture = Fixture::new();
+        fixture.publish(100);
+        let path = "projects/project/session-00000.jsonl";
+        let proof = session_source_proof(&fixture.options, "claude", path)
+            .unwrap()
+            .unwrap();
+        assert_eq!(proof.source.native_id, "session-00000");
+        assert_eq!(proof.source.offset, proof.size);
+        assert_eq!(proof.freshness.state, "cached");
+        assert!(
+            session_source_proof(&fixture.options, "claude", "projects/project/missing.jsonl")
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            session_source_proof(&fixture.options, "claude", "../bad.jsonl"),
+            Err(CatalogIdentityError::InvalidArguments)
+        );
+        let connection = Connection::open(EventCache::path(&fixture.options.cache)).unwrap();
+        let plan: String = connection.query_row("EXPLAIN QUERY PLAN SELECT session_key FROM session_catalog_sources WHERE source_path=?1 ORDER BY session_key LIMIT 1",[fixture.options.claude_home.join(path).to_str().unwrap()],|row|row.get(3)).unwrap();
+        assert!(plan.contains("session_catalog_source_path"), "{plan}");
+        // Ledger progress without catalog publication must not reuse its former
+        // native mapping or manufacture a proof for a new consumed boundary.
+        connection
+            .execute(
+                "UPDATE files SET resume_at=resume_at-1 WHERE path=?1",
+                [fixture.options.claude_home.join(path).to_str().unwrap()],
+            )
+            .unwrap();
+        assert_eq!(
+            session_source_proof(&fixture.options, "claude", path),
+            Err(CatalogIdentityError::Unavailable)
+        );
+        connection
+            .execute(
+                "UPDATE files SET resume_at=resume_at+1 WHERE path=?1",
+                [fixture.options.claude_home.join(path).to_str().unwrap()],
+            )
+            .unwrap();
+        fs::remove_file(fixture.options.facts.as_ref().unwrap()).unwrap();
+        assert_eq!(
+            session_source_proof(&fixture.options, "claude", path),
+            Err(CatalogIdentityError::Unavailable)
+        );
+    }
+
+    #[test]
     fn current_catalog_index_work_is_constant_with_unrelated_retained_history() {
         let fixture = Fixture::new();
         fixture.publish(1);
@@ -892,47 +1236,133 @@ mod tests {
     }
 
     #[test]
-    fn schema_eleven_migration_replaces_current_trees_without_rebinding_history() {
+    fn exact_source_proof_retains_incomplete_prefix_and_rejects_source_replacement() {
+        use sha2::Digest;
+        let fixture = Fixture::new();
+        let native = fixture.source("partial");
+        let complete = fs::read(&native).unwrap();
+        let mut bytes = complete.clone();
+        bytes.extend_from_slice(b"{\"type\":\"user\"");
+        fs::write(&native, &bytes).unwrap();
+        let core = ViewerCore::new(fixture.options.clone());
+        core.warm().unwrap();
+        core.close();
+        let proof =
+            session_source_proof(&fixture.options, "claude", "projects/project/partial.jsonl")
+                .unwrap()
+                .unwrap();
+        assert_eq!(proof.source.offset, complete.len() as u64);
+        assert_eq!(proof.size, bytes.len() as u64);
+        assert_eq!(proof.freshness.state, "incomplete");
+        assert_eq!(
+            proof.source.prefix_sha256,
+            <[u8; 32]>::from(sha2::Sha256::digest(&complete))
+        );
+        let replacement = native.with_extension("replacement");
+        fs::write(&replacement, &bytes).unwrap();
+        fs::rename(replacement, native).unwrap();
+        assert_eq!(
+            session_source_proof(&fixture.options, "claude", "projects/project/partial.jsonl"),
+            Err(CatalogIdentityError::Unavailable)
+        );
+    }
+
+    #[test]
+    fn exact_source_proof_work_stays_fixed_as_unrelated_native_manifest_grows() {
         let fixture = Fixture::new();
         fixture.publish(1);
-        let connection = Connection::open(EventCache::path(&fixture.options.cache)).unwrap();
-        connection
-            .execute("UPDATE session_catalog SET lifecycle='retained'", [])
+        let mut facts = crate::read_facts(fixture.options.facts.as_ref().unwrap()).unwrap();
+        let mut steps = Vec::new();
+        for count in [100, 20_000] {
+            facts.codex_rollouts = Some(
+                (0..count)
+                    .map(|index| format!("sessions/{index:08}.jsonl"))
+                    .collect(),
+            );
+            crate::write_facts(fixture.options.facts.as_ref().unwrap(), &facts).unwrap();
+            SQL_STEPS.with(|value| value.set(0));
+            let proof = session_source_proof(
+                &fixture.options,
+                "claude",
+                "projects/project/session-00000.jsonl",
+            )
+            .unwrap()
             .unwrap();
-        let before: (String, String) = connection.query_row(
-            "SELECT session_catalog.metadata,session_slot_projections.generation FROM session_catalog JOIN session_slot_projections USING(session_key)",
-            [], |row| Ok((row.get(0)?, row.get(1)?))
-        ).unwrap();
-        for (suffix, keys) in [
-            ("order", "last_ms DESC, session_key ASC"),
-            ("harness", "harness, last_ms DESC, session_key ASC"),
-            ("repo", "repo, last_ms DESC, session_key ASC"),
-            (
-                "harness_repo",
-                "harness, repo, last_ms DESC, session_key ASC",
-            ),
-            ("parent", "parent_key, last_ms DESC, session_key ASC"),
-        ] {
-            connection.execute_batch(&format!("DROP INDEX session_catalog_current_{suffix}; CREATE INDEX session_catalog_current_{suffix} ON session_catalog(lifecycle, {keys});")).unwrap();
+            assert_eq!(proof.source.native_id, "session-00000");
+            steps.push(SQL_STEPS.with(|value| value.get()));
+            let mut samples = Vec::new();
+            for _ in 0..31 {
+                let start = std::time::Instant::now();
+                assert!(
+                    session_source_proof(
+                        &fixture.options,
+                        "claude",
+                        "projects/project/session-00000.jsonl"
+                    )
+                    .unwrap()
+                    .is_some()
+                );
+                samples.push(start.elapsed().as_micros());
+            }
+            samples.sort_unstable();
+            eprintln!(
+                "exact source proof manifest={count} facts_bytes={} median_us={} samples=31",
+                fs::metadata(fixture.options.facts.as_ref().unwrap())
+                    .unwrap()
+                    .len(),
+                samples[15]
+            );
         }
-        connection.execute_batch("PRAGMA user_version=11").unwrap();
-        drop(EventCache::open(&fixture.options.cache));
-        let after: (String, String) = connection.query_row(
+        assert_eq!(steps[0], steps[1]);
+        eprintln!("exact source proof selected catalog VM steps={steps:?}");
+    }
+
+    #[test]
+    fn schema_eleven_migration_replaces_current_trees_without_rebinding_history() {
+        for schema in [11, 16] {
+            let fixture = Fixture::new();
+            fixture.publish(1);
+            let connection = Connection::open(EventCache::path(&fixture.options.cache)).unwrap();
+            connection
+                .execute("UPDATE session_catalog SET lifecycle='retained'", [])
+                .unwrap();
+            let before: (String, String) = connection.query_row(
             "SELECT session_catalog.metadata,session_slot_projections.generation FROM session_catalog JOIN session_slot_projections USING(session_key)",
             [], |row| Ok((row.get(0)?, row.get(1)?))
         ).unwrap();
-        assert_eq!(before, after);
-        for suffix in ["order", "harness", "repo", "harness_repo", "parent"] {
-            let sql: String = connection
-                .query_row(
-                    "SELECT sql FROM sqlite_master WHERE name=?1",
-                    [format!("session_catalog_current_{suffix}")],
-                    |row| row.get(0),
-                )
+            for (suffix, keys) in [
+                ("order", "last_ms DESC, session_key ASC"),
+                ("harness", "harness, last_ms DESC, session_key ASC"),
+                ("repo", "repo, last_ms DESC, session_key ASC"),
+                (
+                    "harness_repo",
+                    "harness, repo, last_ms DESC, session_key ASC",
+                ),
+                ("parent", "parent_key, last_ms DESC, session_key ASC"),
+            ] {
+                connection.execute_batch(&format!("DROP INDEX session_catalog_current_{suffix}; CREATE INDEX session_catalog_current_{suffix} ON session_catalog(lifecycle, {keys});")).unwrap();
+            }
+            connection
+                .pragma_update(None, "user_version", schema)
                 .unwrap();
-            assert!(sql.ends_with("WHERE lifecycle='current'"), "{sql}");
-            let count: i64 = connection.query_row(&format!("SELECT count(*) FROM session_catalog INDEXED BY session_catalog_current_{suffix} WHERE lifecycle='current'"), [], |row| row.get(0)).unwrap();
-            assert_eq!(count, 0);
+            drop(EventCache::open(&fixture.options.cache));
+            let after: (String, String) = connection.query_row(
+            "SELECT session_catalog.metadata,session_slot_projections.generation FROM session_catalog JOIN session_slot_projections USING(session_key)",
+            [], |row| Ok((row.get(0)?, row.get(1)?))
+        ).unwrap();
+            assert_eq!(before, after);
+            for suffix in ["order", "harness", "repo", "harness_repo", "parent"] {
+                let sql: String = connection
+                    .query_row(
+                        "SELECT sql FROM sqlite_master WHERE name=?1",
+                        [format!("session_catalog_current_{suffix}")],
+                        |row| row.get(0),
+                    )
+                    .unwrap();
+                assert!(sql.ends_with("WHERE lifecycle='current'"), "{sql}");
+                let count: i64 = connection.query_row(&format!("SELECT count(*) FROM session_catalog INDEXED BY session_catalog_current_{suffix} WHERE lifecycle='current'"), [], |row| row.get(0)).unwrap();
+                assert_eq!(count, 0);
+            }
         }
     }
 
@@ -967,7 +1397,7 @@ mod tests {
                 connection
                     .query_row("PRAGMA user_version", [], |row| row.get::<_, u32>(0))
                     .unwrap(),
-                12
+                17
             );
         }
     }
@@ -1310,6 +1740,98 @@ mod tests {
     }
 
     #[test]
+    fn native_turn_context_signals_have_distinct_stable_current_and_history_entries() {
+        let fixture = Fixture::new();
+        let relative = "sessions/2026/10/01/rollout-signal-session.jsonl";
+        let path = fixture.options.codex_home.join(relative);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let records = [
+            json!({"type":"session_meta","timestamp":"2026-10-01T00:00:00Z","payload":{"id":"signal-session","cwd":"/synthetic/project"}}),
+            json!({"type":"turn_context","timestamp":"2026-10-01T00:00:01Z","payload":{"model":"gpt-6-luna","approval_policy":"on-request","sandbox_policy":{"type":"workspace-write"}}}),
+        ];
+        fs::write(
+            &path,
+            records
+                .iter()
+                .map(|row| format!("{row}\n"))
+                .collect::<String>(),
+        )
+        .unwrap();
+        let facts_path = fixture.options.facts.as_ref().unwrap();
+        let mut facts = crate::read_facts(facts_path).unwrap();
+        facts.codex_rollouts = Some(std::collections::BTreeSet::from([relative.to_owned()]));
+        crate::write_facts(facts_path, &facts).unwrap();
+        fixture.publish(0);
+        let read = |scope: &str| {
+            let reply = crate::session_transcript_range(
+                &fixture.options,
+                "source",
+                &format!("sid=signal-session&scope={scope}&after=0&limit=100"),
+                None,
+            );
+            assert_eq!(reply.status, 200);
+            serde_json::from_slice::<Value>(&reply.body).unwrap()
+        };
+        let current = read("current");
+        let signals = |page: &Value| -> Vec<Value> {
+            page["entries"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|entry| entry["k"] == "signal")
+                .cloned()
+                .collect()
+        };
+        let first = signals(&current);
+        assert_eq!(first.len(), 3);
+        assert_eq!(
+            first
+                .iter()
+                .map(|entry| entry["entry_id"].as_str().unwrap())
+                .collect::<std::collections::BTreeSet<_>>()
+                .len(),
+            3
+        );
+        assert!(
+            first
+                .iter()
+                .all(|entry| entry["provenance"]["offset"] == first[0]["provenance"]["offset"])
+        );
+        assert_eq!(first, signals(&read("retained_history")));
+        let connection = Connection::open(EventCache::path(&fixture.options.cache)).unwrap();
+        let stored: String = connection.query_row("SELECT generation FROM session_slot_projections WHERE session_key='signal-session'", [], |row| row.get(0)).unwrap();
+        assert_ne!(current["projection"]["generation"], stored);
+        assert_eq!(
+            crate::session_transcript_range(
+                &fixture.options,
+                "source",
+                &format!("sid=signal-session&generation={stored}"),
+                None
+            )
+            .status,
+            409
+        );
+        fixture.publish(20);
+        assert_eq!(first, signals(&read("current")));
+        // Partial source retirement merges retained recipes by their original
+        // identity; distinct signals must not collapse during that merge.
+        fs::remove_file(path).unwrap();
+        fixture.publish(20);
+        let retained = signals(&read("retained_history"));
+        assert_eq!(retained.len(), 3);
+        assert_eq!(
+            first
+                .iter()
+                .map(|entry| &entry["entry_id"])
+                .collect::<Vec<_>>(),
+            retained
+                .iter()
+                .map(|entry| &entry["entry_id"])
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
     fn selected_slot_ranges_are_native_bounded_and_stable_across_unrelated_history() {
         let fixture = Fixture::new();
         let path = fixture.source("selected");
@@ -1339,8 +1861,24 @@ mod tests {
         );
         let (_, latest) = get("sid=selected&limit=1");
         assert_eq!(latest["range"]["first"], 2);
-        assert_eq!(latest["freshness"]["state"], "incomplete");
-        assert!(latest["observation"]["source_bytes"].as_u64().unwrap() <= 128 * 1024);
+        assert_eq!(latest["freshness"]["state"], "cached");
+        assert_eq!(latest["entries"][0]["clipped"], true);
+        assert!(latest["observation"]["source_bytes"].as_u64().unwrap() <= 4096 + 11);
+        let generation = latest["projection"]["generation"].as_str().unwrap();
+        let chunks = latest["entries"][0]["field"]["chunks"].as_u64().unwrap();
+        let mut expanded = String::new();
+        for chunk in 0..chunks {
+            let query =
+                format!("sid=selected&after=2&limit=1&generation={generation}&field_chunk={chunk}");
+            let reply = crate::session_entry_field(&fixture.options, "source", &query, None);
+            assert_eq!(reply.status, 200);
+            let body: Value = serde_json::from_slice(&reply.body).unwrap();
+            assert!(body["observation"]["source_bytes"].as_u64().unwrap() <= 64 * 1024 + 11);
+            expanded.push_str(body["text"].as_str().unwrap());
+        }
+        assert_eq!(expanded, "large answer unique body ".repeat(16000));
+        assert_eq!(get("sid=selected&after=%GG").0, 400);
+        assert_eq!(get("sid=selected&scope=unknown").0, 400);
         assert_eq!(get("sid=selected&generation=wrong").0, 409);
         assert_eq!(get("sid=selected&after=99").0, 400);
         assert_eq!(get("sid=missing").0, 404);
@@ -1385,7 +1923,46 @@ mod tests {
         .unwrap()
         .unwrap();
         assert_eq!(ready.lifecycle, "current");
+        // Simulate a rewrite after ledger observation but before producer field
+        // capture. The original generation must never receive new-file spans
+        // or UUIDs; the immutable original below remains provider-readable.
+        let connection = Connection::open(EventCache::path(&fixture.options.cache)).unwrap();
+        let metadata: String = connection
+            .query_row(
+                "SELECT metadata FROM session_catalog WHERE session_key='archived'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let row: CatalogRow = serde_json::from_str(&metadata).unwrap();
+        let original = &row.sources[0];
+        assert!(
+            crate::native_field::capture(original, 0, 0, &crate::slot_projection::Recipe::U)
+                .is_some()
+        );
+        assert!(crate::native_field::read_source_record(original, 0).is_some());
+        let mut unqualified = original.clone();
+        unqualified.changed_ns = None;
+        assert!(crate::native_field::read_source_record(&unqualified, 0).is_none());
+        let mut partial = original.clone();
+        partial.offset = bytes.iter().position(|byte| *byte == b'\n').unwrap() as u64;
+        assert!(crate::native_field::read_source_record(&partial, 0).is_none());
         fs::remove_file(&path).unwrap();
+        fs::write(
+            &path,
+            format!(
+                "{}\n",
+                json!({"uuid":"replacement", "message":{"content":"replacement ".repeat(400)}})
+            ),
+        )
+        .unwrap();
+        assert!(
+            crate::native_field::capture(original, 0, 0, &crate::slot_projection::Recipe::U)
+                .is_none()
+        );
+        assert!(crate::native_field::read_source_record(original, 0).is_none());
+        fs::remove_file(&path).unwrap();
+        drop(connection);
         // A closed/reopened background model retires the native index. History
         // metadata and immutable native recipe generation must survive it.
         let reopened = ViewerCore::new(fixture.options.clone());
@@ -1418,6 +1995,7 @@ mod tests {
         struct Provider {
             bytes: Vec<u8>,
             changed: bool,
+            cached: bool,
             calls: std::sync::atomic::AtomicUsize,
         }
         impl crate::SessionSourceReader for Provider {
@@ -1452,13 +2030,14 @@ mod tests {
                     bytes: std::sync::Arc::from(
                         &self.bytes[offset..offset.saturating_add(max).min(self.bytes.len())],
                     ),
-                    cached: true,
+                    cached: self.cached,
                 })
             }
         }
         let provider = Provider {
             bytes: bytes.clone(),
             changed: false,
+            cached: true,
             calls: std::sync::atomic::AtomicUsize::new(0),
         };
         crate::events::CACHE_READS.with(|reads| reads.set(0));
@@ -1475,9 +2054,39 @@ mod tests {
         assert_eq!(body["entries"][1]["freshness"]["state"], "cached");
         assert_eq!(provider.calls.load(Ordering::Relaxed), 2);
         assert!(!path.exists());
+        assert_eq!(body["content_observation"]["state"], "cached");
+        let fresh = Provider {
+            bytes: bytes.clone(),
+            changed: false,
+            cached: false,
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        };
+        let reply = crate::session_transcript_range(
+            &fixture.options,
+            "source",
+            "sid=archived&after=0&limit=2",
+            Some(&fresh),
+        );
+        assert_eq!(reply.status, 200);
+        let fresh_body: Value = serde_json::from_slice(&reply.body).unwrap();
+        assert_eq!(fresh_body["content_observation"]["state"], "available");
+        assert_eq!(fresh_body["identity"]["freshness"]["state"], "unavailable");
+        let generation = fresh_body["projection"]["generation"].as_str().unwrap();
+        let reply = crate::session_entry_field(
+            &fixture.options,
+            "source",
+            &format!("sid=archived&after=1&limit=1&generation={generation}&field_chunk=0"),
+            Some(&fresh),
+        );
+        assert_eq!(reply.status, 200);
+        let field: Value = serde_json::from_slice(&reply.body).unwrap();
+        assert_eq!(field["text"], "retained native answer");
+        assert_eq!(field["content_observation"]["state"], "available");
+        assert_eq!(field["field"]["layers"], 1);
         let changed = Provider {
             bytes,
             changed: true,
+            cached: true,
             calls: std::sync::atomic::AtomicUsize::new(0),
         };
         let reply = crate::session_transcript_range(
@@ -1492,6 +2101,370 @@ mod tests {
         assert_eq!(body["entries"][1]["freshness"]["state"], "incomplete");
         crate::events::CACHE_READS.with(|reads| assert_eq!(reads.get(), 0));
         assert!(!path.exists());
+    }
+
+    #[test]
+    fn source_observer_upgrades_old_recipes_without_a_source_append() {
+        let fixture = Fixture::new();
+        fixture.publish(1);
+        let before = crate::session_transcript_range(
+            &fixture.options,
+            "source",
+            "sid=session-00000&after=0&limit=1",
+            None,
+        );
+        assert_eq!(before.status, 200);
+        let before: Value = serde_json::from_slice(&before.body).unwrap();
+        let connection = Connection::open(EventCache::path(&fixture.options.cache)).unwrap();
+        let ledger: (i64, Vec<u8>) = connection
+            .query_row(
+                "SELECT resume_at,head_sha256 FROM files LIMIT 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        connection.execute("UPDATE session_slot_projections SET version=3,generation=?1 WHERE session_key='session-00000'",["0".repeat(64)]).unwrap();
+        connection.execute("UPDATE session_slots SET metadata=json_remove(metadata,'$.field.layers') WHERE session_key='session-00000'",[]).unwrap();
+        let unavailable = crate::session_transcript_range(
+            &fixture.options,
+            "source",
+            "sid=session-00000&after=0&limit=1",
+            None,
+        );
+        assert_eq!(unavailable.status, 503);
+        let observer = crate::SessionCatalogObserver::new(fixture.options.clone());
+        observer.demand().unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let reply = crate::session_transcript_range(
+                &fixture.options,
+                "source",
+                "sid=session-00000&after=0&limit=1",
+                None,
+            );
+            if reply.status == 200 {
+                let after: Value = serde_json::from_slice(&reply.body).unwrap();
+                assert_eq!(
+                    after["projection"]["version"],
+                    crate::slot_projection::VERSION
+                );
+                assert_eq!(
+                    after["entries"][0]["entry_id"],
+                    before["entries"][0]["entry_id"]
+                );
+                assert_eq!(
+                    after["entries"][0]["provenance"],
+                    before["entries"][0]["provenance"]
+                );
+                assert_eq!(after["entries"][0]["field"]["layers"], 1);
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "unchanged-source recipe upgrade did not complete"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        observer.close();
+        let after: (i64, Vec<u8>) = connection
+            .query_row(
+                "SELECT resume_at,head_sha256 FROM files LIMIT 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(after, ledger);
+    }
+
+    #[test]
+    fn source_observer_publishes_first_push_without_a_viewer_core() {
+        let fixture = Fixture::new();
+        fixture.source("first-push");
+        let observer = crate::SessionCatalogObserver::new(fixture.options.clone());
+        assert!(!EventCache::path(&fixture.options.cache).exists());
+        observer.changed().unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let reply = session_catalog_page(&fixture.options, "configured", "sid=first-push");
+            if reply.status == 200 {
+                let body: Value = serde_json::from_slice(&reply.body).unwrap();
+                if body["items"]
+                    .as_array()
+                    .is_some_and(|items| items.len() == 1)
+                {
+                    assert_eq!(body["items"][0]["key"], "first-push");
+                    break;
+                }
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "source publication did not complete"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        observer.close();
+        assert!(EventCache::path(&fixture.options.cache).exists());
+        let mut core = ViewerCore::new(fixture.options.clone());
+        assert!(!core.demand_catalog_source("local").unwrap());
+        core.set_refresh(Refresh::OnInvalidate);
+        assert!(!core.demand_catalog_source("wrong").unwrap());
+        assert!(core.demand_catalog_source("local").unwrap());
+        core.close();
+        assert!(!core.demand_catalog_source("local").unwrap());
+    }
+
+    #[test]
+    fn default_local_viewer_advertises_a_nonempty_stable_catalog_source() {
+        let fixture = Fixture::new();
+        fixture.publish(1);
+        let core = ViewerCore::new(fixture.options.clone());
+        let inventory = core.respond("GET", "/api/session-sources", "limit=1", None);
+        assert_eq!(inventory.status, 200);
+        let inventory: Value = serde_json::from_slice(&inventory.body).unwrap();
+        assert_eq!(
+            inventory["items"],
+            serde_json::json!([{"source_key":"local","label":"local"}])
+        );
+        assert!(inventory["next_cursor"].is_null());
+        let capability = core.respond("GET", "/api/session-capabilities", "", None);
+        assert_eq!(capability.status, 200);
+        let body: Value = serde_json::from_slice(&capability.body).unwrap();
+        assert_eq!(body["source_key"], "local");
+        for (path, query) in [
+            ("/api/session-identity", "sid=session-00000"),
+            (
+                "/api/session-transcript",
+                "machine=local&sid=session-00000&after=0&limit=1",
+            ),
+        ] {
+            let reply = core.respond("GET", path, query, None);
+            assert_eq!(
+                reply.status,
+                200,
+                "{}",
+                String::from_utf8_lossy(&reply.body)
+            );
+            let body: Value = serde_json::from_slice(&reply.body).unwrap();
+            assert_eq!(body["identity"]["source_key"], "local");
+        }
+        let reply = core.respond(
+            "GET",
+            "/api/sessions",
+            "machine=local&sid=session-00000",
+            None,
+        );
+        assert_eq!(reply.status, 200);
+        let body: Value = serde_json::from_slice(&reply.body).unwrap();
+        assert_eq!(body["machine"], "local");
+        assert_eq!(
+            core.respond(
+                "GET",
+                "/api/session-identity",
+                "machine=wrong&sid=session-00000",
+                None
+            )
+            .status,
+            404
+        );
+    }
+
+    #[test]
+    fn native_tool_outputs_use_bounded_string_fields_and_preserve_call_context() {
+        for harness in [
+            "claude",
+            "claude-block",
+            "codex",
+            "codex-encoded",
+            "codex-object",
+        ] {
+            let fixture = Fixture::new();
+            let body = "native tool output line \"quoted\" \n".repeat(15000);
+            let key = if harness.starts_with("claude") {
+                "claude-tools"
+            } else {
+                "codex-tools"
+            };
+            let (path, records) = if harness.starts_with("claude") {
+                let content = if harness == "claude-block" {
+                    json!([{"type":"text","text":body}])
+                } else {
+                    json!(body)
+                };
+                (
+                    fixture.source(key),
+                    vec![
+                        json!({"type":"assistant","sessionId":key,"uuid":"native-call","parentUuid":key,"timestamp":"2026-10-01T00:00:01Z","message":{"role":"assistant","content":[{"type":"tool_use","id":"native-tool","name":"Bash","input":{"command":"printf fixture"}}]}}),
+                        json!({"type":"user","sessionId":key,"uuid":"native-result","parentUuid":"native-call","timestamp":"2026-10-01T00:00:02Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"native-tool","content":content}]}}),
+                    ],
+                )
+            } else {
+                let relative = "sessions/2026/10/01/rollout-codex-tools.jsonl";
+                let path = fixture.options.codex_home.join(relative);
+                fs::create_dir_all(path.parent().unwrap()).unwrap();
+                let facts_path = fixture.options.facts.as_ref().unwrap();
+                let mut facts = crate::read_facts(facts_path).unwrap();
+                facts.codex_rollouts =
+                    Some(std::collections::BTreeSet::from([relative.to_owned()]));
+                crate::write_facts(facts_path, &facts).unwrap();
+                let output = match harness {
+                    "codex-encoded" => {
+                        json!(json!({"output":body,"metadata":{"exit_code":0}}).to_string())
+                    }
+                    "codex-object" => json!({"output":body,"metadata":{"exit_code":0}}),
+                    _ => json!(body),
+                };
+                (
+                    path,
+                    vec![
+                        json!({"type":"session_meta","timestamp":"2026-10-01T00:00:00Z","payload":{"id":key,"cwd":"/synthetic/project"}}),
+                        json!({"type":"response_item","timestamp":"2026-10-01T00:00:01Z","payload":{"type":"function_call","name":"exec_command","call_id":"native-tool","arguments":"{\"cmd\":\"printf fixture\"}"}}),
+                        json!({"type":"response_item","timestamp":"2026-10-01T00:00:02Z","payload":{"type":"function_call_output","call_id":"native-tool","output":output}}),
+                    ],
+                )
+            };
+            use std::io::Write;
+            let mut file = fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&path)
+                .unwrap();
+            for record in records {
+                writeln!(file, "{record}").unwrap();
+            }
+            drop(file);
+            fixture.publish(1);
+            crate::events::CACHE_READS.with(|reads| reads.set(0));
+            let reply = crate::session_transcript_range(
+                &fixture.options,
+                "source",
+                &format!("sid={key}&after=0&limit=100"),
+                None,
+            );
+            assert_eq!(
+                reply.status,
+                200,
+                "{harness}: {}",
+                String::from_utf8_lossy(&reply.body)
+            );
+            let page: Value = serde_json::from_slice(&reply.body).unwrap();
+            let entry = page["entries"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|entry| entry["k"] == "tool")
+                .expect("native tool slot");
+            assert_eq!(entry["field"]["name"], "out", "{harness}: {entry}");
+            assert!(
+                entry["ok"] == true || entry["ok"].is_null(),
+                "{harness}: {entry}"
+            );
+            assert!(
+                entry["arg"]
+                    .as_str()
+                    .is_some_and(|arg| arg.contains("printf fixture")),
+                "{harness}: {entry}"
+            );
+            assert!(
+                entry["out"]
+                    .as_str()
+                    .unwrap()
+                    .starts_with("native tool output line")
+            );
+            assert!(page["observation"]["source_bytes"].as_u64().unwrap() < 16 * 1024);
+            let generation = page["projection"]["generation"].as_str().unwrap();
+            let slot = entry["slot"].as_u64().unwrap();
+            let chunks = entry["field"]["chunks"].as_u64().unwrap();
+            let mut expanded = String::new();
+            for chunk in 0..chunks {
+                let reply = crate::session_entry_field(
+                    &fixture.options,
+                    "source",
+                    &format!(
+                        "sid={key}&after={slot}&limit=1&generation={generation}&field_chunk={chunk}"
+                    ),
+                    None,
+                );
+                assert_eq!(reply.status, 200);
+                let part: Value = serde_json::from_slice(&reply.body).unwrap();
+                assert_eq!(part["field"]["name"], "out");
+                assert_eq!(
+                    part["field"]["layers"],
+                    if harness == "codex-encoded" { 2 } else { 1 }
+                );
+                assert_eq!(part["content_observation"]["state"], "cached");
+                assert_eq!(
+                    part["content_observation"]["sources"][0]["generation_hash"]
+                        .as_str()
+                        .unwrap()
+                        .len(),
+                    64
+                );
+                expanded.push_str(part["text"].as_str().unwrap());
+            }
+            assert_eq!(expanded, body);
+            crate::events::CACHE_READS.with(|reads| assert_eq!(reads.get(), 0));
+        }
+    }
+
+    #[test]
+    fn mixed_local_and_provider_reads_never_fallback_for_replaced_sources() {
+        let fixture = Fixture::new();
+        let path = fixture.source("mixed");
+        fixture.publish(1);
+        struct Reject(std::sync::atomic::AtomicUsize);
+        impl crate::SessionSourceReader for Reject {
+            fn read_range(
+                &self,
+                _: &SessionSourceRef,
+                _: Option<&str>,
+                _: u64,
+                _: usize,
+            ) -> io::Result<crate::SessionSourceRange> {
+                self.0.fetch_add(1, Ordering::Relaxed);
+                Err(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    "no authorized archive",
+                ))
+            }
+        }
+        let provider = Reject(std::sync::atomic::AtomicUsize::new(0));
+        let get = || {
+            crate::session_transcript_range_with_mode(
+                &fixture.options,
+                "source",
+                "sid=mixed&after=0&limit=1",
+                Some(&provider),
+                crate::SessionSourceReadMode::LocalThenProvider,
+            )
+        };
+        let first = get();
+        assert_eq!(first.status, 200);
+        let body: Value = serde_json::from_slice(&first.body).unwrap();
+        assert_eq!(body["entries"][0]["text"], "synthetic prompt");
+        let identity = body["entries"][0]["entry_id"].clone();
+        let provenance = body["entries"][0]["provenance"].clone();
+        assert_eq!(provider.0.load(Ordering::Relaxed), 0);
+        fs::remove_file(&path).unwrap();
+        fs::write(&path, "{}\n").unwrap();
+        let changed = get();
+        let body: Value = serde_json::from_slice(&changed.body).unwrap();
+        assert_eq!(body["entries"][0]["freshness"]["state"], "incomplete");
+        assert_eq!(body["entries"][0]["entry_id"], identity);
+        assert_eq!(body["entries"][0]["provenance"], provenance);
+        assert_eq!(
+            provider.0.load(Ordering::Relaxed),
+            0,
+            "replacement must resynchronize, not restore old source bytes"
+        );
+        fs::remove_file(&path).unwrap();
+        let missing = get();
+        let body: Value = serde_json::from_slice(&missing.body).unwrap();
+        assert_eq!(body["entries"][0]["freshness"]["state"], "incomplete");
+        assert_eq!(
+            provider.0.load(Ordering::Relaxed),
+            1,
+            "only absent top-level source requests host reader"
+        );
     }
 
     #[test]
@@ -1521,6 +2494,106 @@ mod tests {
             session_catalog_identity(&fixture.options, "source", "session-00001")
                 .unwrap()
                 .is_some()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn legacy_source_metadata_does_not_invent_a_local_generation_proof() {
+        let fixture = Fixture::new();
+        fixture.publish(1);
+        let connection = Connection::open(EventCache::path(&fixture.options.cache)).unwrap();
+        let metadata: String = connection
+            .query_row("SELECT metadata FROM session_catalog LIMIT 1", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        let row: crate::model::summary::CatalogRow = serde_json::from_str(&metadata).unwrap();
+        let mut source = row.sources[0].clone();
+        assert_eq!(source_state(&source), "cached");
+        source.changed_ns = None;
+        let legacy = serde_json::to_value(&source).unwrap();
+        assert!(legacy.get("changed_ns").is_none());
+        let migrated: CatalogSource = serde_json::from_value(legacy).unwrap();
+        assert_eq!(source, migrated);
+        assert_eq!(source_state(&migrated), "stale");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn restored_mtime_rewrite_invalidates_local_ranges_and_rebuilds_observation() {
+        use std::io::Write;
+        let fixture = Fixture::new();
+        fixture.publish(1);
+        let path = fixture
+            .options
+            .claude_home
+            .join("projects/project/session-00000.jsonl");
+        let before = fs::metadata(&path).unwrap();
+        let original = fs::read_to_string(&path).unwrap();
+        let rewritten = original.replace("synthetic prompt", "rewritten prompt");
+        assert_eq!(original.len(), rewritten.len());
+        let old = crate::session_transcript_range(
+            &fixture.options,
+            "source",
+            "sid=session-00000&after=0&limit=1",
+            None,
+        );
+        let old: Value = serde_json::from_slice(&old.body).unwrap();
+        assert_eq!(old["entries"][0]["text"], "synthetic prompt");
+        let mut file = fs::OpenOptions::new().write(true).open(&path).unwrap();
+        file.write_all(rewritten.as_bytes()).unwrap();
+        file.set_times(fs::FileTimes::new().set_modified(before.modified().unwrap()))
+            .unwrap();
+        let after = fs::metadata(&path).unwrap();
+        use std::os::unix::fs::MetadataExt;
+        assert_eq!(
+            (
+                before.dev(),
+                before.ino(),
+                before.len(),
+                before.modified().unwrap()
+            ),
+            (
+                after.dev(),
+                after.ino(),
+                after.len(),
+                after.modified().unwrap()
+            )
+        );
+        assert_ne!(
+            crate::events::change_time_ns(&before),
+            crate::events::change_time_ns(&after)
+        );
+        let stale = session_catalog_identity(&fixture.options, "source", "session-00000")
+            .unwrap()
+            .unwrap();
+        assert_eq!(stale.source_refs[0].state, "stale");
+        let range = crate::session_transcript_range(
+            &fixture.options,
+            "source",
+            "sid=session-00000&after=0&limit=1",
+            None,
+        );
+        let range: Value = serde_json::from_slice(&range.body).unwrap();
+        assert_eq!(range["freshness"]["state"], "incomplete");
+        assert!(!range.to_string().contains("rewritten prompt"));
+        let core = ViewerCore::new(fixture.options.clone());
+        core.warm().unwrap();
+        core.close();
+        let fresh = crate::session_transcript_range(
+            &fixture.options,
+            "source",
+            "sid=session-00000&after=0&limit=1",
+            None,
+        );
+        let fresh: Value = serde_json::from_slice(&fresh.body).unwrap();
+        assert_eq!(fresh["entries"][0]["text"], "rewritten prompt");
+        assert_eq!(fresh["freshness"]["state"], "cached");
+        assert!(fresh["projection"]["generation"].is_string());
+        assert_ne!(
+            fresh["projection"]["generation"],
+            old["projection"]["generation"]
         );
     }
 
@@ -1567,10 +2640,22 @@ mod tests {
         assert_eq!(selected["items"][0]["key"], "session-00008");
         assert_eq!(fixture.body("sid=absent").0, 404);
         assert_eq!(fixture.body("sid=session-00008&harness=claude").0, 400);
-        assert_eq!(
-            fixture.body("q=prompt").1["error"]["code"],
-            "unsupported_filter"
+        let (status, searched) = fixture.body("q=session-00008");
+        assert_eq!(status, 200, "{searched}");
+        assert_eq!(searched["items"].as_array().unwrap().len(), 1);
+        assert_eq!(searched["items"][0]["key"], "session-00008");
+        assert_eq!(searched["search"]["partial"], false);
+        assert_eq!(fixture.body("q=session&q=other").0, 400);
+        assert_eq!(fixture.body("q=bad%0Aquery").0, 400);
+        assert_eq!(fixture.body("q=%GG").0, 400);
+        assert_eq!(fixture.body("sid=session-00008&q=session").0, 400);
+        assert!(
+            fixture.body("q=missing").1["items"]
+                .as_array()
+                .unwrap()
+                .is_empty()
         );
+        assert!(fixture.body("limit=1").1["search"].is_null());
         assert_eq!(
             fixture.body("harness=claude&repo=project").1["items"]
                 .as_array()
@@ -1671,6 +2756,194 @@ mod tests {
             !EventCache::path(&empty.options.cache).exists(),
             "a read-only catalog miss must not create an index"
         );
+    }
+
+    #[test]
+    fn successive_scoped_batches_preserve_unrelated_durable_source_membership() {
+        let fixture = Fixture::new();
+        let inputs: Vec<_> = ["one", "two"]
+            .into_iter()
+            .map(|id| {
+                fixture.source(id);
+                crate::inputs::Input {
+                    root: crate::inputs::InputRoot::Claude,
+                    path: format!("projects/project/{id}.jsonl"),
+                }
+            })
+            .collect();
+        let mut cache = EventCache::open_scoped(&fixture.options.cache).unwrap();
+        let first = crate::model::prepare_sources(
+            &fixture.options,
+            &mut cache,
+            &inputs,
+            crate::model::now_ms(),
+        )
+        .unwrap();
+        assert_eq!(
+            cache.publish_partial_catalog(&first).unwrap(),
+            crate::events::Outcome::Written
+        );
+        let second = crate::model::prepare_sources(
+            &fixture.options,
+            &mut cache,
+            &inputs[..1],
+            crate::model::now_ms(),
+        )
+        .unwrap();
+        assert_eq!(
+            cache.publish_partial_catalog(&second).unwrap(),
+            crate::events::Outcome::Written
+        );
+        let connection = Connection::open(EventCache::path(&fixture.options.cache)).unwrap();
+        let count: i64 = connection
+            .query_row("SELECT COUNT(*) FROM files", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 2);
+        assert_eq!(cache.paths().count(), 2);
+        let body = fixture.body("sid=two").1;
+        assert_eq!(body["items"][0]["freshness"]["state"], "cached");
+    }
+
+    #[test]
+    fn scoped_publication_rejects_newer_dirty_claim_and_keeps_unrelated_work() {
+        let fixture = Fixture::new();
+        fixture.source("selected");
+        let input = crate::inputs::Input {
+            root: crate::inputs::InputRoot::Claude,
+            path: "projects/project/selected.jsonl".into(),
+        };
+        let mut cache = EventCache::open_scoped(&fixture.options.cache).unwrap();
+        let prepared = crate::model::prepare_sources(
+            &fixture.options,
+            &mut cache,
+            std::slice::from_ref(&input),
+            crate::model::now_ms(),
+        )
+        .unwrap();
+        let connection = Connection::open(EventCache::path(&fixture.options.cache)).unwrap();
+        connection
+            .execute(
+                "UPDATE session_catalog_invalidations SET revision=revision+1 WHERE source_path=?1",
+                [input.full_path(&fixture.options).to_string_lossy().as_ref()],
+            )
+            .unwrap();
+        assert_eq!(
+            cache.publish_partial_catalog(&prepared).unwrap(),
+            crate::events::Outcome::Conflict
+        );
+        assert_eq!(fixture.body("").0, 503);
+        connection
+            .execute(
+                "INSERT INTO session_catalog_invalidations VALUES ('unrelated',999,'changed',0)",
+                [],
+            )
+            .unwrap();
+        let prepared = crate::model::prepare_sources(
+            &fixture.options,
+            &mut cache,
+            &[input],
+            crate::model::now_ms(),
+        )
+        .unwrap();
+        assert_eq!(
+            cache.publish_partial_catalog(&prepared).unwrap(),
+            crate::events::Outcome::Written
+        );
+        let pending: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM session_catalog_invalidations WHERE source_path='unrelated'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            pending, 1,
+            "partial publication cannot ACK another source's work"
+        );
+    }
+
+    #[test]
+    fn cold_scoped_native_publication_is_visible_before_unrelated_source_reads() {
+        for unrelated in [0, 2048] {
+            let fixture = Fixture::new();
+            let inputs: Vec<_> = (0..60)
+                .map(|n| {
+                    let id = format!("selected-{n:05}");
+                    fixture.source(&id);
+                    crate::inputs::Input {
+                        root: crate::inputs::InputRoot::Claude,
+                        path: format!("projects/project/{id}.jsonl"),
+                    }
+                })
+                .collect();
+            for n in 0..unrelated {
+                fixture.source(&format!("unrelated-{n:05}"));
+            }
+            let mut cache = EventCache::open_scoped(&fixture.options.cache).unwrap();
+            assert_eq!(cache.paths().count(), 0);
+            assert!(
+                crate::model::prepare_sources(
+                    &fixture.options,
+                    &mut cache,
+                    &vec![inputs[0].clone(); 65],
+                    crate::model::now_ms()
+                )
+                .is_err()
+            );
+            assert_eq!(
+                cache.paths().count(),
+                0,
+                "over-budget source batches must fail before indexing"
+            );
+            let start = std::time::Instant::now();
+            let prepared = crate::model::prepare_sources(
+                &fixture.options,
+                &mut cache,
+                &inputs,
+                crate::model::now_ms(),
+            )
+            .unwrap();
+            assert_eq!(prepared.rows.len(), 60);
+            assert_eq!(
+                cache.publish_partial_catalog(&prepared).unwrap(),
+                crate::events::Outcome::Written
+            );
+            let (status, body) = fixture.body("limit=60");
+            assert_eq!(status, 200);
+            assert_eq!(body["items"].as_array().unwrap().len(), 60);
+            assert_eq!(body["completeness"]["state"], "partial");
+            assert_eq!(body["freshness"], "updating");
+            assert_eq!(cache.paths().count(), 60);
+            let connection = Connection::open(EventCache::path(&fixture.options.cache)).unwrap();
+            let observed: i64 = connection
+                .query_row("SELECT COUNT(*) FROM files", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(
+                observed, 60,
+                "unrelated native sources must remain unobserved before first page"
+            );
+            let identity = session_catalog_identity(&fixture.options, "source", "selected-00000")
+                .unwrap()
+                .unwrap();
+            assert_eq!(identity.native_id, None);
+            assert_eq!(
+                identity.owner_qualification,
+                CatalogOwnerQualification::Provisional
+            );
+            assert!(
+                session_catalog_history_identity(&fixture.options, "source", "selected-00000")
+                    .unwrap()
+                    .is_some()
+            );
+            eprintln!(
+                "scoped-cold-first-page unrelated={unrelated} elapsed_us={} bytes={} native_sources={observed}",
+                start.elapsed().as_micros(),
+                serde_json::to_vec(&body).unwrap().len()
+            );
+            // A fresh lazy producer restores no global file indexes or runs.
+            let reopened = EventCache::open_scoped(&fixture.options.cache).unwrap();
+            assert_eq!(reopened.paths().count(), 0);
+        }
     }
 
     #[test]
@@ -1805,6 +3078,7 @@ mod tests {
             sid: None,
             harness: Some("claude".into()),
             repo: Some("project".into()),
+            q: None,
             cursor: Some(Cursor {
                 scope: CatalogReadScope::Current,
                 version: 1,
@@ -1812,6 +3086,7 @@ mod tests {
                 machine: "".into(),
                 harness: Some("claude".into()),
                 repo: Some("project".into()),
+                q: None,
                 last: row.last.unwrap_or(0),
                 key: "session-19000".into(),
             }),

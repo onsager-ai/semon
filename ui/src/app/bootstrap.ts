@@ -58,12 +58,33 @@ export function createBootstrap(host: BootstrapHost) {
       return host.viewerHost?.machinesPath;
     },
   };
-  const urlOf = (r: ApplicationRoute) => routeUrl(r, routeModel),
+  const compatibility =
+    new URLSearchParams(location.search).get('compat') === '1' || host.sidebarOnly;
+  const urlOf = (r: ApplicationRoute) => {
+      const address = routeUrl(r, routeModel);
+      if (!compatibility) return address;
+      const url = new URL(address, location.href);
+      url.searchParams.set('compat', '1');
+      return url.pathname + url.search + url.hash;
+    },
     routeOf = (location: Pick<Location, 'pathname' | 'search' | 'hash'>) =>
       parseRoute(location, routeModel);
+  let retryDelay = 1000;
+  let retryTimer: number | undefined;
+  let loading = false;
   function boot() {
-    host.transportOwner.api('/api/model?delta=1').then(
-      (m) => {
+    if (host.disposed || loading) return;
+    host.scope.clearTimeout(retryTimer);
+    loading = true;
+    host.transportOwner
+      .api(
+        '/api/model?delta=1' +
+          (host.viewerHost?.controlStream || host.viewerHost?.catalogControlStream
+            ? '&content=1'
+            : ''),
+      )
+      .then(async (m) => {
+        if (host.disposed) return;
         const adopted = host.transportOwner.adopt(m);
         host.liveModelOwner.LIVE.version = adopted.version;
         host.liveModelOwner.remember(adopted);
@@ -85,15 +106,14 @@ export function createBootstrap(host: BootstrapHost) {
           return;
         }
         try {
+          const address = new URL(urlOf(host.navigation.route), location.href);
+          if (host.navigation.route.v === 'sessions' && host.query)
+            address.searchParams.set('q', host.query);
+          if (host.navigation.route.v === 'session') address.hash = location.hash;
           history.replaceState(
             { ...host.navigation.route, scrollTop: 0 },
             '',
-            urlOf(host.navigation.route) +
-              (host.navigation.route.v === 'session'
-                ? location.hash
-                : host.navigation.route.v === 'sessions' && host.query
-                  ? '?q=' + host.transportOwner.enc(host.query)
-                  : ''),
+            address.pathname + address.search + address.hash,
           );
         } catch {}
         const done = () => {
@@ -127,27 +147,36 @@ export function createBootstrap(host: BootstrapHost) {
         };
         const initialRoute = host.navigation.route,
           p = host.transportOwner.load(initialRoute);
-        if (p)
-          p.then(() => {
-            done();
-          }, done);
-        else {
-          done();
+        if (p) {
+          try {
+            await p;
+          } catch (error) {
+            if (host.disposed || host.navigation.route !== initialRoute) return;
+            throw error;
+          }
         }
-      },
-      (err) => {
+        if (!host.disposed && host.navigation.route === initialRoute) done();
+      })
+      .catch((err) => {
         if (host.disposed) return;
         if (host.viewerHost?.modelFailed?.(err?.status ?? 0)) return;
-        if (host.viewerHost) {
-          console.warn('semon: model unavailable', err.status);
-          return;
+        if (err?.status !== 403) {
+          retryTimer = host.scope.timeout(boot, retryDelay);
+          retryDelay = Math.min(30000, retryDelay * 2);
         }
+        if (host.viewerHost) return;
         renderPlaceholder(
           host.$(host.sidebarOnly ? '#lanes' : '#page'),
-          "Couldn't load the sessions: " + err.message,
+          "Couldn't load the sessions: " +
+            err.message +
+            (err?.status === 403
+              ? '. Reload with an authorized URL.'
+              : '. Retrying automatically…'),
         );
-      },
-    );
+      })
+      .finally(() => {
+        loading = false;
+      });
   }
 
   return { routeModel, urlOf, routeOf, boot };

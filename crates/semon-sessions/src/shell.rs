@@ -99,7 +99,7 @@ impl NavLink<'_> {
             } else {
                 ""
             },
-            icon = self.icon,
+            icon = escape(self.icon),
             label = escape(self.label),
         )
     }
@@ -334,6 +334,22 @@ mod tests {
         let row = super::NAV[0].html("/x?a=1&b=\"2\"'", true);
         assert!(row.contains("href=\"/x?a=1&amp;b=&quot;2&quot;&#39;\" aria-current=\"page\""));
         assert!(!super::NAV[0].html("/", false).contains("aria-current"));
+    }
+
+    #[test]
+    fn public_navigation_fields_cannot_escape_their_html_context() {
+        let nav = super::NavLink {
+            key: "\" onmouseover=\"run()",
+            path: "/",
+            label: "<img src=x onerror=run()>",
+            icon: "M0 0\"></path><script>run()</script><path d=\"",
+        };
+        let html = nav.html("/", false);
+        assert!(html.contains("data-go=\"&quot; onmouseover=&quot;run()\""));
+        assert!(html.contains("<span>&lt;img src=x onerror=run()&gt;</span>"));
+        assert!(html.contains("d=\"M0 0&quot;&gt;&lt;/path&gt;&lt;script&gt;"));
+        assert!(!html.contains("<script>"));
+        assert!(!html.contains("<img"));
     }
 
     /// The viewer's script draws its nav itself; it must draw [`super::NAV`]: the same rows in the same order, each

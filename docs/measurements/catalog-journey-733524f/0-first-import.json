@@ -1,0 +1,185 @@
+{
+  "source_revision": "733524fad75290d05aae887faa0c00263b11c6f7",
+  "bundle": "0e8f41c04320954b89c972f135144b4ac199591b62604d650f44581f540765ed",
+  "source_key": "local",
+  "catalog_key": "backlog",
+  "phase": "first-import",
+  "coldMs": 1416.028676,
+  "filterMs": 82.66713700000014,
+  "selectedMs": 142.86844799999994,
+  "earlierMs": 85.21124400000008,
+  "fieldMs": 183.365503,
+  "warmMs": 81.20494300000018,
+  "before": {
+    "domNodes": 3,
+    "entries": 0,
+    "rows": 0,
+    "Nodes": 8,
+    "LayoutDuration": 0,
+    "ScriptDuration": 0,
+    "TaskDuration": 1.7e-05,
+    "JSHeapUsedSize": 534364
+  },
+  "cold": {
+    "domNodes": 890,
+    "entries": 0,
+    "rows": 60,
+    "Nodes": 1374,
+    "LayoutDuration": 0.057878,
+    "ScriptDuration": 0.006428,
+    "TaskDuration": 0.161573,
+    "JSHeapUsedSize": 4225788
+  },
+  "filtered": {
+    "domNodes": 890,
+    "entries": 0,
+    "rows": 60,
+    "Nodes": 1582,
+    "LayoutDuration": 0.059494,
+    "ScriptDuration": 0.010368,
+    "TaskDuration": 0.209896,
+    "JSHeapUsedSize": 3473712
+  },
+  "selected": {
+    "domNodes": 1120,
+    "entries": 60,
+    "rows": 0,
+    "Nodes": 2311,
+    "LayoutDuration": 0.065236,
+    "ScriptDuration": 0.019368,
+    "TaskDuration": 0.266665,
+    "JSHeapUsedSize": 4511308
+  },
+  "earlier": {
+    "domNodes": 1655,
+    "entries": 120,
+    "rows": 0,
+    "Nodes": 3031,
+    "LayoutDuration": 0.067272,
+    "ScriptDuration": 0.020606,
+    "TaskDuration": 0.336371,
+    "JSHeapUsedSize": 7601272
+  },
+  "warm": {
+    "domNodes": 1654,
+    "entries": 120,
+    "rows": 0,
+    "Nodes": 3561,
+    "LayoutDuration": 0.1191,
+    "ScriptDuration": 0.041488,
+    "TaskDuration": 0.566727,
+    "JSHeapUsedSize": 27384732
+  },
+  "requests": [
+    "/api/session-capabilities?machine=local",
+    "/api/sessions?machine=local&scope=retained_history&limit=60",
+    "/api/sessions?machine=local&scope=retained_history&limit=60",
+    "/api/sessions?machine=local&scope=retained_history&limit=60&harness=claude",
+    "/api/session-identity?machine=local&sid=backlog",
+    "/api/session-transcript?machine=local&scope=retained_history&sid=backlog&limit=60",
+    "/api/session-identity?machine=local&sid=backlog",
+    "/api/session-transcript?machine=local&scope=retained_history&sid=backlog&limit=60&after=353&generation=e63f1d8e153042efa07838e391acead54e58d03af33ff7f7ea9bf399d413dc84",
+    "/api/session-identity?machine=local&sid=backlog",
+    "/api/session-entry?machine=local&scope=retained_history&sid=backlog&after=472&limit=1&generation=e63f1d8e153042efa07838e391acead54e58d03af33ff7f7ea9bf399d413dc84&field_chunk=0",
+    "/api/session-entry?machine=local&scope=retained_history&sid=backlog&after=472&limit=1&generation=e63f1d8e153042efa07838e391acead54e58d03af33ff7f7ea9bf399d413dc84&field_chunk=1",
+    "/api/session-identity?machine=local&sid=backlog",
+    "/api/session-transcript?machine=local&scope=retained_history&sid=backlog&limit=60&generation=e63f1d8e153042efa07838e391acead54e58d03af33ff7f7ea9bf399d413dc84",
+    "/api/session-identity?machine=local&sid=backlog",
+    "/api/session-transcript?machine=local&scope=retained_history&sid=backlog&limit=60&generation=e63f1d8e153042efa07838e391acead54e58d03af33ff7f7ea9bf399d413dc84",
+    "/api/session-identity?machine=local&sid=backlog"
+  ],
+  "responses": [
+    {
+      "path": "/api/session-capabilities",
+      "status": 200,
+      "bytes": 362,
+      "serverResponseMs": 1.9220000000000002
+    },
+    {
+      "path": "/api/sessions",
+      "status": 200,
+      "bytes": 65301,
+      "serverResponseMs": 25.014000000000003
+    },
+    {
+      "path": "/api/sessions",
+      "status": 200,
+      "bytes": 63250,
+      "serverResponseMs": 25.058
+    },
+    {
+      "path": "/api/session-identity",
+      "status": 200,
+      "bytes": 884,
+      "serverResponseMs": 3.773
+    },
+    {
+      "path": "/api/session-transcript",
+      "status": 200,
+      "bytes": 56371,
+      "serverResponseMs": 33.295
+    },
+    {
+      "path": "/api/session-identity",
+      "status": 200,
+      "bytes": 884,
+      "serverResponseMs": 3.866
+    },
+    {
+      "path": "/api/session-transcript",
+      "status": 200,
+      "bytes": 52373,
+      "serverResponseMs": 31.781000000000002
+    },
+    {
+      "path": "/api/session-identity",
+      "status": 200,
+      "bytes": 884,
+      "serverResponseMs": 2.4989999999999997
+    },
+    {
+      "path": "/api/session-entry",
+      "status": 200,
+      "bytes": 67817,
+      "serverResponseMs": 12.082
+    },
+    {
+      "path": "/api/session-entry",
+      "status": 200,
+      "bytes": 46778,
+      "serverResponseMs": 10.597999999999999
+    },
+    {
+      "path": "/api/session-identity",
+      "status": 200,
+      "bytes": 884,
+      "serverResponseMs": 2.638
+    },
+    {
+      "path": "/api/session-transcript",
+      "status": 200,
+      "bytes": 56371,
+      "serverResponseMs": 33.544000000000004
+    },
+    {
+      "path": "/api/session-identity",
+      "status": 200,
+      "bytes": 884,
+      "serverResponseMs": 2.278
+    },
+    {
+      "path": "/api/session-transcript",
+      "status": 200,
+      "bytes": 56371,
+      "serverResponseMs": 31.237
+    },
+    {
+      "path": "/api/sessions",
+      "status": 503,
+      "bytes": null,
+      "body_unavailable": "Response capture deadline",
+      "serverResponseMs": 3.387
+    }
+  ],
+  "errors": []
+}

@@ -1221,9 +1221,48 @@ impl MachineView {
             return Ok(model);
         }
         work.built_at = Some(Instant::now());
-        let cache = work
-            .events
-            .get_or_insert_with(|| EventCache::open(&self.options.cache));
+        if work.events.is_none() {
+            work.events = Some(match EventCache::open_scoped(&self.options.cache) {
+                Ok(cache) => cache,
+                Err(error) if self.catalog_demand.load(Ordering::Relaxed) => {
+                    return Err(io::Error::other(error));
+                }
+                Err(_) => EventCache::open(&self.options.cache),
+            });
+        }
+        let cache = work.events.as_mut().expect("event cache initialized");
+        // Cold catalog demand publishes a small explicit source batch before the
+        // compatibility model reads unrelated native history. Source discovery is
+        // still a filesystem metadata walk; incomplete native lineage cannot grant
+        // control authority until the subsequent complete reconciliation.
+        if self.catalog_demand.load(Ordering::Relaxed)
+            && !self.options.scan_window
+            && cache.is_scoped()
+            && cache.session_catalog_generation().is_none()
+        {
+            let mut inputs = crate::inputs::inputs(&self.options)?;
+            inputs.retain(|input| input.path.ends_with(".jsonl"));
+            inputs.sort_by_cached_key(|input| {
+                std::cmp::Reverse(
+                    fs::metadata(input.full_path(&self.options))
+                        .and_then(|metadata| metadata.modified())
+                        .ok(),
+                )
+            });
+            inputs.truncate(64);
+            if !inputs.is_empty() {
+                let prepared = model::prepare_sources(&self.options, cache, &inputs, now)?;
+                match cache.publish_partial_catalog(&prepared)? {
+                    crate::events::Outcome::Written => {}
+                    _ => {
+                        return Err(io::Error::other(
+                            "initial native catalog publication changed; retry observation",
+                        ));
+                    }
+                }
+                cache.end_scan();
+            }
+        }
         // The index commits each file's change as it reads it: nothing is
         // left to save.
         let mut dirty = false;
@@ -5152,6 +5191,19 @@ mod tests {
             Some("second-key")
         );
         assert_eq!(core.session_machine_key("missing").unwrap(), None);
+        let identity = core
+            .session_view_identity("first-session")
+            .unwrap()
+            .unwrap();
+        assert_eq!(identity.0, "first-key");
+        let model: serde_json::Value =
+            serde_json::from_slice(&core.respond("GET", "/api/model", "", None).body).unwrap();
+        assert_eq!(
+            model["sessions"]["first-session"]["machine"].as_str(),
+            Some(identity.1.as_str())
+        );
+        assert_eq!(core.session_view_identity("missing").unwrap(), None);
+
         let duplicate = machine("same-host", "first-session");
         let ambiguous = ViewerCore::with_machines(vec![
             ("first-key".into(), first.options.clone()),
@@ -6892,6 +6944,66 @@ mod tests {
             "never more threads than its size"
         );
         view.close();
+    }
+
+    #[test]
+    fn initial_catalog_page_precedes_global_native_observation() {
+        for unrelated in [0, 256, 2048] {
+            let fixture = Fixture::new();
+            fixture.write("proc/sys/kernel/hostname", "producer-fixture\n");
+            for n in 0..60 {
+                let id = format!("selected-{n:05}");
+                fixture.claude(&id,&[json!({"type":"user","sessionId":id,"uuid":id,"cwd":"/tmp/project","timestamp":"2026-10-01T00:00:00Z","message":{"role":"user","content":"selected first page"}})]);
+            }
+            for n in 0..unrelated {
+                let id = format!("unrelated-{n:05}");
+                let path=fixture.claude(&id,&[json!({"type":"user","sessionId":id,"uuid":id,"cwd":"/tmp/project","timestamp":"2026-09-01T00:00:00Z","message":{"role":"user","content":"unrelated old history"}})]);
+                fs::File::open(path)
+                    .unwrap()
+                    .set_times(
+                        fs::FileTimes::new().set_modified(UNIX_EPOCH + Duration::from_secs(1)),
+                    )
+                    .unwrap();
+            }
+            let view = MachineView::new(fixture.options.clone());
+            view.catalog_demand.store(true, Ordering::Relaxed);
+            let options = fixture.options.clone();
+            let start = Instant::now();
+            *lock(&view.hooks.building) = Some(Arc::new(move || {
+                let page = crate::session_catalog_page(&options, "fixture", "limit=60");
+                assert_eq!(page.status, 200);
+                let body: Value = serde_json::from_slice(&page.body).unwrap();
+                assert_eq!(body["completeness"]["state"], "partial");
+                let items = body["items"].as_array().unwrap();
+                assert_eq!(items.len(), 60);
+                assert!(
+                    items
+                        .iter()
+                        .all(|item| item["key"].as_str().unwrap().starts_with("selected-"))
+                );
+                let connection =
+                    rusqlite::Connection::open(EventCache::path(&options.cache)).unwrap();
+                let observed: i64 = connection
+                    .query_row("SELECT COUNT(*) FROM files", [], |row| row.get(0))
+                    .unwrap();
+                assert_eq!(observed, if unrelated == 0 { 60 } else { 64 });
+                eprintln!(
+                    "production-first-page unrelated={unrelated} latency_us={} response_bytes={} native_sources={observed}",
+                    start.elapsed().as_micros(),
+                    page.body.len()
+                );
+            }));
+            view.warm().unwrap();
+            let page = crate::session_catalog_page(&fixture.options, "fixture", "limit=60");
+            let body: Value = serde_json::from_slice(&page.body).unwrap();
+            assert_eq!(body["completeness"]["state"], "complete");
+            assert!(
+                crate::session_catalog_identity(&fixture.options, "fixture", "selected-00000")
+                    .unwrap()
+                    .is_some()
+            );
+            view.close();
+        }
     }
 
     /// Fifty views read at once are checked by the pool's three threads,

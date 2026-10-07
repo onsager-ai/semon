@@ -4,7 +4,7 @@ use crate::model::{Background, BgEnd, Shown, SignalData, Slot, SlotFile, SlotKin
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, path::PathBuf, sync::Arc};
 
-pub(crate) const VERSION: u32 = 1;
+pub(crate) const VERSION: u32 = 5;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -134,9 +134,58 @@ pub(crate) struct SavedSlot {
     pub(crate) t: Option<i64>,
     pub(crate) turn: Option<String>,
     pub(crate) first: bool,
+    #[serde(default)]
+    pub(crate) field: Option<crate::native_field::NativeField>,
+    #[serde(default)]
+    pub(crate) native_event_id: Option<String>,
 }
 impl SavedSlot {
-    fn capture(slot: &Slot) -> Self {
+    /// Source paths referenced by this recipe, including background edges.
+    pub(crate) fn source_paths(&self) -> Vec<&std::path::PathBuf> {
+        let mut paths: Vec<_> = self.file.iter().map(|file| &file.path).collect();
+        match &self.recipe {
+            Recipe::Tool {
+                background: Some(background),
+                ..
+            } => {
+                if let Some(end) = &background.end {
+                    paths.push(&end.file.path);
+                }
+            }
+            Recipe::BgEnd { source_file, .. } => paths.push(&source_file.path),
+            _ => {}
+        }
+        paths
+    }
+    pub(crate) fn identity(&self) -> String {
+        let event = self
+            .native_event_id
+            .clone()
+            .unwrap_or_else(|| format!("offset:{}", self.offset));
+        let header = match &self.recipe {
+            Recipe::H { id } => Some(id),
+            _ => None,
+        };
+        let identity = format!(
+            "{:?}|{:?}|{}|{}|{:?}|{:?}",
+            self.file.as_ref().map(|file| &file.path),
+            header,
+            event,
+            self.block,
+            std::mem::discriminant(&self.recipe),
+            self.turn
+        );
+        // A turn-context record expands into several independent signals at
+        // the same file/offset/block. Retention must preserve each kind.
+        match &self.recipe {
+            Recipe::Signal { signal } => format!("{identity}|{:?}", signal.kind),
+            _ => identity,
+        }
+    }
+    fn capture(
+        slot: &Slot,
+        sources: &BTreeMap<PathBuf, &crate::model::summary::CatalogSource>,
+    ) -> Self {
         let recipe = match &slot.kind {
             SlotKind::H(id) => Recipe::H { id: id.clone() },
             SlotKind::U => Recipe::U,
@@ -224,7 +273,28 @@ impl SavedSlot {
             },
             SlotKind::NoActivity => Recipe::NoActivity,
         };
+        let field = slot.file.as_ref().and_then(|file| {
+            crate::native_field::capture(sources.get(&file.path)?, slot.offset, slot.block, &recipe)
+        });
+        let native_event_id = field
+            .as_ref()
+            .filter(|field| matches!(field.kind, crate::native_field::NativeFieldKind::Text))
+            .and_then(|field| field.native_event_id.clone())
+            .or_else(|| {
+                let file = slot.file.as_ref()?;
+                let bytes =
+                    crate::native_field::read_source_record(sources.get(&file.path)?, slot.offset)?;
+                let record = crate::tx::parse_native_record(&bytes)?;
+                record
+                    .get("uuid")
+                    .or_else(|| record.get("id"))
+                    .and_then(|value| value.as_str())
+                    .filter(|value| !value.is_empty() && value.len() <= 4096)
+                    .map(str::to_owned)
+            });
         Self {
+            native_event_id,
+            field,
             recipe,
             file: slot.file.as_deref().map(File::capture),
             offset: slot.offset,
@@ -335,12 +405,24 @@ pub(crate) struct Projection {
     pub(crate) key: String,
     pub(crate) slots: Vec<SavedSlot>,
 }
-pub(crate) fn capture(transcripts: &BTreeMap<String, Arc<Transcript>>) -> Vec<Projection> {
+pub(crate) fn capture(
+    transcripts: &BTreeMap<String, Arc<Transcript>>,
+    rows: &[crate::model::summary::CatalogRow],
+) -> Vec<Projection> {
+    let sources: BTreeMap<_, _> = rows
+        .iter()
+        .flat_map(|row| row.sources.iter())
+        .map(|source| (source.path.clone(), source))
+        .collect();
     transcripts
         .iter()
         .map(|(key, transcript)| Projection {
             key: key.clone(),
-            slots: transcript.slots.iter().map(SavedSlot::capture).collect(),
+            slots: transcript
+                .slots
+                .iter()
+                .map(|slot| SavedSlot::capture(slot, &sources))
+                .collect(),
         })
         .collect()
 }
