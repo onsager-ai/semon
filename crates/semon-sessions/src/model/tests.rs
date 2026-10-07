@@ -6316,7 +6316,7 @@ fn schema_four_upgrade_preserves_event_indices_and_observed_runs() {
     let version: i64 = connection
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 6);
+    assert_eq!(version, 7);
 }
 
 #[test]
@@ -6485,6 +6485,12 @@ fn interrupted_catalog_publication_retains_one_generation_and_recovers_on_restar
         serde_json::to_string(&before.1).unwrap(),
         serde_json::to_string(&retained.1).unwrap()
     );
+    let aliases: i64 = connection
+        .query_row("SELECT COUNT(*) FROM session_catalog_sources", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(aliases, 2);
     connection
         .execute_batch("DROP TRIGGER interrupt_catalog")
         .unwrap();
@@ -6561,4 +6567,132 @@ fn a_slow_catalog_builder_cannot_overwrite_newer_native_metadata_without_log_cha
         catalog.iter().find(|row| row.key == "child").unwrap().name,
         "new native metadata label"
     );
+}
+
+#[test]
+fn catalog_native_and_parent_indexes_keep_ambiguity_and_remove_retired_sources() {
+    let home = Home::new();
+    home.top(
+        "root",
+        &[
+            human("root", ts(0, 0), "prompt"),
+            assistant(
+                "root",
+                ts(0, 1),
+                vec![tool("spawn", "Agent", json!({"prompt":"task"}))],
+            ),
+        ],
+    );
+    home.agent(
+        "root",
+        "child",
+        "spawn",
+        &[user("root", ts(0, 2), "child prompt")],
+    );
+    home.build();
+    let connection =
+        rusqlite::Connection::open(home.options.cache.with_extension("sqlite3")).unwrap();
+    let children: Vec<String> = connection.prepare("SELECT session_key FROM session_catalog WHERE parent_key=?1 ORDER BY last_ms DESC,session_key ASC").unwrap()
+        .query_map(["root"], |row| row.get(0)).unwrap().collect::<Result<_, _>>().unwrap();
+    assert_eq!(children, ["child"]);
+
+    let (generation, mut rows) = read_catalog(&home);
+    // The index must represent ambiguity even if a future adapter observes
+    // one native identifier at several separate physical session owners.
+    for row in &mut rows {
+        row.native_ids = vec!["ambiguous-native".into()];
+        for source in &mut row.sources {
+            source.native_id = "ambiguous-native".into();
+        }
+    }
+    let mut cache = EventCache::open(&home.options.cache);
+    cache.publish_session_catalog(&rows, Some(&generation));
+    let owners: Vec<String> = connection.prepare("SELECT DISTINCT session_key FROM session_catalog_sources WHERE harness=?1 AND native_id=?2 ORDER BY session_key").unwrap()
+        .query_map(["claude", "ambiguous-native"], |row| row.get(0)).unwrap().collect::<Result<_, _>>().unwrap();
+    assert_eq!(owners, ["child", "root"]);
+    let wrong_harness: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM session_catalog_sources WHERE harness=?1 AND native_id=?2",
+            ["codex", "ambiguous-native"],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(wrong_harness, 0);
+    let native_plan: String = connection.query_row("EXPLAIN QUERY PLAN SELECT DISTINCT session_key FROM session_catalog_sources WHERE harness=?1 AND native_id=?2", ["claude", "ambiguous-native"], |row| row.get(3)).unwrap();
+    assert!(
+        native_plan.contains("session_catalog_native"),
+        "{native_plan}"
+    );
+    let parent_plan: String = connection.query_row("EXPLAIN QUERY PLAN SELECT session_key FROM session_catalog WHERE parent_key=?1 ORDER BY last_ms DESC,session_key ASC LIMIT 30", ["root"], |row| row.get(3)).unwrap();
+    assert!(
+        parent_plan.contains("session_catalog_parent"),
+        "{parent_plan}"
+    );
+
+    fs::remove_file(
+        home.root
+            .join("claude/projects/-work-proj/root/subagents/agent-child.jsonl"),
+    )
+    .unwrap();
+    home.build();
+    let retired: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM session_catalog_sources WHERE session_key='child'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(retired, 0);
+    let current: i64 = connection.query_row("SELECT COUNT(*) FROM session_catalog_sources WHERE session_key='root' AND native_id='root'", [], |row| row.get(0)).unwrap();
+    assert_eq!(current, 1);
+}
+
+#[test]
+fn schema_six_catalog_migration_populates_relationship_indexes_on_next_complete_publish() {
+    let home = Home::new();
+    home.top("root", &[human("root", ts(0, 0), "prompt")]);
+    home.build();
+    let connection =
+        rusqlite::Connection::open(home.options.cache.with_extension("sqlite3")).unwrap();
+    connection.execute_batch("DROP TABLE session_catalog_sources; DROP INDEX session_catalog_parent; ALTER TABLE session_catalog DROP COLUMN parent_key; UPDATE meta SET value='1' WHERE key='catalog_version'; PRAGMA user_version=6;").unwrap();
+    use sha2::{Digest, Sha256};
+    let metadata: Vec<String> = read_catalog(&home)
+        .1
+        .iter()
+        .map(|row| serde_json::to_string(row).unwrap())
+        .collect();
+    let old_generation = format!(
+        "{:x}",
+        Sha256::digest(serde_json::to_string(&metadata).unwrap().as_bytes())
+    );
+    connection
+        .execute(
+            "UPDATE meta SET value=?1 WHERE key='catalog_generation'",
+            [&old_generation],
+        )
+        .unwrap();
+    let before = read_catalog(&home);
+    home.build();
+    let after = read_catalog(&home);
+    assert_ne!(before.0, after.0);
+    assert_eq!(
+        serde_json::to_string(&before.1).unwrap(),
+        serde_json::to_string(&after.1).unwrap()
+    );
+    let version: String = connection
+        .query_row(
+            "SELECT value FROM meta WHERE key='catalog_version'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(version, "2");
+    let source: (String, String) = connection
+        .query_row(
+            "SELECT session_key,native_id FROM session_catalog_sources",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(source, ("root".into(), "root".into()));
 }
