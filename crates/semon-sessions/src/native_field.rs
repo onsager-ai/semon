@@ -15,6 +15,7 @@ pub(crate) struct NativeField {
     pub(crate) record_offset: u64,
     pub(crate) block: u32,
     pub(crate) kind: NativeFieldKind,
+    pub(crate) layers: u8,
     pub(crate) pointer: String,
     pub(crate) start: u64,
     pub(crate) end: u64,
@@ -70,6 +71,11 @@ pub(crate) fn capture(
     }
     let value = crate::tx::parse_native_record(&bytes)?;
     let mut kind = kind;
+    let mut layers = 1;
+    let encoded_output = value
+        .pointer("/payload/output")
+        .and_then(|value| value.as_str())
+        .and_then(|text| serde_json::from_str::<serde_json::Value>(text).ok());
     let pointer = match recipe {
         Recipe::U if value.pointer("/message/content")?.is_string() => {
             "/message/content".to_owned()
@@ -101,19 +107,16 @@ pub(crate) fn capture(
             {
                 let output = value.pointer("/payload/output")?;
                 let (text, pointer, variant) = if let Some(text) = output.as_str() {
-                    if serde_json::from_str::<serde_json::Value>(text)
-                        .ok()
-                        .and_then(|value| {
-                            value
-                                .get("output")
-                                .and_then(|value| value.as_str())
-                                .map(str::to_owned)
-                        })
-                        .is_some()
+                    if let Some(inner) = encoded_output
+                        .as_ref()
+                        .and_then(|value| value.get("output"))
+                        .and_then(|value| value.as_str())
                     {
-                        return None;
+                        layers = 2;
+                        (inner, "/payload/output", NativeFieldKind::CodexResultObject)
+                    } else {
+                        (text, "/payload/output", NativeFieldKind::CodexResult)
                     }
-                    (text, "/payload/output", NativeFieldKind::CodexResult)
                 } else {
                     (
                         output.get("output")?.as_str()?,
@@ -129,12 +132,22 @@ pub(crate) fn capture(
                 pointer.to_owned()
             } else {
                 let content = value.pointer(&format!("/message/content/{block}"))?;
-                if content.get("type")?.as_str()? != "tool_result"
-                    || !content.get("content")?.is_string()
-                {
+                if content.get("type")?.as_str()? != "tool_result" {
                     return None;
                 }
-                format!("/message/content/{block}/content")
+                let body = content.get("content")?;
+                if body.is_string() {
+                    format!("/message/content/{block}/content")
+                } else {
+                    let parts = body.as_array()?;
+                    if parts.len() != 1
+                        || parts[0].get("type")?.as_str()? != "text"
+                        || !parts[0].get("text")?.is_string()
+                    {
+                        return None;
+                    }
+                    format!("/message/content/{block}/content/0/text")
+                }
             }
         }
         _ => return None,
@@ -143,6 +156,14 @@ pub(crate) fn capture(
         .ok()?
         .into_iter()
         .find(|span| span.json_pointer == pointer)?;
+    let span = if layers == 2 {
+        json_string::index_nested_json_string_spans(&bytes, &span)
+            .ok()?
+            .into_iter()
+            .find(|span| span.json_pointer == "/output")?
+    } else {
+        span
+    };
     let native_event_id = value
         .get("uuid")
         .and_then(|value| value.as_str())
@@ -152,6 +173,7 @@ pub(crate) fn capture(
         record_offset: offset,
         block,
         kind,
+        layers,
         pointer,
         start: span.start,
         end: span.end,

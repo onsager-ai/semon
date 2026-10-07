@@ -154,3 +154,16 @@ background. This activation seam does not qualify bounded dirty dependency
 recomputation, nor does it initialize unrelated machine models. First useful
 content before an initial projection exists remains explicitly updating or
 unavailable until that publication completes.
+
+### Qualified encoded Codex results
+
+Recipe version 4 also binds a two-layer string descriptor for string-valued
+Codex outputs that encode a JSON object containing a string `output` field.
+The producer qualifies that field once, matching the shared native formatter's
+unwrapping behavior. Both previews and expansion decode only the requested raw
+checkpoint interval; they do not parse the encoded wrapper on requests. Scalar
+read slack is 71 bytes for the largest two-layer escape. Common Claude results
+with one text block also use their exact string span. Multi-block synthesis,
+structured non-string fields and native cuts remain unsupported rather than
+falling back to complete records. Version 3 recipes must be rebuilt before this
+new reader accepts them.
