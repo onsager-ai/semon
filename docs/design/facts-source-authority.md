@@ -68,3 +68,16 @@ host contention still affect timings, so fixed VM work does not imply constant
 wall-clock time. RSS and complete cold/warm Viewer journeys remain separate
 integration measurements; this sample establishes neither their budgets nor a
 production capacity claim.
+
+## Separate observations
+
+Catalog identity now exposes `facts_observation` independently from content
+`freshness`, and optional `native_selection`. Codex has a native selection
+observation (`cached`, `incomplete`, or `unavailable`); other harnesses return
+null because this projection does not contain their native manifest. Neither
+field grants runtime, credential or control authority. A currently selected
+source may have unavailable local bytes while its machine facts and native
+selection remain observed; an authorized archive reader can supply its history.
+Body disappearance remains visible in `freshness` and individual source refs.
+Explicit native retirement still fails the current-identity scope. Viewing a
+retained retired generation requires a separately qualified history-read scope.
