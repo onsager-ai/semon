@@ -1239,6 +1239,9 @@ fn scan(
         ));
     }
     cache.begin_scan();
+    if selected.is_none() {
+        cache.begin_full_scan()?;
+    }
     let projects = options.claude_home.join("projects");
     let mut files = Vec::new();
     let mut seen = BTreeSet::new();
@@ -5778,6 +5781,59 @@ pub(crate) fn build_sources(
     now: i64,
     selected: Option<&[crate::inputs::Input]>,
 ) -> io::Result<Built> {
+    build_sources_inner(options, cache, dirty, texts, now, selected, None)
+}
+
+/// Native producer output captured before compatibility-window trimming.
+/// Scoped preparation does not publish or prune unrelated source membership.
+pub(crate) struct PreparedSources {
+    pub(crate) base_generation: Option<String>,
+    pub(crate) claims: Vec<(String, Option<i64>)>,
+    pub(crate) rows: Vec<summary::CatalogRow>,
+    pub(crate) transcripts: Vec<crate::slot_projection::Projection>,
+}
+
+pub(crate) fn prepare_sources(
+    options: &Options,
+    cache: &mut EventCache,
+    inputs: &[crate::inputs::Input],
+    now: i64,
+) -> io::Result<PreparedSources> {
+    if inputs.len() > 64
+        || inputs
+            .iter()
+            .map(|input| input.full_path(options))
+            .collect::<BTreeSet<_>>()
+            .len()
+            != inputs.len()
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "native producer source batch must contain at most 64 distinct sources",
+        ));
+    }
+    let mut prepared = None;
+    build_sources_inner(
+        options,
+        cache,
+        &mut false,
+        &mut Texts::default(),
+        now,
+        Some(inputs),
+        Some(&mut prepared),
+    )?;
+    prepared.ok_or_else(|| io::Error::other("native producer did not capture projection"))
+}
+
+fn build_sources_inner(
+    options: &Options,
+    cache: &mut EventCache,
+    dirty: &mut bool,
+    texts: &mut Texts,
+    now: i64,
+    selected: Option<&[crate::inputs::Input]>,
+    mut prepared: Option<&mut Option<PreparedSources>>,
+) -> io::Result<Built> {
     let catalog_base = cache.session_catalog_generation();
     let mut timings = Vec::with_capacity(18);
     macro_rules! timed {
@@ -5810,6 +5866,16 @@ pub(crate) fn build_sources(
             hook();
         }
     }
+    let claims = if prepared.is_some() {
+        cache.catalog_claims(
+            &files
+                .iter()
+                .map(|file| file.path.to_string_lossy().into_owned())
+                .collect::<Vec<_>>(),
+        )?
+    } else {
+        Vec::new()
+    };
     let pids;
     let lock_pids;
     let held;
@@ -5829,6 +5895,16 @@ pub(crate) fn build_sources(
         offline_since = facts.offline_since();
         groups = lineages(&files);
     });
+    if cache.is_scoped() && matches!(&facts, MachineFacts::Local) {
+        let ids = files
+            .iter()
+            .flat_map(|file| {
+                std::iter::once(file.id.clone())
+                    .chain(file.summary.links.session_ids.iter().cloned())
+            })
+            .collect();
+        cache.select_reported_runs(&ids)?;
+    }
     let reported_runs: Vec<ReportedRunSnapshot> = match &facts {
         MachineFacts::Local => cache.reported_runs().cloned().collect(),
         MachineFacts::Recorded(facts) => facts.reported_runs.clone(),
@@ -5920,8 +5996,8 @@ pub(crate) fn build_sources(
         .collect();
     // A scan-window build is intentionally incomplete: it cannot replace a
     // source-complete catalog. Publication itself is delayed until success.
-    let catalog =
-        (selected.is_none() && !options.scan_window).then(|| summary::catalog(&builder, &handoffs));
+    let catalog = ((!options.scan_window && selected.is_none()) || prepared.is_some())
+        .then(|| summary::catalog(&builder, &handoffs));
     let slot_projections = catalog
         .as_ref()
         .map(|rows| crate::slot_projection::capture(&tx, rows));
@@ -6176,7 +6252,14 @@ pub(crate) fn build_sources(
         "post",
         u32::try_from(post_started.elapsed().as_millis()).unwrap_or(u32::MAX),
     ));
-    if let Some(catalog) = catalog {
+    if let Some(destination) = prepared.as_mut() {
+        **destination = Some(PreparedSources {
+            base_generation: catalog_base,
+            claims,
+            rows: catalog.unwrap_or_default(),
+            transcripts: slot_projections.unwrap_or_default(),
+        });
+    } else if let Some(catalog) = catalog {
         cache.publish_session_projection(
             &crate::slot_projection::Publication {
                 rows: &catalog,

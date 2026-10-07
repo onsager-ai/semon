@@ -5,8 +5,9 @@ use crate::{Options, Refresh, RefreshPool, viewer::MachineView};
 
 /// Retain one observer per configured source, independently of browser clients.
 /// Construction and demand do not read native history. The shared pool coalesces
-/// checks; its existing producer still performs a complete selected-machine
-/// observation. This is not a bounded incremental publication contract.
+/// checks. A cold catalog publishes an explicit partial batch before complete
+/// selected-machine reconciliation. Complete refresh still scans the machine;
+/// this is not a bounded incremental background observation contract.
 pub struct SessionCatalogObserver {
     view: Arc<MachineView>,
 }
