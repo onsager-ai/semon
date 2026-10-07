@@ -96,3 +96,14 @@ test('catalog rejects wrong machine identity, duplicate rows and malformed sourc
     assert.throws(() => parseCatalogPage(input));
   }
 });
+
+test('catalog discovery completeness stays distinct from row freshness and native authority', () => {
+  const partial = { ...page(), freshness: 'updating', completeness: { state: 'partial' } };
+  const parsed = parseCatalogPage(partial);
+  assert.equal(parsed.completeness.state, 'partial');
+  assert.equal(parsed.freshness, 'updating');
+  assert.equal(parsed.items[0].freshness.state, 'unavailable');
+  assert.equal(parseCatalogPage(page()).completeness.state, 'complete');
+  assert.throws(() => parseCatalogPage({ ...partial, completeness: { state: 'complete' } }));
+  assert.throws(() => parseCatalogPage({ ...partial, completeness: { state: 'unknown' } }));
+});

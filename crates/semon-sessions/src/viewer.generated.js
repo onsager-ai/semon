@@ -8648,8 +8648,8 @@ globalThis.__semonUIShared = __semonUIShared;
     };
   }
   function parseCatalogPage(value) {
-    const page = object2(value), machine2 = text(page.machine), info = object2(page.machine_info), capabilities = object2(page.capabilities), generation = text(page.generation), items = array(page.items, parseCatalogSession), next = nullable(page.next_cursor, text);
-    if (page.api !== 1 || page.freshness !== "cached" || info.key !== machine2 || info.freshness !== "cached" || !/^[0-9a-f]{64}$/i.test(generation) || items.length > 100 || new Set(items.map((item2) => item2.key)).size !== items.length || next !== null && (!next || next.length > 8192))
+    const page = object2(value), machine2 = text(page.machine), info = object2(page.machine_info), capabilities = object2(page.capabilities), generation = text(page.generation), items = array(page.items, parseCatalogSession), next = nullable(page.next_cursor, text), completeness = page.completeness === void 0 ? "complete" : object2(page.completeness).state, collectionFreshness = page.freshness === "updating" ? "updating" : freshness(page.freshness);
+    if (page.api !== 1 || completeness !== "partial" && completeness !== "complete" || collectionFreshness === "updating" && completeness !== "partial" || info.key !== machine2 || info.freshness !== "cached" || !/^[0-9a-f]{64}$/i.test(generation) || items.length > 100 || new Set(items.map((item2) => item2.key)).size !== items.length || next !== null && (!next || next.length > 8192))
       throw new Error("Invalid catalog page");
     return {
       api: 1,
@@ -8658,7 +8658,8 @@ globalThis.__semonUIShared = __semonUIShared;
       machine_info: { key: machine2, label: text(info.label), freshness: "cached" },
       generation,
       observed_at: nullable(page.observed_at, integer),
-      freshness: "cached",
+      freshness: collectionFreshness,
+      completeness: { state: completeness },
       capabilities: {
         pagination: boolean(capabilities.pagination),
         filters: strings4(capabilities.filters),
@@ -15492,7 +15493,8 @@ globalThis.__semonUIShared = __semonUIShared;
           /* @__PURE__ */ jsx("h1", { children: "Sessions" }),
           /* @__PURE__ */ jsxs("p", { class: "sub", children: [
             screenText(snapshot.sourceLabel),
-            " \xB7 Cached history"
+            " \xB7 ",
+            snapshot.observation ?? "Cached history"
           ] })
         ] }),
         /* @__PURE__ */ jsxs(
@@ -15531,6 +15533,7 @@ globalThis.__semonUIShared = __semonUIShared;
           }
         ),
         /* @__PURE__ */ jsx("p", { class: "catalog-note", children: "Sorted by latest recorded activity. Text search and history across sources are unavailable." }),
+        snapshot.discovering && /* @__PURE__ */ jsx("p", { class: "catalog-note", role: "status", children: "More sessions are being discovered. This list is incomplete." }),
         snapshot.note && /* @__PURE__ */ jsxs("p", { class: "catalog-note", role: "status", children: [
           snapshot.note,
           " ",
@@ -15558,7 +15561,7 @@ globalThis.__semonUIShared = __semonUIShared;
           item2.key
         )) }),
         /* @__PURE__ */ jsx("p", { class: "catalog-note", children: /* @__PURE__ */ jsx("a", { class: "link", href: snapshot.compatibilityHref, children: "Open compatibility view (loads workspace history)" }) }),
-        !snapshot.updating && !snapshot.items.length && !snapshot.note && /* @__PURE__ */ jsx("p", { class: "catalog-note", children: "No recorded sessions match these filters." }),
+        !snapshot.updating && !snapshot.items.length && !snapshot.note && !snapshot.discovering && /* @__PURE__ */ jsx("p", { class: "catalog-note", children: "No recorded sessions match these filters." }),
         snapshot.more && /* @__PURE__ */ jsx("button", { class: "link", type: "button", disabled: snapshot.updating, onClick: () => host2.more(), children: "Load more sessions" })
       ] }),
       root
@@ -16124,6 +16127,14 @@ globalThis.__semonUIShared = __semonUIShared;
           items,
           sourceLabel: page?.machine_info.label ?? (capabilities.source_key || "This source"),
           updating,
+          discovering: page?.completeness.state === "partial",
+          observation: {
+            cached: "Cached history",
+            updating: "Discovering history",
+            stale: "History observation is stale",
+            incomplete: "History is incomplete",
+            unavailable: "History observation is unavailable"
+          }[page?.freshness ?? "cached"],
           note,
           harness,
           repo,
@@ -16176,6 +16187,18 @@ globalThis.__semonUIShared = __semonUIShared;
         updating = false;
         drawList();
         chrome();
+        if (next.completeness.state === "partial" && items.length <= 60) {
+          const refresh = () => {
+            if (disposed || epoch !== listEpoch || active || sourcesOpen) return;
+            const focused = document.activeElement;
+            if (focused instanceof HTMLElement && root.contains(focused) && focused.matches("input,textarea,select")) {
+              listRetry = scope.timeout(refresh, 1e3);
+              return;
+            }
+            void loadList(false);
+          };
+          listRetry = scope.timeout(refresh, 1e3);
+        }
       } catch (error) {
         if (disposed || epoch !== listEpoch) return;
         updating = false;
@@ -16228,6 +16251,8 @@ globalThis.__semonUIShared = __semonUIShared;
         );
       root.replaceChildren();
       drawList();
+      if (page?.completeness.state === "partial" && items.length <= 60 && !updating)
+        void loadList(false);
       shell.closeDrawer(true);
     }
     function drawSelected(view) {
