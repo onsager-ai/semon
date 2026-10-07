@@ -197,6 +197,7 @@ export function parseCatalogIdentity(value: unknown): CatalogSessionIdentity {
     catalogKey = text(row.catalog_key),
     harness = text(row.harness);
   if (
+    !sourceKey ||
     !catalogKey ||
     !harness ||
     !/^[0-9a-f]{64}$/i.test(generation) ||
