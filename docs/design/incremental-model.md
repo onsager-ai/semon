@@ -1,6 +1,6 @@
 # Incremental model reuse
 
-The model keeps its full rebuild as the oracle. The session cache is in memory only; the SQLite event store remains the only persisted derivation.
+The model keeps its full rebuild as the oracle. Transcript/activity reuse remains in memory. Stable session descriptions now also survive restart in the SQLite event store; they are validated after the source scan before reuse.
 
 Each build scans complete-line ledgers and reruns lineage and cross-session joins. It records link digests in one pass, using source paths, byte offsets and handoff ids. Session descriptions are reused when their member ledgers, source metadata, reported cost snapshots, repository facts and initial names match. Activity, turns and transcript slots are reused when membership, description, direct and root liveness, and the link digest match. Sessions with no timestamp always recompute their clock fallback. Unseen sessions are evicted.
 
@@ -38,3 +38,41 @@ Requests without `delta=1` keep the previous full-response contract. Account,
 navigation and admin fields are never stored in shared history; each patch uses
 only the current request's extras. The protocol reduces response bytes; global
 join work and constructing the current model still use the existing build path.
+
+
+## Persisted descriptions (#320, first slice)
+
+SQLite schema 5 adds `session_descriptions`, one versioned row per session key.
+The payload is an explicit typed allowlist: source paths and complete-line
+ledger identities, names/labels, native history metadata, usage and cost,
+repository/branch, invariant timestamps and recorded busy intervals. It never
+serializes `Session` as a whole. Message, prompt, answer and tool bodies,
+transcript slots, handoff text, process status, waiting state and current
+liveness are excluded. `reported_runs` remains authoritative observed data in
+its existing table, carried across parser/schema rebuilds; summary copies do
+not replace that custody.
+
+The dependency fingerprint is SHA-256 over the existing description inputs:
+file membership and verified ledger revisions, native metadata, initial names,
+repository facts, shared-usage ownership and observed cost reports. Only the
+fingerprint and source references are persisted, not the inputs' debug strings.
+A current source scan is mandatory. Missing/inaccessible sources cannot be
+restored by a summary. Clock fallback descriptions are never persisted. Live
+status, relationship joins, transcript construction and serving ages still run
+through their existing paths. The in-memory cache continues to avoid SQLite
+lookups on subsequent builds.
+
+Changed descriptions publish as one SQLite transaction after the complete model
+build succeeds. An interrupted/failed publication retains the prior generation;
+a damaged payload, incompatible summary version or changed dependency misses
+the cache and uses the full description builder. The serving snapshot is
+unaffected by publication failure. `model::summary::VERSION` must be bumped when
+description/identity/pricing derivation changes; the parser version and verified
+source ledger also remain part of compatibility.
+
+This is a reusable restart boundary, not completion of #320: event loading,
+source discovery/validation, global relationship joins and transcript indices
+still scale with complete history. Serving useful cached list content before
+those passes, bounded background projection refresh, coherent freshness/progress
+and focused query integration remain follow-up work with #319. `/api/model`
+shape and current freshness semantics are unchanged.

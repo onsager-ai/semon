@@ -6211,3 +6211,151 @@ fn native_claude_copied_usage_keeps_observations_without_assigning_owner() {
             .is_none()
     );
 }
+
+#[test]
+fn persisted_descriptions_reuse_restart_and_revalidate_changed_sources() {
+    let home = Home::new();
+    home.top("root", &[human("root", ts(0, 0), "secret prompt body")]);
+    home.top("other", &[human("other", ts(0, 0), "other prompt")]);
+    let first = home.build();
+    SESSION_DESCRIPTIONS.with(|counts| counts.borrow_mut().clear());
+    let restarted = home.build();
+    assert_equivalent(&first, &restarted, NOW);
+    SESSION_DESCRIPTIONS.with(|counts| assert!(counts.borrow().is_empty()));
+
+    append_records(
+        &home,
+        "root",
+        &[assistant(
+            "root",
+            ts(0, 1),
+            vec![text("secret answer body")],
+        )],
+    );
+    let updated = home.build();
+    SESSION_DESCRIPTIONS
+        .with(|counts| assert_eq!(*counts.borrow(), BTreeMap::from([("root".into(), 1)])));
+    let mut fresh = EventCache::default();
+    let oracle = build_with_cache(
+        &home.options,
+        &mut fresh,
+        &mut false,
+        &mut Texts::default(),
+        NOW,
+    );
+    assert_equivalent(&updated, &oracle, NOW);
+
+    let connection =
+        rusqlite::Connection::open(home.options.cache.with_extension("sqlite3")).unwrap();
+    let rows: Vec<String> = connection
+        .prepare("SELECT description FROM session_descriptions")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(rows.len(), 2);
+    for row in rows {
+        assert!(!row.contains("secret prompt body"));
+        assert!(!row.contains("secret answer body"));
+        let value: Value = serde_json::from_str(&row).unwrap();
+        assert!(!value["sources"].as_array().unwrap().is_empty());
+        for forbidden in [
+            "state",
+            "activity",
+            "waiting_for",
+            "waiting_since",
+            "alive",
+            "turns",
+            "handoffs",
+            "tx",
+        ] {
+            assert!(value.get(forbidden).is_none(), "persisted {forbidden}");
+        }
+    }
+
+    fs::remove_file(home.root.join("claude/projects/-work-proj/other.jsonl")).unwrap();
+    assert!(!home.build().sessions.contains_key("other"));
+}
+
+#[test]
+fn incompatible_or_damaged_description_rebuilds_without_losing_observations() {
+    let home = Home::new();
+    home.top("root", &[human("root", ts(0, 0), "prompt")]);
+    let first = home.build();
+    let connection =
+        rusqlite::Connection::open(home.options.cache.with_extension("sqlite3")).unwrap();
+    connection
+        .execute("UPDATE session_descriptions SET version = version + 1", [])
+        .unwrap();
+    SESSION_DESCRIPTIONS.with(|counts| counts.borrow_mut().clear());
+    assert_equivalent(&first, &home.build(), NOW);
+    SESSION_DESCRIPTIONS.with(|counts| assert_eq!(counts.borrow().get("root"), Some(&1)));
+    connection
+        .execute("UPDATE session_descriptions SET description = '{}'", [])
+        .unwrap();
+    SESSION_DESCRIPTIONS.with(|counts| counts.borrow_mut().clear());
+    assert_equivalent(&first, &home.build(), NOW);
+    SESSION_DESCRIPTIONS.with(|counts| assert_eq!(counts.borrow().get("root"), Some(&1)));
+}
+
+#[test]
+fn schema_four_upgrade_preserves_event_indices_and_observed_runs() {
+    let home = Home::new();
+    home.top("root", &[human("root", ts(0, 0), "prompt")]);
+    home.write(".claude.json", &json!({"projects": {"/work/proj": {"lastSessionId": "root", "lastStartTime": at(0, 0), "lastCost": 1.25}}}).to_string());
+    let first = home.build();
+    assert_eq!(first.sessions["root"].reported_runs.len(), 1);
+    let connection =
+        rusqlite::Connection::open(home.options.cache.with_extension("sqlite3")).unwrap();
+    connection
+        .execute_batch("DROP TABLE session_descriptions; PRAGMA user_version = 4;")
+        .unwrap();
+    home.write(".claude.json", "{}");
+    assert_equivalent(&first, &home.build(), NOW);
+    let version: i64 = connection
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(version, 5);
+}
+
+#[test]
+#[ignore = "measurement workload: 512 sessions × 128 assistant usage records"]
+fn persisted_description_restart_measurement() {
+    let home = Home::new();
+    for index in 0..512 {
+        let id = format!("session-{index:04}");
+        let mut records = vec![human(&id, ts(0, 0), "prompt")];
+        for message in 0..128 {
+            records.push(assistant_usage(
+                &id,
+                ts(0, 1),
+                &format!("message-{index}-{message}"),
+                "claude-sonnet-4-5",
+                json!({"input_tokens": 1000, "output_tokens": 200, "cache_read_input_tokens": 500}),
+            ));
+        }
+        home.top(&id, &records);
+    }
+    home.build();
+    for reuse in [false, true, false, true, false, true] {
+        if !reuse {
+            rusqlite::Connection::open(home.options.cache.with_extension("sqlite3"))
+                .unwrap()
+                .execute("DELETE FROM session_descriptions", [])
+                .unwrap();
+        }
+        SESSION_DESCRIPTIONS.with(|counts| counts.borrow_mut().clear());
+        let start = std::time::Instant::now();
+        let built = home.build();
+        eprintln!(
+            "summary_reuse={reuse} total_ms={} bytes={} phases={:?}",
+            start.elapsed().as_millis(),
+            built.json(NOW).len(),
+            built.timings
+        );
+        if reuse {
+            SESSION_DESCRIPTIONS.with(|counts| assert!(counts.borrow().is_empty()));
+        }
+    }
+}

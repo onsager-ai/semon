@@ -127,7 +127,7 @@ pub(crate) fn table() -> Pricing {
     }
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub(crate) struct CostTokens {
     pub(crate) input: u64,
     pub(crate) output: u64,
@@ -136,20 +136,44 @@ pub(crate) struct CostTokens {
     pub(crate) cache_write_1h: u64,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct ModelCost {
     pub(crate) usd: Option<f64>,
     pub(crate) tokens: CostTokens,
+    #[serde(deserialize_with = "cost_kinds")]
     pub(crate) usd_by_kind: BTreeMap<&'static str, f64>,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct Cost {
     pub(crate) usd: Option<f64>,
     pub(crate) unpriced_models: Vec<String>,
     pub(crate) split_unknown_messages: u64,
     pub(crate) by_model: BTreeMap<String, ModelCost>,
     pub(crate) by_day: BTreeMap<String, f64>,
+}
+
+/// Billing categories are fixed metadata; reject unknown categories rather
+/// than leaking arbitrary strings into a static-lifetime map on restart.
+fn cost_kinds<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<BTreeMap<&'static str, f64>, D::Error> {
+    let kinds = BTreeMap::<String, f64>::deserialize(deserializer)?;
+    kinds
+        .into_iter()
+        .map(|(kind, value)| {
+            let kind = match kind.as_str() {
+                "input" => "input",
+                "output" => "output",
+                "cache_read" => "cache_read",
+                "cache_write_5m" => "cache_write_5m",
+                "cache_write_1h" => "cache_write_1h",
+                "web_search" => "web_search",
+                _ => return Err(serde::de::Error::custom("unknown billing category")),
+            };
+            Ok((kind, value))
+        })
+        .collect()
 }
 
 impl Default for Cost {
