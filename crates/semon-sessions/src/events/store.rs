@@ -46,7 +46,7 @@ use crate::{Tokens, facts::ReportedRunSnapshot};
 
 /// `PRAGMA user_version`: the shape of the tables. The parser's version is
 /// [`CACHE_VERSION`], kept in `meta`.
-const SCHEMA_VERSION: i64 = 16;
+const SCHEMA_VERSION: i64 = 18;
 
 /// How long a write waits for another process's transaction. Tests wait
 /// less, so the busy paths they drive stay quick.
@@ -2010,6 +2010,13 @@ fn init(connection: &mut Connection) -> rusqlite::Result<Init> {
         transaction.execute_batch(SCHEMA)?;
         transaction.execute_batch(crate::history_projection::SCHEMA)?;
         transaction.execute_batch(crate::catalog_search::SCHEMA)?;
+        transaction.execute_batch(crate::catalog_changes::SCHEMA)?;
+        if schema < 18 {
+            // One-time metadata bootstrap; requests only read this durable
+            // stream. Scope indexes permit useful history without consuming
+            // every current-list record first.
+            transaction.execute_batch("INSERT INTO session_catalog_changes(session_key,read_scope) SELECT session_key,'current' FROM session_catalog ORDER BY last_ms DESC,session_key ASC; INSERT INTO session_catalog_changes(session_key,read_scope) SELECT session_key,'retained_history' FROM session_history_catalog ORDER BY session_key;")?;
+        }
         if schema == 1 {
             transaction.execute_batch("ALTER TABLE files ADD COLUMN codex_native_usage TEXT")?;
         }
