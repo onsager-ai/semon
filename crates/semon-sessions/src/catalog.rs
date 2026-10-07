@@ -1344,6 +1344,14 @@ mod tests {
         let fixture = Fixture::new();
         fixture.publish(1);
         let core = ViewerCore::new(fixture.options.clone());
+        let inventory = core.respond("GET", "/api/session-sources", "limit=1", None);
+        assert_eq!(inventory.status, 200);
+        let inventory: Value = serde_json::from_slice(&inventory.body).unwrap();
+        assert_eq!(
+            inventory["items"],
+            serde_json::json!([{"source_key":"local","label":"local"}])
+        );
+        assert!(inventory["next_cursor"].is_null());
         let capability = core.respond("GET", "/api/session-capabilities", "", None);
         assert_eq!(capability.status, 200);
         let body: Value = serde_json::from_slice(&capability.body).unwrap();
