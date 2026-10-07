@@ -85,6 +85,7 @@ export function createCatalogViewer(
     note = '',
     harness = '',
     repo = '',
+    query = '',
     active: SelectedView | null = null;
   let candidates: CatalogSourceCandidate[] = [],
     candidateCursor: string | null = null,
@@ -102,6 +103,7 @@ export function createCatalogViewer(
       cursor: string | null;
       harness: string;
       repo: string;
+      query: string;
       selectedKey: string | null;
     }
   >();
@@ -180,7 +182,10 @@ export function createCatalogViewer(
   function controlFor(view: SelectedView): ControlView | undefined {
     const identity = selection.selectedIdentity();
     const current =
-      active === view && identity?.catalog_key === view.key && identity.native_id
+      active === view &&
+      identity?.catalog_key === view.key &&
+      identity.owner_qualification !== 'provisional' &&
+      identity.native_id
         ? control.view(identity.native_id)
         : undefined;
     if (current) view.lastControl = current;
@@ -362,6 +367,10 @@ export function createCatalogViewer(
         note,
         harness,
         repo,
+        query,
+        metadataSearch: capabilities.metadata_search,
+        searchPartial: page?.search?.partial ?? false,
+        searchIndexIncomplete: page?.search ? !page.search.index_complete : false,
         more: cursor !== null,
         compatibilityHref:
           '/sessions?compat=1' +
@@ -388,6 +397,7 @@ export function createCatalogViewer(
         filter(field, value) {
           cancelCandidate();
           if (field === 'harness') harness = value;
+          else if (field === 'q') query = value;
           else repo = value;
           void loadList(false);
         },
@@ -413,6 +423,7 @@ export function createCatalogViewer(
     p.set('limit', '60');
     if (harness) p.set('harness', harness);
     if (repo) p.set('repo', repo);
+    if (query && capabilities.metadata_search) p.set('q', query);
     if (append && cursor !== null) p.set('cursor', cursor);
     updating = true;
     note = '';
@@ -421,6 +432,7 @@ export function createCatalogViewer(
       const next = parseCatalogPage(await api('/api/sessions?' + p));
       if (disposed || epoch !== listEpoch) return;
       if (
+        (query && capabilities.metadata_search && next.search === null) ||
         next.machine !== capabilities.source_key ||
         next.read_scope !== 'retained_history' ||
         (append && page?.generation !== next.generation)
@@ -436,7 +448,10 @@ export function createCatalogViewer(
       updating = false;
       drawList();
       chrome();
-      if (next.completeness.state === 'partial' && items.length <= 60) {
+      if (
+        (next.completeness.state === 'partial' || next.search?.index_complete === false) &&
+        items.length <= 60
+      ) {
         const refresh = () => {
           if (disposed || epoch !== listEpoch || active || sourcesOpen) return;
           const focused = document.activeElement;
@@ -1017,7 +1032,13 @@ export function createCatalogViewer(
     try {
       const reply = object(await api('/api/session-identity?' + p));
       if (reply.api !== 1) throw new Error('Unsupported source identity response');
-      if (active === view && selection.accept(ticket, reply.identity)) drawSelected(view);
+      if (active === view && selection.accept(ticket, reply.identity)) {
+        if (selection.selectedIdentity()?.owner_qualification === 'provisional')
+          view.note =
+            'Session identity is provisional while history is being discovered. Native controls are unavailable.';
+        else if (view.note.startsWith('Session identity is provisional')) view.note = '';
+        drawSelected(view);
+      }
     } catch (error) {
       if (disposed || active !== view || ticket !== view.ticket) return;
       if (
@@ -1200,6 +1221,7 @@ export function createCatalogViewer(
       cursor,
       harness,
       repo,
+      query,
       selectedKey: active?.key ?? null,
     });
   }
@@ -1247,6 +1269,7 @@ export function createCatalogViewer(
       candidateNote = '';
       harness = retained?.harness ?? '';
       repo = retained?.repo ?? '';
+      query = retained?.query ?? '';
       updating = false;
       note = '';
       sourcesOpen = false;

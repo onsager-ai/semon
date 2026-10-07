@@ -36,7 +36,12 @@ export function createControlObservation(host: ControlObservationHost) {
     if (host.catalogSelection) {
       const selected = host.catalogSelection.selectedIdentity();
       const accepted =
-        route.v === 'session' && selected?.catalog_key === route.id ? selected : null;
+        route.v === 'session' &&
+        selected?.catalog_key === route.id &&
+        selected.owner_qualification !== 'provisional' &&
+        selected.read_scope !== 'retained_history'
+          ? selected
+          : null;
       return {
         path: accepted?.native_id ? host.viewerHost?.catalogControlStream : undefined,
         params: accepted

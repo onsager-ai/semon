@@ -802,3 +802,73 @@ test('archive source hint waits for a parsed canonical session without native au
     await browser.close();
   }
 });
+
+test('bounded metadata search preserves literal query and exposes empty partial continuation', async () => {
+  const browser = await chromium.launch();
+  try {
+    const page = await browser.newPage(),
+      requests = [];
+    let searches = 0;
+    const query = 'Écho + & branch';
+    await page.route('http://catalog.test/**', (route) => {
+      const u = new URL(route.request().url());
+      requests.push(u.pathname + u.search);
+      if (u.pathname === '/api/session-capabilities')
+        return route.fulfill({
+          json: {
+            ...capabilities(false),
+            metadata_search: true,
+            filters: ['harness', 'repo', 'q'],
+          },
+        });
+      if (u.pathname === '/api/sessions') {
+        if (!u.searchParams.has('q')) return route.fulfill({ json: list([meta('initial')]) });
+        assert.equal(u.searchParams.get('q'), query);
+        searches++;
+        return route.fulfill({
+          json: {
+            ...list(searches === 1 ? [] : [meta('matched')]),
+            next_cursor: searches === 1 ? 'continue' : null,
+            search: {
+              semantics: 'unicode_lowercase_substring',
+              fields: ['name', 'key', 'repo', 'branch', 'model', 'harness'],
+              partial: searches === 1,
+              candidates: searches === 1 ? 512 : 1,
+              index_complete: true,
+              candidate_budget: 512,
+              byte_budget: 2097152,
+            },
+          },
+        });
+      }
+      return route.fulfill({
+        contentType: u.pathname === '/viewer.css' ? 'text/css' : 'text/html',
+        body: u.pathname === '/viewer.css' ? css : html,
+      });
+    });
+    await page.goto('http://catalog.test/sessions');
+    await page.addScriptTag({ content: outputFiles[0].text });
+    await page.evaluate(() => (window.app = CatalogViewer.mountViewerApplication()));
+    const input = page.getByRole('textbox', { name: 'Search session details', exact: true });
+    await input.waitFor();
+    await input.fill(query);
+    await input.press('Tab');
+    await page
+      .getByText(
+        'Search checked a bounded part of the index. Load more sessions to continue looking for matches.',
+      )
+      .waitFor();
+    assert.equal(await page.getByText('No recorded sessions match these filters.').count(), 0);
+    await page.getByRole('button', { name: 'Load more sessions', exact: true }).click();
+    await page.locator('#page [data-id="matched"]').waitFor();
+    assert.equal(await input.inputValue(), query);
+    assert.equal(searches, 2);
+    assert.equal(
+      requests.some((path) => /^\/api\/model/.test(path)),
+      false,
+    );
+    await page.evaluate(() => app.destroy());
+  } finally {
+    await browser.close();
+  }
+});

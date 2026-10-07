@@ -57,6 +57,15 @@ export interface CatalogPage {
   };
   items: CatalogSession[];
   next_cursor: string | null;
+  search: {
+    semantics: 'unicode_lowercase_substring';
+    fields: string[];
+    partial: boolean;
+    candidates: number;
+    index_complete: boolean;
+    candidate_budget: 512;
+    byte_budget: 2097152;
+  } | null;
 }
 const nullable = <T>(value: unknown, parse: (value: unknown) => T): T | null =>
   value === null ? null : parse(value);
@@ -144,6 +153,34 @@ export function parseCatalogSession(value: unknown): CatalogSession {
     ...observations(row),
   };
 }
+function searchObservation(value: unknown): CatalogPage['search'] {
+  if (value === undefined || value === null) return null;
+  const row = object(value),
+    fields = strings(row.fields),
+    candidates = integer(row.candidates);
+  if (
+    row.semantics !== 'unicode_lowercase_substring' ||
+    fields.length !== 6 ||
+    new Set(fields).size !== 6 ||
+    fields.some(
+      (field) => !['name', 'key', 'repo', 'branch', 'model', 'harness'].includes(field),
+    ) ||
+    row.candidate_budget !== 512 ||
+    row.byte_budget !== 2097152 ||
+    candidates < 0 ||
+    candidates > 512
+  )
+    throw new Error('Unsupported metadata search observation');
+  return {
+    semantics: 'unicode_lowercase_substring',
+    fields,
+    partial: boolean(row.partial),
+    candidates,
+    index_complete: boolean(row.index_complete),
+    candidate_budget: 512,
+    byte_budget: 2097152,
+  };
+}
 export function parseCatalogPage(value: unknown): CatalogPage {
   const page = object(value),
     machine = text(page.machine),
@@ -186,6 +223,7 @@ export function parseCatalogPage(value: unknown): CatalogPage {
     },
     items,
     next_cursor: next,
+    search: searchObservation(page.search),
   };
 }
 
@@ -200,8 +238,13 @@ export function parseCatalogIdentity(value: unknown): CatalogSessionIdentity {
     state = object(row.freshness),
     sourceKey = text(row.source_key),
     catalogKey = text(row.catalog_key),
-    harness = text(row.harness);
+    harness = text(row.harness),
+    qualification = row.owner_qualification;
   if (
+    (qualification !== undefined &&
+      qualification !== 'qualified' &&
+      qualification !== 'provisional') ||
+    (qualification === 'provisional' && nativeId !== null) ||
     !sourceKey ||
     !catalogKey ||
     !harness ||
@@ -220,6 +263,7 @@ export function parseCatalogIdentity(value: unknown): CatalogSessionIdentity {
     catalog_key: catalogKey,
     harness,
     native_id: nativeId,
+    owner_qualification: qualification as CatalogSessionIdentity['owner_qualification'],
     native_ids: nativeIds,
     source_refs: refs,
     machine_label: nullable(row.machine_label, text),
