@@ -1284,6 +1284,154 @@ mod tests {
     }
 
     #[test]
+    fn selected_slot_ranges_are_native_bounded_and_stable_across_unrelated_history() {
+        let fixture = Fixture::new();
+        let path = fixture.source("selected");
+        use std::io::Write;
+        let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
+        writeln!(file,"{}",json!({"type":"assistant","sessionId":"selected","uuid":"answer-1","parentUuid":"selected","timestamp":"2026-10-01T00:00:01Z","message":{"role":"assistant","content":[{"type":"text","text":"selected answer unique body"}]}})).unwrap();
+        writeln!(file,"{}",json!({"type":"assistant","sessionId":"selected","uuid":"large-answer","parentUuid":"answer-1","timestamp":"2026-10-01T00:00:02Z","message":{"role":"assistant","content":[{"type":"text","text":"large answer unique body ".repeat(16000)}]}})).unwrap();
+        drop(file);
+        fixture.publish(2);
+        crate::events::CACHE_READS.with(|reads| reads.set(0));
+        let get = |query: &str| {
+            let reply = crate::session_transcript_range(&fixture.options, "source", query, None);
+            (
+                reply.status,
+                serde_json::from_slice::<Value>(&reply.body).unwrap(),
+            )
+        };
+        let (status, first) = get("sid=selected&after=0&limit=2");
+        assert_eq!(status, 200, "{first}");
+        assert_eq!(first["range"], json!({"first":0,"end":2,"next":2}));
+        assert_eq!(first["entries"][0]["k"], "u");
+        assert_eq!(first["entries"][0]["text"], "synthetic prompt");
+        assert_eq!(first["entries"][1]["text"], "selected answer unique body");
+        assert_eq!(
+            first["entries"][1]["provenance"]["native_event_id"],
+            "answer-1"
+        );
+        let (_, latest) = get("sid=selected&limit=1");
+        assert_eq!(latest["range"]["first"], 2);
+        assert_eq!(latest["freshness"]["state"], "incomplete");
+        assert!(latest["observation"]["source_bytes"].as_u64().unwrap() <= 128 * 1024);
+        assert_eq!(get("sid=selected&generation=wrong").0, 409);
+        assert_eq!(get("sid=selected&after=99").0, 400);
+        assert_eq!(get("sid=missing").0, 404);
+        crate::events::CACHE_READS.with(|reads| assert_eq!(reads.get(), 0));
+        fixture.publish(50);
+        crate::events::CACHE_READS.with(|reads| reads.set(0));
+        let (_, unchanged) = get("sid=selected&after=0&limit=2");
+        assert_eq!(
+            first["projection"]["generation"],
+            unchanged["projection"]["generation"]
+        );
+        assert_eq!(
+            first["entries"][1]["entry_id"],
+            unchanged["entries"][1]["entry_id"]
+        );
+        crate::events::CACHE_READS.with(|reads| assert_eq!(reads.get(), 0));
+        let connection = Connection::open(EventCache::path(&fixture.options.cache)).unwrap();
+        let leaked:i64=connection.query_row("SELECT COUNT(*) FROM session_slots WHERE metadata LIKE '%selected answer unique body%' OR metadata LIKE '%large answer unique body%'",[],|row|row.get(0)).unwrap();
+        assert_eq!(leaked, 0);
+        let plan:String=connection.query_row("EXPLAIN QUERY PLAN SELECT metadata FROM session_slots WHERE session_key='selected' AND slot>=0 AND slot<2 ORDER BY slot",[],|row|row.get(3)).unwrap();
+        assert!(
+            plan.contains("SEARCH session_slots USING PRIMARY KEY"),
+            "{plan}"
+        );
+    }
+
+    #[test]
+    fn selected_provider_ranges_render_native_records_without_restoring_sources() {
+        let fixture = Fixture::new();
+        let path = fixture.source("archived");
+        use std::io::Write;
+        let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
+        writeln!(file,"{}",json!({"type":"assistant","sessionId":"archived","uuid":"archived-answer","parentUuid":"archived","timestamp":"2026-10-01T00:00:01Z","message":{"role":"assistant","content":[{"type":"text","text":"retained native answer"}]}})).unwrap();
+        drop(file);
+        fixture.publish(1);
+        let bytes = fs::read(&path).unwrap();
+        fs::remove_file(&path).unwrap();
+        struct Provider {
+            bytes: Vec<u8>,
+            changed: bool,
+            calls: std::sync::atomic::AtomicUsize,
+        }
+        impl crate::SessionSourceReader for Provider {
+            fn read_range(
+                &self,
+                source: &SessionSourceRef,
+                expected: Option<&str>,
+                offset: u64,
+                max: usize,
+            ) -> io::Result<crate::SessionSourceRange> {
+                assert_eq!(source.root, "claude");
+                assert_eq!(source.native_id, "archived");
+                assert_eq!(source.path, "projects/project/archived.jsonl");
+                assert_eq!(source.offset, self.bytes.len() as u64);
+                use sha2::{Digest, Sha256};
+                let full: [u8; 32] = Sha256::digest(&self.bytes).into();
+                assert_eq!(source.prefix_sha256, full);
+                let generation: String = full.iter().map(|byte| format!("{byte:02x}")).collect();
+                if let Some(expected) = expected {
+                    assert_eq!(expected, generation);
+                }
+                let call = self.calls.fetch_add(1, Ordering::Relaxed);
+                let offset = usize::try_from(offset).unwrap();
+                Ok(crate::SessionSourceRange {
+                    generation: if self.changed && call > 0 {
+                        "changed".into()
+                    } else {
+                        generation
+                    },
+                    length: self.bytes.len() as u64,
+                    offset: offset as u64,
+                    bytes: std::sync::Arc::from(
+                        &self.bytes[offset..offset.saturating_add(max).min(self.bytes.len())],
+                    ),
+                    cached: true,
+                })
+            }
+        }
+        let provider = Provider {
+            bytes: bytes.clone(),
+            changed: false,
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        };
+        crate::events::CACHE_READS.with(|reads| reads.set(0));
+        let reply = crate::session_transcript_range(
+            &fixture.options,
+            "source",
+            "sid=archived&after=0&limit=2",
+            Some(&provider),
+        );
+        assert_eq!(reply.status, 200);
+        let body: Value = serde_json::from_slice(&reply.body).unwrap();
+        assert_eq!(body["entries"][1]["text"], "retained native answer");
+        assert_eq!(body["identity"]["freshness"]["state"], "unavailable");
+        assert_eq!(body["entries"][1]["freshness"]["state"], "cached");
+        assert_eq!(provider.calls.load(Ordering::Relaxed), 2);
+        assert!(!path.exists());
+        let changed = Provider {
+            bytes,
+            changed: true,
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        };
+        let reply = crate::session_transcript_range(
+            &fixture.options,
+            "source",
+            "sid=archived&after=0&limit=2",
+            Some(&changed),
+        );
+        let body: Value = serde_json::from_slice(&reply.body).unwrap();
+        assert_eq!(reply.status, 200);
+        assert_eq!(body["freshness"]["state"], "incomplete");
+        assert_eq!(body["entries"][1]["freshness"]["state"], "incomplete");
+        crate::events::CACHE_READS.with(|reads| assert_eq!(reads.get(), 0));
+        assert!(!path.exists());
+    }
+
+    #[test]
     fn focused_cold_reads_are_indexed_metadata_and_coherent_keysets() {
         let fixture = Fixture::new();
         fixture.publish(9);
