@@ -72,7 +72,7 @@ do not include that evidence wait. There is no byte/RSS budget claim.
 Successful first-list responses are64.8–64.9KB, selected ranges55.7–56.2KB,
 and scalar chunk responses67.8KB/46.8KB. The selected60-record DOM has1120
 nodes at every workload; selected JS heap is approximately4–5MiB, cumulative
-script time14–22ms and layout time50–64ms. After120 entries and field expansion,
+script time15–28ms and layout time51–65ms. After120 entries and field expansion,
 visible DOM has1654 nodes. Uncollected JS heap varies with garbage collection,
 so it is not a memory ceiling. Full CDP/task/heap/node and response evidence is
 in [the raw measurement directory](measurements/catalog-journey-733524f/).
