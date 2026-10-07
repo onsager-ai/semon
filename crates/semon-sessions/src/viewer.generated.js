@@ -3105,7 +3105,8 @@ globalThis.__semonUIShared = __semonUIShared;
   }) {
     const [text2, setText] = useState("");
     const s = view.snapshot;
-    const canSend = !view.busy && !view.uncertain && s.connected && (s.activeTurn ? s.capabilities.steer : s.capabilities.input) && !!text2.trim();
+    const canWrite = !view.busy && !view.uncertain && s.connected && (s.activeTurn ? s.capabilities.steer : s.capabilities.input);
+    const canSend = canWrite && !!text2.trim();
     const showStop = !!s.activeTurn && s.capabilities.interrupt && !text2.trim();
     const pending = s.requests.filter((r) => r.state.state === "open" || r.state.state === "claimed");
     const recent = s.requests.filter((r) => r.state.state !== "open" && r.state.state !== "claimed").slice(-10);
@@ -3154,8 +3155,8 @@ globalThis.__semonUIShared = __semonUIShared;
           "aria-busy": view.busy || void 0,
           onSubmit: async (event) => {
             event.preventDefault();
-            if (!canSend) return;
-            const submitted = text2;
+            const submitted = event.currentTarget.querySelector("textarea")?.value ?? text2;
+            if (!canWrite || !submitted.trim()) return;
             if (await view.send(submitted))
               setText((current) => current === submitted ? "" : current);
           },
@@ -3173,7 +3174,8 @@ globalThis.__semonUIShared = __semonUIShared;
                 onKeyDown: (event) => {
                   if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
                     event.preventDefault();
-                    if (canSend) event.currentTarget.form?.requestSubmit();
+                    if (canWrite && event.currentTarget.value.trim())
+                      event.currentTarget.form?.requestSubmit();
                   }
                 }
               }
@@ -7104,6 +7106,8 @@ globalThis.__semonUIShared = __semonUIShared;
     let selection = 0;
     async function write(op, extra = {}) {
       if (!current || busy2 || uncertain && op !== "reconnect") return false;
+      if (op === "send" && (!current.connected || !(current.activeTurn ? current.capabilities.steer : current.capabilities.input)))
+        return false;
       if (op === "reconnect" && current.runtime?.reconnectable === false) return false;
       if (op !== "reconnect" && !current.connected) return false;
       if (op === "interrupt" && !current.capabilities.interrupt) return false;
