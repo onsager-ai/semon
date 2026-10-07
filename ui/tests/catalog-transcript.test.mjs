@@ -225,3 +225,14 @@ test('incomplete source reobservation retains useful body and exposes loss witho
   fresh.accept(fresh.request(0, 2), empty);
   assert.equal(fresh.entries()[0].entry.text, '');
 });
+test('retained-history range intent cannot silently accept a current-scope projection', () => {
+  const store = new CatalogTranscriptStore();
+  store.select({ source_key: 'source', catalog_key: 'session' }, 'retained_history');
+  assert.throws(() => store.accept(store.request(0, 2), page()), /requested range/);
+  assert.equal(store.selectedPage(), null);
+  const historical = page();
+  historical.identity.read_scope = 'retained_history';
+  historical.identity.native_selection = { state: 'retired' };
+  assert.equal(store.accept(store.request(0, 2), historical), true);
+  assert.equal(store.selectedPage().identity.native_selection.state, 'retired');
+});

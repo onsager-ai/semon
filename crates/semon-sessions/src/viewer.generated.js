@@ -15307,17 +15307,19 @@ globalThis.__semonUIShared = __semonUIShared;
       return this.contentVersion;
     }
     scope = null;
+    readScope = "current";
     disposed = false;
     requests = /* @__PURE__ */ new Set();
     pages = [];
     listeners = /* @__PURE__ */ new Set();
-    select(scope) {
+    select(scope, readScope2 = "current") {
       if (this.disposed) throw new Error("Catalog transcript is destroyed");
-      if (typeof scope.source_key !== "string" || typeof scope.catalog_key !== "string" || !scope.catalog_key)
+      if (typeof scope.source_key !== "string" || typeof scope.catalog_key !== "string" || !scope.catalog_key || readScope2 !== "current" && readScope2 !== "retained_history")
         throw new Error("Invalid catalog transcript scope");
       ++this.epoch;
       ++this.contentVersion;
       this.scope = { ...scope };
+      this.readScope = readScope2;
       this.requests.clear();
       this.pages = [];
       this.changed();
@@ -15331,7 +15333,8 @@ globalThis.__semonUIShared = __semonUIShared;
         epoch: this.epoch,
         after,
         limit,
-        generation: this.pages[0]?.projection.generation ?? null
+        generation: this.pages[0]?.projection.generation ?? null,
+        read_scope: this.readScope
       });
       this.requests.add(request);
       return request;
@@ -15341,7 +15344,7 @@ globalThis.__semonUIShared = __semonUIShared;
       const page = parseCatalogTranscriptPage(value);
       const generation = this.pages[0]?.projection.generation ?? request.generation;
       const first = request.after === null ? Math.max(0, page.projection.total - request.limit) : Math.min(request.after, page.projection.total);
-      if (page.identity.source_key !== request.source_key || page.identity.catalog_key !== request.catalog_key || page.range.first !== first || page.range.end !== Math.min(first + request.limit, page.projection.total) || generation !== null && page.projection.generation !== generation)
+      if (page.identity.source_key !== request.source_key || page.identity.catalog_key !== request.catalog_key || page.identity.read_scope !== request.read_scope || page.range.first !== first || page.range.end !== Math.min(first + request.limit, page.projection.total) || generation !== null && page.projection.generation !== generation)
         throw new Error("Catalog transcript response does not match the requested range");
       const sameRange = this.pages.find(
         (old) => old.range.first === page.range.first && old.range.end === page.range.end
@@ -15819,7 +15822,7 @@ globalThis.__semonUIShared = __semonUIShared;
       try {
         const next = parseCatalogPage(await api("/api/sessions?" + p));
         if (disposed || epoch !== listEpoch) return;
-        if (next.machine !== capabilities.source_key || append && page?.generation !== next.generation)
+        if (next.machine !== capabilities.source_key || next.read_scope !== "retained_history" || append && page?.generation !== next.generation)
           throw new Error("History changed; refresh this list before loading another page.");
         if (append && next.items.some((item2) => items.some((old) => old.key === item2.key)))
           throw new Error("History page repeated a session. Refresh this list.");
@@ -16076,7 +16079,10 @@ globalThis.__semonUIShared = __semonUIShared;
     }
     async function resynchronize(view) {
       const candidate = new CatalogTranscriptStore();
-      candidate.select({ source_key: capabilities.source_key, catalog_key: view.key });
+      candidate.select(
+        { source_key: capabilities.source_key, catalog_key: view.key },
+        "retained_history"
+      );
       const read = async (after, limit) => {
         const ticket = candidate.request(after, limit), p = params();
         p.set("sid", view.key);
@@ -16191,7 +16197,7 @@ globalThis.__semonUIShared = __semonUIShared;
       let view = selected.get(key);
       if (!view) {
         const store = new CatalogTranscriptStore();
-        store.select({ source_key: capabilities.source_key, catalog_key: key });
+        store.select({ source_key: capabilities.source_key, catalog_key: key }, "retained_history");
         view = {
           key,
           root: document.createElement("div"),
