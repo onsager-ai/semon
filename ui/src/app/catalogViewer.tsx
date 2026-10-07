@@ -22,6 +22,8 @@ import { createControlObservation } from './controlObservation';
 import { createLocalControl } from './localControl';
 import { EffectScope } from './effects';
 import { catalogTranscriptBlocks } from './catalogTranscriptView';
+import type { CatalogTranscriptEntry } from '../state/catalog-transcript-wire';
+import { parseCatalogField } from '../state/catalog-field-wire';
 import { I } from './registry';
 interface SelectedView {
   key: string;
@@ -39,6 +41,10 @@ interface SelectedView {
   retryDelay: number;
   renderedRevision: number;
   renderedNote: string;
+  fields: Map<
+    string,
+    { generation: string; text?: string; next: number | null; loading: boolean; note: string }
+  >;
 }
 /** The advertised bounded reader has no complete ModelStore or global content poller. */
 export function createCatalogViewer(
@@ -439,7 +445,7 @@ export function createCatalogViewer(
             incomplete: 'History is incomplete',
             unavailable: 'Source history is unavailable',
           }[current.freshness.state] + ' · related session context is incomplete',
-        blocks: catalogTranscriptBlocks(view.store.entries()),
+        blocks: catalogTranscriptBlocks(view.store.entries(), (entry) => fieldView(view, entry)),
         order: view.store.entries().map((item) => item.entry_id),
         before:
           (view.store.loadedRanges()[0]?.first ?? 0) > 0
@@ -484,6 +490,94 @@ export function createCatalogViewer(
       if (window.matchMedia('(max-width: 760px)').matches)
         window.scrollTo(0, document.documentElement.scrollHeight);
       else main.scrollTop = main.scrollHeight;
+    }
+  }
+  function fieldView(view: SelectedView, entry: CatalogTranscriptEntry) {
+    if (!entry.clipped || !entry.field) return null;
+    const progress = view.fields.get(entry.entry_id),
+      generation = view.store.selectedPage()!.projection.generation,
+      changed = progress && progress.generation !== generation;
+    return {
+      text: progress?.text,
+      note: changed
+        ? 'Source projection changed. Previously loaded text is retained. '
+        : progress?.note ||
+          (progress?.next === null
+            ? 'Complete recorded text loaded.'
+            : progress?.text === undefined
+              ? 'Recorded text preview. '
+              : 'Part of the recorded text is loaded. '),
+      action: capabilities.selected_entry
+        ? {
+            label: progress?.loading
+              ? 'Loading text…'
+              : changed
+                ? 'Reload recorded text'
+                : progress?.text === undefined
+                  ? 'Load recorded text'
+                  : 'Load more text',
+            busy: !!progress?.loading,
+            run() {
+              void loadField(view, entry);
+            },
+          }
+        : undefined,
+      ...(progress?.next === null && !changed ? { action: undefined } : {}),
+    };
+  }
+  async function loadField(view: SelectedView, entry: CatalogTranscriptEntry) {
+    if (disposed || !capabilities.selected_entry || !entry.field) return;
+    const generation = view.store.selectedPage()?.projection.generation;
+    if (!generation) return;
+    let progress = view.fields.get(entry.entry_id);
+    if (progress?.loading) return;
+    if (!progress || progress.generation !== generation) {
+      progress = { generation, next: 0, loading: false, note: '' };
+      view.fields.set(entry.entry_id, progress);
+    }
+    if (progress.next === null) return;
+    const chunk = progress.next,
+      p = params(),
+      pending = progress;
+    p.set('sid', view.key);
+    p.set('after', String(entry.slot));
+    p.set('limit', '1');
+    p.set('generation', generation);
+    p.set('field_chunk', String(chunk));
+    pending.loading = true;
+    pending.note = '';
+    view.renderedRevision = -1;
+    drawSelected(view);
+    try {
+      const value = await api('/api/session-entry?' + p);
+      if (disposed || view.fields.get(entry.entry_id) !== pending) return;
+      if (view.store.selectedPage()?.projection.generation !== generation) {
+        pending.note = 'Source projection changed. Reload recorded text. ';
+        return;
+      }
+      const field = parseCatalogField(value, {
+        source_key: capabilities.source_key,
+        catalog_key: view.key,
+        generation,
+        entry,
+        chunk,
+      });
+      pending.text = (chunk === 0 ? '' : (pending.text ?? '')) + field.text;
+      pending.next = field.next;
+    } catch (error) {
+      if (disposed) return;
+      pending.note =
+        error && typeof error === 'object' && 'status' in error && error.status === 422
+          ? 'Complete text is unavailable for this native format. '
+          : readError(error) + ' ';
+      if (error && typeof error === 'object' && 'status' in error && error.status === 409)
+        void loadSelected(view);
+    } finally {
+      pending.loading = false;
+      if (!disposed) {
+        view.renderedRevision = -1;
+        drawSelected(view);
+      }
     }
   }
   async function resynchronize(view: SelectedView) {
@@ -633,6 +727,7 @@ export function createCatalogViewer(
         retryDelay: 1000,
         renderedRevision: -1,
         renderedNote: '',
+        fields: new Map(),
       };
       selected.set(key, view);
     }

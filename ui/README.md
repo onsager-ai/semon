@@ -308,6 +308,17 @@ The browser contract uses synthetic source payloads and the actual shared
 renderers; it does not establish production body-span, archive, host authorization
 or connection-to-session integration performance. Those require the matching
 backend capability/projection producer and recorded artifact revisions.
+
+When `selected_entry` is advertised and a native entry includes a qualified string
+field descriptor, its recorded text can be loaded one chunk at a time through
+`/api/session-entry`. Each chunk is checked against the selected source, canonical
+session, projection generation, native slot, field name and original provenance.
+The first accepted chunk replaces the preview; subsequent actions append only the
+next bounded chunk. Loaded text is retained across navigation and projection
+changes, with an explicit reload action after a change. Unsupported formats and
+failed reads remain visible; this path never requests the compatibility tool,
+image or transcript endpoints. Source observation failures retain previously
+loaded useful bodies while marking their entry observation incomplete.
 Status snapshots may include a typed `runtime` observation on the existing native
 control snapshot: `{state, phase, freshness, reconnectable}` and optional
 `presence`, `observedAt`, `observationError`, `updating`. Durable session phase,

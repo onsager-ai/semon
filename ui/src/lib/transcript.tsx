@@ -32,6 +32,7 @@ export interface LabelView extends Identity {
   kind: 'label';
   className: string;
   text: string;
+  action?: { label: string; busy: boolean; run(): void };
 }
 export interface ToolView extends Identity {
   kind: 'tool';
@@ -301,6 +302,18 @@ function Entry({ entry, owner }: { entry: EntryView; owner: SessionOwner }): Com
       return (
         <div class={entry.className} data-e={entry.key} data-entry-key={entry.entryKey}>
           {screenText(entry.text)}
+          {entry.action && (
+            <button
+              type="button"
+              class="link"
+              disabled={entry.action.busy}
+              onClick={(event) => {
+                if (event.currentTarget.isConnected) active(() => entry.action?.run());
+              }}
+            >
+              {screenText(entry.action.label)}
+            </button>
+          )}
         </div>
       );
     case 'tool':
