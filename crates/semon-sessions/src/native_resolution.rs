@@ -103,33 +103,38 @@ fn resolve(
     result.generation = Some(generation);
     // Current navigation uses current native bindings. History additionally
     // resolves qualified retained bindings; ambiguity is never guessed away.
-    let sql = match result.read_scope {
-        CatalogReadScope::Current => {
-            "SELECT DISTINCT session_key FROM session_catalog_sources INDEXED BY session_catalog_current_native WHERE lifecycle='current' AND harness=?1 AND native_id=?2 ORDER BY session_key LIMIT 2"
-        }
-        CatalogReadScope::RetainedHistory => {
-            "SELECT DISTINCT session_key FROM session_catalog_sources INDEXED BY session_catalog_native WHERE harness=?1 AND native_id=?2 ORDER BY session_key LIMIT 2"
-        }
+    let current_sql = "SELECT DISTINCT session_key FROM session_catalog_sources INDEXED BY session_catalog_current_native WHERE lifecycle='current' AND harness=?1 AND native_id=?2 ORDER BY session_key LIMIT 2";
+    let lookup = |sql: &str| -> rusqlite::Result<Vec<String>> {
+        tx.prepare(sql)?
+            .query_map((&result.harness, &result.native_id), |row| row.get(0))?
+            .collect()
     };
-    let keys = tx
-        .prepare(sql)?
-        .query_map((&result.harness, &result.native_id), |r| {
-            r.get::<_, String>(0)
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut keys = lookup(current_sql)?;
+    let current_owner = !keys.is_empty();
+    if !current_owner && result.read_scope == CatalogReadScope::RetainedHistory {
+        keys = lookup(
+            "SELECT DISTINCT session_key FROM session_catalog_sources INDEXED BY session_catalog_native WHERE harness=?1 AND native_id=?2 ORDER BY session_key LIMIT 2",
+        )?;
+    }
     match keys.as_slice() {
         [] => result.state = CatalogNativeResolutionState::Pending,
         [key] => {
-            let sql = match result.read_scope {
-                CatalogReadScope::Current => {
-                    "SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata END FROM session_catalog WHERE session_key=?1"
-                }
-                CatalogReadScope::RetainedHistory => {
-                    "SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata END FROM session_history_catalog WHERE session_key=?1"
+            let current_metadata = "SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata END FROM session_catalog WHERE session_key=?1";
+            let history_metadata = "SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata END FROM session_history_catalog WHERE session_key=?1";
+            let read_metadata = |sql: &str| -> rusqlite::Result<Option<Option<String>>> {
+                tx.query_row(sql, [key], |row| row.get(0)).optional()
+            };
+            // An active parsed owner may precede materialized History. Its
+            // current metadata already proves this exact native membership.
+            // Retained-only aliases prefer the richer History provenance.
+            let encoded = if current_owner {
+                read_metadata(current_metadata)?
+            } else {
+                match read_metadata(history_metadata)? {
+                    None => read_metadata(current_metadata)?,
+                    present => present,
                 }
             };
-            let encoded: Option<Option<String>> =
-                tx.query_row(sql, [key], |r| r.get(0)).optional()?;
             if let Some(Some(encoded)) = encoded {
                 let row: CatalogRow =
                     serde_json::from_str(&encoded).map_err(|_| rusqlite::Error::InvalidQuery)?;
@@ -254,6 +259,25 @@ mod tests {
         resolve(&mut db, &mut r, None).unwrap();
         assert_eq!(r.state, CatalogNativeResolutionState::Resolved);
         assert_eq!(r.catalog_key.as_deref(), Some("canonical"));
+        db.execute("DELETE FROM session_history_catalog", [])
+            .unwrap();
+        r.read_scope = CatalogReadScope::RetainedHistory;
+        resolve(&mut db, &mut r, None).unwrap();
+        assert_eq!(r.state, CatalogNativeResolutionState::Resolved);
+        assert_eq!(r.catalog_key.as_deref(), Some("canonical"));
+        db.execute(
+            "INSERT INTO session_catalog_sources VALUES('old-owner','codex','native','retained')",
+            [],
+        )
+        .unwrap();
+        resolve(&mut db, &mut r, None).unwrap();
+        assert_eq!(r.state, CatalogNativeResolutionState::Resolved);
+        db.execute(
+            "DELETE FROM session_catalog_sources WHERE session_key='old-owner'",
+            [],
+        )
+        .unwrap();
+        r.read_scope = CatalogReadScope::Current;
         db.execute(
             "INSERT INTO meta VALUES('catalog_completeness','partial')",
             [],
