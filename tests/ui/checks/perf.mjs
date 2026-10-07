@@ -29,7 +29,8 @@ const median = (values) => {
   return sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
 };
 const round = (value) => (value == null ? null : Math.round(value * 10) / 10);
-const sessionUrl = (base, token, id) => `${base}/s/claude/${encodeURIComponent(id)}?t=${token}`;
+const sessionUrl = (base, token, id) =>
+  `${base}/s/claude/${encodeURIComponent(id)}?t=${token}&compat=1`;
 
 function bucket(url) {
   try {
