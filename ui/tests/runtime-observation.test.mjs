@@ -32,9 +32,20 @@ test('readonly runtime observations preserve phase and freshness without native 
   assert.ok(Object.isFrozen(result));
   for (const patch of [
     { state: 'idle' },
+    { state: ['ended'] },
+    { state: new String('ended') },
+    {
+      state: {
+        toString() {
+          return 'ended';
+        },
+      },
+    },
     { freshness: 'cached' },
+    { freshness: ['current'] },
     { phase: 'a'.repeat(65) },
     { presence: 'up' },
+    { presence: ['absent'] },
     { observedAt: 'yesterday' },
     { observationError: 'a'.repeat(513) },
     { updating: 1 },

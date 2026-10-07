@@ -453,3 +453,116 @@ test('temporary boot failure and pending projection recover without starting glo
     await browser.close();
   }
 });
+for (const width of [390, 1280])
+  test(`bounded source discovery chooses exact keys and ignores late inventory at ${width}px`, async () => {
+    const browser = await chromium.launch();
+    try {
+      const page = await browser.newPage({ viewport: { width, height: 900 } }),
+        requests = [];
+      let inventoryReads = 0,
+        releaseInventory,
+        startedInventory;
+      const inventoryStarted = new Promise((resolve) => {
+        startedInventory = resolve;
+      });
+      await page.route('http://catalog.test/**', async (route) => {
+        const url = new URL(route.request().url());
+        requests.push(url.pathname + url.search);
+        if (url.pathname === '/api/session-capabilities')
+          return url.searchParams.has('machine')
+            ? route.fulfill({
+                json: { ...capabilities(true), source_key: url.searchParams.get('machine') },
+              })
+            : route.fulfill({
+                status: 400,
+                json: {
+                  api: 1,
+                  error: {
+                    code: 'machine_scope_required',
+                    message: 'Choose a machine',
+                    retryable: false,
+                  },
+                },
+              });
+        if (url.pathname === '/api/session-sources') {
+          if (++inventoryReads === 1) return route.fulfill({ status: 503, body: '' });
+          if (url.searchParams.has('cursor')) {
+            startedInventory();
+            await new Promise((resolve) => {
+              releaseInventory = resolve;
+            });
+            try {
+              await route.fulfill({
+                json: {
+                  api: 1,
+                  items: [{ source_key: 'late', label: 'Late machine' }],
+                  next_cursor: null,
+                },
+              });
+            } catch {}
+            return;
+          }
+          return route.fulfill({
+            json: {
+              api: 1,
+              items: [
+                { source_key: 'one', label: 'Same hostname' },
+                { source_key: 'two', label: 'Same hostname' },
+              ],
+              next_cursor: 'opaque',
+            },
+          });
+        }
+        if (url.pathname === '/api/sessions')
+          return route.fulfill({
+            json: {
+              ...list([meta('one')]),
+              machine: 'two',
+              machine_info: { key: 'two', label: 'Same hostname', freshness: 'cached' },
+            },
+          });
+        return route.fulfill({
+          contentType: url.pathname === '/viewer.css' ? 'text/css' : 'text/html',
+          body: url.pathname === '/viewer.css' ? css : html,
+        });
+      });
+      await page.goto('http://catalog.test/sessions');
+      await page.clock.install({ time: new Date('2026-10-07T00:00:00Z') });
+      await page.clock.pauseAt(new Date('2026-10-07T00:01:00Z'));
+      await page.addScriptTag({ content: outputFiles[0].text });
+      await page.evaluate(() => {
+        window.app = CatalogViewer.mountViewerApplication({
+          machinesPath: '/machines',
+          loadMachines: async () => {
+            throw Error('No global native inventory');
+          },
+        });
+      });
+      await page.getByText('Source inventory is unavailable.', { exact: false }).waitFor();
+      await page.clock.runFor(1100);
+      await page.locator('[data-source-key="two"]').waitFor();
+      await page.getByRole('button', { name: 'Load more machines', exact: true }).click();
+      await inventoryStarted;
+      await page.locator('[data-source-key="two"]').click();
+      await page.locator('#page [data-id="one"]').waitFor();
+      assert.equal(new URL(page.url()).searchParams.get('machine'), 'two');
+      releaseInventory();
+      await page.clock.runFor(100);
+      assert.equal(await page.locator('[data-source-key="late"]').count(), 0);
+      assert.equal(await page.locator('#page [data-id="one"]').count(), 1);
+      assert.equal(
+        requests.some((path) => /^\/api\/(model|tool|image|tx)/.test(path)),
+        false,
+      );
+      assert.ok(
+        requests
+          .filter((path) => path.startsWith('/api/sessions?'))
+          .every(
+            (path) => new URL('http://catalog.test' + path).searchParams.get('machine') === 'two',
+          ),
+      );
+      await page.evaluate(() => app.destroy());
+    } finally {
+      await browser.close();
+    }
+  });
