@@ -67,8 +67,7 @@ export function parseCatalogTranscriptPage(value: unknown): CatalogTranscriptPag
   const row = object(value);
   if (!Array.isArray(row.entries) || row.entries.length > 100)
     throw new Error('Invalid catalog transcript page size');
-  const
-    identity = parseCatalogIdentity(row.identity),
+  const identity = parseCatalogIdentity(row.identity),
     session = parseCatalogSession(row.session),
     projection = object(row.projection),
     range = object(row.range),
