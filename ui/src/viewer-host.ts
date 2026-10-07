@@ -14,6 +14,14 @@ export interface ViewerHost {
   modelAccount?(account: Account | null): void;
   /** Host SSE models enter the existing validated model transaction. */
   modelStream?: string;
+  /** Bind hosted model/control reads to the selected native session and model machine. */
+  selectedModel?: boolean;
+  /** Separate bounded status snapshots, independent of content model revisions. */
+  controlStream?: string;
+  /** Exact catalog/source status; identity comes from the accepted Viewer selection owner. */
+  catalogControlStream?: string;
+  /** Readonly selected phase/status by source/catalog intent, independent of native identity. */
+  catalogRuntimeStream?: string;
   modelNavigation?(model: unknown): void;
   /** Return true when the host has taken native recovery for a model failure. */
   modelFailed?(status: number): boolean;

@@ -95,6 +95,7 @@ struct Selection {
     start: usize,
     slots: Vec<SavedSlot>,
     sources: BTreeMap<PathBuf, CatalogSource>,
+    history_incomplete: bool,
 }
 
 fn read(
@@ -238,9 +239,27 @@ fn read(
     if catalog_generation.as_deref() != Some(identity.generation.as_str()) {
         return Ok(stale());
     }
+    let history_projection =
+        history && crate::history_projection::catalog(&transaction, &key)?.is_some();
+    let history_incomplete = history_projection
+        && transaction.query_row(
+            "SELECT incomplete FROM session_history_projections WHERE session_key=?1",
+            [&key],
+            |row| row.get::<_, bool>(0),
+        )?;
+    let header_table = if history_projection {
+        "session_history_projections"
+    } else {
+        "session_slot_projections"
+    };
+    let slot_table = if history_projection {
+        "session_history_slots"
+    } else {
+        "session_slots"
+    };
     let projection: Option<(String, u32, i64)> = transaction
         .query_row(
-            "SELECT generation,version,total FROM session_slot_projections WHERE session_key=?1",
+            &format!("SELECT generation,version,total FROM {header_table} WHERE session_key=?1"),
             [&key],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
@@ -267,7 +286,7 @@ fn read(
     let end = first.saturating_add(limit).min(total);
     let start = first.saturating_sub(1);
     let mut statement = transaction.prepare(
-        "SELECT CASE WHEN length(metadata)<=65536 THEN metadata ELSE NULL END FROM session_slots WHERE session_key=?1 AND slot>=?2 AND slot<?3 ORDER BY slot")?;
+        &format!("SELECT CASE WHEN octet_length(metadata)<=65536 THEN metadata ELSE NULL END FROM {slot_table} WHERE session_key=?1 AND slot>=?2 AND slot<?3 ORDER BY slot"))?;
     let texts: Vec<String> = statement
         .query_map(
             rusqlite::params![
@@ -286,11 +305,15 @@ fn read(
     if slots.len() != end.saturating_add(1).min(total) - start {
         return Ok(unavailable());
     }
-    let row_text: String = transaction.query_row(
-        "SELECT metadata FROM session_catalog WHERE session_key=?1",
-        [&key],
-        |row| row.get(0),
-    )?;
+    let row_text: String = if history_projection {
+        crate::history_projection::catalog(&transaction, &key)?.ok_or_else(invalid)?
+    } else {
+        transaction.query_row(
+            "SELECT metadata FROM session_catalog WHERE session_key=?1",
+            [&key],
+            |row| row.get(0),
+        )?
+    };
     let row: crate::model::summary::CatalogRow = serde_json::from_str(&row_text)?;
     let sources = row
         .sources
@@ -308,6 +331,7 @@ fn read(
         start,
         slots,
         sources,
+        history_incomplete,
     };
     if let Some(chunk) = argument("field_chunk") {
         let Ok(chunk) = chunk.parse::<usize>() else {
@@ -433,6 +457,9 @@ impl SessionSourceReader for Local<'_> {
             #[cfg(not(unix))]
             let identity = (0, 0);
             identity == (source.dev, source.ino)
+                && source
+                    .changed_ns
+                    .is_some_and(|token| Some(token) == crate::events::change_time_ns(metadata))
                 && metadata.len() == source.size
                 && metadata
                     .modified()
@@ -782,7 +809,7 @@ fn render(
     }
     let failures = lines.failures;
     drop(lines);
-    let state = if failures > 0 || incomplete_entries > 0 {
+    let state = if failures > 0 || incomplete_entries > 0 || selection.history_incomplete {
         "incomplete"
     } else {
         selection.identity.freshness.state.as_str()
@@ -790,7 +817,7 @@ fn render(
     use sha2::{Digest, Sha256};
     let content_sources:Vec<_>=generations.iter().filter_map(|(path,(generation,length,cached))|references.get(path).map(|source|
         json!({"source":source,"generation_hash":format!("{:x}",Sha256::digest(generation.as_bytes())),"length":length,"cached":cached}))).collect();
-    let content_state = if failures > 0 || incomplete_entries > 0 {
+    let content_state = if failures > 0 || incomplete_entries > 0 || selection.history_incomplete {
         "incomplete"
     } else if generations.values().any(|source| !source.2) {
         "available"
@@ -800,7 +827,7 @@ fn render(
     reply(
         200,
         json!({"api":1,"identity":selection.identity,"session":selection.session,
-        "projection":{"version":VERSION,"generation":selection.generation,"total":selection.total},
+        "projection":{"version":VERSION,"generation":selection.generation,"total":selection.total,"history_incomplete":selection.history_incomplete},
         "range":{"first":selection.first,"end":selection.end,"next":(selection.end<selection.total).then_some(selection.end)},
         "entries":entries,"freshness":{"state":state},"content_observation":{"state":content_state,"sources":content_sources},
         "relationship_context":{"state":"incomplete","turn_ids":turn_ids,"handoffs":[]},

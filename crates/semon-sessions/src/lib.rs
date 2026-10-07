@@ -17,8 +17,9 @@ mod catalog;
 mod catalog_observer;
 pub use catalog::{
     CatalogFreshness, CatalogIdentityError, CatalogReadScope, CatalogSessionIdentity,
-    CatalogSourceObservation, SessionSourceRef, session_catalog_history_identity,
-    session_catalog_identity, session_catalog_page,
+    CatalogSourceObservation, SessionSourceProof, SessionSourceRef,
+    session_catalog_history_identity, session_catalog_identity, session_catalog_page,
+    session_source_proof,
 };
 pub use catalog_observer::SessionCatalogObserver;
 mod claude_usage;
@@ -44,6 +45,7 @@ mod native_field;
 mod read_capabilities;
 mod source_inventory;
 pub use source_inventory::SessionSourceInventory;
+mod history_projection;
 mod received;
 mod refresh;
 mod repo;

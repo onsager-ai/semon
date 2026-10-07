@@ -102,15 +102,21 @@ function Permission({ request }: { request: ControlRequest }) {
     </>
   );
 }
-export function LocalControl({ view }: { view: ControlView }) {
+export function LocalControl({
+  view,
+  runtimeObserved = false,
+}: {
+  view: ControlView;
+  runtimeObserved?: boolean;
+}) {
   const [text, setText] = useState('');
   const s = view.snapshot;
-  const canSend =
+  const canWrite =
     !view.busy &&
     !view.uncertain &&
     s.connected &&
-    (s.activeTurn ? s.capabilities.steer : s.capabilities.input) &&
-    !!text.trim();
+    (s.activeTurn ? s.capabilities.steer : s.capabilities.input);
+  const canSend = canWrite && !!text.trim();
   const showStop = !!s.activeTurn && s.capabilities.interrupt && !text.trim();
   const pending = s.requests.filter((r) => r.state.state === 'open' || r.state.state === 'claimed');
   const recent = s.requests
@@ -118,8 +124,32 @@ export function LocalControl({ view }: { view: ControlView }) {
     .slice(-10);
   return (
     <section class="local-control" aria-label="Conversation controls">
-      {!s.connected && <p role="status">Reconnecting to your session…</p>}
+      {!s.connected && (
+        <p role="status">
+          {runtimeObserved
+            ? 'Native session controls are unavailable.'
+            : s.runtime?.state === 'ended'
+              ? 'This session has ended.'
+              : s.runtime?.state === 'failed'
+                ? 'This environment needs attention.'
+                : s.runtime?.state === 'disconnected'
+                  ? 'This environment is disconnected.'
+                  : s.runtime?.state === 'unavailable'
+                    ? 'Runtime state is unavailable.'
+                    : 'Reconnecting to your session…'}
+        </p>
+      )}
       {s.reason && <p>{s.reason}</p>}
+      {s.runtime && s.runtime.freshness !== 'current' && (
+        <p role="status">
+          {s.runtime.freshness === 'updating'
+            ? 'Checking the environment…'
+            : s.runtime.freshness === 'stale'
+              ? 'Last environment observation is stale.'
+              : 'Current environment observation is unavailable.'}
+        </p>
+      )}
+      {s.runtime?.observationError && <p>{s.runtime.observationError}</p>}
       {pending.map((request) => {
         const supported =
           request.kind === 'question'
@@ -173,8 +203,10 @@ export function LocalControl({ view }: { view: ControlView }) {
         aria-busy={view.busy || undefined}
         onSubmit={async (event) => {
           event.preventDefault();
-          if (!canSend) return;
-          const submitted = text;
+          // Input and Enter can share a render batch. Read the current draft,
+          // while native authority and acceptance still govern the write.
+          const submitted = event.currentTarget.querySelector('textarea')?.value ?? text;
+          if (!canWrite || !submitted.trim()) return;
           if (await view.send(submitted))
             setText((current) => (current === submitted ? '' : current));
         }}
@@ -190,7 +222,8 @@ export function LocalControl({ view }: { view: ControlView }) {
           onKeyDown={(event) => {
             if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
               event.preventDefault();
-              if (canSend) event.currentTarget.form?.requestSubmit();
+              if (canWrite && event.currentTarget.value.trim())
+                event.currentTarget.form?.requestSubmit();
             }
           }}
         />
@@ -225,18 +258,20 @@ export function LocalControl({ view }: { view: ControlView }) {
           )}
         </button>
       </form>
-      {(!s.connected || view.uncertain) && (
-        <div class="local-control-actions">
-          <button
-            type="button"
-            class="btn sh-quiet"
-            disabled={view.busy}
-            onClick={() => view.reconnect()}
-          >
-            Reconnect
-          </button>
-        </div>
-      )}
+      {(!s.connected || view.uncertain) &&
+        view.canReconnect !== false &&
+        s.runtime?.reconnectable !== false && (
+          <div class="local-control-actions">
+            <button
+              type="button"
+              class="btn sh-quiet"
+              disabled={view.busy}
+              onClick={() => view.reconnect()}
+            >
+              Reconnect
+            </button>
+          </div>
+        )}
       {view.note && <p role="status">{view.note}</p>}
       {recent.length > 0 && (
         <details>
