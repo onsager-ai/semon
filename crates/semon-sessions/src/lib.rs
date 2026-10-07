@@ -14,12 +14,14 @@ use serde_json::Value;
 
 mod analytics;
 mod catalog;
+mod catalog_observer;
 pub use catalog::{
     CatalogFreshness, CatalogIdentityError, CatalogReadScope, CatalogSessionIdentity,
     CatalogSourceObservation, SessionSourceProof, SessionSourceRef,
     session_catalog_history_identity, session_catalog_identity, session_catalog_page,
     session_source_proof,
 };
+pub use catalog_observer::SessionCatalogObserver;
 mod claude_usage;
 pub mod copilot;
 pub use claude_usage::ClaudeUsageEvidence;
@@ -41,6 +43,8 @@ pub(crate) use read_path::open_input;
 mod model_delta;
 mod native_field;
 mod read_capabilities;
+mod source_inventory;
+pub use source_inventory::SessionSourceInventory;
 mod received;
 mod refresh;
 mod repo;
