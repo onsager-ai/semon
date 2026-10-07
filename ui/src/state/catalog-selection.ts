@@ -19,6 +19,7 @@ export class CatalogSelectionStore {
     if (this.disposed) throw new Error('Catalog selection is destroyed');
     if (
       typeof scope.source_key !== 'string' ||
+      !scope.source_key ||
       typeof scope.catalog_key !== 'string' ||
       !scope.catalog_key
     )

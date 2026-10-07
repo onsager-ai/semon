@@ -66,3 +66,104 @@ Current coherent publication still builds all background native histories; dirty
 component publication remains a separate dependency. Metadata-only q/global
 union pagination are also unfinished. This slice does not satisfy all #319
 acceptance criteria or claim a complete default Viewer journey.
+
+## Qualified string fields
+
+Recipe version 2 indexes plain Claude user, assistant and thinking strings during
+complete observation. It stores only an allowlisted field pointer, scalar-safe
+raw offsets/checkpoints and native event identity. It does not persist body text.
+Structured user content with multiple blocks, attachments, Codex records and tool
+formatting wrappers remain unsupported by this field path.
+
+Selected previews decode at most 4 KiB of text from at most 4 KiB + 11 raw bytes.
+A clipped entry exposes `field: {name: "text", chunks, complete}`. The scoped
+`/api/session-entry` endpoint requires `sid`, `after`, `limit=1`, the observed
+projection `generation`, and a `field_chunk` ordinal. Each ordinal addresses one
+persisted scalar-safe checkpoint interval, capped at 64 KiB + 11 raw bytes and
+128 KiB decoded text. It never reads or decodes earlier field bytes. A generation
+change returns the normal 409 resynchronization response; unqualified fields
+return 422 and unavailable source ranges return 503.
+
+`selected_entry` advertises this qualified endpoint; `large_native_records`
+remains false because native formats outside this allowlist remain incomplete.
+Producer indexing still rereads qualified source records during a complete
+rebuild, and repeated slots can duplicate producer parsing. This work is outside
+the bounded request path and remains a measured background-refresh concern.
+
+## Common tool fields and host dispatch
+
+Recipe version 3 adds string Claude `tool_result.content` and Codex
+`function_call_output.output` (including an object with a string `output`). A
+qualified result field feeds the shared native tool renderer; the small native
+call supplies its name, argument preview and recorded outcome. Call context that
+exceeds the request record budget remains visibly incomplete. Codex formatting
+frames, provider truncation markers and embedded JSON strings that require
+another decoding layer remain unqualified pending the producer mapping contract.
+The result descriptor and expansion response use `field.name: "out"`.
+
+Native slot UUIDs are persisted as metadata so a failed byte observation retains
+entry identity and provenance. Useful already-loaded content can remain visible
+with its incomplete observation overlay. The bounded response also reports
+`content_observation` separately from local source/facts/native-selection
+freshness. Its source generation hashes fingerprint opaque reader generation
+identifiers, rather than purporting to hash returned content.
+
+Hosts can opt into `session_transcript_range_with_mode` or
+`session_entry_field_with_mode` with `LocalThenProvider`. Only a missing original
+local source falls through to the request-owned provider. A changed/replaced
+local source, permission denial or missing/corrupt sealed segment must resynchronize
+and does not silently fall through. The host must authorize before and after the
+complete call because its callback is not invoked for qualified local bytes.
+Default provider-only behavior remains available.
+
+`session_catalog_capabilities` and `SessionReadEndpoints` provide pure capability
+advertisement for an already-authorized source without creating a ViewerCore or
+restoring/discovering sources. The public default Viewer exposes the stable
+catalog-only `local` source alias; legacy internal identities remain unchanged.
+
+### Configured source inventory
+
+`GET /api/session-sources?limit=60&cursor=...` returns API 1 `items` with
+`source_key` and `label`, plus an opaque `next_cursor` or null. Limits are 1–100;
+clients percent-encode the returned cursor once. A changed configuration returns
+409 `stale_cursor`. Labels describe configured source keys, not runtime health.
+The original single-machine Viewer advertises `local` as its explicit catalog
+source key. Duplicate or empty configured keys fail explicitly.
+
+`SessionSourceInventory` is a reusable metadata-only keyset registry. Hosts build
+it when their authorized configuration changes, then reuse it for paged reads.
+ViewerCore builds the fixed configuration index during construction; focused
+source lookup uses the same ordered index and never initializes a native model.
+The received-directory compatibility mode still discovers machine metadata in
+`follow()` on each request. Removing that directory-wide discovery from the cold
+and warm journey remains separate work; this registry does not claim that mode
+is bounded by the returned page.
+
+### Producer demand without a ViewerCore
+
+A host retains `SessionCatalogObserver` per configured source and calls `changed()`
+after an authorized native push, including when no browser exists. Focused reads
+may call `demand()` to queue initial or recovery observation. Both use the existing
+bounded refresh pool, coalescing and publication revision checks; neither call
+waits for a native history build. `close()` stops and drains work before source
+configuration or custody is replaced. The host owns the observer lifetime and
+must authorize options before construction.
+
+The existing producer still observes the complete selected machine in the
+background. This activation seam does not qualify bounded dirty dependency
+recomputation, nor does it initialize unrelated machine models. First useful
+content before an initial projection exists remains explicitly updating or
+unavailable until that publication completes.
+
+### Qualified encoded Codex results
+
+Recipe version 4 also binds a two-layer string descriptor for string-valued
+Codex outputs that encode a JSON object containing a string `output` field.
+The producer qualifies that field once, matching the shared native formatter's
+unwrapping behavior. Both previews and expansion decode only the requested raw
+checkpoint interval; they do not parse the encoded wrapper on requests. Scalar
+read slack is 71 bytes for the largest two-layer escape. Common Claude results
+with one text block also use their exact string span. Multi-block synthesis,
+structured non-string fields and native cuts remain unsupported rather than
+falling back to complete records. Version 3 recipes must be rebuilt before this
+new reader accepts them.

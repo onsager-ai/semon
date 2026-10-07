@@ -18,7 +18,7 @@ export interface CatalogTranscriptEntry {
   entry: Entry;
   native_action_text?: string;
   clipped?: boolean;
-  field?: { name: 'text' | 'out'; chunks: number; complete: boolean };
+  field?: { name: 'text' | 'out'; chunks: number; complete: boolean; layers: 1 | 2 };
   freshness?: { state: CatalogFreshness };
   provenance: {
     source: CatalogSourceReference['source'];
@@ -32,7 +32,7 @@ export interface CatalogTranscriptPage {
   api: 1;
   identity: CatalogSessionIdentity;
   session: CatalogSession;
-  projection: { version: 1; generation: string; total: number };
+  projection: { version: 4; generation: string; total: number };
   range: { first: number; end: number; next: number | null };
   entries: CatalogTranscriptEntry[];
   freshness: { state: CatalogFreshness };
@@ -55,7 +55,10 @@ function entry(value: unknown): CatalogTranscriptEntry {
     const reference = object(row.field);
     if (reference.name !== 'text' && reference.name !== 'out')
       throw new Error('Unsupported native text field');
+    const layers = reference.layers ?? 1;
+    if (layers !== 1 && layers !== 2) throw new Error('Unsupported native field encoding');
     field = {
+      layers,
       name: reference.name,
       chunks: ordinal(reference.chunks),
       complete: boolean(reference.complete),
@@ -110,7 +113,7 @@ export function parseCatalogTranscriptPage(value: unknown): CatalogTranscriptPag
     state = object(row.freshness).state;
   if (
     row.api !== 1 ||
-    projection.version !== 1 ||
+    projection.version !== 4 ||
     !/^[0-9a-f]{64}$/i.test(generation) ||
     session.key !== identity.catalog_key ||
     session.harness !== identity.harness ||
@@ -131,7 +134,7 @@ export function parseCatalogTranscriptPage(value: unknown): CatalogTranscriptPag
     api: 1,
     identity,
     session,
-    projection: { version: 1, generation, total },
+    projection: { version: 4, generation, total },
     range: { first, end, next },
     entries,
     freshness: { state },

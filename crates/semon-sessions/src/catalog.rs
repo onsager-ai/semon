@@ -1233,6 +1233,49 @@ mod tests {
     }
 
     #[test]
+    fn source_projection_readiness_defers_oversized_metadata_and_source_context() {
+        let fixture = Fixture::new();
+        fixture.publish(1);
+        let relative = "projects/project/session-00000.jsonl";
+        let connection = Connection::open(EventCache::path(&fixture.options.cache)).unwrap();
+        let encoded: String = connection
+            .query_row("SELECT metadata FROM session_catalog", [], |row| row.get(0))
+            .unwrap();
+        let mut row: CatalogRow = serde_json::from_str(&encoded).unwrap();
+        row.name = "x".repeat(1024 * 1024);
+        connection
+            .execute(
+                "UPDATE session_catalog SET metadata=?1",
+                [serde_json::to_string(&row).unwrap()],
+            )
+            .unwrap();
+        assert!(
+            crate::source_projection_ready(&fixture.options, "claude", relative)
+                .unwrap()
+                .is_none()
+        );
+        row = serde_json::from_str(&encoded).unwrap();
+        row.sources = vec![row.sources[0].clone(); 65];
+        connection
+            .execute(
+                "UPDATE session_catalog SET metadata=?1",
+                [serde_json::to_string(&row).unwrap()],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "UPDATE session_slot_projections SET source_generation=?1",
+                [crate::retention::source_generation(&row.sources).unwrap()],
+            )
+            .unwrap();
+        assert!(
+            crate::source_projection_ready(&fixture.options, "claude", relative)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
     fn source_projection_readiness_never_initializes_and_rejects_stale_headers() {
         let fixture = Fixture::new();
         let relative = "projects/project/session-00000.jsonl";
@@ -1516,8 +1559,24 @@ mod tests {
         );
         let (_, latest) = get("sid=selected&limit=1");
         assert_eq!(latest["range"]["first"], 2);
-        assert_eq!(latest["freshness"]["state"], "incomplete");
-        assert!(latest["observation"]["source_bytes"].as_u64().unwrap() <= 128 * 1024);
+        assert_eq!(latest["freshness"]["state"], "cached");
+        assert_eq!(latest["entries"][0]["clipped"], true);
+        assert!(latest["observation"]["source_bytes"].as_u64().unwrap() <= 4096 + 11);
+        let generation = latest["projection"]["generation"].as_str().unwrap();
+        let chunks = latest["entries"][0]["field"]["chunks"].as_u64().unwrap();
+        let mut expanded = String::new();
+        for chunk in 0..chunks {
+            let query =
+                format!("sid=selected&after=2&limit=1&generation={generation}&field_chunk={chunk}");
+            let reply = crate::session_entry_field(&fixture.options, "source", &query, None);
+            assert_eq!(reply.status, 200);
+            let body: Value = serde_json::from_slice(&reply.body).unwrap();
+            assert!(body["observation"]["source_bytes"].as_u64().unwrap() <= 64 * 1024 + 11);
+            expanded.push_str(body["text"].as_str().unwrap());
+        }
+        assert_eq!(expanded, "large answer unique body ".repeat(16000));
+        assert_eq!(get("sid=selected&after=%GG").0, 400);
+        assert_eq!(get("sid=selected&scope=unknown").0, 400);
         assert_eq!(get("sid=selected&generation=wrong").0, 409);
         assert_eq!(get("sid=selected&after=99").0, 400);
         assert_eq!(get("sid=missing").0, 404);
@@ -1595,6 +1654,7 @@ mod tests {
         struct Provider {
             bytes: Vec<u8>,
             changed: bool,
+            cached: bool,
             calls: std::sync::atomic::AtomicUsize,
         }
         impl crate::SessionSourceReader for Provider {
@@ -1629,13 +1689,14 @@ mod tests {
                     bytes: std::sync::Arc::from(
                         &self.bytes[offset..offset.saturating_add(max).min(self.bytes.len())],
                     ),
-                    cached: true,
+                    cached: self.cached,
                 })
             }
         }
         let provider = Provider {
             bytes: bytes.clone(),
             changed: false,
+            cached: true,
             calls: std::sync::atomic::AtomicUsize::new(0),
         };
         crate::events::CACHE_READS.with(|reads| reads.set(0));
@@ -1652,9 +1713,39 @@ mod tests {
         assert_eq!(body["entries"][1]["freshness"]["state"], "cached");
         assert_eq!(provider.calls.load(Ordering::Relaxed), 2);
         assert!(!path.exists());
+        assert_eq!(body["content_observation"]["state"], "cached");
+        let fresh = Provider {
+            bytes: bytes.clone(),
+            changed: false,
+            cached: false,
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        };
+        let reply = crate::session_transcript_range(
+            &fixture.options,
+            "source",
+            "sid=archived&after=0&limit=2",
+            Some(&fresh),
+        );
+        assert_eq!(reply.status, 200);
+        let fresh_body: Value = serde_json::from_slice(&reply.body).unwrap();
+        assert_eq!(fresh_body["content_observation"]["state"], "available");
+        assert_eq!(fresh_body["identity"]["freshness"]["state"], "unavailable");
+        let generation = fresh_body["projection"]["generation"].as_str().unwrap();
+        let reply = crate::session_entry_field(
+            &fixture.options,
+            "source",
+            &format!("sid=archived&after=1&limit=1&generation={generation}&field_chunk=0"),
+            Some(&fresh),
+        );
+        assert_eq!(reply.status, 200);
+        let field: Value = serde_json::from_slice(&reply.body).unwrap();
+        assert_eq!(field["text"], "retained native answer");
+        assert_eq!(field["content_observation"]["state"], "available");
+        assert_eq!(field["field"]["layers"], 1);
         let changed = Provider {
             bytes,
             changed: true,
+            cached: true,
             calls: std::sync::atomic::AtomicUsize::new(0),
         };
         let reply = crate::session_transcript_range(
@@ -1669,6 +1760,297 @@ mod tests {
         assert_eq!(body["entries"][1]["freshness"]["state"], "incomplete");
         crate::events::CACHE_READS.with(|reads| assert_eq!(reads.get(), 0));
         assert!(!path.exists());
+    }
+
+    #[test]
+    fn source_observer_publishes_first_push_without_a_viewer_core() {
+        let fixture = Fixture::new();
+        fixture.source("first-push");
+        let observer = crate::SessionCatalogObserver::new(fixture.options.clone());
+        assert!(!EventCache::path(&fixture.options.cache).exists());
+        observer.changed().unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let reply = session_catalog_page(&fixture.options, "configured", "sid=first-push");
+            if reply.status == 200 {
+                let body: Value = serde_json::from_slice(&reply.body).unwrap();
+                if body["items"]
+                    .as_array()
+                    .is_some_and(|items| items.len() == 1)
+                {
+                    assert_eq!(body["items"][0]["key"], "first-push");
+                    break;
+                }
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "source publication did not complete"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        observer.close();
+        assert!(EventCache::path(&fixture.options.cache).exists());
+        let mut core = ViewerCore::new(fixture.options.clone());
+        assert!(!core.demand_catalog_source("local").unwrap());
+        core.set_refresh(Refresh::OnInvalidate);
+        assert!(!core.demand_catalog_source("wrong").unwrap());
+        assert!(core.demand_catalog_source("local").unwrap());
+        core.close();
+        assert!(!core.demand_catalog_source("local").unwrap());
+    }
+
+    #[test]
+    fn default_local_viewer_advertises_a_nonempty_stable_catalog_source() {
+        let fixture = Fixture::new();
+        fixture.publish(1);
+        let core = ViewerCore::new(fixture.options.clone());
+        let inventory = core.respond("GET", "/api/session-sources", "limit=1", None);
+        assert_eq!(inventory.status, 200);
+        let inventory: Value = serde_json::from_slice(&inventory.body).unwrap();
+        assert_eq!(
+            inventory["items"],
+            serde_json::json!([{"source_key":"local","label":"local"}])
+        );
+        assert!(inventory["next_cursor"].is_null());
+        let capability = core.respond("GET", "/api/session-capabilities", "", None);
+        assert_eq!(capability.status, 200);
+        let body: Value = serde_json::from_slice(&capability.body).unwrap();
+        assert_eq!(body["source_key"], "local");
+        for (path, query) in [
+            ("/api/session-identity", "sid=session-00000"),
+            (
+                "/api/session-transcript",
+                "machine=local&sid=session-00000&after=0&limit=1",
+            ),
+        ] {
+            let reply = core.respond("GET", path, query, None);
+            assert_eq!(
+                reply.status,
+                200,
+                "{}",
+                String::from_utf8_lossy(&reply.body)
+            );
+            let body: Value = serde_json::from_slice(&reply.body).unwrap();
+            assert_eq!(body["identity"]["source_key"], "local");
+        }
+        let reply = core.respond(
+            "GET",
+            "/api/sessions",
+            "machine=local&sid=session-00000",
+            None,
+        );
+        assert_eq!(reply.status, 200);
+        let body: Value = serde_json::from_slice(&reply.body).unwrap();
+        assert_eq!(body["machine"], "local");
+        assert_eq!(
+            core.respond(
+                "GET",
+                "/api/session-identity",
+                "machine=wrong&sid=session-00000",
+                None
+            )
+            .status,
+            404
+        );
+    }
+
+    #[test]
+    fn native_tool_outputs_use_bounded_string_fields_and_preserve_call_context() {
+        for harness in [
+            "claude",
+            "claude-block",
+            "codex",
+            "codex-encoded",
+            "codex-object",
+        ] {
+            let fixture = Fixture::new();
+            let body = "native tool output line \"quoted\" \n".repeat(15000);
+            let key = if harness.starts_with("claude") {
+                "claude-tools"
+            } else {
+                "codex-tools"
+            };
+            let (path, records) = if harness.starts_with("claude") {
+                let content = if harness == "claude-block" {
+                    json!([{"type":"text","text":body}])
+                } else {
+                    json!(body)
+                };
+                (
+                    fixture.source(key),
+                    vec![
+                        json!({"type":"assistant","sessionId":key,"uuid":"native-call","parentUuid":key,"timestamp":"2026-10-01T00:00:01Z","message":{"role":"assistant","content":[{"type":"tool_use","id":"native-tool","name":"Bash","input":{"command":"printf fixture"}}]}}),
+                        json!({"type":"user","sessionId":key,"uuid":"native-result","parentUuid":"native-call","timestamp":"2026-10-01T00:00:02Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"native-tool","content":content}]}}),
+                    ],
+                )
+            } else {
+                let relative = "sessions/2026/10/01/rollout-codex-tools.jsonl";
+                let path = fixture.options.codex_home.join(relative);
+                fs::create_dir_all(path.parent().unwrap()).unwrap();
+                let facts_path = fixture.options.facts.as_ref().unwrap();
+                let mut facts = crate::read_facts(facts_path).unwrap();
+                facts.codex_rollouts =
+                    Some(std::collections::BTreeSet::from([relative.to_owned()]));
+                crate::write_facts(facts_path, &facts).unwrap();
+                let output = match harness {
+                    "codex-encoded" => {
+                        json!(json!({"output":body,"metadata":{"exit_code":0}}).to_string())
+                    }
+                    "codex-object" => json!({"output":body,"metadata":{"exit_code":0}}),
+                    _ => json!(body),
+                };
+                (
+                    path,
+                    vec![
+                        json!({"type":"session_meta","timestamp":"2026-10-01T00:00:00Z","payload":{"id":key,"cwd":"/synthetic/project"}}),
+                        json!({"type":"response_item","timestamp":"2026-10-01T00:00:01Z","payload":{"type":"function_call","name":"exec_command","call_id":"native-tool","arguments":"{\"cmd\":\"printf fixture\"}"}}),
+                        json!({"type":"response_item","timestamp":"2026-10-01T00:00:02Z","payload":{"type":"function_call_output","call_id":"native-tool","output":output}}),
+                    ],
+                )
+            };
+            use std::io::Write;
+            let mut file = fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&path)
+                .unwrap();
+            for record in records {
+                writeln!(file, "{record}").unwrap();
+            }
+            drop(file);
+            fixture.publish(1);
+            crate::events::CACHE_READS.with(|reads| reads.set(0));
+            let reply = crate::session_transcript_range(
+                &fixture.options,
+                "source",
+                &format!("sid={key}&after=0&limit=100"),
+                None,
+            );
+            assert_eq!(
+                reply.status,
+                200,
+                "{harness}: {}",
+                String::from_utf8_lossy(&reply.body)
+            );
+            let page: Value = serde_json::from_slice(&reply.body).unwrap();
+            let entry = page["entries"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|entry| entry["k"] == "tool")
+                .expect("native tool slot");
+            assert_eq!(entry["field"]["name"], "out", "{harness}: {entry}");
+            assert!(
+                entry["ok"] == true || entry["ok"].is_null(),
+                "{harness}: {entry}"
+            );
+            assert!(
+                entry["arg"]
+                    .as_str()
+                    .is_some_and(|arg| arg.contains("printf fixture")),
+                "{harness}: {entry}"
+            );
+            assert!(
+                entry["out"]
+                    .as_str()
+                    .unwrap()
+                    .starts_with("native tool output line")
+            );
+            assert!(page["observation"]["source_bytes"].as_u64().unwrap() < 16 * 1024);
+            let generation = page["projection"]["generation"].as_str().unwrap();
+            let slot = entry["slot"].as_u64().unwrap();
+            let chunks = entry["field"]["chunks"].as_u64().unwrap();
+            let mut expanded = String::new();
+            for chunk in 0..chunks {
+                let reply = crate::session_entry_field(
+                    &fixture.options,
+                    "source",
+                    &format!(
+                        "sid={key}&after={slot}&limit=1&generation={generation}&field_chunk={chunk}"
+                    ),
+                    None,
+                );
+                assert_eq!(reply.status, 200);
+                let part: Value = serde_json::from_slice(&reply.body).unwrap();
+                assert_eq!(part["field"]["name"], "out");
+                assert_eq!(
+                    part["field"]["layers"],
+                    if harness == "codex-encoded" { 2 } else { 1 }
+                );
+                assert_eq!(part["content_observation"]["state"], "cached");
+                assert_eq!(
+                    part["content_observation"]["sources"][0]["generation_hash"]
+                        .as_str()
+                        .unwrap()
+                        .len(),
+                    64
+                );
+                expanded.push_str(part["text"].as_str().unwrap());
+            }
+            assert_eq!(expanded, body);
+            crate::events::CACHE_READS.with(|reads| assert_eq!(reads.get(), 0));
+        }
+    }
+
+    #[test]
+    fn mixed_local_and_provider_reads_never_fallback_for_replaced_sources() {
+        let fixture = Fixture::new();
+        let path = fixture.source("mixed");
+        fixture.publish(1);
+        struct Reject(std::sync::atomic::AtomicUsize);
+        impl crate::SessionSourceReader for Reject {
+            fn read_range(
+                &self,
+                _: &SessionSourceRef,
+                _: Option<&str>,
+                _: u64,
+                _: usize,
+            ) -> io::Result<crate::SessionSourceRange> {
+                self.0.fetch_add(1, Ordering::Relaxed);
+                Err(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    "no authorized archive",
+                ))
+            }
+        }
+        let provider = Reject(std::sync::atomic::AtomicUsize::new(0));
+        let get = || {
+            crate::session_transcript_range_with_mode(
+                &fixture.options,
+                "source",
+                "sid=mixed&after=0&limit=1",
+                Some(&provider),
+                crate::SessionSourceReadMode::LocalThenProvider,
+            )
+        };
+        let first = get();
+        assert_eq!(first.status, 200);
+        let body: Value = serde_json::from_slice(&first.body).unwrap();
+        assert_eq!(body["entries"][0]["text"], "synthetic prompt");
+        let identity = body["entries"][0]["entry_id"].clone();
+        let provenance = body["entries"][0]["provenance"].clone();
+        assert_eq!(provider.0.load(Ordering::Relaxed), 0);
+        fs::remove_file(&path).unwrap();
+        fs::write(&path, "{}\n").unwrap();
+        let changed = get();
+        let body: Value = serde_json::from_slice(&changed.body).unwrap();
+        assert_eq!(body["entries"][0]["freshness"]["state"], "incomplete");
+        assert_eq!(body["entries"][0]["entry_id"], identity);
+        assert_eq!(body["entries"][0]["provenance"], provenance);
+        assert_eq!(
+            provider.0.load(Ordering::Relaxed),
+            0,
+            "replacement must resynchronize, not restore old source bytes"
+        );
+        fs::remove_file(&path).unwrap();
+        let missing = get();
+        let body: Value = serde_json::from_slice(&missing.body).unwrap();
+        assert_eq!(body["entries"][0]["freshness"]["state"], "incomplete");
+        assert_eq!(
+            provider.0.load(Ordering::Relaxed),
+            1,
+            "only absent top-level source requests host reader"
+        );
     }
 
     #[test]

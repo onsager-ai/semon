@@ -3207,7 +3207,7 @@ globalThis.__semonUIShared = __semonUIShared;
           ]
         }
       ),
-      (!s.connected || view.uncertain) && s.runtime?.reconnectable !== false && /* @__PURE__ */ jsx("div", { class: "local-control-actions", children: /* @__PURE__ */ jsx(
+      (!s.connected || view.uncertain) && view.canReconnect !== false && s.runtime?.reconnectable !== false && /* @__PURE__ */ jsx("div", { class: "local-control-actions", children: /* @__PURE__ */ jsx(
         "button",
         {
           type: "button",
@@ -6023,6 +6023,14 @@ globalThis.__semonUIShared = __semonUIShared;
     owner.snapshot = { ...owner.snapshot, control };
     owner.controls?.();
   }
+  function updateSessionRuntime(root, runtime) {
+    const owner = owners.get(root);
+    if (!owner || owner.disposed) return;
+    const hadRuntime = !!owner.snapshot.runtime;
+    owner.snapshot = { ...owner.snapshot, runtime };
+    owner.runtime?.();
+    if (hadRuntime !== !!runtime) owner.controls?.();
+  }
   function updateSessionPager(root, view) {
     const owner = owners.get(root);
     if (!owner || owner.snapshot.id !== view.sid) return;
@@ -7066,13 +7074,13 @@ globalThis.__semonUIShared = __semonUIShared;
       (key) => record2(value.capabilities) && typeof value.capabilities[key] === "boolean"
     ) || !Array.isArray(value.requests) || value.requests.length > 1280 || !record2(value.actions))
       throw new Error("Invalid control snapshot");
-    if (value.runtime !== void 0 && (!record2(value.runtime) || !["active", "disconnected", "failed", "ended", "unavailable"].includes(
+    if (value.runtime !== void 0 && (!record2(value.runtime) || typeof value.runtime.state !== "string" || !["active", "disconnected", "failed", "ended", "unavailable"].includes(
       String(value.runtime.state)
-    ) || typeof value.runtime.phase !== "string" || value.runtime.phase.length > 64 || !["current", "updating", "stale", "unavailable"].includes(String(value.runtime.freshness)) || typeof value.runtime.reconnectable !== "boolean"))
+    ) || typeof value.runtime.phase !== "string" || value.runtime.phase.length > 64 || typeof value.runtime.freshness !== "string" || !["current", "updating", "stale", "unavailable"].includes(value.runtime.freshness) || typeof value.runtime.reconnectable !== "boolean"))
       throw new Error("Invalid runtime status");
-    if (record2(value.runtime) && (value.runtime.presence !== void 0 && !["active", "absent", "paused", "transitioning", "failed", "unknown"].includes(
+    if (record2(value.runtime) && (value.runtime.presence !== void 0 && (typeof value.runtime.presence !== "string" || !["active", "absent", "paused", "transitioning", "failed", "unknown"].includes(
       String(value.runtime.presence)
-    ) || value.runtime.observedAt !== void 0 && value.runtime.observedAt !== null && (typeof value.runtime.observedAt !== "string" || value.runtime.observedAt.length > 64 || !Number.isFinite(Date.parse(value.runtime.observedAt))) || value.runtime.observationError !== void 0 && value.runtime.observationError !== null && (typeof value.runtime.observationError !== "string" || value.runtime.observationError.length > 512) || value.runtime.updating !== void 0 && typeof value.runtime.updating !== "boolean" || value.runtime.state !== "active" && (value.runtime.reconnectable || value.connected || ["input", "steer", "interrupt", "commandApproval", "fileApproval", "questions"].some(
+    )) || value.runtime.observedAt !== void 0 && value.runtime.observedAt !== null && (typeof value.runtime.observedAt !== "string" || value.runtime.observedAt.length > 64 || !Number.isFinite(Date.parse(value.runtime.observedAt))) || value.runtime.observationError !== void 0 && value.runtime.observationError !== null && (typeof value.runtime.observationError !== "string" || value.runtime.observationError.length > 512) || value.runtime.updating !== void 0 && typeof value.runtime.updating !== "boolean" || value.runtime.state !== "active" && (value.runtime.reconnectable || value.connected || ["input", "steer", "interrupt", "commandApproval", "fileApproval", "questions"].some(
       (key) => record2(value.capabilities) && value.capabilities[key] === true
     ))))
       throw new Error("Invalid runtime authority");
@@ -8677,7 +8685,7 @@ globalThis.__semonUIShared = __semonUIShared;
   }
   function parseCatalogIdentity(value) {
     const row = object2(value), refs = array(row.source_refs, sourceReference), nativeIds = strings4(row.native_ids), nativeId = nullable(row.native_id, text), ids = new Set(refs.map((ref) => ref.source.native_id)), generation = text(row.generation), state2 = object2(row.freshness), sourceKey = text(row.source_key), catalogKey = text(row.catalog_key), harness = text(row.harness);
-    if (!catalogKey || !harness || !/^[0-9a-f]{64}$/i.test(generation) || nativeIds.some((id) => !id) || ids.has("") || new Set(nativeIds).size !== nativeIds.length || ids.size !== nativeIds.length || nativeIds.some((id) => !ids.has(id)) || nativeId !== null && (ids.size !== 1 || !ids.has(nativeId)))
+    if (!sourceKey || !catalogKey || !harness || !/^[0-9a-f]{64}$/i.test(generation) || nativeIds.some((id) => !id) || ids.has("") || new Set(nativeIds).size !== nativeIds.length || ids.size !== nativeIds.length || nativeIds.some((id) => !ids.has(id)) || nativeId !== null && (ids.size !== 1 || !ids.has(nativeId)))
       throw new Error("Invalid catalog identity");
     return {
       source_key: sourceKey,
@@ -8705,7 +8713,7 @@ globalThis.__semonUIShared = __semonUIShared;
     listeners = /* @__PURE__ */ new Set();
     begin(scope) {
       if (this.disposed) throw new Error("Catalog selection is destroyed");
-      if (typeof scope.source_key !== "string" || typeof scope.catalog_key !== "string" || !scope.catalog_key)
+      if (typeof scope.source_key !== "string" || !scope.source_key || typeof scope.catalog_key !== "string" || !scope.catalog_key)
         throw new Error("Invalid catalog selection");
       const request = Object.freeze({
         source_key: scope.source_key,
@@ -15265,13 +15273,13 @@ globalThis.__semonUIShared = __semonUIShared;
 
   // src/state/catalog-capabilities.ts
   function parseCatalogCapabilities(value) {
-    const row = object2(value), filters = array(row.filters, text);
-    if (row.api !== 1 || row.read_contract !== "catalog-v1" || row.pagination !== true || row.order !== "last_desc_key_asc" || row.full_text_search !== false || row.global_union !== false || filters.some((filter) => filter !== "harness" && filter !== "repo") || new Set(filters).size !== filters.length)
+    const row = object2(value), filters = array(row.filters, text), sourceKey = text(row.source_key);
+    if (row.api !== 1 || row.read_contract !== "catalog-v1" || !sourceKey || row.pagination !== true || row.order !== "last_desc_key_asc" || row.full_text_search !== false || row.global_union !== false || filters.some((filter) => filter !== "harness" && filter !== "repo") || new Set(filters).size !== filters.length)
       throw new Error("Unsupported catalog read contract");
     return {
       api: 1,
       read_contract: "catalog-v1",
-      source_key: text(row.source_key),
+      source_key: sourceKey,
       selected_transcript: boolean(row.selected_transcript),
       selected_identity: boolean(row.selected_identity),
       selected_entry: boolean(row.selected_entry),
@@ -15300,7 +15308,10 @@ globalThis.__semonUIShared = __semonUIShared;
       const reference = object2(row.field);
       if (reference.name !== "text" && reference.name !== "out")
         throw new Error("Unsupported native text field");
+      const layers = reference.layers ?? 1;
+      if (layers !== 1 && layers !== 2) throw new Error("Unsupported native field encoding");
       field = {
+        layers,
         name: reference.name,
         chunks: ordinal(reference.chunks),
         complete: boolean(reference.complete)
@@ -15336,13 +15347,13 @@ globalThis.__semonUIShared = __semonUIShared;
     if (!Array.isArray(row.entries) || row.entries.length > 100)
       throw new Error("Invalid catalog transcript page size");
     const identity2 = parseCatalogIdentity(row.identity), session = parseCatalogSession(row.session), projection = object2(row.projection), range = object2(row.range), context = object2(row.relationship_context), generation = text(projection.generation), total = ordinal(projection.total), first = ordinal(range.first), end = ordinal(range.end), next = range.next === null ? null : ordinal(range.next), entries = array(row.entries, entry), state2 = object2(row.freshness).state;
-    if (row.api !== 1 || projection.version !== 1 || !/^[0-9a-f]{64}$/i.test(generation) || session.key !== identity2.catalog_key || session.harness !== identity2.harness || end < first || end > total || end - first > 100 || entries.length !== end - first || next !== (end < total ? end : null) || entries.some((item2, i) => item2.slot !== first + i) || new Set(entries.map((item2) => item2.entry_id)).size !== entries.length || context.state !== "incomplete" || !Array.isArray(context.handoffs) || context.handoffs.length !== 0 || state2 !== "cached" && state2 !== "stale" && state2 !== "incomplete" && state2 !== "unavailable")
+    if (row.api !== 1 || projection.version !== 4 || !/^[0-9a-f]{64}$/i.test(generation) || session.key !== identity2.catalog_key || session.harness !== identity2.harness || end < first || end > total || end - first > 100 || entries.length !== end - first || next !== (end < total ? end : null) || entries.some((item2, i) => item2.slot !== first + i) || new Set(entries.map((item2) => item2.entry_id)).size !== entries.length || context.state !== "incomplete" || !Array.isArray(context.handoffs) || context.handoffs.length !== 0 || state2 !== "cached" && state2 !== "stale" && state2 !== "incomplete" && state2 !== "unavailable")
       throw new Error("Invalid catalog transcript page");
     return {
       api: 1,
       identity: identity2,
       session,
-      projection: { version: 1, generation, total },
+      projection: { version: 4, generation, total },
       range: { first, end, next },
       entries,
       freshness: { state: state2 },
@@ -15377,7 +15388,7 @@ globalThis.__semonUIShared = __semonUIShared;
     listeners = /* @__PURE__ */ new Set();
     select(scope, readScope2 = "current") {
       if (this.disposed) throw new Error("Catalog transcript is destroyed");
-      if (typeof scope.source_key !== "string" || typeof scope.catalog_key !== "string" || !scope.catalog_key || readScope2 !== "current" && readScope2 !== "retained_history")
+      if (typeof scope.source_key !== "string" || !scope.source_key || typeof scope.catalog_key !== "string" || !scope.catalog_key || readScope2 !== "current" && readScope2 !== "retained_history")
         throw new Error("Invalid catalog transcript scope");
       ++this.epoch;
       ++this.contentVersion;
@@ -15575,6 +15586,194 @@ globalThis.__semonUIShared = __semonUIShared;
     );
   }
 
+  // src/lib/runtimeObservation.ts
+  function parseRuntimeObservation(value) {
+    if (!value || typeof value !== "object" || Array.isArray(value))
+      throw new Error("Invalid readonly runtime observation");
+    const row = value;
+    if (typeof row.state !== "string" || !["active", "disconnected", "failed", "ended", "unavailable"].includes(row.state) || typeof row.phase !== "string" || row.phase.length > 64 || typeof row.freshness !== "string" || !["current", "updating", "stale", "unavailable"].includes(row.freshness) || row.presence !== void 0 && (typeof row.presence !== "string" || !["active", "absent", "paused", "transitioning", "failed", "unknown"].includes(
+      row.presence
+    )) || row.observedAt !== void 0 && row.observedAt !== null && (typeof row.observedAt !== "string" || row.observedAt.length > 64 || !Number.isFinite(Date.parse(row.observedAt))) || row.observationError !== void 0 && row.observationError !== null && (typeof row.observationError !== "string" || row.observationError.length > 512) || row.updating !== void 0 && typeof row.updating !== "boolean")
+      throw new Error("Invalid readonly runtime observation");
+    return Object.freeze({
+      state: row.state,
+      phase: row.phase,
+      freshness: row.freshness,
+      ...row.presence === void 0 ? {} : { presence: row.presence },
+      ...row.observedAt === void 0 ? {} : { observedAt: row.observedAt },
+      ...row.observationError === void 0 ? {} : { observationError: row.observationError },
+      ...row.updating === void 0 ? {} : { updating: row.updating }
+    });
+  }
+
+  // src/app/runtimeObservation.ts
+  function createRuntimeObservation(host2) {
+    let disposed = false;
+    let stream = null;
+    let cleanups2 = [];
+    let ticket = 0;
+    let key = "";
+    let frame = null;
+    let timer;
+    let deadline;
+    let delay = 1e3;
+    const listeners = /* @__PURE__ */ new Set();
+    const selected = () => {
+      const selected2 = host2.catalogRuntimeSelection?.selectedScope();
+      const route = host2.navigation.route;
+      return route.v === "session" && selected2?.catalog_key === route.id ? selected2 : null;
+    };
+    const selectionKey = (scope) => scope ? JSON.stringify([scope.source_key, scope.catalog_key]) : "";
+    function publish(value) {
+      frame = value ? Object.freeze(value) : null;
+      for (const listener of listeners) listener();
+    }
+    function cancel() {
+      ++ticket;
+      for (const cleanup of cleanups2) cleanup();
+      cleanups2 = [];
+      stream?.close();
+      stream = null;
+      host2.scope.clearTimeout(timer);
+      timer = void 0;
+      host2.scope.clearTimeout(deadline);
+      deadline = void 0;
+    }
+    function disconnected(reason, permanent = false) {
+      cancel();
+      if (frame)
+        publish({
+          ...frame,
+          delivery: permanent ? "unavailable" : frame.observation ? "stale" : "unavailable",
+          reason
+        });
+      if (!permanent) {
+        const generation = ticket;
+        timer = host2.scope.timeout(() => {
+          if (!disposed && generation === ticket) connect();
+        }, delay);
+        delay = Math.min(15e3, delay * 2);
+      }
+    }
+    function connect() {
+      if (disposed) return;
+      cancel();
+      const scope = selected();
+      const path = host2.viewerHost?.catalogRuntimeStream;
+      key = selectionKey(scope);
+      if (!scope || !path || !safePath(path)) {
+        publish(null);
+        return;
+      }
+      if (!frame || selectionKey(frame) !== key)
+        publish({
+          ...scope,
+          revision: null,
+          observation: null,
+          reason: "Checking environment status\u2026",
+          delivery: "updating"
+        });
+      else publish({ ...frame, delivery: "updating" });
+      const generation = ticket;
+      const query = new URLSearchParams({
+        source_key: scope.source_key,
+        catalog_key: scope.catalog_key
+      });
+      let current;
+      try {
+        current = new EventSource(path + (path.includes("?") ? "&" : "?") + query);
+      } catch {
+        disconnected("Environment status is unavailable. Retrying.");
+        return;
+      }
+      stream = current;
+      const valid = () => !disposed && ticket === generation && stream === current && key === selectionKey(selected());
+      const recover = () => {
+        if (valid()) disconnected("Environment status updates were interrupted. Retrying.");
+      };
+      const heartbeat = () => {
+        if (!valid()) return;
+        host2.scope.clearTimeout(deadline);
+        deadline = host2.scope.timeout(recover, 3e4);
+      };
+      function listen(type, listener) {
+        current.addEventListener(type, listener);
+        cleanups2.push(() => current.removeEventListener(type, listener));
+      }
+      heartbeat();
+      listen("heartbeat", heartbeat);
+      listen("error", recover);
+      listen("unavailable", recover);
+      listen("ended", () => {
+        if (valid())
+          disconnected(
+            "Access changed. Sign in or select an authorized workspace to inspect status.",
+            true
+          );
+      });
+      listen("runtime", (event) => {
+        if (!valid() || !(event instanceof MessageEvent)) return;
+        try {
+          if (String(event.data).length > 16384) throw new Error("Runtime status too large");
+          const value = JSON.parse(String(event.data));
+          if (!value || typeof value !== "object" || Array.isArray(value))
+            throw new Error("Invalid runtime envelope");
+          const row = value;
+          if (row.source_key !== scope.source_key || row.catalog_key !== scope.catalog_key || typeof row.revision !== "string" || !/^[0-9a-f]{64}$/.test(row.revision) || !(row.reason === null || row.reason === void 0 || typeof row.reason === "string" && row.reason.length <= 512) || row.runtime === void 0)
+            throw new Error("Runtime selection changed");
+          const observation = row.runtime === null ? null : parseRuntimeObservation(row.runtime);
+          heartbeat();
+          delay = 1e3;
+          if (frame?.revision === row.revision && frame.delivery === "current") return;
+          publish({
+            ...scope,
+            revision: row.revision,
+            observation,
+            reason: typeof row.reason === "string" ? row.reason : null,
+            delivery: "current"
+          });
+        } catch {
+          recover();
+        }
+      });
+    }
+    const reselect = () => {
+      const next = selectionKey(selected());
+      if (next === key) return;
+      cancel();
+      key = next;
+      delay = 1e3;
+      publish(null);
+      connect();
+    };
+    const unsubscribe = host2.catalogRuntimeSelection?.subscribe(reselect) ?? (() => {
+    });
+    const unnavigate = host2.navigation.subscribeRoute(reselect);
+    host2.scope.listen(document, "semon:refresh", () => {
+      delay = 1e3;
+      connect();
+    });
+    connect();
+    return {
+      view: () => frame,
+      subscribe(listener) {
+        if (disposed) return () => {
+        };
+        listeners.add(listener);
+        return () => listeners.delete(listener);
+      },
+      destroy() {
+        if (disposed) return;
+        disposed = true;
+        cancel();
+        unsubscribe();
+        unnavigate();
+        listeners.clear();
+        frame = null;
+      }
+    };
+  }
+
   // src/app/catalogTranscriptView.ts
   function catalogTranscriptBlocks(entries, fieldView) {
     return entries.map((item2) => {
@@ -15661,8 +15860,9 @@ globalThis.__semonUIShared = __semonUIShared;
 
   // src/state/catalog-field-wire.ts
   function parseCatalogField(value, request) {
-    const row = object2(value), identity2 = parseCatalogIdentity(row.identity), projection = object2(row.projection), field = object2(row.field), provenance = object2(row.provenance), source = parseCatalogSource(provenance.source), chunk = number(field.chunk), next = field.next === null ? null : number(field.next), complete = boolean(field.complete), body = text(row.text), sourceBytes = number(object2(row.observation).source_bytes);
-    if (row.api !== 1 || identity2.read_scope !== "retained_history" || identity2.source_key !== request.source_key || identity2.catalog_key !== request.catalog_key || projection.version !== 1 || projection.generation !== request.generation || row.slot !== request.entry.slot || field.name !== request.entry.field?.name || chunk !== request.chunk || !Number.isSafeInteger(chunk) || chunk < 0 || next !== (complete ? null : chunk + 1) || !request.entry.field || chunk >= request.entry.field.chunks || complete !== (chunk + 1 === request.entry.field.chunks) || object2(row.freshness).state !== "cached" || !Number.isSafeInteger(sourceBytes) || sourceBytes < 0 || sourceBytes > 65547 || new TextEncoder().encode(body).byteLength > 65547 || JSON.stringify(source) !== JSON.stringify(request.entry.provenance.source) || provenance.offset !== request.entry.provenance.offset || provenance.block !== request.entry.provenance.block || provenance.native_event_id !== request.entry.provenance.native_event_id)
+    const row = object2(value), identity2 = parseCatalogIdentity(row.identity), projection = object2(row.projection), field = object2(row.field), provenance = object2(row.provenance), source = parseCatalogSource(provenance.source), chunk = number(field.chunk), next = field.next === null ? null : number(field.next), complete = boolean(field.complete), body = text(row.text), sourceBytes = number(object2(row.observation).source_bytes), layers = field.layers ?? 1;
+    const sourceLimit = layers === 2 ? 65607 : 65547;
+    if (row.api !== 1 || identity2.read_scope !== "retained_history" || identity2.source_key !== request.source_key || identity2.catalog_key !== request.catalog_key || projection.version !== 4 || projection.generation !== request.generation || row.slot !== request.entry.slot || field.name !== request.entry.field?.name || layers !== 1 && layers !== 2 || layers !== (request.entry.field?.layers ?? 1) || chunk !== request.chunk || !Number.isSafeInteger(chunk) || chunk < 0 || next !== (complete ? null : chunk + 1) || !request.entry.field || chunk >= request.entry.field.chunks || complete !== (chunk + 1 === request.entry.field.chunks) || object2(row.freshness).state !== "cached" || !Number.isSafeInteger(sourceBytes) || sourceBytes < 0 || sourceBytes > sourceLimit || new TextEncoder().encode(body).byteLength > 131072 || JSON.stringify(source) !== JSON.stringify(request.entry.provenance.source) || provenance.offset !== request.entry.provenance.offset || provenance.block !== request.entry.provenance.block || provenance.native_event_id !== request.entry.provenance.native_event_id)
       throw new Error("Native field chunk does not match the selected source projection");
     return { text: body, next, complete };
   }
@@ -15674,7 +15874,7 @@ globalThis.__semonUIShared = __semonUIShared;
     let disposed = false, page = null, items = [], cursor = null, listEpoch = 0, updating = false, note = "", harness = "", repo = "", active = null;
     const selected = /* @__PURE__ */ new Map();
     const account = parseAccount(viewerHost?.account);
-    let wide = false, chromeTitle = null, chromeSession = false;
+    let wide = false, rail = document.querySelector(".app")?.classList.contains("rail") ?? false, chromeTitle = null, chromeSession = false;
     const shell = createShellChrome({
       account: {
         place(widget, trigger) {
@@ -15704,11 +15904,19 @@ globalThis.__semonUIShared = __semonUIShared;
       drawerClosed() {
       },
       railChanged() {
+        rail = !rail;
+        chrome();
       }
     });
     shell.mount(document.querySelector(".app"));
-    const root = shell.slots.content, title = document.createElement("div");
+    const root = shell.slots.content, title = document.createElement("div"), jumpActions = document.createElement("div"), jumpSlot = document.createElement("span"), jumpTarget = document.createElement("div");
     title.className = "ttl";
+    jumpActions.className = "viewer-bar-actions";
+    jumpSlot.className = "viewer-jump";
+    jumpTarget.className = "jump-wrap";
+    jumpTarget.hidden = true;
+    jumpSlot.append(jumpTarget);
+    jumpActions.append(jumpSlot);
     const recent = createRecentRenderer(shell.slots.recent, {
       open(key) {
         void goSession(key);
@@ -15722,23 +15930,24 @@ globalThis.__semonUIShared = __semonUIShared;
     });
     const control = createLocalControl(scope, () => {
       if (!active) return;
-      const identity2 = selection.selectedIdentity();
       updateSessionControl(active.root, controlFor(active));
     });
     function controlFor(view) {
       const identity2 = selection.selectedIdentity();
       const current = active === view && identity2?.catalog_key === view.key && identity2.native_id ? control.view(identity2.native_id) : void 0;
       if (current) view.lastControl = current;
-      if (current || !view.lastControl) return current;
-      const previous = view.lastControl;
+      const runtime = runtimeFor(view)?.observation, terminal = runtime && runtime.state !== "active";
+      if (current && !terminal || !view.lastControl) return current;
+      const previous = current ?? view.lastControl;
       return {
         ...previous,
         busy: false,
         uncertain: true,
+        canReconnect: false,
         snapshot: {
           ...previous.snapshot,
           connected: false,
-          reason: "Current connection status is unavailable.",
+          reason: terminal ? "Native controls are unavailable for this environment state." : "Current connection status is unavailable.",
           capabilities: {
             ...previous.snapshot.capabilities,
             input: false,
@@ -15771,6 +15980,21 @@ globalThis.__semonUIShared = __semonUIShared;
         }
       }
     });
+    const runtimeObservation = createRuntimeObservation({
+      scope,
+      navigation,
+      viewerHost,
+      catalogRuntimeSelection: selection
+    });
+    function runtimeFor(view) {
+      const frame = runtimeObservation.view();
+      return frame?.source_key === capabilities.source_key && frame.catalog_key === view.key ? frame : void 0;
+    }
+    const removeRuntimeListener = runtimeObservation.subscribe(() => {
+      if (!active) return;
+      updateSessionRuntime(active.root, runtimeFor(active));
+      updateSessionControl(active.root, controlFor(active));
+    });
     const api = async (path) => {
       const controller = scope.request(), deadline = scope.timeout(() => controller.abort(), 15e3);
       try {
@@ -15791,7 +16015,7 @@ globalThis.__semonUIShared = __semonUIShared;
             (destination) => destination.key !== "sessions"
           )
         ],
-        false
+        rail
       );
       if (chromeTitle !== name || chromeSession !== !!active) {
         chromeTitle = name;
@@ -15799,6 +16023,7 @@ globalThis.__semonUIShared = __semonUIShared;
         title.textContent = name;
         shell.topbar({
           titleSlot: title,
+          actions: active ? [jumpActions] : [],
           session: !!active,
           lead: { label: "Open menu", icon: I.menu },
           account: account ? {
@@ -15959,6 +16184,7 @@ globalThis.__semonUIShared = __semonUIShared;
             id: view.key,
             name: view.meta?.name ?? "Session",
             control: controlFor(view),
+            runtime: runtimeFor(view),
             blocks: [],
             order: [],
             observation: "Recorded history is updating",
@@ -15992,8 +16218,13 @@ globalThis.__semonUIShared = __semonUIShared;
         );
         return;
       }
+      if (view.lastTotal !== null && !view.following && current.projection.total > view.lastTotal)
+        view.newCount += current.projection.total - view.lastTotal;
+      view.lastTotal = current.projection.total;
       if (view.renderedRevision === view.store.revision && view.renderedNote === view.note) {
         updateSessionControl(view.root, controlFor(view));
+        updateSessionRuntime(view.root, runtimeFor(view));
+        syncJump(view);
         if ((view.store.loadedRanges()[0]?.first ?? 0) > 0)
           updateSessionPager(view.root, {
             sid: view.key,
@@ -16016,6 +16247,7 @@ globalThis.__semonUIShared = __semonUIShared;
           id: view.key,
           name: view.meta?.name ?? "Session",
           control: controlFor(view),
+          runtime: runtimeFor(view),
           observation: view.note || {
             cached: "Cached history",
             stale: "Stale history",
@@ -16056,6 +16288,7 @@ globalThis.__semonUIShared = __semonUIShared;
           background() {
           },
           jump() {
+            jumpLatest(view);
           },
           pager() {
             void loadSelected(view, Math.max(0, view.store.loadedRanges()[0].first - 60));
@@ -16063,7 +16296,10 @@ globalThis.__semonUIShared = __semonUIShared;
         }
       );
       const main = document.querySelector("#main");
-      if (anchor?.isConnected && anchorTop !== void 0) {
+      if (view.following) {
+        view.opening = false;
+        scrollEnd();
+      } else if (anchor?.isConnected && anchorTop !== void 0) {
         const shift = anchor.getBoundingClientRect().top - anchorTop;
         if (window.matchMedia("(max-width: 760px)").matches) window.scrollBy(0, shift);
         else main.scrollTop += shift;
@@ -16073,6 +16309,29 @@ globalThis.__semonUIShared = __semonUIShared;
           window.scrollTo(0, document.documentElement.scrollHeight);
         else main.scrollTop = main.scrollHeight;
       }
+      syncJump(view);
+    }
+    function scrollEnd() {
+      if (window.matchMedia("(max-width: 760px)").matches)
+        window.scrollTo(0, document.documentElement.scrollHeight);
+      else {
+        const main = document.querySelector("#main");
+        main.scrollTop = main.scrollHeight;
+      }
+    }
+    function syncJump(view) {
+      if (active !== view || disposed) return;
+      updateSessionJump(view.root, !view.following, view.newCount, false, jumpTarget);
+    }
+    function jumpLatest(view) {
+      if (active !== view || disposed) return;
+      view.following = true;
+      view.newCount = 0;
+      syncJump(view);
+      scrollEnd();
+      void loadSelected(view).finally(() => {
+        if (active === view && !disposed) scrollEnd();
+      });
     }
     function fieldView(view, entry2) {
       if (!entry2.clipped || !entry2.field) return null;
@@ -16179,10 +16438,15 @@ globalThis.__semonUIShared = __semonUIShared;
       }
     }
     async function loadSelected(view, after = null) {
-      if (disposed || view.loading || !capabilities.selected_transcript) {
+      if (view.loading && !disposed && capabilities.selected_transcript) {
+        if (view.queuedAfter === void 0 || after !== null) view.queuedAfter = after;
+        return;
+      }
+      if (disposed || !capabilities.selected_transcript) {
         drawSelected(view);
         return;
       }
+      if (after !== null) view.following = false;
       scope.clearTimeout(view.retry);
       const request = view.store.request(after), p = params();
       p.set("sid", view.key);
@@ -16190,6 +16454,7 @@ globalThis.__semonUIShared = __semonUIShared;
       if (after !== null) p.set("after", String(after));
       if (request.generation !== null) p.set("generation", request.generation);
       view.loading = true;
+      view.root.setAttribute("aria-busy", "true");
       view.note = "";
       drawSelected(view);
       try {
@@ -16224,7 +16489,11 @@ globalThis.__semonUIShared = __semonUIShared;
         }
       } finally {
         view.loading = false;
+        if (!disposed) view.root.setAttribute("aria-busy", "false");
         drawSelected(view);
+        const queued = view.queuedAfter;
+        view.queuedAfter = void 0;
+        if (!disposed && active === view && queued !== void 0) void loadSelected(view, queued);
       }
     }
     async function loadIdentity(view) {
@@ -16274,7 +16543,10 @@ globalThis.__semonUIShared = __semonUIShared;
           retryDelay: 1e3,
           renderedRevision: -1,
           renderedNote: "",
-          fields: /* @__PURE__ */ new Map()
+          fields: /* @__PURE__ */ new Map(),
+          following: true,
+          newCount: 0,
+          lastTotal: null
         };
         selected.set(key, view);
       }
@@ -16334,6 +16606,17 @@ globalThis.__semonUIShared = __semonUIShared;
       } else goList(false);
     }
     scope.listen(window, "popstate", fromLocation);
+    const readingScroll = () => {
+      if (!active) return;
+      const main = document.querySelector("#main"), gap = window.matchMedia("(max-width: 760px)").matches ? document.documentElement.scrollHeight - window.scrollY - window.innerHeight : main.scrollHeight - main.scrollTop - main.clientHeight;
+      active.following = gap <= 80;
+      if (active.following) active.newCount = 0;
+      syncJump(active);
+    };
+    scope.listen(window, "scroll", readingScroll, { passive: true });
+    scope.listen(document.querySelector("#main"), "scroll", readingScroll, {
+      passive: true
+    });
     scope.listen(document, "keydown", (event) => {
       if (event.key === "Escape") shell.closeDrawer();
     });
@@ -16350,6 +16633,8 @@ globalThis.__semonUIShared = __semonUIShared;
         disposed = true;
         ++listEpoch;
         observation.destroy();
+        removeRuntimeListener();
+        runtimeObservation.destroy();
         scope.destroy();
         selection.destroy();
         navigation.destroy();
@@ -16364,6 +16649,197 @@ globalThis.__semonUIShared = __semonUIShared;
         render(null, root);
         shell.destroy();
         selected.clear();
+      }
+    };
+  }
+
+  // src/lib/catalogSources.tsx
+  function renderCatalogSources(root, view, host2) {
+    render(
+      /* @__PURE__ */ jsxs(Fragment2, { children: [
+        /* @__PURE__ */ jsxs("div", { class: "ph", children: [
+          /* @__PURE__ */ jsx("h1", { children: "Choose a machine" }),
+          /* @__PURE__ */ jsx("p", { class: "sub", children: "Browse recorded history from one authorized source." })
+        ] }),
+        view.note && /* @__PURE__ */ jsxs("p", { class: "catalog-note", role: "status", children: [
+          screenText(view.note),
+          " ",
+          /* @__PURE__ */ jsx("button", { class: "link", type: "button", onClick: () => host2.retry(), children: "Retry" })
+        ] }),
+        view.updating && /* @__PURE__ */ jsx("p", { class: "catalog-note", role: "status", children: "Loading machines\u2026" }),
+        /* @__PURE__ */ jsx("div", { class: "session-list", children: view.items.map((item2) => /* @__PURE__ */ jsx(
+          "button",
+          {
+            class: "nrow",
+            type: "button",
+            "data-source-key": item2.source_key,
+            onClick: () => host2.select(item2.source_key),
+            children: /* @__PURE__ */ jsx("span", { class: "nm", children: screenText(item2.label) })
+          },
+          item2.source_key
+        )) }),
+        !view.items.length && !view.updating && !view.note && /* @__PURE__ */ jsx("p", { class: "catalog-note", children: "No authorized recorded sources are available." }),
+        view.more && /* @__PURE__ */ jsx("button", { class: "link", type: "button", disabled: view.updating, onClick: () => host2.more(), children: "Load more machines" }),
+        /* @__PURE__ */ jsx("p", { class: "catalog-note", children: "This source list contains names and keys only. History across sources and text search are unavailable." }),
+        /* @__PURE__ */ jsxs("p", { class: "catalog-note", children: [
+          /* @__PURE__ */ jsx("a", { class: "link", href: view.machinesHref, children: "Manage machines" }),
+          " \xB7 ",
+          /* @__PURE__ */ jsx("a", { class: "link", href: "/sessions?compat=1", children: "Open compatibility view (loads workspace history)" })
+        ] })
+      ] }),
+      root
+    );
+  }
+
+  // src/state/catalog-sources.ts
+  function parseCatalogSources(value) {
+    const row = object2(value);
+    if (row.api !== 1 || !Array.isArray(row.items) || row.items.length > 100)
+      throw new Error("Invalid source inventory");
+    const items = array(row.items, (value2) => {
+      const item2 = object2(value2), source_key = text(item2.source_key), label = text(item2.label);
+      if (!source_key || !label) throw new Error("Invalid source identity");
+      return { source_key, label };
+    });
+    if (new Set(items.map((item2) => item2.source_key)).size !== items.length)
+      throw new Error("Repeated source inventory identity");
+    const cursor = row.next_cursor === null ? null : text(row.next_cursor);
+    if (cursor === "") throw new Error("Invalid source inventory cursor");
+    return { api: 1, items, next_cursor: cursor };
+  }
+
+  // src/app/catalogSources.ts
+  function createCatalogSources(host2, select) {
+    const scope = new EffectScope();
+    let disposed = false, epoch = 0, items = [], cursor = null, updating = false, note = "", retry, delay = 1e3;
+    const account = parseAccount(host2?.account);
+    let wide = false;
+    const shell = createShellChrome({
+      account: {
+        place(widget, trigger) {
+          const at = trigger.getBoundingClientRect();
+          setGeometry(widget, "accountLeft", at.left);
+          setGeometry(widget, "accountWidth", at.width);
+          setGeometry(widget, "accountBottom", Math.max(0, innerHeight - at.top + 6));
+        },
+        opened() {
+        },
+        closed() {
+        },
+        navigate() {
+          return false;
+        },
+        submit() {
+          return false;
+        }
+      },
+      navigate() {
+        return false;
+      },
+      drawerOpened() {
+      },
+      drawerClosed() {
+      },
+      railChanged() {
+      }
+    });
+    shell.mount(document.querySelector(".app"));
+    shell.update(
+      [{ key: "sessions", label: "Sessions", href: "/sessions", icon: I.sessions, current: true }],
+      false
+    );
+    const title = document.createElement("div");
+    title.className = "ttl";
+    title.textContent = "Choose a machine";
+    function wideChange() {
+      wide = !wide;
+      document.querySelector(".app")?.classList.toggle("wide-mode", wide);
+      shell.account.updateWide(wide);
+    }
+    shell.topbar({
+      titleSlot: title,
+      lead: { label: "Open menu", icon: I.menu },
+      account: account ? { account, compact: false, wide, onWideChange: wideChange } : null
+    });
+    shell.drawerAccount(account ? { account, compact: true, wide, onWideChange: wideChange } : null);
+    const root = shell.slots.content;
+    function draw() {
+      if (disposed) return;
+      renderCatalogSources(
+        root,
+        {
+          items,
+          updating,
+          note,
+          more: cursor !== null,
+          machinesHref: host2?.machinesPath ?? "/machines?compat=1"
+        },
+        {
+          select(key) {
+            if (!disposed && items.some((item2) => item2.source_key === key)) select(key);
+          },
+          more() {
+            void load(true);
+          },
+          retry() {
+            void load(false);
+          }
+        }
+      );
+    }
+    async function load(append) {
+      if (disposed || append && updating) return;
+      scope.clearTimeout(retry);
+      const ticket = ++epoch, request = scope.request(), deadline = scope.timeout(() => request.abort(), 15e3), params = new URLSearchParams({ limit: "60" });
+      if (append && cursor !== null) params.set("cursor", cursor);
+      updating = true;
+      note = "";
+      draw();
+      try {
+        const page = parseCatalogSources(
+          await requestJson("/api/session-sources?" + params, request.signal)
+        );
+        if (disposed || ticket !== epoch) return;
+        if (append && page.items.some((item2) => items.some((old) => old.source_key === item2.source_key)))
+          throw Error("Source inventory repeated a machine");
+        items = append ? [...items, ...page.items] : page.items;
+        cursor = page.next_cursor;
+        delay = 1e3;
+      } catch (error) {
+        if (disposed || ticket !== epoch) return;
+        const status2 = error && typeof error === "object" && "status" in error ? Number(error.status) : 0;
+        const transient = error && typeof error === "object" && "status" in error || error instanceof Error && error.name === "AbortError";
+        note = !transient ? "The source returned an invalid inventory. Check this source and retry." : status2 === 401 || status2 === 403 ? "Authorization is required to browse these machines." : status2 === 404 ? "Bounded source discovery is unavailable. Choose a machine from its management page." : status2 === 400 ? "The source inventory cursor is unavailable. Refresh this list." : "Source inventory is unavailable. Retrying\u2026";
+        if (append && status2 === 400) {
+          void load(false);
+          return;
+        }
+        if (transient && (status2 === 0 || [429, 500, 502, 503, 504].includes(status2))) {
+          retry = scope.timeout(() => void load(append), delay);
+          delay = Math.min(8e3, delay * 2);
+        }
+      } finally {
+        scope.clearTimeout(deadline);
+        scope.releaseRequest(request);
+        if (!disposed && ticket === epoch) {
+          updating = false;
+          draw();
+        }
+      }
+    }
+    scope.listen(document, "keydown", (event) => {
+      if (event.key === "Escape") shell.closeDrawer();
+    });
+    scope.listen(window, "focus", () => void load(false));
+    void load(false);
+    return {
+      destroy() {
+        if (disposed) return;
+        disposed = true;
+        ++epoch;
+        scope.destroy();
+        render(null, root);
+        shell.destroy();
       }
     };
   }
@@ -16401,12 +16877,27 @@ globalThis.__semonUIShared = __semonUIShared;
           "/api/session-capabilities" + (params.size ? "?" + params : ""),
           request.signal
         );
-        if (!disposed) owner = createCatalogViewer(parseCatalogCapabilities(value), host2);
+        const capabilities = parseCatalogCapabilities(value);
+        if (source !== null && capabilities.source_key !== source)
+          throw new Error("Source capability identity does not match this selection");
+        if (!disposed) owner = createCatalogViewer(capabilities, host2);
       } catch (error) {
         if (disposed) return;
         const status2 = error && typeof error === "object" && "status" in error ? error.status : 0;
         if (status2 === 404) {
           legacy();
+          return;
+        }
+        if (status2 === 400 && !new URLSearchParams(location.search).has("machine")) {
+          owner = createCatalogSources(host2, (key) => {
+            if (disposed) return;
+            owner?.destroy();
+            owner = null;
+            const url = new URL(location.href);
+            url.searchParams.set("machine", key);
+            history.replaceState(null, "", url.pathname + url.search + url.hash);
+            void chooseReader();
+          });
           return;
         }
         const root = document.querySelector("#page");
