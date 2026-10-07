@@ -1431,6 +1431,13 @@ mod tests {
         }
         observer.close();
         assert!(EventCache::path(&fixture.options.cache).exists());
+        let mut core = ViewerCore::new(fixture.options.clone());
+        assert!(!core.demand_catalog_source("local").unwrap());
+        core.set_refresh(Refresh::OnInvalidate);
+        assert!(!core.demand_catalog_source("wrong").unwrap());
+        assert!(core.demand_catalog_source("local").unwrap());
+        core.close();
+        assert!(!core.demand_catalog_source("local").unwrap());
     }
 
     #[test]
