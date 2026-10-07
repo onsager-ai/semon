@@ -546,19 +546,17 @@ fn read_page(
     let recorded = options
         .facts
         .as_ref()
-        .and_then(|path| crate::read_facts(path).ok())
-        .filter(|facts| facts.version == crate::FACTS_VERSION);
-    let facts_known = options.facts.is_none() || recorded.is_some();
+        .and_then(|path| crate::facts::source_authority::CurrentSources::open(path).ok());
+    let facts_known =
+        options.facts.is_none() || recorded.as_ref().is_some_and(|source| source.facts_known());
     let codex_selection_known = options.facts.is_none()
         || recorded
             .as_ref()
-            .is_some_and(|facts| facts.codex_rollouts.is_some());
-    let facts = match recorded {
-        Some(facts) => crate::facts::MachineFacts::Recorded(Box::new(facts)),
-        None if options.facts.is_none() => crate::facts::MachineFacts::Local,
-        None => crate::facts::MachineFacts::Recorded(Box::default()),
+            .is_some_and(|source| source.selection_known());
+    let machine_label = match &options.facts {
+        None => Some(crate::facts::MachineFacts::Local.hostname(options)),
+        Some(_) => recorded.as_ref().and_then(|source| source.hostname()),
     };
-    let machine_label = facts_known.then(|| facts.hostname(options));
     let mut page_state = if facts_known { "cached" } else { "unavailable" };
     let mut items = Vec::with_capacity(selected.len());
     for row in selected {
@@ -581,7 +579,26 @@ fn read_page(
                     true,
                 ));
             };
-            if row.harness == "codex" && !facts.codex_rollout_is_current(options, &source.path) {
+            let retired = if row.harness == "codex" {
+                match recorded
+                    .as_ref()
+                    .map(|snapshot| snapshot.codex_current(&relative))
+                    .transpose()
+                {
+                    Ok(current) => current.flatten() == Some(false),
+                    Err(_) => {
+                        return Ok(error(
+                            503,
+                            "catalog_scope_changed",
+                            "Source observation changed during this read. Retry with the current catalog.",
+                            true,
+                        ));
+                    }
+                }
+            } else {
+                false
+            };
+            if retired {
                 return Ok(error(
                     503,
                     "catalog_scope_changed",
@@ -627,6 +644,17 @@ fn read_page(
         item["source_refs"] = json!(refs);
         item["freshness"] = json!({"state":state});
         items.push(item);
+    }
+    if recorded
+        .as_ref()
+        .is_some_and(|source| source.validate().is_err())
+    {
+        return Ok(error(
+            503,
+            "catalog_scope_changed",
+            "Source observation changed during this read. Retry with the current catalog.",
+            true,
+        ));
     }
     Ok(reply(
         200,
