@@ -279,7 +279,13 @@ test('stream events received during snapshot recovery cannot overwrite the resyn
           enc: encodeURIComponent,
           api: () => new Promise((resolve) => requests.push(resolve)),
         },
-        liveUpdates: { applyModelDelta: (x) => x, update: async (x) => applied.push(x.version) },
+        liveUpdates: {
+          applyModelDelta: (x) => x,
+          update: async (x) => {
+            if (x.newMachine) selectedSessions.b.machine = x.newMachine;
+            applied.push(x.version);
+          },
+        },
       });
       live.LIVE.version = 'initial';
       live.schedule(0);
@@ -330,11 +336,12 @@ test('selected hosted streams bind both runtimes and reject callbacks after navi
           return () => listeners.delete(fn);
         },
       };
+      window.selectedSessions = { a: { machine: 'machine-a' }, b: { machine: 'machine-b' } };
       window.live = Recovery.createLiveModel({
         navigation: nav,
         disposed: false,
         viewerHost: { modelStream: '/events', selectedModel: true },
-        modelStore: { sessions: { a: { machine: 'machine-a' }, b: { machine: 'machine-b' } } },
+        modelStore: { sessions: selectedSessions },
         $: (s) => document.querySelector(s),
         transportOwner: {
           enc: encodeURIComponent,
@@ -365,11 +372,31 @@ test('selected hosted streams bind both runtimes and reject callbacks after navi
       '/api/model?delta=1&selected=b&machine=machine-b',
     ]);
     assert.deepEqual(await page.evaluate(() => applied), ['selected-b', 'recovered-b']);
+    await page.evaluate(() =>
+      sources[1].dispatchEvent(
+        new MessageEvent('model', {
+          data: '{"version":"projection-changed","newMachine":"renamed-b"}',
+        }),
+      ),
+    );
+    assert.equal(await page.evaluate(() => sources.length), 3);
+    assert.equal(await page.evaluate(() => sources[2].url), '/events?selected=b&machine=renamed-b');
+    await page.evaluate(() =>
+      sources[1].dispatchEvent(
+        new MessageEvent('model', {
+          data: '{"version":"late-projection"}',
+        }),
+      ),
+    );
     await page.evaluate(() => {
       live.destroy();
       nav.route = { v: 'session', id: 'a' };
       sources[1].dispatchEvent(new MessageEvent('model', { data: '{"version":"destroyed"}' }));
     });
-    assert.equal(await page.evaluate(() => sources.length), 2);
-    assert.deepEqual(await page.evaluate(() => applied), ['selected-b', 'recovered-b']);
+    assert.equal(await page.evaluate(() => sources.length), 3);
+    assert.deepEqual(await page.evaluate(() => applied), [
+      'selected-b',
+      'recovered-b',
+      'projection-changed',
+    ]);
   }));
