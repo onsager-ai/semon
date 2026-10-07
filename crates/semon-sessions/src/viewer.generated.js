@@ -5736,12 +5736,14 @@ globalThis.__semonUIShared = __semonUIShared;
           type: "button",
           id: "jump-bottom",
           "aria-label": owner.jumpCount ? "Jump to bottom; " + owner.jumpCount + " new entries" : "Jump to bottom of transcript",
+          "data-tip": owner.jumpCount ? owner.jumpCount + " new entries \xB7 Jump to latest" : "Jump to latest",
+          "data-count": owner.jumpCount > 0 ? owner.jumpCount > 99 ? "99+" : String(owner.jumpCount) : void 0,
           disabled: owner.jumpBusy,
           onClick: (event) => {
             if (event.currentTarget.isConnected) owner.host.jump();
           },
           children: [
-            owner.jumpCount > 0 && /* @__PURE__ */ jsx("span", { class: "new-count", children: owner.jumpCount + " new" }),
+            owner.jumpCount > 0 && /* @__PURE__ */ jsx("span", { class: "new-count sr-only", children: owner.jumpCount + " new" }),
             /* @__PURE__ */ jsx(Glyph, { path: "M12 4v15M5 12l7 7 7-7", className: "" })
           ]
         }
@@ -5749,9 +5751,13 @@ globalThis.__semonUIShared = __semonUIShared;
       owner.jump
     );
   }
-  function updateSessionJump(root, visible2, count, busy2 = false) {
+  function updateSessionJump(root, visible2, count, busy2 = false, target) {
     const owner = owners.get(root);
     if (!owner) return;
+    if (target && owner.jump !== target) {
+      if (owner.jump) render(null, owner.jump);
+      owner.jump = target;
+    }
     owner.jumpVisible = visible2;
     owner.jumpCount = count;
     owner.jumpBusy = busy2;
@@ -5815,7 +5821,10 @@ globalThis.__semonUIShared = __semonUIShared;
         state3.disposed = true;
         state3.observer.disconnect();
         cancelAnimationFrame(state3.frame);
-        if (state3.jump) render(null, state3.jump);
+        if (state3.jump) {
+          render(null, state3.jump);
+          state3.jump.hidden = true;
+        }
         owners.delete(root);
       });
     }
@@ -5880,17 +5889,7 @@ globalThis.__semonUIShared = __semonUIShared;
               ),
               view.after && pager(view.after),
               view.empty && /* @__PURE__ */ jsx("p", { class: "empty", children: screenText(view.empty) })
-            ] }),
-            /* @__PURE__ */ jsx(
-              "div",
-              {
-                class: "jump-wrap",
-                ref: (node) => {
-                  state2.jump = node;
-                  paintJump(state2);
-                }
-              }
-            )
+            ] })
           ] }),
           /* @__PURE__ */ jsx(SessionControls, { owner: state2 }),
           view.footer && /* @__PURE__ */ jsxs("div", { class: "session-foot", children: [
@@ -6000,7 +5999,9 @@ globalThis.__semonUIShared = __semonUIShared;
 
   // src/lib/viewer-bar.tsx
   function createViewerBar() {
-    const title = document.createElement("div"), actions = document.createElement("div"), mode = document.createElement("div");
+    const title = document.createElement("div"), actions = document.createElement("div"), mode = document.createElement("div"), jumpTarget = document.createElement("div");
+    jumpTarget.className = "jump-wrap";
+    jumpTarget.hidden = true;
     title.className = "ttl";
     actions.className = "viewer-bar-actions";
     mode.className = "viewer-bar-mode";
@@ -6079,48 +6080,59 @@ globalThis.__semonUIShared = __semonUIShared;
         title
       );
       render(
-        view.mode === "normal" ? view.analytics ? /* @__PURE__ */ jsx("div", { class: "analytics-range", role: "group", "aria-label": "Analytics range", children: [
-          [1, "24 h"],
-          [7, "7 d"],
-          [30, "30 d"]
-        ].map(([days, label]) => /* @__PURE__ */ jsx(
-          "button",
-          {
-            type: "button",
-            "data-e": "analytics-range:" + days,
-            "aria-pressed": view.days === days,
-            onClick: (event) => active(event.currentTarget, () => host2.range(Number(days))),
-            children: label
-          },
-          days
-        )) }) : view.session ? /* @__PURE__ */ jsxs(Fragment2, { children: [
-          !view.trace && /* @__PURE__ */ jsx(
-            "button",
+        /* @__PURE__ */ jsxs(Fragment2, { children: [
+          view.session && !view.trace && /* @__PURE__ */ jsx(
+            "span",
             {
-              class: "ibtn",
-              type: "button",
-              id: "find-btn",
-              "aria-label": "Find and filter",
-              onClick: (event) => active(event.currentTarget, host2.find),
-              children: icon("search")
-            },
-            "find:" + view.session
+              class: "viewer-jump",
+              ref: (node) => {
+                if (node && jumpTarget.parentNode !== node) node.append(jumpTarget);
+              }
+            }
           ),
-          /* @__PURE__ */ jsx(
+          view.mode === "normal" ? view.analytics ? /* @__PURE__ */ jsx("div", { class: "analytics-range", role: "group", "aria-label": "Analytics range", children: [
+            [1, "24 h"],
+            [7, "7 d"],
+            [30, "30 d"]
+          ].map(([days, label]) => /* @__PURE__ */ jsx(
             "button",
             {
-              class: "ibtn",
               type: "button",
-              id: "more-btn",
-              "aria-label": "Session menu: details, cost and actions",
-              "aria-haspopup": "dialog",
-              "aria-expanded": "false",
-              onClick: (event) => active(event.currentTarget, () => host2.menu(event.currentTarget)),
-              children: icon("more")
+              "data-e": "analytics-range:" + days,
+              "aria-pressed": view.days === days,
+              onClick: (event) => active(event.currentTarget, () => host2.range(Number(days))),
+              children: label
             },
-            "more:" + view.session
-          )
-        ] }) : null : null,
+            days
+          )) }) : view.session ? /* @__PURE__ */ jsxs(Fragment2, { children: [
+            !view.trace && /* @__PURE__ */ jsx(
+              "button",
+              {
+                class: "ibtn",
+                type: "button",
+                id: "find-btn",
+                "aria-label": "Find and filter",
+                onClick: (event) => active(event.currentTarget, host2.find),
+                children: icon("search")
+              },
+              "find:" + view.session
+            ),
+            /* @__PURE__ */ jsx(
+              "button",
+              {
+                class: "ibtn",
+                type: "button",
+                id: "more-btn",
+                "aria-label": "Session menu: details, cost and actions",
+                "aria-haspopup": "dialog",
+                "aria-expanded": "false",
+                onClick: (event) => active(event.currentTarget, () => host2.menu(event.currentTarget)),
+                children: icon("more")
+              },
+              "more:" + view.session
+            )
+          ] }) : null : null
+        ] }),
         actions
       );
       render(
@@ -6240,6 +6252,7 @@ globalThis.__semonUIShared = __semonUIShared;
     }
     return {
       update,
+      jumpTarget,
       destroy() {
         if (disposed) return;
         disposed = true;
@@ -14592,7 +14605,8 @@ globalThis.__semonUIShared = __semonUIShared;
         host2.$("#page"),
         gap > 80 || !!newer,
         host2.liveModelOwner.LIVE.fresh + newer,
-        jumpBusy
+        jumpBusy,
+        host2.sessionChrome.viewerBar.jumpTarget
       );
     }
     function clearNewEntries() {
