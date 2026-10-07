@@ -140,6 +140,42 @@ pub(crate) struct SavedSlot {
     pub(crate) native_event_id: Option<String>,
 }
 impl SavedSlot {
+    /// Source paths referenced by this recipe, including background edges.
+    pub(crate) fn source_paths(&self) -> Vec<&std::path::PathBuf> {
+        let mut paths: Vec<_> = self.file.iter().map(|file| &file.path).collect();
+        match &self.recipe {
+            Recipe::Tool {
+                background: Some(background),
+                ..
+            } => {
+                if let Some(end) = &background.end {
+                    paths.push(&end.file.path);
+                }
+            }
+            Recipe::BgEnd { source_file, .. } => paths.push(&source_file.path),
+            _ => {}
+        }
+        paths
+    }
+    pub(crate) fn identity(&self) -> String {
+        let event = self
+            .native_event_id
+            .clone()
+            .unwrap_or_else(|| format!("offset:{}", self.offset));
+        let header = match &self.recipe {
+            Recipe::H { id } => Some(id),
+            _ => None,
+        };
+        format!(
+            "{:?}|{:?}|{}|{}|{:?}|{:?}",
+            self.file.as_ref().map(|file| &file.path),
+            header,
+            event,
+            self.block,
+            std::mem::discriminant(&self.recipe),
+            self.turn
+        )
+    }
     fn capture(slot: &Slot) -> Self {
         let recipe = match &slot.kind {
             SlotKind::H(id) => Recipe::H { id: id.clone() },
