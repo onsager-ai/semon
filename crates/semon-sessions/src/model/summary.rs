@@ -140,7 +140,7 @@ pub(crate) struct CatalogSource {
     pub(crate) tail_sha256: [u8; 32],
 }
 
-pub(crate) const CATALOG_VERSION: u32 = 1;
+pub(crate) const CATALOG_VERSION: u32 = 2;
 
 pub(super) fn catalog(builder: &Builder<'_>, handoffs: &[Handoff]) -> Vec<CatalogRow> {
     let mut rows = Vec::new();
