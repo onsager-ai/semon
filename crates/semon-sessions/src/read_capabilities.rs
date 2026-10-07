@@ -35,7 +35,7 @@ pub fn session_catalog_capabilities(
             "native_resolution":endpoints.native_resolution,"selected_identity":endpoints.selected_identity,"selected_transcript":endpoints.selected_transcript,
             "selected_entry":endpoints.selected_entry,"pagination":true,"relationship_context":false,
             "large_native_records":false,"attachment":false,"global_union":false,"full_text_search":false,
-            "filters":["harness","repo"],"order":"last_desc_key_asc"}).to_string().into_bytes(),
+            "metadata_search":true,"filters":["harness","repo","q"],"order":"last_desc_key_asc"}).to_string().into_bytes(),
         etag:None,
     }
 }
