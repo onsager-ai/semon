@@ -56,6 +56,7 @@ try:
         raise AssertionError({'launch':accepted,'diagnostic':diagnostic})
     duplicate=subprocess.run([args.installer],input=json.dumps(bootstrap),text=True,capture_output=True,timeout=45)
     assert duplicate.returncode==0 and json.loads(duplicate.stdout)==accepted,'duplicate launch changed thread'
+    assert accepted['snapshotObserved'] and Provider.credential not in result.stdout
     thread=accepted['thread'];snap=rpc(root,{'op':'snapshot'})['snapshot']
     scope={'enrollment':enrollment,'authority':str(uuid.uuid4()),'owner':'owner-307','workspace':'workspace-307','connection':'ssh-307','session':'session-307','operation':launch,'epoch':1,'thread':thread,'model_connection':'codex-307','expires':bootstrap['expires']}
     broker=Path(__file__).parents[2].joinpath('crates/semon-ssh/src/execution.py').read_text()
