@@ -852,10 +852,10 @@ impl IndexStore for SqliteStore {
             for source in rows.iter().flat_map(|row| &row.sources) {
                 sources.insert(source.path.to_string_lossy().into_owned(), source);
             }
-            let committed: usize = transaction
+            let committed: i64 = transaction
                 .query_row("SELECT COUNT(*) FROM files", [], |row| row.get(0))
                 .map_err(failure)?;
-            if committed != sources.len() {
+            if committed != i64::try_from(sources.len()).unwrap_or(-1) {
                 return Ok(Outcome::Conflict);
             }
             for (path, source) in sources {
