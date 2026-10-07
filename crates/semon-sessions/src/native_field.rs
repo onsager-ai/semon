@@ -54,20 +54,45 @@ pub(crate) fn capture(
     block: u32,
     recipe: &Recipe,
 ) -> Option<NativeField> {
-    let (offset, block, kind) = match recipe {
-        Recipe::U | Recipe::A | Recipe::Think => (offset, block, NativeFieldKind::Text),
+    let (offset, block) = match recipe {
+        Recipe::U | Recipe::A | Recipe::Think => (offset, block),
         Recipe::Tool {
             reply: Some(reply),
             item: None,
             ..
-        } => (reply.o, reply.b, NativeFieldKind::ClaudeResult),
+        } => (reply.o, reply.b),
         _ => return None,
     };
     if block > 1024 {
         return None;
     }
     let bytes = read_source_record(source, offset)?;
-    let value = crate::tx::parse_native_record(&bytes)?;
+    capture_from_verified_record(&bytes, offset, block, recipe)
+}
+
+/// Producer-only mapping from one already generation-verified original record.
+/// The caller must bind these bytes and the source offset to an immutable
+/// generation before publishing recipes. This helper supplies no authorization
+/// or generation proof and must never be used as a request-time record parser.
+pub(crate) fn capture_from_verified_record(
+    bytes: &[u8],
+    offset: u64,
+    block: u32,
+    recipe: &Recipe,
+) -> Option<NativeField> {
+    let kind = match recipe {
+        Recipe::U | Recipe::A | Recipe::Think => NativeFieldKind::Text,
+        Recipe::Tool {
+            reply: Some(reply),
+            item: None,
+            ..
+        } if reply.o == offset && reply.b == block => NativeFieldKind::ClaudeResult,
+        _ => return None,
+    };
+    if block > 1024 || bytes.len() > 32 * 1024 * 1024 {
+        return None;
+    }
+    let value = crate::tx::parse_native_record(bytes)?;
     let mut kind = kind;
     let mut layers = 1;
     let encoded_output = value
@@ -150,12 +175,12 @@ pub(crate) fn capture(
         }
         _ => return None,
     };
-    let span = json_string::index_json_string_spans(&bytes)
+    let span = json_string::index_json_string_spans(bytes)
         .ok()?
         .into_iter()
         .find(|span| span.json_pointer == pointer)?;
     let span = if layers == 2 {
-        json_string::index_nested_json_string_spans(&bytes, &span)
+        json_string::index_nested_json_string_spans(bytes, &span)
             .ok()?
             .into_iter()
             .find(|span| span.json_pointer == "/output")?
@@ -229,4 +254,25 @@ fn source_matches(
             .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
             .map(|time| time.as_nanos())
             == Some(source.modified_ns)
+}
+
+#[cfg(test)]
+mod verified_record_tests {
+    use super::*;
+
+    #[test]
+    fn verified_original_record_fields_preserve_offsets_and_native_identity() {
+        let bytes = br#"{"type":"user","uuid":"native-event-1","message":{"role":"user","content":"original text"}}
+"#;
+        let field = capture_from_verified_record(bytes, 4096, 0, &Recipe::U).unwrap();
+        assert_eq!(field.record_offset, 4096);
+        assert_eq!(field.native_event_id.as_deref(), Some("native-event-1"));
+        assert_eq!(
+            &bytes[field.start as usize..field.end as usize],
+            b"original text"
+        );
+        assert_eq!(field.layers, 1);
+        assert!(capture_from_verified_record(bytes, 4096, 1025, &Recipe::U).is_none());
+        assert!(capture_from_verified_record(b"not JSON", 4096, 0, &Recipe::U).is_none());
+    }
 }
