@@ -38,7 +38,7 @@ export function createLiveModel(host: LiveModelHost) {
         activeRead = request;
         const response = await host.transportOwner.api(
           recovering
-            ? '/api/model?delta=1'
+            ? '/api/model?delta=1&since='
             : '/api/model?delta=1&since=' +
                 host.transportOwner.enc(LIVE.late ? '' : (LIVE.version ?? '')),
           request.signal,
@@ -49,7 +49,7 @@ export function createLiveModel(host: LiveModelHost) {
         try {
           model = host.liveUpdates.applyModelDelta(response);
         } catch {
-          model = await host.transportOwner.api('/api/model?delta=1', request.signal);
+          model = await host.transportOwner.api('/api/model?delta=1&since=', request.signal);
           if (destroyed || host.disposed || request.signal.aborted) return;
         }
         await host.liveUpdates.update(model, recovering);

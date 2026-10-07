@@ -134,7 +134,7 @@ test('stream application recovery uses snapshots and retains status until synchr
           enc: encodeURIComponent,
           api: async (path) => {
             reads++;
-            if (path !== '/api/model?delta=1') throw Error('not a snapshot');
+            if (path !== '/api/model?delta=1&since=') throw Error('not a snapshot');
             if (reads === 1) throw Object.assign(Error('temporary'), { status: 503 });
             return { version: 'snapshot' };
           },
