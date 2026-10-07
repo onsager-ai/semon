@@ -1,4 +1,5 @@
 import type { CatalogSelectionScope } from './catalog-selection';
+import type { CatalogReadScope } from '../domain/catalog';
 import {
   parseCatalogTranscriptPage,
   type CatalogTranscriptPage,
@@ -21,6 +22,7 @@ export interface CatalogRangeRequest extends CatalogSelectionScope {
   readonly after: number | null;
   readonly limit: number;
   readonly generation: string | null;
+  readonly read_scope: CatalogReadScope;
 }
 export interface CatalogLoadedRange {
   first: number;
@@ -34,21 +36,24 @@ export class CatalogTranscriptStore {
     return this.contentVersion;
   }
   private scope: CatalogSelectionScope | null = null;
+  private readScope: CatalogReadScope = 'current';
   private disposed = false;
   private requests = new Set<CatalogRangeRequest>();
   private pages: CatalogTranscriptPage[] = [];
   private listeners = new Set<() => void>();
-  select(scope: CatalogSelectionScope): void {
+  select(scope: CatalogSelectionScope, readScope: CatalogReadScope = 'current'): void {
     if (this.disposed) throw new Error('Catalog transcript is destroyed');
     if (
       typeof scope.source_key !== 'string' ||
       typeof scope.catalog_key !== 'string' ||
-      !scope.catalog_key
+      !scope.catalog_key ||
+      (readScope !== 'current' && readScope !== 'retained_history')
     )
       throw new Error('Invalid catalog transcript scope');
     ++this.epoch;
     ++this.contentVersion;
     this.scope = { ...scope };
+    this.readScope = readScope;
     this.requests.clear();
     this.pages = [];
     this.changed();
@@ -68,6 +73,7 @@ export class CatalogTranscriptStore {
       after,
       limit,
       generation: this.pages[0]?.projection.generation ?? null,
+      read_scope: this.readScope,
     });
     this.requests.add(request);
     return request;
@@ -83,6 +89,7 @@ export class CatalogTranscriptStore {
     if (
       page.identity.source_key !== request.source_key ||
       page.identity.catalog_key !== request.catalog_key ||
+      page.identity.read_scope !== request.read_scope ||
       page.range.first !== first ||
       page.range.end !== Math.min(first + request.limit, page.projection.total) ||
       (generation !== null && page.projection.generation !== generation)
