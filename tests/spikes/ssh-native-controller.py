@@ -110,12 +110,20 @@ try:
     assert any(standalone.MARKER in str(row.get('output')) and 'Process exited with code 0' in str(row.get('output')) for row in outputs),outputs
     # Original native records are transported and parsed by the real Semon CLI
     # on the same SSH server as the native controller, not generated history.
-    pushed=remote("import json,os,pathlib,subprocess,sys\np=json.load(sys.stdin);root=pathlib.Path(p['root']);token=root/'fixture-mirror-token';fd=os.open(token,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600);os.write(fd,p['token'].encode());os.close(fd);r=subprocess.run(['/opt/semon-mirror','push','--to','http://127.0.0.1:33222','--token-file',str(token),'--state',str(root/'fixture-push-state.json'),'--codex-home',str(root/'session/home')],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=20);print(json.dumps({'pushed':r.returncode==0}))",{'root':root,'token':mirror_token})
-    assert pushed['pushed'],'native original-record push failed'
-    readback=subprocess.check_output([mirror_binary,'sessions','--all','--machines',str(receiver_dir),'--no-local','--model-json'],text=True,timeout=20)
+    capture=subprocess.run([args.installer],input=json.dumps({'action':'capture','enrollment':enrollment,'mirror':mirror_binary,'destination':'http://127.0.0.1:33222','token':mirror_token,'receiver':'native-307'}),text=True,capture_output=True,timeout=65)
+    assert capture.returncode==0 and json.loads(capture.stdout)['running'],'native-home-only capture failed'
+    deadline=time.monotonic()+10
+    while True:
+        readback=subprocess.check_output([mirror_binary,'sessions','--all','--machines',str(receiver_dir),'--no-local','--model-json'],text=True,timeout=20)
+        if thread in readback and standalone.MARKER in readback: break
+        assert time.monotonic()<deadline,'native capture/readback did not converge'
+        time.sleep(.05)
     assert thread in readback and standalone.MARKER in readback,'native push/readback lost the selected thread or tool output'
     assert Provider.credential not in readback and mirror_token not in readback,'custody leaked into parsed history'
+    watch_receipt=remote("import pathlib,json,sys\np=json.load(sys.stdin);root=pathlib.Path(p['root']);r=json.loads((root/'receipt').read_text());run=(root/'run').read_text();assert '--codex-home' in run and str(root/'session/home') in run;print(json.dumps({'scoped':r['capture_native']}))",{'root':root})
+    assert watch_receipt['scoped']
     report['native_push_readback']=True
+    report['native_home_scoped_watch']=True
     report['push_binary_sha256']=hashlib.sha256(Path(mirror_binary).read_bytes()).hexdigest()
     report['readback_bytes']=len(readback.encode())
     # Simulate a lost broker acknowledgement after the native result was durably
@@ -134,7 +142,7 @@ try:
     assert observed['state']=='ended' and observed['writer_excluded'],observed
     # A native controller, unlike a synthetic transport fixture, must stop with
     # no browser and even if a peer holds an unfinished status request open.
-    for lifetime_case in ('expiry','controller_crash'):
+    for lifetime_case in ('expiry','controller_crash','explicit_stop'):
         next_enrollment=str(uuid.uuid4());next_launch=uuid.uuid4().hex
         next_root='/home/fixture/.local/state/semon-ssh/'+next_enrollment
         remote("import os,pathlib,sys,json\nos.umask(0o077);pathlib.Path(json.load(sys.stdin)['root']).mkdir(parents=True,mode=0o700)",{'root':next_root})
@@ -142,12 +150,15 @@ try:
         next_result=subprocess.run([args.installer],input=json.dumps(next_bootstrap),text=True,capture_output=True,timeout=40)
         assert next_result.returncode==0,next_result.stderr
         next_accepted=json.loads(next_result.stdout);assert next_accepted['state']=='running',next_accepted
-        if lifetime_case=='controller_crash':
+        if lifetime_case=='explicit_stop':
+            stopped=remote(observer,{'version':1,'method':'stop','authorize_stop':True,'enrollment':next_enrollment,'launch':next_launch,'binding':binding})
+            assert stopped['launch']==next_launch
+        elif lifetime_case=='controller_crash':
             # Obtain the exact protected IPC peer identity, then stop only that
             # exclusively created fixture controller. Its supervisor adopts and
             # reaps the native descendants; it never launches a replacement.
             remote("import os,socket,struct,json,sys\np=json.load(sys.stdin);s=socket.socket(socket.AF_UNIX);s.connect(p['root']+'/control.sock');pid,uid,gid=struct.unpack('3i',s.getsockopt(socket.SOL_SOCKET,socket.SO_PEERCRED,12));assert uid==os.getuid();os.kill(pid,9)",{'root':next_root})
-        else:
+        elif lifetime_case=='expiry':
             stalled_script="import socket,json,sys,time\np=json.load(sys.stdin);s=socket.socket(socket.AF_UNIX);s.connect(p['root']+'/control.sock');time.sleep(15)"
             stalled=subprocess.Popen(ssh+["python3 -c '"+stalled_script.replace("'","'\\''")+"'"],stdin=subprocess.PIPE,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,text=True)
             stalled.stdin.write(json.dumps({'root':next_root}));stalled.stdin.close()
