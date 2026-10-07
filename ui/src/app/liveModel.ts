@@ -27,6 +27,20 @@ interface LiveModelHost {
 export function createLiveModel(host: LiveModelHost) {
   let streamSequence = 0;
   let activeRead: AbortController | null = null;
+  function selection() {
+    if (!host.viewerHost?.selectedModel) return '';
+    const route = host.navigation.route;
+    if (route.v !== 'session') return '';
+    const session = host.modelStore.sessions[route.id];
+    return (
+      '&selected=' +
+      host.transportOwner.enc(route.id) +
+      (session ? '&machine=' + host.transportOwner.enc(session.machine) : '')
+    );
+  }
+  function modelPath(path: string, selected = selection()) {
+    return path + selected;
+  }
   const liveController = createLiveController({
     async poll() {
       // Recovery and SSE delivery share the same update transaction queue.
@@ -34,25 +48,41 @@ export function createLiveModel(host: LiveModelHost) {
       const work = delivery.then(async () => {
         if (destroyed || host.disposed) return;
         const sequence = streamSequence;
+        const selected = selection();
         const request = new AbortController();
         activeRead = request;
         const response = await host.transportOwner.api(
-          recovering
-            ? '/api/model?delta=1'
-            : '/api/model?delta=1&since=' +
-                host.transportOwner.enc(LIVE.late ? '' : (LIVE.version ?? '')),
+          modelPath(
+            recovering
+              ? '/api/model?delta=1'
+              : '/api/model?delta=1&since=' +
+                  host.transportOwner.enc(LIVE.late ? '' : (LIVE.version ?? '')),
+            selected,
+          ),
           request.signal,
           !recovering,
         );
-        if (!response || destroyed || host.disposed || request.signal.aborted) return;
+        if (
+          !response ||
+          destroyed ||
+          host.disposed ||
+          request.signal.aborted ||
+          selected !== selection()
+        )
+          return;
         let model;
         try {
           model = host.liveUpdates.applyModelDelta(response);
         } catch {
-          model = await host.transportOwner.api('/api/model?delta=1', request.signal);
-          if (destroyed || host.disposed || request.signal.aborted) return;
+          model = await host.transportOwner.api(
+            modelPath('/api/model?delta=1', selected),
+            request.signal,
+          );
+          if (destroyed || host.disposed || request.signal.aborted || selected !== selection())
+            return;
         }
         await host.liveUpdates.update(model, recovering);
+        if (stream && selected !== selection()) schedule(0);
         if (activeRead === request) activeRead = null;
         if (recovering && !destroyed && !host.disposed) {
           if (sequence === streamSequence) {
@@ -116,6 +146,8 @@ export function createLiveModel(host: LiveModelHost) {
   // rendered route is owned by navigation; // the route the page shows
   const visible = () => document.visibilityState === 'visible';
   let stream: EventSource | null = null;
+  let streamSelection = '';
+  let started = false;
   let destroyed = false;
   let streamNote: HTMLElement | null = null;
   function clearStreamNote() {
@@ -129,35 +161,64 @@ export function createLiveModel(host: LiveModelHost) {
   }
   let delivery = Promise.resolve();
   const schedule = (ms: number) => {
+    started = true;
+    const selected = selection();
     const path = host.viewerHost?.modelStream;
     if (!path || typeof EventSource === 'undefined') {
       liveController.schedule(ms);
       return;
     }
-    if (stream || destroyed) return;
+    if (destroyed) return;
+    if (stream && streamSelection === selected) return;
+    if (stream) {
+      stream.close();
+      activeRead?.abort();
+      streamSequence++;
+    }
+    streamSelection = selected;
     if (!path.startsWith('/') || path.startsWith('//') || /[\\\s]/.test(path))
       throw new Error('Invalid live model stream');
-    stream = new EventSource(path);
+    const current = new EventSource(
+      path + (selected ? (path.includes('?') ? selected : '?' + selected.slice(1)) : ''),
+    );
+    stream = current;
     liveController.useStream();
-    stream.addEventListener('open', () => {
+    current.addEventListener('open', () => {
+      if (stream !== current || selection() !== selected || destroyed) return;
       if (streamNote) liveController.recover();
     });
     const recover = () => {
+      if (stream !== current || selection() !== selected || destroyed) return;
       showStreamNote();
       liveController.recover();
     };
-    stream.addEventListener('error', recover);
-    stream.addEventListener('unavailable', recover);
-    stream.addEventListener('model', (event) => {
-      if (!(event instanceof MessageEvent) || destroyed || host.disposed) return;
+    current.addEventListener('error', recover);
+    current.addEventListener('unavailable', recover);
+    current.addEventListener('model', (event) => {
+      if (
+        !(event instanceof MessageEvent) ||
+        destroyed ||
+        host.disposed ||
+        stream !== current ||
+        selection() !== selected
+      )
+        return;
       streamSequence++;
       if (liveController.recovering) return;
       // Serialize deliveries through the existing model/transcript owner; a
       // stream never introduces a second cache, router or rendering pipeline.
       delivery = delivery
         .then(async () => {
-          if (destroyed || host.disposed || liveController.recovering) return;
+          if (
+            destroyed ||
+            host.disposed ||
+            liveController.recovering ||
+            stream !== current ||
+            selection() !== selected
+          )
+            return;
           await host.liveUpdates.update(JSON.parse(String(event.data)));
+          if (selected !== selection()) schedule(0);
           clearStreamNote();
         })
         .catch((error: unknown) => {
@@ -166,7 +227,8 @@ export function createLiveModel(host: LiveModelHost) {
           else recover();
         });
     });
-    stream.addEventListener('ended', () => {
+    current.addEventListener('ended', () => {
+      if (stream !== current || selection() !== selected || destroyed) return;
       activeRead?.abort();
       destroyed = true;
       liveController.stop();
@@ -176,6 +238,17 @@ export function createLiveModel(host: LiveModelHost) {
       host.viewerHost?.modelFailed?.(403);
     });
   };
+  const unsubscribeRoute = host.viewerHost?.selectedModel
+    ? host.navigation.subscribeRoute(() => {
+        if (!started || destroyed) return;
+        if (stream) schedule(0);
+        else {
+          activeRead?.abort();
+          LIVE.again = true;
+          liveController.schedule(0);
+        }
+      })
+    : () => {};
   // An embedding page can cancel `semon:ended` to draw its own note in place of this one.
   function ended(status: number) {
     if (host.disposed) return;
@@ -237,6 +310,7 @@ export function createLiveModel(host: LiveModelHost) {
 
   return {
     destroy() {
+      unsubscribeRoute();
       activeRead?.abort();
       activeRead = null;
       destroyed = true;
