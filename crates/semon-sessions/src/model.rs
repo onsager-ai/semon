@@ -1488,7 +1488,9 @@ fn scan(
             summary,
         });
     }
-    cache.retain(&seen, dirty);
+    if selected.is_none() {
+        cache.retain(&seen, dirty);
+    }
     cache.end_scan();
     texts
         .prompt_caches
