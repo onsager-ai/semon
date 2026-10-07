@@ -1501,8 +1501,24 @@ mod tests {
         );
         let (_, latest) = get("sid=selected&limit=1");
         assert_eq!(latest["range"]["first"], 2);
-        assert_eq!(latest["freshness"]["state"], "incomplete");
-        assert!(latest["observation"]["source_bytes"].as_u64().unwrap() <= 128 * 1024);
+        assert_eq!(latest["freshness"]["state"], "cached");
+        assert_eq!(latest["entries"][0]["clipped"], true);
+        assert!(latest["observation"]["source_bytes"].as_u64().unwrap() <= 4096 + 11);
+        let generation = latest["projection"]["generation"].as_str().unwrap();
+        let chunks = latest["entries"][0]["field"]["chunks"].as_u64().unwrap();
+        let mut expanded = String::new();
+        for chunk in 0..chunks {
+            let query =
+                format!("sid=selected&after=2&limit=1&generation={generation}&field_chunk={chunk}");
+            let reply = crate::session_entry_field(&fixture.options, "source", &query, None);
+            assert_eq!(reply.status, 200);
+            let body: Value = serde_json::from_slice(&reply.body).unwrap();
+            assert!(body["observation"]["source_bytes"].as_u64().unwrap() <= 64 * 1024 + 11);
+            expanded.push_str(body["text"].as_str().unwrap());
+        }
+        assert_eq!(expanded, "large answer unique body ".repeat(16000));
+        assert_eq!(get("sid=selected&after=%GG").0, 400);
+        assert_eq!(get("sid=selected&scope=unknown").0, 400);
         assert_eq!(get("sid=selected&generation=wrong").0, 409);
         assert_eq!(get("sid=selected&after=99").0, 400);
         assert_eq!(get("sid=missing").0, 404);

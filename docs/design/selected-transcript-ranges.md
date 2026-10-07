@@ -66,3 +66,26 @@ Current coherent publication still builds all background native histories; dirty
 component publication remains a separate dependency. Metadata-only q/global
 union pagination are also unfinished. This slice does not satisfy all #319
 acceptance criteria or claim a complete default Viewer journey.
+
+## Qualified string fields
+
+Recipe version 2 indexes plain Claude user, assistant and thinking strings during
+complete observation. It stores only an allowlisted field pointer, scalar-safe
+raw offsets/checkpoints and native event identity. It does not persist body text.
+Structured user content with multiple blocks, attachments, Codex records and tool
+formatting wrappers remain unsupported by this field path.
+
+Selected previews decode at most 4 KiB of text from at most 4 KiB + 11 raw bytes.
+A clipped entry exposes `field: {name: "text", chunks, complete}`. The scoped
+`/api/session-entry` endpoint requires `sid`, `after`, `limit=1`, the observed
+projection `generation`, and a `field_chunk` ordinal. Each ordinal addresses one
+persisted scalar-safe checkpoint interval, capped at 64 KiB + 11 raw bytes and
+128 KiB decoded text. It never reads or decodes earlier field bytes. A generation
+change returns the normal 409 resynchronization response; unqualified fields
+return 422 and unavailable source ranges return 503.
+
+`selected_entry` advertises this qualified endpoint; `large_native_records`
+remains false because native formats outside this allowlist remain incomplete.
+Producer indexing still rereads qualified source records during a complete
+rebuild, and repeated slots can duplicate producer parsing. This work is outside
+the bounded request path and remains a measured background-refresh concern.
