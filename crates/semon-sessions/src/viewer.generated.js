@@ -7434,7 +7434,19 @@ globalThis.__semonUIShared = __semonUIShared;
       this.content = initial;
     }
     host;
-    route = { v: "home" };
+    currentRoute = { v: "home" };
+    routeListeners = /* @__PURE__ */ new Set();
+    get route() {
+      return this.currentRoute;
+    }
+    set route(value) {
+      this.currentRoute = value;
+      for (const listener of this.routeListeners) listener();
+    }
+    subscribeRoute(listener) {
+      this.routeListeners.add(listener);
+      return () => this.routeListeners.delete(listener);
+    }
     rendered = null;
     content;
     nativePending = null;
@@ -7535,6 +7547,7 @@ globalThis.__semonUIShared = __semonUIShared;
       return out;
     }
     destroy() {
+      this.routeListeners.clear();
       if (this.disposed) return;
       this.disposed = true;
       this.cancelNative();
@@ -10202,28 +10215,48 @@ globalThis.__semonUIShared = __semonUIShared;
   function createLiveModel(host2) {
     let streamSequence = 0;
     let activeRead = null;
+    function selection() {
+      if (!host2.viewerHost?.selectedModel) return "";
+      const route = host2.navigation.route;
+      if (route.v !== "session") return "";
+      const session = host2.modelStore.sessions[route.id];
+      return "&selected=" + host2.transportOwner.enc(route.id) + (session ? "&machine=" + host2.transportOwner.enc(session.machine) : "");
+    }
+    function modelPath(path, selected = selection()) {
+      return path + selected;
+    }
     const liveController = createLiveController({
       async poll() {
         const recovering = liveController.recovering;
         const work = delivery.then(async () => {
           if (destroyed || host2.disposed) return;
           const sequence = streamSequence;
+          const selected = selection();
           const request = new AbortController();
           activeRead = request;
           const response = await host2.transportOwner.api(
-            recovering ? "/api/model?delta=1" : "/api/model?delta=1&since=" + host2.transportOwner.enc(LIVE.late ? "" : LIVE.version ?? ""),
+            modelPath(
+              recovering ? "/api/model?delta=1" : "/api/model?delta=1&since=" + host2.transportOwner.enc(LIVE.late ? "" : LIVE.version ?? ""),
+              selected
+            ),
             request.signal,
             !recovering
           );
-          if (!response || destroyed || host2.disposed || request.signal.aborted) return;
+          if (!response || destroyed || host2.disposed || request.signal.aborted || selected !== selection())
+            return;
           let model2;
           try {
             model2 = host2.liveUpdates.applyModelDelta(response);
           } catch {
-            model2 = await host2.transportOwner.api("/api/model?delta=1", request.signal);
-            if (destroyed || host2.disposed || request.signal.aborted) return;
+            model2 = await host2.transportOwner.api(
+              modelPath("/api/model?delta=1", selected),
+              request.signal
+            );
+            if (destroyed || host2.disposed || request.signal.aborted || selected !== selection())
+              return;
           }
           await host2.liveUpdates.update(model2, recovering);
+          if (stream && selected !== selection()) schedule(0);
           if (activeRead === request) activeRead = null;
           if (recovering && !destroyed && !host2.disposed) {
             if (sequence === streamSequence) {
@@ -10281,6 +10314,8 @@ globalThis.__semonUIShared = __semonUIShared;
     ].join("|");
     const visible2 = () => document.visibilityState === "visible";
     let stream = null;
+    let streamSelection = "";
+    let started = false;
     let destroyed = false;
     let streamNote = null;
     function clearStreamNote() {
@@ -10294,32 +10329,49 @@ globalThis.__semonUIShared = __semonUIShared;
     }
     let delivery = Promise.resolve();
     const schedule = (ms) => {
+      started = true;
+      const selected = selection();
       const path = host2.viewerHost?.modelStream;
       if (!path || typeof EventSource === "undefined") {
         liveController.schedule(ms);
         return;
       }
-      if (stream || destroyed) return;
+      if (destroyed) return;
+      if (stream && streamSelection === selected) return;
+      if (stream) {
+        stream.close();
+        activeRead?.abort();
+        streamSequence++;
+      }
+      streamSelection = selected;
       if (!path.startsWith("/") || path.startsWith("//") || /[\\\s]/.test(path))
         throw new Error("Invalid live model stream");
-      stream = new EventSource(path);
+      const current = new EventSource(
+        path + (selected ? path.includes("?") ? selected : "?" + selected.slice(1) : "")
+      );
+      stream = current;
       liveController.useStream();
-      stream.addEventListener("open", () => {
+      current.addEventListener("open", () => {
+        if (stream !== current || selection() !== selected || destroyed) return;
         if (streamNote) liveController.recover();
       });
       const recover = () => {
+        if (stream !== current || selection() !== selected || destroyed) return;
         showStreamNote();
         liveController.recover();
       };
-      stream.addEventListener("error", recover);
-      stream.addEventListener("unavailable", recover);
-      stream.addEventListener("model", (event) => {
-        if (!(event instanceof MessageEvent) || destroyed || host2.disposed) return;
+      current.addEventListener("error", recover);
+      current.addEventListener("unavailable", recover);
+      current.addEventListener("model", (event) => {
+        if (!(event instanceof MessageEvent) || destroyed || host2.disposed || stream !== current || selection() !== selected)
+          return;
         streamSequence++;
         if (liveController.recovering) return;
         delivery = delivery.then(async () => {
-          if (destroyed || host2.disposed || liveController.recovering) return;
+          if (destroyed || host2.disposed || liveController.recovering || stream !== current || selection() !== selected)
+            return;
           await host2.liveUpdates.update(JSON.parse(String(event.data)));
+          if (selected !== selection()) schedule(0);
           clearStreamNote();
         }).catch((error) => {
           if (failed(error)) return;
@@ -10327,7 +10379,8 @@ globalThis.__semonUIShared = __semonUIShared;
           else recover();
         });
       });
-      stream.addEventListener("ended", () => {
+      current.addEventListener("ended", () => {
+        if (stream !== current || selection() !== selected || destroyed) return;
         activeRead?.abort();
         destroyed = true;
         liveController.stop();
@@ -10336,6 +10389,16 @@ globalThis.__semonUIShared = __semonUIShared;
         clearStreamNote();
         host2.viewerHost?.modelFailed?.(403);
       });
+    };
+    const unsubscribeRoute = host2.viewerHost?.selectedModel ? host2.navigation.subscribeRoute(() => {
+      if (!started || destroyed) return;
+      if (stream) schedule(0);
+      else {
+        activeRead?.abort();
+        LIVE.again = true;
+        liveController.schedule(0);
+      }
+    }) : () => {
     };
     function ended(status2) {
       if (host2.disposed) return;
@@ -10384,6 +10447,7 @@ globalThis.__semonUIShared = __semonUIShared;
     );
     return {
       destroy() {
+        unsubscribeRoute();
         activeRead?.abort();
         activeRead = null;
         destroyed = true;

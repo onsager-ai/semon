@@ -14,6 +14,8 @@ export interface ViewerHost {
   modelAccount?(account: Account | null): void;
   /** Host SSE models enter the existing validated model transaction. */
   modelStream?: string;
+  /** Bind hosted model/control reads to the selected native session and model machine. */
+  selectedModel?: boolean;
   modelNavigation?(model: unknown): void;
   /** Return true when the host has taken native recovery for a model failure. */
   modelFailed?(status: number): boolean;
