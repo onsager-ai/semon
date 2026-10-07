@@ -102,7 +102,7 @@ export function createCatalogViewer(
     sourcesRetryDelay = 1000;
   const cacheKey = (key: string) => JSON.stringify([capabilities.source_key, key]);
   const account = parseAccount(viewerHost?.account);
-  let wide = false,
+  let wide = document.querySelector('#page')?.classList.contains('wide-mode') ?? false,
     rail = document.querySelector('.app')?.classList.contains('rail') ?? false,
     chromeTitle: string | null = null,
     chromeSession = false;
