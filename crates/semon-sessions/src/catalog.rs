@@ -1205,6 +1205,17 @@ mod tests {
             )
         };
         connection.execute("INSERT INTO session_catalog(session_key,lifecycle,last_ms,harness,repo,metadata) VALUES('initial-retained','retained',0,'claude','project','{}')", []).unwrap();
+        let indexes = ["order", "harness", "repo", "harness_repo", "parent"];
+        for suffix in indexes {
+            let sql: String = connection
+                .query_row(
+                    "SELECT sql FROM sqlite_master WHERE name=?1",
+                    [format!("session_catalog_current_{suffix}")],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert!(sql.ends_with("WHERE lifecycle='current'"), "{sql}");
+        }
         let small = measure();
         let transaction = connection.unchecked_transaction().unwrap();
         for id in 0..20_000 {
@@ -1307,6 +1318,55 @@ mod tests {
     }
 
     #[test]
+    fn schema_eleven_migration_replaces_current_trees_without_rebinding_history() {
+        for schema in [11, 16] {
+            let fixture = Fixture::new();
+            fixture.publish(1);
+            let connection = Connection::open(EventCache::path(&fixture.options.cache)).unwrap();
+            connection
+                .execute("UPDATE session_catalog SET lifecycle='retained'", [])
+                .unwrap();
+            let before: (String, String) = connection.query_row(
+            "SELECT session_catalog.metadata,session_slot_projections.generation FROM session_catalog JOIN session_slot_projections USING(session_key)",
+            [], |row| Ok((row.get(0)?, row.get(1)?))
+        ).unwrap();
+            for (suffix, keys) in [
+                ("order", "last_ms DESC, session_key ASC"),
+                ("harness", "harness, last_ms DESC, session_key ASC"),
+                ("repo", "repo, last_ms DESC, session_key ASC"),
+                (
+                    "harness_repo",
+                    "harness, repo, last_ms DESC, session_key ASC",
+                ),
+                ("parent", "parent_key, last_ms DESC, session_key ASC"),
+            ] {
+                connection.execute_batch(&format!("DROP INDEX session_catalog_current_{suffix}; CREATE INDEX session_catalog_current_{suffix} ON session_catalog(lifecycle, {keys});")).unwrap();
+            }
+            connection
+                .pragma_update(None, "user_version", schema)
+                .unwrap();
+            drop(EventCache::open(&fixture.options.cache));
+            let after: (String, String) = connection.query_row(
+            "SELECT session_catalog.metadata,session_slot_projections.generation FROM session_catalog JOIN session_slot_projections USING(session_key)",
+            [], |row| Ok((row.get(0)?, row.get(1)?))
+        ).unwrap();
+            assert_eq!(before, after);
+            for suffix in ["order", "harness", "repo", "harness_repo", "parent"] {
+                let sql: String = connection
+                    .query_row(
+                        "SELECT sql FROM sqlite_master WHERE name=?1",
+                        [format!("session_catalog_current_{suffix}")],
+                        |row| row.get(0),
+                    )
+                    .unwrap();
+                assert!(sql.ends_with("WHERE lifecycle='current'"), "{sql}");
+                let count: i64 = connection.query_row(&format!("SELECT count(*) FROM session_catalog INDEXED BY session_catalog_current_{suffix} WHERE lifecycle='current'"), [], |row| row.get(0)).unwrap();
+                assert_eq!(count, 0);
+            }
+        }
+    }
+
+    #[test]
     fn schema_ten_retention_migration_binds_only_coherent_supported_recipes() {
         for coherent in [true, false] {
             let fixture = Fixture::new();
@@ -1337,7 +1397,7 @@ mod tests {
                 connection
                     .query_row("PRAGMA user_version", [], |row| row.get::<_, u32>(0))
                     .unwrap(),
-                16
+                17
             );
         }
     }

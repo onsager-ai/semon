@@ -241,3 +241,9 @@ accessor and subscription. The host contributes only a static
 selection cannot enter the legacy observer or select a native destination.
 Returning to the same native thread invalidates handles from a previous
 selection epoch, even when the native generation remains unchanged.
+
+Compatibility embedding navigation preserves `compat=1` in native Home,
+Sessions, Analytics and Machines destinations. These links retain the explicitly
+selected complete-model reader across navigation; omitting the marker selects
+the focused reader. Complete-model embedding and storage-failure tests must
+enter that reader explicitly rather than waiting for its DOM on a focused page.

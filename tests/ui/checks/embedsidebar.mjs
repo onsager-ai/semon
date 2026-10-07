@@ -380,7 +380,12 @@ export default async function embedSidebarCheck(browser) {
     );
     r.expect(
       JSON.stringify(ourNav.map((x) => x.href)) ===
-        JSON.stringify(['/', '/sessions', '/analytics', '/machines']),
+        JSON.stringify([
+          '/?compat=1',
+          '/sessions?compat=1',
+          '/analytics?compat=1',
+          '/machines?compat=1',
+        ]),
       P + ': native navigation destinations differ: ' + JSON.stringify(ourNav),
     );
     r.expect(
