@@ -6441,8 +6441,15 @@ fn complete_catalog_is_untrimmed_stable_and_preserves_native_source_and_parent()
     home.build();
     let (next, rows) = read_catalog(&home);
     assert_ne!(generation, next);
-    assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].key, "root");
+    assert_eq!(rows.len(), 2);
+    assert_eq!(
+        rows.iter().find(|row| row.key == "root").unwrap().lifecycle,
+        super::summary::CatalogLifecycle::Current
+    );
+    assert_eq!(
+        rows.iter().find(|row| row.key != "root").unwrap().lifecycle,
+        super::summary::CatalogLifecycle::Retained
+    );
 }
 
 #[test]
@@ -6524,7 +6531,7 @@ fn source_disappearance_stays_pending_until_catalog_retirement_commits() {
     let before = read_catalog(&home).0;
     let connection =
         rusqlite::Connection::open(home.options.cache.with_extension("sqlite3")).unwrap();
-    connection.execute_batch("CREATE TRIGGER interrupt_retirement BEFORE DELETE ON session_catalog BEGIN SELECT RAISE(ABORT,'interrupted'); END;").unwrap();
+    connection.execute_batch("CREATE TRIGGER interrupt_retirement BEFORE UPDATE OF lifecycle ON session_catalog WHEN NEW.lifecycle='retained' AND OLD.lifecycle='current' BEGIN SELECT RAISE(ABORT,'interrupted'); END;").unwrap();
     let source = home.root.join("claude/projects/-work-proj/root.jsonl");
     fs::remove_file(&source).unwrap();
     let built = home.build();
@@ -6544,7 +6551,11 @@ fn source_disappearance_stays_pending_until_catalog_retirement_commits() {
     home.build();
     let (generation, rows) = read_catalog(&home);
     assert_ne!(before, generation);
-    assert!(rows.is_empty());
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0].lifecycle,
+        super::summary::CatalogLifecycle::Retained
+    );
     let pending: i64 = connection
         .query_row(
             "SELECT COUNT(*) FROM session_catalog_invalidations",
@@ -6692,12 +6703,17 @@ fn catalog_native_and_parent_indexes_keep_ambiguity_and_remove_retired_sources()
     home.build();
     let retired: i64 = connection
         .query_row(
-            "SELECT COUNT(*) FROM session_catalog_sources WHERE session_key='child'",
+            "SELECT COUNT(*) FROM session_catalog_sources WHERE session_key='child' AND lifecycle='current'",
             [],
             |row| row.get(0),
         )
         .unwrap();
     assert_eq!(retired, 0);
+    let retained:i64=connection.query_row("SELECT count(*) FROM session_catalog_sources WHERE session_key='child' AND lifecycle='retained'",[],|row|row.get(0)).unwrap();
+    assert_eq!(
+        retained, 1,
+        "disappeared source identity remains explicit retained provenance"
+    );
     let current: i64 = connection.query_row("SELECT COUNT(*) FROM session_catalog_sources WHERE session_key='root' AND native_id='root'", [], |row| row.get(0)).unwrap();
     assert_eq!(current, 1);
 }
@@ -6709,7 +6725,7 @@ fn schema_six_catalog_migration_populates_relationship_indexes_on_next_complete_
     home.build();
     let connection =
         rusqlite::Connection::open(home.options.cache.with_extension("sqlite3")).unwrap();
-    connection.execute_batch("DROP TABLE session_catalog_sources; DROP INDEX session_catalog_parent; ALTER TABLE session_catalog DROP COLUMN parent_key; UPDATE meta SET value='1' WHERE key='catalog_version'; PRAGMA user_version=6;").unwrap();
+    connection.execute_batch("DROP TABLE session_catalog_sources; DROP INDEX session_catalog_parent; DROP INDEX session_catalog_current_parent; ALTER TABLE session_catalog DROP COLUMN parent_key; UPDATE meta SET value='1' WHERE key='catalog_version'; PRAGMA user_version=6;").unwrap();
     use sha2::{Digest, Sha256};
     let metadata: Vec<String> = read_catalog(&home)
         .1
@@ -6741,7 +6757,7 @@ fn schema_six_catalog_migration_populates_relationship_indexes_on_next_complete_
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(version, "2");
+    assert_eq!(version, super::summary::CATALOG_VERSION.to_string());
     let source: (String, String) = connection
         .query_row(
             "SELECT session_key,native_id FROM session_catalog_sources",
