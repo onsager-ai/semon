@@ -10,6 +10,8 @@ export interface ViewerHost {
   nativeNavigation?: readonly ShellDestination[];
   /** A native administrative page uses shared chrome/Recent, with native destination links. */
   nativePage?: { title: string; nav: string };
+  /** Advertise source inventory so an unselected reader can choose without a failing probe. */
+  catalogSources?: boolean;
   account?: unknown;
   modelAccount?(account: Account | null): void;
   /** Host SSE models enter the existing validated model transaction. */

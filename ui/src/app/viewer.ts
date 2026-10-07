@@ -33,6 +33,17 @@ export function mountViewerApplication(
     if (disposed) return;
     owner = new ViewerComposition(host, () => {}).application;
   }
+  function chooseSources() {
+    owner = createCatalogSources(host, (key) => {
+      if (disposed) return;
+      owner?.destroy();
+      owner = null;
+      const url = new URL(location.href);
+      url.searchParams.set('machine', key);
+      history.replaceState(null, '', url.pathname + url.search + url.hash);
+      void chooseReader();
+    });
+  }
   async function chooseReader() {
     if (disposed || owner || choosing) return;
     choosing = true;
@@ -60,15 +71,7 @@ export function mountViewerApplication(
         return;
       }
       if (status === 400 && !new URLSearchParams(location.search).has('machine')) {
-        owner = createCatalogSources(host, (key) => {
-          if (disposed) return;
-          owner?.destroy();
-          owner = null;
-          const url = new URL(location.href);
-          url.searchParams.set('machine', key);
-          history.replaceState(null, '', url.pathname + url.search + url.hash);
-          void chooseReader();
-        });
+        chooseSources();
         return;
       }
       const root = document.querySelector<HTMLElement>('#page');
@@ -113,6 +116,8 @@ export function mountViewerApplication(
     document.querySelector<HTMLElement>('.app')?.dataset.viewer === 'sidebar'
   )
     legacy();
+  else if (host?.catalogSources && !new URLSearchParams(location.search).has('machine'))
+    chooseSources();
   else {
     void chooseReader();
     scope.listen(window, 'focus', () => void chooseReader());
