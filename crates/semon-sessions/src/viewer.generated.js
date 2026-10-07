@@ -17370,6 +17370,17 @@ globalThis.__semonUIShared = __semonUIShared;
       owner = new ViewerComposition(host2, () => {
       }).application;
     }
+    function chooseSources() {
+      owner = createCatalogSources(host2, (key2) => {
+        if (disposed) return;
+        owner?.destroy();
+        owner = null;
+        const url = new URL(location.href);
+        url.searchParams.set("machine", key2);
+        history.replaceState(null, "", url.pathname + url.search + url.hash);
+        void chooseReader();
+      });
+    }
     async function chooseReader() {
       if (disposed || owner || choosing) return;
       choosing = true;
@@ -17394,15 +17405,7 @@ globalThis.__semonUIShared = __semonUIShared;
           return;
         }
         if (status2 === 400 && !new URLSearchParams(location.search).has("machine")) {
-          owner = createCatalogSources(host2, (key2) => {
-            if (disposed) return;
-            owner?.destroy();
-            owner = null;
-            const url = new URL(location.href);
-            url.searchParams.set("machine", key2);
-            history.replaceState(null, "", url.pathname + url.search + url.hash);
-            void chooseReader();
-          });
+          chooseSources();
           return;
         }
         const root = document.querySelector("#page");
@@ -17436,6 +17439,8 @@ globalThis.__semonUIShared = __semonUIShared;
     }
     if (new URLSearchParams(location.search).get("compat") === "1" || host2?.nativePage || host2?.loadMachines && host2.machinesPath === location.pathname || document.querySelector(".app")?.dataset.viewer === "sidebar")
       legacy();
+    else if (host2?.catalogSources && !new URLSearchParams(location.search).has("machine"))
+      chooseSources();
     else {
       void chooseReader();
       scope.listen(window, "focus", () => void chooseReader());

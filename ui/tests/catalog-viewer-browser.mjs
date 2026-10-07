@@ -619,12 +619,14 @@ for (const width of [390, 1280])
       await page.evaluate(() => {
         window.app = CatalogViewer.mountViewerApplication({
           machinesPath: '/machines',
+          catalogSources: true,
           loadMachines: async () => {
             throw Error('No global native inventory');
           },
         });
       });
       await page.getByText('Source inventory is unavailable.', { exact: false }).waitFor();
+      assert.equal(requests.includes('/api/session-capabilities'), false);
       await page.clock.runFor(1100);
       await page.locator('[data-source-key="two"]').waitFor();
       assert.equal(
