@@ -531,7 +531,7 @@ fn render(
             }
             let max = usize::try_from(end - at)
                 .unwrap_or(usize::MAX)
-                .min(READ_CHUNK + crate::json_string::JSON_STRING_LAYERED_SCALAR_SLACK)
+                .min(READ_CHUNK + field.scalar_slack())
                 .min(bytes_left);
             if max == 0 && at != end || requests_left == 0 {
                 return Err(invalid());
@@ -908,7 +908,7 @@ fn render_field(
                 pair[0] < pair[1]
                     && pair[1] - pair[0]
                         <= crate::json_string::JSON_STRING_CHECKPOINT_BYTES
-                            + crate::json_string::JSON_STRING_LAYERED_SCALAR_SLACK as u64
+                            + field.scalar_slack() as u64
             })
         {
             return Err(invalid());
