@@ -16,6 +16,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::{Options, events::EventCache, lock_pid, model, proc_start};
 
+pub(crate) mod source_authority;
+
 pub const FACTS_VERSION: u32 = 2;
 
 /// The environment variables Semon reads from a session's process, by exact
@@ -538,14 +540,37 @@ fn run_of(environ: &[u8]) -> Option<BTreeMap<String, String>> {
 
 /// Reads a facts file written by [`write_facts`] (or received as JSON).
 pub fn read_facts(path: &Path) -> io::Result<Facts> {
-    let bytes = fs::read(path)?;
-    serde_json::from_slice(&bytes)
-        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+    let mut file = fs::File::open(path)?;
+    let before = source_authority::Identity::of(&file.metadata()?).ok();
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)?;
+    let facts = serde_json::from_slice(&bytes)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    // This legacy/full observation already reads all facts. It may repair a
+    // missing derived index; focused reads never use it as a fallback.
+    if let Some(identity) = before
+        && source_authority::Identity::of(&file.metadata()?)
+            .ok()
+            .as_ref()
+            == Some(&identity)
+        && source_authority::CurrentSources::open(path).is_err()
+    {
+        let _ = source_authority::publish(path, &facts, &identity);
+    }
+    Ok(facts)
 }
 
 /// Writes facts as JSON, atomically.
 pub fn write_facts(path: &Path, facts: &Facts) -> io::Result<()> {
-    crate::save_json(path, facts)
+    let file = crate::save_json_file(path, facts)?;
+    if let Ok(metadata) = file.metadata()
+        && let Ok(identity) = source_authority::Identity::of(&metadata)
+    {
+        // Facts remain the original record even if optional projection I/O
+        // fails. Readers reject the old index's mismatched file identity.
+        let _ = source_authority::publish(path, facts, &identity);
+    }
+    Ok(())
 }
 
 #[cfg(test)]
