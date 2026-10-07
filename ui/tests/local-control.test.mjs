@@ -150,3 +150,52 @@ test('selection invalidates old control handles and late command receipts', asyn
     globalThis.fetch = oldFetch;
   }
 });
+
+test('final owned runtime status invalidates pending receipts and reconnect authority', async () => {
+  const oldFetch = globalThis.fetch;
+  let release,
+    writes = 0;
+  globalThis.fetch = async (_url, options) => {
+    writes++;
+    const command = JSON.parse(options.body);
+    return new Promise((resolve) => {
+      release = () =>
+        resolve({
+          ok: true,
+          json: async () => ({ snapshot: { actions: { [command.id]: { delivery: 'accepted' } } } }),
+        });
+    });
+  };
+  const owner = createLocalControl(
+    { request: () => new AbortController(), releaseRequest() {} },
+    () => {},
+  );
+  try {
+    owner.observe(owner.prepare(model()));
+    const pending = owner.view().send('retained draft');
+    owner.observe(
+      owner.prepare({
+        ...model(),
+        connected: false,
+        runtime: { state: 'ended', phase: 'ended', freshness: 'current', reconnectable: false },
+        capabilities: Object.fromEntries(
+          Object.keys(model().capabilities).map((key) => [key, false]),
+        ),
+      }),
+    );
+    release();
+    assert.equal(await pending, false);
+    assert.equal(owner.view().busy, false);
+    owner.view().reconnect();
+    assert.equal(writes, 1);
+    assert.throws(() =>
+      owner.prepare({
+        ...model(),
+        runtime: { state: 'unknown', phase: 'ended', freshness: 'current', reconnectable: true },
+      }),
+    );
+  } finally {
+    owner.destroy();
+    globalThis.fetch = oldFetch;
+  }
+});

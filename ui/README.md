@@ -257,3 +257,11 @@ control authority. Hosts validate the selected catalog source and independently
 recheck runtime custody and authorization. Catalog selection does not fall back
 to workspace model resolution. The scoped observer retains the same snapshot,
 heartbeat, retry and teardown semantics described above.
+
+Status snapshots may include a typed `runtime` observation on the existing native
+control snapshot: `{state, phase, freshness, reconnectable}` and optional
+`presence`, `observedAt`, `observationError`, `updating`. Durable session phase,
+compute presence and observation freshness are separate. Non-active states
+carry disabled native capabilities. Ended and failed states have explicit
+presentation; they retain the composer and its draft and do not advertise native
+reconnect. A final end invalidates pending command receipts without replay.
