@@ -45,12 +45,22 @@ pub struct CatalogFreshness {
     pub state: String,
 }
 
+/// Read intent is separate from native control/source-selection authority.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CatalogReadScope {
+    #[default]
+    Current,
+    RetainedHistory,
+}
+
 /// Scoped cached identity, resolved without global event/model construction.
 /// A nullable native_id preserves ambiguity in multi-native continuations.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CatalogSessionIdentity {
     pub source_key: String,
+    pub read_scope: CatalogReadScope,
     pub catalog_key: String,
     pub harness: String,
     pub native_id: Option<String>,
@@ -93,6 +103,36 @@ pub fn session_catalog_identity(
     source_key: &str,
     canonical_catalog_key: &str,
 ) -> Result<Option<CatalogSessionIdentity>, CatalogIdentityError> {
+    catalog_identity(
+        options,
+        source_key,
+        canonical_catalog_key,
+        CatalogReadScope::Current,
+    )
+}
+
+/// Resolve retained history without treating retired native selection as current.
+/// Hosts must independently authorize history access and verify immutable source
+/// generations when providing bytes. This identity never grants control access.
+pub fn session_catalog_history_identity(
+    options: &Options,
+    source_key: &str,
+    canonical_catalog_key: &str,
+) -> Result<Option<CatalogSessionIdentity>, CatalogIdentityError> {
+    catalog_identity(
+        options,
+        source_key,
+        canonical_catalog_key,
+        CatalogReadScope::RetainedHistory,
+    )
+}
+
+fn catalog_identity(
+    options: &Options,
+    source_key: &str,
+    canonical_catalog_key: &str,
+    scope: CatalogReadScope,
+) -> Result<Option<CatalogSessionIdentity>, CatalogIdentityError> {
     use CatalogIdentityError::{InvalidArguments, ScopeChanged, Unavailable};
     if source_key.is_empty()
         || source_key.len() > 4096
@@ -102,6 +142,7 @@ pub fn session_catalog_identity(
         return Err(InvalidArguments);
     }
     let request = Request {
+        scope,
         limit: 1,
         sid: Some(canonical_catalog_key.to_owned()),
         harness: None,
@@ -151,6 +192,7 @@ pub fn session_catalog_identity(
     }
     Ok(Some(CatalogSessionIdentity {
         source_key: source_key.to_owned(),
+        read_scope: scope,
         catalog_key: item.key,
         harness: item.harness,
         native_id: (native_ids.len() == 1).then(|| native_ids[0].clone()),
@@ -181,6 +223,8 @@ pub fn session_catalog_page(options: &Options, machine: &str, query: &str) -> Vi
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Cursor {
+    #[serde(default)]
+    scope: CatalogReadScope,
     version: u32,
     generation: String,
     machine: String,
@@ -191,6 +235,7 @@ struct Cursor {
 }
 
 pub(crate) struct Request {
+    scope: CatalogReadScope,
     limit: usize,
     sid: Option<String>,
     harness: Option<String>,
@@ -228,6 +273,11 @@ impl Request {
         let parameter = |key| match query_value(query, key) {
             None => Ok(None),
             Some(value) => decoded(value).map(Some).ok_or_else(invalid),
+        };
+        let scope = match parameter("scope")?.as_deref() {
+            None | Some("current") => CatalogReadScope::Current,
+            Some("retained_history") => CatalogReadScope::RetainedHistory,
+            _ => return Err(invalid()),
         };
         let limit = parameter("limit")?
             .map_or(Ok(60), |value| value.parse::<usize>())
@@ -286,6 +336,7 @@ impl Request {
             return Err(invalid());
         }
         Ok(Self {
+            scope,
             limit,
             sid,
             harness,
@@ -474,7 +525,8 @@ fn read_page(
     request: &Request,
 ) -> Result<ViewerReply, Box<dyn std::error::Error>> {
     if request.cursor.as_ref().is_some_and(|cursor| {
-        cursor.machine != machine
+        cursor.scope != request.scope
+            || cursor.machine != machine
             || cursor.harness != request.harness
             || cursor.repo != request.repo
     }) {
@@ -536,6 +588,7 @@ fn read_page(
             .last()
             .map(|row| {
                 serde_json::to_string(&Cursor {
+                    scope: request.scope,
                     version: 1,
                     generation: generation.clone(),
                     machine: machine.to_owned(),
@@ -566,9 +619,14 @@ fn read_page(
         None => Some(crate::facts::MachineFacts::Local.hostname(options)),
         Some(_) => recorded.as_ref().and_then(|source| source.hostname()),
     };
-    let mut page_state = if facts_known { "cached" } else { "unavailable" };
+    let mut page_state = if facts_known || request.scope == CatalogReadScope::RetainedHistory {
+        "cached"
+    } else {
+        "unavailable"
+    };
     let mut items = Vec::with_capacity(selected.len());
     for row in selected {
+        let mut retired_native = false;
         let mut refs = Vec::new();
         let mut states = Vec::new();
         if row.sources.is_empty() {
@@ -607,7 +665,8 @@ fn read_page(
             } else {
                 false
             };
-            if retired {
+            retired_native |= retired;
+            if retired && request.scope == CatalogReadScope::Current {
                 return Ok(error(
                     503,
                     "catalog_scope_changed",
@@ -627,11 +686,15 @@ fn read_page(
             };
             refs.push(json!({"source":reference,"state":state}));
         }
-        let state = if !facts_known || states.iter().all(|state| *state == "unavailable") {
+        let state = if (request.scope == CatalogReadScope::Current && !facts_known)
+            || states.iter().all(|state| *state == "unavailable")
+        {
             "unavailable"
         } else if states.contains(&"unavailable")
             || states.contains(&"incomplete")
-            || (row.harness == "codex" && !codex_selection_known)
+            || (request.scope == CatalogReadScope::Current
+                && row.harness == "codex"
+                && !codex_selection_known)
         {
             "incomplete"
         } else if states.contains(&"stale") {
@@ -656,7 +719,7 @@ fn read_page(
         item["facts_observation"] =
             json!({"state":if facts_known { "cached" } else { "unavailable" }});
         item["native_selection"] = if is_codex {
-            json!({"state":if !facts_known { "unavailable" } else if codex_selection_known { "cached" } else { "incomplete" }})
+            json!({"state":if !facts_known { "unavailable" } else if retired_native { "retired" } else if codex_selection_known { "cached" } else { "incomplete" }})
         } else {
             serde_json::Value::Null
         };
@@ -675,7 +738,7 @@ fn read_page(
     }
     Ok(reply(
         200,
-        json!({"api":1,"machine":machine,"generation":generation,"observed_at":observed_at,
+        json!({"api":1,"machine":machine,"read_scope":request.scope,"generation":generation,"observed_at":observed_at,
         "machine_info":{"key":machine,"label":machine_label,"freshness":if facts_known { "cached" } else { "unavailable" }},
         "capabilities":{"pagination":true,"filters":["harness","repo"],"order":"last_desc_key_asc",
             "full_text_search":false,"selected_session_lookup":true,"runtime_status":false,"global_union":false},
@@ -1036,6 +1099,19 @@ mod tests {
         facts.codex_rollouts = Some(std::collections::BTreeSet::new());
         crate::write_facts(facts_path, &facts).unwrap();
         assert_eq!(read(), Err(CatalogIdentityError::ScopeChanged));
+        let history =
+            session_catalog_history_identity(&fixture.options, "stable-source", "codex-session")
+                .unwrap()
+                .unwrap();
+        assert_eq!(history.read_scope, CatalogReadScope::RetainedHistory);
+        assert_eq!(history.native_selection.unwrap().state, "retired");
+        assert_eq!(history.source_refs[0].source.native_id, "codex-session");
+        assert_eq!(history.source_refs[0].state, "cached");
+        let (status, page) = fixture.body("scope=retained_history&sid=codex-session");
+        assert_eq!(status, 200);
+        assert_eq!(page["read_scope"], "retained_history");
+        assert_eq!(page["items"][0]["native_selection"]["state"], "retired");
+
         fs::write(facts_path, b"corrupt facts").unwrap();
         let corrupt = read().unwrap().unwrap();
         assert_eq!(corrupt.freshness.state, "unavailable");
@@ -1043,6 +1119,13 @@ mod tests {
         assert_eq!(corrupt.facts_observation.state, "unavailable");
         assert_eq!(corrupt.native_selection.unwrap().state, "unavailable");
         assert_eq!(corrupt.source_refs[0].state, "cached");
+        let history =
+            session_catalog_history_identity(&fixture.options, "stable-source", "codex-session")
+                .unwrap()
+                .unwrap();
+        assert_eq!(history.freshness.state, "cached");
+        assert_eq!(history.facts_observation.state, "unavailable");
+        assert_eq!(history.native_selection.unwrap().state, "unavailable");
         assert_eq!(
             fixture.body("sid=session-00000").1["items"][0]["freshness"]["state"],
             "unavailable"
@@ -1268,6 +1351,27 @@ mod tests {
         facts.codex_rollouts = Some(std::collections::BTreeSet::new());
         crate::write_facts(facts_path, &facts).unwrap();
         assert_eq!(read(), Err(CatalogIdentityError::ScopeChanged));
+    }
+
+    #[test]
+    fn cursors_bind_retained_read_intent_and_unknown_scope_is_rejected() {
+        let fixture = Fixture::new();
+        fixture.publish(3);
+        let (status, first) = fixture.body("limit=1&scope=retained_history");
+        assert_eq!(status, 200);
+        let cursor = crate::viewer::percent_encode(first["next_cursor"].as_str().unwrap());
+        assert_eq!(fixture.body(&format!("limit=1&cursor={cursor}")).0, 400);
+        assert_eq!(
+            fixture
+                .body(&format!("limit=1&scope=retained_history&cursor={cursor}"))
+                .0,
+            200
+        );
+        assert!(Request::parse("scope=unknown").is_err());
+        let current = session_catalog_identity(&fixture.options, "stable-source", "session-00000")
+            .unwrap()
+            .unwrap();
+        assert_eq!(current.read_scope, CatalogReadScope::Current);
     }
 
     #[test]
@@ -1546,11 +1650,13 @@ mod tests {
         assert_eq!(small_steps, large_steps);
         // A late cursor in a huge equal-time group must seek its key directly.
         let request = Request {
+            scope: CatalogReadScope::Current,
             limit: 3,
             sid: None,
             harness: Some("claude".into()),
             repo: Some("project".into()),
             cursor: Some(Cursor {
+                scope: CatalogReadScope::Current,
                 version: 1,
                 generation: "0".repeat(64),
                 machine: "".into(),
