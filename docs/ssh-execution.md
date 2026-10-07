@@ -6,8 +6,9 @@ remain in semon-runtime; hosted custody, current owner/workspace authorization,
 product controls and network policy remain in Hub. Local push and E2B are unchanged.
 
 `semon_ssh::execution` transports separately authorized operations to an already
-running, qualified private driver. It does **not** install or launch a native
-harness. Mirror bootstrap neither calls nor creates execution authority. A driver
+running, qualified private driver. The broker itself does **not** install or launch a native
+harness; the separate [native controller](ssh-native-controller.md) now supplies
+that explicit opt-in slice. Mirror bootstrap neither calls nor creates execution authority. A driver
 must expose the existing managed-guest JSON protocol on a private 0600 Unix socket
 at `~/.local/state/semon-ssh/<stable-enrollment>/control.sock`. The embedding must
 qualify the driver binary, version, controller protection, executor isolation,
@@ -89,9 +90,11 @@ native mobile/keyboard/no-JavaScript onboarding suite remains a separate gate.
 
 Hub SSH execution actions must stay absent. Remaining native work is [#307](https://github.com/onsager-ai/semon/issues/307);
 hosted integration is [Hub #102](https://github.com/onsager-ai/semon-hub/issues/102).
-Follow-up work must qualify a native
-SSH controller installer (with separate launch consent, no reused-home launch,
-bounded lifetime and shutdown), owner/workspace revocation races and encrypted
-model custody/generations, combined dispatch/session push/Hub readback, native
-credential repair/revocation and mobile/keyboard/no-JavaScript execution forms.
-Do not treat passing synthetic receipts as permission to launch on a user's server.
+The [native controller](ssh-native-controller.md) now qualifies separately
+consented, integrity-pinned fresh-home launch, bounded lifetime, independent
+shutdown proof, native dispatch, credential repair and public mirrored-history
+readback on an isolated OpenSSH fixture. Controller restart/native resume,
+owner/workspace revocation races and encrypted hosted model custody remain
+separate gates, together with combined application readback and
+mobile/keyboard/no-JavaScript execution forms. Passing this local fixture does
+not enable hosted execution or authorize a launch on a user's server.
