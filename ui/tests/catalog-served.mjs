@@ -144,6 +144,8 @@ test(
       const start = performance.now();
       await page.goto(url[1] + '/?t=' + url[2]);
       await page.locator('#page [data-id]').first().waitFor({ timeout: 60000 });
+      const firstRows = performance.now() - start;
+      await page.locator('#page [data-id="backlog"]').waitFor({ timeout: 60000 });
       const firstList = performance.now() - start;
       const key = 'backlog';
       const selectedStart = performance.now();
@@ -369,6 +371,7 @@ test(
         visual,
         metadataSearch,
         firstListMs: firstList,
+        firstRowsMs: firstRows,
         selectedMs: selected,
         warmSwitchMs: warm,
         fieldMs,
