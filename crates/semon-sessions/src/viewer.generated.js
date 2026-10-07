@@ -15903,8 +15903,14 @@ globalThis.__semonUIShared = __semonUIShared;
       }
     });
     shell.mount(document.querySelector(".app"));
-    const root = shell.slots.content, title = document.createElement("div");
+    const root = shell.slots.content, title = document.createElement("div"), jumpActions = document.createElement("div"), jumpSlot = document.createElement("span"), jumpTarget = document.createElement("div");
     title.className = "ttl";
+    jumpActions.className = "viewer-bar-actions";
+    jumpSlot.className = "viewer-jump";
+    jumpTarget.className = "jump-wrap";
+    jumpTarget.hidden = true;
+    jumpSlot.append(jumpTarget);
+    jumpActions.append(jumpSlot);
     const recent = createRecentRenderer(shell.slots.recent, {
       open(key) {
         void goSession(key);
@@ -16011,6 +16017,7 @@ globalThis.__semonUIShared = __semonUIShared;
         title.textContent = name;
         shell.topbar({
           titleSlot: title,
+          actions: active ? [jumpActions] : [],
           session: !!active,
           lead: { label: "Open menu", icon: I.menu },
           account: account ? {
@@ -16205,9 +16212,13 @@ globalThis.__semonUIShared = __semonUIShared;
         );
         return;
       }
+      if (view.lastTotal !== null && !view.following && current.projection.total > view.lastTotal)
+        view.newCount += current.projection.total - view.lastTotal;
+      view.lastTotal = current.projection.total;
       if (view.renderedRevision === view.store.revision && view.renderedNote === view.note) {
         updateSessionControl(view.root, controlFor(view));
         updateSessionRuntime(view.root, runtimeFor(view));
+        syncJump(view);
         if ((view.store.loadedRanges()[0]?.first ?? 0) > 0)
           updateSessionPager(view.root, {
             sid: view.key,
@@ -16271,6 +16282,7 @@ globalThis.__semonUIShared = __semonUIShared;
           background() {
           },
           jump() {
+            jumpLatest(view);
           },
           pager() {
             void loadSelected(view, Math.max(0, view.store.loadedRanges()[0].first - 60));
@@ -16278,7 +16290,10 @@ globalThis.__semonUIShared = __semonUIShared;
         }
       );
       const main = document.querySelector("#main");
-      if (anchor?.isConnected && anchorTop !== void 0) {
+      if (view.following) {
+        view.opening = false;
+        scrollEnd();
+      } else if (anchor?.isConnected && anchorTop !== void 0) {
         const shift = anchor.getBoundingClientRect().top - anchorTop;
         if (window.matchMedia("(max-width: 760px)").matches) window.scrollBy(0, shift);
         else main.scrollTop += shift;
@@ -16288,6 +16303,29 @@ globalThis.__semonUIShared = __semonUIShared;
           window.scrollTo(0, document.documentElement.scrollHeight);
         else main.scrollTop = main.scrollHeight;
       }
+      syncJump(view);
+    }
+    function scrollEnd() {
+      if (window.matchMedia("(max-width: 760px)").matches)
+        window.scrollTo(0, document.documentElement.scrollHeight);
+      else {
+        const main = document.querySelector("#main");
+        main.scrollTop = main.scrollHeight;
+      }
+    }
+    function syncJump(view) {
+      if (active !== view || disposed) return;
+      updateSessionJump(view.root, !view.following, view.newCount, false, jumpTarget);
+    }
+    function jumpLatest(view) {
+      if (active !== view || disposed) return;
+      view.following = true;
+      view.newCount = 0;
+      syncJump(view);
+      scrollEnd();
+      void loadSelected(view).finally(() => {
+        if (active === view && !disposed) scrollEnd();
+      });
     }
     function fieldView(view, entry2) {
       if (!entry2.clipped || !entry2.field) return null;
@@ -16394,10 +16432,15 @@ globalThis.__semonUIShared = __semonUIShared;
       }
     }
     async function loadSelected(view, after = null) {
-      if (disposed || view.loading || !capabilities.selected_transcript) {
+      if (view.loading && !disposed && capabilities.selected_transcript) {
+        if (view.queuedAfter === void 0 || after !== null) view.queuedAfter = after;
+        return;
+      }
+      if (disposed || !capabilities.selected_transcript) {
         drawSelected(view);
         return;
       }
+      if (after !== null) view.following = false;
       scope.clearTimeout(view.retry);
       const request = view.store.request(after), p = params();
       p.set("sid", view.key);
@@ -16405,6 +16448,7 @@ globalThis.__semonUIShared = __semonUIShared;
       if (after !== null) p.set("after", String(after));
       if (request.generation !== null) p.set("generation", request.generation);
       view.loading = true;
+      view.root.setAttribute("aria-busy", "true");
       view.note = "";
       drawSelected(view);
       try {
@@ -16439,7 +16483,11 @@ globalThis.__semonUIShared = __semonUIShared;
         }
       } finally {
         view.loading = false;
+        if (!disposed) view.root.setAttribute("aria-busy", "false");
         drawSelected(view);
+        const queued = view.queuedAfter;
+        view.queuedAfter = void 0;
+        if (!disposed && active === view && queued !== void 0) void loadSelected(view, queued);
       }
     }
     async function loadIdentity(view) {
@@ -16489,7 +16537,10 @@ globalThis.__semonUIShared = __semonUIShared;
           retryDelay: 1e3,
           renderedRevision: -1,
           renderedNote: "",
-          fields: /* @__PURE__ */ new Map()
+          fields: /* @__PURE__ */ new Map(),
+          following: true,
+          newCount: 0,
+          lastTotal: null
         };
         selected.set(key, view);
       }
@@ -16549,6 +16600,17 @@ globalThis.__semonUIShared = __semonUIShared;
       } else goList(false);
     }
     scope.listen(window, "popstate", fromLocation);
+    const readingScroll = () => {
+      if (!active) return;
+      const main = document.querySelector("#main"), gap = window.matchMedia("(max-width: 760px)").matches ? document.documentElement.scrollHeight - window.scrollY - window.innerHeight : main.scrollHeight - main.scrollTop - main.clientHeight;
+      active.following = gap <= 80;
+      if (active.following) active.newCount = 0;
+      syncJump(active);
+    };
+    scope.listen(window, "scroll", readingScroll, { passive: true });
+    scope.listen(document.querySelector("#main"), "scroll", readingScroll, {
+      passive: true
+    });
     scope.listen(document, "keydown", (event) => {
       if (event.key === "Escape") shell.closeDrawer();
     });
