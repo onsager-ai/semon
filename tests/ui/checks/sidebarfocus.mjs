@@ -84,6 +84,12 @@ export default async function sidebarFocus(browser) {
     await page.setViewportSize({ width: 1280, height: 420 });
     for (const scheme of ['light', 'dark']) {
       await page.emulateMedia({ colorScheme: scheme });
+      // A rail toggle changes the app grid over 180 ms. Sample its complete hit
+      // area after that actual transition, rather than a transient logo overlap.
+      await page.locator('.app').evaluate(async (app) => {
+        getComputedStyle(app).gridTemplateColumns;
+        await Promise.all(app.getAnimations().map((animation) => animation.finished));
+      });
       const hit = await page.locator('#rail-toggle').evaluate((button) => {
         const rect = button.getBoundingClientRect();
         return {
