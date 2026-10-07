@@ -950,6 +950,49 @@ mod tests {
     }
 
     #[test]
+    fn source_projection_readiness_defers_oversized_metadata_and_source_context() {
+        let fixture = Fixture::new();
+        fixture.publish(1);
+        let relative = "projects/project/session-00000.jsonl";
+        let connection = Connection::open(EventCache::path(&fixture.options.cache)).unwrap();
+        let encoded: String = connection
+            .query_row("SELECT metadata FROM session_catalog", [], |row| row.get(0))
+            .unwrap();
+        let mut row: CatalogRow = serde_json::from_str(&encoded).unwrap();
+        row.name = "x".repeat(1024 * 1024);
+        connection
+            .execute(
+                "UPDATE session_catalog SET metadata=?1",
+                [serde_json::to_string(&row).unwrap()],
+            )
+            .unwrap();
+        assert!(
+            crate::source_projection_ready(&fixture.options, "claude", relative)
+                .unwrap()
+                .is_none()
+        );
+        row = serde_json::from_str(&encoded).unwrap();
+        row.sources = vec![row.sources[0].clone(); 65];
+        connection
+            .execute(
+                "UPDATE session_catalog SET metadata=?1",
+                [serde_json::to_string(&row).unwrap()],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "UPDATE session_slot_projections SET source_generation=?1",
+                [crate::retention::source_generation(&row.sources).unwrap()],
+            )
+            .unwrap();
+        assert!(
+            crate::source_projection_ready(&fixture.options, "claude", relative)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
     fn source_projection_readiness_never_initializes_and_rejects_stale_headers() {
         let fixture = Fixture::new();
         let relative = "projects/project/session-00000.jsonl";
@@ -968,6 +1011,20 @@ mod tests {
             .unwrap();
         assert_eq!(ready.projection_version, crate::slot_projection::VERSION);
         let connection = Connection::open(EventCache::path(&fixture.options.cache)).unwrap();
+        connection.execute("INSERT INTO session_catalog_invalidations(source_path,revision,reason,observed_at) VALUES(?1,1,'changed',0)", [fixture.options.claude_home.join(relative).to_str().unwrap()]).unwrap();
+        assert!(
+            crate::source_projection_ready(&fixture.options, "claude", relative)
+                .unwrap()
+                .is_none()
+        );
+        connection
+            .execute("DELETE FROM session_catalog_invalidations", [])
+            .unwrap();
+        assert!(
+            crate::source_projection_ready(&fixture.options, "claude", relative)
+                .unwrap()
+                .is_some()
+        );
         let hash:String=connection.query_row("SELECT source_generation FROM session_slot_projections WHERE session_key='session-00000'",[],|row|row.get(0)).unwrap();
         connection
             .execute(
