@@ -20,16 +20,20 @@ export function parseCatalogField(value: unknown, request: CatalogFieldRequest) 
     next = field.next === null ? null : number(field.next),
     complete = boolean(field.complete),
     body = text(row.text),
-    sourceBytes = number(object(row.observation).source_bytes);
+    sourceBytes = number(object(row.observation).source_bytes),
+    layers = field.layers ?? 1;
+  const sourceLimit = layers === 2 ? 65607 : 65547;
   if (
     row.api !== 1 ||
     identity.read_scope !== 'retained_history' ||
     identity.source_key !== request.source_key ||
     identity.catalog_key !== request.catalog_key ||
-    projection.version !== 1 ||
+    projection.version !== 4 ||
     projection.generation !== request.generation ||
     row.slot !== request.entry.slot ||
     field.name !== request.entry.field?.name ||
+    (layers !== 1 && layers !== 2) ||
+    layers !== (request.entry.field?.layers ?? 1) ||
     chunk !== request.chunk ||
     !Number.isSafeInteger(chunk) ||
     chunk < 0 ||
@@ -40,8 +44,8 @@ export function parseCatalogField(value: unknown, request: CatalogFieldRequest) 
     object(row.freshness).state !== 'cached' ||
     !Number.isSafeInteger(sourceBytes) ||
     sourceBytes < 0 ||
-    sourceBytes > 65547 ||
-    new TextEncoder().encode(body).byteLength > 65547 ||
+    sourceBytes > sourceLimit ||
+    new TextEncoder().encode(body).byteLength > 131072 ||
     JSON.stringify(source) !== JSON.stringify(request.entry.provenance.source) ||
     provenance.offset !== request.entry.provenance.offset ||
     provenance.block !== request.entry.provenance.block ||

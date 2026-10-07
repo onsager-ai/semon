@@ -15308,7 +15308,10 @@ globalThis.__semonUIShared = __semonUIShared;
       const reference = object2(row.field);
       if (reference.name !== "text" && reference.name !== "out")
         throw new Error("Unsupported native text field");
+      const layers = reference.layers ?? 1;
+      if (layers !== 1 && layers !== 2) throw new Error("Unsupported native field encoding");
       field = {
+        layers,
         name: reference.name,
         chunks: ordinal(reference.chunks),
         complete: boolean(reference.complete)
@@ -15344,13 +15347,13 @@ globalThis.__semonUIShared = __semonUIShared;
     if (!Array.isArray(row.entries) || row.entries.length > 100)
       throw new Error("Invalid catalog transcript page size");
     const identity2 = parseCatalogIdentity(row.identity), session = parseCatalogSession(row.session), projection = object2(row.projection), range = object2(row.range), context = object2(row.relationship_context), generation = text(projection.generation), total = ordinal(projection.total), first = ordinal(range.first), end = ordinal(range.end), next = range.next === null ? null : ordinal(range.next), entries = array(row.entries, entry), state2 = object2(row.freshness).state;
-    if (row.api !== 1 || projection.version !== 1 || !/^[0-9a-f]{64}$/i.test(generation) || session.key !== identity2.catalog_key || session.harness !== identity2.harness || end < first || end > total || end - first > 100 || entries.length !== end - first || next !== (end < total ? end : null) || entries.some((item2, i) => item2.slot !== first + i) || new Set(entries.map((item2) => item2.entry_id)).size !== entries.length || context.state !== "incomplete" || !Array.isArray(context.handoffs) || context.handoffs.length !== 0 || state2 !== "cached" && state2 !== "stale" && state2 !== "incomplete" && state2 !== "unavailable")
+    if (row.api !== 1 || projection.version !== 4 || !/^[0-9a-f]{64}$/i.test(generation) || session.key !== identity2.catalog_key || session.harness !== identity2.harness || end < first || end > total || end - first > 100 || entries.length !== end - first || next !== (end < total ? end : null) || entries.some((item2, i) => item2.slot !== first + i) || new Set(entries.map((item2) => item2.entry_id)).size !== entries.length || context.state !== "incomplete" || !Array.isArray(context.handoffs) || context.handoffs.length !== 0 || state2 !== "cached" && state2 !== "stale" && state2 !== "incomplete" && state2 !== "unavailable")
       throw new Error("Invalid catalog transcript page");
     return {
       api: 1,
       identity: identity2,
       session,
-      projection: { version: 1, generation, total },
+      projection: { version: 4, generation, total },
       range: { first, end, next },
       entries,
       freshness: { state: state2 },
@@ -15857,8 +15860,9 @@ globalThis.__semonUIShared = __semonUIShared;
 
   // src/state/catalog-field-wire.ts
   function parseCatalogField(value, request) {
-    const row = object2(value), identity2 = parseCatalogIdentity(row.identity), projection = object2(row.projection), field = object2(row.field), provenance = object2(row.provenance), source = parseCatalogSource(provenance.source), chunk = number(field.chunk), next = field.next === null ? null : number(field.next), complete = boolean(field.complete), body = text(row.text), sourceBytes = number(object2(row.observation).source_bytes);
-    if (row.api !== 1 || identity2.read_scope !== "retained_history" || identity2.source_key !== request.source_key || identity2.catalog_key !== request.catalog_key || projection.version !== 1 || projection.generation !== request.generation || row.slot !== request.entry.slot || field.name !== request.entry.field?.name || chunk !== request.chunk || !Number.isSafeInteger(chunk) || chunk < 0 || next !== (complete ? null : chunk + 1) || !request.entry.field || chunk >= request.entry.field.chunks || complete !== (chunk + 1 === request.entry.field.chunks) || object2(row.freshness).state !== "cached" || !Number.isSafeInteger(sourceBytes) || sourceBytes < 0 || sourceBytes > 65547 || new TextEncoder().encode(body).byteLength > 65547 || JSON.stringify(source) !== JSON.stringify(request.entry.provenance.source) || provenance.offset !== request.entry.provenance.offset || provenance.block !== request.entry.provenance.block || provenance.native_event_id !== request.entry.provenance.native_event_id)
+    const row = object2(value), identity2 = parseCatalogIdentity(row.identity), projection = object2(row.projection), field = object2(row.field), provenance = object2(row.provenance), source = parseCatalogSource(provenance.source), chunk = number(field.chunk), next = field.next === null ? null : number(field.next), complete = boolean(field.complete), body = text(row.text), sourceBytes = number(object2(row.observation).source_bytes), layers = field.layers ?? 1;
+    const sourceLimit = layers === 2 ? 65607 : 65547;
+    if (row.api !== 1 || identity2.read_scope !== "retained_history" || identity2.source_key !== request.source_key || identity2.catalog_key !== request.catalog_key || projection.version !== 4 || projection.generation !== request.generation || row.slot !== request.entry.slot || field.name !== request.entry.field?.name || layers !== 1 && layers !== 2 || layers !== (request.entry.field?.layers ?? 1) || chunk !== request.chunk || !Number.isSafeInteger(chunk) || chunk < 0 || next !== (complete ? null : chunk + 1) || !request.entry.field || chunk >= request.entry.field.chunks || complete !== (chunk + 1 === request.entry.field.chunks) || object2(row.freshness).state !== "cached" || !Number.isSafeInteger(sourceBytes) || sourceBytes < 0 || sourceBytes > sourceLimit || new TextEncoder().encode(body).byteLength > 131072 || JSON.stringify(source) !== JSON.stringify(request.entry.provenance.source) || provenance.offset !== request.entry.provenance.offset || provenance.block !== request.entry.provenance.block || provenance.native_event_id !== request.entry.provenance.native_event_id)
       throw new Error("Native field chunk does not match the selected source projection");
     return { text: body, next, complete };
   }

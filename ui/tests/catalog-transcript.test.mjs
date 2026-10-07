@@ -53,7 +53,7 @@ const page = () => ({
     source_refs: [{ source: source(), state: 'unavailable' }],
     freshness: { state: 'unavailable' },
   },
-  projection: { version: 1, generation: 'b'.repeat(64), total: 3 },
+  projection: { version: 4, generation: 'b'.repeat(64), total: 3 },
   range: { first: 0, end: 2, next: 2 },
   entries: [
     {
