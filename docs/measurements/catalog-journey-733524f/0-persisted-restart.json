@@ -1,0 +1,155 @@
+{
+  "source_revision": "733524fad75290d05aae887faa0c00263b11c6f7",
+  "bundle": "0e8f41c04320954b89c972f135144b4ac199591b62604d650f44581f540765ed",
+  "source_key": "local",
+  "catalog_key": "backlog",
+  "phase": "persisted-restart",
+  "coldMs": 181.76317199999994,
+  "filterMs": 89.101812,
+  "selectedMs": 125.993426,
+  "earlierMs": 108.400711,
+  "fieldMs": 257.98015899999996,
+  "warmMs": 56.450405000000046,
+  "before": {
+    "domNodes": 3,
+    "entries": 0,
+    "rows": 0,
+    "Nodes": 8,
+    "LayoutDuration": 0,
+    "ScriptDuration": 0,
+    "TaskDuration": 1.9e-05,
+    "JSHeapUsedSize": 534364
+  },
+  "cold": {
+    "domNodes": 890,
+    "entries": 0,
+    "rows": 60,
+    "Nodes": 1368,
+    "LayoutDuration": 0.053789,
+    "ScriptDuration": 0.003907,
+    "TaskDuration": 0.159332,
+    "JSHeapUsedSize": 4031856
+  },
+  "filtered": {
+    "domNodes": 890,
+    "entries": 0,
+    "rows": 60,
+    "Nodes": 1576,
+    "LayoutDuration": 0.055132,
+    "ScriptDuration": 0.007533,
+    "TaskDuration": 0.203769,
+    "JSHeapUsedSize": 4820040
+  },
+  "selected": {
+    "domNodes": 1120,
+    "entries": 60,
+    "rows": 0,
+    "Nodes": 2305,
+    "LayoutDuration": 0.064682,
+    "ScriptDuration": 0.01442,
+    "TaskDuration": 0.260968,
+    "JSHeapUsedSize": 4562996
+  },
+  "earlier": {
+    "domNodes": 1655,
+    "entries": 120,
+    "rows": 0,
+    "Nodes": 3025,
+    "LayoutDuration": 0.067375,
+    "ScriptDuration": 0.015673,
+    "TaskDuration": 0.333371,
+    "JSHeapUsedSize": 7920900
+  },
+  "warm": {
+    "domNodes": 1654,
+    "entries": 120,
+    "rows": 0,
+    "Nodes": 3553,
+    "LayoutDuration": 0.109574,
+    "ScriptDuration": 0.036383,
+    "TaskDuration": 0.562387,
+    "JSHeapUsedSize": 26746704
+  },
+  "requests": [
+    "/api/session-capabilities?machine=local",
+    "/api/sessions?machine=local&scope=retained_history&limit=60",
+    "/api/sessions?machine=local&scope=retained_history&limit=60&harness=claude",
+    "/api/session-identity?machine=local&sid=backlog",
+    "/api/session-transcript?machine=local&scope=retained_history&sid=backlog&limit=60",
+    "/api/session-identity?machine=local&sid=backlog",
+    "/api/session-transcript?machine=local&scope=retained_history&sid=backlog&limit=60&after=353&generation=e63f1d8e153042efa07838e391acead54e58d03af33ff7f7ea9bf399d413dc84",
+    "/api/session-identity?machine=local&sid=backlog",
+    "/api/session-entry?machine=local&scope=retained_history&sid=backlog&after=472&limit=1&generation=e63f1d8e153042efa07838e391acead54e58d03af33ff7f7ea9bf399d413dc84&field_chunk=0",
+    "/api/session-entry?machine=local&scope=retained_history&sid=backlog&after=472&limit=1&generation=e63f1d8e153042efa07838e391acead54e58d03af33ff7f7ea9bf399d413dc84&field_chunk=1",
+    "/api/session-identity?machine=local&sid=backlog"
+  ],
+  "responses": [
+    {
+      "path": "/api/session-capabilities",
+      "status": 200,
+      "bytes": 362,
+      "serverResponseMs": 1.718
+    },
+    {
+      "path": "/api/sessions",
+      "status": 200,
+      "bytes": 65301,
+      "serverResponseMs": 43.739
+    },
+    {
+      "path": "/api/sessions",
+      "status": 200,
+      "bytes": 63250,
+      "serverResponseMs": 32.916000000000004
+    },
+    {
+      "path": "/api/session-identity",
+      "status": 200,
+      "bytes": 884,
+      "serverResponseMs": 4.9350000000000005
+    },
+    {
+      "path": "/api/session-transcript",
+      "status": 200,
+      "bytes": 56371,
+      "serverResponseMs": 36.607
+    },
+    {
+      "path": "/api/session-identity",
+      "status": 200,
+      "bytes": 884,
+      "serverResponseMs": 2.84
+    },
+    {
+      "path": "/api/session-transcript",
+      "status": 200,
+      "bytes": 52373,
+      "serverResponseMs": 36.137
+    },
+    {
+      "path": "/api/session-identity",
+      "status": 200,
+      "bytes": 884,
+      "serverResponseMs": 2.25
+    },
+    {
+      "path": "/api/session-entry",
+      "status": 200,
+      "bytes": 67817,
+      "serverResponseMs": 14.979
+    },
+    {
+      "path": "/api/session-entry",
+      "status": 200,
+      "bytes": 46778,
+      "serverResponseMs": 14.871
+    },
+    {
+      "path": "/api/session-identity",
+      "status": 200,
+      "bytes": 884,
+      "serverResponseMs": 2.677
+    }
+  ],
+  "errors": []
+}

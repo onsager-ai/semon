@@ -152,6 +152,21 @@ fn handle(core: &mut ViewerCore, request: Request, address: SocketAddr) {
         return;
     }
     let if_none_match = request_header(&request, "If-None-Match").map(str::to_owned);
+    // This fixture exercises the older complete-model embedding contract,
+    // including its form redirects. The actual default catalog has a separate
+    // producer/browser lane; do not accidentally switch owners after a 303.
+    if path == "/api/session-capabilities" {
+        answer(
+            request,
+            404,
+            "text/plain; charset=utf-8",
+            b"Not found".to_vec(),
+            None,
+            &SECURITY_HEADERS,
+            false,
+        );
+        return;
+    }
     let reply = core.respond("GET", path, query, if_none_match.as_deref());
     let headers = reply.headers();
     answer(

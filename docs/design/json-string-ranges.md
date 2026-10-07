@@ -1,0 +1,94 @@
+# Native JSON string field ranges
+
+`semon_sessions::json_string` separates the producer's complete native-record
+validation from request-local decoding. Version 1 descriptors use offsets
+relative to the original record, excluding quotes. Scalar checkpoints include
+both field boundaries and are separated by at most 64 KiB + 11 raw bytes.
+Escaped UTF-16 surrogate pairs form one boundary unit.
+
+`index_json_string_spans` walks syntactically valid JSON once without allocating
+string values. It returns RFC 6901 pointers and offsets. The caller must qualify
+the native record and retain only explicit native field pointers. Arbitrary
+object keys can contain user text and must never be blindly persisted. Duplicate
+keys, excessive depth, field counts or pointer sizes return explicit unsupported
+errors. Structured body fields have no string descriptor for the body itself;
+embedded JSON wrappers and native formatting remain separate qualifications.
+
+`decode_json_string_chunk(bytes, at_end, max_decoded)` accepts bytes beginning at
+a verified scalar boundary. It decodes only that fragment and allocates at most
+the requested output budget (1..=128 KiB). `consumed` counts raw bytes; the next
+cursor adds it to the prior raw offset. Partial UTF-8, escapes and surrogate pairs
+remain unconsumed until the next bounded read. `at_end` means the fragment reaches
+the indexed field end, rather than simply reaching a provider response boundary.
+A budget unable to hold the next scalar is an explicit error, preventing a
+zero-progress retry loop.
+
+The containing projection binds record offset, field span and cursor to the
+source identity and independently verified source generation. These functions
+provide neither source authorization nor generation verification. Callers use
+a stored checkpoint or a prior verified chunk cursor; a supplied arbitrary raw
+offset is insufficient. Provider requests must have their own byte limits.
+When starting at a nearby checkpoint, discard only the bounded decoded distance
+to a requested position. Never read a complete prefix to recover a cursor.
+
+Tests compare all fields in committed Claude blocks and Codex legacy/early-item
+fixtures with the shared native transcript parser. Escapes and literal UTF-8 are
+split at every input-byte boundary, including surrogate pairs. A large result
+fixture grows from approximately 2 MiB to 20 MiB while requesting a 4096-byte
+chunk from a late checkpoint using at most 32 KiB of source input. Every
+checkpoint segment independently decodes to the same complete-field oracle.
+These are field-decoder bounds, not measured end-to-end Viewer budgets. SQL
+publication, bounded provider access and native tool rendering must integrate
+these descriptors before a complete large-result journey can claim those bounds.
+
+A helper-only measurement on the shared Linux workspace used 31 paired warm
+iterations in an unoptimized Rust executable. The baseline parses the complete
+native record with `serde_json::Value`; the bounded case decodes 4096 bytes from
+a late checkpoint with 32768 bytes supplied. The field contains plain ASCII;
+the correctness test above separately qualifies escaped/non-ASCII boundaries.
+Index production, provider I/O, SQL, server responses and browser rendering are
+excluded. Other integration builds shared the host, so tail timings are noisy.
+
+| Original record bytes | Full parse median / p95 µs | Chunk median / p95 µs | Chunk output allocation |
+| ---: | ---: | ---: | ---: |
+| 1,048,601 | 21,334 / 36,468 | 142 / 7,726 | 4,096 bytes |
+| 16,777,241 | 216,948 / 633,754 | 106 / 709 | 4,096 bytes |
+
+Both paths returned identical requested text. Full parsing necessarily visits
+1 or 16 MiB of body and materializes that complete string; the chunk decodes
+4096 raw ASCII bytes with constant output allocation. This comparison motivates
+using indexed spans, without claiming an end-to-end latency budget or a process
+RSS reduction. Measurement source/output were retained as
+`/tmp/semon-json-string-bench.rs` and `/tmp/semon-json-string-bench.log` in the
+integration workspace; the implementation revision was `1d1d803`.
+
+## Encoded result strings
+
+Some native results place a JSON wrapper inside a JSON string, with the useful
+text in a string-valued wrapper field such as `output`. Producers can qualify
+those formats with `index_nested_json_string_spans(record, outer_span)`. Pointers
+refer to the decoded wrapper; all offsets and checkpoints still refer to the
+original native record. Native callers must select their supported pointers and
+persist the escape layer count with the qualified recipe, source generation and
+cursor identity. Structured bodies and unknown wrapper formatting remain
+explicitly unsupported until native semantics are qualified.
+
+The producer decodes the wrapper and walks its fields once per qualified
+observation. A second scalar pass maps only needed boundaries, avoiding an
+allocation for every character's raw offset. Denser inner checkpoints account
+for the outer escaping, so combined raw checkpoint gaps stay at most 64 KiB.
+This linear producer work does not happen on range requests.
+
+`decode_json_string_layered_chunk` supports one or two escape layers. It decodes
+combined scalars with a fixed 12-byte scratch buffer and preserves incomplete
+units without consuming them. A maximally escaped surrogate pair can occupy
+72 original bytes, requiring up to 71 bytes of read slack. Decoded output keeps
+the existing 128-KiB maximum and the requested smaller allocation budget. A
+request starts at a qualified combined checkpoint or prior scalar cursor; it
+never decodes an earlier prefix or trusts an arbitrary supplied raw offset.
+
+`slice_json_string_span` maps a contiguous decoded UTF-8 byte range to original
+scalar-safe offsets during production. It lets a native producer qualify a
+plain result's contiguous displayed body while keeping native header/cut
+semantics in its recipe. Splits inside a Unicode scalar fail explicitly. Native
+formatters needing noncontiguous synthesis require separate qualified recipes.

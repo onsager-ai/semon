@@ -14,10 +14,18 @@ use serde_json::Value;
 
 mod analytics;
 mod catalog;
+mod catalog_observer;
+mod catalog_search;
+mod native_resolution;
 pub use catalog::{
-    CatalogFreshness, CatalogIdentityError, CatalogReadScope, CatalogSessionIdentity,
-    CatalogSourceObservation, SessionSourceRef, session_catalog_history_identity,
-    session_catalog_identity, session_catalog_page,
+    CatalogFreshness, CatalogIdentityError, CatalogOwnerQualification, CatalogReadScope,
+    CatalogSessionIdentity, CatalogSourceObservation, SessionSourceProof, SessionSourceRef,
+    session_catalog_history_identity, session_catalog_identity, session_catalog_page,
+    session_source_proof,
+};
+pub use catalog_observer::SessionCatalogObserver;
+pub use native_resolution::{
+    CatalogNativeResolution, CatalogNativeResolutionState, session_catalog_resolve_native,
 };
 mod claude_usage;
 pub mod copilot;
@@ -29,6 +37,7 @@ mod facts;
 mod handoff;
 pub mod harness;
 mod inputs;
+pub mod json_string;
 mod mcp;
 mod model;
 mod parent_links;
@@ -37,14 +46,23 @@ mod query;
 mod read_path;
 pub(crate) use read_path::open_input;
 mod model_delta;
+mod native_field;
+mod read_capabilities;
+mod source_inventory;
+pub use source_inventory::SessionSourceInventory;
+mod history_projection;
 mod received;
 mod refresh;
 mod repo;
 pub mod sealed;
 pub mod shell;
 mod slot_projection;
+pub use read_capabilities::{SessionReadEndpoints, session_catalog_capabilities};
 mod transcript_range;
-pub use transcript_range::session_transcript_range;
+pub use transcript_range::{
+    SessionSourceReadMode, session_entry_field, session_entry_field_with_mode,
+    session_transcript_range, session_transcript_range_with_mode,
+};
 mod source_reader;
 mod tx;
 pub use source_reader::{SESSION_SOURCE_CHUNK_MAX, SessionSourceRange, SessionSourceReader};

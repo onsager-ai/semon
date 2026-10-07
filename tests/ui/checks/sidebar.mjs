@@ -1191,6 +1191,7 @@ export default async function sidebarCheck(browser) {
 
       const direct = new URL('/s/codex/' + encodeURIComponent(approvalReviewIds[0]), page.url());
       direct.searchParams.set('t', ENV.extraToken);
+      direct.searchParams.set('compat', '1');
       await page.goto(direct.toString(), { waitUntil: 'load' });
       await settled(page);
       await page.waitForFunction(
@@ -1227,6 +1228,7 @@ export default async function sidebarCheck(browser) {
           page.url(),
         );
         descendant.searchParams.set('t', ENV.extraToken);
+        descendant.searchParams.set('compat', '1');
         await page.goto(descendant.toString(), { waitUntil: 'load' });
         await settled(page);
         await page.waitForFunction(

@@ -46,7 +46,7 @@ use crate::{Tokens, facts::ReportedRunSnapshot};
 
 /// `PRAGMA user_version`: the shape of the tables. The parser's version is
 /// [`CACHE_VERSION`], kept in `meta`.
-const SCHEMA_VERSION: i64 = 12;
+const SCHEMA_VERSION: i64 = 17;
 
 /// How long a write waits for another process's transaction. Tests wait
 /// less, so the busy paths they drive stay quick.
@@ -129,6 +129,7 @@ CREATE TABLE IF NOT EXISTS files (
     ino INTEGER NOT NULL,
     size INTEGER NOT NULL,
     mtime_ns BLOB NOT NULL,
+    ctime_ns BLOB,
     resume_at INTEGER NOT NULL,
     head_sha256 BLOB NOT NULL,
     tail_sha256 BLOB NOT NULL,
@@ -261,7 +262,7 @@ const DERIVED: &str = "
 DELETE FROM session_catalog_invalidations;
 UPDATE session_catalog SET lifecycle='retained',metadata=CASE WHEN json_valid(metadata) THEN json_set(metadata,'$.lifecycle','retained') ELSE metadata END;
 UPDATE session_catalog_sources SET lifecycle='retained';
-DELETE FROM meta WHERE key IN ('catalog_version', 'catalog_generation', 'catalog_observed_at');
+DELETE FROM meta WHERE key IN ('catalog_version', 'catalog_generation', 'catalog_observed_at', 'catalog_completeness', 'catalog_publication_epoch');
 DELETE FROM session_descriptions;
 DELETE FROM events;
 DELETE FROM signals;
@@ -274,14 +275,14 @@ DELETE FROM files;
 const FILE_COLUMNS: &str = "file_id, path, dev, ino, size, mtime_ns, resume_at, head_sha256, \
      tail_sha256, entrypoint, title, agent_name, last_model, failed, first_ms, last_ms, cwd, \
      branch, pending, tool_ids, yields, busy, links, codex_tokens, codex_tokens_by_model, \
-     rate_limits, codex_native_usage, copilot";
+     rate_limits, codex_native_usage, copilot, ctime_ns";
 
 const PUT_FILE: &str = "INSERT INTO files (path, dev, ino, size, mtime_ns, resume_at, \
      head_sha256, tail_sha256, entrypoint, title, agent_name, last_model, failed, first_ms, \
      last_ms, cwd, branch, pending, tool_ids, yields, busy, links, codex_tokens, \
-     codex_tokens_by_model, rate_limits, codex_native_usage, copilot) \
+     codex_tokens_by_model, rate_limits, codex_native_usage, copilot, ctime_ns) \
      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, \
-     ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27) \
+     ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28) \
      ON CONFLICT (path) DO UPDATE SET dev = excluded.dev, ino = excluded.ino, \
      size = excluded.size, mtime_ns = excluded.mtime_ns, resume_at = excluded.resume_at, \
      head_sha256 = excluded.head_sha256, tail_sha256 = excluded.tail_sha256, \
@@ -292,7 +293,7 @@ const PUT_FILE: &str = "INSERT INTO files (path, dev, ino, size, mtime_ns, resum
      tool_ids = excluded.tool_ids, yields = excluded.yields, busy = excluded.busy, \
      links = excluded.links, codex_tokens = excluded.codex_tokens, \
      codex_tokens_by_model = excluded.codex_tokens_by_model, \
-     rate_limits = excluded.rate_limits, codex_native_usage = excluded.codex_native_usage, copilot = excluded.copilot \
+     rate_limits = excluded.rate_limits, codex_native_usage = excluded.codex_native_usage, copilot = excluded.copilot, ctime_ns = excluded.ctime_ns \
      RETURNING file_id";
 
 const EVENT_COLUMNS: &str = "extra, seq, k, o, b, t, id, n, code_mode, code_mode_open, parent, \
@@ -342,6 +343,7 @@ const PUT_RUN: &str = "INSERT OR REPLACE INTO reported_runs (session_id, start, 
 struct SqliteStore {
     connection: Connection,
     path: PathBuf,
+    selected_runs: Option<std::collections::BTreeSet<String>>,
 }
 
 /// Opens (creating when missing) the store at `path` and reads all of it,
@@ -363,6 +365,18 @@ pub(super) fn open(path: &Path, legacy: &Path) -> Result<(Box<dyn IndexStore>, L
         }
         opened => opened.map_err(|error| error.to_string())?,
     };
+    Ok((Box::new(store), loaded))
+}
+
+/// Producer open: initialize the durable store without restoring unrelated indexes.
+/// Store failures are returned; a background worker must retry rather than silently
+/// switch to an unbounded in-memory rebuild.
+pub(super) fn open_scoped(
+    path: &Path,
+    legacy: &Path,
+) -> Result<(Box<dyn IndexStore>, Loaded), String> {
+    let (store, loaded) =
+        SqliteStore::attempt_scoped(path, Some(legacy), true).map_err(|error| error.to_string())?;
     Ok((Box::new(store), loaded))
 }
 
@@ -943,7 +957,165 @@ impl IndexStore for SqliteStore {
         publication: &crate::slot_projection::Publication<'_>,
         expected_generation: Option<&str>,
     ) -> Result<Outcome, StoreError> {
+        self.publish_catalog(publication, expected_generation, None)
+    }
+
+    fn publish_partial_catalog(
+        &mut self,
+        publication: &crate::slot_projection::Publication<'_>,
+        expected_generation: Option<&str>,
+        claims: &[(String, Option<i64>)],
+    ) -> Result<Outcome, StoreError> {
+        self.publish_catalog(publication, expected_generation, Some(claims))
+    }
+
+    fn catalog_claims(&self, paths: &[String]) -> Result<Vec<(String, Option<i64>)>, StoreError> {
+        let mut statement = self
+            .connection
+            .prepare("SELECT revision FROM session_catalog_invalidations WHERE source_path=?1")
+            .map_err(failure)?;
+        paths
+            .iter()
+            .map(|path| {
+                Ok((
+                    path.clone(),
+                    statement
+                        .query_row([path], |row| row.get(0))
+                        .optional()
+                        .map_err(failure)?,
+                ))
+            })
+            .collect()
+    }
+
+    fn ledger(&self, path: &str) -> Result<Option<Ledger>, StoreError> {
+        ledger_row(&self.connection, path)
+            .map(|found| found.map(|(_, ledger)| ledger))
+            .map_err(failure)
+    }
+
+    fn load_file(&self, path: &str) -> Result<Option<(Ledger, FileIndex)>, StoreError> {
+        self.read_one(path).map_err(failure)
+    }
+
+    fn commit_file(
+        &mut self,
+        path: &str,
+        expected: Option<&Ledger>,
+        changes: Option<&super::DirtyRows>,
+        ledger: &Ledger,
+        index: &FileIndex,
+    ) -> Result<Outcome, StoreError> {
+        self.write_one_dirty(path, expected, changes, ledger, index)
+            .map_err(failure)
+    }
+
+    fn select_reported_runs(
+        &mut self,
+        ids: &std::collections::BTreeSet<String>,
+    ) -> Result<Vec<ReportedRunSnapshot>, StoreError> {
+        let transaction = self.connection.unchecked_transaction().map_err(failure)?;
+        if !current(&transaction).map_err(failure)? {
+            return Err(StoreError::Failed(
+                "session index version changed".to_owned(),
+            ));
+        }
+        let runs = read_runs_selected(&transaction, ids).map_err(failure)?;
+        transaction.commit().map_err(failure)?;
+        self.selected_runs = Some(ids.clone());
+        Ok(runs)
+    }
+
+    fn file_ledgers(&self) -> Result<Vec<(String, Option<Ledger>)>, StoreError> {
+        let transaction = self.connection.unchecked_transaction().map_err(failure)?;
+        let mut statement=transaction.prepare("SELECT file_id,dev,ino,size,mtime_ns,resume_at,head_sha256,tail_sha256,ctime_ns,path FROM files ORDER BY file_id").map_err(failure)?;
+        let mut rows = statement.query([]).map_err(failure)?;
+        let mut ledgers = Vec::new();
+        while let Some(row) = rows.next().map_err(failure)? {
+            let path = row.get(9).map_err(failure)?;
+            let ledger = match read_ledger(row) {
+                Ok((_, ledger)) => Some(ledger),
+                Err(error) if is_data_error(&error) => None,
+                Err(error) => return Err(failure(error)),
+            };
+            ledgers.push((path, ledger));
+        }
+        Ok(ledgers)
+    }
+
+    fn remove_files(&mut self, files: &[(String, Option<Ledger>)]) -> Result<Outcome, StoreError> {
+        self.remove(files).map_err(failure)
+    }
+
+    fn save_runs(
+        &mut self,
+        runs: &[ReportedRunSnapshot],
+        stamp: &ReportedFileStamp,
+    ) -> Result<Option<Vec<ReportedRunSnapshot>>, StoreError> {
+        self.write_runs(runs, stamp).map_err(failure)
+    }
+}
+
+/// Source observation work survives a process restart. The journal contains
+/// paths and observation facts only, never source bodies or runtime liveness.
+/// Its revision prevents a future bounded worker from acknowledging newer
+/// observations than the revision that worker claimed.
+fn invalidate_catalog_source(
+    transaction: &Transaction<'_>,
+    path: &str,
+    reason: &str,
+) -> rusqlite::Result<()> {
+    // Keep the counter after acknowledgement. Resetting per-path revisions
+    // would let an old claim mistake a later observation for its own (ABA).
+    transaction.execute(
+        "INSERT INTO meta(key,value) VALUES ('catalog_source_revision','1')
+         ON CONFLICT(key) DO UPDATE SET value=CAST(CAST(meta.value AS INTEGER)+1 AS TEXT)",
+        [],
+    )?;
+    transaction.execute(
+        "INSERT INTO session_catalog_invalidations(source_path,revision,reason,observed_at)
+         VALUES (?1,CAST((SELECT value FROM meta WHERE key='catalog_source_revision') AS INTEGER),?2,?3)
+         ON CONFLICT(source_path) DO UPDATE SET revision=excluded.revision,
+         reason=excluded.reason, observed_at=excluded.observed_at",
+        params![path, reason, crate::model::now_ms()],
+    )?;
+    Ok(())
+}
+
+enum Unopened {
+    /// Not a database, or a damaged one: set aside and rebuilt.
+    Corrupt(rusqlite::Error),
+    Other(String),
+}
+
+impl fmt::Display for Unopened {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Corrupt(error) => write!(formatter, "{error}"),
+            Self::Other(message) => formatter.write_str(message),
+        }
+    }
+}
+
+enum Init {
+    Ready,
+    NoWal,
+    Newer,
+}
+
+impl SqliteStore {
+    fn publish_catalog(
+        &mut self,
+        publication: &crate::slot_projection::Publication<'_>,
+        expected_generation: Option<&str>,
+        claims: Option<&[(String, Option<i64>)]>,
+    ) -> Result<Outcome, StoreError> {
         let rows = publication.rows;
+        if claims.is_some_and(|claims| claims.len() > 64) || (claims.is_some() && rows.len() > 64) {
+            return Err(StoreError::Data(
+                "scoped catalog source budget exceeded".into(),
+            ));
+        }
         use sha2::{Digest, Sha256};
         let version = crate::model::summary::CATALOG_VERSION.to_string();
         let metadata: Vec<_> = rows
@@ -980,14 +1152,66 @@ impl IndexStore for SqliteStore {
             for source in rows.iter().flat_map(|row| &row.sources) {
                 sources.insert(source.path.to_string_lossy().into_owned(), source);
             }
-            let committed: i64 = transaction
-                .query_row("SELECT COUNT(*) FROM files", [], |row| row.get(0))
-                .map_err(failure)?;
+            let committed: i64 = if claims.is_none() {
+                transaction
+                    .query_row("SELECT COUNT(*) FROM files", [], |row| row.get(0))
+                    .map_err(failure)?
+            } else {
+                i64::try_from(sources.len()).unwrap_or(-1)
+            };
             if committed != i64::try_from(sources.len()).unwrap_or(-1) {
                 return Ok(Outcome::Conflict);
             }
-            for (path, source) in sources {
-                let Some((_, ledger)) = ledger_row(&transaction, &path).map_err(failure)? else {
+            let mut affected = std::collections::BTreeSet::new();
+            if let Some(claims) = claims {
+                let claimed: std::collections::BTreeSet<_> =
+                    claims.iter().map(|(path, _)| path.as_str()).collect();
+                if claimed.len() != sources.len()
+                    || sources.keys().any(|path| !claimed.contains(path.as_str()))
+                {
+                    return Ok(Outcome::Conflict);
+                }
+                for (path, revision) in claims {
+                    let actual: Option<i64> = transaction.query_row("SELECT revision FROM session_catalog_invalidations WHERE source_path=?1",[path],|row|row.get(0)).optional().map_err(failure)?;
+                    if actual != *revision {
+                        return Ok(Outcome::Conflict);
+                    }
+                    let mut statement = transaction.prepare("SELECT session_key FROM session_catalog_sources WHERE lifecycle='current' AND source_path=?1 LIMIT 65").map_err(failure)?;
+                    for owner in statement
+                        .query_map([path], |row| row.get::<_, String>(0))
+                        .map_err(failure)?
+                    {
+                        affected.insert(owner.map_err(failure)?);
+                    }
+                }
+                for row in rows {
+                    for id in &row.native_ids {
+                        let mut statement = transaction.prepare("SELECT DISTINCT session_key FROM session_catalog_sources WHERE lifecycle='current' AND harness=?1 AND native_id=?2 LIMIT 65").map_err(failure)?;
+                        for owner in statement
+                            .query_map(params![row.harness, id], |row| row.get::<_, String>(0))
+                            .map_err(failure)?
+                        {
+                            affected.insert(owner.map_err(failure)?);
+                        }
+                    }
+                }
+                if affected.len() > 64 {
+                    return Ok(Outcome::Conflict);
+                }
+                for key in &affected {
+                    let mut statement = transaction.prepare("SELECT source_path FROM session_catalog_sources WHERE session_key=?1 AND lifecycle='current' LIMIT 65").map_err(failure)?;
+                    for path in statement
+                        .query_map([key], |row| row.get::<_, String>(0))
+                        .map_err(failure)?
+                    {
+                        if !sources.contains_key(&path.map_err(failure)?) {
+                            return Ok(Outcome::Conflict);
+                        }
+                    }
+                }
+            }
+            for (path, source) in &sources {
+                let Some((_, ledger)) = ledger_row(&transaction, path).map_err(failure)? else {
                     return Ok(Outcome::Conflict);
                 };
                 if (
@@ -996,15 +1220,42 @@ impl IndexStore for SqliteStore {
                     ledger.offset,
                     ledger.prefix,
                     ledger.tail,
+                    ledger.stat.changed_ns,
                 ) != (
                     source.dev,
                     source.ino,
                     source.offset,
                     source.prefix_sha256,
                     source.tail_sha256,
+                    source.changed_ns,
                 ) {
                     return Ok(Outcome::Conflict);
                 }
+            }
+            crate::history_projection::publish(&transaction, publication).map_err(failure)?;
+            let search_version: Option<String> = transaction
+                .query_row(
+                    "SELECT value FROM meta WHERE key='search_version'",
+                    [],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(failure)?;
+            let initialize_search =
+                search_version.as_deref() != Some(crate::catalog_search::VERSION);
+            let search_backfill: Option<String> = transaction
+                .query_row(
+                    "SELECT value FROM meta WHERE key='search_backfill_complete'",
+                    [],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(failure)?;
+            let rebuild_search =
+                claims.is_none() && (initialize_search || search_backfill.as_deref() != Some("1"));
+            if initialize_search {
+                transaction.execute_batch("DELETE FROM session_search_postings; DELETE FROM session_search_counts; DELETE FROM session_search_documents; UPDATE session_search_coverage SET incomplete=0;").map_err(failure)?;
+                transaction.execute("INSERT OR REPLACE INTO meta(key,value) VALUES('search_backfill_complete','0')",[]).map_err(failure)?;
             }
             let previous_version: Option<String> = transaction
                 .query_row(
@@ -1024,9 +1275,9 @@ impl IndexStore for SqliteStore {
                         .map_err(failure)?;
                     let mut put = transaction.prepare("INSERT INTO session_catalog (session_key, lifecycle, last_ms, harness, repo, parent_key, metadata) VALUES (?1, 'current', ?2, ?3, ?4, ?5, ?6) ON CONFLICT(session_key) DO UPDATE SET lifecycle='current', last_ms=excluded.last_ms, harness=excluded.harness, repo=excluded.repo, parent_key=excluded.parent_key, metadata=excluded.metadata WHERE session_catalog.lifecycle != 'current' OR session_catalog.metadata != excluded.metadata OR session_catalog.parent_key IS NOT excluded.parent_key").map_err(failure)?;
                     let mut remove_sources = transaction
-                        .prepare("DELETE FROM session_catalog_sources WHERE session_key=?1")
+                        .prepare("UPDATE session_catalog_sources SET lifecycle='retained' WHERE session_key=?1")
                         .map_err(failure)?;
-                    let mut put_source = transaction.prepare("INSERT INTO session_catalog_sources(session_key,harness,native_id,source_path) VALUES (?1,?2,?3,?4)").map_err(failure)?;
+                    let mut put_source = transaction.prepare("INSERT INTO session_catalog_sources(session_key,harness,native_id,source_path) VALUES (?1,?2,?3,?4) ON CONFLICT(session_key,source_path) DO UPDATE SET lifecycle='current',harness=excluded.harness,native_id=excluded.native_id").map_err(failure)?;
                     for (row, metadata) in rows.iter().zip(&metadata) {
                         member.execute([&row.key]).map_err(failure)?;
                         let changed = put
@@ -1039,6 +1290,25 @@ impl IndexStore for SqliteStore {
                                 metadata
                             ])
                             .map_err(failure)?;
+                        if !rebuild_search
+                            && (changed > 0
+                                || initialize_search
+                                || !crate::catalog_search::row_present(&transaction, &row.key)
+                                    .map_err(failure)?)
+                        {
+                            crate::catalog_search::publish_row(
+                                &transaction,
+                                crate::CatalogReadScope::Current,
+                                row,
+                            )
+                            .map_err(failure)?;
+                            crate::catalog_search::publish_row(
+                                &transaction,
+                                crate::CatalogReadScope::RetainedHistory,
+                                row,
+                            )
+                            .map_err(failure)?;
+                        }
                         if changed > 0 || previous_version.as_deref() != Some(&version) {
                             remove_sources.execute([&row.key]).map_err(failure)?;
                             for source in &row.sources {
@@ -1054,20 +1324,92 @@ impl IndexStore for SqliteStore {
                         }
                     }
                 }
-                transaction.execute("UPDATE session_catalog SET lifecycle='retained', metadata=CASE WHEN json_valid(metadata) THEN json_set(metadata,'$.lifecycle','retained') ELSE metadata END WHERE lifecycle='current' AND session_key NOT IN (SELECT session_key FROM catalog_members)", []).map_err(failure)?;
-                transaction.execute("UPDATE session_catalog_sources SET lifecycle='retained' WHERE lifecycle='current' AND session_key NOT IN (SELECT session_key FROM catalog_members)", []).map_err(failure)?;
+                if claims.is_none() {
+                    transaction.execute("UPDATE session_catalog SET lifecycle='retained', metadata=CASE WHEN json_valid(metadata) THEN json_set(metadata,'$.lifecycle','retained') ELSE metadata END WHERE lifecycle='current' AND session_key NOT IN (SELECT session_key FROM catalog_members)", []).map_err(failure)?;
+                    transaction.execute("UPDATE session_catalog_sources SET lifecycle='retained' WHERE lifecycle='current' AND session_key NOT IN (SELECT session_key FROM catalog_members)", []).map_err(failure)?;
+                } else {
+                    for key in &affected {
+                        transaction.execute("UPDATE session_catalog SET lifecycle='retained',metadata=json_set(metadata,'$.lifecycle','retained') WHERE session_key=?1 AND session_key NOT IN (SELECT session_key FROM catalog_members)",[key]).map_err(failure)?;
+                        transaction.execute("UPDATE session_catalog_sources SET lifecycle='retained' WHERE session_key=?1 AND session_key NOT IN (SELECT session_key FROM catalog_members)",[key]).map_err(failure)?;
+                    }
+                }
+            }
+            if claims.is_none() {
+                transaction.execute("UPDATE session_history_catalog SET metadata=json_set(metadata,'$.lifecycle','retained') WHERE session_key NOT IN (SELECT session_key FROM catalog_members)",[]).map_err(failure)?;
+            } else {
+                for key in &affected {
+                    transaction.execute("UPDATE session_history_catalog SET metadata=json_set(metadata,'$.lifecycle','retained') WHERE session_key=?1 AND session_key NOT IN (SELECT session_key FROM catalog_members)",[key]).map_err(failure)?;
+                }
+            }
+            if rebuild_search {
+                transaction.execute_batch("DELETE FROM session_search_postings; DELETE FROM session_search_counts; DELETE FROM session_search_documents; UPDATE session_search_coverage SET incomplete=0;").map_err(failure)?;
+                let mut statement = transaction
+                    .prepare("SELECT metadata FROM session_catalog ORDER BY session_key")
+                    .map_err(failure)?;
+                let mut encoded = statement.query([]).map_err(failure)?;
+                while let Some(value) = encoded.next().map_err(failure)? {
+                    let encoded: String = value.get(0).map_err(failure)?;
+                    let row: crate::model::summary::CatalogRow = serde_json::from_str(&encoded)
+                        .map_err(|_| failure(rusqlite::Error::InvalidQuery))?;
+                    if row.lifecycle == crate::model::summary::CatalogLifecycle::Current {
+                        crate::catalog_search::publish_row(
+                            &transaction,
+                            crate::CatalogReadScope::Current,
+                            &row,
+                        )
+                        .map_err(failure)?;
+                    }
+                    crate::catalog_search::publish_row(
+                        &transaction,
+                        crate::CatalogReadScope::RetainedHistory,
+                        &row,
+                    )
+                    .map_err(failure)?;
+                }
+            }
+            if rebuild_search {
+                transaction.execute("INSERT OR REPLACE INTO meta(key,value) VALUES('search_backfill_complete','1')",[]).map_err(failure)?;
+            }
+            if claims.is_none() {
+                crate::catalog_search::retire_missing(&transaction).map_err(failure)?;
+            } else {
+                for key in &affected {
+                    crate::catalog_search::retire_key(&transaction, key).map_err(failure)?;
+                }
             }
             let generation = {
                 let mut digest = Sha256::new();
                 digest.update(version.as_bytes());
-                let mut statement = transaction
-                    .prepare("SELECT metadata FROM session_catalog ORDER BY session_key")
-                    .map_err(failure)?;
-                let mut values = statement.query([]).map_err(failure)?;
-                while let Some(row) = values.next().map_err(failure)? {
-                    let metadata: String = row.get(0).map_err(failure)?;
-                    digest.update((metadata.len() as u64).to_le_bytes());
-                    digest.update(metadata.as_bytes());
+                if claims.is_some() {
+                    transaction.execute("INSERT INTO meta(key,value) VALUES ('catalog_publication_epoch','1') ON CONFLICT(key) DO UPDATE SET value=CAST(CAST(value AS INTEGER)+1 AS TEXT)",[]).map_err(failure)?;
+                    let epoch: String = transaction
+                        .query_row(
+                            "SELECT value FROM meta WHERE key='catalog_publication_epoch'",
+                            [],
+                            |row| row.get(0),
+                        )
+                        .map_err(failure)?;
+                    digest.update(previous.as_deref().unwrap_or("").as_bytes());
+                    digest.update(epoch.as_bytes());
+                    for value in &metadata {
+                        digest.update((value.len() as u64).to_le_bytes());
+                        digest.update(value.as_bytes());
+                    }
+                } else {
+                    for table in ["session_catalog", "session_history_catalog"] {
+                        digest.update(table.as_bytes());
+                        let mut statement = transaction
+                            .prepare(&format!(
+                                "SELECT metadata FROM {table} ORDER BY session_key"
+                            ))
+                            .map_err(failure)?;
+                        let mut values = statement.query([]).map_err(failure)?;
+                        while let Some(row) = values.next().map_err(failure)? {
+                            let metadata: String = row.get(0).map_err(failure)?;
+                            digest.update((metadata.len() as u64).to_le_bytes());
+                            digest.update(metadata.as_bytes());
+                        }
+                    }
                 }
                 format!("{:x}", digest.finalize())
             };
@@ -1147,8 +1489,10 @@ impl IndexStore for SqliteStore {
                         }
                     }
                 }
-                transaction.execute("DELETE FROM session_slots WHERE session_key NOT IN (SELECT session_key FROM session_catalog)", []).map_err(failure)?;
-                transaction.execute("DELETE FROM session_slot_projections WHERE session_key NOT IN (SELECT session_key FROM session_catalog)", []).map_err(failure)?;
+                if claims.is_none() {
+                    transaction.execute("DELETE FROM session_slots WHERE session_key NOT IN (SELECT session_key FROM session_catalog)", []).map_err(failure)?;
+                    transaction.execute("DELETE FROM session_slot_projections WHERE session_key NOT IN (SELECT session_key FROM session_catalog)", []).map_err(failure)?;
+                }
                 transaction.execute("INSERT OR REPLACE INTO meta(key,value) VALUES ('slot_projection_catalog_generation',?1)", [&generation]).map_err(failure)?;
             } else {
                 transaction
@@ -1158,11 +1502,56 @@ impl IndexStore for SqliteStore {
                     )
                     .map_err(failure)?;
             }
+            for scope in ["current", "retained_history"] {
+                let incomplete: i64 = transaction
+                    .query_row(
+                        "SELECT incomplete FROM session_search_coverage WHERE read_scope=?1",
+                        [scope],
+                        |row| row.get(0),
+                    )
+                    .map_err(failure)?;
+                transaction
+                    .execute(
+                        "INSERT OR REPLACE INTO meta(key,value) VALUES(?1,?2)",
+                        params![format!("search_generation_{scope}"), generation],
+                    )
+                    .map_err(failure)?;
+                transaction
+                    .execute(
+                        "INSERT OR REPLACE INTO meta(key,value) VALUES(?1,?2)",
+                        params![format!("search_incomplete_{scope}"), incomplete.to_string()],
+                    )
+                    .map_err(failure)?;
+            }
+            transaction
+                .execute(
+                    "INSERT OR REPLACE INTO meta(key,value) VALUES('search_version',?1)",
+                    [crate::catalog_search::VERSION],
+                )
+                .map_err(failure)?;
             // A complete publication validated every committed ledger and
             // source membership while holding the write transaction. Only now
             // can outstanding source observations be acknowledged atomically.
+            if let Some(claims) = claims {
+                for (path, revision) in claims {
+                    if let Some(revision) = revision {
+                        transaction.execute("DELETE FROM session_catalog_invalidations WHERE source_path=?1 AND revision=?2",params![path,revision]).map_err(failure)?;
+                    }
+                }
+            } else {
+                transaction
+                    .execute("DELETE FROM session_catalog_invalidations", [])
+                    .map_err(failure)?;
+            }
             transaction
-                .execute("DELETE FROM session_catalog_invalidations", [])
+                .execute(
+                    "INSERT OR REPLACE INTO meta(key,value) VALUES ('catalog_completeness',?1)",
+                    [if claims.is_some() {
+                        "partial"
+                    } else {
+                        "complete"
+                    }],
+                )
                 .map_err(failure)?;
             transaction.commit().map_err(failure)?;
             Ok(Outcome::Written)
@@ -1173,90 +1562,15 @@ impl IndexStore for SqliteStore {
         result
     }
 
-    fn ledger(&self, path: &str) -> Result<Option<Ledger>, StoreError> {
-        ledger_row(&self.connection, path)
-            .map(|found| found.map(|(_, ledger)| ledger))
-            .map_err(failure)
-    }
-
-    fn load_file(&self, path: &str) -> Result<Option<(Ledger, FileIndex)>, StoreError> {
-        self.read_one(path).map_err(failure)
-    }
-
-    fn commit_file(
-        &mut self,
-        path: &str,
-        expected: Option<&Ledger>,
-        changes: Option<&super::DirtyRows>,
-        ledger: &Ledger,
-        index: &FileIndex,
-    ) -> Result<Outcome, StoreError> {
-        self.write_one_dirty(path, expected, changes, ledger, index)
-            .map_err(failure)
-    }
-
-    fn remove_files(&mut self, files: &[(String, Option<Ledger>)]) -> Result<Outcome, StoreError> {
-        self.remove(files).map_err(failure)
-    }
-
-    fn save_runs(
-        &mut self,
-        runs: &[ReportedRunSnapshot],
-        stamp: &ReportedFileStamp,
-    ) -> Result<Option<Vec<ReportedRunSnapshot>>, StoreError> {
-        self.write_runs(runs, stamp).map_err(failure)
-    }
-}
-
-/// Source observation work survives a process restart. The journal contains
-/// paths and observation facts only, never source bodies or runtime liveness.
-/// Its revision prevents a future bounded worker from acknowledging newer
-/// observations than the revision that worker claimed.
-fn invalidate_catalog_source(
-    transaction: &Transaction<'_>,
-    path: &str,
-    reason: &str,
-) -> rusqlite::Result<()> {
-    // Keep the counter after acknowledgement. Resetting per-path revisions
-    // would let an old claim mistake a later observation for its own (ABA).
-    transaction.execute(
-        "INSERT INTO meta(key,value) VALUES ('catalog_source_revision','1')
-         ON CONFLICT(key) DO UPDATE SET value=CAST(CAST(meta.value AS INTEGER)+1 AS TEXT)",
-        [],
-    )?;
-    transaction.execute(
-        "INSERT INTO session_catalog_invalidations(source_path,revision,reason,observed_at)
-         VALUES (?1,CAST((SELECT value FROM meta WHERE key='catalog_source_revision') AS INTEGER),?2,?3)
-         ON CONFLICT(source_path) DO UPDATE SET revision=excluded.revision,
-         reason=excluded.reason, observed_at=excluded.observed_at",
-        params![path, reason, crate::model::now_ms()],
-    )?;
-    Ok(())
-}
-
-enum Unopened {
-    /// Not a database, or a damaged one: set aside and rebuilt.
-    Corrupt(rusqlite::Error),
-    Other(String),
-}
-
-impl fmt::Display for Unopened {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Corrupt(error) => write!(formatter, "{error}"),
-            Self::Other(message) => formatter.write_str(message),
-        }
-    }
-}
-
-enum Init {
-    Ready,
-    NoWal,
-    Newer,
-}
-
-impl SqliteStore {
     fn attempt(path: &Path, legacy: Option<&Path>) -> Result<(Self, Loaded), Unopened> {
+        Self::attempt_scoped(path, legacy, false)
+    }
+
+    fn attempt_scoped(
+        path: &Path,
+        legacy: Option<&Path>,
+        scoped: bool,
+    ) -> Result<(Self, Loaded), Unopened> {
         let classify = |error: rusqlite::Error| {
             if is_corrupt(&error) {
                 Unopened::Corrupt(error)
@@ -1299,9 +1613,30 @@ impl SqliteStore {
         let store = Self {
             connection,
             path: path.to_owned(),
+            selected_runs: scoped.then(std::collections::BTreeSet::new),
         };
-        let loaded = store.load().map_err(classify)?;
+        let loaded = if scoped {
+            Loaded {
+                files: Vec::new(),
+                reported_runs: Vec::new(),
+                stamp: store.read_stamp().map_err(classify)?,
+            }
+        } else {
+            store.load().map_err(classify)?
+        };
         Ok((store, loaded))
+    }
+
+    fn read_stamp(&self) -> rusqlite::Result<Option<ReportedFileStamp>> {
+        Ok(self
+            .connection
+            .query_row(
+                "SELECT value FROM meta WHERE key='claude_json_stamp'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .and_then(|text| serde_json::from_str(&text).ok()))
     }
 
     /// Every file's index, and the reported runs, in one read transaction.
@@ -1473,7 +1808,10 @@ impl SqliteStore {
             "INSERT OR REPLACE INTO meta (key, value) VALUES ('claude_json_stamp', ?1)",
             [json(stamp)?],
         )?;
-        let all = read_runs(&transaction)?;
+        let all = match &self.selected_runs {
+            Some(ids) => read_runs_selected(&transaction, ids)?,
+            None => read_runs(&transaction)?,
+        };
         transaction.commit()?;
         Ok(Some(all))
     }
@@ -1648,6 +1986,15 @@ fn init(connection: &mut Connection) -> rusqlite::Result<Init> {
         return Ok(Init::Newer);
     }
     if schema < SCHEMA_VERSION {
+        if schema != 0
+            && !transaction.query_row(
+                "SELECT EXISTS(SELECT 1 FROM pragma_table_info('files') WHERE name='ctime_ns')",
+                [],
+                |row| row.get::<_, bool>(0),
+            )?
+        {
+            transaction.execute_batch("ALTER TABLE files ADD COLUMN ctime_ns BLOB")?;
+        }
         if schema == 6 {
             transaction.execute_batch("ALTER TABLE session_catalog ADD COLUMN parent_key TEXT")?;
         }
@@ -1660,10 +2007,10 @@ fn init(connection: &mut Connection) -> rusqlite::Result<Init> {
         if schema==10 && !transaction.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info('session_slot_projections') WHERE name='source_generation')",[],|row|row.get::<_,bool>(0))? {
             transaction.execute_batch("ALTER TABLE session_slot_projections ADD COLUMN source_generation TEXT")?;
         }
-        // Schema 11 used lifecycle-prefixed indexes containing retained rows.
+        // Earlier schemas used lifecycle-prefixed indexes containing retained rows.
         // Replace only the Current list trees; history/source lookup indexes
         // still support both lifecycle states and keep their existing authority.
-        if schema == 11 {
+        if (11..17).contains(&schema) {
             transaction.execute_batch(
                 "DROP INDEX IF EXISTS session_catalog_current_order;
                 DROP INDEX IF EXISTS session_catalog_current_harness;
@@ -1673,6 +2020,8 @@ fn init(connection: &mut Connection) -> rusqlite::Result<Init> {
             )?;
         }
         transaction.execute_batch(SCHEMA)?;
+        transaction.execute_batch(crate::history_projection::SCHEMA)?;
+        transaction.execute_batch(crate::catalog_search::SCHEMA)?;
         if schema == 1 {
             transaction.execute_batch("ALTER TABLE files ADD COLUMN codex_native_usage TEXT")?;
         }
@@ -1834,27 +2183,30 @@ fn gap(what: &str) -> rusqlite::Error {
 fn ledger_row(connection: &Connection, path: &str) -> rusqlite::Result<Option<(i64, Ledger)>> {
     connection
         .query_row(
-            "SELECT file_id, dev, ino, size, mtime_ns, resume_at, head_sha256, tail_sha256 \
+            "SELECT file_id, dev, ino, size, mtime_ns, resume_at, head_sha256, tail_sha256, ctime_ns \
              FROM files WHERE path = ?1",
             [path],
-            |row| {
-                Ok((
-                    row.get(0)?,
-                    Ledger {
-                        stat: Stat {
-                            dev: uint(row.get(1)?),
-                            ino: uint(row.get(2)?),
-                            size: uint(row.get(3)?),
-                            modified_ns: u128::from_be_bytes(row.get(4)?),
-                        },
-                        offset: uint(row.get(5)?),
-                        prefix: row.get(6)?,
-                        tail: row.get(7)?,
-                    },
-                ))
-            },
+            read_ledger,
         )
         .optional()
+}
+
+fn read_ledger(row: &Row<'_>) -> rusqlite::Result<(i64, Ledger)> {
+    Ok((
+        row.get(0)?,
+        Ledger {
+            stat: Stat {
+                dev: uint(row.get(1)?),
+                ino: uint(row.get(2)?),
+                size: uint(row.get(3)?),
+                modified_ns: u128::from_be_bytes(row.get(4)?),
+                changed_ns: row.get::<_, Option<[u8; 16]>>(8)?.map(i128::from_be_bytes),
+            },
+            offset: uint(row.get(5)?),
+            prefix: row.get(6)?,
+            tail: row.get(7)?,
+        },
+    ))
 }
 
 /// The per-file child queries, prepared once per read.
@@ -1897,6 +2249,7 @@ fn read_file(
             ino: uint(row.get(3)?),
             size: uint(row.get(4)?),
             modified_ns: u128::from_be_bytes(row.get(5)?),
+            changed_ns: row.get::<_, Option<[u8; 16]>>(28)?.map(i128::from_be_bytes),
         },
         offset: uint(row.get(6)?),
         prefix: row.get(7)?,
@@ -2090,6 +2443,23 @@ fn read_runs(connection: &Connection) -> rusqlite::Result<Vec<ReportedRunSnapsho
     Ok(runs)
 }
 
+fn read_runs_selected(
+    connection: &Connection,
+    ids: &std::collections::BTreeSet<String>,
+) -> rusqlite::Result<Vec<ReportedRunSnapshot>> {
+    let mut statement = connection.prepare(&format!(
+        "SELECT {RUN_COLUMNS} FROM reported_runs WHERE session_id=?1 ORDER BY start"
+    ))?;
+    let mut runs = Vec::new();
+    for id in ids {
+        let mut rows = statement.query([id])?;
+        while let Some(row) = rows.next()? {
+            runs.push(read_run(row)?);
+        }
+    }
+    Ok(runs)
+}
+
 fn read_run(row: &Row<'_>) -> rusqlite::Result<ReportedRunSnapshot> {
     Ok(ReportedRunSnapshot {
         last_session_id: row.get(0)?,
@@ -2189,6 +2559,7 @@ fn write_file(
                 ino,
                 size,
                 modified_ns,
+                changed_ns,
             },
         offset,
         prefix,
@@ -2225,6 +2596,7 @@ fn write_file(
             rate_limits,
             codex_native_usage.as_ref().map(json).transpose()?,
             copilot.as_ref().map(json).transpose()?,
+            changed_ns.map(i128::to_be_bytes),
         ],
         |row| row.get(0),
     )?;
@@ -2540,6 +2912,52 @@ mod tests {
     }
 
     #[test]
+    fn scoped_store_restores_only_named_reported_runs_and_preserves_overwritten_history() {
+        let root = scratch("scoped-runs");
+        let path = root.join("index.sqlite3");
+        let legacy = root.join("index.events.json");
+        let (mut store, _) = SqliteStore::attempt(&path, None)
+            .map_err(|error| error.to_string())
+            .unwrap();
+        let mut old = run();
+        old.last_session_id = "selected".into();
+        let mut newer = old.clone();
+        newer.last_start_time += 1;
+        newer.last_cost = Some(2.5);
+        store
+            .write_runs(&[old.clone(), newer.clone()], &stamp())
+            .unwrap();
+        {
+            let transaction = store.connection.transaction().unwrap();
+            let mut statement = transaction.prepare(PUT_RUN).unwrap();
+            for n in 0..20000 {
+                let mut unrelated = run();
+                unrelated.last_session_id = format!("unrelated-{n}");
+                put_run(&mut statement, &unrelated).unwrap();
+            }
+            drop(statement);
+            transaction.commit().unwrap();
+        }
+        drop(store);
+        let (mut store, loaded) = open_scoped(&path, &legacy).unwrap();
+        assert!(loaded.files.is_empty());
+        assert!(loaded.reported_runs.is_empty());
+        assert_eq!(loaded.stamp, Some(stamp()));
+        let selected = std::collections::BTreeSet::from(["selected".to_owned()]);
+        let restored = store.select_reported_runs(&selected).unwrap();
+        assert_eq!(restored.len(), 2);
+        assert_eq!(restored[0], old);
+        assert_eq!(restored[1], newer);
+        let mut last = newer.clone();
+        last.last_start_time += 1;
+        let saved = store.save_runs(&[last], &stamp()).unwrap().unwrap();
+        assert_eq!(saved.len(), 3);
+        assert!(saved.iter().all(|run| run.last_session_id == "selected"));
+        drop(store);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn finishing_the_same_corrupt_claim_keeps_one_archive() {
         let root = scratch("same-corrupt-claim");
         let legacy = root.join("index.events.json");
@@ -2597,6 +3015,7 @@ mod tests {
                 ino: 2,
                 size: 3 + u64::from(n),
                 modified_ns: u128::MAX - u128::from(n),
+                changed_ns: Some(i128::MIN + i128::from(n)),
             },
             offset: 3,
             prefix: [n; 32],
@@ -3193,6 +3612,33 @@ mod tests {
                 .unwrap();
             assert_eq!(rows, 0, "{table}");
         }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn schema_thirteen_preserves_sources_without_inventing_change_time() {
+        let root = scratch("change-time-migration");
+        let path = root.join("index.sqlite3");
+        let (mut store, _) = opened(&path);
+        store
+            .write_one("original.jsonl", None, None, &ledger(1), &full())
+            .unwrap();
+        store
+            .connection
+            .execute_batch("ALTER TABLE files DROP COLUMN ctime_ns; PRAGMA user_version = 13;")
+            .unwrap();
+        drop(store);
+        let (store, _) = opened(&path);
+        let (migrated, original) = store.read_one("original.jsonl").unwrap().unwrap();
+        let mut expected = ledger(1);
+        expected.stat.changed_ns = None;
+        assert_eq!(migrated, expected);
+        assert_eq!(format!("{original:?}"), format!("{:?}", full()));
+        assert_eq!(
+            versions(&store.connection).unwrap(),
+            (SCHEMA_VERSION, Some(CACHE_VERSION))
+        );
+        drop(store);
         fs::remove_dir_all(root).unwrap();
     }
 

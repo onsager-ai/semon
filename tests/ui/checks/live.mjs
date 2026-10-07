@@ -356,9 +356,12 @@ export async function open(browser, srv, where, scheme, before = null) {
       : r.abort(),
   );
   await before?.(page); // routes added here run before the one above
-  await page.goto(srv.base + where + (where.includes('?') ? '&' : '?') + 't=' + srv.token, {
-    waitUntil: 'load',
-  });
+  await page.goto(
+    srv.base + where + (where.includes('?') ? '&' : '?') + 't=' + srv.token + '&compat=1',
+    {
+      waitUntil: 'load',
+    },
+  );
   await settled(page);
   if (where.startsWith('/s/'))
     await page.waitForFunction(
@@ -3026,6 +3029,7 @@ async function lateFixture(browser, prefix) {
       (note) => ({
         intros: document.querySelectorAll('#page .bubble.in').length,
         foot: document.querySelectorAll('#page .session-foot').length,
+        observation: document.querySelector('[data-transcript-observation]')?.textContent ?? null,
         copies: [...document.querySelectorAll('#page *')]
           .filter(
             (n) =>
@@ -3274,6 +3278,10 @@ async function childIntroLateGivesUp(browser, r) {
       R.shown.intros === 0 && R.shown.copies.length === 1,
       "child-intro-late-gives-up: after giving up the page keeps the brief once, as the subagent's own first message (no bubble): " +
         JSON.stringify(R.shown),
+    );
+    r.expect(
+      R.shown.observation?.includes('saved transcript is incomplete'),
+      'child-intro-late-gives-up: exhausted observation retries must remain visible',
     );
     R.errors = pages.flatMap((p) => p.errors);
     r.expect(

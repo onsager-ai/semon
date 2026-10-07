@@ -73,7 +73,7 @@ for (const width of [390, 1280])
         await page.route('**/viewer.js', (route) =>
           route.fulfill({ contentType: 'text/javascript', body: bundle.outputFiles[0].text }),
         );
-        await page.goto(match[1] + '/?t=' + match[2]);
+        await page.goto(match[1] + '/?t=' + match[2] + '&compat=1');
         const result = await page.evaluate(async (mode) => {
           const assert = (condition, message) => {
             if (!condition) throw Error(message);

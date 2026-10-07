@@ -69,6 +69,7 @@ export function createTransport(host: TransportHost) {
     if (host.disposed) throw new DOMException('Viewer destroyed', 'AbortError');
     const controller = host.scope.request(),
       release = () => host.scope.releaseRequest(controller);
+    const deadline = host.scope.timeout(() => controller.abort(), 15000);
     try {
       const response = await requestJson(
         path,
@@ -78,6 +79,7 @@ export function createTransport(host: TransportHost) {
       if (host.disposed) throw new DOMException('Viewer destroyed', 'AbortError');
       return response;
     } finally {
+      host.scope.clearTimeout(deadline);
       release();
     }
   }
@@ -106,7 +108,8 @@ export function createTransport(host: TransportHost) {
       host.viewerHost?.machinesPath ??
       (nav && typeof nav.machines === 'string' && safePath(nav.machines) ? nav.machines : null);
     host.modelStore.adopt(m, () => {
-      host.controlOwner.adopt(control);
+      if (!(host.viewerHost?.controlStream || host.viewerHost?.catalogControlStream))
+        host.controlOwner.adopt(control);
       serverNow = m.now;
       fetchedAt = Date.now();
       TOK = marks;

@@ -43,7 +43,10 @@ interface ViewportHost {
 
   accountControlsOwner: Pick<ReturnType<typeof createAccountControls>, 'shellChrome'>;
 
-  sessionChrome: Pick<ReturnType<typeof createSessionChrome>, 'syncBarLine' | 'drawSessionBar'>;
+  sessionChrome: Pick<
+    ReturnType<typeof createSessionChrome>,
+    'syncBarLine' | 'drawSessionBar' | 'viewerBar'
+  >;
 
   toolViewsOwner: Pick<ReturnType<typeof createToolViews>, 'viewerEl'>;
 
@@ -212,6 +215,7 @@ export function createViewport(host: ViewportHost) {
       gap > 80 || !!newer,
       host.liveModelOwner.LIVE.fresh + newer,
       jumpBusy,
+      host.sessionChrome.viewerBar.jumpTarget,
     );
   }
   function clearNewEntries() {

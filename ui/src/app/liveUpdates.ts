@@ -51,7 +51,7 @@ interface LiveUpdatesHost {
 export function createLiveUpdates(host: LiveUpdatesHost) {
   let generation = 0;
   const applyModelDelta = (value: unknown) => host.modelStore.apply(value);
-  function update(value: unknown) {
+  function update(value: unknown, resynchronize = false) {
     if (host.disposed) return Promise.resolve();
     const m = applyModelDelta(value);
     const oldH = new Map(
@@ -116,9 +116,11 @@ export function createLiveUpdates(host: LiveUpdatesHost) {
       grown = new Set<string>(),
       cuts = new Map<string, number>(),
       patched = new Map<string, Entry[]>();
-    let full = Object.values(host.modelStore.sessions).some(
-      (x) => names.has(x.id) && names.get(x.id) !== x.name,
-    ); // a new name shows in every turn
+    let full =
+      resynchronize ||
+      Object.values(host.modelStore.sessions).some(
+        (x) => names.has(x.id) && names.get(x.id) !== x.name,
+      ); // a new name shows in every turn
     for (const sid of Object.keys(host.transcripts.entries)) {
       if (view.has(sid) && host.modelStore.sessions[sid]) host.transportOwner.spread(sid);
       else host.pagingOwner.dropTx(sid);
@@ -340,12 +342,17 @@ export function createLiveUpdates(host: LiveUpdatesHost) {
         return r;
       },
       (err) => {
+        if (err?.status === 403) throw err;
         if (host.liveModelOwner.LIVE.late === sid) {
           if (++host.liveModelOwner.LIVE.lateTries >= LATE_TRIES) {
             host.liveModelOwner.LIVE.late = null;
             console.warn(
               'semon: gave up reloading the transcript of ' + sid + ' after its origin arrived',
             );
+            // This observation has exhausted its own bounded retries. Keep the
+            // transcript explicitly stale, but let unrelated model/status reads
+            // resume instead of extending generic recovery backoff indefinitely.
+            return { cut: null, reload: true };
           } else host.liveModelOwner.LIVE.retry = true;
         }
         throw err;
