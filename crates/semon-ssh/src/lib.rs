@@ -331,6 +331,33 @@ pub async fn bootstrap(
     credential: &Credential,
     setup: Bootstrap<'_>,
 ) -> Result<Setup, Error> {
+    bootstrap_inner(target, key, credential, setup, None).await
+}
+/// Scope mirror checkpoints to the stable logical receiver. Reuse this identity
+/// for credential rotation/repair; choose a new identity for a new receiver even
+/// when its URL is unchanged. No native harness is started or resumed.
+pub async fn bootstrap_for_receiver(
+    target: &Target,
+    key: &HostKey,
+    credential: &Credential,
+    setup: Bootstrap<'_>,
+    receiver_identity: &str,
+) -> Result<Setup, Error> {
+    if receiver_identity.is_empty()
+        || receiver_identity.len() > 256
+        || receiver_identity.bytes().any(|b| b.is_ascii_control())
+    {
+        return Err(Error::Invalid);
+    }
+    bootstrap_inner(target, key, credential, setup, Some(receiver_identity)).await
+}
+async fn bootstrap_inner(
+    target: &Target,
+    key: &HostKey,
+    credential: &Credential,
+    setup: Bootstrap<'_>,
+    receiver_identity: Option<&str>,
+) -> Result<Setup, Error> {
     target.validate()?;
     if setup.operation.len() != 36
         || !setup
@@ -344,7 +371,7 @@ pub async fn bootstrap(
         return Err(Error::Invalid);
     }
     let files = PrivateFiles::new(key, credential)?;
-    let input=Zeroizing::new(serde_json::to_vec(&serde_json::json!({"version":1,"operation":setup.operation,"destination":setup.destination,"token":setup.token,"binary":STANDARD.encode(setup.binary),"sha256":format!("{:x}",Sha256::digest(setup.binary))})).map_err(|_|Error::Invalid)?);
+    let input=Zeroizing::new(serde_json::to_vec(&serde_json::json!({"version":1,"operation":setup.operation,"receiver_identity":receiver_identity,"destination":setup.destination,"token":setup.token,"binary":STANDARD.encode(setup.binary),"sha256":format!("{:x}",Sha256::digest(setup.binary))})).map_err(|_|Error::Invalid)?);
     let script = include_str!("bootstrap.py");
     let command = format!("python3 -c '{}'", script.replace('\'', "'\\''"));
     let out = run(
