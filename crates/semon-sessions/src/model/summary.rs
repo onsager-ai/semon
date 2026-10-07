@@ -128,7 +128,7 @@ pub(crate) struct CatalogRow {
 /// 4 KiB of that prefix. Neither binds unread trailing bytes or a whole archive
 /// object. Serving validates access and current stat before deciding whether
 /// this observation is current or stale.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct CatalogSource {
     pub(crate) path: PathBuf,
