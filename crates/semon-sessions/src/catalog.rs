@@ -1088,6 +1088,49 @@ mod tests {
     }
 
     #[test]
+    fn source_projection_readiness_defers_oversized_metadata_and_source_context() {
+        let fixture = Fixture::new();
+        fixture.publish(1);
+        let relative = "projects/project/session-00000.jsonl";
+        let connection = Connection::open(EventCache::path(&fixture.options.cache)).unwrap();
+        let encoded: String = connection
+            .query_row("SELECT metadata FROM session_catalog", [], |row| row.get(0))
+            .unwrap();
+        let mut row: CatalogRow = serde_json::from_str(&encoded).unwrap();
+        row.name = "x".repeat(1024 * 1024);
+        connection
+            .execute(
+                "UPDATE session_catalog SET metadata=?1",
+                [serde_json::to_string(&row).unwrap()],
+            )
+            .unwrap();
+        assert!(
+            crate::source_projection_ready(&fixture.options, "claude", relative)
+                .unwrap()
+                .is_none()
+        );
+        row = serde_json::from_str(&encoded).unwrap();
+        row.sources = vec![row.sources[0].clone(); 65];
+        connection
+            .execute(
+                "UPDATE session_catalog SET metadata=?1",
+                [serde_json::to_string(&row).unwrap()],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "UPDATE session_slot_projections SET source_generation=?1",
+                [crate::retention::source_generation(&row.sources).unwrap()],
+            )
+            .unwrap();
+        assert!(
+            crate::source_projection_ready(&fixture.options, "claude", relative)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
     fn source_projection_readiness_never_initializes_and_rejects_stale_headers() {
         let fixture = Fixture::new();
         let relative = "projects/project/session-00000.jsonl";
@@ -1673,10 +1716,48 @@ mod tests {
     }
 
     #[test]
+    fn source_observer_publishes_first_push_without_a_viewer_core() {
+        let fixture = Fixture::new();
+        fixture.source("first-push");
+        let observer = crate::SessionCatalogObserver::new(fixture.options.clone());
+        assert!(!EventCache::path(&fixture.options.cache).exists());
+        observer.changed().unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let reply = session_catalog_page(&fixture.options, "configured", "sid=first-push");
+            if reply.status == 200 {
+                let body: Value = serde_json::from_slice(&reply.body).unwrap();
+                if body["items"]
+                    .as_array()
+                    .is_some_and(|items| items.len() == 1)
+                {
+                    assert_eq!(body["items"][0]["key"], "first-push");
+                    break;
+                }
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "source publication did not complete"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        observer.close();
+        assert!(EventCache::path(&fixture.options.cache).exists());
+    }
+
+    #[test]
     fn default_local_viewer_advertises_a_nonempty_stable_catalog_source() {
         let fixture = Fixture::new();
         fixture.publish(1);
         let core = ViewerCore::new(fixture.options.clone());
+        let inventory = core.respond("GET", "/api/session-sources", "limit=1", None);
+        assert_eq!(inventory.status, 200);
+        let inventory: Value = serde_json::from_slice(&inventory.body).unwrap();
+        assert_eq!(
+            inventory["items"],
+            serde_json::json!([{"source_key":"local","label":"local"}])
+        );
+        assert!(inventory["next_cursor"].is_null());
         let capability = core.respond("GET", "/api/session-capabilities", "", None);
         assert_eq!(capability.status, 200);
         let body: Value = serde_json::from_slice(&capability.body).unwrap();
@@ -1921,6 +2002,36 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(current.read_scope, CatalogReadScope::Current);
+    }
+
+    #[test]
+    fn current_page_excludes_retained_rows_with_bounded_work_and_history_keeps_them() {
+        let fixture = Fixture::new();
+        fixture.publish(2);
+        let connection = Connection::open(EventCache::path(&fixture.options.cache)).unwrap();
+        connection.execute("UPDATE session_catalog SET lifecycle='retained',metadata=json_set(metadata,'$.lifecycle','retained') WHERE session_key='session-00001'",[]).unwrap();
+        SQL_STEPS.with(|steps| steps.set(0));
+        let (status, before) = fixture.body("limit=1");
+        assert_eq!(status, 200);
+        let baseline = SQL_STEPS.with(|steps| steps.get());
+        assert_eq!(before["items"].as_array().unwrap().len(), 1);
+        assert_eq!(before["items"][0]["key"], "session-00000");
+        connection.execute_batch("WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM n WHERE x<20000) INSERT INTO session_catalog(session_key,lifecycle,last_ms,harness,repo,parent_key,metadata) SELECT 'retained-'||printf('%05d',x),'retained',last_ms,harness,repo,parent_key,json_set(metadata,'$.key','retained-'||printf('%05d',x)) FROM n,session_catalog WHERE session_key='session-00001'").unwrap();
+        SQL_STEPS.with(|steps| steps.set(0));
+        let (status, after) = fixture.body("limit=1");
+        assert_eq!(status, 200);
+        assert_eq!(after["items"], before["items"]);
+        assert_eq!(SQL_STEPS.with(|steps| steps.get()), baseline);
+        let (status, history) = fixture.body("scope=retained_history&limit=2");
+        assert_eq!(status, 200);
+        assert_eq!(history["items"].as_array().unwrap().len(), 2);
+        assert!(history["next_cursor"].is_string());
+        // Local absence does not revoke native-current authority by itself.
+        assert!(
+            session_catalog_identity(&fixture.options, "source", "session-00001")
+                .unwrap()
+                .is_some()
+        );
     }
 
     #[test]

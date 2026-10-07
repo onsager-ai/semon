@@ -6,11 +6,17 @@
 //! Readers bind spans/cursors to an authorized source generation and begin at a
 //! verified checkpoint or a prior chunk's cursor. A raw offset is not authority
 //! or proof of a scalar boundary. No prefix or complete record is needed here.
-use std::{collections::BTreeSet, fmt, io};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fmt, io,
+    ops::Range,
+};
 
 pub const JSON_STRING_SPAN_VERSION: u32 = 1;
 pub const JSON_STRING_CHECKPOINT_BYTES: u64 = 64 * 1024;
 pub const JSON_STRING_CHUNK_DECODED_MAX: usize = 128 * 1024;
+/// Largest incomplete scalar in a two-layer JSON string is 72 raw bytes.
+pub const JSON_STRING_LAYERED_SCALAR_SLACK: usize = 71;
 const MAX_DEPTH: usize = 128;
 const MAX_FIELDS: usize = 8192;
 const MAX_POINTER_BYTES: usize = 4096;
@@ -169,6 +175,26 @@ pub fn decode_json_string_chunk(
     at_end: bool,
     max_decoded: usize,
 ) -> io::Result<JsonStringChunk> {
+    decode_json_string_layered_chunk(bytes, 1, at_end, max_decoded)
+}
+
+/// Decode one or two JSON-string escape layers from a verified combined scalar
+/// boundary. Layer two uses a fixed 12-byte scratch buffer, never a decoded
+/// prefix or intermediate field allocation. Partial combined scalars remain
+/// entirely unconsumed. Native recipe qualification and source authority belong
+/// to the caller, including whether a string contains an encoded JSON wrapper.
+pub fn decode_json_string_layered_chunk(
+    bytes: &[u8],
+    layers: u8,
+    at_end: bool,
+    max_decoded: usize,
+) -> io::Result<JsonStringChunk> {
+    if !matches!(layers, 1 | 2) {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "unsupported JSON string escape layers",
+        ));
+    }
     if max_decoded == 0 || max_decoded > JSON_STRING_CHUNK_DECODED_MAX {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -178,7 +204,7 @@ pub fn decode_json_string_chunk(
     let mut text = String::with_capacity(bytes.len().min(max_decoded));
     let mut consumed = 0;
     while consumed < bytes.len() && text.len() < max_decoded {
-        let Some((value, width)) = scalar(&bytes[consumed..], at_end)? else {
+        let Some((value, width)) = layered_scalar(&bytes[consumed..], layers, at_end)? else {
             break;
         };
         if value.len_utf8() > max_decoded - text.len() {
@@ -200,12 +226,171 @@ pub fn decode_json_string_chunk(
     })
 }
 
+fn layered_scalar(bytes: &[u8], layers: u8, at_end: bool) -> io::Result<Option<(char, usize)>> {
+    if layers == 1 {
+        return scalar(bytes, at_end);
+    }
+    let mut encoded = [0u8; 12];
+    let mut filled = 0;
+    let mut consumed = 0;
+    loop {
+        let Some((value, width)) = scalar(&bytes[consumed..], at_end)? else {
+            return Ok(None);
+        };
+        let next = filled + value.len_utf8();
+        if next > encoded.len() {
+            return Err(invalid());
+        }
+        value.encode_utf8(&mut encoded[filled..next]);
+        filled = next;
+        consumed += width;
+        if let Some((decoded, inner_width)) = scalar(&encoded[..filled], false)? {
+            if inner_width != filled {
+                return Err(invalid());
+            }
+            return Ok(Some((decoded, consumed)));
+        }
+    }
+}
+
+fn field_bytes<'a>(record: &'a [u8], span: &JsonStringSpan) -> io::Result<&'a [u8]> {
+    let start = usize::try_from(span.start).map_err(|_| invalid())?;
+    let end = usize::try_from(span.end).map_err(|_| invalid())?;
+    if start == 0
+        || start > end
+        || record.get(start - 1) != Some(&b'"')
+        || record.get(end) != Some(&b'"')
+    {
+        return Err(invalid());
+    }
+    record.get(start..end).ok_or_else(invalid)
+}
+
+/// Producer-only slicing by decoded UTF-8 byte offsets. Both ends must be
+/// complete scalar boundaries. Offsets/checkpoints stay relative to the
+/// original native record; the producer walks this field once, not each request.
+pub fn slice_json_string_span(
+    record: &[u8],
+    outer: &JsonStringSpan,
+    decoded_range: Range<usize>,
+) -> io::Result<JsonStringSpan> {
+    if decoded_range.start > decoded_range.end {
+        return Err(invalid());
+    }
+    let bytes = field_bytes(record, outer)?;
+    let mut decoded = 0usize;
+    let mut raw = 0usize;
+    let mut start = None;
+    let mut checkpoints = Vec::new();
+    let mut checkpoint = 0usize;
+    loop {
+        if decoded == decoded_range.start && start.is_none() {
+            start = Some(raw);
+            checkpoint = raw;
+            checkpoints.push(outer.start + raw as u64);
+        }
+        if decoded == decoded_range.end {
+            let start = start.ok_or_else(invalid)?;
+            let end = outer.start + raw as u64;
+            if checkpoints.last() != Some(&end) {
+                checkpoints.push(end);
+            }
+            return Ok(JsonStringSpan {
+                json_pointer: outer.json_pointer.clone(),
+                start: outer.start + start as u64,
+                end,
+                checkpoints,
+            });
+        }
+        if raw == bytes.len()
+            || decoded > decoded_range.start && start.is_none()
+            || decoded > decoded_range.end
+        {
+            return Err(invalid());
+        }
+        let (value, width) = scalar(&bytes[raw..], true)?.ok_or_else(invalid)?;
+        raw += width;
+        decoded = decoded.checked_add(value.len_utf8()).ok_or_else(limit)?;
+        if start.is_some() && raw - checkpoint >= JSON_STRING_CHECKPOINT_BYTES as usize {
+            checkpoints.push(outer.start + raw as u64);
+            checkpoint = raw;
+        }
+    }
+}
+
+/// Producer-only qualification of string fields inside one encoded JSON
+/// wrapper. Returned pointers address the decoded wrapper; persist only native
+/// allowlisted pointers. Returned spans/checkpoints address the original record
+/// and require layer-two decoding. Arbitrary complex wrappers remain unsupported
+/// by native callers until their semantics are separately qualified.
+pub fn index_nested_json_string_spans(
+    record: &[u8],
+    outer: &JsonStringSpan,
+) -> io::Result<Vec<JsonStringSpan>> {
+    let bytes = field_bytes(record, outer)?;
+    let mut decoded = String::with_capacity(bytes.len().min(JSON_STRING_CHUNK_DECODED_MAX));
+    let mut at = 0;
+    while at < bytes.len() {
+        let (value, width) = scalar(&bytes[at..], true)?.ok_or_else(invalid)?;
+        decoded.push(value);
+        at += width;
+    }
+    // Each decoded outer byte expands to at most six raw bytes. A completed
+    // inner scalar overshoots its checkpoint threshold by at most 11 bytes.
+    let mut spans = index_with_checkpoints(
+        decoded.as_bytes(),
+        (JSON_STRING_CHECKPOINT_BYTES as usize / 6) - 11,
+    )?;
+    let wanted: BTreeSet<u64> = spans
+        .iter()
+        .flat_map(|span| span.checkpoints.iter().copied())
+        .collect();
+    let mut mapped = BTreeMap::new();
+    let mut raw = 0;
+    let mut offset = 0u64;
+    let mut wanted = wanted.into_iter().peekable();
+    loop {
+        if wanted.peek() == Some(&offset) {
+            mapped.insert(offset, outer.start + raw as u64);
+            wanted.next();
+        }
+        if wanted.peek().is_some_and(|next| *next < offset) {
+            return Err(invalid());
+        }
+        if raw == bytes.len() {
+            break;
+        }
+        let (value, width) = scalar(&bytes[raw..], true)?.ok_or_else(invalid)?;
+        raw += width;
+        offset += value.len_utf8() as u64;
+    }
+    if wanted.peek().is_some() {
+        return Err(invalid());
+    }
+    for span in &mut spans {
+        span.start = *mapped.get(&span.start).ok_or_else(invalid)?;
+        span.end = *mapped.get(&span.end).ok_or_else(invalid)?;
+        for checkpoint in &mut span.checkpoints {
+            *checkpoint = *mapped.get(checkpoint).ok_or_else(invalid)?;
+        }
+    }
+    Ok(spans)
+}
+
 /// Index syntactically valid JSON without retaining string values. Duplicate
 /// keys, deep/oversized field maps and unqualified complex native body formats
 /// must remain explicit unsupported/incomplete outcomes in the caller.
 pub fn index_json_string_spans(record: &[u8]) -> io::Result<Vec<JsonStringSpan>> {
+    index_with_checkpoints(record, JSON_STRING_CHECKPOINT_BYTES as usize)
+}
+
+fn index_with_checkpoints(
+    record: &[u8],
+    checkpoint_bytes: usize,
+) -> io::Result<Vec<JsonStringSpan>> {
     let mut lexer = Lexer {
         bytes: record,
+        checkpoint_bytes,
         at: 0,
         fields: 0,
         spans: Vec::new(),
@@ -220,6 +405,7 @@ pub fn index_json_string_spans(record: &[u8]) -> io::Result<Vec<JsonStringSpan>>
 
 struct Lexer<'a> {
     bytes: &'a [u8],
+    checkpoint_bytes: usize,
     at: usize,
     fields: usize,
     spans: Vec<JsonStringSpan>,
@@ -254,7 +440,7 @@ impl Lexer<'_> {
             let (_, width) = scalar(self.bytes.get(self.at..).ok_or_else(invalid)?, true)?
                 .ok_or_else(invalid)?;
             self.at += width;
-            if pointer.is_some() && self.at - checkpoint >= JSON_STRING_CHECKPOINT_BYTES as usize {
+            if pointer.is_some() && self.at - checkpoint >= self.checkpoint_bytes {
                 checkpoints.push(self.at as u64);
                 checkpoint = self.at;
             }
@@ -427,6 +613,178 @@ mod tests {
             result.push_str(&chunk.text);
         }
         result
+    }
+
+    fn decode_layered_all(raw: &[u8], budget: usize) -> String {
+        let mut remaining = raw;
+        let mut output = String::new();
+        while !remaining.is_empty() {
+            let chunk = decode_json_string_layered_chunk(remaining, 2, true, budget).unwrap();
+            assert!(chunk.consumed > 0);
+            output.push_str(&chunk.text);
+            remaining = &remaining[chunk.consumed..];
+        }
+        output
+    }
+
+    #[test]
+    fn layered_native_wrapper_spans_match_committed_parser_oracle() {
+        let fixture =
+            include_str!("../../../tests/fixtures/compatibility/v1/namespace-codex.jsonl");
+        let mut qualified = 0;
+        for line in fixture.lines() {
+            let oracle = crate::tx::parse_native_record(line.as_bytes()).unwrap();
+            if oracle
+                .pointer("/payload/type")
+                .and_then(serde_json::Value::as_str)
+                != Some("function_call_output")
+            {
+                continue;
+            }
+            let outer = index_json_string_spans(line.as_bytes())
+                .unwrap()
+                .into_iter()
+                .find(|span| span.json_pointer == "/payload/output")
+                .unwrap();
+            let inner: serde_json::Value =
+                serde_json::from_str(oracle.pointer("/payload/output").unwrap().as_str().unwrap())
+                    .unwrap();
+            let spans = index_nested_json_string_spans(line.as_bytes(), &outer).unwrap();
+            let body = spans
+                .iter()
+                .find(|span| span.json_pointer == "/output")
+                .unwrap();
+            assert_eq!(
+                decode_layered_all(&line.as_bytes()[body.start as usize..body.end as usize], 16),
+                inner["output"].as_str().unwrap()
+            );
+            qualified += 1;
+        }
+        assert_eq!(qualified, 1);
+    }
+
+    #[test]
+    fn layered_decoder_preserves_fragment_boundaries_and_worst_escape_unit() {
+        let inner = r#"{"output":"A\u00e9\uD83D\uDE80\n\\\"Z"}"#;
+        let encoded: String = inner
+            .bytes()
+            .map(|byte| format!("\\u{:04x}", byte))
+            .collect();
+        let record = format!("{{\"payload\":\"{encoded}\"}}");
+        let outer = index_json_string_spans(record.as_bytes())
+            .unwrap()
+            .remove(0);
+        let span = index_nested_json_string_spans(record.as_bytes(), &outer)
+            .unwrap()
+            .remove(0);
+        let raw = &record.as_bytes()[span.start as usize..span.end as usize];
+        let oracle: serde_json::Value = serde_json::from_str(inner).unwrap();
+        let expected = oracle["output"].as_str().unwrap();
+        for split in 0..=raw.len() {
+            let chunk = decode_json_string_layered_chunk(&raw[..split], 2, false, 1024).unwrap();
+            assert!(expected.starts_with(&chunk.text));
+            assert!(split - chunk.consumed <= JSON_STRING_LAYERED_SCALAR_SLACK);
+            let rest =
+                decode_json_string_layered_chunk(&raw[chunk.consumed..], 2, true, 1024).unwrap();
+            assert!(rest.complete);
+            assert_eq!(format!("{}{}", chunk.text, rest.text), expected);
+        }
+        assert_eq!(decode_layered_all(raw, 4), expected);
+        assert!(decode_json_string_layered_chunk(raw, 3, true, 1024).is_err());
+        assert!(decode_json_string_layered_chunk(b"\\\\uD800", 2, true, 1024).is_err());
+    }
+
+    #[test]
+    fn decoded_slice_bounds_are_scalar_safe_and_record_relative() {
+        let header = "Chunk ID: fixture\nFinal output:\n";
+        let body = "é🚀\nquoted \"body\"\\";
+        for record in [
+            serde_json::json!({"type":"response_item","payload":{"type":"function_call_output","output":format!("{header}{body}")}}),
+            serde_json::json!({"type":"user","message":{"content":[{"type":"tool_result","content":format!("{header}{body}")}]}}),
+        ] {
+            let bytes = serde_json::to_vec(&record).unwrap();
+            let oracle = crate::tx::parse_native_record(&bytes).unwrap();
+            let pointer = if record["type"] == "user" {
+                "/message/content/0/content"
+            } else {
+                "/payload/output"
+            };
+            let outer = index_json_string_spans(&bytes)
+                .unwrap()
+                .into_iter()
+                .find(|span| span.json_pointer == pointer)
+                .unwrap();
+            assert_eq!(
+                oracle.pointer(pointer).unwrap().as_str().unwrap(),
+                format!("{header}{body}")
+            );
+            let selected =
+                slice_json_string_span(&bytes, &outer, header.len()..header.len() + body.len())
+                    .unwrap();
+            assert_eq!(
+                decode_all(&bytes[selected.start as usize..selected.end as usize], 8),
+                body
+            );
+            assert!(
+                slice_json_string_span(&bytes, &outer, header.len() + 1..header.len() + body.len())
+                    .is_err()
+            );
+            assert!(
+                slice_json_string_span(&bytes, &outer, header.len()..header.len() + 1).is_err()
+            );
+            assert!(
+                slice_json_string_span(&bytes, &outer, 0..header.len() + body.len() + 1).is_err()
+            );
+            assert_eq!(
+                slice_json_string_span(&bytes, &outer, header.len()..header.len())
+                    .unwrap()
+                    .start,
+                selected.start
+            );
+        }
+    }
+
+    #[test]
+    fn nested_late_chunks_are_bounded_as_native_record_size_grows() {
+        for repetitions in [64 * 1024, 1024 * 1024] {
+            let body = "x\\\n🚀".repeat(repetitions);
+            let inner = serde_json::to_string(
+                &serde_json::json!({"output":body,"metadata":{"exit_code":0}}),
+            )
+            .unwrap();
+            let record = serde_json::to_vec(
+                &serde_json::json!({"payload":{"type":"function_call_output","output":inner}}),
+            )
+            .unwrap();
+            let outer = index_json_string_spans(&record)
+                .unwrap()
+                .into_iter()
+                .find(|span| span.json_pointer == "/payload/output")
+                .unwrap();
+            let span = index_nested_json_string_spans(&record, &outer)
+                .unwrap()
+                .into_iter()
+                .find(|span| span.json_pointer == "/output")
+                .unwrap();
+            for pair in span.checkpoints.windows(2) {
+                assert!(pair[1] - pair[0] <= JSON_STRING_CHECKPOINT_BYTES);
+            }
+            let start = span.checkpoints[span.checkpoints.len() - 3] as usize;
+            let end = (start + 4096 + JSON_STRING_LAYERED_SCALAR_SLACK).min(span.end as usize);
+            assert_eq!(end - start, 4096 + JSON_STRING_LAYERED_SCALAR_SLACK);
+            let chunk = decode_json_string_layered_chunk(
+                &record[start..end],
+                2,
+                end == span.end as usize,
+                4096,
+            )
+            .unwrap();
+            assert!(
+                chunk.consumed > 0 && chunk.consumed <= 4096 + JSON_STRING_LAYERED_SCALAR_SLACK
+            );
+            assert!(chunk.text.capacity() <= 4096);
+            assert!(body.ends_with(&decode_layered_all(&record[start..span.end as usize], 4096)));
+        }
     }
 
     #[test]
