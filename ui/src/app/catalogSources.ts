@@ -24,7 +24,8 @@ export function createCatalogSources(
     retry: number | undefined,
     delay = 1000;
   const account = parseAccount(host?.account);
-  let wide = false;
+  let wide = document.querySelector('#page')?.classList.contains('wide-mode') ?? false,
+    rail = document.querySelector('.app')?.classList.contains('rail') ?? false;
   const shell = createShellChrome({
     account: {
       place(widget, trigger) {
@@ -47,19 +48,33 @@ export function createCatalogSources(
     },
     drawerOpened() {},
     drawerClosed() {},
-    railChanged() {},
+    railChanged() {
+      rail = !rail;
+      shell.update(
+        [
+          {
+            key: 'sessions',
+            label: 'Sessions',
+            href: '/sessions',
+            icon: I.sessions,
+            current: true,
+          },
+        ],
+        rail,
+      );
+    },
   });
   shell.mount(document.querySelector<HTMLElement>('.app')!);
   shell.update(
     [{ key: 'sessions', label: 'Sessions', href: '/sessions', icon: I.sessions, current: true }],
-    false,
+    rail,
   );
   const title = document.createElement('div');
   title.className = 'ttl';
   title.textContent = 'Choose a machine';
   function wideChange() {
     wide = !wide;
-    document.querySelector('.app')?.classList.toggle('wide-mode', wide);
+    document.querySelector('#page')?.classList.toggle('wide-mode', wide);
     shell.account.updateWide(wide);
   }
   shell.topbar({
