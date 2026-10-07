@@ -5407,6 +5407,44 @@ globalThis.__semonUIShared = __semonUIShared;
       ] });
     }
   };
+  var SessionPager = class extends Component {
+    componentDidMount() {
+      this.props.owner.pagers[this.props.where] = () => this.forceUpdate();
+    }
+    componentWillUnmount() {
+      delete this.props.owner.pagers[this.props.where];
+    }
+    render() {
+      const { owner, where } = this.props, view = owner.snapshot[where];
+      if (!view) {
+        const started = where === "before" ? owner.snapshot.started : void 0;
+        return started ? /* @__PURE__ */ jsx("div", { class: "divider started", children: /* @__PURE__ */ jsxs("span", { class: "dv-text", children: [
+          /* @__PURE__ */ jsx("span", { class: "dv-lead", children: started.lead }),
+          /* @__PURE__ */ jsx("span", { class: "dv-machine", "data-tip": started.machine, "data-tip-clipped": "", children: screenText(started.machine) })
+        ] }) }) : null;
+      }
+      return /* @__PURE__ */ jsx("div", { class: "list", children: /* @__PURE__ */ jsxs(
+        "button",
+        {
+          class: "more",
+          type: "button",
+          "data-load-earlier": where === "before" ? "" : void 0,
+          "data-pager-sid": view.sid,
+          "data-pager-where": where,
+          disabled: view.disabled,
+          "aria-busy": view.busy || void 0,
+          onClick: (event) => {
+            if (event.currentTarget.isConnected && !owner.disposed)
+              owner.host.pager(event.currentTarget);
+          },
+          children: [
+            view.busy && /* @__PURE__ */ jsx("span", { class: "spin", "aria-hidden": "true" }),
+            /* @__PURE__ */ jsx("span", { class: "pager-label", "aria-live": "polite", children: screenText(view.text) })
+          ]
+        }
+      ) });
+    }
+  };
   var identity = (entry2) => entry2.entryKey ?? entry2.key ?? "";
   function State({ state: state2, label, text: text2 }) {
     return /* @__PURE__ */ jsxs("span", { class: "state " + state2, children: [
@@ -5819,6 +5857,7 @@ globalThis.__semonUIShared = __semonUIShared;
         },
         controls: null,
         runtime: null,
+        pagers: {},
         measure() {
         },
         change() {
@@ -5867,27 +5906,6 @@ globalThis.__semonUIShared = __semonUIShared;
           state2.revisions.set(block.turn.id, (state2.revisions.get(block.turn.id) ?? 0) + 1);
       state2.paint();
     };
-    function pager(view) {
-      return /* @__PURE__ */ jsx("div", { class: "list", children: /* @__PURE__ */ jsxs(
-        "button",
-        {
-          class: "more",
-          type: "button",
-          "data-load-earlier": view.where === "before" ? "" : void 0,
-          "data-pager-sid": view.sid,
-          "data-pager-where": view.where,
-          disabled: view.disabled,
-          "aria-busy": view.busy || void 0,
-          onClick: (event) => {
-            if (event.currentTarget.isConnected) state2.host.pager(event.currentTarget);
-          },
-          children: [
-            view.busy && /* @__PURE__ */ jsx("span", { class: "spin", "aria-hidden": "true" }),
-            /* @__PURE__ */ jsx("span", { class: "pager-label", "aria-live": "polite", children: screenText(view.text) })
-          ]
-        }
-      ) }, view.where);
-    }
     state2.paint = () => {
       if (state2.disposed) return;
       const held = document.activeElement instanceof HTMLElement && document.activeElement.closest(".session-foot") ? document.activeElement : null, heldKind = held?.dataset.foot;
@@ -5899,10 +5917,7 @@ globalThis.__semonUIShared = __semonUIShared;
           /* @__PURE__ */ jsxs("section", { class: "transcript", "aria-label": "Transcript", children: [
             view.observation && /* @__PURE__ */ jsx("p", { class: "empty", role: "status", "data-transcript-observation": "", children: screenText(view.observation) }),
             /* @__PURE__ */ jsxs("div", { class: "turns", children: [
-              view.before ? pager(view.before) : view.started && /* @__PURE__ */ jsx("div", { class: "divider started", children: /* @__PURE__ */ jsxs("span", { class: "dv-text", children: [
-                /* @__PURE__ */ jsx("span", { class: "dv-lead", children: view.started.lead }),
-                /* @__PURE__ */ jsx("span", { class: "dv-machine", "data-tip": view.started.machine, "data-tip-clipped": "", children: screenText(view.started.machine) })
-              ] }) }),
+              /* @__PURE__ */ jsx(SessionPager, { owner: state2, where: "before" }),
               state2.blocks.map(
                 (block) => block.kind === "turn" ? /* @__PURE__ */ jsx(
                   Turn,
@@ -5914,7 +5929,7 @@ globalThis.__semonUIShared = __semonUIShared;
                   block.turn.id
                 ) : /* @__PURE__ */ jsx(Fragment, { children: block.entries.map((entry2, i) => /* @__PURE__ */ jsx(Entry, { entry: entry2, owner: state2 }, identity(entry2) || block.key + i)) }, block.key)
               ),
-              view.after && pager(view.after),
+              /* @__PURE__ */ jsx(SessionPager, { owner: state2, where: "after" }),
               view.empty && /* @__PURE__ */ jsx("p", { class: "empty", children: screenText(view.empty) })
             ] }),
             /* @__PURE__ */ jsx(
@@ -5996,7 +6011,7 @@ globalThis.__semonUIShared = __semonUIShared;
     const owner = owners.get(root);
     if (!owner || owner.snapshot.id !== view.sid) return;
     owner.snapshot = { ...owner.snapshot, [view.where]: view };
-    owner.paint();
+    owner.pagers[view.where]?.();
   }
   function updateSessionClock(root, now, starts) {
     const owner = owners.get(root);

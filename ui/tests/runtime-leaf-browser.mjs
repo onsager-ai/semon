@@ -6,7 +6,7 @@ const { outputFiles } = await build({
   absWorkingDir: new URL('../', import.meta.url).pathname,
   stdin: {
     contents:
-      "export {renderSessionScreen,updateSessionRuntime,updateSessionControl} from './src/lib/transcript';",
+      "export {renderSessionScreen,updateSessionRuntime,updateSessionControl,updateSessionPager} from './src/lib/transcript';",
     resolveDir: new URL('../', import.meta.url).pathname,
   },
   bundle: true,
@@ -123,6 +123,36 @@ for (const width of [390, 1280])
         ),
         true,
       );
+      await page.evaluate(() =>
+        RuntimeLeaf.updateSessionPager(root, {
+          sid: 'catalog',
+          where: 'before',
+          text: 'Load earlier records',
+          disabled: false,
+          busy: false,
+        }),
+      );
+      const pager = page.getByRole('button', { name: 'Load earlier records', exact: true });
+      await pager.waitFor();
+      const pagerNode = await pager.elementHandle();
+      await page.evaluate(() =>
+        RuntimeLeaf.updateSessionPager(root, {
+          sid: 'catalog',
+          where: 'before',
+          text: 'Loading earlier records',
+          disabled: true,
+          busy: true,
+        }),
+      );
+      await page.getByRole('button', { name: 'Loading earlier records', exact: true }).waitFor();
+      assert.equal(
+        await page.evaluate(
+          (node) => node === document.querySelector('[data-pager-sid="catalog"]'),
+          pagerNode,
+        ),
+        true,
+      );
+      assert.equal(await page.evaluate((node) => node === document.activeElement, input), true);
       await page.evaluate(() =>
         RuntimeLeaf.updateSessionRuntime(root, {
           observation: {
