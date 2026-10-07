@@ -89,11 +89,11 @@ pub fn source_projection_ready(
         return Ok(None);
     }
     for lifecycle in ["current", "retained"] {
-        let mut statement=transaction.prepare("SELECT session_catalog.metadata,session_slot_projections.version,session_slot_projections.generation,session_slot_projections.source_generation FROM session_catalog_sources INDEXED BY session_catalog_current_source_path JOIN session_catalog USING(session_key) LEFT JOIN session_slot_projections USING(session_key) WHERE session_catalog_sources.lifecycle=?1 AND source_path=?2 ORDER BY session_catalog_sources.session_key LIMIT 9").map_err(|_|Unavailable)?;
+        let mut statement=transaction.prepare("SELECT CASE WHEN octet_length(session_catalog.metadata)<=1048576 THEN session_catalog.metadata ELSE NULL END,session_slot_projections.version,session_slot_projections.generation,session_slot_projections.source_generation FROM session_catalog_sources INDEXED BY session_catalog_current_source_path JOIN session_catalog USING(session_key) LEFT JOIN session_slot_projections USING(session_key) WHERE session_catalog_sources.lifecycle=?1 AND source_path=?2 ORDER BY session_catalog_sources.session_key LIMIT 9").map_err(|_|Unavailable)?;
         let candidates = statement
             .query_map([lifecycle, full], |row| {
                 Ok((
-                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<String>>(0)?,
                     row.get::<_, Option<u32>>(1)?,
                     row.get::<_, Option<String>>(2)?,
                     row.get::<_, Option<String>>(3)?,
@@ -110,10 +110,14 @@ pub fn source_projection_ready(
         }
         let mut result: Option<SourceProjectionReady> = None;
         for (metadata, version, generation, source_hash) in candidates {
+            let Some(metadata) = metadata else {
+                return Ok(None);
+            };
             let Ok(row) = serde_json::from_str::<CatalogRow>(&metadata) else {
                 return Ok(None);
             };
-            if row.harness != root || row.lifecycle.as_str() != lifecycle {
+            if row.sources.len() > 64 || row.harness != root || row.lifecycle.as_str() != lifecycle
+            {
                 return Ok(None);
             }
             let Some(source) = row
@@ -123,6 +127,19 @@ pub fn source_projection_ready(
             else {
                 return Ok(None);
             };
+            // A recipe can still describe a coherent old prefix while a newer
+            // source observation awaits publication. Preserve it for history,
+            // but do not qualify another local eviction during that interval.
+            for dependency in &row.sources {
+                let pending: bool = transaction.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM session_catalog_invalidations WHERE source_path=?1)",
+                    [dependency.path.to_str().ok_or(InvalidArguments)?],
+                    |row| row.get(0),
+                ).map_err(|_| Unavailable)?;
+                if pending {
+                    return Ok(None);
+                }
+            }
             let expected = source_generation(&row.sources).map_err(|_| Unavailable)?;
             if version != Some(crate::slot_projection::VERSION)
                 || source_hash.as_deref() != Some(expected.as_str())
