@@ -1101,6 +1101,7 @@ export function createCatalogViewer(
         newCount: 0,
         lastTotal: null,
       };
+      view.root.className = 'catalog-session';
       selected.set(cacheKey(key), view);
     }
     active = view;
