@@ -1716,6 +1716,36 @@ mod tests {
     }
 
     #[test]
+    fn source_observer_publishes_first_push_without_a_viewer_core() {
+        let fixture = Fixture::new();
+        fixture.source("first-push");
+        let observer = crate::SessionCatalogObserver::new(fixture.options.clone());
+        assert!(!EventCache::path(&fixture.options.cache).exists());
+        observer.changed().unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let reply = session_catalog_page(&fixture.options, "configured", "sid=first-push");
+            if reply.status == 200 {
+                let body: Value = serde_json::from_slice(&reply.body).unwrap();
+                if body["items"]
+                    .as_array()
+                    .is_some_and(|items| items.len() == 1)
+                {
+                    assert_eq!(body["items"][0]["key"], "first-push");
+                    break;
+                }
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "source publication did not complete"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        observer.close();
+        assert!(EventCache::path(&fixture.options.cache).exists());
+    }
+
+    #[test]
     fn default_local_viewer_advertises_a_nonempty_stable_catalog_source() {
         let fixture = Fixture::new();
         fixture.publish(1);
