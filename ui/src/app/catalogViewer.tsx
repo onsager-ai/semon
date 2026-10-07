@@ -11,7 +11,12 @@ import { CatalogTranscriptStore } from '../state/catalog-transcript';
 import { createShellChrome } from '../lib/shell';
 import { createRecentRenderer } from '../lib/recent';
 import { renderCatalogList } from '../lib/catalog';
-import { renderSessionScreen, updateSessionControl, updateSessionPager } from '../lib/transcript';
+import {
+  renderSessionScreen,
+  updateSessionControl,
+  updateSessionPager,
+  updateSessionRuntime,
+} from '../lib/transcript';
 import { releaseScreen } from '../lib/screens';
 import { requestJson } from '../lib/model';
 import { parseAccount } from '../lib/account';
@@ -19,6 +24,7 @@ import { setGeometry } from '../lib';
 import { NavigationController } from '../navigation/routes';
 import { ViewUpdates } from '../state/viewUpdates';
 import { createControlObservation } from './controlObservation';
+import { createRuntimeObservation } from './runtimeObservation';
 import { createLocalControl } from './localControl';
 import { EffectScope } from './effects';
 import { catalogTranscriptBlocks } from './catalogTranscriptView';
@@ -112,7 +118,6 @@ export function createCatalogViewer(
   });
   const control = createLocalControl(scope, () => {
     if (!active) return;
-    const identity = selection.selectedIdentity();
     updateSessionControl(active.root, controlFor(active));
   });
   function controlFor(view: SelectedView): ControlView | undefined {
@@ -122,16 +127,21 @@ export function createCatalogViewer(
         ? control.view(identity.native_id)
         : undefined;
     if (current) view.lastControl = current;
-    if (current || !view.lastControl) return current;
-    const previous = view.lastControl;
+    const runtime = runtimeFor(view)?.observation,
+      terminal = runtime && runtime.state !== 'active';
+    if ((current && !terminal) || !view.lastControl) return current;
+    const previous = current ?? view.lastControl;
     return {
       ...previous,
       busy: false,
       uncertain: true,
+      canReconnect: false,
       snapshot: {
         ...previous.snapshot,
         connected: false,
-        reason: 'Current connection status is unavailable.',
+        reason: terminal
+          ? 'Native controls are unavailable for this environment state.'
+          : 'Current connection status is unavailable.',
         capabilities: {
           ...previous.snapshot.capabilities,
           input: false,
@@ -160,6 +170,23 @@ export function createCatalogViewer(
         throw new Error('Catalog status cannot access the complete model');
       },
     },
+  });
+  const runtimeObservation = createRuntimeObservation({
+    scope,
+    navigation,
+    viewerHost,
+    catalogRuntimeSelection: selection,
+  });
+  function runtimeFor(view: SelectedView) {
+    const frame = runtimeObservation.view();
+    return frame?.source_key === capabilities.source_key && frame.catalog_key === view.key
+      ? frame
+      : undefined;
+  }
+  const removeRuntimeListener = runtimeObservation.subscribe(() => {
+    if (!active) return;
+    updateSessionRuntime(active.root, runtimeFor(active));
+    updateSessionControl(active.root, controlFor(active));
   });
   const api = async (path: string): Promise<unknown> => {
     const controller = scope.request(),
@@ -383,6 +410,7 @@ export function createCatalogViewer(
           id: view.key,
           name: view.meta?.name ?? 'Session',
           control: controlFor(view),
+          runtime: runtimeFor(view),
           blocks: [],
           order: [],
           observation: 'Recorded history is updating',
@@ -412,6 +440,7 @@ export function createCatalogViewer(
     }
     if (view.renderedRevision === view.store.revision && view.renderedNote === view.note) {
       updateSessionControl(view.root, controlFor(view));
+      updateSessionRuntime(view.root, runtimeFor(view));
       if ((view.store.loadedRanges()[0]?.first ?? 0) > 0)
         updateSessionPager(view.root, {
           sid: view.key,
@@ -438,6 +467,7 @@ export function createCatalogViewer(
         id: view.key,
         name: view.meta?.name ?? 'Session',
         control: controlFor(view),
+        runtime: runtimeFor(view),
         observation:
           view.note ||
           {
@@ -818,6 +848,8 @@ export function createCatalogViewer(
       disposed = true;
       ++listEpoch;
       observation.destroy();
+      removeRuntimeListener();
+      runtimeObservation.destroy();
       scope.destroy();
       selection.destroy();
       navigation.destroy();
