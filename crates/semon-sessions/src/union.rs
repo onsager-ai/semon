@@ -300,6 +300,7 @@ impl Refresh {
 /// [`ViewerCore::close`] stops it before the files it reads are removed.
 pub struct ViewerCore {
     views: RwLock<Arc<Views>>,
+    source_inventory: Mutex<Option<(Weak<Views>, Arc<crate::SessionSourceInventory>)>>,
     received: Option<Received>,
     /// What [`ViewerCore::respond`] serves in the model when a call
     /// doesn't pass its own ([`ViewerCore::respond_with`]).
@@ -861,13 +862,16 @@ impl ViewerCore {
     /// order is kept: the first machine is the model's `machine`. With one
     /// machine this is [`ViewerCore::new`], byte for byte.
     pub fn with_machines(machines: Vec<(String, Options)>) -> Self {
+        let views = Arc::new(
+            machines
+                .into_iter()
+                .map(|(key, options)| (key, MachineView::new(options)))
+                .collect::<Views>(),
+        );
+        let inventory = Self::configured_source_inventory(&views);
         Self {
-            views: RwLock::new(Arc::new(
-                machines
-                    .into_iter()
-                    .map(|(key, options)| (key, MachineView::new(options)))
-                    .collect(),
-            )),
+            views: RwLock::new(views.clone()),
+            source_inventory: Mutex::new(Some((Arc::downgrade(&views), inventory))),
             received: None,
             extras: Extras::default(),
             refresh: Refresh::OnRead,
@@ -907,6 +911,36 @@ impl ViewerCore {
     /// The machines served now.
     fn views(&self) -> Arc<Views> {
         read_lock(&self.views).clone()
+    }
+
+    /// Build configured source metadata once per views snapshot. No native
+    /// model, facts, source bodies or health checks participate in this index.
+    fn source_inventory(&self, views: &Arc<Views>) -> Arc<crate::SessionSourceInventory> {
+        let mut cached = lock(&self.source_inventory);
+        if let Some((snapshot, inventory)) = cached.as_ref()
+            && snapshot
+                .upgrade()
+                .is_some_and(|old| Arc::ptr_eq(&old, views))
+        {
+            return inventory.clone();
+        }
+        let inventory = Self::configured_source_inventory(views);
+        *cached = Some((Arc::downgrade(views), inventory.clone()));
+        inventory
+    }
+
+    fn configured_source_inventory(views: &Views) -> Arc<crate::SessionSourceInventory> {
+        let local = views.len() == 1 && views[0].0.is_empty();
+        Arc::new(crate::SessionSourceInventory::new(views.iter().map(
+            |(key, _)| {
+                let key = if local {
+                    "local".to_owned()
+                } else {
+                    key.clone()
+                };
+                (key.clone(), key)
+            },
+        )))
     }
 
     /// Each machine's view, in order: for tests that read its hooks.
@@ -1078,6 +1112,31 @@ impl ViewerCore {
         true
     }
 
+    /// Reuse this core's asynchronous producer for an exact configured source.
+    /// This uses the published configuration index; it performs no received
+    /// directory discovery, model construction or native body reads. Hosts
+    /// authorize source custody first and call invalidate() after a push.
+    /// False means absent/ambiguous, closed, or compatibility OnRead mode;
+    /// hosts may then use a source-scoped SessionCatalogObserver instead.
+    pub fn demand_catalog_source(&self, source_key: &str) -> io::Result<bool> {
+        let Some(_entered) = self.open.enter() else {
+            return Ok(false);
+        };
+        if self.refresh == Refresh::OnRead {
+            return Ok(false);
+        }
+        let views = self.views();
+        let inventory = self.source_inventory(&views);
+        if !inventory.valid() {
+            return Ok(false);
+        }
+        let Some(index) = inventory.index(source_key) else {
+            return Ok(false);
+        };
+        views[index].1.note_catalog_read()?;
+        Ok(true)
+    }
+
     /// Stops the core for good, and returns once it no longer reads or
     /// writes any file: calls in progress and each machine's background
     /// rebuild have finished, and every later call answers 404 without
@@ -1165,10 +1224,14 @@ impl ViewerCore {
         };
         self.follow();
         let views = self.views();
+        if path == "/api/session-sources" {
+            return self.source_inventory(&views).page(query);
+        }
         if matches!(
             path,
             "/api/sessions"
                 | "/api/session-transcript"
+                | "/api/session-entry"
                 | "/api/session-capabilities"
                 | "/api/session-identity"
         ) {
@@ -1231,7 +1294,7 @@ impl ViewerCore {
 
     /// Focused lists are scoped by the embedder's stable machine key. A
     /// hostname is a label, and never selects a source access boundary.
-    fn catalog(&self, views: &Views, path: &str, query: &str) -> ViewerReply {
+    fn catalog(&self, views: &Arc<Views>, path: &str, query: &str) -> ViewerReply {
         let request = if path == "/api/sessions" {
             match crate::catalog::Request::parse(query) {
                 Ok(request) => Some(request),
@@ -1240,6 +1303,10 @@ impl ViewerCore {
         } else {
             None
         };
+        // The original single-machine Viewer uses an empty internal key.
+        // Its additive catalog contract has a stable explicit local alias.
+        // This never derives source authority from hostnames or session ids.
+        let local_alias = views.len() == 1 && views[0].0.is_empty();
         let machine = match query_value(query, "machine") {
             Some(value) => match decoded(value) {
                 Some(machine) => machine,
@@ -1252,6 +1319,7 @@ impl ViewerCore {
                     );
                 }
             },
+            None if local_alias => "local".to_owned(),
             None if views.len() == 1 => views[0].0.clone(),
             None => {
                 return crate::catalog::error(
@@ -1262,7 +1330,18 @@ impl ViewerCore {
                 );
             }
         };
-        let matches: Vec<_> = views.iter().filter(|(key, _)| *key == machine).collect();
+        let inventory = self.source_inventory(views);
+        let matches: Vec<_> = if inventory.valid() {
+            inventory
+                .index(&machine)
+                .map(|index| &views[index])
+                .into_iter()
+                .collect()
+        } else {
+            // Invalid configurations retain the legacy explicit ambiguity
+            // refusal. Valid configured inventories use indexed lookup.
+            views.iter().filter(|(key, _)| *key == machine).collect()
+        };
         let [(key, view)] = matches.as_slice() else {
             return crate::catalog::error(
                 if matches.is_empty() { 404 } else { 409 },
@@ -1271,6 +1350,7 @@ impl ViewerCore {
                 false,
             );
         };
+        let key = if local_alias { "local" } else { key.as_str() };
         // Record demand without waiting for an initial model build. The
         // configured background coordinator performs coherent observation;
         // OnRead callers retain their explicit warm()/api/model contract.
@@ -1319,18 +1399,15 @@ impl ViewerCore {
             "/api/session-transcript" => {
                 crate::session_transcript_range(view.options(), key, query, None)
             }
-            "/api/session-capabilities" => {
-                let body = json!({"api":1,"read_contract":"catalog-v1","source_key":key,
-                    "selected_identity":true,"selected_transcript":true,"pagination":true,"relationship_context":false,
-                    "large_native_records":false,"selected_entry":false,"attachment":false,"global_union":false,"full_text_search":false,
-                    "filters":["harness","repo"],"order":"last_desc_key_asc"});
-                ViewerReply {
-                    status: 200,
-                    content_type: "application/json; charset=utf-8",
-                    body: body.to_string().into_bytes(),
-                    etag: None,
-                }
-            }
+            "/api/session-entry" => crate::session_entry_field(view.options(), key, query, None),
+            "/api/session-capabilities" => crate::session_catalog_capabilities(
+                key,
+                crate::SessionReadEndpoints {
+                    selected_identity: true,
+                    selected_transcript: true,
+                    selected_entry: true,
+                },
+            ),
             _ => crate::catalog::page(
                 view.options(),
                 key,

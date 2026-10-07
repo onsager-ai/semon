@@ -105,7 +105,7 @@ function transcript(key, p, total = 65, generation = 'b') {
     api: 1,
     identity: { ...identity(key), read_scope: 'retained_history' },
     session: meta(key),
-    projection: { version: 1, generation: generation.repeat(64), total },
+    projection: { version: 4, generation: generation.repeat(64), total },
     range: { first, end, next: end < total ? end : null },
     entries: Array.from({ length: end - first }, (_, i) => ({
       k: 'a',
@@ -157,7 +157,7 @@ for (const width of [390, 1280])
               json: {
                 api: 1,
                 identity: { ...identity(key), read_scope: 'retained_history' },
-                projection: { version: 1, generation: nativeGeneration.repeat(64) },
+                projection: { version: 4, generation: nativeGeneration.repeat(64) },
                 slot: 6,
                 field: { name: 'text', chunk, next: chunk === 0 ? 1 : null, complete: chunk === 1 },
                 text: chunk === 0 ? 'First native text chunk ' : 'and final native text chunk.',
@@ -256,6 +256,7 @@ for (const width of [390, 1280])
             path: process.env.SEMON_CATALOG_OUT + '/list-' + width + '-' + colorScheme + '.png',
           });
         }
+        if (width === 1280) await page.getByRole('button', { name: 'Collapse sidebar' }).click();
         await page.locator('#page [data-id="one"]').click();
         await page.locator('#page [data-entry-key="one:5"]').waitFor();
         const original = await page.evaluateHandle(() =>
@@ -288,6 +289,13 @@ for (const width of [390, 1280])
         await page.evaluate(() => document.querySelector('#nav a, #nav button')?.click());
         await page.locator('#page [data-id="two"]').click();
         await page.locator('#page [data-entry-key="two:5"]').waitFor();
+        if (width === 1280) {
+          assert.equal(
+            await page.locator('.app').evaluate((node) => node.classList.contains('rail')),
+            true,
+          );
+          await page.getByRole('button', { name: 'Expand sidebar' }).waitFor();
+        }
         await page.evaluate(() => document.querySelector('#nav a, #nav button')?.click());
         await page.locator('#page [data-id="one"]').click();
         assert.equal(
@@ -338,6 +346,27 @@ for (const width of [390, 1280])
         );
         await page.getByRole('button', { name: 'Reload recorded text', exact: true }).waitFor();
         assert.equal(requests.filter((p) => p.startsWith('/api/session-entry')).length, 2);
+        await page.getByRole('button', { name: /Jump to bottom/ }).click();
+        await page.waitForFunction(
+          () => document.querySelector('#page > div')?.getAttribute('aria-busy') === 'false',
+        );
+        await page.locator('#page textarea').focus();
+        nativeGeneration = 'd';
+        nativeTotal = 67;
+        await page.clock.runFor(3100);
+        await page.locator('#page [data-entry-key="one:66"]').waitFor({ state: 'attached' });
+        assert.equal(await page.locator('#page textarea').inputValue(), 'Retained native draft');
+        assert.equal(
+          await page.evaluate((node) => node === document.activeElement, draftNode),
+          true,
+        );
+        const endGap = await page.evaluate(() => {
+          const main = document.querySelector('#main');
+          return innerWidth <= 760
+            ? document.documentElement.scrollHeight - scrollY - innerHeight
+            : main.scrollHeight - main.scrollTop - main.clientHeight;
+        });
+        assert.ok(endGap < 2, 'Deliberate live following must reach the new end; gap=' + endGap);
         assert.equal(
           requests.some((p) => /^\/api\/(model|tool|image|tx)/.test(p)),
           false,
@@ -371,8 +400,7 @@ test('temporary boot failure and pending projection recover without starting glo
         return route.fulfill({ json: capabilities(ready) });
       }
       if (p === '/api/sessions') return route.fulfill({ json: list([meta('one')]) });
-      if (p === '/api/session-identity')
-        return route.fulfill({ json: { api: 1, identity: identity('one') } });
+      if (p === '/api/session-identity') return route.fulfill({ status: 404, body: '' });
       if (p === '/api/session-transcript') {
         if (++rangeReads === 1) return route.fulfill({ status: 503, body: '' });
         return route.fulfill({ json: transcript('one', url.searchParams) });
@@ -386,11 +414,52 @@ test('temporary boot failure and pending projection recover without starting glo
     await page.clock.install({ time: new Date('2026-10-07T00:00:00Z') });
     await page.clock.pauseAt(new Date('2026-10-07T00:01:00Z'));
     await page.addScriptTag({ content: outputFiles[0].text });
-    await page.evaluate(() => (window.app = CatalogViewer.mountViewerApplication()));
+    await page.evaluate(() => {
+      window.runtimeStreams = [];
+      window.EventSource = class extends EventTarget {
+        constructor(path) {
+          super();
+          this.closed = false;
+          runtimeStreams.push(this);
+          const scope = Object.fromEntries(new URL(path, location.href).searchParams);
+          queueMicrotask(() =>
+            this.dispatchEvent(
+              new MessageEvent('runtime', {
+                data: JSON.stringify({
+                  ...scope,
+                  revision: 'd'.repeat(64),
+                  runtime: {
+                    state: 'ended',
+                    phase: 'released',
+                    freshness: 'current',
+                    presence: 'absent',
+                  },
+                  reason: null,
+                }),
+              }),
+            ),
+          );
+        }
+        close() {
+          this.closed = true;
+        }
+      };
+      window.app = CatalogViewer.mountViewerApplication({
+        machinesPath: '/machines',
+        catalogRuntimeStream: '/catalog/runtime',
+        loadMachines: async () => {
+          throw Error('No global inventory');
+        },
+      });
+    });
     await page.getByText('Session history is unavailable.', { exact: false }).waitFor();
     await page.clock.runFor(1100);
     await page.locator('#page [data-id="one"]').click();
-    await page.getByText('Recorded transcript is updating.', { exact: false }).waitFor();
+    await page.getByText('This session has ended.', { exact: true }).waitFor();
+    await page
+      .getByText('Current native session selection is unavailable.', { exact: false })
+      .waitFor();
+    assert.equal(await page.locator('textarea').count(), 0);
     assert.equal(
       requests.some((p) => p === '/api/model' || p === '/api/session-transcript'),
       false,
@@ -402,12 +471,127 @@ test('temporary boot failure and pending projection recover without starting glo
       .waitFor();
     await page.clock.runFor(1100);
     await page.locator('#page [data-entry-key="one:5"]').waitFor();
+    await page.getByText('This session has ended.', { exact: true }).waitFor();
     assert.equal(requests.includes('/api/model'), false);
     await page.evaluate(() => app.destroy());
     const afterDestroy = requests.length;
     await page.clock.runFor(30000);
     assert.equal(requests.length, afterDestroy);
+    assert.equal(await page.evaluate(() => runtimeStreams.every((stream) => stream.closed)), true);
   } finally {
     await browser.close();
   }
 });
+for (const width of [390, 1280])
+  test(`bounded source discovery chooses exact keys and ignores late inventory at ${width}px`, async () => {
+    const browser = await chromium.launch();
+    try {
+      const page = await browser.newPage({ viewport: { width, height: 900 } }),
+        requests = [];
+      let inventoryReads = 0,
+        releaseInventory,
+        startedInventory;
+      const inventoryStarted = new Promise((resolve) => {
+        startedInventory = resolve;
+      });
+      await page.route('http://catalog.test/**', async (route) => {
+        const url = new URL(route.request().url());
+        requests.push(url.pathname + url.search);
+        if (url.pathname === '/api/session-capabilities')
+          return url.searchParams.has('machine')
+            ? route.fulfill({
+                json: { ...capabilities(true), source_key: url.searchParams.get('machine') },
+              })
+            : route.fulfill({
+                status: 400,
+                json: {
+                  api: 1,
+                  error: {
+                    code: 'machine_scope_required',
+                    message: 'Choose a machine',
+                    retryable: false,
+                  },
+                },
+              });
+        if (url.pathname === '/api/session-sources') {
+          if (++inventoryReads === 1) return route.fulfill({ status: 503, body: '' });
+          if (url.searchParams.has('cursor')) {
+            startedInventory();
+            await new Promise((resolve) => {
+              releaseInventory = resolve;
+            });
+            try {
+              await route.fulfill({
+                json: {
+                  api: 1,
+                  items: [{ source_key: 'late', label: 'Late machine' }],
+                  next_cursor: null,
+                },
+              });
+            } catch {}
+            return;
+          }
+          return route.fulfill({
+            json: {
+              api: 1,
+              items: [
+                { source_key: 'one', label: 'Same hostname' },
+                { source_key: 'two', label: 'Same hostname' },
+              ],
+              next_cursor: 'opaque',
+            },
+          });
+        }
+        if (url.pathname === '/api/sessions')
+          return route.fulfill({
+            json: {
+              ...list([meta('one')]),
+              machine: 'two',
+              machine_info: { key: 'two', label: 'Same hostname', freshness: 'cached' },
+            },
+          });
+        return route.fulfill({
+          contentType: url.pathname === '/viewer.css' ? 'text/css' : 'text/html',
+          body: url.pathname === '/viewer.css' ? css : html,
+        });
+      });
+      await page.goto('http://catalog.test/sessions');
+      await page.clock.install({ time: new Date('2026-10-07T00:00:00Z') });
+      await page.clock.pauseAt(new Date('2026-10-07T00:01:00Z'));
+      await page.addScriptTag({ content: outputFiles[0].text });
+      await page.evaluate(() => {
+        window.app = CatalogViewer.mountViewerApplication({
+          machinesPath: '/machines',
+          loadMachines: async () => {
+            throw Error('No global native inventory');
+          },
+        });
+      });
+      await page.getByText('Source inventory is unavailable.', { exact: false }).waitFor();
+      await page.clock.runFor(1100);
+      await page.locator('[data-source-key="two"]').waitFor();
+      await page.getByRole('button', { name: 'Load more machines', exact: true }).click();
+      await inventoryStarted;
+      await page.locator('[data-source-key="two"]').click();
+      await page.locator('#page [data-id="one"]').waitFor();
+      assert.equal(new URL(page.url()).searchParams.get('machine'), 'two');
+      releaseInventory();
+      await page.clock.runFor(100);
+      assert.equal(await page.locator('[data-source-key="late"]').count(), 0);
+      assert.equal(await page.locator('#page [data-id="one"]').count(), 1);
+      assert.equal(
+        requests.some((path) => /^\/api\/(model|tool|image|tx)/.test(path)),
+        false,
+      );
+      assert.ok(
+        requests
+          .filter((path) => path.startsWith('/api/sessions?'))
+          .every(
+            (path) => new URL('http://catalog.test' + path).searchParams.get('machine') === 'two',
+          ),
+      );
+      await page.evaluate(() => app.destroy());
+    } finally {
+      await browser.close();
+    }
+  });

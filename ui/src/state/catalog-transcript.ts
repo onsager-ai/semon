@@ -45,6 +45,7 @@ export class CatalogTranscriptStore {
     if (this.disposed) throw new Error('Catalog transcript is destroyed');
     if (
       typeof scope.source_key !== 'string' ||
+      !scope.source_key ||
       typeof scope.catalog_key !== 'string' ||
       !scope.catalog_key ||
       (readScope !== 'current' && readScope !== 'retained_history')

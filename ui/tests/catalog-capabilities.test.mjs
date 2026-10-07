@@ -14,7 +14,7 @@ const { parseCatalogCapabilities } = await import(
 const capabilities = () => ({
   api: 1,
   read_contract: 'catalog-v1',
-  source_key: '',
+  source_key: 'local',
   selected_transcript: false,
   selected_identity: true,
   selected_entry: false,
@@ -29,13 +29,14 @@ const capabilities = () => ({
 });
 test('catalog capability advertisement preserves unavailable features and rejects unsupported scope contracts', () => {
   const parsed = parseCatalogCapabilities(capabilities());
-  assert.equal(parsed.source_key, '');
+  assert.equal(parsed.source_key, 'local');
   assert.equal(parsed.selected_transcript, false);
   assert.equal(parsed.selected_entry, false);
   for (const change of [
     { api: 2 },
     { read_contract: 'future' },
     { source_key: null },
+    { source_key: '' },
     { selected_transcript: undefined },
     { pagination: false },
     { filters: ['q'] },

@@ -57,21 +57,24 @@ export function parseControl(value: unknown): ControlSnapshot | null {
   if (
     value.runtime !== undefined &&
     (!record(value.runtime) ||
+      typeof value.runtime.state !== 'string' ||
       !['active', 'disconnected', 'failed', 'ended', 'unavailable'].includes(
         String(value.runtime.state),
       ) ||
       typeof value.runtime.phase !== 'string' ||
       value.runtime.phase.length > 64 ||
-      !['current', 'updating', 'stale', 'unavailable'].includes(String(value.runtime.freshness)) ||
+      typeof value.runtime.freshness !== 'string' ||
+      !['current', 'updating', 'stale', 'unavailable'].includes(value.runtime.freshness) ||
       typeof value.runtime.reconnectable !== 'boolean')
   )
     throw new Error('Invalid runtime status');
   if (
     record(value.runtime) &&
     ((value.runtime.presence !== undefined &&
-      !['active', 'absent', 'paused', 'transitioning', 'failed', 'unknown'].includes(
-        String(value.runtime.presence),
-      )) ||
+      (typeof value.runtime.presence !== 'string' ||
+        !['active', 'absent', 'paused', 'transitioning', 'failed', 'unknown'].includes(
+          String(value.runtime.presence),
+        ))) ||
       (value.runtime.observedAt !== undefined &&
         value.runtime.observedAt !== null &&
         (typeof value.runtime.observedAt !== 'string' ||
@@ -113,6 +116,7 @@ export function parseControl(value: unknown): ControlSnapshot | null {
   return value as unknown as ControlSnapshot;
 }
 export interface ControlView {
+  canReconnect?: boolean;
   snapshot: ControlSnapshot;
   busy: boolean;
   uncertain: boolean;
