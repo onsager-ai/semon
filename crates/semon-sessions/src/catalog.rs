@@ -369,6 +369,13 @@ fn rows(connection: &Connection, request: &Request) -> rusqlite::Result<Vec<Cata
             "session_catalog_harness_repo",
         ),
     };
+    let (filters, index) = match request.scope {
+        CatalogReadScope::Current => (
+            format!("lifecycle='current' AND {filters}"),
+            index.replacen("session_catalog_", "session_catalog_current_", 1),
+        ),
+        CatalogReadScope::RetainedHistory => (filters.to_owned(), index.to_owned()),
+    };
     let mut base = Vec::new();
     if let Some(value) = &request.harness {
         base.push(SqlValue::Text(value.clone()));
@@ -383,8 +390,8 @@ fn rows(connection: &Connection, request: &Request) -> rusqlite::Result<Vec<Cata
         args.push(SqlValue::Text(cursor.key.clone()));
         let mut found = read_range(
             connection,
-            index,
-            filters,
+            &index,
+            &filters,
             "last_ms = ? AND session_key > ?",
             args,
             limit,
@@ -395,8 +402,8 @@ fn rows(connection: &Connection, request: &Request) -> rusqlite::Result<Vec<Cata
             args.push(SqlValue::Integer(cursor.last));
             found.extend(read_range(
                 connection,
-                index,
-                filters,
+                &index,
+                &filters,
                 "last_ms < ?",
                 args,
                 remaining,
@@ -404,7 +411,7 @@ fn rows(connection: &Connection, request: &Request) -> rusqlite::Result<Vec<Cata
         }
         found
     } else {
-        read_range(connection, index, filters, "1", base, limit)?
+        read_range(connection, &index, &filters, "1", base, limit)?
     };
     // Capacity returned by SQLite is bounded by the requested page plus one.
     found.shrink_to_fit();
@@ -1372,6 +1379,36 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(current.read_scope, CatalogReadScope::Current);
+    }
+
+    #[test]
+    fn current_page_excludes_retained_rows_with_bounded_work_and_history_keeps_them() {
+        let fixture = Fixture::new();
+        fixture.publish(2);
+        let connection = Connection::open(EventCache::path(&fixture.options.cache)).unwrap();
+        connection.execute("UPDATE session_catalog SET lifecycle='retained',metadata=json_set(metadata,'$.lifecycle','retained') WHERE session_key='session-00001'",[]).unwrap();
+        SQL_STEPS.with(|steps| steps.set(0));
+        let (status, before) = fixture.body("limit=1");
+        assert_eq!(status, 200);
+        let baseline = SQL_STEPS.with(|steps| steps.get());
+        assert_eq!(before["items"].as_array().unwrap().len(), 1);
+        assert_eq!(before["items"][0]["key"], "session-00000");
+        connection.execute_batch("WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM n WHERE x<20000) INSERT INTO session_catalog(session_key,lifecycle,last_ms,harness,repo,parent_key,metadata) SELECT 'retained-'||printf('%05d',x),'retained',last_ms,harness,repo,parent_key,json_set(metadata,'$.key','retained-'||printf('%05d',x)) FROM n,session_catalog WHERE session_key='session-00001'").unwrap();
+        SQL_STEPS.with(|steps| steps.set(0));
+        let (status, after) = fixture.body("limit=1");
+        assert_eq!(status, 200);
+        assert_eq!(after["items"], before["items"]);
+        assert_eq!(SQL_STEPS.with(|steps| steps.get()), baseline);
+        let (status, history) = fixture.body("scope=retained_history&limit=2");
+        assert_eq!(status, 200);
+        assert_eq!(history["items"].as_array().unwrap().len(), 2);
+        assert!(history["next_cursor"].is_string());
+        // Local absence does not revoke native-current authority by itself.
+        assert!(
+            session_catalog_identity(&fixture.options, "source", "session-00001")
+                .unwrap()
+                .is_some()
+        );
     }
 
     #[test]
