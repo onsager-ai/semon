@@ -120,3 +120,21 @@ Default provider-only behavior remains available.
 advertisement for an already-authorized source without creating a ViewerCore or
 restoring/discovering sources. The public default Viewer exposes the stable
 catalog-only `local` source alias; legacy internal identities remain unchanged.
+
+### Configured source inventory
+
+`GET /api/session-sources?limit=60&cursor=...` returns API 1 `items` with
+`source_key` and `label`, plus an opaque `next_cursor` or null. Limits are 1–100;
+clients percent-encode the returned cursor once. A changed configuration returns
+409 `stale_cursor`. Labels describe configured source keys, not runtime health.
+The original single-machine Viewer advertises `local` as its explicit catalog
+source key. Duplicate or empty configured keys fail explicitly.
+
+`SessionSourceInventory` is a reusable metadata-only keyset registry. Hosts build
+it when their authorized configuration changes, then reuse it for paged reads.
+ViewerCore builds the fixed configuration index during construction; focused
+source lookup uses the same ordered index and never initializes a native model.
+The received-directory compatibility mode still discovers machine metadata in
+`follow()` on each request. Removing that directory-wide discovery from the cold
+and warm journey remains separate work; this registry does not claim that mode
+is bounded by the returned page.
