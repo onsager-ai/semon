@@ -5924,7 +5924,7 @@ pub(crate) fn build_sources(
         (selected.is_none() && !options.scan_window).then(|| summary::catalog(&builder, &handoffs));
     let slot_projections = catalog
         .as_ref()
-        .map(|_| crate::slot_projection::capture(&tx));
+        .map(|rows| crate::slot_projection::capture(&tx, rows));
     // Analytics reads a month and the month before it, whatever the model's
     // window: taken from every session before the window trims them.
     let activity = crate::analytics::activity(&sessions, &tx, &turns, &handoffs, now);
