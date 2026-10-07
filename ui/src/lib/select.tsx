@@ -46,7 +46,8 @@ function Icon({ path, className }: { path: string; className?: string }) {
   );
 }
 let serial = 0,
-  sheet: { popped(): void } | null = null,
+  sheet: { popped(): void; orphaned(): void } | null = null,
+  pendingOpen: (() => void) | null = null,
   swallow = 0,
   sheetList: HTMLElement | null = null,
   touchY = 0,
@@ -54,27 +55,27 @@ let serial = 0,
 const phone = () => window.matchMedia('(max-width: 760px)').matches;
 function orphaned() {
   if (!sheetList || sheetList.isConnected) return false;
-  lock(null);
-  sheet = null;
+  if (sheet) sheet.orphaned();
+  else lock(null);
   return true;
 }
 function refuse(event: Event) {
   if (orphaned() || !sheetList) return;
+  if (event instanceof TouchEvent && event.touches.length > 1) return;
   if (event instanceof TouchEvent && event.type === 'touchstart') {
     touchY = event.touches[0]?.clientY ?? 0;
     return;
   }
+  const nextTouchY = event instanceof TouchEvent ? (event.touches[0]?.clientY ?? touchY) : touchY;
+  const touchDelta = touchY - nextTouchY;
+  touchY = nextTouchY;
   if (!(event.target instanceof Node) || !sheetList.contains(event.target)) {
     event.preventDefault();
     return;
   }
   const room = sheetList.scrollHeight - sheetList.clientHeight,
     delta =
-      event instanceof WheelEvent
-        ? event.deltaY
-        : event instanceof TouchEvent
-          ? touchY - (event.touches[0]?.clientY ?? touchY)
-          : 0;
+      event instanceof WheelEvent ? event.deltaY : event instanceof TouchEvent ? touchDelta : 0;
   if (
     room <= 1 ||
     (delta > 0 && sheetList.scrollTop >= room - 1) ||
@@ -317,6 +318,10 @@ export function createSelect(config: SelectConfig = {}): SelectController {
   function openList() {
     if (opened || disposed || !root.isConnected) return;
     const asSheet = phone() && typeof HTMLDialogElement.prototype.showModal === 'function';
+    if (asSheet && swallow) {
+      pendingOpen = openList;
+      return;
+    }
     query = '';
     opened = { sheet: asSheet, search: options.length > searchAbove };
     paintTrigger();
@@ -348,9 +353,11 @@ export function createSelect(config: SelectConfig = {}): SelectController {
       lock(list);
       try {
         history.pushState({ ...history.state, shSelect: n }, '');
-        swallow = 0;
         opened.entry = true;
         sheet = {
+          orphaned() {
+            close(false);
+          },
           popped() {
             if (opened) opened.entry = false;
             close();
@@ -386,7 +393,7 @@ export function createSelect(config: SelectConfig = {}): SelectController {
       }
       lock(null);
       sheet = null;
-      if (was.entry) {
+      if (was.entry && history.state?.shSelect === n) {
         swallow++;
         history.back();
       }
@@ -549,6 +556,7 @@ export function createSelect(config: SelectConfig = {}): SelectController {
     },
     destroy() {
       if (disposed) return;
+      if (pendingOpen === openList) pendingOpen = null;
       close(false);
       disposed = true;
       if (sizing !== null) cancelAnimationFrame(sizing);
@@ -588,6 +596,11 @@ export function installSelect() {
   window.addEventListener('popstate', (event) => {
     if (swallow) {
       swallow--;
+      if (!swallow && pendingOpen) {
+        const open = pendingOpen;
+        pendingOpen = null;
+        queueMicrotask(open);
+      }
       event.stopImmediatePropagation();
       return;
     }

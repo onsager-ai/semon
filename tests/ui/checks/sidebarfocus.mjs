@@ -81,6 +81,22 @@ export default async function sidebarFocus(browser) {
         .evaluateAll((rows) => rows.every((r) => getComputedStyle(r).position !== 'sticky')),
       'rail rows never pin',
     );
+    await page.setViewportSize({ width: 1280, height: 420 });
+    for (const scheme of ['light', 'dark']) {
+      await page.emulateMedia({ colorScheme: scheme });
+      const hit = await page.locator('#rail-toggle').evaluate((button) => {
+        const rect = button.getBoundingClientRect();
+        return [
+          [rect.left + rect.width / 2, rect.top + rect.height / 2],
+          [rect.left + 1, rect.top + rect.height / 2],
+          [rect.right - 1, rect.top + rect.height / 2],
+        ].every(([x, y]) => button.contains(document.elementFromPoint(x, y)));
+      });
+      assert(hit, scheme + ': short-window rail toggle must own its hit area');
+      const before = await page.locator('#rail-toggle').getAttribute('aria-expanded');
+      await page.locator('#rail-toggle').click();
+      assert.notEqual(await page.locator('#rail-toggle').getAttribute('aria-expanded'), before);
+    }
     assert.equal(page.errors.length, 0, page.errors.join(' | '));
   } finally {
     await page.unrouteAll({ behavior: 'ignoreErrors' });
