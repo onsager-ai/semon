@@ -16,6 +16,7 @@ export function createLocalControl(scope: EffectScope, refresh: () => void) {
   let selection = 0;
   async function write(op: string, extra: JsonObject = {}): Promise<boolean> {
     if (!current || busy || (uncertain && op !== 'reconnect')) return false;
+    if (op === 'reconnect' && current.runtime?.reconnectable === false) return false;
     if (
       op === 'send' &&
       (!current.connected ||
@@ -128,7 +129,11 @@ export function createLocalControl(scope: EffectScope, refresh: () => void) {
           fileApproval: false,
           questions: false,
         },
-        reason: 'Current connection status is unavailable. Reconnecting…',
+        runtime: current.runtime ? { ...current.runtime, freshness: 'stale' } : undefined,
+        reason:
+          current.runtime?.state === 'ended' || current.runtime?.state === 'failed'
+            ? current.reason
+            : 'Current connection status is unavailable. Reconnecting…',
       };
       refresh();
     },
@@ -138,6 +143,11 @@ export function createLocalControl(scope: EffectScope, refresh: () => void) {
         ++revision;
         busy = false;
         uncertain = false;
+        note = '';
+      }
+      if (value?.runtime?.state === 'ended' && current?.runtime?.state !== 'ended') {
+        ++revision;
+        busy = false;
         note = '';
       }
       current = value;
