@@ -140,8 +140,14 @@ Hosts may set `ViewerHost.modelStream` to a same-origin SSE endpoint. `model`
 events contain full model JSON and enter the existing validated model/transcript
 transaction; `unavailable` shows a reconnecting notice, and `ended` closes the
 stream and calls `modelFailed(403)`. EventSource reconnects interrupted streams.
-The application owns and closes this connection on teardown; stream mode disables
-the browser polling timer. Hosts without this port retain the existing poller.
+The application owns and closes this connection on teardown; stream mode suspends ordinary
+browser polling. Initial read failures retry with bounded backoff. A stream
+application or observation failure resumes the same live controller for full
+snapshot resynchronization; Reconnecting clears only after required model and
+transcript reads apply. Requests have a 15-second deadline and teardown cancels
+recovery. Native readiness polls have independent 10-second request deadlines
+and stop after thirty minutes, removal, success or teardown. Recovery retries
+reads only and retains native forms and conversation input. Hosts without this port retain the existing poller.
 `modelNavigation` receives an accepted model for host-owned navigation updates.
 Rust hosts can call `ViewerCore::session_machine_key` to bind controls to a
 caller's mirror key rather than a displayed hostname. Missing or ambiguous
