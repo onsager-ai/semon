@@ -602,12 +602,18 @@ function paintJump(owner: SessionOwner) {
           ? 'Jump to bottom; ' + owner.jumpCount + ' new entries'
           : 'Jump to bottom of transcript'
       }
+      data-tip={
+        owner.jumpCount ? owner.jumpCount + ' new entries · Jump to latest' : 'Jump to latest'
+      }
+      data-count={
+        owner.jumpCount > 0 ? (owner.jumpCount > 99 ? '99+' : String(owner.jumpCount)) : undefined
+      }
       disabled={owner.jumpBusy}
       onClick={(event) => {
         if (event.currentTarget.isConnected) owner.host.jump();
       }}
     >
-      {owner.jumpCount > 0 && <span class="new-count">{owner.jumpCount + ' new'}</span>}
+      {owner.jumpCount > 0 && <span class="new-count sr-only">{owner.jumpCount + ' new'}</span>}
       <Glyph path="M12 4v15M5 12l7 7 7-7" className="" />
     </button>,
     owner.jump,
@@ -618,9 +624,14 @@ export function updateSessionJump(
   visible: boolean,
   count: number,
   busy = false,
+  target?: HTMLElement,
 ) {
   const owner = owners.get(root);
   if (!owner) return;
+  if (target && owner.jump !== target) {
+    if (owner.jump) render(null, owner.jump);
+    owner.jump = target;
+  }
   owner.jumpVisible = visible;
   owner.jumpCount = count;
   owner.jumpBusy = busy;
@@ -686,7 +697,10 @@ export function renderSessionScreen(
       state.disposed = true;
       state.observer.disconnect();
       cancelAnimationFrame(state.frame);
-      if (state.jump) render(null, state.jump);
+      if (state.jump) {
+        render(null, state.jump);
+        state.jump.hidden = true;
+      }
       owners.delete(root);
     });
   }
@@ -783,13 +797,6 @@ export function renderSessionScreen(
             {view.after && pager(view.after)}
             {view.empty && <p class="empty">{screenText(view.empty)}</p>}
           </div>
-          <div
-            class="jump-wrap"
-            ref={(node) => {
-              state.jump = node;
-              paintJump(state);
-            }}
-          />
         </section>
         {view.control && <LocalControl view={view.control} />}
         {view.footer && (
