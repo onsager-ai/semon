@@ -24,33 +24,69 @@ try {
     requests = [],
     responses = [],
     fieldTexts = [];
+  const captures = new Set(),
+    fieldCaptures = new Set();
   let bundle = null;
   page.on('pageerror', (error) => errors.push(error.message));
   page.on('request', (request) => {
     const url = new URL(request.url());
     if (url.pathname.startsWith('/api/')) requests.push(url.pathname + url.search);
   });
-  page.on('response', async (response) => {
-    const url = new URL(response.url());
-    if (url.pathname === '/viewer.js')
-      bundle = createHash('sha256')
-        .update(await response.body())
-        .digest('hex');
-    if (!url.pathname.startsWith('/api/')) return;
-    const started = response.request().timing();
-    let bytes = null;
-    try {
-      bytes = (await response.body()).length;
-    } catch {}
-    if (url.pathname === '/api/session-entry' && response.status() === 200) {
-      const field = await response.json();
-      fieldTexts[field.field.chunk] = field.text;
-    }
-    responses.push({
-      path: url.pathname,
-      status: response.status(),
-      bytes,
-      serverResponseMs: started.responseStart - started.requestStart,
+  page.on('response', (response) => {
+    const capture = (async () => {
+      const url = new URL(response.url());
+      if (url.pathname === '/viewer.js')
+        bundle = createHash('sha256')
+          .update(await response.body())
+          .digest('hex');
+      if (!url.pathname.startsWith('/api/')) return;
+      const started = response.request().timing();
+      if ((response.headers()['content-type'] ?? '').includes('text/event-stream')) {
+        responses.push({
+          path: url.pathname,
+          status: response.status(),
+          bytes: null,
+          streamed: true,
+          serverResponseMs: started.responseStart - started.requestStart,
+        });
+        return;
+      }
+      let bytes = null,
+        body = null,
+        unavailable = null,
+        timer;
+      try {
+        body = await Promise.race([
+          response.body(),
+          new Promise((_, reject) => {
+            timer = setTimeout(() => reject(Error('Response capture deadline')), 6000);
+          }),
+        ]);
+        bytes = body.length;
+      } catch (error) {
+        unavailable = error.message;
+      } finally {
+        clearTimeout(timer);
+      }
+      if (url.pathname === '/api/session-entry' && response.status() === 200) {
+        if (!body) throw Error('Native field response bytes are unavailable');
+        const field = JSON.parse(body.toString('utf8'));
+        fieldTexts[field.field.chunk] = field.text;
+      }
+      responses.push({
+        path: url.pathname,
+        status: response.status(),
+        bytes,
+        ...(unavailable ? { body_unavailable: unavailable } : {}),
+        serverResponseMs: started.responseStart - started.requestStart,
+      });
+    })().catch((error) => errors.push('Response capture failed: ' + error.message));
+    captures.add(capture);
+    if (new URL(response.url()).pathname === '/api/session-entry' && response.status() === 200)
+      fieldCaptures.add(capture);
+    void capture.finally(() => {
+      captures.delete(capture);
+      fieldCaptures.delete(capture);
     });
   });
   async function sample() {
@@ -129,7 +165,12 @@ try {
     await page.getByRole('button', { name: 'Load more text', exact: true }).click();
     await page.getByText('Complete recorded text loaded.', { exact: true }).waitFor();
     fieldMs = performance.now() - started;
-    assert.equal(fieldTexts.join(''), fixture.scalar);
+    await Promise.all([...fieldCaptures]);
+    assert.equal(
+      fieldTexts.join(''),
+      fixture.scalar,
+      'Native field chunks must reconstruct the source exactly',
+    );
   }
 
   await page.evaluate(() => document.querySelector('#nav [data-go="sessions"]').click());
@@ -144,7 +185,10 @@ try {
     requests.some((path) => /^\/api\/(model|tx|tool|image)(\?|$)/.test(path)),
     false,
   );
+  await writeFile(evidencePath + '.journey', JSON.stringify({ completed_at_ms: Date.now() }));
   await page.waitForTimeout(100);
+  await Promise.all([...captures]);
+  assert.deepEqual(errors, []);
   const evidence = {
     source_revision: fixture.source_revision ?? null,
     bundle,
