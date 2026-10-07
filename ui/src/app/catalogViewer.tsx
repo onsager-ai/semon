@@ -325,6 +325,14 @@ export function createCatalogViewer(
         items,
         sourceLabel: page?.machine_info.label ?? (capabilities.source_key || 'This source'),
         updating,
+        discovering: page?.completeness.state === 'partial',
+        observation: {
+          cached: 'Cached history',
+          updating: 'Discovering history',
+          stale: 'History observation is stale',
+          incomplete: 'History is incomplete',
+          unavailable: 'History observation is unavailable',
+        }[page?.freshness ?? 'cached'],
         note,
         harness,
         repo,
@@ -386,6 +394,22 @@ export function createCatalogViewer(
       updating = false;
       drawList();
       chrome();
+      if (next.completeness.state === 'partial' && items.length <= 60) {
+        const refresh = () => {
+          if (disposed || epoch !== listEpoch || active || sourcesOpen) return;
+          const focused = document.activeElement;
+          if (
+            focused instanceof HTMLElement &&
+            root.contains(focused) &&
+            focused.matches('input,textarea,select')
+          ) {
+            listRetry = scope.timeout(refresh, 1000);
+            return;
+          }
+          void loadList(false);
+        };
+        listRetry = scope.timeout(refresh, 1000);
+      }
     } catch (error) {
       if (disposed || epoch !== listEpoch) return;
       updating = false;
@@ -459,6 +483,8 @@ export function createCatalogViewer(
       );
     root.replaceChildren();
     drawList();
+    if (page?.completeness.state === 'partial' && items.length <= 60 && !updating)
+      void loadList(false);
     shell.closeDrawer(true);
   }
   function drawSelected(view: SelectedView) {

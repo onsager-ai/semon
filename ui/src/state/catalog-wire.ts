@@ -44,7 +44,8 @@ export interface CatalogPage {
   machine_info: { key: string; label: string; freshness: 'cached' };
   generation: string;
   observed_at: number | null;
-  freshness: 'cached';
+  freshness: CatalogFreshness | 'updating';
+  completeness: { state: 'partial' | 'complete' };
   capabilities: {
     pagination: boolean;
     filters: string[];
@@ -150,10 +151,13 @@ export function parseCatalogPage(value: unknown): CatalogPage {
     capabilities = object(page.capabilities),
     generation = text(page.generation),
     items = array(page.items, parseCatalogSession),
-    next = nullable(page.next_cursor, text);
+    next = nullable(page.next_cursor, text),
+    completeness = page.completeness === undefined ? 'complete' : object(page.completeness).state,
+    collectionFreshness = page.freshness === 'updating' ? 'updating' : freshness(page.freshness);
   if (
     page.api !== 1 ||
-    page.freshness !== 'cached' ||
+    (completeness !== 'partial' && completeness !== 'complete') ||
+    (collectionFreshness === 'updating' && completeness !== 'partial') ||
     info.key !== machine ||
     info.freshness !== 'cached' ||
     !/^[0-9a-f]{64}$/i.test(generation) ||
@@ -169,7 +173,8 @@ export function parseCatalogPage(value: unknown): CatalogPage {
     machine_info: { key: machine, label: text(info.label), freshness: 'cached' },
     generation,
     observed_at: nullable(page.observed_at, integer),
-    freshness: 'cached',
+    freshness: collectionFreshness,
+    completeness: { state: completeness as 'partial' | 'complete' },
     capabilities: {
       pagination: boolean(capabilities.pagination),
       filters: strings(capabilities.filters),
