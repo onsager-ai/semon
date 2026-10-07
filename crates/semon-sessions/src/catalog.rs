@@ -709,6 +709,24 @@ fn read_page(
     }
     let observed_at = meta("catalog_observed_at")?.and_then(|value| value.parse::<i64>().ok());
     let mut selected = rows(&transaction, request)?;
+    if request.scope == CatalogReadScope::RetainedHistory {
+        for current in &mut selected {
+            if let Some(metadata) = crate::history_projection::catalog(&transaction, &current.key)?
+            {
+                let history: CatalogRow = serde_json::from_str(&metadata)?;
+                // History extends source context only; current indexed fields
+                // remain the list ordering/filter and native selection oracle.
+                if history.key != current.key
+                    || history.harness != current.harness
+                    || history.last != current.last
+                    || history.repo != current.repo
+                {
+                    return Err(io::Error::other("history catalog context changed").into());
+                }
+                *current = history;
+            }
+        }
+    }
     if request.sid.is_some() && selected.is_empty() {
         return Ok(error(
             404,
@@ -1172,7 +1190,7 @@ mod tests {
                 connection
                     .query_row("PRAGMA user_version", [], |row| row.get::<_, u32>(0))
                     .unwrap(),
-                11
+                13
             );
         }
     }

@@ -45,6 +45,7 @@ mod native_field;
 mod read_capabilities;
 mod source_inventory;
 pub use source_inventory::SessionSourceInventory;
+mod history_projection;
 mod received;
 mod refresh;
 mod repo;
