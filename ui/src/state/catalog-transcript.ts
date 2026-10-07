@@ -17,6 +17,10 @@ export interface CatalogLoadedRange {
 /** Owns only requested native ranges; metadata is never adopted as a complete graph. */
 export class CatalogTranscriptStore {
   private epoch = 0;
+  private contentVersion = 0;
+  get revision(): number {
+    return this.contentVersion;
+  }
   private scope: CatalogSelectionScope | null = null;
   private disposed = false;
   private requests = new Set<CatalogRangeRequest>();
@@ -31,6 +35,7 @@ export class CatalogTranscriptStore {
     )
       throw new Error('Invalid catalog transcript scope');
     ++this.epoch;
+    ++this.contentVersion;
     this.scope = { ...scope };
     this.requests.clear();
     this.pages = [];
@@ -71,6 +76,18 @@ export class CatalogTranscriptStore {
       (generation !== null && page.projection.generation !== generation)
     )
       throw new Error('Catalog transcript response does not match the requested range');
+    const sameRange = this.pages.find(
+      (old) => old.range.first === page.range.first && old.range.end === page.range.end,
+    );
+    if (
+      sameRange &&
+      sameRange.projection.total === page.projection.total &&
+      JSON.stringify(sameRange.entries) === JSON.stringify(page.entries)
+    ) {
+      this.requests.delete(request);
+      this.pages[this.pages.indexOf(sameRange)] = page;
+      return true;
+    }
     const existing = new Map<number, CatalogTranscriptEntry>(),
       ids = new Map<string, number>();
     for (const loaded of this.pages) {
@@ -94,6 +111,7 @@ export class CatalogTranscriptStore {
       ...this.pages.filter((old) => old.range.first !== first || old.range.end !== page.range.end),
       page,
     ].sort((a, b) => a.range.first - b.range.first);
+    ++this.contentVersion;
     this.changed();
     return true;
   }

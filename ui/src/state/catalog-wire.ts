@@ -4,11 +4,15 @@ import type {
   CatalogFreshness,
   CatalogSourceReference,
   CatalogSessionIdentity,
+  CatalogReadScope,
+  CatalogNativeSelection,
 } from '../domain/catalog';
 export type {
   CatalogFreshness,
   CatalogSourceReference,
   CatalogSessionIdentity,
+  CatalogReadScope,
+  CatalogNativeSelection,
 } from '../domain/catalog';
 
 /** Metadata is a partial read view, independent of runtime status and model deltas. */
@@ -30,10 +34,13 @@ export interface CatalogSession {
   cost: { usd: number | null; unpriced_models: string[] };
   source_refs: CatalogSourceReference[];
   freshness: { state: CatalogFreshness };
+  facts_observation?: { state: CatalogFreshness };
+  native_selection?: { state: CatalogNativeSelection } | null;
 }
 export interface CatalogPage {
   api: 1;
   machine: string;
+  read_scope: CatalogReadScope;
   machine_info: { key: string; label: string; freshness: 'cached' };
   generation: string;
   observed_at: number | null;
@@ -62,6 +69,28 @@ function freshness(value: unknown): CatalogFreshness {
   if (value === 'cached' || value === 'stale' || value === 'incomplete' || value === 'unavailable')
     return value;
   throw new Error('Invalid catalog freshness');
+}
+function readScope(value: unknown): CatalogReadScope {
+  if (value === undefined || value === 'current') return 'current';
+  if (value === 'retained_history') return value;
+  throw new Error('Invalid catalog read scope');
+}
+function nativeSelection(value: unknown): CatalogNativeSelection {
+  return value === 'retired' ? value : freshness(value);
+}
+function observations(row: Record<string, unknown>) {
+  return {
+    facts_observation:
+      row.facts_observation === undefined
+        ? undefined
+        : { state: freshness(object(row.facts_observation).state) },
+    native_selection:
+      row.native_selection === undefined
+        ? undefined
+        : row.native_selection === null
+          ? null
+          : { state: nativeSelection(object(row.native_selection).state) },
+  };
 }
 function digest(value: unknown) {
   const bytes = array(value, integer);
@@ -111,6 +140,7 @@ export function parseCatalogSession(value: unknown): CatalogSession {
     cost: { usd: nullable(cost.usd, number), unpriced_models: strings(cost.unpriced_models) },
     source_refs: array(row.source_refs, sourceReference),
     freshness: { state: freshness(state.state) },
+    ...observations(row),
   };
 }
 export function parseCatalogPage(value: unknown): CatalogPage {
@@ -135,6 +165,7 @@ export function parseCatalogPage(value: unknown): CatalogPage {
   return {
     api: 1,
     machine,
+    read_scope: readScope(page.read_scope),
     machine_info: { key: machine, label: text(info.label), freshness: 'cached' },
     generation,
     observed_at: nullable(page.observed_at, integer),
@@ -179,6 +210,7 @@ export function parseCatalogIdentity(value: unknown): CatalogSessionIdentity {
     throw new Error('Invalid catalog identity');
   return {
     source_key: sourceKey,
+    read_scope: readScope(row.read_scope),
     catalog_key: catalogKey,
     harness,
     native_id: nativeId,
@@ -188,5 +220,6 @@ export function parseCatalogIdentity(value: unknown): CatalogSessionIdentity {
     generation,
     observed_at: nullable(row.observed_at, integer),
     freshness: { state: freshness(state.state) },
+    ...observations(row),
   };
 }
