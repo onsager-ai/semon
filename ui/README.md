@@ -335,3 +335,23 @@ current native identity is available. Failed observations retain the last durabl
 phase with a stale indicator. Native controls keep their separate authority and
 draft ownership. The focused browser contract poisons transcript block traversal
 while applying final and stale runtime updates and verifies retained input focus.
+
+The current native projection recipe is version 4 (the public API envelope stays
+version 1). Range and field decoders reject other projection versions. Native
+field descriptors and chunks may declare one or two string-encoding layers;
+source byte limits follow that declaration, and decoded text remains bounded.
+A metadata-only source chooser handles the initial machine-scope requirement
+through `/api/session-sources`, retaining exact source keys even when labels
+match. It never loads a complete model to discover sources. Mid-session source
+owner suspension remains a separate work item. The sole local CLI source uses
+the nonempty catalog alias `local`.
+
+Live range refresh preserves older reading anchors. Following the latest output
+scrolls only the selected view, while the shared toolbar Jump action resumes
+following deliberately. Sidebar collapse and native drafts survive session
+switches. The optional real producer check is `ui/tests/catalog-served.mjs`: set
+`SEMON_CATALOG_SERVED_BIN` to a matching test-clock executable and record its
+source revision with `SEMON_CATALOG_SERVED_SOURCE`; the test overlays the current
+generated UI bundle and checks cold first content, bounded selected reads and
+retained return without compatibility endpoint requests. This is integration
+evidence for its documented synthetic workload, not a general latency budget.
