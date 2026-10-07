@@ -279,13 +279,7 @@ test('stream events received during snapshot recovery cannot overwrite the resyn
           enc: encodeURIComponent,
           api: () => new Promise((resolve) => requests.push(resolve)),
         },
-        liveUpdates: {
-          applyModelDelta: (x) => x,
-          update: async (x) => {
-            if (x.newMachine) selectedSessions.b.machine = x.newMachine;
-            applied.push(x.version);
-          },
-        },
+        liveUpdates: { applyModelDelta: (x) => x, update: async (x) => applied.push(x.version) },
       });
       live.LIVE.version = 'initial';
       live.schedule(0);
@@ -350,7 +344,13 @@ test('selected hosted streams bind both runtimes and reject callbacks after navi
             return { version: 'recovered-b' };
           },
         },
-        liveUpdates: { applyModelDelta: (x) => x, update: async (x) => applied.push(x.version) },
+        liveUpdates: {
+          applyModelDelta: (x) => x,
+          update: async (x) => {
+            if (x.newMachine) selectedSessions.b.machine = x.newMachine;
+            applied.push(x.version);
+          },
+        },
       });
       live.LIVE.version = 'v1';
       live.schedule(0);
