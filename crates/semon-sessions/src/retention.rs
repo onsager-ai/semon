@@ -89,7 +89,28 @@ pub fn source_projection_ready(
         return Ok(None);
     }
     for lifecycle in ["current", "retained"] {
-        let mut statement=transaction.prepare("SELECT CASE WHEN octet_length(session_catalog.metadata)<=1048576 THEN session_catalog.metadata ELSE NULL END,session_slot_projections.version,session_slot_projections.generation,session_slot_projections.source_generation FROM session_catalog_sources INDEXED BY session_catalog_current_source_path JOIN session_catalog USING(session_key) LEFT JOIN session_slot_projections USING(session_key) WHERE session_catalog_sources.lifecycle=?1 AND source_path=?2 ORDER BY session_catalog_sources.session_key LIMIT 9").map_err(|_|Unavailable)?;
+        let history = lifecycle == "retained" && transaction.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='session_history_catalog')",[],|row|row.get::<_,bool>(0)).map_err(|_|Unavailable)?;
+        let tables = if history {
+            "LEFT JOIN session_history_catalog USING(session_key) LEFT JOIN session_history_projections USING(session_key)"
+        } else {
+            "LEFT JOIN session_slot_projections USING(session_key)"
+        };
+        let metadata = if history {
+            "coalesce(session_history_catalog.metadata,session_catalog.metadata)"
+        } else {
+            "session_catalog.metadata"
+        };
+        let header = if history {
+            "CASE WHEN session_history_projections.incomplete=1 THEN NULL ELSE coalesce(session_history_projections.version,session_slot_projections.version) END,coalesce(session_history_projections.generation,session_slot_projections.generation),coalesce(session_history_projections.source_generation,session_slot_projections.source_generation)"
+        } else {
+            "session_slot_projections.version,session_slot_projections.generation,session_slot_projections.source_generation"
+        };
+        let current_header = if history {
+            "LEFT JOIN session_slot_projections USING(session_key)"
+        } else {
+            ""
+        };
+        let mut statement=transaction.prepare(&format!("SELECT CASE WHEN octet_length({metadata})<=1048576 THEN {metadata} ELSE NULL END,{header} FROM session_catalog_sources INDEXED BY session_catalog_current_source_path JOIN session_catalog USING(session_key) {tables} {current_header} WHERE session_catalog_sources.lifecycle=?1 AND source_path=?2 ORDER BY session_catalog_sources.session_key LIMIT 9")).map_err(|_|Unavailable)?;
         let candidates = statement
             .query_map([lifecycle, full], |row| {
                 Ok((
@@ -116,7 +137,9 @@ pub fn source_projection_ready(
             let Ok(row) = serde_json::from_str::<CatalogRow>(&metadata) else {
                 return Ok(None);
             };
-            if row.sources.len() > 64 || row.harness != root || row.lifecycle.as_str() != lifecycle
+            if row.sources.len() > 64
+                || row.harness != root
+                || (lifecycle == "current" && row.lifecycle.as_str() != lifecycle)
             {
                 return Ok(None);
             }
