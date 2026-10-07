@@ -12065,6 +12065,23 @@ globalThis.__semonUIShared = __semonUIShared;
     return { sentenceHost, sentenceSnapshot };
   }
 
+  // src/domain/resume.ts
+  function resumeCommand(session) {
+    const id = session.sessionId ?? session.id;
+    if (!id.trim() || id.startsWith("-") || /[\0\r\n]/.test(id)) return null;
+    const argument = /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(id) ? id : "'" + id.replaceAll("'", `'"'"'`) + "'";
+    switch (session.harness) {
+      case "claude":
+        return "claude --resume " + argument;
+      case "codex":
+        return "codex resume " + argument;
+      case "copilot":
+        return "copilot --resume=" + argument;
+      default:
+        return null;
+    }
+  }
+
   // src/navigation/errors.ts
   function createErrorNavigation(host2) {
     const {
@@ -12781,8 +12798,8 @@ globalThis.__semonUIShared = __semonUIShared;
       })();
       const actions = [], addAction = (key, text2, icon, className, note, checked, dot) => actions.push({ key, text: text2, icon, className, note, checked, dot });
       if (traceTurn?.out.length) addAction("trace", "Trace this turn", I.trace, "menu-trace");
-      const command = s.harness === "codex" ? "codex resume " + s.id : "claude --resume " + (s.sessionId ?? s.id);
-      addAction("copy", "Copy resume command", I.copy);
+      const command = resumeCommand(s);
+      if (command !== null) addAction("copy", "Copy resume command", I.copy);
       if (s.harness === "claude") addAction("external", "Open in claude.ai", I.ext);
       if (!host2.phone.matches)
         addAction("wide", "Wide transcript", I.wide, void 0, void 0, host2.layoutOwner.wideMode);
@@ -12837,7 +12854,7 @@ globalThis.__semonUIShared = __semonUIShared;
         body,
         {
           actions,
-          command,
+          command: command ?? "",
           path: host2.phone.matches ? host2.domain.lineageOf(s.id).map((a) => ({
             id: a.id,
             name: a.name,
