@@ -3107,8 +3107,10 @@ globalThis.__semonUIShared = __semonUIShared;
     const pending = s.requests.filter((r) => r.state.state === "open" || r.state.state === "claimed");
     const recent = s.requests.filter((r) => r.state.state !== "open" && r.state.state !== "claimed").slice(-10);
     return /* @__PURE__ */ jsxs("section", { class: "local-control", "aria-label": "Conversation controls", children: [
-      !s.connected && /* @__PURE__ */ jsx("p", { role: "status", children: "Reconnecting to your session\u2026" }),
+      !s.connected && /* @__PURE__ */ jsx("p", { role: "status", children: s.runtime?.state === "ended" ? "This session has ended." : s.runtime?.state === "failed" ? "This environment needs attention." : s.runtime?.state === "disconnected" ? "This environment is disconnected." : s.runtime?.state === "unavailable" ? "Runtime state is unavailable." : "Reconnecting to your session\u2026" }),
       s.reason && /* @__PURE__ */ jsx("p", { children: s.reason }),
+      s.runtime && s.runtime.freshness !== "current" && /* @__PURE__ */ jsx("p", { role: "status", children: s.runtime.freshness === "updating" ? "Checking the environment\u2026" : s.runtime.freshness === "stale" ? "Last environment observation is stale." : "Current environment observation is unavailable." }),
+      s.runtime?.observationError && /* @__PURE__ */ jsx("p", { children: s.runtime.observationError }),
       pending.map((request) => {
         const supported = request.kind === "question" ? s.capabilities.questions : request.payload.method === "item/fileChange/requestApproval" ? s.capabilities.fileApproval : s.capabilities.commandApproval;
         const disabled = view.busy || view.uncertain || !supported || !!request.reason || request.state.state !== "open" || request.remainingMs === 0;
@@ -3202,7 +3204,7 @@ globalThis.__semonUIShared = __semonUIShared;
           ]
         }
       ),
-      (!s.connected || view.uncertain) && /* @__PURE__ */ jsx("div", { class: "local-control-actions", children: /* @__PURE__ */ jsx(
+      (!s.connected || view.uncertain) && s.runtime?.reconnectable !== false && /* @__PURE__ */ jsx("div", { class: "local-control-actions", children: /* @__PURE__ */ jsx(
         "button",
         {
           type: "button",
@@ -6997,6 +6999,16 @@ globalThis.__semonUIShared = __semonUIShared;
       (key) => record2(value.capabilities) && typeof value.capabilities[key] === "boolean"
     ) || !Array.isArray(value.requests) || value.requests.length > 1280 || !record2(value.actions))
       throw new Error("Invalid control snapshot");
+    if (value.runtime !== void 0 && (!record2(value.runtime) || !["active", "disconnected", "failed", "ended", "unavailable"].includes(
+      String(value.runtime.state)
+    ) || typeof value.runtime.phase !== "string" || value.runtime.phase.length > 64 || !["current", "updating", "stale", "unavailable"].includes(String(value.runtime.freshness)) || typeof value.runtime.reconnectable !== "boolean"))
+      throw new Error("Invalid runtime status");
+    if (record2(value.runtime) && (value.runtime.presence !== void 0 && !["active", "absent", "paused", "transitioning", "failed", "unknown"].includes(
+      String(value.runtime.presence)
+    ) || value.runtime.observedAt !== void 0 && value.runtime.observedAt !== null && (typeof value.runtime.observedAt !== "string" || value.runtime.observedAt.length > 64 || !Number.isFinite(Date.parse(value.runtime.observedAt))) || value.runtime.observationError !== void 0 && value.runtime.observationError !== null && (typeof value.runtime.observationError !== "string" || value.runtime.observationError.length > 512) || value.runtime.updating !== void 0 && typeof value.runtime.updating !== "boolean" || value.runtime.state !== "active" && (value.runtime.reconnectable || value.connected || ["input", "steer", "interrupt", "commandApproval", "fileApproval", "questions"].some(
+      (key) => record2(value.capabilities) && value.capabilities[key] === true
+    ))))
+      throw new Error("Invalid runtime authority");
     for (const request of value.requests) {
       if (!record2(request) || typeof request.id !== "string" || !/^[0-9a-f]{32}$/.test(request.id) || !["permission", "question"].includes(String(request.kind)) || !record2(request.payload) || !(request.hash === null || typeof request.hash === "string" && /^[0-9a-f]{64}$/.test(request.hash)) || !record2(request.state) || typeof request.state.state !== "string" || !(request.reason === null || typeof request.reason === "string") || typeof request.remainingMs !== "number" || !Number.isFinite(request.remainingMs) || request.remainingMs < 0)
         throw new Error("Invalid control request");
@@ -7017,6 +7029,7 @@ globalThis.__semonUIShared = __semonUIShared;
     let selection = 0;
     async function write(op, extra = {}) {
       if (!current || busy2 || uncertain && op !== "reconnect") return false;
+      if (op === "reconnect" && current.runtime?.reconnectable === false) return false;
       if (op === "send" && (!current.connected || !(current.activeTurn ? current.capabilities.steer : current.capabilities.input)))
         return false;
       const target = current;
@@ -7111,7 +7124,8 @@ globalThis.__semonUIShared = __semonUIShared;
             fileApproval: false,
             questions: false
           },
-          reason: "Current connection status is unavailable. Reconnecting\u2026"
+          runtime: current.runtime ? { ...current.runtime, freshness: "stale" } : void 0,
+          reason: current.runtime?.state === "ended" || current.runtime?.state === "failed" ? current.reason : "Current connection status is unavailable. Reconnecting\u2026"
         };
         refresh();
       },
@@ -7121,6 +7135,11 @@ globalThis.__semonUIShared = __semonUIShared;
           ++revision;
           busy2 = false;
           uncertain = false;
+          note = "";
+        }
+        if (value?.runtime?.state === "ended" && current?.runtime?.state !== "ended") {
+          ++revision;
+          busy2 = false;
           note = "";
         }
         current = value;

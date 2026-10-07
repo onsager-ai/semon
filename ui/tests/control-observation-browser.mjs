@@ -129,6 +129,35 @@ for (const width of [390, 1280])
         })),
         { same: true, focus: true, draft: 'retained draft', history: true },
       );
+      await page.evaluate(() =>
+        sources[0].emit('control', {
+          selected: 'one',
+          machine: 'a',
+          revision: 'final',
+          control: {
+            ...native('one'),
+            connected: false,
+            generation: '',
+            reason: 'Environment shutdown was confirmed.',
+            runtime: { state: 'ended', phase: 'ended', freshness: 'current', reconnectable: false },
+            capabilities: Object.fromEntries(
+              Object.keys(native('one').capabilities).map((key) => [key, false]),
+            ),
+          },
+        }),
+      );
+      assert.deepEqual(
+        await page.evaluate(() => ({
+          same: input === document.querySelector('textarea'),
+          focus: input === document.activeElement,
+          draft: input.value,
+          ended: document.querySelector('#page').textContent.includes('This session has ended.'),
+          reconnect: [...document.querySelectorAll('button')].some(
+            (button) => button.textContent.trim() === 'Reconnect',
+          ),
+        })),
+        { same: true, focus: true, draft: 'retained draft', ended: true, reconnect: false },
+      );
       await page.evaluate(() => sources[0].emit('error', 'temporary'));
       assert.equal(await page.evaluate(() => sources[0].closed), true);
       await page.clock.runFor(1001);
