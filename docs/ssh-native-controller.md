@@ -92,6 +92,11 @@ private keys; it never uses a user server or paid inference. Docker's fixture-on
 seccomp/AppArmor/system-path restrictions are removed so the *unprivileged native
 namespace boundary itself* can be tested. The native package and push binary are
 mounted read-only and the invoking unprivileged UID matches the fixture user.
+The exclusive Ubuntu CI runner temporarily allows unprivileged user namespaces
+through its host AppArmor setting and restores that setting when the fixture
+exits. This enables the same mandatory native isolation probe; a deployment
+whose kernel or policy prevents that isolation remains unsupported and fails
+closed.
 Docker containers/images, synthetic keys and receiver tokens are removed on exit.
 The product remains fail-closed on hosts where those kernel probes fail.
 
