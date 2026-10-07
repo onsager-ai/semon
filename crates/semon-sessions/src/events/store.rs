@@ -45,7 +45,7 @@ use crate::{Tokens, facts::ReportedRunSnapshot};
 
 /// `PRAGMA user_version`: the shape of the tables. The parser's version is
 /// [`CACHE_VERSION`], kept in `meta`.
-const SCHEMA_VERSION: i64 = 5;
+const SCHEMA_VERSION: i64 = 6;
 
 /// How long a write waits for another process's transaction. Tests wait
 /// less, so the busy paths they drive stay quick.
@@ -60,6 +60,17 @@ const BUSY_TIMEOUT: Duration = if cfg!(test) {
 const JOURNAL_SIZE_LIMIT: i64 = 64 * 1024 * 1024;
 
 const SCHEMA: &str = "
+CREATE TABLE IF NOT EXISTS session_catalog (
+    session_key TEXT PRIMARY KEY,
+    last_ms INTEGER NOT NULL,
+    harness TEXT NOT NULL,
+    repo TEXT,
+    metadata TEXT NOT NULL
+) STRICT;
+CREATE INDEX IF NOT EXISTS session_catalog_order ON session_catalog(last_ms DESC, session_key ASC);
+CREATE INDEX IF NOT EXISTS session_catalog_harness ON session_catalog(harness, last_ms DESC, session_key ASC);
+CREATE INDEX IF NOT EXISTS session_catalog_repo ON session_catalog(repo, last_ms DESC, session_key ASC);
+CREATE INDEX IF NOT EXISTS session_catalog_harness_repo ON session_catalog(harness, repo, last_ms DESC, session_key ASC);
 CREATE TABLE IF NOT EXISTS session_descriptions (
     session_key TEXT PRIMARY KEY,
     version INTEGER NOT NULL,
@@ -199,6 +210,8 @@ CREATE TABLE IF NOT EXISTS reported_runs (
 /// changes. `reported_runs` isn't among them: its source keeps only the
 /// last run, so it can't be rebuilt.
 const DERIVED: &str = "
+DELETE FROM session_catalog;
+DELETE FROM meta WHERE key IN ('catalog_version', 'catalog_generation', 'catalog_observed_at');
 DELETE FROM session_descriptions;
 DELETE FROM events;
 DELETE FROM signals;
@@ -797,6 +810,89 @@ impl IndexStore for SqliteStore {
                         .map_err(failure)?;
                 }
             }
+            transaction.commit().map_err(failure)?;
+            Ok(Outcome::Written)
+        })();
+        self.connection
+            .busy_timeout(BUSY_TIMEOUT)
+            .map_err(failure)?;
+        result
+    }
+
+    fn publish_session_catalog(
+        &mut self,
+        rows: &[crate::model::summary::CatalogRow],
+    ) -> Result<Outcome, StoreError> {
+        use sha2::{Digest, Sha256};
+        let version = crate::model::summary::CATALOG_VERSION.to_string();
+        let metadata: Vec<_> = rows
+            .iter()
+            .map(|row| json(row))
+            .collect::<Result<_, _>>()
+            .map_err(failure)?;
+        let generation = format!(
+            "{:x}",
+            Sha256::digest(json(&metadata).map_err(failure)?.as_bytes())
+        );
+        self.connection
+            .busy_timeout(Duration::ZERO)
+            .map_err(failure)?;
+        let result = (|| {
+            let transaction = self
+                .connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(failure)?;
+            if !current(&transaction).map_err(failure)? {
+                return Ok(Outcome::Stale);
+            }
+            let previous: Option<String> = transaction
+                .query_row(
+                    "SELECT value FROM meta WHERE key = 'catalog_generation'",
+                    [],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(failure)?;
+            let previous_version: Option<String> = transaction
+                .query_row(
+                    "SELECT value FROM meta WHERE key = 'catalog_version'",
+                    [],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(failure)?;
+            if previous.as_deref() != Some(&generation)
+                || previous_version.as_deref() != Some(&version)
+            {
+                // A temporary membership table bounds deletion SQL parameters and
+                // never escapes the transaction or becomes part of the read model.
+                transaction.execute_batch("CREATE TEMP TABLE IF NOT EXISTS catalog_members (session_key TEXT PRIMARY KEY) WITHOUT ROWID; DELETE FROM catalog_members;").map_err(failure)?;
+                {
+                    let mut member = transaction
+                        .prepare("INSERT INTO catalog_members VALUES (?1)")
+                        .map_err(failure)?;
+                    let mut put = transaction.prepare("INSERT INTO session_catalog (session_key, last_ms, harness, repo, metadata) VALUES (?1, ?2, ?3, ?4, ?5) ON CONFLICT(session_key) DO UPDATE SET last_ms=excluded.last_ms, harness=excluded.harness, repo=excluded.repo, metadata=excluded.metadata WHERE session_catalog.metadata != excluded.metadata").map_err(failure)?;
+                    for (row, metadata) in rows.iter().zip(&metadata) {
+                        member.execute([&row.key]).map_err(failure)?;
+                        put.execute(params![
+                            row.key,
+                            row.last.unwrap_or(0),
+                            row.harness,
+                            row.repo,
+                            metadata
+                        ])
+                        .map_err(failure)?;
+                    }
+                }
+                transaction.execute("DELETE FROM session_catalog WHERE session_key NOT IN (SELECT session_key FROM catalog_members)", []).map_err(failure)?;
+                transaction.execute("INSERT OR REPLACE INTO meta(key,value) VALUES ('catalog_generation',?1),('catalog_version',?2)", params![generation, version]).map_err(failure)?;
+            }
+            transaction
+                .execute(
+                    "INSERT OR REPLACE INTO meta(key,value) VALUES ('catalog_observed_at',?1)",
+                    [crate::model::now_ms().to_string()],
+                )
+                .map_err(failure)?;
             transaction.commit().map_err(failure)?;
             Ok(Outcome::Written)
         })();

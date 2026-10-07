@@ -42,7 +42,7 @@ join work and constructing the current model still use the existing build path.
 
 ## Persisted descriptions (#320, first slice)
 
-SQLite schema 5 adds `session_descriptions`, one versioned row per session key.
+SQLite schema 6 adds `session_descriptions`, one versioned row per session key.
 The payload is an explicit typed allowlist: source paths and complete-line
 ledger identities, names/labels, native history metadata, usage and cost,
 repository/branch, invariant timestamps and recorded busy intervals. It never
@@ -76,3 +76,34 @@ still scale with complete history. Serving useful cached list content before
 those passes, bounded background projection refresh, coherent freshness/progress
 and focused query integration remain follow-up work with #319. `/api/model`
 shape and current freshness semantics are unchanged.
+
+
+### Complete metadata catalog for focused reads
+
+A successful build without `scan_window` also publishes `session_catalog`: one
+source-backed session row, indexed by last observed source timestamp and session
+key, with harness, repository and combined filter indexes. Rows contain stable
+identity/native IDs, names, usage/cost, observed timestamps, and the same logged
+parent rule as the compatibility model. Every source reference retains its
+path, native ID, stat stamp and complete-line prefix/tail hashes. Unknown source
+timestamps stay null; they never persist the model's clock fallback. Stubs have
+no independent source authority and are excluded from the catalog.
+
+The complete catalog is taken before the serving window trims history. A
+scan-window build cannot replace it. Changed rows, removed source-backed
+sessions, catalog version and deterministic SHA-256 generation publish together
+in one transaction. Unchanged metadata keeps the generation across restart and
+live status changes; `catalog_observed_at` records the last successful complete
+observation independently. Parser rebuilding clears catalog readiness while
+retaining authoritative observed reports. Optional description/catalog writes
+use a zero lock wait and cannot add a writer-lock delay to startup or refresh.
+An interrupted transaction exposes the earlier complete generation; a later
+successful build retries publication.
+
+This makes a bounded read-only SQL page possible before loading the event
+indexes or rebuilding the model. #319 owns page filters/cursors and serving-time
+source-access/generation checks, freshness and HTTP integration. It must validate
+selected sources under the current configured roots: a persisted path or a
+catalog generation is never authorization. Background full refresh still runs
+the existing global builder; dirty-lineage refresh and bounded transcript/detail
+reads remain subsequent work.

@@ -100,3 +100,107 @@ impl Summary {
         session.out.role = self.role;
     }
 }
+
+/// Stable metadata used by focused cold list queries. No clock or process facts.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct CatalogRow {
+    pub(crate) key: String,
+    pub(crate) name: String,
+    pub(crate) harness: String,
+    pub(crate) kind: String,
+    pub(crate) native_ids: Vec<String>,
+    pub(crate) parent: Option<String>,
+    pub(crate) parent_source: Option<String>,
+    pub(crate) repo: Option<String>,
+    pub(crate) branch: Option<String>,
+    pub(crate) model: String,
+    pub(crate) effort: Option<String>,
+    pub(crate) start: Option<i64>,
+    pub(crate) last: Option<i64>,
+    pub(crate) tokens: [f64; 3],
+    pub(crate) cost: crate::pricing::Cost,
+    pub(crate) sources: Vec<CatalogSource>,
+}
+
+/// Native source identity and last observed generation. The complete-line
+/// hashes identify the derived source records; serving validates access and
+/// current stat before deciding whether this observation is current or stale.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct CatalogSource {
+    pub(crate) path: PathBuf,
+    pub(crate) native_id: String,
+    pub(crate) dev: u64,
+    pub(crate) ino: u64,
+    pub(crate) size: u64,
+    pub(crate) modified_ns: u128,
+    pub(crate) offset: u64,
+    pub(crate) prefix_sha256: [u8; 32],
+    pub(crate) tail_sha256: [u8; 32],
+}
+
+pub(crate) const CATALOG_VERSION: u32 = 1;
+
+pub(super) fn catalog(builder: &Builder<'_>, handoffs: &[Handoff]) -> Vec<CatalogRow> {
+    let mut rows = Vec::new();
+    for session in &builder.sessions {
+        if session.kind == SessKind::Stub {
+            continue;
+        }
+        let out = &session.out;
+        let mut sources: Vec<_> = session
+            .files
+            .iter()
+            .map(|position| {
+                let file = &builder.files[*position];
+                let (dev, ino, offset, prefix_sha256, tail_sha256) = file.revision;
+                CatalogSource {
+                    path: file.path.clone(),
+                    native_id: file.id.clone(),
+                    dev,
+                    ino,
+                    size: file.stamp.size,
+                    modified_ns: file.stamp.modified_ns,
+                    offset,
+                    prefix_sha256,
+                    tail_sha256,
+                }
+            })
+            .collect();
+        sources.sort_by(|a, b| a.path.cmp(&b.path));
+        let native_ids = sources
+            .iter()
+            .map(|source| source.native_id.clone())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        rows.push(CatalogRow {
+            key: session.key.clone(),
+            name: out.name.clone(),
+            harness: out.harness.into(),
+            kind: match session.kind {
+                SessKind::Lineage => "session",
+                SessKind::Agent => "subagent",
+                SessKind::Codex => "codex-run",
+                SessKind::Copilot => "copilot-session",
+                SessKind::Stub => unreachable!(),
+            }
+            .into(),
+            native_ids,
+            parent: session_parent(&session.key, out, handoffs),
+            parent_source: out.parent_source.clone(),
+            repo: out.repo.clone(),
+            branch: out.branch.clone(),
+            model: out.model.clone(),
+            effort: out.effort.clone(),
+            start: session.first,
+            last: session.last,
+            tokens: out.tokens,
+            cost: out.cost.clone(),
+            sources,
+        });
+    }
+    rows.sort_by(|a, b| a.key.cmp(&b.key));
+    rows
+}
