@@ -45,7 +45,7 @@ use crate::{Tokens, facts::ReportedRunSnapshot};
 
 /// `PRAGMA user_version`: the shape of the tables. The parser's version is
 /// [`CACHE_VERSION`], kept in `meta`.
-const SCHEMA_VERSION: i64 = 4;
+const SCHEMA_VERSION: i64 = 6;
 
 /// How long a write waits for another process's transaction. Tests wait
 /// less, so the busy paths they drive stay quick.
@@ -60,6 +60,23 @@ const BUSY_TIMEOUT: Duration = if cfg!(test) {
 const JOURNAL_SIZE_LIMIT: i64 = 64 * 1024 * 1024;
 
 const SCHEMA: &str = "
+CREATE TABLE IF NOT EXISTS session_catalog (
+    session_key TEXT PRIMARY KEY,
+    last_ms INTEGER NOT NULL,
+    harness TEXT NOT NULL,
+    repo TEXT,
+    metadata TEXT NOT NULL
+) STRICT;
+CREATE INDEX IF NOT EXISTS session_catalog_order ON session_catalog(last_ms DESC, session_key ASC);
+CREATE INDEX IF NOT EXISTS session_catalog_harness ON session_catalog(harness, last_ms DESC, session_key ASC);
+CREATE INDEX IF NOT EXISTS session_catalog_repo ON session_catalog(repo, last_ms DESC, session_key ASC);
+CREATE INDEX IF NOT EXISTS session_catalog_harness_repo ON session_catalog(harness, repo, last_ms DESC, session_key ASC);
+CREATE TABLE IF NOT EXISTS session_descriptions (
+    session_key TEXT PRIMARY KEY,
+    version INTEGER NOT NULL,
+    inputs TEXT NOT NULL,
+    description TEXT NOT NULL
+) STRICT;
 CREATE TABLE IF NOT EXISTS meta (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
@@ -193,6 +210,9 @@ CREATE TABLE IF NOT EXISTS reported_runs (
 /// changes. `reported_runs` isn't among them: its source keeps only the
 /// last run, so it can't be rebuilt.
 const DERIVED: &str = "
+DELETE FROM session_catalog;
+DELETE FROM meta WHERE key IN ('catalog_version', 'catalog_generation', 'catalog_observed_at');
+DELETE FROM session_descriptions;
 DELETE FROM events;
 DELETE FROM signals;
 DELETE FROM usage;
@@ -749,6 +769,185 @@ fn failure(error: rusqlite::Error) -> StoreError {
 impl IndexStore for SqliteStore {
     fn describe(&self) -> String {
         self.path.display().to_string()
+    }
+
+    fn session_description(
+        &self,
+        key: &str,
+        version: u32,
+        inputs: &str,
+    ) -> Result<Option<String>, StoreError> {
+        if !current(&self.connection).map_err(failure)? {
+            return Ok(None);
+        }
+        self.connection.query_row(
+            "SELECT description FROM session_descriptions WHERE session_key = ?1 AND version = ?2 AND inputs = ?3",
+            params![key, version, inputs], |row| row.get(0),
+        ).optional().map_err(failure)
+    }
+
+    fn save_session_descriptions(
+        &mut self,
+        descriptions: &[(String, u32, String, String)],
+    ) -> Result<Outcome, StoreError> {
+        // Optional reuse must not add another writer-lock wait to startup or
+        // refresh. A contended publication is safely retried by a later build.
+        self.connection
+            .busy_timeout(Duration::ZERO)
+            .map_err(failure)?;
+        let result = (|| {
+            let transaction = self
+                .connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(failure)?;
+            if !current(&transaction).map_err(failure)? {
+                return Ok(Outcome::Stale);
+            }
+            {
+                let mut put = transaction.prepare("INSERT OR REPLACE INTO session_descriptions (session_key, version, inputs, description) VALUES (?1, ?2, ?3, ?4)").map_err(failure)?;
+                for (key, version, inputs, description) in descriptions {
+                    put.execute(params![key, version, inputs, description])
+                        .map_err(failure)?;
+                }
+            }
+            transaction.commit().map_err(failure)?;
+            Ok(Outcome::Written)
+        })();
+        self.connection
+            .busy_timeout(BUSY_TIMEOUT)
+            .map_err(failure)?;
+        result
+    }
+
+    fn session_catalog_generation(&self) -> Result<Option<String>, StoreError> {
+        self.connection
+            .query_row(
+                "SELECT value FROM meta WHERE key='catalog_generation'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(failure)
+    }
+
+    fn publish_session_catalog(
+        &mut self,
+        rows: &[crate::model::summary::CatalogRow],
+        expected_generation: Option<&str>,
+    ) -> Result<Outcome, StoreError> {
+        use sha2::{Digest, Sha256};
+        let version = crate::model::summary::CATALOG_VERSION.to_string();
+        let metadata: Vec<_> = rows
+            .iter()
+            .map(json)
+            .collect::<Result<_, _>>()
+            .map_err(failure)?;
+        let generation = format!(
+            "{:x}",
+            Sha256::digest(json(&metadata).map_err(failure)?.as_bytes())
+        );
+        self.connection
+            .busy_timeout(Duration::ZERO)
+            .map_err(failure)?;
+        let result = (|| {
+            let transaction = self
+                .connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(failure)?;
+            if !current(&transaction).map_err(failure)? {
+                return Ok(Outcome::Stale);
+            }
+            let previous: Option<String> = transaction
+                .query_row(
+                    "SELECT value FROM meta WHERE key = 'catalog_generation'",
+                    [],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(failure)?;
+            if previous.as_deref() != expected_generation {
+                return Ok(Outcome::Conflict);
+            }
+            // Do not let a slow builder overwrite a newer complete catalog.
+            // Verify source membership and consumed-prefix identities inside
+            // the publication transaction, after any competing ledger writes.
+            let mut sources = BTreeMap::new();
+            for source in rows.iter().flat_map(|row| &row.sources) {
+                sources.insert(source.path.to_string_lossy().into_owned(), source);
+            }
+            let committed: i64 = transaction
+                .query_row("SELECT COUNT(*) FROM files", [], |row| row.get(0))
+                .map_err(failure)?;
+            if committed != i64::try_from(sources.len()).unwrap_or(-1) {
+                return Ok(Outcome::Conflict);
+            }
+            for (path, source) in sources {
+                let Some((_, ledger)) = ledger_row(&transaction, &path).map_err(failure)? else {
+                    return Ok(Outcome::Conflict);
+                };
+                if (
+                    ledger.stat.dev,
+                    ledger.stat.ino,
+                    ledger.offset,
+                    ledger.prefix,
+                    ledger.tail,
+                ) != (
+                    source.dev,
+                    source.ino,
+                    source.offset,
+                    source.prefix_sha256,
+                    source.tail_sha256,
+                ) {
+                    return Ok(Outcome::Conflict);
+                }
+            }
+            let previous_version: Option<String> = transaction
+                .query_row(
+                    "SELECT value FROM meta WHERE key = 'catalog_version'",
+                    [],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(failure)?;
+            if previous.as_deref() != Some(&generation)
+                || previous_version.as_deref() != Some(&version)
+            {
+                // A temporary membership table bounds deletion SQL parameters and
+                // never escapes the transaction or becomes part of the read model.
+                transaction.execute_batch("CREATE TEMP TABLE IF NOT EXISTS catalog_members (session_key TEXT PRIMARY KEY) WITHOUT ROWID; DELETE FROM catalog_members;").map_err(failure)?;
+                {
+                    let mut member = transaction
+                        .prepare("INSERT INTO catalog_members VALUES (?1)")
+                        .map_err(failure)?;
+                    let mut put = transaction.prepare("INSERT INTO session_catalog (session_key, last_ms, harness, repo, metadata) VALUES (?1, ?2, ?3, ?4, ?5) ON CONFLICT(session_key) DO UPDATE SET last_ms=excluded.last_ms, harness=excluded.harness, repo=excluded.repo, metadata=excluded.metadata WHERE session_catalog.metadata != excluded.metadata").map_err(failure)?;
+                    for (row, metadata) in rows.iter().zip(&metadata) {
+                        member.execute([&row.key]).map_err(failure)?;
+                        put.execute(params![
+                            row.key,
+                            row.last.unwrap_or(0),
+                            row.harness,
+                            row.repo,
+                            metadata
+                        ])
+                        .map_err(failure)?;
+                    }
+                }
+                transaction.execute("DELETE FROM session_catalog WHERE session_key NOT IN (SELECT session_key FROM catalog_members)", []).map_err(failure)?;
+                transaction.execute("INSERT OR REPLACE INTO meta(key,value) VALUES ('catalog_generation',?1),('catalog_version',?2)", params![generation, version]).map_err(failure)?;
+            }
+            transaction
+                .execute(
+                    "INSERT OR REPLACE INTO meta(key,value) VALUES ('catalog_observed_at',?1)",
+                    [crate::model::now_ms().to_string()],
+                )
+                .map_err(failure)?;
+            transaction.commit().map_err(failure)?;
+            Ok(Outcome::Written)
+        })();
+        self.connection
+            .busy_timeout(BUSY_TIMEOUT)
+            .map_err(failure)?;
+        result
     }
 
     fn ledger(&self, path: &str) -> Result<Option<Ledger>, StoreError> {
@@ -2637,5 +2836,55 @@ mod tests {
             .collect();
         assert_eq!(paths, ["b.jsonl"]);
         fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod summary_tests {
+    use super::*;
+
+    #[test]
+    fn interrupted_summary_batch_publishes_no_partial_generation() {
+        let path = std::env::temp_dir().join(format!(
+            "semon-summary-rollback-{}.sqlite3",
+            std::process::id()
+        ));
+        let (mut store, _) =
+            SqliteStore::attempt(&path, None).unwrap_or_else(|error| panic!("{error}"));
+        let rows = vec![("first".into(), 1, "inputs".into(), "old".into())];
+        store.save_session_descriptions(&rows).unwrap();
+        store.connection.execute_batch("CREATE TEMP TRIGGER interrupt_summary BEFORE INSERT ON session_descriptions WHEN NEW.session_key = 'second' BEGIN SELECT RAISE(ABORT, 'interrupted'); END;").unwrap();
+        let batch = vec![
+            ("first".into(), 1, "inputs".into(), "new".into()),
+            ("second".into(), 1, "inputs".into(), "new".into()),
+        ];
+        assert!(store.save_session_descriptions(&batch).is_err());
+        assert_eq!(
+            store
+                .session_description("first", 1, "inputs")
+                .unwrap()
+                .as_deref(),
+            Some("old")
+        );
+        assert_eq!(
+            store.session_description("second", 1, "inputs").unwrap(),
+            None
+        );
+        drop(store);
+        let (store, _) =
+            SqliteStore::attempt(&path, None).unwrap_or_else(|error| panic!("{error}"));
+        assert_eq!(
+            store
+                .session_description("first", 1, "inputs")
+                .unwrap()
+                .as_deref(),
+            Some("old")
+        );
+        assert_eq!(
+            store.session_description("second", 1, "inputs").unwrap(),
+            None
+        );
+        drop(store);
+        fs::remove_file(path).unwrap();
     }
 }
