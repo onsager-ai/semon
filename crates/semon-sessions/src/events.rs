@@ -856,6 +856,31 @@ pub(crate) trait IndexStore: Send {
     /// Where the store is, for messages.
     fn describe(&self) -> String;
 
+    /// A compatible metadata-only session description. Dependencies are checked
+    /// by the model after a successful source scan, before this lookup.
+    fn session_description(
+        &self,
+        key: &str,
+        version: u32,
+        inputs: &str,
+    ) -> Result<Option<String>, StoreError>;
+
+    /// One complete description replaces its predecessor atomically.
+    fn save_session_descriptions(
+        &mut self,
+        descriptions: &[(String, u32, String, String)],
+    ) -> Result<Outcome, StoreError>;
+
+    /// The committed catalog observed before a model build starts.
+    fn session_catalog_generation(&self) -> Result<Option<String>, StoreError>;
+
+    /// Replaces one complete source-validated metadata catalog atomically.
+    fn publish_session_catalog(
+        &mut self,
+        rows: &[crate::model::summary::CatalogRow],
+        expected_generation: Option<&str>,
+    ) -> Result<Outcome, StoreError>;
+
     /// `path`'s ledger as committed now.
     fn ledger(&self, path: &str) -> Result<Option<Ledger>, StoreError>;
 
@@ -920,6 +945,7 @@ pub(crate) struct EventCache {
     replaced: BTreeSet<String>,
     /// Reported runs the store didn't take: saved at the next refresh.
     runs_unsaved: bool,
+    descriptions_pending: Vec<(String, u32, String, String)>,
     /// Files whose change is in memory only (the store was busy, or other
     /// processes kept moving them on): read again at the next scan, which
     /// writes them through.
@@ -1054,6 +1080,67 @@ impl EventCache {
                     ledger.tail,
                 )
             })
+    }
+
+    pub(crate) fn session_description(
+        &self,
+        key: &str,
+        version: u32,
+        inputs: &str,
+    ) -> Option<String> {
+        self.store
+            .as_ref()?
+            .session_description(key, version, inputs)
+            .ok()
+            .flatten()
+    }
+
+    pub(crate) fn save_session_description(
+        &mut self,
+        key: &str,
+        version: u32,
+        inputs: &str,
+        description: &str,
+    ) {
+        self.descriptions_pending.push((
+            key.to_owned(),
+            version,
+            inputs.to_owned(),
+            description.to_owned(),
+        ));
+    }
+
+    pub(crate) fn publish_session_descriptions(&mut self) {
+        let descriptions = std::mem::take(&mut self.descriptions_pending);
+        if !descriptions.is_empty()
+            && !self.busy
+            && self.unpersisted.is_empty()
+            && let Some(store) = self.store.as_mut()
+        {
+            // A failed cache publication never changes the serving snapshot.
+            let _ = store.save_session_descriptions(&descriptions);
+        }
+    }
+
+    pub(crate) fn session_catalog_generation(&self) -> Option<String> {
+        self.store
+            .as_ref()?
+            .session_catalog_generation()
+            .ok()
+            .flatten()
+    }
+
+    pub(crate) fn publish_session_catalog(
+        &mut self,
+        rows: &[crate::model::summary::CatalogRow],
+        expected_generation: Option<&str>,
+    ) {
+        if !self.busy
+            && self.unpersisted.is_empty()
+            && let Some(store) = self.store.as_mut()
+        {
+            let _ = store.publish_session_catalog(rows, expected_generation);
+        }
     }
 
     pub(crate) fn replaced(&self, path: &Path) -> bool {
