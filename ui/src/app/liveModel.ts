@@ -25,33 +25,65 @@ interface LiveModelHost {
 }
 /** Owns liveModel behavior through explicit application ports. */
 export function createLiveModel(host: LiveModelHost) {
+  let streamSequence = 0;
+  let activeRead: AbortController | null = null;
   const liveController = createLiveController({
     async poll() {
-      const response = await host.transportOwner.api(
-        '/api/model?delta=1&since=' +
-          host.transportOwner.enc(LIVE.late ? '' : (LIVE.version ?? '')),
-        undefined,
-        true,
-      );
-      if (!response) return;
-      let model;
+      // Recovery and SSE delivery share the same update transaction queue.
+      const recovering = liveController.recovering;
+      const work = delivery.then(async () => {
+        if (destroyed || host.disposed) return;
+        const sequence = streamSequence;
+        const request = new AbortController();
+        activeRead = request;
+        const response = await host.transportOwner.api(
+          recovering
+            ? '/api/model?delta=1'
+            : '/api/model?delta=1&since=' +
+                host.transportOwner.enc(LIVE.late ? '' : (LIVE.version ?? '')),
+          request.signal,
+          !recovering,
+        );
+        if (!response || destroyed || host.disposed || request.signal.aborted) return;
+        let model;
+        try {
+          model = host.liveUpdates.applyModelDelta(response);
+        } catch {
+          model = await host.transportOwner.api('/api/model?delta=1', request.signal);
+          if (destroyed || host.disposed || request.signal.aborted) return;
+        }
+        await host.liveUpdates.update(model, recovering);
+        if (activeRead === request) activeRead = null;
+        if (recovering && !destroyed && !host.disposed) {
+          if (sequence === streamSequence) {
+            liveController.synchronized();
+            clearStreamNote();
+          } else LIVE.again = true;
+        }
+      });
+      delivery = work.catch(() => {});
       try {
-        model = host.liveUpdates.applyModelDelta(response);
-      } catch {
-        await host.transportOwner
-          .api('/api/model?delta=1')
-          .then((...args: Parameters<typeof host.liveUpdates.update>) =>
-            host.liveUpdates.update(...args),
-          );
-        return;
+        await work;
+      } catch (error) {
+        showStreamNote();
+        liveController.recover();
+        throw error;
       }
-      await host.liveUpdates.update(model);
     },
-    failed(error) {
-      return !!host.viewerHost?.modelFailed?.(error instanceof ApiError ? error.status : 0);
-    },
+    failed,
     ended,
   });
+  function failed(error: unknown) {
+    const handled = !!host.viewerHost?.modelFailed?.(error instanceof ApiError ? error.status : 0);
+    if (handled) {
+      liveController.stop();
+      destroyed = true;
+      stream?.close();
+      stream = null;
+      clearStreamNote();
+    }
+    return handled;
+  }
   const LIVE = liveController.state;
   // The turn index as last drawn, to tell which turns an update changed.
   const remember = (_m: ModelWire) => {
@@ -107,24 +139,35 @@ export function createLiveModel(host: LiveModelHost) {
       throw new Error('Invalid live model stream');
     stream = new EventSource(path);
     liveController.useStream();
-    stream.addEventListener('open', clearStreamNote);
-    stream.addEventListener('error', showStreamNote);
-    stream.addEventListener('unavailable', showStreamNote);
+    stream.addEventListener('open', () => {
+      if (streamNote) liveController.recover();
+    });
+    const recover = () => {
+      showStreamNote();
+      liveController.recover();
+    };
+    stream.addEventListener('error', recover);
+    stream.addEventListener('unavailable', recover);
     stream.addEventListener('model', (event) => {
-      if (!(event instanceof MessageEvent)) return;
+      if (!(event instanceof MessageEvent) || destroyed || host.disposed) return;
+      streamSequence++;
+      if (liveController.recovering) return;
       // Serialize deliveries through the existing model/transcript owner; a
       // stream never introduces a second cache, router or rendering pipeline.
       delivery = delivery
         .then(async () => {
-          if (destroyed || host.disposed) return;
+          if (destroyed || host.disposed || liveController.recovering) return;
           await host.liveUpdates.update(JSON.parse(String(event.data)));
           clearStreamNote();
         })
-        .catch(() => {
-          showStreamNote();
+        .catch((error: unknown) => {
+          if (failed(error)) return;
+          if (error instanceof ApiError && error.status === 403) ended(403);
+          else recover();
         });
     });
     stream.addEventListener('ended', () => {
+      activeRead?.abort();
       destroyed = true;
       liveController.stop();
       stream?.close();
@@ -136,7 +179,12 @@ export function createLiveModel(host: LiveModelHost) {
   // An embedding page can cancel `semon:ended` to draw its own note in place of this one.
   function ended(status: number) {
     if (host.disposed) return;
+    activeRead?.abort();
     liveController.stop();
+    destroyed = true;
+    stream?.close();
+    stream = null;
+    clearStreamNote();
     if (host.$('.livenote, .livenote-side')) return;
     if (
       !window.dispatchEvent(
@@ -153,11 +201,9 @@ export function createLiveModel(host: LiveModelHost) {
     if (host.sidebarOnly) host.$('#lanes').after(n);
     else document.body.append(n); // on an embedding page, under the list that stopped
   }
-  // A 403 or a dropped connection fails the update (and backs off); anything else skips that one transcript.
-  const soft = <T>(p: Promise<T>) =>
-    p.catch((e: unknown) => {
-      if (e instanceof ApiError && (e.status === 403 || e.status === 0)) throw e;
-    });
+  // Required reads participate in synchronization; a failure must reach the
+  // single recovery owner rather than falsely advancing freshness.
+  const soft = <T>(p: Promise<T>) => p;
   // The transcript on screen: a session page's own. Any other loaded transcript is dropped from TX (the last few opened are kept in
   // TXCACHE, and brought up to date when opened again). A child run's card is drawn from the model, so its transcript is not loaded.
   const viewed = () => {
@@ -191,6 +237,8 @@ export function createLiveModel(host: LiveModelHost) {
 
   return {
     destroy() {
+      activeRead?.abort();
+      activeRead = null;
       destroyed = true;
       clearStreamNote();
       stream?.close();

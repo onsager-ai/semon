@@ -51,7 +51,7 @@ interface LiveUpdatesHost {
 export function createLiveUpdates(host: LiveUpdatesHost) {
   let generation = 0;
   const applyModelDelta = (value: unknown) => host.modelStore.apply(value);
-  function update(value: unknown) {
+  function update(value: unknown, resynchronize = false) {
     if (host.disposed) return Promise.resolve();
     const m = applyModelDelta(value);
     const oldH = new Map(
@@ -116,9 +116,11 @@ export function createLiveUpdates(host: LiveUpdatesHost) {
       grown = new Set<string>(),
       cuts = new Map<string, number>(),
       patched = new Map<string, Entry[]>();
-    let full = Object.values(host.modelStore.sessions).some(
-      (x) => names.has(x.id) && names.get(x.id) !== x.name,
-    ); // a new name shows in every turn
+    let full =
+      resynchronize ||
+      Object.values(host.modelStore.sessions).some(
+        (x) => names.has(x.id) && names.get(x.id) !== x.name,
+      ); // a new name shows in every turn
     for (const sid of Object.keys(host.transcripts.entries)) {
       if (view.has(sid) && host.modelStore.sessions[sid]) host.transportOwner.spread(sid);
       else host.pagingOwner.dropTx(sid);

@@ -1,5 +1,6 @@
 import { EffectScope } from './effects';
 import { mountComposers } from '../lib/composer';
+import { createStatusNote } from '../lib';
 let current: { destroy(): void } | null = null;
 /** Native Rust pages keep their forms and fallback markup; this owner only adds enhancements. */
 export interface NativeShellOptions {
@@ -238,32 +239,88 @@ export function mountNativeShell(options: NativeShellOptions = {}) {
     const url = element.dataset.poll;
     if (!url) return;
     const deadline = Date.now() + 30 * 60 * 1000;
-    let pending = false;
-    const request = effects.request();
+    let active: AbortController | null = null;
+    let stopped = false;
+    const originalLabel = element.getAttribute('aria-label');
+    let status: HTMLElement | null = null;
+    const note = (message: string) => {
+      if (status && element.getAttribute('aria-label') === message) return;
+      element.setAttribute('aria-label', message);
+      status?.remove();
+      status = createStatusNote(message, 'sub');
+      element.after(status);
+    };
+    const stop = () => {
+      stopped = true;
+      effects.clearInterval(interval);
+      effects.clearTimeout(expiry);
+      active?.abort();
+      active = null;
+      observer.disconnect();
+    };
+    const observer = new MutationObserver(() => {
+      if (!element.isConnected) stop();
+    });
+    observer.observe(document, { childList: true, subtree: true });
+    effects.own(() => {
+      stop();
+      status?.remove();
+      if (originalLabel === null) element.removeAttribute('aria-label');
+      else element.setAttribute('aria-label', originalLabel);
+    });
     const interval = effects.interval(async () => {
-      if (!element.isConnected || Date.now() >= deadline) {
-        effects.clearInterval(interval);
+      if (stopped || !element.isConnected || Date.now() >= deadline) {
+        if (!stopped && element.isConnected && Date.now() >= deadline)
+          note('Status checking expired. Return to this page to check again.');
+        stop();
         return;
       }
-      if (pending) return;
-      pending = true;
+      if (active) return;
+      const request = effects.request();
+      active = request;
+      const timeout = effects.timeout(() => request.abort(), 10000);
+      let abort: (() => void) | undefined;
       try {
-        const response = await fetch(url, {
-          signal: request.signal,
-          credentials: 'same-origin',
-          cache: 'no-store',
-        });
-        if (!disposed && element.isConnected && Date.now() < deadline && response.status === 200) {
-          effects.clearInterval(interval);
+        // The abort promise also settles transports that fail to reject on abort.
+        const response = await Promise.race([
+          fetch(url, {
+            signal: request.signal,
+            credentials: 'same-origin',
+            cache: 'no-store',
+          }),
+          new Promise<never>((_resolve, reject) => {
+            abort = () => reject(new DOMException('Status request cancelled', 'AbortError'));
+            request.signal.addEventListener('abort', abort, { once: true });
+          }),
+        ]);
+        if (
+          !disposed &&
+          !stopped &&
+          !request.signal.aborted &&
+          element.isConnected &&
+          Date.now() < deadline &&
+          response.status === 200
+        ) {
+          stop();
           window.location.assign(element.dataset.pollGo || '/');
-        }
+        } else if (!stopped) note('Waiting for completion; checking again automatically.');
       } catch {
-        // A later poll can recover from a temporary network error.
+        if (!disposed && !stopped)
+          note('Status temporarily unavailable; checking again automatically.');
       } finally {
-        pending = false;
+        if (abort) request.signal.removeEventListener('abort', abort);
+        effects.clearTimeout(timeout);
+        effects.releaseRequest(request);
+        if (active === request) active = null;
       }
     }, 3000);
-    effects.timeout(() => effects.clearInterval(interval), 30 * 60 * 1000);
+    const expiry = effects.timeout(
+      () => {
+        note('Status checking expired. Return to this page to check again.');
+        stop();
+      },
+      30 * 60 * 1000,
+    );
   });
   const controller = {
     destroy() {
