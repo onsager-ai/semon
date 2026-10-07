@@ -1,6 +1,6 @@
 # The derived store: persisting what Semon derives from the logs
 
-Status: design only (Marvin, 2026-09-29: "Write the design (Recommended)"). Nothing here is implemented. Each step in [the plan](#9-the-plan-in-pr-sized-steps) needs a go that names it.
+Status: historical design, reconciled for #320. The event SQLite store, incremental ledgers and in-memory session reuse are implemented; the first persisted description slice is documented in [incremental-model.md](incremental-model.md). The remaining Phase B/shadow-serving plan below is proposed, not a current implementation inventory. The Product Foundation task authorizes the scoped implementation work; this design grants no additional scope.
 
 Read at `c4ec3f5`, with #104 (refresh pool) and #105 (server-side analytics) read from their open branches. Claims marked *measured* were measured on 2026-09-29; claims marked *inference* were not.
 
@@ -51,7 +51,7 @@ These hold for every step below. A PR that breaks one is wrong, whatever else it
 
 | Layer | Persisted | Why |
 |---|---|---|
-| **File ledger** | Path, root, harness, `(dev, ino)`, size, mtime, resume offset, a hash of the first 4 KiB and of the 4 KiB before the offset, line count, parser version, and the fold state (`pending`, `yields`, the open code-mode call) | Resuming a file needs exactly this; today it lives in `CachedFile` and `FileIndex` |
+| **File ledger** | Path, root, harness, `(dev, ino)`, size, mtime, resume offset, SHA-256 of the complete consumed prefix and of the 4 KiB before the offset, line count, parser version, and the fold state (`pending`, `yields`, the open code-mode call) | Resuming a file needs exactly this; today it lives in `CachedFile` and `FileIndex` |
 | **Events and extras** | Every `Event` field as columns, keyed `(file, extra, seq)`, updated in place when a tool result resolves an earlier call | The per-line product of phase A; everything else derives from it |
 | **Per-file facts** | Links, entrypoint, title, agent name, first and last time, cwd, branch, last model, failed flag, usage by message id, Codex usage deltas, rate limits, busy intervals | Today in `FileIndex`; needed by phase B without reading the file |
 | **Link keys** | Every logged id a file defines or refers to: `session_id`, `continued-in`, bridge, Codex marker and `parent_thread_id`, agent id, tool-use id, `msg_id`, spawn task name | Finds the lineages a change affects without scanning every file ([§4](#4-incrementality)) |
@@ -93,6 +93,13 @@ A shared file would mean a version bump either can't drop tables freely or risks
 **Code location.** `semon-sessions` owns the builder and must own the store: `semon-store` depends on `semon-sessions`, so the reverse would be a cycle. `semon-sessions` gains the `rusqlite` (bundled) dependency the Cargo workspace already has and a `derived` module. No trait is needed: every consumer, an embedding server included, uses this SQLite store through `Options`.
 
 ## 3. Schema sketch
+
+The historical SQL column name `head_sha256` now stores the complete consumed
+prefix hash in the implemented event store (parser version 19 and later), not
+just a 4 KiB head marker. `events::consumed_hashes` hashes bytes `[0, resume_at)`;
+`tail_sha256` covers at most 4 KiB before that boundary. Neither establishes an
+archive object's full generation when bytes remain after `resume_at`; hosted
+archive access must bind its own immutable object generation separately.
 
 Types and columns are indicative; step (a) and (b) PRs fix them. All tables are `STRICT`; wide keyed tables are `WITHOUT ROWID`.
 

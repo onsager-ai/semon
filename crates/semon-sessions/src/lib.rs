@@ -13,6 +13,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 mod analytics;
+mod catalog;
+pub use catalog::{
+    CatalogFreshness, CatalogIdentityError, CatalogSessionIdentity, CatalogSourceObservation,
+    SessionSourceRef, session_catalog_identity, session_catalog_page,
+};
 mod claude_usage;
 pub mod copilot;
 pub use claude_usage::ClaudeUsageEvidence;

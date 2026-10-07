@@ -13,8 +13,15 @@ export function createLocalControl(scope: EffectScope, refresh: () => void) {
   let note = '';
   let uncertain = false;
   let revision = 0;
+  let selection = 0;
   async function write(op: string, extra: JsonObject = {}): Promise<boolean> {
     if (!current || busy || (uncertain && op !== 'reconnect')) return false;
+    if (
+      op === 'send' &&
+      (!current.connected ||
+        !(current.activeTurn ? current.capabilities.steer : current.capabilities.input))
+    )
+      return false;
     const target = current;
     const at = ++revision;
     busy = true;
@@ -83,8 +90,11 @@ export function createLocalControl(scope: EffectScope, refresh: () => void) {
   function view(sid?: string): ControlView | undefined {
     if (!current || (sid && sid !== current.thread)) return undefined;
     const target = current;
+    const selected = selection;
     const send = (op: string, extra: JsonObject = {}) =>
-      current?.thread === target.thread && current.generation === target.generation
+      selection === selected &&
+      current?.thread === target.thread &&
+      current.generation === target.generation
         ? write(op, extra)
         : Promise.resolve(false);
     return {
@@ -124,6 +134,7 @@ export function createLocalControl(scope: EffectScope, refresh: () => void) {
     },
     observe(value: ControlSnapshot | null) {
       if (current?.thread !== value?.thread) {
+        ++selection;
         ++revision;
         busy = false;
         uncertain = false;
@@ -134,6 +145,7 @@ export function createLocalControl(scope: EffectScope, refresh: () => void) {
     },
     view,
     destroy() {
+      ++selection;
       ++revision;
       current = null;
     },
