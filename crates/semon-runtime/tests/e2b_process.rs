@@ -277,3 +277,76 @@ async fn invalid_configuration_or_withdrawn_launch_does_not_start_worker() {
     );
     assert!(!f.root.join("pid").exists());
 }
+
+#[tokio::test]
+async fn completed_launch_has_owned_observations_without_reopening_create_authority() {
+    let fixture = Fixture::new("success");
+    let (mut session, operation) = session();
+    let owner = session.binding().owner.clone();
+    session
+        .operation_progress(&owner, session.epoch(), &operation, Progress::InFlight)
+        .unwrap();
+    session
+        .bind_runtime(
+            &owner,
+            session.epoch(),
+            RuntimeId::new("sandbox-1").unwrap(),
+        )
+        .unwrap();
+    session
+        .bind_thread(
+            &owner,
+            session.epoch(),
+            ThreadId::new("native-thread").unwrap(),
+        )
+        .unwrap();
+    session
+        .set_compute(&owner, session.epoch(), Compute::Active)
+        .unwrap();
+    session
+        .operation_progress(&owner, session.epoch(), &operation, Progress::Succeeded)
+        .unwrap();
+    let python = PathBuf::from("/usr/bin/python3");
+    let worker = fixture.root.join("worker.py");
+    let inventory = InventoryWorker {
+        python: &python,
+        worker: &worker,
+        lifetime: Duration::from_secs(5),
+        environment_exclusions: &[],
+    };
+    assert!(matches!(
+        inventory
+            .inspect(
+                "synthetic-provider-only-key",
+                "hub-prod",
+                &session,
+                &operation
+            )
+            .await,
+        Err(ProcessError::Configuration)
+    ));
+    let observed = inventory
+        .inspect_owned(
+            "synthetic-provider-only-key",
+            "hub-prod",
+            &session,
+            &operation,
+        )
+        .await
+        .unwrap();
+    assert!(matches!(observed, OwnedInventory::Complete(_)));
+    assert!(reconcile_launch("hub-prod", &session, &operation, observed.as_inventory()).is_err());
+    let wrong_operation = OperationId::new("foreign-operation").unwrap();
+    assert!(matches!(
+        inventory
+            .inspect_owned(
+                "synthetic-provider-only-key",
+                "hub-prod",
+                &session,
+                &wrong_operation
+            )
+            .await,
+        Err(ProcessError::Configuration)
+    ));
+    fixture.assert_stopped().await;
+}
