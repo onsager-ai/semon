@@ -148,6 +148,20 @@ transcript reads apply. Requests have a 15-second deadline and teardown cancels
 recovery. Native readiness polls have independent 10-second request deadlines
 and stop after thirty minutes, removal, success or teardown. Recovery retries
 reads only and retains native forms and conversation input. Hosts without this port retain the existing poller.
+Hosts may opt into `ViewerHost.selectedModel`. Model recovery/poll reads and
+stream URLs then include `selected=<native session id>` and `machine=<model
+machine id>` for the currently selected conversation. The native session id is
+an identity candidate; hosts must resolve its authoritative source/mirror binding
+and revalidate owner/workspace authorization. The model machine id is a projection
+consistency guard, not an authorization or credential key. Initial boot reads
+remain unselected until route parsing has the model context. Navigation owns the
+selection subscription; the existing live owner restarts its sole stream and
+rejects queued or late old-selection deliveries and read responses. Models that
+change the selected machine projection also restart that stream. Teardown
+unsubscribes before aborting requests and closing the stream. This optional read
+contract grants no execution permission and hosts without it retain existing
+transport behavior.
+
 `modelNavigation` receives an accepted model for host-owned navigation updates.
 Rust hosts can call `ViewerCore::session_machine_key` to bind controls to a
 caller's mirror key rather than a displayed hostname. Missing or ambiguous
