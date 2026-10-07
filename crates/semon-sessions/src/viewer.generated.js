@@ -9953,7 +9953,7 @@ globalThis.__semonUIShared = __semonUIShared;
         return host2.viewerHost?.machinesPath;
       }
     };
-    const compatibility = new URLSearchParams(location.search).get("compat") === "1";
+    const compatibility = new URLSearchParams(location.search).get("compat") === "1" || host2.sidebarOnly;
     const urlOf = (r) => {
       const address = routeUrl(r, routeModel);
       if (!compatibility) return address;
@@ -9993,10 +9993,14 @@ globalThis.__semonUIShared = __semonUIShared;
           return;
         }
         try {
+          const address = new URL(urlOf(host2.navigation.route), location.href);
+          if (host2.navigation.route.v === "sessions" && host2.query)
+            address.searchParams.set("q", host2.query);
+          if (host2.navigation.route.v === "session") address.hash = location.hash;
           history.replaceState(
             { ...host2.navigation.route, scrollTop: 0 },
             "",
-            urlOf(host2.navigation.route) + (host2.navigation.route.v === "session" ? location.hash : host2.navigation.route.v === "sessions" && host2.query ? "?q=" + host2.transportOwner.enc(host2.query) : "")
+            address.pathname + address.search + address.hash
           );
         } catch {
         }

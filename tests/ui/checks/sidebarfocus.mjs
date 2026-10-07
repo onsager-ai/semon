@@ -86,13 +86,27 @@ export default async function sidebarFocus(browser) {
       await page.emulateMedia({ colorScheme: scheme });
       const hit = await page.locator('#rail-toggle').evaluate((button) => {
         const rect = button.getBoundingClientRect();
-        return [
-          [rect.left + rect.width / 2, rect.top + rect.height / 2],
-          [rect.left + 1, rect.top + rect.height / 2],
-          [rect.right - 1, rect.top + rect.height / 2],
-        ].every(([x, y]) => button.contains(document.elementFromPoint(x, y)));
+        return {
+          rect: { left: rect.left, right: rect.right, top: rect.top, bottom: rect.bottom },
+          hits: [
+            [rect.left + rect.width / 2, rect.top + rect.height / 2],
+            [rect.left + 1, rect.top + rect.height / 2],
+            [rect.right - 1, rect.top + rect.height / 2],
+          ].map(([x, y]) => {
+            const element = document.elementFromPoint(x, y);
+            return {
+              owned: button.contains(element),
+              tag: element?.tagName,
+              id: element?.id,
+              className: element?.getAttribute('class'),
+            };
+          }),
+        };
       });
-      assert(hit, scheme + ': short-window rail toggle must own its hit area');
+      assert(
+        hit.hits.every((point) => point.owned),
+        scheme + ': short-window rail toggle must own its hit area: ' + JSON.stringify(hit),
+      );
       const before = await page.locator('#rail-toggle').getAttribute('aria-expanded');
       await page.locator('#rail-toggle').click();
       assert.notEqual(await page.locator('#rail-toggle').getAttribute('aria-expanded'), before);

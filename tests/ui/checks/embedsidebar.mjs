@@ -514,7 +514,8 @@ export default async function embedSidebarCheck(browser) {
       r.expect(
         prefill.value === query &&
           prefill.path === '/sessions' &&
-          prefill.search === '?q=' + encodeURIComponent(query),
+          new URLSearchParams(prefill.search).get('q') === query &&
+          new URLSearchParams(prefill.search).get('compat') === '1',
         P + ': a direct ?q= link did not prefill the Sessions search: ' + JSON.stringify(prefill),
       );
       await prefilled.evaluate(() => document.activeElement?.blur());
@@ -525,8 +526,7 @@ export default async function embedSidebarCheck(browser) {
       }));
       K.sessionsSlash = sessionsSlash;
       r.expect(
-        sessionsSlash.path === '/sessions?q=' + encodeURIComponent(query) &&
-          sessionsSlash.focus === 'sq',
+        sessionsSlash.path === prefill.path + prefill.search && sessionsSlash.focus === 'sq',
         P +
           ': "/" on Sessions changed the route or failed to focus its search: ' +
           JSON.stringify(sessionsSlash),
