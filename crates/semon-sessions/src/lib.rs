@@ -41,6 +41,8 @@ pub(crate) use read_path::open_input;
 mod model_delta;
 mod native_field;
 mod read_capabilities;
+mod source_inventory;
+pub use source_inventory::SessionSourceInventory;
 mod received;
 mod refresh;
 mod repo;
