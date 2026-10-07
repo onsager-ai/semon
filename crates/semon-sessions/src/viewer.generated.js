@@ -6399,6 +6399,7 @@ globalThis.__semonUIShared = __semonUIShared;
     };
     let disposed = false;
     let streamed = false;
+    let recovering = false;
     const visible2 = () => document.visibilityState === "visible", floorWait = () => Math.max(0, state2.started + 1e3 - performance.now());
     function cancel() {
       if (state2.timer !== null) clearTimeout(state2.timer);
@@ -6406,7 +6407,7 @@ globalThis.__semonUIShared = __semonUIShared;
     }
     function schedule(ms) {
       cancel();
-      if (!disposed && !streamed && !state2.ended && visible2()) {
+      if (!disposed && (!streamed || recovering) && !state2.ended && visible2()) {
         state2.due = performance.now() + ms;
         state2.timer = window.setTimeout(poll, ms);
       }
@@ -6440,10 +6441,6 @@ globalThis.__semonUIShared = __semonUIShared;
         } else if (status2 === 403) host2.ended(403);
         else {
           state2.delay = Math.min(3e4, state2.delay * 2);
-          if (status2 === void 0)
-            window.setTimeout(() => {
-              throw error;
-            });
         }
       } finally {
         state2.busy = false;
@@ -6464,6 +6461,19 @@ globalThis.__semonUIShared = __semonUIShared;
     return {
       state: state2,
       schedule,
+      recover() {
+        if (disposed || state2.ended) return;
+        recovering = true;
+        if (!state2.busy && state2.timer === null) schedule(floorWait());
+      },
+      synchronized() {
+        recovering = false;
+        state2.delay = 2e3;
+        if (streamed) cancel();
+      },
+      get recovering() {
+        return recovering;
+      },
       useStream() {
         streamed = true;
         cancel();
@@ -9383,84 +9393,93 @@ globalThis.__semonUIShared = __semonUIShared;
       }
     };
     const urlOf = (r) => routeUrl(r, routeModel), routeOf = (location2) => parseRoute(location2, routeModel);
+    let retryDelay = 1e3;
+    let retryTimer;
+    let loading = false;
     function boot() {
-      host2.transportOwner.api("/api/model?delta=1").then(
-        (m) => {
-          const adopted = host2.transportOwner.adopt(m);
-          host2.liveModelOwner.LIVE.version = adopted.version;
-          host2.liveModelOwner.remember(adopted);
-          if (host2.sidebarOnly || host2.nativePage) {
-            if (host2.nativePage)
-              host2.navigation.route = host2.navigation.historyRoute(
-                { v: host2.nativePage.nav },
-                { v: "home" }
-              );
-            host2.documentRendererOwner.render();
-            host2.liveModelOwner.schedule(2e3);
-            return;
-          }
-          host2.navigation.route = routeOf(location);
-          if (host2.navigation.route.v === "sessions")
-            host2.query = (new URLSearchParams(location.search).get("q") ?? "").trim();
-          if (host2.navigation.route.v === "machines" && host2.machinesPath && !host2.viewerHost) {
-            location.assign(host2.machinesPath);
-            return;
-          }
-          try {
-            history.replaceState(
-              { ...host2.navigation.route, scrollTop: 0 },
-              "",
-              urlOf(host2.navigation.route) + (host2.navigation.route.v === "session" ? location.hash : host2.navigation.route.v === "sessions" && host2.query ? "?q=" + host2.transportOwner.enc(host2.query) : "")
+      if (host2.disposed || loading) return;
+      host2.scope.clearTimeout(retryTimer);
+      loading = true;
+      host2.transportOwner.api("/api/model?delta=1").then(async (m) => {
+        if (host2.disposed) return;
+        const adopted = host2.transportOwner.adopt(m);
+        host2.liveModelOwner.LIVE.version = adopted.version;
+        host2.liveModelOwner.remember(adopted);
+        if (host2.sidebarOnly || host2.nativePage) {
+          if (host2.nativePage)
+            host2.navigation.route = host2.navigation.historyRoute(
+              { v: host2.nativePage.nav },
+              { v: "home" }
             );
-          } catch {
-          }
-          const done = () => {
-            host2.documentRendererOwner.render();
-            if (host2.navigation.route.v === "session" && ("turn" in host2.navigation.route ? host2.navigation.route.turn : void 0)) {
-              host2.destination.revealTurn(
-                ("turn" in host2.navigation.route ? host2.navigation.route.turn : void 0) ?? "",
-                true
-              );
-              if (location.hash)
-                host2.scope.frame(
-                  () => host2.scope.frame(
-                    (...args) => host2.destination.revealEntryHash(...args)
-                  )
-                );
-            } else if (host2.navigation.route.v === "session" && location.hash)
-              host2.destination.revealEntryHash();
-            else if (host2.navigation.route.v === "session") {
-              host2.destination.openSessionAtEnd();
-              host2.viewport.syncJump();
-            } else host2.historyScrollOwner.quietTop();
-            host2.liveModelOwner.schedule(2e3);
-            host2.scope.interval(
-              (...args) => host2.tickerOwner.ticker(...args),
-              1e3
-            );
-          };
-          const initialRoute = host2.navigation.route, p = host2.transportOwner.load(initialRoute);
-          if (p)
-            p.then(() => {
-              done();
-            }, done);
-          else {
-            done();
-          }
-        },
-        (err) => {
-          if (host2.disposed) return;
-          if (host2.viewerHost?.modelFailed?.(err?.status ?? 0)) return;
-          if (host2.viewerHost) {
-            console.warn("semon: model unavailable", err.status);
-            return;
-          }
-          renderPlaceholder(
-            host2.$(host2.sidebarOnly ? "#lanes" : "#page"),
-            "Couldn't load the sessions: " + err.message
-          );
+          host2.documentRendererOwner.render();
+          host2.liveModelOwner.schedule(2e3);
+          return;
         }
-      );
+        host2.navigation.route = routeOf(location);
+        if (host2.navigation.route.v === "sessions")
+          host2.query = (new URLSearchParams(location.search).get("q") ?? "").trim();
+        if (host2.navigation.route.v === "machines" && host2.machinesPath && !host2.viewerHost) {
+          location.assign(host2.machinesPath);
+          return;
+        }
+        try {
+          history.replaceState(
+            { ...host2.navigation.route, scrollTop: 0 },
+            "",
+            urlOf(host2.navigation.route) + (host2.navigation.route.v === "session" ? location.hash : host2.navigation.route.v === "sessions" && host2.query ? "?q=" + host2.transportOwner.enc(host2.query) : "")
+          );
+        } catch {
+        }
+        const done = () => {
+          host2.documentRendererOwner.render();
+          if (host2.navigation.route.v === "session" && ("turn" in host2.navigation.route ? host2.navigation.route.turn : void 0)) {
+            host2.destination.revealTurn(
+              ("turn" in host2.navigation.route ? host2.navigation.route.turn : void 0) ?? "",
+              true
+            );
+            if (location.hash)
+              host2.scope.frame(
+                () => host2.scope.frame(
+                  (...args) => host2.destination.revealEntryHash(...args)
+                )
+              );
+          } else if (host2.navigation.route.v === "session" && location.hash)
+            host2.destination.revealEntryHash();
+          else if (host2.navigation.route.v === "session") {
+            host2.destination.openSessionAtEnd();
+            host2.viewport.syncJump();
+          } else host2.historyScrollOwner.quietTop();
+          host2.liveModelOwner.schedule(2e3);
+          host2.scope.interval(
+            (...args) => host2.tickerOwner.ticker(...args),
+            1e3
+          );
+        };
+        const initialRoute = host2.navigation.route, p = host2.transportOwner.load(initialRoute);
+        if (p) {
+          try {
+            await p;
+          } catch (error) {
+            if (host2.disposed || host2.navigation.route !== initialRoute) return;
+            throw error;
+          }
+        }
+        if (!host2.disposed && host2.navigation.route === initialRoute) done();
+      }).catch((err) => {
+        if (host2.disposed) return;
+        if (host2.viewerHost?.modelFailed?.(err?.status ?? 0)) return;
+        if (err?.status !== 403) {
+          retryTimer = host2.scope.timeout(boot, retryDelay);
+          retryDelay = Math.min(3e4, retryDelay * 2);
+        }
+        if (host2.viewerHost) return;
+        renderPlaceholder(
+          host2.$(host2.sidebarOnly ? "#lanes" : "#page"),
+          "Couldn't load the sessions: " + err.message + (err?.status === 403 ? ". Reload with an authorized URL." : ". Retrying automatically\u2026")
+        );
+      }).finally(() => {
+        loading = false;
+      });
     }
     return { routeModel, urlOf, routeOf, boot };
   }
@@ -10181,30 +10200,62 @@ globalThis.__semonUIShared = __semonUIShared;
 
   // src/app/liveModel.ts
   function createLiveModel(host2) {
+    let streamSequence = 0;
+    let activeRead = null;
     const liveController = createLiveController({
       async poll() {
-        const response = await host2.transportOwner.api(
-          "/api/model?delta=1&since=" + host2.transportOwner.enc(LIVE.late ? "" : LIVE.version ?? ""),
-          void 0,
-          true
-        );
-        if (!response) return;
-        let model2;
-        try {
-          model2 = host2.liveUpdates.applyModelDelta(response);
-        } catch {
-          await host2.transportOwner.api("/api/model?delta=1").then(
-            (...args) => host2.liveUpdates.update(...args)
+        const recovering = liveController.recovering;
+        const work = delivery.then(async () => {
+          if (destroyed || host2.disposed) return;
+          const sequence = streamSequence;
+          const request = new AbortController();
+          activeRead = request;
+          const response = await host2.transportOwner.api(
+            recovering ? "/api/model?delta=1" : "/api/model?delta=1&since=" + host2.transportOwner.enc(LIVE.late ? "" : LIVE.version ?? ""),
+            request.signal,
+            !recovering
           );
-          return;
+          if (!response || destroyed || host2.disposed || request.signal.aborted) return;
+          let model2;
+          try {
+            model2 = host2.liveUpdates.applyModelDelta(response);
+          } catch {
+            model2 = await host2.transportOwner.api("/api/model?delta=1", request.signal);
+            if (destroyed || host2.disposed || request.signal.aborted) return;
+          }
+          await host2.liveUpdates.update(model2, recovering);
+          if (activeRead === request) activeRead = null;
+          if (recovering && !destroyed && !host2.disposed) {
+            if (sequence === streamSequence) {
+              liveController.synchronized();
+              clearStreamNote();
+            } else LIVE.again = true;
+          }
+        });
+        delivery = work.catch(() => {
+        });
+        try {
+          await work;
+        } catch (error) {
+          showStreamNote();
+          liveController.recover();
+          throw error;
         }
-        await host2.liveUpdates.update(model2);
       },
-      failed(error) {
-        return !!host2.viewerHost?.modelFailed?.(error instanceof ApiError ? error.status : 0);
-      },
+      failed,
       ended
     });
+    function failed(error) {
+      const handled = !!host2.viewerHost?.modelFailed?.(error instanceof ApiError ? error.status : 0);
+      if (handled) {
+        liveController.stop();
+        destroyed = true;
+        stream?.close();
+        stream = null;
+        clearStreamNote();
+      }
+      return handled;
+    }
     const LIVE = liveController.state;
     const remember = (_m) => {
       LIVE.turns = new Map(
@@ -10253,20 +10304,31 @@ globalThis.__semonUIShared = __semonUIShared;
         throw new Error("Invalid live model stream");
       stream = new EventSource(path);
       liveController.useStream();
-      stream.addEventListener("open", clearStreamNote);
-      stream.addEventListener("error", showStreamNote);
-      stream.addEventListener("unavailable", showStreamNote);
+      stream.addEventListener("open", () => {
+        if (streamNote) liveController.recover();
+      });
+      const recover = () => {
+        showStreamNote();
+        liveController.recover();
+      };
+      stream.addEventListener("error", recover);
+      stream.addEventListener("unavailable", recover);
       stream.addEventListener("model", (event) => {
-        if (!(event instanceof MessageEvent)) return;
+        if (!(event instanceof MessageEvent) || destroyed || host2.disposed) return;
+        streamSequence++;
+        if (liveController.recovering) return;
         delivery = delivery.then(async () => {
-          if (destroyed || host2.disposed) return;
+          if (destroyed || host2.disposed || liveController.recovering) return;
           await host2.liveUpdates.update(JSON.parse(String(event.data)));
           clearStreamNote();
-        }).catch(() => {
-          showStreamNote();
+        }).catch((error) => {
+          if (failed(error)) return;
+          if (error instanceof ApiError && error.status === 403) ended(403);
+          else recover();
         });
       });
       stream.addEventListener("ended", () => {
+        activeRead?.abort();
         destroyed = true;
         liveController.stop();
         stream?.close();
@@ -10277,7 +10339,12 @@ globalThis.__semonUIShared = __semonUIShared;
     };
     function ended(status2) {
       if (host2.disposed) return;
+      activeRead?.abort();
       liveController.stop();
+      destroyed = true;
+      stream?.close();
+      stream = null;
+      clearStreamNote();
       if (host2.$(".livenote, .livenote-side")) return;
       if (!window.dispatchEvent(
         new CustomEvent("semon:ended", { cancelable: true, detail: { status: status2 } })
@@ -10290,9 +10357,7 @@ globalThis.__semonUIShared = __semonUIShared;
       if (host2.sidebarOnly) host2.$("#lanes").after(n);
       else document.body.append(n);
     }
-    const soft = (p) => p.catch((e) => {
-      if (e instanceof ApiError && (e.status === 403 || e.status === 0)) throw e;
-    });
+    const soft = (p) => p;
     const viewed = () => {
       const v = /* @__PURE__ */ new Set();
       if (host2.navigation.route.v === "session")
@@ -10319,6 +10384,8 @@ globalThis.__semonUIShared = __semonUIShared;
     );
     return {
       destroy() {
+        activeRead?.abort();
+        activeRead = null;
         destroyed = true;
         clearStreamNote();
         stream?.close();
@@ -10342,7 +10409,7 @@ globalThis.__semonUIShared = __semonUIShared;
   function createLiveUpdates(host2) {
     let generation = 0;
     const applyModelDelta = (value) => host2.modelStore.apply(value);
-    function update(value) {
+    function update(value, resynchronize = false) {
       if (host2.disposed) return Promise.resolve();
       const m = applyModelDelta(value);
       const oldH = new Map(
@@ -10382,7 +10449,7 @@ globalThis.__semonUIShared = __semonUIShared;
         [...newCards].filter(([id, k]) => oldCards.has(id) && oldCards.get(id) !== k).map(([id]) => id)
       );
       const view = host2.liveModelOwner.viewed(), grown = /* @__PURE__ */ new Set(), cuts = /* @__PURE__ */ new Map(), patched = /* @__PURE__ */ new Map();
-      let full = Object.values(host2.modelStore.sessions).some(
+      let full = resynchronize || Object.values(host2.modelStore.sessions).some(
         (x) => names.has(x.id) && names.get(x.id) !== x.name
       );
       for (const sid of Object.keys(host2.transcripts.entries)) {
@@ -13815,6 +13882,7 @@ globalThis.__semonUIShared = __semonUIShared;
     async function api(path, signal, unchanged = false) {
       if (host2.disposed) throw new DOMException("Viewer destroyed", "AbortError");
       const controller = host2.scope.request(), release = () => host2.scope.releaseRequest(controller);
+      const deadline = host2.scope.timeout(() => controller.abort(), 15e3);
       try {
         const response = await requestJson(
           path,
@@ -13824,6 +13892,7 @@ globalThis.__semonUIShared = __semonUIShared;
         if (host2.disposed) throw new DOMException("Viewer destroyed", "AbortError");
         return response;
       } finally {
+        host2.scope.clearTimeout(deadline);
         release();
       }
     }
