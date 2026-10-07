@@ -119,7 +119,12 @@ try {
       await page.locator('.account-popover').waitFor();
       await audit('account');
       await page.keyboard.press('Escape');
-      if (width === 390) await page.keyboard.press('Escape');
+      if (width === 390) {
+        await page.keyboard.press('Escape');
+        // Let the real drawer's closing transition finish before Playwright
+        // scrolls the next trigger into view; capture its settled backdrop.
+        await page.locator('#sidebar').waitFor({ state: 'hidden' });
+      }
       for (const state of ['sheet', 'panel']) {
         await page.locator(`#${state}-trigger`).click();
         await page.locator('dialog[open]').waitFor();
