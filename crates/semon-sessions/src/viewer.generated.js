@@ -15833,12 +15833,70 @@ globalThis.__semonUIShared = __semonUIShared;
     return { text: body, next, complete };
   }
 
+  // src/state/catalog-sources.ts
+  function parseCatalogSources(value) {
+    const row = object2(value);
+    if (row.api !== 1 || !Array.isArray(row.items) || row.items.length > 100)
+      throw new Error("Invalid source inventory");
+    const items = array(row.items, (value2) => {
+      const item2 = object2(value2), source_key = text(item2.source_key), label = text(item2.label);
+      if (!source_key || !label) throw new Error("Invalid source identity");
+      return { source_key, label };
+    });
+    if (new Set(items.map((item2) => item2.source_key)).size !== items.length)
+      throw new Error("Repeated source inventory identity");
+    const cursor = row.next_cursor === null ? null : text(row.next_cursor);
+    if (cursor === "") throw new Error("Invalid source inventory cursor");
+    return { api: 1, items, next_cursor: cursor };
+  }
+
+  // src/lib/catalogSources.tsx
+  function renderCatalogSources(root, view, host2) {
+    render(
+      /* @__PURE__ */ jsxs(Fragment2, { children: [
+        /* @__PURE__ */ jsxs("div", { class: "ph", children: [
+          /* @__PURE__ */ jsx("h1", { children: "Choose a machine" }),
+          /* @__PURE__ */ jsx("p", { class: "sub", children: "Browse recorded history from one authorized source." })
+        ] }),
+        view.note && /* @__PURE__ */ jsxs("p", { class: "catalog-note", role: "status", children: [
+          screenText(view.note),
+          " ",
+          /* @__PURE__ */ jsx("button", { class: "link", type: "button", onClick: () => host2.retry(), children: "Retry" })
+        ] }),
+        view.updating && /* @__PURE__ */ jsx("p", { class: "catalog-note", role: "status", children: "Loading machines\u2026" }),
+        /* @__PURE__ */ jsx("div", { class: "session-list", children: view.items.map((item2) => /* @__PURE__ */ jsx(
+          "button",
+          {
+            class: "nrow",
+            type: "button",
+            "data-source-key": item2.source_key,
+            onClick: () => host2.select(item2.source_key),
+            children: /* @__PURE__ */ jsx("span", { class: "nm", children: screenText(item2.label) })
+          },
+          item2.source_key
+        )) }),
+        !view.items.length && !view.updating && !view.note && /* @__PURE__ */ jsx("p", { class: "catalog-note", children: "No authorized recorded sources are available." }),
+        view.more && /* @__PURE__ */ jsx("button", { class: "link", type: "button", disabled: view.updating, onClick: () => host2.more(), children: "Load more machines" }),
+        /* @__PURE__ */ jsx("p", { class: "catalog-note", children: "This source list contains names and keys only. History across sources and text search are unavailable." }),
+        /* @__PURE__ */ jsxs("p", { class: "catalog-note", children: [
+          /* @__PURE__ */ jsx("a", { class: "link", href: view.machinesHref, children: "Manage machines" }),
+          " \xB7 ",
+          /* @__PURE__ */ jsx("a", { class: "link", href: "/sessions?compat=1", children: "Open compatibility view (loads workspace history)" })
+        ] })
+      ] }),
+      root
+    );
+  }
+
   // src/app/catalogViewer.tsx
   function createCatalogViewer(capabilities, viewerHost) {
     const scope = new EffectScope(), selection = new CatalogSelectionStore(), navigation = new NavigationController({}), updates = new ViewUpdates();
     let listRetry, listRetryDelay = 1e3;
     let disposed = false, page = null, items = [], cursor = null, listEpoch = 0, updating = false, note = "", harness = "", repo = "", active = null;
     const selected = /* @__PURE__ */ new Map();
+    const sourceViews = /* @__PURE__ */ new Map();
+    let sourcesOpen = false, sourcesEpoch = 0, sourceItems = [], sourceCursor = null, sourcesUpdating = false, sourcesNote = "", sourcesRetryDelay = 1e3;
+    const cacheKey = (key) => JSON.stringify([capabilities.source_key, key]);
     const account = parseAccount(viewerHost?.account);
     let wide = false, rail = document.querySelector(".app")?.classList.contains("rail") ?? false, chromeTitle = null, chromeSession = false;
     const shell = createShellChrome({
@@ -15861,7 +15919,12 @@ globalThis.__semonUIShared = __semonUIShared;
         }
       },
       navigate(destination) {
+        if (destination.key === "sources") {
+          void showSources();
+          return true;
+        }
         if (destination.key !== "sessions") return false;
+        sourcesOpen = false;
         goList();
         return true;
       },
@@ -15973,10 +16036,23 @@ globalThis.__semonUIShared = __semonUIShared;
     const currentParams = () => new URLSearchParams({ machine: capabilities.source_key });
     const params = () => new URLSearchParams({ machine: capabilities.source_key, scope: "retained_history" });
     function chrome() {
-      const name = active?.meta?.name ?? (active ? "Session" : "Sessions");
+      const name = sourcesOpen ? "Choose a machine" : active?.meta?.name ?? (active ? "Session" : "Sessions");
       shell.update(
         [
-          { key: "sessions", label: "Sessions", href: "/sessions", icon: I.sessions, current: true },
+          {
+            key: "sessions",
+            label: "Sessions",
+            href: "/sessions",
+            icon: I.sessions,
+            current: !sourcesOpen
+          },
+          {
+            key: "sources",
+            label: "Sources",
+            href: "/sessions?choose_source=1",
+            icon: I.sessions,
+            current: sourcesOpen
+          },
           ...(viewerHost?.nativeNavigation ?? []).filter(
             (destination) => destination.key !== "sessions"
           )
@@ -16027,7 +16103,7 @@ globalThis.__semonUIShared = __semonUIShared;
       });
     }
     function drawList() {
-      if (disposed || active) return;
+      if (disposed || active || sourcesOpen) return;
       chrome();
       renderCatalogList(
         root,
@@ -16126,6 +16202,7 @@ globalThis.__semonUIShared = __semonUIShared;
         active.scroll = window.matchMedia("(max-width: 760px)").matches ? window.scrollY : document.querySelector("#main").scrollTop;
     }
     function goList(push = true) {
+      sourcesOpen = false;
       preserveScroll();
       active = null;
       selection.clear();
@@ -16316,7 +16393,8 @@ globalThis.__semonUIShared = __semonUIShared;
       };
     }
     async function loadField(view, entry2) {
-      if (disposed || !capabilities.selected_entry || !entry2.field) return;
+      if (disposed || view.sourceKey !== capabilities.source_key || !capabilities.selected_entry || !entry2.field)
+        return;
       const generation = view.store.selectedPage()?.projection.generation;
       if (!generation) return;
       let progress = view.fields.get(entry2.entry_id);
@@ -16408,7 +16486,7 @@ globalThis.__semonUIShared = __semonUIShared;
         if (view.queuedAfter === void 0 || after !== null) view.queuedAfter = after;
         return;
       }
-      if (disposed || !capabilities.selected_transcript) {
+      if (disposed || view.sourceKey !== capabilities.source_key || !capabilities.selected_transcript) {
         drawSelected(view);
         return;
       }
@@ -16463,7 +16541,8 @@ globalThis.__semonUIShared = __semonUIShared;
       }
     }
     async function loadIdentity(view) {
-      if (disposed || view.identityLoading || !view.ticket || !capabilities.selected_identity) return;
+      if (disposed || view.sourceKey !== capabilities.source_key || view.identityLoading || !view.ticket || !capabilities.selected_identity)
+        return;
       const ticket = view.ticket, p = currentParams();
       p.set("sid", view.key);
       view.identityLoading = true;
@@ -16492,11 +16571,13 @@ globalThis.__semonUIShared = __semonUIShared;
     async function goSession(key, meta, push = true) {
       if (disposed) return;
       preserveScroll();
-      let view = selected.get(key);
+      sourcesOpen = false;
+      let view = selected.get(cacheKey(key));
       if (!view) {
         const store = new CatalogTranscriptStore();
         store.select({ source_key: capabilities.source_key, catalog_key: key }, "retained_history");
         view = {
+          sourceKey: capabilities.source_key,
           key,
           root: document.createElement("div"),
           store,
@@ -16514,7 +16595,7 @@ globalThis.__semonUIShared = __semonUIShared;
           newCount: 0,
           lastTotal: null
         };
-        selected.set(key, view);
+        selected.set(cacheKey(key), view);
       }
       active = view;
       view.ticket = selection.begin({ source_key: capabilities.source_key, catalog_key: key });
@@ -16540,11 +16621,12 @@ globalThis.__semonUIShared = __semonUIShared;
       }
     }
     async function recheckCapabilities() {
+      const observedSource = capabilities.source_key;
       try {
         const next = parseCatalogCapabilities(
           await api("/api/session-capabilities?" + currentParams())
         );
-        if (disposed) return;
+        if (disposed || observedSource !== capabilities.source_key) return;
         if (next.source_key !== capabilities.source_key)
           throw new Error("Source selection changed. Choose the source again.");
         const ready = !capabilities.selected_transcript && next.selected_transcript;
@@ -16561,7 +16643,144 @@ globalThis.__semonUIShared = __semonUIShared;
         if (!disposed) scope.timeout(() => void recheckCapabilities(), 8e3);
       }
     }
+    function drawSources() {
+      if (disposed || !sourcesOpen) return;
+      chrome();
+      renderCatalogSources(
+        root,
+        {
+          items: sourceItems,
+          updating: sourcesUpdating,
+          note: sourcesNote,
+          more: sourceCursor !== null,
+          machinesHref: viewerHost?.machinesPath ?? "/machines?compat=1"
+        },
+        {
+          select(key) {
+            if (sourceItems.some((item2) => item2.source_key === key)) void switchSource(key);
+          },
+          more() {
+            void loadSources(true);
+          },
+          retry() {
+            void loadSources(false);
+          }
+        }
+      );
+    }
+    async function loadSources(append) {
+      if (disposed || !sourcesOpen || sourcesUpdating) return;
+      const epoch = ++sourcesEpoch, p = new URLSearchParams({ limit: "60" });
+      if (append && sourceCursor !== null) p.set("cursor", sourceCursor);
+      sourcesUpdating = true;
+      sourcesNote = "";
+      drawSources();
+      try {
+        const next = parseCatalogSources(await api("/api/session-sources?" + p));
+        if (disposed || !sourcesOpen || epoch !== sourcesEpoch) return;
+        if (append && next.items.some((item2) => sourceItems.some((old) => old.source_key === item2.source_key)))
+          throw new Error("Source page repeated a machine");
+        sourceItems = append ? [...sourceItems, ...next.items] : next.items;
+        sourceCursor = next.next_cursor;
+        sourcesRetryDelay = 1e3;
+      } catch (error) {
+        if (disposed || !sourcesOpen || epoch !== sourcesEpoch) return;
+        sourcesNote = readError(error);
+        if (retryable(error)) {
+          scope.timeout(() => {
+            if (sourcesOpen && epoch === sourcesEpoch) void loadSources(append);
+          }, sourcesRetryDelay);
+          sourcesRetryDelay = Math.min(8e3, sourcesRetryDelay * 2);
+        }
+      } finally {
+        if (!disposed && epoch === sourcesEpoch) {
+          sourcesUpdating = false;
+          drawSources();
+        }
+      }
+    }
+    function saveSource() {
+      preserveScroll();
+      sourceViews.set(capabilities.source_key, {
+        page,
+        items,
+        cursor,
+        harness,
+        repo,
+        selectedKey: active?.key ?? null
+      });
+    }
+    async function showSources() {
+      if (disposed) return;
+      if (!sourcesOpen) saveSource();
+      ++listEpoch;
+      scope.clearTimeout(listRetry);
+      active = null;
+      selection.clear();
+      navigation.route = { v: "sessions" };
+      sourcesOpen = true;
+      root.replaceChildren();
+      shell.closeDrawer(true);
+      drawSources();
+      if (!sourceItems.length) await loadSources(false);
+    }
+    async function switchSource(key, push = true) {
+      if (disposed) return;
+      const epoch = ++sourcesEpoch;
+      sourcesUpdating = true;
+      sourcesNote = "";
+      drawSources();
+      try {
+        const next = parseCatalogCapabilities(
+          await api("/api/session-capabilities?" + new URLSearchParams({ machine: key }))
+        );
+        if (disposed || epoch !== sourcesEpoch) return;
+        if (next.source_key !== key)
+          throw new Error("Source capability identity does not match this selection");
+        if (!sourcesOpen) saveSource();
+        ++listEpoch;
+        scope.clearTimeout(listRetry);
+        selection.clear();
+        Object.assign(capabilities, next);
+        const retained = sourceViews.get(key);
+        page = retained?.page ?? null;
+        items = retained?.items ?? [];
+        cursor = retained?.cursor ?? null;
+        harness = retained?.harness ?? "";
+        repo = retained?.repo ?? "";
+        updating = false;
+        note = "";
+        sourcesOpen = false;
+        active = null;
+        if (push && retained?.selectedKey) await goSession(retained.selectedKey, void 0, false);
+        else goList(false);
+        const url = retained?.selectedKey ? "/s/" + encodeURIComponent(
+          selected.get(cacheKey(retained.selectedKey))?.meta?.harness ?? "native"
+        ) + "/" + encodeURIComponent(retained.selectedKey) : "/sessions";
+        if (push) history.pushState(null, "", url + "?" + new URLSearchParams({ machine: key }));
+        else fromLocation();
+        void loadList(false);
+      } catch (error) {
+        if (disposed || epoch !== sourcesEpoch) return;
+        sourcesNote = readError(error);
+      } finally {
+        if (!disposed && epoch === sourcesEpoch) {
+          sourcesUpdating = false;
+          drawSources();
+        }
+      }
+    }
     function fromLocation() {
+      if (new URLSearchParams(location.search).get("choose_source") === "1") {
+        void showSources();
+        return;
+      }
+      const machine2 = new URLSearchParams(location.search).get("machine");
+      if (machine2 && machine2 !== capabilities.source_key) {
+        void showSources();
+        void switchSource(machine2, false);
+        return;
+      }
       const parts = location.pathname.split("/").filter(Boolean);
       if (parts[0] === "s" && parts[2]) {
         try {
@@ -16617,61 +16836,6 @@ globalThis.__semonUIShared = __semonUIShared;
         selected.clear();
       }
     };
-  }
-
-  // src/lib/catalogSources.tsx
-  function renderCatalogSources(root, view, host2) {
-    render(
-      /* @__PURE__ */ jsxs(Fragment2, { children: [
-        /* @__PURE__ */ jsxs("div", { class: "ph", children: [
-          /* @__PURE__ */ jsx("h1", { children: "Choose a machine" }),
-          /* @__PURE__ */ jsx("p", { class: "sub", children: "Browse recorded history from one authorized source." })
-        ] }),
-        view.note && /* @__PURE__ */ jsxs("p", { class: "catalog-note", role: "status", children: [
-          screenText(view.note),
-          " ",
-          /* @__PURE__ */ jsx("button", { class: "link", type: "button", onClick: () => host2.retry(), children: "Retry" })
-        ] }),
-        view.updating && /* @__PURE__ */ jsx("p", { class: "catalog-note", role: "status", children: "Loading machines\u2026" }),
-        /* @__PURE__ */ jsx("div", { class: "session-list", children: view.items.map((item2) => /* @__PURE__ */ jsx(
-          "button",
-          {
-            class: "nrow",
-            type: "button",
-            "data-source-key": item2.source_key,
-            onClick: () => host2.select(item2.source_key),
-            children: /* @__PURE__ */ jsx("span", { class: "nm", children: screenText(item2.label) })
-          },
-          item2.source_key
-        )) }),
-        !view.items.length && !view.updating && !view.note && /* @__PURE__ */ jsx("p", { class: "catalog-note", children: "No authorized recorded sources are available." }),
-        view.more && /* @__PURE__ */ jsx("button", { class: "link", type: "button", disabled: view.updating, onClick: () => host2.more(), children: "Load more machines" }),
-        /* @__PURE__ */ jsx("p", { class: "catalog-note", children: "This source list contains names and keys only. History across sources and text search are unavailable." }),
-        /* @__PURE__ */ jsxs("p", { class: "catalog-note", children: [
-          /* @__PURE__ */ jsx("a", { class: "link", href: view.machinesHref, children: "Manage machines" }),
-          " \xB7 ",
-          /* @__PURE__ */ jsx("a", { class: "link", href: "/sessions?compat=1", children: "Open compatibility view (loads workspace history)" })
-        ] })
-      ] }),
-      root
-    );
-  }
-
-  // src/state/catalog-sources.ts
-  function parseCatalogSources(value) {
-    const row = object2(value);
-    if (row.api !== 1 || !Array.isArray(row.items) || row.items.length > 100)
-      throw new Error("Invalid source inventory");
-    const items = array(row.items, (value2) => {
-      const item2 = object2(value2), source_key = text(item2.source_key), label = text(item2.label);
-      if (!source_key || !label) throw new Error("Invalid source identity");
-      return { source_key, label };
-    });
-    if (new Set(items.map((item2) => item2.source_key)).size !== items.length)
-      throw new Error("Repeated source inventory identity");
-    const cursor = row.next_cursor === null ? null : text(row.next_cursor);
-    if (cursor === "") throw new Error("Invalid source inventory cursor");
-    return { api: 1, items, next_cursor: cursor };
   }
 
   // src/app/catalogSources.ts
