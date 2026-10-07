@@ -871,10 +871,14 @@ pub(crate) trait IndexStore: Send {
         descriptions: &[(String, u32, String, String)],
     ) -> Result<Outcome, StoreError>;
 
+    /// The committed catalog observed before a model build starts.
+    fn session_catalog_generation(&self) -> Result<Option<String>, StoreError>;
+
     /// Replaces one complete source-validated metadata catalog atomically.
     fn publish_session_catalog(
         &mut self,
         rows: &[crate::model::summary::CatalogRow],
+        expected_generation: Option<&str>,
     ) -> Result<Outcome, StoreError>;
 
     /// `path`'s ledger as committed now.
@@ -1118,12 +1122,24 @@ impl EventCache {
         }
     }
 
-    pub(crate) fn publish_session_catalog(&mut self, rows: &[crate::model::summary::CatalogRow]) {
+    pub(crate) fn session_catalog_generation(&self) -> Option<String> {
+        self.store
+            .as_ref()?
+            .session_catalog_generation()
+            .ok()
+            .flatten()
+    }
+
+    pub(crate) fn publish_session_catalog(
+        &mut self,
+        rows: &[crate::model::summary::CatalogRow],
+        expected_generation: Option<&str>,
+    ) {
         if !self.busy
             && self.unpersisted.is_empty()
             && let Some(store) = self.store.as_mut()
         {
-            let _ = store.publish_session_catalog(rows);
+            let _ = store.publish_session_catalog(rows, expected_generation);
         }
     }
 

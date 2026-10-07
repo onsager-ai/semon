@@ -6518,3 +6518,47 @@ fn a_slow_catalog_builder_cannot_overwrite_newer_committed_source_generation() {
     let (_, catalog) = read_catalog(&home);
     assert_eq!(catalog[0].last, Some(at(0, 1)));
 }
+
+#[test]
+fn a_slow_catalog_builder_cannot_overwrite_newer_native_metadata_without_log_changes() {
+    let home = Home::new();
+    home.top(
+        "root",
+        &[
+            human("root", ts(0, 0), "prompt"),
+            assistant(
+                "root",
+                ts(0, 1),
+                vec![tool("spawn", "Agent", json!({"prompt":"task"}))],
+            ),
+        ],
+    );
+    home.agent(
+        "root",
+        "child",
+        "spawn",
+        &[user("root", ts(0, 2), "child prompt")],
+    );
+    home.build();
+    let options = home.options.clone();
+    let meta = home
+        .root
+        .join("claude/projects/-work-proj/root/subagents/agent-child.meta.json");
+    AFTER_SCAN.with(|hook| {
+        *hook.borrow_mut() = Some(Box::new(move || {
+            fs::write(
+                meta,
+                json!({"description":"new native metadata label", "toolUseId":"spawn"}).to_string(),
+            )
+            .unwrap();
+            model_json_at(&options, NOW).unwrap();
+        }));
+    });
+    let older = home.build();
+    assert_ne!(older.sessions["child"].name, "new native metadata label");
+    let (_, catalog) = read_catalog(&home);
+    assert_eq!(
+        catalog.iter().find(|row| row.key == "child").unwrap().name,
+        "new native metadata label"
+    );
+}

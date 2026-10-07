@@ -819,9 +819,21 @@ impl IndexStore for SqliteStore {
         result
     }
 
+    fn session_catalog_generation(&self) -> Result<Option<String>, StoreError> {
+        self.connection
+            .query_row(
+                "SELECT value FROM meta WHERE key='catalog_generation'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(failure)
+    }
+
     fn publish_session_catalog(
         &mut self,
         rows: &[crate::model::summary::CatalogRow],
+        expected_generation: Option<&str>,
     ) -> Result<Outcome, StoreError> {
         use sha2::{Digest, Sha256};
         let version = crate::model::summary::CATALOG_VERSION.to_string();
@@ -844,6 +856,17 @@ impl IndexStore for SqliteStore {
                 .map_err(failure)?;
             if !current(&transaction).map_err(failure)? {
                 return Ok(Outcome::Stale);
+            }
+            let previous: Option<String> = transaction
+                .query_row(
+                    "SELECT value FROM meta WHERE key = 'catalog_generation'",
+                    [],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(failure)?;
+            if previous.as_deref() != expected_generation {
+                return Ok(Outcome::Conflict);
             }
             // Do not let a slow builder overwrite a newer complete catalog.
             // Verify source membership and consumed-prefix identities inside
@@ -878,14 +901,6 @@ impl IndexStore for SqliteStore {
                     return Ok(Outcome::Conflict);
                 }
             }
-            let previous: Option<String> = transaction
-                .query_row(
-                    "SELECT value FROM meta WHERE key = 'catalog_generation'",
-                    [],
-                    |row| row.get(0),
-                )
-                .optional()
-                .map_err(failure)?;
             let previous_version: Option<String> = transaction
                 .query_row(
                     "SELECT value FROM meta WHERE key = 'catalog_version'",
