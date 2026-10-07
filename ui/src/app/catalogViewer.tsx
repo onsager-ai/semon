@@ -283,8 +283,15 @@ export function createCatalogViewer(
           icon: I.sessions,
           current: sourcesOpen,
         },
+        {
+          key: 'machines',
+          label: 'Machines',
+          href: viewerHost?.machinesPath ?? '/machines?compat=1',
+          icon: I.machines,
+          current: false,
+        },
         ...(viewerHost?.nativeNavigation ?? []).filter(
-          (destination) => destination.key !== 'sessions',
+          (destination) => !['sessions', 'machines', 'sources'].includes(destination.key),
         ),
       ],
       rail,
