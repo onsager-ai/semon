@@ -30,6 +30,132 @@ pub struct SessionSourceRef {
     pub tail_sha256: [u8; 32],
 }
 
+/// Observation of a source in a cached catalog projection. This is neither
+/// runtime health nor authorization to mutate the native session.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CatalogSourceObservation {
+    pub source: SessionSourceRef,
+    pub state: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CatalogFreshness {
+    pub state: String,
+}
+
+/// Scoped cached identity, resolved without global event/model construction.
+/// A nullable native_id preserves ambiguity in multi-native continuations.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CatalogSessionIdentity {
+    pub source_key: String,
+    pub catalog_key: String,
+    pub harness: String,
+    pub native_id: Option<String>,
+    pub native_ids: Vec<String>,
+    pub source_refs: Vec<CatalogSourceObservation>,
+    pub machine_label: Option<String>,
+    pub generation: String,
+    pub observed_at: Option<i64>,
+    pub freshness: CatalogFreshness,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CatalogIdentityError {
+    InvalidArguments,
+    Unavailable,
+    ScopeChanged,
+}
+impl std::fmt::Display for CatalogIdentityError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::InvalidArguments => "Invalid scoped catalog identity arguments.",
+            Self::Unavailable => "The selected catalog observation is unavailable.",
+            Self::ScopeChanged => "The configured native source authority changed.",
+        })
+    }
+}
+impl std::error::Error for CatalogIdentityError {}
+
+/// The host selects authorized options and its stable source_key. Missing keys
+/// are distinct from unavailable observations. Source roots and current native
+/// manifests are validated exactly as for the paged catalog; no source bodies
+/// are read. Cached identity alone grants no control or provider authority.
+pub fn session_catalog_identity(
+    options: &Options,
+    source_key: &str,
+    canonical_catalog_key: &str,
+) -> Result<Option<CatalogSessionIdentity>, CatalogIdentityError> {
+    use CatalogIdentityError::{InvalidArguments, ScopeChanged, Unavailable};
+    if source_key.is_empty()
+        || source_key.len() > 4096
+        || canonical_catalog_key.is_empty()
+        || canonical_catalog_key.len() > 4096
+    {
+        return Err(InvalidArguments);
+    }
+    let request = Request {
+        limit: 1,
+        sid: Some(canonical_catalog_key.to_owned()),
+        harness: None,
+        repo: None,
+        cursor: None,
+    };
+    let reply = read_page(options, source_key, &request).map_err(|_| Unavailable)?;
+    let body: Value = serde_json::from_slice(&reply.body).map_err(|_| Unavailable)?;
+    match reply.status {
+        404 => return Ok(None),
+        200 => {}
+        _ if body["error"]["code"] == "catalog_scope_changed" => return Err(ScopeChanged),
+        _ => return Err(Unavailable),
+    }
+    #[derive(Deserialize)]
+    struct Item {
+        key: String,
+        harness: String,
+        native_ids: Vec<String>,
+        source_refs: Vec<CatalogSourceObservation>,
+        freshness: CatalogFreshness,
+    }
+    let item: Item = serde_json::from_value(body["items"][0].clone()).map_err(|_| Unavailable)?;
+    let native_ids: Vec<String> = item
+        .source_refs
+        .iter()
+        .map(|reference| reference.source.native_id.clone())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    if item.key != canonical_catalog_key
+        || native_ids.is_empty()
+        || native_ids.iter().any(String::is_empty)
+        || item.native_ids != native_ids
+    {
+        return Err(Unavailable);
+    }
+    let generation = body["generation"].as_str().ok_or(Unavailable)?.to_owned();
+    if generation.len() != 64 || !generation.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(Unavailable);
+    }
+    let observed_at = body["observed_at"].as_i64();
+    if observed_at.is_some_and(|time| !(0..=9_007_199_254_740_991).contains(&time)) {
+        return Err(Unavailable);
+    }
+    Ok(Some(CatalogSessionIdentity {
+        source_key: source_key.to_owned(),
+        catalog_key: item.key,
+        harness: item.harness,
+        native_id: (native_ids.len() == 1).then(|| native_ids[0].clone()),
+        native_ids,
+        source_refs: item.source_refs,
+        machine_label: body["machine_info"]["label"].as_str().map(str::to_owned),
+        generation,
+        observed_at,
+        freshness: item.freshness,
+    }))
+}
+
 /// Read a configured machine's published metadata page without constructing a
 /// ViewerCore or opening its event cache. The host authenticates the caller and
 /// chooses `options` and its stable `machine` key before calling this function.
@@ -571,6 +697,81 @@ mod tests {
             "cursor={}",
             crate::viewer::percent_encode(cursor.as_str().unwrap())
         )
+    }
+
+    #[test]
+    fn scoped_catalog_identity_preserves_native_ambiguity_and_source_authority() {
+        let fixture = Fixture::new();
+        fixture.publish(2);
+        crate::events::CACHE_READS.with(|reads| reads.set(0));
+        let selected = session_catalog_identity(&fixture.options, "stable-source", "session-00000")
+            .unwrap()
+            .unwrap();
+        assert_eq!(selected.source_key, "stable-source");
+        assert_eq!(selected.native_id.as_deref(), Some("session-00000"));
+        assert_eq!(selected.freshness.state, "cached");
+        assert_eq!(selected.source_refs.len(), 1);
+        assert_eq!(selected.machine_label.as_deref(), Some("synthetic-catalog"));
+        assert!(
+            session_catalog_identity(&fixture.options, "stable-source", "missing")
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            session_catalog_identity(&fixture.options, "", "session-00000"),
+            Err(CatalogIdentityError::InvalidArguments)
+        );
+        let connection = Connection::open(EventCache::path(&fixture.options.cache)).unwrap();
+        let read = |key: &str| -> Value {
+            let text: String = connection
+                .query_row(
+                    "SELECT metadata FROM session_catalog WHERE session_key=?1",
+                    [key],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            serde_json::from_str(&text).unwrap()
+        };
+        // Model a published multi-native continuation using two valid scoped
+        // source ledgers. No arbitrary first native target may become authority.
+        let mut row = read("session-00000");
+        let second = read("session-00001");
+        row["sources"]
+            .as_array_mut()
+            .unwrap()
+            .extend(second["sources"].as_array().unwrap().iter().cloned());
+        row["native_ids"] = json!(["session-00000", "session-00001"]);
+        connection
+            .execute(
+                "UPDATE session_catalog SET metadata=?1 WHERE session_key='session-00000'",
+                [row.to_string()],
+            )
+            .unwrap();
+        let ambiguous =
+            session_catalog_identity(&fixture.options, "stable-source", "session-00000")
+                .unwrap()
+                .unwrap();
+        assert_eq!(ambiguous.native_id, None);
+        assert_eq!(ambiguous.native_ids, ["session-00000", "session-00001"]);
+        fs::remove_file(
+            fixture
+                .options
+                .claude_home
+                .join("projects/project/session-00000.jsonl"),
+        )
+        .unwrap();
+        let missing = session_catalog_identity(&fixture.options, "stable-source", "session-00000")
+            .unwrap()
+            .unwrap();
+        assert_eq!(missing.freshness.state, "incomplete");
+        assert_eq!(missing.source_refs[0].state, "unavailable");
+        let mut changed = fixture.options.clone();
+        changed.claude_home = fixture.root.join("different-root");
+        assert_eq!(
+            session_catalog_identity(&changed, "stable-source", "session-00000"),
+            Err(CatalogIdentityError::ScopeChanged)
+        );
+        crate::events::CACHE_READS.with(|reads| assert_eq!(reads.get(), 0));
     }
 
     #[test]
