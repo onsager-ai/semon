@@ -7,7 +7,7 @@ use std::{
     sync::{
         Arc, Condvar, Mutex, MutexGuard, OnceLock, PoisonError, RwLock, RwLockReadGuard,
         RwLockWriteGuard, TryLockError, Weak,
-        atomic::{AtomicU8, Ordering},
+        atomic::{AtomicBool, AtomicU8, Ordering},
     },
     thread,
     time::{Duration, Instant, UNIX_EPOCH},
@@ -185,6 +185,9 @@ pub(crate) struct MachineView {
     options: Options,
     /// Its [`Refresh`] mode ([`Refresh::code`]).
     mode: AtomicU8,
+    /// A persisted-catalog reader needs coherent background publication even
+    /// before this process has shown its first compatibility model.
+    catalog_demand: AtomicBool,
     work: Mutex<Work>,
     shown: RwLock<Shown>,
     files: Mutex<Files>,
@@ -1086,6 +1089,7 @@ impl MachineView {
         Arc::new_cyclic(|me| Self {
             options,
             mode: AtomicU8::new(Refresh::OnRead.code()),
+            catalog_demand: AtomicBool::new(false),
             work: Mutex::default(),
             shown: RwLock::default(),
             files: Mutex::default(),
@@ -1398,6 +1402,13 @@ impl MachineView {
         }
     }
 
+    /// Demand for the persisted metadata catalog must not synchronously load
+    /// all event indices just because this process has no shown model yet.
+    pub(crate) fn note_catalog_read(&self) -> io::Result<()> {
+        self.catalog_demand.store(true, Ordering::Relaxed);
+        self.note_read(Kind::Model)
+    }
+
     /// A read's own refresh of the kind it wants, when none is built yet
     /// (the first read of a view, outside [`Refresh::OnRead`]), and of the
     /// other kind if that is shown, after which the view's next background
@@ -1562,7 +1573,10 @@ impl MachineView {
         lock(&self.live.state).invalidated = false;
         let results: Vec<_> = [Kind::Model, Kind::Tree]
             .into_iter()
-            .filter(|kind| self.is_shown(*kind))
+            .filter(|kind| {
+                self.is_shown(*kind)
+                    || (matches!(kind, Kind::Model) && self.catalog_demand.load(Ordering::Relaxed))
+            })
             .map(|kind| (kind, self.refresh_kind(&mut work, kind)))
             .collect();
         let built_at = work.built_at;
