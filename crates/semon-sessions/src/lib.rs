@@ -28,6 +28,7 @@ mod facts;
 mod handoff;
 pub mod harness;
 mod inputs;
+pub mod json_string;
 mod mcp;
 mod model;
 mod parent_links;
