@@ -1007,6 +1007,7 @@ impl IndexStore for SqliteStore {
                     return Ok(Outcome::Conflict);
                 }
             }
+            crate::history_projection::publish(&transaction, publication).map_err(failure)?;
             let previous_version: Option<String> = transaction
                 .query_row(
                     "SELECT value FROM meta WHERE key = 'catalog_version'",
@@ -1025,9 +1026,9 @@ impl IndexStore for SqliteStore {
                         .map_err(failure)?;
                     let mut put = transaction.prepare("INSERT INTO session_catalog (session_key, lifecycle, last_ms, harness, repo, parent_key, metadata) VALUES (?1, 'current', ?2, ?3, ?4, ?5, ?6) ON CONFLICT(session_key) DO UPDATE SET lifecycle='current', last_ms=excluded.last_ms, harness=excluded.harness, repo=excluded.repo, parent_key=excluded.parent_key, metadata=excluded.metadata WHERE session_catalog.lifecycle != 'current' OR session_catalog.metadata != excluded.metadata OR session_catalog.parent_key IS NOT excluded.parent_key").map_err(failure)?;
                     let mut remove_sources = transaction
-                        .prepare("DELETE FROM session_catalog_sources WHERE session_key=?1")
+                        .prepare("UPDATE session_catalog_sources SET lifecycle='retained' WHERE session_key=?1")
                         .map_err(failure)?;
-                    let mut put_source = transaction.prepare("INSERT INTO session_catalog_sources(session_key,harness,native_id,source_path) VALUES (?1,?2,?3,?4)").map_err(failure)?;
+                    let mut put_source = transaction.prepare("INSERT INTO session_catalog_sources(session_key,harness,native_id,source_path) VALUES (?1,?2,?3,?4) ON CONFLICT(session_key,source_path) DO UPDATE SET lifecycle='current',harness=excluded.harness,native_id=excluded.native_id").map_err(failure)?;
                     for (row, metadata) in rows.iter().zip(&metadata) {
                         member.execute([&row.key]).map_err(failure)?;
                         let changed = put
@@ -1058,17 +1059,23 @@ impl IndexStore for SqliteStore {
                 transaction.execute("UPDATE session_catalog SET lifecycle='retained', metadata=CASE WHEN json_valid(metadata) THEN json_set(metadata,'$.lifecycle','retained') ELSE metadata END WHERE lifecycle='current' AND session_key NOT IN (SELECT session_key FROM catalog_members)", []).map_err(failure)?;
                 transaction.execute("UPDATE session_catalog_sources SET lifecycle='retained' WHERE lifecycle='current' AND session_key NOT IN (SELECT session_key FROM catalog_members)", []).map_err(failure)?;
             }
+            transaction.execute("UPDATE session_history_catalog SET metadata=json_set(metadata,'$.lifecycle','retained') WHERE session_key NOT IN (SELECT session_key FROM catalog_members)",[]).map_err(failure)?;
             let generation = {
                 let mut digest = Sha256::new();
                 digest.update(version.as_bytes());
-                let mut statement = transaction
-                    .prepare("SELECT metadata FROM session_catalog ORDER BY session_key")
-                    .map_err(failure)?;
-                let mut values = statement.query([]).map_err(failure)?;
-                while let Some(row) = values.next().map_err(failure)? {
-                    let metadata: String = row.get(0).map_err(failure)?;
-                    digest.update((metadata.len() as u64).to_le_bytes());
-                    digest.update(metadata.as_bytes());
+                for table in ["session_catalog", "session_history_catalog"] {
+                    digest.update(table.as_bytes());
+                    let mut statement = transaction
+                        .prepare(&format!(
+                            "SELECT metadata FROM {table} ORDER BY session_key"
+                        ))
+                        .map_err(failure)?;
+                    let mut values = statement.query([]).map_err(failure)?;
+                    while let Some(row) = values.next().map_err(failure)? {
+                        let metadata: String = row.get(0).map_err(failure)?;
+                        digest.update((metadata.len() as u64).to_le_bytes());
+                        digest.update(metadata.as_bytes());
+                    }
                 }
                 format!("{:x}", digest.finalize())
             };
@@ -1671,6 +1678,7 @@ fn init(connection: &mut Connection) -> rusqlite::Result<Init> {
             transaction.execute_batch("ALTER TABLE session_slot_projections ADD COLUMN source_generation TEXT")?;
         }
         transaction.execute_batch(SCHEMA)?;
+        transaction.execute_batch(crate::history_projection::SCHEMA)?;
         if schema == 1 {
             transaction.execute_batch("ALTER TABLE files ADD COLUMN codex_native_usage TEXT")?;
         }
