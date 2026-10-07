@@ -158,8 +158,20 @@ authorize retained history and archive access, and source readers must verify
 original immutable generations before supplying bytes. History identity grants
 no control, credential or runtime authority.
 
-This scope cannot resurrect deleted projection rows. Durable retention of
-catalog, consumed-source provenance and native slot/span recipes across local
-source disappearance/eviction is a separate producer requirement. Without those
-rows, a selected history request remains not-found or unavailable rather than
-silently rebuilding unrelated workspace history or granting native authority.
+Durable retained projection rows preserve consumed-source provenance and native
+slot/span recipes across local source disappearance. A missing or unsupported
+projection still returns not-found or unavailable; history intent cannot
+reconstruct absent provenance or grant native authority.
+
+Current lists use lifecycle-prefixed indexes and omit retained projection rows.
+Retained-history lists use the existing order/filter indexes over both lifecycles.
+Selected identity is an exact primary-key lookup in either scope: local byte
+absence or a retained projection does not itself revoke current native authority.
+Current identity still independently requires the recorded native selection;
+history read intent never grants native control authority.
+
+A fixed one-item current page with 1 versus 20,001 unrelated retained rows returns
+the same item with equal SQLite VM work. The focused catalog tests also verify
+that retained-history pagination exposes retained rows and that an exact current
+identity remains available independently of projection lifecycle. These SQL
+measurements do not establish complete browser journey budgets.
