@@ -3105,7 +3105,8 @@ globalThis.__semonUIShared = __semonUIShared;
   }) {
     const [text2, setText] = useState("");
     const s = view.snapshot;
-    const canSend = !view.busy && !view.uncertain && s.connected && (s.activeTurn ? s.capabilities.steer : s.capabilities.input) && !!text2.trim();
+    const canWrite = !view.busy && !view.uncertain && s.connected && (s.activeTurn ? s.capabilities.steer : s.capabilities.input);
+    const canSend = canWrite && !!text2.trim();
     const showStop = !!s.activeTurn && s.capabilities.interrupt && !text2.trim();
     const pending = s.requests.filter((r) => r.state.state === "open" || r.state.state === "claimed");
     const recent = s.requests.filter((r) => r.state.state !== "open" && r.state.state !== "claimed").slice(-10);
@@ -3154,8 +3155,8 @@ globalThis.__semonUIShared = __semonUIShared;
           "aria-busy": view.busy || void 0,
           onSubmit: async (event) => {
             event.preventDefault();
-            if (!canSend) return;
-            const submitted = text2;
+            const submitted = event.currentTarget.querySelector("textarea")?.value ?? text2;
+            if (!canWrite || !submitted.trim()) return;
             if (await view.send(submitted))
               setText((current) => current === submitted ? "" : current);
           },
@@ -3173,7 +3174,8 @@ globalThis.__semonUIShared = __semonUIShared;
                 onKeyDown: (event) => {
                   if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
                     event.preventDefault();
-                    if (canSend) event.currentTarget.form?.requestSubmit();
+                    if (canWrite && event.currentTarget.value.trim())
+                      event.currentTarget.form?.requestSubmit();
                   }
                 }
               }
@@ -7104,6 +7106,8 @@ globalThis.__semonUIShared = __semonUIShared;
     let selection = 0;
     async function write(op, extra = {}) {
       if (!current || busy2 || uncertain && op !== "reconnect") return false;
+      if (op === "send" && (!current.connected || !(current.activeTurn ? current.capabilities.steer : current.capabilities.input)))
+        return false;
       if (op === "reconnect" && current.runtime?.reconnectable === false) return false;
       if (op !== "reconnect" && !current.connected) return false;
       if (op === "interrupt" && !current.capabilities.interrupt) return false;
@@ -15932,7 +15936,7 @@ globalThis.__semonUIShared = __semonUIShared;
     let sourcesOpen = false, sourcesEpoch = 0, sourceItems = [], sourceCursor = null, sourcesUpdating = false, sourcesNote = "", sourcesRetryDelay = 1e3;
     const cacheKey = (key) => JSON.stringify([capabilities.source_key, key]);
     const account = parseAccount(viewerHost?.account);
-    let wide = false, rail = document.querySelector(".app")?.classList.contains("rail") ?? false, chromeTitle = null, chromeSession = false;
+    let wide = document.querySelector("#page")?.classList.contains("wide-mode") ?? false, rail = document.querySelector(".app")?.classList.contains("rail") ?? false, chromeTitle = null, chromeSession = false;
     const shell = createShellChrome({
       account: {
         place(widget, trigger) {
@@ -16877,7 +16881,7 @@ globalThis.__semonUIShared = __semonUIShared;
     const scope = new EffectScope();
     let disposed = false, epoch = 0, items = [], cursor = null, updating = false, note = "", retry, delay = 1e3;
     const account = parseAccount(host2?.account);
-    let wide = false;
+    let wide = document.querySelector("#page")?.classList.contains("wide-mode") ?? false, rail = document.querySelector(".app")?.classList.contains("rail") ?? false;
     const shell = createShellChrome({
       account: {
         place(widget, trigger) {
@@ -16905,19 +16909,32 @@ globalThis.__semonUIShared = __semonUIShared;
       drawerClosed() {
       },
       railChanged() {
+        rail = !rail;
+        shell.update(
+          [
+            {
+              key: "sessions",
+              label: "Sessions",
+              href: "/sessions",
+              icon: I.sessions,
+              current: true
+            }
+          ],
+          rail
+        );
       }
     });
     shell.mount(document.querySelector(".app"));
     shell.update(
       [{ key: "sessions", label: "Sessions", href: "/sessions", icon: I.sessions, current: true }],
-      false
+      rail
     );
     const title = document.createElement("div");
     title.className = "ttl";
     title.textContent = "Choose a machine";
     function wideChange() {
       wide = !wide;
-      document.querySelector(".app")?.classList.toggle("wide-mode", wide);
+      document.querySelector("#page")?.classList.toggle("wide-mode", wide);
       shell.account.updateWide(wide);
     }
     shell.topbar({

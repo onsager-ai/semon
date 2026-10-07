@@ -16,6 +16,108 @@ const bundle = await build({
   platform: 'browser',
 });
 for (const width of [390, 1280])
+  test(`immediate Enter uses the current draft and preserves later input at ${width}px`, async () => {
+    const browser = await chromium.launch();
+    try {
+      const page = await browser.newPage({ viewport: { width, height: 900 } });
+      await page.route('https://controls.test/**', (route) =>
+        route.fulfill({ contentType: 'text/html', body: '<!doctype html><div id="page"></div>' }),
+      );
+      await page.goto('https://controls.test/');
+      await page.clock.install({ time: new Date('2026-10-07T00:00:00Z') });
+      await page.clock.pauseAt(new Date('2026-10-07T00:01:00Z'));
+      await page.addScriptTag({ content: bundle.outputFiles[0].text });
+      await page.evaluate(() => {
+        window.commands = [];
+        window.fetch = async (_path, options) => {
+          const command = JSON.parse(options.body);
+          commands.push(command);
+          return new Promise((resolve) => {
+            window.accept = () =>
+              resolve(
+                new Response(
+                  JSON.stringify({
+                    snapshot: { actions: { [command.id]: { delivery: 'accepted' } } },
+                  }),
+                  { status: 200 },
+                ),
+              );
+          });
+        };
+        const root = document.querySelector('#page');
+        const owner = (window.owner = Controls.createLocalControl(new Controls.EffectScope(), () =>
+          Controls.updateSessionControl(root, owner.view('one')),
+        ));
+        Controls.renderSessionScreen(
+          root,
+          {
+            id: 'one',
+            name: 'Conversation',
+            blocks: [],
+            order: [],
+            empty: 'Retained history',
+          },
+          { committed() {} },
+        );
+        owner.observe({
+          thread: 'one',
+          generation: 'g',
+          activeTurn: null,
+          connected: true,
+          reason: null,
+          capabilities: {
+            input: true,
+            steer: true,
+            interrupt: false,
+            commandApproval: false,
+            fileApproval: false,
+            questions: false,
+          },
+          requests: [],
+          actions: {},
+        });
+      });
+      await page.clock.runFor(100);
+      await page.locator('textarea').waitFor();
+      await page.evaluate(() => {
+        const input = document.querySelector('textarea');
+        input.focus();
+        input.value = 'Immediate pasted draft';
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        // Deliberately do not advance the render clock between input and Enter.
+        input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+      });
+      assert.deepEqual(await page.evaluate(() => commands.map((c) => c.text)), [
+        'Immediate pasted draft',
+      ]);
+      await page.clock.runFor(100);
+      await page.locator('textarea').fill('A later draft');
+      await page.clock.runFor(100);
+      await page.evaluate(() => accept());
+      await page.clock.runFor(100);
+      assert.equal(await page.locator('textarea').inputValue(), 'A later draft');
+      assert.equal(
+        await page.locator('textarea').evaluate((n) => n === document.activeElement),
+        true,
+      );
+      assert.equal(await page.evaluate(() => commands.length), 1);
+      await page.evaluate(() => {
+        // The old event closure must not send during a pending status repaint.
+        owner.unavailable();
+        const input = document.querySelector('textarea');
+        input.value = 'Retain this unavailable draft';
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+      });
+      await page.clock.runFor(100);
+      assert.equal(await page.evaluate(() => commands.length), 1);
+      assert.equal(await page.locator('textarea').inputValue(), 'Retain this unavailable draft');
+      await page.evaluate(() => owner.destroy());
+    } finally {
+      await browser.close();
+    }
+  });
+for (const width of [390, 1280])
   test(`bounded control observation preserves inputs and rejects stale selection at ${width}px`, async () => {
     const browser = await chromium.launch();
     try {
