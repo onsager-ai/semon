@@ -1165,8 +1165,14 @@ impl ViewerCore {
         };
         self.follow();
         let views = self.views();
-        if path == "/api/sessions" {
-            return self.catalog(&views, query);
+        if matches!(
+            path,
+            "/api/sessions"
+                | "/api/session-transcript"
+                | "/api/session-capabilities"
+                | "/api/session-identity"
+        ) {
+            return self.catalog(&views, path, query);
         }
         if views.is_empty() {
             return text(404, "Not found");
@@ -1225,10 +1231,14 @@ impl ViewerCore {
 
     /// Focused lists are scoped by the embedder's stable machine key. A
     /// hostname is a label, and never selects a source access boundary.
-    fn catalog(&self, views: &Views, query: &str) -> ViewerReply {
-        let request = match crate::catalog::Request::parse(query) {
-            Ok(request) => request,
-            Err(reply) => return reply,
+    fn catalog(&self, views: &Views, path: &str, query: &str) -> ViewerReply {
+        let request = if path == "/api/sessions" {
+            match crate::catalog::Request::parse(query) {
+                Ok(request) => Some(request),
+                Err(reply) => return reply,
+            }
+        } else {
+            None
         };
         let machine = match query_value(query, "machine") {
             Some(value) => match decoded(value) {
@@ -1265,7 +1275,68 @@ impl ViewerCore {
         // configured background coordinator performs coherent observation;
         // OnRead callers retain their explicit warm()/api/model contract.
         let refresh_error = view.note_catalog_read().err();
-        let mut reply = crate::catalog::page(view.options(), key, request);
+        let mut reply = match path {
+            "/api/session-identity" => {
+                let sid = query_value(query, "sid").and_then(decoded);
+                match sid
+                    .as_deref()
+                    .map(|sid| crate::session_catalog_identity(view.options(), key, sid))
+                {
+                    Some(Ok(Some(identity))) => ViewerReply {
+                        status: 200,
+                        content_type: "application/json; charset=utf-8",
+                        body: json!({"api":1,"identity":identity})
+                            .to_string()
+                            .into_bytes(),
+                        etag: None,
+                    },
+                    Some(Ok(None)) => crate::catalog::error(
+                        404,
+                        "session_not_found",
+                        "The selected session is absent from this catalog.",
+                        false,
+                    ),
+                    Some(Err(crate::CatalogIdentityError::ScopeChanged)) => crate::catalog::error(
+                        503,
+                        "catalog_scope_changed",
+                        "The configured native source authority changed.",
+                        true,
+                    ),
+                    Some(Err(crate::CatalogIdentityError::Unavailable)) => crate::catalog::error(
+                        503,
+                        "catalog_unavailable",
+                        "The selected identity observation is unavailable.",
+                        true,
+                    ),
+                    _ => crate::catalog::error(
+                        400,
+                        "invalid_arguments",
+                        "A canonical sid is required.",
+                        false,
+                    ),
+                }
+            }
+            "/api/session-transcript" => {
+                crate::session_transcript_range(view.options(), key, query, None)
+            }
+            "/api/session-capabilities" => {
+                let body = json!({"api":1,"read_contract":"catalog-v1","source_key":key,
+                    "selected_identity":true,"selected_transcript":true,"pagination":true,"relationship_context":false,
+                    "large_native_records":false,"selected_entry":false,"attachment":false,"global_union":false,"full_text_search":false,
+                    "filters":["harness","repo"],"order":"last_desc_key_asc"});
+                ViewerReply {
+                    status: 200,
+                    content_type: "application/json; charset=utf-8",
+                    body: body.to_string().into_bytes(),
+                    etag: None,
+                }
+            }
+            _ => crate::catalog::page(
+                view.options(),
+                key,
+                request.expect("catalog route parsed request"),
+            ),
+        };
         if let Ok(mut body) = serde_json::from_slice::<Value>(&reply.body) {
             body["refresh"] = match refresh_error {
                 Some(_) => json!({"state":"unavailable","retryable":true}),

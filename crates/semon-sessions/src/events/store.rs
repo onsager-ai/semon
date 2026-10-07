@@ -46,7 +46,7 @@ use crate::{Tokens, facts::ReportedRunSnapshot};
 
 /// `PRAGMA user_version`: the shape of the tables. The parser's version is
 /// [`CACHE_VERSION`], kept in `meta`.
-const SCHEMA_VERSION: i64 = 9;
+const SCHEMA_VERSION: i64 = 10;
 
 /// How long a write waits for another process's transaction. Tests wait
 /// less, so the busy paths they drive stay quick.
@@ -61,6 +61,19 @@ const BUSY_TIMEOUT: Duration = if cfg!(test) {
 const JOURNAL_SIZE_LIMIT: i64 = 64 * 1024 * 1024;
 
 const SCHEMA: &str = "
+CREATE TABLE IF NOT EXISTS session_slot_projections (
+    session_key TEXT PRIMARY KEY,
+    generation TEXT NOT NULL,
+    version INTEGER NOT NULL,
+    total INTEGER NOT NULL
+) STRICT;
+CREATE TABLE IF NOT EXISTS session_slots (
+    session_key TEXT NOT NULL,
+    slot INTEGER NOT NULL,
+    metadata TEXT NOT NULL,
+    PRIMARY KEY(session_key,slot)
+) STRICT, WITHOUT ROWID;
+
 CREATE TABLE IF NOT EXISTS session_catalog (
     session_key TEXT PRIMARY KEY,
     last_ms INTEGER NOT NULL,
@@ -917,9 +930,10 @@ impl IndexStore for SqliteStore {
 
     fn publish_session_catalog(
         &mut self,
-        rows: &[crate::model::summary::CatalogRow],
+        publication: &crate::slot_projection::Publication<'_>,
         expected_generation: Option<&str>,
     ) -> Result<Outcome, StoreError> {
+        let rows = publication.rows;
         use sha2::{Digest, Sha256};
         let version = crate::model::summary::CATALOG_VERSION.to_string();
         let metadata: Vec<_> = rows
@@ -1046,6 +1060,72 @@ impl IndexStore for SqliteStore {
                     [crate::model::now_ms().to_string()],
                 )
                 .map_err(failure)?;
+            if let Some(projections) = publication.transcripts {
+                let membership: std::collections::BTreeSet<_> =
+                    rows.iter().map(|row| row.key.as_str()).collect();
+                for projection in projections
+                    .iter()
+                    .filter(|projection| membership.contains(projection.key.as_str()))
+                {
+                    let metadata: Vec<String> = projection
+                        .slots
+                        .iter()
+                        .map(json)
+                        .collect::<Result<_, _>>()
+                        .map_err(failure)?;
+                    let slot_generation = format!(
+                        "{:x}",
+                        Sha256::digest(
+                            format!(
+                                "{}|{}|{}",
+                                crate::slot_projection::VERSION,
+                                json(&metadata).map_err(failure)?,
+                                json(
+                                    &rows
+                                        .iter()
+                                        .find(|row| row.key == projection.key)
+                                        .expect("catalog membership checked")
+                                        .sources
+                                )
+                                .map_err(failure)?
+                            )
+                            .as_bytes()
+                        )
+                    );
+                    let changed = transaction.execute(
+                        "INSERT INTO session_slot_projections(session_key,generation,version,total) VALUES (?1,?2,?3,?4) ON CONFLICT(session_key) DO UPDATE SET generation=excluded.generation,version=excluded.version,total=excluded.total WHERE session_slot_projections.generation != excluded.generation OR session_slot_projections.version != excluded.version",
+                        params![projection.key,slot_generation,crate::slot_projection::VERSION,i64::try_from(metadata.len()).map_err(|_| StoreError::Data("slot count exceeds SQL range".into()))?]).map_err(failure)?;
+                    if changed > 0 {
+                        transaction
+                            .execute(
+                                "DELETE FROM session_slots WHERE session_key=?1",
+                                [&projection.key],
+                            )
+                            .map_err(failure)?;
+                        let mut put = transaction.prepare("INSERT INTO session_slots(session_key,slot,metadata) VALUES (?1,?2,?3)").map_err(failure)?;
+                        for (slot, metadata) in metadata.iter().enumerate() {
+                            put.execute(params![
+                                projection.key,
+                                i64::try_from(slot).map_err(|_| StoreError::Data(
+                                    "slot index exceeds SQL range".into()
+                                ))?,
+                                metadata
+                            ])
+                            .map_err(failure)?;
+                        }
+                    }
+                }
+                transaction.execute("DELETE FROM session_slots WHERE session_key NOT IN (SELECT session_key FROM session_catalog)", []).map_err(failure)?;
+                transaction.execute("DELETE FROM session_slot_projections WHERE session_key NOT IN (SELECT session_key FROM session_catalog)", []).map_err(failure)?;
+                transaction.execute("INSERT OR REPLACE INTO meta(key,value) VALUES ('slot_projection_catalog_generation',?1)", [&generation]).map_err(failure)?;
+            } else {
+                transaction
+                    .execute(
+                        "DELETE FROM meta WHERE key='slot_projection_catalog_generation'",
+                        [],
+                    )
+                    .map_err(failure)?;
+            }
             // A complete publication validated every committed ledger and
             // source membership while holding the write transaction. Only now
             // can outstanding source observations be acknowledged atomically.
