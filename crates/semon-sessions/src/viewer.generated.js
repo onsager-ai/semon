@@ -5357,6 +5357,18 @@ globalThis.__semonUIShared = __semonUIShared;
 
   // src/lib/transcript.tsx
   var owners = /* @__PURE__ */ new WeakMap();
+  var SessionControls = class extends Component {
+    componentDidMount() {
+      this.props.owner.controls = () => this.forceUpdate();
+    }
+    componentWillUnmount() {
+      this.props.owner.controls = null;
+    }
+    render() {
+      const view = this.props.owner.snapshot.control;
+      return view ? /* @__PURE__ */ jsx(LocalControl, { view }) : null;
+    }
+  };
   var identity = (entry) => entry.entryKey ?? entry.key ?? "";
   function State({ state: state2, label, text: text2 }) {
     return /* @__PURE__ */ jsxs("span", { class: "state " + state2, children: [
@@ -5753,6 +5765,7 @@ globalThis.__semonUIShared = __semonUIShared;
         jumpBusy: false,
         paint() {
         },
+        controls: null,
         measure() {
         },
         change() {
@@ -5862,7 +5875,7 @@ globalThis.__semonUIShared = __semonUIShared;
               }
             )
           ] }),
-          view.control && /* @__PURE__ */ jsx(LocalControl, { view: view.control }),
+          /* @__PURE__ */ jsx(SessionControls, { owner: state2 }),
           view.footer && /* @__PURE__ */ jsxs("div", { class: "session-foot", children: [
             /* @__PURE__ */ jsxs("span", { class: "stat " + view.footer.state, children: [
               view.footer.state === "work" ? /* @__PURE__ */ jsx("span", { class: "spin" }) : /* @__PURE__ */ jsx(
@@ -5923,7 +5936,7 @@ globalThis.__semonUIShared = __semonUIShared;
     const owner = owners.get(root);
     if (!owner || owner.disposed) return;
     owner.snapshot = { ...owner.snapshot, control };
-    owner.paint();
+    owner.controls?.();
   }
   function updateSessionPager(root, view) {
     const owner = owners.get(root);

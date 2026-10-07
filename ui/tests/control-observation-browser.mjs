@@ -97,6 +97,11 @@ for (const width of [390, 1280])
           empty: 'History retained',
         };
         Controls.renderSessionScreen(document.querySelector('#page'), snapshot, { committed() {} });
+        // A control repaint must never traverse the cached transcript blocks.
+        snapshot.blocks.map = () => {
+          throw Error('status traversed transcript blocks');
+        };
+
         sources[0].emit('control', {
           selected: 'one',
           machine: 'a',

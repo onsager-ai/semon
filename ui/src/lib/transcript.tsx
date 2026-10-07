@@ -167,10 +167,25 @@ interface SessionOwner {
   jumpCount: number;
   jumpBusy: boolean;
   paint(): void;
+  controls: (() => void) | null;
   measure(): void;
   change(key: string): void;
 }
 const owners = new WeakMap<HTMLElement, SessionOwner>();
+/** The existing page tree owns this leaf; status never walks transcript blocks. */
+class SessionControls extends Component<{ owner: SessionOwner }> {
+  componentDidMount() {
+    this.props.owner.controls = () => this.forceUpdate();
+  }
+  componentWillUnmount() {
+    this.props.owner.controls = null;
+  }
+  render() {
+    const view = this.props.owner.snapshot.control;
+    return view ? <LocalControl view={view} /> : null;
+  }
+}
+
 const identity = (entry: Identity) => entry.entryKey ?? entry.key ?? '';
 const TRACE = 'M6 4v10a4 4 0 0 0 4 4h8M6 10h12M15 7l3 3-3 3M15 15l3 3-3 3';
 function State({ state, label, text }: { state: string; label: string; text: string }) {
@@ -654,6 +669,7 @@ export function renderSessionScreen(
       jumpCount: 0,
       jumpBusy: false,
       paint() {},
+      controls: null,
       measure() {},
       change() {},
       observer: new ResizeObserver(() => {}),
@@ -791,7 +807,7 @@ export function renderSessionScreen(
             }}
           />
         </section>
-        {view.control && <LocalControl view={view.control} />}
+        <SessionControls owner={state} />
         {view.footer && (
           <div class="session-foot">
             <span class={'stat ' + view.footer.state}>
@@ -860,7 +876,7 @@ export function updateSessionControl(root: HTMLElement, control: ControlView | u
   const owner = owners.get(root);
   if (!owner || owner.disposed) return;
   owner.snapshot = { ...owner.snapshot, control };
-  owner.paint();
+  owner.controls?.();
 }
 
 export function updateSessionPager(root: HTMLElement, view: PagerView) {
