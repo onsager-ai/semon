@@ -186,3 +186,33 @@ indexes are populated. Source authority and generation CAS remain identical;
 these indexes grant no archive access, native operation authority or source
 body access. Substring text search is not implemented by this slice and retains
 its separate query-contract/measurement workstream.
+
+### Durable source observation work
+
+SQLite schema 8 adds `session_catalog_invalidations`, keyed by physical source
+path. Event append/rewrite commits and confirmed source removals record a
+monotonic pending revision, `changed`/`removed` reason, and observation time in
+the same transaction as the event ledger. Conflicting writers and interrupted
+transactions leave both the event index and pending revision unchanged. No
+source body or runtime liveness enters this journal. A covering source-path
+index maps work to existing catalog owners without parsing unrelated rows.
+
+A successful complete catalog publication acknowledges pending observations
+only after its generation, source membership and consumed-prefix checks pass,
+in the same transaction as publishing metadata and retiring absent rows. A
+failed publication leaves the old coherent catalog and pending observations,
+including source disappearance, intact across restart. Parser-version rebuilding
+clears this rebuildable work together with derived views, preserving observed
+reports. Additive schema migration preserves the committed catalog.
+
+This is a durable observation foundation, not yet a bounded partial-refresh
+scheduler. Stat/source-access checks remain required for reads: unobserved
+external changes and native metadata changes cannot be inferred from an empty
+journal. Parent/child and native ownership indexes identify immediate context,
+but shared Claude usage records, resume bridges, spawn/relay peers and repository
+metadata can affect distant sessions. Partial publication must prove the entire
+affected dependency closure, including new links and removed sources, before
+acknowledging a claimed revision. Until that contract is implemented, coherent
+refresh still uses the full rebuild oracle; global discovery, joins and catalog
+generation work remain explicit scaling limitations. The journal does not grant
+source authority or make cached runtime state current.

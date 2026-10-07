@@ -46,7 +46,7 @@ use crate::{Tokens, facts::ReportedRunSnapshot};
 
 /// `PRAGMA user_version`: the shape of the tables. The parser's version is
 /// [`CACHE_VERSION`], kept in `meta`.
-const SCHEMA_VERSION: i64 = 7;
+const SCHEMA_VERSION: i64 = 8;
 
 /// How long a write waits for another process's transaction. Tests wait
 /// less, so the busy paths they drive stay quick.
@@ -82,6 +82,13 @@ CREATE TABLE IF NOT EXISTS session_catalog_sources (
     PRIMARY KEY(session_key, source_path)
 ) STRICT, WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS session_catalog_native ON session_catalog_sources(harness, native_id, session_key);
+CREATE INDEX IF NOT EXISTS session_catalog_source_path ON session_catalog_sources(source_path, session_key);
+CREATE TABLE IF NOT EXISTS session_catalog_invalidations (
+    source_path TEXT PRIMARY KEY,
+    revision INTEGER NOT NULL,
+    reason TEXT NOT NULL CHECK(reason IN ('changed', 'removed')),
+    observed_at INTEGER NOT NULL
+) STRICT, WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS session_descriptions (
     session_key TEXT PRIMARY KEY,
     version INTEGER NOT NULL,
@@ -221,6 +228,7 @@ CREATE TABLE IF NOT EXISTS reported_runs (
 /// changes. `reported_runs` isn't among them: its source keeps only the
 /// last run, so it can't be rebuilt.
 const DERIVED: &str = "
+DELETE FROM session_catalog_invalidations;
 DELETE FROM session_catalog_sources;
 DELETE FROM session_catalog;
 DELETE FROM meta WHERE key IN ('catalog_version', 'catalog_generation', 'catalog_observed_at');
@@ -973,6 +981,12 @@ impl IndexStore for SqliteStore {
                     [crate::model::now_ms().to_string()],
                 )
                 .map_err(failure)?;
+            // A complete publication validated every committed ledger and
+            // source membership while holding the write transaction. Only now
+            // can outstanding source observations be acknowledged atomically.
+            transaction
+                .execute("DELETE FROM session_catalog_invalidations", [])
+                .map_err(failure)?;
             transaction.commit().map_err(failure)?;
             Ok(Outcome::Written)
         })();
@@ -1015,6 +1029,25 @@ impl IndexStore for SqliteStore {
     ) -> Result<Option<Vec<ReportedRunSnapshot>>, StoreError> {
         self.write_runs(runs, stamp).map_err(failure)
     }
+}
+
+/// Source observation work survives a process restart. The journal contains
+/// paths and observation facts only, never source bodies or runtime liveness.
+/// Its revision prevents a future bounded worker from acknowledging newer
+/// observations than the revision that worker claimed.
+fn invalidate_catalog_source(
+    transaction: &Transaction<'_>,
+    path: &str,
+    reason: &str,
+) -> rusqlite::Result<()> {
+    transaction.execute(
+        "INSERT INTO session_catalog_invalidations(source_path,revision,reason,observed_at)
+         VALUES (?1,1,?2,?3) ON CONFLICT(source_path) DO UPDATE SET
+         revision=session_catalog_invalidations.revision+1,
+         reason=excluded.reason, observed_at=excluded.observed_at",
+        params![path, reason, crate::model::now_ms()],
+    )?;
+    Ok(())
 }
 
 enum Unopened {
@@ -1187,6 +1220,7 @@ impl SqliteStore {
             ..super::DirtyRows::default()
         };
         write_file(&transaction, path, ledger, changes.unwrap_or(&full), index)?;
+        invalidate_catalog_source(&transaction, path, "changed")?;
         transaction.commit()?;
         Ok(Outcome::Written)
     }
@@ -1219,6 +1253,7 @@ impl SqliteStore {
                 )?;
             }
             transaction.execute("DELETE FROM files WHERE path = ?1", [path])?;
+            invalidate_catalog_source(&transaction, path, "removed")?;
         }
         transaction.commit()?;
         Ok(Outcome::Written)
@@ -2548,6 +2583,68 @@ mod tests {
             None
         );
         assert_eq!(tightened(&store("/tmp/idx.sqlite3"), state), None);
+    }
+
+    #[test]
+    fn catalog_invalidation_is_atomic_durable_and_conflict_checked() {
+        let root = scratch("catalog-invalidations");
+        let path = root.join("index.sqlite3");
+        let (mut store, _) = opened(&path);
+        let invalidation = |store: &SqliteStore| {
+            store.connection.query_row(
+                "SELECT revision,reason FROM session_catalog_invalidations WHERE source_path='a.jsonl'",
+                [], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+            ).optional().unwrap()
+        };
+        store
+            .write_one("a.jsonl", None, None, &ledger(1), &full())
+            .unwrap();
+        assert_eq!(invalidation(&store), Some((1, "changed".into())));
+        drop(store);
+        let (mut store, _) = opened(&path);
+        assert_eq!(invalidation(&store), Some((1, "changed".into())));
+        assert_eq!(
+            store
+                .write_one("a.jsonl", None, None, &ledger(2), &full())
+                .unwrap(),
+            Outcome::Conflict
+        );
+        assert_eq!(invalidation(&store), Some((1, "changed".into())));
+        store.connection.execute_batch("CREATE TEMP TRIGGER fail_observation BEFORE UPDATE ON session_catalog_invalidations BEGIN SELECT RAISE(ABORT,'interrupted'); END;").unwrap();
+        assert!(
+            store
+                .write_one("a.jsonl", Some(&ledger(1)), None, &ledger(2), &full())
+                .is_err()
+        );
+        assert_eq!(store.read_one("a.jsonl").unwrap().unwrap().0, ledger(1));
+        assert_eq!(invalidation(&store), Some((1, "changed".into())));
+        store
+            .connection
+            .execute_batch("DROP TRIGGER fail_observation")
+            .unwrap();
+        store
+            .write_one(
+                "a.jsonl",
+                Some(&ledger(1)),
+                Some(&full()),
+                &ledger(2),
+                &full(),
+            )
+            .unwrap();
+        assert_eq!(invalidation(&store), Some((2, "changed".into())));
+        store
+            .remove(&[("a.jsonl".into(), Some(ledger(1)))])
+            .unwrap();
+        assert_eq!(invalidation(&store), Some((2, "changed".into())));
+        store
+            .remove(&[("a.jsonl".into(), Some(ledger(2)))])
+            .unwrap();
+        assert_eq!(invalidation(&store), Some((3, "removed".into())));
+        assert!(store.read_one("a.jsonl").unwrap().is_none());
+        drop(store);
+        let (store, _) = opened(&path);
+        assert_eq!(invalidation(&store), Some((3, "removed".into())));
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
