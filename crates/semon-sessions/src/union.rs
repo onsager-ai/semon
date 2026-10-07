@@ -300,6 +300,7 @@ impl Refresh {
 /// [`ViewerCore::close`] stops it before the files it reads are removed.
 pub struct ViewerCore {
     views: RwLock<Arc<Views>>,
+    source_inventory: Mutex<Option<(Weak<Views>, Arc<crate::SessionSourceInventory>)>>,
     received: Option<Received>,
     /// What [`ViewerCore::respond`] serves in the model when a call
     /// doesn't pass its own ([`ViewerCore::respond_with`]).
@@ -861,13 +862,16 @@ impl ViewerCore {
     /// order is kept: the first machine is the model's `machine`. With one
     /// machine this is [`ViewerCore::new`], byte for byte.
     pub fn with_machines(machines: Vec<(String, Options)>) -> Self {
+        let views = Arc::new(
+            machines
+                .into_iter()
+                .map(|(key, options)| (key, MachineView::new(options)))
+                .collect::<Views>(),
+        );
+        let inventory = Self::configured_source_inventory(&views);
         Self {
-            views: RwLock::new(Arc::new(
-                machines
-                    .into_iter()
-                    .map(|(key, options)| (key, MachineView::new(options)))
-                    .collect(),
-            )),
+            views: RwLock::new(views.clone()),
+            source_inventory: Mutex::new(Some((Arc::downgrade(&views), inventory))),
             received: None,
             extras: Extras::default(),
             refresh: Refresh::OnRead,
@@ -907,6 +911,36 @@ impl ViewerCore {
     /// The machines served now.
     fn views(&self) -> Arc<Views> {
         read_lock(&self.views).clone()
+    }
+
+    /// Build configured source metadata once per views snapshot. No native
+    /// model, facts, source bodies or health checks participate in this index.
+    fn source_inventory(&self, views: &Arc<Views>) -> Arc<crate::SessionSourceInventory> {
+        let mut cached = lock(&self.source_inventory);
+        if let Some((snapshot, inventory)) = cached.as_ref()
+            && snapshot
+                .upgrade()
+                .is_some_and(|old| Arc::ptr_eq(&old, views))
+        {
+            return inventory.clone();
+        }
+        let inventory = Self::configured_source_inventory(views);
+        *cached = Some((Arc::downgrade(views), inventory.clone()));
+        inventory
+    }
+
+    fn configured_source_inventory(views: &Views) -> Arc<crate::SessionSourceInventory> {
+        let local = views.len() == 1 && views[0].0.is_empty();
+        Arc::new(crate::SessionSourceInventory::new(views.iter().map(
+            |(key, _)| {
+                let key = if local {
+                    "local".to_owned()
+                } else {
+                    key.clone()
+                };
+                (key.clone(), key)
+            },
+        )))
     }
 
     /// Each machine's view, in order: for tests that read its hooks.
@@ -1165,6 +1199,9 @@ impl ViewerCore {
         };
         self.follow();
         let views = self.views();
+        if path == "/api/session-sources" {
+            return self.source_inventory(&views).page(query);
+        }
         if matches!(
             path,
             "/api/sessions"
@@ -1232,7 +1269,7 @@ impl ViewerCore {
 
     /// Focused lists are scoped by the embedder's stable machine key. A
     /// hostname is a label, and never selects a source access boundary.
-    fn catalog(&self, views: &Views, path: &str, query: &str) -> ViewerReply {
+    fn catalog(&self, views: &Arc<Views>, path: &str, query: &str) -> ViewerReply {
         let request = if path == "/api/sessions" {
             match crate::catalog::Request::parse(query) {
                 Ok(request) => Some(request),
@@ -1268,16 +1305,18 @@ impl ViewerCore {
                 );
             }
         };
-        let matches: Vec<_> = views
-            .iter()
-            .filter(|(key, _)| {
-                if local_alias {
-                    machine == "local"
-                } else {
-                    *key == machine
-                }
-            })
-            .collect();
+        let inventory = self.source_inventory(views);
+        let matches: Vec<_> = if inventory.valid() {
+            inventory
+                .index(&machine)
+                .map(|index| &views[index])
+                .into_iter()
+                .collect()
+        } else {
+            // Invalid configurations retain the legacy explicit ambiguity
+            // refusal. Valid configured inventories use indexed lookup.
+            views.iter().filter(|(key, _)| *key == machine).collect()
+        };
         let [(key, view)] = matches.as_slice() else {
             return crate::catalog::error(
                 if matches.is_empty() { 404 } else { 409 },
