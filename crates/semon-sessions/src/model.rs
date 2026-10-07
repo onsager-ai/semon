@@ -5724,6 +5724,7 @@ pub(crate) fn build(
     texts: &mut Texts,
     now: i64,
 ) -> io::Result<Built> {
+    let catalog_base = cache.session_catalog_generation();
     let mut timings = Vec::with_capacity(18);
     macro_rules! timed {
         ($name:literal, $body:expr) => {{
@@ -6118,7 +6119,7 @@ pub(crate) fn build(
         u32::try_from(post_started.elapsed().as_millis()).unwrap_or(u32::MAX),
     ));
     if let Some(catalog) = catalog {
-        cache.publish_session_catalog(&catalog);
+        cache.publish_session_catalog(&catalog, catalog_base.as_deref());
     }
     cache.publish_session_descriptions();
     Ok(built)

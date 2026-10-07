@@ -118,8 +118,10 @@ The persisted allowlist is captured at the description boundary, before any
 handoff/transcript body reads. Native label metadata is retained as metadata;
 the related transcript body is always reread through its source reference.
 
-Catalog publication verifies source membership and each committed ledger's
-complete-prefix identity inside its transaction. If another builder has added,
+Catalog publication captures the committed catalog generation before building
+and verifies it, source membership, and each committed ledger's complete-prefix
+identity inside its transaction. This also rejects competing native-metadata
+updates that do not advance a log ledger. If another builder has added,
 removed or advanced a source, publication returns conflict and retains the
 newer catalog rather than rolling back its generation.
 
