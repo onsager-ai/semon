@@ -369,6 +369,13 @@ fn rows(connection: &Connection, request: &Request) -> rusqlite::Result<Vec<Cata
             "session_catalog_harness_repo",
         ),
     };
+    let (filters, index) = match request.scope {
+        CatalogReadScope::Current => (
+            format!("lifecycle='current' AND {filters}"),
+            index.replacen("session_catalog_", "session_catalog_current_", 1),
+        ),
+        CatalogReadScope::RetainedHistory => (filters.to_owned(), index.to_owned()),
+    };
     let mut base = Vec::new();
     if let Some(value) = &request.harness {
         base.push(SqlValue::Text(value.clone()));
@@ -383,8 +390,8 @@ fn rows(connection: &Connection, request: &Request) -> rusqlite::Result<Vec<Cata
         args.push(SqlValue::Text(cursor.key.clone()));
         let mut found = read_range(
             connection,
-            index,
-            filters,
+            &index,
+            &filters,
             "last_ms = ? AND session_key > ?",
             args,
             limit,
@@ -395,8 +402,8 @@ fn rows(connection: &Connection, request: &Request) -> rusqlite::Result<Vec<Cata
             args.push(SqlValue::Integer(cursor.last));
             found.extend(read_range(
                 connection,
-                index,
-                filters,
+                &index,
+                &filters,
                 "last_ms < ?",
                 args,
                 remaining,
@@ -404,7 +411,7 @@ fn rows(connection: &Connection, request: &Request) -> rusqlite::Result<Vec<Cata
         }
         found
     } else {
-        read_range(connection, index, filters, "1", base, limit)?
+        read_range(connection, &index, &filters, "1", base, limit)?
     };
     // Capacity returned by SQLite is bounded by the requested page plus one.
     found.shrink_to_fit();
@@ -854,6 +861,17 @@ mod tests {
             )
         };
         connection.execute("INSERT INTO session_catalog(session_key,lifecycle,last_ms,harness,repo,metadata) VALUES('initial-retained','retained',0,'claude','project','{}')", []).unwrap();
+        let indexes = ["order", "harness", "repo", "harness_repo", "parent"];
+        for suffix in indexes {
+            let sql: String = connection
+                .query_row(
+                    "SELECT sql FROM sqlite_master WHERE name=?1",
+                    [format!("session_catalog_current_{suffix}")],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert!(sql.ends_with("WHERE lifecycle='current'"), "{sql}");
+        }
         let small = measure();
         let transaction = connection.unchecked_transaction().unwrap();
         for id in 0..20_000 {
@@ -871,6 +889,51 @@ mod tests {
             "current catalog SQL VM steps: one retained={}, 20001 retained={}",
             small.1, large.1
         );
+    }
+
+    #[test]
+    fn schema_eleven_migration_replaces_current_trees_without_rebinding_history() {
+        let fixture = Fixture::new();
+        fixture.publish(1);
+        let connection = Connection::open(EventCache::path(&fixture.options.cache)).unwrap();
+        connection
+            .execute("UPDATE session_catalog SET lifecycle='retained'", [])
+            .unwrap();
+        let before: (String, String) = connection.query_row(
+            "SELECT session_catalog.metadata,session_slot_projections.generation FROM session_catalog JOIN session_slot_projections USING(session_key)",
+            [], |row| Ok((row.get(0)?, row.get(1)?))
+        ).unwrap();
+        for (suffix, keys) in [
+            ("order", "last_ms DESC, session_key ASC"),
+            ("harness", "harness, last_ms DESC, session_key ASC"),
+            ("repo", "repo, last_ms DESC, session_key ASC"),
+            (
+                "harness_repo",
+                "harness, repo, last_ms DESC, session_key ASC",
+            ),
+            ("parent", "parent_key, last_ms DESC, session_key ASC"),
+        ] {
+            connection.execute_batch(&format!("DROP INDEX session_catalog_current_{suffix}; CREATE INDEX session_catalog_current_{suffix} ON session_catalog(lifecycle, {keys});")).unwrap();
+        }
+        connection.execute_batch("PRAGMA user_version=11").unwrap();
+        drop(EventCache::open(&fixture.options.cache));
+        let after: (String, String) = connection.query_row(
+            "SELECT session_catalog.metadata,session_slot_projections.generation FROM session_catalog JOIN session_slot_projections USING(session_key)",
+            [], |row| Ok((row.get(0)?, row.get(1)?))
+        ).unwrap();
+        assert_eq!(before, after);
+        for suffix in ["order", "harness", "repo", "harness_repo", "parent"] {
+            let sql: String = connection
+                .query_row(
+                    "SELECT sql FROM sqlite_master WHERE name=?1",
+                    [format!("session_catalog_current_{suffix}")],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert!(sql.ends_with("WHERE lifecycle='current'"), "{sql}");
+            let count: i64 = connection.query_row(&format!("SELECT count(*) FROM session_catalog INDEXED BY session_catalog_current_{suffix} WHERE lifecycle='current'"), [], |row| row.get(0)).unwrap();
+            assert_eq!(count, 0);
+        }
     }
 
     #[test]
@@ -904,7 +967,7 @@ mod tests {
                 connection
                     .query_row("PRAGMA user_version", [], |row| row.get::<_, u32>(0))
                     .unwrap(),
-                11
+                12
             );
         }
     }
@@ -1429,6 +1492,36 @@ mod tests {
         assert_eq!(body["entries"][1]["freshness"]["state"], "incomplete");
         crate::events::CACHE_READS.with(|reads| assert_eq!(reads.get(), 0));
         assert!(!path.exists());
+    }
+
+    #[test]
+    fn current_page_excludes_retained_rows_with_bounded_work_and_history_keeps_them() {
+        let fixture = Fixture::new();
+        fixture.publish(2);
+        let connection = Connection::open(EventCache::path(&fixture.options.cache)).unwrap();
+        connection.execute("UPDATE session_catalog SET lifecycle='retained',metadata=json_set(metadata,'$.lifecycle','retained') WHERE session_key='session-00001'",[]).unwrap();
+        SQL_STEPS.with(|steps| steps.set(0));
+        let (status, before) = fixture.body("limit=1");
+        assert_eq!(status, 200);
+        let baseline = SQL_STEPS.with(|steps| steps.get());
+        assert_eq!(before["items"].as_array().unwrap().len(), 1);
+        assert_eq!(before["items"][0]["key"], "session-00000");
+        connection.execute_batch("WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM n WHERE x<20000) INSERT INTO session_catalog(session_key,lifecycle,last_ms,harness,repo,parent_key,metadata) SELECT 'retained-'||printf('%05d',x),'retained',last_ms,harness,repo,parent_key,json_set(metadata,'$.key','retained-'||printf('%05d',x)) FROM n,session_catalog WHERE session_key='session-00001'").unwrap();
+        SQL_STEPS.with(|steps| steps.set(0));
+        let (status, after) = fixture.body("limit=1");
+        assert_eq!(status, 200);
+        assert_eq!(after["items"], before["items"]);
+        assert_eq!(SQL_STEPS.with(|steps| steps.get()), baseline);
+        let (status, history) = fixture.body("scope=retained_history&limit=2");
+        assert_eq!(status, 200);
+        assert_eq!(history["items"].as_array().unwrap().len(), 2);
+        assert!(history["next_cursor"].is_string());
+        // Local absence does not revoke native-current authority by itself.
+        assert!(
+            session_catalog_identity(&fixture.options, "source", "session-00001")
+                .unwrap()
+                .is_some()
+        );
     }
 
     #[test]

@@ -16,8 +16,10 @@ current native facts and independent durable ownership still bind it. Retired
 native manifests remain outside Current scope. Explicit retained-history reads
 can inspect past identity without gaining current control authority.
 
-Current list indexes start with lifecycle, followed by their filter and keyset
-order. Separate unprefixed indexes support history across both observation
+Current list indexes are partial B-trees (`WHERE lifecycle='current'`) ordered
+by their filter and keyset keys. Retained rows do not enter those trees; schema
+12 replaces schema 11's lifecycle-prefixed list indexes without rebinding rows.
+Separate unprefixed indexes support history across both observation
 states. Current exact-key lookup remains a primary-key operation. Source maps
 carry the same lifecycle and have indexed current native/path lookups. Default
 current lists therefore do not scan unrelated retained history.
@@ -73,7 +75,7 @@ versions.
 
 An isolated indexed SQL check holds one selected current row and a three-row
 request constant while unrelated retained rows grow from 1 to 20,001. The
-returned metadata is identical and the lifecycle/harness/repo covering order
-requires 18 SQLite VM steps in both cases. This qualifies the new current index
-shape, not complete journey latency, browser work, memory or the background
+returned metadata is identical and the partial harness/repo order
+has the same SQLite VM-step count in both cases. This qualifies SQLite
+execution work for the current index shape, not complete journey latency, browser work, memory or the background
 producer. The reader scope/filter integration is a separate dependent change.
