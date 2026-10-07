@@ -9912,7 +9912,14 @@ globalThis.__semonUIShared = __semonUIShared;
         return host2.viewerHost?.machinesPath;
       }
     };
-    const urlOf = (r) => routeUrl(r, routeModel), routeOf = (location2) => parseRoute(location2, routeModel);
+    const compatibility = new URLSearchParams(location.search).get("compat") === "1";
+    const urlOf = (r) => {
+      const address = routeUrl(r, routeModel);
+      if (!compatibility) return address;
+      const url = new URL(address, location.href);
+      url.searchParams.set("compat", "1");
+      return url.pathname + url.search + url.hash;
+    }, routeOf = (location2) => parseRoute(location2, routeModel);
     let retryDelay = 1e3;
     let retryTimer;
     let loading = false;

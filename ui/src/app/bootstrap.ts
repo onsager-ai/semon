@@ -58,7 +58,14 @@ export function createBootstrap(host: BootstrapHost) {
       return host.viewerHost?.machinesPath;
     },
   };
-  const urlOf = (r: ApplicationRoute) => routeUrl(r, routeModel),
+  const compatibility = new URLSearchParams(location.search).get('compat') === '1';
+  const urlOf = (r: ApplicationRoute) => {
+      const address = routeUrl(r, routeModel);
+      if (!compatibility) return address;
+      const url = new URL(address, location.href);
+      url.searchParams.set('compat', '1');
+      return url.pathname + url.search + url.hash;
+    },
     routeOf = (location: Pick<Location, 'pathname' | 'search' | 'hash'>) =>
       parseRoute(location, routeModel);
   let retryDelay = 1000;

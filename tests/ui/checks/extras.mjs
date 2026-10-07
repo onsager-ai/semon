@@ -21,7 +21,7 @@
 //     card names its kind once (in its meta line, after the harness mark, #146) and never uses the person icon or a delegation glyph, and the top bar names the kind as a plain label.
 //   - no page errors.
 import path from 'node:path';
-import { ENV, served, goto, data, reporter, overflow } from '../lib.mjs';
+import { ENV, served, goto, data, reporter, overflow, compatibilityUrl } from '../lib.mjs';
 import { XSS, XSS_KEY } from '../fixture.mjs';
 
 const inView = (page, sel) =>
@@ -133,7 +133,7 @@ async function automaticPaging(browser, size, D, r, dark = false) {
       !url.searchParams.has('after')
     );
   });
-  await page.goto(ENV.extraBase + '/s/claude/backlog', { waitUntil: 'load' });
+  await page.goto(compatibilityUrl(ENV.extraBase + '/s/claude/backlog'), { waitUntil: 'load' });
   const range = await (await opened).json();
   await page.waitForSelector('.turns > .turn');
   r.expect(range.from > 0, size + ': backlog opens on a partial last page');
@@ -286,9 +286,12 @@ async function automaticPaging(browser, size, D, r, dark = false) {
 
   // The other margin loads toward the end of a middle page without a click.
   const older = D.turns.filter((t) => t.sid === 'backlog')[1];
-  await page.goto(ENV.extraBase + '/s/claude/backlog?turn=' + encodeURIComponent(older.id), {
-    waitUntil: 'load',
-  });
+  await page.goto(
+    compatibilityUrl(ENV.extraBase + '/s/claude/backlog?turn=' + encodeURIComponent(older.id)),
+    {
+      waitUntil: 'load',
+    },
+  );
   await page.waitForSelector('.turns > .turn');
   const landedRequests = requests.length,
     landedLater = afterRequests.length;
@@ -375,7 +378,7 @@ async function pagingBoundaryCheck(browser, size, D, r) {
       },
     });
   });
-  await page.goto(ENV.extraBase + '/s/claude/backlog', { waitUntil: 'load' });
+  await page.goto(compatibilityUrl(ENV.extraBase + '/s/claude/backlog'), { waitUntil: 'load' });
   await page.waitForSelector('.tgroup');
   await page.mouse.move(size === 'phone' ? 350 : 1200, 300);
   await page.mouse.wheel(0, -1);
@@ -450,7 +453,7 @@ async function pagingChainCheck(browser, size, D, r) {
       },
     });
   });
-  await page.goto(ENV.extraBase + '/s/claude/backlog', { waitUntil: 'load' });
+  await page.goto(compatibilityUrl(ENV.extraBase + '/s/claude/backlog'), { waitUntil: 'load' });
   await page.waitForSelector('[data-load-earlier]');
   await page.waitForTimeout(2200);
   r.expect(
@@ -597,7 +600,7 @@ async function stalePagingCheck(browser, size, D, r) {
       },
     });
   });
-  await page.goto(ENV.extraBase + '/s/claude/backlog', { waitUntil: 'load' });
+  await page.goto(compatibilityUrl(ENV.extraBase + '/s/claude/backlog'), { waitUntil: 'load' });
   await page.waitForSelector('[data-load-earlier]');
   await page.mouse.move(size === 'phone' ? 350 : 1200, 300);
   await page.mouse.wheel(0, -1);
@@ -1368,9 +1371,12 @@ export default async function (browser) {
     await page.screenshot({ path: path.join(ENV.out, 'extras-backlog-start.png') });
     // A deep link to an older turn.
     const older = turns[1];
-    await page.goto(ENV.extraBase + '/s/claude/backlog?turn=' + encodeURIComponent(older.id), {
-      waitUntil: 'load',
-    });
+    await page.goto(
+      compatibilityUrl(ENV.extraBase + '/s/claude/backlog?turn=' + encodeURIComponent(older.id)),
+      {
+        waitUntil: 'load',
+      },
+    );
     await page.waitForFunction(
       (id) => !!document.querySelector('.turn[data-turn="' + CSS.escape(id) + '"]'),
       older.id,
@@ -1477,7 +1483,7 @@ export default async function (browser) {
     );
 
     const childRequestsSettled = trackChildRequests(page);
-    await page.goto(ENV.extraBase + '/s/claude/harbor', { waitUntil: 'load' });
+    await page.goto(compatibilityUrl(ENV.extraBase + '/s/claude/harbor'), { waitUntil: 'load' });
     await page.waitForFunction(() => !!document.querySelector('.turns'));
     await childRequestsSettled();
     await page.evaluate(() =>
@@ -1927,7 +1933,7 @@ export default async function (browser) {
       'the Home badge counts all open inbox items: ' + JSON.stringify(before),
     );
 
-    await page.goto(ENV.extraBase + '/s/claude/result-card?t=' + ENV.extraToken, {
+    await page.goto(compatibilityUrl(ENV.extraBase + '/s/claude/result-card?t=' + ENV.extraToken), {
       waitUntil: 'load',
     });
     await page.waitForFunction(() => !!document.querySelector('.turns .event'));
@@ -1938,7 +1944,9 @@ export default async function (browser) {
       stored.includes(resultHandoff?.id),
       'opening the session stores its result id as seen: ' + JSON.stringify(stored),
     );
-    await page.goto(ENV.extraBase + '/?t=' + ENV.extraToken, { waitUntil: 'load' });
+    await page.goto(compatibilityUrl(ENV.extraBase + '/?t=' + ENV.extraToken), {
+      waitUntil: 'load',
+    });
     await page.waitForFunction(() => document.querySelector('#topbar .t')?.textContent === 'Home');
     const onHome = () =>
       page.evaluate((id) => {

@@ -54,3 +54,12 @@ that estimate as an achieved CI duration.
 
 Shared design rules, consumer auditing and deliberate gallery baseline updates are
 documented in [the design contract](../../docs/design/design-contract.md).
+
+The original complete-model suites enter the explicitly supported `compat=1`
+reader. Their references, mismatch limits and functional assertions are unchanged.
+The interaction lane also runs `ui/tests/catalog-served.mjs` against the actual
+compiled producer and embedded default bundle, at phone and desktop sizes in
+both themes. It checks bounded ranges, recorded field bytes, keyboard paging,
+accessible focus, phone paging targets and sideways overflow, and records PNGs
+for design review. These new images do not replace approved compatibility
+references or claim an approved whole-screen comparison for the new layout.
