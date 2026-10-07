@@ -47,7 +47,16 @@ try:
     if receiver is not None:
         assert isinstance(receiver, str) and 0 < len(receiver.encode()) <= 256
     prior = json.loads((d / 'receipt').read_text()) if busy else {}
-    changed_receiver = prior.get('receiver') != receiver or prior.get('destination') != p['destination']
+    capture_native = p.get('capture_native',False)
+    assert type(capture_native) is bool
+    if capture_native:
+        claim = d / 'controller-install.json'
+        assert not claim.is_symlink() and claim.stat().st_uid == os.getuid() and not claim.stat().st_mode & 0o077
+        native_home = d / 'session' / 'home'
+        for path in (native_home,*native_home.parents):
+            if path == d: break
+            assert not path.is_symlink() and path.stat().st_uid == os.getuid() and not path.stat().st_mode & 0o077
+    changed_receiver = prior.get('receiver') != receiver or prior.get('destination') != p['destination'] or prior.get('capture_native',False) != capture_native
     if busy and ((d / 'token').read_bytes() != p['token'].encode() or changed_receiver):
         # Credential rotation keeps one logical receiver checkpoint. A new
         # receiver or destination must not leave the old watcher publishing.
@@ -87,12 +96,14 @@ try:
                 raise ValueError('unsafe state permissions')
         state_export = 'export XDG_STATE_HOME=' + shlex.quote(str(state_home)) + '\n'
     cmd = [str(d / 'semon'), 'push', '--to', p['destination'], '--token-file', str(d / 'token'), '--watch']
+    if capture_native:
+        cmd.extend(['--codex-home',str(native_home)])
     write('run', ('#!/bin/sh\n' + state_export + 'exec flock -n ' + shlex.quote(str(d / 'watch.lock')) + ' ' + shlex.join(cmd) + '\n').encode(), 0o700)
     if not busy:
         fcntl.flock(watch, fcntl.LOCK_UN)
         process = subprocess.Popen(['nohup', str(d / 'run')], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True, close_fds=True)
         stat = pathlib.Path('/proc/' + str(process.pid) + '/stat').read_text().rsplit(')', 1)[1].split()
-        write('receipt', json.dumps({'pid': process.pid, 'start': stat[19], 'boot': pathlib.Path('/proc/sys/kernel/random/boot_id').read_text(), 'receiver': receiver, 'destination': p['destination']}).encode(), 0o600)
+        write('receipt', json.dumps({'pid': process.pid, 'start': stat[19], 'boot': pathlib.Path('/proc/sys/kernel/random/boot_id').read_text(), 'receiver': receiver, 'destination': p['destination'], 'capture_native':capture_native}).encode(), 0o600)
         time.sleep(0.5)
         try:
             fcntl.flock(watch, fcntl.LOCK_EX | fcntl.LOCK_NB)

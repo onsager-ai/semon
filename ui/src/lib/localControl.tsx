@@ -111,12 +111,12 @@ export function LocalControl({
 }) {
   const [text, setText] = useState('');
   const s = view.snapshot;
-  const canSend =
+  const canWrite =
     !view.busy &&
     !view.uncertain &&
     s.connected &&
-    (s.activeTurn ? s.capabilities.steer : s.capabilities.input) &&
-    !!text.trim();
+    (s.activeTurn ? s.capabilities.steer : s.capabilities.input);
+  const canSend = canWrite && !!text.trim();
   const showStop = !!s.activeTurn && s.capabilities.interrupt && !text.trim();
   const pending = s.requests.filter((r) => r.state.state === 'open' || r.state.state === 'claimed');
   const recent = s.requests
@@ -203,8 +203,10 @@ export function LocalControl({
         aria-busy={view.busy || undefined}
         onSubmit={async (event) => {
           event.preventDefault();
-          if (!canSend) return;
-          const submitted = text;
+          // Input and Enter can share a render batch. Read the current draft,
+          // while native authority and acceptance still govern the write.
+          const submitted = event.currentTarget.querySelector('textarea')?.value ?? text;
+          if (!canWrite || !submitted.trim()) return;
           if (await view.send(submitted))
             setText((current) => (current === submitted ? '' : current));
         }}
@@ -220,7 +222,8 @@ export function LocalControl({
           onKeyDown={(event) => {
             if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
               event.preventDefault();
-              if (canSend) event.currentTarget.form?.requestSubmit();
+              if (canWrite && event.currentTarget.value.trim())
+                event.currentTarget.form?.requestSubmit();
             }
           }}
         />
