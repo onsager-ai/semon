@@ -78,30 +78,35 @@ test(
         errors = [],
         requests = [],
         responses = [],
-        fieldTexts = [];
+        fieldTexts = [],
+        fieldCaptures = [];
       page.on('pageerror', (e) => errors.push(e.message));
       page.on('request', (r) => {
         if (new URL(r.url()).pathname.startsWith('/api/'))
           requests.push(new URL(r.url()).pathname + new URL(r.url()).search);
       });
-      page.on('response', async (r) => {
-        if (new URL(r.url()).pathname.startsWith('/api/')) {
-          const t = r.request().timing();
-          let body = '';
-          try {
-            body = await r.text();
-          } catch {}
-          if (new URL(r.url()).pathname === '/api/session-entry' && r.status() === 200) {
-            const field = JSON.parse(body);
-            fieldTexts[field.field.chunk] = field.text;
+      page.on('response', (r) => {
+        const capture = (async () => {
+          if (new URL(r.url()).pathname.startsWith('/api/')) {
+            const t = r.request().timing();
+            let body = '';
+            try {
+              body = await r.text();
+            } catch {}
+            if (new URL(r.url()).pathname === '/api/session-entry' && r.status() === 200) {
+              const field = JSON.parse(body);
+              fieldTexts[field.field.chunk] = field.text;
+            }
+            responses.push({
+              path: new URL(r.url()).pathname,
+              status: r.status(),
+              bytes: Buffer.byteLength(body),
+              ms: t.responseEnd >= 0 ? t.responseEnd : t.responseStart,
+            });
           }
-          responses.push({
-            path: new URL(r.url()).pathname,
-            status: r.status(),
-            bytes: Buffer.byteLength(body),
-            ms: t.responseEnd >= 0 ? t.responseEnd : t.responseStart,
-          });
-        }
+        })();
+        if (new URL(r.url()).pathname === '/api/session-entry' && r.status() === 200)
+          fieldCaptures.push(capture);
       });
       if (process.env.SEMON_CATALOG_SERVED_UI_OVERRIDE === '1')
         await page.route('**/viewer.js', async (route) =>
@@ -130,6 +135,7 @@ test(
       await page.getByRole('button', { name: 'Load more text', exact: true }).click();
       await page.getByText('Complete recorded text loaded.', { exact: true }).waitFor();
       const fieldMs = performance.now() - fieldStart;
+      await Promise.all(fieldCaptures);
       assert.equal(fieldTexts.join(''), scalar);
       assert.equal(
         (await page.locator('#page').innerText()).match(/Recorded source text\./g)?.length,
@@ -223,6 +229,27 @@ test(
           await context.close();
         }
       }
+      // Losing the observed native source must remain visible without erasing useful
+      // previously loaded history or issuing a complete-model restoration request.
+      const retainedEntry = await page.locator('#page [data-entry-key]').first().elementHandle();
+      await rm(join(home, 'claude', backlog));
+      await page.waitForFunction(
+        () =>
+          /History is incomplete|History is unavailable|Couldn.t read|Retained history remains readable/.test(
+            document.querySelector('#page')?.textContent || '',
+          ),
+        null,
+        { timeout: 30000 },
+      );
+      assert.equal(await retainedEntry.evaluate((node) => node.isConnected), true);
+      assert.equal(
+        (await page.locator('#page').innerText()).match(/Recorded source text\./g)?.length,
+        5000,
+      );
+      assert.equal(
+        requests.some((r) => /^\/api\/(model|tool|tx|image)(\?|$)/.test(r)),
+        false,
+      );
       await page.waitForTimeout(400);
       const evidence = {
         source: process.env.SEMON_CATALOG_SERVED_SOURCE ?? 'unrecorded',
