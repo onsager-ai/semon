@@ -105,7 +105,7 @@ function transcript(key, p, total = 65, generation = 'b') {
     api: 1,
     identity: { ...identity(key), read_scope: 'retained_history' },
     session: meta(key),
-    projection: { version: 1, generation: generation.repeat(64), total },
+    projection: { version: 4, generation: generation.repeat(64), total },
     range: { first, end, next: end < total ? end : null },
     entries: Array.from({ length: end - first }, (_, i) => ({
       k: 'a',
@@ -148,8 +148,25 @@ for (const width of [390, 1280])
             });
           if (u.pathname === '/viewer.css')
             return route.fulfill({ contentType: 'text/css', body: css });
+          if (u.pathname === '/api/session-sources')
+            return route.fulfill({
+              json: {
+                api: 1,
+                items: [
+                  { source_key: 'source', label: 'Same machine' },
+                  { source_key: 'second', label: 'Same machine' },
+                ],
+                next_cursor: null,
+              },
+            });
           if (u.pathname === '/api/session-capabilities')
-            return route.fulfill({ json: { ...capabilities(true), selected_entry: true } });
+            return route.fulfill({
+              json: {
+                ...capabilities(true),
+                source_key: u.searchParams.get('machine') ?? 'source',
+                selected_entry: true,
+              },
+            });
           if (u.pathname === '/api/session-entry') {
             const chunk = Number(u.searchParams.get('field_chunk')),
               key = u.searchParams.get('sid');
@@ -157,7 +174,7 @@ for (const width of [390, 1280])
               json: {
                 api: 1,
                 identity: { ...identity(key), read_scope: 'retained_history' },
-                projection: { version: 1, generation: nativeGeneration.repeat(64) },
+                projection: { version: 4, generation: nativeGeneration.repeat(64) },
                 slot: 6,
                 field: { name: 'text', chunk, next: chunk === 0 ? 1 : null, complete: chunk === 1 },
                 text: chunk === 0 ? 'First native text chunk ' : 'and final native text chunk.',
@@ -169,10 +186,26 @@ for (const width of [390, 1280])
           }
           if (u.pathname === '/api/session-identity')
             return route.fulfill({
-              json: { api: 1, identity: identity(u.searchParams.get('sid')) },
+              json: {
+                api: 1,
+                identity: {
+                  ...identity(u.searchParams.get('sid')),
+                  source_key: u.searchParams.get('machine') ?? 'source',
+                },
+              },
             });
           if (u.pathname === '/api/sessions')
-            return route.fulfill({ json: list([meta('one'), meta('two')]) });
+            return route.fulfill({
+              json: {
+                ...list([meta('one'), meta('two')]),
+                machine: u.searchParams.get('machine'),
+                machine_info: {
+                  key: u.searchParams.get('machine'),
+                  label: 'Same machine',
+                  freshness: 'cached',
+                },
+              },
+            });
           if (u.pathname === '/api/session-transcript') {
             if (
               u.searchParams.has('generation') &&
@@ -182,14 +215,14 @@ for (const width of [390, 1280])
                 status: 409,
                 json: { error: 'stale_projection', resynchronize: true },
               });
-            return route.fulfill({
-              json: transcript(
-                u.searchParams.get('sid'),
-                u.searchParams,
-                nativeTotal,
-                nativeGeneration,
-              ),
-            });
+            const value = transcript(
+              u.searchParams.get('sid'),
+              u.searchParams,
+              nativeTotal,
+              nativeGeneration,
+            );
+            value.identity.source_key = u.searchParams.get('machine');
+            return route.fulfill({ json: value });
           }
           if (u.pathname.startsWith('/api/')) return route.fulfill({ status: 404, body: '' });
           return route.fulfill({ contentType: 'text/html', body: html });
@@ -256,6 +289,7 @@ for (const width of [390, 1280])
             path: process.env.SEMON_CATALOG_OUT + '/list-' + width + '-' + colorScheme + '.png',
           });
         }
+        if (width === 1280) await page.getByRole('button', { name: 'Collapse sidebar' }).click();
         await page.locator('#page [data-id="one"]').click();
         await page.locator('#page [data-entry-key="one:5"]').waitFor();
         const original = await page.evaluateHandle(() =>
@@ -288,6 +322,13 @@ for (const width of [390, 1280])
         await page.evaluate(() => document.querySelector('#nav a, #nav button')?.click());
         await page.locator('#page [data-id="two"]').click();
         await page.locator('#page [data-entry-key="two:5"]').waitFor();
+        if (width === 1280) {
+          assert.equal(
+            await page.locator('.app').evaluate((node) => node.classList.contains('rail')),
+            true,
+          );
+          await page.getByRole('button', { name: 'Expand sidebar' }).waitFor();
+        }
         await page.evaluate(() => document.querySelector('#nav a, #nav button')?.click());
         await page.locator('#page [data-id="one"]').click();
         assert.equal(
@@ -298,6 +339,28 @@ for (const width of [390, 1280])
           true,
         );
         await page.locator('#page [data-entry-key="one:0"]').waitFor();
+        await page.evaluate(() => document.querySelector('#nav [data-go="sources"]').click());
+        await page.locator('[data-source-key="second"]').click();
+        await page.locator('#page [data-id="one"]').click();
+        await page.locator('#page [data-entry-key="one:5"]').waitFor();
+        await page.locator('#page textarea').fill('Second source draft');
+        await page.evaluate(() => document.querySelector('#nav [data-go="sources"]').click());
+        await page.locator('[data-source-key="source"]').click();
+        await page.locator('#page [data-entry-key="one:0"]').waitFor();
+        assert.equal(await page.locator('#page textarea').inputValue(), 'Retained native draft');
+        assert.equal(
+          await page.evaluate(
+            (node) => node === document.querySelector('#page [data-entry-key="one:5"]'),
+            original,
+          ),
+          true,
+        );
+        await page.goBack();
+        await page.locator('#page [data-entry-key="one:5"]').waitFor();
+        assert.equal(await page.locator('#page textarea').inputValue(), 'Second source draft');
+        await page.goForward();
+        await page.locator('#page [data-entry-key="one:0"]').waitFor();
+        assert.equal(await page.locator('#page textarea').inputValue(), 'Retained native draft');
         if (process.env.SEMON_CATALOG_OUT)
           await page.screenshot({
             path: process.env.SEMON_CATALOG_OUT + '/selected-' + width + '-' + colorScheme + '.png',
@@ -366,8 +429,10 @@ for (const width of [390, 1280])
         assert.ok(
           requests
             .filter((p) => p.startsWith('/api/session-transcript'))
-            .every(
-              (p) => new URL('http://catalog.test' + p).searchParams.get('machine') === 'source',
+            .every((p) =>
+              ['source', 'second'].includes(
+                new URL('http://catalog.test' + p).searchParams.get('machine'),
+              ),
             ),
         );
         await page.evaluate(() => app.destroy());
