@@ -1187,7 +1187,7 @@ mod tests {
                 connection
                     .query_row("PRAGMA user_version", [], |row| row.get::<_, u32>(0))
                     .unwrap(),
-                11
+                14
             );
         }
     }
@@ -2154,7 +2154,11 @@ mod tests {
         let fresh: Value = serde_json::from_slice(&fresh.body).unwrap();
         assert_eq!(fresh["entries"][0]["text"], "rewritten prompt");
         assert_eq!(fresh["freshness"]["state"], "cached");
-        assert_ne!(fresh["generation"], old["generation"]);
+        assert!(fresh["projection"]["generation"].is_string());
+        assert_ne!(
+            fresh["projection"]["generation"],
+            old["projection"]["generation"]
+        );
     }
 
     #[test]
