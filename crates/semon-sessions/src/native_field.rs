@@ -211,7 +211,9 @@ pub(crate) fn read_source_record(
     source: &crate::model::summary::CatalogSource,
     offset: u64,
 ) -> Option<Vec<u8>> {
-    if source.immutable_generation.is_some() { return None; }
+    if source.immutable_generation.is_some() {
+        return None;
+    }
     let remaining = source.offset.checked_sub(offset)?;
     if remaining == 0 {
         return None;
@@ -247,7 +249,7 @@ fn source_matches(
     let identity = (0, 0);
     source.changed_ns.is_some()
         && source.changed_ns == crate::events::change_time_ns(metadata)
-        && (Some(identity.0),Some(identity.1)) == (source.dev, source.ino)
+        && (Some(identity.0), Some(identity.1)) == (source.dev, source.ino)
         && metadata.len() == source.size
         && metadata
             .modified()
