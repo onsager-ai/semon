@@ -60,6 +60,11 @@ pub struct CatalogSessionIdentity {
     pub generation: String,
     pub observed_at: Option<i64>,
     pub freshness: CatalogFreshness,
+    /// Original machine-facts observation, independent of source byte availability.
+    pub facts_observation: CatalogFreshness,
+    /// Current native manifest observation; absent for harnesses without one.
+    /// Neither observation grants runtime or credential authority.
+    pub native_selection: Option<CatalogFreshness>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -118,6 +123,8 @@ pub fn session_catalog_identity(
         native_ids: Vec<String>,
         source_refs: Vec<CatalogSourceObservation>,
         freshness: CatalogFreshness,
+        facts_observation: CatalogFreshness,
+        native_selection: Option<CatalogFreshness>,
     }
     let item: Item = serde_json::from_value(body["items"][0].clone()).map_err(|_| Unavailable)?;
     let native_ids: Vec<String> = item
@@ -153,6 +160,8 @@ pub fn session_catalog_identity(
         generation,
         observed_at,
         freshness: item.freshness,
+        facts_observation: item.facts_observation,
+        native_selection: item.native_selection,
     }))
 }
 
@@ -637,12 +646,20 @@ fn read_page(
                 page_state = "stale";
             }
         }
+        let is_codex = row.harness == "codex";
         let mut item = serde_json::to_value(row)?;
         item.as_object_mut()
             .expect("catalog row object")
             .remove("sources");
         item["source_refs"] = json!(refs);
         item["freshness"] = json!({"state":state});
+        item["facts_observation"] =
+            json!({"state":if facts_known { "cached" } else { "unavailable" }});
+        item["native_selection"] = if is_codex {
+            json!({"state":if !facts_known { "unavailable" } else if codex_selection_known { "cached" } else { "incomplete" }})
+        } else {
+            serde_json::Value::Null
+        };
         items.push(item);
     }
     if recorded
@@ -988,6 +1005,8 @@ mod tests {
             .unwrap();
         assert_eq!(missing.freshness.state, "incomplete");
         assert_eq!(missing.source_refs[0].state, "unavailable");
+        assert_eq!(missing.facts_observation.state, "cached");
+        assert_eq!(missing.native_selection, None);
         let mut changed = fixture.options.clone();
         changed.claude_home = fixture.root.join("different-root");
         assert_eq!(
@@ -1021,6 +1040,8 @@ mod tests {
         let corrupt = read().unwrap().unwrap();
         assert_eq!(corrupt.freshness.state, "unavailable");
         assert_eq!(corrupt.machine_label, None);
+        assert_eq!(corrupt.facts_observation.state, "unavailable");
+        assert_eq!(corrupt.native_selection.unwrap().state, "unavailable");
         assert_eq!(corrupt.source_refs[0].state, "cached");
         assert_eq!(
             fixture.body("sid=session-00000").1["items"][0]["freshness"]["state"],
@@ -1217,6 +1238,36 @@ mod tests {
         assert_eq!(body["entries"][1]["freshness"]["state"], "incomplete");
         crate::events::CACHE_READS.with(|reads| assert_eq!(reads.get(), 0));
         assert!(!path.exists());
+    }
+
+    #[test]
+    fn unavailable_content_does_not_erase_current_machine_and_native_selection_observation() {
+        let fixture = Fixture::new();
+        let relative = "sessions/2026/10/01/rollout-codex-session.jsonl";
+        let path = fixture.options.codex_home.join(relative);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, format!("{}\n", json!({"type":"session_meta","timestamp":"2026-10-01T00:00:00Z","payload":{"id":"codex-session","cwd":"/synthetic/project"}}))).unwrap();
+        fixture.publish(1);
+        let facts_path = fixture.options.facts.as_ref().unwrap();
+        let mut facts = crate::read_facts(facts_path).unwrap();
+        facts.codex_rollouts = Some(std::collections::BTreeSet::from([relative.to_owned()]));
+        crate::write_facts(facts_path, &facts).unwrap();
+        fs::remove_file(path).unwrap();
+        let read = || session_catalog_identity(&fixture.options, "stable-source", "codex-session");
+        let missing = read().unwrap().unwrap();
+        assert_eq!(missing.freshness.state, "unavailable");
+        assert_eq!(missing.source_refs[0].state, "unavailable");
+        assert_eq!(missing.facts_observation.state, "cached");
+        assert_eq!(missing.native_selection.unwrap().state, "cached");
+        facts.codex_rollouts = None;
+        crate::write_facts(facts_path, &facts).unwrap();
+        assert_eq!(
+            read().unwrap().unwrap().native_selection.unwrap().state,
+            "incomplete"
+        );
+        facts.codex_rollouts = Some(std::collections::BTreeSet::new());
+        crate::write_facts(facts_path, &facts).unwrap();
+        assert_eq!(read(), Err(CatalogIdentityError::ScopeChanged));
     }
 
     #[test]
