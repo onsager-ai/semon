@@ -827,7 +827,7 @@ impl IndexStore for SqliteStore {
         let version = crate::model::summary::CATALOG_VERSION.to_string();
         let metadata: Vec<_> = rows
             .iter()
-            .map(|row| json(row))
+            .map(json)
             .collect::<Result<_, _>>()
             .map_err(failure)?;
         let generation = format!(
@@ -844,6 +844,39 @@ impl IndexStore for SqliteStore {
                 .map_err(failure)?;
             if !current(&transaction).map_err(failure)? {
                 return Ok(Outcome::Stale);
+            }
+            // Do not let a slow builder overwrite a newer complete catalog.
+            // Verify source membership and consumed-prefix identities inside
+            // the publication transaction, after any competing ledger writes.
+            let mut sources = BTreeMap::new();
+            for source in rows.iter().flat_map(|row| &row.sources) {
+                sources.insert(source.path.to_string_lossy().into_owned(), source);
+            }
+            let committed: usize = transaction
+                .query_row("SELECT COUNT(*) FROM files", [], |row| row.get(0))
+                .map_err(failure)?;
+            if committed != sources.len() {
+                return Ok(Outcome::Conflict);
+            }
+            for (path, source) in sources {
+                let Some((_, ledger)) = ledger_row(&transaction, &path).map_err(failure)? else {
+                    return Ok(Outcome::Conflict);
+                };
+                if (
+                    ledger.stat.dev,
+                    ledger.stat.ino,
+                    ledger.offset,
+                    ledger.prefix,
+                    ledger.tail,
+                ) != (
+                    source.dev,
+                    source.ino,
+                    source.offset,
+                    source.prefix_sha256,
+                    source.tail_sha256,
+                ) {
+                    return Ok(Outcome::Conflict);
+                }
             }
             let previous: Option<String> = transaction
                 .query_row(
