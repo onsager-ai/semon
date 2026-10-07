@@ -15,8 +15,9 @@ use serde_json::Value;
 mod analytics;
 mod catalog;
 pub use catalog::{
-    CatalogFreshness, CatalogIdentityError, CatalogSessionIdentity, CatalogSourceObservation,
-    SessionSourceProof, SessionSourceRef, session_catalog_identity, session_catalog_page,
+    CatalogFreshness, CatalogIdentityError, CatalogReadScope, CatalogSessionIdentity,
+    CatalogSourceObservation, SessionSourceProof, SessionSourceRef,
+    session_catalog_history_identity, session_catalog_identity, session_catalog_page,
     session_source_proof,
 };
 mod claude_usage;
