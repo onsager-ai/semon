@@ -101,10 +101,30 @@ impl Summary {
     }
 }
 
+/// Read-model observation state, never runtime or credential authority.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum CatalogLifecycle {
+    #[default]
+    Current,
+    Retained,
+}
+
+impl CatalogLifecycle {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Current => "current",
+            Self::Retained => "retained",
+        }
+    }
+}
+
 /// Stable metadata used by focused cold list queries. No clock or process facts.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct CatalogRow {
+    #[serde(default)]
+    pub(crate) lifecycle: CatalogLifecycle,
     pub(crate) key: String,
     pub(crate) name: String,
     pub(crate) harness: String,
@@ -142,7 +162,7 @@ pub(crate) struct CatalogSource {
     pub(crate) tail_sha256: [u8; 32],
 }
 
-pub(crate) const CATALOG_VERSION: u32 = 2;
+pub(crate) const CATALOG_VERSION: u32 = 3;
 
 pub(super) fn catalog(builder: &Builder<'_>, handoffs: &[Handoff]) -> Vec<CatalogRow> {
     let mut rows = Vec::new();
@@ -178,6 +198,7 @@ pub(super) fn catalog(builder: &Builder<'_>, handoffs: &[Handoff]) -> Vec<Catalo
             .into_iter()
             .collect();
         rows.push(CatalogRow {
+            lifecycle: CatalogLifecycle::Current,
             key: session.key.clone(),
             name: out.name.clone(),
             harness: out.harness.into(),
