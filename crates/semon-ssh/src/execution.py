@@ -56,26 +56,39 @@ def rpc(payload):
         return json.loads(data)
 
 def evidence(record):
-    # Missing controller or action evidence stays unknown. Never resend work.
+    # Missing controller/action/index evidence stays unknown. Never resend work.
     try:
-        if record['method'] == 'revoke':
-            ended = read(enrollment / 'ended.json')
-            if ended.get('ended') is True and ended.get('thread') == scope['thread']:
-                record['receipt']['writer_excluded'] = True
+        if record['method']=='revoke':
+            ended=read(enrollment/'ended.json')
+            installed=enrollment/'controller-install.json'
+            if ended.get('ended') is True and ended.get('thread')==scope['thread']:
+                if not installed.exists() or (ended.get('binding')==read(installed)['binding'] and ended.get('writer_excluded') is True and ended.get('supervisor_reaped') is True):
+                    record['receipt']['writer_excluded']=True
             return record
-        response = rpc({'op': 'snapshot'})
-        snap = response['snapshot']
-        if snap.get('thread') != scope['thread']: return record
-        if record['method'] == 'dispatch':
-            delivery = snap.get('actions', {}).get(identifier, {}).get('delivery')
-            if delivery == 'accepted': record['receipt']['outcome'] = 'accepted'
-            # Missing evidence cannot prove rejection or writer exclusion.
-        elif record['method'] == 'reconnect' and snap.get('connected') is True:
-            record['receipt']['outcome'] = 'reconnected'
-        elif record['method'] == 'repair' and snap.get('renewalId') == identifier:
-            record['receipt']['outcome'] = 'repaired'
-    except Exception:
-        pass
+        snap=rpc({'op':'snapshot'})['snapshot']
+        if snap.get('thread')!=scope['thread']: return record
+        if record['method']=='dispatch':
+            delivery=snap.get('actions',{}).get(identifier,{}).get('delivery')
+            if delivery=='accepted': record['receipt']['outcome']='accepted'
+        elif record['method']=='reconnect' and snap.get('connected') is True:
+            record['receipt']['outcome']='reconnected'
+        elif record['method']=='repair' and snap.get('renewalId')==identifier:
+            record['receipt']['outcome']='repaired'
+    except Exception: pass
+    if record['method']=='dispatch' and record['receipt']['outcome']=='unknown' and 'native_identity' in record:
+        try:
+            proof=read(enrollment/'native-receipts'/(identifier+'.json'))
+            stable=read(enrollment/'controller-install.json')['binding']
+            if proof.get('thread')==scope['thread'] and proof.get('binding')==stable and proof.get('native_identity')==record['native_identity'] and proof.get('delivery') in ('accepted','rejected'):
+                record['receipt']['outcome']=proof['delivery']
+        except Exception: pass
+    if record['method']=='repair' and record['receipt']['outcome']=='unknown':
+        try:
+            proof=read(enrollment/'native-renewals'/(identifier+'.json'))
+            stable=read(enrollment/'controller-install.json')['binding']
+            if proof.get('thread')==scope['thread'] and proof.get('binding')==stable and proof.get('generation')==record['identity'] and proof.get('state')=='accepted':
+                record['receipt']['outcome']='repaired'
+        except Exception: pass
     return record
 
 try:
@@ -105,6 +118,12 @@ try:
             info = ancestor.lstat()
             if info.st_uid != os.getuid() or info.st_mode & 0o022: refuse(46)
     private(enrollment, True)
+    installed = enrollment / 'controller-install.json'
+    if installed.exists() or installed.is_symlink():
+        launch = read(enrollment / 'launch.json')
+        stable = read(installed)['binding']
+        if any(stable.get(key) != scope[key] for key in ('owner','workspace','connection','session','model_connection','epoch')) or launch.get('thread') != scope['thread']:
+            refuse(44)
     root = enrollment / 'execution'
     root.mkdir(mode=0o700, exist_ok=True)
     private(root, True)
@@ -163,6 +182,8 @@ try:
     if grant['revoked']: refuse(44)
     payload = request['payload']
     record = {'binding':binding,'method':method,'identity':identity,'receipt':{'id':identifier,'outcome':'unknown','writer_excluded':False}}
+    if method=='dispatch':
+        record['native_identity']={'generation':payload['generation'],'input_sha256':hashlib.sha256(payload['text'].encode()).hexdigest()}
     if method == 'revoke':
         # Revocation fences future delivery even if shutdown cannot be confirmed.
         grant['revoked'] = True
@@ -183,7 +204,7 @@ try:
         else:
             model = payload.get('model_key')
             if not isinstance(model,str) or not 1 <= len(model) <= 4096 or any(ord(c)<32 for c in model): refuse(46)
-            command = {'op':'renew','id':identifier,'method':'openai_api_key','model_key':model}
+            command = {'op':'renew','id':identifier,'method':'openai_api_key','model_key':model,'model_generation':payload['generation']}
     # This durable claim is the no-replay boundary. Cancellation, expiry or crash
     # after this fsync leaves Unknown until qualified driver evidence resolves it.
     atomic(receiptpath, record)
