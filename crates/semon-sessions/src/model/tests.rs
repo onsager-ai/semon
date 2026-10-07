@@ -6316,7 +6316,7 @@ fn schema_four_upgrade_preserves_event_indices_and_observed_runs() {
     let version: i64 = connection
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 11);
+    assert_eq!(version, 13);
 }
 
 #[test]
@@ -6559,6 +6559,265 @@ fn interrupted_catalog_publication_retains_one_generation_and_recovers_on_restar
         )
         .unwrap();
     assert_eq!(pending, 0);
+}
+
+#[test]
+fn partial_lineage_source_disappearance_preserves_natural_history_context() {
+    let home = Home::new();
+    home.top(
+        "root",
+        &[uuid(
+            human("root", ts(0, 0), "original root prompt"),
+            "root-event",
+        )],
+    );
+    home.top("cleared", &[json!({"type":"user","uuid":"cleared-event","timestamp":ts(0,1),"sessionId":"cleared","session_id":"root","origin":{"kind":"human"},"message":{"role":"user","content":"original cleared prompt"}})]);
+    home.build();
+    let (_, before) = read_catalog(&home);
+    let root = before.iter().find(|row| row.key == "root").unwrap();
+    assert_eq!(root.sources.len(), 2);
+    let removed = root
+        .sources
+        .iter()
+        .find(|source| source.native_id == "cleared")
+        .unwrap()
+        .clone();
+    let before_identity = crate::session_catalog_history_identity(&home.options, "fixture", "root")
+        .unwrap()
+        .unwrap();
+    assert_eq!(before_identity.source_refs.len(), 2);
+    let original = fs::read(&removed.path).unwrap();
+    let before_body = crate::session_transcript_range(
+        &home.options,
+        "fixture",
+        "sid=root&scope=retained_history&after=0&limit=100",
+        None,
+    );
+    assert_eq!(before_body.status, 200);
+    let before_body: Value = serde_json::from_slice(&before_body.body).unwrap();
+    let original_entry = before_body["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["text"] == "original cleared prompt")
+        .unwrap()
+        .clone();
+    fs::remove_file(&removed.path).unwrap();
+    let current = home.build();
+    assert!(current.sessions.contains_key("root"));
+    let (_, after) = read_catalog(&home);
+    let root = after.iter().find(|row| row.key == "root").unwrap();
+    assert_eq!(root.lifecycle, super::summary::CatalogLifecycle::Current);
+    assert_eq!(root.sources.len(), 1);
+    let history = crate::session_catalog_history_identity(&home.options, "fixture", "root")
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        history.source_refs.len(),
+        2,
+        "a current canonical owner must retain its disappeared native source for natural History reads"
+    );
+    assert!(
+        history
+            .source_refs
+            .iter()
+            .any(|source| source.source.native_id == "cleared"
+                && source.source.prefix_sha256 == removed.prefix_sha256)
+    );
+    let ready = crate::source_projection_ready(
+        &home.options,
+        "claude",
+        "projects/-work-proj/cleared.jsonl",
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(ready.lifecycle, "retained");
+    assert_eq!(ready.source.prefix_sha256, removed.prefix_sha256);
+    struct Archive {
+        bytes: Vec<u8>,
+        calls: std::sync::atomic::AtomicUsize,
+    }
+    impl crate::SessionSourceReader for Archive {
+        fn read_range(
+            &self,
+            source: &crate::SessionSourceRef,
+            expected: Option<&str>,
+            offset: u64,
+            max: usize,
+        ) -> io::Result<crate::SessionSourceRange> {
+            assert_eq!(source.native_id, "cleared");
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            let generation = format!("{:x}", sha2::Sha256::digest(&self.bytes));
+            assert!(expected.is_none_or(|expected| expected == generation));
+            let end = (offset as usize + max).min(self.bytes.len());
+            Ok(crate::SessionSourceRange {
+                generation,
+                length: self.bytes.len() as u64,
+                offset,
+                bytes: std::sync::Arc::from(&self.bytes[offset as usize..end]),
+                cached: false,
+            })
+        }
+    }
+    use sha2::Digest;
+    let archive = Archive {
+        bytes: original,
+        calls: std::sync::atomic::AtomicUsize::new(0),
+    };
+    let read = || {
+        crate::events::CACHE_READS.with(|reads| reads.set(0));
+        let reply = crate::session_transcript_range_with_mode(
+            &home.options,
+            "fixture",
+            "sid=root&scope=retained_history&after=0&limit=100",
+            Some(&archive),
+            crate::SessionSourceReadMode::LocalThenProvider,
+        );
+        assert_eq!(
+            reply.status,
+            200,
+            "{}",
+            String::from_utf8_lossy(&reply.body)
+        );
+        crate::events::CACHE_READS.with(|reads| assert_eq!(reads.get(), 0));
+        serde_json::from_slice::<Value>(&reply.body).unwrap()
+    };
+    let retained = read();
+    let entry = retained["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["text"] == "original cleared prompt")
+        .unwrap();
+    assert_eq!(entry["entry_id"], original_entry["entry_id"]);
+    assert_eq!(entry["provenance"], original_entry["provenance"]);
+    assert!(archive.calls.load(Ordering::Relaxed) > 0);
+    assert!(!removed.path.exists());
+    let current_identity = crate::session_catalog_identity(&home.options, "fixture", "root")
+        .unwrap()
+        .unwrap();
+    assert_eq!(current_identity.source_refs.len(), 1);
+    assert_eq!(current_identity.native_id.as_deref(), Some("root"));
+    // Current work can advance while the original disappeared path stays part
+    // of natural history after another complete observation and cold restart.
+    let root_path = home
+        .options
+        .claude_home
+        .join("projects/-work-proj/root.jsonl");
+    let mut file = fs::OpenOptions::new().append(true).open(root_path).unwrap();
+    writeln!(
+        file,
+        "{}",
+        uuid(
+            assistant("root", ts(0, 2), vec![text("new current answer")]),
+            "new-current-answer"
+        )
+    )
+    .unwrap();
+    drop(file);
+    home.build();
+    home.build();
+    let advanced = read();
+    let entries = advanced["entries"].as_array().unwrap();
+    assert_eq!(
+        entries
+            .iter()
+            .filter(|entry| entry["text"] == "original cleared prompt")
+            .count(),
+        1
+    );
+    assert!(
+        entries
+            .iter()
+            .any(|entry| entry["text"] == "new current answer")
+    );
+    assert!(!removed.path.exists());
+    let connection = rusqlite::Connection::open(EventCache::path(&home.options.cache)).unwrap();
+    let body_leaks:i64=connection.query_row("SELECT count(*) FROM session_history_slots WHERE instr(metadata,'original cleared prompt')>0 OR instr(metadata,'new current answer')>0",[],|row|row.get(0)).unwrap();
+    assert_eq!(body_leaks, 0);
+    let plan:String=connection.query_row("EXPLAIN QUERY PLAN SELECT metadata FROM session_history_slots WHERE session_key='root' AND slot>=0 AND slot<2 ORDER BY slot",[],|row|row.get(3)).unwrap();
+    assert!(
+        plan.contains("SEARCH session_history_slots USING PRIMARY KEY"),
+        "{plan}"
+    );
+    let ranged = || {
+        let mut query=connection.prepare("SELECT metadata FROM session_history_slots WHERE session_key='root' AND slot>=0 AND slot<2 ORDER BY slot").unwrap();
+        let rows: Vec<String> = query
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        (rows, query.get_status(rusqlite::StatementStatus::VmStep))
+    };
+    let baseline = ranged();
+    // Isolate ranged storage work: unrelated retained recipe rows, without
+    // native-file discovery or a producer build, grow from zero to 20,000.
+    connection.execute_batch("WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM n WHERE x<20000) INSERT INTO session_history_slots(session_key,slot,metadata) SELECT 'unrelated-'||printf('%05d',x),0,metadata FROM n,session_history_slots WHERE session_key='root' AND slot=0").unwrap();
+    assert_eq!(ranged(), baseline);
+    let grown = read();
+    assert_eq!(grown["entries"], advanced["entries"]);
+    assert_eq!(grown["projection"], advanced["projection"]);
+    assert_eq!(
+        grown["observation"]["source_bytes"],
+        advanced["observation"]["source_bytes"]
+    );
+    eprintln!(
+        "partial-lineage ranged isolation: unrelated recipe owners 0->20000, fixed slots 0..2, VM steps {}, response bytes {}, selected source bytes {}",
+        baseline.1,
+        serde_json::to_vec(&grown).unwrap().len(),
+        grown["observation"]["source_bytes"]
+    );
+}
+
+#[test]
+fn partial_lineage_unsupported_recipes_remain_visible_and_block_eviction() {
+    let home = Home::new();
+    home.top("root", &[human("root", ts(0, 0), "current root prompt")]);
+    let removed=home.top("cleared", &[json!({"type":"user","uuid":"old-event","timestamp":ts(0,1),"sessionId":"cleared","session_id":"root","origin":{"kind":"human"},"message":{"role":"user","content":"unsupported old native prompt"}})]);
+    home.build();
+    let connection = rusqlite::Connection::open(EventCache::path(&home.options.cache)).unwrap();
+    connection
+        .execute(
+            "UPDATE session_slot_projections SET version=version+1 WHERE session_key='root'",
+            [],
+        )
+        .unwrap();
+    fs::remove_file(removed).unwrap();
+    home.build();
+    let history = crate::session_catalog_history_identity(&home.options, "fixture", "root")
+        .unwrap()
+        .unwrap();
+    assert_eq!(history.source_refs.len(), 2);
+    let current = crate::session_catalog_identity(&home.options, "fixture", "root")
+        .unwrap()
+        .unwrap();
+    assert_eq!(current.source_refs.len(), 1);
+    assert!(
+        crate::source_projection_ready(
+            &home.options,
+            "claude",
+            "projects/-work-proj/cleared.jsonl"
+        )
+        .unwrap()
+        .is_none()
+    );
+    let reply = crate::session_transcript_range(
+        &home.options,
+        "fixture",
+        "sid=root&scope=retained_history&after=0&limit=100",
+        None,
+    );
+    assert_eq!(reply.status, 200);
+    let body: Value = serde_json::from_slice(&reply.body).unwrap();
+    assert_eq!(body["projection"]["history_incomplete"], true);
+    assert_eq!(body["content_observation"]["state"], "incomplete");
+    assert!(
+        body["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|entry| entry["text"] != "unsupported old native prompt")
+    );
 }
 
 #[test]
