@@ -308,3 +308,10 @@ The browser contract uses synthetic source payloads and the actual shared
 renderers; it does not establish production body-span, archive, host authorization
 or connection-to-session integration performance. Those require the matching
 backend capability/projection producer and recorded artifact revisions.
+Status snapshots may include a typed `runtime` observation on the existing native
+control snapshot: `{state, phase, freshness, reconnectable}` and optional
+`presence`, `observedAt`, `observationError`, `updating`. Durable session phase,
+compute presence and observation freshness are separate. Non-active states
+carry disabled native capabilities. Ended and failed states have explicit
+presentation; they retain the composer and its draft and do not advertise native
+reconnect. A final end invalidates pending command receipts without replay.
