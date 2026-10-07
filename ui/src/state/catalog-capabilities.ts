@@ -6,6 +6,7 @@ export interface CatalogCapabilities {
   selected_transcript: boolean;
   selected_identity: boolean;
   selected_entry: boolean;
+  source_candidates: boolean;
   attachment: boolean;
   relationship_context: boolean;
   large_native_records: boolean;
@@ -39,6 +40,7 @@ export function parseCatalogCapabilities(value: unknown): CatalogCapabilities {
     selected_transcript: boolean(row.selected_transcript),
     selected_identity: boolean(row.selected_identity),
     selected_entry: boolean(row.selected_entry),
+    source_candidates: row.source_candidates === undefined ? false : boolean(row.source_candidates),
     attachment: boolean(row.attachment),
     relationship_context: boolean(row.relationship_context),
     large_native_records: boolean(row.large_native_records),
