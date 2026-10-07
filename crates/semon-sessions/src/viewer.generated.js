@@ -7057,13 +7057,13 @@ globalThis.__semonUIShared = __semonUIShared;
       (key) => record2(value.capabilities) && typeof value.capabilities[key] === "boolean"
     ) || !Array.isArray(value.requests) || value.requests.length > 1280 || !record2(value.actions))
       throw new Error("Invalid control snapshot");
-    if (value.runtime !== void 0 && (!record2(value.runtime) || !["active", "disconnected", "failed", "ended", "unavailable"].includes(
+    if (value.runtime !== void 0 && (!record2(value.runtime) || typeof value.runtime.state !== "string" || !["active", "disconnected", "failed", "ended", "unavailable"].includes(
       String(value.runtime.state)
-    ) || typeof value.runtime.phase !== "string" || value.runtime.phase.length > 64 || !["current", "updating", "stale", "unavailable"].includes(String(value.runtime.freshness)) || typeof value.runtime.reconnectable !== "boolean"))
+    ) || typeof value.runtime.phase !== "string" || value.runtime.phase.length > 64 || typeof value.runtime.freshness !== "string" || !["current", "updating", "stale", "unavailable"].includes(value.runtime.freshness) || typeof value.runtime.reconnectable !== "boolean"))
       throw new Error("Invalid runtime status");
-    if (record2(value.runtime) && (value.runtime.presence !== void 0 && !["active", "absent", "paused", "transitioning", "failed", "unknown"].includes(
+    if (record2(value.runtime) && (value.runtime.presence !== void 0 && (typeof value.runtime.presence !== "string" || !["active", "absent", "paused", "transitioning", "failed", "unknown"].includes(
       String(value.runtime.presence)
-    ) || value.runtime.observedAt !== void 0 && value.runtime.observedAt !== null && (typeof value.runtime.observedAt !== "string" || value.runtime.observedAt.length > 64 || !Number.isFinite(Date.parse(value.runtime.observedAt))) || value.runtime.observationError !== void 0 && value.runtime.observationError !== null && (typeof value.runtime.observationError !== "string" || value.runtime.observationError.length > 512) || value.runtime.updating !== void 0 && typeof value.runtime.updating !== "boolean" || value.runtime.state !== "active" && (value.runtime.reconnectable || value.connected || ["input", "steer", "interrupt", "commandApproval", "fileApproval", "questions"].some(
+    )) || value.runtime.observedAt !== void 0 && value.runtime.observedAt !== null && (typeof value.runtime.observedAt !== "string" || value.runtime.observedAt.length > 64 || !Number.isFinite(Date.parse(value.runtime.observedAt))) || value.runtime.observationError !== void 0 && value.runtime.observationError !== null && (typeof value.runtime.observationError !== "string" || value.runtime.observationError.length > 512) || value.runtime.updating !== void 0 && typeof value.runtime.updating !== "boolean" || value.runtime.state !== "active" && (value.runtime.reconnectable || value.connected || ["input", "steer", "interrupt", "commandApproval", "fileApproval", "questions"].some(
       (key) => record2(value.capabilities) && value.capabilities[key] === true
     ))))
       throw new Error("Invalid runtime authority");
@@ -15554,9 +15554,9 @@ globalThis.__semonUIShared = __semonUIShared;
     if (!value || typeof value !== "object" || Array.isArray(value))
       throw new Error("Invalid readonly runtime observation");
     const row = value;
-    if (!["active", "disconnected", "failed", "ended", "unavailable"].includes(String(row.state)) || typeof row.phase !== "string" || row.phase.length > 64 || !["current", "updating", "stale", "unavailable"].includes(String(row.freshness)) || row.presence !== void 0 && !["active", "absent", "paused", "transitioning", "failed", "unknown"].includes(
-      String(row.presence)
-    ) || row.observedAt !== void 0 && row.observedAt !== null && (typeof row.observedAt !== "string" || row.observedAt.length > 64 || !Number.isFinite(Date.parse(row.observedAt))) || row.observationError !== void 0 && row.observationError !== null && (typeof row.observationError !== "string" || row.observationError.length > 512) || row.updating !== void 0 && typeof row.updating !== "boolean")
+    if (typeof row.state !== "string" || !["active", "disconnected", "failed", "ended", "unavailable"].includes(row.state) || typeof row.phase !== "string" || row.phase.length > 64 || typeof row.freshness !== "string" || !["current", "updating", "stale", "unavailable"].includes(row.freshness) || row.presence !== void 0 && (typeof row.presence !== "string" || !["active", "absent", "paused", "transitioning", "failed", "unknown"].includes(
+      row.presence
+    )) || row.observedAt !== void 0 && row.observedAt !== null && (typeof row.observedAt !== "string" || row.observedAt.length > 64 || !Number.isFinite(Date.parse(row.observedAt))) || row.observationError !== void 0 && row.observationError !== null && (typeof row.observationError !== "string" || row.observationError.length > 512) || row.updating !== void 0 && typeof row.updating !== "boolean")
       throw new Error("Invalid readonly runtime observation");
     return Object.freeze({
       state: row.state,
@@ -16613,6 +16613,197 @@ globalThis.__semonUIShared = __semonUIShared;
     };
   }
 
+  // src/lib/catalogSources.tsx
+  function renderCatalogSources(root, view, host2) {
+    render(
+      /* @__PURE__ */ jsxs(Fragment2, { children: [
+        /* @__PURE__ */ jsxs("div", { class: "ph", children: [
+          /* @__PURE__ */ jsx("h1", { children: "Choose a machine" }),
+          /* @__PURE__ */ jsx("p", { class: "sub", children: "Browse recorded history from one authorized source." })
+        ] }),
+        view.note && /* @__PURE__ */ jsxs("p", { class: "catalog-note", role: "status", children: [
+          screenText(view.note),
+          " ",
+          /* @__PURE__ */ jsx("button", { class: "link", type: "button", onClick: () => host2.retry(), children: "Retry" })
+        ] }),
+        view.updating && /* @__PURE__ */ jsx("p", { class: "catalog-note", role: "status", children: "Loading machines\u2026" }),
+        /* @__PURE__ */ jsx("div", { class: "session-list", children: view.items.map((item2) => /* @__PURE__ */ jsx(
+          "button",
+          {
+            class: "nrow",
+            type: "button",
+            "data-source-key": item2.source_key,
+            onClick: () => host2.select(item2.source_key),
+            children: /* @__PURE__ */ jsx("span", { class: "nm", children: screenText(item2.label) })
+          },
+          item2.source_key
+        )) }),
+        !view.items.length && !view.updating && !view.note && /* @__PURE__ */ jsx("p", { class: "catalog-note", children: "No authorized recorded sources are available." }),
+        view.more && /* @__PURE__ */ jsx("button", { class: "link", type: "button", disabled: view.updating, onClick: () => host2.more(), children: "Load more machines" }),
+        /* @__PURE__ */ jsx("p", { class: "catalog-note", children: "This source list contains names and keys only. History across sources and text search are unavailable." }),
+        /* @__PURE__ */ jsxs("p", { class: "catalog-note", children: [
+          /* @__PURE__ */ jsx("a", { class: "link", href: view.machinesHref, children: "Manage machines" }),
+          " \xB7 ",
+          /* @__PURE__ */ jsx("a", { class: "link", href: "/sessions?compat=1", children: "Open compatibility view (loads workspace history)" })
+        ] })
+      ] }),
+      root
+    );
+  }
+
+  // src/state/catalog-sources.ts
+  function parseCatalogSources(value) {
+    const row = object2(value);
+    if (row.api !== 1 || !Array.isArray(row.items) || row.items.length > 100)
+      throw new Error("Invalid source inventory");
+    const items = array(row.items, (value2) => {
+      const item2 = object2(value2), source_key = text(item2.source_key), label = text(item2.label);
+      if (!source_key || !label) throw new Error("Invalid source identity");
+      return { source_key, label };
+    });
+    if (new Set(items.map((item2) => item2.source_key)).size !== items.length)
+      throw new Error("Repeated source inventory identity");
+    const cursor = row.next_cursor === null ? null : text(row.next_cursor);
+    if (cursor === "") throw new Error("Invalid source inventory cursor");
+    return { api: 1, items, next_cursor: cursor };
+  }
+
+  // src/app/catalogSources.ts
+  function createCatalogSources(host2, select) {
+    const scope = new EffectScope();
+    let disposed = false, epoch = 0, items = [], cursor = null, updating = false, note = "", retry, delay = 1e3;
+    const account = parseAccount(host2?.account);
+    let wide = false;
+    const shell = createShellChrome({
+      account: {
+        place(widget, trigger) {
+          const at = trigger.getBoundingClientRect();
+          setGeometry(widget, "accountLeft", at.left);
+          setGeometry(widget, "accountWidth", at.width);
+          setGeometry(widget, "accountBottom", Math.max(0, innerHeight - at.top + 6));
+        },
+        opened() {
+        },
+        closed() {
+        },
+        navigate() {
+          return false;
+        },
+        submit() {
+          return false;
+        }
+      },
+      navigate() {
+        return false;
+      },
+      drawerOpened() {
+      },
+      drawerClosed() {
+      },
+      railChanged() {
+      }
+    });
+    shell.mount(document.querySelector(".app"));
+    shell.update(
+      [{ key: "sessions", label: "Sessions", href: "/sessions", icon: I.sessions, current: true }],
+      false
+    );
+    const title = document.createElement("div");
+    title.className = "ttl";
+    title.textContent = "Choose a machine";
+    function wideChange() {
+      wide = !wide;
+      document.querySelector(".app")?.classList.toggle("wide-mode", wide);
+      shell.account.updateWide(wide);
+    }
+    shell.topbar({
+      titleSlot: title,
+      lead: { label: "Open menu", icon: I.menu },
+      account: account ? { account, compact: false, wide, onWideChange: wideChange } : null
+    });
+    shell.drawerAccount(account ? { account, compact: true, wide, onWideChange: wideChange } : null);
+    const root = shell.slots.content;
+    function draw() {
+      if (disposed) return;
+      renderCatalogSources(
+        root,
+        {
+          items,
+          updating,
+          note,
+          more: cursor !== null,
+          machinesHref: host2?.machinesPath ?? "/machines?compat=1"
+        },
+        {
+          select(key) {
+            if (!disposed && items.some((item2) => item2.source_key === key)) select(key);
+          },
+          more() {
+            void load(true);
+          },
+          retry() {
+            void load(false);
+          }
+        }
+      );
+    }
+    async function load(append) {
+      if (disposed || append && updating) return;
+      scope.clearTimeout(retry);
+      const ticket = ++epoch, request = scope.request(), deadline = scope.timeout(() => request.abort(), 15e3), params = new URLSearchParams({ limit: "60" });
+      if (append && cursor !== null) params.set("cursor", cursor);
+      updating = true;
+      note = "";
+      draw();
+      try {
+        const page = parseCatalogSources(
+          await requestJson("/api/session-sources?" + params, request.signal)
+        );
+        if (disposed || ticket !== epoch) return;
+        if (append && page.items.some((item2) => items.some((old) => old.source_key === item2.source_key)))
+          throw Error("Source inventory repeated a machine");
+        items = append ? [...items, ...page.items] : page.items;
+        cursor = page.next_cursor;
+        delay = 1e3;
+      } catch (error) {
+        if (disposed || ticket !== epoch) return;
+        const status2 = error && typeof error === "object" && "status" in error ? Number(error.status) : 0;
+        const transient = error && typeof error === "object" && "status" in error || error instanceof Error && error.name === "AbortError";
+        note = !transient ? "The source returned an invalid inventory. Check this source and retry." : status2 === 401 || status2 === 403 ? "Authorization is required to browse these machines." : status2 === 404 ? "Bounded source discovery is unavailable. Choose a machine from its management page." : status2 === 400 ? "The source inventory cursor is unavailable. Refresh this list." : "Source inventory is unavailable. Retrying\u2026";
+        if (append && status2 === 400) {
+          void load(false);
+          return;
+        }
+        if (transient && (status2 === 0 || [429, 500, 502, 503, 504].includes(status2))) {
+          retry = scope.timeout(() => void load(append), delay);
+          delay = Math.min(8e3, delay * 2);
+        }
+      } finally {
+        scope.clearTimeout(deadline);
+        scope.releaseRequest(request);
+        if (!disposed && ticket === epoch) {
+          updating = false;
+          draw();
+        }
+      }
+    }
+    scope.listen(document, "keydown", (event) => {
+      if (event.key === "Escape") shell.closeDrawer();
+    });
+    scope.listen(window, "focus", () => void load(false));
+    void load(false);
+    return {
+      destroy() {
+        if (disposed) return;
+        disposed = true;
+        ++epoch;
+        scope.destroy();
+        render(null, root);
+        shell.destroy();
+      }
+    };
+  }
+
   // src/app/viewer.ts
   var mounted = null;
   function mountViewerApplication(host2 = getViewerHost()) {
@@ -16646,12 +16837,27 @@ globalThis.__semonUIShared = __semonUIShared;
           "/api/session-capabilities" + (params.size ? "?" + params : ""),
           request.signal
         );
-        if (!disposed) owner = createCatalogViewer(parseCatalogCapabilities(value), host2);
+        const capabilities = parseCatalogCapabilities(value);
+        if (source !== null && capabilities.source_key !== source)
+          throw new Error("Source capability identity does not match this selection");
+        if (!disposed) owner = createCatalogViewer(capabilities, host2);
       } catch (error) {
         if (disposed) return;
         const status2 = error && typeof error === "object" && "status" in error ? error.status : 0;
         if (status2 === 404) {
           legacy();
+          return;
+        }
+        if (status2 === 400 && !new URLSearchParams(location.search).has("machine")) {
+          owner = createCatalogSources(host2, (key) => {
+            if (disposed) return;
+            owner?.destroy();
+            owner = null;
+            const url = new URL(location.href);
+            url.searchParams.set("machine", key);
+            history.replaceState(null, "", url.pathname + url.search + url.hash);
+            void chooseReader();
+          });
           return;
         }
         const root = document.querySelector("#page");
