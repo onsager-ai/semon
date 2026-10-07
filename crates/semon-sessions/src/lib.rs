@@ -1722,3 +1722,6 @@ mod native_home_tests {
         );
     }
 }
+
+mod retention;
+pub use retention::{SourceProjectionReady, source_projection_ready};
