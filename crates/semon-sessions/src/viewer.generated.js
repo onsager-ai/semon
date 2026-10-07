@@ -8468,20 +8468,21 @@ globalThis.__semonUIShared = __semonUIShared;
       throw new Error("Invalid catalog source digest");
     return bytes;
   }
-  function sourceReference(value) {
-    const row = object2(value), source = object2(row.source), offset = integer(source.offset);
+  function parseCatalogSource(value) {
+    const source = object2(value), offset = integer(source.offset);
     if (offset < 0) throw new Error("Invalid catalog source offset");
     return {
-      source: {
-        root: text(source.root),
-        path: text(source.path),
-        native_id: text(source.native_id),
-        offset,
-        prefix_sha256: digest(source.prefix_sha256),
-        tail_sha256: digest(source.tail_sha256)
-      },
-      state: freshness(row.state)
+      root: text(source.root),
+      path: text(source.path),
+      native_id: text(source.native_id),
+      offset,
+      prefix_sha256: digest(source.prefix_sha256),
+      tail_sha256: digest(source.tail_sha256)
     };
+  }
+  function sourceReference(value) {
+    const row = object2(value);
+    return { source: parseCatalogSource(row.source), state: freshness(row.state) };
   }
   function parseCatalogIdentity(value) {
     const row = object2(value), refs = array(row.source_refs, sourceReference), nativeIds = strings4(row.native_ids), nativeId = nullable(row.native_id, text), ids = new Set(refs.map((ref) => ref.source.native_id)), generation = text(row.generation), state2 = object2(row.freshness), sourceKey = text(row.source_key), catalogKey = text(row.catalog_key), harness = text(row.harness);

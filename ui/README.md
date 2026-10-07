@@ -257,3 +257,21 @@ control authority. Hosts validate the selected catalog source and independently
 recheck runtime custody and authorization. Catalog selection does not fall back
 to workspace model resolution. The scoped observer retains the same snapshot,
 heartbeat, retry and teardown semantics described above.
+
+The catalog read consumers are separate from the complete workspace graph.
+`CatalogCapabilities` validates an explicit `catalog-v1` advertisement; unsupported
+search, ordering, union, attachment, relationship and large-record capabilities
+are not inferred from cached metadata. A recognized contract with selected
+transcripts still unavailable must remain a bounded pending view, rather than
+starting a concurrent workspace model read.
+
+`CatalogTranscriptStore` accepts only issued requests for the current selected
+source and canonical session. Each page has a half-open native slot range,
+projection generation, stable entry identities and original source provenance.
+Explicit `after=0` includes the first slot; omitting `after` requests the latest
+`limit` entries. Pages from different generations cannot mix, and an inconsistent
+overlap is rejected before any retained range changes. A stale projection needs
+explicit resynchronization of the requested ranges. Slot numbers address ranges;
+entry identities preserve renderer ownership across projection versions.
+These contracts are preparation: the existing bootstrap remains the complete
+model compatibility path until the catalog application consumer is connected.
