@@ -1,10 +1,11 @@
 import { spawn, spawnSync } from 'node:child_process';
-import { mkdtemp, writeFile, readFile, rm, readdir, appendFile } from 'node:fs/promises';
+import { mkdtemp, writeFile, readFile, rm, readdir, appendFile, mkdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import assert from 'node:assert/strict';
 import { chromium } from '../../tests/ui/node_modules/playwright/index.mjs';
 import { test } from 'node:test';
+import { auditText } from '../../tests/ui/text-audit.mjs';
 const root = new URL('../../', import.meta.url).pathname;
 test(
   'real bounded producer cold list and retained selected range',
@@ -153,9 +154,79 @@ test(
         requests.some((r) => /^\/api\/(model|tool|tx|image)(\?|$)/.test(r)),
         false,
       );
+      const visual = [];
+      for (const width of [390, 1280]) {
+        for (const colorScheme of ['light', 'dark']) {
+          const context = await browser.newContext({
+            viewport: { width, height: 860 },
+            colorScheme,
+          });
+          const check = await context.newPage();
+          check.on('pageerror', (e) => errors.push(e.message));
+          await check.goto(url[1] + '/?t=' + url[2]);
+          await check.locator('#page [data-id="backlog"]').waitFor();
+          await check.locator('#page [data-id="backlog"]').click();
+          await check.locator('#page [data-entry-key]').first().waitFor();
+          await check.evaluate(() => document.fonts.ready);
+          const audit = await auditText(check);
+          assert.equal(audit.smallCount, 0, JSON.stringify(audit.small));
+          assert.equal(audit.lowCount, 0, JSON.stringify(audit.low));
+          const geometry = await check.evaluate(() => ({
+            overflow: document.documentElement.scrollWidth > innerWidth + 1,
+            title: document.querySelector('#topbar')?.textContent,
+            entries: document.querySelectorAll('[data-entry-key]').length,
+          }));
+          assert.equal(geometry.overflow, false, `${width}/${colorScheme} sideways overflow`);
+          assert.ok(geometry.title?.trim(), 'Shared toolbar has a readable title');
+          assert.ok(
+            geometry.entries > 0 && geometry.entries <= 60,
+            'Visible transcript is bounded',
+          );
+          await check.keyboard.press('Tab');
+          const focus = await check.evaluate(() => {
+            const element = document.activeElement;
+            return {
+              tag: element?.tagName,
+              name: element?.getAttribute('aria-label') || element?.textContent?.trim(),
+            };
+          });
+          assert.notEqual(focus.tag, 'BODY', 'Keyboard reaches a real interactive control');
+          assert.ok(focus.name, 'Keyboard control has an accessible name');
+          const earlier = check.getByRole('button', { name: 'Load earlier records', exact: true });
+          await earlier.waitFor();
+          if (width === 390) {
+            const box = await earlier.boundingBox();
+            assert.ok(
+              box.height >= 44 && box.width >= 44,
+              'Transcript paging meets phone touch target',
+            );
+          }
+          await earlier.focus();
+          await check.keyboard.press('Enter');
+          await check.waitForFunction(
+            () => document.querySelectorAll('[data-entry-key]').length > 60,
+          );
+          const screenshotDir = process.env.SEMON_CATALOG_VISUAL_OUT;
+          if (screenshotDir) {
+            await mkdir(screenshotDir, { recursive: true });
+            await check.screenshot({
+              path: join(screenshotDir, `catalog-${width}-${colorScheme}.png`),
+            });
+          }
+          visual.push({
+            width,
+            colorScheme,
+            ...geometry,
+            focus,
+            textAudit: { smallCount: audit.smallCount, lowCount: audit.lowCount },
+          });
+          await context.close();
+        }
+      }
       await page.waitForTimeout(400);
       const evidence = {
         source: process.env.SEMON_CATALOG_SERVED_SOURCE ?? 'unrecorded',
+        visual,
         firstListMs: firstList,
         selectedMs: selected,
         warmSwitchMs: warm,
