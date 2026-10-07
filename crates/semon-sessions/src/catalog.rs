@@ -709,6 +709,24 @@ fn read_page(
     }
     let observed_at = meta("catalog_observed_at")?.and_then(|value| value.parse::<i64>().ok());
     let mut selected = rows(&transaction, request)?;
+    let has_history = transaction.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='session_history_catalog')",
+        [],
+        |row| row.get::<_, bool>(0),
+    )?;
+    let mut partial_history = std::collections::BTreeSet::new();
+    if has_history {
+        for row in &selected {
+            if transaction.query_row(
+                "SELECT EXISTS(SELECT 1 FROM session_history_catalog WHERE session_key=?1)",
+                [&row.key],
+                |row| row.get::<_, bool>(0),
+            )? {
+                partial_history.insert(row.key.clone());
+            }
+        }
+    }
+
     if request.scope == CatalogReadScope::RetainedHistory {
         for current in &mut selected {
             if let Some(metadata) = crate::history_projection::catalog(&transaction, &current.key)?
@@ -866,7 +884,14 @@ fn read_page(
             }
         }
         let is_codex = row.harness == "codex";
+        let partial_summary = partial_history.contains(&row.key);
         let mut item = serde_json::to_value(row)?;
+        if partial_summary {
+            // Body provenance can include retained sources; current summary
+            // metrics have not rebuilt those sources' usage contributions.
+            item["summary_context"] = json!({"state":"incomplete","scope":"current_observation"});
+        }
+
         item.as_object_mut()
             .expect("catalog row object")
             .remove("sources");

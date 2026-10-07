@@ -12,6 +12,10 @@ paths. Ordinary sessions reuse the existing current tables. History metadata
 keeps current name, filters, ordering, and relationship fields, and extends its
 source references and native identifiers with the original disappeared paths.
 Current identity and native identifiers continue to use the current catalog.
+Usage/cost summary metrics remain those of the current observation; mixed
+owners explicitly expose `summary_context` as incomplete rather than claiming
+retained-source totals were recomputed. Per-source retained usage projections
+are necessary to qualify complete historical totals.
 Neither observation lifecycle nor history identity grants control authority.
 
 The full native producer publishes the history context before replacing current

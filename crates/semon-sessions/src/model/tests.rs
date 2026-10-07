@@ -6683,6 +6683,10 @@ fn partial_lineage_source_disappearance_preserves_natural_history_context() {
         serde_json::from_slice::<Value>(&reply.body).unwrap()
     };
     let retained = read();
+    assert_eq!(
+        retained["session"]["summary_context"],
+        json!({"state":"incomplete","scope":"current_observation"})
+    );
     let entry = retained["entries"]
         .as_array()
         .unwrap()
