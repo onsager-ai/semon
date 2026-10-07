@@ -5831,6 +5831,7 @@ globalThis.__semonUIShared = __semonUIShared;
         /* @__PURE__ */ jsxs(Fragment2, { children: [
           /* @__PURE__ */ jsx("div", { class: "ph sr", children: /* @__PURE__ */ jsx("h1", { children: screenText(view.name) }) }),
           /* @__PURE__ */ jsxs("section", { class: "transcript", "aria-label": "Transcript", children: [
+            view.observation && /* @__PURE__ */ jsx("p", { class: "empty", role: "status", "data-transcript-observation": "", children: screenText(view.observation) }),
             /* @__PURE__ */ jsxs("div", { class: "turns", children: [
               view.before ? pager(view.before) : view.started && /* @__PURE__ */ jsx("div", { class: "divider started", children: /* @__PURE__ */ jsxs("span", { class: "dv-text", children: [
                 /* @__PURE__ */ jsx("span", { class: "dv-lead", children: view.started.lead }),
@@ -10236,7 +10237,7 @@ globalThis.__semonUIShared = __semonUIShared;
           activeRead = request;
           const response = await host2.transportOwner.api(
             modelPath(
-              recovering ? "/api/model?delta=1" : "/api/model?delta=1&since=" + host2.transportOwner.enc(LIVE.late ? "" : LIVE.version ?? ""),
+              recovering ? "/api/model?delta=1&since=" : "/api/model?delta=1&since=" + host2.transportOwner.enc(LIVE.late ? "" : LIVE.version ?? ""),
               selected
             ),
             request.signal,
@@ -10249,7 +10250,7 @@ globalThis.__semonUIShared = __semonUIShared;
             model2 = host2.liveUpdates.applyModelDelta(response);
           } catch {
             model2 = await host2.transportOwner.api(
-              modelPath("/api/model?delta=1", selected),
+              modelPath("/api/model?delta=1&since=", selected),
               request.signal
             );
             if (destroyed || host2.disposed || request.signal.aborted || selected !== selection())
@@ -10668,12 +10669,14 @@ globalThis.__semonUIShared = __semonUIShared;
           return r;
         },
         (err) => {
+          if (err?.status === 403) throw err;
           if (host2.liveModelOwner.LIVE.late === sid) {
             if (++host2.liveModelOwner.LIVE.lateTries >= LATE_TRIES) {
               host2.liveModelOwner.LIVE.late = null;
               console.warn(
                 "semon: gave up reloading the transcript of " + sid + " after its origin arrived"
               );
+              return { cut: null, reload: true };
             } else host2.liveModelOwner.LIVE.retry = true;
           }
           throw err;
@@ -13904,6 +13907,7 @@ globalThis.__semonUIShared = __semonUIShared;
       return {
         id: sid,
         name: s.name,
+        observation: host2.transcripts.staleBriefs.has(sid) ? "This conversation changed at its source. The saved transcript is incomplete; reopen this session to update it." : void 0,
         blocks: blocks2,
         order: (host2.modelStore.turns[sid] ?? []).map((t) => t.id),
         dirty: opts.only,

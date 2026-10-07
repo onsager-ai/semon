@@ -129,6 +129,7 @@ export interface SessionSnapshot {
   control?: ControlView;
   id: string;
   name: string;
+  observation?: string;
   blocks: readonly TranscriptBlock[];
   started?: { lead: string; machine: string };
   before?: PagerView;
@@ -745,6 +746,11 @@ export function renderSessionScreen(
           <h1>{screenText(view.name)}</h1>
         </div>
         <section class="transcript" aria-label="Transcript">
+          {view.observation && (
+            <p class="empty" role="status" data-transcript-observation="">
+              {screenText(view.observation)}
+            </p>
+          )}
           <div class="turns">
             {view.before
               ? pager(view.before)
