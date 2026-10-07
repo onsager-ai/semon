@@ -22,7 +22,9 @@ use std::{
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+
+pub(crate) mod summary;
 use serde_json::Value;
 
 use crate::{
@@ -127,7 +129,7 @@ pub(crate) struct Session {
 
 /// Native ancestry and inherited storage are independent observations. Neither
 /// creates a spawn edge or merges a fork's owned turns into its parent's work.
-#[derive(Clone, Debug, Default, Serialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub(crate) struct CodexHistory {
     #[serde(skip_serializing_if = "Option::is_none")]
     native_root_session_id: Option<String>,
@@ -139,7 +141,7 @@ pub(crate) struct CodexHistory {
     history_base: Option<CodexHistoryBase>,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 struct CodexHistoryBase {
     thread_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -185,7 +187,7 @@ pub(crate) struct WaitEdge {
     pub(crate) turn: Option<String>,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct ReportedRun {
     pub(crate) start: i64,
     pub(crate) cost_usd: Option<f64>,
@@ -197,7 +199,7 @@ pub(crate) struct ReportedRun {
     pub(crate) by_model: BTreeMap<String, ReportedModelUsage>,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct CostCheck {
     pub(crate) start: i64,
     pub(crate) computed_usd: Option<f64>,
@@ -437,6 +439,19 @@ impl Handoff {
             ambiguous: false,
         }
     }
+}
+
+/// The compatibility model and focused catalog use the same logged-parent rule.
+fn session_parent(sid: &str, session: &Session, handoffs: &[Handoff]) -> Option<String> {
+    handoffs
+        .iter()
+        .find(|handoff| {
+            (handoff.kind == "spawn" || handoff.kind == "relay")
+                && handoff.to.as_deref() == Some(sid)
+                && handoff.from.as_str() != sid
+                && (handoff.kind == "spawn" || session.kind == Some("Relayed") || !session.lane)
+        })
+        .map(|handoff| handoff.from.clone())
 }
 
 pub(crate) fn now_ms() -> i64 {
@@ -1591,6 +1606,7 @@ struct Builder<'a> {
     machine: String,
     facts: &'a MachineFacts,
     reported_runs: &'a [ReportedRunSnapshot],
+    cache: &'a mut EventCache,
     home: Option<String>,
     sessions: Vec<Sess>,
     of_file: Vec<usize>,
@@ -1629,6 +1645,7 @@ impl<'a> Builder<'a> {
         machine: String,
         facts: &'a MachineFacts,
         reported_runs: &'a [ReportedRunSnapshot],
+        cache: &'a mut EventCache,
     ) -> Self {
         Self {
             slot_files: files
@@ -1665,6 +1682,7 @@ impl<'a> Builder<'a> {
             home: facts.home(),
             facts,
             reported_runs,
+            cache,
             sessions: Vec::new(),
             of_file: vec![usize::MAX; files.len()],
             by_key: HashMap::new(),
@@ -2196,7 +2214,32 @@ impl<'a> Builder<'a> {
             session.first = description.first;
             session.last = description.last;
         } else {
-            self.describe_uncached(index);
+            let fingerprint = summary::fingerprint(&inputs);
+            let persisted = if inputs.clock.is_none() {
+                self.cache
+                    .session_description(&key, summary::VERSION, &fingerprint)
+                    .and_then(|json| serde_json::from_str::<summary::Summary>(&json).ok())
+            } else {
+                None
+            };
+            if let Some(persisted) = persisted {
+                persisted.apply(&mut self.sessions[index]);
+            } else {
+                self.describe_uncached(index);
+                if inputs.clock.is_none() {
+                    let json = serde_json::to_string(&summary::Summary::of(
+                        &self.sessions[index],
+                        &inputs,
+                    ))
+                    .expect("metadata summary serializes");
+                    self.cache.save_session_description(
+                        &key,
+                        summary::VERSION,
+                        &fingerprint,
+                        &json,
+                    );
+                }
+            }
             let session = &self.sessions[index];
             self.texts.descriptions.insert(
                 key,
@@ -5681,6 +5724,7 @@ pub(crate) fn build(
     texts: &mut Texts,
     now: i64,
 ) -> io::Result<Built> {
+    let catalog_base = cache.session_catalog_generation();
     let mut timings = Vec::with_capacity(18);
     macro_rules! timed {
         ($name:literal, $body:expr) => {{
@@ -5707,7 +5751,10 @@ pub(crate) fn build(
     #[cfg(test)]
     {
         BUILDS.with(|builds| builds.set(builds.get() + 1));
-        AFTER_SCAN.with(|hook| hook.borrow_mut().take().map(|hook| hook()));
+        let hook = AFTER_SCAN.with(|hook| hook.borrow_mut().take());
+        if let Some(hook) = hook {
+            hook();
+        }
     }
     let pids;
     let lock_pids;
@@ -5732,7 +5779,15 @@ pub(crate) fn build(
         MachineFacts::Local => cache.reported_runs().cloned().collect(),
         MachineFacts::Recorded(facts) => facts.reported_runs.clone(),
     };
-    let mut builder = Builder::new(&files, texts, now, machine.clone(), &facts, &reported_runs);
+    let mut builder = Builder::new(
+        &files,
+        texts,
+        now,
+        machine.clone(),
+        &facts,
+        &reported_runs,
+        cache,
+    );
     timed!("sessions", builder.sessions(groups, &pids, &held));
     timed!("index_tools", builder.index_tools());
     timed!("background_commands", builder.background_commands());
@@ -5809,6 +5864,9 @@ pub(crate) fn build(
         .iter()
         .map(|session| (session.key.clone(), session.out.clone()))
         .collect();
+    // A scan-window build is intentionally incomplete: it cannot replace a
+    // source-complete catalog. Publication itself is delayed until success.
+    let catalog = (!options.scan_window).then(|| summary::catalog(&builder, &handoffs));
     // Analytics reads a month and the month before it, whatever the model's
     // window: taken from every session before the window trims them.
     let activity = crate::analytics::activity(&sessions, &tx, &turns, &handoffs, now);
@@ -5892,15 +5950,7 @@ pub(crate) fn build(
     // Match the approved mockup's parentOf rule against the same handoffs
     // and session flags the client receives.
     for (sid, session) in &mut sessions {
-        session.parent = handoffs
-            .iter()
-            .find(|handoff| {
-                (handoff.kind == "spawn" || handoff.kind == "relay")
-                    && handoff.to.as_deref() == Some(sid.as_str())
-                    && handoff.from.as_str() != sid.as_str()
-                    && (handoff.kind == "spawn" || session.kind == Some("Relayed") || !session.lane)
-            })
-            .map(|handoff| handoff.from.clone());
+        session.parent = session_parent(sid, session, &handoffs);
     }
     let order: HashMap<&str, usize> = {
         let mut keys: Vec<(&str, i64)> = sessions
@@ -6068,6 +6118,10 @@ pub(crate) fn build(
         "post",
         u32::try_from(post_started.elapsed().as_millis()).unwrap_or(u32::MAX),
     ));
+    if let Some(catalog) = catalog {
+        cache.publish_session_catalog(&catalog, catalog_base.as_deref());
+    }
+    cache.publish_session_descriptions();
     Ok(built)
 }
 

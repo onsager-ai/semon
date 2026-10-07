@@ -6211,3 +6211,354 @@ fn native_claude_copied_usage_keeps_observations_without_assigning_owner() {
             .is_none()
     );
 }
+
+#[test]
+fn persisted_descriptions_reuse_restart_and_revalidate_changed_sources() {
+    let home = Home::new();
+    home.top("root", &[human("root", ts(0, 0), "secret prompt body")]);
+    home.top("other", &[human("other", ts(0, 0), "other prompt")]);
+    let first = home.build();
+    SESSION_DESCRIPTIONS.with(|counts| counts.borrow_mut().clear());
+    let restarted = home.build();
+    assert_equivalent(&first, &restarted, NOW);
+    SESSION_DESCRIPTIONS.with(|counts| assert!(counts.borrow().is_empty()));
+
+    append_records(
+        &home,
+        "root",
+        &[assistant(
+            "root",
+            ts(0, 1),
+            vec![text("secret answer body")],
+        )],
+    );
+    let updated = home.build();
+    SESSION_DESCRIPTIONS
+        .with(|counts| assert_eq!(*counts.borrow(), BTreeMap::from([("root".into(), 1)])));
+    let mut fresh = EventCache::default();
+    let oracle = build_with_cache(
+        &home.options,
+        &mut fresh,
+        &mut false,
+        &mut Texts::default(),
+        NOW,
+    );
+    assert_equivalent(&updated, &oracle, NOW);
+
+    let connection =
+        rusqlite::Connection::open(home.options.cache.with_extension("sqlite3")).unwrap();
+    let rows: Vec<String> = connection
+        .prepare("SELECT description FROM session_descriptions")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(rows.len(), 2);
+    for row in rows {
+        assert!(!row.contains("secret prompt body"));
+        assert!(!row.contains("secret answer body"));
+        let value: Value = serde_json::from_str(&row).unwrap();
+        assert!(!value["sources"].as_array().unwrap().is_empty());
+        for forbidden in [
+            "state",
+            "activity",
+            "waiting_for",
+            "waiting_since",
+            "alive",
+            "turns",
+            "handoffs",
+            "tx",
+        ] {
+            assert!(value.get(forbidden).is_none(), "persisted {forbidden}");
+        }
+    }
+
+    fs::remove_file(home.root.join("claude/projects/-work-proj/other.jsonl")).unwrap();
+    assert!(!home.build().sessions.contains_key("other"));
+}
+
+#[test]
+fn incompatible_or_damaged_description_rebuilds_without_losing_observations() {
+    let home = Home::new();
+    home.top("root", &[human("root", ts(0, 0), "prompt")]);
+    let first = home.build();
+    let connection =
+        rusqlite::Connection::open(home.options.cache.with_extension("sqlite3")).unwrap();
+    connection
+        .execute("UPDATE session_descriptions SET version = version + 1", [])
+        .unwrap();
+    SESSION_DESCRIPTIONS.with(|counts| counts.borrow_mut().clear());
+    assert_equivalent(&first, &home.build(), NOW);
+    SESSION_DESCRIPTIONS.with(|counts| assert_eq!(counts.borrow().get("root"), Some(&1)));
+    connection
+        .execute("UPDATE session_descriptions SET description = '{}'", [])
+        .unwrap();
+    SESSION_DESCRIPTIONS.with(|counts| counts.borrow_mut().clear());
+    assert_equivalent(&first, &home.build(), NOW);
+    SESSION_DESCRIPTIONS.with(|counts| assert_eq!(counts.borrow().get("root"), Some(&1)));
+}
+
+#[test]
+fn schema_four_upgrade_preserves_event_indices_and_observed_runs() {
+    let home = Home::new();
+    home.top("root", &[human("root", ts(0, 0), "prompt")]);
+    home.write(".claude.json", &json!({"projects": {"/work/proj": {"lastSessionId": "root", "lastStartTime": at(0, 0), "lastCost": 1.25}}}).to_string());
+    let first = home.build();
+    assert_eq!(first.sessions["root"].reported_runs.len(), 1);
+    let connection =
+        rusqlite::Connection::open(home.options.cache.with_extension("sqlite3")).unwrap();
+    connection
+        .execute_batch("DROP TABLE session_descriptions; PRAGMA user_version = 4;")
+        .unwrap();
+    home.write(".claude.json", "{}");
+    assert_equivalent(&first, &home.build(), NOW);
+    let version: i64 = connection
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(version, 6);
+}
+
+#[test]
+#[ignore = "measurement workload: 512 sessions × 128 assistant usage records"]
+fn persisted_description_restart_measurement() {
+    let home = Home::new();
+    for index in 0..512 {
+        let id = format!("session-{index:04}");
+        let mut records = vec![human(&id, ts(0, 0), "prompt")];
+        for message in 0..128 {
+            records.push(assistant_usage(
+                &id,
+                ts(0, 1),
+                &format!("message-{index}-{message}"),
+                "claude-sonnet-4-5",
+                json!({"input_tokens": 1000, "output_tokens": 200, "cache_read_input_tokens": 500}),
+            ));
+        }
+        home.top(&id, &records);
+    }
+    home.build();
+    for reuse in [false, true, false, true, false, true] {
+        if !reuse {
+            rusqlite::Connection::open(home.options.cache.with_extension("sqlite3"))
+                .unwrap()
+                .execute("DELETE FROM session_descriptions", [])
+                .unwrap();
+        }
+        SESSION_DESCRIPTIONS.with(|counts| counts.borrow_mut().clear());
+        let start = std::time::Instant::now();
+        let built = home.build();
+        eprintln!(
+            "summary_reuse={reuse} total_ms={} bytes={} phases={:?}",
+            start.elapsed().as_millis(),
+            built.json(NOW).len(),
+            built.timings
+        );
+        if reuse {
+            SESSION_DESCRIPTIONS.with(|counts| assert!(counts.borrow().is_empty()));
+        }
+    }
+}
+
+fn read_catalog(home: &Home) -> (String, Vec<summary::CatalogRow>) {
+    let connection =
+        rusqlite::Connection::open(home.options.cache.with_extension("sqlite3")).unwrap();
+    let generation = connection
+        .query_row(
+            "SELECT value FROM meta WHERE key='catalog_generation'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let rows = connection
+        .prepare("SELECT metadata FROM session_catalog ORDER BY session_key")
+        .unwrap()
+        .query_map([], |row| row.get::<_, String>(0))
+        .unwrap()
+        .map(|row| serde_json::from_str(&row.unwrap()).unwrap())
+        .collect();
+    (generation, rows)
+}
+
+#[test]
+fn complete_catalog_is_untrimmed_stable_and_preserves_native_source_and_parent() {
+    let home = Home::new();
+    home.top(
+        "root",
+        &[
+            human("root", ts(0, 0), "private prompt"),
+            assistant(
+                "root",
+                ts(0, 1),
+                vec![tool(
+                    "spawn",
+                    "Agent",
+                    json!({"prompt":"private tool body"}),
+                )],
+            ),
+        ],
+    );
+    home.agent(
+        "root",
+        "child",
+        "spawn",
+        &[user("root", ts(0, 2), "private child prompt")],
+    );
+    let built = home.build();
+    let (generation, rows) = read_catalog(&home);
+    assert_eq!(rows.len(), 2);
+    for row in &rows {
+        let expected = &built.sessions[&row.key];
+        assert_eq!(row.parent, expected.parent);
+        assert_eq!(row.name, expected.name);
+        assert_eq!(row.harness, expected.harness);
+        assert_eq!(row.start, Some(expected.start));
+        assert_eq!(row.last, Some(expected.last));
+        assert!(!row.native_ids.is_empty());
+        assert_eq!(row.sources.len(), 1);
+        let source = &row.sources[0];
+        assert_eq!(source.size, fs::metadata(&source.path).unwrap().len());
+        assert!(source.offset > 0);
+        let json = serde_json::to_string(row).unwrap();
+        assert!(!json.contains("private prompt"));
+        assert!(!json.contains("private tool body"));
+        assert!(!json.contains("private child prompt"));
+    }
+    home.build();
+    assert_eq!(generation, read_catalog(&home).0);
+    let mut window = home.options.clone();
+    window.all = false;
+    window.since = Duration::from_secs(1);
+    home.build_at(&window, NOW);
+    assert_eq!(generation, read_catalog(&home).0);
+    assert_eq!(read_catalog(&home).1.len(), 2);
+
+    fs::remove_file(
+        home.root
+            .join("claude/projects/-work-proj/root/subagents/agent-child.jsonl"),
+    )
+    .unwrap();
+    home.build();
+    let (next, rows) = read_catalog(&home);
+    assert_ne!(generation, next);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].key, "root");
+}
+
+#[test]
+fn scan_window_never_replaces_a_complete_catalog_and_unknown_times_remain_unknown() {
+    let home = Home::new();
+    home.top("root", &[json!({"type":"user","sessionId":"root","message":{"role":"user","content":"prompt without a timestamp"}})]);
+    home.build();
+    let (generation, rows) = read_catalog(&home);
+    assert_eq!(rows[0].start, None);
+    assert_eq!(rows[0].last, None);
+    let mut window = home.options.clone();
+    window.scan_window = true;
+    home.build_at(&window, NOW + 60_000);
+    assert_eq!(generation, read_catalog(&home).0);
+    assert_eq!(read_catalog(&home).1.len(), 1);
+}
+
+#[test]
+fn interrupted_catalog_publication_retains_one_generation_and_recovers_on_restart() {
+    let home = Home::new();
+    for id in ["aaa", "zzz"] {
+        home.top(id, &[human(id, ts(0, 0), "prompt")]);
+    }
+    home.build();
+    let before = read_catalog(&home);
+    let connection =
+        rusqlite::Connection::open(home.options.cache.with_extension("sqlite3")).unwrap();
+    connection.execute_batch("CREATE TRIGGER interrupt_catalog BEFORE UPDATE ON session_catalog WHEN NEW.session_key='zzz' BEGIN SELECT RAISE(ABORT,'interrupted'); END;").unwrap();
+    for id in ["aaa", "zzz"] {
+        append_records(
+            &home,
+            id,
+            &[assistant(id, ts(0, 1), vec![text("new answer")])],
+        );
+    }
+    home.build();
+    let retained = read_catalog(&home);
+    assert_eq!(before.0, retained.0);
+    assert_eq!(
+        serde_json::to_string(&before.1).unwrap(),
+        serde_json::to_string(&retained.1).unwrap()
+    );
+    connection
+        .execute_batch("DROP TRIGGER interrupt_catalog")
+        .unwrap();
+    home.build();
+    let recovered = read_catalog(&home);
+    assert_ne!(before.0, recovered.0);
+    assert!(recovered.1.iter().all(|row| row.last == Some(at(0, 1))));
+}
+
+#[test]
+fn a_slow_catalog_builder_cannot_overwrite_newer_committed_source_generation() {
+    let home = Home::new();
+    home.top("root", &[human("root", ts(0, 0), "prompt")]);
+    home.build();
+    let options = home.options.clone();
+    let path = home.root.join("claude/projects/-work-proj/root.jsonl");
+    AFTER_SCAN.with(|hook| {
+        *hook.borrow_mut() = Some(Box::new(move || {
+            let mut file = fs::OpenOptions::new().append(true).open(path).unwrap();
+            writeln!(
+                file,
+                "{}",
+                assistant("root", ts(0, 1), vec![text("new answer")])
+            )
+            .unwrap();
+            model_json_at(&options, NOW).unwrap();
+        }));
+    });
+    let older = home.build();
+    assert_eq!(older.sessions["root"].last, at(0, 0));
+    let (_, catalog) = read_catalog(&home);
+    assert_eq!(catalog[0].last, Some(at(0, 1)));
+}
+
+#[test]
+fn a_slow_catalog_builder_cannot_overwrite_newer_native_metadata_without_log_changes() {
+    let home = Home::new();
+    home.top(
+        "root",
+        &[
+            human("root", ts(0, 0), "prompt"),
+            assistant(
+                "root",
+                ts(0, 1),
+                vec![tool("spawn", "Agent", json!({"prompt":"task"}))],
+            ),
+        ],
+    );
+    home.agent(
+        "root",
+        "child",
+        "spawn",
+        &[user("root", ts(0, 2), "child prompt")],
+    );
+    home.build();
+    let options = home.options.clone();
+    let meta = home
+        .root
+        .join("claude/projects/-work-proj/root/subagents/agent-child.meta.json");
+    AFTER_SCAN.with(|hook| {
+        *hook.borrow_mut() = Some(Box::new(move || {
+            fs::write(
+                meta,
+                json!({"description":"new native metadata label", "toolUseId":"spawn"}).to_string(),
+            )
+            .unwrap();
+            model_json_at(&options, NOW).unwrap();
+        }));
+    });
+    let older = home.build();
+    assert_ne!(older.sessions["child"].name, "new native metadata label");
+    let (_, catalog) = read_catalog(&home);
+    assert_eq!(
+        catalog.iter().find(|row| row.key == "child").unwrap().name,
+        "new native metadata label"
+    );
+}
