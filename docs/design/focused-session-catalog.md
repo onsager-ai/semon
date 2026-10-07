@@ -140,3 +140,26 @@ without a rollout manifest makes that selected identity incomplete. An explicit
 empty manifest selects no current native sources. The compatibility model's
 legacy facts fallback is unchanged. Clients must disable native controls when
 composite identity observation is incomplete or unavailable.
+
+### Explicit retained history reads
+
+`scope=retained_history` selects read-only retained history intent; the default
+is `scope=current`. Cursors bind this intent as well as machine and filters.
+`session_catalog_history_identity` resolves the same immutable source references
+with typed `read_scope=retained_history`; the existing
+`session_catalog_identity` remains the strict current-native identity service.
+
+An omitted Codex native source can remain readable in history scope while
+`native_selection.state=retired` explicitly denies any assertion of current
+native selection. Unavailable machine observations are separate from known
+retained body observations. Current-native identity still refuses retirement,
+and source-root substitution still fails both scopes. Hosts must independently
+authorize retained history and archive access, and source readers must verify
+original immutable generations before supplying bytes. History identity grants
+no control, credential or runtime authority.
+
+This scope cannot resurrect deleted projection rows. Durable retention of
+catalog, consumed-source provenance and native slot/span recipes across local
+source disappearance/eviction is a separate producer requirement. Without those
+rows, a selected history request remains not-found or unavailable rather than
+silently rebuilding unrelated workspace history or granting native authority.

@@ -16,6 +16,23 @@ export function createLocalControl(scope: EffectScope, refresh: () => void) {
   let selection = 0;
   async function write(op: string, extra: JsonObject = {}): Promise<boolean> {
     if (!current || busy || (uncertain && op !== 'reconnect')) return false;
+    if (op === 'reconnect' && current.runtime?.reconnectable === false) return false;
+    if (op !== 'reconnect' && !current.connected) return false;
+    if (op === 'interrupt' && !current.capabilities.interrupt) return false;
+    if (op === 'answer') {
+      const request = current.requests.find(
+        (request) => request.id === extra.request && request.hash === extra.hash,
+      );
+      if (!request || request.state.state !== 'open') return false;
+      const supported =
+        request.kind === 'question'
+          ? current.capabilities.questions
+          : request.payload.method === 'item/fileChange/requestApproval'
+            ? current.capabilities.fileApproval
+            : current.capabilities.commandApproval;
+      if (!supported) return false;
+    }
+
     if (
       op === 'send' &&
       (!current.connected ||
@@ -109,11 +126,24 @@ export function createLocalControl(scope: EffectScope, refresh: () => void) {
       reconnect: () => void send('reconnect'),
     };
   }
+  function apply(value: ControlSnapshot | null) {
+    if (current?.thread !== value?.thread) {
+      ++selection;
+      ++revision;
+      busy = false;
+      uncertain = false;
+      note = '';
+    }
+    if (value?.runtime?.state === 'ended' && current?.runtime?.state !== 'ended') {
+      ++revision;
+      busy = false;
+      note = '';
+    }
+    current = value;
+  }
   return {
     prepare: parseControl,
-    adopt(value: ControlSnapshot | null) {
-      current = value;
-    },
+    adopt: apply,
     unavailable() {
       if (!current) return;
       current = {
@@ -128,19 +158,16 @@ export function createLocalControl(scope: EffectScope, refresh: () => void) {
           fileApproval: false,
           questions: false,
         },
-        reason: 'Current connection status is unavailable. Reconnecting…',
+        runtime: current.runtime ? { ...current.runtime, freshness: 'stale' } : undefined,
+        reason:
+          current.runtime?.state === 'ended' || current.runtime?.state === 'failed'
+            ? current.reason
+            : 'Current connection status is unavailable. Reconnecting…',
       };
       refresh();
     },
     observe(value: ControlSnapshot | null) {
-      if (current?.thread !== value?.thread) {
-        ++selection;
-        ++revision;
-        busy = false;
-        uncertain = false;
-        note = '';
-      }
-      current = value;
+      apply(value);
       refresh();
     },
     view,
