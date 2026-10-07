@@ -76,11 +76,15 @@ pub fn session_source_proof(
     };
     // Recorded roots/native manifests must remain observable. Missing facts
     // cannot be treated as permission to reuse a formerly selected rollout.
-    if options.facts.as_ref().is_some_and(|file| {
-        !crate::read_facts(file).is_ok_and(|facts| {
-            facts.version == crate::FACTS_VERSION
-                && (root != "codex" || facts.codex_rollouts.is_some())
+    let current = options
+        .facts
+        .as_ref()
+        .map(|file| {
+            crate::facts::source_authority::CurrentSources::open(file).map_err(|_| Unavailable)
         })
+        .transpose()?;
+    if current.as_ref().is_some_and(|source| {
+        !source.facts_known() || (root == "codex" && !source.selection_known())
     }) {
         return Err(Unavailable);
     }
@@ -154,6 +158,9 @@ pub fn session_source_proof(
             || observed.source.prefix_sha256 != source.prefix_sha256
         {
             return Err(io::Error::other("source observation changed").into());
+        }
+        if let Some(current) = &current {
+            current.validate()?;
         }
         Ok(Some(SessionSourceProof {
             source: observed.source.clone(),
@@ -957,6 +964,56 @@ mod tests {
             session_source_proof(&fixture.options, "claude", "projects/project/partial.jsonl"),
             Err(CatalogIdentityError::Unavailable)
         );
+    }
+
+    #[test]
+    fn exact_source_proof_work_stays_fixed_as_unrelated_native_manifest_grows() {
+        let fixture = Fixture::new();
+        fixture.publish(1);
+        let mut facts = crate::read_facts(fixture.options.facts.as_ref().unwrap()).unwrap();
+        let mut steps = Vec::new();
+        for count in [100, 20_000] {
+            facts.codex_rollouts = Some(
+                (0..count)
+                    .map(|index| format!("sessions/{index:08}.jsonl"))
+                    .collect(),
+            );
+            crate::write_facts(fixture.options.facts.as_ref().unwrap(), &facts).unwrap();
+            SQL_STEPS.with(|value| value.set(0));
+            let proof = session_source_proof(
+                &fixture.options,
+                "claude",
+                "projects/project/session-00000.jsonl",
+            )
+            .unwrap()
+            .unwrap();
+            assert_eq!(proof.source.native_id, "session-00000");
+            steps.push(SQL_STEPS.with(|value| value.get()));
+            let mut samples = Vec::new();
+            for _ in 0..31 {
+                let start = std::time::Instant::now();
+                assert!(
+                    session_source_proof(
+                        &fixture.options,
+                        "claude",
+                        "projects/project/session-00000.jsonl"
+                    )
+                    .unwrap()
+                    .is_some()
+                );
+                samples.push(start.elapsed().as_micros());
+            }
+            samples.sort_unstable();
+            eprintln!(
+                "exact source proof manifest={count} facts_bytes={} median_us={} samples=31",
+                fs::metadata(fixture.options.facts.as_ref().unwrap())
+                    .unwrap()
+                    .len(),
+                samples[15]
+            );
+        }
+        assert_eq!(steps[0], steps[1]);
+        eprintln!("exact source proof selected catalog VM steps={steps:?}");
     }
 
     #[test]
