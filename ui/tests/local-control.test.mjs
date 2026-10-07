@@ -143,6 +143,8 @@ test('selection invalidates old control handles and late command receipts', asyn
     assert.equal(owner.view('native').note, '');
     owner.unavailable();
     assert.equal(owner.view('native').snapshot.capabilities.input, false);
+    assert.equal(await owner.view('native').send('cannot send through stale observation'), false);
+    assert.equal(writes, 1);
   } finally {
     owner.destroy();
     globalThis.fetch = oldFetch;
