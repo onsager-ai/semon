@@ -6380,6 +6380,44 @@ fn read_catalog(home: &Home) -> (String, Vec<summary::CatalogRow>) {
     (generation, rows)
 }
 
+#[cfg(unix)]
+#[test]
+fn unsupported_summary_path_encoding_preserves_native_model_without_panic() {
+    use std::os::unix::ffi::OsStringExt;
+    let home = Home::new();
+    home.top("root", &[human("root", ts(0, 0), "prompt")]);
+    let projects = home.root.join("claude/projects");
+    fs::rename(
+        projects.join("-work-proj"),
+        projects.join(std::ffi::OsString::from_vec(b"-work-\xff".to_vec())),
+    )
+    .unwrap();
+    let built = home.build();
+    assert_eq!(built.sessions["root"].last, at(0, 0));
+    let connection =
+        rusqlite::Connection::open(home.options.cache.with_extension("sqlite3")).unwrap();
+    let summaries: i64 = connection
+        .query_row("SELECT COUNT(*) FROM session_descriptions", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(summaries, 0);
+    let ready: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM meta WHERE key='catalog_generation'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(ready, 0);
+    // An unsupported path must not become an authoritative lossy source alias.
+    let restarted = home.build();
+    assert_eq!(
+        serde_json::to_value(built.sessions).unwrap(),
+        serde_json::to_value(restarted.sessions).unwrap()
+    );
+}
+
 #[test]
 fn complete_catalog_is_untrimmed_stable_and_preserves_native_source_and_parent() {
     let home = Home::new();

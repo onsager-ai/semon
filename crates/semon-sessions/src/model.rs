@@ -2226,12 +2226,12 @@ impl<'a> Builder<'a> {
                 persisted.apply(&mut self.sessions[index]);
             } else {
                 self.describe_uncached(index);
-                if inputs.clock.is_none() {
-                    let json = serde_json::to_string(&summary::Summary::of(
-                        &self.sessions[index],
-                        &inputs,
-                    ))
-                    .expect("metadata summary serializes");
+                // Persistence is optional: unsupported native path encodings
+                // must not turn a usable in-memory description into a panic.
+                if inputs.clock.is_none()
+                    && let Ok(json) =
+                        serde_json::to_string(&summary::Summary::of(&self.sessions[index], &inputs))
+                {
                     self.cache.save_session_description(
                         &key,
                         summary::VERSION,
