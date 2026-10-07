@@ -1040,10 +1040,17 @@ fn invalidate_catalog_source(
     path: &str,
     reason: &str,
 ) -> rusqlite::Result<()> {
+    // Keep the counter after acknowledgement. Resetting per-path revisions
+    // would let an old claim mistake a later observation for its own (ABA).
+    transaction.execute(
+        "INSERT INTO meta(key,value) VALUES ('catalog_source_revision','1')
+         ON CONFLICT(key) DO UPDATE SET value=CAST(CAST(meta.value AS INTEGER)+1 AS TEXT)",
+        [],
+    )?;
     transaction.execute(
         "INSERT INTO session_catalog_invalidations(source_path,revision,reason,observed_at)
-         VALUES (?1,1,?2,?3) ON CONFLICT(source_path) DO UPDATE SET
-         revision=session_catalog_invalidations.revision+1,
+         VALUES (?1,CAST((SELECT value FROM meta WHERE key='catalog_source_revision') AS INTEGER),?2,?3)
+         ON CONFLICT(source_path) DO UPDATE SET revision=excluded.revision,
          reason=excluded.reason, observed_at=excluded.observed_at",
         params![path, reason, crate::model::now_ms()],
     )?;
@@ -2642,8 +2649,17 @@ mod tests {
         assert_eq!(invalidation(&store), Some((3, "removed".into())));
         assert!(store.read_one("a.jsonl").unwrap().is_none());
         drop(store);
-        let (store, _) = opened(&path);
+        let (mut store, _) = opened(&path);
         assert_eq!(invalidation(&store), Some((3, "removed".into())));
+        // Acknowledging work never reuses a revision for later observations.
+        store
+            .connection
+            .execute("DELETE FROM session_catalog_invalidations", [])
+            .unwrap();
+        store
+            .write_one("a.jsonl", None, None, &ledger(3), &full())
+            .unwrap();
+        assert_eq!(invalidation(&store), Some((4, "changed".into())));
         fs::remove_dir_all(root).unwrap();
     }
 

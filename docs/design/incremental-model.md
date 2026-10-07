@@ -191,7 +191,7 @@ its separate query-contract/measurement workstream.
 
 SQLite schema 8 adds `session_catalog_invalidations`, keyed by physical source
 path. Event append/rewrite commits and confirmed source removals record a
-monotonic pending revision, `changed`/`removed` reason, and observation time in
+store-wide monotonic pending revision, `changed`/`removed` reason, and observation time in
 the same transaction as the event ledger. Conflicting writers and interrupted
 transactions leave both the event index and pending revision unchanged. No
 source body or runtime liveness enters this journal. A covering source-path
@@ -201,7 +201,9 @@ A successful complete catalog publication acknowledges pending observations
 only after its generation, source membership and consumed-prefix checks pass,
 in the same transaction as publishing metadata and retiring absent rows. A
 failed publication leaves the old coherent catalog and pending observations,
-including source disappearance, intact across restart. Parser-version rebuilding
+including source disappearance, intact across restart. Acknowledgement retains
+the revision counter so a later observation cannot reuse an older work claim.
+Parser-version rebuilding
 clears this rebuildable work together with derived views, preserving observed
 reports. Additive schema migration preserves the committed catalog.
 
