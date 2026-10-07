@@ -123,9 +123,11 @@ pub(crate) struct CatalogRow {
     pub(crate) sources: Vec<CatalogSource>,
 }
 
-/// Native source identity and last observed generation. The complete-line
-/// hashes identify the derived source records; serving validates access and
-/// current stat before deciding whether this observation is current or stale.
+/// Native source identity and last observed generation. `prefix_sha256` hashes
+/// every consumed byte in `[0, offset)`; `tail_sha256` hashes at most the last
+/// 4 KiB of that prefix. Neither binds unread trailing bytes or a whole archive
+/// object. Serving validates access and current stat before deciding whether
+/// this observation is current or stale.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct CatalogSource {

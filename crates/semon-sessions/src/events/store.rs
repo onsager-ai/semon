@@ -1,8 +1,9 @@
 //! The event index persisted in SQLite: `sessions-index.sqlite3`, beside the
 //! V1 metadata cache (step a1 of `docs/design/derived-store.md`).
 //!
-//! It holds what [`FileIndex`] holds and nothing more: kinds, offsets, ids,
-//! counts, flags and short tags, never message text (risk:secret). Every
+//! It holds the metadata represented by [`FileIndex`], versioned stable session
+//! descriptions and a focused-read catalog: kinds, offsets, ids, counts, flags
+//! and native metadata, never message or tool text (risk:secret). Every
 //! file's change commits in one `BEGIN IMMEDIATE` transaction together with
 //! its ledger row, so a file's resume offset never runs ahead of its rows,
 //! and a writer re-reads the ledger inside that transaction, so two
