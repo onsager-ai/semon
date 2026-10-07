@@ -16,6 +16,7 @@ import {
   updateSessionControl,
   updateSessionPager,
   updateSessionRuntime,
+  updateSessionJump,
 } from '../lib/transcript';
 import { releaseScreen } from '../lib/screens';
 import { requestJson } from '../lib/model';
@@ -51,6 +52,10 @@ interface SelectedView {
     string,
     { generation: string; text?: string; next: number | null; loading: boolean; note: string }
   >;
+  following: boolean;
+  newCount: number;
+  lastTotal: number | null;
+  queuedAfter?: number | null;
 }
 /** The advertised bounded reader has no complete ModelStore or global content poller. */
 export function createCatalogViewer(
@@ -106,8 +111,17 @@ export function createCatalogViewer(
   });
   shell.mount(document.querySelector<HTMLElement>('.app')!);
   const root = shell.slots.content,
-    title = document.createElement('div');
+    title = document.createElement('div'),
+    jumpActions = document.createElement('div'),
+    jumpSlot = document.createElement('span'),
+    jumpTarget = document.createElement('div');
   title.className = 'ttl';
+  jumpActions.className = 'viewer-bar-actions';
+  jumpSlot.className = 'viewer-jump';
+  jumpTarget.className = 'jump-wrap';
+  jumpTarget.hidden = true;
+  jumpSlot.append(jumpTarget);
+  jumpActions.append(jumpSlot);
   const recent = createRecentRenderer(shell.slots.recent, {
     open(key) {
       void goSession(key);
@@ -218,6 +232,7 @@ export function createCatalogViewer(
       title.textContent = name;
       shell.topbar({
         titleSlot: title,
+        actions: active ? [jumpActions] : [],
         session: !!active,
         lead: { label: 'Open menu', icon: I.menu },
         account: account
@@ -438,9 +453,13 @@ export function createCatalogViewer(
       );
       return;
     }
+    if (view.lastTotal !== null && !view.following && current.projection.total > view.lastTotal)
+      view.newCount += current.projection.total - view.lastTotal;
+    view.lastTotal = current.projection.total;
     if (view.renderedRevision === view.store.revision && view.renderedNote === view.note) {
       updateSessionControl(view.root, controlFor(view));
       updateSessionRuntime(view.root, runtimeFor(view));
+      syncJump(view);
       if ((view.store.loadedRanges()[0]?.first ?? 0) > 0)
         updateSessionPager(view.root, {
           sid: view.key,
@@ -505,14 +524,19 @@ export function createCatalogViewer(
         script() {},
         image() {},
         background() {},
-        jump() {},
+        jump() {
+          jumpLatest(view);
+        },
         pager() {
           void loadSelected(view, Math.max(0, view.store.loadedRanges()[0].first - 60));
         },
       },
     );
     const main = document.querySelector<HTMLElement>('#main')!;
-    if (anchor?.isConnected && anchorTop !== undefined) {
+    if (view.following) {
+      view.opening = false;
+      scrollEnd();
+    } else if (anchor?.isConnected && anchorTop !== undefined) {
       const shift = anchor.getBoundingClientRect().top - anchorTop;
       if (window.matchMedia('(max-width: 760px)').matches) window.scrollBy(0, shift);
       else main.scrollTop += shift;
@@ -522,6 +546,29 @@ export function createCatalogViewer(
         window.scrollTo(0, document.documentElement.scrollHeight);
       else main.scrollTop = main.scrollHeight;
     }
+    syncJump(view);
+  }
+  function scrollEnd() {
+    if (window.matchMedia('(max-width: 760px)').matches)
+      window.scrollTo(0, document.documentElement.scrollHeight);
+    else {
+      const main = document.querySelector<HTMLElement>('#main')!;
+      main.scrollTop = main.scrollHeight;
+    }
+  }
+  function syncJump(view: SelectedView) {
+    if (active !== view || disposed) return;
+    updateSessionJump(view.root, !view.following, view.newCount, false, jumpTarget);
+  }
+  function jumpLatest(view: SelectedView) {
+    if (active !== view || disposed) return;
+    view.following = true;
+    view.newCount = 0;
+    syncJump(view);
+    scrollEnd();
+    void loadSelected(view).finally(() => {
+      if (active === view && !disposed) scrollEnd();
+    });
   }
   function fieldView(view: SelectedView, entry: CatalogTranscriptEntry) {
     if (!entry.clipped || !entry.field) return null;
@@ -651,10 +698,15 @@ export function createCatalogViewer(
     }
   }
   async function loadSelected(view: SelectedView, after: number | null = null) {
-    if (disposed || view.loading || !capabilities.selected_transcript) {
+    if (view.loading && !disposed && capabilities.selected_transcript) {
+      if (view.queuedAfter === undefined || after !== null) view.queuedAfter = after;
+      return;
+    }
+    if (disposed || !capabilities.selected_transcript) {
       drawSelected(view);
       return;
     }
+    if (after !== null) view.following = false;
     scope.clearTimeout(view.retry);
     const request = view.store.request(after),
       p = params();
@@ -663,6 +715,7 @@ export function createCatalogViewer(
     if (after !== null) p.set('after', String(after));
     if (request.generation !== null) p.set('generation', request.generation);
     view.loading = true;
+    view.root.setAttribute('aria-busy', 'true');
     view.note = '';
     drawSelected(view);
     try {
@@ -700,7 +753,11 @@ export function createCatalogViewer(
       }
     } finally {
       view.loading = false;
+      if (!disposed) view.root.setAttribute('aria-busy', 'false');
       drawSelected(view);
+      const queued = view.queuedAfter;
+      view.queuedAfter = undefined;
+      if (!disposed && active === view && queued !== undefined) void loadSelected(view, queued);
     }
   }
   async function loadIdentity(view: SelectedView) {
@@ -762,6 +819,9 @@ export function createCatalogViewer(
         renderedRevision: -1,
         renderedNote: '',
         fields: new Map(),
+        following: true,
+        newCount: 0,
+        lastTotal: null,
       };
       selected.set(key, view);
     }
@@ -827,6 +887,20 @@ export function createCatalogViewer(
     } else goList(false);
   }
   scope.listen(window, 'popstate', fromLocation);
+  const readingScroll = () => {
+    if (!active) return;
+    const main = document.querySelector<HTMLElement>('#main')!,
+      gap = window.matchMedia('(max-width: 760px)').matches
+        ? document.documentElement.scrollHeight - window.scrollY - window.innerHeight
+        : main.scrollHeight - main.scrollTop - main.clientHeight;
+    active.following = gap <= 80;
+    if (active.following) active.newCount = 0;
+    syncJump(active);
+  };
+  scope.listen(window, 'scroll', readingScroll, { passive: true });
+  scope.listen(document.querySelector<HTMLElement>('#main')!, 'scroll', readingScroll, {
+    passive: true,
+  });
   scope.listen(document, 'keydown', (event) => {
     if (event.key === 'Escape') shell.closeDrawer();
   });
