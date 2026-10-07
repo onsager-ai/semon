@@ -14,7 +14,11 @@ export class CatalogSelectionStore {
   private identity: CatalogSessionIdentity | null = null;
   private readonly listeners = new Set<() => void>();
   begin(scope: CatalogSelectionScope): CatalogSelectionRequest {
-    if (typeof scope.source_key !== 'string' || !scope.catalog_key)
+    if (
+      typeof scope.source_key !== 'string' ||
+      typeof scope.catalog_key !== 'string' ||
+      !scope.catalog_key
+    )
       throw new Error('Invalid catalog selection');
     const request = Object.freeze({
       source_key: scope.source_key,
