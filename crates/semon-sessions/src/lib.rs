@@ -16,8 +16,8 @@ mod analytics;
 mod catalog;
 mod catalog_observer;
 pub use catalog::{
-    CatalogFreshness, CatalogIdentityError, CatalogReadScope, CatalogSessionIdentity,
-    CatalogSourceObservation, SessionSourceProof, SessionSourceRef,
+    CatalogFreshness, CatalogIdentityError, CatalogOwnerQualification, CatalogReadScope,
+    CatalogSessionIdentity, CatalogSourceObservation, SessionSourceProof, SessionSourceRef,
     session_catalog_history_identity, session_catalog_identity, session_catalog_page,
     session_source_proof,
 };

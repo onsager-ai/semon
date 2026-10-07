@@ -6316,7 +6316,7 @@ fn schema_four_upgrade_preserves_event_indices_and_observed_runs() {
     let version: i64 = connection
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 13);
+    assert_eq!(version, 15);
 }
 
 #[test]
@@ -6683,6 +6683,10 @@ fn partial_lineage_source_disappearance_preserves_natural_history_context() {
         serde_json::from_slice::<Value>(&reply.body).unwrap()
     };
     let retained = read();
+    assert_eq!(
+        retained["session"]["summary_context"],
+        json!({"state":"incomplete","scope":"current_observation"})
+    );
     let entry = retained["entries"]
         .as_array()
         .unwrap()

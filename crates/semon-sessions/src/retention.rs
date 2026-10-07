@@ -84,6 +84,10 @@ pub fn source_projection_ready(
     if version.as_deref() != Some(crate::model::summary::CATALOG_VERSION.to_string().as_str()) {
         return Ok(None);
     }
+    let partial: bool = transaction.query_row("SELECT EXISTS(SELECT 1 FROM meta WHERE key='catalog_completeness' AND value='partial')",[],|row|row.get(0)).map_err(|_|Unavailable)?;
+    if partial {
+        return Ok(None);
+    }
     let coherent: bool = transaction.query_row("SELECT EXISTS(SELECT 1 FROM meta a JOIN meta b ON a.value=b.value WHERE a.key='catalog_generation' AND b.key='slot_projection_catalog_generation')",[],|row|row.get(0)).map_err(|_|Unavailable)?;
     if !coherent {
         return Ok(None);

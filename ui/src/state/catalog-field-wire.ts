@@ -28,7 +28,7 @@ export function parseCatalogField(value: unknown, request: CatalogFieldRequest) 
     identity.read_scope !== 'retained_history' ||
     identity.source_key !== request.source_key ||
     identity.catalog_key !== request.catalog_key ||
-    projection.version !== 4 ||
+    projection.version !== 5 ||
     projection.generation !== request.generation ||
     row.slot !== request.entry.slot ||
     field.name !== request.entry.field?.name ||
