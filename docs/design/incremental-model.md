@@ -122,3 +122,40 @@ Catalog publication verifies source membership and each committed ledger's
 complete-prefix identity inside its transaction. If another builder has added,
 removed or advanced a source, publication returns conflict and retains the
 newer catalog rather than rolling back its generation.
+
+
+### Restart-style preparation measurement, 2026-10-07
+
+Reproduce with `cargo test -p semon-sessions --locked --lib
+persisted_description_restart_measurement -- --ignored --nocapture`. The
+workload is 512 Claude sessions, each with one prompt and 128 unique billed
+assistant usage records (65,536 usage records). Each iteration constructs a new
+`EventCache` and `Texts`; OS caches are warm. This measures application cache
+restart, not an OS-cold server/browser journey. The generated workload contains
+no live processes, cross-session links, archived providers or expanded tools.
+
+At `79b7529` (schema 6 catalog included), alternating forced-description misses
+and compatible committed hits yielded:
+
+| Pair | Miss total ms | Hit total ms | Miss sessions ms | Hit sessions ms |
+| --- | ---: | ---: | ---: | ---: |
+| 1 | 4265 | 3272 | 2441 | 938 |
+| 2 | 2552 | 2454 | 1244 | 460 |
+| 3 | 2878 | 1321 | 1449 | 282 |
+
+Every full-model response was 614,977 bytes. The whole workload process peaked
+at 77,508 KiB RSS. The complete model still loads all event metadata, so this
+slice does not claim a memory or response-size reduction. The original
+`83e2325` plus the same measurement-only fixture yielded repeated totals
+2158/2793/2669/3308/3153/4103 ms and 74,376 KiB whole-process RSS; the earlier
+schema-5 description-only slice (`441b333`) yielded paired misses
+1926/1724/1509 ms and hits 885/895/1013 ms (76,224 KiB RSS). These runs shared a
+host with parallel builds: the consistent description-phase savings are useful
+evidence, while total latency varies too much to calibrate a production budget.
+
+The embedded Viewer bundle remains the base revision's bundle, SHA-256
+`f8e53117df754dde006726c1b87f09864480e875fc13c1cab07bf5fbdcbbf059`.
+No guest artifact was used. UI connection/session integration, cold focused list
+pages under increasing unrelated history and multi-machine/archive journeys
+require the consuming query/UI/host workstreams; this evidence does not stand
+in for those gates.
