@@ -3026,6 +3026,7 @@ async function lateFixture(browser, prefix) {
       (note) => ({
         intros: document.querySelectorAll('#page .bubble.in').length,
         foot: document.querySelectorAll('#page .session-foot').length,
+        observation: document.querySelector('[data-transcript-observation]')?.textContent ?? null,
         copies: [...document.querySelectorAll('#page *')]
           .filter(
             (n) =>
@@ -3274,6 +3275,10 @@ async function childIntroLateGivesUp(browser, r) {
       R.shown.intros === 0 && R.shown.copies.length === 1,
       "child-intro-late-gives-up: after giving up the page keeps the brief once, as the subagent's own first message (no bubble): " +
         JSON.stringify(R.shown),
+    );
+    r.expect(
+      R.shown.observation?.includes('saved transcript is incomplete'),
+      'child-intro-late-gives-up: exhausted observation retries must remain visible',
     );
     R.errors = pages.flatMap((p) => p.errors);
     r.expect(

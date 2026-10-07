@@ -158,10 +158,11 @@ authorize retained history and archive access, and source readers must verify
 original immutable generations before supplying bytes. History identity grants
 no control, credential or runtime authority.
 
-Durable retained projection rows preserve consumed-source provenance and native
-slot/span recipes across local source disappearance. A missing or unsupported
-projection still returns not-found or unavailable; history intent cannot
-reconstruct absent provenance or grant native authority.
+This scope cannot resurrect deleted projection rows. Durable retention of
+catalog, consumed-source provenance and native slot/span recipes across local
+source disappearance/eviction is a separate producer requirement. Without those
+rows, a selected history request remains not-found or unavailable rather than
+silently rebuilding unrelated workspace history or granting native authority.
 
 Current lists use lifecycle-prefixed indexes and omit retained projection rows.
 Retained-history lists use the existing order/filter indexes over both lifecycles.

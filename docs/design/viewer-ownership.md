@@ -213,3 +213,31 @@ It never reads credential fields or installs a submit controller.
 navigation root; shared safe-path validation and native links apply. It creates
 no additional router, model store or poller. The compact gallery covers geometry,
 Escape/focus return and remount; Hub provides the real server/form adoption checks.
+
+## Selected model observation
+
+Opt-in selected model reads borrow the current native session and projected
+machine from navigation/model owners. Navigation publishes route changes through
+`subscribeRoute`; it retains ownership of the route and cleans subscribers on
+destroy. The existing live owner scopes its sole stream and snapshot recovery
+reads, cancels superseded reads and rejects late/queued deliveries from a previous
+selection. A changed accepted machine projection resubscribes under the new scope.
+This adds no model store, router, poller or rendering owner. Hosts resolve the
+authoritative native source binding and authorization; the projected machine id
+is only a consistency guard. Initial boot is unselected until its model supplies
+route context. Controls cannot carry authority merely because a client supplied
+a session or machine candidate.
+
+An embedding host may opt into a separate `controlStream`. The composition owns
+one navigation-scoped status observer and disposes it with the Viewer. Its
+snapshots update the existing local control owner and cached Session screen;
+they never adopt a model or prepare transcript blocks. Native status, transport
+freshness and content revisions remain distinct. Selection changes invalidate
+queued status callbacks and clear authority from the previous selection.
+
+Catalog status consumes the accepted selection owner's narrow typed identity
+accessor and subscription. The host contributes only a static
+`catalogControlStream` path. An unresolved, superseded or multi-native catalog
+selection cannot enter the legacy observer or select a native destination.
+Returning to the same native thread invalidates handles from a previous
+selection epoch, even when the native generation remains unchanged.

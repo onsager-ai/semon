@@ -8,7 +8,19 @@ export interface ControlRequest {
   reason: string | null;
   remainingMs: number;
 }
+/** Durable runtime state and native-observation freshness remain distinct. */
+export interface ControlRuntimeStatus {
+  state: 'active' | 'disconnected' | 'failed' | 'ended' | 'unavailable';
+  phase: string;
+  freshness: 'current' | 'updating' | 'stale' | 'unavailable';
+  reconnectable: boolean;
+  presence?: 'active' | 'absent' | 'paused' | 'transitioning' | 'failed' | 'unknown';
+  observedAt?: string | null;
+  observationError?: string | null;
+  updating?: boolean;
+}
 export interface ControlSnapshot {
+  runtime?: ControlRuntimeStatus;
   thread: string;
   generation: string;
   activeTurn: string | null;
@@ -42,6 +54,45 @@ export function parseControl(value: unknown): ControlSnapshot | null {
     !record(value.actions)
   )
     throw new Error('Invalid control snapshot');
+  if (
+    value.runtime !== undefined &&
+    (!record(value.runtime) ||
+      typeof value.runtime.state !== 'string' ||
+      !['active', 'disconnected', 'failed', 'ended', 'unavailable'].includes(
+        String(value.runtime.state),
+      ) ||
+      typeof value.runtime.phase !== 'string' ||
+      value.runtime.phase.length > 64 ||
+      typeof value.runtime.freshness !== 'string' ||
+      !['current', 'updating', 'stale', 'unavailable'].includes(value.runtime.freshness) ||
+      typeof value.runtime.reconnectable !== 'boolean')
+  )
+    throw new Error('Invalid runtime status');
+  if (
+    record(value.runtime) &&
+    ((value.runtime.presence !== undefined &&
+      (typeof value.runtime.presence !== 'string' ||
+        !['active', 'absent', 'paused', 'transitioning', 'failed', 'unknown'].includes(
+          String(value.runtime.presence),
+        ))) ||
+      (value.runtime.observedAt !== undefined &&
+        value.runtime.observedAt !== null &&
+        (typeof value.runtime.observedAt !== 'string' ||
+          value.runtime.observedAt.length > 64 ||
+          !Number.isFinite(Date.parse(value.runtime.observedAt)))) ||
+      (value.runtime.observationError !== undefined &&
+        value.runtime.observationError !== null &&
+        (typeof value.runtime.observationError !== 'string' ||
+          value.runtime.observationError.length > 512)) ||
+      (value.runtime.updating !== undefined && typeof value.runtime.updating !== 'boolean') ||
+      (value.runtime.state !== 'active' &&
+        (value.runtime.reconnectable ||
+          value.connected ||
+          ['input', 'steer', 'interrupt', 'commandApproval', 'fileApproval', 'questions'].some(
+            (key) => record(value.capabilities) && value.capabilities[key] === true,
+          ))))
+  )
+    throw new Error('Invalid runtime authority');
   for (const request of value.requests) {
     if (
       !record(request) ||
@@ -65,6 +116,7 @@ export function parseControl(value: unknown): ControlSnapshot | null {
   return value as unknown as ControlSnapshot;
 }
 export interface ControlView {
+  canReconnect?: boolean;
   snapshot: ControlSnapshot;
   busy: boolean;
   uncertain: boolean;

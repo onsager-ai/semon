@@ -2,10 +2,7 @@
 //! complete source record; readers start at stored scalar checkpoints.
 use crate::{json_string, slot_projection::Recipe};
 use serde::{Deserialize, Serialize};
-use std::{
-    io::{BufRead, BufReader, Read, Seek, SeekFrom},
-    path::Path,
-};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 
 const PRODUCER_RECORD_MAX: u64 = 32 * 1024 * 1024;
 
@@ -52,7 +49,7 @@ impl NativeFieldKind {
 /// Plain Claude text only. Structured bodies, native formatting wrappers and
 /// arbitrary JSON keys are deliberately excluded from persisted metadata.
 pub(crate) fn capture(
-    path: &Path,
+    source: &crate::model::summary::CatalogSource,
     offset: u64,
     block: u32,
     recipe: &Recipe,
@@ -69,16 +66,7 @@ pub(crate) fn capture(
     if block > 1024 {
         return None;
     }
-    let mut file = crate::sealed::LogFile::open(path).ok()?;
-    file.seek(SeekFrom::Start(offset)).ok()?;
-    let mut bytes = Vec::new();
-    BufReader::new(file)
-        .take(PRODUCER_RECORD_MAX + 1)
-        .read_until(b'\n', &mut bytes)
-        .ok()?;
-    if bytes.len() as u64 > PRODUCER_RECORD_MAX {
-        return None;
-    }
+    let bytes = read_source_record(source, offset)?;
     let value = crate::tx::parse_native_record(&bytes)?;
     let mut kind = kind;
     let mut layers = 1;
@@ -190,4 +178,55 @@ pub(crate) fn capture(
         checkpoints: span.checkpoints,
         native_event_id,
     })
+}
+
+/// Producer-only record read bound to the exact ledger observation, not merely
+/// to a pathname. Refuse bytes changed between event parsing and projection.
+pub(crate) fn read_source_record(
+    source: &crate::model::summary::CatalogSource,
+    offset: u64,
+) -> Option<Vec<u8>> {
+    let remaining = source.offset.checked_sub(offset)?;
+    if remaining == 0 {
+        return None;
+    }
+    let mut file = crate::sealed::LogFile::open(&source.path).ok()?;
+    if !source_matches(source, &file.metadata().ok()?) {
+        return None;
+    }
+    file.seek(SeekFrom::Start(offset)).ok()?;
+    let mut bytes = Vec::new();
+    BufReader::new(&mut file)
+        .take(remaining.min(PRODUCER_RECORD_MAX + 1))
+        .read_until(b'\n', &mut bytes)
+        .ok()?;
+    if bytes.len() as u64 > PRODUCER_RECORD_MAX
+        || bytes.last() != Some(&b'\n')
+        || !source_matches(source, &file.metadata().ok()?)
+    {
+        return None;
+    }
+    Some(bytes)
+}
+fn source_matches(
+    source: &crate::model::summary::CatalogSource,
+    metadata: &std::fs::Metadata,
+) -> bool {
+    #[cfg(unix)]
+    let identity = {
+        use std::os::unix::fs::MetadataExt;
+        (metadata.dev(), metadata.ino())
+    };
+    #[cfg(not(unix))]
+    let identity = (0, 0);
+    source.changed_ns.is_some()
+        && source.changed_ns == crate::events::change_time_ns(metadata)
+        && identity == (source.dev, source.ino)
+        && metadata.len() == source.size
+        && metadata
+            .modified()
+            .ok()
+            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|time| time.as_nanos())
+            == Some(source.modified_ns)
 }
