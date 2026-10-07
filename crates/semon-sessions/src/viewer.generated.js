@@ -14911,6 +14911,9 @@ globalThis.__semonUIShared = __semonUIShared;
     applicationRefreshOwner;
     viewport;
     tickerOwner;
+    get catalogSelection() {
+      return this.viewerHost?.catalogControlStream ? this.catalogSelectionStore : void 0;
+    }
     constructor(host2, onDestroyed) {
       const context = this;
       this.scope = new EffectScope();
