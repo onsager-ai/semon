@@ -37,6 +37,13 @@ impl SessionCatalogObserver {
         self.view.note_catalog_read()
     }
 
+    /// Stop future checks immediately without waiting for running work. Hosts
+    /// retire before scheduling a bounded off-reactor close/drain; source custody
+    /// must remain valid until close completes.
+    pub fn retire(&self) {
+        self.view.retire();
+    }
+
     /// Stop and drain work before replacing options or removing source custody.
     /// This can wait for running work; async hosts call it outside their reactor.
     pub fn close(&self) {
