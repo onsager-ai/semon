@@ -121,8 +121,16 @@ try {
     throw Error('Fixture navigation failed');
   }
   await page.locator('[data-session-row="list"]').first().waitFor({ timeout: 60000 });
+  const firstRowsMs = performance.now() - started,
+    firstRows = await sample();
+  // Partial discovery may show older rows first. The requested recent page is
+  // ready only when its deliberately selected fixture session is available.
+  await page
+    .locator(`[data-session-row="list"][data-id="${fixture.catalog_key}"]`)
+    .waitFor({ timeout: 60000 });
   const coldMs = performance.now() - started,
     cold = await sample();
+  assert.equal(cold.rows, 60, 'the requested first list page remains sixty rows');
   if (fixture.harness) {
     started = performance.now();
     const response = page.waitForResponse(
@@ -194,6 +202,7 @@ try {
     source_key: fixture.source_key,
     catalog_key: fixture.catalog_key,
     phase: fixture.phase ?? null,
+    firstRowsMs,
     coldMs,
     filterMs,
     selectedMs,
@@ -201,6 +210,7 @@ try {
     fieldMs,
     warmMs,
     before,
+    firstRows,
     cold,
     filtered,
     selected,
@@ -213,7 +223,17 @@ try {
   await writeFile(evidencePath, JSON.stringify(evidence, null, 2));
   await writeFile(evidencePath + '.result', JSON.stringify({ ok: true }));
   console.log(
-    JSON.stringify({ coldMs, filterMs, selectedMs, earlierMs, fieldMs, warmMs, bundle, errors }),
+    JSON.stringify({
+      firstRowsMs,
+      coldMs,
+      filterMs,
+      selectedMs,
+      earlierMs,
+      fieldMs,
+      warmMs,
+      bundle,
+      errors,
+    }),
   );
 } catch (error) {
   await writeFile(evidencePath + '.result', JSON.stringify({ ok: false, error: error.message }));
