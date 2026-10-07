@@ -78,12 +78,16 @@ test(
           });
         }
       });
-      await page.route('**/viewer.js', async (route) =>
-        route.fulfill({
-          contentType: 'text/javascript',
-          body: await readFile(join(root, 'crates/semon-sessions/src/viewer.generated.js'), 'utf8'),
-        }),
-      );
+      if (process.env.SEMON_CATALOG_SERVED_UI_OVERRIDE === '1')
+        await page.route('**/viewer.js', async (route) =>
+          route.fulfill({
+            contentType: 'text/javascript',
+            body: await readFile(
+              join(root, 'crates/semon-sessions/src/viewer.generated.js'),
+              'utf8',
+            ),
+          }),
+        );
       const start = performance.now();
       await page.goto(url[1] + '/?t=' + url[2]);
       await page.locator('#page [data-id]').first().waitFor({ timeout: 60000 });
