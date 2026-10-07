@@ -836,6 +836,173 @@ mod tests {
     }
 
     #[test]
+    fn current_catalog_index_work_is_constant_with_unrelated_retained_history() {
+        let fixture = Fixture::new();
+        fixture.publish(1);
+        let connection = Connection::open(EventCache::path(&fixture.options.cache)).unwrap();
+        let query = "SELECT metadata FROM session_catalog INDEXED BY session_catalog_current_harness_repo WHERE lifecycle='current' AND harness='claude' AND repo='project' ORDER BY last_ms DESC,session_key ASC LIMIT 3";
+        let measure = || {
+            let mut statement = connection.prepare(query).unwrap();
+            let values = statement
+                .query_map([], |row| row.get::<_, String>(0))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap();
+            (
+                values,
+                statement.get_status(rusqlite::StatementStatus::VmStep),
+            )
+        };
+        connection.execute("INSERT INTO session_catalog(session_key,lifecycle,last_ms,harness,repo,metadata) VALUES('initial-retained','retained',0,'claude','project','{}')", []).unwrap();
+        let small = measure();
+        let transaction = connection.unchecked_transaction().unwrap();
+        for id in 0..20_000 {
+            transaction.execute("INSERT INTO session_catalog(session_key,lifecycle,last_ms,harness,repo,metadata) VALUES(?1,'retained',0,'claude','project','{}')", [format!("retained-{id:05}")]).unwrap();
+        }
+        transaction.commit().unwrap();
+        let large = measure();
+        assert_eq!(small, large);
+        let plan: String = connection
+            .query_row(&format!("EXPLAIN QUERY PLAN {query}"), [], |row| row.get(3))
+            .unwrap();
+        assert!(plan.contains("session_catalog_current_harness_repo"));
+        assert!(!plan.contains("SCAN"));
+        eprintln!(
+            "current catalog SQL VM steps: one retained={}, 20001 retained={}",
+            small.1, large.1
+        );
+    }
+
+    #[test]
+    fn schema_ten_retention_migration_binds_only_coherent_supported_recipes() {
+        for coherent in [true, false] {
+            let fixture = Fixture::new();
+            fixture.publish(1);
+            let connection = Connection::open(EventCache::path(&fixture.options.cache)).unwrap();
+            let before: String = connection
+                .query_row(
+                    "SELECT generation FROM session_slot_projections",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            connection.execute_batch("DROP INDEX session_catalog_current_order; DROP INDEX session_catalog_current_harness; DROP INDEX session_catalog_current_repo; DROP INDEX session_catalog_current_harness_repo; DROP INDEX session_catalog_current_parent; DROP INDEX session_catalog_current_native; DROP INDEX session_catalog_current_source_path; ALTER TABLE session_catalog DROP COLUMN lifecycle; ALTER TABLE session_catalog_sources DROP COLUMN lifecycle; ALTER TABLE session_slot_projections DROP COLUMN source_generation; UPDATE session_catalog SET metadata=json_remove(metadata,'$.lifecycle'); PRAGMA user_version=10;").unwrap();
+            if !coherent {
+                connection.execute("UPDATE meta SET value='stale' WHERE key='slot_projection_catalog_generation'", []).unwrap();
+            }
+            drop(EventCache::open(&fixture.options.cache));
+            let (after, source): (String, Option<String>) = connection
+                .query_row(
+                    "SELECT generation,source_generation FROM session_slot_projections",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .unwrap();
+            assert_eq!(before, after);
+            assert_eq!(source.is_some(), coherent);
+            assert_eq!(
+                connection
+                    .query_row("PRAGMA user_version", [], |row| row.get::<_, u32>(0))
+                    .unwrap(),
+                11
+            );
+        }
+    }
+
+    #[test]
+    fn retained_projection_survives_parser_reset_and_source_reappearance() {
+        let fixture = Fixture::new();
+        fixture.publish(1);
+        let relative = "projects/project/session-00000.jsonl";
+        let before = crate::source_projection_ready(&fixture.options, "claude", relative)
+            .unwrap()
+            .unwrap();
+        let connection = Connection::open(EventCache::path(&fixture.options.cache)).unwrap();
+        fs::remove_file(fixture.options.claude_home.join(relative)).unwrap();
+        connection
+            .execute("UPDATE meta SET value='0' WHERE key='cache_version'", [])
+            .unwrap();
+        let core = ViewerCore::new(fixture.options.clone());
+        core.warm().unwrap();
+        core.close();
+        let retained = crate::source_projection_ready(&fixture.options, "claude", relative)
+            .unwrap()
+            .unwrap();
+        assert_eq!(retained.lifecycle, "retained");
+        assert_eq!(before.source, retained.source);
+        assert_eq!(before.projection_generation, retained.projection_generation);
+        fixture.source("session-00000");
+        let core = ViewerCore::new(fixture.options.clone());
+        core.warm().unwrap();
+        core.close();
+        let current = crate::source_projection_ready(&fixture.options, "claude", relative)
+            .unwrap()
+            .unwrap();
+        assert_eq!(current.lifecycle, "current");
+        let count: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM session_catalog_sources WHERE lifecycle='current'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn source_projection_readiness_never_initializes_and_rejects_stale_headers() {
+        let fixture = Fixture::new();
+        let relative = "projects/project/session-00000.jsonl";
+        assert!(
+            crate::source_projection_ready(&fixture.options, "claude", relative)
+                .unwrap()
+                .is_none()
+        );
+        assert!(!EventCache::path(&fixture.options.cache).exists());
+        assert!(
+            crate::source_projection_ready(&fixture.options, "claude", "../outside.jsonl").is_err()
+        );
+        fixture.publish(1);
+        let ready = crate::source_projection_ready(&fixture.options, "claude", relative)
+            .unwrap()
+            .unwrap();
+        assert_eq!(ready.projection_version, crate::slot_projection::VERSION);
+        let connection = Connection::open(EventCache::path(&fixture.options.cache)).unwrap();
+        let hash:String=connection.query_row("SELECT source_generation FROM session_slot_projections WHERE session_key='session-00000'",[],|row|row.get(0)).unwrap();
+        connection
+            .execute(
+                "UPDATE session_slot_projections SET source_generation=NULL",
+                [],
+            )
+            .unwrap();
+        assert!(
+            crate::source_projection_ready(&fixture.options, "claude", relative)
+                .unwrap()
+                .is_none()
+        );
+        connection
+            .execute(
+                "UPDATE session_slot_projections SET source_generation=?1,version=version+1",
+                [hash],
+            )
+            .unwrap();
+        assert!(
+            crate::source_projection_ready(&fixture.options, "claude", relative)
+                .unwrap()
+                .is_none()
+        );
+        connection
+            .execute("UPDATE session_slot_projections SET version=version-1", [])
+            .unwrap();
+        connection.execute("UPDATE meta SET value='not-coherent' WHERE key='slot_projection_catalog_generation'",[]).unwrap();
+        assert!(
+            crate::source_projection_ready(&fixture.options, "claude", relative)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
     fn scoped_catalog_identity_preserves_native_ambiguity_and_source_authority() {
         let fixture = Fixture::new();
         fixture.publish(2);
@@ -1055,7 +1222,44 @@ mod tests {
         drop(file);
         fixture.publish(1);
         let bytes = fs::read(&path).unwrap();
+        let ready = crate::source_projection_ready(
+            &fixture.options,
+            "claude",
+            "projects/project/archived.jsonl",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(ready.lifecycle, "current");
         fs::remove_file(&path).unwrap();
+        // A closed/reopened background model retires the native index. History
+        // metadata and immutable native recipe generation must survive it.
+        let reopened = ViewerCore::new(fixture.options.clone());
+        reopened.warm().unwrap();
+        reopened.close();
+        let retained = crate::source_projection_ready(
+            &fixture.options,
+            "claude",
+            "projects/project/archived.jsonl",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(retained.lifecycle, "retained");
+        assert_eq!(retained.source, ready.source);
+        assert_eq!(retained.projection_generation, ready.projection_generation);
+        let connection = Connection::open(EventCache::path(&fixture.options.cache)).unwrap();
+        let removed: i64 = connection
+            .query_row(
+                "SELECT count(*) FROM files WHERE path=?1",
+                [path.to_str().unwrap()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            removed, 0,
+            "retained provenance must not pretend to be a current file ledger"
+        );
+        let retired:i64=connection.query_row("SELECT count(*) FROM session_catalog_sources WHERE session_key='archived' AND lifecycle='retained'",[],|row|row.get(0)).unwrap();
+        assert_eq!(retired, 1);
         struct Provider {
             bytes: Vec<u8>,
             changed: bool,

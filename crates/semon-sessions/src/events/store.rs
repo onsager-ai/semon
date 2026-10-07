@@ -46,7 +46,7 @@ use crate::{Tokens, facts::ReportedRunSnapshot};
 
 /// `PRAGMA user_version`: the shape of the tables. The parser's version is
 /// [`CACHE_VERSION`], kept in `meta`.
-const SCHEMA_VERSION: i64 = 10;
+const SCHEMA_VERSION: i64 = 11;
 
 /// How long a write waits for another process's transaction. Tests wait
 /// less, so the busy paths they drive stay quick.
@@ -64,6 +64,7 @@ const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS session_slot_projections (
     session_key TEXT PRIMARY KEY,
     generation TEXT NOT NULL,
+    source_generation TEXT,
     version INTEGER NOT NULL,
     total INTEGER NOT NULL
 ) STRICT;
@@ -76,6 +77,7 @@ CREATE TABLE IF NOT EXISTS session_slots (
 
 CREATE TABLE IF NOT EXISTS session_catalog (
     session_key TEXT PRIMARY KEY,
+    lifecycle TEXT NOT NULL DEFAULT 'current' CHECK(lifecycle IN ('current','retained')),
     last_ms INTEGER NOT NULL,
     harness TEXT NOT NULL,
     repo TEXT,
@@ -87,8 +89,14 @@ CREATE INDEX IF NOT EXISTS session_catalog_harness ON session_catalog(harness, l
 CREATE INDEX IF NOT EXISTS session_catalog_repo ON session_catalog(repo, last_ms DESC, session_key ASC);
 CREATE INDEX IF NOT EXISTS session_catalog_harness_repo ON session_catalog(harness, repo, last_ms DESC, session_key ASC);
 CREATE INDEX IF NOT EXISTS session_catalog_parent ON session_catalog(parent_key, last_ms DESC, session_key ASC);
+CREATE INDEX IF NOT EXISTS session_catalog_current_order ON session_catalog(lifecycle, last_ms DESC, session_key ASC);
+CREATE INDEX IF NOT EXISTS session_catalog_current_harness ON session_catalog(lifecycle, harness, last_ms DESC, session_key ASC);
+CREATE INDEX IF NOT EXISTS session_catalog_current_repo ON session_catalog(lifecycle, repo, last_ms DESC, session_key ASC);
+CREATE INDEX IF NOT EXISTS session_catalog_current_harness_repo ON session_catalog(lifecycle, harness, repo, last_ms DESC, session_key ASC);
+CREATE INDEX IF NOT EXISTS session_catalog_current_parent ON session_catalog(lifecycle, parent_key, last_ms DESC, session_key ASC);
 CREATE TABLE IF NOT EXISTS session_catalog_sources (
     session_key TEXT NOT NULL,
+    lifecycle TEXT NOT NULL DEFAULT 'current' CHECK(lifecycle IN ('current','retained')),
     harness TEXT NOT NULL,
     native_id TEXT NOT NULL,
     source_path TEXT NOT NULL,
@@ -96,6 +104,8 @@ CREATE TABLE IF NOT EXISTS session_catalog_sources (
 ) STRICT, WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS session_catalog_native ON session_catalog_sources(harness, native_id, session_key);
 CREATE INDEX IF NOT EXISTS session_catalog_source_path ON session_catalog_sources(source_path, session_key);
+CREATE INDEX IF NOT EXISTS session_catalog_current_native ON session_catalog_sources(lifecycle, harness, native_id, session_key);
+CREATE INDEX IF NOT EXISTS session_catalog_current_source_path ON session_catalog_sources(lifecycle, source_path, session_key);
 CREATE TABLE IF NOT EXISTS session_catalog_invalidations (
     source_path TEXT PRIMARY KEY,
     revision INTEGER NOT NULL,
@@ -249,8 +259,8 @@ CREATE TABLE IF NOT EXISTS reported_runs (
 /// last run, so it can't be rebuilt.
 const DERIVED: &str = "
 DELETE FROM session_catalog_invalidations;
-DELETE FROM session_catalog_sources;
-DELETE FROM session_catalog;
+UPDATE session_catalog SET lifecycle='retained',metadata=CASE WHEN json_valid(metadata) THEN json_set(metadata,'$.lifecycle','retained') ELSE metadata END;
+UPDATE session_catalog_sources SET lifecycle='retained';
 DELETE FROM meta WHERE key IN ('catalog_version', 'catalog_generation', 'catalog_observed_at');
 DELETE FROM session_descriptions;
 DELETE FROM events;
@@ -941,10 +951,6 @@ impl IndexStore for SqliteStore {
             .map(json)
             .collect::<Result<_, _>>()
             .map_err(failure)?;
-        let generation = format!(
-            "{:x}",
-            Sha256::digest(format!("{version}|{}", json(&metadata).map_err(failure)?).as_bytes())
-        );
         self.connection
             .busy_timeout(Duration::ZERO)
             .map_err(failure)?;
@@ -1008,8 +1014,6 @@ impl IndexStore for SqliteStore {
                 )
                 .optional()
                 .map_err(failure)?;
-            if previous.as_deref() != Some(&generation)
-                || previous_version.as_deref() != Some(&version)
             {
                 // A temporary membership table bounds deletion SQL parameters and
                 // never escapes the transaction or becomes part of the read model.
@@ -1018,7 +1022,7 @@ impl IndexStore for SqliteStore {
                     let mut member = transaction
                         .prepare("INSERT INTO catalog_members VALUES (?1)")
                         .map_err(failure)?;
-                    let mut put = transaction.prepare("INSERT INTO session_catalog (session_key, last_ms, harness, repo, parent_key, metadata) VALUES (?1, ?2, ?3, ?4, ?5, ?6) ON CONFLICT(session_key) DO UPDATE SET last_ms=excluded.last_ms, harness=excluded.harness, repo=excluded.repo, parent_key=excluded.parent_key, metadata=excluded.metadata WHERE session_catalog.metadata != excluded.metadata OR session_catalog.parent_key IS NOT excluded.parent_key").map_err(failure)?;
+                    let mut put = transaction.prepare("INSERT INTO session_catalog (session_key, lifecycle, last_ms, harness, repo, parent_key, metadata) VALUES (?1, 'current', ?2, ?3, ?4, ?5, ?6) ON CONFLICT(session_key) DO UPDATE SET lifecycle='current', last_ms=excluded.last_ms, harness=excluded.harness, repo=excluded.repo, parent_key=excluded.parent_key, metadata=excluded.metadata WHERE session_catalog.lifecycle != 'current' OR session_catalog.metadata != excluded.metadata OR session_catalog.parent_key IS NOT excluded.parent_key").map_err(failure)?;
                     let mut remove_sources = transaction
                         .prepare("DELETE FROM session_catalog_sources WHERE session_key=?1")
                         .map_err(failure)?;
@@ -1050,9 +1054,27 @@ impl IndexStore for SqliteStore {
                         }
                     }
                 }
-                transaction.execute("DELETE FROM session_catalog_sources WHERE session_key NOT IN (SELECT session_key FROM catalog_members)", []).map_err(failure)?;
-                transaction.execute("DELETE FROM session_catalog WHERE session_key NOT IN (SELECT session_key FROM catalog_members)", []).map_err(failure)?;
-                transaction.execute("INSERT OR REPLACE INTO meta(key,value) VALUES ('catalog_generation',?1),('catalog_version',?2)", params![generation, version]).map_err(failure)?;
+                transaction.execute("UPDATE session_catalog SET lifecycle='retained', metadata=CASE WHEN json_valid(metadata) THEN json_set(metadata,'$.lifecycle','retained') ELSE metadata END WHERE lifecycle='current' AND session_key NOT IN (SELECT session_key FROM catalog_members)", []).map_err(failure)?;
+                transaction.execute("UPDATE session_catalog_sources SET lifecycle='retained' WHERE lifecycle='current' AND session_key NOT IN (SELECT session_key FROM catalog_members)", []).map_err(failure)?;
+            }
+            let generation = {
+                let mut digest = Sha256::new();
+                digest.update(version.as_bytes());
+                let mut statement = transaction
+                    .prepare("SELECT metadata FROM session_catalog ORDER BY session_key")
+                    .map_err(failure)?;
+                let mut values = statement.query([]).map_err(failure)?;
+                while let Some(row) = values.next().map_err(failure)? {
+                    let metadata: String = row.get(0).map_err(failure)?;
+                    digest.update((metadata.len() as u64).to_le_bytes());
+                    digest.update(metadata.as_bytes());
+                }
+                format!("{:x}", digest.finalize())
+            };
+            if previous.as_deref() != Some(&generation)
+                || previous_version.as_deref() != Some(&version)
+            {
+                transaction.execute("INSERT OR REPLACE INTO meta(key,value) VALUES ('catalog_generation',?1),('catalog_version',?2)",params![generation,version]).map_err(failure)?;
             }
             transaction
                 .execute(
@@ -1073,6 +1095,16 @@ impl IndexStore for SqliteStore {
                         .map(json)
                         .collect::<Result<_, _>>()
                         .map_err(failure)?;
+                    let source_generation = crate::retention::source_generation(
+                        &rows
+                            .iter()
+                            .find(|row| row.key == projection.key)
+                            .expect("catalog membership checked")
+                            .sources,
+                    )
+                    .map_err(|_| {
+                        StoreError::Data("source projection metadata cannot serialize".into())
+                    })?;
                     let slot_generation = format!(
                         "{:x}",
                         Sha256::digest(
@@ -1093,8 +1125,8 @@ impl IndexStore for SqliteStore {
                         )
                     );
                     let changed = transaction.execute(
-                        "INSERT INTO session_slot_projections(session_key,generation,version,total) VALUES (?1,?2,?3,?4) ON CONFLICT(session_key) DO UPDATE SET generation=excluded.generation,version=excluded.version,total=excluded.total WHERE session_slot_projections.generation != excluded.generation OR session_slot_projections.version != excluded.version",
-                        params![projection.key,slot_generation,crate::slot_projection::VERSION,i64::try_from(metadata.len()).map_err(|_| StoreError::Data("slot count exceeds SQL range".into()))?]).map_err(failure)?;
+                        "INSERT INTO session_slot_projections(session_key,generation,version,total,source_generation) VALUES (?1,?2,?3,?4,?5) ON CONFLICT(session_key) DO UPDATE SET generation=excluded.generation,version=excluded.version,total=excluded.total,source_generation=excluded.source_generation WHERE session_slot_projections.generation != excluded.generation OR session_slot_projections.version != excluded.version OR session_slot_projections.source_generation IS NOT excluded.source_generation",
+                        params![projection.key,slot_generation,crate::slot_projection::VERSION,i64::try_from(metadata.len()).map_err(|_| StoreError::Data("slot count exceeds SQL range".into()))?,source_generation]).map_err(failure)?;
                     if changed > 0 {
                         transaction
                             .execute(
@@ -1619,6 +1651,15 @@ fn init(connection: &mut Connection) -> rusqlite::Result<Init> {
         if schema == 6 {
             transaction.execute_batch("ALTER TABLE session_catalog ADD COLUMN parent_key TEXT")?;
         }
+        if (6..11).contains(&schema) && !transaction.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info('session_catalog') WHERE name='lifecycle')", [], |row| row.get::<_,bool>(0))? {
+            transaction.execute_batch("ALTER TABLE session_catalog ADD COLUMN lifecycle TEXT NOT NULL DEFAULT 'current' CHECK(lifecycle IN ('current','retained')); ")?;
+        }
+        if (7..11).contains(&schema) && !transaction.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info('session_catalog_sources') WHERE name='lifecycle')", [], |row| row.get::<_,bool>(0))? {
+            transaction.execute_batch("ALTER TABLE session_catalog_sources ADD COLUMN lifecycle TEXT NOT NULL DEFAULT 'current' CHECK(lifecycle IN ('current','retained')); ")?;
+        }
+        if schema==10 && !transaction.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info('session_slot_projections') WHERE name='source_generation')",[],|row|row.get::<_,bool>(0))? {
+            transaction.execute_batch("ALTER TABLE session_slot_projections ADD COLUMN source_generation TEXT")?;
+        }
         transaction.execute_batch(SCHEMA)?;
         if schema == 1 {
             transaction.execute_batch("ALTER TABLE files ADD COLUMN codex_native_usage TEXT")?;
@@ -1642,6 +1683,26 @@ fn init(connection: &mut Connection) -> rusqlite::Result<Init> {
                     ELSE '[]' END) AS identity
                 WHERE identity.type='text'
                 ON CONFLICT DO NOTHING;")?;
+        }
+        if schema == 10 {
+            let coherent:bool=transaction.query_row("SELECT EXISTS(SELECT 1 FROM meta a JOIN meta b ON a.value=b.value WHERE a.key='catalog_generation' AND b.key='slot_projection_catalog_generation')",[],|row|row.get(0))?;
+            if coherent {
+                let mut statement=transaction.prepare("SELECT session_catalog.metadata FROM session_catalog JOIN session_slot_projections USING(session_key) WHERE session_slot_projections.version=?1 AND session_slot_projections.source_generation IS NULL")?;
+                let metadata = statement
+                    .query_map([crate::slot_projection::VERSION], |row| {
+                        row.get::<_, String>(0)
+                    })?
+                    .collect::<Result<Vec<_>, _>>()?;
+                for metadata in metadata {
+                    if let Ok(row) =
+                        serde_json::from_str::<crate::model::summary::CatalogRow>(&metadata)
+                        && let Ok(source_generation) =
+                            crate::retention::source_generation(&row.sources)
+                    {
+                        transaction.execute("UPDATE session_slot_projections SET source_generation=?1 WHERE session_key=?2",params![source_generation,row.key])?;
+                    }
+                }
+            }
         }
         transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     }
