@@ -144,7 +144,7 @@ jobs:
           node tests/ui/gallery.mjs
           node tests/ui/compact-gallery.mjs
           node tests/ui/native-controls.mjs
-          node --test ui/tests/browser-lifecycle.mjs ui/tests/application-lifecycle.mjs ui/tests/native-shell-lifecycle.mjs ui/tests/recovery-browser.mjs
+          node --test ui/tests/browser-lifecycle.mjs ui/tests/application-lifecycle.mjs ui/tests/native-shell-lifecycle.mjs ui/tests/recovery-browser.mjs ui/tests/control-observation-browser.mjs
 
       - name: Write the sample fixtures
         run: |

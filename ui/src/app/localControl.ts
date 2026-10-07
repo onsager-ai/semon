@@ -82,22 +82,55 @@ export function createLocalControl(scope: EffectScope, refresh: () => void) {
   }
   function view(sid?: string): ControlView | undefined {
     if (!current || (sid && sid !== current.thread)) return undefined;
+    const target = current;
+    const send = (op: string, extra: JsonObject = {}) =>
+      current?.thread === target.thread && current.generation === target.generation
+        ? write(op, extra)
+        : Promise.resolve(false);
     return {
       snapshot: current,
       busy,
       uncertain,
       note,
-      send: (text) => write('send', { text }),
-      interrupt: () => void write('interrupt'),
+      send: (text) => send('send', { text }),
+      interrupt: () => void send('interrupt'),
       answer: (request, answer) =>
-        void write('answer', { request: request.id, hash: request.hash, answer }),
-      reconnect: () => void write('reconnect'),
+        void send('answer', { request: request.id, hash: request.hash, answer }),
+      reconnect: () => void send('reconnect'),
     };
   }
   return {
     prepare: parseControl,
     adopt(value: ControlSnapshot | null) {
       current = value;
+    },
+    unavailable() {
+      if (!current) return;
+      current = {
+        ...current,
+        connected: false,
+        capabilities: {
+          ...current.capabilities,
+          input: false,
+          steer: false,
+          interrupt: false,
+          commandApproval: false,
+          fileApproval: false,
+          questions: false,
+        },
+        reason: 'Current connection status is unavailable. Reconnecting…',
+      };
+      refresh();
+    },
+    observe(value: ControlSnapshot | null) {
+      if (current?.thread !== value?.thread) {
+        ++revision;
+        busy = false;
+        uncertain = false;
+        note = '';
+      }
+      current = value;
+      refresh();
     },
     view,
     destroy() {

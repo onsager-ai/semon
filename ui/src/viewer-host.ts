@@ -16,6 +16,8 @@ export interface ViewerHost {
   modelStream?: string;
   /** Bind hosted model/control reads to the selected native session and model machine. */
   selectedModel?: boolean;
+  /** Separate bounded status snapshots, independent of content model revisions. */
+  controlStream?: string;
   modelNavigation?(model: unknown): void;
   /** Return true when the host has taken native recovery for a model failure. */
   modelFailed?(status: number): boolean;

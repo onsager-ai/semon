@@ -69,7 +69,7 @@ export function createBootstrap(host: BootstrapHost) {
     host.scope.clearTimeout(retryTimer);
     loading = true;
     host.transportOwner
-      .api('/api/model?delta=1')
+      .api('/api/model?delta=1' + (host.viewerHost?.controlStream ? '&content=1' : ''))
       .then(async (m) => {
         if (host.disposed) return;
         const adopted = host.transportOwner.adopt(m);

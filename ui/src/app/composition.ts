@@ -1,3 +1,4 @@
+import { createControlObservation } from './controlObservation';
 import { createLocalControl } from './localControl';
 import { createRenderTransaction } from './renderTransaction';
 import { ViewUpdates } from '../state/viewUpdates';
@@ -48,6 +49,7 @@ import { createViewport } from './viewport';
 /** The document composition owns services; focused factories own behavior and mutable feature state. */
 export class ViewerComposition {
   readonly scope: EffectScope;
+  readonly controlObservationOwner: ReturnType<typeof createControlObservation>;
   readonly controlOwner: ReturnType<typeof createLocalControl>;
   readonly dialogs: Map<HTMLDialogElement, { destroy(): void }>;
   disposed: boolean;
@@ -141,6 +143,7 @@ export class ViewerComposition {
       destroy() {
         if (context.disposed) return;
         context.disposed = true;
+        context.controlObservationOwner.destroy();
         context.controlOwner.destroy();
         context.updates.destroy();
         context.scope.destroy();
@@ -232,9 +235,10 @@ export class ViewerComposition {
     this.sentencesOwner = createSentences(context);
     this.isGap = (e: Entry) =>
       e.k === 'end' && /entries (not included|omitted)|^No activity/.test(e.text ?? '');
-    this.controlOwner = createLocalControl(this.scope, () =>
-      context.applicationRefreshOwner.refresh(),
-    );
+    this.controlOwner = createLocalControl(this.scope, () => {
+      if (context.viewerHost?.controlStream) context.applicationRefreshOwner.controls();
+      else context.applicationRefreshOwner.refresh();
+    });
     this.transportOwner = createTransport(context);
     this.cacheTx = (sid: string, entries: Entry[], meta: TranscriptMeta) =>
       context.transcripts.keep(sid, entries, meta, !!context.domain.originHandoff(sid));
@@ -296,6 +300,7 @@ export class ViewerComposition {
     this.liveModelOwner = createLiveModel(context);
     this.liveUpdates = createLiveUpdates(context);
     this.applicationRefreshOwner = createApplicationRefresh(context);
+    this.controlObservationOwner = createControlObservation(context);
     this.viewport = createViewport(context);
     this.tickerOwner = createTicker(context);
     // An embedding page's sidebar: the row its data-viewer-nav names (home, sessions or machines) is current.
