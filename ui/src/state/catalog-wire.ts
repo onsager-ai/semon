@@ -112,6 +112,13 @@ export function parseCatalogSource(value: unknown): CatalogSourceReference['sour
   const source = object(value),
     offset = integer(source.offset);
   if (offset < 0) throw new Error('Invalid catalog source offset');
+  const immutable = source.immutable_generation;
+  if (
+    immutable !== undefined &&
+    immutable !== null &&
+    (typeof immutable !== 'string' || !/^[0-9a-f]{64}$/.test(immutable))
+  )
+    throw new Error('Invalid immutable source generation');
   return {
     root: text(source.root),
     path: text(source.path),
@@ -119,6 +126,9 @@ export function parseCatalogSource(value: unknown): CatalogSourceReference['sour
     offset,
     prefix_sha256: digest(source.prefix_sha256),
     tail_sha256: digest(source.tail_sha256),
+    ...(source.immutable_generation === undefined
+      ? {}
+      : { immutable_generation: immutable as string | null }),
   };
 }
 function sourceReference(value: unknown): CatalogSourceReference {

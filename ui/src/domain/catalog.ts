@@ -9,6 +9,7 @@ export interface CatalogSourceReference {
     offset: number;
     prefix_sha256: number[];
     tail_sha256: number[];
+    immutable_generation?: string | null;
   };
   state: CatalogFreshness;
 }

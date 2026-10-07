@@ -85,6 +85,7 @@ test('catalog rejects wrong machine identity, duplicate rows and malformed sourc
     (p) => p.items.push(session()),
     (p) => (p.items[0].source_refs[0].source.offset = Number.MAX_SAFE_INTEGER + 1),
     (p) => (p.items[0].source_refs[0].source.prefix_sha256 = [1]),
+    (p) => (p.items[0].source_refs[0].source.immutable_generation = 'not-verified'),
     (p) => (p.items[0].freshness.state = 'healthy'),
     (p) => (p.items[0].last = Infinity),
     (p) => (p.generation = 'unversioned'),
@@ -95,6 +96,17 @@ test('catalog rejects wrong machine identity, duplicate rows and malformed sourc
     change(input);
     assert.throws(() => parseCatalogPage(input));
   }
+});
+
+test('catalog preserves explicit immutable source generation without inferring write authority', () => {
+  const input = page();
+  input.items[0].source_refs[0].source.immutable_generation = 'a'.repeat(64);
+  const parsed = parseCatalogPage(input);
+  assert.equal(parsed.items[0].source_refs[0].source.immutable_generation, 'a'.repeat(64));
+  assert.equal(parsed.items[0].source_refs[0].state, 'unavailable');
+  assert.equal('state' in parsed.items[0], false);
+  input.items[0].source_refs[0].source.immutable_generation = null;
+  assert.equal(parseCatalogPage(input).items[0].source_refs[0].source.immutable_generation, null);
 });
 
 test('catalog discovery completeness stays distinct from row freshness and native authority', () => {
