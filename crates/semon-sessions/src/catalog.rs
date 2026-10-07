@@ -2198,6 +2198,28 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn legacy_source_metadata_does_not_invent_a_local_generation_proof() {
+        let fixture = Fixture::new();
+        fixture.publish(1);
+        let connection = Connection::open(EventCache::path(&fixture.options.cache)).unwrap();
+        let metadata: String = connection
+            .query_row("SELECT metadata FROM session_catalog LIMIT 1", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        let row: crate::model::summary::CatalogRow = serde_json::from_str(&metadata).unwrap();
+        let mut source = row.sources[0].clone();
+        assert_eq!(source_state(&source), "cached");
+        source.changed_ns = None;
+        let legacy = serde_json::to_value(&source).unwrap();
+        assert!(legacy.get("changed_ns").is_none());
+        let migrated: CatalogSource = serde_json::from_value(legacy).unwrap();
+        assert_eq!(source, migrated);
+        assert_eq!(source_state(&migrated), "stale");
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn restored_mtime_rewrite_invalidates_local_ranges_and_rebuilds_observation() {
         use std::io::Write;
         let fixture = Fixture::new();
