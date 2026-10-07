@@ -56,7 +56,7 @@ interface TranscriptViewHost {
 
   domain: Pick<ReturnType<typeof createDomain>, 'turnEnd' | 'answersOf' | 'originHandoff'>;
 
-  transcripts: Pick<TranscriptStore, 'entries' | 'meta' | 'view'>;
+  transcripts: Pick<TranscriptStore, 'entries' | 'meta' | 'view' | 'staleBriefs'>;
 
   modelStore: Pick<ViewerModelStore, 'sessions' | 'turns' | 'handoff' | 'machines'>;
 }
@@ -648,6 +648,9 @@ export function createTranscriptView(host: TranscriptViewHost) {
     return {
       id: sid,
       name: s.name,
+      observation: host.transcripts.staleBriefs.has(sid)
+        ? 'This conversation changed at its source. The saved transcript is incomplete; reopen this session to update it.'
+        : undefined,
       blocks,
       order: (host.modelStore.turns[sid] ?? []).map((t) => t.id),
       dirty: opts.only,

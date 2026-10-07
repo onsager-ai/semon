@@ -1,5 +1,6 @@
 import { LocalControl } from './localControl';
 import type { ControlView } from './control';
+import type { RuntimeObservationView } from './runtimeObservation';
 import { commitApplicationView } from './application-view';
 import { Component, Fragment, render } from 'preact';
 import type { ComponentChildren } from 'preact';
@@ -32,6 +33,7 @@ export interface LabelView extends Identity {
   kind: 'label';
   className: string;
   text: string;
+  action?: { label: string; busy: boolean; run(): void };
 }
 export interface ToolView extends Identity {
   kind: 'tool';
@@ -127,8 +129,10 @@ export interface FooterView {
 }
 export interface SessionSnapshot {
   control?: ControlView;
+  runtime?: RuntimeObservationView;
   id: string;
   name: string;
+  observation?: string;
   blocks: readonly TranscriptBlock[];
   started?: { lead: string; machine: string };
   before?: PagerView;
@@ -166,10 +170,118 @@ interface SessionOwner {
   jumpCount: number;
   jumpBusy: boolean;
   paint(): void;
+  controls: (() => void) | null;
+  runtime: (() => void) | null;
+  pagers: Partial<Record<'before' | 'after', () => void>>;
   measure(): void;
   change(key: string): void;
 }
 const owners = new WeakMap<HTMLElement, SessionOwner>();
+/** The existing page tree owns this leaf; status never walks transcript blocks. */
+class SessionControls extends Component<{ owner: SessionOwner }> {
+  componentDidMount() {
+    this.props.owner.controls = () => this.forceUpdate();
+  }
+  componentWillUnmount() {
+    this.props.owner.controls = null;
+  }
+  render() {
+    const view = this.props.owner.snapshot.control;
+    return view ? (
+      <LocalControl view={view} runtimeObserved={!!this.props.owner.snapshot.runtime} />
+    ) : null;
+  }
+}
+/** Durable status stays observable even when no current native control identity exists. */
+class SessionRuntime extends Component<{ owner: SessionOwner }> {
+  componentDidMount() {
+    this.props.owner.runtime = () => this.forceUpdate();
+  }
+  componentWillUnmount() {
+    this.props.owner.runtime = null;
+  }
+  render() {
+    const value = this.props.owner.snapshot.runtime;
+    if (!value) return null;
+    const observation = value.observation;
+    return (
+      <section class="local-control" aria-label="Environment status">
+        <p role="status">
+          {observation
+            ? {
+                active: 'Environment is active.',
+                disconnected: 'Environment is disconnected.',
+                failed: 'Environment needs attention.',
+                ended: 'This session has ended.',
+                unavailable: 'Runtime state is unavailable.',
+              }[observation.state]
+            : 'Runtime state is unavailable.'}
+        </p>
+        {observation?.phase && <p>Phase: {screenText(observation.phase)}</p>}
+        {observation?.presence && <p>Compute presence: {screenText(observation.presence)}</p>}
+        {(value.delivery !== 'current' || observation?.freshness !== 'current') && (
+          <p role="status">
+            {value.delivery === 'updating' || observation?.freshness === 'updating'
+              ? 'Checking the environment…'
+              : value.delivery === 'stale' || observation?.freshness === 'stale'
+                ? 'Last environment observation is stale.'
+                : 'Current environment observation is unavailable.'}
+          </p>
+        )}
+        {value.reason && <p>{screenText(value.reason)}</p>}
+        {observation?.observationError && <p>{screenText(observation.observationError)}</p>}
+      </section>
+    );
+  }
+}
+class SessionPager extends Component<{ owner: SessionOwner; where: 'before' | 'after' }> {
+  componentDidMount() {
+    this.props.owner.pagers[this.props.where] = () => this.forceUpdate();
+  }
+  componentWillUnmount() {
+    delete this.props.owner.pagers[this.props.where];
+  }
+  render() {
+    const { owner, where } = this.props,
+      view = owner.snapshot[where];
+    if (!view) {
+      const started = where === 'before' ? owner.snapshot.started : undefined;
+      return started ? (
+        <div class="divider started">
+          <span class="dv-text">
+            <span class="dv-lead">{started.lead}</span>
+            <span class="dv-machine" data-tip={started.machine} data-tip-clipped="">
+              {screenText(started.machine)}
+            </span>
+          </span>
+        </div>
+      ) : null;
+    }
+    return (
+      <div class="list">
+        <button
+          class="more"
+          type="button"
+          data-load-earlier={where === 'before' ? '' : undefined}
+          data-pager-sid={view.sid}
+          data-pager-where={where}
+          disabled={view.disabled}
+          aria-busy={view.busy || undefined}
+          onClick={(event) => {
+            if (event.currentTarget.isConnected && !owner.disposed)
+              owner.host.pager(event.currentTarget);
+          }}
+        >
+          {view.busy && <span class="spin" aria-hidden="true" />}
+          <span class="pager-label" aria-live="polite">
+            {screenText(view.text)}
+          </span>
+        </button>
+      </div>
+    );
+  }
+}
+
 const identity = (entry: Identity) => entry.entryKey ?? entry.key ?? '';
 const TRACE = 'M6 4v10a4 4 0 0 0 4 4h8M6 10h12M15 7l3 3-3 3M15 15l3 3-3 3';
 function State({ state, label, text }: { state: string; label: string; text: string }) {
@@ -285,6 +397,18 @@ function Entry({ entry, owner }: { entry: EntryView; owner: SessionOwner }): Com
       return (
         <div class={entry.className} data-e={entry.key} data-entry-key={entry.entryKey}>
           {screenText(entry.text)}
+          {entry.action && (
+            <button
+              type="button"
+              class="link"
+              disabled={entry.action.busy}
+              onClick={(event) => {
+                if (event.currentTarget.isConnected) active(() => entry.action?.run());
+              }}
+            >
+              {screenText(entry.action.label)}
+            </button>
+          )}
         </div>
       );
     case 'tool':
@@ -601,12 +725,18 @@ function paintJump(owner: SessionOwner) {
           ? 'Jump to bottom; ' + owner.jumpCount + ' new entries'
           : 'Jump to bottom of transcript'
       }
+      data-tip={
+        owner.jumpCount ? owner.jumpCount + ' new entries · Jump to latest' : 'Jump to latest'
+      }
+      data-count={
+        owner.jumpCount > 0 ? (owner.jumpCount > 99 ? '99+' : String(owner.jumpCount)) : undefined
+      }
       disabled={owner.jumpBusy}
       onClick={(event) => {
         if (event.currentTarget.isConnected) owner.host.jump();
       }}
     >
-      {owner.jumpCount > 0 && <span class="new-count">{owner.jumpCount + ' new'}</span>}
+      {owner.jumpCount > 0 && <span class="new-count sr-only">{owner.jumpCount + ' new'}</span>}
       <Glyph path="M12 4v15M5 12l7 7 7-7" className="" />
     </button>,
     owner.jump,
@@ -617,9 +747,14 @@ export function updateSessionJump(
   visible: boolean,
   count: number,
   busy = false,
+  target?: HTMLElement,
 ) {
   const owner = owners.get(root);
   if (!owner) return;
+  if (target && owner.jump !== target) {
+    if (owner.jump) render(null, owner.jump);
+    owner.jump = target;
+  }
   owner.jumpVisible = visible;
   owner.jumpCount = count;
   owner.jumpBusy = busy;
@@ -653,6 +788,9 @@ export function renderSessionScreen(
       jumpCount: 0,
       jumpBusy: false,
       paint() {},
+      controls: null,
+      runtime: null,
+      pagers: {},
       measure() {},
       change() {},
       observer: new ResizeObserver(() => {}),
@@ -685,7 +823,10 @@ export function renderSessionScreen(
       state.disposed = true;
       state.observer.disconnect();
       cancelAnimationFrame(state.frame);
-      if (state.jump) render(null, state.jump);
+      if (state.jump) {
+        render(null, state.jump);
+        state.jump.hidden = true;
+      }
       owners.delete(root);
     });
   }
@@ -706,29 +847,6 @@ export function renderSessionScreen(
         state.revisions.set(block.turn.id, (state.revisions.get(block.turn.id) ?? 0) + 1);
     state.paint();
   };
-  function pager(view: PagerView) {
-    return (
-      <div key={view.where} class="list">
-        <button
-          class="more"
-          type="button"
-          data-load-earlier={view.where === 'before' ? '' : undefined}
-          data-pager-sid={view.sid}
-          data-pager-where={view.where}
-          disabled={view.disabled}
-          aria-busy={view.busy || undefined}
-          onClick={(event) => {
-            if (event.currentTarget.isConnected) state.host.pager(event.currentTarget);
-          }}
-        >
-          {view.busy && <span class="spin" aria-hidden="true" />}
-          <span class="pager-label" aria-live="polite">
-            {screenText(view.text)}
-          </span>
-        </button>
-      </div>
-    );
-  }
   state.paint = () => {
     if (state.disposed) return;
     const held =
@@ -745,19 +863,13 @@ export function renderSessionScreen(
           <h1>{screenText(view.name)}</h1>
         </div>
         <section class="transcript" aria-label="Transcript">
+          {view.observation && (
+            <p class="empty" role="status" data-transcript-observation="">
+              {screenText(view.observation)}
+            </p>
+          )}
           <div class="turns">
-            {view.before
-              ? pager(view.before)
-              : view.started && (
-                  <div class="divider started">
-                    <span class="dv-text">
-                      <span class="dv-lead">{view.started.lead}</span>
-                      <span class="dv-machine" data-tip={view.started.machine} data-tip-clipped="">
-                        {screenText(view.started.machine)}
-                      </span>
-                    </span>
-                  </div>
-                )}
+            <SessionPager owner={state} where="before" />
             {state.blocks.map((block) =>
               block.kind === 'turn' ? (
                 <Turn
@@ -774,18 +886,12 @@ export function renderSessionScreen(
                 </Fragment>
               ),
             )}
-            {view.after && pager(view.after)}
+            <SessionPager owner={state} where="after" />
             {view.empty && <p class="empty">{screenText(view.empty)}</p>}
           </div>
-          <div
-            class="jump-wrap"
-            ref={(node) => {
-              state.jump = node;
-              paintJump(state);
-            }}
-          />
         </section>
-        {view.control && <LocalControl view={view.control} />}
+        <SessionRuntime owner={state} />
+        <SessionControls owner={state} />
         {view.footer && (
           <div class="session-foot">
             <span class={'stat ' + view.footer.state}>
@@ -849,11 +955,30 @@ export function renderSessionScreen(
   host.committed();
 }
 
+/** Update only native controls; retain parsed blocks, keyed turns and input ownership. */
+export function updateSessionControl(root: HTMLElement, control: ControlView | undefined) {
+  const owner = owners.get(root);
+  if (!owner || owner.disposed) return;
+  owner.snapshot = { ...owner.snapshot, control };
+  owner.controls?.();
+}
+export function updateSessionRuntime(
+  root: HTMLElement,
+  runtime: RuntimeObservationView | undefined,
+) {
+  const owner = owners.get(root);
+  if (!owner || owner.disposed) return;
+  const hadRuntime = !!owner.snapshot.runtime;
+  owner.snapshot = { ...owner.snapshot, runtime };
+  owner.runtime?.();
+  if (hadRuntime !== !!runtime) owner.controls?.();
+}
+
 export function updateSessionPager(root: HTMLElement, view: PagerView) {
   const owner = owners.get(root);
   if (!owner || owner.snapshot.id !== view.sid) return;
   owner.snapshot = { ...owner.snapshot, [view.where]: view };
-  owner.paint();
+  owner.pagers[view.where]?.();
 }
 
 export function updateSessionClock(

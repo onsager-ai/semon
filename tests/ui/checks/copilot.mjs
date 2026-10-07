@@ -68,9 +68,21 @@ export default async function copilotCheck(browser) {
             path: '/s/copilot/' + fixture.id,
           });
           try {
+            await page.context().grantPermissions(['clipboard-read', 'clipboard-write'], {
+              origin: server.base,
+            });
             assert.ok(await page.locator("section[aria-label='Transcript']").count());
             await page.click('#more-btn');
             await page.waitForFunction(() => document.querySelector('dialog.session-menu')?.open);
+            await page.getByRole('menuitem', { name: 'Copy resume command', exact: true }).click();
+            await page.waitForFunction(
+              async (expected) => (await navigator.clipboard.readText()) === expected,
+              'copilot --resume=' + fixture.id,
+            );
+            assert.equal(
+              await page.getByRole('menuitem', { name: 'Copied', exact: true }).count(),
+              1,
+            );
             assert.equal(await page.locator('dialog.session-menu .cost-big').textContent(), '—');
             const mark = page.locator('dialog.session-menu .hicon[data-harness="copilot"]');
             assert.equal(await mark.count(), 1);
@@ -131,6 +143,7 @@ export default async function copilotCheck(browser) {
       liveResumeInput: 22,
       unknownLineage: true,
       readOnly: true,
+      nativeResumeClipboard: true,
     };
     return report.done();
   } finally {

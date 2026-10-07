@@ -147,6 +147,9 @@ async function checkLongSessionOpenEnd(page) {
       jumpHidden: document.querySelector('.jump-wrap')?.hidden ?? true,
     };
   });
+  await page.screenshot({
+    path: path.join(ENV.out, 'perf-open-at-end-' + page.viewportSize().width + '.png'),
+  });
   const main = await page.locator('#main').boundingBox();
   await page.mouse.move(main ? main.x + Math.min(main.width / 2, 200) : 195, 300);
   await page.mouse.wheel(0, await page.evaluate(() => -innerHeight * 2));
@@ -178,36 +181,37 @@ async function checkLongSessionOpenEnd(page) {
       gap: sc.scrollHeight - sc.scrollTop - sc.clientHeight,
       inside:
         rect.left >= 0 && rect.top >= 0 && rect.right <= innerWidth && rect.bottom <= innerHeight,
-      overlapsBar: overlaps(rect, bar),
+      insideBar:
+        rect.left >= bar.left &&
+        rect.right <= bar.right &&
+        rect.top >= bar.top &&
+        rect.bottom <= bar.bottom,
       overlapsComposer: overlaps(rect, composer),
     };
   });
-  // The button sits over the middle of the transcript column, not the viewport: measured as delivered, and on a desktop
-  // page again in wide mode and in rail mode, where the column moves.
-  const centred = async (mode) =>
+  // The jump action belongs to the sticky toolbar, clear of the transcript and
+  // composer in default, wide and rail layouts. Keep the scroller contract.
+  const positioned = async (mode) =>
     page.evaluate((mode) => {
       const button = document.querySelector('#jump-bottom'),
-        column = document.querySelector("#page section[aria-label='Transcript']");
-      if (!button || button.closest('.jump-wrap')?.hidden || !column)
-        return { mode, visible: false, dx: null };
+        bar = document.querySelector('#topbar');
+      if (!button || button.closest('.jump-wrap')?.hidden || !bar)
+        return { mode, visible: false, insideBar: false };
       const b = button.getBoundingClientRect(),
-        c = column.getBoundingClientRect();
+        c = bar.getBoundingClientRect();
       return {
         mode,
         visible: true,
-        dx: Math.round((b.left + b.width / 2 - (c.left + c.width / 2)) * 100) / 100,
-        button: Math.round(b.left + b.width / 2),
-        column: Math.round(c.left + c.width / 2),
-        viewport: innerWidth,
+        insideBar: b.left >= c.left && b.right <= c.right && b.top >= c.top && b.bottom <= c.bottom,
       };
     }, mode);
-  const centring = [await centred('default')];
+  const toolbarPositions = [await positioned('default')];
   if (!(await page.evaluate(() => matchMedia('(max-width: 760px)').matches))) {
     for (const mode of ['wide', 'rail']) {
       if (mode === 'wide') await wide(page, true);
       else await page.locator('#rail-toggle').click();
       await page.waitForTimeout(300);
-      centring.push(await centred(mode));
+      toolbarPositions.push(await positioned(mode));
       if (mode === 'wide') await wide(page, false);
       else await page.locator('#rail-toggle').click();
       await page.waitForTimeout(300);
@@ -224,11 +228,8 @@ async function checkLongSessionOpenEnd(page) {
     null,
     { timeout: 10_000 },
   );
-  // The tail of the page sits clear of where the button floats. The button is sticky at the foot of the viewport and hides once the
-  // reader is within 80 px of the end, so the case that matters is the first place it shows: 90 px from the end. A 36 px button is
-  // appended as the very last thing in the transcript (cancelling the section's grid gap), the page is scrolled to that place, and
-  // the button's box and the tail's are read there (the tail is then at or below the viewport's foot, so clear of the button). The floating button can still cover content mid-scroll: what is guaranteed is
-  // that it never sits over the tail.
+  // At the visibility boundary and at the tail the toolbar action must also
+  // remain clear of the last transcript action.
   const tail = await page.evaluate(async () => {
     const button = document.querySelector('#jump-bottom'),
       wrap = button.closest('.jump-wrap'),
@@ -271,9 +272,9 @@ async function checkLongSessionOpenEnd(page) {
     scrollUpDistance: opened.top - raised.top,
     raisedGap: raised.gap,
     jumpInsideViewport: raised.inside,
-    overlapsBar: raised.overlapsBar,
+    insideBar: raised.insideBar,
     overlapsComposer: raised.overlapsComposer,
-    centring,
+    toolbarPositions,
     tail,
     returnedGap,
     ok:
@@ -282,9 +283,9 @@ async function checkLongSessionOpenEnd(page) {
       opened.top - raised.top >= 2 * (await page.evaluate(() => innerHeight)) - 1 &&
       raised.gap > 80 &&
       raised.inside &&
-      !raised.overlapsBar &&
+      raised.insideBar &&
       !raised.overlapsComposer &&
-      centring.every((c) => c.visible && Math.abs(c.dx) <= 2) &&
+      toolbarPositions.every((c) => c.visible && c.insideBar) &&
       tail.hiddenAtEnd &&
       tail.shownThere &&
       !tail.overlaps &&

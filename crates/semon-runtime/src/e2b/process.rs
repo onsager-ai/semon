@@ -127,13 +127,31 @@ impl InventoryWorker<'_> {
         session: &Session,
         operation: &OperationId,
     ) -> Result<OwnedInventory, ProcessError> {
+        if reconcile_launch(deployment, session, operation, Inventory::Unavailable).is_err() {
+            return Err(ProcessError::Configuration);
+        }
+        self.inspect_owned(api_key, deployment, session, operation)
+            .await
+    }
+
+    /// Observe the persisted attempt's owned inventory after launch completion.
+    /// This is a repeatable read, never a create/retry plan. The embedding still
+    /// authorizes credential use and checks exact ownership labels and bound ID.
+    /// Incomplete/unavailable inventory never proves resource disappearance.
+    pub async fn inspect_owned(
+        &self,
+        api_key: &str,
+        deployment: &str,
+        session: &Session,
+        operation: &OperationId,
+    ) -> Result<OwnedInventory, ProcessError> {
         if !self.python.is_absolute()
             || !self.worker.is_absolute()
             || api_key.is_empty()
             || api_key.len() > 4096
             || self.lifetime.is_zero()
             || self.lifetime > Duration::from_secs(25)
-            || reconcile_launch(deployment, session, operation, Inventory::Unavailable).is_err()
+            || super::ownership_labels(deployment, session, operation).is_err()
         {
             return Err(ProcessError::Configuration);
         }
