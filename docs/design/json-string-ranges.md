@@ -61,3 +61,34 @@ using indexed spans, without claiming an end-to-end latency budget or a process
 RSS reduction. Measurement source/output were retained as
 `/tmp/semon-json-string-bench.rs` and `/tmp/semon-json-string-bench.log` in the
 integration workspace; the implementation revision was `1d1d803`.
+
+## Encoded result strings
+
+Some native results place a JSON wrapper inside a JSON string, with the useful
+text in a string-valued wrapper field such as `output`. Producers can qualify
+those formats with `index_nested_json_string_spans(record, outer_span)`. Pointers
+refer to the decoded wrapper; all offsets and checkpoints still refer to the
+original native record. Native callers must select their supported pointers and
+persist the escape layer count with the qualified recipe, source generation and
+cursor identity. Structured bodies and unknown wrapper formatting remain
+explicitly unsupported until native semantics are qualified.
+
+The producer decodes the wrapper and walks its fields once per qualified
+observation. A second scalar pass maps only needed boundaries, avoiding an
+allocation for every character's raw offset. Denser inner checkpoints account
+for the outer escaping, so combined raw checkpoint gaps stay at most 64 KiB.
+This linear producer work does not happen on range requests.
+
+`decode_json_string_layered_chunk` supports one or two escape layers. It decodes
+combined scalars with a fixed 12-byte scratch buffer and preserves incomplete
+units without consuming them. A maximally escaped surrogate pair can occupy
+72 original bytes, requiring up to 71 bytes of read slack. Decoded output keeps
+the existing 128-KiB maximum and the requested smaller allocation budget. A
+request starts at a qualified combined checkpoint or prior scalar cursor; it
+never decodes an earlier prefix or trusts an arbitrary supplied raw offset.
+
+`slice_json_string_span` maps a contiguous decoded UTF-8 byte range to original
+scalar-safe offsets during production. It lets a native producer qualify a
+plain result's contiguous displayed body while keeping native header/cut
+semantics in its recipe. Splits inside a Unicode scalar fail explicitly. Native
+formatters needing noncontiguous synthesis require separate qualified recipes.
