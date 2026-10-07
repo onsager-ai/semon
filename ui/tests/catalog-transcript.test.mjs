@@ -122,7 +122,10 @@ test('ranged native content rejects holes, stale scope and fabricated complete c
 });
 const { outputFiles: storeFiles } = await build({
   entryPoints: [new URL('../src/state/catalog-transcript.ts', import.meta.url).pathname],
-  bundle: true, write: false, format: 'esm', platform: 'node',
+  bundle: true,
+  write: false,
+  format: 'esm',
+  platform: 'node',
 });
 const { CatalogTranscriptStore } = await import(
   'data:text/javascript;base64,' + Buffer.from(storeFiles[0].text).toString('base64')
@@ -150,10 +153,15 @@ test('selected ranges reject old selections, cross-generation mixing and inconsi
   assert.deepEqual(store.entries(), before);
   const tail = page();
   tail.range = { first: 2, end: 3, next: null };
-  tail.entries = [{ k: 'a', text: 'Native final message', slot: 2, entry_id: 'final', provenance: provenance() }];
+  tail.entries = [
+    { k: 'a', text: 'Native final message', slot: 2, entry_id: 'final', provenance: provenance() },
+  ];
   assert.equal(store.accept(store.request(null, 1), tail), true);
   assert.deepEqual(store.loadedRanges(), [{ first: 0, end: 3 }]);
-  assert.deepEqual(store.entries().map(item => item.entry_id), ['event-stable', 'action-stable', 'final']);
+  assert.deepEqual(
+    store.entries().map((item) => item.entry_id),
+    ['event-stable', 'action-stable', 'final'],
+  );
   const late = store.request(0, 2);
   store.destroy();
   assert.equal(store.accept(late, page()), false);
