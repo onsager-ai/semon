@@ -58,7 +58,8 @@ export function createBootstrap(host: BootstrapHost) {
       return host.viewerHost?.machinesPath;
     },
   };
-  const compatibility = new URLSearchParams(location.search).get('compat') === '1';
+  const compatibility =
+    new URLSearchParams(location.search).get('compat') === '1' || host.sidebarOnly;
   const urlOf = (r: ApplicationRoute) => {
       const address = routeUrl(r, routeModel);
       if (!compatibility) return address;
@@ -105,15 +106,14 @@ export function createBootstrap(host: BootstrapHost) {
           return;
         }
         try {
+          const address = new URL(urlOf(host.navigation.route), location.href);
+          if (host.navigation.route.v === 'sessions' && host.query)
+            address.searchParams.set('q', host.query);
+          if (host.navigation.route.v === 'session') address.hash = location.hash;
           history.replaceState(
             { ...host.navigation.route, scrollTop: 0 },
             '',
-            urlOf(host.navigation.route) +
-              (host.navigation.route.v === 'session'
-                ? location.hash
-                : host.navigation.route.v === 'sessions' && host.query
-                  ? '?q=' + host.transportOwner.enc(host.query)
-                  : ''),
+            address.pathname + address.search + address.hash,
           );
         } catch {}
         const done = () => {
