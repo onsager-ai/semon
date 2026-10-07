@@ -109,6 +109,7 @@ export function mountViewerApplication(
   if (
     new URLSearchParams(location.search).get('compat') === '1' ||
     host?.nativePage ||
+    (host?.loadMachines && host.machinesPath === location.pathname) ||
     document.querySelector<HTMLElement>('.app')?.dataset.viewer === 'sidebar'
   )
     legacy();

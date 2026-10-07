@@ -627,11 +627,19 @@ for (const width of [390, 1280])
       await page.getByText('Source inventory is unavailable.', { exact: false }).waitFor();
       await page.clock.runFor(1100);
       await page.locator('[data-source-key="two"]').waitFor();
+      assert.equal(
+        await page.locator('#nav [data-go="machines"]').getAttribute('href'),
+        '/machines',
+      );
       if (width === 1280) await page.getByRole('button', { name: 'Collapse sidebar' }).click();
       await page.getByRole('button', { name: 'Load more machines', exact: true }).click();
       await inventoryStarted;
       await page.locator('[data-source-key="two"]').click();
       await page.locator('#page [data-id="one"]').waitFor();
+      assert.equal(
+        await page.locator('#nav [data-go="machines"]').getAttribute('href'),
+        '/machines',
+      );
       assert.equal(new URL(page.url()).searchParams.get('machine'), 'two');
       if (width === 1280) {
         await page.getByRole('button', { name: 'Expand sidebar' }).waitFor();
