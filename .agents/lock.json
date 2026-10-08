@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "manifest_sha256": "7faea42b4ebfae7c3996dec085527f91d6a3e62ec4d454f4e9cec5da1f31eb1b",
+  "manifest_sha256": "45cb5ff2d9652ede5c9297650ab1baada1c06017e91c20a63bae1011b86d249f",
   "block_sha256": "21b24d84a4636c657f08116aac12fb3d4a0ea717b66c92f4cfe1dff433f8d9a4",
   "resolved_skills": [
     "ci-triage",
@@ -83,7 +83,7 @@
       "mode": "100644"
     },
     ".agents/skills/ui-design/references/integrations.md": {
-      "sha256": "ab573a049fe82bf1e623f85f3adfef8e4f8964e918496bb01b98c63646ae8785",
+      "sha256": "e31a98a16444d318fd66f29ee09ed5f01abe290fcd223f661e7fa508605d5c8e",
       "owner": "shared",
       "mode": "100644"
     },
@@ -97,8 +97,13 @@
       "owner": "shared",
       "mode": "100644"
     },
+    ".agents/skills/ui-design/scripts/proxy.mjs": {
+      "sha256": "436ce07233732e7118fd6ce21b6837e4f071a3683aa418993babbf3aa0042277",
+      "owner": "shared",
+      "mode": "100644"
+    },
     ".agents/skills/ui-design/scripts/run.mjs": {
-      "sha256": "618de52db1ca8b0c97fafe328b93a9233f32b39ba0962349d49f2f08d5c679d8",
+      "sha256": "d2cb120a479ffbebd394ea98a90f2ed1150d1d792f9f1cac7f6cc361325687ab",
       "owner": "shared",
       "mode": "100755"
     },
@@ -108,9 +113,14 @@
       "mode": "100644"
     },
     ".agents/skills/ui-design/scripts/setup.py": {
-      "sha256": "067dfc9e309dc5bc796ca465c9e83b39c7982bd57d1bce13922f1291e0fd4cdf",
+      "sha256": "49b0e82cc578c444bf58dd391f6283d59bd5c26f65c0e522768a6fa057bd6c59",
       "owner": "shared",
       "mode": "100755"
+    },
+    ".agents/skills/ui-design/scripts/setup.test.py": {
+      "sha256": "227a2abd75d8bf3a3f52e7bb87ef5a56e73fae204b5c8fae9be36b9858330e9b",
+      "owner": "shared",
+      "mode": "100644"
     },
     ".agents/skills/ui-design/scripts/smoke.mjs": {
       "sha256": "5d2e6ac680380864d9afee051d3b0efd2ee8755d29dbbfb2af924c5012457149",
@@ -198,7 +208,7 @@
       "mode": "100644"
     },
     ".claude/skills/ui-design/references/integrations.md": {
-      "sha256": "ab573a049fe82bf1e623f85f3adfef8e4f8964e918496bb01b98c63646ae8785",
+      "sha256": "e31a98a16444d318fd66f29ee09ed5f01abe290fcd223f661e7fa508605d5c8e",
       "owner": "shared",
       "mode": "100644"
     },
@@ -212,8 +222,13 @@
       "owner": "shared",
       "mode": "100644"
     },
+    ".claude/skills/ui-design/scripts/proxy.mjs": {
+      "sha256": "436ce07233732e7118fd6ce21b6837e4f071a3683aa418993babbf3aa0042277",
+      "owner": "shared",
+      "mode": "100644"
+    },
     ".claude/skills/ui-design/scripts/run.mjs": {
-      "sha256": "618de52db1ca8b0c97fafe328b93a9233f32b39ba0962349d49f2f08d5c679d8",
+      "sha256": "d2cb120a479ffbebd394ea98a90f2ed1150d1d792f9f1cac7f6cc361325687ab",
       "owner": "shared",
       "mode": "100755"
     },
@@ -223,9 +238,14 @@
       "mode": "100644"
     },
     ".claude/skills/ui-design/scripts/setup.py": {
-      "sha256": "067dfc9e309dc5bc796ca465c9e83b39c7982bd57d1bce13922f1291e0fd4cdf",
+      "sha256": "49b0e82cc578c444bf58dd391f6283d59bd5c26f65c0e522768a6fa057bd6c59",
       "owner": "shared",
       "mode": "100755"
+    },
+    ".claude/skills/ui-design/scripts/setup.test.py": {
+      "sha256": "227a2abd75d8bf3a3f52e7bb87ef5a56e73fae204b5c8fae9be36b9858330e9b",
+      "owner": "shared",
+      "mode": "100644"
     },
     ".claude/skills/ui-design/scripts/smoke.mjs": {
       "sha256": "5d2e6ac680380864d9afee051d3b0efd2ee8755d29dbbfb2af924c5012457149",

@@ -5,6 +5,10 @@ Use the pinned ui-design workflow from `.agents/skills/ui-design/SKILL.md`
 configured once at user level by its integration setup reference. Do not add
 repository MCP files, duplicate vendor skills or personal credentials here.
 
+Current user setup selects `--harness codex`; Claude Code installation, user
+configuration and live validation are deferred. The generated Claude discovery
+projection remains for future compatibility.
+
 ## Source and design ownership
 
 Read [the design contract](design-contract.md), [viewer ownership](viewer-ownership.md),
