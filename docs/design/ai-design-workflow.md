@@ -11,6 +11,23 @@ projection remains for future compatibility.
 
 ## Source and design ownership
 
+Read the authoritative [DESIGN.md](../../.stitch/DESIGN.md) before UI edits.
+The editable [session inspection canvas](session-inspection/session-inspection.pen)
+records layout and interaction intent; [delivery evidence](session-inspection/README.md)
+links the actual Stitch screens, before/after captures and checks.
+Reuse semantic tokens and established components. Update the canvas when layout
+or interaction intent changes, compare representative implementation screenshots
+at matching widths/themes/states, and explain intentional deviations in the PR.
+Review visual diffs before updating baselines. These controls extend this existing
+brief and the pinned skill; they do not create another instruction system.
+
+Preserve the existing rendered viewer as the default visual baseline. Stitch
+explorations and pen.dev canvases describe workflow intent within that foundation;
+they do not replace its fonts, type scale, controls or compact spacing. Calibrate
+design artifacts from computed product styles and use actual UI screenshots for
+visual review. Document an intentional foundation change separately when the
+task calls for one.
+
 Read [the design contract](design-contract.md), [viewer ownership](viewer-ownership.md),
 [UI source/build guidance](../../ui/README.md) and
 [viewer verification](../../.agents/skills/viewer-verification/SKILL.md).

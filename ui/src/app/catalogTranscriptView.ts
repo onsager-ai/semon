@@ -77,14 +77,21 @@ export function catalogTranscriptBlocks(
         label('Full result unavailable for this source. The recorded preview is shown.');
     } else if (entry.k === 'h') {
       label('Native action · related session context is incomplete');
-      views.push({
-        kind: 'message',
-        key: entry_id,
-        entryKey: entry_id,
-        flavor: 'incoming',
-        text: native_action_text ?? '',
-      });
-    } else if (entry.k === 'end') label(entry.text ?? 'Native session end recorded');
+      if (native_action_text === undefined) label('Original action prompt is unavailable.');
+      else
+        views.push({
+          kind: 'message',
+          key: entry_id,
+          entryKey: entry_id,
+          flavor: 'incoming',
+          text: native_action_text ?? '',
+        });
+    } else if (entry.k === 'end')
+      label(
+        item.provenance
+          ? (entry.text ?? 'Native session end recorded')
+          : 'Session boundary · native provenance unavailable',
+      );
     else if (entry.k === 'bgend') label(entry.label ?? entry.state);
     else if (entry.k === 'harness') label(entry.label);
     else if (entry.k === 'signal')

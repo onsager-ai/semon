@@ -38,7 +38,8 @@ export interface CatalogListSnapshot {
 }
 export interface CatalogListHost {
   session(item: CatalogListItem): void;
-  filter(field: 'harness' | 'repo' | 'q', value: string): void;
+  filters(values: { harness: string; repo: string; q: string }): void;
+  clearFilters(): void;
   more(): void;
   retry(): void;
   candidate?(candidate: CatalogSourceCandidate): void;
@@ -51,6 +52,15 @@ export function renderCatalogList(
   snapshot: CatalogListSnapshot,
   host: CatalogListHost,
 ) {
+  const filtered = !!(snapshot.query || snapshot.harness || snapshot.repo);
+  function commit(form: HTMLFormElement) {
+    const values = new FormData(form);
+    host.filters({
+      q: String(values.get('q') ?? '').trim(),
+      harness: String(values.get('harness') ?? '').trim(),
+      repo: String(values.get('repo') ?? '').trim(),
+    });
+  }
   render(
     <>
       <div class="ph">
@@ -63,41 +73,49 @@ export function renderCatalogList(
         class="catalog-filters facet-filters"
         onSubmit={(event) => {
           event.preventDefault();
+          commit(event.currentTarget);
         }}
       >
         {snapshot.metadataSearch && (
-          <label class="search" key="q">
-            Search session details{' '}
+          <label class="search catalog-query" key="q">
+            <span>Search</span>
             <input
+              name="q"
               aria-label="Search session details"
+              placeholder="Session details…"
               value={snapshot.query ?? ''}
-              onChange={(event) => host.filter('q', event.currentTarget.value)}
+              onChange={(event) => {
+                if (event.currentTarget.form) commit(event.currentTarget.form);
+              }}
             />
           </label>
         )}
         <label class="search" key="harness">
-          Harness{' '}
+          <span>Harness</span>
           <input
+            name="harness"
             aria-label="Harness"
             value={snapshot.harness}
-            onChange={(event) => host.filter('harness', event.currentTarget.value.trim())}
+            onChange={(event) => {
+              if (event.currentTarget.form) commit(event.currentTarget.form);
+            }}
           />
         </label>
         <label class="search" key="repo">
-          Repository{' '}
+          <span>Repository</span>
           <input
+            name="repo"
             aria-label="Repository"
             value={snapshot.repo}
-            onChange={(event) => host.filter('repo', event.currentTarget.value.trim())}
+            onChange={(event) => {
+              if (event.currentTarget.form) commit(event.currentTarget.form);
+            }}
           />
         </label>
+        <button class="link catalog-apply" type="submit">
+          Apply filters
+        </button>
       </form>
-      <p class="catalog-note">
-        Sorted by latest recorded activity.{' '}
-        {snapshot.metadataSearch
-          ? 'Search includes names, IDs, repositories, branches, models and harnesses. Conversation text and history across sources are unavailable.'
-          : 'Text search and history across sources are unavailable.'}
-      </p>
       {snapshot.searchPartial && (
         <p class="catalog-note" role="status">
           Search checked a bounded part of the index. Load more sessions to continue looking for
@@ -180,7 +198,27 @@ export function renderCatalogList(
           )}
         </section>
       )}
-      <div class="session-list">
+      <div class="catalog-result-header">
+        <span>
+          {snapshot.items.length}{' '}
+          {snapshot.items.length === 1 ? 'session loaded' : 'sessions loaded'}
+          <span class="catalog-sort"> · Latest recorded activity</span>
+        </span>
+        {filtered && (
+          <button class="link" type="button" onClick={() => host.clearFilters()}>
+            Clear filters
+          </button>
+        )}
+        <details class="catalog-scope">
+          <summary>Search scope</summary>
+          <p class="catalog-note">
+            {snapshot.metadataSearch
+              ? 'Search includes names, IDs, repositories, branches, models and harnesses. Conversation text and history across sources are unavailable.'
+              : 'Text search and history across sources are unavailable.'}
+          </p>
+        </details>
+      </div>
+      <div class="session-list" aria-label="Recorded sessions">
         {snapshot.items.map((item) => (
           <button
             key={item.key}
@@ -196,7 +234,7 @@ export function renderCatalogList(
             </span>
             <span class="session-row-meta srow-meta for">
               {screenText(
-                [item.harness, item.repo, item.branch, item.model].filter(Boolean).join(' · '),
+                [item.repo, item.branch, item.harness, item.model].filter(Boolean).join(' · '),
               )}
             </span>
           </button>
