@@ -2,14 +2,15 @@
   "schema": 1,
   "source": {
     "repository": "onsager-ai/dev-skills",
-    "revision": "365e2e1b91605cacb9913dfe1ef25f8e3d0eae17"
+    "revision": "6aecaf41bb0cb37057f3727598313628e9d8254f"
   },
   "skills": [
     "issue-spec",
     "pre-push",
     "pr-lifecycle",
     "ci-triage",
-    "docs-drift-guard"
+    "docs-drift-guard",
+    "ui-design"
   ],
   "rules": [
     "authority",
