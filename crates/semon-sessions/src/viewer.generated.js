@@ -15398,7 +15398,10 @@ globalThis.__semonUIShared = __semonUIShared;
     return v;
   }
   function entry(value) {
-    const row = object2(value), provenance = object2(row.provenance), entryId = text(row.entry_id), slot = ordinal(row.slot), parsed = parseEntry(row);
+    const row = object2(value), entryId = text(row.entry_id), slot = ordinal(row.slot), parsed = parseEntry(row);
+    const provenance = row.provenance === null && parsed.k === "end" ? null : object2(row.provenance);
+    if (!provenance && (row.field !== void 0 || row.clipped === true))
+      throw new Error("Unprovenanced boundary cannot expose native text");
     if (!entryId) throw new Error("Invalid catalog entry identity");
     let field;
     if (row.field !== void 0) {
@@ -15430,13 +15433,13 @@ globalThis.__semonUIShared = __semonUIShared;
       clipped: row.clipped === void 0 ? void 0 : boolean(row.clipped),
       field,
       freshness: freshness2,
-      native_action_text: parsed.k === "h" ? text(row.text) : void 0,
-      provenance: {
+      native_action_text: parsed.k === "h" && row.text !== void 0 ? text(row.text) : void 0,
+      provenance: provenance ? {
         source: parseCatalogSource(provenance.source),
         native_event_id: provenance.native_event_id === null ? null : text(provenance.native_event_id),
         offset: ordinal(provenance.offset),
         block: ordinal(provenance.block)
-      }
+      } : null
     };
   }
   function parseCatalogTranscriptPage(value) {
@@ -15604,6 +15607,15 @@ globalThis.__semonUIShared = __semonUIShared;
 
   // src/lib/catalog.tsx
   function renderCatalogList(root, snapshot, host2) {
+    const filtered = !!(snapshot.query || snapshot.harness || snapshot.repo);
+    function commit(form) {
+      const values = new FormData(form);
+      host2.filters({
+        q: String(values.get("q") ?? "").trim(),
+        harness: String(values.get("harness") ?? "").trim(),
+        repo: String(values.get("repo") ?? "").trim()
+      });
+    }
     render(
       /* @__PURE__ */ jsxs(Fragment2, { children: [
         /* @__PURE__ */ jsxs("div", { class: "ph", children: [
@@ -15617,54 +15629,64 @@ globalThis.__semonUIShared = __semonUIShared;
         /* @__PURE__ */ jsxs(
           "form",
           {
-            class: "catalog-filters facet-filters",
+            class: "catalog-filters",
             onSubmit: (event) => {
               event.preventDefault();
+              commit(event.currentTarget);
             },
             children: [
-              snapshot.metadataSearch && /* @__PURE__ */ jsxs("label", { class: "search", children: [
-                "Search session details",
-                " ",
-                /* @__PURE__ */ jsx(
+              snapshot.metadataSearch && /* @__PURE__ */ jsxs("label", { class: "catalog-field catalog-query", children: [
+                /* @__PURE__ */ jsx("span", { children: "Search session details" }),
+                /* @__PURE__ */ jsx("span", { class: "search", children: /* @__PURE__ */ jsx(
                   "input",
                   {
+                    name: "q",
                     "aria-label": "Search session details",
+                    placeholder: "Search names, IDs, repositories\u2026",
                     value: snapshot.query ?? "",
-                    onChange: (event) => host2.filter("q", event.currentTarget.value)
+                    onChange: (event) => {
+                      if (event.currentTarget.form) commit(event.currentTarget.form);
+                    }
                   }
-                )
+                ) })
               ] }, "q"),
-              /* @__PURE__ */ jsxs("label", { class: "search", children: [
-                "Harness",
-                " ",
-                /* @__PURE__ */ jsx(
+              /* @__PURE__ */ jsxs("label", { class: "catalog-field", children: [
+                /* @__PURE__ */ jsx("span", { children: "Harness" }),
+                /* @__PURE__ */ jsx("span", { class: "search", children: /* @__PURE__ */ jsx(
                   "input",
                   {
+                    name: "harness",
                     "aria-label": "Harness",
+                    placeholder: "All harnesses",
                     value: snapshot.harness,
-                    onChange: (event) => host2.filter("harness", event.currentTarget.value.trim())
+                    onChange: (event) => {
+                      if (event.currentTarget.form) commit(event.currentTarget.form);
+                    }
                   }
-                )
+                ) })
               ] }, "harness"),
-              /* @__PURE__ */ jsxs("label", { class: "search", children: [
-                "Repository",
-                " ",
-                /* @__PURE__ */ jsx(
+              /* @__PURE__ */ jsxs("label", { class: "catalog-field", children: [
+                /* @__PURE__ */ jsx("span", { children: "Repository" }),
+                /* @__PURE__ */ jsx("span", { class: "search", children: /* @__PURE__ */ jsx(
                   "input",
                   {
+                    name: "repo",
                     "aria-label": "Repository",
+                    placeholder: "All repositories",
                     value: snapshot.repo,
-                    onChange: (event) => host2.filter("repo", event.currentTarget.value.trim())
+                    onChange: (event) => {
+                      if (event.currentTarget.form) commit(event.currentTarget.form);
+                    }
                   }
-                )
-              ] }, "repo")
+                ) })
+              ] }, "repo"),
+              /* @__PURE__ */ jsx("button", { class: "link catalog-apply", type: "submit", children: "Apply filters" })
             ]
           }
         ),
-        /* @__PURE__ */ jsxs("p", { class: "catalog-note", children: [
-          "Sorted by latest recorded activity.",
-          " ",
-          snapshot.metadataSearch ? "Search includes names, IDs, repositories, branches, models and harnesses. Conversation text and history across sources are unavailable." : "Text search and history across sources are unavailable."
+        /* @__PURE__ */ jsxs("details", { class: "catalog-scope", children: [
+          /* @__PURE__ */ jsx("summary", { children: "Search scope and source limitations" }),
+          /* @__PURE__ */ jsx("p", { class: "catalog-note", children: snapshot.metadataSearch ? "Search includes names, IDs, repositories, branches, models and harnesses. Conversation text and history across sources are unavailable." : "Text search and history across sources are unavailable." })
         ] }),
         snapshot.searchPartial && /* @__PURE__ */ jsx("p", { class: "catalog-note", role: "status", children: "Search checked a bounded part of the index. Load more sessions to continue looking for matches." }),
         snapshot.searchIndexIncomplete && /* @__PURE__ */ jsx("p", { class: "catalog-note", role: "status", children: "Search is incomplete while recorded sessions are being indexed." }),
@@ -15715,7 +15737,16 @@ globalThis.__semonUIShared = __semonUIShared;
             }
           )
         ] }),
-        /* @__PURE__ */ jsx("div", { class: "session-list", children: snapshot.items.map((item2) => /* @__PURE__ */ jsxs(
+        /* @__PURE__ */ jsxs("div", { class: "catalog-result-header", children: [
+          /* @__PURE__ */ jsxs("span", { children: [
+            snapshot.items.length,
+            " ",
+            snapshot.items.length === 1 ? "session loaded" : "sessions loaded",
+            /* @__PURE__ */ jsx("span", { class: "catalog-sort", children: " \xB7 Latest recorded activity" })
+          ] }),
+          filtered && /* @__PURE__ */ jsx("button", { class: "link", type: "button", onClick: () => host2.clearFilters(), children: "Clear filters" })
+        ] }),
+        /* @__PURE__ */ jsx("div", { class: "session-list", "aria-label": "Recorded sessions", children: snapshot.items.map((item2) => /* @__PURE__ */ jsxs(
           "button",
           {
             class: "nrow",
@@ -15729,7 +15760,7 @@ globalThis.__semonUIShared = __semonUIShared;
                 /* @__PURE__ */ jsx("span", { class: "ag", children: item2.freshness.state })
               ] }),
               /* @__PURE__ */ jsx("span", { class: "session-row-meta srow-meta for", children: screenText(
-                [item2.harness, item2.repo, item2.branch, item2.model].filter(Boolean).join(" \xB7 ")
+                [item2.repo, item2.branch, item2.harness, item2.model].filter(Boolean).join(" \xB7 ")
               ) })
             ]
           },
@@ -15985,14 +16016,19 @@ globalThis.__semonUIShared = __semonUIShared;
           label("Full result unavailable for this source. The recorded preview is shown.");
       } else if (entry2.k === "h") {
         label("Native action \xB7 related session context is incomplete");
-        views.push({
-          kind: "message",
-          key: entry_id,
-          entryKey: entry_id,
-          flavor: "incoming",
-          text: native_action_text ?? ""
-        });
-      } else if (entry2.k === "end") label(entry2.text ?? "Native session end recorded");
+        if (native_action_text === void 0) label("Original action prompt is unavailable.");
+        else
+          views.push({
+            kind: "message",
+            key: entry_id,
+            entryKey: entry_id,
+            flavor: "incoming",
+            text: native_action_text ?? ""
+          });
+      } else if (entry2.k === "end")
+        label(
+          item2.provenance ? entry2.text ?? "Native session end recorded" : "Session boundary \xB7 native provenance unavailable"
+        );
       else if (entry2.k === "bgend") label(entry2.label ?? entry2.state);
       else if (entry2.k === "harness") label(entry2.label);
       else if (entry2.k === "signal")
@@ -16017,6 +16053,7 @@ globalThis.__semonUIShared = __semonUIShared;
 
   // src/state/catalog-field-wire.ts
   function parseCatalogField(value, request) {
+    if (!request.entry.provenance) throw new Error("Native text requires source provenance");
     const row = object2(value), identity2 = parseCatalogIdentity(row.identity), projection = object2(row.projection), field = object2(row.field), provenance = object2(row.provenance), source = parseCatalogSource(provenance.source), chunk = number(field.chunk), next = field.next === null ? null : number(field.next), complete = boolean(field.complete), body = text(row.text), sourceBytes = number(object2(row.observation).source_bytes), layers = field.layers ?? 1;
     const sourceLimit = layers === 2 ? 65607 : 65547;
     if (row.api !== 1 || identity2.read_scope !== "retained_history" || identity2.source_key !== request.source_key || identity2.catalog_key !== request.catalog_key || projection.version !== 5 || projection.generation !== request.generation || row.slot !== request.entry.slot || field.name !== request.entry.field?.name || layers !== 1 && layers !== 2 || layers !== (request.entry.field?.layers ?? 1) || chunk !== request.chunk || !Number.isSafeInteger(chunk) || chunk < 0 || next !== (complete ? null : chunk + 1) || !request.entry.field || chunk >= request.entry.field.chunks || complete !== (chunk + 1 === request.entry.field.chunks) || object2(row.freshness).state !== "cached" || !Number.isSafeInteger(sourceBytes) || sourceBytes < 0 || sourceBytes > sourceLimit || new TextEncoder().encode(body).byteLength > 131072 || JSON.stringify(source) !== JSON.stringify(request.entry.provenance.source) || provenance.offset !== request.entry.provenance.offset || provenance.block !== request.entry.provenance.block || provenance.native_event_id !== request.entry.provenance.native_event_id)
@@ -16083,7 +16120,7 @@ globalThis.__semonUIShared = __semonUIShared;
   function createCatalogViewer(capabilities, viewerHost) {
     const scope = new EffectScope(), selection = new CatalogSelectionStore(), navigation = new NavigationController({}), updates = new ViewUpdates();
     let listRetry, listRetryDelay = 1e3;
-    let disposed = false, page = null, items = [], cursor = null, listEpoch = 0, updating = false, note = "", harness = "", repo = "", query = "", active = null;
+    let disposed = false, page = null, items = [], cursor = null, listEpoch = 0, updating = false, note = "", harness = "", repo = "", query = "", listScroll = 0, listFocus = "", active = null;
     let candidates = [], candidateCursor = null, candidateLoaded = false, candidateUpdating = false, candidateNote = "", candidateEpoch = 0, candidateTimer;
     const selected = /* @__PURE__ */ new Map();
     const sourceViews = /* @__PURE__ */ new Map();
@@ -16130,8 +16167,12 @@ globalThis.__semonUIShared = __semonUIShared;
       }
     });
     shell.mount(document.querySelector(".app"));
-    const root = shell.slots.content, title = document.createElement("div"), jumpActions = document.createElement("div"), jumpSlot = document.createElement("span"), jumpTarget = document.createElement("div");
-    title.className = "ttl";
+    const root = shell.slots.content, title = document.createElement("div"), back = document.createElement("button"), jumpActions = document.createElement("div"), jumpSlot = document.createElement("span"), jumpTarget = document.createElement("div");
+    title.className = "ttl catalog-title";
+    back.type = "button";
+    back.className = "link catalog-back";
+    back.textContent = "\u2190 Back to sessions";
+    scope.listen(back, "click", () => goList());
     jumpActions.className = "viewer-bar-actions";
     jumpSlot.className = "viewer-jump";
     jumpTarget.className = "jump-wrap";
@@ -16261,7 +16302,11 @@ globalThis.__semonUIShared = __semonUIShared;
       if (chromeTitle !== name || chromeSession !== !!active) {
         chromeTitle = name;
         chromeSession = !!active;
-        title.textContent = name;
+        const label = document.createElement("span");
+        label.className = "catalog-session-name";
+        label.textContent = name;
+        title.replaceChildren(label);
+        if (active) title.prepend(back);
         shell.topbar({
           titleSlot: title,
           actions: active ? [jumpActions] : [],
@@ -16355,12 +16400,19 @@ globalThis.__semonUIShared = __semonUIShared;
           candidateRetry() {
             void loadCandidates(false);
           },
-          filter(field, value) {
+          filters(values) {
+            if (harness === values.harness && repo === values.repo && query === values.q) return;
             cancelCandidate();
-            if (field === "harness") harness = value;
-            else if (field === "q") query = value;
-            else repo = value;
+            harness = values.harness;
+            repo = values.repo;
+            query = values.q;
             void loadList(false);
+          },
+          clearFilters() {
+            cancelCandidate();
+            harness = repo = query = "";
+            void loadList(false);
+            root.querySelector(".catalog-filters input")?.focus();
           },
           more() {
             void loadList(true);
@@ -16539,13 +16591,14 @@ globalThis.__semonUIShared = __semonUIShared;
       return status2 === 0 || status2 === 429 || status2 === 500 || status2 === 502 || status2 === 503 || status2 === 504;
     }
     function preserveScroll() {
-      if (active)
-        active.scroll = window.matchMedia("(max-width: 760px)").matches ? window.scrollY : document.querySelector("#main").scrollTop;
+      const scroll = window.matchMedia("(max-width: 760px)").matches ? window.scrollY : document.querySelector("#main").scrollTop;
+      if (active) active.scroll = scroll;
+      else if (!sourcesOpen) listScroll = scroll;
     }
     function goList(push = true) {
       cancelCandidate();
       sourcesOpen = false;
-      preserveScroll();
+      if (active) preserveScroll();
       active = null;
       selection.clear();
       navigation.route = { v: "sessions" };
@@ -16557,6 +16610,12 @@ globalThis.__semonUIShared = __semonUIShared;
         );
       root.replaceChildren();
       drawList();
+      const row = [...root.querySelectorAll('[data-session-row="list"]')].find(
+        (node) => node.dataset.id === listFocus
+      );
+      row?.focus({ preventScroll: true });
+      if (window.matchMedia("(max-width: 760px)").matches) window.scrollTo(0, listScroll);
+      else document.querySelector("#main").scrollTop = listScroll;
       if (page?.completeness.state === "partial" && items.length <= 60 && !updating)
         void loadList(false);
       shell.closeDrawer(true);
@@ -16921,6 +16980,7 @@ globalThis.__semonUIShared = __semonUIShared;
       if (disposed) return;
       cancelCandidate();
       preserveScroll();
+      if (!active && !sourcesOpen) listFocus = key2;
       sourcesOpen = false;
       let view = selected.get(cacheKey(key2));
       if (!view) {
@@ -17063,6 +17123,8 @@ globalThis.__semonUIShared = __semonUIShared;
         harness,
         repo,
         query,
+        listScroll,
+        listFocus,
         selectedKey: active?.key ?? null
       });
     }
@@ -17111,6 +17173,8 @@ globalThis.__semonUIShared = __semonUIShared;
         harness = retained?.harness ?? "";
         repo = retained?.repo ?? "";
         query = retained?.query ?? "";
+        listScroll = retained?.listScroll ?? 0;
+        listFocus = retained?.listFocus ?? "";
         updating = false;
         note = "";
         sourcesOpen = false;

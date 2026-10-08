@@ -107,7 +107,7 @@ test('ranged native content rejects holes, stale scope and fabricated complete c
     (p) => (p.projection.generation = 'not-sha'),
     (p) => (p.relationship_context.state = 'complete'),
     (p) => (p.relationship_context.handoffs = [{}]),
-    (p) => (p.entries[1].text = undefined),
+    (p) => (p.entries[1].text = null),
     (p) => (p.entries[0].provenance.offset = Number.MAX_SAFE_INTEGER + 1),
     (p) => (p.freshness.state = 'fresh'),
   ]) {
@@ -235,4 +235,19 @@ test('retained-history range intent cannot silently accept a current-scope proje
   historical.identity.native_selection = { state: 'retired' };
   assert.equal(store.accept(store.request(0, 2), historical), true);
   assert.equal(store.selectedPage().identity.native_selection.state, 'retired');
+});
+
+test('incomplete action prompts and derived boundaries stay readable without source authority', () => {
+  const raw = page();
+  delete raw.entries[1].text;
+  assert.equal(parseCatalogTranscriptPage(raw).entries[1].native_action_text, undefined);
+  raw.entries[1] = { ...raw.entries[1], k: 'end', provenance: null };
+  const boundary = parseCatalogTranscriptPage(raw).entries[1];
+  assert.equal(boundary.provenance, null);
+  raw.entries[1].field = { name: 'text', chunks: 1, complete: true };
+  assert.throws(() => parseCatalogTranscriptPage(raw), /cannot expose native text/);
+  delete raw.entries[1].field;
+  raw.entries[1].k = 'u';
+  raw.entries[1].text = 'Unprovenanced native message';
+  assert.throws(() => parseCatalogTranscriptPage(raw));
 });

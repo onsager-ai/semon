@@ -1,0 +1,499 @@
+<!DOCTYPE html>
+
+<html class="h-full" lang="en"><head>
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+<title>Semon — Session Inspection</title>
+<!-- Material Symbols -->
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<!-- Fonts -->
+<link href="https://fonts.googleapis.com" rel="preconnect"/>
+<link crossorigin="" href="https://fonts.gstatic.com" rel="preconnect"/>
+<link href="https://fonts.googleapis.com/css2?family=Instrument+Sans:ital,wght@0,400..700;1,400..700&amp;family=JetBrains+Mono:wght@400;500;600&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<script id="tailwind-config">
+    tailwind.config = {
+      darkMode: "class",
+      theme: {
+        extend: {
+          "colors": {
+            "on-primary": "#ffffff",
+            "on-surface-variant": "#434845",
+            "surface-container-low": "#f3f3f4",
+            "sunken": "#f1f2ef",
+            "outline-variant": "#c4c7c4",
+            "surface-dim": "#dadada",
+            "surface-container-highest": "#e2e2e2",
+            "surface-variant": "#e2e2e2",
+            "on-tertiary-fixed": "#211a19",
+            "surface-tint": "#5b5f5d",
+            "on-background": "#1a1c1c",
+            "surface-container": "#eeeeee",
+            "primary-fixed-dim": "#c4c7c4",
+            "on-tertiary-fixed-variant": "#4e4543",
+            "lineStrong": "#d3d7d2",
+            "muted": "#5d6561",
+            "surface-container-high": "#e8e8e8",
+            "on-secondary": "#ffffff",
+            "on-error": "#ffffff",
+            "on-primary-fixed-variant": "#444845",
+            "on-secondary-fixed": "#161d1a",
+            "secondary": "#59605c",
+            "on-tertiary": "#ffffff",
+            "on-primary-container": "#818582",
+            "tertiary-fixed-dim": "#d1c4c2",
+            "primary-container": "#191d1b",
+            "secondary-container": "#dde4de",
+            "tertiary-container": "#221b1a",
+            "on-secondary-fixed-variant": "#414844",
+            "on-primary-fixed": "#181c1a",
+            "inverse-primary": "#c4c7c4",
+            "inverse-on-surface": "#f0f1f1",
+            "ink": "#191d1b",
+            "errorSurface": "#fbeaea",
+            "error": "#b53232",
+            "error-container": "#ffdad6",
+            "surface-bright": "#f9f9f9",
+            "outline": "#747875",
+            "background": "#f9f9f9",
+            "on-error-container": "#93000a",
+            "primary-fixed": "#e0e3e0",
+            "inverse-surface": "#2f3131",
+            "working": "#1d6db0",
+            "line": "#e5e7e3",
+            "waiting": "#8f5700",
+            "tertiary-fixed": "#eedfdd",
+            "primary": "#000101",
+            "on-surface": "#1a1c1c",
+            "on-secondary-container": "#5f6662",
+            "ground": "#ffffff",
+            "tertiary": "#030101",
+            "surface-container-lowest": "#ffffff",
+            "secondary-fixed-dim": "#c1c8c3",
+            "side": "#f7f7f5",
+            "secondary-fixed": "#dde4de",
+            "on-tertiary-container": "#8d8280",
+            "surface": "#f9f9f9"
+          },
+          "borderRadius": {
+            "DEFAULT": "0.125rem",
+            "lg": "0.25rem",
+            "xl": "0.5rem",
+            "full": "0.75rem"
+          },
+          "spacing": {
+            "space-xl": "24px",
+            "margin": "24px",
+            "space-xs": "4px",
+            "space-md": "12px",
+            "space-2xl": "32px",
+            "space-sm": "8px",
+            "space-lg": "16px",
+            "gutter": "32px"
+          },
+          "fontFamily": {
+            "body-base-mobile": ["Instrument Sans"],
+            "code": ["JetBrains Mono"],
+            "body-base": ["Instrument Sans"],
+            "body-secondary": ["Instrument Sans"],
+            "headline-lg-mobile": ["Instrument Sans"],
+            "headline-md": ["Instrument Sans"],
+            "headline-lg": ["Instrument Sans"],
+            "caption": ["Instrument Sans"],
+            "body-reading": ["Instrument Sans"]
+          },
+          "fontSize": {
+            "body-base-mobile": ["15px", { "lineHeight": "22px", "fontWeight": "400" }],
+            "code": ["13px", { "lineHeight": "18px", "fontWeight": "400" }],
+            "body-base": ["14px", { "lineHeight": "20px", "fontWeight": "400" }],
+            "body-secondary": ["13px", { "lineHeight": "18px", "fontWeight": "400" }],
+            "headline-lg-mobile": ["17px", { "lineHeight": "24px", "fontWeight": "600" }],
+            "headline-md": ["16px", { "lineHeight": "22px", "fontWeight": "600" }],
+            "headline-lg": ["20px", { "lineHeight": "28px", "fontWeight": "600" }],
+            "caption": ["12px", { "lineHeight": "18px", "fontWeight": "400" }],
+            "body-reading": ["16px", { "lineHeight": "24px", "fontWeight": "400" }]
+          }
+        }
+      }
+    }
+  </script>
+<style>
+    .material-symbols-outlined {
+      font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 20;
+      font-size: 18px;
+      line-height: 1;
+    }
+    /* Discrete focus styles conforming to standard */
+    :focus-visible {
+      outline: 2px solid #191d1b;
+      outline-offset: 1px;
+    }
+  </style>
+</head>
+<body class="bg-ground text-ink antialiased min-h-screen flex selection:bg-sunken selection:text-ink">
+<!-- ================= SIDEBAR (Shared Component: SideNavBar) ================= -->
+<aside class="w-[296px] h-screen flex-shrink-0 flex flex-col justify-between fixed left-0 top-0 z-30 bg-side border-r border-line p-space-lg select-none">
+<!-- Top Identity & Core Navigation -->
+<div class="flex flex-col gap-space-lg">
+<!-- App Identity Anchor -->
+<div class="flex items-start justify-between pb-space-md border-b border-line">
+<div class="flex flex-col">
+<div class="flex items-center gap-space-sm">
+<span class="w-2.5 h-2.5 bg-ink rounded-full inline-block"></span>
+<span class="font-headline-md text-headline-md font-semibold text-ink tracking-tight">Semon</span>
+</div>
+<span class="font-caption text-caption text-muted mt-0.5">Record Reader v1.4</span>
+</div>
+<span class="font-code text-[11px] leading-[14px] px-1.5 py-0.5 bg-sunken text-muted border border-line rounded">daemon:local</span>
+</div>
+<!-- Nav Links -->
+<nav class="flex flex-col gap-1">
+<!-- Sessions (Active: intent matches page purpose) -->
+<a aria-current="page" class="bg-ground text-ink font-semibold border border-line rounded-lg px-3 py-2 flex items-center justify-between text-body-base font-body-base shadow-xs" href="#">
+<div class="flex items-center gap-space-sm">
+<span class="material-symbols-outlined text-ink">terminal</span>
+<span>Sessions</span>
+</div>
+<span class="font-code text-[11px] bg-sunken px-1.5 py-0.2 rounded text-muted">23</span>
+</a>
+<!-- Sources -->
+<a class="text-muted hover:text-ink hover:bg-ground/60 rounded-lg px-3 py-2 flex items-center gap-space-sm transition-colors text-body-base font-body-base" href="#">
+<span class="material-symbols-outlined">hub</span>
+<span>Sources</span>
+</a>
+<!-- Machines -->
+<a class="text-muted hover:text-ink hover:bg-ground/60 rounded-lg px-3 py-2 flex items-center gap-space-sm transition-colors text-body-base font-body-base" href="#">
+<span class="material-symbols-outlined">dns</span>
+<span>Machines</span>
+</a>
+<!-- Recent Activity -->
+<a class="text-muted hover:text-ink hover:bg-ground/60 rounded-lg px-3 py-2 flex items-center gap-space-sm transition-colors text-body-base font-body-base" href="#">
+<span class="material-symbols-outlined">history</span>
+<span>Recent Activity</span>
+</a>
+</nav>
+<!-- Action Button -->
+<div>
+<button class="w-full flex items-center justify-center gap-1.5 py-1.5 px-3 border border-lineStrong bg-ground hover:bg-side text-ink rounded font-body-base text-body-base font-medium transition-colors">
+<span class="material-symbols-outlined text-[16px]">add</span>
+<span>Add Source</span>
+</button>
+</div>
+</div>
+<!-- Sidebar Footer: Runtime vs Cache distinction & System tabs -->
+<div class="flex flex-col gap-space-md pt-space-md border-t border-line">
+<!-- Status Panels -->
+<div class="flex flex-col gap-1.5 bg-sunken p-2.5 rounded border border-line">
+<div class="flex items-center justify-between">
+<div class="flex items-center gap-1.5">
+<span class="w-2 h-2 rounded-full bg-emerald-600"></span>
+<span class="font-body-secondary text-body-secondary font-medium text-ink">Source: local-daemon</span>
+</div>
+<span class="font-code text-[10px] text-muted">connected</span>
+</div>
+<div class="font-caption text-caption text-muted border-t border-line/80 pt-1.5 flex items-start gap-1">
+<span class="material-symbols-outlined text-[13px] text-muted mt-0.5">cached</span>
+<span>Cache: 23 records synced from disk · 14m ago</span>
+</div>
+</div>
+<!-- Secondary Tools -->
+<div class="flex flex-col gap-0.5">
+<a class="text-muted hover:text-ink rounded px-2 py-1.5 flex items-center gap-space-sm font-caption text-caption transition-colors" href="#">
+<span class="material-symbols-outlined text-[16px]">vital_signs</span>
+<span>Runtime Health</span>
+</a>
+<a class="text-muted hover:text-ink rounded px-2 py-1.5 flex items-center gap-space-sm font-caption text-caption transition-colors" href="#">
+<span class="material-symbols-outlined text-[16px]">tune</span>
+<span>Settings</span>
+</a>
+</div>
+</div>
+</aside>
+<!-- ================= MAIN WRAPPER ================= -->
+<div class="flex-1 pl-[296px] min-h-screen flex flex-col bg-ground">
+<!-- TopNavBar (Shared Component: TopNavBar) -->
+<header class="h-[56px] w-full bg-ground border-b border-line px-space-2xl sticky top-0 z-20 flex justify-between items-center select-none">
+<!-- Left: Breadcrumb / System identity -->
+<div class="flex items-center gap-space-md">
+<div class="flex items-center gap-1.5 font-code text-code font-medium text-ink">
+<span>harbor</span>
+<span class="text-muted">/</span>
+<span>local-daemon</span>
+</div>
+<div class="h-3.5 w-px bg-lineStrong"></div>
+<div class="flex items-center gap-1.5 text-caption font-caption text-secondary">
+<span class="w-2 h-2 rounded-full bg-emerald-600 inline-block"></span>
+<span>Live Connected</span>
+</div>
+</div>
+<!-- Right: Direct Reader Actions -->
+<div class="flex items-center gap-space-md">
+<button class="font-caption text-caption text-muted hover:text-ink transition-colors px-2 py-1 rounded" type="button">
+          Clear filters
+        </button>
+<div class="h-4 w-px bg-line"></div>
+<button class="flex items-center gap-1.5 px-2.5 py-1 border border-line bg-side hover:bg-sunken text-ink text-body-secondary font-body-secondary font-medium rounded transition-colors" type="button">
+<span class="material-symbols-outlined text-[16px]">refresh</span>
+<span>Refresh Record</span>
+</button>
+<div class="flex items-center gap-1 border-l border-line pl-space-sm">
+<button class="p-1 hover:bg-side rounded text-muted hover:text-ink" title="Filter view">
+<span class="material-symbols-outlined text-[18px]">filter_list</span>
+</button>
+<button class="p-1 hover:bg-side rounded text-muted hover:text-ink" title="Reader layout settings">
+<span class="material-symbols-outlined text-[18px]">tune</span>
+</button>
+</div>
+</div>
+</header>
+<!-- Content Workspace -->
+<main class="w-full max-w-[760px] px-gutter py-space-xl flex flex-col gap-space-xl">
+<!-- Source Observation Notice -->
+<section class="p-3 bg-sunken border border-line rounded flex items-start gap-2.5" role="note">
+<span class="material-symbols-outlined text-muted text-[18px] mt-0.5">info</span>
+<div class="font-body-secondary text-body-secondary text-muted">
+<strong class="font-medium text-ink">Observing local daemon socket.</strong> History is capped at the last 100 on-disk ledger entries. Remote agent execution controls are disabled in reader mode.
+        </div>
+</section>
+<!-- ================= SEARCH & FILTER SECTION (Direction A) ================= -->
+<section class="flex flex-col gap-space-md border border-line p-space-lg rounded bg-side/40">
+<!-- Primary Search -->
+<div class="flex flex-col gap-1.5">
+<label class="font-body-base text-body-base font-medium text-ink" for="session-search">
+            Search session details
+          </label>
+<div class="relative">
+<input class="w-full bg-ground border border-line rounded px-3 py-2 text-body-base font-body-base text-ink placeholder:text-muted focus:border-ink transition-colors" id="session-search" placeholder="Filter records..." type="text" value="harbor"/>
+</div>
+<span class="font-caption text-caption text-muted">Names, IDs, repositories, branches, models and harnesses</span>
+</div>
+<!-- Secondary Filter Controls -->
+<div class="flex items-end gap-space-md pt-1">
+<div class="flex-1 flex flex-col gap-1">
+<label class="font-caption text-caption font-medium text-muted" for="filter-harness">Harness</label>
+<div class="relative">
+<input class="w-full bg-ground border border-line rounded px-2.5 py-1.5 text-body-secondary font-body-secondary font-code text-ink" id="filter-harness" type="text" value="all"/>
+</div>
+</div>
+<div class="flex-1 flex flex-col gap-1">
+<label class="font-caption text-caption font-medium text-muted" for="filter-repo">Repository</label>
+<div class="relative">
+<input class="w-full bg-ground border border-line rounded px-2.5 py-1.5 text-body-secondary font-body-secondary font-code text-ink" id="filter-repo" type="text" value="harbor-sync"/>
+</div>
+</div>
+<div>
+<button class="px-3 py-1.5 text-body-secondary font-body-secondary text-secondary hover:text-ink hover:underline font-medium h-[35px] flex items-center" type="button">
+              Clear filters
+            </button>
+</div>
+</div>
+</section>
+<!-- ================= SESSION CATALOG ROWS ================= -->
+<section class="flex flex-col gap-2">
+<div class="flex justify-between items-center pb-1">
+<h2 class="font-headline-md text-headline-md font-semibold text-ink">23 sessions loaded · Latest recorded activity</h2>
+<span class="font-code text-caption text-muted">Ledger sort: desc</span>
+</div>
+<div class="border border-line rounded divide-y divide-line overflow-hidden bg-ground">
+<!-- Row 1: Selected / Active Failure Record -->
+<article aria-selected="true" class="p-3 bg-ground relative border-l-4 border-l-ink hover:bg-side/50 cursor-pointer transition-colors">
+<div class="flex items-center justify-between">
+<div class="flex items-center gap-2">
+<span class="font-code font-semibold text-body-base text-ink">harbor / feat-offline-sync / opus-5.5</span>
+<span class="font-caption text-caption text-muted">· 12m ago</span>
+</div>
+<span class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded font-caption text-caption font-medium text-error bg-errorSurface border border-error/20">
+<span class="w-1.5 h-1.5 rounded-full bg-error"></span>
+                Failed (exit 101)
+              </span>
+</div>
+<div class="mt-1 flex items-center gap-2 text-caption font-caption text-muted">
+<span class="font-code text-ink">harbor-sync:feat-offline-sync</span>
+<span>·</span>
+<span>harness <code class="font-code text-ink">cargo-runner</code></span>
+<span>·</span>
+<span>model <code class="font-code text-ink">claude-3-5-sonnet</code></span>
+</div>
+</article>
+<!-- Row 2 -->
+<article class="p-3 bg-ground hover:bg-side/40 cursor-pointer transition-colors border-l-4 border-l-transparent">
+<div class="flex items-center justify-between">
+<div class="flex items-center gap-2">
+<span class="font-code font-medium text-body-base text-ink">Check retry safety / sonnet-5</span>
+<span class="font-caption text-caption text-muted">· 34m ago</span>
+</div>
+<span class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded font-caption text-caption font-medium text-muted bg-sunken border border-line">
+<span class="w-1.5 h-1.5 rounded-full bg-emerald-600"></span>
+                Success (exit 0)
+              </span>
+</div>
+<div class="mt-1 flex items-center gap-2 text-caption font-caption text-muted">
+<span class="font-code text-ink">harbor-sync:main</span>
+<span>·</span>
+<span>harness <code class="font-code text-ink">pytest-runner</code></span>
+<span>·</span>
+<span>model <code class="font-code text-ink">claude-3-5-sonnet</code></span>
+</div>
+</article>
+<!-- Row 3 -->
+<article class="p-3 bg-ground hover:bg-side/40 cursor-pointer transition-colors border-l-4 border-l-transparent">
+<div class="flex items-center justify-between">
+<div class="flex items-center gap-2">
+<span class="font-code font-medium text-body-base text-ink">atlas ingest / gpt-6-luna</span>
+<span class="font-caption text-caption text-muted">· 2h ago</span>
+</div>
+<span class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded font-caption text-caption font-medium text-muted bg-sunken border border-line">
+<span class="w-1.5 h-1.5 rounded-full bg-emerald-600"></span>
+                Success (exit 0)
+              </span>
+</div>
+<div class="mt-1 flex items-center gap-2 text-caption font-caption text-muted">
+<span class="font-code text-ink">atlas:dev</span>
+<span>·</span>
+<span>harness <code class="font-code text-ink">python-exec</code></span>
+<span>·</span>
+<span>model <code class="font-code text-ink">gpt-6-luna</code></span>
+</div>
+</article>
+<!-- Row 4 -->
+<article class="p-3 bg-ground hover:bg-side/40 cursor-pointer transition-colors border-l-4 border-l-transparent">
+<div class="flex items-center justify-between">
+<div class="flex items-center gap-2">
+<span class="font-code font-medium text-body-base text-ink">ledger / fix-rounding</span>
+<span class="font-caption text-caption text-muted">· 4h ago</span>
+</div>
+<span class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded font-caption text-caption font-medium text-muted bg-sunken border border-line">
+<span class="w-1.5 h-1.5 rounded-full bg-emerald-600"></span>
+                Success (exit 0)
+              </span>
+</div>
+<div class="mt-1 flex items-center gap-2 text-caption font-caption text-muted">
+<span class="font-code text-ink">ledger:patch-1</span>
+<span>·</span>
+<span>harness <code class="font-code text-ink">cargo-runner</code></span>
+<span>·</span>
+<span>model <code class="font-code text-ink">claude-3-5-sonnet</code></span>
+</div>
+</article>
+</div>
+</section>
+<!-- ================= SELECTED SESSION INSPECTION FRAME ================= -->
+<section class="flex flex-col gap-space-lg pt-space-md border-t-2 border-line">
+<!-- Navigation back link -->
+<div>
+<button class="font-body-secondary text-body-secondary text-secondary hover:text-ink font-medium flex items-center gap-1">
+<span>←</span> Back to sessions (preserves harbor filter)
+          </button>
+</div>
+<!-- Session Header & Meta Badges -->
+<div class="flex flex-col gap-2">
+<div class="flex items-center justify-between">
+<h1 class="font-headline-lg text-headline-lg font-semibold text-ink">harbor / feat-offline-sync / opus-5.5</h1>
+<span class="px-2 py-0.5 bg-errorSurface border border-error/20 text-error font-code text-[12px] font-semibold rounded">
+              Exit Code 101
+            </span>
+</div>
+<div class="flex flex-wrap items-center gap-x-space-md gap-y-1 font-code text-caption text-muted pt-1">
+<div><span class="text-secondary font-sans">ID:</span> sess_99a8b1c4</div>
+<span>·</span>
+<div><span class="text-secondary font-sans">Recorded:</span> 14:23:09 UTC</div>
+<span>·</span>
+<div><span class="text-secondary font-sans">Repository:</span> harbor-sync</div>
+<span>·</span>
+<div><span class="text-secondary font-sans">Branch:</span> feat-offline-sync</div>
+</div>
+</div>
+<!-- Transcript Section -->
+<div class="flex flex-col gap-space-md">
+<!-- User Instruction Card -->
+<div class="border border-line rounded p-space-md bg-sunken/40 flex flex-col gap-1.5">
+<div class="font-caption text-caption text-secondary font-medium uppercase tracking-wider">
+              User instruction (recorded)
+            </div>
+<p class="font-body-reading text-body-reading text-ink leading-relaxed">
+              Review the offline queue implementation. Check retry safety after a network interruption, preserve ordering for partially flushed batches, and explain whether retrying can duplicate an acknowledged write. Keep the surrounding records available while I inspect the failure.
+            </p>
+</div>
+<!-- Expandable Tool Call Disclosure -->
+<div class="border border-line rounded overflow-hidden">
+<!-- Disclosure Bar Header -->
+<div class="bg-side p-space-md flex items-center justify-between border-b border-line">
+<div class="flex items-center gap-2">
+<span class="material-symbols-outlined text-ink text-[18px]">expand_more</span>
+<span class="font-code text-caption font-semibold bg-sunken border border-line px-1.5 py-0.5 rounded text-ink">
+                  exec_command
+                </span>
+<code class="font-code text-body-secondary text-ink font-medium">cargo test -p harbor-sync -- --nocapture queue::retry_limit</code>
+</div>
+<div class="flex items-center gap-space-md">
+<span class="font-code text-caption font-medium text-error">Exit 101</span>
+<button class="text-caption font-caption text-secondary hover:text-ink border border-line bg-ground hover:bg-side px-2 py-0.5 rounded transition-colors flex items-center gap-1" type="button">
+<span class="material-symbols-outlined text-[14px]">content_copy</span>
+<span>Copy output</span>
+</button>
+</div>
+</div>
+<!-- Terminal / Code Output -->
+<div class="bg-sunken p-space-md font-code text-code text-ink overflow-x-auto leading-relaxed border-t border-line/40">
+<pre class="m-0 font-code"><code>running 1 test
+test queue::retry_limit ... <span class="text-error font-medium">FAILED</span>
+
+failures:
+
+---- queue::retry_limit stdout ----
+[DEBUG] harbor_sync::queue: initializing mock socket with 500ms drop probability 0.8
+[DEBUG] harbor_sync::queue: batch 0x4a flushed 12 items, 2 unacknowledged
+<span class="text-waiting">[WARN]  network dropped during batch flush, scheduling retry backoff</span>
+[DEBUG] retry loop cycle 1: attempt count = 1
+[DEBUG] retry loop cycle 2: attempt count = 2
+[DEBUG] retry loop cycle 3: attempt count = 3
+<span class="text-error">[ERROR] retry limit exceeded in queue worker thread</span>
+<span class="text-error font-medium">thread 'queue::retry_limit' panicked at src/queue/worker.rs:184:9:</span>
+<span class="text-error font-medium">expected retry budget 3, observed 4</span>
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace</code></pre>
+<!-- Truncation Notice Footer -->
+<div class="mt-3 pt-2 border-t border-line text-caption font-caption text-muted flex items-center justify-between">
+<span>[Output truncated: showing 12 of 86 lines. Full log retained on disk (48.2 KB).]</span>
+<button class="hover:text-ink underline">Load full log</button>
+</div>
+</div>
+</div>
+</div>
+</section>
+<!-- ================= COMPACT REPRESENTATIVE STATES STRIP ================= -->
+<section class="mt-4 pt-space-lg border-t border-lineStrong flex flex-col gap-2">
+<span class="font-caption text-caption font-medium uppercase tracking-wider text-muted">
+          Representative record states (retained context)
+        </span>
+<div class="flex flex-col gap-2">
+<!-- State A: Inline Loading with Preserved Records -->
+<div class="p-2.5 bg-ground border border-line rounded flex items-center justify-between text-body-secondary font-body-secondary text-muted">
+<div class="flex items-center gap-2">
+<span class="w-3.5 h-3.5 border-2 border-muted border-t-ink rounded-full animate-spin"></span>
+<span>Fetching background session entries...</span>
+</div>
+<span class="font-caption text-caption text-secondary">(23 existing records preserved)</span>
+</div>
+<!-- State B: Empty Filter with Recoverable Action -->
+<div class="p-2.5 bg-sunken border border-line rounded flex items-center justify-between text-body-secondary font-body-secondary">
+<span class="text-muted">No sessions matching harness="unknown" in harbor-sync</span>
+<button class="font-body-secondary text-body-secondary font-medium text-ink hover:underline">
+              Clear filters
+            </button>
+</div>
+<!-- State C: Transient Error with Recoverable Retry -->
+<div class="p-2.5 bg-errorSurface border border-error/20 rounded flex items-center justify-between text-body-secondary font-body-secondary text-ink">
+<div class="flex items-center gap-1.5">
+<span class="material-symbols-outlined text-error text-[16px]">cloud_off</span>
+<span>Connection lost to daemon socket at <code class="font-code text-[12px]">/tmp/semon.sock</code> · Retaining cached history</span>
+</div>
+<button class="font-body-secondary text-body-secondary font-medium text-error hover:underline">
+              Retry connection
+            </button>
+</div>
+</div>
+</section>
+</main>
+</div>
+</body></html>

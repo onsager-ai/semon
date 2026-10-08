@@ -122,6 +122,14 @@ test(
       await page.goto(url[1] + '/?t=' + url[2]);
       await page.locator('#page [data-id]').first().waitFor({ timeout: 60000 });
       const firstList = performance.now() - start;
+      const query = page.getByRole('textbox', { name: 'Search session details', exact: true });
+      await query.fill('backlog');
+      await query.press('Enter');
+      await page.waitForFunction(
+        () => document.querySelectorAll('#page [data-session-row="list"]').length === 1,
+      );
+      assert.equal(await page.locator('#page [data-id="backlog"]').count(), 1);
+      assert.equal(await page.getByRole('button', { name: 'Retry', exact: true }).count(), 0);
       const key = 'backlog';
       const selectedStart = performance.now();
       await page.locator('#page [data-id="backlog"]').click();
@@ -229,6 +237,36 @@ test(
           await context.close();
         }
       }
+      const representative = [];
+      for (const session of ['harbor', 'q-codex', 'h-failed']) {
+        const check = await browser.newPage({ viewport: { width: 1280, height: 860 } });
+        check.on('pageerror', (e) => errors.push(e.message));
+        await check.goto(url[1] + '/?t=' + url[2]);
+        const row = check.locator(`#page [data-id="${session}"]`);
+        await row.waitFor();
+        await row.click();
+        await check.locator('#page [data-entry-key]').first().waitFor();
+        assert.equal(await check.getByText('Invalid string', { exact: true }).count(), 0);
+        assert.equal(await check.getByText('Invalid object', { exact: true }).count(), 0);
+        const failed = check.locator('#page .step.err').first();
+        if (await failed.count()) {
+          await failed.locator(':scope > button').click();
+          assert.equal(
+            await failed.locator(':scope > button').getAttribute('aria-expanded'),
+            'true',
+          );
+          assert.ok(
+            (await failed.innerText()).length > 20,
+            'Recorded failure output is inspectable',
+          );
+        }
+        const body = await check.locator('#page').innerText();
+        if (session === 'harbor')
+          assert.ok(body.includes('Original action prompt is unavailable.'));
+        representative.push({ session, readable: true, failedTool: !!(await failed.count()) });
+        await check.close();
+      }
+      assert.deepEqual(errors, []);
       // Losing the observed native source must remain visible without erasing useful
       // previously loaded history or issuing a complete-model restoration request.
       const retainedEntry = await page.locator('#page [data-entry-key]').first().elementHandle();
@@ -254,6 +292,7 @@ test(
       const evidence = {
         source: process.env.SEMON_CATALOG_SERVED_SOURCE ?? 'unrecorded',
         visual,
+        representative,
         firstListMs: firstList,
         selectedMs: selected,
         warmSwitchMs: warm,

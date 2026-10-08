@@ -1,0 +1,25 @@
+{
+  "projectId": "4096612056644866749",
+  "designSystem": "assets/4efd29b1bcee4cccbe2a54657836d9ce",
+  "source": "274f0b9bb43f65982863a22c177413c04d805740",
+  "screens": [
+    {
+      "direction": "a",
+      "title": "Semon Session Inspection",
+      "name": "projects/4096612056644866749/screens/3e0ca02d8a604ba2932095cee5879661",
+      "width": "2560",
+      "height": "3436",
+      "screenshot": "designs/direction-a-0.png",
+      "html": "designs/direction-a-0.html"
+    },
+    {
+      "direction": "b",
+      "title": "Semon Session Discovery & Inspection",
+      "name": "projects/4096612056644866749/screens/ee33d0e2514041ef9eb45e91c917f401",
+      "width": "2560",
+      "height": "2472",
+      "screenshot": "designs/direction-b-0.png",
+      "html": "designs/direction-b-0.html"
+    }
+  ]
+}

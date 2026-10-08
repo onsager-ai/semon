@@ -1,0 +1,2335 @@
+{
+  "version": "2.20",
+  "children": [
+    {
+      "type": "frame",
+      "id": "Nt3eb",
+      "x": 0,
+      "y": 0,
+      "name": "Semon · Search-first catalog · 1280",
+      "theme": {
+        "mode": "light"
+      },
+      "clip": true,
+      "width": 1280,
+      "height": 860,
+      "fill": "$ground",
+      "layout": "none",
+      "children": [
+        {
+          "type": "frame",
+          "id": "P4cT3K",
+          "x": 0,
+          "y": 0,
+          "name": "Shared navigation",
+          "width": 296,
+          "height": 860,
+          "fill": "$side",
+          "layout": "vertical",
+          "gap": 16,
+          "padding": 16,
+          "children": [
+            {
+              "type": "text",
+              "id": "sr4EU",
+              "name": "Brand",
+              "fill": "$ink",
+              "content": "Semon",
+              "fontFamily": "$sans",
+              "fontSize": 16,
+              "fontWeight": "normal"
+            },
+            {
+              "type": "frame",
+              "id": "XxrIN",
+              "name": "Navigation · Sessions",
+              "width": "fill_container",
+              "height": 36,
+              "fill": "$sunken",
+              "cornerRadius": 10,
+              "padding": 12,
+              "children": [
+                {
+                  "type": "text",
+                  "id": "oh1rX",
+                  "name": "Navigation label",
+                  "fill": "$ink",
+                  "content": "Sessions",
+                  "fontFamily": "$sans",
+                  "fontSize": 14,
+                  "fontWeight": "normal"
+                }
+              ]
+            },
+            {
+              "type": "frame",
+              "id": "u2bYht",
+              "name": "Navigation · Sources",
+              "width": "fill_container",
+              "height": 36,
+              "fill": "$side",
+              "cornerRadius": 10,
+              "padding": 12,
+              "children": [
+                {
+                  "type": "text",
+                  "id": "VHUjO",
+                  "name": "Navigation label",
+                  "fill": "$ink",
+                  "content": "Sources",
+                  "fontFamily": "$sans",
+                  "fontSize": 14,
+                  "fontWeight": "normal"
+                }
+              ]
+            },
+            {
+              "type": "frame",
+              "id": "GZCvb",
+              "name": "Navigation · Machines",
+              "width": "fill_container",
+              "height": 36,
+              "fill": "$side",
+              "cornerRadius": 10,
+              "padding": 12,
+              "children": [
+                {
+                  "type": "text",
+                  "id": "mgicH",
+                  "name": "Navigation label",
+                  "fill": "$ink",
+                  "content": "Machines",
+                  "fontFamily": "$sans",
+                  "fontSize": 14,
+                  "fontWeight": "normal"
+                }
+              ]
+            },
+            {
+              "type": "text",
+              "id": "m7uFp",
+              "name": "Recent heading",
+              "fill": "$muted",
+              "content": "RECENT",
+              "fontFamily": "$sans",
+              "fontSize": 12,
+              "fontWeight": "normal"
+            },
+            {
+              "type": "frame",
+              "id": "K22Z2",
+              "name": "Recent · deps audit",
+              "width": "fill_container",
+              "height": 48,
+              "layout": "vertical",
+              "gap": 4,
+              "children": [
+                {
+                  "type": "text",
+                  "id": "RrjFH",
+                  "name": "Recent name",
+                  "fill": "$ink",
+                  "content": "deps audit",
+                  "fontFamily": "$sans",
+                  "fontSize": 14,
+                  "fontWeight": "normal"
+                },
+                {
+                  "type": "text",
+                  "id": "KpdLb",
+                  "name": "Recent metadata",
+                  "fill": "$muted",
+                  "content": "Cached history · opus-5.5",
+                  "fontFamily": "$sans",
+                  "fontSize": 12,
+                  "fontWeight": "normal"
+                }
+              ]
+            },
+            {
+              "type": "frame",
+              "id": "siYza",
+              "name": "Recent · feat/offline-sync",
+              "width": "fill_container",
+              "height": 48,
+              "layout": "vertical",
+              "gap": 4,
+              "children": [
+                {
+                  "type": "text",
+                  "id": "y0IHA3",
+                  "name": "Recent name",
+                  "fill": "$ink",
+                  "content": "feat/offline-sync",
+                  "fontFamily": "$sans",
+                  "fontSize": 14,
+                  "fontWeight": "normal"
+                },
+                {
+                  "type": "text",
+                  "id": "anqo8",
+                  "name": "Recent metadata",
+                  "fill": "$muted",
+                  "content": "Cached history · opus-5.5",
+                  "fontFamily": "$sans",
+                  "fontSize": 12,
+                  "fontWeight": "normal"
+                }
+              ]
+            },
+            {
+              "type": "frame",
+              "id": "Sughc",
+              "name": "Recent · Review offline-sync diff",
+              "width": "fill_container",
+              "height": 48,
+              "layout": "vertical",
+              "gap": 4,
+              "children": [
+                {
+                  "type": "text",
+                  "id": "e6VAj8",
+                  "name": "Recent name",
+                  "fill": "$ink",
+                  "content": "Review offline-sync diff",
+                  "fontFamily": "$sans",
+                  "fontSize": 14,
+                  "fontWeight": "normal"
+                },
+                {
+                  "type": "text",
+                  "id": "VJM73",
+                  "name": "Recent metadata",
+                  "fill": "$muted",
+                  "content": "Cached history · opus-5.5",
+                  "fontFamily": "$sans",
+                  "fontSize": 12,
+                  "fontWeight": "normal"
+                }
+              ]
+            },
+            {
+              "type": "frame",
+              "id": "K0C2W",
+              "name": "Recent · Check flush ordering",
+              "width": "fill_container",
+              "height": 48,
+              "layout": "vertical",
+              "gap": 4,
+              "children": [
+                {
+                  "type": "text",
+                  "id": "JauT4",
+                  "name": "Recent name",
+                  "fill": "$ink",
+                  "content": "Check flush ordering",
+                  "fontFamily": "$sans",
+                  "fontSize": 14,
+                  "fontWeight": "normal"
+                },
+                {
+                  "type": "text",
+                  "id": "Kgt2e",
+                  "name": "Recent metadata",
+                  "fill": "$muted",
+                  "content": "Cached history · opus-5.5",
+                  "fontFamily": "$sans",
+                  "fontSize": 12,
+                  "fontWeight": "normal"
+                }
+              ]
+            },
+            {
+              "type": "frame",
+              "id": "ARFew",
+              "name": "Recent · harbor",
+              "width": "fill_container",
+              "height": 48,
+              "layout": "vertical",
+              "gap": 4,
+              "children": [
+                {
+                  "type": "text",
+                  "id": "aYiW5",
+                  "name": "Recent name",
+                  "fill": "$ink",
+                  "content": "harbor",
+                  "fontFamily": "$sans",
+                  "fontSize": 14,
+                  "fontWeight": "normal"
+                },
+                {
+                  "type": "text",
+                  "id": "s3HSrx",
+                  "name": "Recent metadata",
+                  "fill": "$muted",
+                  "content": "Cached history · opus-5.5",
+                  "fontFamily": "$sans",
+                  "fontSize": 12,
+                  "fontWeight": "normal"
+                }
+              ]
+            },
+            {
+              "type": "frame",
+              "id": "hFSHE",
+              "name": "Recent · Check retry safety",
+              "width": "fill_container",
+              "height": 48,
+              "layout": "vertical",
+              "gap": 4,
+              "children": [
+                {
+                  "type": "text",
+                  "id": "yxFBq",
+                  "name": "Recent name",
+                  "fill": "$ink",
+                  "content": "Check retry safety",
+                  "fontFamily": "$sans",
+                  "fontSize": 14,
+                  "fontWeight": "normal"
+                },
+                {
+                  "type": "text",
+                  "id": "i5kLT",
+                  "name": "Recent metadata",
+                  "fill": "$muted",
+                  "content": "Cached history · opus-5.5",
+                  "fontFamily": "$sans",
+                  "fontSize": 12,
+                  "fontWeight": "normal"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "frame",
+          "id": "t6oQxQ",
+          "x": 296,
+          "y": 0,
+          "name": "Shared toolbar",
+          "width": 984,
+          "height": 56,
+          "fill": "$ground",
+          "padding": [
+            16,
+            24
+          ],
+          "children": [
+            {
+              "type": "text",
+              "id": "j8TCK",
+              "name": "Toolbar title",
+              "fill": "$ink",
+              "content": "Sessions",
+              "fontFamily": "$sans",
+              "fontSize": 16,
+              "fontWeight": "normal"
+            }
+          ]
+        },
+        {
+          "type": "frame",
+          "id": "BR60V",
+          "x": 440,
+          "y": 82,
+          "name": "Catalog content · existing reading column",
+          "width": 696,
+          "height": 770,
+          "layout": "vertical",
+          "gap": 16,
+          "children": [
+            {
+              "type": "text",
+              "id": "B4vXb",
+              "name": "Source observation",
+              "fill": "$muted",
+              "content": "laptop · Cached history",
+              "lineHeight": 1.6,
+              "fontFamily": "$sans",
+              "fontSize": 14,
+              "fontWeight": "normal"
+            },
+            {
+              "id": "yAXhd",
+              "type": "ref",
+              "ref": "BYbh8",
+              "name": "Metadata search",
+              "width": 696,
+              "descendants": {
+                "Hf5RI": {
+                  "content": "Search session details"
+                },
+                "v1uz4A": {
+                  "content": "Search names, IDs, repositories…"
+                }
+              }
+            },
+            {
+              "type": "frame",
+              "id": "BcZql",
+              "name": "Secondary filters",
+              "width": 696,
+              "height": 64,
+              "gap": 16,
+              "alignItems": "end",
+              "children": [
+                {
+                  "id": "PQvRJ",
+                  "type": "ref",
+                  "ref": "BYbh8",
+                  "name": "Harness filter",
+                  "width": "fill_container",
+                  "height": 64,
+                  "descendants": {
+                    "Hf5RI": {
+                      "content": "Harness"
+                    },
+                    "v1uz4A": {
+                      "content": "All harnesses"
+                    }
+                  }
+                },
+                {
+                  "id": "hkkUj",
+                  "type": "ref",
+                  "ref": "BYbh8",
+                  "name": "Repository filter",
+                  "width": "fill_container",
+                  "height": 64,
+                  "descendants": {
+                    "Hf5RI": {
+                      "content": "Repository"
+                    },
+                    "v1uz4A": {
+                      "content": "All repositories"
+                    }
+                  }
+                },
+                {
+                  "type": "frame",
+                  "id": "cMHEB",
+                  "name": "Apply filters · native submit",
+                  "width": 93,
+                  "height": 36,
+                  "alignItems": "center",
+                  "children": [
+                    {
+                      "type": "text",
+                      "id": "ZveTZ",
+                      "name": "Apply filters label",
+                      "fill": "$ink",
+                      "content": "Apply filters",
+                      "fontFamily": "$sans",
+                      "fontSize": 13,
+                      "fontWeight": "normal"
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "text",
+              "id": "YWOLK",
+              "name": "Scope disclosure",
+              "fill": "$muted",
+              "textGrowth": "fixed-width-height",
+              "width": 696,
+              "height": 36,
+              "content": "Search scope and source limitations  ›",
+              "textAlignVertical": "middle",
+              "fontFamily": "$sans",
+              "fontSize": 13,
+              "fontWeight": "normal"
+            },
+            {
+              "type": "text",
+              "id": "bEhFh",
+              "name": "Loaded results",
+              "fill": "$muted",
+              "textGrowth": "fixed-width-height",
+              "width": 696,
+              "height": 36,
+              "content": "23 sessions loaded · Latest recorded activity",
+              "textAlignVertical": "middle",
+              "fontFamily": "$sans",
+              "fontSize": 13,
+              "fontWeight": "normal"
+            },
+            {
+              "type": "frame",
+              "id": "I0NY3",
+              "name": "Session list · contiguous rows",
+              "width": 696,
+              "layout": "vertical",
+              "children": [
+                {
+                  "id": "z6UEX",
+                  "type": "ref",
+                  "ref": "raaGL",
+                  "name": "Session · deps audit",
+                  "width": 696,
+                  "descendants": {
+                    "otWZS": {
+                      "content": "deps audit"
+                    },
+                    "siihk": {
+                      "content": "meridian · chore/deps-audit · codex · gpt-6-luna"
+                    }
+                  }
+                },
+                {
+                  "id": "qbldx",
+                  "type": "ref",
+                  "ref": "raaGL",
+                  "name": "Session · feat/offline-sync",
+                  "width": 696,
+                  "descendants": {
+                    "otWZS": {
+                      "content": "feat/offline-sync"
+                    },
+                    "siihk": {
+                      "content": "harbor · feat/offline-sync · codex · gpt-6-luna"
+                    }
+                  }
+                },
+                {
+                  "id": "c9NXOA",
+                  "type": "ref",
+                  "ref": "raaGL",
+                  "name": "Session · Review offline-sync diff",
+                  "width": 696,
+                  "descendants": {
+                    "otWZS": {
+                      "content": "Review offline-sync diff"
+                    },
+                    "siihk": {
+                      "content": "harbor · claude · sonnet-5"
+                    }
+                  }
+                },
+                {
+                  "id": "SF5Pn",
+                  "type": "ref",
+                  "ref": "raaGL",
+                  "name": "Session · Check flush ordering",
+                  "width": 696,
+                  "descendants": {
+                    "otWZS": {
+                      "content": "Check flush ordering"
+                    },
+                    "siihk": {
+                      "content": "harbor · feat/offline-sync · codex · gpt-6-luna"
+                    }
+                  }
+                },
+                {
+                  "id": "H0IUqP",
+                  "type": "ref",
+                  "ref": "raaGL",
+                  "name": "Session · harbor",
+                  "width": 696,
+                  "descendants": {
+                    "otWZS": {
+                      "content": "harbor"
+                    },
+                    "siihk": {
+                      "content": "harbor · main · claude · opus-5.5"
+                    }
+                  }
+                },
+                {
+                  "id": "n1K2kp",
+                  "type": "ref",
+                  "ref": "raaGL",
+                  "name": "Session · Check retry safety",
+                  "width": 696,
+                  "descendants": {
+                    "otWZS": {
+                      "content": "Check retry safety"
+                    },
+                    "siihk": {
+                      "content": "harbor · claude · sonnet-5"
+                    }
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "type": "frame",
+      "id": "BYbh8",
+      "x": 0,
+      "y": -140,
+      "name": "Labeled filter · component",
+      "reusable": true,
+      "width": 336,
+      "height": 64,
+      "layout": "vertical",
+      "gap": 8,
+      "children": [
+        {
+          "type": "text",
+          "id": "Hf5RI",
+          "name": "Field label",
+          "fill": "$muted",
+          "content": "Harness",
+          "fontFamily": "$sans",
+          "fontSize": 13,
+          "fontWeight": "normal"
+        },
+        {
+          "type": "frame",
+          "id": "rzFC5",
+          "name": "Input surface",
+          "width": "fill_container",
+          "height": 36,
+          "fill": "$sunken",
+          "cornerRadius": 10,
+          "padding": [
+            8,
+            12
+          ],
+          "children": [
+            {
+              "type": "text",
+              "id": "v1uz4A",
+              "name": "Field value",
+              "fill": "$ink",
+              "content": "All harnesses",
+              "fontFamily": "$sans",
+              "fontSize": 14,
+              "fontWeight": "normal"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "type": "frame",
+      "id": "raaGL",
+      "x": 420,
+      "y": -140,
+      "name": "Session row · component",
+      "reusable": true,
+      "width": 696,
+      "height": 64,
+      "stroke": "$line",
+      "strokeWidth": {
+        "bottom": 1
+      },
+      "layout": "vertical",
+      "gap": 8,
+      "padding": [
+        10,
+        0
+      ],
+      "children": [
+        {
+          "type": "text",
+          "id": "otWZS",
+          "name": "Session name",
+          "fill": "$ink",
+          "content": "harbor",
+          "fontFamily": "$sans",
+          "fontSize": 14,
+          "fontWeight": "600"
+        },
+        {
+          "type": "text",
+          "id": "siihk",
+          "name": "Repository · branch · harness · model",
+          "fill": "$muted",
+          "content": "harbor · main · claude · opus-5.5",
+          "fontFamily": "$sans",
+          "fontSize": 13,
+          "fontWeight": "normal"
+        }
+      ]
+    },
+    {
+      "type": "frame",
+      "id": "gZYIY",
+      "x": 1360,
+      "y": 0,
+      "name": "Semon · Filtered catalog · 390",
+      "theme": {
+        "mode": "light"
+      },
+      "clip": true,
+      "width": 390,
+      "height": 860,
+      "fill": "$ground",
+      "layout": "vertical",
+      "children": [
+        {
+          "type": "frame",
+          "id": "FIwqa",
+          "name": "Phone toolbar",
+          "width": 390,
+          "height": 56,
+          "padding": 16,
+          "children": [
+            {
+              "type": "text",
+              "id": "zjIuH",
+              "name": "Menu and title",
+              "fill": "$ink",
+              "textGrowth": "fixed-width",
+              "width": "fill_container",
+              "content": "☰   Sessions",
+              "fontFamily": "$sans",
+              "fontSize": 17,
+              "fontWeight": "normal"
+            }
+          ]
+        },
+        {
+          "type": "frame",
+          "id": "ypFy7",
+          "name": "Phone catalog",
+          "width": 390,
+          "layout": "vertical",
+          "gap": 16,
+          "padding": [
+            19,
+            16,
+            16,
+            16
+          ],
+          "children": [
+            {
+              "id": "shNP7",
+              "type": "ref",
+              "ref": "BYbh8",
+              "name": "Search session details",
+              "width": 358,
+              "height": 74,
+              "descendants": {
+                "Hf5RI": {
+                  "content": "Search session details"
+                },
+                "rzFC5": {
+                  "height": 44,
+                  "stroke": "$ink",
+                  "strokeWidth": 2
+                },
+                "v1uz4A": {
+                  "content": "harbor"
+                }
+              }
+            },
+            {
+              "id": "e5pTgK",
+              "type": "ref",
+              "ref": "BYbh8",
+              "name": "Harness",
+              "width": 358,
+              "height": 74,
+              "descendants": {
+                "Hf5RI": {
+                  "content": "Harness"
+                },
+                "rzFC5": {
+                  "height": 44
+                },
+                "v1uz4A": {
+                  "content": "All harnesses"
+                }
+              }
+            },
+            {
+              "id": "UScgj",
+              "type": "ref",
+              "ref": "BYbh8",
+              "name": "Repository",
+              "width": 358,
+              "height": 74,
+              "descendants": {
+                "Hf5RI": {
+                  "content": "Repository"
+                },
+                "rzFC5": {
+                  "height": 44
+                },
+                "v1uz4A": {
+                  "content": "All repositories"
+                }
+              }
+            },
+            {
+              "type": "frame",
+              "id": "XUBQx",
+              "name": "Apply filters · native submit · phone",
+              "width": "fill_container",
+              "height": 44,
+              "alignItems": "center",
+              "children": [
+                {
+                  "type": "text",
+                  "id": "hDTBF",
+                  "name": "Phone submit label",
+                  "fill": "$ink",
+                  "content": "Apply filters",
+                  "fontFamily": "$sans",
+                  "fontSize": 15,
+                  "fontWeight": "normal"
+                }
+              ]
+            },
+            {
+              "type": "text",
+              "id": "siHIW",
+              "name": "Scope disclosure",
+              "fill": "$muted",
+              "textGrowth": "fixed-width-height",
+              "width": "fill_container",
+              "height": 44,
+              "content": "Search scope and source limitations  ›",
+              "textAlignVertical": "middle",
+              "fontFamily": "$sans",
+              "fontSize": 13,
+              "fontWeight": "normal"
+            },
+            {
+              "type": "frame",
+              "id": "gXHrB",
+              "name": "Loaded result count and Clear filters action",
+              "width": "fill_container",
+              "height": 44,
+              "justifyContent": "space_between",
+              "alignItems": "center",
+              "children": [
+                {
+                  "type": "text",
+                  "id": "I4B1s",
+                  "name": "Loaded result count",
+                  "fill": "$muted",
+                  "content": "5 sessions loaded",
+                  "fontFamily": "$sans",
+                  "fontSize": 13,
+                  "fontWeight": "normal"
+                },
+                {
+                  "type": "text",
+                  "id": "q7SpH",
+                  "name": "Clear filters action",
+                  "fill": "$ink",
+                  "content": "Clear filters",
+                  "fontFamily": "$sans",
+                  "fontSize": 13,
+                  "fontWeight": "normal"
+                }
+              ]
+            },
+            {
+              "type": "frame",
+              "id": "TRQHl",
+              "name": "Filtered list · contiguous rows",
+              "width": "fill_container",
+              "layout": "vertical",
+              "children": [
+                {
+                  "id": "sMiEE",
+                  "type": "ref",
+                  "ref": "raaGL",
+                  "name": "Filtered · feat/offline-sync",
+                  "width": 358,
+                  "height": 68,
+                  "descendants": {
+                    "otWZS": {
+                      "content": "feat/offline-sync"
+                    },
+                    "siihk": {
+                      "content": "harbor · codex · gpt-6-luna"
+                    }
+                  }
+                },
+                {
+                  "id": "EN6Ca",
+                  "type": "ref",
+                  "ref": "raaGL",
+                  "name": "Filtered · Review offline-sync diff",
+                  "width": 358,
+                  "height": 68,
+                  "descendants": {
+                    "otWZS": {
+                      "content": "Review offline-sync diff"
+                    },
+                    "siihk": {
+                      "content": "harbor · claude · sonnet-5"
+                    }
+                  }
+                },
+                {
+                  "id": "bOVbu",
+                  "type": "ref",
+                  "ref": "raaGL",
+                  "name": "Filtered · Check flush ordering",
+                  "width": 358,
+                  "height": 68,
+                  "descendants": {
+                    "otWZS": {
+                      "content": "Check flush ordering"
+                    },
+                    "siihk": {
+                      "content": "harbor · codex · gpt-6-luna"
+                    }
+                  }
+                },
+                {
+                  "id": "LAFEb",
+                  "type": "ref",
+                  "ref": "raaGL",
+                  "name": "Filtered · harbor",
+                  "width": 358,
+                  "height": 68,
+                  "descendants": {
+                    "otWZS": {
+                      "content": "harbor"
+                    },
+                    "siihk": {
+                      "content": "harbor · claude · opus-5.5"
+                    }
+                  }
+                },
+                {
+                  "id": "o02WoI",
+                  "type": "ref",
+                  "ref": "raaGL",
+                  "name": "Filtered · Check retry safety",
+                  "width": "fill_container",
+                  "height": 68,
+                  "descendants": {
+                    "otWZS": {
+                      "content": "Check retry safety"
+                    },
+                    "siihk": {
+                      "content": "harbor · claude · sonnet-5"
+                    }
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "type": "frame",
+      "id": "nGo6u",
+      "x": 1830,
+      "y": 0,
+      "name": "Semon · Failure inspection · 1280",
+      "theme": {
+        "mode": "light"
+      },
+      "clip": true,
+      "width": 1280,
+      "height": 860,
+      "fill": "$ground",
+      "layout": "none",
+      "children": [
+        {
+          "type": "frame",
+          "id": "FiLXX",
+          "x": 0,
+          "y": 0,
+          "name": "Shared navigation",
+          "width": 296,
+          "height": 860,
+          "fill": "$side",
+          "layout": "vertical",
+          "gap": 16,
+          "padding": 16,
+          "children": [
+            {
+              "type": "text",
+              "id": "ifOfQ",
+              "name": "Brand",
+              "fill": "$ink",
+              "content": "Semon",
+              "fontFamily": "$sans",
+              "fontSize": 16,
+              "fontWeight": "normal"
+            },
+            {
+              "type": "frame",
+              "id": "dcx52",
+              "name": "Navigation · Sessions",
+              "width": "fill_container",
+              "height": 36,
+              "fill": "$sunken",
+              "cornerRadius": 10,
+              "padding": 12,
+              "children": [
+                {
+                  "type": "text",
+                  "id": "Yf92W",
+                  "name": "Navigation label",
+                  "fill": "$ink",
+                  "content": "Sessions",
+                  "fontFamily": "$sans",
+                  "fontSize": 14,
+                  "fontWeight": "normal"
+                }
+              ]
+            },
+            {
+              "type": "frame",
+              "id": "Jb6nO",
+              "name": "Navigation · Sources",
+              "width": "fill_container",
+              "height": 36,
+              "fill": "$side",
+              "cornerRadius": 10,
+              "padding": 12,
+              "children": [
+                {
+                  "type": "text",
+                  "id": "q89n9",
+                  "name": "Navigation label",
+                  "fill": "$ink",
+                  "content": "Sources",
+                  "fontFamily": "$sans",
+                  "fontSize": 14,
+                  "fontWeight": "normal"
+                }
+              ]
+            },
+            {
+              "type": "frame",
+              "id": "t5d78r",
+              "name": "Navigation · Machines",
+              "width": "fill_container",
+              "height": 36,
+              "fill": "$side",
+              "cornerRadius": 10,
+              "padding": 12,
+              "children": [
+                {
+                  "type": "text",
+                  "id": "tEelE",
+                  "name": "Navigation label",
+                  "fill": "$ink",
+                  "content": "Machines",
+                  "fontFamily": "$sans",
+                  "fontSize": 14,
+                  "fontWeight": "normal"
+                }
+              ]
+            },
+            {
+              "type": "text",
+              "id": "nBa9p",
+              "name": "Recent heading",
+              "fill": "$muted",
+              "content": "RECENT",
+              "fontFamily": "$sans",
+              "fontSize": 12,
+              "fontWeight": "normal"
+            },
+            {
+              "type": "frame",
+              "id": "ikalf",
+              "name": "Recent · deps audit",
+              "width": "fill_container",
+              "height": 48,
+              "layout": "vertical",
+              "gap": 4,
+              "children": [
+                {
+                  "type": "text",
+                  "id": "N6JH8h",
+                  "name": "Recent name",
+                  "fill": "$ink",
+                  "content": "deps audit",
+                  "fontFamily": "$sans",
+                  "fontSize": 14,
+                  "fontWeight": "normal"
+                },
+                {
+                  "type": "text",
+                  "id": "nkZHf",
+                  "name": "Recent metadata",
+                  "fill": "$muted",
+                  "content": "Cached history · opus-5.5",
+                  "fontFamily": "$sans",
+                  "fontSize": 12,
+                  "fontWeight": "normal"
+                }
+              ]
+            },
+            {
+              "type": "frame",
+              "id": "be8BK",
+              "name": "Recent · feat/offline-sync",
+              "width": "fill_container",
+              "height": 48,
+              "layout": "vertical",
+              "gap": 4,
+              "children": [
+                {
+                  "type": "text",
+                  "id": "n8PqWU",
+                  "name": "Recent name",
+                  "fill": "$ink",
+                  "content": "feat/offline-sync",
+                  "fontFamily": "$sans",
+                  "fontSize": 14,
+                  "fontWeight": "normal"
+                },
+                {
+                  "type": "text",
+                  "id": "VSUb6",
+                  "name": "Recent metadata",
+                  "fill": "$muted",
+                  "content": "Cached history · opus-5.5",
+                  "fontFamily": "$sans",
+                  "fontSize": 12,
+                  "fontWeight": "normal"
+                }
+              ]
+            },
+            {
+              "type": "frame",
+              "id": "tg2IX",
+              "name": "Recent · Review offline-sync diff",
+              "width": "fill_container",
+              "height": 48,
+              "layout": "vertical",
+              "gap": 4,
+              "children": [
+                {
+                  "type": "text",
+                  "id": "S3qnj",
+                  "name": "Recent name",
+                  "fill": "$ink",
+                  "content": "Review offline-sync diff",
+                  "fontFamily": "$sans",
+                  "fontSize": 14,
+                  "fontWeight": "normal"
+                },
+                {
+                  "type": "text",
+                  "id": "bzpoK",
+                  "name": "Recent metadata",
+                  "fill": "$muted",
+                  "content": "Cached history · opus-5.5",
+                  "fontFamily": "$sans",
+                  "fontSize": 12,
+                  "fontWeight": "normal"
+                }
+              ]
+            },
+            {
+              "type": "frame",
+              "id": "vzVL5",
+              "name": "Recent · Check flush ordering",
+              "width": "fill_container",
+              "height": 48,
+              "layout": "vertical",
+              "gap": 4,
+              "children": [
+                {
+                  "type": "text",
+                  "id": "w78tBq",
+                  "name": "Recent name",
+                  "fill": "$ink",
+                  "content": "Check flush ordering",
+                  "fontFamily": "$sans",
+                  "fontSize": 14,
+                  "fontWeight": "normal"
+                },
+                {
+                  "type": "text",
+                  "id": "NSJUg",
+                  "name": "Recent metadata",
+                  "fill": "$muted",
+                  "content": "Cached history · opus-5.5",
+                  "fontFamily": "$sans",
+                  "fontSize": 12,
+                  "fontWeight": "normal"
+                }
+              ]
+            },
+            {
+              "type": "frame",
+              "id": "zWtI1",
+              "name": "Recent · harbor",
+              "width": "fill_container",
+              "height": 48,
+              "layout": "vertical",
+              "gap": 4,
+              "children": [
+                {
+                  "type": "text",
+                  "id": "mEaGY",
+                  "name": "Recent name",
+                  "fill": "$ink",
+                  "content": "harbor",
+                  "fontFamily": "$sans",
+                  "fontSize": 14,
+                  "fontWeight": "normal"
+                },
+                {
+                  "type": "text",
+                  "id": "BWkCh",
+                  "name": "Recent metadata",
+                  "fill": "$muted",
+                  "content": "Cached history · opus-5.5",
+                  "fontFamily": "$sans",
+                  "fontSize": 12,
+                  "fontWeight": "normal"
+                }
+              ]
+            },
+            {
+              "type": "frame",
+              "id": "PzYKs",
+              "name": "Recent · Check retry safety",
+              "width": "fill_container",
+              "height": 48,
+              "layout": "vertical",
+              "gap": 4,
+              "children": [
+                {
+                  "type": "text",
+                  "id": "KcxYG",
+                  "name": "Recent name",
+                  "fill": "$ink",
+                  "content": "Check retry safety",
+                  "fontFamily": "$sans",
+                  "fontSize": 14,
+                  "fontWeight": "normal"
+                },
+                {
+                  "type": "text",
+                  "id": "oW3Hh",
+                  "name": "Recent metadata",
+                  "fill": "$muted",
+                  "content": "Cached history · opus-5.5",
+                  "fontFamily": "$sans",
+                  "fontSize": 12,
+                  "fontWeight": "normal"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "frame",
+          "id": "o0s4e",
+          "x": 296,
+          "y": 0,
+          "name": "Shared toolbar",
+          "width": 984,
+          "height": 56,
+          "fill": "$ground",
+          "padding": [
+            16,
+            24
+          ],
+          "children": [
+            {
+              "type": "text",
+              "id": "g5hA1P",
+              "name": "Toolbar title",
+              "fill": "$ink",
+              "content": "← Back to sessions     harbor",
+              "fontFamily": "$sans",
+              "fontSize": 16,
+              "fontWeight": "normal"
+            }
+          ]
+        },
+        {
+          "type": "frame",
+          "id": "oLroE",
+          "x": 440,
+          "y": 82,
+          "name": "Recorded transcript",
+          "width": 696,
+          "layout": "vertical",
+          "gap": 8,
+          "children": [
+            {
+              "type": "text",
+              "id": "igusd",
+              "name": "Observation",
+              "fill": "$muted",
+              "textGrowth": "fixed-width",
+              "width": "fill_container",
+              "content": "Cached history · Related session context is incomplete",
+              "fontFamily": "$sans",
+              "fontSize": 13,
+              "fontWeight": "normal"
+            },
+            {
+              "type": "text",
+              "id": "llgza",
+              "name": "Native handoff context",
+              "fill": "$muted",
+              "content": "Native action · related session context is incomplete",
+              "fontFamily": "$sans",
+              "fontSize": 13,
+              "fontWeight": "normal"
+            },
+            {
+              "type": "frame",
+              "id": "M7Zjq",
+              "name": "Long user message",
+              "width": 640,
+              "fill": "$ground",
+              "cornerRadius": 18,
+              "stroke": "$line",
+              "strokeWidth": 1,
+              "layout": "vertical",
+              "padding": [
+                8,
+                14
+              ],
+              "children": [
+                {
+                  "type": "text",
+                  "id": "SBks9",
+                  "name": "User instruction",
+                  "fill": "$ink",
+                  "textGrowth": "fixed-width",
+                  "width": "fill_container",
+                  "content": "Run the sync tests again; if retry_backoff still fails, fix it and hand the offline flush to Codex.",
+                  "fontFamily": "$sans",
+                  "fontSize": 16,
+                  "fontWeight": "normal"
+                }
+              ]
+            },
+            {
+              "type": "text",
+              "id": "Y1t4P",
+              "name": "Recorded thinking excerpt",
+              "fill": "$muted",
+              "textGrowth": "fixed-width",
+              "width": 640,
+              "content": "The retry test needs a fixed seed so I can tell whether the extra attempt is a timing issue or an overflow.",
+              "fontFamily": "$sans",
+              "fontSize": 14,
+              "fontWeight": "normal"
+            },
+            {
+              "type": "text",
+              "id": "qGrrl",
+              "name": "Recorded assistant message",
+              "fill": "$ink",
+              "textGrowth": "fixed-width",
+              "width": "fill_container",
+              "content": "Running the sync suite first. If retry_backoff still fails intermittently I will fix it before handing anything off.",
+              "lineHeight": 1.5,
+              "fontFamily": "$sans",
+              "fontSize": 16,
+              "fontWeight": "normal"
+            },
+            {
+              "type": "text",
+              "id": "I291F",
+              "name": "Expanded recorded failed tool summary",
+              "fill": "$muted",
+              "content": "⌄  Bash   cargo test -p harbor-sync",
+              "fontFamily": "$mono",
+              "fontSize": 13,
+              "fontWeight": "normal"
+            },
+            {
+              "type": "frame",
+              "id": "kD4Pe",
+              "name": "Expanded failed tool · component",
+              "reusable": true,
+              "width": 696,
+              "fill": "$sunken",
+              "cornerRadius": 10,
+              "stroke": "#00000000",
+              "layout": "vertical",
+              "gap": 12,
+              "padding": 12,
+              "children": [
+                {
+                  "type": "frame",
+                  "id": "V6i5L",
+                  "name": "Command heading and copy action",
+                  "width": "fill_container",
+                  "height": 24,
+                  "justifyContent": "space_between",
+                  "alignItems": "center",
+                  "children": [
+                    {
+                      "type": "text",
+                      "id": "iTP73",
+                      "name": "Command label",
+                      "fill": "$muted",
+                      "content": "Command",
+                      "fontFamily": "$sans",
+                      "fontSize": 12,
+                      "fontWeight": "normal"
+                    },
+                    {
+                      "type": "text",
+                      "id": "B39Ld",
+                      "name": "Native copy action",
+                      "fill": "$ink",
+                      "content": "Copy",
+                      "fontFamily": "$sans",
+                      "fontSize": 13,
+                      "fontWeight": "normal"
+                    }
+                  ]
+                },
+                {
+                  "type": "text",
+                  "id": "rrQQq",
+                  "name": "Recorded command",
+                  "fill": "$ink",
+                  "textGrowth": "fixed-width",
+                  "width": "fill_container",
+                  "content": "cargo test -p harbor-sync",
+                  "fontFamily": "$mono",
+                  "fontSize": 12,
+                  "fontWeight": "normal"
+                },
+                {
+                  "type": "text",
+                  "id": "joaNB",
+                  "name": "Output heading",
+                  "fill": "$muted",
+                  "textGrowth": "fixed-width",
+                  "width": "fill_container",
+                  "content": "Output · last 12 of 41 lines",
+                  "fontFamily": "$sans",
+                  "fontSize": 12,
+                  "fontWeight": "normal"
+                },
+                {
+                  "type": "text",
+                  "id": "htI1f",
+                  "name": "Recorded failure output",
+                  "fill": "$ink",
+                  "textGrowth": "fixed-width",
+                  "width": "fill_container",
+                  "content": "...\n\nfailures:\n\n---- queue::retry_backoff stdout ----\nseed 0x5f3a: expected 3 attempts, got 4\nthread queue::retry_backoff panicked at crates/sync/src/queue.rs:212:9:\nassertion left == right failed\n  left: 4\n right: 3\n\ntest result: FAILED. 127 passed; 1 failed",
+                  "lineHeight": 1.5,
+                  "fontFamily": "$mono",
+                  "fontSize": 12,
+                  "fontWeight": "normal"
+                },
+                {
+                  "type": "text",
+                  "id": "MIJaF",
+                  "name": "Recorded text boundary",
+                  "fill": "$ink",
+                  "textGrowth": "fixed-width-height",
+                  "width": "fill_container",
+                  "height": 36,
+                  "content": "View all 41 lines",
+                  "textAlign": "center",
+                  "textAlignVertical": "middle",
+                  "fontFamily": "$sans",
+                  "fontSize": 13,
+                  "fontWeight": "normal"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "type": "frame",
+      "id": "Oo357",
+      "x": 3190,
+      "y": 0,
+      "name": "Semon · Loading empty error focus states",
+      "theme": {
+        "mode": "light"
+      },
+      "width": 760,
+      "height": 600,
+      "fill": "$ground",
+      "layout": "vertical",
+      "gap": 24,
+      "padding": 32,
+      "children": [
+        {
+          "type": "frame",
+          "id": "qO2OE",
+          "name": "Loading · retained history",
+          "width": "fill_container",
+          "cornerRadius": 6,
+          "stroke": "$line",
+          "strokeWidth": 1,
+          "layout": "vertical",
+          "gap": 8,
+          "padding": 16,
+          "children": [
+            {
+              "type": "text",
+              "id": "s4KPo",
+              "name": "State heading",
+              "fill": "$muted",
+              "textGrowth": "fixed-width",
+              "width": "fill_container",
+              "content": "Loading · retained history",
+              "fontFamily": "$sans",
+              "fontSize": 13,
+              "fontWeight": "normal"
+            },
+            {
+              "type": "text",
+              "id": "fHCJz",
+              "name": "State message and action",
+              "fill": "$muted",
+              "textGrowth": "fixed-width",
+              "width": "fill_container",
+              "content": "Updating history… Previously loaded sessions remain readable.",
+              "fontFamily": "$sans",
+              "fontSize": 13,
+              "fontWeight": "normal"
+            }
+          ]
+        },
+        {
+          "type": "frame",
+          "id": "OxmTy",
+          "name": "Empty · filtered",
+          "width": "fill_container",
+          "cornerRadius": 6,
+          "stroke": "$line",
+          "strokeWidth": 1,
+          "layout": "vertical",
+          "gap": 8,
+          "padding": 16,
+          "children": [
+            {
+              "type": "text",
+              "id": "g3jEK",
+              "name": "State heading",
+              "fill": "$muted",
+              "textGrowth": "fixed-width",
+              "width": "fill_container",
+              "content": "Empty · filtered",
+              "fontFamily": "$sans",
+              "fontSize": 13,
+              "fontWeight": "normal"
+            },
+            {
+              "type": "text",
+              "id": "UzSg4",
+              "name": "State message and action",
+              "fill": "$muted",
+              "textGrowth": "fixed-width",
+              "width": "fill_container",
+              "content": "No recorded sessions match these filters. Clear filters",
+              "fontFamily": "$sans",
+              "fontSize": 13,
+              "fontWeight": "normal"
+            }
+          ]
+        },
+        {
+          "type": "frame",
+          "id": "KEdPz",
+          "name": "Error · retained history",
+          "width": "fill_container",
+          "cornerRadius": 6,
+          "stroke": "$line",
+          "strokeWidth": 1,
+          "layout": "vertical",
+          "gap": 8,
+          "padding": 16,
+          "children": [
+            {
+              "type": "text",
+              "id": "Ynwcd",
+              "name": "State heading",
+              "fill": "$muted",
+              "textGrowth": "fixed-width",
+              "width": "fill_container",
+              "content": "Error · retained history",
+              "fontFamily": "$sans",
+              "fontSize": 13,
+              "fontWeight": "normal"
+            },
+            {
+              "type": "text",
+              "id": "uGzqo",
+              "name": "State message and action",
+              "fill": "$muted",
+              "textGrowth": "fixed-width",
+              "width": "fill_container",
+              "content": "History could not be read. Retained sessions remain readable. Retry",
+              "fontFamily": "$sans",
+              "fontSize": 13,
+              "fontWeight": "normal"
+            }
+          ]
+        },
+        {
+          "type": "frame",
+          "id": "C3JzD2",
+          "name": "Source scope · expanded",
+          "width": "fill_container",
+          "cornerRadius": 6,
+          "stroke": "$line",
+          "strokeWidth": 1,
+          "layout": "vertical",
+          "gap": 8,
+          "padding": 16,
+          "children": [
+            {
+              "type": "text",
+              "id": "YR5Wr",
+              "name": "State heading",
+              "fill": "$muted",
+              "textGrowth": "fixed-width",
+              "width": "fill_container",
+              "content": "Source scope · expanded",
+              "fontFamily": "$sans",
+              "fontSize": 13,
+              "fontWeight": "normal"
+            },
+            {
+              "type": "text",
+              "id": "KIXoO",
+              "name": "State message and action",
+              "fill": "$muted",
+              "textGrowth": "fixed-width",
+              "width": "fill_container",
+              "content": "Names, IDs, repositories, branches, models and harnesses. Conversation text and history across sources are unavailable.",
+              "fontFamily": "$sans",
+              "fontSize": 13,
+              "fontWeight": "normal"
+            }
+          ]
+        },
+        {
+          "id": "f7Z2RO",
+          "type": "ref",
+          "ref": "BYbh8",
+          "name": "Focused metadata search",
+          "width": 696,
+          "stroke": "$ink",
+          "strokeWidth": 2,
+          "descendants": {
+            "Hf5RI": {
+              "content": "Search session details"
+            },
+            "v1uz4A": {
+              "content": "harbor"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "type": "frame",
+      "id": "gbtK3",
+      "x": 4030,
+      "y": 0,
+      "name": "Semon · Search-first catalog · dark",
+      "theme": {
+        "mode": "dark"
+      },
+      "clip": true,
+      "width": 1280,
+      "height": 860,
+      "fill": "$ground",
+      "layout": "none",
+      "children": [
+        {
+          "type": "frame",
+          "id": "wCnIL",
+          "x": 0,
+          "y": 0,
+          "name": "Shared navigation",
+          "width": 296,
+          "height": 860,
+          "fill": "$side",
+          "layout": "vertical",
+          "gap": 16,
+          "padding": 16,
+          "children": [
+            {
+              "type": "text",
+              "id": "UU631",
+              "name": "Brand",
+              "fill": "$ink",
+              "content": "Semon",
+              "fontFamily": "$sans",
+              "fontSize": 16,
+              "fontWeight": "normal"
+            },
+            {
+              "type": "frame",
+              "id": "XwmtP",
+              "name": "Navigation · Sessions",
+              "width": "fill_container",
+              "height": 36,
+              "fill": "$sunken",
+              "cornerRadius": 10,
+              "padding": 12,
+              "children": [
+                {
+                  "type": "text",
+                  "id": "Vupoo",
+                  "name": "Navigation label",
+                  "fill": "$ink",
+                  "content": "Sessions",
+                  "fontFamily": "$sans",
+                  "fontSize": 14,
+                  "fontWeight": "normal"
+                }
+              ]
+            },
+            {
+              "type": "frame",
+              "id": "ztAky",
+              "name": "Navigation · Sources",
+              "width": "fill_container",
+              "height": 36,
+              "fill": "$side",
+              "cornerRadius": 10,
+              "padding": 12,
+              "children": [
+                {
+                  "type": "text",
+                  "id": "RSgSq",
+                  "name": "Navigation label",
+                  "fill": "$ink",
+                  "content": "Sources",
+                  "fontFamily": "$sans",
+                  "fontSize": 14,
+                  "fontWeight": "normal"
+                }
+              ]
+            },
+            {
+              "type": "frame",
+              "id": "g8aOkf",
+              "name": "Navigation · Machines",
+              "width": "fill_container",
+              "height": 36,
+              "fill": "$side",
+              "cornerRadius": 10,
+              "padding": 12,
+              "children": [
+                {
+                  "type": "text",
+                  "id": "qWLDw",
+                  "name": "Navigation label",
+                  "fill": "$ink",
+                  "content": "Machines",
+                  "fontFamily": "$sans",
+                  "fontSize": 14,
+                  "fontWeight": "normal"
+                }
+              ]
+            },
+            {
+              "type": "text",
+              "id": "Jdg80",
+              "name": "Recent heading",
+              "fill": "$muted",
+              "content": "RECENT",
+              "fontFamily": "$sans",
+              "fontSize": 12,
+              "fontWeight": "normal"
+            },
+            {
+              "type": "frame",
+              "id": "Xo51R",
+              "name": "Recent · deps audit",
+              "width": "fill_container",
+              "height": 48,
+              "layout": "vertical",
+              "gap": 4,
+              "children": [
+                {
+                  "type": "text",
+                  "id": "E4xHp",
+                  "name": "Recent name",
+                  "fill": "$ink",
+                  "content": "deps audit",
+                  "fontFamily": "$sans",
+                  "fontSize": 14,
+                  "fontWeight": "normal"
+                },
+                {
+                  "type": "text",
+                  "id": "K6lUxG",
+                  "name": "Recent metadata",
+                  "fill": "$muted",
+                  "content": "Cached history · opus-5.5",
+                  "fontFamily": "$sans",
+                  "fontSize": 12,
+                  "fontWeight": "normal"
+                }
+              ]
+            },
+            {
+              "type": "frame",
+              "id": "s4RT1R",
+              "name": "Recent · feat/offline-sync",
+              "width": "fill_container",
+              "height": 48,
+              "layout": "vertical",
+              "gap": 4,
+              "children": [
+                {
+                  "type": "text",
+                  "id": "TvD9f",
+                  "name": "Recent name",
+                  "fill": "$ink",
+                  "content": "feat/offline-sync",
+                  "fontFamily": "$sans",
+                  "fontSize": 14,
+                  "fontWeight": "normal"
+                },
+                {
+                  "type": "text",
+                  "id": "hqUYM",
+                  "name": "Recent metadata",
+                  "fill": "$muted",
+                  "content": "Cached history · opus-5.5",
+                  "fontFamily": "$sans",
+                  "fontSize": 12,
+                  "fontWeight": "normal"
+                }
+              ]
+            },
+            {
+              "type": "frame",
+              "id": "trEGm",
+              "name": "Recent · Review offline-sync diff",
+              "width": "fill_container",
+              "height": 48,
+              "layout": "vertical",
+              "gap": 4,
+              "children": [
+                {
+                  "type": "text",
+                  "id": "R1NSG",
+                  "name": "Recent name",
+                  "fill": "$ink",
+                  "content": "Review offline-sync diff",
+                  "fontFamily": "$sans",
+                  "fontSize": 14,
+                  "fontWeight": "normal"
+                },
+                {
+                  "type": "text",
+                  "id": "b2hVYL",
+                  "name": "Recent metadata",
+                  "fill": "$muted",
+                  "content": "Cached history · opus-5.5",
+                  "fontFamily": "$sans",
+                  "fontSize": 12,
+                  "fontWeight": "normal"
+                }
+              ]
+            },
+            {
+              "type": "frame",
+              "id": "jsUvU",
+              "name": "Recent · Check flush ordering",
+              "width": "fill_container",
+              "height": 48,
+              "layout": "vertical",
+              "gap": 4,
+              "children": [
+                {
+                  "type": "text",
+                  "id": "DEStN",
+                  "name": "Recent name",
+                  "fill": "$ink",
+                  "content": "Check flush ordering",
+                  "fontFamily": "$sans",
+                  "fontSize": 14,
+                  "fontWeight": "normal"
+                },
+                {
+                  "type": "text",
+                  "id": "FpXDe",
+                  "name": "Recent metadata",
+                  "fill": "$muted",
+                  "content": "Cached history · opus-5.5",
+                  "fontFamily": "$sans",
+                  "fontSize": 12,
+                  "fontWeight": "normal"
+                }
+              ]
+            },
+            {
+              "type": "frame",
+              "id": "v0xoB",
+              "name": "Recent · harbor",
+              "width": "fill_container",
+              "height": 48,
+              "layout": "vertical",
+              "gap": 4,
+              "children": [
+                {
+                  "type": "text",
+                  "id": "gqR9t",
+                  "name": "Recent name",
+                  "fill": "$ink",
+                  "content": "harbor",
+                  "fontFamily": "$sans",
+                  "fontSize": 14,
+                  "fontWeight": "normal"
+                },
+                {
+                  "type": "text",
+                  "id": "KeUhX",
+                  "name": "Recent metadata",
+                  "fill": "$muted",
+                  "content": "Cached history · opus-5.5",
+                  "fontFamily": "$sans",
+                  "fontSize": 12,
+                  "fontWeight": "normal"
+                }
+              ]
+            },
+            {
+              "type": "frame",
+              "id": "WrISy",
+              "name": "Recent · Check retry safety",
+              "width": "fill_container",
+              "height": 48,
+              "layout": "vertical",
+              "gap": 4,
+              "children": [
+                {
+                  "type": "text",
+                  "id": "V5d2N",
+                  "name": "Recent name",
+                  "fill": "$ink",
+                  "content": "Check retry safety",
+                  "fontFamily": "$sans",
+                  "fontSize": 14,
+                  "fontWeight": "normal"
+                },
+                {
+                  "type": "text",
+                  "id": "ksQT6",
+                  "name": "Recent metadata",
+                  "fill": "$muted",
+                  "content": "Cached history · opus-5.5",
+                  "fontFamily": "$sans",
+                  "fontSize": 12,
+                  "fontWeight": "normal"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "frame",
+          "id": "e3gpV",
+          "x": 296,
+          "y": 0,
+          "name": "Shared toolbar",
+          "width": 984,
+          "height": 56,
+          "fill": "$ground",
+          "padding": [
+            16,
+            24
+          ],
+          "children": [
+            {
+              "type": "text",
+              "id": "ILgkg",
+              "name": "Toolbar title",
+              "fill": "$ink",
+              "content": "Sessions",
+              "fontFamily": "$sans",
+              "fontSize": 16,
+              "fontWeight": "normal"
+            }
+          ]
+        },
+        {
+          "type": "frame",
+          "id": "W0tEEh",
+          "x": 440,
+          "y": 82,
+          "name": "Catalog content · existing reading column",
+          "width": 696,
+          "height": 770,
+          "layout": "vertical",
+          "gap": 16,
+          "children": [
+            {
+              "type": "text",
+              "id": "CIaVl",
+              "name": "Source observation",
+              "fill": "$muted",
+              "content": "laptop · Cached history",
+              "lineHeight": 1.6,
+              "fontFamily": "$sans",
+              "fontSize": 14,
+              "fontWeight": "normal"
+            },
+            {
+              "id": "Q9kC2",
+              "type": "ref",
+              "ref": "BYbh8",
+              "name": "Metadata search",
+              "width": 696,
+              "descendants": {
+                "Hf5RI": {
+                  "content": "Search session details"
+                },
+                "v1uz4A": {
+                  "content": "Search names, IDs, repositories…"
+                }
+              }
+            },
+            {
+              "type": "frame",
+              "id": "l1X7z",
+              "name": "Secondary filters",
+              "width": 696,
+              "height": 64,
+              "gap": 16,
+              "alignItems": "end",
+              "children": [
+                {
+                  "id": "jrrLt",
+                  "type": "ref",
+                  "ref": "BYbh8",
+                  "name": "Harness filter",
+                  "width": "fill_container",
+                  "height": 64,
+                  "descendants": {
+                    "Hf5RI": {
+                      "content": "Harness"
+                    },
+                    "v1uz4A": {
+                      "content": "All harnesses"
+                    }
+                  }
+                },
+                {
+                  "id": "a9n2A",
+                  "type": "ref",
+                  "ref": "BYbh8",
+                  "name": "Repository filter",
+                  "width": "fill_container",
+                  "height": 64,
+                  "descendants": {
+                    "Hf5RI": {
+                      "content": "Repository"
+                    },
+                    "v1uz4A": {
+                      "content": "All repositories"
+                    }
+                  }
+                },
+                {
+                  "type": "frame",
+                  "id": "CQZfM",
+                  "name": "Apply filters · native submit",
+                  "width": 93,
+                  "height": 36,
+                  "alignItems": "center",
+                  "children": [
+                    {
+                      "type": "text",
+                      "id": "qISJR",
+                      "name": "Apply filters label",
+                      "fill": "$ink",
+                      "content": "Apply filters",
+                      "fontFamily": "$sans",
+                      "fontSize": 13,
+                      "fontWeight": "normal"
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "text",
+              "id": "DbAHh",
+              "name": "Scope disclosure",
+              "fill": "$muted",
+              "textGrowth": "fixed-width-height",
+              "width": 696,
+              "height": 36,
+              "content": "Search scope and source limitations  ›",
+              "textAlignVertical": "middle",
+              "fontFamily": "$sans",
+              "fontSize": 13,
+              "fontWeight": "normal"
+            },
+            {
+              "type": "text",
+              "id": "lS7CS",
+              "name": "Loaded results",
+              "fill": "$muted",
+              "textGrowth": "fixed-width-height",
+              "width": 696,
+              "height": 36,
+              "content": "23 sessions loaded · Latest recorded activity",
+              "textAlignVertical": "middle",
+              "fontFamily": "$sans",
+              "fontSize": 13,
+              "fontWeight": "normal"
+            },
+            {
+              "type": "frame",
+              "id": "KMzk2",
+              "name": "Session list · contiguous rows",
+              "width": 696,
+              "layout": "vertical",
+              "children": [
+                {
+                  "id": "uTHbO",
+                  "type": "ref",
+                  "ref": "raaGL",
+                  "name": "Session · deps audit",
+                  "width": 696,
+                  "descendants": {
+                    "otWZS": {
+                      "content": "deps audit"
+                    },
+                    "siihk": {
+                      "content": "meridian · chore/deps-audit · codex · gpt-6-luna"
+                    }
+                  }
+                },
+                {
+                  "id": "XSwNm",
+                  "type": "ref",
+                  "ref": "raaGL",
+                  "name": "Session · feat/offline-sync",
+                  "width": 696,
+                  "descendants": {
+                    "otWZS": {
+                      "content": "feat/offline-sync"
+                    },
+                    "siihk": {
+                      "content": "harbor · feat/offline-sync · codex · gpt-6-luna"
+                    }
+                  }
+                },
+                {
+                  "id": "kAN4f",
+                  "type": "ref",
+                  "ref": "raaGL",
+                  "name": "Session · Review offline-sync diff",
+                  "width": 696,
+                  "descendants": {
+                    "otWZS": {
+                      "content": "Review offline-sync diff"
+                    },
+                    "siihk": {
+                      "content": "harbor · claude · sonnet-5"
+                    }
+                  }
+                },
+                {
+                  "id": "tlVJD",
+                  "type": "ref",
+                  "ref": "raaGL",
+                  "name": "Session · Check flush ordering",
+                  "width": 696,
+                  "descendants": {
+                    "otWZS": {
+                      "content": "Check flush ordering"
+                    },
+                    "siihk": {
+                      "content": "harbor · feat/offline-sync · codex · gpt-6-luna"
+                    }
+                  }
+                },
+                {
+                  "id": "C7GdP",
+                  "type": "ref",
+                  "ref": "raaGL",
+                  "name": "Session · harbor",
+                  "width": 696,
+                  "descendants": {
+                    "otWZS": {
+                      "content": "harbor"
+                    },
+                    "siihk": {
+                      "content": "harbor · main · claude · opus-5.5"
+                    }
+                  }
+                },
+                {
+                  "id": "BziGW",
+                  "type": "ref",
+                  "ref": "raaGL",
+                  "name": "Session · Check retry safety",
+                  "width": 696,
+                  "descendants": {
+                    "otWZS": {
+                      "content": "Check retry safety"
+                    },
+                    "siihk": {
+                      "content": "harbor · claude · sonnet-5"
+                    }
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "themes": {
+    "mode": [
+      "light",
+      "dark"
+    ]
+  },
+  "variables": {
+    "ground": {
+      "type": "color",
+      "value": [
+        {
+          "value": "#ffffff",
+          "theme": {
+            "mode": "light"
+          }
+        },
+        {
+          "value": "#141817",
+          "theme": {
+            "mode": "dark"
+          }
+        }
+      ]
+    },
+    "side": {
+      "type": "color",
+      "value": [
+        {
+          "value": "#f7f7f5",
+          "theme": {
+            "mode": "light"
+          }
+        },
+        {
+          "value": "#181c1b",
+          "theme": {
+            "mode": "dark"
+          }
+        }
+      ]
+    },
+    "sunken": {
+      "type": "color",
+      "value": [
+        {
+          "value": "#f1f2ef",
+          "theme": {
+            "mode": "light"
+          }
+        },
+        {
+          "value": "#222725",
+          "theme": {
+            "mode": "dark"
+          }
+        }
+      ]
+    },
+    "ink": {
+      "type": "color",
+      "value": [
+        {
+          "value": "#191d1b",
+          "theme": {
+            "mode": "light"
+          }
+        },
+        {
+          "value": "#e6e9e7",
+          "theme": {
+            "mode": "dark"
+          }
+        }
+      ]
+    },
+    "muted": {
+      "type": "color",
+      "value": [
+        {
+          "value": "#5d6561",
+          "theme": {
+            "mode": "light"
+          }
+        },
+        {
+          "value": "#9ba39f",
+          "theme": {
+            "mode": "dark"
+          }
+        }
+      ]
+    },
+    "line": {
+      "type": "color",
+      "value": [
+        {
+          "value": "#e5e7e3",
+          "theme": {
+            "mode": "light"
+          }
+        },
+        {
+          "value": "#2a302d",
+          "theme": {
+            "mode": "dark"
+          }
+        }
+      ]
+    },
+    "error": {
+      "type": "color",
+      "value": [
+        {
+          "value": "#b53232",
+          "theme": {
+            "mode": "light"
+          }
+        },
+        {
+          "value": "#f27c77",
+          "theme": {
+            "mode": "dark"
+          }
+        }
+      ]
+    },
+    "sans": {
+      "type": "string",
+      "value": "Instrument Sans"
+    },
+    "mono": {
+      "type": "string",
+      "value": "JetBrains Mono"
+    },
+    "space": {
+      "type": "number",
+      "value": 16
+    }
+  },
+  "fileToken": "8de57cf7-39d6-41e0-ad39-591d0f987d7c"
+}

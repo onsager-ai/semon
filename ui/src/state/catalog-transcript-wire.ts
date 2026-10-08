@@ -25,7 +25,7 @@ export interface CatalogTranscriptEntry {
     native_event_id: string | null;
     offset: number;
     block: number;
-  };
+  } | null;
 }
 /** Selected native content is a ranged read view, not a complete model graph. */
 export interface CatalogTranscriptPage {
@@ -45,10 +45,12 @@ function ordinal(value: unknown): number {
 }
 function entry(value: unknown): CatalogTranscriptEntry {
   const row = object(value),
-    provenance = object(row.provenance),
     entryId = text(row.entry_id),
     slot = ordinal(row.slot),
     parsed = parseEntry(row);
+  const provenance = row.provenance === null && parsed.k === 'end' ? null : object(row.provenance);
+  if (!provenance && (row.field !== undefined || row.clipped === true))
+    throw new Error('Unprovenanced boundary cannot expose native text');
   if (!entryId) throw new Error('Invalid catalog entry identity');
   let field: CatalogTranscriptEntry['field'];
   if (row.field !== undefined) {
@@ -85,14 +87,16 @@ function entry(value: unknown): CatalogTranscriptEntry {
     clipped: row.clipped === undefined ? undefined : boolean(row.clipped),
     field,
     freshness,
-    native_action_text: parsed.k === 'h' ? text(row.text) : undefined,
-    provenance: {
-      source: parseCatalogSource(provenance.source),
-      native_event_id:
-        provenance.native_event_id === null ? null : text(provenance.native_event_id),
-      offset: ordinal(provenance.offset),
-      block: ordinal(provenance.block),
-    },
+    native_action_text: parsed.k === 'h' && row.text !== undefined ? text(row.text) : undefined,
+    provenance: provenance
+      ? {
+          source: parseCatalogSource(provenance.source),
+          native_event_id:
+            provenance.native_event_id === null ? null : text(provenance.native_event_id),
+          offset: ordinal(provenance.offset),
+          block: ordinal(provenance.block),
+        }
+      : null,
   };
 }
 export function parseCatalogTranscriptPage(value: unknown): CatalogTranscriptPage {
