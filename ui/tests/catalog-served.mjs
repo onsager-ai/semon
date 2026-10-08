@@ -1,10 +1,11 @@
 import { spawn, spawnSync } from 'node:child_process';
-import { mkdtemp, writeFile, readFile, rm, readdir, appendFile } from 'node:fs/promises';
+import { mkdtemp, writeFile, readFile, rm, readdir, appendFile, mkdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import assert from 'node:assert/strict';
 import { chromium } from '../../tests/ui/node_modules/playwright/index.mjs';
 import { test } from 'node:test';
+import { auditText } from '../../tests/ui/text-audit.mjs';
 const root = new URL('../../', import.meta.url).pathname;
 test(
   'real bounded producer cold list and retained selected range',
@@ -77,30 +78,35 @@ test(
         errors = [],
         requests = [],
         responses = [],
-        fieldTexts = [];
+        fieldTexts = [],
+        fieldCaptures = [];
       page.on('pageerror', (e) => errors.push(e.message));
       page.on('request', (r) => {
         if (new URL(r.url()).pathname.startsWith('/api/'))
           requests.push(new URL(r.url()).pathname + new URL(r.url()).search);
       });
-      page.on('response', async (r) => {
-        if (new URL(r.url()).pathname.startsWith('/api/')) {
-          const t = r.request().timing();
-          let body = '';
-          try {
-            body = await r.text();
-          } catch {}
-          if (new URL(r.url()).pathname === '/api/session-entry' && r.status() === 200) {
-            const field = JSON.parse(body);
-            fieldTexts[field.field.chunk] = field.text;
+      page.on('response', (r) => {
+        const capture = (async () => {
+          if (new URL(r.url()).pathname.startsWith('/api/')) {
+            const t = r.request().timing();
+            let body = '';
+            try {
+              body = await r.text();
+            } catch {}
+            if (new URL(r.url()).pathname === '/api/session-entry' && r.status() === 200) {
+              const field = JSON.parse(body);
+              fieldTexts[field.field.chunk] = field.text;
+            }
+            responses.push({
+              path: new URL(r.url()).pathname,
+              status: r.status(),
+              bytes: Buffer.byteLength(body),
+              ms: t.responseEnd >= 0 ? t.responseEnd : t.responseStart,
+            });
           }
-          responses.push({
-            path: new URL(r.url()).pathname,
-            status: r.status(),
-            bytes: Buffer.byteLength(body),
-            ms: t.responseEnd >= 0 ? t.responseEnd : t.responseStart,
-          });
-        }
+        })();
+        if (new URL(r.url()).pathname === '/api/session-entry' && r.status() === 200)
+          fieldCaptures.push(capture);
       });
       if (process.env.SEMON_CATALOG_SERVED_UI_OVERRIDE === '1')
         await page.route('**/viewer.js', async (route) =>
@@ -129,6 +135,7 @@ test(
       await page.getByRole('button', { name: 'Load more text', exact: true }).click();
       await page.getByText('Complete recorded text loaded.', { exact: true }).waitFor();
       const fieldMs = performance.now() - fieldStart;
+      await Promise.all(fieldCaptures);
       assert.equal(fieldTexts.join(''), scalar);
       assert.equal(
         (await page.locator('#page').innerText()).match(/Recorded source text\./g)?.length,
@@ -153,9 +160,100 @@ test(
         requests.some((r) => /^\/api\/(model|tool|tx|image)(\?|$)/.test(r)),
         false,
       );
+      const visual = [];
+      for (const width of [390, 1280]) {
+        for (const colorScheme of ['light', 'dark']) {
+          const context = await browser.newContext({
+            viewport: { width, height: 860 },
+            colorScheme,
+          });
+          const check = await context.newPage();
+          check.on('pageerror', (e) => errors.push(e.message));
+          await check.goto(url[1] + '/?t=' + url[2]);
+          await check.locator('#page [data-id="backlog"]').waitFor();
+          await check.locator('#page [data-id="backlog"]').click();
+          await check.locator('#page [data-entry-key]').first().waitFor();
+          await check.evaluate(() => document.fonts.ready);
+          const audit = await auditText(check);
+          assert.equal(audit.smallCount, 0, JSON.stringify(audit.small));
+          assert.equal(audit.lowCount, 0, JSON.stringify(audit.low));
+          const geometry = await check.evaluate(() => ({
+            overflow: document.documentElement.scrollWidth > innerWidth + 1,
+            title: document.querySelector('#topbar')?.textContent,
+            entries: document.querySelectorAll('[data-entry-key]').length,
+          }));
+          assert.equal(geometry.overflow, false, `${width}/${colorScheme} sideways overflow`);
+          assert.ok(geometry.title?.trim(), 'Shared toolbar has a readable title');
+          assert.ok(
+            geometry.entries > 0 && geometry.entries <= 60,
+            'Visible transcript is bounded',
+          );
+          await check.keyboard.press('Tab');
+          const focus = await check.evaluate(() => {
+            const element = document.activeElement;
+            return {
+              tag: element?.tagName,
+              name: element?.getAttribute('aria-label') || element?.textContent?.trim(),
+            };
+          });
+          assert.notEqual(focus.tag, 'BODY', 'Keyboard reaches a real interactive control');
+          assert.ok(focus.name, 'Keyboard control has an accessible name');
+          const earlier = check.getByRole('button', { name: 'Load earlier records', exact: true });
+          await earlier.waitFor();
+          if (width === 390) {
+            const box = await earlier.boundingBox();
+            assert.ok(
+              box.height >= 44 && box.width >= 44,
+              'Transcript paging meets phone touch target',
+            );
+          }
+          await earlier.focus();
+          await check.keyboard.press('Enter');
+          await check.waitForFunction(
+            () => document.querySelectorAll('[data-entry-key]').length > 60,
+          );
+          const screenshotDir = process.env.SEMON_CATALOG_VISUAL_OUT;
+          if (screenshotDir) {
+            await mkdir(screenshotDir, { recursive: true });
+            await check.screenshot({
+              path: join(screenshotDir, `catalog-${width}-${colorScheme}.png`),
+            });
+          }
+          visual.push({
+            width,
+            colorScheme,
+            ...geometry,
+            focus,
+            textAudit: { smallCount: audit.smallCount, lowCount: audit.lowCount },
+          });
+          await context.close();
+        }
+      }
+      // Losing the observed native source must remain visible without erasing useful
+      // previously loaded history or issuing a complete-model restoration request.
+      const retainedEntry = await page.locator('#page [data-entry-key]').first().elementHandle();
+      await rm(join(home, 'claude', backlog));
+      await page.waitForFunction(
+        () =>
+          /History is incomplete|History is unavailable|Couldn.t read|Retained history remains readable/.test(
+            document.querySelector('#page')?.textContent || '',
+          ),
+        null,
+        { timeout: 30000 },
+      );
+      assert.equal(await retainedEntry.evaluate((node) => node.isConnected), true);
+      assert.equal(
+        (await page.locator('#page').innerText()).match(/Recorded source text\./g)?.length,
+        5000,
+      );
+      assert.equal(
+        requests.some((r) => /^\/api\/(model|tool|tx|image)(\?|$)/.test(r)),
+        false,
+      );
       await page.waitForTimeout(400);
       const evidence = {
         source: process.env.SEMON_CATALOG_SERVED_SOURCE ?? 'unrecorded',
+        visual,
         firstListMs: firstList,
         selectedMs: selected,
         warmSwitchMs: warm,

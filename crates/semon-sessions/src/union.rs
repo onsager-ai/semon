@@ -1234,6 +1234,7 @@ impl ViewerCore {
                 | "/api/session-entry"
                 | "/api/session-capabilities"
                 | "/api/session-identity"
+                | "/api/session-resolve"
         ) {
             return self.catalog(&views, path, query);
         }
@@ -1356,6 +1357,7 @@ impl ViewerCore {
         // OnRead callers retain their explicit warm()/api/model contract.
         let refresh_error = view.note_catalog_read().err();
         let mut reply = match path {
+            "/api/session-resolve" => crate::native_resolution::page(view.options(), key, query),
             "/api/session-identity" => {
                 let sid = query_value(query, "sid").and_then(decoded);
                 match sid
@@ -1404,6 +1406,7 @@ impl ViewerCore {
                 key,
                 crate::SessionReadEndpoints {
                     selected_identity: true,
+                    native_resolution: true,
                     selected_transcript: true,
                     selected_entry: true,
                 },

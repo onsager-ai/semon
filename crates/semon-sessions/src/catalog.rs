@@ -1205,6 +1205,17 @@ mod tests {
             )
         };
         connection.execute("INSERT INTO session_catalog(session_key,lifecycle,last_ms,harness,repo,metadata) VALUES('initial-retained','retained',0,'claude','project','{}')", []).unwrap();
+        let indexes = ["order", "harness", "repo", "harness_repo", "parent"];
+        for suffix in indexes {
+            let sql: String = connection
+                .query_row(
+                    "SELECT sql FROM sqlite_master WHERE name=?1",
+                    [format!("session_catalog_current_{suffix}")],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert!(sql.ends_with("WHERE lifecycle='current'"), "{sql}");
+        }
         let small = measure();
         let transaction = connection.unchecked_transaction().unwrap();
         for id in 0..20_000 {
@@ -1307,6 +1318,55 @@ mod tests {
     }
 
     #[test]
+    fn schema_eleven_migration_replaces_current_trees_without_rebinding_history() {
+        for schema in [11, 16] {
+            let fixture = Fixture::new();
+            fixture.publish(1);
+            let connection = Connection::open(EventCache::path(&fixture.options.cache)).unwrap();
+            connection
+                .execute("UPDATE session_catalog SET lifecycle='retained'", [])
+                .unwrap();
+            let before: (String, String) = connection.query_row(
+            "SELECT session_catalog.metadata,session_slot_projections.generation FROM session_catalog JOIN session_slot_projections USING(session_key)",
+            [], |row| Ok((row.get(0)?, row.get(1)?))
+        ).unwrap();
+            for (suffix, keys) in [
+                ("order", "last_ms DESC, session_key ASC"),
+                ("harness", "harness, last_ms DESC, session_key ASC"),
+                ("repo", "repo, last_ms DESC, session_key ASC"),
+                (
+                    "harness_repo",
+                    "harness, repo, last_ms DESC, session_key ASC",
+                ),
+                ("parent", "parent_key, last_ms DESC, session_key ASC"),
+            ] {
+                connection.execute_batch(&format!("DROP INDEX session_catalog_current_{suffix}; CREATE INDEX session_catalog_current_{suffix} ON session_catalog(lifecycle, {keys});")).unwrap();
+            }
+            connection
+                .pragma_update(None, "user_version", schema)
+                .unwrap();
+            drop(EventCache::open(&fixture.options.cache));
+            let after: (String, String) = connection.query_row(
+            "SELECT session_catalog.metadata,session_slot_projections.generation FROM session_catalog JOIN session_slot_projections USING(session_key)",
+            [], |row| Ok((row.get(0)?, row.get(1)?))
+        ).unwrap();
+            assert_eq!(before, after);
+            for suffix in ["order", "harness", "repo", "harness_repo", "parent"] {
+                let sql: String = connection
+                    .query_row(
+                        "SELECT sql FROM sqlite_master WHERE name=?1",
+                        [format!("session_catalog_current_{suffix}")],
+                        |row| row.get(0),
+                    )
+                    .unwrap();
+                assert!(sql.ends_with("WHERE lifecycle='current'"), "{sql}");
+                let count: i64 = connection.query_row(&format!("SELECT count(*) FROM session_catalog INDEXED BY session_catalog_current_{suffix} WHERE lifecycle='current'"), [], |row| row.get(0)).unwrap();
+                assert_eq!(count, 0);
+            }
+        }
+    }
+
+    #[test]
     fn schema_ten_retention_migration_binds_only_coherent_supported_recipes() {
         for coherent in [true, false] {
             let fixture = Fixture::new();
@@ -1337,7 +1397,7 @@ mod tests {
                 connection
                     .query_row("PRAGMA user_version", [], |row| row.get::<_, u32>(0))
                     .unwrap(),
-                18
+                19
             );
         }
     }
@@ -1677,6 +1737,98 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(current.read_scope, CatalogReadScope::Current);
+    }
+
+    #[test]
+    fn native_turn_context_signals_have_distinct_stable_current_and_history_entries() {
+        let fixture = Fixture::new();
+        let relative = "sessions/2026/10/01/rollout-signal-session.jsonl";
+        let path = fixture.options.codex_home.join(relative);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let records = [
+            json!({"type":"session_meta","timestamp":"2026-10-01T00:00:00Z","payload":{"id":"signal-session","cwd":"/synthetic/project"}}),
+            json!({"type":"turn_context","timestamp":"2026-10-01T00:00:01Z","payload":{"model":"gpt-6-luna","approval_policy":"on-request","sandbox_policy":{"type":"workspace-write"}}}),
+        ];
+        fs::write(
+            &path,
+            records
+                .iter()
+                .map(|row| format!("{row}\n"))
+                .collect::<String>(),
+        )
+        .unwrap();
+        let facts_path = fixture.options.facts.as_ref().unwrap();
+        let mut facts = crate::read_facts(facts_path).unwrap();
+        facts.codex_rollouts = Some(std::collections::BTreeSet::from([relative.to_owned()]));
+        crate::write_facts(facts_path, &facts).unwrap();
+        fixture.publish(0);
+        let read = |scope: &str| {
+            let reply = crate::session_transcript_range(
+                &fixture.options,
+                "source",
+                &format!("sid=signal-session&scope={scope}&after=0&limit=100"),
+                None,
+            );
+            assert_eq!(reply.status, 200);
+            serde_json::from_slice::<Value>(&reply.body).unwrap()
+        };
+        let current = read("current");
+        let signals = |page: &Value| -> Vec<Value> {
+            page["entries"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|entry| entry["k"] == "signal")
+                .cloned()
+                .collect()
+        };
+        let first = signals(&current);
+        assert_eq!(first.len(), 3);
+        assert_eq!(
+            first
+                .iter()
+                .map(|entry| entry["entry_id"].as_str().unwrap())
+                .collect::<std::collections::BTreeSet<_>>()
+                .len(),
+            3
+        );
+        assert!(
+            first
+                .iter()
+                .all(|entry| entry["provenance"]["offset"] == first[0]["provenance"]["offset"])
+        );
+        assert_eq!(first, signals(&read("retained_history")));
+        let connection = Connection::open(EventCache::path(&fixture.options.cache)).unwrap();
+        let stored: String = connection.query_row("SELECT generation FROM session_slot_projections WHERE session_key='signal-session'", [], |row| row.get(0)).unwrap();
+        assert_ne!(current["projection"]["generation"], stored);
+        assert_eq!(
+            crate::session_transcript_range(
+                &fixture.options,
+                "source",
+                &format!("sid=signal-session&generation={stored}"),
+                None
+            )
+            .status,
+            409
+        );
+        fixture.publish(20);
+        assert_eq!(first, signals(&read("current")));
+        // Partial source retirement merges retained recipes by their original
+        // identity; distinct signals must not collapse during that merge.
+        fs::remove_file(path).unwrap();
+        fixture.publish(20);
+        let retained = signals(&read("retained_history"));
+        assert_eq!(retained.len(), 3);
+        assert_eq!(
+            first
+                .iter()
+                .map(|entry| &entry["entry_id"])
+                .collect::<Vec<_>>(),
+            retained
+                .iter()
+                .map(|entry| &entry["entry_id"])
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]
@@ -2604,6 +2756,52 @@ mod tests {
             !EventCache::path(&empty.options.cache).exists(),
             "a read-only catalog miss must not create an index"
         );
+    }
+
+    #[test]
+    fn successive_scoped_batches_preserve_unrelated_durable_source_membership() {
+        let fixture = Fixture::new();
+        let inputs: Vec<_> = ["one", "two"]
+            .into_iter()
+            .map(|id| {
+                fixture.source(id);
+                crate::inputs::Input {
+                    root: crate::inputs::InputRoot::Claude,
+                    path: format!("projects/project/{id}.jsonl"),
+                }
+            })
+            .collect();
+        let mut cache = EventCache::open_scoped(&fixture.options.cache).unwrap();
+        let first = crate::model::prepare_sources(
+            &fixture.options,
+            &mut cache,
+            &inputs,
+            crate::model::now_ms(),
+        )
+        .unwrap();
+        assert_eq!(
+            cache.publish_partial_catalog(&first).unwrap(),
+            crate::events::Outcome::Written
+        );
+        let second = crate::model::prepare_sources(
+            &fixture.options,
+            &mut cache,
+            &inputs[..1],
+            crate::model::now_ms(),
+        )
+        .unwrap();
+        assert_eq!(
+            cache.publish_partial_catalog(&second).unwrap(),
+            crate::events::Outcome::Written
+        );
+        let connection = Connection::open(EventCache::path(&fixture.options.cache)).unwrap();
+        let count: i64 = connection
+            .query_row("SELECT COUNT(*) FROM files", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 2);
+        assert_eq!(cache.paths().count(), 2);
+        let body = fixture.body("sid=two").1;
+        assert_eq!(body["items"][0]["freshness"]["state"], "cached");
     }
 
     #[test]

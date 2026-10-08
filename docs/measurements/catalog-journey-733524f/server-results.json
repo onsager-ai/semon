@@ -1,0 +1,194 @@
+[
+  {
+    "unrelated_sessions": 0,
+    "fixed_padding_sessions": 64,
+    "phase": "first-import",
+    "browser_exit": 0,
+    "source_revision": "733524fad75290d05aae887faa0c00263b11c6f7",
+    "binary_sha256": "ef6014187907bec42020e81d51cef33be90a5be38b7ed893fd8969ce455e11ec",
+    "wall_ms": 6620.59401699662,
+    "clock_ticks_per_second": 100,
+    "server_before": {
+      "VmHWM": 16924,
+      "VmRSS": 16924,
+      "rchar": 9146,
+      "wchar": 59,
+      "read_bytes": 0,
+      "write_bytes": 0,
+      "cpu_ticks": 0
+    },
+    "server_after": {
+      "VmHWM": 46780,
+      "VmRSS": 46780,
+      "rchar": 29020627,
+      "wchar": 7226216,
+      "read_bytes": 0,
+      "write_bytes": 7315456,
+      "cpu_ticks": 100
+    },
+    "peak_rss_kib": 46780,
+    "claude_native_files": 109,
+    "native_bytes": 2535212,
+    "evidence": "0-first-import.json"
+  },
+  {
+    "unrelated_sessions": 0,
+    "fixed_padding_sessions": 64,
+    "phase": "persisted-restart",
+    "browser_exit": 0,
+    "source_revision": "733524fad75290d05aae887faa0c00263b11c6f7",
+    "binary_sha256": "ef6014187907bec42020e81d51cef33be90a5be38b7ed893fd8969ce455e11ec",
+    "wall_ms": 1620.4231640003854,
+    "clock_ticks_per_second": 100,
+    "server_before": {
+      "VmHWM": 16940,
+      "VmRSS": 16940,
+      "rchar": 9146,
+      "wchar": 59,
+      "read_bytes": 0,
+      "write_bytes": 0,
+      "cpu_ticks": 0
+    },
+    "server_after": {
+      "VmHWM": 43820,
+      "VmRSS": 43820,
+      "rchar": 22478177,
+      "wchar": 12427,
+      "read_bytes": 0,
+      "write_bytes": 40960,
+      "cpu_ticks": 75
+    },
+    "peak_rss_kib": 43820,
+    "claude_native_files": 109,
+    "native_bytes": 2535212,
+    "evidence": "0-persisted-restart.json"
+  },
+  {
+    "unrelated_sessions": 256,
+    "fixed_padding_sessions": 64,
+    "phase": "first-import",
+    "browser_exit": 0,
+    "source_revision": "733524fad75290d05aae887faa0c00263b11c6f7",
+    "binary_sha256": "ef6014187907bec42020e81d51cef33be90a5be38b7ed893fd8969ce455e11ec",
+    "wall_ms": 7678.9922549978655,
+    "clock_ticks_per_second": 100,
+    "server_before": {
+      "VmHWM": 16864,
+      "VmRSS": 16864,
+      "rchar": 9146,
+      "wchar": 59,
+      "read_bytes": 0,
+      "write_bytes": 0,
+      "cpu_ticks": 0
+    },
+    "server_after": {
+      "VmHWM": 74804,
+      "VmRSS": 74804,
+      "rchar": 84153394,
+      "wchar": 17242776,
+      "read_bytes": 0,
+      "write_bytes": 17301504,
+      "cpu_ticks": 256
+    },
+    "peak_rss_kib": 74804,
+    "claude_native_files": 365,
+    "native_bytes": 9821078,
+    "evidence": "256-first-import.json"
+  },
+  {
+    "unrelated_sessions": 256,
+    "fixed_padding_sessions": 64,
+    "phase": "persisted-restart",
+    "browser_exit": 0,
+    "source_revision": "733524fad75290d05aae887faa0c00263b11c6f7",
+    "binary_sha256": "ef6014187907bec42020e81d51cef33be90a5be38b7ed893fd8969ce455e11ec",
+    "wall_ms": 1568.502850997902,
+    "clock_ticks_per_second": 100,
+    "server_before": {
+      "VmHWM": 16824,
+      "VmRSS": 16824,
+      "rchar": 9146,
+      "wchar": 59,
+      "read_bytes": 0,
+      "write_bytes": 0,
+      "cpu_ticks": 0
+    },
+    "server_after": {
+      "VmHWM": 73192,
+      "VmRSS": 73192,
+      "rchar": 58390388,
+      "wchar": 67,
+      "read_bytes": 0,
+      "write_bytes": 28672,
+      "cpu_ticks": 113
+    },
+    "peak_rss_kib": 72976,
+    "claude_native_files": 365,
+    "native_bytes": 9821078,
+    "evidence": "256-persisted-restart.json"
+  },
+  {
+    "unrelated_sessions": 2048,
+    "fixed_padding_sessions": 64,
+    "phase": "first-import",
+    "browser_exit": 0,
+    "source_revision": "733524fad75290d05aae887faa0c00263b11c6f7",
+    "binary_sha256": "ef6014187907bec42020e81d51cef33be90a5be38b7ed893fd8969ce455e11ec",
+    "wall_ms": 16744.080897999083,
+    "clock_ticks_per_second": 100,
+    "server_before": {
+      "VmHWM": 16860,
+      "VmRSS": 16860,
+      "rchar": 9146,
+      "wchar": 59,
+      "read_bytes": 0,
+      "write_bytes": 0,
+      "cpu_ticks": 0
+    },
+    "server_after": {
+      "VmHWM": 257376,
+      "VmRSS": 253452,
+      "rchar": 508465553,
+      "wchar": 113605976,
+      "read_bytes": 0,
+      "write_bytes": 113537024,
+      "cpu_ticks": 1224
+    },
+    "peak_rss_kib": 257908,
+    "claude_native_files": 2157,
+    "native_bytes": 60801483,
+    "evidence": "2048-first-import.json"
+  },
+  {
+    "unrelated_sessions": 2048,
+    "fixed_padding_sessions": 64,
+    "phase": "persisted-restart",
+    "browser_exit": 0,
+    "source_revision": "733524fad75290d05aae887faa0c00263b11c6f7",
+    "binary_sha256": "ef6014187907bec42020e81d51cef33be90a5be38b7ed893fd8969ce455e11ec",
+    "wall_ms": 1523.7540399975842,
+    "clock_ticks_per_second": 100,
+    "server_before": {
+      "VmHWM": 16892,
+      "VmRSS": 16892,
+      "rchar": 9146,
+      "wchar": 59,
+      "read_bytes": 0,
+      "write_bytes": 0,
+      "cpu_ticks": 0
+    },
+    "server_after": {
+      "VmHWM": 57948,
+      "VmRSS": 57948,
+      "rchar": 68758274,
+      "wchar": 67,
+      "read_bytes": 0,
+      "write_bytes": 28672,
+      "cpu_ticks": 118
+    },
+    "peak_rss_kib": 57948,
+    "claude_native_files": 2157,
+    "native_bytes": 60801483,
+    "evidence": "2048-persisted-restart.json"
+  }
+]

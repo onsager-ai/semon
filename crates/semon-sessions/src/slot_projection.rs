@@ -166,7 +166,7 @@ impl SavedSlot {
             Recipe::H { id } => Some(id),
             _ => None,
         };
-        format!(
+        let identity = format!(
             "{:?}|{:?}|{}|{}|{:?}|{:?}",
             self.file.as_ref().map(|file| &file.path),
             header,
@@ -174,7 +174,13 @@ impl SavedSlot {
             self.block,
             std::mem::discriminant(&self.recipe),
             self.turn
-        )
+        );
+        // A turn-context record expands into several independent signals at
+        // the same file/offset/block. Retention must preserve each kind.
+        match &self.recipe {
+            Recipe::Signal { signal } => format!("{identity}|{:?}", signal.kind),
+            _ => identity,
+        }
     }
     fn capture(
         slot: &Slot,

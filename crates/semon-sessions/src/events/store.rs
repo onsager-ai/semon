@@ -46,7 +46,7 @@ use crate::{Tokens, facts::ReportedRunSnapshot};
 
 /// `PRAGMA user_version`: the shape of the tables. The parser's version is
 /// [`CACHE_VERSION`], kept in `meta`.
-const SCHEMA_VERSION: i64 = 18;
+const SCHEMA_VERSION: i64 = 19;
 
 /// How long a write waits for another process's transaction. Tests wait
 /// less, so the busy paths they drive stay quick.
@@ -89,11 +89,11 @@ CREATE INDEX IF NOT EXISTS session_catalog_harness ON session_catalog(harness, l
 CREATE INDEX IF NOT EXISTS session_catalog_repo ON session_catalog(repo, last_ms DESC, session_key ASC);
 CREATE INDEX IF NOT EXISTS session_catalog_harness_repo ON session_catalog(harness, repo, last_ms DESC, session_key ASC);
 CREATE INDEX IF NOT EXISTS session_catalog_parent ON session_catalog(parent_key, last_ms DESC, session_key ASC);
-CREATE INDEX IF NOT EXISTS session_catalog_current_order ON session_catalog(lifecycle, last_ms DESC, session_key ASC);
-CREATE INDEX IF NOT EXISTS session_catalog_current_harness ON session_catalog(lifecycle, harness, last_ms DESC, session_key ASC);
-CREATE INDEX IF NOT EXISTS session_catalog_current_repo ON session_catalog(lifecycle, repo, last_ms DESC, session_key ASC);
-CREATE INDEX IF NOT EXISTS session_catalog_current_harness_repo ON session_catalog(lifecycle, harness, repo, last_ms DESC, session_key ASC);
-CREATE INDEX IF NOT EXISTS session_catalog_current_parent ON session_catalog(lifecycle, parent_key, last_ms DESC, session_key ASC);
+CREATE INDEX IF NOT EXISTS session_catalog_current_order ON session_catalog(last_ms DESC, session_key ASC) WHERE lifecycle='current';
+CREATE INDEX IF NOT EXISTS session_catalog_current_harness ON session_catalog(harness, last_ms DESC, session_key ASC) WHERE lifecycle='current';
+CREATE INDEX IF NOT EXISTS session_catalog_current_repo ON session_catalog(repo, last_ms DESC, session_key ASC) WHERE lifecycle='current';
+CREATE INDEX IF NOT EXISTS session_catalog_current_harness_repo ON session_catalog(harness, repo, last_ms DESC, session_key ASC) WHERE lifecycle='current';
+CREATE INDEX IF NOT EXISTS session_catalog_current_parent ON session_catalog(parent_key, last_ms DESC, session_key ASC) WHERE lifecycle='current';
 CREATE TABLE IF NOT EXISTS session_catalog_sources (
     session_key TEXT NOT NULL,
     lifecycle TEXT NOT NULL DEFAULT 'current' CHECK(lifecycle IN ('current','retained')),
@@ -2007,6 +2007,18 @@ fn init(connection: &mut Connection) -> rusqlite::Result<Init> {
         if schema==10 && !transaction.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info('session_slot_projections') WHERE name='source_generation')",[],|row|row.get::<_,bool>(0))? {
             transaction.execute_batch("ALTER TABLE session_slot_projections ADD COLUMN source_generation TEXT")?;
         }
+        // Earlier schemas used lifecycle-prefixed indexes containing retained rows.
+        // Replace only the Current list trees; history/source lookup indexes
+        // still support both lifecycle states and keep their existing authority.
+        if (11..17).contains(&schema) {
+            transaction.execute_batch(
+                "DROP INDEX IF EXISTS session_catalog_current_order;
+                DROP INDEX IF EXISTS session_catalog_current_harness;
+                DROP INDEX IF EXISTS session_catalog_current_repo;
+                DROP INDEX IF EXISTS session_catalog_current_harness_repo;
+                DROP INDEX IF EXISTS session_catalog_current_parent;",
+            )?;
+        }
         transaction.execute_batch(SCHEMA)?;
         transaction.execute_batch(crate::history_projection::SCHEMA)?;
         transaction.execute_batch(crate::catalog_search::SCHEMA)?;
@@ -2015,7 +2027,11 @@ fn init(connection: &mut Connection) -> rusqlite::Result<Init> {
             // One-time metadata bootstrap; requests only read this durable
             // stream. Scope indexes permit useful history without consuming
             // every current-list record first.
-            transaction.execute_batch("INSERT INTO session_catalog_changes(session_key,read_scope) SELECT session_key,'current' FROM session_catalog ORDER BY last_ms DESC,session_key ASC; INSERT INTO session_catalog_changes(session_key,read_scope) SELECT session_key,'retained_history' FROM session_history_catalog ORDER BY session_key;")?;
+            transaction.execute_batch("INSERT INTO session_catalog_changes(session_key,read_scope) SELECT session_key,'current' FROM session_catalog ORDER BY last_ms DESC,session_key ASC; INSERT INTO session_catalog_changes(session_key,read_scope) SELECT session_key,'retained_history' FROM (SELECT session_key FROM session_catalog UNION SELECT session_key FROM session_history_catalog) ORDER BY session_key;")?;
+        } else if schema == 18 {
+            // Schema 18 omitted Current fallback keys from the initial History
+            // stream. Append recovery hints without resetting any saved cursor.
+            transaction.execute_batch("INSERT INTO session_catalog_changes(session_key,read_scope) SELECT session_key,'retained_history' FROM session_catalog ORDER BY session_key;")?;
         }
         if schema == 1 {
             transaction.execute_batch("ALTER TABLE files ADD COLUMN codex_native_usage TEXT")?;
@@ -3608,6 +3624,92 @@ mod tests {
             assert_eq!(rows, 0, "{table}");
         }
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn catalog_outbox_migration_includes_current_history_fallback_without_reseeding() {
+        for schema in [17, 18] {
+            let root = scratch(&format!("outbox-migration-{schema}"));
+            let path = root.join("index.sqlite3");
+            let (store, _) = opened(&path);
+            store.connection.execute("INSERT INTO session_catalog(session_key,last_ms,harness,metadata) VALUES('current-only',0,'claude','{}')", []).unwrap();
+            let epoch: String = store
+                .connection
+                .query_row(
+                    "SELECT value FROM meta WHERE key='catalog_changes_epoch'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            if schema == 17 {
+                store.connection.execute_batch("DROP TRIGGER catalog_changes_insert; DROP TRIGGER catalog_changes_update; DROP TRIGGER catalog_changes_delete; DROP TRIGGER catalog_history_changes_insert; DROP TRIGGER catalog_history_changes_update; DROP TRIGGER catalog_history_changes_delete; DROP TABLE session_catalog_changes; DELETE FROM meta WHERE key='catalog_changes_epoch';").unwrap();
+            } else {
+                // The old bootstrap stream did not seed Current fallback rows
+                // for History, but its Current consumer may have a saved head.
+                store
+                    .connection
+                    .execute(
+                        "DELETE FROM session_catalog_changes WHERE read_scope='retained_history'",
+                        [],
+                    )
+                    .unwrap();
+            }
+            store
+                .connection
+                .execute(
+                    "DELETE FROM meta WHERE key LIKE 'catalog_changes_floor_%'",
+                    [],
+                )
+                .unwrap();
+            store
+                .connection
+                .pragma_update(None, "user_version", schema)
+                .unwrap();
+            drop(store);
+            let (store, _) = opened(&path);
+            let hints: Vec<(String, String)> = store
+                .connection
+                .prepare(
+                    "SELECT session_key,read_scope FROM session_catalog_changes ORDER BY revision",
+                )
+                .unwrap()
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+                .unwrap()
+                .collect::<rusqlite::Result<_>>()
+                .unwrap();
+            assert_eq!(
+                hints,
+                [
+                    ("current-only".into(), "current".into()),
+                    ("current-only".into(), "retained_history".into())
+                ]
+            );
+            if schema == 18 {
+                let migrated: String = store
+                    .connection
+                    .query_row(
+                        "SELECT value FROM meta WHERE key='catalog_changes_epoch'",
+                        [],
+                        |r| r.get(0),
+                    )
+                    .unwrap();
+                assert_eq!(
+                    migrated, epoch,
+                    "saved consumer epoch must survive migration"
+                );
+            }
+            drop(store);
+            let (store, _) = opened(&path);
+            let count: i64 = store
+                .connection
+                .query_row("SELECT count(*) FROM session_catalog_changes", [], |r| {
+                    r.get(0)
+                })
+                .unwrap();
+            assert_eq!(count, 2, "restart cannot repeat migration hints");
+            drop(store);
+            fs::remove_dir_all(root).unwrap();
+        }
     }
 
     #[test]
