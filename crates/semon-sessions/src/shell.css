@@ -38,10 +38,15 @@
    Native details remain usable without JavaScript. Tooltips use the shared
    document overlay, outside the frame. No autofocus is installed. */
 .sh-composer { position: relative; min-width: 0; border: 1px solid var(--line-2); border-radius: var(--r2); background: var(--ground); }
-.sh-composer textarea { display: block; box-sizing: border-box; width: 100%; height: auto; min-height: 96px; max-height: 280px; field-sizing: content; resize: none; overflow-y: auto; padding: var(--s4); border: 0; border-radius: var(--r2); background: transparent; color: var(--ink); font: 400 var(--fs-read)/1.5 var(--sans); }
+.sh-composer textarea { display: block; box-sizing: border-box; width: 100%; height: auto; min-height: 96px; max-height: 280px; field-sizing: content; resize: none; overflow-y: auto; padding: var(--s4); border: 0; border-radius: var(--r2); background: transparent; color: var(--ink); font: 400 var(--fs-ui)/1.5 var(--sans); }
 .sh-composer textarea:focus-visible { outline: 2px solid var(--ink); outline-offset: -2px; }
 .sh-composer-toolbar { display: flex; align-items: center; gap: var(--s1); min-width: 0; padding: 0 var(--s4) var(--s4); }
 .sh-composer-send { margin-left: auto; }
+/* Quiet configuration chips; emphasis appears on hover, focus and expansion. */
+.sh-composer-toolbar .sh-picker > summary::before { border-color: transparent; background: transparent; }
+.sh-composer-toolbar .sh-picker[open] > summary::before { border-color: var(--line); background: var(--sunken); }
+.sh-composer-toolbar .sh-picker > summary.sh-value::after { content: ""; flex: none; width: 5px; height: 5px; margin: -3px 2px 0 var(--s1); border-right: 1px solid currentColor; border-bottom: 1px solid currentColor; transform: rotate(45deg); }
+@media (hover: hover) { .sh-composer-toolbar .sh-picker > summary:hover::before { border-color: var(--line); background: var(--sunken); } }
 /* Conversation input shares the viewer's message surface and quiet icon controls. */
 .sh-composer.sh-composer-conversation { display: flex; align-items: flex-end; padding: var(--s1); border-color: transparent; border-radius: calc(var(--r3) + var(--s1)); background: var(--bubble); }
 .sh-composer-conversation:focus-within { border-color: var(--line-2); }
@@ -56,8 +61,10 @@
 .sh-picker-body { position: absolute; z-index: 5; inset: auto var(--s4); margin-top: var(--s2); padding: var(--s4); max-height: min(65vh, 480px); overflow: auto; border: 1px solid var(--line); border-radius: var(--r2); background: var(--ground); color: var(--ink); box-shadow: 0 16px 48px color-mix(in srgb, var(--ink) 14%, transparent); }
 .sh-picker-body h2 { margin: 0 0 var(--s3); font: 500 var(--fs-ui)/1.3 var(--sans); }
 .sh-picker-body p { font-size: var(--fs-sm); overflow-wrap: anywhere; }
-.sh-picker-body select { max-width: 100%; min-height: var(--tap); color: var(--ink); background: var(--ground); font: inherit; }
-@media (max-width: 760px), (any-pointer: coarse) { .sh-composer-toolbar { padding-inline: 10px; } .sh-picker-body select { min-height: 44px; } }
+.sh-picker-body select { max-width: 100%; min-height: var(--tap); color: var(--ink); background: var(--ground); font: 400 var(--fs-sm)/1.2 var(--sans); }
+.sh-picker-body .field { display: grid; grid-template-columns: minmax(100px, 1fr) minmax(0, 1.25fr); align-items: center; gap: var(--s3); }
+/* Keep editable native fields at 16px on touch devices to avoid focus zoom. */
+@media (max-width: 760px), (any-pointer: coarse) { .sh-composer-toolbar { padding-inline: 10px; } .sh-composer-toolbar .sh-compact.sh-value { padding-inline: var(--s2); } .sh-picker-body select { min-height: 44px; } .sh-composer textarea, .sh-picker-body select { font-size: var(--fs-read); } }
 .btn-row { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: 8px; }
 .copy.copied { width: auto; padding-inline: 9px; background: var(--sunken); color: var(--ink-2); }
 .copy.copied::after { content: "Copied"; margin-left: 5px; font: 500 var(--fs-cap)/1 var(--sans); }
@@ -188,7 +195,10 @@ dialog.sh-composer-panel { background: var(--ground); }
 .sh-composer-panel .sh-picker-body p { margin: 0; color: var(--ink-2); line-height: 1.5; }
 .sh-composer-panel .field + .field { margin-top: 0; }
 .sh-composer-panel .sh-select-label { display: none; }
-.sh-composer-panel .sh-select-trigger { min-height: 44px; padding-inline: 12px; font-size: var(--fs-ui); }
+.sh-composer-panel .sh-select-trigger { min-height: 44px; padding-inline: 12px; border-color: transparent; background: var(--sunken); font-size: var(--fs-sm); }
+.sh-composer-panel .sh-select-trigger:hover { border-color: var(--line-2); }
+.sh-composer-panel .sh-setting-summary { padding: 0; border: 0; border-radius: 0; background: transparent; }
+.sh-composer-panel .sh-picker-body > .btn { justify-self: end; }
 .sh-composer-panel .sh-select-pop { z-index: 6; }
 .sh-composer-panel .sh-select-option { min-height: 44px; padding-block: 8px; }
 .sh-composer-panel .sh-select-option-text { white-space: normal; overflow-wrap: anywhere; }

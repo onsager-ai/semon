@@ -23,6 +23,23 @@ available for deliberately distinct layouts, rather than being a native-page
 default. Hub enforces its compact choice in its authored-markup policy and
 rendered native-fallback audit; visual baseline matches alone do not prove parity.
 
+Composer task text uses the 14px UI role on a desktop, rather than the 16px
+transcript reading role. Compact buttons, setting labels and enhanced select
+values use the 13px secondary role. Native editable fields (textarea and select)
+retain 16px on narrow/coarse-pointer devices to avoid browser focus zoom. Text
+size does not determine target size: preserve the 96–280px task area, existing
+32px visible toolbar surfaces and at least 44px touch targets. Keep transcript
+reading text at 16px. These shared rules belong in `shell.css`, including the
+native fallback; consumers must not introduce typography overrides.
+
+Configuration entrances use quiet chips within the existing composer toolbar:
+neutral at rest, with a subtle surface/border on hover or expansion and the
+existing visible keyboard outline. A small disclosure chevron accompanies a
+visible value. Settings use aligned label/value rows and a quiet sunken select
+surface; retain native named selects, shared Select/Panel ownership and existing
+keyboard behavior. Do not substitute a stack of full-width outlined fields or
+invent model/effort choices to make the panel look more sophisticated.
+
 ## Enforced checks
 
 - `npm --prefix ui run check:design` parses production CSS. Token references must

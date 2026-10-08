@@ -60,6 +60,24 @@ code and identifiers. UI 14px/20px (15px/22px phone); reading 16px; secondary
 names and headings. No text below 12px. Wrap long prose; horizontally scroll
 code inside its region without creating page overflow.
 
+Intentional composer refinement from source baseline
+`2c9a7dade9dc045ca1218f016346d88d054caefb`: desktop task input changes from the
+16px reading role to the 14px UI role; expanded select values change from 14px
+to the same 13px secondary role already used by compact setting buttons and
+labels. Preserve Instrument Sans, existing insets/control geometry and the
+16px transcript text. On narrow/coarse-pointer devices native textarea/select
+fields remain 16px to avoid focus zoom, while enhanced button-based selects
+stay 13px and preserve 44px targets. This is an incremental control adjustment,
+not a change to the reading type scale or navigation.
+
+Composer configuration is presented as quiet value chips, with a small
+disclosure chevron and emphasis on hover, keyboard focus or expansion. Expanded
+settings align labels and values in property rows; the shared Select uses a
+quiet sunken surface rather than repeated full-width outlined fields. Preserve
+native fallback, labels, value owners and focus return. Retain the established
+state-dot-plus-word vocabulary; never replace actual runtime or connection
+states with decorative or inferred readiness.
+
 ## 4. Component Stylings
 
 Reuse shared shell, search, compact buttons, session rows, transcript messages,
