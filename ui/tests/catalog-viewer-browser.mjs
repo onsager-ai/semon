@@ -619,19 +619,29 @@ for (const width of [390, 1280])
       await page.evaluate(() => {
         window.app = CatalogViewer.mountViewerApplication({
           machinesPath: '/machines',
+          catalogSources: true,
           loadMachines: async () => {
             throw Error('No global native inventory');
           },
         });
       });
       await page.getByText('Source inventory is unavailable.', { exact: false }).waitFor();
+      assert.equal(requests.includes('/api/session-capabilities'), false);
       await page.clock.runFor(1100);
       await page.locator('[data-source-key="two"]').waitFor();
+      assert.equal(
+        await page.locator('#nav [data-go="machines"]').getAttribute('href'),
+        '/machines',
+      );
       if (width === 1280) await page.getByRole('button', { name: 'Collapse sidebar' }).click();
       await page.getByRole('button', { name: 'Load more machines', exact: true }).click();
       await inventoryStarted;
       await page.locator('[data-source-key="two"]').click();
       await page.locator('#page [data-id="one"]').waitFor();
+      assert.equal(
+        await page.locator('#nav [data-go="machines"]').getAttribute('href'),
+        '/machines',
+      );
       assert.equal(new URL(page.url()).searchParams.get('machine'), 'two');
       if (width === 1280) {
         await page.getByRole('button', { name: 'Expand sidebar' }).waitFor();
@@ -660,3 +670,218 @@ for (const width of [390, 1280])
       await browser.close();
     }
   });
+
+test('partial catalog discovery completes while retaining uncommitted filter focus', async () => {
+  const browser = await chromium.launch();
+  try {
+    const page = await browser.newPage();
+    let reads = 0;
+    await page.route('http://catalog.test/**', (route) => {
+      const path = new URL(route.request().url()).pathname;
+      if (path === '/api/session-capabilities') return route.fulfill({ json: capabilities(false) });
+      if (path === '/api/sessions') {
+        reads++;
+        return route.fulfill({
+          json: {
+            api: 1,
+            machine: 'source',
+            read_scope: 'retained_history',
+            machine_info: { key: 'source', label: 'Source', freshness: 'cached' },
+            generation: 'a'.repeat(64),
+            observed_at: null,
+            freshness: reads === 1 ? 'updating' : 'cached',
+            completeness: { state: reads === 1 ? 'partial' : 'complete' },
+            capabilities: {
+              pagination: true,
+              filters: ['harness', 'repo'],
+              order: 'last_desc_key_asc',
+              full_text_search: false,
+              selected_session_lookup: true,
+              runtime_status: false,
+              global_union: false,
+            },
+            items: [meta('one')],
+            next_cursor: null,
+          },
+        });
+      }
+      return route.fulfill({
+        contentType: path === '/viewer.css' ? 'text/css' : 'text/html',
+        body: path === '/viewer.css' ? css : html,
+      });
+    });
+    await page.goto('http://catalog.test/sessions');
+    await page.addScriptTag({ content: outputFiles[0].text });
+    await page.evaluate(() => (window.app = CatalogViewer.mountViewerApplication()));
+    await page.getByText('More sessions are being discovered. This list is incomplete.').waitFor();
+    const harness = page.getByRole('textbox', { name: 'Harness', exact: true });
+    await harness.fill('uncommitted');
+    await harness.evaluate((node) => node.setSelectionRange(2, 7));
+    await page
+      .getByText('More sessions are being discovered. This list is incomplete.')
+      .waitFor({ state: 'hidden' });
+    assert.equal(await harness.inputValue(), 'uncommitted');
+    assert.equal(await harness.evaluate((node) => document.activeElement === node), true);
+    assert.deepEqual(
+      await harness.evaluate((node) => [node.selectionStart, node.selectionEnd]),
+      [2, 7],
+    );
+    assert.ok(reads >= 2);
+    await harness.press('Tab');
+    assert.equal(await harness.inputValue(), 'uncommitted');
+    await page.evaluate(() => app.destroy());
+  } finally {
+    await browser.close();
+  }
+});
+
+test('archive source hint waits for a parsed canonical session without native authority or global restore', async () => {
+  const browser = await chromium.launch();
+  try {
+    const page = await browser.newPage(),
+      requests = [];
+    let polls = 0;
+    await page.route('http://catalog.test/**', (route) => {
+      const u = new URL(route.request().url());
+      requests.push(u.pathname + u.search);
+      if (u.pathname === '/api/session-capabilities')
+        return route.fulfill({ json: { ...capabilities(true), source_candidates: true } });
+      if (u.pathname === '/api/sessions')
+        return route.fulfill({ json: list(u.searchParams.has('sid') ? [meta('parsed')] : []) });
+      if (u.pathname === '/api/session-source-candidates')
+        return route.fulfill({
+          json: {
+            api: 1,
+            source_key: 'source',
+            items: [
+              {
+                candidate_key: 'candidate',
+                source: { root: 'claude', path: 'archived.jsonl' },
+                native_name_hint: 'Old native name hint',
+                generation: 'c'.repeat(64),
+                archive_observed_at: null,
+              },
+            ],
+            next_cursor: null,
+          },
+        });
+      if (u.pathname === '/api/session-source-candidate') {
+        polls++;
+        return route.fulfill({
+          json: {
+            api: 1,
+            source_key: 'source',
+            candidate_key: 'candidate',
+            generation: 'c'.repeat(64),
+            state: polls === 1 ? 'updating' : 'ready',
+            catalog_key: polls === 1 ? null : 'parsed',
+            retryable: true,
+            reason: null,
+          },
+        });
+      }
+      if (u.pathname === '/api/session-transcript')
+        return route.fulfill({ json: transcript('parsed', u.searchParams, 3) });
+      if (u.pathname === '/api/session-identity')
+        return route.fulfill({ status: 404, json: { error: 'Current authority unavailable' } });
+      return route.fulfill({
+        contentType: u.pathname === '/viewer.css' ? 'text/css' : 'text/html',
+        body: u.pathname === '/viewer.css' ? css : html,
+      });
+    });
+    await page.goto('http://catalog.test/sessions');
+    await page.addScriptTag({ content: outputFiles[0].text });
+    await page.evaluate(() => (window.app = CatalogViewer.mountViewerApplication()));
+    const hint = page.getByRole('button', { name: /Old native name hint/ });
+    await hint.waitFor();
+    assert.equal(await page.locator('[data-id="candidate"]').count(), 0);
+    assert.equal(
+      requests.some((path) => path.startsWith('/api/session-identity')),
+      false,
+    );
+    await hint.click();
+    await page
+      .getByText('Recorded source is being indexed. Its session will open automatically.')
+      .waitFor();
+    await page.getByText('Original parsed record 0', { exact: true }).waitFor();
+    assert.equal(new URL(page.url()).pathname, '/s/claude/parsed');
+    assert.ok(polls >= 2);
+    assert.equal(
+      requests.some((path) => /^\/api\/(model|tool|tx|image)(\?|$)/.test(path)),
+      false,
+    );
+    await page.evaluate(() => app.destroy());
+  } finally {
+    await browser.close();
+  }
+});
+
+test('bounded metadata search preserves literal query and exposes empty partial continuation', async () => {
+  const browser = await chromium.launch();
+  try {
+    const page = await browser.newPage(),
+      requests = [];
+    let searches = 0;
+    const query = 'Écho + & branch';
+    await page.route('http://catalog.test/**', (route) => {
+      const u = new URL(route.request().url());
+      requests.push(u.pathname + u.search);
+      if (u.pathname === '/api/session-capabilities')
+        return route.fulfill({
+          json: {
+            ...capabilities(false),
+            metadata_search: true,
+            filters: ['harness', 'repo', 'q'],
+          },
+        });
+      if (u.pathname === '/api/sessions') {
+        if (!u.searchParams.has('q')) return route.fulfill({ json: list([meta('initial')]) });
+        assert.equal(u.searchParams.get('q'), query);
+        searches++;
+        return route.fulfill({
+          json: {
+            ...list(searches === 1 ? [] : [meta('matched')]),
+            next_cursor: searches === 1 ? 'continue' : null,
+            search: {
+              semantics: 'unicode_lowercase_substring',
+              fields: ['name', 'key', 'repo', 'branch', 'model', 'harness'],
+              partial: searches === 1,
+              candidates: searches === 1 ? 512 : 1,
+              index_complete: true,
+              candidate_budget: 512,
+              byte_budget: 2097152,
+            },
+          },
+        });
+      }
+      return route.fulfill({
+        contentType: u.pathname === '/viewer.css' ? 'text/css' : 'text/html',
+        body: u.pathname === '/viewer.css' ? css : html,
+      });
+    });
+    await page.goto('http://catalog.test/sessions');
+    await page.addScriptTag({ content: outputFiles[0].text });
+    await page.evaluate(() => (window.app = CatalogViewer.mountViewerApplication()));
+    const input = page.getByRole('textbox', { name: 'Search session details', exact: true });
+    await input.waitFor();
+    await input.fill(query);
+    await input.press('Tab');
+    await page
+      .getByText(
+        'Search checked a bounded part of the index. Load more sessions to continue looking for matches.',
+      )
+      .waitFor();
+    assert.equal(await page.getByText('No recorded sessions match these filters.').count(), 0);
+    await page.getByRole('button', { name: 'Load more sessions', exact: true }).click();
+    await page.locator('#page [data-id="matched"]').waitFor();
+    assert.equal(await input.inputValue(), query);
+    assert.equal(searches, 2);
+    assert.equal(
+      requests.some((path) => /^\/api\/model/.test(path)),
+      false,
+    );
+    await page.evaluate(() => app.destroy());
+  } finally {
+    await browser.close();
+  }
+});

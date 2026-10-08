@@ -356,9 +356,12 @@ export async function open(browser, srv, where, scheme, before = null) {
       : r.abort(),
   );
   await before?.(page); // routes added here run before the one above
-  await page.goto(srv.base + where + (where.includes('?') ? '&' : '?') + 't=' + srv.token, {
-    waitUntil: 'load',
-  });
+  await page.goto(
+    srv.base + where + (where.includes('?') ? '&' : '?') + 't=' + srv.token + '&compat=1',
+    {
+      waitUntil: 'load',
+    },
+  );
   await settled(page);
   if (where.startsWith('/s/'))
     await page.waitForFunction(

@@ -16,8 +16,12 @@ mod analytics;
 mod catalog;
 mod catalog_changes;
 mod catalog_observer;
-pub use catalog_changes::{CatalogChange, CatalogChangePage, session_catalog_changes};
+pub use catalog_changes::{
+    CatalogChange, CatalogChangeCompaction, CatalogChangePage, compact_session_catalog_changes,
+    session_catalog_changes,
+};
 mod catalog_search;
+mod native_resolution;
 pub use catalog::{
     CatalogFreshness, CatalogIdentityError, CatalogOwnerQualification, CatalogReadScope,
     CatalogSessionIdentity, CatalogSourceObservation, SessionSourceProof, SessionSourceRef,
@@ -25,6 +29,9 @@ pub use catalog::{
     session_source_proof,
 };
 pub use catalog_observer::SessionCatalogObserver;
+pub use native_resolution::{
+    CatalogNativeResolution, CatalogNativeResolutionState, session_catalog_resolve_native,
+};
 mod claude_usage;
 pub mod copilot;
 pub use claude_usage::ClaudeUsageEvidence;

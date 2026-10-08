@@ -24,6 +24,19 @@ export function createCatalogSources(
     retry: number | undefined,
     delay = 1000;
   const account = parseAccount(host?.account);
+  const navigation = [
+    { key: 'sessions', label: 'Sessions', href: '/sessions', icon: I.sessions, current: true },
+    {
+      key: 'machines',
+      label: 'Machines',
+      href: host?.machinesPath ?? '/machines?compat=1',
+      icon: I.machines,
+      current: false,
+    },
+    ...(host?.nativeNavigation ?? []).filter(
+      (destination) => !['sessions', 'machines'].includes(destination.key),
+    ),
+  ];
   let wide = document.querySelector('#page')?.classList.contains('wide-mode') ?? false,
     rail = document.querySelector('.app')?.classList.contains('rail') ?? false;
   const shell = createShellChrome({
@@ -50,25 +63,11 @@ export function createCatalogSources(
     drawerClosed() {},
     railChanged() {
       rail = !rail;
-      shell.update(
-        [
-          {
-            key: 'sessions',
-            label: 'Sessions',
-            href: '/sessions',
-            icon: I.sessions,
-            current: true,
-          },
-        ],
-        rail,
-      );
+      shell.update(navigation, rail);
     },
   });
   shell.mount(document.querySelector<HTMLElement>('.app')!);
-  shell.update(
-    [{ key: 'sessions', label: 'Sessions', href: '/sessions', icon: I.sessions, current: true }],
-    rail,
-  );
+  shell.update(navigation, rail);
   const title = document.createElement('div');
   title.className = 'ttl';
   title.textContent = 'Choose a machine';

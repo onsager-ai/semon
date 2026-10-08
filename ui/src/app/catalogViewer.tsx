@@ -1,3 +1,8 @@
+import {
+  parseCatalogSourceCandidates,
+  parseCatalogSourceCandidateProgress,
+  type CatalogSourceCandidate,
+} from '../state/catalog-source-candidates';
 import { render } from 'preact';
 import type { ControlView } from '../lib/control';
 import type { ViewerApplication } from './viewer';
@@ -80,7 +85,15 @@ export function createCatalogViewer(
     note = '',
     harness = '',
     repo = '',
+    query = '',
     active: SelectedView | null = null;
+  let candidates: CatalogSourceCandidate[] = [],
+    candidateCursor: string | null = null,
+    candidateLoaded = false,
+    candidateUpdating = false,
+    candidateNote = '',
+    candidateEpoch = 0,
+    candidateTimer: number | undefined;
   const selected = new Map<string, SelectedView>();
   const sourceViews = new Map<
     string,
@@ -90,6 +103,7 @@ export function createCatalogViewer(
       cursor: string | null;
       harness: string;
       repo: string;
+      query: string;
       selectedKey: string | null;
     }
   >();
@@ -168,7 +182,10 @@ export function createCatalogViewer(
   function controlFor(view: SelectedView): ControlView | undefined {
     const identity = selection.selectedIdentity();
     const current =
-      active === view && identity?.catalog_key === view.key && identity.native_id
+      active === view &&
+      identity?.catalog_key === view.key &&
+      identity.owner_qualification !== 'provisional' &&
+      identity.native_id
         ? control.view(identity.native_id)
         : undefined;
     if (current) view.lastControl = current;
@@ -266,8 +283,15 @@ export function createCatalogViewer(
           icon: I.sessions,
           current: sourcesOpen,
         },
+        {
+          key: 'machines',
+          label: 'Machines',
+          href: viewerHost?.machinesPath ?? '/machines?compat=1',
+          icon: I.machines,
+          current: false,
+        },
         ...(viewerHost?.nativeNavigation ?? []).filter(
-          (destination) => destination.key !== 'sessions',
+          (destination) => !['sessions', 'machines', 'sources'].includes(destination.key),
         ),
       ],
       rail,
@@ -319,15 +343,41 @@ export function createCatalogViewer(
   function drawList() {
     if (disposed || active || sourcesOpen) return;
     chrome();
+    const focused = document.activeElement;
+    const draft =
+      focused instanceof HTMLInputElement && root.contains(focused)
+        ? {
+            node: focused,
+            value: focused.value,
+            start: focused.selectionStart,
+            end: focused.selectionEnd,
+          }
+        : null;
     renderCatalogList(
       root,
       {
         items,
         sourceLabel: page?.machine_info.label ?? (capabilities.source_key || 'This source'),
         updating,
+        candidates,
+        candidatesMore: candidateCursor !== null,
+        candidateUpdating,
+        candidateNote,
+        discovering: page?.completeness.state === 'partial',
+        observation: {
+          cached: 'Cached history',
+          updating: 'Discovering history',
+          stale: 'History observation is stale',
+          incomplete: 'History is incomplete',
+          unavailable: 'History observation is unavailable',
+        }[page?.freshness ?? 'cached'],
         note,
         harness,
         repo,
+        query,
+        metadataSearch: capabilities.metadata_search,
+        searchPartial: page?.search?.partial ?? false,
+        searchIndexIncomplete: page?.search ? !page.search.index_complete : false,
         more: cursor !== null,
         compatibilityHref:
           '/sessions?compat=1' +
@@ -342,8 +392,19 @@ export function createCatalogViewer(
             items.find((row) => row.key === item.key),
           );
         },
+        candidate(item) {
+          void prepareCandidate(item);
+        },
+        candidateMore() {
+          void loadCandidates(true);
+        },
+        candidateRetry() {
+          void loadCandidates(false);
+        },
         filter(field, value) {
+          cancelCandidate();
           if (field === 'harness') harness = value;
+          else if (field === 'q') query = value;
           else repo = value;
           void loadList(false);
         },
@@ -355,6 +416,11 @@ export function createCatalogViewer(
         },
       },
     );
+    if (draft?.node.isConnected && document.activeElement === draft.node) {
+      draft.node.value = draft.value;
+      if (draft.start !== null && draft.end !== null)
+        draft.node.setSelectionRange(draft.start, draft.end);
+    }
   }
   async function loadList(append: boolean) {
     if (disposed || (append && updating)) return;
@@ -364,6 +430,7 @@ export function createCatalogViewer(
     p.set('limit', '60');
     if (harness) p.set('harness', harness);
     if (repo) p.set('repo', repo);
+    if (query && capabilities.metadata_search) p.set('q', query);
     if (append && cursor !== null) p.set('cursor', cursor);
     updating = true;
     note = '';
@@ -372,6 +439,7 @@ export function createCatalogViewer(
       const next = parseCatalogPage(await api('/api/sessions?' + p));
       if (disposed || epoch !== listEpoch) return;
       if (
+        (query && capabilities.metadata_search && next.search === null) ||
         next.machine !== capabilities.source_key ||
         next.read_scope !== 'retained_history' ||
         (append && page?.generation !== next.generation)
@@ -381,11 +449,24 @@ export function createCatalogViewer(
         throw new Error('History page repeated a session. Refresh this list.');
       listRetryDelay = 1000;
       page = next;
+      if (capabilities.source_candidates && !candidateLoaded) void loadCandidates(false);
       cursor = next.next_cursor;
       items = append ? [...items, ...next.items] : next.items;
       updating = false;
       drawList();
       chrome();
+      if (
+        (next.completeness.state === 'partial' || next.search?.index_complete === false) &&
+        items.length <= 60
+      ) {
+        const refresh = () => {
+          if (disposed || epoch !== listEpoch || active || sourcesOpen) return;
+          // drawList preserves the focused filter's draft and selection while
+          // provisional discovery advances; focus must not stall publication.
+          void loadList(false);
+        };
+        listRetry = scope.timeout(refresh, 1000);
+      }
     } catch (error) {
       if (disposed || epoch !== listEpoch) return;
       updating = false;
@@ -406,6 +487,120 @@ export function createCatalogViewer(
         listRetryDelay = Math.min(8000, listRetryDelay * 2);
       }
     }
+  }
+  function cancelCandidate() {
+    candidateEpoch++;
+    scope.clearTimeout(candidateTimer);
+    candidateUpdating = false;
+  }
+  async function loadCandidates(append: boolean) {
+    if (!capabilities.source_candidates || disposed || (append && candidateUpdating)) return;
+    cancelCandidate();
+    const epoch = candidateEpoch,
+      sourceKey = capabilities.source_key;
+    candidateLoaded = true;
+    candidateUpdating = true;
+    candidateNote = '';
+    drawList();
+    const p = new URLSearchParams({ machine: sourceKey, limit: '60' });
+    if (append && candidateCursor) p.set('cursor', candidateCursor);
+    try {
+      const result = parseCatalogSourceCandidates(await api('/api/session-source-candidates?' + p));
+      if (disposed || epoch !== candidateEpoch || sourceKey !== capabilities.source_key) return;
+      if (
+        result.source_key !== sourceKey ||
+        (append &&
+          result.items.some((item) =>
+            candidates.some((old) => old.candidate_key === item.candidate_key),
+          ))
+      )
+        throw new Error('Invalid archive source scope');
+      candidates = append ? [...candidates, ...result.items] : result.items;
+      candidateCursor = result.next_cursor;
+    } catch (error) {
+      if (disposed || epoch !== candidateEpoch) return;
+      candidateNote = readError(error);
+    } finally {
+      if (!disposed && epoch === candidateEpoch) {
+        candidateUpdating = false;
+        drawList();
+      }
+    }
+  }
+  async function prepareCandidate(candidate: CatalogSourceCandidate) {
+    cancelCandidate();
+    const epoch = candidateEpoch,
+      sourceKey = capabilities.source_key;
+    candidateUpdating = true;
+    candidateNote = '';
+    drawList();
+    let delay = 1000;
+    const poll = async () => {
+      if (disposed || epoch !== candidateEpoch || sourceKey !== capabilities.source_key) return;
+      try {
+        const p = new URLSearchParams({
+          machine: sourceKey,
+          candidate: candidate.candidate_key,
+          generation: candidate.generation,
+        });
+        const result = parseCatalogSourceCandidateProgress(
+          await api('/api/session-source-candidate?' + p),
+        );
+        if (disposed || epoch !== candidateEpoch || sourceKey !== capabilities.source_key) return;
+        if (
+          result.source_key !== sourceKey ||
+          result.candidate_key !== candidate.candidate_key ||
+          result.generation !== candidate.generation
+        )
+          throw new Error('Archive source changed; resynchronize source hints');
+        if (result.state === 'ready') {
+          const metadata = parseCatalogPage(
+            await api(
+              '/api/sessions?' +
+                new URLSearchParams({
+                  machine: sourceKey,
+                  scope: 'retained_history',
+                  sid: result.catalog_key!,
+                }),
+            ),
+          );
+          if (disposed || epoch !== candidateEpoch || sourceKey !== capabilities.source_key) return;
+          if (
+            metadata.machine !== sourceKey ||
+            metadata.read_scope !== 'retained_history' ||
+            metadata.items.length !== 1 ||
+            metadata.items[0].key !== result.catalog_key
+          )
+            throw new Error('Parsed archive session identity is unavailable');
+          candidateUpdating = false;
+          await goSession(result.catalog_key!, metadata.items[0]);
+          return;
+        }
+        candidateNote =
+          result.reason ??
+          (result.state === 'updating'
+            ? 'Recorded source is being indexed. Its session will open automatically.'
+            : 'This archived source cannot currently be read.');
+        if (result.state === 'unavailable' && !result.retryable) {
+          candidateUpdating = false;
+          drawList();
+          return;
+        }
+        drawList();
+        candidateTimer = scope.timeout(() => void poll(), delay);
+        delay = Math.min(delay * 2, 8000);
+      } catch (error) {
+        if (disposed || epoch !== candidateEpoch) return;
+        candidateNote = readError(error);
+        candidateUpdating = retryable(error);
+        drawList();
+        if (candidateUpdating) {
+          candidateTimer = scope.timeout(() => void poll(), delay);
+          delay = Math.min(delay * 2, 8000);
+        }
+      }
+    };
+    await poll();
   }
   function readError(error: unknown): string {
     if (
@@ -443,6 +638,7 @@ export function createCatalogViewer(
         : document.querySelector<HTMLElement>('#main')!.scrollTop;
   }
   function goList(push = true) {
+    cancelCandidate();
     sourcesOpen = false;
     preserveScroll();
     active = null;
@@ -459,6 +655,8 @@ export function createCatalogViewer(
       );
     root.replaceChildren();
     drawList();
+    if (page?.completeness.state === 'partial' && items.length <= 60 && !updating)
+      void loadList(false);
     shell.closeDrawer(true);
   }
   function drawSelected(view: SelectedView) {
@@ -834,7 +1032,13 @@ export function createCatalogViewer(
     try {
       const reply = object(await api('/api/session-identity?' + p));
       if (reply.api !== 1) throw new Error('Unsupported source identity response');
-      if (active === view && selection.accept(ticket, reply.identity)) drawSelected(view);
+      if (active === view && selection.accept(ticket, reply.identity)) {
+        if (selection.selectedIdentity()?.owner_qualification === 'provisional')
+          view.note =
+            'Session identity is provisional while history is being discovered. Native controls are unavailable.';
+        else if (view.note.startsWith('Session identity is provisional')) view.note = '';
+        drawSelected(view);
+      }
     } catch (error) {
       if (disposed || active !== view || ticket !== view.ticket) return;
       if (
@@ -864,6 +1068,7 @@ export function createCatalogViewer(
   }
   async function goSession(key: string, meta?: CatalogSession, push = true) {
     if (disposed) return;
+    cancelCandidate();
     preserveScroll();
     sourcesOpen = false;
     let view = selected.get(cacheKey(key));
@@ -889,6 +1094,7 @@ export function createCatalogViewer(
         newCount: 0,
         lastTotal: null,
       };
+      view.root.className = 'catalog-session';
       selected.set(cacheKey(key), view);
     }
     active = view;
@@ -933,6 +1139,8 @@ export function createCatalogViewer(
         throw new Error('Source selection changed. Choose the source again.');
       const ready = !capabilities.selected_transcript && next.selected_transcript;
       Object.assign(capabilities, next);
+      if (next.source_candidates && !candidateLoaded && !active && !sourcesOpen)
+        void loadCandidates(false);
       if (active) void loadIdentity(active);
       if (ready && active && !active.store.selectedPage()) void loadSelected(active);
     } catch (error) {
@@ -1014,10 +1222,12 @@ export function createCatalogViewer(
       cursor,
       harness,
       repo,
+      query,
       selectedKey: active?.key ?? null,
     });
   }
   async function showSources() {
+    cancelCandidate();
     if (disposed) return;
     if (!sourcesOpen) saveSource();
     ++listEpoch;
@@ -1053,8 +1263,14 @@ export function createCatalogViewer(
       page = retained?.page ?? null;
       items = retained?.items ?? [];
       cursor = retained?.cursor ?? null;
+      cancelCandidate();
+      candidates = [];
+      candidateCursor = null;
+      candidateLoaded = false;
+      candidateNote = '';
       harness = retained?.harness ?? '';
       repo = retained?.repo ?? '';
+      query = retained?.query ?? '';
       updating = false;
       note = '';
       sourcesOpen = false;

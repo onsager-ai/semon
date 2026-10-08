@@ -96,3 +96,43 @@ test('catalog rejects wrong machine identity, duplicate rows and malformed sourc
     assert.throws(() => parseCatalogPage(input));
   }
 });
+
+test('catalog discovery completeness stays distinct from row freshness and native authority', () => {
+  const partial = { ...page(), freshness: 'updating', completeness: { state: 'partial' } };
+  const parsed = parseCatalogPage(partial);
+  assert.equal(parsed.completeness.state, 'partial');
+  assert.equal(parsed.freshness, 'updating');
+  assert.equal(parsed.items[0].freshness.state, 'unavailable');
+  assert.equal(parseCatalogPage(page()).completeness.state, 'complete');
+  assert.throws(() => parseCatalogPage({ ...partial, completeness: { state: 'complete' } }));
+  assert.throws(() => parseCatalogPage({ ...partial, completeness: { state: 'unknown' } }));
+});
+
+test('metadata search exposes bounded partial scan and independent index coverage', () => {
+  const observation = {
+    semantics: 'unicode_lowercase_substring',
+    fields: ['name', 'key', 'repo', 'branch', 'model', 'harness'],
+    partial: true,
+    candidates: 512,
+    index_complete: false,
+    candidate_budget: 512,
+    byte_budget: 2097152,
+  };
+  const parsed = parseCatalogPage({ ...page(), search: observation, items: [] });
+  assert.equal(parsed.search.partial, true);
+  assert.equal(parsed.search.index_complete, false);
+  assert.equal(parseCatalogPage(page()).search, null);
+  assert.throws(() => parseCatalogPage({ ...page(), search: { ...observation, candidates: 513 } }));
+  assert.throws(() =>
+    parseCatalogPage({
+      ...page(),
+      search: {
+        ...observation,
+        fields: ['native_ids', 'key', 'repo', 'branch', 'model', 'harness'],
+      },
+    }),
+  );
+  assert.throws(() =>
+    parseCatalogPage({ ...page(), search: { ...observation, byte_budget: Infinity } }),
+  );
+});

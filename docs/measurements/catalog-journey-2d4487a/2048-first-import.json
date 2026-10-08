@@ -1,0 +1,208 @@
+{
+  "source_revision": "2d4487a23ca70f0094f8dea79db81d9af9b78791",
+  "bundle": "168c95189c6ba5cced2f01121192b03907b412cbae9cc56f25f6e5073dc6c295",
+  "source_key": "local",
+  "catalog_key": "backlog",
+  "phase": "first-import",
+  "coldMs": 15601.293807,
+  "filterMs": 87.86545099999967,
+  "selectedMs": 138.65919600000052,
+  "earlierMs": 108.18315000000257,
+  "fieldMs": 335.06122499999765,
+  "warmMs": 66.98228400000153,
+  "before": {
+    "domNodes": 3,
+    "entries": 0,
+    "rows": 0,
+    "Nodes": 8,
+    "LayoutDuration": 0,
+    "ScriptDuration": 0,
+    "TaskDuration": 4.1e-05,
+    "JSHeapUsedSize": 534364
+  },
+  "cold": {
+    "domNodes": 894,
+    "entries": 0,
+    "rows": 60,
+    "Nodes": 1397,
+    "LayoutDuration": 0.069092,
+    "ScriptDuration": 0.014688,
+    "TaskDuration": 0.240217,
+    "JSHeapUsedSize": 3578080
+  },
+  "filtered": {
+    "domNodes": 894,
+    "entries": 0,
+    "rows": 60,
+    "Nodes": 1605,
+    "LayoutDuration": 0.070456,
+    "ScriptDuration": 0.018036,
+    "TaskDuration": 0.290899,
+    "JSHeapUsedSize": 5169212
+  },
+  "selected": {
+    "domNodes": 1124,
+    "entries": 60,
+    "rows": 0,
+    "Nodes": 2334,
+    "LayoutDuration": 0.076482,
+    "ScriptDuration": 0.034516,
+    "TaskDuration": 0.372614,
+    "JSHeapUsedSize": 4837916
+  },
+  "earlier": {
+    "domNodes": 1659,
+    "entries": 120,
+    "rows": 0,
+    "Nodes": 3054,
+    "LayoutDuration": 0.080915,
+    "ScriptDuration": 0.036475,
+    "TaskDuration": 0.452361,
+    "JSHeapUsedSize": 6503772
+  },
+  "warm": {
+    "domNodes": 1658,
+    "entries": 120,
+    "rows": 0,
+    "Nodes": 2805,
+    "LayoutDuration": 0.124162,
+    "ScriptDuration": 0.056762,
+    "TaskDuration": 0.704916,
+    "JSHeapUsedSize": 5636128
+  },
+  "requests": [
+    "/api/session-capabilities?machine=local",
+    "/api/sessions?machine=local&scope=retained_history&limit=60",
+    "/api/sessions?machine=local&scope=retained_history&limit=60",
+    "/api/sessions?machine=local&scope=retained_history&limit=60",
+    "/api/sessions?machine=local&scope=retained_history&limit=60",
+    "/api/session-capabilities?machine=local",
+    "/api/sessions?machine=local&scope=retained_history&limit=60",
+    "/api/sessions?machine=local&scope=retained_history&limit=60&harness=claude",
+    "/api/session-identity?machine=local&sid=backlog",
+    "/api/session-transcript?machine=local&scope=retained_history&sid=backlog&limit=60",
+    "/api/session-identity?machine=local&sid=backlog",
+    "/api/session-transcript?machine=local&scope=retained_history&sid=backlog&limit=60&after=353&generation=591c3e6284228ae7a3d3c69e3e14029afc4da9be9b373ba71a6c2a8a3572df7c",
+    "/api/session-identity?machine=local&sid=backlog",
+    "/api/session-entry?machine=local&scope=retained_history&sid=backlog&after=472&limit=1&generation=591c3e6284228ae7a3d3c69e3e14029afc4da9be9b373ba71a6c2a8a3572df7c&field_chunk=0",
+    "/api/session-capabilities?machine=local",
+    "/api/session-identity?machine=local&sid=backlog",
+    "/api/session-entry?machine=local&scope=retained_history&sid=backlog&after=472&limit=1&generation=591c3e6284228ae7a3d3c69e3e14029afc4da9be9b373ba71a6c2a8a3572df7c&field_chunk=1",
+    "/api/session-identity?machine=local&sid=backlog"
+  ],
+  "responses": [
+    {
+      "path": "/api/session-capabilities",
+      "status": 200,
+      "bytes": 362,
+      "serverResponseMs": 0.708
+    },
+    {
+      "path": "/api/sessions",
+      "status": 503,
+      "bytes": null,
+      "body_unavailable": "response.body: Protocol error (Network.getResponseBody): No data found for resource with given identifier\nResponse body is not available for a response that was navigated away from. Read response.body() before triggering any navigation.",
+      "serverResponseMs": 1.6929999999999998
+    },
+    {
+      "path": "/api/sessions",
+      "status": 503,
+      "bytes": null,
+      "body_unavailable": "response.body: Protocol error (Network.getResponseBody): No data found for resource with given identifier\nResponse body is not available for a response that was navigated away from. Read response.body() before triggering any navigation.",
+      "serverResponseMs": 2.248
+    },
+    {
+      "path": "/api/sessions",
+      "status": 503,
+      "bytes": null,
+      "body_unavailable": "response.body: Protocol error (Network.getResponseBody): No data found for resource with given identifier\nResponse body is not available for a response that was navigated away from. Read response.body() before triggering any navigation.",
+      "serverResponseMs": 1.479
+    },
+    {
+      "path": "/api/sessions",
+      "status": 503,
+      "bytes": null,
+      "body_unavailable": "response.body: Protocol error (Network.getResponseBody): No data found for resource with given identifier\nResponse body is not available for a response that was navigated away from. Read response.body() before triggering any navigation.",
+      "serverResponseMs": 2.4579999999999997
+    },
+    {
+      "path": "/api/session-capabilities",
+      "status": 200,
+      "bytes": 362,
+      "serverResponseMs": 2.758
+    },
+    {
+      "path": "/api/sessions",
+      "status": 200,
+      "bytes": 65425,
+      "serverResponseMs": 36.779999999999994
+    },
+    {
+      "path": "/api/sessions",
+      "status": 200,
+      "bytes": 63360,
+      "serverResponseMs": 30.633000000000003
+    },
+    {
+      "path": "/api/session-identity",
+      "status": 200,
+      "bytes": 891,
+      "serverResponseMs": 5.975
+    },
+    {
+      "path": "/api/session-transcript",
+      "status": 200,
+      "bytes": 56839,
+      "serverResponseMs": 41.763
+    },
+    {
+      "path": "/api/session-identity",
+      "status": 200,
+      "bytes": 891,
+      "serverResponseMs": 7.218
+    },
+    {
+      "path": "/api/session-transcript",
+      "status": 200,
+      "bytes": 52841,
+      "serverResponseMs": 41.74
+    },
+    {
+      "path": "/api/session-identity",
+      "status": 200,
+      "bytes": 891,
+      "serverResponseMs": 4.5089999999999995
+    },
+    {
+      "path": "/api/session-entry",
+      "status": 200,
+      "bytes": 67838,
+      "serverResponseMs": 14.833
+    },
+    {
+      "path": "/api/session-capabilities",
+      "status": 200,
+      "bytes": 362,
+      "serverResponseMs": 1.064
+    },
+    {
+      "path": "/api/session-identity",
+      "status": 200,
+      "bytes": 891,
+      "serverResponseMs": 2.292
+    },
+    {
+      "path": "/api/session-entry",
+      "status": 200,
+      "bytes": 46799,
+      "serverResponseMs": 11.395
+    },
+    {
+      "path": "/api/session-identity",
+      "status": 200,
+      "bytes": 891,
+      "serverResponseMs": 3.3360000000000003
+    }
+  ],
+  "errors": []
+}

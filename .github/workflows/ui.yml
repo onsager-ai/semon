@@ -127,6 +127,12 @@ jobs:
           cache: npm
           cache-dependency-path: tests/ui/package-lock.json
 
+      # Keep signed Ubuntu packages; avoid the intermittently unreachable Azure mirror.
+      - name: Configure Ubuntu browser dependency mirrors
+        run: |
+          printf '%s\n' 'https://archive.ubuntu.com/ubuntu' | sudo tee /etc/apt/apt-mirrors.txt >/dev/null
+          printf '%s\n' 'https://security.ubuntu.com/ubuntu' | sudo tee /etc/apt/apt-mirrors-security.txt >/dev/null
+
       - name: Install the check tooling and Chromium
         working-directory: tests/ui
         run: |
@@ -145,6 +151,15 @@ jobs:
           node tests/ui/compact-gallery.mjs
           node tests/ui/native-controls.mjs
           node --test ui/tests/browser-lifecycle.mjs ui/tests/application-lifecycle.mjs ui/tests/native-shell-lifecycle.mjs ui/tests/recovery-browser.mjs ui/tests/select-lifecycle.mjs ui/tests/code-scroll.mjs ui/tests/control-observation-browser.mjs ui/tests/jump-toolbar.mjs ui/tests/catalog-viewer-browser.mjs ui/tests/runtime-leaf-browser.mjs
+
+      - name: Actual default catalog producer, keyboard and visual geometry
+        if: matrix.suite == 'interaction'
+        env:
+          SEMON_CATALOG_SERVED_BIN: ${{ github.workspace }}/target/debug/semon
+          SEMON_CATALOG_SERVED_SOURCE: ${{ github.sha }}
+          SEMON_CATALOG_SERVED_EVIDENCE: ${{ github.workspace }}/tests/ui/out/catalog-default.json
+          SEMON_CATALOG_VISUAL_OUT: ${{ github.workspace }}/tests/ui/out/catalog-default
+        run: node --test ui/tests/catalog-served.mjs
 
       - name: Write the sample fixtures
         run: |
