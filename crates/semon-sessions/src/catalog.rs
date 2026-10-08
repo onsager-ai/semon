@@ -1397,7 +1397,7 @@ mod tests {
                 connection
                     .query_row("PRAGMA user_version", [], |row| row.get::<_, u32>(0))
                     .unwrap(),
-                17
+                19
             );
         }
     }
