@@ -14,7 +14,12 @@ use serde_json::Value;
 
 mod analytics;
 mod catalog;
+mod catalog_changes;
 mod catalog_observer;
+pub use catalog_changes::{
+    CatalogChange, CatalogChangeCompaction, CatalogChangePage, compact_session_catalog_changes,
+    session_catalog_changes,
+};
 mod catalog_search;
 mod native_resolution;
 pub use catalog::{
