@@ -1317,7 +1317,26 @@ html.viewer-open, html.viewer-open body { overflow: hidden; }
 .local-control button:disabled { opacity: .5; }
 
 /* Machine-scoped catalog filters use existing search controls and design tokens. */
-.catalog-filters { margin-top: 16px; }
+.catalog-filters { margin-top: var(--s4); }
 .catalog-filters .search { flex: 1 1 260px; }
+.catalog-filters .search > span { flex: none; }
+.catalog-apply { flex: none; }
 .catalog-filters .search:focus-within { outline: 2px solid var(--accent); outline-offset: 2px; }
 .catalog-note { margin: 12px 0; font-size: var(--fs-sm); color: var(--muted); }
+.catalog-scope { color: var(--muted); font-size: var(--fs-sm); }
+.catalog-scope[open] { flex-basis: 100%; }
+.catalog-scope summary { cursor: pointer; min-height: var(--tap); display: flex; align-items: center; gap: var(--s2); }
+.catalog-scope summary::after { content: '›'; }
+.catalog-scope[open] summary::after { transform: rotate(90deg); }
+.catalog-result-header { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: var(--s2); min-height: var(--tap); color: var(--muted); font-size: var(--fs-sm); }
+.catalog-result-header .link { min-height: var(--tap); }
+.catalog-back { align-self: flex-start; min-height: var(--tap); font-size: var(--fs-sm); }
+.topbar .ttl.catalog-title { flex-direction: row; align-items: center; justify-content: flex-start; gap: var(--s2); }
+.catalog-title .catalog-back { align-self: center; flex: none; white-space: nowrap; }
+.catalog-session-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+@media (max-width: 760px) {
+  .catalog-sort { display: none; }
+}
+@media (any-pointer: coarse) {
+  .catalog-filters .search, .catalog-scope summary, .catalog-result-header .link, .catalog-back { min-height: 44px; }
+}

@@ -885,3 +885,121 @@ test('bounded metadata search preserves literal query and exposes empty partial 
     await browser.close();
   }
 });
+
+for (const width of [390, 1280])
+  test(`search submission and Back retain list context at ${width}px`, async () => {
+    const browser = await chromium.launch();
+    try {
+      const page = await browser.newPage({ viewport: { width, height: 860 } });
+      const reads = [];
+      let fail = false;
+      const items = Array.from({ length: 36 }, (_, i) => meta('row-' + i));
+      await page.route('http://catalog.test/**', (route) => {
+        const u = new URL(route.request().url());
+        if (u.pathname === '/api/session-capabilities')
+          return route.fulfill({
+            json: {
+              ...capabilities(true),
+              metadata_search: true,
+              filters: ['harness', 'repo', 'q'],
+            },
+          });
+        if (u.pathname === '/api/sessions') {
+          reads.push(Object.fromEntries(u.searchParams));
+          if (fail) return route.fulfill({ status: 503, json: { error: 'unavailable' } });
+          return route.fulfill({
+            json: {
+              ...list(u.searchParams.get('q') === 'missing' ? [] : items),
+              ...(u.searchParams.has('q')
+                ? {
+                    search: {
+                      semantics: 'unicode_lowercase_substring',
+                      fields: ['name', 'key', 'repo', 'branch', 'model', 'harness'],
+                      partial: false,
+                      candidates: 36,
+                      index_complete: true,
+                      candidate_budget: 512,
+                      byte_budget: 2097152,
+                    },
+                  }
+                : {}),
+            },
+          });
+        }
+        if (u.pathname === '/api/session-identity')
+          return route.fulfill({ json: { api: 1, identity: identity(u.searchParams.get('sid')) } });
+        if (u.pathname === '/api/session-transcript')
+          return route.fulfill({ json: transcript(u.searchParams.get('sid'), u.searchParams, 10) });
+        return route.fulfill({
+          contentType: u.pathname === '/viewer.css' ? 'text/css' : 'text/html',
+          body: u.pathname === '/viewer.css' ? css : html,
+        });
+      });
+      await page.goto('http://catalog.test/sessions');
+      await page.addScriptTag({ content: outputFiles[0].text });
+      await page.evaluate(() => (window.app = CatalogViewer.mountViewerApplication()));
+      const query = page.getByRole('textbox', { name: 'Search session details', exact: true });
+      await query.waitFor();
+      // One submit reads the whole form, including fields that have not blurred.
+      await page.locator('.catalog-filters').evaluate((form) => {
+        form.elements.namedItem('q').value = 'Session';
+        form.elements.namedItem('harness').value = 'claude';
+        form.elements.namedItem('repo').value = '/repo';
+      });
+      await query.press('Enter');
+      await page.getByRole('button', { name: 'Clear filters', exact: true }).waitFor();
+      assert.equal(reads.length, 2);
+      assert.equal(reads[1].q, 'Session');
+      assert.equal(reads[1].harness, 'claude');
+      assert.equal(reads[1].repo, '/repo');
+      const row = page.locator('#page [data-id="row-18"]');
+      await row.scrollIntoViewIfNeeded();
+      const listScroll = await page.evaluate(() =>
+        matchMedia('(max-width: 760px)').matches
+          ? scrollY
+          : document.querySelector('#main').scrollTop,
+      );
+      assert.ok(listScroll > 100);
+      await row.press('Enter');
+      await page.locator('[data-entry-key]').first().waitFor();
+      await page.getByRole('button', { name: 'Back to sessions', exact: false }).press('Enter');
+      await row.waitFor();
+      assert.equal(await query.inputValue(), 'Session');
+      assert.equal(await row.evaluate((node) => document.activeElement === node), true);
+      const returnedScroll = await page.evaluate(() =>
+        matchMedia('(max-width: 760px)').matches
+          ? scrollY
+          : document.querySelector('#main').scrollTop,
+      );
+      assert.ok(Math.abs(returnedScroll - listScroll) <= 2, `${returnedScroll} vs ${listScroll}`);
+      await page.getByRole('button', { name: 'Clear filters', exact: true }).click();
+      await page
+        .getByRole('button', { name: 'Clear filters', exact: true })
+        .waitFor({ state: 'hidden' });
+      assert.equal(await query.inputValue(), '');
+      assert.equal(await query.evaluate((node) => document.activeElement === node), true);
+      assert.equal(reads.at(-1).q, undefined);
+      assert.equal(reads.at(-1).repo, undefined);
+      await query.fill('missing');
+      await query.press('Enter');
+      await page.getByText('No recorded sessions match these filters.').waitFor();
+      assert.equal(
+        await page.getByRole('button', { name: 'Clear filters', exact: true }).count(),
+        1,
+      );
+      fail = true;
+      await query.fill('Session');
+      await query.press('Enter');
+      await page.getByRole('button', { name: 'Retry', exact: true }).waitFor();
+      fail = false;
+      await page.getByRole('button', { name: 'Retry', exact: true }).click();
+      await row.waitFor();
+      assert.equal(
+        await page.evaluate(() => document.documentElement.scrollWidth > innerWidth),
+        false,
+      );
+      await page.evaluate(() => app.destroy());
+    } finally {
+      await browser.close();
+    }
+  });

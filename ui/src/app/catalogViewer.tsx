@@ -86,6 +86,8 @@ export function createCatalogViewer(
     harness = '',
     repo = '',
     query = '',
+    listScroll = 0,
+    listFocus = '',
     active: SelectedView | null = null;
   let candidates: CatalogSourceCandidate[] = [],
     candidateCursor: string | null = null,
@@ -104,6 +106,8 @@ export function createCatalogViewer(
       harness: string;
       repo: string;
       query: string;
+      listScroll: number;
+      listFocus: string;
       selectedKey: string | null;
     }
   >();
@@ -157,10 +161,15 @@ export function createCatalogViewer(
   shell.mount(document.querySelector<HTMLElement>('.app')!);
   const root = shell.slots.content,
     title = document.createElement('div'),
+    back = document.createElement('button'),
     jumpActions = document.createElement('div'),
     jumpSlot = document.createElement('span'),
     jumpTarget = document.createElement('div');
-  title.className = 'ttl';
+  title.className = 'ttl catalog-title';
+  back.type = 'button';
+  back.className = 'link catalog-back';
+  back.textContent = '← Back to sessions';
+  scope.listen(back, 'click', () => goList());
   jumpActions.className = 'viewer-bar-actions';
   jumpSlot.className = 'viewer-jump';
   jumpTarget.className = 'jump-wrap';
@@ -299,7 +308,11 @@ export function createCatalogViewer(
     if (chromeTitle !== name || chromeSession !== !!active) {
       chromeTitle = name;
       chromeSession = !!active;
-      title.textContent = name;
+      const label = document.createElement('span');
+      label.className = 'catalog-session-name';
+      label.textContent = name;
+      title.replaceChildren(label);
+      if (active) title.prepend(back);
       shell.topbar({
         titleSlot: title,
         actions: active ? [jumpActions] : [],
@@ -401,12 +414,19 @@ export function createCatalogViewer(
         candidateRetry() {
           void loadCandidates(false);
         },
-        filter(field, value) {
+        filters(values) {
+          if (harness === values.harness && repo === values.repo && query === values.q) return;
           cancelCandidate();
-          if (field === 'harness') harness = value;
-          else if (field === 'q') query = value;
-          else repo = value;
+          harness = values.harness;
+          repo = values.repo;
+          query = values.q;
           void loadList(false);
+        },
+        clearFilters() {
+          cancelCandidate();
+          harness = repo = query = '';
+          void loadList(false);
+          root.querySelector<HTMLInputElement>('.catalog-filters input')?.focus();
         },
         more() {
           void loadList(true);
@@ -632,15 +652,16 @@ export function createCatalogViewer(
     );
   }
   function preserveScroll() {
-    if (active)
-      active.scroll = window.matchMedia('(max-width: 760px)').matches
-        ? window.scrollY
-        : document.querySelector<HTMLElement>('#main')!.scrollTop;
+    const scroll = window.matchMedia('(max-width: 760px)').matches
+      ? window.scrollY
+      : document.querySelector<HTMLElement>('#main')!.scrollTop;
+    if (active) active.scroll = scroll;
+    else if (!sourcesOpen) listScroll = scroll;
   }
   function goList(push = true) {
     cancelCandidate();
     sourcesOpen = false;
-    preserveScroll();
+    if (active) preserveScroll();
     active = null;
     selection.clear();
     navigation.route = { v: 'sessions' };
@@ -655,6 +676,12 @@ export function createCatalogViewer(
       );
     root.replaceChildren();
     drawList();
+    const row = [...root.querySelectorAll<HTMLButtonElement>('[data-session-row="list"]')].find(
+      (node) => node.dataset.id === listFocus,
+    );
+    row?.focus({ preventScroll: true });
+    if (window.matchMedia('(max-width: 760px)').matches) window.scrollTo(0, listScroll);
+    else document.querySelector<HTMLElement>('#main')!.scrollTop = listScroll;
     if (page?.completeness.state === 'partial' && items.length <= 60 && !updating)
       void loadList(false);
     shell.closeDrawer(true);
@@ -1070,6 +1097,7 @@ export function createCatalogViewer(
     if (disposed) return;
     cancelCandidate();
     preserveScroll();
+    if (!active && !sourcesOpen) listFocus = key;
     sourcesOpen = false;
     let view = selected.get(cacheKey(key));
     if (!view) {
@@ -1223,6 +1251,8 @@ export function createCatalogViewer(
       harness,
       repo,
       query,
+      listScroll,
+      listFocus,
       selectedKey: active?.key ?? null,
     });
   }
@@ -1271,6 +1301,8 @@ export function createCatalogViewer(
       harness = retained?.harness ?? '';
       repo = retained?.repo ?? '';
       query = retained?.query ?? '';
+      listScroll = retained?.listScroll ?? 0;
+      listFocus = retained?.listFocus ?? '';
       updating = false;
       note = '';
       sourcesOpen = false;

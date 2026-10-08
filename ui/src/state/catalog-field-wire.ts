@@ -10,6 +10,7 @@ export interface CatalogFieldRequest {
 }
 /** Qualified native string chunks never use a workspace tool or transcript endpoint. */
 export function parseCatalogField(value: unknown, request: CatalogFieldRequest) {
+  if (!request.entry.provenance) throw new Error('Native text requires source provenance');
   const row = object(value),
     identity = parseCatalogIdentity(row.identity),
     projection = object(row.projection),
