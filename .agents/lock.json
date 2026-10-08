@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "manifest_sha256": "08f835b169b21606bdc50f52d12ac3b6c4f513b2a0d8365fa2dec90ccba10a5e",
+  "manifest_sha256": "bbac8f547f3f3e94fb5bdce1b13d9af6565f339397f234856fa9e5edf66003ef",
   "block_sha256": "21b24d84a4636c657f08116aac12fb3d4a0ea717b66c92f4cfe1dff433f8d9a4",
   "resolved_skills": [
     "ci-triage",
@@ -26,6 +26,11 @@
       "owner": "shared",
       "mode": "100644"
     },
+    ".agents/skills/harness-operations/references/chatgpt-work.md": {
+      "sha256": "c6130e726c55d009b6c6938c6eeab85afe4372c3d86d2f0018e7dec970e8b17b",
+      "owner": "shared",
+      "mode": "100644"
+    },
     ".agents/skills/harness-operations/references/claude-code.md": {
       "sha256": "0917258bb67a0a121120cb419e6a272dc047ea881205033f7e3dbb12b3844632",
       "owner": "shared",
@@ -37,7 +42,7 @@
       "mode": "100644"
     },
     ".agents/skills/harness-operations/SKILL.md": {
-      "sha256": "e743e9660f2a0f297305766b08d5819d75904750be5610b67b4c38a7ca1e49d2",
+      "sha256": "ae7dc9b93a64b46d5926b5772aeb61eacde09c764051785b2fe32aa3d13c7d46",
       "owner": "shared",
       "mode": "100644"
     },
@@ -96,6 +101,11 @@
       "owner": "local-projection",
       "mode": "100644"
     },
+    ".claude/skills/harness-operations/references/chatgpt-work.md": {
+      "sha256": "c6130e726c55d009b6c6938c6eeab85afe4372c3d86d2f0018e7dec970e8b17b",
+      "owner": "shared",
+      "mode": "100644"
+    },
     ".claude/skills/harness-operations/references/claude-code.md": {
       "sha256": "0917258bb67a0a121120cb419e6a272dc047ea881205033f7e3dbb12b3844632",
       "owner": "shared",
@@ -107,7 +117,7 @@
       "mode": "100644"
     },
     ".claude/skills/harness-operations/SKILL.md": {
-      "sha256": "e743e9660f2a0f297305766b08d5819d75904750be5610b67b4c38a7ca1e49d2",
+      "sha256": "ae7dc9b93a64b46d5926b5772aeb61eacde09c764051785b2fe32aa3d13c7d46",
       "owner": "shared",
       "mode": "100644"
     },
