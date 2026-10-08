@@ -46,6 +46,9 @@ The Rust and UI workflow files supply exact CI setup and aggregate semantics.
   docs/design/design-contract.md,
   tests/ui/README.md and viewer-verification skill. Viewer refactors must follow
   the ownership contract and complete its refactoring review checklist.
+- AI-assisted UI/UX: docs/design/ai-design-workflow.md and ui-design skill.
+  User-level Stitch/pen.dev tooling is optional; keep vendor skills and credentials
+  outside the checkout and preserve the existing visual/implementation contract.
 - Relay/protocol changes: docs/mirror-protocol.md and
   docs/encrypted-remote-sessions.md.
 
