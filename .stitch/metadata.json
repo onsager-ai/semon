@@ -10,7 +10,10 @@
       "width": "2560",
       "height": "3436",
       "screenshot": "designs/direction-a-0.png",
-      "html": "designs/direction-a-0.html"
+      "html": "designs/direction-a-0.html",
+      "screenshotWidth": 2560,
+      "screenshotHeight": 3436,
+      "screenshotVariant": "original (=s0), no raster upscaling"
     },
     {
       "direction": "b",
@@ -19,7 +22,10 @@
       "width": "2560",
       "height": "2472",
       "screenshot": "designs/direction-b-0.png",
-      "html": "designs/direction-b-0.html"
+      "html": "designs/direction-b-0.html",
+      "screenshotWidth": 2560,
+      "screenshotHeight": 2472,
+      "screenshotVariant": "original (=s0), no raster upscaling"
     }
   ]
 }

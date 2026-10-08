@@ -17,6 +17,17 @@ complete-model capabilities.
 
 ## Design evidence
 
+Review images now retain native source resolution: Stitch originals are 2560px
+wide (downloaded with `=s0`), canvas exports use pen.dev `scale: 2`, and product
+captures use Playwright `deviceScaleFactor: 2` at unchanged CSS viewports.
+Desktop PNGs are 2560 × 1720 and phone PNGs are 780 × 1720; no low-resolution
+bitmap was enlarged. Open the linked PNG at original size to inspect text.
+[Filtered content detail](after/filtered-1280-detail.png),
+[transcript detail](after/failure-1280-detail.png) and
+[failed tool detail](after/tool-output-detail.png) omit unrelated chrome for reading.
+The high-resolution baseline captures were reproduced with the baseline JS/CSS
+against the same synthetic source. Original 1x captures remain in Git history.
+
 The authoritative specification is [DESIGN.md](../../../.stitch/DESIGN.md).
 Exact CSS values remain implementation authority; the specification defines
 intent and reuse. The [existing workflow brief](../ai-design-workflow.md) links
