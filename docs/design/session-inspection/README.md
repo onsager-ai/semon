@@ -56,6 +56,7 @@ MCP synchronization is claimed.
 | --- | --- |
 | Desktop catalog, 1280 × 860 | [Nt3eb](canvas/Nt3eb.png) |
 | Filtered phone, 390 × 860 | [gZYIY](canvas/gZYIY.png) |
+| Compact reader, collapsed tool, 1280 × 860 | [vGVHj](canvas/vGVHj.png) |
 | Expanded failure, 1280 × 860 | [nGo6u](canvas/nGo6u.png) |
 | Loading, empty, error and focus | [Oo357](canvas/Oo357.png) |
 | Dark catalog | [gbtK3](canvas/gbtK3.png) |
@@ -67,6 +68,23 @@ reconstructed from the real sanitized harbor fixture. Existing transcript stylin
 and navigation remain shared components. Canvas navigation is schematic; it does
 not authorize changes to shared chrome. The canvas is a reviewable intent model,
 not a pixel-identical DOM export.
+
+User review preferred the previous actual compact viewer over the mockup style.
+The final UI preserves its original typography, type scale, search controls,
+automatic form wrapping, page spacing, one toolbar and one reading column.
+Inline labels remain visible. The result count, Clear filters and collapsed
+Search scope share a metadata row, with active errors still visible.
+The compact reader shows tools collapsed; the expanded failure frame is a separate
+inspection state. Original Stitch A/B previews remain exploration evidence, not
+the final layout. The final implementation uses the same compact geometry while
+retaining inline labels, atomic submission and context restoration.
+The canonical stylesheet before the catalog-specific extension is byte-for-byte
+unchanged from the inspected baseline. [Style parity evidence](validation/preserved-style.json)
+compares search controls against that baseline at 390/820/1280 in both themes;
+family, size, line height, control height, padding, corners, gap and background
+match. Geometry for the canvas was measured from the real rendered controls.
+The [actual reader capture](after/reader-collapsed-1280.png) is the visual review
+authority; the editable canvas describes its workflow and states.
 
 ## Result and screenshots
 
@@ -126,7 +144,7 @@ SEMON_TEST_NOW="$fixture_now" target/debug/semon sessions --serve \
 Open the local token URL printed by your server; do not publish it. Search harbor,
 open harbor, expand the failed Bash call, inspect complete output, then use Back.
 Use `compat=1` for the existing complete relationship view. The delivered workspace
-preview runs on port 8081; authentication tokens are intentionally excluded from
+preview runs on port 8082; authentication tokens are intentionally excluded from
 the artifacts. The fixture uses synthetic session messages, paths and identities.
 
 ## Validation

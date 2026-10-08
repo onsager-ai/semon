@@ -6,7 +6,7 @@
       "id": "Nt3eb",
       "x": 0,
       "y": 0,
-      "name": "Semon · Search-first catalog · 1280",
+      "name": "Semon · Existing UI catalog · 1280",
       "theme": {
         "mode": "light"
       },
@@ -333,129 +333,188 @@
           "type": "frame",
           "id": "BR60V",
           "x": 440,
-          "y": 82,
+          "y": 64,
           "name": "Catalog content · existing reading column",
           "width": 696,
           "height": 770,
           "layout": "vertical",
-          "gap": 16,
+          "gap": 24,
           "children": [
             {
-              "type": "text",
-              "id": "B4vXb",
-              "name": "Source observation",
-              "fill": "$muted",
-              "content": "laptop · Cached history",
-              "lineHeight": 1.6,
-              "fontFamily": "$sans",
-              "fontSize": 14,
-              "fontWeight": "normal"
-            },
-            {
-              "id": "yAXhd",
-              "type": "ref",
-              "ref": "BYbh8",
-              "name": "Metadata search",
+              "type": "frame",
+              "id": "SHMo4",
+              "name": "Existing source header",
               "width": 696,
-              "descendants": {
-                "Hf5RI": {
-                  "content": "Search session details"
-                },
-                "v1uz4A": {
-                  "content": "Search names, IDs, repositories…"
+              "height": 54,
+              "layout": "vertical",
+              "padding": [
+                20,
+                0,
+                14,
+                0
+              ],
+              "children": [
+                {
+                  "type": "text",
+                  "id": "B4vXb",
+                  "name": "Source observation",
+                  "fill": "$muted",
+                  "content": "laptop · Cached history",
+                  "lineHeight": 1.4285714285714286,
+                  "fontFamily": "$sans",
+                  "fontSize": 14,
+                  "fontWeight": "normal"
                 }
-              }
+              ]
             },
             {
               "type": "frame",
               "id": "BcZql",
-              "name": "Secondary filters",
+              "name": "Existing facet filters · responsive wrapping",
               "width": 696,
-              "height": 64,
-              "gap": 16,
-              "alignItems": "end",
+              "height": 100,
+              "layout": "vertical",
+              "gap": 8,
+              "padding": [
+                18,
+                0,
+                2,
+                0
+              ],
               "children": [
                 {
-                  "id": "PQvRJ",
-                  "type": "ref",
-                  "ref": "BYbh8",
-                  "name": "Harness filter",
-                  "width": "fill_container",
-                  "height": 64,
-                  "descendants": {
-                    "Hf5RI": {
-                      "content": "Harness"
+                  "type": "frame",
+                  "id": "eoiQs",
+                  "name": "Search and harness · existing first row",
+                  "width": 696,
+                  "height": 36,
+                  "gap": 8,
+                  "children": [
+                    {
+                      "id": "yAXhd",
+                      "type": "ref",
+                      "ref": "BYbh8",
+                      "name": "Metadata search",
+                      "width": 344,
+                      "height": 36,
+                      "descendants": {
+                        "Hf5RI": {
+                          "content": "Search"
+                        },
+                        "v1uz4A": {
+                          "content": "Session details…",
+                          "textGrowth": "fixed-width-height",
+                          "width": "fill_container",
+                          "height": 20,
+                          "fill": "$muted"
+                        }
+                      }
                     },
-                    "v1uz4A": {
-                      "content": "All harnesses"
+                    {
+                      "id": "PQvRJ",
+                      "type": "ref",
+                      "ref": "BYbh8",
+                      "name": "Harness filter",
+                      "width": 344,
+                      "height": 36,
+                      "descendants": {
+                        "Hf5RI": {
+                          "content": "Harness"
+                        },
+                        "v1uz4A": {
+                          "content": ""
+                        }
+                      }
                     }
-                  }
-                },
-                {
-                  "id": "hkkUj",
-                  "type": "ref",
-                  "ref": "BYbh8",
-                  "name": "Repository filter",
-                  "width": "fill_container",
-                  "height": 64,
-                  "descendants": {
-                    "Hf5RI": {
-                      "content": "Repository"
-                    },
-                    "v1uz4A": {
-                      "content": "All repositories"
-                    }
-                  }
+                  ]
                 },
                 {
                   "type": "frame",
-                  "id": "cMHEB",
-                  "name": "Apply filters · native submit",
-                  "width": 93,
+                  "id": "D4FY6",
+                  "name": "Repository and native submit",
+                  "width": 696,
                   "height": 36,
-                  "alignItems": "center",
+                  "gap": 8,
                   "children": [
                     {
-                      "type": "text",
-                      "id": "ZveTZ",
-                      "name": "Apply filters label",
-                      "fill": "$ink",
-                      "content": "Apply filters",
-                      "fontFamily": "$sans",
-                      "fontSize": 13,
-                      "fontWeight": "normal"
+                      "id": "hkkUj",
+                      "type": "ref",
+                      "ref": "BYbh8",
+                      "name": "Repository filter",
+                      "width": 616,
+                      "height": 36,
+                      "descendants": {
+                        "Hf5RI": {
+                          "content": "Repository"
+                        },
+                        "v1uz4A": {
+                          "content": ""
+                        }
+                      }
+                    },
+                    {
+                      "type": "frame",
+                      "id": "cMHEB",
+                      "name": "Apply filters · native submit",
+                      "width": 72,
+                      "height": 36,
+                      "alignItems": "center",
+                      "children": [
+                        {
+                          "type": "text",
+                          "id": "ZveTZ",
+                          "name": "Apply filters label",
+                          "fill": "$ink",
+                          "content": "Apply filters",
+                          "fontFamily": "$sans",
+                          "fontSize": 13,
+                          "fontWeight": "normal"
+                        }
+                      ]
                     }
                   ]
                 }
               ]
             },
             {
-              "type": "text",
-              "id": "YWOLK",
-              "name": "Scope disclosure",
-              "fill": "$muted",
-              "textGrowth": "fixed-width-height",
+              "type": "frame",
+              "id": "EGONE",
+              "name": "Compact list metadata · scope disclosure",
               "width": 696,
               "height": 36,
-              "content": "Search scope and source limitations  ›",
-              "textAlignVertical": "middle",
-              "fontFamily": "$sans",
-              "fontSize": 13,
-              "fontWeight": "normal"
-            },
-            {
-              "type": "text",
-              "id": "bEhFh",
-              "name": "Loaded results",
-              "fill": "$muted",
-              "textGrowth": "fixed-width-height",
-              "width": 696,
-              "height": 36,
-              "content": "23 sessions loaded · Latest recorded activity",
-              "textAlignVertical": "middle",
-              "fontFamily": "$sans",
-              "fontSize": 13,
-              "fontWeight": "normal"
+              "justifyContent": "space_between",
+              "alignItems": "center",
+              "children": [
+                {
+                  "type": "text",
+                  "id": "bEhFh",
+                  "name": "Loaded results",
+                  "fill": "$muted",
+                  "textGrowth": "fixed-width-height",
+                  "width": 400,
+                  "height": 36,
+                  "content": "23 sessions loaded · Latest recorded activity",
+                  "textAlignVertical": "middle",
+                  "fontFamily": "$sans",
+                  "fontSize": 13,
+                  "fontWeight": "normal"
+                },
+                {
+                  "type": "text",
+                  "id": "YWOLK",
+                  "name": "Scope disclosure",
+                  "fill": "$muted",
+                  "textGrowth": "fixed-width-height",
+                  "width": 93,
+                  "height": 36,
+                  "content": "Search scope  ›",
+                  "lineHeight": 1.5384615384615385,
+                  "textAlignVertical": "middle",
+                  "fontFamily": "$sans",
+                  "fontSize": 13,
+                  "fontWeight": "normal"
+                }
+              ]
             },
             {
               "type": "frame",
@@ -565,12 +624,18 @@
       "id": "BYbh8",
       "x": 0,
       "y": -140,
-      "name": "Labeled filter · component",
+      "name": "Shared search · existing compact control",
       "reusable": true,
       "width": 336,
-      "height": 64,
-      "layout": "vertical",
+      "height": 36,
+      "fill": "$sunken",
+      "cornerRadius": 10,
       "gap": 8,
+      "padding": [
+        0,
+        10
+      ],
+      "alignItems": "center",
       "children": [
         {
           "type": "text",
@@ -578,29 +643,27 @@
           "name": "Field label",
           "fill": "$muted",
           "content": "Harness",
+          "lineHeight": 1.4285714285714286,
           "fontFamily": "$sans",
-          "fontSize": 13,
+          "fontSize": 14,
           "fontWeight": "normal"
         },
         {
           "type": "frame",
           "id": "rzFC5",
           "name": "Input surface",
+          "clip": true,
           "width": "fill_container",
-          "height": 36,
+          "height": "fill_container",
           "fill": "$sunken",
-          "cornerRadius": 10,
-          "padding": [
-            8,
-            12
-          ],
+          "alignItems": "center",
           "children": [
             {
               "type": "text",
               "id": "v1uz4A",
               "name": "Field value",
               "fill": "$ink",
-              "content": "All harnesses",
+              "lineHeight": 1.4285714285714286,
               "fontFamily": "$sans",
               "fontSize": 14,
               "fontWeight": "normal"
@@ -693,114 +756,143 @@
           "id": "ypFy7",
           "name": "Phone catalog",
           "width": 390,
-          "layout": "vertical",
-          "gap": 16,
-          "padding": [
-            19,
-            16,
-            16,
-            16
-          ],
+          "height": 804,
+          "layout": "none",
           "children": [
+            {
+              "type": "text",
+              "id": "e1xZl",
+              "x": 16,
+              "y": 23,
+              "name": "Source observation · phone",
+              "fill": "$muted",
+              "content": "laptop · Cached history",
+              "lineHeight": 1.4666666666666666,
+              "fontFamily": "$sans",
+              "fontSize": 15,
+              "fontWeight": "normal"
+            },
             {
               "id": "shNP7",
               "type": "ref",
               "ref": "BYbh8",
               "name": "Search session details",
               "width": 358,
-              "height": 74,
+              "height": 44,
+              "x": 16,
+              "y": 94,
+              "stroke": "$ink",
+              "strokeWidth": 2,
               "descendants": {
                 "Hf5RI": {
-                  "content": "Search session details"
+                  "content": "Search",
+                  "fontSize": 15,
+                  "lineHeight": 1.4666666666666666
                 },
                 "rzFC5": {
                   "height": 44,
                   "stroke": "$ink",
-                  "strokeWidth": 2
+                  "strokeWidth": 0
                 },
                 "v1uz4A": {
-                  "content": "harbor"
-                }
-              }
-            },
-            {
-              "id": "e5pTgK",
-              "type": "ref",
-              "ref": "BYbh8",
-              "name": "Harness",
-              "width": 358,
-              "height": 74,
-              "descendants": {
-                "Hf5RI": {
-                  "content": "Harness"
-                },
-                "rzFC5": {
-                  "height": 44
-                },
-                "v1uz4A": {
-                  "content": "All harnesses"
-                }
-              }
-            },
-            {
-              "id": "UScgj",
-              "type": "ref",
-              "ref": "BYbh8",
-              "name": "Repository",
-              "width": 358,
-              "height": 74,
-              "descendants": {
-                "Hf5RI": {
-                  "content": "Repository"
-                },
-                "rzFC5": {
-                  "height": 44
-                },
-                "v1uz4A": {
-                  "content": "All repositories"
+                  "content": "harbor",
+                  "fontSize": 15,
+                  "lineHeight": 1.4666666666666666
                 }
               }
             },
             {
               "type": "frame",
-              "id": "XUBQx",
-              "name": "Apply filters · native submit · phone",
-              "width": "fill_container",
-              "height": 44,
-              "alignItems": "center",
+              "id": "vFIlg",
+              "x": 16,
+              "y": 146,
+              "name": "Existing phone wrapping · secondary controls",
+              "width": 358,
+              "height": 96,
+              "layout": "none",
               "children": [
                 {
-                  "type": "text",
-                  "id": "hDTBF",
-                  "name": "Phone submit label",
-                  "fill": "$ink",
-                  "content": "Apply filters",
-                  "fontFamily": "$sans",
-                  "fontSize": 15,
-                  "fontWeight": "normal"
+                  "id": "e5pTgK",
+                  "type": "ref",
+                  "ref": "BYbh8",
+                  "name": "Harness",
+                  "width": 358,
+                  "height": 44,
+                  "x": 0,
+                  "y": 0,
+                  "descendants": {
+                    "Hf5RI": {
+                      "content": "Harness",
+                      "fontSize": 15,
+                      "lineHeight": 1.4666666666666666
+                    },
+                    "rzFC5": {
+                      "height": 44
+                    },
+                    "v1uz4A": {
+                      "content": "",
+                      "fontSize": 15
+                    }
+                  }
+                },
+                {
+                  "id": "UScgj",
+                  "type": "ref",
+                  "ref": "BYbh8",
+                  "name": "Repository",
+                  "width": 278,
+                  "height": 44,
+                  "x": 0,
+                  "y": 52,
+                  "descendants": {
+                    "Hf5RI": {
+                      "content": "Repository",
+                      "fontSize": 15,
+                      "lineHeight": 1.4666666666666666
+                    },
+                    "rzFC5": {
+                      "height": 44
+                    },
+                    "v1uz4A": {
+                      "content": "",
+                      "fontSize": 15
+                    }
+                  }
+                },
+                {
+                  "type": "frame",
+                  "id": "XUBQx",
+                  "x": 286,
+                  "y": 52,
+                  "name": "Apply filters · native submit · phone",
+                  "width": 72,
+                  "height": 44,
+                  "alignItems": "center",
+                  "children": [
+                    {
+                      "type": "text",
+                      "id": "hDTBF",
+                      "name": "Phone submit label",
+                      "fill": "$ink",
+                      "content": "Apply filters",
+                      "lineHeight": 1.6923076923076923,
+                      "fontFamily": "$sans",
+                      "fontSize": 13,
+                      "fontWeight": "normal"
+                    }
+                  ]
                 }
               ]
             },
             {
-              "type": "text",
-              "id": "siHIW",
-              "name": "Scope disclosure",
-              "fill": "$muted",
-              "textGrowth": "fixed-width-height",
-              "width": "fill_container",
-              "height": 44,
-              "content": "Search scope and source limitations  ›",
-              "textAlignVertical": "middle",
-              "fontFamily": "$sans",
-              "fontSize": 13,
-              "fontWeight": "normal"
-            },
-            {
               "type": "frame",
               "id": "gXHrB",
-              "name": "Loaded result count and Clear filters action",
-              "width": "fill_container",
+              "x": 16,
+              "y": 260,
+              "name": "Compact result count, Clear and scope",
+              "width": 358,
               "height": 44,
+              "gap": 12,
               "justifyContent": "space_between",
               "alignItems": "center",
               "children": [
@@ -823,14 +915,30 @@
                   "fontFamily": "$sans",
                   "fontSize": 13,
                   "fontWeight": "normal"
+                },
+                {
+                  "type": "text",
+                  "id": "siHIW",
+                  "name": "Scope disclosure",
+                  "fill": "$muted",
+                  "textGrowth": "fixed-width-height",
+                  "width": 93,
+                  "height": 44,
+                  "content": "Search scope  ›",
+                  "textAlignVertical": "middle",
+                  "fontFamily": "$sans",
+                  "fontSize": 13,
+                  "fontWeight": "normal"
                 }
               ]
             },
             {
               "type": "frame",
               "id": "TRQHl",
+              "x": 16,
+              "y": 320,
               "name": "Filtered list · contiguous rows",
-              "width": "fill_container",
+              "width": 358,
               "layout": "vertical",
               "children": [
                 {
@@ -1621,9 +1729,10 @@
           "width": 696,
           "stroke": "$ink",
           "strokeWidth": 2,
+          "height": 36,
           "descendants": {
             "Hf5RI": {
-              "content": "Search session details"
+              "content": "Search"
             },
             "v1uz4A": {
               "content": "harbor"
@@ -1637,7 +1746,7 @@
       "id": "gbtK3",
       "x": 4030,
       "y": 0,
-      "name": "Semon · Search-first catalog · dark",
+      "name": "Semon · Existing UI catalog · dark",
       "theme": {
         "mode": "dark"
       },
@@ -1964,129 +2073,188 @@
           "type": "frame",
           "id": "W0tEEh",
           "x": 440,
-          "y": 82,
+          "y": 64,
           "name": "Catalog content · existing reading column",
           "width": 696,
           "height": 770,
           "layout": "vertical",
-          "gap": 16,
+          "gap": 24,
           "children": [
             {
-              "type": "text",
-              "id": "CIaVl",
-              "name": "Source observation",
-              "fill": "$muted",
-              "content": "laptop · Cached history",
-              "lineHeight": 1.6,
-              "fontFamily": "$sans",
-              "fontSize": 14,
-              "fontWeight": "normal"
-            },
-            {
-              "id": "Q9kC2",
-              "type": "ref",
-              "ref": "BYbh8",
-              "name": "Metadata search",
+              "type": "frame",
+              "id": "uj2tA",
+              "name": "Existing source header",
               "width": 696,
-              "descendants": {
-                "Hf5RI": {
-                  "content": "Search session details"
-                },
-                "v1uz4A": {
-                  "content": "Search names, IDs, repositories…"
+              "height": 54,
+              "layout": "vertical",
+              "padding": [
+                20,
+                0,
+                14,
+                0
+              ],
+              "children": [
+                {
+                  "type": "text",
+                  "id": "CIaVl",
+                  "name": "Source observation",
+                  "fill": "$muted",
+                  "content": "laptop · Cached history",
+                  "lineHeight": 1.4285714285714286,
+                  "fontFamily": "$sans",
+                  "fontSize": 14,
+                  "fontWeight": "normal"
                 }
-              }
+              ]
             },
             {
               "type": "frame",
               "id": "l1X7z",
-              "name": "Secondary filters",
+              "name": "Existing facet filters · responsive wrapping",
               "width": 696,
-              "height": 64,
-              "gap": 16,
-              "alignItems": "end",
+              "height": 100,
+              "layout": "vertical",
+              "gap": 8,
+              "padding": [
+                18,
+                0,
+                2,
+                0
+              ],
               "children": [
                 {
-                  "id": "jrrLt",
-                  "type": "ref",
-                  "ref": "BYbh8",
-                  "name": "Harness filter",
-                  "width": "fill_container",
-                  "height": 64,
-                  "descendants": {
-                    "Hf5RI": {
-                      "content": "Harness"
+                  "type": "frame",
+                  "id": "NFwCK",
+                  "name": "Search and harness · existing first row",
+                  "width": 696,
+                  "height": 36,
+                  "gap": 8,
+                  "children": [
+                    {
+                      "id": "Q9kC2",
+                      "type": "ref",
+                      "ref": "BYbh8",
+                      "name": "Metadata search",
+                      "width": 344,
+                      "height": 36,
+                      "descendants": {
+                        "Hf5RI": {
+                          "content": "Search"
+                        },
+                        "v1uz4A": {
+                          "content": "Session details…",
+                          "textGrowth": "fixed-width-height",
+                          "width": "fill_container",
+                          "height": 20,
+                          "fill": "$muted"
+                        }
+                      }
                     },
-                    "v1uz4A": {
-                      "content": "All harnesses"
+                    {
+                      "id": "jrrLt",
+                      "type": "ref",
+                      "ref": "BYbh8",
+                      "name": "Harness filter",
+                      "width": 344,
+                      "height": 36,
+                      "descendants": {
+                        "Hf5RI": {
+                          "content": "Harness"
+                        },
+                        "v1uz4A": {
+                          "content": ""
+                        }
+                      }
                     }
-                  }
-                },
-                {
-                  "id": "a9n2A",
-                  "type": "ref",
-                  "ref": "BYbh8",
-                  "name": "Repository filter",
-                  "width": "fill_container",
-                  "height": 64,
-                  "descendants": {
-                    "Hf5RI": {
-                      "content": "Repository"
-                    },
-                    "v1uz4A": {
-                      "content": "All repositories"
-                    }
-                  }
+                  ]
                 },
                 {
                   "type": "frame",
-                  "id": "CQZfM",
-                  "name": "Apply filters · native submit",
-                  "width": 93,
+                  "id": "B9gQL",
+                  "name": "Repository and native submit",
+                  "width": 696,
                   "height": 36,
-                  "alignItems": "center",
+                  "gap": 8,
                   "children": [
                     {
-                      "type": "text",
-                      "id": "qISJR",
-                      "name": "Apply filters label",
-                      "fill": "$ink",
-                      "content": "Apply filters",
-                      "fontFamily": "$sans",
-                      "fontSize": 13,
-                      "fontWeight": "normal"
+                      "id": "a9n2A",
+                      "type": "ref",
+                      "ref": "BYbh8",
+                      "name": "Repository filter",
+                      "width": 616,
+                      "height": 36,
+                      "descendants": {
+                        "Hf5RI": {
+                          "content": "Repository"
+                        },
+                        "v1uz4A": {
+                          "content": ""
+                        }
+                      }
+                    },
+                    {
+                      "type": "frame",
+                      "id": "CQZfM",
+                      "name": "Apply filters · native submit",
+                      "width": 72,
+                      "height": 36,
+                      "alignItems": "center",
+                      "children": [
+                        {
+                          "type": "text",
+                          "id": "qISJR",
+                          "name": "Apply filters label",
+                          "fill": "$ink",
+                          "content": "Apply filters",
+                          "fontFamily": "$sans",
+                          "fontSize": 13,
+                          "fontWeight": "normal"
+                        }
+                      ]
                     }
                   ]
                 }
               ]
             },
             {
-              "type": "text",
-              "id": "DbAHh",
-              "name": "Scope disclosure",
-              "fill": "$muted",
-              "textGrowth": "fixed-width-height",
+              "type": "frame",
+              "id": "wWSJr",
+              "name": "Compact list metadata · scope disclosure",
               "width": 696,
               "height": 36,
-              "content": "Search scope and source limitations  ›",
-              "textAlignVertical": "middle",
-              "fontFamily": "$sans",
-              "fontSize": 13,
-              "fontWeight": "normal"
-            },
-            {
-              "type": "text",
-              "id": "lS7CS",
-              "name": "Loaded results",
-              "fill": "$muted",
-              "textGrowth": "fixed-width-height",
-              "width": 696,
-              "height": 36,
-              "content": "23 sessions loaded · Latest recorded activity",
-              "textAlignVertical": "middle",
-              "fontFamily": "$sans",
-              "fontSize": 13,
-              "fontWeight": "normal"
+              "justifyContent": "space_between",
+              "alignItems": "center",
+              "children": [
+                {
+                  "type": "text",
+                  "id": "lS7CS",
+                  "name": "Loaded results",
+                  "fill": "$muted",
+                  "textGrowth": "fixed-width-height",
+                  "width": 400,
+                  "height": 36,
+                  "content": "23 sessions loaded · Latest recorded activity",
+                  "textAlignVertical": "middle",
+                  "fontFamily": "$sans",
+                  "fontSize": 13,
+                  "fontWeight": "normal"
+                },
+                {
+                  "type": "text",
+                  "id": "DbAHh",
+                  "name": "Scope disclosure",
+                  "fill": "$muted",
+                  "textGrowth": "fixed-width-height",
+                  "width": 93,
+                  "height": 36,
+                  "content": "Search scope  ›",
+                  "lineHeight": 1.5384615384615385,
+                  "textAlignVertical": "middle",
+                  "fontFamily": "$sans",
+                  "fontSize": 13,
+                  "fontWeight": "normal"
+                }
+              ]
             },
             {
               "type": "frame",
@@ -2186,6 +2354,434 @@
                   }
                 }
               ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "type": "frame",
+      "id": "vGVHj",
+      "x": 5390,
+      "y": 0,
+      "name": "Semon · Compact reader · 1280",
+      "theme": {
+        "mode": "light"
+      },
+      "clip": true,
+      "width": 1280,
+      "height": 860,
+      "fill": "$ground",
+      "layout": "none",
+      "children": [
+        {
+          "type": "frame",
+          "id": "hnbrS",
+          "x": 0,
+          "y": 0,
+          "name": "Shared navigation",
+          "width": 296,
+          "height": 860,
+          "fill": "$side",
+          "layout": "vertical",
+          "gap": 16,
+          "padding": 16,
+          "children": [
+            {
+              "type": "text",
+              "id": "NgEZK",
+              "name": "Brand",
+              "fill": "$ink",
+              "content": "Semon",
+              "fontFamily": "$sans",
+              "fontSize": 16,
+              "fontWeight": "normal"
+            },
+            {
+              "type": "frame",
+              "id": "UOPSN",
+              "name": "Navigation · Sessions",
+              "width": "fill_container",
+              "height": 36,
+              "fill": "$sunken",
+              "cornerRadius": 10,
+              "padding": 12,
+              "children": [
+                {
+                  "type": "text",
+                  "id": "P7zZa",
+                  "name": "Navigation label",
+                  "fill": "$ink",
+                  "content": "Sessions",
+                  "fontFamily": "$sans",
+                  "fontSize": 14,
+                  "fontWeight": "normal"
+                }
+              ]
+            },
+            {
+              "type": "frame",
+              "id": "x3zFKU",
+              "name": "Navigation · Sources",
+              "width": "fill_container",
+              "height": 36,
+              "fill": "$side",
+              "cornerRadius": 10,
+              "padding": 12,
+              "children": [
+                {
+                  "type": "text",
+                  "id": "Mj4VA",
+                  "name": "Navigation label",
+                  "fill": "$ink",
+                  "content": "Sources",
+                  "fontFamily": "$sans",
+                  "fontSize": 14,
+                  "fontWeight": "normal"
+                }
+              ]
+            },
+            {
+              "type": "frame",
+              "id": "O7h1ft",
+              "name": "Navigation · Machines",
+              "width": "fill_container",
+              "height": 36,
+              "fill": "$side",
+              "cornerRadius": 10,
+              "padding": 12,
+              "children": [
+                {
+                  "type": "text",
+                  "id": "KK0uR",
+                  "name": "Navigation label",
+                  "fill": "$ink",
+                  "content": "Machines",
+                  "fontFamily": "$sans",
+                  "fontSize": 14,
+                  "fontWeight": "normal"
+                }
+              ]
+            },
+            {
+              "type": "text",
+              "id": "ITWuI",
+              "name": "Recent heading",
+              "fill": "$muted",
+              "content": "RECENT",
+              "fontFamily": "$sans",
+              "fontSize": 12,
+              "fontWeight": "normal"
+            },
+            {
+              "type": "frame",
+              "id": "oZ1Jj",
+              "name": "Recent · deps audit",
+              "width": "fill_container",
+              "height": 48,
+              "layout": "vertical",
+              "gap": 4,
+              "children": [
+                {
+                  "type": "text",
+                  "id": "pwkzN",
+                  "name": "Recent name",
+                  "fill": "$ink",
+                  "content": "deps audit",
+                  "fontFamily": "$sans",
+                  "fontSize": 14,
+                  "fontWeight": "normal"
+                },
+                {
+                  "type": "text",
+                  "id": "sbrwW",
+                  "name": "Recent metadata",
+                  "fill": "$muted",
+                  "content": "Cached history · opus-5.5",
+                  "fontFamily": "$sans",
+                  "fontSize": 12,
+                  "fontWeight": "normal"
+                }
+              ]
+            },
+            {
+              "type": "frame",
+              "id": "eWa49",
+              "name": "Recent · feat/offline-sync",
+              "width": "fill_container",
+              "height": 48,
+              "layout": "vertical",
+              "gap": 4,
+              "children": [
+                {
+                  "type": "text",
+                  "id": "EN6E5",
+                  "name": "Recent name",
+                  "fill": "$ink",
+                  "content": "feat/offline-sync",
+                  "fontFamily": "$sans",
+                  "fontSize": 14,
+                  "fontWeight": "normal"
+                },
+                {
+                  "type": "text",
+                  "id": "G8Aska",
+                  "name": "Recent metadata",
+                  "fill": "$muted",
+                  "content": "Cached history · opus-5.5",
+                  "fontFamily": "$sans",
+                  "fontSize": 12,
+                  "fontWeight": "normal"
+                }
+              ]
+            },
+            {
+              "type": "frame",
+              "id": "nj0hK",
+              "name": "Recent · Review offline-sync diff",
+              "width": "fill_container",
+              "height": 48,
+              "layout": "vertical",
+              "gap": 4,
+              "children": [
+                {
+                  "type": "text",
+                  "id": "vfGlD",
+                  "name": "Recent name",
+                  "fill": "$ink",
+                  "content": "Review offline-sync diff",
+                  "fontFamily": "$sans",
+                  "fontSize": 14,
+                  "fontWeight": "normal"
+                },
+                {
+                  "type": "text",
+                  "id": "HOl8O",
+                  "name": "Recent metadata",
+                  "fill": "$muted",
+                  "content": "Cached history · opus-5.5",
+                  "fontFamily": "$sans",
+                  "fontSize": 12,
+                  "fontWeight": "normal"
+                }
+              ]
+            },
+            {
+              "type": "frame",
+              "id": "YvyEJ",
+              "name": "Recent · Check flush ordering",
+              "width": "fill_container",
+              "height": 48,
+              "layout": "vertical",
+              "gap": 4,
+              "children": [
+                {
+                  "type": "text",
+                  "id": "o5FLsN",
+                  "name": "Recent name",
+                  "fill": "$ink",
+                  "content": "Check flush ordering",
+                  "fontFamily": "$sans",
+                  "fontSize": 14,
+                  "fontWeight": "normal"
+                },
+                {
+                  "type": "text",
+                  "id": "Iy37b",
+                  "name": "Recent metadata",
+                  "fill": "$muted",
+                  "content": "Cached history · opus-5.5",
+                  "fontFamily": "$sans",
+                  "fontSize": 12,
+                  "fontWeight": "normal"
+                }
+              ]
+            },
+            {
+              "type": "frame",
+              "id": "DQHeF",
+              "name": "Recent · harbor",
+              "width": "fill_container",
+              "height": 48,
+              "layout": "vertical",
+              "gap": 4,
+              "children": [
+                {
+                  "type": "text",
+                  "id": "XqTtM",
+                  "name": "Recent name",
+                  "fill": "$ink",
+                  "content": "harbor",
+                  "fontFamily": "$sans",
+                  "fontSize": 14,
+                  "fontWeight": "normal"
+                },
+                {
+                  "type": "text",
+                  "id": "T9TNsd",
+                  "name": "Recent metadata",
+                  "fill": "$muted",
+                  "content": "Cached history · opus-5.5",
+                  "fontFamily": "$sans",
+                  "fontSize": 12,
+                  "fontWeight": "normal"
+                }
+              ]
+            },
+            {
+              "type": "frame",
+              "id": "sXwhD",
+              "name": "Recent · Check retry safety",
+              "width": "fill_container",
+              "height": 48,
+              "layout": "vertical",
+              "gap": 4,
+              "children": [
+                {
+                  "type": "text",
+                  "id": "k4YFG",
+                  "name": "Recent name",
+                  "fill": "$ink",
+                  "content": "Check retry safety",
+                  "fontFamily": "$sans",
+                  "fontSize": 14,
+                  "fontWeight": "normal"
+                },
+                {
+                  "type": "text",
+                  "id": "Y9hajs",
+                  "name": "Recent metadata",
+                  "fill": "$muted",
+                  "content": "Cached history · opus-5.5",
+                  "fontFamily": "$sans",
+                  "fontSize": 12,
+                  "fontWeight": "normal"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "frame",
+          "id": "K5eEtt",
+          "x": 296,
+          "y": 0,
+          "name": "Shared toolbar",
+          "width": 984,
+          "height": 56,
+          "fill": "$ground",
+          "padding": [
+            16,
+            24
+          ],
+          "children": [
+            {
+              "type": "text",
+              "id": "P5Ds5",
+              "name": "Toolbar title",
+              "fill": "$ink",
+              "content": "← Back to sessions     harbor",
+              "fontFamily": "$sans",
+              "fontSize": 16,
+              "fontWeight": "normal"
+            }
+          ]
+        },
+        {
+          "type": "frame",
+          "id": "j1fnH",
+          "x": 440,
+          "y": 82,
+          "name": "Recorded transcript",
+          "width": 696,
+          "layout": "vertical",
+          "gap": 8,
+          "children": [
+            {
+              "type": "text",
+              "id": "MyUh8",
+              "name": "Observation",
+              "fill": "$muted",
+              "textGrowth": "fixed-width",
+              "width": "fill_container",
+              "content": "Cached history · Related session context is incomplete",
+              "fontFamily": "$sans",
+              "fontSize": 13,
+              "fontWeight": "normal"
+            },
+            {
+              "type": "text",
+              "id": "nW8b3",
+              "name": "Native handoff context",
+              "fill": "$muted",
+              "content": "Native action · related session context is incomplete",
+              "fontFamily": "$sans",
+              "fontSize": 13,
+              "fontWeight": "normal"
+            },
+            {
+              "type": "frame",
+              "id": "Wd35g",
+              "name": "Long user message",
+              "width": 640,
+              "fill": "$ground",
+              "cornerRadius": 18,
+              "stroke": "$line",
+              "strokeWidth": 1,
+              "layout": "vertical",
+              "padding": [
+                8,
+                14
+              ],
+              "children": [
+                {
+                  "type": "text",
+                  "id": "bMKxy",
+                  "name": "User instruction",
+                  "fill": "$ink",
+                  "textGrowth": "fixed-width",
+                  "width": "fill_container",
+                  "content": "Run the sync tests again; if retry_backoff still fails, fix it and hand the offline flush to Codex.",
+                  "fontFamily": "$sans",
+                  "fontSize": 16,
+                  "fontWeight": "normal"
+                }
+              ]
+            },
+            {
+              "type": "text",
+              "id": "lSPTw",
+              "name": "Recorded thinking excerpt",
+              "fill": "$muted",
+              "textGrowth": "fixed-width",
+              "width": 640,
+              "content": "The retry test needs a fixed seed so I can tell whether the extra attempt is a timing issue or an overflow.",
+              "fontFamily": "$sans",
+              "fontSize": 14,
+              "fontWeight": "normal"
+            },
+            {
+              "type": "text",
+              "id": "xc50m",
+              "name": "Recorded assistant message",
+              "fill": "$ink",
+              "textGrowth": "fixed-width",
+              "width": "fill_container",
+              "content": "Running the sync suite first. If retry_backoff still fails intermittently I will fix it before handing anything off.",
+              "lineHeight": 1.5,
+              "fontFamily": "$sans",
+              "fontSize": 16,
+              "fontWeight": "normal"
+            },
+            {
+              "type": "text",
+              "id": "D8ThS",
+              "name": "Recorded tool · collapsed",
+              "fill": "$muted",
+              "content": "›  Bash   cargo test -p harbor-sync",
+              "fontFamily": "$mono",
+              "fontSize": 13,
+              "fontWeight": "normal"
             }
           ]
         }

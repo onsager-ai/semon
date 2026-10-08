@@ -15629,65 +15629,59 @@ globalThis.__semonUIShared = __semonUIShared;
         /* @__PURE__ */ jsxs(
           "form",
           {
-            class: "catalog-filters",
+            class: "catalog-filters facet-filters",
             onSubmit: (event) => {
               event.preventDefault();
               commit(event.currentTarget);
             },
             children: [
-              snapshot.metadataSearch && /* @__PURE__ */ jsxs("label", { class: "catalog-field catalog-query", children: [
-                /* @__PURE__ */ jsx("span", { children: "Search session details" }),
-                /* @__PURE__ */ jsx("span", { class: "search", children: /* @__PURE__ */ jsx(
+              snapshot.metadataSearch && /* @__PURE__ */ jsxs("label", { class: "search catalog-query", children: [
+                /* @__PURE__ */ jsx("span", { children: "Search" }),
+                /* @__PURE__ */ jsx(
                   "input",
                   {
                     name: "q",
                     "aria-label": "Search session details",
-                    placeholder: "Search names, IDs, repositories\u2026",
+                    placeholder: "Session details\u2026",
                     value: snapshot.query ?? "",
                     onChange: (event) => {
                       if (event.currentTarget.form) commit(event.currentTarget.form);
                     }
                   }
-                ) })
+                )
               ] }, "q"),
-              /* @__PURE__ */ jsxs("label", { class: "catalog-field", children: [
+              /* @__PURE__ */ jsxs("label", { class: "search", children: [
                 /* @__PURE__ */ jsx("span", { children: "Harness" }),
-                /* @__PURE__ */ jsx("span", { class: "search", children: /* @__PURE__ */ jsx(
+                /* @__PURE__ */ jsx(
                   "input",
                   {
                     name: "harness",
                     "aria-label": "Harness",
-                    placeholder: "All harnesses",
                     value: snapshot.harness,
                     onChange: (event) => {
                       if (event.currentTarget.form) commit(event.currentTarget.form);
                     }
                   }
-                ) })
+                )
               ] }, "harness"),
-              /* @__PURE__ */ jsxs("label", { class: "catalog-field", children: [
+              /* @__PURE__ */ jsxs("label", { class: "search", children: [
                 /* @__PURE__ */ jsx("span", { children: "Repository" }),
-                /* @__PURE__ */ jsx("span", { class: "search", children: /* @__PURE__ */ jsx(
+                /* @__PURE__ */ jsx(
                   "input",
                   {
                     name: "repo",
                     "aria-label": "Repository",
-                    placeholder: "All repositories",
                     value: snapshot.repo,
                     onChange: (event) => {
                       if (event.currentTarget.form) commit(event.currentTarget.form);
                     }
                   }
-                ) })
+                )
               ] }, "repo"),
               /* @__PURE__ */ jsx("button", { class: "link catalog-apply", type: "submit", children: "Apply filters" })
             ]
           }
         ),
-        /* @__PURE__ */ jsxs("details", { class: "catalog-scope", children: [
-          /* @__PURE__ */ jsx("summary", { children: "Search scope and source limitations" }),
-          /* @__PURE__ */ jsx("p", { class: "catalog-note", children: snapshot.metadataSearch ? "Search includes names, IDs, repositories, branches, models and harnesses. Conversation text and history across sources are unavailable." : "Text search and history across sources are unavailable." })
-        ] }),
         snapshot.searchPartial && /* @__PURE__ */ jsx("p", { class: "catalog-note", role: "status", children: "Search checked a bounded part of the index. Load more sessions to continue looking for matches." }),
         snapshot.searchIndexIncomplete && /* @__PURE__ */ jsx("p", { class: "catalog-note", role: "status", children: "Search is incomplete while recorded sessions are being indexed." }),
         snapshot.discovering && /* @__PURE__ */ jsx("p", { class: "catalog-note", role: "status", children: "More sessions are being discovered. This list is incomplete." }),
@@ -15744,7 +15738,11 @@ globalThis.__semonUIShared = __semonUIShared;
             snapshot.items.length === 1 ? "session loaded" : "sessions loaded",
             /* @__PURE__ */ jsx("span", { class: "catalog-sort", children: " \xB7 Latest recorded activity" })
           ] }),
-          filtered && /* @__PURE__ */ jsx("button", { class: "link", type: "button", onClick: () => host2.clearFilters(), children: "Clear filters" })
+          filtered && /* @__PURE__ */ jsx("button", { class: "link", type: "button", onClick: () => host2.clearFilters(), children: "Clear filters" }),
+          /* @__PURE__ */ jsxs("details", { class: "catalog-scope", children: [
+            /* @__PURE__ */ jsx("summary", { children: "Search scope" }),
+            /* @__PURE__ */ jsx("p", { class: "catalog-note", children: snapshot.metadataSearch ? "Search includes names, IDs, repositories, branches, models and harnesses. Conversation text and history across sources are unavailable." : "Text search and history across sources are unavailable." })
+          ] })
         ] }),
         /* @__PURE__ */ jsx("div", { class: "session-list", "aria-label": "Recorded sessions", children: snapshot.items.map((item2) => /* @__PURE__ */ jsxs(
           "button",

@@ -37,6 +37,12 @@ the reader's surrounding context when opening tool output or returning to the
 list. Do not introduce global conversation search, runtime totals, nested agent
 relationships, attachments or remote execution where capabilities omit them.
 
+Final visual direction: preserve the existing actual viewer, including its
+Instrument Sans/JetBrains Mono families, type scale, compact controls, page
+spacing and reader components. Stitch screens are workflow explorations;
+their aesthetics do not replace the approved product UI. Canvas typography and
+geometry derive from the rendered product, not an independent visual redesign.
+
 ## 2. Color Palette & Roles
 
 Use the YAML light roles above. Dark roles: ground #141817; sidebar #181c1b;
@@ -59,8 +65,10 @@ code inside its region without creating page overflow.
 Reuse shared shell, search, compact buttons, session rows, transcript messages,
 tool-step disclosure and panel chrome. Use 4/8/12/16/24/32px spacing, 6/10/14px
 corner roles. Panels alone use the existing shadow. List rows remain flat.
-Search is the primary full-width field; Harness and Repository are secondary
-labeled fields. Explain search scope once. Clear filters is a real action.
+Search is the primary field; Harness and Repository are secondary labeled fields.
+Reuse the existing `search` controls and wrapping `facet-filters` form with inline
+labels. Explain search scope once.
+Clear filters is a real action.
 Show a loaded-result count without pretending it is a global total.
 Tool summaries show name, command/title, recorded exit status and expansion.
 Expanded output keeps input/output labels, copy actions and truncation notices.
@@ -68,8 +76,10 @@ Expanded output keeps input/output labels, copy actions and truncation notices.
 ## 5. Layout Principles
 
 The desktop main reading column retains existing width and 32px gutters. Phone
-gutters are 16px and the shell becomes its existing drawer at 760px. Search and
-secondary filters stack without clipped labels. Match 390/820/1280px evidence.
+gutters are 16px and the shell becomes its existing drawer at 760px. Keep the
+existing 8px wrapping form gap and 260px field flex basis. At 1280px, Search and
+Harness share the first row; Repository and Apply filters share the next. At
+390px, fields wrap with 44px targets. Match 390/820/1280px evidence.
 Focus is a visible 2px ink outline. Every control has an accessible name;
 disclosures expose aria-expanded, filters have persistent labels, and Tab/Enter/
 Space/Escape follow native semantics. Coarse-pointer targets are at least 44px.
@@ -95,14 +105,22 @@ Choose A for the retained reading width, narrow-screen navigation, existing
 host ownership and bounded implementation. B offers simultaneous list context
 but narrows the reader and requires new pane/focus ownership. It is deferred.
 
-- Search occupies a whole row. Keep its label above the shared sunken input.
-  Harness and Repository use equal desktop columns beside the existing reader's
-  `link` submit control, Apply filters; stack on phones. The explicit submit
+- Preserve the existing compact viewer anatomy: one toolbar, contiguous session
+  rows and one reading column. Avoid extra panes, summary cards or permanently
+  expanded tool output. Use the compact reader frame as the default review view;
+  the expanded failure frame demonstrates an explicitly opened tool.
+- Keep labels inside the existing shared search controls, with the original
+  UI type size, 10px horizontal padding, 8px gap and 10px corners. Search has a
+  short visible label and an accessible name of `Search session details`.
+  Harness and Repository retain visible inline labels. Form wrapping follows
+  the existing facet filters; no bespoke stacked-label layout is introduced.
+  The explicit submit
   button makes Enter reliable in a multi-field form. Commit on native change,
   Apply filters or Enter. Do not fetch on every keystroke.
 - Keep the full search/scope explanation inside a native disclosure, labeled
-  `Search scope and source limitations`. Do not hide active failure/loading
-  notices in that disclosure. State `N sessions loaded`, never a global total.
+  `Search scope`, beside the loaded count and Clear filters on one metadata row.
+  Its expanded explanation wraps across the content width. Do not hide active
+  failure/loading notices. State `N sessions loaded`, never a global total.
 - Clear filters resets query/harness/repository atomically, loads one list and
   returns focus to the first available filter. Empty matching results retain
   the same recovery action; an empty source without filters does not show it.
@@ -115,8 +133,8 @@ but narrows the reader and requires new pane/focus ownership. It is deferred.
   dropping the surrounding messages; compatibility view alone supplies full
   relationship context.
 
-Preferred patterns: `catalog-field` wraps a persistent label and the shared
-`search` surface; `nrow` contains one name line and one metadata line; native
+Preferred patterns: `label.search` contains the inline label and named input;
+`facet-filters` owns wrapping; `nrow` contains one name line and one metadata line; native
 `details/summary` contains background explanation; `link` buttons contain real
 actions. Reuse shared transcript and tool components without copying their
 controllers into a product host. Lists must remain contiguous, not card grids.
@@ -124,7 +142,7 @@ controllers into a product host. Lists must remain contiguous, not card grids.
 ## 8. Handoff reconciliation and future changes
 
 Editable canvas: `../docs/design/session-inspection/session-inspection.pen`.
-Frames cover 1280px catalog, 390px filtered catalog, expanded failed tool,
+Frames cover compact 1280px catalog and reader, 390px filtered catalog, expanded failed tool,
 loading/empty/error/focus and dark theme. The shared navigation in the canvas is
 a schematic reference; production chrome keeps its existing components.
 
@@ -138,6 +156,14 @@ Browser validation added a real submit action and moved Back to sessions beside
 the truncated session name within the existing single-line toolbar. These changes
 are reflected in the native canvas. Reader controls use viewer.css primitives;
 they must not rely on Hub-only shell.css loading.
+
+User review preferred the previous actual compact viewer over the mockup style.
+The final refinement restores its original inline search controls, automatic
+form wrapping, fonts, sizing and page spacing, with one count/scope row. Labels,
+atomic submission and restored navigation context remain. Stitch A/B PNGs are
+unaltered exploration evidence; the editable canvas and implementation capture
+the selected source-derived intent. The failed-tool component stays collapsed until
+opened; its separate expanded frame is an interaction state, not the default.
 
 Real native-record validation also exposed two baseline defects: retained metadata
 search could fail before a history copy existed, and incomplete handoff prompts

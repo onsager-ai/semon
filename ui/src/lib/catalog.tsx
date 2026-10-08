@@ -70,68 +70,52 @@ export function renderCatalogList(
         </p>
       </div>
       <form
-        class="catalog-filters"
+        class="catalog-filters facet-filters"
         onSubmit={(event) => {
           event.preventDefault();
           commit(event.currentTarget);
         }}
       >
         {snapshot.metadataSearch && (
-          <label class="catalog-field catalog-query" key="q">
-            <span>Search session details</span>
-            <span class="search">
-              <input
-                name="q"
-                aria-label="Search session details"
-                placeholder="Search names, IDs, repositories…"
-                value={snapshot.query ?? ''}
-                onChange={(event) => {
-                  if (event.currentTarget.form) commit(event.currentTarget.form);
-                }}
-              />
-            </span>
+          <label class="search catalog-query" key="q">
+            <span>Search</span>
+            <input
+              name="q"
+              aria-label="Search session details"
+              placeholder="Session details…"
+              value={snapshot.query ?? ''}
+              onChange={(event) => {
+                if (event.currentTarget.form) commit(event.currentTarget.form);
+              }}
+            />
           </label>
         )}
-        <label class="catalog-field" key="harness">
+        <label class="search" key="harness">
           <span>Harness</span>
-          <span class="search">
-            <input
-              name="harness"
-              aria-label="Harness"
-              placeholder="All harnesses"
-              value={snapshot.harness}
-              onChange={(event) => {
-                if (event.currentTarget.form) commit(event.currentTarget.form);
-              }}
-            />
-          </span>
+          <input
+            name="harness"
+            aria-label="Harness"
+            value={snapshot.harness}
+            onChange={(event) => {
+              if (event.currentTarget.form) commit(event.currentTarget.form);
+            }}
+          />
         </label>
-        <label class="catalog-field" key="repo">
+        <label class="search" key="repo">
           <span>Repository</span>
-          <span class="search">
-            <input
-              name="repo"
-              aria-label="Repository"
-              placeholder="All repositories"
-              value={snapshot.repo}
-              onChange={(event) => {
-                if (event.currentTarget.form) commit(event.currentTarget.form);
-              }}
-            />
-          </span>
+          <input
+            name="repo"
+            aria-label="Repository"
+            value={snapshot.repo}
+            onChange={(event) => {
+              if (event.currentTarget.form) commit(event.currentTarget.form);
+            }}
+          />
         </label>
         <button class="link catalog-apply" type="submit">
           Apply filters
         </button>
       </form>
-      <details class="catalog-scope">
-        <summary>Search scope and source limitations</summary>
-        <p class="catalog-note">
-          {snapshot.metadataSearch
-            ? 'Search includes names, IDs, repositories, branches, models and harnesses. Conversation text and history across sources are unavailable.'
-            : 'Text search and history across sources are unavailable.'}
-        </p>
-      </details>
       {snapshot.searchPartial && (
         <p class="catalog-note" role="status">
           Search checked a bounded part of the index. Load more sessions to continue looking for
@@ -225,6 +209,14 @@ export function renderCatalogList(
             Clear filters
           </button>
         )}
+        <details class="catalog-scope">
+          <summary>Search scope</summary>
+          <p class="catalog-note">
+            {snapshot.metadataSearch
+              ? 'Search includes names, IDs, repositories, branches, models and harnesses. Conversation text and history across sources are unavailable.'
+              : 'Text search and history across sources are unavailable.'}
+          </p>
+        </details>
       </div>
       <div class="session-list" aria-label="Recorded sessions">
         {snapshot.items.map((item) => (
