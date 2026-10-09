@@ -1,3 +1,4 @@
+import { readShellPreference, writeShellPreference, withReturnPath } from '../lib/navigation';
 import { render } from 'preact';
 import type { ViewerApplication } from './viewer';
 import type { ViewerHost } from '../viewer-host';
@@ -8,7 +9,7 @@ import { requestJson } from '../lib/model';
 import { EffectScope } from './effects';
 import { I } from './registry';
 import { parseAccount } from '../lib/account';
-import { setGeometry } from '../lib';
+import { setGeometry, projectShellNavigation } from '../lib';
 /** Initial source discovery reads only authorized metadata, never a workspace model or native pane. */
 export function createCatalogSources(
   host: ViewerHost | null,
@@ -24,21 +25,22 @@ export function createCatalogSources(
     retry: number | undefined,
     delay = 1000;
   const account = parseAccount(host?.account);
-  const navigation = [
-    { key: 'sessions', label: 'Sessions', href: '/sessions', icon: I.sessions, current: true },
-    {
-      key: 'machines',
-      label: 'Machines',
-      href: host?.machinesPath ?? '/machines?compat=1',
-      icon: I.machines,
-      current: false,
-    },
-    ...(host?.nativeNavigation ?? []).filter(
-      (destination) => !['sessions', 'machines'].includes(destination.key),
-    ),
-  ];
-  let wide = document.querySelector('#page')?.classList.contains('wide-mode') ?? false,
-    rail = document.querySelector('.app')?.classList.contains('rail') ?? false;
+  const navigation = () =>
+    projectShellNavigation(host?.navigation ?? { leading: host?.nativeNavigation }, 'sessions', {
+      ...(host?.navigation?.leading?.find((item) => item.key === 'new-session')
+        ? {
+            'new-session': withReturnPath(
+              host.navigation.leading.find((item) => item.key === 'new-session')!.href,
+              location.pathname + location.search,
+            ),
+          }
+        : {}),
+      home: host?.navigation?.paths?.home ?? '/?compat=1',
+      analytics: host?.navigation?.paths?.analytics ?? '/analytics?compat=1',
+      machines: host?.machinesPath ?? '/machines?compat=1',
+    });
+  let wide = readShellPreference('wide'),
+    rail = readShellPreference('rail');
   const shell = createShellChrome({
     account: {
       place(widget, trigger) {
@@ -63,16 +65,21 @@ export function createCatalogSources(
     drawerClosed() {},
     railChanged() {
       rail = !rail;
-      shell.update(navigation, rail);
+      writeShellPreference('rail', rail);
+      shell.update(navigation(), rail);
     },
   });
   shell.mount(document.querySelector<HTMLElement>('.app')!);
-  shell.update(navigation, rail);
+  shell.update(navigation(), rail);
   const title = document.createElement('div');
   title.className = 'ttl';
-  title.textContent = 'Choose a machine';
+  const line = document.createElement('span');
+  line.className = 'l1';
+  line.textContent = 'Choose a machine';
+  title.append(line);
   function wideChange() {
     wide = !wide;
+    writeShellPreference('wide', wide);
     document.querySelector('#page')?.classList.toggle('wide-mode', wide);
     shell.account.updateWide(wide);
   }
@@ -82,6 +89,7 @@ export function createCatalogSources(
     account: account ? { account, compact: false, wide, onWideChange: wideChange } : null,
   });
   shell.drawerAccount(account ? { account, compact: true, wide, onWideChange: wideChange } : null);
+  const removeNavigation = host?.subscribeNavigation?.(() => shell.update(navigation(), rail));
   const root = shell.slots.content;
   function draw() {
     if (disposed) return;
@@ -165,7 +173,10 @@ export function createCatalogSources(
     }
   }
   scope.listen(document, 'keydown', (event) => {
-    if (event.key === 'Escape') shell.closeDrawer();
+    if (event.key === 'Escape') {
+      if (shell.account.open) shell.account.escape();
+      else shell.closeDrawer();
+    }
   });
   scope.listen(window, 'focus', () => void load(false));
   void load(false);
@@ -174,6 +185,7 @@ export function createCatalogSources(
       if (disposed) return;
       disposed = true;
       ++epoch;
+      removeNavigation?.();
       scope.destroy();
       render(null, root);
       shell.destroy();

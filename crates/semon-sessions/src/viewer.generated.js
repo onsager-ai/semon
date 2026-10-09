@@ -5704,6 +5704,10 @@ globalThis.__semonUIShared = __semonUIShared;
                 )
               ] }),
               /* @__PURE__ */ jsxs("div", { class: "cc-details", hidden: !open, children: [
+                /* @__PURE__ */ jsxs("span", { class: "cc-context", children: [
+                  /* @__PURE__ */ jsx("span", { class: "cc-context-name", children: screenText(entry2.name) }),
+                  /* @__PURE__ */ jsx("span", { class: "cc-context-meta", children: screenText(entry2.meta) })
+                ] }),
                 /* @__PURE__ */ jsx("span", { class: "cc-brief", children: /* @__PURE__ */ jsx(Inline, { text: entry2.brief }) }),
                 entry2.result ? /* @__PURE__ */ jsxs("span", { class: "cc-result" + (entry2.failed ? " err" : ""), children: [
                   /* @__PURE__ */ jsx("span", { class: "rl", children: entry2.failed ? "Result: " : "Returned: " }),
@@ -6961,6 +6965,52 @@ globalThis.__semonUIShared = __semonUIShared;
     }
     scope.lists.set(key2, ids);
     return ids.map((id) => by.get(id));
+  }
+
+  // src/lib/navigation.json
+  var navigation_default = [
+    { key: "home", label: "Home", path: "/", icon: "M4 11l8-7 8 7M6 9.5V20h12V9.5M10 20v-5h4v5" },
+    { key: "sessions", label: "Sessions", path: "/sessions", icon: "M9 6h11M9 12h11M9 18h11M4.5 6h.01M4.5 12h.01M4.5 18h.01" },
+    { key: "analytics", label: "Analytics", path: "/analytics", icon: "M4 19V5M4 19h17M8 15l3-4 3 2 5-7" },
+    { key: "machines", label: "Machines", path: "/machines", icon: "M3 5h18v11H3zM8 20h8M12 16v4" }
+  ];
+
+  // src/lib/navigation.ts
+  function readShellPreference(key2) {
+    try {
+      return localStorage.getItem("semon." + key2) === "1";
+    } catch {
+      return false;
+    }
+  }
+  function writeShellPreference(key2, value) {
+    try {
+      localStorage.setItem("semon." + key2, value ? "1" : "0");
+    } catch {
+    }
+  }
+  function withReturnPath(href, path) {
+    if (!safePath(href) || !safePath(path)) return href;
+    const url = new URL(href, location.href);
+    url.searchParams.set("return_to", path.split("#")[0]);
+    return url.pathname + url.search;
+  }
+  function projectShellNavigation(policy, route, paths = {}, counts = {}) {
+    const current = ["session", "trace", "sources"].includes(route) ? "sessions" : route === "machine" ? "machines" : route;
+    return [
+      ...policy?.leading ?? [],
+      ...navigation_default.map(({ path, ...definition }) => ({
+        ...definition,
+        href: paths[definition.key] ?? policy?.paths?.[definition.key] ?? path,
+        current: false
+      })),
+      ...policy?.trailing ?? []
+    ].map((destination) => ({
+      ...destination,
+      href: paths[destination.key] ?? destination.href,
+      current: destination.key === current,
+      ...counts[destination.key] === void 0 ? {} : { count: counts[destination.key], hot: true }
+    }));
   }
 
   // src/lib/index.ts
@@ -11273,42 +11323,29 @@ globalThis.__semonUIShared = __semonUIShared;
   // src/app/navigationView.ts
   function createNavigationView(host2) {
     function renderNav() {
-      const nav = host2.$("#nav"), destinations = [];
-      const under = {
-        home: ["home"],
-        analytics: ["analytics"],
-        sessions: ["sessions", "session", "trace"],
-        machines: ["machines", "machine"]
-      };
-      const item2 = (v, label, ic, count, hot) => {
-        destinations.push({
-          key: v,
-          label,
-          icon: ic,
-          href: v === "machines" && host2.machinesPath ? host2.machinesPath : host2.bootstrapOwner.urlOf({ v }),
-          current: under[v].includes(
-            (host2.sidebarOnly ? host2.layoutOwner.app.dataset.viewerNav : host2.nativePage?.nav) ?? host2.navigation.route.v
-          ),
-          count,
-          hot
-        });
-      };
-      destinations.push(...host2.viewerHost?.nativeNavigation ?? []);
-      item2("home", "Home", I.home, host2.domain.inbox().length, true);
-      item2("sessions", "Sessions", I.sessions);
-      item2("analytics", "Analytics", I.chart);
-      item2(
-        "machines",
-        "Machines",
-        I.machine,
-        Object.keys(host2.modelStore.machines).filter((m) => !host2.modelStore.machineUp[m]).length,
-        true
+      const nav = host2.$("#nav");
+      const route = (host2.sidebarOnly ? host2.layoutOwner.app.dataset.viewerNav : host2.nativePage?.nav) ?? host2.navigation.route.v;
+      const destinations = projectShellNavigation(
+        host2.viewerHost?.navigation ?? { leading: host2.viewerHost?.nativeNavigation },
+        route,
+        {
+          home: host2.bootstrapOwner.urlOf({ v: "home" }),
+          sessions: host2.bootstrapOwner.urlOf({ v: "sessions" }),
+          analytics: host2.bootstrapOwner.urlOf({ v: "analytics" }),
+          machines: host2.machinesPath ?? host2.bootstrapOwner.urlOf({ v: "machines" })
+        },
+        host2.nativePage ? {} : {
+          home: host2.domain.inbox().length,
+          machines: Object.keys(host2.modelStore.machines).filter(
+            (m) => !host2.modelStore.machineUp[m]
+          ).length
+        }
       );
       if (host2.accountControlsOwner.shellChrome)
         host2.accountControlsOwner.shellChrome.update(destinations, host2.layoutOwner.railMode);
       else
         renderShellNavigation(nav, destinations, (destination) => {
-          if (host2.viewerHost?.nativeNavigation?.some((item3) => item3.key === destination.key))
+          if (host2.viewerHost?.nativeNavigation?.some((item2) => item2.key === destination.key))
             return false;
           host2.destination.go(host2.navigation.historyRoute({ v: destination.key }, { v: "home" }));
           return true;
@@ -11324,6 +11361,10 @@ globalThis.__semonUIShared = __semonUIShared;
       s.role ? "role no repo" : "",
       ...(host2.modelStore.turns[s.id] ?? []).map((t) => t.start?.brief ?? t.u?.text ?? "")
     ].join(" ").toLowerCase().includes(q.toLowerCase());
+    const unsubscribe = host2.viewerHost?.subscribeNavigation?.(
+      () => host2.scope.timeout(renderNav, 0)
+    );
+    if (unsubscribe) host2.scope.own(unsubscribe);
     return { renderNav, sessMatch };
   }
 
@@ -15785,7 +15826,11 @@ globalThis.__semonUIShared = __semonUIShared;
           item2.key
         )) }),
         /* @__PURE__ */ jsx("p", { class: "catalog-note", children: /* @__PURE__ */ jsx("a", { class: "link", href: snapshot.compatibilityHref, children: "Open compatibility view (loads workspace history)" }) }),
-        !snapshot.updating && !snapshot.items.length && !snapshot.note && !snapshot.discovering && !snapshot.searchIndexIncomplete && !snapshot.searchPartial && !snapshot.candidates?.length && !snapshot.candidateUpdating && /* @__PURE__ */ jsx("p", { class: "catalog-note", children: "No recorded sessions match these filters." }),
+        !snapshot.updating && !snapshot.items.length && !snapshot.note && !snapshot.discovering && !snapshot.searchIndexIncomplete && !snapshot.searchPartial && !snapshot.candidates?.length && !snapshot.candidateUpdating && /* @__PURE__ */ jsx("p", { class: "catalog-note", children: filtered ? "No recorded sessions match these filters." : /* @__PURE__ */ jsxs(Fragment2, { children: [
+          "No recorded sessions in this source yet.",
+          " ",
+          /* @__PURE__ */ jsx("button", { class: "link", type: "button", onClick: () => host2.retry(), children: "Refresh history" })
+        ] }) }),
         snapshot.more && /* @__PURE__ */ jsx("button", { class: "link", type: "button", disabled: snapshot.updating, onClick: () => host2.more(), children: "Load more sessions" })
       ] }),
       root
@@ -16138,14 +16183,14 @@ globalThis.__semonUIShared = __semonUIShared;
   function createCatalogViewer(capabilities, viewerHost) {
     const scope = new EffectScope(), selection = new CatalogSelectionStore(), navigation = new NavigationController({}), updates = new ViewUpdates();
     let listRetry, listRetryDelay = 1e3;
-    let disposed = false, page = null, items = [], cursor = null, listEpoch = 0, updating = false, note = "", harness = "", repo = "", query = "", listScroll = 0, listFocus = "", active = null;
+    let disposed = false, page = null, items = [], cursor = null, listEpoch = 0, updating = false, note = "", harness = new URLSearchParams(location.search).get("harness") ?? "", repo = new URLSearchParams(location.search).get("repo") ?? "", query = new URLSearchParams(location.search).get("q") ?? "", listScroll = 0, listFocus = "", active = null;
     let candidates = [], candidateCursor = null, candidateLoaded = false, candidateUpdating = false, candidateNote = "", candidateEpoch = 0, candidateTimer;
     const selected = /* @__PURE__ */ new Map();
     const sourceViews = /* @__PURE__ */ new Map();
     let sourcesOpen = false, sourcesEpoch = 0, sourceItems = [], sourceCursor = null, sourcesUpdating = false, sourcesNote = "", sourcesRetryDelay = 1e3;
     const cacheKey = (key2) => JSON.stringify([capabilities.source_key, key2]);
     const account = parseAccount(viewerHost?.account);
-    let wide = document.querySelector("#page")?.classList.contains("wide-mode") ?? false, rail = document.querySelector(".app")?.classList.contains("rail") ?? false, chromeTitle = null, chromeSession = false;
+    let wide = readShellPreference("wide"), rail = readShellPreference("rail"), chromeTitle = null, chromeSession = false;
     const shell = createShellChrome({
       account: {
         place(widget, trigger) {
@@ -16166,10 +16211,6 @@ globalThis.__semonUIShared = __semonUIShared;
         }
       },
       navigate(destination) {
-        if (destination.key === "sources") {
-          void showSources();
-          return true;
-        }
         if (destination.key !== "sessions") return false;
         sourcesOpen = false;
         goList();
@@ -16181,6 +16222,7 @@ globalThis.__semonUIShared = __semonUIShared;
       },
       railChanged() {
         rail = !rail;
+        writeShellPreference("rail", rail);
         chrome();
       }
     });
@@ -16190,6 +16232,17 @@ globalThis.__semonUIShared = __semonUIShared;
     back.type = "button";
     back.className = "link catalog-back";
     back.textContent = "\u2190 Back to sessions";
+    const sources = document.createElement("a");
+    sources.className = "link catalog-sources";
+    sources.href = "/sessions?choose_source=1";
+    sources.textContent = "Choose a machine";
+    scope.listen(sources, "click", (event) => {
+      if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey)
+        return;
+      event.preventDefault();
+      history.pushState(null, "", "/sessions?choose_source=1");
+      void showSources();
+    });
     scope.listen(back, "click", () => goList());
     jumpActions.className = "viewer-bar-actions";
     jumpSlot.className = "viewer-jump";
@@ -16285,49 +16338,49 @@ globalThis.__semonUIShared = __semonUIShared;
       }
     };
     const currentParams = () => new URLSearchParams({ machine: capabilities.source_key });
+    const browsingParams = () => {
+      const value = currentParams();
+      if (harness) value.set("harness", harness);
+      if (repo) value.set("repo", repo);
+      if (query) value.set("q", query);
+      return value;
+    };
+    const saveFilters = () => history.replaceState(history.state, "", "/sessions?" + browsingParams());
     const params = () => new URLSearchParams({ machine: capabilities.source_key, scope: "retained_history" });
     function chrome() {
       const name = sourcesOpen ? "Choose a machine" : active?.meta?.name ?? (active ? "Session" : "Sessions");
+      const recentHeading = document.querySelector(".side-h");
+      if (recentHeading) recentHeading.textContent = "Recent on this machine";
       shell.update(
-        [
+        projectShellNavigation(
+          viewerHost?.navigation ?? { leading: viewerHost?.nativeNavigation },
+          "sessions",
           {
-            key: "sessions",
-            label: "Sessions",
-            href: "/sessions",
-            icon: I.sessions,
-            current: !sourcesOpen
-          },
-          {
-            key: "sources",
-            label: "Sources",
-            href: "/sessions?choose_source=1",
-            icon: I.sessions,
-            current: sourcesOpen
-          },
-          {
-            key: "machines",
-            label: "Machines",
-            href: viewerHost?.machinesPath ?? "/machines?compat=1",
-            icon: I.machines,
-            current: false
-          },
-          ...(viewerHost?.nativeNavigation ?? []).filter(
-            (destination) => !["sessions", "machines", "sources"].includes(destination.key)
-          )
-        ],
+            ...viewerHost?.navigation?.leading?.find((item2) => item2.key === "new-session") ? {
+              "new-session": withReturnPath(
+                viewerHost.navigation.leading.find((item2) => item2.key === "new-session").href,
+                location.pathname + location.search
+              )
+            } : {},
+            home: viewerHost?.navigation?.paths?.home ?? "/?compat=1",
+            analytics: viewerHost?.navigation?.paths?.analytics ?? "/analytics?compat=1",
+            sessions: "/sessions?" + browsingParams(),
+            machines: viewerHost?.machinesPath ?? "/machines?compat=1"
+          }
+        ),
         rail
       );
       if (chromeTitle !== name || chromeSession !== !!active) {
         chromeTitle = name;
         chromeSession = !!active;
         const label = document.createElement("span");
-        label.className = "catalog-session-name";
+        label.className = "catalog-session-name l1";
         label.textContent = name;
         title.replaceChildren(label);
         if (active) title.prepend(back);
         shell.topbar({
           titleSlot: title,
-          actions: active ? [jumpActions] : [],
+          actions: active ? [sources, jumpActions] : sourcesOpen ? [] : [sources],
           session: !!active,
           lead: { label: "Open menu", icon: I.menu },
           account: account ? {
@@ -16336,6 +16389,7 @@ globalThis.__semonUIShared = __semonUIShared;
             wide,
             onWideChange() {
               wide = !wide;
+              writeShellPreference("wide", wide);
               root.classList.toggle("wide-mode", wide);
               shell.account.updateWide(wide);
             }
@@ -16424,11 +16478,13 @@ globalThis.__semonUIShared = __semonUIShared;
             harness = values.harness;
             repo = values.repo;
             query = values.q;
+            saveFilters();
             void loadList(false);
           },
           clearFilters() {
             cancelCandidate();
             harness = repo = query = "";
+            saveFilters();
             void loadList(false);
             root.querySelector(".catalog-filters input")?.focus();
           },
@@ -16620,12 +16676,7 @@ globalThis.__semonUIShared = __semonUIShared;
       active = null;
       selection.clear();
       navigation.route = { v: "sessions" };
-      if (push)
-        history.pushState(
-          null,
-          "",
-          "/sessions" + (capabilities.source_key ? "?machine=" + encodeURIComponent(capabilities.source_key) : "")
-        );
+      if (push) history.pushState(null, "", "/sessions?" + browsingParams());
       root.replaceChildren();
       drawList();
       const row = [...root.querySelectorAll('[data-session-row="list"]')].find(
@@ -17031,14 +17082,14 @@ globalThis.__semonUIShared = __semonUIShared;
       navigation.route = { v: "session", id: key2 };
       render(null, root);
       root.replaceChildren(view.root);
-      chrome();
       shell.closeDrawer(true);
       if (push)
         history.pushState(
           null,
           "",
-          "/s/" + encodeURIComponent(view.meta?.harness ?? "native") + "/" + encodeURIComponent(key2) + (capabilities.source_key ? "?machine=" + encodeURIComponent(capabilities.source_key) : "")
+          "/s/" + encodeURIComponent(view.meta?.harness ?? "native") + "/" + encodeURIComponent(key2) + "?" + browsingParams()
         );
+      chrome();
       drawSelected(view);
       if (view.store.selectedPage()) {
         void loadIdentity(view);
@@ -17202,8 +17253,9 @@ globalThis.__semonUIShared = __semonUIShared;
         const url = retained?.selectedKey ? "/s/" + encodeURIComponent(
           selected.get(cacheKey(retained.selectedKey))?.meta?.harness ?? "native"
         ) + "/" + encodeURIComponent(retained.selectedKey) : "/sessions";
-        if (push) history.pushState(null, "", url + "?" + new URLSearchParams({ machine: key2 }));
+        if (push) history.pushState(null, "", url + "?" + browsingParams());
         else fromLocation();
+        chrome();
         void loadList(false);
       } catch (error) {
         if (disposed || epoch !== sourcesEpoch) return;
@@ -17216,7 +17268,7 @@ globalThis.__semonUIShared = __semonUIShared;
       }
     }
     function fromLocation() {
-      if (new URLSearchParams(location.search).get("choose_source") === "1") {
+      if (new URLSearchParams(location.search).get("choose_source") === "1" || viewerHost?.catalogSources && !new URLSearchParams(location.search).has("machine")) {
         void showSources();
         return;
       }
@@ -17226,6 +17278,10 @@ globalThis.__semonUIShared = __semonUIShared;
         void switchSource(machine2, false);
         return;
       }
+      const queryParams = new URLSearchParams(location.search);
+      harness = queryParams.get("harness") ?? "";
+      repo = queryParams.get("repo") ?? "";
+      query = queryParams.get("q") ?? "";
       const parts = location.pathname.split("/").filter(Boolean);
       if (parts[0] === "s" && parts[2]) {
         try {
@@ -17248,8 +17304,12 @@ globalThis.__semonUIShared = __semonUIShared;
       passive: true
     });
     scope.listen(document, "keydown", (event) => {
-      if (event.key === "Escape") shell.closeDrawer();
+      if (event.key === "Escape") {
+        if (shell.account.open) shell.account.escape();
+        else shell.closeDrawer();
+      }
     });
+    const removeNavigation = viewerHost?.subscribeNavigation?.(chrome);
     fromLocation();
     void loadList(false);
     scope.timeout(() => void recheckCapabilities(), 8e3);
@@ -17265,6 +17325,7 @@ globalThis.__semonUIShared = __semonUIShared;
         observation.destroy();
         removeRuntimeListener();
         runtimeObservation.destroy();
+        removeNavigation?.();
         scope.destroy();
         selection.destroy();
         navigation.destroy();
@@ -17288,20 +17349,18 @@ globalThis.__semonUIShared = __semonUIShared;
     const scope = new EffectScope();
     let disposed = false, epoch = 0, items = [], cursor = null, updating = false, note = "", retry, delay = 1e3;
     const account = parseAccount(host2?.account);
-    const navigation = [
-      { key: "sessions", label: "Sessions", href: "/sessions", icon: I.sessions, current: true },
-      {
-        key: "machines",
-        label: "Machines",
-        href: host2?.machinesPath ?? "/machines?compat=1",
-        icon: I.machines,
-        current: false
-      },
-      ...(host2?.nativeNavigation ?? []).filter(
-        (destination) => !["sessions", "machines"].includes(destination.key)
-      )
-    ];
-    let wide = document.querySelector("#page")?.classList.contains("wide-mode") ?? false, rail = document.querySelector(".app")?.classList.contains("rail") ?? false;
+    const navigation = () => projectShellNavigation(host2?.navigation ?? { leading: host2?.nativeNavigation }, "sessions", {
+      ...host2?.navigation?.leading?.find((item2) => item2.key === "new-session") ? {
+        "new-session": withReturnPath(
+          host2.navigation.leading.find((item2) => item2.key === "new-session").href,
+          location.pathname + location.search
+        )
+      } : {},
+      home: host2?.navigation?.paths?.home ?? "/?compat=1",
+      analytics: host2?.navigation?.paths?.analytics ?? "/analytics?compat=1",
+      machines: host2?.machinesPath ?? "/machines?compat=1"
+    });
+    let wide = readShellPreference("wide"), rail = readShellPreference("rail");
     const shell = createShellChrome({
       account: {
         place(widget, trigger) {
@@ -17330,16 +17389,21 @@ globalThis.__semonUIShared = __semonUIShared;
       },
       railChanged() {
         rail = !rail;
-        shell.update(navigation, rail);
+        writeShellPreference("rail", rail);
+        shell.update(navigation(), rail);
       }
     });
     shell.mount(document.querySelector(".app"));
-    shell.update(navigation, rail);
+    shell.update(navigation(), rail);
     const title = document.createElement("div");
     title.className = "ttl";
-    title.textContent = "Choose a machine";
+    const line = document.createElement("span");
+    line.className = "l1";
+    line.textContent = "Choose a machine";
+    title.append(line);
     function wideChange() {
       wide = !wide;
+      writeShellPreference("wide", wide);
       document.querySelector("#page")?.classList.toggle("wide-mode", wide);
       shell.account.updateWide(wide);
     }
@@ -17349,6 +17413,7 @@ globalThis.__semonUIShared = __semonUIShared;
       account: account ? { account, compact: false, wide, onWideChange: wideChange } : null
     });
     shell.drawerAccount(account ? { account, compact: true, wide, onWideChange: wideChange } : null);
+    const removeNavigation = host2?.subscribeNavigation?.(() => shell.update(navigation(), rail));
     const root = shell.slots.content;
     function draw() {
       if (disposed) return;
@@ -17415,7 +17480,10 @@ globalThis.__semonUIShared = __semonUIShared;
       }
     }
     scope.listen(document, "keydown", (event) => {
-      if (event.key === "Escape") shell.closeDrawer();
+      if (event.key === "Escape") {
+        if (shell.account.open) shell.account.escape();
+        else shell.closeDrawer();
+      }
     });
     scope.listen(window, "focus", () => void load(false));
     void load(false);
@@ -17424,8 +17492,111 @@ globalThis.__semonUIShared = __semonUIShared;
         if (disposed) return;
         disposed = true;
         ++epoch;
+        removeNavigation?.();
         scope.destroy();
         render(null, root);
+        shell.destroy();
+      }
+    };
+  }
+
+  // src/app/nativePageShell.ts
+  function createNativePageShell(host2) {
+    const scope = new EffectScope(), account = parseAccount(host2.account);
+    const app = document.querySelector(".app");
+    const content2 = host2.initialMachines;
+    if (content2) {
+      const page = app.querySelector("#page");
+      if (page && !page.contains(content2.element)) page.replaceChildren(content2.element);
+      scope.own(() => {
+        content2.destroy();
+        content2.element.remove();
+      });
+    }
+    let rail = readShellPreference("rail"), wide = readShellPreference("wide");
+    let destinations = projectShellNavigation(
+      host2.navigation ?? { leading: host2.nativeNavigation },
+      host2.nativePage?.nav ?? "machines",
+      { machines: host2.machinesPath }
+    );
+    const shell = createShellChrome({
+      account: {
+        place(widget, trigger) {
+          const at = trigger.getBoundingClientRect();
+          setGeometry(widget, "accountLeft", at.left);
+          setGeometry(widget, "accountWidth", at.width);
+          setGeometry(widget, "accountBottom", Math.max(0, innerHeight - at.top + 6));
+        },
+        opened() {
+        },
+        closed() {
+        },
+        navigate() {
+          return false;
+        },
+        submit() {
+          return false;
+        }
+      },
+      navigate() {
+        return false;
+      },
+      drawerOpened() {
+      },
+      drawerClosed() {
+      },
+      railChanged() {
+        rail = !rail;
+        writeShellPreference("rail", rail);
+        shell.update(destinations, rail);
+      }
+    });
+    const refresh = () => {
+      destinations = projectShellNavigation(
+        host2.navigation ?? { leading: host2.nativeNavigation },
+        host2.nativePage?.nav ?? "machines",
+        { machines: host2.machinesPath }
+      );
+      shell.update(destinations, rail);
+    };
+    const removeNavigation = host2.subscribeNavigation?.(refresh);
+    const title = app.querySelector("#topbar .ttl") ?? document.createElement("div");
+    title.className = "ttl";
+    if (!title.textContent) title.textContent = host2.nativePage?.title ?? "";
+    if (!title.querySelector(".l1")) {
+      const line = document.createElement("div");
+      line.className = "l1";
+      line.append(...title.childNodes);
+      title.append(line);
+    }
+    shell.mount(app);
+    shell.update(destinations, rail);
+    const accountProps = account ? {
+      account,
+      compact: false,
+      wide,
+      onWideChange() {
+        wide = !wide;
+        writeShellPreference("wide", wide);
+        shell.account.updateWide(wide);
+      }
+    } : null;
+    shell.topbar({
+      titleSlot: title,
+      lead: { label: "Open menu", icon: I.menu },
+      account: accountProps
+    });
+    shell.drawerAccount(accountProps ? { ...accountProps, compact: true } : null);
+    scope.listen(document, "keydown", (event) => {
+      if (event.key === "Escape") {
+        if (shell.account.open) shell.account.escape();
+        else shell.closeDrawer();
+      }
+    });
+    return {
+      destroy() {
+        removeNavigation?.();
+        scope.destroy();
         shell.destroy();
       }
     };
@@ -17459,7 +17630,8 @@ globalThis.__semonUIShared = __semonUIShared;
         owner = null;
         const url = new URL(location.href);
         url.searchParams.set("machine", key2);
-        history.replaceState(null, "", url.pathname + url.search + url.hash);
+        url.searchParams.delete("choose_source");
+        history.pushState(null, "", url.pathname + url.search + url.hash);
         void chooseReader();
       });
     }
@@ -17519,7 +17691,8 @@ globalThis.__semonUIShared = __semonUIShared;
         scope.releaseRequest(request);
       }
     }
-    if (new URLSearchParams(location.search).get("compat") === "1" || host2?.nativePage || host2?.loadMachines && host2.machinesPath === location.pathname || document.querySelector(".app")?.dataset.viewer === "sidebar")
+    if (host2?.nativePage) owner = createNativePageShell(host2);
+    else if (new URLSearchParams(location.search).get("compat") === "1" || host2?.loadMachines && host2.machinesPath === location.pathname || document.querySelector(".app")?.dataset.viewer === "sidebar")
       legacy();
     else if (host2?.catalogSources && !new URLSearchParams(location.search).has("machine"))
       chooseSources();

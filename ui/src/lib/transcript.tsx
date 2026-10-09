@@ -570,6 +570,10 @@ function Entry({ entry, owner }: { entry: EntryView; owner: SessionOwner }): Com
             </button>
           </div>
           <div class="cc-details" hidden={!open}>
+            <span class="cc-context">
+              <span class="cc-context-name">{screenText(entry.name)}</span>
+              <span class="cc-context-meta">{screenText(entry.meta)}</span>
+            </span>
             <span class="cc-brief">
               <Inline text={entry.brief} />
             </span>

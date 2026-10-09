@@ -53,6 +53,17 @@ clicks retain browser behavior. `drawerOpened`, `drawerClosed` and `railChanged`
 leave held ordering, persistence and routing in the host. Forward Escape from
 host overlay arbitration via `account.escape()` / `closeDrawer()`.
 
+`src/lib/navigation.json` defines the core destination identities, labels, icons
+and standalone paths. Rust fallback and every reader project this same registry.
+The optional `ViewerHost.navigation` supplies generic path overrides and leading
+or trailing destinations; `subscribeNavigation` reports changes without requiring
+a content model. Its unsubscribe belongs to the reader's document lifetime.
+Hosts validate unknown policy JSON with `parseShellNavigation` before rendering.
+Focused readers keep source selection in Sessions context and label Recent with
+its machine scope. Destinations needing the complete reader use explicit
+compatibility URLs. A `nativePage` mounts shared chrome over server content and
+owns no model, transcript request, router or poller; native forms remain native.
+
 `topbar(ShellBar)` commits host-owned `titleSlot` and `actions` nodes, or `mode`
 nodes for Find/error navigation. Supply `lead`, `session`, optional validated
 AccountMenuProps, and `accountTarget` for Find's nested account row. Nodes remain

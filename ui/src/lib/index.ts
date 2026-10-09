@@ -133,3 +133,5 @@ export type { LiveState, LiveHost, PagingState } from './live';
 export type { ViewerRoute, RouteModel } from './routes';
 export type { PagingDirection, PagingRange, PagerHost } from './paging';
 export { measureViewerBar } from './viewer-bar';
+
+export { projectShellNavigation, parseShellNavigation, type ShellNavigation } from './navigation';

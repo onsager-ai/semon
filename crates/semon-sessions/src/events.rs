@@ -61,7 +61,9 @@ thread_local! {
 /// v18: background Claude Bash calls retain their launch flag and terminal
 /// notifications retain their failure outcome.
 /// v19: ledgers verify the full consumed prefix instead of just two windows.
-const CACHE_VERSION: u32 = 22;
+/// v23: native connector completions and tool search are tools, including
+/// their exact code-mode parent; only explicitly typed reasoning is thinking.
+const CACHE_VERSION: u32 = 23;
 
 /// The four token categories the model serves for an exact model id.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -1907,8 +1909,8 @@ pub(crate) struct Event {
     /// Still open for operation attribution within the current turn.
     #[serde(default, skip_serializing_if = "is_false")]
     pub(crate) code_mode_open: bool,
-    /// Operation: the exact index of its parent code-mode call, the only one
-    /// open when the item completed.
+    /// Operation or native connector tool: the exact index of its parent
+    /// code-mode call, the only one open when the item completed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) parent: Option<usize>,
     /// Call flags: code-mode source calls ([`STDIN`], [`SENDS`]), or a
@@ -2980,9 +2982,75 @@ fn tool_event(summary: &mut FileIndex, event: Event) {
     if let Some(id) = &event.id {
         let index = summary.events.len();
         summary.tool_ids.entry(id.clone()).or_default().push(index);
-        summary.pending.insert(id.clone(), index);
+        if event.r.is_none() {
+            summary.pending.insert(id.clone(), index);
+        }
     }
     summary.events.push(event);
+}
+
+/// A completed native connector call is a tool even when no legacy call was
+/// emitted. Match mirrors only by their exact call id, never by tool name or
+/// text. Index offsets and metadata; keep arguments/results in the source.
+fn codex_connector_tool(summary: &mut FileIndex, item: &Value, offset: u64, time: Option<i64>) {
+    let Some(id) = field(item, "id").filter(|id| !id.is_empty()) else {
+        return;
+    };
+    let Some(tool) = field(item, "tool").filter(|name| !name.is_empty()) else {
+        return;
+    };
+    let scope = field(item, "namespace").or_else(|| field(item, "server"));
+    let name = scope
+        .filter(|scope| !scope.is_empty())
+        .map_or_else(|| tool.to_owned(), |scope| format!("{scope}.{tool}"));
+    let result_error = item
+        .get("result")
+        .and_then(|result| result.get("isError"))
+        .and_then(Value::as_bool);
+    let success = item.get("success").and_then(Value::as_bool);
+    let status = field(item, "status");
+    let failed = success == Some(false)
+        || result_error == Some(true)
+        || item.get("error").is_some_and(|error| !error.is_null())
+        || matches!(status, Some("failed" | "declined" | "cancelled"));
+    let known =
+        failed || success.is_some() || result_error.is_some() || status == Some("completed");
+    let reply = Reply {
+        o: offset,
+        t: time,
+        e: failed,
+        f: if known { 0 } else { UNKNOWN },
+        ..Reply::default()
+    };
+    if let Some(index) = summary.tool_ids.get(id).and_then(|indices| {
+        indices.iter().rev().copied().find(|index| {
+            summary
+                .events
+                .get(*index)
+                .is_some_and(|event| !event.code_mode)
+        })
+    }) {
+        summary.pending.remove(id);
+        if let Some(event) = summary.event_mut(index) {
+            event.r = Some(reply);
+            event.code_mode_open = false;
+        }
+        return;
+    }
+    let parent = open_code_mode_call(summary);
+    tool_event(
+        summary,
+        Event {
+            k: Kind::Tool,
+            o: offset,
+            t: time,
+            id: Some(id.to_owned()),
+            n: Some(name),
+            parent,
+            r: Some(reply),
+            ..Event::default()
+        },
+    );
 }
 
 /// Claude Code lines: `offset` is the line's byte offset.
@@ -3476,6 +3544,9 @@ pub(crate) fn codex(summary: &mut FileIndex, record: &Value, offset: u64) {
         // operations emitted by code-mode `exec`.
         Some("event_msg") if field(payload, "type") == Some("item_completed") => {
             let item = &payload["item"];
+            if matches!(field(item, "type"), Some("McpToolCall" | "DynamicToolCall")) {
+                codex_connector_tool(summary, item, offset, time);
+            }
             if field(item, "type") == Some("ContextCompaction") {
                 signal(summary, SignalKind::Compact, offset, time, None, None);
             }
@@ -3669,7 +3740,9 @@ pub(crate) fn codex(summary: &mut FileIndex, record: &Value, offset: u64) {
                     _ => {}
                 }
             }
-            Some("function_call" | "custom_tool_call" | "local_shell_call") => {
+            Some(
+                "function_call" | "custom_tool_call" | "local_shell_call" | "tool_search_call",
+            ) => {
                 let code_mode = field(payload, "type") == Some("custom_tool_call")
                     && field(payload, "name") == Some("exec");
                 let script = if code_mode {
@@ -3684,8 +3757,18 @@ pub(crate) fn codex(summary: &mut FileIndex, record: &Value, offset: u64) {
                         k: Kind::Tool,
                         o: offset,
                         t: time,
-                        id: field(payload, "call_id").map(str::to_owned),
-                        n: Some(field(payload, "name").unwrap_or("shell").to_owned()),
+                        id: field(payload, "call_id")
+                            .or_else(|| field(payload, "id"))
+                            .map(str::to_owned),
+                        n: Some(
+                            field(payload, "name")
+                                .unwrap_or(if field(payload, "type") == Some("tool_search_call") {
+                                    "tool_search"
+                                } else {
+                                    "shell"
+                                })
+                                .to_owned(),
+                        ),
                         code_mode,
                         code_mode_open: code_mode,
                         script,
@@ -3694,9 +3777,9 @@ pub(crate) fn codex(summary: &mut FileIndex, record: &Value, offset: u64) {
                     },
                 );
             }
-            Some("function_call_output" | "custom_tool_call_output") => {
+            Some("function_call_output" | "custom_tool_call_output" | "tool_search_output") => {
                 if let Some(id) = field(payload, "call_id") {
-                    let output = payload.get("output");
+                    let output = payload.get("output").or_else(|| payload.get("tools"));
                     let code = codex_exit(output);
                     let mut flags = if code.is_none() { UNKNOWN } else { 0 };
                     if acknowledgement(output) {
@@ -6415,4 +6498,30 @@ mod tests {
         assert!(!legacy.exists());
         fs::remove_dir_all(root).unwrap();
     }
+}
+#[test]
+fn native_connector_tool_classification_refuses_incomplete_identity_and_keeps_unknown_outcomes() {
+    let mut index = FileIndex::default();
+    for item in [
+        serde_json::json!({"type":"McpToolCall","tool":"search","result":{"content":[]}}),
+        serde_json::json!({"type":"DynamicToolCall","id":"missing-tool","summary":[{"text":"not thinking"}]}),
+        serde_json::json!({"type":"FutureTool","id":"future","tool":"search","summary":[{"text":"not thinking"}]}),
+    ] {
+        codex(
+            &mut index,
+            &serde_json::json!({"type":"event_msg","payload":{"type":"item_completed","item":item}}),
+            0,
+        );
+    }
+    assert!(index.events.is_empty());
+    assert!(index.extras.is_empty());
+    codex(
+        &mut index,
+        &serde_json::json!({"type":"event_msg","payload":{"type":"item_completed","item":{"type":"DynamicToolCall","id":"unknown","tool":"search","arguments":{}}}}),
+        1,
+    );
+    assert_eq!(index.events.len(), 1);
+    assert_eq!(index.events[0].k, Kind::Tool);
+    assert_eq!(index.events[0].r.as_ref().unwrap().f, UNKNOWN);
+    assert!(index.pending.is_empty());
 }
