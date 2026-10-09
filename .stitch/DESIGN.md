@@ -295,3 +295,10 @@ the surface border; coarse-pointer targets stay 44px (6px toolbar padding plus
 the 6px compact-control visual inset). Generic composers retain their existing
 96px minimum and 17px toolbar insets. This exception follows the supplied
 Codex/ChatGPT reference and does not change transcript density.
+
+The linked-session state board now uses 16px phone-example edge padding and an
+automatically sized outer frame. Narrow metadata has a deliberate ellipsis,
+rather than cutting a glyph at the canvas edge; expanded tasks/results wrap
+without a clamp. This corrects the native demonstration, not product typography
+or row density. Hosts may use the shared finite `minHeight` geometry slot for
+visible-viewport fitting; layout policy and listener lifetime remain host-owned.

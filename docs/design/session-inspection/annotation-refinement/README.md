@@ -57,3 +57,11 @@ coordinate that now targets the compact row's session-name button. The test now
 clicks metadata to validate noninteractive content separately; name navigation
 and route preservation assertions are retained. Final-head remote checks remain
 separate from selected local validation.
+
+The phone canvas example was subsequently corrected after the user identified
+hard-cropped metadata. Its dark pane now has 16px edge padding, deliberate
+metadata ellipses and full-width wrapping for disclosed task/result text. The
+board grows to its content rather than clipping its lower edge. Native compact
+rows/components remain editable; Source product row CSS is unchanged. The shared
+finite CSSOM geometry API additionally exposes `minHeight` for consumer-owned
+visible-viewport layout, with its existing cleanup and numeric validation.

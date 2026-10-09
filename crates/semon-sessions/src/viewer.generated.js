@@ -6669,6 +6669,7 @@ globalThis.__semonUIShared = __semonUIShared;
 
   // src/lib/geometry.ts
   var properties2 = {
+    minHeight: "min-height",
     paddingBottom: "padding-bottom",
     scrollPaddingTop: "scroll-padding-top",
     barHeight: "--barh",
