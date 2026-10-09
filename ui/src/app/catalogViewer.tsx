@@ -1,3 +1,4 @@
+import { readShellPreference, writeShellPreference, withReturnPath } from '../lib/navigation';
 import {
   parseCatalogSourceCandidates,
   parseCatalogSourceCandidateProgress,
@@ -26,7 +27,7 @@ import {
 import { releaseScreen } from '../lib/screens';
 import { requestJson } from '../lib/model';
 import { parseAccount } from '../lib/account';
-import { setGeometry } from '../lib';
+import { setGeometry, projectShellNavigation } from '../lib';
 import { NavigationController } from '../navigation/routes';
 import { ViewUpdates } from '../state/viewUpdates';
 import { createControlObservation } from './controlObservation';
@@ -83,9 +84,9 @@ export function createCatalogViewer(
     listEpoch = 0,
     updating = false,
     note = '',
-    harness = '',
-    repo = '',
-    query = '',
+    harness = new URLSearchParams(location.search).get('harness') ?? '',
+    repo = new URLSearchParams(location.search).get('repo') ?? '',
+    query = new URLSearchParams(location.search).get('q') ?? '',
     listScroll = 0,
     listFocus = '',
     active: SelectedView | null = null;
@@ -120,8 +121,8 @@ export function createCatalogViewer(
     sourcesRetryDelay = 1000;
   const cacheKey = (key: string) => JSON.stringify([capabilities.source_key, key]);
   const account = parseAccount(viewerHost?.account);
-  let wide = document.querySelector('#page')?.classList.contains('wide-mode') ?? false,
-    rail = document.querySelector('.app')?.classList.contains('rail') ?? false,
+  let wide = readShellPreference('wide'),
+    rail = readShellPreference('rail'),
     chromeTitle: string | null = null,
     chromeSession = false;
   const shell = createShellChrome({
@@ -142,10 +143,6 @@ export function createCatalogViewer(
       },
     },
     navigate(destination) {
-      if (destination.key === 'sources') {
-        void showSources();
-        return true;
-      }
       if (destination.key !== 'sessions') return false;
       sourcesOpen = false;
       goList();
@@ -155,6 +152,7 @@ export function createCatalogViewer(
     drawerClosed() {},
     railChanged() {
       rail = !rail;
+      writeShellPreference('rail', rail);
       chrome();
     },
   });
@@ -169,6 +167,17 @@ export function createCatalogViewer(
   back.type = 'button';
   back.className = 'link catalog-back';
   back.textContent = '← Back to sessions';
+  const sources = document.createElement('a');
+  sources.className = 'link catalog-sources';
+  sources.href = '/sessions?choose_source=1';
+  sources.textContent = 'Choose a machine';
+  scope.listen(sources, 'click', (event) => {
+    if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey)
+      return;
+    event.preventDefault();
+    history.pushState(null, '', '/sessions?choose_source=1');
+    void showSources();
+  });
   scope.listen(back, 'click', () => goList());
   jumpActions.className = 'viewer-bar-actions';
   jumpSlot.className = 'viewer-jump';
@@ -270,52 +279,55 @@ export function createCatalogViewer(
     }
   };
   const currentParams = () => new URLSearchParams({ machine: capabilities.source_key });
+  const browsingParams = () => {
+    const value = currentParams();
+    if (harness) value.set('harness', harness);
+    if (repo) value.set('repo', repo);
+    if (query) value.set('q', query);
+    return value;
+  };
+  const saveFilters = () =>
+    history.replaceState(history.state, '', '/sessions?' + browsingParams());
   const params = () =>
     new URLSearchParams({ machine: capabilities.source_key, scope: 'retained_history' });
   function chrome() {
     const name = sourcesOpen
       ? 'Choose a machine'
       : (active?.meta?.name ?? (active ? 'Session' : 'Sessions'));
+    const recentHeading = document.querySelector('.side-h');
+    if (recentHeading) recentHeading.textContent = 'Recent on this machine';
     shell.update(
-      [
+      projectShellNavigation(
+        viewerHost?.navigation ?? { leading: viewerHost?.nativeNavigation },
+        'sessions',
         {
-          key: 'sessions',
-          label: 'Sessions',
-          href: '/sessions',
-          icon: I.sessions,
-          current: !sourcesOpen,
+          ...(viewerHost?.navigation?.leading?.find((item) => item.key === 'new-session')
+            ? {
+                'new-session': withReturnPath(
+                  viewerHost.navigation.leading.find((item) => item.key === 'new-session')!.href,
+                  location.pathname + location.search,
+                ),
+              }
+            : {}),
+          home: viewerHost?.navigation?.paths?.home ?? '/?compat=1',
+          analytics: viewerHost?.navigation?.paths?.analytics ?? '/analytics?compat=1',
+          sessions: '/sessions?' + browsingParams(),
+          machines: viewerHost?.machinesPath ?? '/machines?compat=1',
         },
-        {
-          key: 'sources',
-          label: 'Sources',
-          href: '/sessions?choose_source=1',
-          icon: I.sessions,
-          current: sourcesOpen,
-        },
-        {
-          key: 'machines',
-          label: 'Machines',
-          href: viewerHost?.machinesPath ?? '/machines?compat=1',
-          icon: I.machines,
-          current: false,
-        },
-        ...(viewerHost?.nativeNavigation ?? []).filter(
-          (destination) => !['sessions', 'machines', 'sources'].includes(destination.key),
-        ),
-      ],
+      ),
       rail,
     );
     if (chromeTitle !== name || chromeSession !== !!active) {
       chromeTitle = name;
       chromeSession = !!active;
       const label = document.createElement('span');
-      label.className = 'catalog-session-name';
+      label.className = 'catalog-session-name l1';
       label.textContent = name;
       title.replaceChildren(label);
       if (active) title.prepend(back);
       shell.topbar({
         titleSlot: title,
-        actions: active ? [jumpActions] : [],
+        actions: active ? [sources, jumpActions] : sourcesOpen ? [] : [sources],
         session: !!active,
         lead: { label: 'Open menu', icon: I.menu },
         account: account
@@ -325,6 +337,7 @@ export function createCatalogViewer(
               wide,
               onWideChange() {
                 wide = !wide;
+                writeShellPreference('wide', wide);
                 root.classList.toggle('wide-mode', wide);
                 shell.account.updateWide(wide);
               },
@@ -420,11 +433,13 @@ export function createCatalogViewer(
           harness = values.harness;
           repo = values.repo;
           query = values.q;
+          saveFilters();
           void loadList(false);
         },
         clearFilters() {
           cancelCandidate();
           harness = repo = query = '';
+          saveFilters();
           void loadList(false);
           root.querySelector<HTMLInputElement>('.catalog-filters input')?.focus();
         },
@@ -665,15 +680,7 @@ export function createCatalogViewer(
     active = null;
     selection.clear();
     navigation.route = { v: 'sessions' };
-    if (push)
-      history.pushState(
-        null,
-        '',
-        '/sessions' +
-          (capabilities.source_key
-            ? '?machine=' + encodeURIComponent(capabilities.source_key)
-            : ''),
-      );
+    if (push) history.pushState(null, '', '/sessions?' + browsingParams());
     root.replaceChildren();
     drawList();
     const row = [...root.querySelectorAll<HTMLButtonElement>('[data-session-row="list"]')].find(
@@ -1130,7 +1137,6 @@ export function createCatalogViewer(
     navigation.route = { v: 'session', id: key };
     render(null, root);
     root.replaceChildren(view.root);
-    chrome();
     shell.closeDrawer(true);
     if (push)
       history.pushState(
@@ -1140,10 +1146,10 @@ export function createCatalogViewer(
           encodeURIComponent(view.meta?.harness ?? 'native') +
           '/' +
           encodeURIComponent(key) +
-          (capabilities.source_key
-            ? '?machine=' + encodeURIComponent(capabilities.source_key)
-            : ''),
+          '?' +
+          browsingParams(),
       );
+    chrome();
     drawSelected(view);
     if (view.store.selectedPage()) {
       void loadIdentity(view);
@@ -1317,8 +1323,9 @@ export function createCatalogViewer(
           '/' +
           encodeURIComponent(retained.selectedKey)
         : '/sessions';
-      if (push) history.pushState(null, '', url + '?' + new URLSearchParams({ machine: key }));
+      if (push) history.pushState(null, '', url + '?' + browsingParams());
       else fromLocation();
+      chrome();
       void loadList(false);
     } catch (error) {
       if (disposed || epoch !== sourcesEpoch) return;
@@ -1331,7 +1338,10 @@ export function createCatalogViewer(
     }
   }
   function fromLocation() {
-    if (new URLSearchParams(location.search).get('choose_source') === '1') {
+    if (
+      new URLSearchParams(location.search).get('choose_source') === '1' ||
+      (viewerHost?.catalogSources && !new URLSearchParams(location.search).has('machine'))
+    ) {
       void showSources();
       return;
     }
@@ -1341,6 +1351,10 @@ export function createCatalogViewer(
       void switchSource(machine, false);
       return;
     }
+    const queryParams = new URLSearchParams(location.search);
+    harness = queryParams.get('harness') ?? '';
+    repo = queryParams.get('repo') ?? '';
+    query = queryParams.get('q') ?? '';
     const parts = location.pathname.split('/').filter(Boolean);
     if (parts[0] === 's' && parts[2]) {
       try {
@@ -1366,8 +1380,12 @@ export function createCatalogViewer(
     passive: true,
   });
   scope.listen(document, 'keydown', (event) => {
-    if (event.key === 'Escape') shell.closeDrawer();
+    if (event.key === 'Escape') {
+      if (shell.account.open) shell.account.escape();
+      else shell.closeDrawer();
+    }
   });
+  const removeNavigation = viewerHost?.subscribeNavigation?.(chrome);
   fromLocation();
   void loadList(false);
   scope.timeout(() => void recheckCapabilities(), 8000);
@@ -1388,6 +1406,7 @@ export function createCatalogViewer(
       observation.destroy();
       removeRuntimeListener();
       runtimeObservation.destroy();
+      removeNavigation?.();
       scope.destroy();
       selection.destroy();
       navigation.destroy();

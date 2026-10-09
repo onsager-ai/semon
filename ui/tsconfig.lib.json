@@ -6,6 +6,7 @@
     "jsx": "react-jsx",
     "jsxImportSource": "preact",
     "strict": true,
+    "resolveJsonModule": true,
     "noEmit": true,
     "lib": ["ES2022", "DOM"],
     "skipLibCheck": false
