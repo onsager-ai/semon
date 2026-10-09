@@ -33,5 +33,16 @@
     "crates/semon-sessions/src/shell.css": "aa430cbc4ea40c2fbef7020a237565e97e6d7cdcead0d30be98d006108b82fe3",
     "crates/semon-sessions/src/viewer.generated.js": "64e02bfdf40d8e3bd02c73cd9583e98c0baa233c03edb6a786f8cd8f9980f7f7",
     "docs/design/session-inspection/session-inspection.pen": "f8a0fc9bea788dd16ebbc39c56bef17fb50e41e7057c7e7b5f84d3120110c63b"
+  },
+  "turn_navigation": {
+    "passed": true,
+    "light_and_dark_screens": 134,
+    "handoff_navigation_cases": 4,
+    "page_errors": 0,
+    "note": "CI exposed an obsolete top-left content coordinate now occupied by the session-name button. The test clicks noninteractive metadata and preserves route/name assertions; the full turns check passes locally."
+  },
+  "remote_ci": {
+    "previous_head": "82e09eb335e7d5aac8b0e53a7aebe0c6bb905c0f",
+    "status": "All jobs except navigation/aggregate passed. The navigation fixture is corrected in this follow-up; final-head checks are pending."
   }
 }

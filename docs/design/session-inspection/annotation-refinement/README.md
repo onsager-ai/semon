@@ -50,3 +50,10 @@ Future UI work continues through the pinned ui-design skill: read the authoritat
 specification, reuse tokens/components, edit the native canvas when intent changes,
 compare representative product states and explain deliberate deviations in the PR.
 No parallel instruction platform or shared-skill projection changes are needed.
+
+The full turns/navigation check also passes (134 light/dark screens and four
+phone/desktop handoff navigation cases). Remote CI caught a stale content-click
+coordinate that now targets the compact row's session-name button. The test now
+clicks metadata to validate noninteractive content separately; name navigation
+and route preservation assertions are retained. Final-head remote checks remain
+separate from selected local validation.
