@@ -7,9 +7,9 @@ import type { createDomain } from '../domain/calculations';
 import type { createAccountControls } from './accountControls';
 import type { createDestination } from './destination';
 import type { Session } from '../domain/types';
-import type { ShellDestination } from '../lib';
-import { renderShellNavigation } from '../lib';
-import { HARNESS, I } from './registry';
+import type { EffectScope } from './effects';
+import { renderShellNavigation, projectShellNavigation } from '../lib';
+import { HARNESS } from './registry';
 interface NavigationViewHost {
   viewerHost: ViewerHost | null;
   $: <T extends HTMLElement = HTMLElement>(s: string, r?: ParentNode) => T;
@@ -17,6 +17,7 @@ interface NavigationViewHost {
   sidebarOnly: boolean;
   nativePage: { title: string; nav: string } | undefined;
   navigation: NavigationController;
+  scope: Pick<EffectScope, 'own' | 'timeout'>;
 
   destination: Pick<ReturnType<typeof createDestination>, 'go'>;
 
@@ -33,48 +34,27 @@ interface NavigationViewHost {
 /** Owns navigationView behavior through explicit application ports. */
 export function createNavigationView(host: NavigationViewHost) {
   function renderNav() {
-    const nav = host.$('#nav'),
-      destinations: ShellDestination[] = [];
-    // A session or a trace sits under Sessions, a machine under Machines.
-    const under: Record<'home' | 'analytics' | 'sessions' | 'machines', string[]> = {
-      home: ['home'],
-      analytics: ['analytics'],
-      sessions: ['sessions', 'session', 'trace'],
-      machines: ['machines', 'machine'],
-    };
-    const item = (
-      v: 'home' | 'analytics' | 'sessions' | 'machines',
-      label: string,
-      ic: string,
-      count?: number,
-      hot?: boolean,
-    ) => {
-      destinations.push({
-        key: v,
-        label,
-        icon: ic,
-        href:
-          v === 'machines' && host.machinesPath
-            ? host.machinesPath
-            : host.bootstrapOwner.urlOf({ v }),
-        current: under[v].includes(
-          (host.sidebarOnly ? host.layoutOwner.app.dataset.viewerNav : host.nativePage?.nav) ??
-            host.navigation.route.v,
-        ),
-        count,
-        hot,
-      });
-    };
-    destinations.push(...(host.viewerHost?.nativeNavigation ?? []));
-    item('home', 'Home', I.home, host.domain.inbox().length, true);
-    item('sessions', 'Sessions', I.sessions);
-    item('analytics', 'Analytics', I.chart);
-    item(
-      'machines',
-      'Machines',
-      I.machine,
-      Object.keys(host.modelStore.machines).filter((m) => !host.modelStore.machineUp[m]).length,
-      true,
+    const nav = host.$('#nav');
+    const route =
+      (host.sidebarOnly ? host.layoutOwner.app.dataset.viewerNav : host.nativePage?.nav) ??
+      host.navigation.route.v;
+    const destinations = projectShellNavigation(
+      host.viewerHost?.navigation ?? { leading: host.viewerHost?.nativeNavigation },
+      route,
+      {
+        home: host.bootstrapOwner.urlOf({ v: 'home' }),
+        sessions: host.bootstrapOwner.urlOf({ v: 'sessions' }),
+        analytics: host.bootstrapOwner.urlOf({ v: 'analytics' }),
+        machines: host.machinesPath ?? host.bootstrapOwner.urlOf({ v: 'machines' }),
+      },
+      host.nativePage || host.sidebarOnly
+        ? {}
+        : {
+            home: host.domain.inbox().length,
+            machines: Object.keys(host.modelStore.machines).filter(
+              (m) => !host.modelStore.machineUp[m],
+            ).length,
+          },
     );
     if (host.accountControlsOwner.shellChrome)
       host.accountControlsOwner.shellChrome.update(destinations, host.layoutOwner.railMode);
@@ -103,6 +83,10 @@ export function createNavigationView(host: NavigationViewHost) {
       .toLowerCase()
       .includes(q.toLowerCase());
   // Relationship indexes are invalidated by accepted model/transcript transactions.
+  const unsubscribe = host.viewerHost?.subscribeNavigation?.(() =>
+    host.scope.timeout(renderNav, 0),
+  );
+  if (unsubscribe) host.scope.own(unsubscribe);
 
   return { renderNav, sessMatch };
 }

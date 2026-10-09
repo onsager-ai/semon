@@ -1,4 +1,4 @@
-import { safePath, type Account, type ShellDestination } from './lib';
+import { safePath, type Account, type ShellNavigation, type ShellDestination } from './lib';
 /** Narrow document host port; the viewer remains the sole router/model poller. */
 export interface ViewerContent {
   element: HTMLElement;
@@ -6,6 +6,10 @@ export interface ViewerContent {
 }
 export interface ViewerHost {
   machinesPath: string;
+  /** Shared destination policy; no host data or routing owner lives in chrome. */
+  navigation?: ShellNavigation;
+  /** Narrow host destination notifications; no model observation is implied. */
+  subscribeNavigation?(changed: () => void): () => void;
   /** Host-owned links use native navigation; shared chrome validates paths. */
   nativeNavigation?: readonly ShellDestination[];
   /** A native administrative page uses shared chrome/Recent, with native destination links. */

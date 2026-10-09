@@ -44,7 +44,7 @@ pub const FAVICON_SVG: &str = include_str!("favicon.svg");
 /// One of the viewer's navigation destinations. [`NAV`] lists them in the order the viewer's sidebar draws them; a page
 /// served beside the viewer draws the same rows with [`NavLink::html`], so its drawer lists what the viewer's does, with
 /// the same labels and icons.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize)]
 pub struct NavLink<'a> {
     /// The viewer's name for the destination: `home`, `sessions`, `analytics` or `machines`.
     pub key: &'a str,
@@ -57,32 +57,64 @@ pub struct NavLink<'a> {
 
 /// The viewer's navigation, in its sidebar's order. A Rust test checks that the viewer's own script draws exactly these
 /// rows with these icons, so a change here or there that leaves the other behind fails the build.
-pub const NAV: [NavLink<'static>; 4] = [
-    NavLink {
-        key: "home",
-        label: "Home",
-        path: "/",
-        icon: "M4 11l8-7 8 7M6 9.5V20h12V9.5M10 20v-5h4v5",
-    },
-    NavLink {
-        key: "sessions",
-        label: "Sessions",
-        path: "/sessions",
-        icon: "M9 6h11M9 12h11M9 18h11M4.5 6h.01M4.5 12h.01M4.5 18h.01",
-    },
-    NavLink {
-        key: "analytics",
-        label: "Analytics",
-        path: "/analytics",
-        icon: "M4 19V5M4 19h17M8 15l3-4 3 2 5-7",
-    },
-    NavLink {
-        key: "machines",
-        label: "Machines",
-        path: "/machines",
-        icon: "M3 5h18v11H3zM8 20h8M12 16v4",
-    },
-];
+pub static NAV: std::sync::LazyLock<Vec<NavLink<'static>>> = std::sync::LazyLock::new(|| {
+    serde_json::from_str(include_str!("../../../ui/src/lib/navigation.json"))
+        .expect("valid shared navigation definitions")
+});
+
+/// Generic native host policy, also consumed by the typed shell projection.
+#[derive(Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct NavigationPolicy {
+    pub paths: std::collections::BTreeMap<String, String>,
+    pub leading: Vec<NavigationDestination>,
+    pub trailing: Vec<NavigationDestination>,
+}
+
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+pub struct NavigationDestination {
+    pub key: String,
+    pub label: String,
+    pub href: String,
+    pub icon: String,
+    pub current: bool,
+}
+
+impl NavigationPolicy {
+    pub fn html(&self, route: &str) -> String {
+        let current = match route {
+            "session" | "trace" | "sources" => "sessions",
+            "machine" => "machines",
+            route => route,
+        };
+        let base = NAV.iter().map(|link| NavigationDestination {
+            key: link.key.into(),
+            label: link.label.into(),
+            icon: link.icon.into(),
+            href: self
+                .paths
+                .get(link.key)
+                .cloned()
+                .unwrap_or_else(|| link.path.into()),
+            current: false,
+        });
+        self.leading
+            .iter()
+            .cloned()
+            .chain(base)
+            .chain(self.trailing.iter().cloned())
+            .map(|destination| {
+                NavLink {
+                    key: &destination.key,
+                    label: &destination.label,
+                    path: &destination.href,
+                    icon: &destination.icon,
+                }
+                .html(&destination.href, destination.key == current)
+                    + "\n"
+            })
+            .collect()
+    }
+}
 
 impl NavLink<'_> {
     /// The row as a served page draws it: `<a class="nav-item">` with the viewer's 18 px icon and the label, marked
@@ -356,46 +388,21 @@ mod tests {
     /// with the icon path `NAV` gives it.
     #[test]
     fn the_viewer_script_draws_the_exported_nav() {
-        let js = include_str!("../../../ui/src/app/navigationView.ts");
-        let registry = include_str!("../../../ui/src/app/registry.ts").replace('\'', "\"");
-        let render = js
-            .split("function renderNav()")
-            .nth(1)
-            .expect("typed navigation owner has renderNav")
-            .split("\n  }\n")
-            .next()
-            .expect("renderNav's body")
-            .lines()
-            .map(str::trim)
-            .collect::<String>()
-            .replace('\'', "\"")
-            .replace(", ", ",");
-        // The viewer's names for these icons in its `I` table.
-        let icon_names = ["home", "sessions", "chart", "machine"];
-        let mut last = 0;
-        for (link, icon_name) in super::NAV.iter().zip(icon_names) {
-            let call = format!("item(\"{}\",\"{}\",I.{icon_name}", link.key, link.label);
-            let at = render
-                .find(&call)
-                .unwrap_or_else(|| panic!("renderNav lacks `{call}`"));
-            assert!(
-                at >= last,
-                "renderNav draws {} out of NAV's order",
-                link.key
-            );
-            last = at;
-            let entry = format!("{icon_name}: \"{}\"", link.icon);
-            assert!(
-                registry.contains(&entry),
-                "viewer.js's I.{icon_name} is not NAV's {} icon",
-                link.key
-            );
+        let definitions: serde_json::Value =
+            serde_json::from_str(include_str!("../../../ui/src/lib/navigation.json")).unwrap();
+        for (link, definition) in super::NAV.iter().zip(definitions.as_array().unwrap()) {
+            assert_eq!(link.key, definition["key"]);
+            assert_eq!(link.label, definition["label"]);
+            assert_eq!(link.path, definition["path"]);
+            assert_eq!(link.icon, definition["icon"]);
         }
-        assert_eq!(
-            render.matches("item(\"").count(),
-            super::NAV.len(),
-            "renderNav draws a row NAV does not list"
-        );
+        for source in [
+            include_str!("../../../ui/src/app/navigationView.ts"),
+            include_str!("../../../ui/src/app/catalogSources.ts"),
+            include_str!("../../../ui/src/app/catalogViewer.tsx"),
+        ] {
+            assert!(source.contains("projectShellNavigation("));
+        }
     }
 
     #[test]

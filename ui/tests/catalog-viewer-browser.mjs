@@ -319,7 +319,7 @@ for (const width of [390, 1280])
         await page.getByRole('button', { name: 'Load earlier records' }).first().click();
         await page.locator('#page [data-entry-key="one:0"]').waitFor();
         assert.equal(await draft.inputValue(), 'Retained native draft');
-        await page.evaluate(() => document.querySelector('#nav a, #nav button')?.click());
+        await page.evaluate(() => document.querySelector('#nav [data-go="sessions"]')?.click());
         await page.locator('#page [data-id="two"]').click();
         await page.locator('#page [data-entry-key="two:5"]').waitFor();
         if (width === 1280) {
@@ -329,7 +329,7 @@ for (const width of [390, 1280])
           );
           await page.getByRole('button', { name: 'Expand sidebar' }).waitFor();
         }
-        await page.evaluate(() => document.querySelector('#nav a, #nav button')?.click());
+        await page.evaluate(() => document.querySelector('#nav [data-go="sessions"]')?.click());
         await page.locator('#page [data-id="one"]').click();
         assert.equal(
           await page.evaluate(
@@ -339,12 +339,12 @@ for (const width of [390, 1280])
           true,
         );
         await page.locator('#page [data-entry-key="one:0"]').waitFor();
-        await page.evaluate(() => document.querySelector('#nav [data-go="sources"]').click());
+        await page.evaluate(() => document.querySelector('.catalog-sources').click());
         await page.locator('[data-source-key="second"]').click();
         await page.locator('#page [data-id="one"]').click();
         await page.locator('#page [data-entry-key="one:5"]').waitFor();
         await page.locator('#page textarea').fill('Second source draft');
-        await page.evaluate(() => document.querySelector('#nav [data-go="sources"]').click());
+        await page.evaluate(() => document.querySelector('.catalog-sources').click());
         await page.locator('[data-source-key="source"]').click();
         await page.locator('#page [data-entry-key="one:0"]').waitFor();
         assert.equal(await page.locator('#page textarea').inputValue(), 'Retained native draft');
@@ -356,8 +356,13 @@ for (const width of [390, 1280])
           true,
         );
         await page.goBack();
+        await page.locator('[data-source-key="second"]').waitFor();
+        assert.equal(new URL(page.url()).searchParams.get('choose_source'), '1');
+        await page.goBack();
         await page.locator('#page [data-entry-key="one:5"]').waitFor();
         assert.equal(await page.locator('#page textarea').inputValue(), 'Second source draft');
+        await page.goForward();
+        await page.locator('[data-source-key="source"]').waitFor();
         await page.goForward();
         await page.locator('#page [data-entry-key="one:0"]').waitFor();
         assert.equal(await page.locator('#page textarea').inputValue(), 'Retained native draft');

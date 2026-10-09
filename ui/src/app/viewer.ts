@@ -2,6 +2,7 @@ import { getViewerHost, type ViewerHost } from '../viewer-host';
 import { ViewerComposition } from './composition';
 import { createCatalogViewer } from './catalogViewer';
 import { createCatalogSources } from './catalogSources';
+import { createNativePageShell } from './nativePageShell';
 import { parseCatalogCapabilities } from '../state/catalog-capabilities';
 import { requestJson } from '../lib/model';
 import { EffectScope } from './effects';
@@ -40,7 +41,7 @@ export function mountViewerApplication(
       owner = null;
       const url = new URL(location.href);
       url.searchParams.set('machine', key);
-      history.replaceState(null, '', url.pathname + url.search + url.hash);
+      history.pushState(null, '', url.pathname + url.search + url.hash);
       void chooseReader();
     });
   }
@@ -108,10 +109,9 @@ export function mountViewerApplication(
       scope.releaseRequest(request);
     }
   }
-  // Native embedding pages retain their explicitly configured compatibility owner.
-  if (
+  if (host?.nativePage) owner = createNativePageShell(host);
+  else if (
     new URLSearchParams(location.search).get('compat') === '1' ||
-    host?.nativePage ||
     (host?.loadMachines && host.machinesPath === location.pathname) ||
     document.querySelector<HTMLElement>('.app')?.dataset.viewer === 'sidebar'
   )
