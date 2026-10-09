@@ -47,6 +47,10 @@ pub struct Facts {
     /// explicitly selects no sources. Retired mirrored bytes stay retained.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub codex_rollouts: Option<BTreeSet<String>>,
+    /// Receiver-proven provisional prefixes, served as a separate overlay.
+    /// Local collectors never populate this field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub codex_provisional_rollouts: Option<BTreeSet<String>>,
     /// Each Codex thread whose writer lock is held, with the holder's pid.
     pub codex_locks: BTreeMap<String, u32>,
     /// The repository (its directory's name) of every working directory the
@@ -178,6 +182,22 @@ fn collect_facts(
             (cwd, repo)
         })
         .collect();
+    let mut facts = local_runtime_facts(options)?;
+    facts.repos = repos;
+    facts.codex_rollouts = Some(
+        crate::inputs(options)?
+            .into_iter()
+            .filter(|input| input.root == crate::InputRoot::Codex)
+            .map(|input| input.path)
+            .collect(),
+    );
+    facts.reported_runs = cache.reported_runs().cloned().collect();
+    Ok(facts)
+}
+
+/// Fresh allowlisted process/lock/run observations, without transcript, event
+/// index or repository scans. Source inventory is deliberately unknown.
+pub fn local_runtime_facts(options: &crate::Options) -> io::Result<Facts> {
     let mut proc_starts = BTreeMap::new();
     for pid in claude_pids(options) {
         if let Some(start) = proc_start(&options.proc_root, pid) {
@@ -224,17 +244,12 @@ fn collect_facts(
         home: env_home(),
         proc_starts,
         codex_locks,
-        codex_rollouts: Some(
-            crate::inputs(options)?
-                .into_iter()
-                .filter(|input| input.root == crate::InputRoot::Codex)
-                .map(|input| input.path)
-                .collect(),
-        ),
-        repos,
+        codex_rollouts: None,
+        codex_provisional_rollouts: None,
+        repos: BTreeMap::new(),
         offline_since: None,
         runs,
-        reported_runs: cache.reported_runs().cloned().collect(),
+        reported_runs: Vec::new(),
     })
 }
 
@@ -314,7 +329,7 @@ impl MachineFacts {
         let Self::Recorded(facts) = self else {
             return true;
         };
-        let Some(paths) = &facts.codex_rollouts else {
+        if facts.codex_rollouts.is_none() && facts.codex_provisional_rollouts.is_none() {
             return true;
         };
         let Ok(relative) = path.strip_prefix(&options.codex_home) else {
@@ -325,7 +340,15 @@ impl MachineFacts {
             .map(|part| part.as_os_str().to_string_lossy())
             .collect::<Vec<_>>()
             .join("/");
-        crate::is_input_path("codex", &relative) && paths.contains(&relative)
+        crate::is_input_path("codex", &relative)
+            && (facts
+                .codex_rollouts
+                .as_ref()
+                .is_some_and(|paths| paths.contains(&relative))
+                || facts
+                    .codex_provisional_rollouts
+                    .as_ref()
+                    .is_some_and(|paths| paths.contains(&relative)))
     }
 
     pub(crate) fn proc_start(&self, options: &Options, pid: u32) -> Option<u64> {

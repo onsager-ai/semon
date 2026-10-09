@@ -32,9 +32,13 @@ use std::{
 };
 
 use semon_sessions::{Facts, is_input_path, is_machine_name};
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use crate::wire::{Append, CHUNK_BYTES, HEAD_BYTES, base64_decode, sha256_hex};
+use crate::wire::{
+    Append, CHUNK_BYTES, HEAD_BYTES, MAX_STATUS_TARGETS, Status, base64_decode, is_generation,
+    sha256_hex,
+};
 
 /// Where each machine's copy lives under the receiver's directory.
 pub const MACHINES_DIR: &str = "machines";
@@ -56,6 +60,8 @@ pub enum Endpoint {
     Append,
     /// `POST <url>/v1/mirror/facts`
     Facts,
+    /// Optional partial observation; never commits full facts.
+    Status,
 }
 
 impl Endpoint {
@@ -64,6 +70,7 @@ impl Endpoint {
         match path {
             "/v1/mirror/append" => Some(Self::Append),
             "/v1/mirror/facts" => Some(Self::Facts),
+            "/v1/mirror/status" => Some(Self::Status),
             _ => None,
         }
     }
@@ -252,6 +259,10 @@ impl Receiver {
                 Ok(append) => self.append(machine, &append),
                 Err(error) => Reply::error(400, format!("the body is not an append: {error}")),
             },
+            Endpoint::Status => match serde_json::from_slice::<Status>(body) {
+                Ok(status) => self.status(machine, &status),
+                Err(error) => Reply::error(400, format!("the body is not status: {error}")),
+            },
             Endpoint::Facts => match serde_json::from_slice::<Facts>(body) {
                 Ok(facts) => self.facts(machine, &facts),
                 Err(error) => Reply::error(400, format!("the body is not facts: {error}")),
@@ -296,6 +307,13 @@ impl Receiver {
                 "head_sha256 is not a lowercase hex SHA-256".into(),
             ));
         }
+        if request
+            .generation
+            .as_ref()
+            .is_some_and(|g| !is_generation(g))
+        {
+            return Err(Refusal::Invalid("invalid transfer generation".into()));
+        }
         if request.replace && request.offset != 0 {
             return Err(Refusal::Invalid("a replace starts at offset 0".into()));
         }
@@ -326,13 +344,35 @@ impl Receiver {
             Some(file) => (file.metadata()?.len(), read_head(file)?),
             None => (0, Vec::new()),
         };
+        let marker_dir = self.directories(&[MACHINES_DIR, machine, "sync-generations"])?;
+        let marker_name = format!(
+            "{}.json",
+            sha256_hex(format!("{}/{}", request.root, request.path).as_bytes())
+        );
+        let marker_path = marker_dir.join(&marker_name);
+        let previous = read_generation(&marker_path)?;
+        let current_generation = previous
+            .filter(|g| g.length == length && g.head_sha256 == sha256_hex(&head))
+            .map(|g| g.generation);
         let conflict = || {
             Reply::new(
                 409,
-                json!({"length": length, "head_sha256": sha256_hex(&head)}),
+                serde_json::to_value(crate::wire::Length {
+                    length,
+                    head_sha256: Some(sha256_hex(&head)),
+                    generation: current_generation.clone(),
+                })
+                .expect("length serializes"),
             )
         };
         if !request.replace && request.offset != length {
+            return Ok(conflict());
+        }
+        if !request.replace
+            && current_generation.is_some()
+            && request.generation.is_some()
+            && request.generation != current_generation
+        {
             return Ok(conflict());
         }
         // The head of the copy as it will be: the first min(4096, offset +
@@ -353,6 +393,13 @@ impl Receiver {
             new_length.saturating_sub(length),
             length.saturating_sub(new_length),
         );
+        // Invalidate proof durably BEFORE touching bytes. A crash between
+        // data and marker commits leaves unknown proof, never old authority.
+        match fs::remove_file(&marker_path) {
+            Ok(()) => sync_dir(&marker_dir)?,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e.into()),
+        }
         self.counted(machine, grow, shrink, || {
             if request.replace {
                 replace_file(&parent, name, bytes)?;
@@ -371,7 +418,145 @@ impl Receiver {
             }
             Ok(())
         })?;
-        Ok(Reply::new(200, json!({"length": new_length})))
+        if let Some(generation) = &request.generation {
+            let marker = Generation {
+                generation: generation.clone(),
+                length: new_length,
+                head_sha256: sha256_hex(&next),
+            };
+            let bytes = serde_json::to_vec(&marker).map_err(|e| Refusal::Invalid(e.to_string()))?;
+            replace_file(&marker_dir, &marker_name, &bytes).map_err(|e| e.refusal)?;
+        }
+        Ok(Reply::new(
+            200,
+            serde_json::to_value(crate::wire::Length {
+                length: new_length,
+                head_sha256: None,
+                generation: request.generation.clone(),
+            })
+            .expect("length serializes"),
+        ))
+    }
+
+    /// Stores partial observations separately. Returned confirmed targets have
+    /// been checked under the same locks as append, including a durable marker.
+    pub fn status(&self, machine: &str, status: &Status) -> Reply {
+        self.try_status(machine, status)
+            .unwrap_or_else(Refusal::reply)
+    }
+
+    fn try_status(&self, machine: &str, status: &Status) -> Result<Reply, Refusal> {
+        check_machine(machine)?;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as i64;
+        if status.version != 1
+            || !is_generation(&status.observation_id)
+            || status.sequence == 0
+            || status.targets.len() > MAX_STATUS_TARGETS
+            || status.observed_at_ms > now.saturating_add(60_000)
+            || status.observed_at_ms < now.saturating_sub(60_000)
+            || status.runtime.codex_rollouts.is_some()
+            || status.runtime.codex_provisional_rollouts.is_some()
+            || !status.runtime.repos.is_empty()
+            || !status.runtime.reported_runs.is_empty()
+        {
+            return Err(Refusal::Invalid("invalid partial observation".into()));
+        }
+        let mut unique = std::collections::BTreeSet::new();
+        for target in &status.targets {
+            if !is_input_path(&target.root, &target.path)
+                || !unique.insert((&target.root, &target.path))
+                || target.acked_bytes > target.target_bytes
+                || !is_sha256_hex(&target.head_sha256)
+                || !(is_generation(&target.generation)
+                    || (target.generation.is_empty() && target.acked_bytes == 0))
+            {
+                return Err(Refusal::Invalid("invalid sync target".into()));
+            }
+        }
+        self.locks.with(&format!("{machine}/status.json"), || {
+            let dir = self.directories(&[MACHINES_DIR, machine])?;
+            if let Some(mut old) = open_existing(&dir.join("status.json"))? {
+                let mut bytes = Vec::new();
+                (&mut old)
+                    .take(MAX_BODY_BYTES as u64 + 1)
+                    .read_to_end(&mut bytes)?;
+                let prior: StoredStatus = serde_json::from_slice(&bytes)
+                    .map_err(|_| Refusal::Invalid("previous status unavailable".into()))?;
+                if status.observed_at_ms <= prior.observation.observed_at_ms
+                    || (status.observation_id == prior.observation.observation_id
+                        && status.sequence <= prior.observation.sequence)
+                    || (status.observation_id != prior.observation.observation_id
+                        && status.sequence != 1)
+                {
+                    return Ok(Reply::new(409, json!({"error":"stale_observation"})));
+                }
+            }
+            let mut confirmed = Vec::new();
+            for target in &status.targets {
+                if target.acked_bytes == 0 {
+                    continue;
+                }
+                let key = format!("{machine}/{}/{}", target.root, target.path);
+                let verified = self.locks.with(&key, || -> Result<bool, Refusal> {
+                    let marker_dir =
+                        self.directories(&[MACHINES_DIR, machine, "sync-generations"])?;
+                    let marker_path = marker_dir.join(format!(
+                        "{}.json",
+                        sha256_hex(format!("{}/{}", target.root, target.path).as_bytes())
+                    ));
+                    let Some(marker) = read_generation(&marker_path)? else {
+                        return Ok(false);
+                    };
+                    if marker.generation != target.generation || marker.length < target.acked_bytes
+                    {
+                        return Ok(false);
+                    }
+                    let mut parts = vec![MACHINES_DIR, machine, target.root.as_str()];
+                    parts.extend(target.path.split('/'));
+                    let (name, dirs) = parts.split_last().expect("target path");
+                    let path = self.directories(dirs)?.join(name);
+                    let Some(file) = open_existing(&path)? else {
+                        return Ok(false);
+                    };
+                    if file.metadata()?.len() != marker.length {
+                        return Ok(false);
+                    }
+                    let head = read_head(&file)?;
+                    if sha256_hex(&head) != marker.head_sha256
+                        || sha256_hex(&head[..head.len().min(target.acked_bytes as usize)])
+                            != target.head_sha256
+                    {
+                        return Ok(false);
+                    }
+                    if target.path.ends_with(".jsonl") {
+                        let mut log = semon_sessions::sealed::LogFile::open(&path)?;
+                        log.seek(SeekFrom::Start(target.acked_bytes - 1))?;
+                        let mut last = [0];
+                        log.read_exact(&mut last)?;
+                        if last[0] != b'\n' {
+                            return Ok(false);
+                        }
+                    }
+                    Ok(true)
+                })?;
+                if verified {
+                    confirmed.push(target.clone());
+                }
+            }
+            let stored = StoredStatus {
+                observation: status.clone(),
+                confirmed,
+            };
+            let bytes = serde_json::to_vec(&stored).map_err(|e| Refusal::Invalid(e.to_string()))?;
+            if bytes.len() > MAX_BODY_BYTES {
+                return Err(Refusal::TooLarge("stored status too large".into()));
+            }
+            replace_file(&dir, "status.json", &bytes).map_err(|e| e.refusal)?;
+            Ok(Reply::new(200, json!({"confirmed": stored.confirmed})))
+        })
     }
 
     fn try_facts(&self, machine: &str, facts: &Facts) -> Result<Reply, Refusal> {
@@ -426,6 +611,26 @@ impl Receiver {
         }
         Ok(dir)
     }
+}
+
+#[derive(Serialize, Deserialize)]
+struct Generation {
+    generation: String,
+    length: u64,
+    head_sha256: String,
+}
+#[derive(Serialize, Deserialize)]
+struct StoredStatus {
+    observation: Status,
+    confirmed: Vec<crate::wire::SyncTarget>,
+}
+fn read_generation(path: &Path) -> Result<Option<Generation>, Refusal> {
+    let Some(file) = open_existing(path)? else {
+        return Ok(None);
+    };
+    let mut bytes = Vec::new();
+    file.take(4096).read_to_end(&mut bytes)?;
+    Ok(serde_json::from_slice::<Generation>(&bytes).ok())
 }
 
 fn check_machine(machine: &str) -> Result<(), Refusal> {
@@ -785,6 +990,7 @@ mod tests {
         let mut head = if replace { Vec::new() } else { before.to_vec() };
         head.extend_from_slice(bytes);
         Append {
+            generation: None,
             root: "claude".into(),
             path: path.into(),
             offset,

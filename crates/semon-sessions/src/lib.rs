@@ -1,3 +1,5 @@
+mod native_prefix;
+pub use native_prefix::codex_native_id_prefix;
 use std::{
     collections::{BTreeMap, BTreeSet},
     env, fs,
@@ -75,7 +77,7 @@ mod union;
 mod viewer;
 pub use facts::{
     FACTS_VERSION, Facts, FactsSource, RUN_VARIABLES, ReportedModelUsage, ReportedRunSnapshot,
-    local_facts, read_facts, write_facts,
+    local_facts, local_runtime_facts, read_facts, write_facts,
 };
 pub use harness::{HARNESS_ICONS, HARNESSES, HarnessDefinition, harness};
 pub use inputs::{Input, InputRoot, inputs, is_input_path};

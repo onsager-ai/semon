@@ -17,11 +17,11 @@
 //! ([`tokens`]) and `semon receive`'s listener ([`serve`]).
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet, VecDeque},
     fmt, fs,
     io::{self, Read, Seek, SeekFrom},
     path::{Path, PathBuf},
-    sync::{Arc, mpsc},
+    sync::{Arc, Mutex, mpsc},
     thread,
     time::{Duration, Instant},
 };
@@ -33,6 +33,7 @@ mod lock;
 pub mod mirror;
 pub mod redact;
 pub mod serve;
+mod status;
 mod stop;
 pub mod tokens;
 pub mod wire;
@@ -219,6 +220,12 @@ fn loopback(host: &str) -> bool {
 struct FileState {
     /// Bytes of the original acknowledged by the receiver.
     sent: u64,
+    #[serde(default)]
+    generation: String,
+    #[serde(default)]
+    confirmed: bool,
+    #[serde(default)]
+    redacted_head: String,
     /// SHA-256 of the original's first `min(4096, sent)` bytes: a change
     /// means the file was rewritten, and is sent again whole.
     raw_head: String,
@@ -313,7 +320,7 @@ pub struct Report {
 }
 
 enum Answer {
-    Ok(u64),
+    Ok(Length),
     Conflict(Length),
 }
 
@@ -327,6 +334,8 @@ pub struct Client {
     state: State,
     chunk: usize,
     heads: BTreeMap<String, Vec<u8>>,
+    progress: Arc<Mutex<status::Progress>>,
+    completed_inventory: Option<BTreeSet<String>>,
 }
 
 impl Client {
@@ -357,6 +366,8 @@ impl Client {
             state,
             chunk: CHUNK_BYTES,
             heads: BTreeMap::new(),
+            progress: Arc::new(Mutex::new(status::Progress::default())),
+            completed_inventory: None,
         })
     }
 
@@ -430,6 +441,12 @@ impl Client {
                 Ok(None) => return Err(Failure::Stopped),
                 Err(error) => return Err(Failure::Remote(error)),
             };
+            if route == "append" && status == 429 {
+                self.progress
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .phase = wire::SyncPhase::WaitingToRetry;
+            }
             if status == 429 && error_kind(&text).as_deref() == Some("rate_limited") {
                 retries += 1;
                 if retries == 2 {
@@ -483,7 +500,7 @@ impl Client {
                 .map_err(|_| Failure::Remote(format!("append: {status} with an unreadable body")))
         };
         match status {
-            200..=299 => Ok(Answer::Ok(parsed()?.length)),
+            200..=299 => Ok(Answer::Ok(parsed()?)),
             409 => Ok(Answer::Conflict(parsed()?)),
             _ => Err(Failure::Remote(format!(
                 "append {}/{}: {status} {}",
@@ -508,36 +525,79 @@ impl Client {
     /// with what was sent before it: a file it caught midway keeps its last
     /// recorded place, and the rest wait for the next push.
     pub fn pass(&mut self, sessions: &Options) -> Result<Report> {
+        self.completed_inventory = None;
+        {
+            let mut progress = self.progress.lock().unwrap_or_else(|e| e.into_inner());
+            progress.targets.clear();
+            progress.inventory_complete = false;
+            progress.phase = wire::SyncPhase::Syncing;
+        }
         let mut report = Report::default();
-        let mut dirty = false;
-        let inputs = semon_sessions::inputs(sessions).map_err(|error| error.to_string())?;
-        for input in inputs {
+        let mut touched = BTreeSet::new();
+        let mut selected = BTreeMap::<String, (Input, FileStat)>::new();
+        let mut foreground = VecDeque::new();
+        let mut history = VecDeque::new();
+        let mut foreground_turns = 0;
+        let mut local_failure = false;
+        self.discover(sessions, &mut selected, &mut foreground, &mut history)?;
+        let mut discovered = Instant::now();
+        while !foreground.is_empty() || !history.is_empty() {
             if self.stop.is_stopped() {
                 break;
             }
-            let path = input.full_path(sessions);
-            let key = Self::key(&input);
-            let previous = self.state.files.get(&key).cloned();
-            let outcome = if input.path.ends_with(".jsonl") {
-                self.sync_log(&input, &path)
+            if discovered.elapsed() >= PASS_EVERY {
+                self.discover(sessions, &mut selected, &mut foreground, &mut history)?;
+                discovered = Instant::now();
+            }
+            let use_foreground =
+                !foreground.is_empty() && (history.is_empty() || foreground_turns < 3);
+            let key = if use_foreground {
+                foreground_turns += 1;
+                foreground.pop_front().expect("foreground")
             } else {
-                self.sync_whole(&input, &path)
+                foreground_turns = 0;
+                history.pop_front().expect("history")
+            };
+            let (input, target) = selected.get(&key).expect("selected");
+            let path = input.full_path(sessions);
+            let log = input.path.ends_with(".jsonl");
+            let outcome = if log {
+                self.sync_log(input, &path, target.len)
+            } else {
+                self.sync_whole(input, &path)
             };
             match outcome {
                 Ok((bytes, replaced)) => {
                     if bytes > 0 || replaced {
-                        report.files += 1;
+                        touched.insert(key.clone());
                         report.bytes += bytes;
                         report.replaced += usize::from(replaced);
                     }
-                    dirty |= previous != self.state.files.get(&key).cloned();
+                    self.update_target(input, target.len);
+                    // A scheduling turn is one complete redaction batch. A
+                    // split long line remains one indivisible checkpoint.
+                    if log
+                        && bytes > 0
+                        && self
+                            .state
+                            .files
+                            .get(&key)
+                            .is_some_and(|f| f.sent < target.len)
+                    {
+                        if use_foreground {
+                            foreground.push_back(key);
+                        } else {
+                            history.push_back(key);
+                        }
+                    } else if log {
+                        // An incomplete frozen tail is not a transferable target.
+                        let sent = self.state.files.get(&key).map_or(0, |f| f.sent);
+                        self.update_target(input, sent.min(target.len));
+                    }
                 }
                 Err(Failure::Local(error)) => {
-                    eprintln!(
-                        "semon push: {}/{}: {error}",
-                        input.root.as_str(),
-                        input.path
-                    );
+                    local_failure = true;
+                    eprintln!("semon push: {key}: {error}");
                 }
                 Err(Failure::Remote(error)) => {
                     self.save()?;
@@ -546,10 +606,114 @@ impl Client {
                 Err(Failure::Stopped) => break,
             }
         }
-        if dirty {
-            self.save()?;
+        report.files = touched.len();
+        self.save()?;
+        if !local_failure && !self.stop.is_stopped() {
+            self.completed_inventory = Some(
+                selected
+                    .values()
+                    .filter(|(input, _)| input.root == semon_sessions::InputRoot::Codex)
+                    .map(|(input, _)| input.path.clone())
+                    .collect(),
+            );
         }
         Ok(report)
+    }
+
+    fn discover(
+        &mut self,
+        sessions: &Options,
+        selected: &mut BTreeMap<String, (Input, FileStat)>,
+        foreground: &mut VecDeque<String>,
+        history: &mut VecDeque<String>,
+    ) -> Result<()> {
+        let mut fresh = Vec::new();
+        for input in semon_sessions::inputs(sessions).map_err(|e| e.to_string())? {
+            let key = Self::key(&input);
+            if selected.contains_key(&key) {
+                continue;
+            }
+            let stat = FileStat::from_metadata(
+                &fs::metadata(input.full_path(sessions)).map_err(|e| e.to_string())?,
+            );
+            fresh.push((input, stat));
+        }
+        // Recent files first, deterministic ties; small files win equal time.
+        fresh.sort_by(|(a, sa), (b, sb)| {
+            sb.mtime_ns
+                .cmp(&sa.mtime_ns)
+                .then(sa.len.cmp(&sb.len))
+                .then(a.cmp(b))
+        });
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos() as i128;
+        for (input, stat) in fresh {
+            let key = Self::key(&input);
+            let changed = self
+                .state
+                .files
+                .get(&key)
+                .is_some_and(|f| !f.matches_stat(stat));
+            let recent = stat
+                .mtime_ns
+                .is_some_and(|mtime| now.saturating_sub(mtime) <= 600_000_000_000);
+            if changed || recent || input.path.ends_with(".json") {
+                foreground.push_back(key.clone());
+            } else {
+                history.push_back(key.clone());
+            }
+            self.update_target(&input, stat.len);
+            if self
+                .state
+                .files
+                .get(&key)
+                .is_some_and(|f| !f.matches_stat(stat))
+            {
+                if let Some(target) = self
+                    .progress
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .targets
+                    .get_mut(&key)
+                {
+                    target.acked_bytes = 0;
+                }
+            }
+            selected.insert(key, (input, stat));
+        }
+        let mut progress = self.progress.lock().unwrap_or_else(|e| e.into_inner());
+        progress.inventory_complete = selected.len() <= wire::MAX_STATUS_TARGETS;
+        progress.phase = wire::SyncPhase::Syncing;
+        Ok(())
+    }
+
+    fn update_target(&self, input: &Input, target: u64) {
+        let key = Self::key(input);
+        let known = self.state.files.get(&key);
+        let mut progress = self.progress.lock().unwrap_or_else(|e| e.into_inner());
+        if progress.targets.len() >= wire::MAX_STATUS_TARGETS
+            && !progress.targets.contains_key(&key)
+        {
+            progress.inventory_complete = false;
+            return;
+        }
+        progress.targets.insert(
+            key,
+            wire::SyncTarget {
+                root: input.root.as_str().into(),
+                path: input.path.clone(),
+                generation: known.map_or_else(String::new, |f| f.generation.clone()),
+                target_bytes: target,
+                acked_bytes: known
+                    .filter(|f| f.confirmed)
+                    .map_or(0, |f| f.sent.min(target)),
+                head_sha256: known
+                    .filter(|f| !f.redacted_head.is_empty())
+                    .map_or_else(|| head_sha256(&[]), |f| f.redacted_head.clone()),
+            },
+        );
     }
 
     fn key(input: &Input) -> String {
@@ -565,9 +729,12 @@ impl Client {
         let stat = FileStat::from_metadata(&fs::metadata(path).map_err(local)?);
         let key = Self::key(input);
         let known = self.state.files.get(&key);
-        if known
-            .is_some_and(|file| file.has_stat() && file.matches_stat(stat) && file.sent == stat.len)
-        {
+        if known.is_some_and(|file| {
+            file.has_stat()
+                && file.matches_stat(stat)
+                && file.sent == stat.len
+                && !file.generation.is_empty()
+        }) {
             return Ok((0, false));
         }
         if stat.len > WHOLE_CAP {
@@ -575,19 +742,18 @@ impl Client {
         }
         let raw = read_input(path).map_err(local)?;
         let digest = sha256_hex(&raw);
-        if self
-            .state
-            .files
-            .get(&key)
-            .is_some_and(|file| file.raw_head == digest && file.sent == raw.len() as u64)
-        {
+        if self.state.files.get(&key).is_some_and(|file| {
+            file.raw_head == digest && file.sent == raw.len() as u64 && !file.generation.is_empty()
+        }) {
             let file = self.state.files.get_mut(&key).expect("known file");
             file.set_stat(stat);
             return Ok((0, false));
         }
         let mut data = raw.clone();
         redact::redact(&mut data);
+        let generation = wire::new_generation().map_err(Failure::Local)?;
         let append = Append {
+            generation: Some(generation.clone()),
             root: input.root.as_str().into(),
             path: input.path.clone(),
             offset: 0,
@@ -595,16 +761,23 @@ impl Client {
             bytes: base64_encode(&data),
             replace: true,
         };
-        if let Answer::Conflict(length) = self.send(&append)? {
-            return Err(Failure::Remote(format!(
-                "a replace of {}/{} was refused (receiver at {})",
-                append.root, append.path, length.length
-            )));
-        }
+        let ack = match self.send(&append)? {
+            Answer::Ok(ack) if ack.length == raw.len() as u64 => ack,
+            Answer::Ok(_) => return Err(Failure::Remote("whole file ACK length disagrees".into())),
+            Answer::Conflict(length) => {
+                return Err(Failure::Remote(format!(
+                    "a replace was refused (receiver at {})",
+                    length.length
+                )));
+            }
+        };
         self.state.files.insert(
             key,
             FileState {
                 sent: raw.len() as u64,
+                confirmed: ack.generation.as_deref() == Some(generation.as_str()),
+                generation,
+                redacted_head: append.head_sha256.clone(),
                 raw_head: digest,
                 len: stat.len,
                 mtime_ns: stat.mtime_ns,
@@ -612,16 +785,21 @@ impl Client {
                 ino: stat.ino,
             },
         );
+        self.save().map_err(Failure::Local)?;
         Ok((raw.len() as u64, true))
     }
 
     /// A JSONL log: its new complete lines, appended; the whole file again
     /// if it was rewritten or the receiver's copy differs.
-    fn sync_log(&mut self, input: &Input, path: &Path) -> Synced {
+    fn sync_log(&mut self, input: &Input, path: &Path, target: u64) -> Synced {
         let key = Self::key(input);
         let stat = FileStat::from_metadata(&fs::metadata(path).map_err(local)?);
         let known = self.state.files.get(&key).cloned().unwrap_or_default();
-        if known.has_stat() && known.matches_stat(stat) && known.sent == stat.len {
+        if known.has_stat()
+            && known.matches_stat(stat)
+            && known.sent == stat.len
+            && !known.generation.is_empty()
+        {
             return Ok((0, false));
         }
         let mut sent = known.sent;
@@ -635,10 +813,21 @@ impl Client {
             && sent > 0
             && sent <= stat.len
             && raw_head(path, sent).map_err(Failure::Local)? != known.raw_head;
-        if sent > stat.len || shortened || identity_changed || head_changed {
+        if sent > stat.len
+            || shortened
+            || identity_changed
+            || head_changed
+            || (stat_changed && known.has_stat() && stat.len == known.len && sent > 0)
+        {
             sent = 0;
             replace = true;
         }
+        let mut generation = if replace || known.generation.is_empty() {
+            wire::new_generation().map_err(Failure::Local)?
+        } else {
+            known.generation.clone()
+        };
+        let mut confirmed = known.confirmed && !replace;
         let mut head = if replace {
             Vec::new()
         } else {
@@ -647,20 +836,23 @@ impl Client {
         let mut total = 0;
         let mut replaced = false;
         let mut conflicts = 0;
+        let mut acknowledged_raw_head = None;
         loop {
             if self.stop.is_stopped() {
                 return Err(Failure::Stopped);
             }
-            let (mut data, end) = complete_lines(path, sent, self.chunk).map_err(Failure::Local)?;
-            if data.is_empty() && !replace {
+            let (mut data, end) = complete_lines_to(path, sent, self.chunk, target.min(stat.len))
+                .map_err(Failure::Local)?;
+            if data.is_empty() && !replace && !known.generation.is_empty() {
                 break;
             }
             if replace {
                 head.clear();
             }
-            if !data.is_empty() && head.is_empty() && sent > 0 {
+            if head.is_empty() && sent > 0 {
                 head = redacted_prefix(path, sent).map_err(Failure::Local)?;
             }
+            let batch_raw_head = raw_head(path, end).map_err(Failure::Local)?;
             redact::redact(&mut data);
             let mut offset = sent;
             let mut conflict = None;
@@ -676,6 +868,7 @@ impl Client {
                     head.extend_from_slice(&piece[..take]);
                 }
                 let append = Append {
+                    generation: Some(generation.clone()),
                     root: input.root.as_str().into(),
                     path: input.path.clone(),
                     offset,
@@ -684,14 +877,17 @@ impl Client {
                     replace,
                 };
                 match self.send(&append)? {
-                    Answer::Ok(length) if length == offset + piece.len() as u64 => {
+                    Answer::Ok(ack) if ack.length == offset + piece.len() as u64 => {
+                        confirmed = ack.generation.as_deref() == Some(generation.as_str());
+                        let length = ack.length;
                         replaced |= replace;
                         replace = false;
                         offset = length;
                         total += piece.len() as u64;
                         self.heads.insert(key.clone(), head.clone());
                     }
-                    Answer::Ok(length) => {
+                    Answer::Ok(ack) => {
+                        let length = ack.length;
                         return Err(Failure::Remote(format!(
                             "the receiver reports {length} bytes after an append to {}",
                             offset + piece.len() as u64
@@ -712,12 +908,22 @@ impl Client {
                 }
                 // Resume from the receiver's length when its copy is ours up
                 // to a line boundary; otherwise send the file again whole.
-                if resumable(path, stat.len, &theirs).map_err(Failure::Local)? {
+                if resumable(path, target.min(stat.len), &theirs).map_err(Failure::Local)? {
                     sent = theirs.length;
                     replace = false;
+                    if let Some(receiver_generation) =
+                        theirs.generation.filter(|g| wire::is_generation(g))
+                    {
+                        generation = receiver_generation;
+                        confirmed = true;
+                    } else {
+                        confirmed = false;
+                    }
                 } else {
                     sent = 0;
                     replace = true;
+                    confirmed = false;
+                    generation = wire::new_generation().map_err(Failure::Local)?;
                 }
                 head = if replace {
                     Vec::new()
@@ -727,12 +933,11 @@ impl Client {
                 continue;
             }
             sent = end;
-            if data.is_empty() {
-                break;
-            }
+            acknowledged_raw_head = Some(batch_raw_head);
+            break;
         }
         let digest = if total > 0 || replaced || sent != known.sent {
-            raw_head(path, sent).map_err(Failure::Local)?
+            acknowledged_raw_head.unwrap_or(raw_head(path, sent).map_err(Failure::Local)?)
         } else {
             known.raw_head
         };
@@ -740,6 +945,9 @@ impl Client {
             key,
             FileState {
                 sent,
+                generation,
+                confirmed,
+                redacted_head: head_sha256(&head),
                 raw_head: digest,
                 len: stat.len,
                 mtime_ns: stat.mtime_ns,
@@ -747,6 +955,7 @@ impl Client {
                 ino: stat.ino,
             },
         );
+        self.save().map_err(Failure::Local)?;
         Ok((total, replaced))
     }
 }
@@ -870,10 +1079,16 @@ fn resumable(path: &Path, size: u64, theirs: &Length) -> Result<bool> {
 /// `chunk` bytes, and where they end. A first line longer than `chunk` is
 /// read whole, up to [`LINE_CAP`]; one longer than that is cut there.
 /// Nothing when no line is complete yet.
+#[cfg(test)]
 fn complete_lines(path: &Path, from: u64, chunk: usize) -> Result<(Vec<u8>, u64)> {
+    complete_lines_to(path, from, chunk, u64::MAX)
+}
+
+fn complete_lines_to(path: &Path, from: u64, chunk: usize, upto: u64) -> Result<(Vec<u8>, u64)> {
     let mut file = open_input(path).map_err(|e| e.to_string())?;
     file.seek(SeekFrom::Start(from))
         .map_err(|e| e.to_string())?;
+    let mut file = file.take(upto.saturating_sub(from));
     let mut data = Vec::new();
     let mut buffer = vec![0; chunk.clamp(1, 1 << 20)];
     loop {
@@ -966,6 +1181,22 @@ pub fn push_until(options: &PushOptions, watch: bool, stop: &Stop) -> Result<()>
     let mut client = Client::new(options)?
         .with_stop(stop.clone())
         .with_lock(hold.share());
+    let heartbeat =
+        status::Heartbeat::start(options, stop, hold.share(), Arc::clone(&client.progress))?;
+    let result = push_running(options, watch, stop, &hold, &mut client);
+    if let Some(error) = heartbeat.fatal() {
+        return Err(error);
+    }
+    result
+}
+
+fn push_running(
+    options: &PushOptions,
+    watch: bool,
+    stop: &Stop,
+    hold: &Hold,
+    client: &mut Client,
+) -> Result<()> {
     let initial_pass = client.pass(&options.sessions);
     if let Err(error) = &initial_pass
         && error.contains("refused the token")
@@ -999,7 +1230,13 @@ pub fn push_until(options: &PushOptions, watch: bool, stop: &Stop) -> Result<()>
         else {
             return Ok(());
         };
-        return match client.post_facts(&facts?) {
+        let mut facts = facts?;
+        if client.completed_inventory.is_none() {
+            return Ok(());
+        }
+        facts.codex_rollouts = client.completed_inventory.clone();
+        facts.codex_provisional_rollouts = None;
+        return match client.post_facts(&facts) {
             Err(Failure::Stopped) => Ok(()),
             result => result.map_err(Failure::message),
         };
@@ -1029,34 +1266,66 @@ pub fn push_until(options: &PushOptions, watch: bool, stop: &Stop) -> Result<()>
         for message in messages {
             eprintln!("semon push: {message}");
         }
+        {
+            let phase = match backoff.state {
+                Some("paused") => wire::SyncPhase::Paused,
+                Some("storage full") => wire::SyncPhase::StorageFull,
+                _ if pass.is_err() => wire::SyncPhase::WaitingToRetry,
+                _ => wire::SyncPhase::Syncing,
+            };
+            client
+                .progress
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .phase = phase;
+        }
         if backoff.state.is_none()
             && let Some(end) = after_pass(pass, stop)
         {
             return end;
         }
-        if backoff.state != Some("paused") && last_facts.elapsed() >= FACTS_EVERY {
+        if backoff.state != Some("paused")
+            && client.completed_inventory.is_some()
+            && last_facts.elapsed() >= FACTS_EVERY
+        {
             match facts.collect(stop)? {
                 None => return Ok(()),
-                Some(Ok(current)) => match client.post_facts(&current) {
-                    Ok(()) => {}
-                    Err(Failure::Stopped) => return Ok(()),
-                    Err(failure) => {
-                        let error = failure.message();
-                        if error.contains("refused the token") {
-                            return Err(error);
-                        }
-                        if !(backoff.state == Some("storage full")
-                            && error.starts_with("storage is full"))
-                        {
-                            for message in backoff.observe(Some(&error)) {
-                                eprintln!("semon push: {message}");
+                Some(Ok(mut current)) => {
+                    current.codex_rollouts = client.completed_inventory.clone();
+                    current.codex_provisional_rollouts = None;
+                    match client.post_facts(&current) {
+                        Ok(()) => {
+                            let mut progress =
+                                client.progress.lock().unwrap_or_else(|e| e.into_inner());
+                            if progress.inventory_complete
+                                && progress
+                                    .targets
+                                    .values()
+                                    .all(|t| t.acked_bytes == t.target_bytes)
+                                && client.state.files.values().all(|f| f.confirmed)
+                            {
+                                progress.phase = wire::SyncPhase::UpToDate;
                             }
                         }
-                        if backoff.state.is_none() {
-                            eprintln!("semon push: {error}");
+                        Err(Failure::Stopped) => return Ok(()),
+                        Err(failure) => {
+                            let error = failure.message();
+                            if error.contains("refused the token") {
+                                return Err(error);
+                            }
+                            if !(backoff.state == Some("storage full")
+                                && error.starts_with("storage is full"))
+                            {
+                                for message in backoff.observe(Some(&error)) {
+                                    eprintln!("semon push: {message}");
+                                }
+                            }
+                            if backoff.state.is_none() {
+                                eprintln!("semon push: {error}");
+                            }
                         }
                     }
-                },
+                }
                 Some(Err(error)) => eprintln!("semon push: {error}"),
             }
             last_facts = Instant::now();
@@ -1069,28 +1338,6 @@ pub fn push_until(options: &PushOptions, watch: bool, stop: &Stop) -> Result<()>
             }
             if stop.sleep(remaining.min(FACTS_EVERY)) {
                 return Ok(());
-            }
-            if backoff.state == Some("storage full") && last_facts.elapsed() >= FACTS_EVERY {
-                match facts.collect(stop)? {
-                    None => return Ok(()),
-                    Some(Ok(current)) => match client.post_facts(&current) {
-                        Ok(()) => {}
-                        Err(Failure::Stopped) => return Ok(()),
-                        Err(failure) => {
-                            let error = failure.message();
-                            if error.contains("refused the token") {
-                                return Err(error);
-                            }
-                            if error.starts_with("pushes are paused") {
-                                for message in backoff.observe(Some(&error)) {
-                                    eprintln!("semon push: {message}");
-                                }
-                            }
-                        }
-                    },
-                    Some(Err(error)) => eprintln!("semon push: {error}"),
-                }
-                last_facts = Instant::now();
             }
         }
         pass = client.pass(&options.sessions);

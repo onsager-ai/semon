@@ -90,8 +90,17 @@ pub(crate) fn publish(path: &Path, facts: &Facts, identity: &Identity) -> io::Re
         Err(error) => return Err(error),
     }
     let mut digest = Sha256::new();
-    digest.update([u8::from(facts.codex_rollouts.is_some())]);
+    digest.update([
+        u8::from(facts.codex_rollouts.is_some()),
+        u8::from(facts.codex_provisional_rollouts.is_some()),
+    ]);
     if let Some(paths) = &facts.codex_rollouts {
+        for native in paths {
+            digest.update((native.len() as u64).to_le_bytes());
+            digest.update(native.as_bytes());
+        }
+    }
+    if let Some(paths) = &facts.codex_provisional_rollouts {
         for native in paths {
             digest.update((native.len() as u64).to_le_bytes());
             digest.update(native.as_bytes());
@@ -103,7 +112,8 @@ pub(crate) fn publish(path: &Path, facts: &Facts, identity: &Identity) -> io::Re
         source: identity.clone(),
         facts_version: facts.version,
         hostname: (facts.hostname.len() <= 4096).then(|| facts.hostname.clone()),
-        selection_known: facts.codex_rollouts.is_some(),
+        selection_known: facts.codex_rollouts.is_some()
+            || facts.codex_provisional_rollouts.is_some(),
         manifest_digest: manifest_digest.clone(),
     };
     let result = (|| -> rusqlite::Result<()> {
@@ -128,7 +138,13 @@ pub(crate) fn publish(path: &Path, facts: &Facts, identity: &Identity) -> io::Re
             });
         if !unchanged {
             tx.execute("DELETE FROM current_codex", [])?;
-            if let Some(paths) = &facts.codex_rollouts {
+            let paths = facts
+                .codex_rollouts
+                .iter()
+                .chain(facts.codex_provisional_rollouts.iter())
+                .flat_map(|paths| paths.iter())
+                .collect::<std::collections::BTreeSet<_>>();
+            {
                 let mut insert = tx.prepare("INSERT INTO current_codex(path) VALUES(?1)")?;
                 for native in paths {
                     insert.execute([native])?;

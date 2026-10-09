@@ -216,6 +216,7 @@ fn append_body(path: &str, before: &[u8], offset: u64, bytes: &[u8]) -> Vec<u8> 
     let mut head = before.to_vec();
     head.extend_from_slice(bytes);
     serde_json::to_vec(&Append {
+        generation: None,
         root: "claude".into(),
         path: path.into(),
         offset,
@@ -762,6 +763,7 @@ fn a_peer_that_never_reads_its_answer_is_closed_at_the_write_deadline() {
     // A path the 400 echoes back: an answer of about 5.5 MiB, more than
     // the socket buffers hold while the peer reads nothing.
     let body = serde_json::to_vec(&Append {
+        generation: None,
         root: "claude".into(),
         path: format!("projects/{}.jsonl", "a".repeat(5_500_000)),
         offset: 0,
