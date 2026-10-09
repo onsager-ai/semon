@@ -776,7 +776,44 @@ pub(crate) fn result_text(record: &Value, block: usize) -> Option<String> {
             .map(str::to_owned);
     }
     if let Some(payload) = record.get("payload") {
-        let output = payload.get("output")?;
+        if let Some(item) = payload.get("item")
+            && matches!(field(item, "type"), Some("McpToolCall" | "DynamicToolCall"))
+        {
+            let parts = item
+                .pointer("/result/content")
+                .or_else(|| item.get("content_items"));
+            if let Some(parts) = parts.and_then(Value::as_array) {
+                let text = parts
+                    .iter()
+                    .filter_map(|part| match field(part, "type") {
+                        Some("text" | "input_text" | "output_text") => {
+                            field(part, "text").map(str::to_owned)
+                        }
+                        Some("image" | "input_image") => Some("[image]".into()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                if !text.is_empty() {
+                    return Some(text);
+                }
+            }
+            return item
+                .get("error")
+                .filter(|error| !error.is_null())
+                .or_else(|| item.get("result"))
+                .or(parts)
+                .map(|error| {
+                    error
+                        .as_str()
+                        .map(str::to_owned)
+                        .unwrap_or_else(|| error.to_string())
+                });
+        }
+        let output = payload.get("output").or_else(|| payload.get("tools"))?;
+        if field(payload, "type") == Some("tool_search_output") {
+            return serde_json::to_string_pretty(output).ok();
+        }
         let structured = match output {
             Value::String(text) => serde_json::from_str::<Value>(text).ok(),
             other => Some(other.clone()),
@@ -795,7 +832,7 @@ pub(crate) fn result_text(record: &Value, block: usize) -> Option<String> {
                 }
                 script_text(parts)
             }
-            other => content_text(other),
+            other => serde_json::to_string_pretty(other).unwrap_or_default(),
         });
     }
     tool_result_text(record, block)
@@ -1172,7 +1209,12 @@ fn tool_output(
     }
     let reply = reply?;
     let record = lines.get(path, reply.o)?;
-    let source = if record.get("payload").is_some() {
+    let source = if matches!(
+        record.pointer("/payload/item/type").and_then(Value::as_str),
+        Some("McpToolCall" | "DynamicToolCall")
+    ) {
+        Source::Plain
+    } else if record.get("payload").is_some() {
         Source::Model
     } else {
         Source::Plain
@@ -1182,6 +1224,11 @@ fn tool_output(
 
 fn think_text(record: &Value, block: usize) -> Option<String> {
     if let Some(payload) = record.get("payload") {
+        if field(record, "type") != Some("response_item")
+            || field(payload, "type") != Some("reasoning")
+        {
+            return None;
+        }
         let text = payload
             .get("summary")
             .and_then(Value::as_array)
@@ -1241,7 +1288,6 @@ fn tool_entry(
             more.push("in");
         }
     }
-    let mut result = || tool_output(lines, &file.path, reply, item);
     match shown {
         Shown::Live => {
             entry.insert("live".into(), json!(true));
@@ -1267,10 +1313,13 @@ fn tool_entry(
                     _ => Value::Null,
                 },
             );
-            let took = match (slot.t, reply.and_then(|reply| reply.t)) {
-                (Some(start), Some(end)) => secs(end - start),
-                _ => "—".to_owned(),
-            };
+            let took = reply
+                .and_then(|reply| lines.get(&file.path, reply.o))
+                .and_then(|record| record.pointer("/payload/item").and_then(codex_duration))
+                .unwrap_or_else(|| match (slot.t, reply.and_then(|reply| reply.t)) {
+                    (Some(start), Some(end)) => secs(end - start),
+                    _ => "—".to_owned(),
+                });
             entry.insert("secs".into(), json!(took));
             let diff = if shown == Shown::Err {
                 None
@@ -1282,8 +1331,8 @@ fn tool_entry(
                 if cut {
                     more.push("diff");
                 }
-            } else if let Some((text, source)) =
-                result().filter(|(text, _)| !text.trim().is_empty())
+            } else if let Some((text, source)) = tool_output(lines, &file.path, reply, item)
+                .filter(|(text, _)| !text.trim().is_empty())
             {
                 put_out(&mut entry, &mut more, &text, source);
             }
@@ -3184,6 +3233,115 @@ mod tests {
             serde_json::from_str(&full_slot(&built, "ops", 0, "script").unwrap()).unwrap();
         assert_eq!(script_view["text"], script);
         assert_eq!(script_view["truncated"], false);
+    }
+
+    #[test]
+    fn codex_native_connector_tools_are_steps_between_thoughts() {
+        let home = Home::new();
+        let codex = |time: String, kind: &str, payload: Value| json!({"timestamp":time,"type":kind,"payload":payload});
+        home.lines("codex/sessions/2026/09/24/rollout-native-tools.jsonl", &[
+            codex(ts(4,0,0), "session_meta", json!({"id":"native-tools","cwd":"/work/proj"})),
+            codex(ts(4,1,0), "response_item", json!({"type":"message","role":"user","content":[{"type":"input_text","text":"Inspect tools"}]})),
+            codex(ts(4,1,1), "response_item", json!({"type":"reasoning","summary":[{"type":"summary_text","text":"Before tools"}]})),
+            codex(ts(4,1,2), "response_item", json!({"type":"custom_tool_call","name":"exec","call_id":"wrapper","input":"await tools.search({query:'parser'});"})),
+            codex(ts(4,1,3), "event_msg", json!({"type":"item_completed","item":{"type":"McpToolCall","id":"mcp","server":"github","tool":"search","arguments":{"query":"parser"},"status":"completed","result":{"content":[{"type":"text","text":"Tool result, not reasoning"}],"isError":false},"duration":{"secs":2,"nanos":0}}})),
+            codex(ts(4,1,4), "event_msg", json!({"type":"item_completed","item":{"type":"DynamicToolCall","id":"dynamic","namespace":"functions","tool":"lookup","arguments":{"key":"parser"},"status":"completed","success":false,"content_items":[{"type":"input_text","text":"Lookup failed"}]}})),
+            codex(ts(4,1,5), "response_item", json!({"type":"custom_tool_call_output","call_id":"wrapper","output":[{"type":"input_text","text":"Script completed"}]})),
+            codex(ts(4,1,6), "response_item", json!({"type":"reasoning","summary":[{"type":"summary_text","text":"After tools"}]})),
+            codex(ts(4,1,7), "response_item", json!({"type":"future_item","summary":[{"type":"summary_text","text":"Unknown is not thinking"}]})),
+        ]);
+        for _ in 0..2 {
+            let built = home.built(BASE + 86_400_000);
+            let page = page_of(&built, "native-tools", &Anchor::Last);
+            let entries = page["entries"].as_array().unwrap();
+            assert_eq!(
+                entries
+                    .iter()
+                    .map(|entry| entry["k"].as_str().unwrap())
+                    .collect::<Vec<_>>(),
+                ["u", "think", "tool", "tool", "think"]
+            );
+            assert_eq!(entries[2]["name"], "github.search");
+            assert_eq!(entries[2]["out"], "Tool result, not reasoning");
+            assert_eq!(entries[2]["ok"], true);
+            assert_eq!(entries[2]["secs"], "2.0s");
+            assert_eq!(entries[3]["name"], "functions.lookup");
+            assert_eq!(entries[3]["out"], "Lookup failed");
+            assert_eq!(entries[3]["ok"], false);
+            let full: Value = serde_json::from_str(
+                &full_slot(
+                    &built,
+                    "native-tools",
+                    entries[2]["slot"].as_u64().unwrap() as usize,
+                    "out",
+                )
+                .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(full["text"], "Tool result, not reasoning");
+            assert_eq!(
+                (page["calls"].as_u64(), page["errors"].as_u64()),
+                (Some(2), Some(1))
+            );
+        }
+    }
+
+    #[test]
+    fn codex_tool_search_and_native_completion_keep_exact_call_identity() {
+        let home = Home::new();
+        let codex = |time: String, kind: &str, payload: Value| json!({"timestamp":time,"type":kind,"payload":payload});
+        home.lines("codex/sessions/2026/09/24/rollout-tool-search.jsonl", &[
+            codex(ts(4,0,0), "session_meta", json!({"id":"tool-search","cwd":"/work/proj"})),
+            codex(ts(4,1,0), "response_item", json!({"type":"tool_search_call","id":"search","arguments":{"query":"repository"}})),
+            codex(ts(4,1,1), "response_item", json!({"type":"tool_search_output","call_id":"search","tools":[{"name":"fetch"}]})),
+            codex(ts(4,1,2), "response_item", json!({"type":"function_call","name":"lookup","call_id":"mirrored","arguments":"{\"key\":\"parser\"}"})),
+            codex(ts(4,1,3), "event_msg", json!({"type":"item_completed","item":{"type":"DynamicToolCall","id":"mirrored","tool":"lookup","arguments":{"key":"parser"},"success":true,"status":"completed","content_items":[{"type":"input_text","text":"native answer"}]}})),
+            codex(ts(4,1,4), "response_item", json!({"type":"function_call_output","call_id":"mirrored","output":"legacy answer"})),
+        ]);
+        let built = home.built(BASE + 86_400_000);
+        let page = page_of(&built, "tool-search", &Anchor::Last);
+        let entries = page["entries"].as_array().unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0]["name"], "tool_search");
+        assert!(entries[0]["out"].as_str().unwrap().contains("fetch"));
+        assert_eq!(entries[1]["name"], "lookup");
+        assert_eq!(entries[1]["out"], "native answer");
+        assert_eq!(entries[1]["ok"], true);
+        assert_eq!(page["calls"], 2);
+        assert_eq!(page["errors"], 0);
+    }
+
+    #[test]
+    fn codex_failed_and_unfinished_wrappers_follow_their_native_tools() {
+        for failed in [false, true] {
+            let home = Home::new();
+            let codex = |kind: &str, payload: Value| json!({"timestamp":ts(4,1,0),"type":kind,"payload":payload});
+            let mut records = vec![
+                codex("session_meta", json!({"id":"native-wrapper"})),
+                codex(
+                    "response_item",
+                    json!({"type":"custom_tool_call","name":"exec","call_id":"wrapper","input":"await tools.lookup({key:'parser'});"}),
+                ),
+                codex(
+                    "event_msg",
+                    json!({"type":"item_completed","item":{"type":"DynamicToolCall","id":"native","namespace":"functions","tool":"lookup","arguments":{"key":"parser"},"status":"completed","success":true,"content_items":[{"type":"input_text","text":"answer"}]}}),
+                ),
+            ];
+            if failed {
+                records.push(codex("response_item", json!({"type":"custom_tool_call_output","call_id":"wrapper","output":[{"type":"input_text","text":"Script error: fixture failure"}]})));
+            }
+            home.lines(
+                "codex/sessions/2026/09/24/rollout-native-wrapper.jsonl",
+                &records,
+            );
+            let built = home.built(BASE + 86_400_000);
+            let page = page_of(&built, "native-wrapper", &Anchor::Last);
+            assert_eq!(page["entries"][0]["name"], "functions.lookup");
+            assert_eq!(page["entries"][1]["name"], "exec");
+            assert_eq!(page["entries"][1]["ok"], false);
+            assert_eq!(page["calls"], 2);
+            assert_eq!(page["errors"], 1);
+        }
     }
 
     #[test]
