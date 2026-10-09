@@ -35,7 +35,10 @@ struct Received {
     omit_generations: bool,
     grow_source: Option<PathBuf>,
     discover_source: Option<(PathBuf, String)>,
+    move_source: Option<(String, PathBuf, PathBuf)>,
     facts: Option<Facts>,
+    hang_facts: bool,
+    prepared_facts: Option<Facts>,
     appends: u64,
     replaces: u64,
     conflicts: u64,
@@ -109,6 +112,12 @@ fn receiver() -> Receiver {
                     let _ = request.respond(json_response(401, json!({"error":"revoked"})));
                     continue;
                 }
+            }
+            if authorized && url == "/v1/mirror/facts" && shared.lock().unwrap().hang_facts {
+                let mut state = shared.lock().unwrap();
+                state.prepared_facts = serde_json::from_str(&body).ok();
+                state.held_requests.push(request);
+                continue;
             }
             let response = if !authorized {
                 json_response(401, json!({"error":"unauthorized"}))
@@ -201,7 +210,16 @@ fn handle_append(received: &mut Received, body: &str) -> Response<std::io::Curso
     if let Some(generation) = &append.generation {
         received.generations.insert(key.clone(), generation.clone());
     }
-    received.files.insert(key, next);
+    received.files.insert(key.clone(), next);
+    if received
+        .move_source
+        .as_ref()
+        .is_some_and(|(selected, _, _)| selected == &key)
+    {
+        let (_, from, to) = received.move_source.take().unwrap();
+        fs::create_dir_all(to.parent().unwrap()).unwrap();
+        fs::rename(from, to).unwrap();
+    }
     if let Some(source) = &received.grow_source {
         use std::io::Write;
         fs::OpenOptions::new()
@@ -1222,6 +1240,12 @@ fn discovery_between_slices_exposes_a_new_small_session_and_growth_is_frozen() {
     let receiver = receiver();
     let original = line("bulk").repeat(8);
     let path = home.write(LOG, &original);
+    for n in 0..40 {
+        home.write(
+            &format!("claude/projects/-work/recent-{n:02}.jsonl"),
+            &line("pending recent"),
+        );
+    }
     let recent = "claude/projects/-work/new.jsonl";
     {
         let mut r = receiver.state.lock().unwrap();
@@ -1235,6 +1259,10 @@ fn discovery_between_slices_exposes_a_new_small_session_and_growth_is_frozen() {
     let state = receiver.state.lock().unwrap();
     assert_eq!(state.files[LOG], original.as_bytes());
     assert_eq!(state.files[recent], line("new").as_bytes());
+    assert_eq!(
+        state.append_order.iter().position(|p| p == recent).unwrap(),
+        1
+    );
     assert!(
         state.append_order.iter().position(|p| p == recent).unwrap()
             < state.append_order.iter().rposition(|p| p == LOG).unwrap()
@@ -1333,6 +1361,101 @@ fn heartbeat_token_refusal_wins_over_its_own_shared_stop() {
     let error = worker.join().unwrap().unwrap_err();
     assert!(error.contains("refused the token"), "{error}");
     assert!(stop.is_stopped());
+    receiver.state.lock().unwrap().held_requests.clear();
+    assert_lock_freed(&options);
+}
+
+#[test]
+fn a_move_during_the_sweep_commits_only_the_exact_current_archive_inventory() {
+    let home = Home::new();
+    let receiver = receiver();
+    let current = "codex/sessions/moved.jsonl";
+    let archive = "codex/archived_sessions/moved.jsonl";
+    let source = home.write(
+        current,
+        "{\"type\":\"session_meta\",\"payload\":{\"id\":\"move-id\"}}\n",
+    );
+    receiver.state.lock().unwrap().move_source =
+        Some((current.into(), source, home.root.join(archive)));
+    semon_push::push(&home.push_options(&receiver.url), false).unwrap();
+    let state = receiver.state.lock().unwrap();
+    assert!(state.files.contains_key(current));
+    assert!(state.files.contains_key(archive));
+    assert_eq!(
+        state.facts.as_ref().unwrap().codex_rollouts,
+        Some(std::collections::BTreeSet::from([
+            "archived_sessions/moved.jsonl".into()
+        ]))
+    );
+}
+
+#[test]
+fn heartbeat_after_prepared_full_facts_uses_the_frozen_current_targets_and_shared_fence() {
+    let home = Home::new();
+    let receiver = receiver();
+    let current = "codex/sessions/moved.jsonl";
+    let archive = "codex/archived_sessions/moved.jsonl";
+    let source = home.write(
+        current,
+        "{\"type\":\"session_meta\",\"payload\":{\"id\":\"move-id\"}}\n",
+    );
+    {
+        let mut state = receiver.state.lock().unwrap();
+        state.status_supported = true;
+        state.hang_facts = true;
+        state.move_source = Some((current.into(), source, home.root.join(archive)));
+    }
+    let options = home.push_options(&receiver.url);
+    let stop = Stop::new();
+    let worker = watch_in_background(&options, &stop);
+    wait_for(
+        "higher sequence heartbeat while full facts post is blocked",
+        || {
+            let state = receiver.state.lock().unwrap();
+            state.prepared_facts.as_ref().is_some_and(|facts| {
+                state
+                    .statuses
+                    .iter()
+                    .any(|s| s.sequence > facts.mirror_sequence.unwrap())
+            })
+        },
+    );
+    {
+        let state = receiver.state.lock().unwrap();
+        let facts = state.prepared_facts.as_ref().unwrap();
+        assert_eq!(
+            facts.codex_rollouts,
+            Some(std::collections::BTreeSet::from([
+                "archived_sessions/moved.jsonl".into()
+            ]))
+        );
+        let fresh = state
+            .statuses
+            .iter()
+            .find(|s| s.sequence > facts.mirror_sequence.unwrap())
+            .unwrap();
+        assert_eq!(
+            Some(&fresh.observation_id),
+            facts.mirror_observation_id.as_ref()
+        );
+        assert!(
+            fresh
+                .targets
+                .iter()
+                .all(|t| t.path != "sessions/moved.jsonl")
+        );
+        assert!(
+            fresh
+                .targets
+                .iter()
+                .any(|t| t.path == "archived_sessions/moved.jsonl")
+        );
+        assert!(
+            fresh.runtime.mirror_sequence.is_none()
+                && fresh.runtime.mirror_observation_id.is_none()
+        );
+    }
+    stop_and_join(&stop, worker).unwrap();
     receiver.state.lock().unwrap().held_requests.clear();
     assert_lock_freed(&options);
 }

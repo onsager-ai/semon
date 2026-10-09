@@ -34,6 +34,11 @@ const ENVIRON_MAX: u64 = 256 * 1024;
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Facts {
     pub version: u32,
+    /// Paired sender observation fence on a full mirror facts commit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mirror_observation_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mirror_sequence: Option<u64>,
     /// What the model names the machine by.
     pub hostname: String,
     /// `$HOME`, which paths in tool summaries are shortened against.
@@ -240,6 +245,8 @@ pub fn local_runtime_facts(options: &crate::Options) -> io::Result<Facts> {
     Ok(Facts {
         process_ancestors,
         version: FACTS_VERSION,
+        mirror_observation_id: None,
+        mirror_sequence: None,
         hostname: model::local_hostname(options),
         home: env_home(),
         proc_starts,

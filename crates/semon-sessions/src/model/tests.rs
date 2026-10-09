@@ -3392,6 +3392,8 @@ fn recorded_facts_decide_liveness_hostname_home_and_repos() {
         codex_locks: BTreeMap::new(),
         codex_rollouts: None,
         codex_provisional_rollouts: None,
+        mirror_observation_id: None,
+        mirror_sequence: None,
         repos: BTreeMap::new(),
         offline_since: None,
         runs: BTreeMap::new(),
