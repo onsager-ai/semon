@@ -610,7 +610,10 @@ export default async function turnsCheck(browser) {
           card = page.locator(sel).first();
         r.expect((await card.count()) === 1, size + ': handoff content is present');
         const before = await page.evaluate(() => ({ v: history.state.v, id: history.state.id }));
-        await card.click({ position: { x: 3, y: 3 } });
+        // The compact child's top-left corner is now its navigation button.
+        // Click its noninteractive metadata to exercise content separately.
+        if (h.kind === 'spawn') await card.locator('.cc-meta').click();
+        else await card.click({ position: { x: 3, y: 3 } });
         const after = await page.evaluate(() => ({ v: history.state.v, id: history.state.id }));
         r.expect(
           JSON.stringify(before) === JSON.stringify(after),

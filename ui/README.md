@@ -98,7 +98,9 @@ The shared prefix initializes once when shell and viewer assets coexist. Consume
 bundles already include it: **do not prepend `shell::COMPONENT_JS`** to output from
 `ui/build.mjs`. The Rust constant remains available for custom hosts. Application
 HTML sinks and inline styles remain banned; measured geometry is finite numeric
-CSSOM data, with stylesheet cleanup on disposal. External log links require HTTP(S),
+CSSOM data, with stylesheet cleanup on disposal. `setGeometry` also accepts
+`minHeight` for a host-owned visible-viewport layout; release that measurement
+when the host is destroyed. External log links require HTTP(S),
 `target="_blank"` and `rel="noopener noreferrer"`.
 
 External consumers: `node ui/build.mjs --entry /absolute/consumer.ts --output /absolute/consumer.generated.js`

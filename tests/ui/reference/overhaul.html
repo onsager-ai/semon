@@ -350,14 +350,25 @@ code, .mono { font-family: var(--mono); font-size: max(.88em, var(--fs-cap)); fo
 .diff .add { background: var(--diff-add); } .diff .del { background: var(--diff-del); } .diff .ctx { color: var(--muted); }
 
 /* ---- Session: other sessions. A child is a card that opens it; a relay or message is an event row --------- */
-.child-card { display: grid; grid-template-columns: minmax(0, 1fr); gap: 3px; width: 100%; min-width: 0; border: 1px solid transparent; border-top-color: var(--line); border-left-color: var(--line-2); border-radius: 0; background: var(--ground); padding: 12px 14px; text-align: left; color: var(--ink); }
-@media (hover: hover) { .child-card:hover { background: var(--hover); } }
+.child-card { width: 100%; min-width: 0; text-align: left; color: var(--ink); }
+@media (hover: hover) { .cc-head:hover { background: var(--hover); } }
 .cc-head { display: flex; align-items: center; gap: 8px; min-width: 0; }
-.cc-name { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
+.cc-identity { display: flex; align-items: center; gap: var(--s2); flex: 1 1 auto; min-width: 0; }
+.cc-name { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--fs-sm); font-weight: 500; }
 .cc-head .state { margin-left: auto; font-size: var(--fs-cap); }
-.cc-head .chev { margin-left: 2px; }
-.cc-meta { font-size: var(--fs-cap); line-height: var(--lh-cap); color: var(--muted); }
-.cc-brief { margin-top: 4px; font-size: var(--fs-sm); line-height: 1.45; color: var(--ink-2); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; }
+.cc-toggle { flex: none; width: var(--tap); height: var(--tap); }
+.cc-toggle .chev { width: 16px; height: 16px; }
+.cc-toggle[aria-expanded="true"] .chev { transform: rotate(90deg); }
+.cc-meta { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--fs-cap); line-height: var(--lh-cap); color: var(--muted); }
+.cc-details { display: grid; gap: var(--s2); padding: var(--s2) 0 var(--s3); }
+.cc-details[hidden] { display: none; }
+.cc-brief { font-size: var(--fs-sm); line-height: 1.45; color: var(--ink-2); overflow-wrap: anywhere; }
+@media (max-width: 760px), (any-pointer: coarse) {
+  .cc-identity { flex-direction: column; align-items: flex-start; gap: 0; }
+  .cc-name { max-width: 100%; }
+  .cc-meta { width: 100%; }
+  .cc-toggle { width: 44px; height: 44px; }
+}
 .cc-now { display: flex; align-items: center; gap: 7px; min-width: 0; margin-top: 4px; font-size: var(--fs-sm); color: var(--ink-2); }
 .cc-now code { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .cc-result { margin-top: 4px; font-size: var(--fs-sm); line-height: 1.45; color: var(--ink-2); overflow-wrap: anywhere; }
@@ -1743,12 +1754,15 @@ html, #main { overflow-anchor:none; }
   function childCard(h, c) {
     const b = el("div", "child-card"); b.dataset.h = h.id;
     const calls = c.calls ?? (TX[c.id] ?? []).filter((e) => e.k === "tool").length;
-    const head = el("span", "cc-head"), name = btn("cc-name who-link", c.name, "Open " + c.name); name.addEventListener("click", () => goSession(c.id, STARTS.get(h.id)?.id)); head.append(name, stateLabel(c.state), icon(I.chev, "chev"));
-    b.append(head, withHarnessIcon(el("span", "cc-meta", [kindText(c), shortModel(c.model), dur(c.start, c.state === "work" ? null : c.last), calls + (calls === 1 ? " step" : " steps"), costText(costForSession(c.id, true))].join(" · ")), c.harness, { size: 14 }));
-    b.append(rich("span", "cc-brief", preview(h.brief)));
-    if (h.result) { const r = el("span", "cc-result" + (h.status === "err" ? " err" : "")); r.append(el("span", "rl", h.status === "err" ? "Result: " : "Returned: ")); inline(r, h.result); b.append(r); }
-    else if (c.state === "work") { const last = (TX[c.id] ?? []).filter((e) => e.k === "tool").at(-1); if (last) { const n = el("span", "cc-now"); n.append(el("span", "spin"), el("span", null, (last.live ? verbNow(last.name) : verb(last.name)[1]))); n.append(el("code", null, last.arg)); b.append(n); } }
-    const holder = HOLDS.get(h.id); if (holder) { const run = btn("link cc-run", "Run view", "Open run view for " + nameOf(h.from)); run.addEventListener("click", () => goTrace(holder.id)); b.append(run); }
+    const head = el("div", "cc-head"), identity = el("span", "cc-identity"), name = btn("cc-name who-link", c.name, "Open " + c.name); name.addEventListener("click", () => goSession(c.id, STARTS.get(h.id)?.id));
+    identity.append(name, withHarnessIcon(el("span", "cc-meta", [kindText(c), shortModel(c.model), dur(c.start, c.state === "work" ? null : c.last), calls + (calls === 1 ? " step" : " steps"), costText(costForSession(c.id, true))].join(" · ")), c.harness, { size: 14 }));
+    const toggle = btn("ibtn cc-toggle", null, "Expand " + c.name + " details"), details = el("div", "cc-details"); toggle.setAttribute("aria-expanded", "false"); toggle.append(icon(I.chev, "chev")); details.hidden = true;
+    toggle.addEventListener("click", () => { details.hidden = !details.hidden; toggle.setAttribute("aria-expanded", String(!details.hidden)); toggle.setAttribute("aria-label", (details.hidden ? "Expand " : "Collapse ") + c.name + " details"); });
+    head.append(identity, stateLabel(c.state), toggle); b.append(head, details);
+    details.append(rich("span", "cc-brief", preview(h.brief)));
+    if (h.result) { const r = el("span", "cc-result" + (h.status === "err" ? " err" : "")); r.append(el("span", "rl", h.status === "err" ? "Result: " : "Returned: ")); inline(r, h.result); details.append(r); }
+    else if (c.state === "work") { const last = (TX[c.id] ?? []).filter((e) => e.k === "tool").at(-1); if (last) { const n = el("span", "cc-now"); n.append(el("span", "spin"), el("span", null, (last.live ? verbNow(last.name) : verb(last.name)[1]))); n.append(el("code", null, last.arg)); details.append(n); } }
+    const holder = HOLDS.get(h.id); if (holder) { const run = btn("link cc-run", "Run view", "Open run view for " + nameOf(h.from)); run.addEventListener("click", () => goTrace(holder.id)); details.append(run); }
     return b;
   }
   // A relay, a message to you, or a machine move: who, when, the text, and what came back.
