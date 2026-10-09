@@ -1,0 +1,48 @@
+{
+  "date": "2026-10-09",
+  "checks": [
+    {
+      "command": "cargo fmt --all --check; cargo clippy --all-targets --locked -- --no-deps -D warnings; cargo test --locked",
+      "result": "passed",
+      "logs": "/workspace/scratch/surface-{clippy,rust-tests}.log"
+    },
+    {
+      "command": "npm --prefix ui run format:check; check:architecture; check:design; typecheck; test; check:bundle; sizes",
+      "result": "passed; 89 UI unit tests; embedded bundle fresh"
+    },
+    {
+      "command": "node tests/ui/gallery.mjs",
+      "result": "30 states; zero visual changes and failures",
+      "threshold": 0.1,
+      "maxRatio": 0.001
+    },
+    {
+      "command": "node tests/ui/compact-gallery.mjs",
+      "result": "6 theme/width cases passed; text, growth, values, End/selection, focus, Back and remount"
+    },
+    {
+      "command": "node tests/ui/native-controls.mjs",
+      "result": "12 viewport/theme/JavaScript cases passed"
+    },
+    {
+      "command": "node tests/ui/pixels.mjs with SEMON_PIXEL_SCREENS=session-harbor,session-deps,session-h-failed,session-atlas-ingest and SEMON_PIXEL_SCHEMES=all",
+      "result": "16 screens, 44 enforced regions; 0 mismatches/page errors",
+      "threshold": 0.1,
+      "maxRatio": 0.0001,
+      "referenceChange": "Only linked-session border and hover paint in overhaul.html was reconciled after actual before/after image review; no other reference or threshold change."
+    },
+    {
+      "command": "capture-viewer.mjs",
+      "result": "8 before/after cases, 24 scale-2 images; same feature counts and exact block bounds/type size"
+    }
+  ],
+  "artifacts": {
+    ".stitch/DESIGN.md": "36003bbf71e589d010fea234e0072a2a105ecedf5fd53733131d19633624a5c9",
+    "docs/design/session-inspection/session-inspection.pen": "8c5c91bd8de7c4ae986aeb7797c9e339813419935890236fd6d3ef2a8fb0795b"
+  },
+  "limits": [
+    "Aggregate remote CI is checked separately on the published head.",
+    "No measured usability improvement is claimed.",
+    "Paid provider execution and production deployment are outside this local CSS refinement."
+  ]
+}

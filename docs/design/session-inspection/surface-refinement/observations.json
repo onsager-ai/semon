@@ -1,0 +1,541 @@
+{
+  "note": "Same synthetic full compatibility reader and embedded controller in both phases. Only authored viewer CSS is routed. Equal DOM counts and block bounds verify that surface refinement does not reflow the reader.",
+  "cases": [
+    {
+      "phase": "before",
+      "width": 390,
+      "colorScheme": "light",
+      "features": {
+        ".msg.user": 1,
+        ".msg.assistant": 2,
+        ".thought": 1,
+        ".tsum": 1,
+        ".child-card": 3,
+        ".event": 0
+      },
+      "geometry": [
+        {
+          "type": "msg user",
+          "x": 58.96875,
+          "y": -486,
+          "width": 315.03125,
+          "height": 83.25,
+          "font": "15px"
+        },
+        {
+          "type": "thought",
+          "x": 16,
+          "y": -362.75,
+          "width": 358,
+          "height": 63.171875,
+          "font": "15px"
+        },
+        {
+          "type": "tsum",
+          "x": 16,
+          "y": -203.578125,
+          "width": 358,
+          "height": 44,
+          "font": "13px"
+        },
+        {
+          "type": "child-card",
+          "x": 16,
+          "y": -149.578125,
+          "width": 358,
+          "height": 188.234375,
+          "font": "15px"
+        },
+        {
+          "type": "child-card",
+          "x": 16,
+          "y": 52.65625,
+          "width": 358,
+          "height": 217.78125,
+          "font": "15px"
+        },
+        {
+          "type": "child-card",
+          "x": 16,
+          "y": 284.4375,
+          "width": 358,
+          "height": 232.375,
+          "font": "15px"
+        }
+      ],
+      "failedToolExpanded": true,
+      "keyboardChildFocusVisible": true,
+      "pageOverflow": false,
+      "cssSha256": "91bb1da5533cb92b2e7dc537002ee769a16ae7c91a46e604dda4ee7eab119ea8"
+    },
+    {
+      "phase": "before",
+      "width": 390,
+      "colorScheme": "dark",
+      "features": {
+        ".msg.user": 1,
+        ".msg.assistant": 2,
+        ".thought": 1,
+        ".tsum": 1,
+        ".child-card": 3,
+        ".event": 0
+      },
+      "geometry": [
+        {
+          "type": "msg user",
+          "x": 58.96875,
+          "y": -486,
+          "width": 315.03125,
+          "height": 83.25,
+          "font": "15px"
+        },
+        {
+          "type": "thought",
+          "x": 16,
+          "y": -362.75,
+          "width": 358,
+          "height": 63.171875,
+          "font": "15px"
+        },
+        {
+          "type": "tsum",
+          "x": 16,
+          "y": -203.578125,
+          "width": 358,
+          "height": 44,
+          "font": "13px"
+        },
+        {
+          "type": "child-card",
+          "x": 16,
+          "y": -149.578125,
+          "width": 358,
+          "height": 188.234375,
+          "font": "15px"
+        },
+        {
+          "type": "child-card",
+          "x": 16,
+          "y": 52.65625,
+          "width": 358,
+          "height": 217.78125,
+          "font": "15px"
+        },
+        {
+          "type": "child-card",
+          "x": 16,
+          "y": 284.4375,
+          "width": 358,
+          "height": 232.375,
+          "font": "15px"
+        }
+      ],
+      "failedToolExpanded": true,
+      "keyboardChildFocusVisible": true,
+      "pageOverflow": false,
+      "cssSha256": "91bb1da5533cb92b2e7dc537002ee769a16ae7c91a46e604dda4ee7eab119ea8"
+    },
+    {
+      "phase": "before",
+      "width": 1280,
+      "colorScheme": "light",
+      "features": {
+        ".msg.user": 1,
+        ".msg.assistant": 2,
+        ".thought": 1,
+        ".tsum": 1,
+        ".child-card": 3,
+        ".event": 0
+      },
+      "geometry": [
+        {
+          "type": "msg user",
+          "x": 544.40625,
+          "y": 102,
+          "width": 591.59375,
+          "height": 61.5,
+          "font": "14px"
+        },
+        {
+          "type": "thought",
+          "x": 440,
+          "y": 201.5,
+          "width": 612,
+          "height": 63.171875,
+          "font": "14px"
+        },
+        {
+          "type": "tsum",
+          "x": 432,
+          "y": 336.671875,
+          "width": 712,
+          "height": 36,
+          "font": "13px"
+        },
+        {
+          "type": "child-card",
+          "x": 440,
+          "y": 382.671875,
+          "width": 696,
+          "height": 156.78125,
+          "font": "14px"
+        },
+        {
+          "type": "child-card",
+          "x": 440,
+          "y": 553.453125,
+          "width": 696,
+          "height": 164.390625,
+          "font": "14px"
+        },
+        {
+          "type": "child-card",
+          "x": 440,
+          "y": 731.84375,
+          "width": 696,
+          "height": 162.6875,
+          "font": "14px"
+        }
+      ],
+      "failedToolExpanded": true,
+      "keyboardChildFocusVisible": true,
+      "pageOverflow": false,
+      "cssSha256": "91bb1da5533cb92b2e7dc537002ee769a16ae7c91a46e604dda4ee7eab119ea8"
+    },
+    {
+      "phase": "before",
+      "width": 1280,
+      "colorScheme": "dark",
+      "features": {
+        ".msg.user": 1,
+        ".msg.assistant": 2,
+        ".thought": 1,
+        ".tsum": 1,
+        ".child-card": 3,
+        ".event": 0
+      },
+      "geometry": [
+        {
+          "type": "msg user",
+          "x": 544.40625,
+          "y": 102,
+          "width": 591.59375,
+          "height": 61.5,
+          "font": "14px"
+        },
+        {
+          "type": "thought",
+          "x": 440,
+          "y": 201.5,
+          "width": 612,
+          "height": 63.171875,
+          "font": "14px"
+        },
+        {
+          "type": "tsum",
+          "x": 432,
+          "y": 336.671875,
+          "width": 712,
+          "height": 36,
+          "font": "13px"
+        },
+        {
+          "type": "child-card",
+          "x": 440,
+          "y": 382.671875,
+          "width": 696,
+          "height": 156.78125,
+          "font": "14px"
+        },
+        {
+          "type": "child-card",
+          "x": 440,
+          "y": 553.453125,
+          "width": 696,
+          "height": 164.390625,
+          "font": "14px"
+        },
+        {
+          "type": "child-card",
+          "x": 440,
+          "y": 731.84375,
+          "width": 696,
+          "height": 162.6875,
+          "font": "14px"
+        }
+      ],
+      "failedToolExpanded": true,
+      "keyboardChildFocusVisible": true,
+      "pageOverflow": false,
+      "cssSha256": "91bb1da5533cb92b2e7dc537002ee769a16ae7c91a46e604dda4ee7eab119ea8"
+    },
+    {
+      "phase": "after",
+      "width": 390,
+      "colorScheme": "light",
+      "features": {
+        ".msg.user": 1,
+        ".msg.assistant": 2,
+        ".thought": 1,
+        ".tsum": 1,
+        ".child-card": 3,
+        ".event": 0
+      },
+      "geometry": [
+        {
+          "type": "msg user",
+          "x": 58.96875,
+          "y": -486,
+          "width": 315.03125,
+          "height": 83.25,
+          "font": "15px"
+        },
+        {
+          "type": "thought",
+          "x": 16,
+          "y": -362.75,
+          "width": 358,
+          "height": 63.171875,
+          "font": "15px"
+        },
+        {
+          "type": "tsum",
+          "x": 16,
+          "y": -203.578125,
+          "width": 358,
+          "height": 44,
+          "font": "13px"
+        },
+        {
+          "type": "child-card",
+          "x": 16,
+          "y": -149.578125,
+          "width": 358,
+          "height": 188.234375,
+          "font": "15px"
+        },
+        {
+          "type": "child-card",
+          "x": 16,
+          "y": 52.65625,
+          "width": 358,
+          "height": 217.78125,
+          "font": "15px"
+        },
+        {
+          "type": "child-card",
+          "x": 16,
+          "y": 284.4375,
+          "width": 358,
+          "height": 232.375,
+          "font": "15px"
+        }
+      ],
+      "failedToolExpanded": true,
+      "keyboardChildFocusVisible": true,
+      "pageOverflow": false,
+      "cssSha256": "50f3042c9d8017c4294431525dca72e4b60051a328f24ef87ef6dc6824250cd2"
+    },
+    {
+      "phase": "after",
+      "width": 390,
+      "colorScheme": "dark",
+      "features": {
+        ".msg.user": 1,
+        ".msg.assistant": 2,
+        ".thought": 1,
+        ".tsum": 1,
+        ".child-card": 3,
+        ".event": 0
+      },
+      "geometry": [
+        {
+          "type": "msg user",
+          "x": 58.96875,
+          "y": -486,
+          "width": 315.03125,
+          "height": 83.25,
+          "font": "15px"
+        },
+        {
+          "type": "thought",
+          "x": 16,
+          "y": -362.75,
+          "width": 358,
+          "height": 63.171875,
+          "font": "15px"
+        },
+        {
+          "type": "tsum",
+          "x": 16,
+          "y": -203.578125,
+          "width": 358,
+          "height": 44,
+          "font": "13px"
+        },
+        {
+          "type": "child-card",
+          "x": 16,
+          "y": -149.578125,
+          "width": 358,
+          "height": 188.234375,
+          "font": "15px"
+        },
+        {
+          "type": "child-card",
+          "x": 16,
+          "y": 52.65625,
+          "width": 358,
+          "height": 217.78125,
+          "font": "15px"
+        },
+        {
+          "type": "child-card",
+          "x": 16,
+          "y": 284.4375,
+          "width": 358,
+          "height": 232.375,
+          "font": "15px"
+        }
+      ],
+      "failedToolExpanded": true,
+      "keyboardChildFocusVisible": true,
+      "pageOverflow": false,
+      "cssSha256": "50f3042c9d8017c4294431525dca72e4b60051a328f24ef87ef6dc6824250cd2"
+    },
+    {
+      "phase": "after",
+      "width": 1280,
+      "colorScheme": "light",
+      "features": {
+        ".msg.user": 1,
+        ".msg.assistant": 2,
+        ".thought": 1,
+        ".tsum": 1,
+        ".child-card": 3,
+        ".event": 0
+      },
+      "geometry": [
+        {
+          "type": "msg user",
+          "x": 544.40625,
+          "y": 102,
+          "width": 591.59375,
+          "height": 61.5,
+          "font": "14px"
+        },
+        {
+          "type": "thought",
+          "x": 440,
+          "y": 201.5,
+          "width": 612,
+          "height": 63.171875,
+          "font": "14px"
+        },
+        {
+          "type": "tsum",
+          "x": 432,
+          "y": 336.671875,
+          "width": 712,
+          "height": 36,
+          "font": "13px"
+        },
+        {
+          "type": "child-card",
+          "x": 440,
+          "y": 382.671875,
+          "width": 696,
+          "height": 156.78125,
+          "font": "14px"
+        },
+        {
+          "type": "child-card",
+          "x": 440,
+          "y": 553.453125,
+          "width": 696,
+          "height": 164.390625,
+          "font": "14px"
+        },
+        {
+          "type": "child-card",
+          "x": 440,
+          "y": 731.84375,
+          "width": 696,
+          "height": 162.6875,
+          "font": "14px"
+        }
+      ],
+      "failedToolExpanded": true,
+      "keyboardChildFocusVisible": true,
+      "pageOverflow": false,
+      "cssSha256": "50f3042c9d8017c4294431525dca72e4b60051a328f24ef87ef6dc6824250cd2"
+    },
+    {
+      "phase": "after",
+      "width": 1280,
+      "colorScheme": "dark",
+      "features": {
+        ".msg.user": 1,
+        ".msg.assistant": 2,
+        ".thought": 1,
+        ".tsum": 1,
+        ".child-card": 3,
+        ".event": 0
+      },
+      "geometry": [
+        {
+          "type": "msg user",
+          "x": 544.40625,
+          "y": 102,
+          "width": 591.59375,
+          "height": 61.5,
+          "font": "14px"
+        },
+        {
+          "type": "thought",
+          "x": 440,
+          "y": 201.5,
+          "width": 612,
+          "height": 63.171875,
+          "font": "14px"
+        },
+        {
+          "type": "tsum",
+          "x": 432,
+          "y": 336.671875,
+          "width": 712,
+          "height": 36,
+          "font": "13px"
+        },
+        {
+          "type": "child-card",
+          "x": 440,
+          "y": 382.671875,
+          "width": 696,
+          "height": 156.78125,
+          "font": "14px"
+        },
+        {
+          "type": "child-card",
+          "x": 440,
+          "y": 553.453125,
+          "width": 696,
+          "height": 164.390625,
+          "font": "14px"
+        },
+        {
+          "type": "child-card",
+          "x": 440,
+          "y": 731.84375,
+          "width": 696,
+          "height": 162.6875,
+          "font": "14px"
+        }
+      ],
+      "failedToolExpanded": true,
+      "keyboardChildFocusVisible": true,
+      "pageOverflow": false,
+      "cssSha256": "50f3042c9d8017c4294431525dca72e4b60051a328f24ef87ef6dc6824250cd2"
+    }
+  ]
+}
