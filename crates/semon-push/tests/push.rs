@@ -15,7 +15,7 @@ use std::{
 
 use semon_push::{
     Client, Credential, PushOptions, StateLock, Stop, Token, read_token,
-    wire::{Append, HEAD_BYTES, Length, base64_decode, head_sha256},
+    wire::{Append, HEAD_BYTES, Length, Status, base64_decode, head_sha256},
 };
 use semon_sessions::{Facts, Options, is_input_path};
 use serde_json::json;
@@ -27,6 +27,14 @@ const TOKEN: &str = "test-token-0123456789";
 #[derive(Default)]
 struct Received {
     files: BTreeMap<String, Vec<u8>>,
+    generations: BTreeMap<String, String>,
+    append_order: Vec<String>,
+    statuses: Vec<Status>,
+    status_supported: bool,
+    status_refuse: bool,
+    omit_generations: bool,
+    grow_source: Option<PathBuf>,
+    discover_source: Option<(PathBuf, String)>,
     facts: Option<Facts>,
     appends: u64,
     replaces: u64,
@@ -107,6 +115,17 @@ fn receiver() -> Receiver {
             } else if url == "/v1/mirror/facts" {
                 shared.lock().unwrap().facts = serde_json::from_str(&body).ok();
                 json_response(200, json!({}))
+            } else if url == "/v1/mirror/status" && shared.lock().unwrap().status_supported {
+                shared
+                    .lock()
+                    .unwrap()
+                    .statuses
+                    .push(serde_json::from_str(&body).unwrap());
+                if shared.lock().unwrap().status_refuse {
+                    json_response(401, json!({"error":"revoked"}))
+                } else {
+                    json_response(200, json!({}))
+                }
             } else if url == "/v1/mirror/append" {
                 handle_append(&mut shared.lock().unwrap(), &body)
             } else {
@@ -152,7 +171,7 @@ fn handle_append(received: &mut Received, body: &str) -> Response<std::io::Curso
         json_response(
             409,
             serde_json::to_value(Length {
-                generation: None,
+                generation: received.generations.get(&key).cloned(),
                 length: current.len() as u64,
                 head_sha256: Some(head_sha256(current)),
             })
@@ -178,13 +197,38 @@ fn handle_append(received: &mut Received, body: &str) -> Response<std::io::Curso
     received.appends += 1;
     received.replaces += u64::from(append.replace);
     let length = next.len() as u64;
+    received.append_order.push(key.clone());
+    if let Some(generation) = &append.generation {
+        received.generations.insert(key.clone(), generation.clone());
+    }
     received.files.insert(key, next);
+    if let Some(source) = &received.grow_source {
+        use std::io::Write;
+        fs::OpenOptions::new()
+            .append(true)
+            .open(source)
+            .unwrap()
+            .write_all(b"{}\n")
+            .unwrap();
+    }
+    if let Some((source, contents)) = received.discover_source.take() {
+        fs::create_dir_all(source.parent().unwrap()).unwrap();
+        fs::write(source, contents).unwrap();
+        thread::sleep(Duration::from_millis(2100));
+    }
     if let Some((after, stop)) = &received.stop_after
         && received.appends >= *after
     {
         stop.stop();
     }
-    json_response(200, json!({"length": length}))
+    if received.omit_generations {
+        json_response(200, json!({"length": length}))
+    } else {
+        json_response(
+            200,
+            json!({"length": length, "generation": append.generation}),
+        )
+    }
 }
 
 struct Home {
@@ -1138,4 +1182,157 @@ fn copilot_redacted_mirror_survives_lost_ack_restart_partial_and_replacement() {
             "source deletion does not erase previously received viewing evidence"
         );
     }
+}
+
+#[test]
+fn batches_rotate_recent_files_and_reserve_a_history_turn() {
+    let home = Home::new();
+    let receiver = receiver();
+    let history = home.write("claude/projects/-work/history.jsonl", &line("old"));
+    fs::File::open(history)
+        .unwrap()
+        .set_times(fs::FileTimes::new().set_modified(std::time::UNIX_EPOCH))
+        .unwrap();
+    let bulk = line("bulk").repeat(10);
+    home.write("claude/projects/-work/bulk.jsonl", &bulk);
+    home.write("claude/projects/-work/latest.jsonl", &line("small"));
+    home.client(&receiver)
+        .with_chunk(line("bulk").len())
+        .pass(&home.options)
+        .unwrap();
+    let state = receiver.state.lock().unwrap();
+    let order = &state.append_order;
+    assert!(order[0].ends_with("latest.jsonl"));
+    assert!(
+        order
+            .iter()
+            .position(|p| p.ends_with("history.jsonl"))
+            .unwrap()
+            <= 3
+    );
+    assert_eq!(
+        state.files["claude/projects/-work/bulk.jsonl"],
+        bulk.as_bytes()
+    );
+}
+
+#[test]
+fn discovery_between_slices_exposes_a_new_small_session_and_growth_is_frozen() {
+    let home = Home::new();
+    let receiver = receiver();
+    let original = line("bulk").repeat(8);
+    let path = home.write(LOG, &original);
+    let recent = "claude/projects/-work/new.jsonl";
+    {
+        let mut r = receiver.state.lock().unwrap();
+        r.grow_source = Some(path.clone());
+        r.discover_source = Some((home.root.join(recent), line("new")));
+    }
+    home.client(&receiver)
+        .with_chunk(line("bulk").len())
+        .pass(&home.options)
+        .unwrap();
+    let state = receiver.state.lock().unwrap();
+    assert_eq!(state.files[LOG], original.as_bytes());
+    assert_eq!(state.files[recent], line("new").as_bytes());
+    assert!(
+        state.append_order.iter().position(|p| p == recent).unwrap()
+            < state.append_order.iter().rposition(|p| p == LOG).unwrap()
+    );
+    assert!(fs::metadata(path).unwrap().len() > original.len() as u64);
+}
+
+#[test]
+fn a_legacy_cursor_binds_an_unchanged_prefix_without_reuploading_history() {
+    let home = Home::new();
+    let receiver = receiver();
+    let original = line("legacy");
+    home.write(LOG, &original);
+    let options = home.push_options(&receiver.url);
+    home.client(&receiver).pass(&home.options).unwrap();
+    let mut state: serde_json::Value =
+        serde_json::from_slice(&fs::read(&options.state).unwrap()).unwrap();
+    for record in state["files"].as_object_mut().unwrap().values_mut() {
+        for field in ["generation", "confirmed", "redacted_head"] {
+            record.as_object_mut().unwrap().remove(field);
+        }
+    }
+    fs::write(&options.state, state.to_string()).unwrap();
+    let before = receiver.state.lock().unwrap().appends;
+    let report = home.client(&receiver).pass(&home.options).unwrap();
+    assert_eq!(report.bytes, 0);
+    assert_eq!(copy(&receiver, LOG), original.as_bytes());
+    assert_eq!(receiver.state.lock().unwrap().appends, before + 1);
+    let saved: serde_json::Value =
+        serde_json::from_slice(&fs::read(&options.state).unwrap()).unwrap();
+    assert_eq!(saved["files"][LOG]["confirmed"], true);
+}
+
+#[test]
+fn status_heartbeats_continue_while_the_first_upload_is_blocked() {
+    let home = Home::new();
+    let receiver = receiver();
+    home.write(LOG, &line("held"));
+    {
+        let mut r = receiver.state.lock().unwrap();
+        r.status_supported = true;
+        r.hang_after = Some(0);
+    }
+    let stop = Stop::new();
+    let options = home.push_options(&receiver.url);
+    let worker = watch_in_background(&options, &stop);
+    wait_for("two fresh heartbeats during blocked append", || {
+        receiver.state.lock().unwrap().statuses.len() >= 2
+    });
+    {
+        let r = receiver.state.lock().unwrap();
+        assert_eq!(r.appends, 0);
+        assert!(r.held > 0);
+        assert!(r.facts.is_none());
+        assert!(r.statuses[1].observed_at_ms > r.statuses[0].observed_at_ms);
+        assert!(r.statuses[1].sequence > r.statuses[0].sequence);
+        assert!(
+            r.statuses
+                .iter()
+                .all(|s| s.runtime.codex_rollouts.is_none() && s.runtime.repos.is_empty())
+        );
+    }
+    stop_and_join(&stop, worker).unwrap();
+    receiver.state.lock().unwrap().held_requests.clear();
+    assert_lock_freed(&options);
+}
+
+#[test]
+fn older_receivers_remain_compatible_with_unknown_generation_confirmation() {
+    let home = Home::new();
+    let receiver = receiver();
+    home.write(LOG, &line("old receiver"));
+    receiver.state.lock().unwrap().omit_generations = true;
+    semon_push::push(&home.push_options(&receiver.url), false).unwrap();
+    let state: serde_json::Value =
+        serde_json::from_slice(&fs::read(home.root.join("state/push.json")).unwrap()).unwrap();
+    assert_eq!(state["files"][LOG]["confirmed"], false);
+    assert!(receiver.state.lock().unwrap().facts.is_some());
+}
+
+#[test]
+fn heartbeat_token_refusal_wins_over_its_own_shared_stop() {
+    let home = Home::new();
+    let receiver = receiver();
+    home.write(LOG, &line("held"));
+    {
+        let mut r = receiver.state.lock().unwrap();
+        r.status_supported = true;
+        r.status_refuse = true;
+        r.hang_after = Some(0);
+    }
+    let stop = Stop::new();
+    let options = home.push_options(&receiver.url);
+    let worker = watch_in_background(&options, &stop);
+    wait_for("fatal status refusal", || worker.is_finished());
+    let error = worker.join().unwrap().unwrap_err();
+    assert!(error.contains("refused the token"), "{error}");
+    assert!(stop.is_stopped());
+    receiver.state.lock().unwrap().held_requests.clear();
+    assert_lock_freed(&options);
 }

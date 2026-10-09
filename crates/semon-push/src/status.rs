@@ -96,7 +96,7 @@ impl Heartbeat {
                             }
                         }
                     }
-                    match ended.recv_timeout(Duration::from_secs(2)) {
+                    match ended.recv_timeout(Duration::from_secs(10)) {
                         Err(mpsc::RecvTimeoutError::Timeout) => {}
                         _ => break,
                     }

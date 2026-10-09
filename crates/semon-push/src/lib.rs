@@ -239,7 +239,7 @@ struct FileState {
     ino: u64,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 struct FileStat {
     len: u64,
     mtime_ns: Option<i128>,
@@ -336,6 +336,7 @@ pub struct Client {
     heads: BTreeMap<String, Vec<u8>>,
     progress: Arc<Mutex<status::Progress>>,
     completed_inventory: Option<BTreeSet<String>>,
+    committed_inventory: Option<BTreeSet<String>>,
 }
 
 impl Client {
@@ -368,6 +369,7 @@ impl Client {
             heads: BTreeMap::new(),
             progress: Arc::new(Mutex::new(status::Progress::default())),
             completed_inventory: None,
+            committed_inventory: None,
         })
     }
 
@@ -617,7 +619,26 @@ impl Client {
                     .collect(),
             );
         }
+        self.refresh_phase();
         Ok(report)
+    }
+
+    fn refresh_phase(&self) {
+        let mut progress = self.progress.lock().unwrap_or_else(|e| e.into_inner());
+        if self.completed_inventory.is_some()
+            && self.completed_inventory == self.committed_inventory
+            && progress.inventory_complete
+            && progress.targets.values().all(|t| {
+                t.acked_bytes == t.target_bytes
+                    && self
+                        .state
+                        .files
+                        .get(&format!("{}/{}", t.root, t.path))
+                        .is_some_and(|f| f.confirmed)
+            })
+        {
+            progress.phase = wire::SyncPhase::UpToDate;
+        }
     }
 
     fn discover(
@@ -627,6 +648,7 @@ impl Client {
         foreground: &mut VecDeque<String>,
         history: &mut VecDeque<String>,
     ) -> Result<()> {
+        let runtime = semon_sessions::local_runtime_facts(sessions).map_err(|e| e.to_string())?;
         let mut fresh = Vec::new();
         for input in semon_sessions::inputs(sessions).map_err(|e| e.to_string())? {
             let key = Self::key(&input);
@@ -659,7 +681,13 @@ impl Client {
             let recent = stat
                 .mtime_ns
                 .is_some_and(|mtime| now.saturating_sub(mtime) <= 600_000_000_000);
-            if changed || recent || input.path.ends_with(".json") {
+            let live = input.root == semon_sessions::InputRoot::Codex
+                && !runtime.codex_locks.is_empty()
+                && semon_sessions::codex_native_id_prefix(&input.full_path(sessions), stat.len)
+                    .ok()
+                    .flatten()
+                    .is_some_and(|id| runtime.codex_locks.contains_key(&id));
+            if live || changed || recent || input.path.ends_with(".json") {
                 foreground.push_back(key.clone());
             } else {
                 history.push_back(key.clone());
@@ -670,16 +698,14 @@ impl Client {
                 .files
                 .get(&key)
                 .is_some_and(|f| !f.matches_stat(stat))
-            {
-                if let Some(target) = self
+                && let Some(target) = self
                     .progress
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
                     .targets
                     .get_mut(&key)
-                {
-                    target.acked_bytes = 0;
-                }
+            {
+                target.acked_bytes = 0;
             }
             selected.insert(key, (input, stat));
         }
@@ -1079,10 +1105,6 @@ fn resumable(path: &Path, size: u64, theirs: &Length) -> Result<bool> {
 /// `chunk` bytes, and where they end. A first line longer than `chunk` is
 /// read whole, up to [`LINE_CAP`]; one longer than that is cut there.
 /// Nothing when no line is complete yet.
-#[cfg(test)]
-fn complete_lines(path: &Path, from: u64, chunk: usize) -> Result<(Vec<u8>, u64)> {
-    complete_lines_to(path, from, chunk, u64::MAX)
-}
 
 fn complete_lines_to(path: &Path, from: u64, chunk: usize, upto: u64) -> Result<(Vec<u8>, u64)> {
     let mut file = open_input(path).map_err(|e| e.to_string())?;
@@ -1271,7 +1293,13 @@ fn push_running(
                 Some("paused") => wire::SyncPhase::Paused,
                 Some("storage full") => wire::SyncPhase::StorageFull,
                 _ if pass.is_err() => wire::SyncPhase::WaitingToRetry,
-                _ => wire::SyncPhase::Syncing,
+                _ => {
+                    client
+                        .progress
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .phase
+                }
             };
             client
                 .progress
@@ -1295,17 +1323,8 @@ fn push_running(
                     current.codex_provisional_rollouts = None;
                     match client.post_facts(&current) {
                         Ok(()) => {
-                            let mut progress =
-                                client.progress.lock().unwrap_or_else(|e| e.into_inner());
-                            if progress.inventory_complete
-                                && progress
-                                    .targets
-                                    .values()
-                                    .all(|t| t.acked_bytes == t.target_bytes)
-                                && client.state.files.values().all(|f| f.confirmed)
-                            {
-                                progress.phase = wire::SyncPhase::UpToDate;
-                            }
+                            client.committed_inventory = client.completed_inventory.clone();
+                            client.refresh_phase();
                         }
                         Err(Failure::Stopped) => return Ok(()),
                         Err(failure) => {
@@ -1433,15 +1452,25 @@ struct FactsWorker {
 impl FactsWorker {
     fn start(sessions: &Options, lock: Arc<StateLock>) -> Result<Self> {
         let sessions = sessions.clone();
+        Self::start_with(lock, move || {
+            let mut source = FactsSource::new(&sessions);
+            move || source.facts().map_err(|error| error.to_string())
+        })
+    }
+
+    fn start_with<F: FnMut() -> Result<Facts> + Send + 'static>(
+        lock: Arc<StateLock>,
+        make: impl FnOnce() -> F + Send + 'static,
+    ) -> Result<Self> {
         let (ask, asked) = mpsc::channel::<()>();
         let (answer, answers) = mpsc::sync_channel(1);
         thread::Builder::new()
             .name("semon-push-facts".to_owned())
             .spawn(move || {
                 let _lock = lock;
-                let mut source = FactsSource::new(&sessions);
+                let mut collect = make();
                 for () in asked {
-                    let facts = source.facts().map_err(|error| error.to_string());
+                    let facts = collect();
                     if answer.send(facts).is_err() {
                         break;
                     }
@@ -1894,5 +1923,157 @@ mod tests {
         assert_eq!(after_pass(refused(), &running), Some(refused()));
         assert_eq!(after_pass(failed(), &running), None);
         assert_eq!(after_pass(sent(), &running), None);
+    }
+}
+
+#[cfg(test)]
+mod sync_status_tests {
+    use super::*;
+    use tiny_http::{Response, Server};
+
+    #[test]
+    fn blocked_full_facts_does_not_block_fresh_heartbeat_or_release_its_lock() {
+        let root =
+            std::env::temp_dir().join(format!("semon-heartbeat-facts-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        let server = Arc::new(Server::http("127.0.0.1:0").unwrap());
+        let url = format!("http://{}", server.server_addr().to_ip().unwrap());
+        let observations = Arc::new(Mutex::new(Vec::<wire::Status>::new()));
+        let observed = Arc::clone(&observations);
+        let listener = Arc::clone(&server);
+        let http = thread::spawn(move || {
+            for mut request in listener.incoming_requests() {
+                let mut body = String::new();
+                request.as_reader().read_to_string(&mut body).unwrap();
+                observed
+                    .lock()
+                    .unwrap()
+                    .push(serde_json::from_str(&body).unwrap());
+                request.respond(Response::from_string("{}")).unwrap();
+            }
+        });
+        let options = PushOptions {
+            url,
+            credential: Credential::Memory(Token::new("test-status-token").unwrap()),
+            sessions: Options {
+                claude_home: root.join("claude"),
+                codex_home: root.join("codex"),
+                copilot_home: root.join("copilot"),
+                proc_root: root.join("proc"),
+                cache: root.join("cache"),
+                ..Options::default()
+            },
+            state: root.join("push.json"),
+        };
+        let lock = Arc::new(StateLock::acquire(&options.state).unwrap());
+        let stop = Stop::new();
+        let (release, blocked) = mpsc::channel();
+        let (entered, waiting) = mpsc::channel();
+        let worker = FactsWorker::start_with(Arc::clone(&lock), move || {
+            move || {
+                entered.send(()).unwrap();
+                blocked.recv().unwrap();
+                Ok(Facts::default())
+            }
+        })
+        .unwrap();
+        worker.ask.send(()).unwrap();
+        waiting.recv_timeout(Duration::from_secs(2)).unwrap();
+        let heartbeat = status::Heartbeat::start(
+            &options,
+            &stop,
+            Arc::clone(&lock),
+            Arc::new(Mutex::new(status::Progress::default())),
+        )
+        .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(25);
+        while observations.lock().unwrap().len() < 2 {
+            assert!(Instant::now() < deadline);
+            thread::sleep(Duration::from_millis(10));
+        }
+        let records = observations.lock().unwrap();
+        assert!(records[1].observed_at_ms > records[0].observed_at_ms);
+        assert!(records.iter().all(|s| s.runtime.codex_rollouts.is_none()));
+        drop(records);
+        stop.stop();
+        drop(heartbeat);
+        drop(worker);
+        drop(lock);
+        assert!(StateLock::acquire(&options.state).is_err());
+        release.send(()).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            if StateLock::acquire(&options.state).is_ok() {
+                break;
+            }
+            assert!(Instant::now() < deadline);
+            thread::sleep(Duration::from_millis(10));
+        }
+        server.unblock();
+        http.join().unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn idle_completion_uses_only_current_targets_and_survives_retained_legacy_cursors() {
+        let options = PushOptions {
+            url: "http://127.0.0.1:1".into(),
+            credential: Credential::Memory(Token::new("test-status-token").unwrap()),
+            sessions: Options::default(),
+            state: std::env::temp_dir().join("semon-phase-unwritten.json"),
+        };
+        let mut client = Client::new(&options).unwrap();
+        client.completed_inventory = Some(BTreeSet::from(["sessions/current.jsonl".into()]));
+        client.committed_inventory = client.completed_inventory.clone();
+        client
+            .state
+            .files
+            .insert("codex/sessions/deleted.jsonl".into(), FileState::default());
+        client.state.files.insert(
+            "codex/sessions/current.jsonl".into(),
+            FileState {
+                confirmed: true,
+                sent: 3,
+                ..FileState::default()
+            },
+        );
+        client.progress.lock().unwrap().inventory_complete = true;
+        client.progress.lock().unwrap().targets.insert(
+            "codex/sessions/current.jsonl".into(),
+            wire::SyncTarget {
+                root: "codex".into(),
+                path: "sessions/current.jsonl".into(),
+                generation: "a".repeat(32),
+                target_bytes: 3,
+                acked_bytes: 3,
+                head_sha256: head_sha256(b"{}\n"),
+            },
+        );
+        client.refresh_phase();
+        assert_eq!(
+            client.progress.lock().unwrap().phase,
+            wire::SyncPhase::UpToDate
+        );
+        client.progress.lock().unwrap().phase = wire::SyncPhase::Syncing;
+        client.refresh_phase();
+        assert_eq!(
+            client.progress.lock().unwrap().phase,
+            wire::SyncPhase::UpToDate
+        );
+        client
+            .progress
+            .lock()
+            .unwrap()
+            .targets
+            .values_mut()
+            .next()
+            .unwrap()
+            .target_bytes += 3;
+        client.progress.lock().unwrap().phase = wire::SyncPhase::Syncing;
+        client.refresh_phase();
+        assert_eq!(
+            client.progress.lock().unwrap().phase,
+            wire::SyncPhase::Syncing
+        );
     }
 }
