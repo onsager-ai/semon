@@ -344,7 +344,13 @@ impl Receiver {
             Some(file) => (file.metadata()?.len(), read_head(file)?),
             None => (0, Vec::new()),
         };
-        let marker_dir = self.directories(&[MACHINES_DIR, machine, "sync-generations"])?;
+        let marker_base = self.machine_dir(machine).join("sync-generations");
+        let marker_dir =
+            if request.generation.is_some() || fs::symlink_metadata(&marker_base).is_ok() {
+                self.directories(&[MACHINES_DIR, machine, "sync-generations"])?
+            } else {
+                marker_base
+            };
         let marker_name = format!(
             "{}.json",
             sha256_hex(format!("{}/{}", request.root, request.path).as_bytes())
@@ -352,7 +358,14 @@ impl Receiver {
         let marker_path = marker_dir.join(&marker_name);
         let previous = read_generation(&marker_path)?;
         let current_generation = previous
-            .filter(|g| g.length == length && g.head_sha256 == sha256_hex(&head))
+            .filter(|g| {
+                g.length == length
+                    && g.head_sha256 == sha256_hex(&head)
+                    && existing
+                        .as_ref()
+                        .and_then(|f| f.metadata().ok())
+                        .is_some_and(|m| crate::FileStat::from_metadata(&m) == g.identity)
+            })
             .map(|g| g.generation);
         let conflict = || {
             Reply::new(
@@ -423,6 +436,7 @@ impl Receiver {
                 generation: generation.clone(),
                 length: new_length,
                 head_sha256: sha256_hex(&next),
+                identity: crate::FileStat::from_metadata(&fs::metadata(&target)?),
             };
             let bytes = serde_json::to_vec(&marker).map_err(|e| Refusal::Invalid(e.to_string()))?;
             replace_file(&marker_dir, &marker_name, &bytes).map_err(|e| e.refusal)?;
@@ -495,7 +509,7 @@ impl Receiver {
                 }
             }
             let mut confirmed = Vec::new();
-            for target in &status.targets {
+            for (index, target) in status.targets.iter().enumerate() {
                 if target.acked_bytes == 0 {
                     continue;
                 }
@@ -521,7 +535,8 @@ impl Receiver {
                     let Some(file) = open_existing(&path)? else {
                         return Ok(false);
                     };
-                    if file.metadata()?.len() != marker.length {
+                    let metadata = file.metadata()?;
+                    if metadata.len() != marker.length || crate::FileStat::from_metadata(&metadata) != marker.identity {
                         return Ok(false);
                     }
                     let head = read_head(&file)?;
@@ -543,7 +558,7 @@ impl Receiver {
                     Ok(true)
                 })?;
                 if verified {
-                    confirmed.push(target.clone());
+                    confirmed.push(index);
                 }
             }
             let stored = StoredStatus {
@@ -555,12 +570,17 @@ impl Receiver {
                 return Err(Refusal::TooLarge("stored status too large".into()));
             }
             replace_file(&dir, "status.json", &bytes).map_err(|e| e.refusal)?;
-            Ok(Reply::new(200, json!({"confirmed": stored.confirmed})))
+            Ok(Reply::new(200, json!({"confirmed": stored.confirmed.iter().map(|index| &status.targets[*index]).collect::<Vec<_>>()})))
         })
     }
 
     fn try_facts(&self, machine: &str, facts: &Facts) -> Result<Reply, Refusal> {
         check_machine(machine)?;
+        if facts.codex_provisional_rollouts.is_some() {
+            return Err(Refusal::Invalid(
+                "authoritative facts cannot carry a provisional overlay".into(),
+            ));
+        }
         let bytes =
             serde_json::to_vec(facts).map_err(|error| Refusal::Invalid(error.to_string()))?;
         self.locks.with(&format!("{machine}/{FACTS_FILE}"), || {
@@ -615,6 +635,7 @@ impl Receiver {
 
 #[derive(Serialize, Deserialize)]
 struct Generation {
+    identity: crate::FileStat,
     generation: String,
     length: u64,
     head_sha256: String,
@@ -622,7 +643,7 @@ struct Generation {
 #[derive(Serialize, Deserialize)]
 struct StoredStatus {
     observation: Status,
-    confirmed: Vec<crate::wire::SyncTarget>,
+    confirmed: Vec<usize>,
 }
 fn read_generation(path: &Path) -> Result<Option<Generation>, Refusal> {
     let Some(file) = open_existing(path)? else {
@@ -1500,5 +1521,174 @@ mod tests {
             receiver.locks.map().is_empty(),
             "no lock outlives its writers"
         );
+    }
+}
+
+#[cfg(test)]
+mod status_tests {
+    use super::*;
+    use crate::wire::{Status, SyncPhase, SyncTarget, base64_encode, head_sha256};
+
+    fn fixture() -> (PathBuf, Receiver) {
+        let dir = std::env::temp_dir().join(format!(
+            "semon-status-{}-{}",
+            std::process::id(),
+            NEXT_TEMPORARY.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let receiver = Receiver::new(&dir);
+        (dir, receiver)
+    }
+    fn observation(bytes: &[u8], generation: &str) -> Status {
+        Status {
+            version: 1,
+            observation_id: "a".repeat(32),
+            sequence: 1,
+            observed_at_ms: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as i64,
+            phase: SyncPhase::Syncing,
+            runtime: Facts {
+                version: semon_sessions::FACTS_VERSION,
+                ..Facts::default()
+            },
+            inventory_complete: true,
+            targets: vec![SyncTarget {
+                root: "codex".into(),
+                path: "sessions/native.jsonl".into(),
+                generation: generation.into(),
+                target_bytes: bytes.len() as u64,
+                acked_bytes: bytes.len() as u64,
+                head_sha256: head_sha256(bytes),
+            }],
+        }
+    }
+    fn request(bytes: &[u8], generation: &str) -> Append {
+        Append {
+            root: "codex".into(),
+            path: "sessions/native.jsonl".into(),
+            generation: Some(generation.into()),
+            offset: 0,
+            replace: true,
+            bytes: base64_encode(bytes),
+            head_sha256: head_sha256(bytes),
+        }
+    }
+    #[test]
+    fn proof_is_generation_bound_and_durable_and_never_commits_facts() {
+        let (dir, receiver) = fixture();
+        let bytes = b"{\"type\":\"session_meta\",\"payload\":{\"id\":\"native-id\"}}\n";
+        let generation = "b".repeat(32);
+        let append = request(bytes, &generation);
+        assert_eq!(
+            receiver.append("laptop", &append).body["generation"],
+            generation
+        );
+        let status = observation(bytes, &generation);
+        assert_eq!(
+            receiver.status("laptop", &status).body["confirmed"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(!receiver.machine_dir("laptop").join(FACTS_FILE).exists());
+        let resumed = Receiver::new(&dir);
+        let mut next = status.clone();
+        next.sequence += 1;
+        next.observed_at_ms += 1;
+        assert_eq!(
+            resumed.status("laptop", &next).body["confirmed"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        next.sequence += 1;
+        next.observed_at_ms += 1;
+        next.targets[0].generation = "c".repeat(32);
+        assert!(
+            resumed.status("laptop", &next).body["confirmed"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn interrupted_metadata_commit_and_same_head_rewrite_fail_closed() {
+        let (dir, receiver) = fixture();
+        let bytes = b"{}\n";
+        let generation = "b".repeat(32);
+        receiver.append("laptop", &request(bytes, &generation));
+        // Simulate a crash after durable bytes but before the generation marker.
+        let marker = receiver
+            .machine_dir("laptop")
+            .join("sync-generations")
+            .join(format!(
+                "{}.json",
+                sha256_hex(b"codex/sessions/native.jsonl")
+            ));
+        fs::remove_file(&marker).unwrap();
+        let status = observation(bytes, &generation);
+        assert!(
+            Receiver::new(&dir).status("laptop", &status).body["confirmed"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        receiver.append("laptop", &request(bytes, &generation));
+        // Replacing a copy with identical bytes still changes its identity.
+        let path = receiver
+            .machine_dir("laptop")
+            .join("codex/sessions/native.jsonl");
+        fs::rename(&path, path.with_extension("retained")).unwrap();
+        fs::write(&path, bytes).unwrap();
+        let mut next = status;
+        next.sequence += 1;
+        next.observed_at_ms += 1;
+        assert!(
+            receiver.status("laptop", &next).body["confirmed"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn stale_heartbeats_cannot_restore_old_run_liveness_or_unknown_inventory() {
+        let (dir, receiver) = fixture();
+        let mut status = observation(b"{}\n", &"b".repeat(32));
+        assert_eq!(receiver.status("laptop", &status).status, 200);
+        assert_eq!(receiver.status("laptop", &status).status, 409);
+        status.observation_id = "d".repeat(32);
+        status.observed_at_ms += 1;
+        assert_eq!(receiver.status("laptop", &status).status, 200);
+        status.observation_id = "a".repeat(32);
+        status.sequence += 1;
+        status.observed_at_ms += 1;
+        assert_eq!(receiver.status("laptop", &status).status, 409);
+        status.observation_id = "d".repeat(32);
+        status.runtime.codex_rollouts = Some(Default::default());
+        assert_eq!(receiver.status("laptop", &status).status, 400);
+        fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn split_line_intermediate_bytes_and_duplicate_targets_are_unproved() {
+        let (dir, receiver) = fixture();
+        let bytes = b"{\"partial\":";
+        let generation = "b".repeat(32);
+        receiver.append("laptop", &request(bytes, &generation));
+        let mut status = observation(bytes, &generation);
+        assert!(
+            receiver.status("laptop", &status).body["confirmed"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        status.targets.push(status.targets[0].clone());
+        assert_eq!(receiver.status("laptop", &status).status, 400);
+        fs::remove_dir_all(dir).unwrap();
     }
 }

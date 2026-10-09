@@ -53,3 +53,53 @@ pub fn codex_native_id_prefix(path: &Path, accepted_bytes: u64) -> io::Result<Op
     }
     Ok(Some(record.payload.id))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn exact_first_record_requires_complete_unique_native_metadata() {
+        let root = std::env::temp_dir().join(format!("semon-native-prefix-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("native.jsonl");
+        for (record, expected) in [
+            (
+                "{\"type\":\"session_meta\",\"payload\":{\"id\":\"exact-native\"}}\n",
+                Some("exact-native"),
+            ),
+            (
+                "{\"type\":\"session_meta\",\"payload\":{\"id\":\"a\",\"id\":\"b\"}}\n",
+                None,
+            ),
+            (
+                "{\"type\":\"session_meta\",\"type\":\"event_msg\",\"payload\":{\"id\":\"a\"}}\n",
+                None,
+            ),
+            (
+                "{\"type\":\"event_msg\",\"payload\":{\"id\":\"a\"}}\n",
+                None,
+            ),
+            (
+                "{\"type\":\"session_meta\",\"payload\":{\"id\":\"\"}}\n",
+                None,
+            ),
+            (
+                "{\"type\":\"session_meta\",\"payload\":{\"id\":\"a\"}}",
+                None,
+            ),
+        ] {
+            std::fs::write(&path, record).unwrap();
+            assert_eq!(
+                codex_native_id_prefix(&path, record.len() as u64)
+                    .unwrap()
+                    .as_deref(),
+                expected
+            );
+            assert_eq!(
+                codex_native_id_prefix(&path, record.len().saturating_sub(1) as u64).unwrap(),
+                None
+            );
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}

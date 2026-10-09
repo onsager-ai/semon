@@ -112,8 +112,7 @@ pub(crate) fn publish(path: &Path, facts: &Facts, identity: &Identity) -> io::Re
         source: identity.clone(),
         facts_version: facts.version,
         hostname: (facts.hostname.len() <= 4096).then(|| facts.hostname.clone()),
-        selection_known: facts.codex_rollouts.is_some()
-            || facts.codex_provisional_rollouts.is_some(),
+        selection_known: facts.codex_rollouts.is_some(),
         manifest_digest: manifest_digest.clone(),
     };
     let result = (|| -> rusqlite::Result<()> {
@@ -303,6 +302,43 @@ mod tests {
             assert_eq!(source.hostname().is_some(), facts.version == FACTS_VERSION);
         }
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn provisional_overlay_does_not_make_full_inventory_known() {
+        let root = root();
+        let path = root.join("facts.json");
+        let mut facts = fixture(None);
+        facts.codex_provisional_rollouts = Some(std::collections::BTreeSet::from([
+            "sessions/new.jsonl".into(),
+        ]));
+        write_facts(&path, &facts).unwrap();
+        let unknown = CurrentSources::open(&path).unwrap();
+        assert!(!unknown.selection_known());
+        assert_eq!(unknown.codex_current("sessions/new.jsonl").unwrap(), None);
+        drop(unknown);
+        facts.codex_rollouts = Some(Default::default());
+        write_facts(&path, &facts).unwrap();
+        let explicit_empty = CurrentSources::open(&path).unwrap();
+        assert!(explicit_empty.selection_known());
+        assert_eq!(
+            explicit_empty.codex_current("sessions/new.jsonl").unwrap(),
+            Some(true)
+        );
+        assert_eq!(
+            explicit_empty
+                .codex_current("sessions/retired.jsonl")
+                .unwrap(),
+            Some(false)
+        );
+        assert!(
+            crate::facts::read_facts(&path)
+                .unwrap()
+                .codex_rollouts
+                .unwrap()
+                .is_empty()
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
