@@ -87,6 +87,7 @@ struct Answer {
     status: u16,
     head: String,
     body: Value,
+    body_bytes: usize,
 }
 
 fn parse(raw: &[u8]) -> Answer {
@@ -101,6 +102,7 @@ fn parse(raw: &[u8]) -> Answer {
         status,
         head: head.to_owned(),
         body: serde_json::from_str(body).unwrap_or(Value::Null),
+        body_bytes: body.len(),
     }
 }
 
@@ -798,4 +800,32 @@ fn a_peer_that_never_reads_its_answer_is_closed_at_the_write_deadline() {
         "freed after {elapsed:?}; the write deadline is 1 s"
     );
     drop(stuck);
+}
+
+#[test]
+fn status_head_advertises_post_without_body_and_unknown_routes_stay_unsupported() {
+    let (receiving, tokens) = receiving(&["laptop"]);
+    let head = format!(
+        "HEAD /v1/mirror/status HTTP/1.1\r\nHost: {}\r\nAuthorization: Bearer {}\r\nConnection: close\r\n\r\n",
+        receiving.address, tokens[0]
+    );
+    let answer = exchange(receiving.address, head.as_bytes());
+    assert_eq!(answer.status, 405);
+    assert!(
+        answer
+            .head
+            .lines()
+            .any(|line| line.eq_ignore_ascii_case("Allow: POST"))
+    );
+    assert!(answer.body.is_null());
+    assert_eq!(answer.body_bytes, 0, "HEAD must not send an error body");
+    let unknown = head.replace("/v1/mirror/status", "/v1/mirror/unknown-status");
+    assert_eq!(exchange(receiving.address, unknown.as_bytes()).status, 404);
+    let unauthorized = post(
+        receiving.address,
+        "/v1/mirror/status",
+        Some("revoked-token"),
+        b"{}",
+    );
+    assert_eq!(unauthorized.status, 401);
 }

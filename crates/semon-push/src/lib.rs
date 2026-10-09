@@ -1120,7 +1120,7 @@ fn redacted_prefix(path: &Path, len: u64) -> Result<Vec<u8>> {
 fn resumable(path: &Path, size: u64, theirs: &Length) -> Result<bool> {
     let length = theirs.length;
     if length == 0 {
-        return Ok(true);
+        return Ok(theirs.head_sha256.as_deref() == Some(head_sha256(&[]).as_str()));
     }
     if length > size {
         return Ok(false);
@@ -1680,6 +1680,23 @@ mod tests {
     }
 
     #[test]
+    fn missing_resumable_proof_requires_replacement_even_for_an_empty_copy() {
+        let fixture = Fixture::new();
+        let path = fixture.write("claude/projects/-work/empty.jsonl", b"");
+        let unknown = Length {
+            length: 0,
+            generation: None,
+            head_sha256: None,
+        };
+        assert!(!resumable(&path, 0, &unknown).unwrap());
+        let known = Length {
+            head_sha256: Some(head_sha256(&[])),
+            ..unknown
+        };
+        assert!(resumable(&path, 0, &known).unwrap());
+    }
+
+    #[test]
     fn limits_have_clear_messages_and_rate_limit_retries_the_same_body() {
         let fixture = Fixture::new();
         let server = Server::http("127.0.0.1:0").unwrap();
@@ -1769,6 +1786,16 @@ mod tests {
                     .recv_timeout(deadline.saturating_duration_since(Instant::now()))
                     .unwrap()
                     .expect("initial append or optional status");
+                if request.method() == &tiny_http::Method::Head {
+                    assert_eq!(request.url(), "/v1/mirror/status");
+                    request
+                        .respond(
+                            Response::empty(405)
+                                .with_header(Header::from_bytes("Allow", "POST").unwrap()),
+                        )
+                        .unwrap();
+                    continue;
+                }
                 match request.url() {
                     "/v1/mirror/append" => {
                         request
@@ -1796,6 +1823,16 @@ mod tests {
                     .recv_timeout(deadline.saturating_duration_since(Instant::now()))
                     .unwrap()
                     .expect("restricted-pass status heartbeat");
+                if request.method() == &tiny_http::Method::Head {
+                    assert_eq!(request.url(), "/v1/mirror/status");
+                    request
+                        .respond(
+                            Response::empty(405)
+                                .with_header(Header::from_bytes("Allow", "POST").unwrap()),
+                        )
+                        .unwrap();
+                    continue;
+                }
                 assert_eq!(
                     request.url(),
                     "/v1/mirror/status",
@@ -2080,6 +2117,21 @@ mod sync_status_tests {
     use super::*;
     use tiny_http::{Response, Server};
 
+    fn answer_status_head(request: tiny_http::Request) -> Option<tiny_http::Request> {
+        if request.method() == &tiny_http::Method::Head {
+            assert_eq!(request.url(), "/v1/mirror/status");
+            request
+                .respond(
+                    Response::empty(405)
+                        .with_header(tiny_http::Header::from_bytes("Allow", "POST").unwrap()),
+                )
+                .unwrap();
+            None
+        } else {
+            Some(request)
+        }
+    }
+
     #[test]
     fn blocked_full_facts_does_not_block_fresh_heartbeat_or_release_its_lock() {
         let root =
@@ -2091,7 +2143,10 @@ mod sync_status_tests {
         let observed = Arc::clone(&observations);
         let listener = Arc::clone(&server);
         let http = thread::spawn(move || {
-            for mut request in listener.incoming_requests() {
+            for request in listener.incoming_requests() {
+                let Some(mut request) = answer_status_head(request) else {
+                    continue;
+                };
                 let mut body = String::new();
                 request.as_reader().read_to_string(&mut body).unwrap();
                 observed
@@ -2173,6 +2228,9 @@ mod sync_status_tests {
         let (seen, received) = mpsc::channel();
         let http = thread::spawn(move || {
             for request in listener.incoming_requests() {
+                let Some(request) = answer_status_head(request) else {
+                    continue;
+                };
                 request
                     .respond(
                         Response::from_string("{\"error\":\"rate_limited\"}")
@@ -2234,7 +2292,10 @@ mod sync_status_tests {
         let (seen, received) = mpsc::channel();
         let http = thread::spawn(move || {
             let mut previous = 0;
-            for mut request in listener.incoming_requests() {
+            for request in listener.incoming_requests() {
+                let Some(mut request) = answer_status_head(request) else {
+                    continue;
+                };
                 let mut body = String::new();
                 request.as_reader().read_to_string(&mut body).unwrap();
                 let status: wire::Status = serde_json::from_str(&body).unwrap();

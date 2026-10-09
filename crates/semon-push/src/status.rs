@@ -53,6 +53,9 @@ impl Heartbeat {
             .name("semon-push-status".into())
             .spawn(move || {
                 let _lock = lock;
+                if !status_advertised(&client) {
+                    return;
+                }
                 loop {
                     if stop.is_stopped() || ended.try_recv().is_ok() {
                         break;
@@ -126,6 +129,43 @@ impl Drop for Heartbeat {
         let _ = self.end.send(());
     }
 }
+// An older receiver may route unknown paths through cookie authentication and
+// answer 401 to a valid push-only token. Discover the POST-only route before
+// treating optional status POST refusal as authoritative token rejection.
+fn status_advertised(client: &Client) -> bool {
+    let Ok(http) = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+    else {
+        return false;
+    };
+    let request = http
+        .head(format!("{}/v1/mirror/status", client.url))
+        .bearer_auth(client.token.expose())
+        .header("connection", "close");
+    let lock = client.lock.clone();
+    matches!(
+        client.stop.run("status-capability", move || {
+            let _lock = lock;
+            request.send().map(|response| {
+                response.status().as_u16() == 405
+                    && response
+                        .headers()
+                        .get_all(reqwest::header::ALLOW)
+                        .iter()
+                        .filter_map(|value| value.to_str().ok())
+                        .any(|allow| {
+                            allow
+                                .split(',')
+                                .any(|method| method.trim().eq_ignore_ascii_case("POST"))
+                        })
+            })
+        }),
+        Ok(Some(Ok(true)))
+    )
+}
+
 fn now_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
