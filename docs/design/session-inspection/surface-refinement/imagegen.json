@@ -1,0 +1,29 @@
+{
+  "baseline": "bcc0a7624e753a818665518837d050af13395bef",
+  "generated_at": "2026-10-08T23:52\u201323:56Z",
+  "input": "Original-resolution sanitized screenshot of the existing viewer or actual Hub shared-CSS candidate.",
+  "brief": "Preserve the existing whole-page layout, type scale, density, content and functions; lighten repeated informational containers. First broad reflow was rejected by the user.",
+  "limitations": "Raster proposals redraw text/state details and are not editable canvases or working frontend evidence. Native output resolution preserved without enlargement.",
+  "images": [
+    {
+      "file": "imagegen-preserved-layout.png",
+      "tool": "OpenAI Image Gen",
+      "dimensions": [
+        1530,
+        1028
+      ],
+      "sha256": "0ca7b1beefa30a5d8e279b4cafd79bd945822feede99988b70e5e6264d0c0655",
+      "status": "retained-layout exploration; authored source and native canvas govern adoption"
+    },
+    {
+      "file": "imagegen-rejected-reflow.png",
+      "tool": "OpenAI Image Gen",
+      "dimensions": [
+        1536,
+        1024
+      ],
+      "sha256": "70b9fe57dc3a10f877ee9b7f67a20ef55c2b209de7157fc6ae7bf7e5a285bdb7",
+      "status": "rejected: excessive layout change"
+    }
+  ]
+}

@@ -67,7 +67,8 @@ to the same 13px secondary role already used by compact setting buttons and
 labels. Preserve Instrument Sans, existing insets/control geometry and the
 16px transcript text. On narrow/coarse-pointer devices native textarea/select
 fields remain 16px to avoid focus zoom, while enhanced button-based selects
-stay 13px and preserve 44px targets. This is an incremental control adjustment,
+stay 13px. Toolbar targets remain 44px; the scoped dropdown density is specified
+in section 9. This is an incremental control adjustment,
 not a change to the reading type scale or navigation.
 
 Composer configuration is presented as quiet value chips, with a small
@@ -200,3 +201,41 @@ state. Record deliberate deviations and actual checks in the PR. Inspect visual
 diffs before updating baselines; never relax their thresholds. Keep documentation
 and canvas links in the existing ai-design-workflow brief and ui-design skill
 architecture; no additional instruction platform is required.
+
+## 9. Restrained surface refinement
+
+Incremental baseline: `bcc0a7624e753a818665518837d050af13395bef`.
+The user rejected the first whole-page Image Gen direction because it changed
+too much. Keep the existing shell, message alignment, fonts, widths, reading
+scale, spacing and interaction owners. Flatten repeated informational enclosures
+without rearranging the workflow. Preserve grouped tools, thinking, child and
+handoff sessions, agent communication, metadata/configuration and composer.
+
+- Linked child sessions retain their existing dimensions, padding, content,
+  state dots and navigation actions. Replace the rounded perimeter with a
+  neutral top separator and left context rule. Hover remains a quiet fill;
+  buttons retain the shared visible keyboard outline. Message bubbles, tool
+  output and modal boundaries keep their existing functional treatments.
+- A shared composer containing supporting notes has open supporting regions.
+  Its textarea keeps a 1px inset boundary and the existing 6px corner role;
+  the enclosing border becomes transparent while retaining its geometry.
+  Input growth, insets, toolbar, recovery, readiness and billing order do not move.
+- Composer enhanced selects use 13px text, 36px desktop triggers and 32px
+  desktop option rows. Narrow/coarse-pointer triggers and rows use 40px, an
+  explicit user-requested exception scoped to this composer dropdown. Generic
+  selects, toolbar buttons, native fallback fields and other touch controls
+  retain their existing 44px target contract. Long option labels wrap and grow.
+- Selection is a trailing 14px check and 500 weight. Keyboard-active options
+  also have a 2px ink inset rule and the existing hover fill; moving active
+  focus must not silently change selection. Preserve arrows, Home/End,
+  typeahead, Enter, nested Escape, mobile Back and native form value ownership.
+  The mobile sheet heading is 13px and its close control is 40px with a 16px icon.
+
+Image Gen originals and rejection provenance are in
+`../docs/design/session-inspection/surface-refinement/`. The retained-layout
+image is an exploration, not a pixel specification: generated text and state
+details can be inaccurate. The implementation deliberately keeps the original
+message bubble and navigation shapes rather than adopting those redraw changes.
+The native session canvas records the linked-session surface component; actual
+before/after images verify unchanged reader geometry at 390/1280px in both themes.
+Hub consumes these shared styles only after reviewed source adoption.

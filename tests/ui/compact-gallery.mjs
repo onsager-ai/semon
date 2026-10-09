@@ -81,6 +81,18 @@ try {
         fullPage: true,
       });
       await page.getByRole('combobox').click();
+      const options = page.getByRole('option');
+      assert(await options.first().evaluate((n) => getComputedStyle(n).fontSize === '13px'));
+      assert(await options.first().evaluate((n) => n.getBoundingClientRect().height >= 32));
+      await page.keyboard.press('End');
+      assert.equal(
+        await options
+          .last()
+          .getAttribute('class')
+          .then((c) => c.includes('sh-active')),
+        true,
+      );
+      assert.equal(await options.first().getAttribute('aria-selected'), 'true');
       await page.getByRole('option', { name: 'Second qualified model' }).click();
       assert.equal(await page.locator('select[name=model]').inputValue(), 'second');
       assert.equal(
@@ -93,13 +105,13 @@ try {
         await page.locator('dialog.sh-select-sheet').waitFor({ state: 'detached' });
         assert(await page.locator('dialog.sh-composer-panel').isVisible());
       }
-      if (width < 1000)
-        assert(
-          await page
-            .locator('.sh-select-trigger')
-            .first()
-            .evaluate((n) => n.getBoundingClientRect().height >= 44),
-        );
+      assert.equal(
+        await page
+          .locator('.sh-select-trigger')
+          .first()
+          .evaluate((n) => n.getBoundingClientRect().height),
+        width < 1000 ? 40 : 36,
+      );
       await page.keyboard.press('Escape');
       await page.locator('.sh-picker[open]').waitFor({ state: 'detached' });
       assert.equal(await trigger.evaluate((n) => document.activeElement === n), true);

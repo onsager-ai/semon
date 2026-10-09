@@ -14,6 +14,13 @@ it complements the existing title and figure roles. Phone and coarse-pointer
 controls use 44px targets. Product-specific layout does not require pixel-identical
 pages, but shared controls keep their appearance and interaction contract.
 
+The user-requested composer dropdown refinement in `.stitch/DESIGN.md` section 9
+is a scoped exception: enhanced composer select triggers/options and their
+sheet close control use 40px narrow/coarse-pointer targets with 13px text.
+Generic controls, composer toolbar actions and native fallback keep 44px targets.
+The compact gallery verifies that density alongside selection, focus and Back;
+the generic gallery's touch assertions and visual thresholds remain unchanged.
+
 Native application actions use `btn sh-compact` and `btn-row sh-actions` to match
 the viewer's compact density. Primary, danger and quiet states retain their
 existing meaning. The visible single-line surface is 32px; touch targets remain

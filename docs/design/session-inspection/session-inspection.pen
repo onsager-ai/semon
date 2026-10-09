@@ -2786,6 +2786,375 @@
           ]
         }
       ]
+    },
+    {
+      "type": "frame",
+      "id": "S2P8p",
+      "x": 0,
+      "y": -360,
+      "name": "Linked session · existing contents with open perimeter",
+      "reusable": true,
+      "width": 696,
+      "fill": "$ground",
+      "stroke": "$line",
+      "strokeWidth": {
+        "top": 1,
+        "left": 1
+      },
+      "layout": "vertical",
+      "gap": 3,
+      "padding": [
+        12,
+        14
+      ],
+      "children": [
+        {
+          "type": "frame",
+          "id": "pG6Ly",
+          "name": "Existing name, state and navigation affordance",
+          "width": "fill_container",
+          "gap": 8,
+          "alignItems": "center",
+          "children": [
+            {
+              "type": "text",
+              "id": "T0goI",
+              "name": "Open child session",
+              "fill": "$ink",
+              "textGrowth": "fixed-width",
+              "width": "fill_container",
+              "content": "feat/offline-sync",
+              "lineHeight": 1.45,
+              "fontFamily": "$sans",
+              "fontSize": 14,
+              "fontWeight": "600"
+            },
+            {
+              "type": "ellipse",
+              "id": "M8cNB",
+              "name": "Recorded state dot",
+              "fill": "$done",
+              "width": 8,
+              "height": 8
+            },
+            {
+              "type": "text",
+              "id": "CvJ9O",
+              "name": "Recorded state word",
+              "fill": "$muted",
+              "content": "Done",
+              "fontFamily": "$sans",
+              "fontSize": 12,
+              "fontWeight": "normal"
+            },
+            {
+              "type": "icon",
+              "id": "DGvNZ",
+              "name": "Child session navigation",
+              "width": 14,
+              "height": 14,
+              "icon": "chevron-right",
+              "library": "lucide",
+              "fill": "$muted"
+            }
+          ]
+        },
+        {
+          "type": "text",
+          "id": "SvOe5",
+          "name": "Existing run metadata",
+          "fill": "$muted",
+          "textGrowth": "fixed-width",
+          "width": "fill_container",
+          "content": "Codex run · luna · 1d 0h · 3 steps · $0.23",
+          "lineHeight": 1.45,
+          "fontFamily": "$sans",
+          "fontSize": 12,
+          "fontWeight": "normal"
+        },
+        {
+          "type": "frame",
+          "id": "Q3hEK",
+          "name": "Existing retained brief",
+          "width": "fill_container",
+          "padding": [
+            4,
+            0,
+            0,
+            0
+          ],
+          "children": [
+            {
+              "type": "text",
+              "id": "YDv7x",
+              "name": "Retained task context",
+              "fill": "$ink",
+              "textGrowth": "fixed-width",
+              "width": "fill_container",
+              "content": "Implement the offline queue flush (#212): flush oldest first, stop at the first Nack. Acceptance: the new flush_* tests pass.",
+              "lineHeight": 1.45,
+              "fontFamily": "$sans",
+              "fontSize": 13,
+              "fontWeight": "normal"
+            }
+          ]
+        },
+        {
+          "type": "text",
+          "id": "Y3cUsU",
+          "x": 0,
+          "y": 0,
+          "name": "Current activity or recorded result",
+          "enabled": false,
+          "fill": "$muted",
+          "textGrowth": "fixed-width",
+          "width": 668,
+          "lineHeight": 1.45,
+          "fontFamily": "$sans",
+          "fontSize": 13,
+          "fontWeight": "normal"
+        },
+        {
+          "type": "text",
+          "id": "NCoXz",
+          "name": "Existing separate trace action",
+          "fill": "$ink",
+          "textGrowth": "fixed-width",
+          "width": "fill_container",
+          "content": "Run view",
+          "lineHeight": 1.45,
+          "fontFamily": "$sans",
+          "fontSize": 13,
+          "fontWeight": "normal"
+        }
+      ]
+    },
+    {
+      "type": "frame",
+      "id": "WIlub",
+      "x": 6750,
+      "y": 0,
+      "name": "Viewer · restrained linked-session surface states",
+      "clip": true,
+      "width": 1180,
+      "height": 760,
+      "fill": "$ground",
+      "layout": "vertical",
+      "gap": 20,
+      "padding": 24,
+      "children": [
+        {
+          "type": "text",
+          "id": "QUkTe",
+          "name": "State board heading",
+          "fill": "$ink",
+          "textGrowth": "fixed-width",
+          "width": "fill_container",
+          "content": "Keep the viewer; lighten repeated enclosures",
+          "lineHeight": 1.45,
+          "fontFamily": "$sans",
+          "fontSize": 16,
+          "fontWeight": "600"
+        },
+        {
+          "type": "text",
+          "id": "u1h4b",
+          "name": "Scope and source",
+          "fill": "$muted",
+          "textGrowth": "fixed-width",
+          "width": "fill_container",
+          "content": "Existing messages, thinking, grouped tools, event rows, metadata and composer remain in place. Only the child-session perimeter changes; real before/after screenshots are the geometry reference.",
+          "lineHeight": 1.45,
+          "fontFamily": "$sans",
+          "fontSize": 13,
+          "fontWeight": "normal"
+        },
+        {
+          "type": "frame",
+          "id": "Cqf0q",
+          "name": "Desktop and constrained-width states",
+          "width": "fill_container",
+          "gap": 24,
+          "children": [
+            {
+              "type": "frame",
+              "id": "uNKUJ",
+              "name": "Original reading-width session context",
+              "width": 696,
+              "layout": "vertical",
+              "gap": 14,
+              "children": [
+                {
+                  "id": "thlmI",
+                  "type": "ref",
+                  "ref": "S2P8p",
+                  "name": "Done linked session · preserved actions and content",
+                  "width": "fill_container"
+                },
+                {
+                  "id": "kzmit",
+                  "type": "ref",
+                  "ref": "S2P8p",
+                  "name": "Working linked session · preserved actions and content",
+                  "width": "fill_container",
+                  "descendants": {
+                    "T0goI": {
+                      "content": "Review offline-sync diff"
+                    },
+                    "M8cNB": {
+                      "fill": "#00000000",
+                      "stroke": "$work",
+                      "strokeWidth": 1.5
+                    },
+                    "CvJ9O": {
+                      "content": "Working"
+                    },
+                    "SvOe5": {
+                      "content": "Subagent · sonnet 5 · 9m · 2 steps · $0.61"
+                    },
+                    "YDv7x": {
+                      "content": "Review Codex's diff on feat/offline-sync as it lands: ordering, Nack handling, no commit before Ack."
+                    },
+                    "Y3cUsU": {
+                      "enabled": true,
+                      "content": "Reading crates/sync/src/flush.rs",
+                      "width": "fill_container"
+                    }
+                  }
+                },
+                {
+                  "id": "iQ1Pc",
+                  "type": "ref",
+                  "ref": "S2P8p",
+                  "name": "Failed linked session · preserved actions and content",
+                  "width": "fill_container",
+                  "descendants": {
+                    "T0goI": {
+                      "content": "Check retry safety"
+                    },
+                    "M8cNB": {
+                      "fill": "$error"
+                    },
+                    "CvJ9O": {
+                      "content": "Failed",
+                      "fill": "$error"
+                    },
+                    "SvOe5": {
+                      "content": "Subagent · sonnet 5 · 3m · 1 step · $0.26"
+                    },
+                    "YDv7x": {
+                      "content": "Check whether the retry cap can overflow under repeated Nacks, then report the smallest reproducer."
+                    },
+                    "Y3cUsU": {
+                      "enabled": true,
+                      "content": "Result: Failed before producing a reproducer: the review sandbox could not read the test fixture.",
+                      "fill": "$error",
+                      "width": "fill_container"
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "type": "frame",
+              "id": "qkmvq",
+              "name": "Constrained-width dark context",
+              "theme": {
+                "mode": "dark"
+              },
+              "width": "fill_container",
+              "fill": "$ground",
+              "layout": "vertical",
+              "gap": 14,
+              "padding": 16,
+              "children": [
+                {
+                  "id": "dbXTz",
+                  "type": "ref",
+                  "ref": "S2P8p",
+                  "name": "Done linked session · preserved actions and content",
+                  "width": "fill_container"
+                },
+                {
+                  "id": "RfXaA",
+                  "type": "ref",
+                  "ref": "S2P8p",
+                  "name": "Working linked session · preserved actions and content",
+                  "width": "fill_container",
+                  "descendants": {
+                    "T0goI": {
+                      "content": "Review offline-sync diff"
+                    },
+                    "M8cNB": {
+                      "fill": "#00000000",
+                      "stroke": "$work",
+                      "strokeWidth": 1.5
+                    },
+                    "CvJ9O": {
+                      "content": "Working"
+                    },
+                    "SvOe5": {
+                      "content": "Subagent · sonnet 5 · 9m · 2 steps · $0.61"
+                    },
+                    "YDv7x": {
+                      "content": "Review Codex's diff on feat/offline-sync as it lands: ordering, Nack handling, no commit before Ack."
+                    },
+                    "Y3cUsU": {
+                      "enabled": true,
+                      "content": "Reading crates/sync/src/flush.rs",
+                      "width": "fill_container"
+                    }
+                  }
+                },
+                {
+                  "id": "XVtAu",
+                  "type": "ref",
+                  "ref": "S2P8p",
+                  "name": "Failed linked session · preserved actions and content",
+                  "width": "fill_container",
+                  "descendants": {
+                    "T0goI": {
+                      "content": "Check retry safety"
+                    },
+                    "M8cNB": {
+                      "fill": "$error"
+                    },
+                    "CvJ9O": {
+                      "content": "Failed",
+                      "fill": "$error"
+                    },
+                    "SvOe5": {
+                      "content": "Subagent · sonnet 5 · 3m · 1 step · $0.26"
+                    },
+                    "YDv7x": {
+                      "content": "Check whether the retry cap can overflow under repeated Nacks, then report the smallest reproducer."
+                    },
+                    "Y3cUsU": {
+                      "enabled": true,
+                      "content": "Result: Failed before producing a reproducer: the review sandbox could not read the test fixture.",
+                      "fill": "$error",
+                      "width": "fill_container"
+                    }
+                  }
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "text",
+          "id": "x3HM68",
+          "name": "Fidelity boundary",
+          "fill": "$muted",
+          "textGrowth": "fixed-width",
+          "width": "fill_container",
+          "content": "Component/state board, not a replacement viewer layout. Canvas tooltips and code-span rendering are schematic; authored transcript components and native navigation remain authoritative.",
+          "lineHeight": 1.45,
+          "fontFamily": "$sans",
+          "fontSize": 13,
+          "fontWeight": "normal"
+        }
+      ]
     }
   ],
   "themes": {
@@ -2925,6 +3294,40 @@
     "space": {
       "type": "number",
       "value": 16
+    },
+    "done": {
+      "type": "color",
+      "value": [
+        {
+          "value": "#8a918d",
+          "theme": {
+            "mode": "light"
+          }
+        },
+        {
+          "value": "#7f8783",
+          "theme": {
+            "mode": "dark"
+          }
+        }
+      ]
+    },
+    "work": {
+      "type": "color",
+      "value": [
+        {
+          "value": "#1d6db0",
+          "theme": {
+            "mode": "light"
+          }
+        },
+        {
+          "value": "#66b0ef",
+          "theme": {
+            "mode": "dark"
+          }
+        }
+      ]
     }
   },
   "fileToken": "8de57cf7-39d6-41e0-ad39-591d0f987d7c"
