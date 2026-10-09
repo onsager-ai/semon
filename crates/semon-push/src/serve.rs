@@ -488,6 +488,7 @@ enum NoHead {
 
 struct Connection {
     stream: Stream,
+    head_only: bool,
     /// Bytes read and not yet used.
     buffer: Vec<u8>,
     limits: Limits,
@@ -591,7 +592,9 @@ impl Connection {
             out.push_str("Connection: close\r\n");
         }
         out.push_str("\r\n");
-        out.push_str(&body);
+        if !self.head_only {
+            out.push_str(&body);
+        }
         self.send(out.as_bytes())
     }
 
@@ -780,6 +783,7 @@ fn serve_connection(slot: &mut Slot, socket: TcpStream, accepted: Instant) {
     };
     let mut connection = Connection {
         stream,
+        head_only: false,
         buffer: Vec::new(),
         limits,
     };
@@ -797,6 +801,7 @@ fn serve_connection(slot: &mut Slot, socket: TcpStream, accepted: Instant) {
                 return connection.close();
             }
         };
+        connection.head_only = head.method == "HEAD";
         match answer(shared, slot, &mut connection, &head) {
             Next::Continue if !head.close => {}
             Next::Continue | Next::Close => return connection.close(),

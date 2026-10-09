@@ -356,6 +356,7 @@ impl Receiver {
             sha256_hex(format!("{}/{}", request.root, request.path).as_bytes())
         );
         let marker_path = marker_dir.join(&marker_name);
+        let marker_present = fs::symlink_metadata(&marker_path).is_ok();
         let previous = read_generation(&marker_path)?;
         let current_generation = previous
             .filter(|g| {
@@ -372,13 +373,19 @@ impl Receiver {
                 409,
                 serde_json::to_value(crate::wire::Length {
                     length,
-                    head_sha256: Some(sha256_hex(&head)),
+                    head_sha256: if marker_present && current_generation.is_none() {
+                        None
+                    } else {
+                        Some(sha256_hex(&head))
+                    },
                     generation: current_generation.clone(),
                 })
                 .expect("length serializes"),
             )
         };
-        if !request.replace && request.offset != length {
+        if !request.replace
+            && (request.offset != length || (marker_present && current_generation.is_none()))
+        {
             return Ok(conflict());
         }
         if !request.replace

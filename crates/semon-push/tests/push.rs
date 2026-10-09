@@ -29,8 +29,17 @@ struct Received {
     files: BTreeMap<String, Vec<u8>>,
     generations: BTreeMap<String, String>,
     append_order: Vec<String>,
+    /// Accepted newline-ended data batches; split-line pieces and empty
+    /// generation-control requests are not separate scheduler turns.
+    data_batch_order: Vec<String>,
     statuses: Vec<Status>,
     status_supported: bool,
+    status_cookie_gate: bool,
+    status_head_global: bool,
+    status_head_checks: u64,
+    hang_status_head: bool,
+    status_post_checks: u64,
+    status_redirect: Option<String>,
     status_refuse: bool,
     omit_generations: bool,
     grow_source: Option<PathBuf>,
@@ -94,6 +103,34 @@ fn receiver() -> Receiver {
             let mut body = String::new();
             let _ = request.as_reader().read_to_string(&mut body);
             let url = request.url().to_owned();
+            if authorized
+                && url == "/v1/mirror/status"
+                && request.method() == &tiny_http::Method::Head
+            {
+                let mut state = shared.lock().unwrap();
+                state.status_head_checks += 1;
+                if state.hang_status_head {
+                    state.held_requests.push(request);
+                    continue;
+                }
+                let response = if let Some(location) = &state.status_redirect {
+                    json_response(302, json!({}))
+                        .with_header(Header::from_bytes("Location", location).unwrap())
+                } else if state.status_cookie_gate {
+                    json_response(401, json!({"error":"session_required"}))
+                } else if state.status_supported || state.status_head_global {
+                    json_response(405, json!({}))
+                        .with_header(Header::from_bytes("Allow", "POST").unwrap())
+                } else {
+                    json_response(404, json!({}))
+                };
+                drop(state);
+                request.respond(response).unwrap();
+                continue;
+            }
+            if authorized && url == "/v1/mirror/status" {
+                shared.lock().unwrap().status_post_checks += 1;
+            }
             if authorized && url == "/v1/mirror/append" {
                 let mut received = shared.lock().unwrap();
                 if received
@@ -124,6 +161,8 @@ fn receiver() -> Receiver {
             } else if url == "/v1/mirror/facts" {
                 shared.lock().unwrap().facts = serde_json::from_str(&body).ok();
                 json_response(200, json!({}))
+            } else if url == "/v1/mirror/status" && shared.lock().unwrap().status_cookie_gate {
+                json_response(401, json!({"error":"session_required"}))
             } else if url == "/v1/mirror/status" && shared.lock().unwrap().status_supported {
                 shared
                     .lock()
@@ -207,6 +246,9 @@ fn handle_append(received: &mut Received, body: &str) -> Response<std::io::Curso
     received.replaces += u64::from(append.replace);
     let length = next.len() as u64;
     received.append_order.push(key.clone());
+    if bytes.last() == Some(&b'\n') {
+        received.data_batch_order.push(key.clone());
+    }
     if let Some(generation) = &append.generation {
         received.generations.insert(key.clone(), generation.clone());
     }
@@ -595,7 +637,16 @@ fn facts_are_sent_and_a_bad_token_is_refused() {
     let receiver = receiver();
     home.write(LOG, &line("hello"));
     semon_push::push(&home.push_options(&receiver.url), false).unwrap();
-    let facts = receiver.state.lock().unwrap().facts.clone().unwrap();
+    let mut facts = receiver.state.lock().unwrap().facts.clone().unwrap();
+    assert!(
+        facts
+            .mirror_observation_id
+            .as_deref()
+            .is_some_and(semon_push::wire::is_generation)
+    );
+    assert!(facts.mirror_sequence.is_some_and(|sequence| sequence > 0));
+    facts.mirror_observation_id = None;
+    facts.mirror_sequence = None;
     assert_eq!(facts.hostname, "laptop");
     assert_eq!(facts, semon_sessions::local_facts(&home.options).unwrap());
 
@@ -1219,7 +1270,7 @@ fn batches_rotate_recent_files_and_reserve_a_history_turn() {
         .pass(&home.options)
         .unwrap();
     let state = receiver.state.lock().unwrap();
-    let order = &state.append_order;
+    let order = &state.data_batch_order;
     assert!(order[0].ends_with("latest.jsonl"));
     assert!(
         order
@@ -1260,12 +1311,24 @@ fn discovery_between_slices_exposes_a_new_small_session_and_growth_is_frozen() {
     assert_eq!(state.files[LOG], original.as_bytes());
     assert_eq!(state.files[recent], line("new").as_bytes());
     assert_eq!(
-        state.append_order.iter().position(|p| p == recent).unwrap(),
+        state
+            .data_batch_order
+            .iter()
+            .position(|p| p == recent)
+            .unwrap(),
         1
     );
     assert!(
-        state.append_order.iter().position(|p| p == recent).unwrap()
-            < state.append_order.iter().rposition(|p| p == LOG).unwrap()
+        state
+            .data_batch_order
+            .iter()
+            .position(|p| p == recent)
+            .unwrap()
+            < state
+                .data_batch_order
+                .iter()
+                .rposition(|p| p == LOG)
+                .unwrap()
     );
     assert!(fs::metadata(path).unwrap().len() > original.len() as u64);
 }
@@ -1456,6 +1519,187 @@ fn heartbeat_after_prepared_full_facts_uses_the_frozen_current_targets_and_share
         );
     }
     stop_and_join(&stop, worker).unwrap();
+    receiver.state.lock().unwrap().held_requests.clear();
+    assert_lock_freed(&options);
+}
+
+#[test]
+fn cookie_gated_unknown_status_does_not_refuse_a_valid_push_only_token() {
+    let home = Home::new();
+    let receiver = receiver();
+    let text = line("legacy cookie fallback");
+    home.write(LOG, &text);
+    receiver.state.lock().unwrap().status_cookie_gate = true;
+    let options = home.push_options(&receiver.url);
+    let stop = Stop::new();
+    let worker = watch_in_background(&options, &stop);
+    wait_for("valid upload and facts despite optional HEAD401", || {
+        let state = receiver.state.lock().unwrap();
+        state.facts.is_some() && state.status_head_checks == 1
+    });
+    assert_eq!(copy(&receiver, LOG), text.as_bytes());
+    assert!(!stop.is_stopped());
+    assert!(!worker.is_finished());
+    assert!(receiver.state.lock().unwrap().statuses.is_empty());
+    stop_and_join(&stop, worker).unwrap();
+    assert_lock_freed(&options);
+}
+
+#[test]
+fn a_global_head405_does_not_make_an_old_post404_extension_mandatory() {
+    let home = Home::new();
+    let receiver = receiver();
+    home.write(LOG, &line("old generic router"));
+    receiver.state.lock().unwrap().status_head_global = true;
+    let options = home.push_options(&receiver.url);
+    let stop = Stop::new();
+    let worker = watch_in_background(&options, &stop);
+    wait_for("optional POST404 after generic HEAD405", || {
+        let state = receiver.state.lock().unwrap();
+        state.facts.is_some() && state.status_post_checks == 1
+    });
+    assert!(!stop.is_stopped());
+    assert!(!worker.is_finished());
+    stop_and_join(&stop, worker).unwrap();
+    assert_lock_freed(&options);
+}
+
+#[test]
+fn optional_capability_discovery_never_follows_an_authentication_redirect() {
+    let home = Home::new();
+    let receiver = receiver();
+    let login = Server::http("127.0.0.1:0").unwrap();
+    home.write(LOG, &line("redirected optional endpoint"));
+    receiver.state.lock().unwrap().status_redirect = Some(format!(
+        "http://{}/login",
+        login.server_addr().to_ip().unwrap()
+    ));
+    let options = home.push_options(&receiver.url);
+    let stop = Stop::new();
+    let worker = watch_in_background(&options, &stop);
+    wait_for("valid facts and rejected optional redirect", || {
+        let state = receiver.state.lock().unwrap();
+        state.facts.is_some() && state.status_head_checks == 1
+    });
+    assert!(
+        login
+            .recv_timeout(Duration::from_millis(100))
+            .unwrap()
+            .is_none()
+    );
+    assert!(!stop.is_stopped());
+    stop_and_join(&stop, worker).unwrap();
+    assert_lock_freed(&options);
+}
+
+#[test]
+fn a_supported_status_token_revocation_remains_fatal_after_a_successful_heartbeat() {
+    let home = Home::new();
+    let receiver = receiver();
+    home.write(LOG, &line("held upload"));
+    {
+        let mut state = receiver.state.lock().unwrap();
+        state.status_supported = true;
+        state.hang_after = Some(0);
+    }
+    let options = home.push_options(&receiver.url);
+    let stop = Stop::new();
+    let worker = watch_in_background(&options, &stop);
+    wait_for("supported first heartbeat", || {
+        !receiver.state.lock().unwrap().statuses.is_empty()
+    });
+    receiver.state.lock().unwrap().status_refuse = true;
+    wait_for("fatal revoked supported heartbeat", || worker.is_finished());
+    assert!(
+        worker
+            .join()
+            .unwrap()
+            .unwrap_err()
+            .contains("refused the token")
+    );
+    assert!(stop.is_stopped());
+    receiver.state.lock().unwrap().held_requests.clear();
+    assert_lock_freed(&options);
+}
+
+#[test]
+fn descriptor_invalid_reference_generation_forces_actual_client_replacement() {
+    let home = Home::new();
+    let text = line(&"x".repeat(6000));
+    home.write(LOG, &text);
+    let mirror = home.root.join("reference");
+    fs::create_dir_all(&mirror).unwrap();
+    let reference = Arc::new(semon_push::mirror::Receiver::new(&mirror));
+    let server = Arc::new(Server::http("127.0.0.1:0").unwrap());
+    let listener = Arc::clone(&server);
+    let sink = Arc::clone(&reference);
+    let attempts = Arc::new(Mutex::new(Vec::<Append>::new()));
+    let observed = Arc::clone(&attempts);
+    let worker = thread::spawn(move || {
+        for mut request in listener.incoming_requests() {
+            assert_eq!(request.url(), "/v1/mirror/append");
+            let mut body = String::new();
+            request.as_reader().read_to_string(&mut body).unwrap();
+            let append: Append = serde_json::from_str(&body).unwrap();
+            observed.lock().unwrap().push(append.clone());
+            let answer = sink.append("fixture", &append);
+            if observed.lock().unwrap().len() == 2 {
+                assert_eq!(answer.status, 409);
+                assert!(answer.body["head_sha256"].is_null());
+                assert!(answer.body["generation"].is_null());
+            }
+            request
+                .respond(json_response(answer.status, answer.body))
+                .unwrap();
+        }
+    });
+    let url = format!("http://{}", server.server_addr().to_ip().unwrap());
+    let mut client = Client::new(&home.push_options(&url)).unwrap();
+    client.pass(&home.options).unwrap();
+    let path = reference.machine_dir("fixture").join(LOG);
+    let mut changed = fs::read(&path).unwrap();
+    changed[5000] = b'y';
+    assert_eq!(head_sha256(&changed), head_sha256(text.as_bytes()));
+    fs::rename(&path, path.with_extension("retained")).unwrap();
+    fs::write(&path, changed).unwrap();
+    let addition = line("new append");
+    home.append(LOG, &addition);
+    let report = client.pass(&home.options).unwrap();
+    assert_eq!(report.replaced, 1);
+    assert_eq!(
+        fs::read(path).unwrap(),
+        redacted(&(text.clone() + &addition))
+    );
+    let rows = attempts.lock().unwrap();
+    assert_eq!(rows.len(), 3);
+    assert!(!rows[1].replace);
+    assert_eq!(rows[1].offset, text.len() as u64);
+    assert!(rows[2].replace);
+    assert_eq!(rows[2].offset, 0);
+    assert_ne!(rows[0].generation, rows[2].generation);
+    drop(rows);
+    server.unblock();
+    worker.join().unwrap();
+}
+
+#[test]
+fn a_stop_cancels_capability_wait_and_retains_lock_until_its_head_request_finishes() {
+    let home = Home::new();
+    let receiver = receiver();
+    home.write(LOG, &line("capability in flight"));
+    receiver.state.lock().unwrap().hang_status_head = true;
+    let options = home.push_options(&receiver.url);
+    let stop = Stop::new();
+    let worker = watch_in_background(&options, &stop);
+    wait_for("held capability HEAD while valid full facts arrive", || {
+        let state = receiver.state.lock().unwrap();
+        state.facts.is_some() && state.status_head_checks == 1
+    });
+    stop_and_join(&stop, worker).unwrap();
+    assert!(
+        StateLock::acquire(&options.state).is_err(),
+        "in-flight capability request owns the state lock"
+    );
     receiver.state.lock().unwrap().held_requests.clear();
     assert_lock_freed(&options);
 }
