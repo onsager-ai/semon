@@ -17543,6 +17543,7 @@ globalThis.__semonUIShared = __semonUIShared;
     const removeNavigation = host2.subscribeNavigation?.(refresh);
     const title = app.querySelector("#topbar .ttl") ?? document.createElement("div");
     title.className = "ttl";
+    if (!title.textContent) title.textContent = host2.nativePage?.title ?? "";
     if (!title.querySelector(".l1")) {
       const line = document.createElement("div");
       line.className = "l1";
@@ -17610,6 +17611,7 @@ globalThis.__semonUIShared = __semonUIShared;
         owner = null;
         const url = new URL(location.href);
         url.searchParams.set("machine", key2);
+        url.searchParams.delete("choose_source");
         history.pushState(null, "", url.pathname + url.search + url.hash);
         void chooseReader();
       });

@@ -617,7 +617,7 @@ for (const width of [390, 1280])
           body: url.pathname === '/viewer.css' ? css : html,
         });
       });
-      await page.goto('http://catalog.test/sessions');
+      await page.goto('http://catalog.test/sessions' + (width === 1280 ? '?choose_source=1' : ''));
       await page.clock.install({ time: new Date('2026-10-07T00:00:00Z') });
       await page.clock.pauseAt(new Date('2026-10-07T00:01:00Z'));
       await page.addScriptTag({ content: outputFiles[0].text });
@@ -648,6 +648,7 @@ for (const width of [390, 1280])
         '/machines',
       );
       assert.equal(new URL(page.url()).searchParams.get('machine'), 'two');
+      assert.equal(new URL(page.url()).searchParams.has('choose_source'), false);
       if (width === 1280) {
         await page.getByRole('button', { name: 'Expand sidebar' }).waitFor();
         assert.equal(

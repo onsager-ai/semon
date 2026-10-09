@@ -60,6 +60,7 @@ export function createNativePageShell(host: ViewerHost): ViewerApplication {
   const removeNavigation = host.subscribeNavigation?.(refresh);
   const title = app.querySelector<HTMLElement>('#topbar .ttl') ?? document.createElement('div');
   title.className = 'ttl';
+  if (!title.textContent) title.textContent = host.nativePage?.title ?? '';
   if (!title.querySelector('.l1')) {
     const line = document.createElement('div');
     line.className = 'l1';

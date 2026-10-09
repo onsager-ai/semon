@@ -41,6 +41,7 @@ export function mountViewerApplication(
       owner = null;
       const url = new URL(location.href);
       url.searchParams.set('machine', key);
+      url.searchParams.delete('choose_source');
       history.pushState(null, '', url.pathname + url.search + url.hash);
       void chooseReader();
     });
