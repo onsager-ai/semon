@@ -75,5 +75,5 @@ try {
     await context.close();
   }
 } finally { await browser.close(); for (const server of servers) server.kill(); }
-await fs.writeFile(path.join(out, 'compiled-observations.json'), JSON.stringify({ baseline: '282007f96c60061a9e8539b5c7570909ebeb61fe', cases: observations }, null, 2) + '\n');
+await fs.writeFile(path.join(out, 'compiled-observations.json'), JSON.stringify({ baseline: 'e9dba7cac8a7b6f36f936ba77361a9fc134737f8', cases: observations }, null, 2) + '\n');
 console.log('12 matched compiled Semon cases: expanded identity, keyboard, child navigation/Back, text and overflow passed');

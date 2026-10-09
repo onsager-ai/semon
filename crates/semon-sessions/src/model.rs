@@ -850,6 +850,11 @@ pub(crate) fn assistant_text(record: &Value, block: usize) -> Option<String> {
 /// A tool call's input: a Claude `tool_use` block, or a Codex call's
 /// arguments parsed as JSON.
 pub(crate) fn tool_input(record: &Value, block: usize) -> Option<Value> {
+    if let Some(item) = record.pointer("/payload/item")
+        && matches!(field(item, "type"), Some("McpToolCall" | "DynamicToolCall"))
+    {
+        return item.get("arguments").cloned();
+    }
     if field(record, "type") == Some("assistant.message") {
         return record
             .get("data")?
@@ -1030,6 +1035,7 @@ struct CodexMeta {
     parent_thread: Option<String>,
     nickname: Option<String>,
     path: Option<String>,
+    subagent: bool,
     cwd: Option<String>,
     branch: Option<String>,
     guardian_review: bool,
@@ -1396,6 +1402,7 @@ fn scan(
                 parent_thread: field(&meta, "parent_thread_id").map(str::to_owned),
                 nickname: field(&meta, "agent_nickname").map(str::to_owned),
                 path: field(&meta, "agent_path").map(str::to_owned),
+                subagent: field(&meta, "thread_source") == Some("subagent"),
                 cwd: field(&meta, "cwd").map(str::to_owned),
                 branch: meta
                     .get("git")
@@ -2102,8 +2109,10 @@ impl<'a> Builder<'a> {
                     });
                     out.name = if meta.guardian_review {
                         "Approval review".into()
-                    } else {
+                    } else if !meta.subagent && meta.parent_thread.is_none() {
                         meta.nickname.clone().unwrap_or_default()
+                    } else {
+                        String::new()
                     };
                     let index =
                         self.add_session(file.id.clone(), SessKind::Codex, vec![position], out);
@@ -2535,6 +2544,38 @@ impl<'a> Builder<'a> {
                 });
             }
         }
+        let codex_task_title = match &last_file.role {
+            Role::Codex(meta)
+                if (meta.subagent || meta.parent_thread.is_some()) && !meta.guardian_review =>
+            {
+                title
+                    .clone()
+                    .or_else(|| {
+                        meta.path
+                            .as_deref()
+                            .and_then(|path| path.rsplit('/').next())
+                            .filter(|task| !task.trim().is_empty())
+                            .map(str::to_owned)
+                    })
+                    .or_else(|| {
+                        files.iter().find_map(|file| {
+                            let event = file
+                                .summary
+                                .events
+                                .iter()
+                                .find(|event| event.k == Kind::U)?;
+                            self.texts
+                                .read(file, event.o, event.b, "user", |record, _| {
+                                    prompt_text(record)
+                                })
+                                .filter(|text| !text.trim().is_empty())
+                        })
+                    })
+                    .map(|text| one_line(&text, 80))
+                    .or_else(|| Some("Codex subagent".into()))
+            }
+            _ => None,
+        };
         let session = &mut self.sessions[index];
         session.names.extend(names);
         session.tokens = tokens.clone();
@@ -2576,14 +2617,14 @@ impl<'a> Builder<'a> {
         out.branch = repo.as_ref().and(branch);
         out.repo = repo;
         if out.name.is_empty() {
-            out.name = match session.kind {
+            out.name = codex_task_title.unwrap_or_else(|| match session.kind {
                 SessKind::Lineage | SessKind::Copilot => title.unwrap_or(fallback_name),
                 _ => out
                     .branch
                     .clone()
                     .or_else(|| out.repo.clone())
                     .unwrap_or_else(|| "Codex run".into()),
-            };
+            });
         }
     }
 
@@ -2855,16 +2896,15 @@ impl<'a> Builder<'a> {
             let Some(&spawner) = self.by_native.get(&("codex", parent.clone())) else {
                 return (None, None, false);
             };
-            let names: Vec<String> = [
-                meta.path
-                    .as_deref()
-                    .and_then(|path| path.rsplit('/').next()),
-                meta.nickname.as_deref(),
-            ]
-            .into_iter()
-            .flatten()
-            .map(str::to_owned)
-            .collect();
+            let names: Vec<String> = meta
+                .path
+                .as_deref()
+                .and_then(|path| path.rsplit('/').next())
+                .filter(|task| !task.is_empty())
+                .or(meta.nickname.as_deref())
+                .into_iter()
+                .map(str::to_owned)
+                .collect();
             // Neither the child's rollout nor `spawn_agent`'s output (only
             // `{task_name}`) names the other side. So a call is placed only
             // when it is the spawner's one `spawn_agent` call for this task
@@ -2875,7 +2915,11 @@ impl<'a> Builder<'a> {
                 .into_iter()
                 .filter(|at| {
                     let event = event(self.files, *at);
-                    event.k == Kind::Tool && event.n.as_deref() == Some("spawn_agent")
+                    event.k == Kind::Tool
+                        && matches!(
+                            event.n.as_deref(),
+                            Some("spawn_agent" | "collaboration.spawn_agent")
+                        )
                 })
                 .collect();
             let mut matching = Vec::new();
@@ -2893,8 +2937,8 @@ impl<'a> Builder<'a> {
                     .filter(|file| {
                         matches!(&file.role, Role::Codex(other)
                             if other.parent_thread.as_deref() == Some(parent.as_str())
-                                && (other.nickname.as_deref() == Some(task)
-                                    || other.path.as_deref().and_then(|path| path.rsplit('/').next()) == Some(task)))
+                                && other.path.as_deref().and_then(|path| path.rsplit('/').next())
+                                    .filter(|task| !task.is_empty()).or(other.nickname.as_deref()) == Some(task))
                     })
                     .count()
             };
@@ -3406,7 +3450,15 @@ impl<'a> Builder<'a> {
                     continue;
                 }
                 if event.k == Kind::Tool
-                    && matches!(event.n.as_deref(), Some("send_message" | "followup_task"))
+                    && matches!(
+                        event.n.as_deref(),
+                        Some(
+                            "send_message"
+                                | "followup_task"
+                                | "collaboration.send_message"
+                                | "collaboration.followup_task"
+                        )
+                    )
                 {
                     sends.push((position, at));
                 }
@@ -3620,7 +3672,12 @@ impl<'a> Builder<'a> {
                 }
                 let codex = matches!(
                     found.n.as_deref(),
-                    Some("request_user_input" | "request_user_input_async")
+                    Some(
+                        "request_user_input"
+                            | "request_user_input_async"
+                            | "functions.request_user_input"
+                            | "functions.request_user_input_async"
+                    )
                 );
                 if found.n.as_deref() != Some("AskUserQuestion") && !codex {
                     continue;
@@ -3664,7 +3721,13 @@ impl<'a> Builder<'a> {
                     _ if codex => {
                         let reply = found.r.as_ref().filter(|reply| {
                             reply.f & ACK == 0
-                                || found.n.as_deref() == Some("request_user_input_async")
+                                || matches!(
+                                    found.n.as_deref(),
+                                    Some(
+                                        "request_user_input_async"
+                                            | "functions.request_user_input_async"
+                                    )
+                                )
                         });
                         let following = refs[position + 1..]
                             .iter()
@@ -4248,6 +4311,13 @@ impl<'a> Builder<'a> {
         let mut extras: BTreeMap<usize, std::collections::VecDeque<Annotation>> = BTreeMap::new();
         let mut operation_parents = BTreeSet::new();
         for file in &session.files {
+            for event in &self.files[*file].summary.events {
+                if event.k == Kind::Tool
+                    && let Some(parent) = event.parent
+                {
+                    operation_parents.insert((*file, parent));
+                }
+            }
             for extra in &self.files[*file].summary.extras {
                 if extra.k == Kind::Operation
                     && let Some(parent) = extra.parent
@@ -4317,7 +4387,7 @@ impl<'a> Builder<'a> {
                     signal.t,
                 );
                 slot.turn = turn_id(owner);
-                return slot;
+                return Some(slot);
             }
             let Annotation::Extra(event) = annotation else {
                 unreachable!()
@@ -4340,7 +4410,8 @@ impl<'a> Builder<'a> {
                         script_offset,
                     }
                 }
-                _ => SlotKind::Think,
+                Kind::Think => SlotKind::Think,
+                _ => return None,
             };
             let mut slot = Slot::new(
                 kind,
@@ -4355,14 +4426,14 @@ impl<'a> Builder<'a> {
             {
                 slot.first = started.insert(owner);
             }
-            slot
+            Some(slot)
         };
         for (position, entry) in entries.iter().enumerate() {
             if let Some(queue) = extras.get_mut(&entry.file) {
                 let at = entry.pos;
                 while queue.front().is_some_and(|extra| extra.pos() < at) {
                     let extra = queue.pop_front().expect("front");
-                    slots.push(extra_slot(
+                    slots.extend(extra_slot(
                         extra,
                         entry.file,
                         owner.or(owners[position]),
@@ -4379,7 +4450,7 @@ impl<'a> Builder<'a> {
                     queue.remove(position)
                 });
                 if let Some(operation) = operation {
-                    slots.push(extra_slot(operation, entry.file, owner, &mut started));
+                    slots.extend(extra_slot(operation, entry.file, owner, &mut started));
                 }
                 continue;
             }
@@ -4516,7 +4587,7 @@ impl<'a> Builder<'a> {
             .collect();
         rest.sort_by_key(|(file, extra)| (extra.time(), *file, extra.pos()));
         for (file, extra) in rest {
-            slots.push(extra_slot(extra, file, owner, &mut started));
+            slots.extend(extra_slot(extra, file, owner, &mut started));
         }
         if let Some(spawn) = self.handoffs.iter().find(|handoff| {
             handoff.to == Some(index)
@@ -4611,12 +4682,22 @@ impl<'a> Builder<'a> {
         // each call's operations sits.
         let mut last_operation: HashMap<Ref, (i64, (u64, u32))> = HashMap::new();
         for file in session_files {
-            for extra in &self.files[*file].summary.extras {
-                if extra.k == Kind::Operation
+            for extra in self.files[*file]
+                .summary
+                .extras
+                .iter()
+                .chain(&self.files[*file].summary.events)
+            {
+                if matches!(extra.k, Kind::Operation | Kind::Tool)
                     && let Some(parent) = extra.parent
                 {
                     let time = extra.t.unwrap_or_else(|| time_at(*file, extra.o));
-                    last_operation.insert((*file, parent), (time, (extra.o, extra.b)));
+                    let entry = last_operation
+                        .entry((*file, parent))
+                        .or_insert((time, (extra.o, extra.b)));
+                    if (extra.o, extra.b) > entry.1 {
+                        *entry = (time, (extra.o, extra.b));
+                    }
                 }
             }
         }

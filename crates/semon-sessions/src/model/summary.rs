@@ -6,7 +6,7 @@ use super::*;
 use sha2::{Digest, Sha256};
 
 /// Bump when description, identity or pricing derivation rules change.
-pub(super) const VERSION: u32 = 1;
+pub(super) const VERSION: u32 = 2;
 
 pub(super) fn fingerprint(inputs: &DescriptionInputs) -> String {
     format!("{:x}", Sha256::digest(format!("{inputs:?}").as_bytes()))

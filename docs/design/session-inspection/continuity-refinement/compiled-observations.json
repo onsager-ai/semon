@@ -1,5 +1,5 @@
 {
-  "baseline": "282007f96c60061a9e8539b5c7570909ebeb61fe",
+  "baseline": "e9dba7cac8a7b6f36f936ba77361a9fc134737f8",
   "cases": [
     {
       "width": 390,
@@ -74,7 +74,7 @@
       "keyboardDisclosure": true,
       "directChildNavigationAndBack": true,
       "textAudit": {
-        "texts": 144,
+        "texts": 153,
         "small": [],
         "smallCount": 0,
         "low": [],
@@ -106,7 +106,7 @@
       "keyboardDisclosure": true,
       "directChildNavigationAndBack": true,
       "textAudit": {
-        "texts": 144,
+        "texts": 145,
         "small": [],
         "smallCount": 0,
         "low": [],
@@ -122,7 +122,7 @@
       "keyboardDisclosure": true,
       "directChildNavigationAndBack": true,
       "textAudit": {
-        "texts": 144,
+        "texts": 155,
         "small": [],
         "smallCount": 0,
         "low": [],
@@ -138,7 +138,7 @@
       "keyboardDisclosure": true,
       "directChildNavigationAndBack": true,
       "textAudit": {
-        "texts": 146,
+        "texts": 154,
         "small": [],
         "smallCount": 0,
         "low": [],
@@ -170,7 +170,7 @@
       "keyboardDisclosure": true,
       "directChildNavigationAndBack": true,
       "textAudit": {
-        "texts": 146,
+        "texts": 154,
         "small": [],
         "smallCount": 0,
         "low": [],
@@ -186,7 +186,7 @@
       "keyboardDisclosure": true,
       "directChildNavigationAndBack": true,
       "textAudit": {
-        "texts": 146,
+        "texts": 156,
         "small": [],
         "smallCount": 0,
         "low": [],

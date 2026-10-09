@@ -1,6 +1,10 @@
 # Catalog recovery and linked-session context
 
-Baseline: `onsager-ai/semon` main `282007f96c60061a9e8539b5c7570909ebeb61fe`.
+Starting snapshot: `onsager-ai/semon` main `282007f96c60061a9e8539b5c7570909ebeb61fe`.
+Refreshed baseline: `e9dba7cac8a7b6f36f936ba77361a9fc134737f8` (native Codex parsing,
+subagent titles and filesystem stamp correction, #375). Its instructions and design
+artifacts are unchanged. The source candidate includes this update alongside the UI
+fixes; compiled before/after evidence uses this latest baseline.
 Branch: `codex/ui-continuity-refinement`. The approved authority is
 [DESIGN sections 9–10](../../../../.stitch/DESIGN.md), the
 [design contract](../../design-contract.md), [viewer ownership](../../viewer-ownership.md),
@@ -58,12 +62,13 @@ partial results, retained records during observation failure, keyboard refresh,
 distinct child/run navigation, keyed expansion updates and detached controls.
 The new suite is included in the existing UI interaction job.
 
-`cargo test --locked` remains limited by the pre-existing
+The starting snapshot's `cargo test --locked` was limited by the pre-existing
 `viewer::tests::a_refused_archive_root_replaced_by_a_directory_invalidates_the_snapshot`:
 528 passed, one failed, four ignored in semon-sessions. It failed twice on this tree
-and again on the exact unchanged baseline; isolated rerun passed. No unrelated
-filesystem assertion was removed or weakened. Remote checks still need exact-head
-results; this remains a draft until required gates are satisfied.
+and again on the exact unchanged baseline; isolated rerun passed. Upstream #375
+corrects the filesystem stamp and is included by merging current main; the refreshed
+full locked Rust suite passes. No assertion or tolerance was weakened in this task.
+Remote checks remain tied to the exact published head.
 
 No physical mobile keyboard, real provider/SSH or full released-image qualification
 is claimed. Existing approved production baselines were not regenerated.
