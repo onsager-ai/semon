@@ -367,7 +367,10 @@ impl Client {
             state,
             chunk: CHUNK_BYTES,
             heads: BTreeMap::new(),
-            progress: Arc::new(Mutex::new(status::Progress::default())),
+            progress: Arc::new(Mutex::new(status::Progress {
+                observation_id: wire::new_generation()?,
+                ..status::Progress::default()
+            })),
             completed_inventory: None,
             committed_inventory: None,
         })
@@ -485,8 +488,17 @@ impl Client {
     }
 
     fn post_facts(&self, facts: &Facts) -> std::result::Result<(), Failure> {
+        let mut prepared = facts.clone();
+        prepared.codex_provisional_rollouts = None;
+        {
+            // Progress snapshot and facts fence share the status allocator.
+            let mut context = self.progress.lock().unwrap_or_else(|e| e.into_inner());
+            context.sequence += 1;
+            prepared.mirror_observation_id = Some(context.observation_id.clone());
+            prepared.mirror_sequence = Some(context.sequence);
+        }
         let body =
-            serde_json::to_string(facts).map_err(|error| Failure::Remote(error.to_string()))?;
+            serde_json::to_string(&prepared).map_err(|error| Failure::Remote(error.to_string()))?;
         match self.post("facts", body)? {
             (200..=299, _) => Ok(()),
             (status, text) => Err(Failure::Remote(format!("facts: {status} {}", text.trim()))),
@@ -543,12 +555,19 @@ impl Client {
         let mut local_failure = false;
         self.discover(sessions, &mut selected, &mut foreground, &mut history)?;
         let mut discovered = Instant::now();
-        while !foreground.is_empty() || !history.is_empty() {
+        loop {
             if self.stop.is_stopped() {
                 break;
             }
             if discovered.elapsed() >= PASS_EVERY {
                 self.discover(sessions, &mut selected, &mut foreground, &mut history)?;
+                discovered = Instant::now();
+            }
+            if foreground.is_empty() && history.is_empty() {
+                self.discover(sessions, &mut selected, &mut foreground, &mut history)?;
+                if foreground.is_empty() && history.is_empty() {
+                    break;
+                }
                 discovered = Instant::now();
             }
             let use_foreground =
@@ -650,7 +669,17 @@ impl Client {
     ) -> Result<()> {
         let runtime = semon_sessions::local_runtime_facts(sessions).map_err(|e| e.to_string())?;
         let mut fresh = Vec::new();
-        for input in semon_sessions::inputs(sessions).map_err(|e| e.to_string())? {
+        let inputs = semon_sessions::inputs(sessions).map_err(|e| e.to_string())?;
+        let present = inputs.iter().map(Self::key).collect::<BTreeSet<_>>();
+        selected.retain(|key, _| present.contains(key));
+        foreground.retain(|key| present.contains(key));
+        history.retain(|key| present.contains(key));
+        self.progress
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .targets
+            .retain(|key, _| present.contains(key));
+        for input in inputs {
             let key = Self::key(&input);
             if selected.contains_key(&key) {
                 continue;
@@ -658,20 +687,27 @@ impl Client {
             let stat = FileStat::from_metadata(
                 &fs::metadata(input.full_path(sessions)).map_err(|e| e.to_string())?,
             );
-            fresh.push((input, stat));
+            let live = input.root == semon_sessions::InputRoot::Codex
+                && !runtime.codex_locks.is_empty()
+                && semon_sessions::codex_native_id_prefix(&input.full_path(sessions), stat.len)
+                    .ok()
+                    .flatten()
+                    .is_some_and(|id| runtime.codex_locks.contains_key(&id));
+            fresh.push((input, stat, live));
         }
         // Recent files first, deterministic ties; small files win equal time.
-        fresh.sort_by(|(a, sa), (b, sb)| {
-            sb.mtime_ns
-                .cmp(&sa.mtime_ns)
+        fresh.sort_by(|(a, sa, la), (b, sb, lb)| {
+            lb.cmp(la)
+                .then(sb.mtime_ns.cmp(&sa.mtime_ns))
                 .then(sa.len.cmp(&sb.len))
                 .then(a.cmp(b))
         });
+        let mut new_foreground = VecDeque::new();
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_nanos() as i128;
-        for (input, stat) in fresh {
+        for (input, stat, live) in fresh {
             let key = Self::key(&input);
             let changed = self
                 .state
@@ -681,14 +717,8 @@ impl Client {
             let recent = stat
                 .mtime_ns
                 .is_some_and(|mtime| now.saturating_sub(mtime) <= 600_000_000_000);
-            let live = input.root == semon_sessions::InputRoot::Codex
-                && !runtime.codex_locks.is_empty()
-                && semon_sessions::codex_native_id_prefix(&input.full_path(sessions), stat.len)
-                    .ok()
-                    .flatten()
-                    .is_some_and(|id| runtime.codex_locks.contains_key(&id));
             if live || changed || recent || input.path.ends_with(".json") {
-                foreground.push_back(key.clone());
+                new_foreground.push_back(key.clone());
             } else {
                 history.push_back(key.clone());
             }
@@ -709,6 +739,8 @@ impl Client {
             }
             selected.insert(key, (input, stat));
         }
+        new_foreground.append(foreground);
+        *foreground = new_foreground;
         let mut progress = self.progress.lock().unwrap_or_else(|e| e.into_inner());
         progress.inventory_complete = selected.len() <= wire::MAX_STATUS_TARGETS;
         progress.phase = wire::SyncPhase::Syncing;
@@ -963,7 +995,11 @@ impl Client {
             break;
         }
         let digest = if total > 0 || replaced || sent != known.sent {
-            acknowledged_raw_head.unwrap_or(raw_head(path, sent).map_err(Failure::Local)?)
+            if let Some(head) = acknowledged_raw_head {
+                head
+            } else {
+                raw_head(path, sent).map_err(Failure::Local)?
+            }
         } else {
             known.raw_head
         };
@@ -1105,7 +1141,6 @@ fn resumable(path: &Path, size: u64, theirs: &Length) -> Result<bool> {
 /// `chunk` bytes, and where they end. A first line longer than `chunk` is
 /// read whole, up to [`LINE_CAP`]; one longer than that is cut there.
 /// Nothing when no line is complete yet.
-
 fn complete_lines_to(path: &Path, from: u64, chunk: usize, upto: u64) -> Result<(Vec<u8>, u64)> {
     let mut file = open_input(path).map_err(|e| e.to_string())?;
     file.seek(SeekFrom::Start(from))
@@ -2009,6 +2044,126 @@ mod sync_status_tests {
             assert!(Instant::now() < deadline);
             thread::sleep(Duration::from_millis(10));
         }
+        server.unblock();
+        http.join().unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn ending_heartbeat_cancels_rate_limit_wait_and_releases_only_its_ownership() {
+        let root =
+            std::env::temp_dir().join(format!("semon-status-rate-stop-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        let server = Arc::new(Server::http("127.0.0.1:0").unwrap());
+        let listener = Arc::clone(&server);
+        let (seen, received) = mpsc::channel();
+        let http = thread::spawn(move || {
+            for request in listener.incoming_requests() {
+                request
+                    .respond(
+                        Response::from_string("{\"error\":\"rate_limited\"}")
+                            .with_status_code(429)
+                            .with_header(
+                                tiny_http::Header::from_bytes("Retry-After", "60").unwrap(),
+                            ),
+                    )
+                    .unwrap();
+                seen.send(()).unwrap();
+            }
+        });
+        let options = PushOptions {
+            url: format!("http://{}", server.server_addr().to_ip().unwrap()),
+            credential: Credential::Memory(Token::new("test-status-token").unwrap()),
+            sessions: Options {
+                claude_home: root.join("claude"),
+                codex_home: root.join("codex"),
+                copilot_home: root.join("copilot"),
+                proc_root: root.join("proc"),
+                cache: root.join("cache"),
+                ..Options::default()
+            },
+            state: root.join("push.json"),
+        };
+        let stop = Stop::new();
+        let lock = Arc::new(StateLock::acquire(&options.state).unwrap());
+        let heartbeat = status::Heartbeat::start(
+            &options,
+            &stop,
+            Arc::clone(&lock),
+            Arc::new(Mutex::new(status::Progress::default())),
+        )
+        .unwrap();
+        received.recv_timeout(Duration::from_secs(3)).unwrap();
+        drop(heartbeat);
+        drop(lock);
+        let deadline = Instant::now() + Duration::from_secs(1);
+        loop {
+            if StateLock::acquire(&options.state).is_ok() {
+                break;
+            }
+            assert!(Instant::now() < deadline);
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(!stop.is_stopped());
+        server.unblock();
+        http.join().unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn applied_status_with_lost_ack_advances_sequence_on_the_next_fresh_submission() {
+        let root =
+            std::env::temp_dir().join(format!("semon-status-lost-ack-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        let server = Arc::new(Server::http("127.0.0.1:0").unwrap());
+        let listener = Arc::clone(&server);
+        let (seen, received) = mpsc::channel();
+        let http = thread::spawn(move || {
+            let mut previous = 0;
+            for mut request in listener.incoming_requests() {
+                let mut body = String::new();
+                request.as_reader().read_to_string(&mut body).unwrap();
+                let status: wire::Status = serde_json::from_str(&body).unwrap();
+                assert!(status.sequence > previous);
+                previous = status.sequence;
+                seen.send(status).unwrap();
+                if previous == 1 {
+                    drop(request);
+                } else {
+                    request.respond(Response::from_string("{}")).unwrap();
+                }
+            }
+        });
+        let options = PushOptions {
+            url: format!("http://{}", server.server_addr().to_ip().unwrap()),
+            credential: Credential::Memory(Token::new("test-status-token").unwrap()),
+            sessions: Options {
+                claude_home: root.join("claude"),
+                codex_home: root.join("codex"),
+                copilot_home: root.join("copilot"),
+                proc_root: root.join("proc"),
+                cache: root.join("cache"),
+                ..Options::default()
+            },
+            state: root.join("push.json"),
+        };
+        let stop = Stop::new();
+        let lock = Arc::new(StateLock::acquire(&options.state).unwrap());
+        let heartbeat = status::Heartbeat::start(
+            &options,
+            &stop,
+            Arc::clone(&lock),
+            Arc::new(Mutex::new(status::Progress::default())),
+        )
+        .unwrap();
+        let first = received.recv_timeout(Duration::from_secs(3)).unwrap();
+        let next = received.recv_timeout(Duration::from_secs(15)).unwrap();
+        assert_eq!(first.observation_id, next.observation_id);
+        assert_eq!(next.sequence, 2);
+        assert!(next.observed_at_ms > first.observed_at_ms);
+        stop.stop();
+        drop(heartbeat);
+        drop(lock);
         server.unblock();
         http.join().unwrap();
         fs::remove_dir_all(root).unwrap();

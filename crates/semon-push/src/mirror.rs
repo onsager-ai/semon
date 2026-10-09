@@ -402,20 +402,25 @@ impl Receiver {
         }
 
         let new_length = bytes.len() as u64 + if request.replace { 0 } else { request.offset };
-        let (grow, shrink) = (
-            new_length.saturating_sub(length),
-            length.saturating_sub(new_length),
-        );
-        // Invalidate proof durably BEFORE touching bytes. A crash between
-        // data and marker commits leaves unknown proof, never old authority.
-        match fs::remove_file(&marker_path) {
-            Ok(()) => sync_dir(&marker_dir)?,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-            Err(e) => return Err(e.into()),
-        }
-        self.counted(machine, grow, shrink, || {
+        let old_marker = fs::symlink_metadata(&marker_path).map_or(0, |m| m.len());
+        let old_total = length.saturating_add(old_marker);
+        // Reserve metadata before invalidation. Refused growth leaves proof intact.
+        let reserved_total = new_length.saturating_add(if request.generation.is_some() {
+            1024
+        } else {
+            0
+        });
+        let reservation = reserved_total.saturating_sub(old_total);
+        self.reserve(machine, reservation)?;
+        let outcome = (|| -> Result<(), Refusal> {
+            // Invalidate durably before admitted data mutation.
+            match fs::remove_file(&marker_path) {
+                Ok(()) => sync_dir(&marker_dir)?,
+                Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e.into()),
+            }
             if request.replace {
-                replace_file(&parent, name, bytes)?;
+                replace_file(&parent, name, bytes).map_err(|e| e.refusal)?;
             } else {
                 let created = existing.is_none();
                 let mut file = match existing {
@@ -427,20 +432,36 @@ impl Receiver {
                     request.offset,
                     bytes,
                     created.then_some(parent.as_path()),
-                )?;
+                )
+                .map_err(|e| e.refusal)?;
+            }
+            if let Some(generation) = &request.generation {
+                let marker = Generation {
+                    generation: generation.clone(),
+                    length: new_length,
+                    head_sha256: sha256_hex(&next),
+                    identity: crate::FileStat::from_metadata(&fs::metadata(&target)?),
+                };
+                let bytes =
+                    serde_json::to_vec(&marker).map_err(|e| Refusal::Invalid(e.to_string()))?;
+                if bytes.len() > 1024 {
+                    return Err(Refusal::TooLarge("generation metadata too large".into()));
+                }
+                replace_file(&marker_dir, &marker_name, &bytes).map_err(|e| e.refusal)?;
             }
             Ok(())
-        })?;
-        if let Some(generation) = &request.generation {
-            let marker = Generation {
-                generation: generation.clone(),
-                length: new_length,
-                head_sha256: sha256_hex(&next),
-                identity: crate::FileStat::from_metadata(&fs::metadata(&target)?),
-            };
-            let bytes = serde_json::to_vec(&marker).map_err(|e| Refusal::Invalid(e.to_string()))?;
-            replace_file(&marker_dir, &marker_name, &bytes).map_err(|e| e.refusal)?;
-        }
+        })();
+        // Settle from bounded owned-path metadata even after a partial failure.
+        let actual = fs::symlink_metadata(&target)
+            .map_or(0, |m| m.len())
+            .saturating_add(fs::symlink_metadata(&marker_path).map_or(0, |m| m.len()));
+        let release = if actual >= old_total {
+            reservation.saturating_sub(actual - old_total)
+        } else {
+            reservation.saturating_add(old_total - actual)
+        };
+        self.release(machine, release);
+        outcome?;
         Ok(Reply::new(
             200,
             serde_json::to_value(crate::wire::Length {
@@ -471,6 +492,8 @@ impl Receiver {
             || status.targets.len() > MAX_STATUS_TARGETS
             || status.observed_at_ms > now.saturating_add(60_000)
             || status.observed_at_ms < now.saturating_sub(60_000)
+            || status.runtime.mirror_observation_id.is_some()
+            || status.runtime.mirror_sequence.is_some()
             || status.runtime.codex_rollouts.is_some()
             || status.runtime.codex_provisional_rollouts.is_some()
             || !status.runtime.repos.is_empty()
@@ -492,22 +515,21 @@ impl Receiver {
         }
         self.locks.with(&format!("{machine}/status.json"), || {
             let dir = self.directories(&[MACHINES_DIR, machine])?;
-            if let Some(mut old) = open_existing(&dir.join("status.json"))? {
-                let mut bytes = Vec::new();
-                (&mut old)
-                    .take(MAX_BODY_BYTES as u64 + 1)
-                    .read_to_end(&mut bytes)?;
-                let prior: StoredStatus = serde_json::from_slice(&bytes)
-                    .map_err(|_| Refusal::Invalid("previous status unavailable".into()))?;
-                if status.observed_at_ms <= prior.observation.observed_at_ms
-                    || (status.observation_id == prior.observation.observation_id
-                        && status.sequence <= prior.observation.sequence)
-                    || (status.observation_id != prior.observation.observation_id
-                        && status.sequence != 1)
-                {
+            let fence = read_stored_facts(&dir.join(FACTS_FILE))?;
+            if fence.as_ref().is_some_and(|facts| facts.mirror_observation_id.as_ref() == Some(&status.observation_id) && facts.mirror_sequence.is_some_and(|seq| status.sequence <= seq)) {
+                return Ok(Reply::new(409, json!({"error":"stale_observation"})));
+            }
+            let prior = read_stored_status(&dir.join("status.json"))?;
+            let mut retired = prior.as_ref().map_or_else(Vec::new, |p| p.retired.clone());
+            retired.retain(|(_, at)| *at >= now.saturating_sub(60_000));
+            if retired.iter().any(|(id, _)| id == &status.observation_id) { return Ok(Reply::new(409, json!({"error":"stale_observation"}))); }
+            if let Some(prior) = prior {
+                if status.observed_at_ms <= prior.observation.observed_at_ms || (status.observation_id == prior.observation.observation_id && status.sequence <= prior.observation.sequence) {
                     return Ok(Reply::new(409, json!({"error":"stale_observation"})));
                 }
+                if status.observation_id != prior.observation.observation_id { retired.push((prior.observation.observation_id, prior.observation.observed_at_ms)); }
             }
+            if retired.len() > 64 { return Err(Refusal::Invalid("too many recent observation epochs".into())); }
             let mut confirmed = Vec::new();
             for (index, target) in status.targets.iter().enumerate() {
                 if target.acked_bytes == 0 {
@@ -564,12 +586,15 @@ impl Receiver {
             let stored = StoredStatus {
                 observation: status.clone(),
                 confirmed,
+                retired,
             };
             let bytes = serde_json::to_vec(&stored).map_err(|e| Refusal::Invalid(e.to_string()))?;
             if bytes.len() > MAX_BODY_BYTES {
                 return Err(Refusal::TooLarge("stored status too large".into()));
             }
-            replace_file(&dir, "status.json", &bytes).map_err(|e| e.refusal)?;
+            let old = fs::symlink_metadata(dir.join("status.json")).map_or(0, |m| m.len());
+            let new = bytes.len() as u64;
+            self.counted(machine, new.saturating_sub(old), old.saturating_sub(new), || replace_file(&dir, "status.json", &bytes))?;
             Ok(Reply::new(200, json!({"confirmed": stored.confirmed.iter().map(|index| &status.targets[*index]).collect::<Vec<_>>()})))
         })
     }
@@ -583,8 +608,48 @@ impl Receiver {
         }
         let bytes =
             serde_json::to_vec(facts).map_err(|error| Refusal::Invalid(error.to_string()))?;
-        self.locks.with(&format!("{machine}/{FACTS_FILE}"), || {
-            self.write_facts(machine, &bytes)
+        let paired = match (&facts.mirror_observation_id, facts.mirror_sequence) {
+            (None, None) => true,
+            (Some(id), Some(sequence)) => is_generation(id) && sequence > 0,
+            _ => false,
+        };
+        if !paired {
+            return Err(Refusal::Invalid("invalid full-facts fence".into()));
+        }
+        self.locks.with(&format!("{machine}/status.json"), || {
+            let dir = self.directories(&[MACHINES_DIR, machine])?;
+            let prior = read_stored_status(&dir.join("status.json"))?;
+            if let Some(id) = &facts.mirror_observation_id {
+                if prior
+                    .as_ref()
+                    .is_some_and(|p| p.retired.iter().any(|(old, _)| old == id))
+                {
+                    return Ok(Reply::new(409, json!({"error":"stale_observation"})));
+                }
+                if read_stored_facts(&dir.join(FACTS_FILE))?.is_some_and(|p| {
+                    p.mirror_observation_id.as_ref() == Some(id)
+                        && p.mirror_sequence >= facts.mirror_sequence
+                }) {
+                    return Ok(Reply::new(409, json!({"error":"stale_observation"})));
+                }
+            }
+            let reply = self.locks.with(&format!("{machine}/{FACTS_FILE}"), || {
+                self.write_facts(machine, &bytes)
+            })?;
+            if let Some(mut prior) = prior {
+                prior.confirmed.clear();
+                let updated =
+                    serde_json::to_vec(&prior).map_err(|e| Refusal::Invalid(e.to_string()))?;
+                let old = fs::symlink_metadata(dir.join("status.json")).map_or(0, |m| m.len());
+                let new = updated.len() as u64;
+                self.counted(
+                    machine,
+                    new.saturating_sub(old),
+                    old.saturating_sub(new),
+                    || replace_file(&dir, "status.json", &updated),
+                )?;
+            }
+            Ok(reply)
         })
     }
 
@@ -644,6 +709,28 @@ struct Generation {
 struct StoredStatus {
     observation: Status,
     confirmed: Vec<usize>,
+    #[serde(default)]
+    retired: Vec<(String, i64)>,
+}
+fn read_stored_status(path: &Path) -> Result<Option<StoredStatus>, Refusal> {
+    read_control(path)
+}
+fn read_stored_facts(path: &Path) -> Result<Option<Facts>, Refusal> {
+    read_control(path)
+}
+fn read_control<T: serde::de::DeserializeOwned>(path: &Path) -> Result<Option<T>, Refusal> {
+    let Some(file) = open_existing(path)? else {
+        return Ok(None);
+    };
+    let mut bytes = Vec::new();
+    file.take(MAX_BODY_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() > MAX_BODY_BYTES {
+        return Err(Refusal::TooLarge("stored observation too large".into()));
+    }
+    let decoded = serde_json::from_slice(&bytes)
+        .map_err(|_| Refusal::Invalid("stored observation unavailable".into()))?;
+    Ok(Some(decoded))
 }
 fn read_generation(path: &Path) -> Result<Option<Generation>, Refusal> {
     let Some(file) = open_existing(path)? else {
@@ -865,10 +952,16 @@ fn measure(machines: &Path) -> HashMap<String, u64> {
                 let _ = fs::remove_file(inner.path());
             }
         }
-        let bytes: u64 = ["claude", "codex", FACTS_FILE]
-            .iter()
-            .map(|part| tree_size(&dir.join(part), 0))
-            .sum();
+        let bytes: u64 = [
+            "claude",
+            "codex",
+            FACTS_FILE,
+            "status.json",
+            "sync-generations",
+        ]
+        .iter()
+        .map(|part| tree_size(&dir.join(part), 0))
+        .sum();
         usage.insert(name, bytes);
     }
     usage
@@ -1674,6 +1767,105 @@ mod status_tests {
         assert_eq!(receiver.status("laptop", &status).status, 400);
         fs::remove_dir_all(dir).unwrap();
     }
+    #[test]
+    fn full_facts_fences_delayed_status_and_permits_later_verified_source_changes() {
+        let (dir, receiver) = fixture();
+        let bytes = b"{}\n";
+        let generation = "b".repeat(32);
+        receiver.append("laptop", &request(bytes, &generation));
+        let status = observation(bytes, &generation);
+        assert_eq!(receiver.status("laptop", &status).status, 200);
+        let facts = Facts {
+            version: semon_sessions::FACTS_VERSION,
+            codex_rollouts: Some(Default::default()),
+            mirror_observation_id: Some(status.observation_id.clone()),
+            mirror_sequence: Some(2),
+            ..Facts::default()
+        };
+        assert_eq!(receiver.facts("laptop", &facts).status, 200);
+        let persisted: StoredStatus = serde_json::from_slice(
+            &fs::read(receiver.machine_dir("laptop").join("status.json")).unwrap(),
+        )
+        .unwrap();
+        assert!(persisted.confirmed.is_empty());
+        let mut delayed = status.clone();
+        delayed.observed_at_ms += 1;
+        assert_eq!(receiver.status("laptop", &delayed).status, 409);
+        let mut archive = request(bytes, &"c".repeat(32));
+        archive.path = "archived_sessions/native.jsonl".into();
+        assert_eq!(receiver.append("laptop", &archive).status, 200);
+        let mut later = status;
+        later.sequence = 3;
+        later.observed_at_ms += 2;
+        later.targets[0].path = archive.path;
+        later.targets[0].generation = archive.generation.unwrap();
+        assert_eq!(
+            receiver.status("laptop", &later).body["confirmed"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        let committed: Facts = serde_json::from_slice(
+            &fs::read(receiver.machine_dir("laptop").join(FACTS_FILE)).unwrap(),
+        )
+        .unwrap();
+        assert!(committed.codex_rollouts.unwrap().is_empty());
+        let orphan = Facts {
+            mirror_observation_id: Some(later.observation_id.clone()),
+            ..Facts::default()
+        };
+        assert_eq!(receiver.facts("laptop", &orphan).status, 400);
+        later.sequence = 4;
+        later.runtime.mirror_sequence = Some(1);
+        assert_eq!(receiver.status("laptop", &later).status, 400);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn generation_and_status_metadata_obey_quota_and_refused_growth_keeps_proof() {
+        let (dir, receiver) = fixture();
+        let receiver = receiver.with_max_bytes(4096);
+        let generation = "b".repeat(32);
+        let bytes = b"{}\n";
+        assert_eq!(
+            receiver
+                .append("laptop", &request(bytes, &generation))
+                .status,
+            200
+        );
+        let before = receiver.used_bytes("laptop");
+        assert!(before > bytes.len() as u64);
+        assert_eq!(Receiver::new(&dir).used_bytes("laptop"), before);
+        let mut grow = request(&vec![b'x'; 4096], &generation);
+        grow.offset = 3;
+        grow.replace = false;
+        grow.head_sha256 = head_sha256(&[bytes.as_slice(), &vec![b'x'; 4096]].concat());
+        assert_eq!(receiver.append("laptop", &grow).status, 507);
+        assert_eq!(receiver.used_bytes("laptop"), before);
+        assert_eq!(
+            receiver
+                .status("laptop", &observation(bytes, &generation))
+                .body["confirmed"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            Receiver::new(&dir).used_bytes("laptop"),
+            receiver.used_bytes("laptop")
+        );
+        let zero = receiver.with_max_bytes(0);
+        assert_eq!(zero.append("empty", &request(b"", &generation)).status, 507);
+        let mut status = observation(b"", &generation);
+        status.targets.clear();
+        assert_eq!(zero.status("empty", &status).status, 507);
+        assert_eq!(zero.used_bytes("empty"), 0);
+        assert!(!zero.machine_dir("empty").join("status.json").exists());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
     #[test]
     fn split_line_intermediate_bytes_and_duplicate_targets_are_unproved() {
         let (dir, receiver) = fixture();

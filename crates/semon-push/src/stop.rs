@@ -30,6 +30,7 @@ const POLL: Duration = Duration::from_millis(20);
 #[derive(Clone, Default)]
 pub struct Stop {
     inner: Arc<Inner>,
+    parent: Option<Arc<Stop>>,
 }
 
 #[derive(Default)]
@@ -63,16 +64,42 @@ impl Stop {
         self.inner.wake.notify_all();
     }
 
+    pub(crate) fn child(&self) -> Self {
+        Self {
+            inner: Arc::new(Inner::default()),
+            parent: Some(Arc::new(self.clone())),
+        }
+    }
+
     pub fn is_stopped(&self) -> bool {
         *self
             .inner
             .stopped
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
+            || self
+                .parent
+                .as_ref()
+                .is_some_and(|parent| parent.is_stopped())
     }
 
     /// Sleeps for `duration`, or until stopped. True when stopped.
     pub fn sleep(&self, duration: Duration) -> bool {
+        if self.parent.is_some() {
+            let deadline = std::time::Instant::now() + duration;
+            while !self.is_stopped() {
+                let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+                if remaining.is_zero() {
+                    return false;
+                }
+                self.sleep_own(remaining.min(POLL));
+            }
+            return true;
+        }
+        self.sleep_own(duration)
+    }
+
+    fn sleep_own(&self, duration: Duration) -> bool {
         let stopped = self
             .inner
             .stopped
