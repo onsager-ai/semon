@@ -152,6 +152,7 @@ fn handle_append(received: &mut Received, body: &str) -> Response<std::io::Curso
         json_response(
             409,
             serde_json::to_value(Length {
+                generation: None,
                 length: current.len() as u64,
                 head_sha256: Some(head_sha256(current)),
             })
