@@ -14,6 +14,7 @@ describes source boundaries and does not claim production acceptance.
 | Scroll owner | Input revision, anchors, focus, opening-end pin and paging restore | Capture, synchronous Preact commit, measurement, restore; deferred restoration yields to reader input and newer routes. |
 | Application owner | Chrome, screen roots, listeners, timers, frames, observers, requests and poller | Mount once per document; destroy invalidates pending work before releasing roots and effects. |
 | Native shell owner | Rust fallback drawer, copy, confirmation dialogs and readiness polling | Native forms remain native; no second viewer router/model poller. |
+| Destination projection | Shared core registry plus validated generic host paths/leading/trailing entries | No content reads or history ownership; native and focused shells release host subscriptions at teardown. |
 
 The domain slice removed superseded calculations from the handwritten host when switching
 callers to `ui/src/domain`. The raw wire snapshot never acquires failed-send

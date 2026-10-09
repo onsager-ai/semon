@@ -224,7 +224,7 @@ test(
         .locator('#page [data-entry-key]')
         .first()
         .getAttribute('data-entry-key');
-      await page.evaluate(() => document.querySelector('#nav a,#nav button')?.click());
+      await page.evaluate(() => document.querySelector('#nav [data-go="sessions"]')?.click());
       await page.locator(`#page [data-id="${key}"]`).waitFor();
       const warmStart = performance.now();
       await page.locator(`#page [data-id="${key}"]`).click();
