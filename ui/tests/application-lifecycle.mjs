@@ -274,6 +274,62 @@ for (const width of [390, 1280])
                 }
               : null;
           try {
+            if (mode === 'native') {
+              const nativeHost = () => {
+                const value = host();
+                value.initialMachines.element.innerHTML =
+                  '<form><input name="task" value="Retained task"></form>';
+                return value;
+              };
+              for (let i = 0; i < 4; i++) {
+                const owner = Application.mountViewerApplication(nativeHost());
+                await settle();
+                assert(
+                  document.querySelector('#page input')?.value === 'Retained task',
+                  'native content was not mounted',
+                );
+                assert(
+                  document.querySelector('#nav [aria-current="page"]')?.dataset.go === 'machines',
+                  'native active state was lost',
+                );
+                assert(
+                  document.querySelector('#nav [data-go="machines"]')?.getAttribute('href') ===
+                    '/manage/machines',
+                  'native host Machines path was lost',
+                );
+                assert(
+                  !document.querySelector('#lanes .srow') && requests === 0,
+                  'native chrome started a complete reader',
+                );
+                assert(count() > 0, 'native chrome owns no document effects');
+                owner.destroy();
+                owner.destroy();
+                await settle();
+                assert(count() === 0 && effects() === 0, 'native effects leaked after teardown');
+                assert(!document.querySelector('#page input'), 'native content survived teardown');
+                window.dispatchEvent(new Event('semon:refresh'));
+                await settle();
+                assert(requests === 0, 'disposed native shell started a model read');
+              }
+              const first = Application.mountViewerApplication(nativeHost());
+              await settle();
+              const active = count();
+              const second = Application.mountViewerApplication(nativeHost());
+              await settle();
+              assert(count() === active, 'native replacement duplicated effects');
+              first.destroy();
+              assert(
+                count() === active && document.querySelector('#page input'),
+                'old native owner destroyed replacement',
+              );
+              second.destroy();
+              await settle();
+              assert(
+                count() === 0 && effects() === 0 && requests === 0,
+                'native replacement leaked effects or read the model',
+              );
+              return { requests, destroys };
+            }
             for (let i = 0; i < 3; i++) {
               const owner = Application.mountViewerApplication(host());
               await ready();

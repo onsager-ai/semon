@@ -1407,10 +1407,7 @@ fn guardian_reviews_get_a_stable_kind_and_name_without_losing_codex_data() {
         built.sessions["approval-review-name-only"].kind,
         Some("Codex run")
     );
-    assert_eq!(
-        built.sessions["approval-review-name-only"].name,
-        "Approval review helper"
-    );
+    assert_eq!(built.sessions["approval-review-name-only"].name, "helper");
     assert_eq!(
         built.sessions["guardian-canonical"].tokens_by_model["gpt-6-luna"],
         crate::events::ModelTokens {
@@ -3154,6 +3151,84 @@ fn a_unique_codex_spawn_call_is_placed() {
     );
     let built = home.build();
     let spawn = only(&built, "spawn", "root", "solo");
+    assert!(!spawn.ambiguous);
+    assert_eq!(spawn.at, at(23, 1));
+    assert_eq!(
+        turns_of(&built, "root")[0].sent,
+        std::slice::from_ref(&spawn.id)
+    );
+}
+
+#[test]
+fn codex_subagent_titles_describe_tasks_instead_of_nicknames() {
+    let home = Home::new();
+    home.codex("root", json!({}), &[]);
+    for (id, path, prompt, expected) in [
+        (
+            "path-title",
+            Some("/root/audit_parser"),
+            Some("Review parsing"),
+            "audit_parser",
+        ),
+        (
+            "prompt-title",
+            None,
+            Some("Review tool classification\nand result correlation"),
+            "Review tool classification and result correlation",
+        ),
+        ("empty-title", None, None, "Codex subagent"),
+    ] {
+        let records = prompt
+            .map(|text| vec![codex_user(ts(23, 2), text)])
+            .unwrap_or_default();
+        home.codex(id, json!({"parent_thread_id":"root","thread_source":"subagent","agent_nickname":"Socrates","agent_path":path}), &records);
+        let built = home.build();
+        assert_eq!(built.sessions[id].name, expected);
+        assert_eq!(built.sessions[id].parent.as_deref(), Some("root"));
+        // Reopening the persisted index must produce the same task title.
+        assert_eq!(home.build().sessions[id].name, expected);
+    }
+}
+
+#[test]
+fn codex_task_paths_take_precedence_over_nicknames_for_spawn_matching() {
+    let home = Home::new();
+    home.codex("root", json!({}), &[
+        codex_user(ts(23, 0), "Coordinate"),
+        codex_line(ts(23, 1), "response_item", json!({"type":"function_call","name":"spawn_agent","call_id":"task","arguments":"{\"task_name\":\"audit_parser\"}"})),
+        codex_line(ts(23, 2), "response_item", json!({"type":"function_call","name":"spawn_agent","call_id":"nickname","arguments":"{\"task_name\":\"Socrates\"}"})),
+    ]);
+    home.codex("child", json!({"parent_thread_id":"root","thread_source":"subagent","agent_path":"/root/audit_parser","agent_nickname":"Socrates"}), &[codex_user(ts(23,3), "Audit the parser")]);
+    let built = home.build();
+    let spawn = only(&built, "spawn", "root", "child");
+    assert!(!spawn.ambiguous);
+    assert_eq!(spawn.at, at(23, 1));
+    assert_eq!(built.sessions["child"].name, "audit_parser");
+}
+
+#[test]
+fn codex_orphan_subagent_keeps_its_task_title_without_inventing_a_parent() {
+    let home = Home::new();
+    home.codex(
+        "orphan",
+        json!({"thread_source":"subagent","agent_nickname":"Socrates"}),
+        &[codex_user(ts(23, 1), "Audit the parser")],
+    );
+    let built = home.build();
+    assert_eq!(built.sessions["orphan"].name, "Audit the parser");
+    assert!(built.sessions["orphan"].parent.is_none());
+}
+
+#[test]
+fn codex_native_spawn_calls_place_their_exact_task() {
+    let home = Home::new();
+    home.codex("root", json!({}), &[
+        codex_user(ts(23,0), "Coordinate"),
+        codex_line(ts(23,1), "event_msg", json!({"type":"item_completed","item":{"type":"DynamicToolCall","id":"native-spawn","namespace":"collaboration","tool":"spawn_agent","arguments":{"task_name":"audit_parser"},"success":true,"status":"completed","content_items":[]}})),
+    ]);
+    home.codex("child", json!({"parent_thread_id":"root","thread_source":"subagent","agent_path":"/root/audit_parser","agent_nickname":"Socrates"}), &[codex_user(ts(23,2), "Audit the parser")]);
+    let built = home.build();
+    let spawn = only(&built, "spawn", "root", "child");
     assert!(!spawn.ambiguous);
     assert_eq!(spawn.at, at(23, 1));
     assert_eq!(

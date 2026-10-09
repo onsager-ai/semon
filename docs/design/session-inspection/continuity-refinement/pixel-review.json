@@ -1,0 +1,258 @@
+{
+  "threshold": 0.1,
+  "purpose": "Before/after implementation review; not an approved baseline comparison",
+  "pairs": [
+    {
+      "name": "compiled-expanded-1280-dark.png",
+      "width": 1280,
+      "height": 860,
+      "changedPixels": 40670,
+      "percent": 3.6946
+    },
+    {
+      "name": "compiled-expanded-1280-light.png",
+      "width": 1280,
+      "height": 860,
+      "changedPixels": 38494,
+      "percent": 3.4969
+    },
+    {
+      "name": "compiled-expanded-390-dark.png",
+      "width": 390,
+      "height": 860,
+      "changedPixels": 32618,
+      "percent": 9.7251
+    },
+    {
+      "name": "compiled-expanded-390-light.png",
+      "width": 390,
+      "height": 860,
+      "changedPixels": 31085,
+      "percent": 9.268
+    },
+    {
+      "name": "compiled-expanded-820-dark.png",
+      "width": 820,
+      "height": 860,
+      "changedPixels": 38067,
+      "percent": 5.398
+    },
+    {
+      "name": "compiled-expanded-820-light.png",
+      "width": 820,
+      "height": 860,
+      "changedPixels": 36244,
+      "percent": 5.1395
+    },
+    {
+      "name": "compiled-reader-1280-dark.png",
+      "width": 1280,
+      "height": 860,
+      "changedPixels": 0,
+      "percent": 0
+    },
+    {
+      "name": "compiled-reader-1280-light.png",
+      "width": 1280,
+      "height": 860,
+      "changedPixels": 0,
+      "percent": 0
+    },
+    {
+      "name": "compiled-reader-390-dark.png",
+      "width": 390,
+      "height": 860,
+      "changedPixels": 0,
+      "percent": 0
+    },
+    {
+      "name": "compiled-reader-390-light.png",
+      "width": 390,
+      "height": 860,
+      "changedPixels": 0,
+      "percent": 0
+    },
+    {
+      "name": "compiled-reader-820-dark.png",
+      "width": 820,
+      "height": 860,
+      "changedPixels": 0,
+      "percent": 0
+    },
+    {
+      "name": "compiled-reader-820-light.png",
+      "width": 820,
+      "height": 860,
+      "changedPixels": 0,
+      "percent": 0
+    },
+    {
+      "name": "empty-source-1280-dark.png",
+      "width": 1280,
+      "height": 860,
+      "changedPixels": 1579,
+      "percent": 0.1434
+    },
+    {
+      "name": "empty-source-1280-light.png",
+      "width": 1280,
+      "height": 860,
+      "changedPixels": 1584,
+      "percent": 0.1439
+    },
+    {
+      "name": "empty-source-390-dark.png",
+      "width": 390,
+      "height": 860,
+      "changedPixels": 1537,
+      "percent": 0.4583
+    },
+    {
+      "name": "empty-source-390-light.png",
+      "width": 390,
+      "height": 860,
+      "changedPixels": 1538,
+      "percent": 0.4586
+    },
+    {
+      "name": "empty-source-820-dark.png",
+      "width": 820,
+      "height": 860,
+      "changedPixels": 1579,
+      "percent": 0.2239
+    },
+    {
+      "name": "empty-source-820-light.png",
+      "width": 820,
+      "height": 860,
+      "changedPixels": 1584,
+      "percent": 0.2246
+    },
+    {
+      "name": "linked-collapsed-1280-dark.png",
+      "width": 1280,
+      "height": 860,
+      "changedPixels": 0,
+      "percent": 0
+    },
+    {
+      "name": "linked-collapsed-1280-light.png",
+      "width": 1280,
+      "height": 860,
+      "changedPixels": 0,
+      "percent": 0
+    },
+    {
+      "name": "linked-collapsed-390-dark.png",
+      "width": 390,
+      "height": 860,
+      "changedPixels": 0,
+      "percent": 0
+    },
+    {
+      "name": "linked-collapsed-390-light.png",
+      "width": 390,
+      "height": 860,
+      "changedPixels": 0,
+      "percent": 0
+    },
+    {
+      "name": "linked-collapsed-820-dark.png",
+      "width": 820,
+      "height": 860,
+      "changedPixels": 0,
+      "percent": 0
+    },
+    {
+      "name": "linked-collapsed-820-light.png",
+      "width": 820,
+      "height": 860,
+      "changedPixels": 0,
+      "percent": 0
+    },
+    {
+      "name": "linked-expanded-1280-dark.png",
+      "width": 1280,
+      "height": 860,
+      "changedPixels": 23605,
+      "percent": 2.1443
+    },
+    {
+      "name": "linked-expanded-1280-light.png",
+      "width": 1280,
+      "height": 860,
+      "changedPixels": 22165,
+      "percent": 2.0135
+    },
+    {
+      "name": "linked-expanded-390-dark.png",
+      "width": 390,
+      "height": 860,
+      "changedPixels": 23254,
+      "percent": 6.9332
+    },
+    {
+      "name": "linked-expanded-390-light.png",
+      "width": 390,
+      "height": 860,
+      "changedPixels": 21954,
+      "percent": 6.5456
+    },
+    {
+      "name": "linked-expanded-820-dark.png",
+      "width": 820,
+      "height": 860,
+      "changedPixels": 23371,
+      "percent": 3.3141
+    },
+    {
+      "name": "linked-expanded-820-light.png",
+      "width": 820,
+      "height": 860,
+      "changedPixels": 21973,
+      "percent": 3.1159
+    },
+    {
+      "name": "retained-error-1280-dark.png",
+      "width": 1280,
+      "height": 860,
+      "changedPixels": 0,
+      "percent": 0
+    },
+    {
+      "name": "retained-error-1280-light.png",
+      "width": 1280,
+      "height": 860,
+      "changedPixels": 0,
+      "percent": 0
+    },
+    {
+      "name": "retained-error-390-dark.png",
+      "width": 390,
+      "height": 860,
+      "changedPixels": 0,
+      "percent": 0
+    },
+    {
+      "name": "retained-error-390-light.png",
+      "width": 390,
+      "height": 860,
+      "changedPixels": 0,
+      "percent": 0
+    },
+    {
+      "name": "retained-error-820-dark.png",
+      "width": 820,
+      "height": 860,
+      "changedPixels": 0,
+      "percent": 0
+    },
+    {
+      "name": "retained-error-820-light.png",
+      "width": 820,
+      "height": 860,
+      "changedPixels": 0,
+      "percent": 0
+    }
+  ]
+}
