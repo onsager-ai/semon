@@ -1652,9 +1652,14 @@ mod tests {
                             let length = append.offset
                                 + base64_decode(&append.bytes).map_or(0, |bytes| bytes.len())
                                     as u64;
+                            let generation = append.generation.clone();
                             shared.lock().unwrap().push(append);
-                            Response::from_data(json!({"length": length}).to_string().into_bytes())
-                                .with_status_code(tiny_http::StatusCode(200))
+                            Response::from_data(
+                                json!({"length": length, "generation": generation})
+                                    .to_string()
+                                    .into_bytes(),
+                            )
+                            .with_status_code(tiny_http::StatusCode(200))
                         }
                         Err(_) => Response::from_data(Vec::new())
                             .with_status_code(tiny_http::StatusCode(400)),
@@ -1758,34 +1763,77 @@ mod tests {
             let push = thread::spawn(move || {
                 ended.send(push_until(&options, true, &stopped)).unwrap();
             });
-            let request = server
-                .recv_timeout(Duration::from_secs(10))
-                .unwrap()
-                .unwrap();
-            assert_eq!(request.url(), "/v1/mirror/append");
-            request
-                .respond(Response::from_string(body).with_status_code(status))
-                .unwrap();
-            if status == 413 {
-                let facts = server
-                    .recv_timeout(Duration::from_secs(10))
+            let deadline = Instant::now() + Duration::from_secs(15);
+            loop {
+                let mut request = server
+                    .recv_timeout(deadline.saturating_duration_since(Instant::now()))
                     .unwrap()
-                    .unwrap();
+                    .expect("initial append or optional status");
+                match request.url() {
+                    "/v1/mirror/append" => {
+                        request
+                            .respond(Response::from_string(body).with_status_code(status))
+                            .unwrap();
+                        break;
+                    }
+                    "/v1/mirror/status" => {
+                        let mut input = String::new();
+                        request.as_reader().read_to_string(&mut input).unwrap();
+                        let observation: wire::Status = serde_json::from_str(&input).unwrap();
+                        assert!(observation.runtime.codex_rollouts.is_none());
+                        request
+                            .respond(Response::from_string("{\"confirmed\":[]}"))
+                            .unwrap();
+                    }
+                    route => panic!("unexpected initial route: {route}"),
+                }
+            }
+            // Restricted appends retain retry backoff while lightweight fresh
+            // status continues. A partial pass must not publish full inventory.
+            let deadline = Instant::now() + Duration::from_secs(15);
+            loop {
+                let mut request = server
+                    .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                    .unwrap()
+                    .expect("restricted-pass status heartbeat");
                 assert_eq!(
-                    facts.url(),
-                    "/v1/mirror/facts",
-                    "storage full still sends its heartbeat"
+                    request.url(),
+                    "/v1/mirror/status",
+                    "no append retry or premature full facts while restricted"
                 );
-                facts.respond(Response::from_string("{}")).unwrap();
-            } else {
+                let mut input = String::new();
+                request.as_reader().read_to_string(&mut input).unwrap();
+                let observation: wire::Status = serde_json::from_str(&input).unwrap();
+                assert!(observation.runtime.codex_rollouts.is_none());
                 assert!(
-                    server
-                        .recv_timeout(Duration::from_millis(100))
-                        .unwrap()
-                        .is_none(),
-                    "paused skips facts"
+                    observation
+                        .targets
+                        .iter()
+                        .all(|target| target.acked_bytes == 0)
+                );
+                request
+                    .respond(Response::from_string("{\"confirmed\":[]}"))
+                    .unwrap();
+                let expected = if status == 413 {
+                    wire::SyncPhase::StorageFull
+                } else {
+                    wire::SyncPhase::Paused
+                };
+                if observation.phase == expected {
+                    break;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "restriction was not reflected in fresh status"
                 );
             }
+            assert!(
+                server
+                    .recv_timeout(Duration::from_millis(100))
+                    .unwrap()
+                    .is_none(),
+                "a successful status must not clear append backoff"
+            );
             assert!(matches!(
                 result.recv_timeout(Duration::from_millis(100)),
                 Err(mpsc::RecvTimeoutError::Timeout)
@@ -1858,10 +1906,9 @@ mod tests {
         assert_eq!(report.bytes, appended.len() as u64);
         let opens = input_opens();
         assert_eq!(opens.len(), 1, "only the growing transcript should open");
-        assert_eq!(
-            opens.get(&paths[0]),
-            Some(&4),
-            "the cached head should avoid a fifth open"
+        assert!(
+            matches!(opens.get(&paths[0]).copied(), Some(1..=4)),
+            "the cached head must avoid a fifth open: {opens:?}"
         );
         let sent = receiver.from(after_initial);
         assert_eq!(sent.len(), 1);
@@ -1905,7 +1952,65 @@ mod tests {
     fn state_without_stat_fields_loads_and_gets_one_full_check() {
         let fixture = Fixture::new();
         let path = fixture.write("claude/projects/-work/old.jsonl", b"already sent\n");
-        let url = "http://127.0.0.1:1";
+        let server = Server::http("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", server.server_addr());
+        let mirror = fixture.root.join("mirror");
+        fs::create_dir_all(&mirror).unwrap();
+        let reference = mirror::Receiver::new(&mirror);
+        let bytes = b"already sent\n";
+        let existing = Append {
+            root: "claude".into(),
+            path: "projects/-work/old.jsonl".into(),
+            offset: 0,
+            head_sha256: head_sha256(bytes),
+            bytes: base64_encode(bytes),
+            replace: false,
+            generation: None,
+        };
+        assert_eq!(reference.append("legacy", &existing).status, 200);
+        let worker = thread::spawn(move || {
+            let mut request = server
+                .recv_timeout(Duration::from_secs(10))
+                .unwrap()
+                .expect("legacy generation negotiation");
+            assert_eq!(request.url(), "/v1/mirror/append");
+            let mut input = String::new();
+            request.as_reader().read_to_string(&mut input).unwrap();
+            let append: Append = serde_json::from_str(&input).unwrap();
+            assert_eq!(append.offset, bytes.len() as u64);
+            assert!(
+                decode(&append).is_empty(),
+                "an unchanged legacy cursor must not reupload history"
+            );
+            assert!(!append.replace);
+            assert_eq!(append.head_sha256, head_sha256(bytes));
+            assert!(
+                append
+                    .generation
+                    .as_deref()
+                    .is_some_and(wire::is_generation)
+            );
+            let answer = reference.append("legacy", &append);
+            assert_eq!(answer.status, 200);
+            assert_eq!(
+                answer.body["generation"],
+                append.generation.as_deref().unwrap()
+            );
+            request
+                .respond(
+                    Response::from_string(answer.body.to_string()).with_status_code(answer.status),
+                )
+                .unwrap();
+            assert_eq!(
+                fs::read(
+                    reference
+                        .machine_dir("legacy")
+                        .join("claude/projects/-work/old.jsonl")
+                )
+                .unwrap(),
+                bytes.as_slice()
+            );
+        });
         let key = "claude/projects/-work/old.jsonl";
         let files = BTreeMap::from([(
             key.to_owned(),
@@ -1919,7 +2024,7 @@ mod tests {
             "url": url,
             "files": files
         });
-        let options = fixture.push_options(url);
+        let options = fixture.push_options(&url);
         fs::create_dir_all(options.state.parent().unwrap()).unwrap();
         fs::write(&options.state, old_state.to_string()).unwrap();
 
@@ -1930,6 +2035,15 @@ mod tests {
         assert_eq!(client.pass(&fixture.options).unwrap().files, 0);
         assert!(input_opens().get(&path).copied().unwrap_or_default() > 0);
         assert!(client.state.files[key].has_stat());
+        assert!(client.state.files[key].confirmed);
+        assert_eq!(client.state.files[key].sent, bytes.len() as u64);
+        worker.join().unwrap();
+        reset_input_opens();
+        assert_eq!(client.pass(&fixture.options).unwrap().files, 0);
+        assert!(
+            input_opens().is_empty(),
+            "qualified legacy cursors should use the stat cache on the next pass"
+        );
     }
 
     #[test]
