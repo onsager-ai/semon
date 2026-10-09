@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "manifest_sha256": "45cb5ff2d9652ede5c9297650ab1baada1c06017e91c20a63bae1011b86d249f",
+  "manifest_sha256": "8a16077dd58acd47ce7b2364a0cc3d42cf7f1c6a08b404187bfcc0d99464d32f",
   "block_sha256": "21b24d84a4636c657f08116aac12fb3d4a0ea717b66c92f4cfe1dff433f8d9a4",
   "resolved_skills": [
     "ci-triage",
@@ -73,7 +73,7 @@
       "mode": "100644"
     },
     ".agents/skills/pr-lifecycle/SKILL.md": {
-      "sha256": "41669b001109f4181dd93e14871b23e3d445cf95da39bb80133d8cba0c012f30",
+      "sha256": "7ef0eb8cc47e1c5605f42b3fcd2f8bc497ffb5afb4c9a5f09002c37d6887438f",
       "owner": "shared",
       "mode": "100644"
     },
@@ -198,7 +198,7 @@
       "mode": "100644"
     },
     ".claude/skills/pr-lifecycle/SKILL.md": {
-      "sha256": "41669b001109f4181dd93e14871b23e3d445cf95da39bb80133d8cba0c012f30",
+      "sha256": "7ef0eb8cc47e1c5605f42b3fcd2f8bc497ffb5afb4c9a5f09002c37d6887438f",
       "owner": "shared",
       "mode": "100644"
     },
