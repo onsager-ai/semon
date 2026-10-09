@@ -366,9 +366,9 @@ dialog.panel::backdrop { background: color-mix(in srgb, #000 40%, transparent); 
 .diff div { padding: 0 12px; white-space: pre-wrap; overflow-wrap: anywhere; }
 .diff .add { background: var(--diff-add); } .diff .del { background: var(--diff-del); } .diff .ctx { color: var(--muted); }
 
-/* ---- Session: other sessions. A child is a card that opens it; a relay or message is an event row --------- */
-.child-card { display: grid; grid-template-columns: minmax(0, 1fr); gap: 3px; width: 100%; min-width: 0; border: 1px solid var(--line-2); border-radius: var(--r3); background: var(--ground); padding: 12px 14px; text-align: left; color: var(--ink); }
-@media (hover: hover) { .child-card:hover { background: var(--hover); border-color: var(--faint); } }
+/* ---- Session: other sessions. Linked context uses a light rail; relays/messages retain their event rows ---- */
+.child-card { display: grid; grid-template-columns: minmax(0, 1fr); gap: 3px; width: 100%; min-width: 0; border: 1px solid transparent; border-top-color: var(--line); border-left-color: var(--line-2); border-radius: 0; background: var(--ground); padding: 12px 14px; text-align: left; color: var(--ink); }
+@media (hover: hover) { .child-card:hover { background: var(--hover); } }
 .cc-head { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .cc-name { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
 .cc-head .state { margin-left: auto; font-size: var(--fs-cap); }

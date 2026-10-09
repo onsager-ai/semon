@@ -1,5 +1,7 @@
 # Session discovery and inspection delivery
 
+Latest incremental surface refinement: [retained-layout review](surface-refinement/README.md). Earlier screenshots/checks below describe their recorded iterations.
+
 ## Source and ownership
 
 The baseline is `274f0b9bb43f65982863a22c177413c04d805740` on `main`.
