@@ -115,7 +115,7 @@ fn receiver() -> Receiver {
                 }
                 let response = if let Some(location) = &state.status_redirect {
                     json_response(302, json!({}))
-                        .with_header(Header::from_bytes("Location", location).unwrap())
+                        .with_header(Header::from_bytes("Location", location.as_str()).unwrap())
                 } else if state.status_cookie_gate {
                     json_response(401, json!({"error":"session_required"}))
                 } else if state.status_supported || state.status_head_global {
