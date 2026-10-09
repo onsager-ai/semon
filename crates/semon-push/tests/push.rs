@@ -15,7 +15,7 @@ use std::{
 
 use semon_push::{
     Client, Credential, PushOptions, StateLock, Stop, Token, read_token,
-    wire::{Append, HEAD_BYTES, Length, base64_decode, head_sha256},
+    wire::{Append, HEAD_BYTES, Length, Status, base64_decode, head_sha256},
 };
 use semon_sessions::{Facts, Options, is_input_path};
 use serde_json::json;
@@ -27,7 +27,27 @@ const TOKEN: &str = "test-token-0123456789";
 #[derive(Default)]
 struct Received {
     files: BTreeMap<String, Vec<u8>>,
+    generations: BTreeMap<String, String>,
+    append_order: Vec<String>,
+    /// Accepted newline-ended data batches; split-line pieces and empty
+    /// generation-control requests are not separate scheduler turns.
+    data_batch_order: Vec<String>,
+    statuses: Vec<Status>,
+    status_supported: bool,
+    status_cookie_gate: bool,
+    status_head_global: bool,
+    status_head_checks: u64,
+    hang_status_head: bool,
+    status_post_checks: u64,
+    status_redirect: Option<String>,
+    status_refuse: bool,
+    omit_generations: bool,
+    grow_source: Option<PathBuf>,
+    discover_source: Option<(PathBuf, String)>,
+    move_source: Option<(String, PathBuf, PathBuf)>,
     facts: Option<Facts>,
+    hang_facts: bool,
+    prepared_facts: Option<Facts>,
     appends: u64,
     replaces: u64,
     conflicts: u64,
@@ -83,6 +103,34 @@ fn receiver() -> Receiver {
             let mut body = String::new();
             let _ = request.as_reader().read_to_string(&mut body);
             let url = request.url().to_owned();
+            if authorized
+                && url == "/v1/mirror/status"
+                && request.method() == &tiny_http::Method::Head
+            {
+                let mut state = shared.lock().unwrap();
+                state.status_head_checks += 1;
+                if state.hang_status_head {
+                    state.held_requests.push(request);
+                    continue;
+                }
+                let response = if let Some(location) = &state.status_redirect {
+                    json_response(302, json!({}))
+                        .with_header(Header::from_bytes("Location", location.as_str()).unwrap())
+                } else if state.status_cookie_gate {
+                    json_response(401, json!({"error":"session_required"}))
+                } else if state.status_supported || state.status_head_global {
+                    json_response(405, json!({}))
+                        .with_header(Header::from_bytes("Allow", "POST").unwrap())
+                } else {
+                    json_response(404, json!({}))
+                };
+                drop(state);
+                request.respond(response).unwrap();
+                continue;
+            }
+            if authorized && url == "/v1/mirror/status" {
+                shared.lock().unwrap().status_post_checks += 1;
+            }
             if authorized && url == "/v1/mirror/append" {
                 let mut received = shared.lock().unwrap();
                 if received
@@ -102,11 +150,30 @@ fn receiver() -> Receiver {
                     continue;
                 }
             }
+            if authorized && url == "/v1/mirror/facts" && shared.lock().unwrap().hang_facts {
+                let mut state = shared.lock().unwrap();
+                state.prepared_facts = serde_json::from_str(&body).ok();
+                state.held_requests.push(request);
+                continue;
+            }
             let response = if !authorized {
                 json_response(401, json!({"error":"unauthorized"}))
             } else if url == "/v1/mirror/facts" {
                 shared.lock().unwrap().facts = serde_json::from_str(&body).ok();
                 json_response(200, json!({}))
+            } else if url == "/v1/mirror/status" && shared.lock().unwrap().status_cookie_gate {
+                json_response(401, json!({"error":"session_required"}))
+            } else if url == "/v1/mirror/status" && shared.lock().unwrap().status_supported {
+                shared
+                    .lock()
+                    .unwrap()
+                    .statuses
+                    .push(serde_json::from_str(&body).unwrap());
+                if shared.lock().unwrap().status_refuse {
+                    json_response(401, json!({"error":"revoked"}))
+                } else {
+                    json_response(200, json!({}))
+                }
             } else if url == "/v1/mirror/append" {
                 handle_append(&mut shared.lock().unwrap(), &body)
             } else {
@@ -152,6 +219,7 @@ fn handle_append(received: &mut Received, body: &str) -> Response<std::io::Curso
         json_response(
             409,
             serde_json::to_value(Length {
+                generation: received.generations.get(&key).cloned(),
                 length: current.len() as u64,
                 head_sha256: Some(head_sha256(current)),
             })
@@ -177,13 +245,50 @@ fn handle_append(received: &mut Received, body: &str) -> Response<std::io::Curso
     received.appends += 1;
     received.replaces += u64::from(append.replace);
     let length = next.len() as u64;
-    received.files.insert(key, next);
+    received.append_order.push(key.clone());
+    if bytes.last() == Some(&b'\n') {
+        received.data_batch_order.push(key.clone());
+    }
+    if let Some(generation) = &append.generation {
+        received.generations.insert(key.clone(), generation.clone());
+    }
+    received.files.insert(key.clone(), next);
+    if received
+        .move_source
+        .as_ref()
+        .is_some_and(|(selected, _, _)| selected == &key)
+    {
+        let (_, from, to) = received.move_source.take().unwrap();
+        fs::create_dir_all(to.parent().unwrap()).unwrap();
+        fs::rename(from, to).unwrap();
+    }
+    if let Some(source) = &received.grow_source {
+        use std::io::Write;
+        fs::OpenOptions::new()
+            .append(true)
+            .open(source)
+            .unwrap()
+            .write_all(b"{}\n")
+            .unwrap();
+    }
+    if let Some((source, contents)) = received.discover_source.take() {
+        fs::create_dir_all(source.parent().unwrap()).unwrap();
+        fs::write(source, contents).unwrap();
+        thread::sleep(Duration::from_millis(2100));
+    }
     if let Some((after, stop)) = &received.stop_after
         && received.appends >= *after
     {
         stop.stop();
     }
-    json_response(200, json!({"length": length}))
+    if received.omit_generations {
+        json_response(200, json!({"length": length}))
+    } else {
+        json_response(
+            200,
+            json!({"length": length, "generation": append.generation}),
+        )
+    }
 }
 
 struct Home {
@@ -532,7 +637,16 @@ fn facts_are_sent_and_a_bad_token_is_refused() {
     let receiver = receiver();
     home.write(LOG, &line("hello"));
     semon_push::push(&home.push_options(&receiver.url), false).unwrap();
-    let facts = receiver.state.lock().unwrap().facts.clone().unwrap();
+    let mut facts = receiver.state.lock().unwrap().facts.clone().unwrap();
+    assert!(
+        facts
+            .mirror_observation_id
+            .as_deref()
+            .is_some_and(semon_push::wire::is_generation)
+    );
+    assert!(facts.mirror_sequence.is_some_and(|sequence| sequence > 0));
+    facts.mirror_observation_id = None;
+    facts.mirror_sequence = None;
     assert_eq!(facts.hostname, "laptop");
     assert_eq!(facts, semon_sessions::local_facts(&home.options).unwrap());
 
@@ -1137,4 +1251,455 @@ fn copilot_redacted_mirror_survives_lost_ack_restart_partial_and_replacement() {
             "source deletion does not erase previously received viewing evidence"
         );
     }
+}
+
+#[test]
+fn batches_rotate_recent_files_and_reserve_a_history_turn() {
+    let home = Home::new();
+    let receiver = receiver();
+    let history = home.write("claude/projects/-work/history.jsonl", &line("old"));
+    fs::File::open(history)
+        .unwrap()
+        .set_times(fs::FileTimes::new().set_modified(std::time::UNIX_EPOCH))
+        .unwrap();
+    let bulk = line("bulk").repeat(10);
+    home.write("claude/projects/-work/bulk.jsonl", &bulk);
+    home.write("claude/projects/-work/latest.jsonl", &line("small"));
+    home.client(&receiver)
+        .with_chunk(line("bulk").len())
+        .pass(&home.options)
+        .unwrap();
+    let state = receiver.state.lock().unwrap();
+    let order = &state.data_batch_order;
+    assert!(order[0].ends_with("latest.jsonl"));
+    assert!(
+        order
+            .iter()
+            .position(|p| p.ends_with("history.jsonl"))
+            .unwrap()
+            <= 3
+    );
+    assert_eq!(
+        state.files["claude/projects/-work/bulk.jsonl"],
+        bulk.as_bytes()
+    );
+}
+
+#[test]
+fn discovery_between_slices_exposes_a_new_small_session_and_growth_is_frozen() {
+    let home = Home::new();
+    let receiver = receiver();
+    let original = line("bulk").repeat(8);
+    let path = home.write(LOG, &original);
+    for n in 0..40 {
+        home.write(
+            &format!("claude/projects/-work/recent-{n:02}.jsonl"),
+            &line("pending recent"),
+        );
+    }
+    let recent = "claude/projects/-work/new.jsonl";
+    {
+        let mut r = receiver.state.lock().unwrap();
+        r.grow_source = Some(path.clone());
+        r.discover_source = Some((home.root.join(recent), line("new")));
+    }
+    home.client(&receiver)
+        .with_chunk(line("bulk").len())
+        .pass(&home.options)
+        .unwrap();
+    let state = receiver.state.lock().unwrap();
+    assert_eq!(state.files[LOG], original.as_bytes());
+    assert_eq!(state.files[recent], line("new").as_bytes());
+    assert_eq!(
+        state
+            .data_batch_order
+            .iter()
+            .position(|p| p == recent)
+            .unwrap(),
+        1
+    );
+    assert!(
+        state
+            .data_batch_order
+            .iter()
+            .position(|p| p == recent)
+            .unwrap()
+            < state
+                .data_batch_order
+                .iter()
+                .rposition(|p| p == LOG)
+                .unwrap()
+    );
+    assert!(fs::metadata(path).unwrap().len() > original.len() as u64);
+}
+
+#[test]
+fn a_legacy_cursor_binds_an_unchanged_prefix_without_reuploading_history() {
+    let home = Home::new();
+    let receiver = receiver();
+    let original = line("legacy");
+    home.write(LOG, &original);
+    let options = home.push_options(&receiver.url);
+    home.client(&receiver).pass(&home.options).unwrap();
+    let mut state: serde_json::Value =
+        serde_json::from_slice(&fs::read(&options.state).unwrap()).unwrap();
+    for record in state["files"].as_object_mut().unwrap().values_mut() {
+        for field in ["generation", "confirmed", "redacted_head"] {
+            record.as_object_mut().unwrap().remove(field);
+        }
+    }
+    fs::write(&options.state, state.to_string()).unwrap();
+    let before = receiver.state.lock().unwrap().appends;
+    let report = home.client(&receiver).pass(&home.options).unwrap();
+    assert_eq!(report.bytes, 0);
+    assert_eq!(copy(&receiver, LOG), original.as_bytes());
+    assert_eq!(receiver.state.lock().unwrap().appends, before + 1);
+    let saved: serde_json::Value =
+        serde_json::from_slice(&fs::read(&options.state).unwrap()).unwrap();
+    assert_eq!(saved["files"][LOG]["confirmed"], true);
+}
+
+#[test]
+fn status_heartbeats_continue_while_the_first_upload_is_blocked() {
+    let home = Home::new();
+    let receiver = receiver();
+    home.write(LOG, &line("held"));
+    {
+        let mut r = receiver.state.lock().unwrap();
+        r.status_supported = true;
+        r.hang_after = Some(0);
+    }
+    let stop = Stop::new();
+    let options = home.push_options(&receiver.url);
+    let worker = watch_in_background(&options, &stop);
+    wait_for("two fresh heartbeats during blocked append", || {
+        receiver.state.lock().unwrap().statuses.len() >= 2
+    });
+    {
+        let r = receiver.state.lock().unwrap();
+        assert_eq!(r.appends, 0);
+        assert!(r.held > 0);
+        assert!(r.facts.is_none());
+        assert!(r.statuses[1].observed_at_ms > r.statuses[0].observed_at_ms);
+        assert!(r.statuses[1].sequence > r.statuses[0].sequence);
+        assert!(
+            r.statuses
+                .iter()
+                .all(|s| s.runtime.codex_rollouts.is_none() && s.runtime.repos.is_empty())
+        );
+    }
+    stop_and_join(&stop, worker).unwrap();
+    receiver.state.lock().unwrap().held_requests.clear();
+    assert_lock_freed(&options);
+}
+
+#[test]
+fn older_receivers_remain_compatible_with_unknown_generation_confirmation() {
+    let home = Home::new();
+    let receiver = receiver();
+    home.write(LOG, &line("old receiver"));
+    receiver.state.lock().unwrap().omit_generations = true;
+    semon_push::push(&home.push_options(&receiver.url), false).unwrap();
+    let state: serde_json::Value =
+        serde_json::from_slice(&fs::read(home.root.join("state/push.json")).unwrap()).unwrap();
+    assert_eq!(state["files"][LOG]["confirmed"], false);
+    assert!(receiver.state.lock().unwrap().facts.is_some());
+}
+
+#[test]
+fn heartbeat_token_refusal_wins_over_its_own_shared_stop() {
+    let home = Home::new();
+    let receiver = receiver();
+    home.write(LOG, &line("held"));
+    {
+        let mut r = receiver.state.lock().unwrap();
+        r.status_supported = true;
+        r.status_refuse = true;
+        r.hang_after = Some(0);
+    }
+    let stop = Stop::new();
+    let options = home.push_options(&receiver.url);
+    let worker = watch_in_background(&options, &stop);
+    wait_for("fatal status refusal", || worker.is_finished());
+    let error = worker.join().unwrap().unwrap_err();
+    assert!(error.contains("refused the token"), "{error}");
+    assert!(stop.is_stopped());
+    receiver.state.lock().unwrap().held_requests.clear();
+    assert_lock_freed(&options);
+}
+
+#[test]
+fn a_move_during_the_sweep_commits_only_the_exact_current_archive_inventory() {
+    let home = Home::new();
+    let receiver = receiver();
+    let current = "codex/sessions/moved.jsonl";
+    let archive = "codex/archived_sessions/moved.jsonl";
+    let source = home.write(
+        current,
+        "{\"type\":\"session_meta\",\"payload\":{\"id\":\"move-id\"}}\n",
+    );
+    receiver.state.lock().unwrap().move_source =
+        Some((current.into(), source, home.root.join(archive)));
+    semon_push::push(&home.push_options(&receiver.url), false).unwrap();
+    let state = receiver.state.lock().unwrap();
+    assert!(state.files.contains_key(current));
+    assert!(state.files.contains_key(archive));
+    assert_eq!(
+        state.facts.as_ref().unwrap().codex_rollouts,
+        Some(std::collections::BTreeSet::from([
+            "archived_sessions/moved.jsonl".into()
+        ]))
+    );
+}
+
+#[test]
+fn heartbeat_after_prepared_full_facts_uses_the_frozen_current_targets_and_shared_fence() {
+    let home = Home::new();
+    let receiver = receiver();
+    let current = "codex/sessions/moved.jsonl";
+    let archive = "codex/archived_sessions/moved.jsonl";
+    let source = home.write(
+        current,
+        "{\"type\":\"session_meta\",\"payload\":{\"id\":\"move-id\"}}\n",
+    );
+    {
+        let mut state = receiver.state.lock().unwrap();
+        state.status_supported = true;
+        state.hang_facts = true;
+        state.move_source = Some((current.into(), source, home.root.join(archive)));
+    }
+    let options = home.push_options(&receiver.url);
+    let stop = Stop::new();
+    let worker = watch_in_background(&options, &stop);
+    wait_for(
+        "higher sequence heartbeat while full facts post is blocked",
+        || {
+            let state = receiver.state.lock().unwrap();
+            state.prepared_facts.as_ref().is_some_and(|facts| {
+                state
+                    .statuses
+                    .iter()
+                    .any(|s| s.sequence > facts.mirror_sequence.unwrap())
+            })
+        },
+    );
+    {
+        let state = receiver.state.lock().unwrap();
+        let facts = state.prepared_facts.as_ref().unwrap();
+        assert_eq!(
+            facts.codex_rollouts,
+            Some(std::collections::BTreeSet::from([
+                "archived_sessions/moved.jsonl".into()
+            ]))
+        );
+        let fresh = state
+            .statuses
+            .iter()
+            .find(|s| s.sequence > facts.mirror_sequence.unwrap())
+            .unwrap();
+        assert_eq!(
+            Some(&fresh.observation_id),
+            facts.mirror_observation_id.as_ref()
+        );
+        assert!(
+            fresh
+                .targets
+                .iter()
+                .all(|t| t.path != "sessions/moved.jsonl")
+        );
+        assert!(
+            fresh
+                .targets
+                .iter()
+                .any(|t| t.path == "archived_sessions/moved.jsonl")
+        );
+        assert!(
+            fresh.runtime.mirror_sequence.is_none()
+                && fresh.runtime.mirror_observation_id.is_none()
+        );
+    }
+    stop_and_join(&stop, worker).unwrap();
+    receiver.state.lock().unwrap().held_requests.clear();
+    assert_lock_freed(&options);
+}
+
+#[test]
+fn cookie_gated_unknown_status_does_not_refuse_a_valid_push_only_token() {
+    let home = Home::new();
+    let receiver = receiver();
+    let text = line("legacy cookie fallback");
+    home.write(LOG, &text);
+    receiver.state.lock().unwrap().status_cookie_gate = true;
+    let options = home.push_options(&receiver.url);
+    let stop = Stop::new();
+    let worker = watch_in_background(&options, &stop);
+    wait_for("valid upload and facts despite optional HEAD401", || {
+        let state = receiver.state.lock().unwrap();
+        state.facts.is_some() && state.status_head_checks == 1
+    });
+    assert_eq!(copy(&receiver, LOG), text.as_bytes());
+    assert!(!stop.is_stopped());
+    assert!(!worker.is_finished());
+    assert!(receiver.state.lock().unwrap().statuses.is_empty());
+    stop_and_join(&stop, worker).unwrap();
+    assert_lock_freed(&options);
+}
+
+#[test]
+fn a_global_head405_does_not_make_an_old_post404_extension_mandatory() {
+    let home = Home::new();
+    let receiver = receiver();
+    home.write(LOG, &line("old generic router"));
+    receiver.state.lock().unwrap().status_head_global = true;
+    let options = home.push_options(&receiver.url);
+    let stop = Stop::new();
+    let worker = watch_in_background(&options, &stop);
+    wait_for("optional POST404 after generic HEAD405", || {
+        let state = receiver.state.lock().unwrap();
+        state.facts.is_some() && state.status_post_checks == 1
+    });
+    assert!(!stop.is_stopped());
+    assert!(!worker.is_finished());
+    stop_and_join(&stop, worker).unwrap();
+    assert_lock_freed(&options);
+}
+
+#[test]
+fn optional_capability_discovery_never_follows_an_authentication_redirect() {
+    let home = Home::new();
+    let receiver = receiver();
+    let login = Server::http("127.0.0.1:0").unwrap();
+    home.write(LOG, &line("redirected optional endpoint"));
+    receiver.state.lock().unwrap().status_redirect = Some(format!(
+        "http://{}/login",
+        login.server_addr().to_ip().unwrap()
+    ));
+    let options = home.push_options(&receiver.url);
+    let stop = Stop::new();
+    let worker = watch_in_background(&options, &stop);
+    wait_for("valid facts and rejected optional redirect", || {
+        let state = receiver.state.lock().unwrap();
+        state.facts.is_some() && state.status_head_checks == 1
+    });
+    assert!(
+        login
+            .recv_timeout(Duration::from_millis(100))
+            .unwrap()
+            .is_none()
+    );
+    assert!(!stop.is_stopped());
+    stop_and_join(&stop, worker).unwrap();
+    assert_lock_freed(&options);
+}
+
+#[test]
+fn a_supported_status_token_revocation_remains_fatal_after_a_successful_heartbeat() {
+    let home = Home::new();
+    let receiver = receiver();
+    home.write(LOG, &line("held upload"));
+    {
+        let mut state = receiver.state.lock().unwrap();
+        state.status_supported = true;
+        state.hang_after = Some(0);
+    }
+    let options = home.push_options(&receiver.url);
+    let stop = Stop::new();
+    let worker = watch_in_background(&options, &stop);
+    wait_for("supported first heartbeat", || {
+        !receiver.state.lock().unwrap().statuses.is_empty()
+    });
+    receiver.state.lock().unwrap().status_refuse = true;
+    wait_for("fatal revoked supported heartbeat", || worker.is_finished());
+    assert!(
+        worker
+            .join()
+            .unwrap()
+            .unwrap_err()
+            .contains("refused the token")
+    );
+    assert!(stop.is_stopped());
+    receiver.state.lock().unwrap().held_requests.clear();
+    assert_lock_freed(&options);
+}
+
+#[test]
+fn descriptor_invalid_reference_generation_forces_actual_client_replacement() {
+    let home = Home::new();
+    let text = line(&"x".repeat(6000));
+    home.write(LOG, &text);
+    let mirror = home.root.join("reference");
+    fs::create_dir_all(&mirror).unwrap();
+    let reference = Arc::new(semon_push::mirror::Receiver::new(&mirror));
+    let server = Arc::new(Server::http("127.0.0.1:0").unwrap());
+    let listener = Arc::clone(&server);
+    let sink = Arc::clone(&reference);
+    let attempts = Arc::new(Mutex::new(Vec::<Append>::new()));
+    let observed = Arc::clone(&attempts);
+    let worker = thread::spawn(move || {
+        for mut request in listener.incoming_requests() {
+            assert_eq!(request.url(), "/v1/mirror/append");
+            let mut body = String::new();
+            request.as_reader().read_to_string(&mut body).unwrap();
+            let append: Append = serde_json::from_str(&body).unwrap();
+            observed.lock().unwrap().push(append.clone());
+            let answer = sink.append("fixture", &append);
+            if observed.lock().unwrap().len() == 2 {
+                assert_eq!(answer.status, 409);
+                assert!(answer.body["head_sha256"].is_null());
+                assert!(answer.body["generation"].is_null());
+            }
+            request
+                .respond(json_response(answer.status, answer.body))
+                .unwrap();
+        }
+    });
+    let url = format!("http://{}", server.server_addr().to_ip().unwrap());
+    let mut client = Client::new(&home.push_options(&url)).unwrap();
+    client.pass(&home.options).unwrap();
+    let path = reference.machine_dir("fixture").join(LOG);
+    let mut changed = fs::read(&path).unwrap();
+    changed[5000] = b'y';
+    assert_eq!(head_sha256(&changed), head_sha256(text.as_bytes()));
+    fs::rename(&path, path.with_extension("retained")).unwrap();
+    fs::write(&path, changed).unwrap();
+    let addition = line("new append");
+    home.append(LOG, &addition);
+    let report = client.pass(&home.options).unwrap();
+    assert_eq!(report.replaced, 1);
+    assert_eq!(
+        fs::read(path).unwrap(),
+        redacted(&(text.clone() + &addition))
+    );
+    let rows = attempts.lock().unwrap();
+    assert_eq!(rows.len(), 3);
+    assert!(!rows[1].replace);
+    assert_eq!(rows[1].offset, text.len() as u64);
+    assert!(rows[2].replace);
+    assert_eq!(rows[2].offset, 0);
+    assert_ne!(rows[0].generation, rows[2].generation);
+    drop(rows);
+    server.unblock();
+    worker.join().unwrap();
+}
+
+#[test]
+fn a_stop_cancels_capability_wait_and_retains_lock_until_its_head_request_finishes() {
+    let home = Home::new();
+    let receiver = receiver();
+    home.write(LOG, &line("capability in flight"));
+    receiver.state.lock().unwrap().hang_status_head = true;
+    let options = home.push_options(&receiver.url);
+    let stop = Stop::new();
+    let worker = watch_in_background(&options, &stop);
+    wait_for("held capability HEAD while valid full facts arrive", || {
+        let state = receiver.state.lock().unwrap();
+        state.facts.is_some() && state.status_head_checks == 1
+    });
+    stop_and_join(&stop, worker).unwrap();
+    assert!(
+        StateLock::acquire(&options.state).is_err(),
+        "in-flight capability request owns the state lock"
+    );
+    receiver.state.lock().unwrap().held_requests.clear();
+    assert_lock_freed(&options);
 }

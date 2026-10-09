@@ -17,11 +17,15 @@
 //! ([`tokens`]) and `semon receive`'s listener ([`serve`]).
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet, VecDeque},
     fmt, fs,
     io::{self, Read, Seek, SeekFrom},
     path::{Path, PathBuf},
-    sync::{Arc, mpsc},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU8, Ordering},
+        mpsc,
+    },
     thread,
     time::{Duration, Instant},
 };
@@ -33,6 +37,7 @@ mod lock;
 pub mod mirror;
 pub mod redact;
 pub mod serve;
+mod status;
 mod stop;
 pub mod tokens;
 pub mod wire;
@@ -219,6 +224,12 @@ fn loopback(host: &str) -> bool {
 struct FileState {
     /// Bytes of the original acknowledged by the receiver.
     sent: u64,
+    #[serde(default)]
+    generation: String,
+    #[serde(default)]
+    confirmed: bool,
+    #[serde(default)]
+    redacted_head: String,
     /// SHA-256 of the original's first `min(4096, sent)` bytes: a change
     /// means the file was rewritten, and is sent again whole.
     raw_head: String,
@@ -232,7 +243,7 @@ struct FileState {
     ino: u64,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 struct FileStat {
     len: u64,
     mtime_ns: Option<i128>,
@@ -313,8 +324,16 @@ pub struct Report {
 }
 
 enum Answer {
-    Ok(u64),
+    Ok(Length),
     Conflict(Length),
+}
+
+/// Learned only from successful append ACKs, and reset on each Client.
+#[repr(u8)]
+enum GenerationSupport {
+    Unknown,
+    Legacy,
+    Supported,
 }
 
 pub struct Client {
@@ -327,6 +346,10 @@ pub struct Client {
     state: State,
     chunk: usize,
     heads: BTreeMap<String, Vec<u8>>,
+    generation_support: AtomicU8,
+    progress: Arc<Mutex<status::Progress>>,
+    completed_inventory: Option<BTreeSet<String>>,
+    committed_inventory: Option<BTreeSet<String>>,
 }
 
 impl Client {
@@ -357,6 +380,10 @@ impl Client {
             state,
             chunk: CHUNK_BYTES,
             heads: BTreeMap::new(),
+            generation_support: AtomicU8::new(GenerationSupport::Unknown as u8),
+            progress: Arc::new(Mutex::new(status::Progress::new(wire::new_generation()?))),
+            completed_inventory: None,
+            committed_inventory: None,
         })
     }
 
@@ -430,6 +457,12 @@ impl Client {
                 Ok(None) => return Err(Failure::Stopped),
                 Err(error) => return Err(Failure::Remote(error)),
             };
+            if route == "append" && status == 429 {
+                self.progress
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .phase = wire::SyncPhase::WaitingToRetry;
+            }
             if status == 429 && error_kind(&text).as_deref() == Some("rate_limited") {
                 retries += 1;
                 if retries == 2 {
@@ -466,8 +499,17 @@ impl Client {
     }
 
     fn post_facts(&self, facts: &Facts) -> std::result::Result<(), Failure> {
+        let mut prepared = facts.clone();
+        prepared.codex_provisional_rollouts = None;
+        {
+            // Progress snapshot and facts fence share the status allocator.
+            let mut context = self.progress.lock().unwrap_or_else(|e| e.into_inner());
+            context.sequence += 1;
+            prepared.mirror_observation_id = Some(context.observation_id.clone());
+            prepared.mirror_sequence = Some(context.sequence);
+        }
         let body =
-            serde_json::to_string(facts).map_err(|error| Failure::Remote(error.to_string()))?;
+            serde_json::to_string(&prepared).map_err(|error| Failure::Remote(error.to_string()))?;
         match self.post("facts", body)? {
             (200..=299, _) => Ok(()),
             (status, text) => Err(Failure::Remote(format!("facts: {status} {}", text.trim()))),
@@ -483,7 +525,22 @@ impl Client {
                 .map_err(|_| Failure::Remote(format!("append: {status} with an unreadable body")))
         };
         match status {
-            200..=299 => Ok(Answer::Ok(parsed()?.length)),
+            200..=299 => {
+                let ack = parsed()?;
+                let supported = append
+                    .generation
+                    .as_deref()
+                    .is_some_and(|generation| ack.generation.as_deref() == Some(generation));
+                self.generation_support.store(
+                    if supported {
+                        GenerationSupport::Supported
+                    } else {
+                        GenerationSupport::Legacy
+                    } as u8,
+                    Ordering::Relaxed,
+                );
+                Ok(Answer::Ok(ack))
+            }
             409 => Ok(Answer::Conflict(parsed()?)),
             _ => Err(Failure::Remote(format!(
                 "append {}/{}: {status} {}",
@@ -508,36 +565,86 @@ impl Client {
     /// with what was sent before it: a file it caught midway keeps its last
     /// recorded place, and the rest wait for the next push.
     pub fn pass(&mut self, sessions: &Options) -> Result<Report> {
+        self.completed_inventory = None;
+        {
+            let mut progress = self.progress.lock().unwrap_or_else(|e| e.into_inner());
+            progress.clear_targets();
+            progress.inventory_complete = false;
+            progress.phase = wire::SyncPhase::Syncing;
+        }
         let mut report = Report::default();
-        let mut dirty = false;
-        let inputs = semon_sessions::inputs(sessions).map_err(|error| error.to_string())?;
-        for input in inputs {
+        let mut touched = BTreeSet::new();
+        let mut selected = BTreeMap::<String, (Input, FileStat, status::TargetRank)>::new();
+        let mut foreground = VecDeque::new();
+        let mut history = VecDeque::new();
+        let mut foreground_turns = 0;
+        let mut local_failure = false;
+        self.discover(sessions, &mut selected, &mut foreground, &mut history)?;
+        let mut discovered = Instant::now();
+        loop {
             if self.stop.is_stopped() {
                 break;
             }
-            let path = input.full_path(sessions);
-            let key = Self::key(&input);
-            let previous = self.state.files.get(&key).cloned();
-            let outcome = if input.path.ends_with(".jsonl") {
-                self.sync_log(&input, &path)
+            if discovered.elapsed() >= PASS_EVERY {
+                self.discover(sessions, &mut selected, &mut foreground, &mut history)?;
+                discovered = Instant::now();
+            }
+            if foreground.is_empty() && history.is_empty() {
+                self.discover(sessions, &mut selected, &mut foreground, &mut history)?;
+                if foreground.is_empty() && history.is_empty() {
+                    break;
+                }
+                discovered = Instant::now();
+            }
+            let use_foreground =
+                !foreground.is_empty() && (history.is_empty() || foreground_turns < 3);
+            let key = if use_foreground {
+                foreground_turns += 1;
+                foreground.pop_front().expect("foreground")
             } else {
-                self.sync_whole(&input, &path)
+                foreground_turns = 0;
+                history.pop_front().expect("history")
+            };
+            let (input, target, rank) = selected.get(&key).expect("selected");
+            let path = input.full_path(sessions);
+            let log = input.path.ends_with(".jsonl");
+            let outcome = if log {
+                self.sync_log(input, &path, target.len)
+            } else {
+                self.sync_whole(input, &path)
             };
             match outcome {
                 Ok((bytes, replaced)) => {
                     if bytes > 0 || replaced {
-                        report.files += 1;
+                        touched.insert(key.clone());
                         report.bytes += bytes;
                         report.replaced += usize::from(replaced);
                     }
-                    dirty |= previous != self.state.files.get(&key).cloned();
+                    self.update_target(input, target.len, *rank, None);
+                    // A scheduling turn is one complete redaction batch. A
+                    // split long line remains one indivisible checkpoint.
+                    if log
+                        && bytes > 0
+                        && self
+                            .state
+                            .files
+                            .get(&key)
+                            .is_some_and(|f| f.sent < target.len)
+                    {
+                        if use_foreground {
+                            foreground.push_back(key);
+                        } else {
+                            history.push_back(key);
+                        }
+                    } else if log {
+                        // An incomplete frozen tail is not a transferable target.
+                        let sent = self.state.files.get(&key).map_or(0, |f| f.sent);
+                        self.update_target(input, sent.min(target.len), *rank, None);
+                    }
                 }
                 Err(Failure::Local(error)) => {
-                    eprintln!(
-                        "semon push: {}/{}: {error}",
-                        input.root.as_str(),
-                        input.path
-                    );
+                    local_failure = true;
+                    eprintln!("semon push: {key}: {error}");
                 }
                 Err(Failure::Remote(error)) => {
                     self.save()?;
@@ -546,10 +653,157 @@ impl Client {
                 Err(Failure::Stopped) => break,
             }
         }
-        if dirty {
-            self.save()?;
+        report.files = touched.len();
+        self.save()?;
+        if !local_failure && !self.stop.is_stopped() {
+            self.completed_inventory = Some(
+                selected
+                    .values()
+                    .filter(|(input, _, _)| input.root == semon_sessions::InputRoot::Codex)
+                    .map(|(input, _, _)| input.path.clone())
+                    .collect(),
+            );
         }
+        self.refresh_phase();
         Ok(report)
+    }
+
+    fn refresh_phase(&self) {
+        let mut progress = self.progress.lock().unwrap_or_else(|e| e.into_inner());
+        if self.completed_inventory.is_some()
+            && self.completed_inventory == self.committed_inventory
+            && progress.inventory_complete
+            && progress.targets.values().all(|t| {
+                t.acked_bytes == t.target_bytes
+                    && self
+                        .state
+                        .files
+                        .get(&format!("{}/{}", t.root, t.path))
+                        .is_some_and(|f| f.confirmed)
+            })
+        {
+            progress.phase = wire::SyncPhase::UpToDate;
+        }
+    }
+
+    fn discover(
+        &mut self,
+        sessions: &Options,
+        selected: &mut BTreeMap<String, (Input, FileStat, status::TargetRank)>,
+        foreground: &mut VecDeque<String>,
+        history: &mut VecDeque<String>,
+    ) -> Result<()> {
+        let runtime = semon_sessions::local_runtime_facts(sessions).map_err(|e| e.to_string())?;
+        let mut fresh = Vec::new();
+        let inputs = semon_sessions::inputs(sessions).map_err(|e| e.to_string())?;
+        let present = inputs.iter().map(Self::key).collect::<BTreeSet<_>>();
+        selected.retain(|key, _| present.contains(key));
+        foreground.retain(|key| present.contains(key));
+        history.retain(|key| present.contains(key));
+        self.progress
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .prune_targets(&present);
+        for input in inputs {
+            let key = Self::key(&input);
+            if selected.contains_key(&key) {
+                continue;
+            }
+            let stat = FileStat::from_metadata(
+                &fs::metadata(input.full_path(sessions)).map_err(|e| e.to_string())?,
+            );
+            let live = input.root == semon_sessions::InputRoot::Codex
+                && !runtime.codex_locks.is_empty()
+                && semon_sessions::codex_native_id_prefix(&input.full_path(sessions), stat.len)
+                    .ok()
+                    .flatten()
+                    .is_some_and(|id| runtime.codex_locks.contains_key(&id));
+            fresh.push((input, stat, live));
+        }
+        // Recent files first, deterministic ties; small files win equal time.
+        fresh.sort_by(|(a, sa, la), (b, sb, lb)| {
+            lb.cmp(la)
+                .then(sb.mtime_ns.cmp(&sa.mtime_ns))
+                .then(sa.len.cmp(&sb.len))
+                .then(a.cmp(b))
+        });
+        let mut new_foreground = VecDeque::new();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos() as i128;
+        for (input, stat, live) in fresh {
+            let key = Self::key(&input);
+            let changed = self
+                .state
+                .files
+                .get(&key)
+                .is_some_and(|f| !f.matches_stat(stat));
+            let recent = stat
+                .mtime_ns
+                .is_some_and(|mtime| now.saturating_sub(mtime) <= 600_000_000_000);
+            let is_foreground = live || changed || recent || input.path.ends_with(".json");
+            let rank = status::TargetRank {
+                live,
+                foreground: is_foreground,
+                modified_ns: stat.mtime_ns,
+                small: std::cmp::Reverse(stat.len),
+            };
+            if is_foreground {
+                new_foreground.push_back(key.clone());
+            } else {
+                history.push_back(key.clone());
+            }
+            self.update_target(&input, stat.len, rank, Some(stat));
+            selected.insert(key, (input, stat, rank));
+        }
+        // Refill vacancies after deletion/moves without rescanning files or
+        // promoting old ACKs. Only discovery examines the complete frozen set.
+        for (input, stat, rank) in selected.values() {
+            let missing = !self
+                .progress
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .targets
+                .contains_key(&Self::key(input));
+            if missing {
+                self.update_target(input, stat.len, *rank, Some(*stat));
+            }
+        }
+        new_foreground.append(foreground);
+        *foreground = new_foreground;
+        let mut progress = self.progress.lock().unwrap_or_else(|e| e.into_inner());
+        progress.inventory_complete = selected.len() == progress.targets.len();
+        progress.phase = wire::SyncPhase::Syncing;
+        Ok(())
+    }
+
+    fn update_target(
+        &self,
+        input: &Input,
+        target: u64,
+        rank: status::TargetRank,
+        observed: Option<FileStat>,
+    ) {
+        let key = Self::key(input);
+        let known = self.state.files.get(&key);
+        let mut progress = self.progress.lock().unwrap_or_else(|e| e.into_inner());
+        progress.admit_target(
+            key,
+            wire::SyncTarget {
+                root: input.root.as_str().into(),
+                path: input.path.clone(),
+                generation: known.map_or_else(String::new, |f| f.generation.clone()),
+                target_bytes: target,
+                acked_bytes: known
+                    .filter(|f| f.confirmed && observed.is_none_or(|stat| f.matches_stat(stat)))
+                    .map_or(0, |f| f.sent.min(target)),
+                head_sha256: known
+                    .filter(|f| !f.redacted_head.is_empty())
+                    .map_or_else(|| head_sha256(&[]), |f| f.redacted_head.clone()),
+            },
+            rank,
+        );
     }
 
     fn key(input: &Input) -> String {
@@ -560,14 +814,22 @@ impl Client {
         self.append(append)
     }
 
+    fn needs_generation_probe(&self, file: &FileState) -> bool {
+        (!file.confirmed || file.generation.is_empty())
+            && self.generation_support.load(Ordering::Relaxed) != GenerationSupport::Legacy as u8
+    }
+
     /// A small JSON file, sent whole whenever its content changes.
     fn sync_whole(&mut self, input: &Input, path: &Path) -> Synced {
         let stat = FileStat::from_metadata(&fs::metadata(path).map_err(local)?);
         let key = Self::key(input);
         let known = self.state.files.get(&key);
-        if known
-            .is_some_and(|file| file.has_stat() && file.matches_stat(stat) && file.sent == stat.len)
-        {
+        if known.is_some_and(|file| {
+            file.has_stat()
+                && file.matches_stat(stat)
+                && file.sent == stat.len
+                && !self.needs_generation_probe(file)
+        }) {
             return Ok((0, false));
         }
         if stat.len > WHOLE_CAP {
@@ -575,19 +837,58 @@ impl Client {
         }
         let raw = read_input(path).map_err(local)?;
         let digest = sha256_hex(&raw);
-        if self
-            .state
-            .files
-            .get(&key)
-            .is_some_and(|file| file.raw_head == digest && file.sent == raw.len() as u64)
-        {
+        if self.state.files.get(&key).is_some_and(|file| {
+            file.raw_head == digest
+                && file.sent == raw.len() as u64
+                && !self.needs_generation_probe(file)
+        }) {
             let file = self.state.files.get_mut(&key).expect("known file");
             file.set_stat(stat);
             return Ok((0, false));
         }
         let mut data = raw.clone();
         redact::redact(&mut data);
+        if let Some(known) = self
+            .state
+            .files
+            .get(&key)
+            .filter(|file| file.raw_head == digest && file.sent == raw.len() as u64)
+        {
+            let generation = if known.generation.is_empty() {
+                wire::new_generation().map_err(Failure::Local)?
+            } else {
+                known.generation.clone()
+            };
+            let bind = Append {
+                generation: Some(generation.clone()),
+                root: input.root.as_str().into(),
+                path: input.path.clone(),
+                offset: raw.len() as u64,
+                head_sha256: head_sha256(&data),
+                bytes: String::new(),
+                replace: false,
+            };
+            match self.send(&bind)? {
+                Answer::Ok(ack) if ack.length == raw.len() as u64 => {
+                    let file = self.state.files.get_mut(&key).expect("known file");
+                    file.confirmed = ack.generation.as_deref() == Some(generation.as_str());
+                    file.generation = generation;
+                    file.redacted_head = bind.head_sha256;
+                    file.set_stat(stat);
+                    self.save().map_err(Failure::Local)?;
+                    return Ok((0, false));
+                }
+                Answer::Ok(_) => {
+                    return Err(Failure::Remote("whole file ACK length disagrees".into()));
+                }
+                // No accepted bind: use the existing full replacement path with
+                // a new generation rather than retrying an unproved prefix.
+                Answer::Conflict(_) => {}
+            }
+        }
+        let generation = wire::new_generation().map_err(Failure::Local)?;
         let append = Append {
+            generation: Some(generation.clone()),
             root: input.root.as_str().into(),
             path: input.path.clone(),
             offset: 0,
@@ -595,16 +896,23 @@ impl Client {
             bytes: base64_encode(&data),
             replace: true,
         };
-        if let Answer::Conflict(length) = self.send(&append)? {
-            return Err(Failure::Remote(format!(
-                "a replace of {}/{} was refused (receiver at {})",
-                append.root, append.path, length.length
-            )));
-        }
+        let ack = match self.send(&append)? {
+            Answer::Ok(ack) if ack.length == raw.len() as u64 => ack,
+            Answer::Ok(_) => return Err(Failure::Remote("whole file ACK length disagrees".into())),
+            Answer::Conflict(length) => {
+                return Err(Failure::Remote(format!(
+                    "a replace was refused (receiver at {})",
+                    length.length
+                )));
+            }
+        };
         self.state.files.insert(
             key,
             FileState {
                 sent: raw.len() as u64,
+                confirmed: ack.generation.as_deref() == Some(generation.as_str()),
+                generation,
+                redacted_head: append.head_sha256.clone(),
                 raw_head: digest,
                 len: stat.len,
                 mtime_ns: stat.mtime_ns,
@@ -612,16 +920,21 @@ impl Client {
                 ino: stat.ino,
             },
         );
+        self.save().map_err(Failure::Local)?;
         Ok((raw.len() as u64, true))
     }
 
     /// A JSONL log: its new complete lines, appended; the whole file again
     /// if it was rewritten or the receiver's copy differs.
-    fn sync_log(&mut self, input: &Input, path: &Path) -> Synced {
+    fn sync_log(&mut self, input: &Input, path: &Path, target: u64) -> Synced {
         let key = Self::key(input);
         let stat = FileStat::from_metadata(&fs::metadata(path).map_err(local)?);
         let known = self.state.files.get(&key).cloned().unwrap_or_default();
-        if known.has_stat() && known.matches_stat(stat) && known.sent == stat.len {
+        if known.has_stat()
+            && known.matches_stat(stat)
+            && known.sent == stat.len
+            && !self.needs_generation_probe(&known)
+        {
             return Ok((0, false));
         }
         let mut sent = known.sent;
@@ -635,10 +948,21 @@ impl Client {
             && sent > 0
             && sent <= stat.len
             && raw_head(path, sent).map_err(Failure::Local)? != known.raw_head;
-        if sent > stat.len || shortened || identity_changed || head_changed {
+        if sent > stat.len
+            || shortened
+            || identity_changed
+            || head_changed
+            || (stat_changed && known.has_stat() && stat.len == known.len && sent > 0)
+        {
             sent = 0;
             replace = true;
         }
+        let mut generation = if replace || known.generation.is_empty() {
+            wire::new_generation().map_err(Failure::Local)?
+        } else {
+            known.generation.clone()
+        };
+        let mut confirmed = known.confirmed && !replace;
         let mut head = if replace {
             Vec::new()
         } else {
@@ -647,20 +971,23 @@ impl Client {
         let mut total = 0;
         let mut replaced = false;
         let mut conflicts = 0;
+        let mut acknowledged_raw_head = None;
         loop {
             if self.stop.is_stopped() {
                 return Err(Failure::Stopped);
             }
-            let (mut data, end) = complete_lines(path, sent, self.chunk).map_err(Failure::Local)?;
-            if data.is_empty() && !replace {
+            let (mut data, end) = complete_lines_to(path, sent, self.chunk, target.min(stat.len))
+                .map_err(Failure::Local)?;
+            if data.is_empty() && !replace && !self.needs_generation_probe(&known) {
                 break;
             }
             if replace {
                 head.clear();
             }
-            if !data.is_empty() && head.is_empty() && sent > 0 {
+            if head.is_empty() && sent > 0 {
                 head = redacted_prefix(path, sent).map_err(Failure::Local)?;
             }
+            let batch_raw_head = raw_head(path, end).map_err(Failure::Local)?;
             redact::redact(&mut data);
             let mut offset = sent;
             let mut conflict = None;
@@ -676,6 +1003,7 @@ impl Client {
                     head.extend_from_slice(&piece[..take]);
                 }
                 let append = Append {
+                    generation: Some(generation.clone()),
                     root: input.root.as_str().into(),
                     path: input.path.clone(),
                     offset,
@@ -684,14 +1012,17 @@ impl Client {
                     replace,
                 };
                 match self.send(&append)? {
-                    Answer::Ok(length) if length == offset + piece.len() as u64 => {
+                    Answer::Ok(ack) if ack.length == offset + piece.len() as u64 => {
+                        confirmed = ack.generation.as_deref() == Some(generation.as_str());
+                        let length = ack.length;
                         replaced |= replace;
                         replace = false;
                         offset = length;
                         total += piece.len() as u64;
                         self.heads.insert(key.clone(), head.clone());
                     }
-                    Answer::Ok(length) => {
+                    Answer::Ok(ack) => {
+                        let length = ack.length;
                         return Err(Failure::Remote(format!(
                             "the receiver reports {length} bytes after an append to {}",
                             offset + piece.len() as u64
@@ -712,12 +1043,22 @@ impl Client {
                 }
                 // Resume from the receiver's length when its copy is ours up
                 // to a line boundary; otherwise send the file again whole.
-                if resumable(path, stat.len, &theirs).map_err(Failure::Local)? {
+                if resumable(path, target.min(stat.len), &theirs).map_err(Failure::Local)? {
                     sent = theirs.length;
                     replace = false;
+                    if let Some(receiver_generation) =
+                        theirs.generation.filter(|g| wire::is_generation(g))
+                    {
+                        generation = receiver_generation;
+                        confirmed = true;
+                    } else {
+                        confirmed = false;
+                    }
                 } else {
                     sent = 0;
                     replace = true;
+                    confirmed = false;
+                    generation = wire::new_generation().map_err(Failure::Local)?;
                 }
                 head = if replace {
                     Vec::new()
@@ -727,12 +1068,15 @@ impl Client {
                 continue;
             }
             sent = end;
-            if data.is_empty() {
-                break;
-            }
+            acknowledged_raw_head = Some(batch_raw_head);
+            break;
         }
         let digest = if total > 0 || replaced || sent != known.sent {
-            raw_head(path, sent).map_err(Failure::Local)?
+            if let Some(head) = acknowledged_raw_head {
+                head
+            } else {
+                raw_head(path, sent).map_err(Failure::Local)?
+            }
         } else {
             known.raw_head
         };
@@ -740,6 +1084,9 @@ impl Client {
             key,
             FileState {
                 sent,
+                generation,
+                confirmed,
+                redacted_head: head_sha256(&head),
                 raw_head: digest,
                 len: stat.len,
                 mtime_ns: stat.mtime_ns,
@@ -747,6 +1094,7 @@ impl Client {
                 ino: stat.ino,
             },
         );
+        self.save().map_err(Failure::Local)?;
         Ok((total, replaced))
     }
 }
@@ -849,7 +1197,7 @@ fn redacted_prefix(path: &Path, len: u64) -> Result<Vec<u8>> {
 fn resumable(path: &Path, size: u64, theirs: &Length) -> Result<bool> {
     let length = theirs.length;
     if length == 0 {
-        return Ok(true);
+        return Ok(theirs.head_sha256.as_deref() == Some(head_sha256(&[]).as_str()));
     }
     if length > size {
         return Ok(false);
@@ -870,10 +1218,11 @@ fn resumable(path: &Path, size: u64, theirs: &Length) -> Result<bool> {
 /// `chunk` bytes, and where they end. A first line longer than `chunk` is
 /// read whole, up to [`LINE_CAP`]; one longer than that is cut there.
 /// Nothing when no line is complete yet.
-fn complete_lines(path: &Path, from: u64, chunk: usize) -> Result<(Vec<u8>, u64)> {
+fn complete_lines_to(path: &Path, from: u64, chunk: usize, upto: u64) -> Result<(Vec<u8>, u64)> {
     let mut file = open_input(path).map_err(|e| e.to_string())?;
     file.seek(SeekFrom::Start(from))
         .map_err(|e| e.to_string())?;
+    let mut file = file.take(upto.saturating_sub(from));
     let mut data = Vec::new();
     let mut buffer = vec![0; chunk.clamp(1, 1 << 20)];
     loop {
@@ -966,6 +1315,22 @@ pub fn push_until(options: &PushOptions, watch: bool, stop: &Stop) -> Result<()>
     let mut client = Client::new(options)?
         .with_stop(stop.clone())
         .with_lock(hold.share());
+    let heartbeat =
+        status::Heartbeat::start(options, stop, hold.share(), Arc::clone(&client.progress))?;
+    let result = push_running(options, watch, stop, &hold, &mut client);
+    if let Some(error) = heartbeat.fatal() {
+        return Err(error);
+    }
+    result
+}
+
+fn push_running(
+    options: &PushOptions,
+    watch: bool,
+    stop: &Stop,
+    hold: &Hold,
+    client: &mut Client,
+) -> Result<()> {
     let initial_pass = client.pass(&options.sessions);
     if let Err(error) = &initial_pass
         && error.contains("refused the token")
@@ -999,7 +1364,13 @@ pub fn push_until(options: &PushOptions, watch: bool, stop: &Stop) -> Result<()>
         else {
             return Ok(());
         };
-        return match client.post_facts(&facts?) {
+        let mut facts = facts?;
+        if client.completed_inventory.is_none() {
+            return Ok(());
+        }
+        facts.codex_rollouts = client.completed_inventory.clone();
+        facts.codex_provisional_rollouts = None;
+        return match client.post_facts(&facts) {
             Err(Failure::Stopped) => Ok(()),
             result => result.map_err(Failure::message),
         };
@@ -1029,34 +1400,63 @@ pub fn push_until(options: &PushOptions, watch: bool, stop: &Stop) -> Result<()>
         for message in messages {
             eprintln!("semon push: {message}");
         }
+        {
+            let phase = match backoff.state {
+                Some("paused") => wire::SyncPhase::Paused,
+                Some("storage full") => wire::SyncPhase::StorageFull,
+                _ if pass.is_err() => wire::SyncPhase::WaitingToRetry,
+                _ => {
+                    client
+                        .progress
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .phase
+                }
+            };
+            client
+                .progress
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .phase = phase;
+        }
         if backoff.state.is_none()
             && let Some(end) = after_pass(pass, stop)
         {
             return end;
         }
-        if backoff.state != Some("paused") && last_facts.elapsed() >= FACTS_EVERY {
+        if backoff.state != Some("paused")
+            && client.completed_inventory.is_some()
+            && last_facts.elapsed() >= FACTS_EVERY
+        {
             match facts.collect(stop)? {
                 None => return Ok(()),
-                Some(Ok(current)) => match client.post_facts(&current) {
-                    Ok(()) => {}
-                    Err(Failure::Stopped) => return Ok(()),
-                    Err(failure) => {
-                        let error = failure.message();
-                        if error.contains("refused the token") {
-                            return Err(error);
+                Some(Ok(mut current)) => {
+                    current.codex_rollouts = client.completed_inventory.clone();
+                    current.codex_provisional_rollouts = None;
+                    match client.post_facts(&current) {
+                        Ok(()) => {
+                            client.committed_inventory = client.completed_inventory.clone();
+                            client.refresh_phase();
                         }
-                        if !(backoff.state == Some("storage full")
-                            && error.starts_with("storage is full"))
-                        {
-                            for message in backoff.observe(Some(&error)) {
-                                eprintln!("semon push: {message}");
+                        Err(Failure::Stopped) => return Ok(()),
+                        Err(failure) => {
+                            let error = failure.message();
+                            if error.contains("refused the token") {
+                                return Err(error);
+                            }
+                            if !(backoff.state == Some("storage full")
+                                && error.starts_with("storage is full"))
+                            {
+                                for message in backoff.observe(Some(&error)) {
+                                    eprintln!("semon push: {message}");
+                                }
+                            }
+                            if backoff.state.is_none() {
+                                eprintln!("semon push: {error}");
                             }
                         }
-                        if backoff.state.is_none() {
-                            eprintln!("semon push: {error}");
-                        }
                     }
-                },
+                }
                 Some(Err(error)) => eprintln!("semon push: {error}"),
             }
             last_facts = Instant::now();
@@ -1069,28 +1469,6 @@ pub fn push_until(options: &PushOptions, watch: bool, stop: &Stop) -> Result<()>
             }
             if stop.sleep(remaining.min(FACTS_EVERY)) {
                 return Ok(());
-            }
-            if backoff.state == Some("storage full") && last_facts.elapsed() >= FACTS_EVERY {
-                match facts.collect(stop)? {
-                    None => return Ok(()),
-                    Some(Ok(current)) => match client.post_facts(&current) {
-                        Ok(()) => {}
-                        Err(Failure::Stopped) => return Ok(()),
-                        Err(failure) => {
-                            let error = failure.message();
-                            if error.contains("refused the token") {
-                                return Err(error);
-                            }
-                            if error.starts_with("pushes are paused") {
-                                for message in backoff.observe(Some(&error)) {
-                                    eprintln!("semon push: {message}");
-                                }
-                            }
-                        }
-                    },
-                    Some(Err(error)) => eprintln!("semon push: {error}"),
-                }
-                last_facts = Instant::now();
             }
         }
         pass = client.pass(&options.sessions);
@@ -1186,15 +1564,25 @@ struct FactsWorker {
 impl FactsWorker {
     fn start(sessions: &Options, lock: Arc<StateLock>) -> Result<Self> {
         let sessions = sessions.clone();
+        Self::start_with(lock, move || {
+            let mut source = FactsSource::new(&sessions);
+            move || source.facts().map_err(|error| error.to_string())
+        })
+    }
+
+    fn start_with<F: FnMut() -> Result<Facts> + Send + 'static>(
+        lock: Arc<StateLock>,
+        make: impl FnOnce() -> F + Send + 'static,
+    ) -> Result<Self> {
         let (ask, asked) = mpsc::channel::<()>();
         let (answer, answers) = mpsc::sync_channel(1);
         thread::Builder::new()
             .name("semon-push-facts".to_owned())
             .spawn(move || {
                 let _lock = lock;
-                let mut source = FactsSource::new(&sessions);
+                let mut collect = make();
                 for () in asked {
-                    let facts = source.facts().map_err(|error| error.to_string());
+                    let facts = collect();
                     if answer.send(facts).is_err() {
                         break;
                     }
@@ -1341,9 +1729,14 @@ mod tests {
                             let length = append.offset
                                 + base64_decode(&append.bytes).map_or(0, |bytes| bytes.len())
                                     as u64;
+                            let generation = append.generation.clone();
                             shared.lock().unwrap().push(append);
-                            Response::from_data(json!({"length": length}).to_string().into_bytes())
-                                .with_status_code(tiny_http::StatusCode(200))
+                            Response::from_data(
+                                json!({"length": length, "generation": generation})
+                                    .to_string()
+                                    .into_bytes(),
+                            )
+                            .with_status_code(tiny_http::StatusCode(200))
                         }
                         Err(_) => Response::from_data(Vec::new())
                             .with_status_code(tiny_http::StatusCode(400)),
@@ -1361,6 +1754,400 @@ mod tests {
             server,
             appends,
         }
+    }
+
+    fn generation_receiver(
+        fixture: &Fixture,
+    ) -> (
+        Receiver,
+        Arc<std::sync::atomic::AtomicBool>,
+        Arc<mirror::Receiver>,
+    ) {
+        let server = Arc::new(Server::http("127.0.0.1:0").unwrap());
+        let url = format!("http://{}", server.server_addr().to_ip().unwrap());
+        let appends = Arc::new(Mutex::new(Vec::<Append>::new()));
+        let upgraded = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let directory = fixture.root.join("receiver");
+        fs::create_dir_all(&directory).unwrap();
+        let reference = Arc::new(mirror::Receiver::new(directory));
+        let (worker, recorded, enabled, sink) = (
+            Arc::clone(&server),
+            Arc::clone(&appends),
+            Arc::clone(&upgraded),
+            Arc::clone(&reference),
+        );
+        thread::spawn(move || {
+            for mut request in worker.incoming_requests() {
+                assert_eq!(request.url(), "/v1/mirror/append");
+                let mut body = Vec::new();
+                request.as_reader().read_to_end(&mut body).unwrap();
+                let mut append: Append = serde_json::from_slice(&body).unwrap();
+                recorded.lock().unwrap().push(append.clone());
+                if !enabled.load(Ordering::SeqCst) {
+                    // Emulate a receiver predating the optional generation field:
+                    // real storage is written, without a generation marker/echo.
+                    append.generation = None;
+                }
+                let reply = sink.append("fixture", &append);
+                request
+                    .respond(
+                        Response::from_string(reply.body.to_string())
+                            .with_status_code(reply.status),
+                    )
+                    .unwrap();
+            }
+        });
+        (
+            Receiver {
+                url,
+                server,
+                appends,
+            },
+            upgraded,
+            reference,
+        )
+    }
+
+    #[test]
+    fn old_generation_acks_persist_then_rebind_whole_and_log_after_receiver_upgrade() {
+        let fixture = Fixture::new();
+        let log = fixture.write("claude/projects/-work/old.jsonl", b"{}\n");
+        let whole = fixture.write(
+            "claude/sessions/42.json",
+            b"{\"pid\":42,\"status\":\"idle\"}",
+        );
+        let (receiver, upgraded, reference) = generation_receiver(&fixture);
+        let options = fixture.push_options(&receiver.url);
+        let mut client = Client::new(&options).unwrap();
+        assert_eq!(client.pass(&fixture.options).unwrap().files, 2);
+        assert_eq!(receiver.len(), 2);
+        assert_eq!(client.state.files.len(), 2);
+        assert!(
+            client
+                .state
+                .files
+                .values()
+                .all(|f| !f.confirmed && wire::is_generation(&f.generation))
+        );
+        for _ in 0..3 {
+            reset_input_opens();
+            assert_eq!(client.pass(&fixture.options).unwrap(), Report::default());
+            assert!(input_opens().is_empty());
+        }
+        assert_eq!(
+            receiver.len(),
+            2,
+            "negative support must keep old idle passes cheap"
+        );
+        drop(client);
+        // A fresh client gets one probe, then negatively caches the old receiver.
+        let mut client = Client::new(&options).unwrap();
+        for _ in 0..3 {
+            assert_eq!(client.pass(&fixture.options).unwrap(), Report::default());
+        }
+        assert_eq!(receiver.len(), 3);
+        let attempts = receiver.from(2);
+        assert_eq!(attempts.len(), 1);
+        assert!(decode(&attempts[0]).is_empty() && !attempts[0].replace);
+        drop(client);
+        upgraded.store(true, Ordering::SeqCst);
+        let mut client = Client::new(&options).unwrap();
+        assert_eq!(client.pass(&fixture.options).unwrap(), Report::default());
+        let binds = receiver.from(3);
+        assert_eq!(
+            binds.len(),
+            2,
+            "restart qualifies both saved unconfirmed cursor kinds"
+        );
+        for bind in &binds {
+            assert!(decode(bind).is_empty() && !bind.replace);
+            let source = if bind.path.ends_with(".jsonl") {
+                &log
+            } else {
+                &whole
+            };
+            let raw = fs::read(source).unwrap();
+            assert_eq!(bind.offset, raw.len() as u64);
+            assert_eq!(bind.head_sha256, head_sha256(&raw));
+            assert_eq!(
+                fs::read(
+                    reference
+                        .machine_dir("fixture")
+                        .join("claude")
+                        .join(&bind.path)
+                )
+                .unwrap(),
+                raw
+            );
+        }
+        assert!(client.state.files.values().all(|f| f.confirmed));
+        let persisted: State = serde_json::from_slice(&fs::read(&options.state).unwrap()).unwrap();
+        assert!(persisted.files.values().all(|f| f.confirmed));
+        reset_input_opens();
+        assert_eq!(client.pass(&fixture.options).unwrap(), Report::default());
+        assert!(input_opens().is_empty());
+        assert_eq!(receiver.len(), 5);
+    }
+
+    #[test]
+    fn positive_data_ack_promotes_legacy_generation_cache_without_restart() {
+        let fixture = Fixture::new();
+        let log = fixture.write("claude/projects/-work/growing.jsonl", b"{}\n");
+        fixture.write("claude/sessions/42.json", b"{\"pid\":42}");
+        let (receiver, upgraded, reference) = generation_receiver(&fixture);
+        let mut client = Client::new(&fixture.push_options(&receiver.url)).unwrap();
+        assert_eq!(client.pass(&fixture.options).unwrap().files, 2);
+        upgraded.store(true, Ordering::SeqCst);
+        fixture.append(&log, b"{\"new\":true}\n");
+        let report = client.pass(&fixture.options).unwrap();
+        assert_eq!(report.bytes, b"{\"new\":true}\n".len() as u64);
+        assert_eq!(report.replaced, 0);
+        assert_eq!(client.pass(&fixture.options).unwrap(), Report::default());
+        let sent = receiver.from(2);
+        assert_eq!(
+            sent.len(),
+            2,
+            "data echo must enable the remaining whole-file bind"
+        );
+        let data = sent.iter().find(|a| !decode(a).is_empty()).unwrap();
+        assert_eq!(data.offset, 3);
+        assert_eq!(decode(data), b"{\"new\":true}\n");
+        let bind = sent.iter().find(|a| decode(a).is_empty()).unwrap();
+        assert_eq!(bind.path, "sessions/42.json");
+        assert!(sent.iter().all(|a| !a.replace));
+        assert!(client.state.files.values().all(|f| f.confirmed));
+        assert_eq!(
+            fs::read(
+                reference
+                    .machine_dir("fixture")
+                    .join("claude/projects/-work/growing.jsonl")
+            )
+            .unwrap(),
+            fs::read(log).unwrap()
+        );
+    }
+
+    #[test]
+    fn missing_resumable_proof_requires_replacement_even_for_an_empty_copy() {
+        let fixture = Fixture::new();
+        let path = fixture.write("claude/projects/-work/empty.jsonl", b"");
+        let unknown = Length {
+            length: 0,
+            generation: None,
+            head_sha256: None,
+        };
+        assert!(!resumable(&path, 0, &unknown).unwrap());
+        let known = Length {
+            head_sha256: Some(head_sha256(&[])),
+            ..unknown
+        };
+        assert!(resumable(&path, 0, &known).unwrap());
+    }
+
+    #[test]
+    fn capped_status_admits_new_acked_native_source_while_history_is_still_pending() {
+        let fixture = Fixture::new();
+        let server = Arc::new(Server::http("127.0.0.1:0").unwrap());
+        let options =
+            fixture.push_options(&format!("http://{}", server.server_addr().to_ip().unwrap()));
+        let lock = Arc::new(StateLock::acquire(&options.state).unwrap());
+        let stop = Stop::new();
+        let mut client = Client::new(&options)
+            .unwrap()
+            .with_stop(stop.clone())
+            .with_lock(Arc::clone(&lock))
+            .with_chunk(64);
+        for index in 0..wire::MAX_STATUS_TARGETS - 1 {
+            let relative = format!("projects/-work/cold-{index:04}.jsonl");
+            let path = fixture.write(&format!("claude/{relative}"), b"{}\n");
+            fs::File::open(&path)
+                .unwrap()
+                .set_times(fs::FileTimes::new().set_modified(std::time::UNIX_EPOCH))
+                .unwrap();
+            let stat = FileStat::from_metadata(&fs::metadata(&path).unwrap());
+            // Prior confirmed cursors make this bounded fixture cheap. Their
+            // missing receiver markers still cannot prove a provisional source.
+            let mut file = FileState {
+                sent: 3,
+                raw_head: sha256_hex(b"{}\n"),
+                generation: "b".repeat(32),
+                confirmed: true,
+                redacted_head: head_sha256(b"{}\n"),
+                ..FileState::default()
+            };
+            file.set_stat(stat);
+            client
+                .state
+                .files
+                .insert(format!("claude/{relative}"), file);
+        }
+        let history = fixture.write("claude/projects/-work/pending.jsonl", &b"{}\n".repeat(200));
+        fs::File::open(&history)
+            .unwrap()
+            .set_times(fs::FileTimes::new().set_modified(std::time::UNIX_EPOCH))
+            .unwrap();
+        let recent = fixture.root.join("codex/sessions/fresh.jsonl");
+        let fresh_bytes =
+            b"{\"type\":\"session_meta\",\"payload\":{\"id\":\"fresh-native\"}}\n".to_vec();
+        let mirror_dir = fixture.root.join("receiver");
+        fs::create_dir_all(&mirror_dir).unwrap();
+        let receiver = Arc::new(mirror::Receiver::new(&mirror_dir));
+        let sink = Arc::clone(&receiver);
+        let listener = Arc::clone(&server);
+        let (waiting, first_pending) = mpsc::channel();
+        let (proof, proven) = mpsc::channel();
+        let blocked = Arc::new(Mutex::new(Vec::<tiny_http::Request>::new()));
+        let held = Arc::clone(&blocked);
+        let http =
+            thread::spawn(move || {
+                let mut initial: Option<(tiny_http::Request, Append)> = None;
+                let mut history_acks = 0;
+                let mut fresh_acked = false;
+                let mut cold_after_fresh = 0;
+                for mut request in listener.incoming_requests() {
+                    if request.method() == &tiny_http::Method::Head {
+                        assert_eq!(request.url(), "/v1/mirror/status");
+                        request
+                            .respond(
+                                Response::empty(405)
+                                    .with_header(Header::from_bytes("Allow", "POST").unwrap()),
+                            )
+                            .unwrap();
+                        continue;
+                    }
+                    let mut body = Vec::new();
+                    request.as_reader().read_to_end(&mut body).unwrap();
+                    match request.url() {
+                        "/v1/mirror/append" => {
+                            let append: Append = serde_json::from_slice(&body).unwrap();
+                            if append.path == "projects/-work/pending.jsonl"
+                                && history_acks == 0
+                                && initial.is_none()
+                            {
+                                initial = Some((request, append));
+                                waiting.send(()).unwrap();
+                                continue;
+                            }
+                            if append.path == "projects/-work/pending.jsonl" && history_acks >= 4 {
+                                held.lock().unwrap().push(request);
+                                continue;
+                            }
+                            let answer = sink.append("fixture", &append);
+                            assert_eq!(answer.status, 200);
+                            if append.path == "projects/-work/pending.jsonl" {
+                                history_acks += 1;
+                                if fresh_acked {
+                                    cold_after_fresh += 1;
+                                }
+                            }
+                            if append.path == "sessions/fresh.jsonl"
+                                && base64_decode(&append.bytes).unwrap().last() == Some(&b'\n')
+                            {
+                                fresh_acked = true;
+                            }
+                            request
+                                .respond(Response::from_string(answer.body.to_string()))
+                                .unwrap();
+                        }
+                        "/v1/mirror/status" => {
+                            let observation: wire::Status = serde_json::from_slice(&body).unwrap();
+                            let answer = sink.handle("fixture", mirror::Endpoint::Status, &body);
+                            assert_eq!(answer.status, 200);
+                            if let Some((pending, append)) = initial.take() {
+                                assert_eq!(
+                                    observation.targets.len(),
+                                    wire::MAX_STATUS_TARGETS,
+                                    "initial manifest is already full before fresh discovery"
+                                );
+                                assert_eq!(history_acks, 0);
+                                request
+                                    .respond(Response::from_string(answer.body.to_string()))
+                                    .unwrap();
+                                fs::create_dir_all(recent.parent().unwrap()).unwrap();
+                                fs::write(&recent, &fresh_bytes).unwrap();
+                                thread::sleep(Duration::from_millis(2100));
+                                let accepted = sink.append("fixture", &append);
+                                assert_eq!(accepted.status, 200);
+                                history_acks = 1;
+                                pending
+                                    .respond(Response::from_string(accepted.body.to_string()))
+                                    .unwrap();
+                            } else {
+                                let verified =
+                                    answer.body["confirmed"].as_array().unwrap().iter().any(
+                                        |target| {
+                                            target["root"] == "codex"
+                                                && target["path"] == "sessions/fresh.jsonl"
+                                        },
+                                    );
+                                request
+                                    .respond(Response::from_string(answer.body.to_string()))
+                                    .unwrap();
+                                if verified {
+                                    assert!(
+                                        fresh_acked
+                                            && cold_after_fresh >= 2
+                                            && !held.lock().unwrap().is_empty()
+                                    );
+                                    let path = sink
+                                        .machine_dir("fixture")
+                                        .join("codex/sessions/fresh.jsonl");
+                                    assert_eq!(fs::read(&path).unwrap(), fresh_bytes);
+                                    assert_eq!(
+                                        semon_sessions::codex_native_id_prefix(
+                                            &path,
+                                            fresh_bytes.len() as u64
+                                        )
+                                        .unwrap()
+                                        .as_deref(),
+                                        Some("fresh-native")
+                                    );
+                                    proof.send(observation).unwrap();
+                                }
+                            }
+                        }
+                        route => panic!("unexpected route before complete history: {route}"),
+                    }
+                }
+            });
+        let progress = Arc::clone(&client.progress);
+        let sessions = fixture.options.clone();
+        let sender = thread::spawn(move || client.pass(&sessions));
+        first_pending.recv_timeout(Duration::from_secs(10)).unwrap();
+        let heartbeat =
+            status::Heartbeat::start(&options, &stop, Arc::clone(&lock), progress).unwrap();
+        let observation = proven.recv_timeout(Duration::from_secs(25)).unwrap();
+        assert_eq!(observation.targets.len(), wire::MAX_STATUS_TARGETS);
+        assert!(!observation.inventory_complete);
+        assert_eq!(observation.targets[0].path, "sessions/fresh.jsonl");
+        assert!(
+            observation.targets[0].acked_bytes > 0
+                && wire::is_generation(&observation.targets[0].generation)
+        );
+        assert!(
+            !receiver
+                .machine_dir("fixture")
+                .join(mirror::FACTS_FILE)
+                .exists(),
+            "backfill must not commit early full facts"
+        );
+        assert!(
+            fs::metadata(
+                receiver
+                    .machine_dir("fixture")
+                    .join("claude/projects/-work/pending.jsonl")
+            )
+            .unwrap()
+            .len()
+                < fs::metadata(history).unwrap().len()
+        );
+        stop.stop();
+        sender.join().unwrap().unwrap();
+        drop(heartbeat);
+        blocked.lock().unwrap().clear();
+        drop(lock);
+        server.unblock();
+        http.join().unwrap();
     }
 
     #[test]
@@ -1447,34 +2234,97 @@ mod tests {
             let push = thread::spawn(move || {
                 ended.send(push_until(&options, true, &stopped)).unwrap();
             });
-            let request = server
-                .recv_timeout(Duration::from_secs(10))
-                .unwrap()
-                .unwrap();
-            assert_eq!(request.url(), "/v1/mirror/append");
-            request
-                .respond(Response::from_string(body).with_status_code(status))
-                .unwrap();
-            if status == 413 {
-                let facts = server
-                    .recv_timeout(Duration::from_secs(10))
+            let deadline = Instant::now() + Duration::from_secs(15);
+            loop {
+                let mut request = server
+                    .recv_timeout(deadline.saturating_duration_since(Instant::now()))
                     .unwrap()
-                    .unwrap();
+                    .expect("initial append or optional status");
+                if request.method() == &tiny_http::Method::Head {
+                    assert_eq!(request.url(), "/v1/mirror/status");
+                    request
+                        .respond(
+                            Response::empty(405)
+                                .with_header(Header::from_bytes("Allow", "POST").unwrap()),
+                        )
+                        .unwrap();
+                    continue;
+                }
+                match request.url() {
+                    "/v1/mirror/append" => {
+                        request
+                            .respond(Response::from_string(body).with_status_code(status))
+                            .unwrap();
+                        break;
+                    }
+                    "/v1/mirror/status" => {
+                        let mut input = String::new();
+                        request.as_reader().read_to_string(&mut input).unwrap();
+                        let observation: wire::Status = serde_json::from_str(&input).unwrap();
+                        assert!(observation.runtime.codex_rollouts.is_none());
+                        request
+                            .respond(Response::from_string("{\"confirmed\":[]}"))
+                            .unwrap();
+                    }
+                    route => panic!("unexpected initial route: {route}"),
+                }
+            }
+            // Restricted appends retain retry backoff while lightweight fresh
+            // status continues. A partial pass must not publish full inventory.
+            let deadline = Instant::now() + Duration::from_secs(15);
+            loop {
+                let mut request = server
+                    .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                    .unwrap()
+                    .expect("restricted-pass status heartbeat");
+                if request.method() == &tiny_http::Method::Head {
+                    assert_eq!(request.url(), "/v1/mirror/status");
+                    request
+                        .respond(
+                            Response::empty(405)
+                                .with_header(Header::from_bytes("Allow", "POST").unwrap()),
+                        )
+                        .unwrap();
+                    continue;
+                }
                 assert_eq!(
-                    facts.url(),
-                    "/v1/mirror/facts",
-                    "storage full still sends its heartbeat"
+                    request.url(),
+                    "/v1/mirror/status",
+                    "no append retry or premature full facts while restricted"
                 );
-                facts.respond(Response::from_string("{}")).unwrap();
-            } else {
+                let mut input = String::new();
+                request.as_reader().read_to_string(&mut input).unwrap();
+                let observation: wire::Status = serde_json::from_str(&input).unwrap();
+                assert!(observation.runtime.codex_rollouts.is_none());
                 assert!(
-                    server
-                        .recv_timeout(Duration::from_millis(100))
-                        .unwrap()
-                        .is_none(),
-                    "paused skips facts"
+                    observation
+                        .targets
+                        .iter()
+                        .all(|target| target.acked_bytes == 0)
+                );
+                request
+                    .respond(Response::from_string("{\"confirmed\":[]}"))
+                    .unwrap();
+                let expected = if status == 413 {
+                    wire::SyncPhase::StorageFull
+                } else {
+                    wire::SyncPhase::Paused
+                };
+                if observation.phase == expected {
+                    break;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "restriction was not reflected in fresh status"
                 );
             }
+            assert!(
+                server
+                    .recv_timeout(Duration::from_millis(100))
+                    .unwrap()
+                    .is_none(),
+                "a successful status must not clear append backoff"
+            );
             assert!(matches!(
                 result.recv_timeout(Duration::from_millis(100)),
                 Err(mpsc::RecvTimeoutError::Timeout)
@@ -1547,10 +2397,9 @@ mod tests {
         assert_eq!(report.bytes, appended.len() as u64);
         let opens = input_opens();
         assert_eq!(opens.len(), 1, "only the growing transcript should open");
-        assert_eq!(
-            opens.get(&paths[0]),
-            Some(&4),
-            "the cached head should avoid a fifth open"
+        assert!(
+            matches!(opens.get(&paths[0]).copied(), Some(1..=4)),
+            "the cached head must avoid a fifth open: {opens:?}"
         );
         let sent = receiver.from(after_initial);
         assert_eq!(sent.len(), 1);
@@ -1594,7 +2443,65 @@ mod tests {
     fn state_without_stat_fields_loads_and_gets_one_full_check() {
         let fixture = Fixture::new();
         let path = fixture.write("claude/projects/-work/old.jsonl", b"already sent\n");
-        let url = "http://127.0.0.1:1";
+        let server = Server::http("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", server.server_addr());
+        let mirror = fixture.root.join("mirror");
+        fs::create_dir_all(&mirror).unwrap();
+        let reference = mirror::Receiver::new(&mirror);
+        let bytes = b"already sent\n";
+        let existing = Append {
+            root: "claude".into(),
+            path: "projects/-work/old.jsonl".into(),
+            offset: 0,
+            head_sha256: head_sha256(bytes),
+            bytes: base64_encode(bytes),
+            replace: false,
+            generation: None,
+        };
+        assert_eq!(reference.append("legacy", &existing).status, 200);
+        let worker = thread::spawn(move || {
+            let mut request = server
+                .recv_timeout(Duration::from_secs(10))
+                .unwrap()
+                .expect("legacy generation negotiation");
+            assert_eq!(request.url(), "/v1/mirror/append");
+            let mut input = String::new();
+            request.as_reader().read_to_string(&mut input).unwrap();
+            let append: Append = serde_json::from_str(&input).unwrap();
+            assert_eq!(append.offset, bytes.len() as u64);
+            assert!(
+                decode(&append).is_empty(),
+                "an unchanged legacy cursor must not reupload history"
+            );
+            assert!(!append.replace);
+            assert_eq!(append.head_sha256, head_sha256(bytes));
+            assert!(
+                append
+                    .generation
+                    .as_deref()
+                    .is_some_and(wire::is_generation)
+            );
+            let answer = reference.append("legacy", &append);
+            assert_eq!(answer.status, 200);
+            assert_eq!(
+                answer.body["generation"],
+                append.generation.as_deref().unwrap()
+            );
+            request
+                .respond(
+                    Response::from_string(answer.body.to_string()).with_status_code(answer.status),
+                )
+                .unwrap();
+            assert_eq!(
+                fs::read(
+                    reference
+                        .machine_dir("legacy")
+                        .join("claude/projects/-work/old.jsonl")
+                )
+                .unwrap(),
+                bytes.as_slice()
+            );
+        });
         let key = "claude/projects/-work/old.jsonl";
         let files = BTreeMap::from([(
             key.to_owned(),
@@ -1608,7 +2515,7 @@ mod tests {
             "url": url,
             "files": files
         });
-        let options = fixture.push_options(url);
+        let options = fixture.push_options(&url);
         fs::create_dir_all(options.state.parent().unwrap()).unwrap();
         fs::write(&options.state, old_state.to_string()).unwrap();
 
@@ -1619,6 +2526,15 @@ mod tests {
         assert_eq!(client.pass(&fixture.options).unwrap().files, 0);
         assert!(input_opens().get(&path).copied().unwrap_or_default() > 0);
         assert!(client.state.files[key].has_stat());
+        assert!(client.state.files[key].confirmed);
+        assert_eq!(client.state.files[key].sent, bytes.len() as u64);
+        worker.join().unwrap();
+        reset_input_opens();
+        assert_eq!(client.pass(&fixture.options).unwrap().files, 0);
+        assert!(
+            input_opens().is_empty(),
+            "qualified legacy cursors should use the stat cache on the next pass"
+        );
     }
 
     #[test]
@@ -1647,5 +2563,301 @@ mod tests {
         assert_eq!(after_pass(refused(), &running), Some(refused()));
         assert_eq!(after_pass(failed(), &running), None);
         assert_eq!(after_pass(sent(), &running), None);
+    }
+}
+
+#[cfg(test)]
+mod sync_status_tests {
+    use super::*;
+    use tiny_http::{Response, Server};
+
+    fn answer_status_head(request: tiny_http::Request) -> Option<tiny_http::Request> {
+        if request.method() == &tiny_http::Method::Head {
+            assert_eq!(request.url(), "/v1/mirror/status");
+            request
+                .respond(
+                    Response::empty(405)
+                        .with_header(tiny_http::Header::from_bytes("Allow", "POST").unwrap()),
+                )
+                .unwrap();
+            None
+        } else {
+            Some(request)
+        }
+    }
+
+    #[test]
+    fn blocked_full_facts_does_not_block_fresh_heartbeat_or_release_its_lock() {
+        let root =
+            std::env::temp_dir().join(format!("semon-heartbeat-facts-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        let server = Arc::new(Server::http("127.0.0.1:0").unwrap());
+        let url = format!("http://{}", server.server_addr().to_ip().unwrap());
+        let observations = Arc::new(Mutex::new(Vec::<wire::Status>::new()));
+        let observed = Arc::clone(&observations);
+        let listener = Arc::clone(&server);
+        let http = thread::spawn(move || {
+            for request in listener.incoming_requests() {
+                let Some(mut request) = answer_status_head(request) else {
+                    continue;
+                };
+                let mut body = String::new();
+                request.as_reader().read_to_string(&mut body).unwrap();
+                observed
+                    .lock()
+                    .unwrap()
+                    .push(serde_json::from_str(&body).unwrap());
+                request.respond(Response::from_string("{}")).unwrap();
+            }
+        });
+        let options = PushOptions {
+            url,
+            credential: Credential::Memory(Token::new("test-status-token").unwrap()),
+            sessions: Options {
+                claude_home: root.join("claude"),
+                codex_home: root.join("codex"),
+                copilot_home: root.join("copilot"),
+                proc_root: root.join("proc"),
+                cache: root.join("cache"),
+                ..Options::default()
+            },
+            state: root.join("push.json"),
+        };
+        let lock = Arc::new(StateLock::acquire(&options.state).unwrap());
+        let stop = Stop::new();
+        let (release, blocked) = mpsc::channel();
+        let (entered, waiting) = mpsc::channel();
+        let worker = FactsWorker::start_with(Arc::clone(&lock), move || {
+            move || {
+                entered.send(()).unwrap();
+                blocked.recv().unwrap();
+                Ok(Facts::default())
+            }
+        })
+        .unwrap();
+        worker.ask.send(()).unwrap();
+        waiting.recv_timeout(Duration::from_secs(2)).unwrap();
+        let heartbeat = status::Heartbeat::start(
+            &options,
+            &stop,
+            Arc::clone(&lock),
+            Arc::new(Mutex::new(status::Progress::default())),
+        )
+        .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(25);
+        while observations.lock().unwrap().len() < 2 {
+            assert!(Instant::now() < deadline);
+            thread::sleep(Duration::from_millis(10));
+        }
+        let records = observations.lock().unwrap();
+        assert!(records[1].observed_at_ms > records[0].observed_at_ms);
+        assert!(records.iter().all(|s| s.runtime.codex_rollouts.is_none()));
+        drop(records);
+        stop.stop();
+        drop(heartbeat);
+        drop(worker);
+        drop(lock);
+        assert!(StateLock::acquire(&options.state).is_err());
+        release.send(()).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            if StateLock::acquire(&options.state).is_ok() {
+                break;
+            }
+            assert!(Instant::now() < deadline);
+            thread::sleep(Duration::from_millis(10));
+        }
+        server.unblock();
+        http.join().unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn ending_heartbeat_cancels_rate_limit_wait_and_releases_only_its_ownership() {
+        let root =
+            std::env::temp_dir().join(format!("semon-status-rate-stop-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        let server = Arc::new(Server::http("127.0.0.1:0").unwrap());
+        let listener = Arc::clone(&server);
+        let (seen, received) = mpsc::channel();
+        let http = thread::spawn(move || {
+            for request in listener.incoming_requests() {
+                let Some(request) = answer_status_head(request) else {
+                    continue;
+                };
+                request
+                    .respond(
+                        Response::from_string("{\"error\":\"rate_limited\"}")
+                            .with_status_code(429)
+                            .with_header(
+                                tiny_http::Header::from_bytes("Retry-After", "60").unwrap(),
+                            ),
+                    )
+                    .unwrap();
+                seen.send(()).unwrap();
+            }
+        });
+        let options = PushOptions {
+            url: format!("http://{}", server.server_addr().to_ip().unwrap()),
+            credential: Credential::Memory(Token::new("test-status-token").unwrap()),
+            sessions: Options {
+                claude_home: root.join("claude"),
+                codex_home: root.join("codex"),
+                copilot_home: root.join("copilot"),
+                proc_root: root.join("proc"),
+                cache: root.join("cache"),
+                ..Options::default()
+            },
+            state: root.join("push.json"),
+        };
+        let stop = Stop::new();
+        let lock = Arc::new(StateLock::acquire(&options.state).unwrap());
+        let heartbeat = status::Heartbeat::start(
+            &options,
+            &stop,
+            Arc::clone(&lock),
+            Arc::new(Mutex::new(status::Progress::default())),
+        )
+        .unwrap();
+        received.recv_timeout(Duration::from_secs(3)).unwrap();
+        drop(heartbeat);
+        drop(lock);
+        let deadline = Instant::now() + Duration::from_secs(1);
+        loop {
+            if StateLock::acquire(&options.state).is_ok() {
+                break;
+            }
+            assert!(Instant::now() < deadline);
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(!stop.is_stopped());
+        server.unblock();
+        http.join().unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn applied_status_with_lost_ack_advances_sequence_on_the_next_fresh_submission() {
+        let root =
+            std::env::temp_dir().join(format!("semon-status-lost-ack-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        let server = Arc::new(Server::http("127.0.0.1:0").unwrap());
+        let listener = Arc::clone(&server);
+        let (seen, received) = mpsc::channel();
+        let http = thread::spawn(move || {
+            let mut previous = 0;
+            for request in listener.incoming_requests() {
+                let Some(mut request) = answer_status_head(request) else {
+                    continue;
+                };
+                let mut body = String::new();
+                request.as_reader().read_to_string(&mut body).unwrap();
+                let status: wire::Status = serde_json::from_str(&body).unwrap();
+                assert!(status.sequence > previous);
+                previous = status.sequence;
+                seen.send(status).unwrap();
+                if previous == 1 {
+                    drop(request);
+                } else {
+                    request.respond(Response::from_string("{}")).unwrap();
+                }
+            }
+        });
+        let options = PushOptions {
+            url: format!("http://{}", server.server_addr().to_ip().unwrap()),
+            credential: Credential::Memory(Token::new("test-status-token").unwrap()),
+            sessions: Options {
+                claude_home: root.join("claude"),
+                codex_home: root.join("codex"),
+                copilot_home: root.join("copilot"),
+                proc_root: root.join("proc"),
+                cache: root.join("cache"),
+                ..Options::default()
+            },
+            state: root.join("push.json"),
+        };
+        let stop = Stop::new();
+        let lock = Arc::new(StateLock::acquire(&options.state).unwrap());
+        let heartbeat = status::Heartbeat::start(
+            &options,
+            &stop,
+            Arc::clone(&lock),
+            Arc::new(Mutex::new(status::Progress::default())),
+        )
+        .unwrap();
+        let first = received.recv_timeout(Duration::from_secs(3)).unwrap();
+        let next = received.recv_timeout(Duration::from_secs(15)).unwrap();
+        assert_eq!(first.observation_id, next.observation_id);
+        assert_eq!(next.sequence, 2);
+        assert!(next.observed_at_ms > first.observed_at_ms);
+        stop.stop();
+        drop(heartbeat);
+        drop(lock);
+        server.unblock();
+        http.join().unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn idle_completion_uses_only_current_targets_and_survives_retained_legacy_cursors() {
+        let options = PushOptions {
+            url: "http://127.0.0.1:1".into(),
+            credential: Credential::Memory(Token::new("test-status-token").unwrap()),
+            sessions: Options::default(),
+            state: std::env::temp_dir().join("semon-phase-unwritten.json"),
+        };
+        let mut client = Client::new(&options).unwrap();
+        client.completed_inventory = Some(BTreeSet::from(["sessions/current.jsonl".into()]));
+        client.committed_inventory = client.completed_inventory.clone();
+        client
+            .state
+            .files
+            .insert("codex/sessions/deleted.jsonl".into(), FileState::default());
+        client.state.files.insert(
+            "codex/sessions/current.jsonl".into(),
+            FileState {
+                confirmed: true,
+                sent: 3,
+                ..FileState::default()
+            },
+        );
+        client.progress.lock().unwrap().inventory_complete = true;
+        client.progress.lock().unwrap().targets.insert(
+            "codex/sessions/current.jsonl".into(),
+            wire::SyncTarget {
+                root: "codex".into(),
+                path: "sessions/current.jsonl".into(),
+                generation: "a".repeat(32),
+                target_bytes: 3,
+                acked_bytes: 3,
+                head_sha256: head_sha256(b"{}\n"),
+            },
+        );
+        client.refresh_phase();
+        assert_eq!(
+            client.progress.lock().unwrap().phase,
+            wire::SyncPhase::UpToDate
+        );
+        client.progress.lock().unwrap().phase = wire::SyncPhase::Syncing;
+        client.refresh_phase();
+        assert_eq!(
+            client.progress.lock().unwrap().phase,
+            wire::SyncPhase::UpToDate
+        );
+        client
+            .progress
+            .lock()
+            .unwrap()
+            .targets
+            .values_mut()
+            .next()
+            .unwrap()
+            .target_bytes += 3;
+        client.progress.lock().unwrap().phase = wire::SyncPhase::Syncing;
+        client.refresh_phase();
+        assert_eq!(
+            client.progress.lock().unwrap().phase,
+            wire::SyncPhase::Syncing
+        );
     }
 }

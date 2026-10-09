@@ -12,6 +12,8 @@ pub const CHUNK_BYTES: usize = 4 * 1024 * 1024;
 /// `POST <url>/v1/mirror/append`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Append {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generation: Option<String>,
     pub root: String,
     pub path: String,
     pub offset: u64,
@@ -29,9 +31,65 @@ pub struct Append {
 /// its current length and head hash.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Length {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generation: Option<String>,
     pub length: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub head_sha256: Option<String>,
+}
+
+/// Optional partial-sync observation, separate from authoritative full facts.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Status {
+    pub version: u32,
+    pub observation_id: String,
+    pub sequence: u64,
+    pub observed_at_ms: i64,
+    pub phase: SyncPhase,
+    pub runtime: semon_sessions::Facts,
+    pub inventory_complete: bool,
+    pub targets: Vec<SyncTarget>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SyncPhase {
+    #[default]
+    Syncing,
+    UpToDate,
+    WaitingToRetry,
+    Paused,
+    StorageFull,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SyncTarget {
+    pub root: String,
+    pub path: String,
+    pub generation: String,
+    pub target_bytes: u64,
+    /// Only acknowledged complete redaction batches, with generation echoed.
+    pub acked_bytes: u64,
+    pub head_sha256: String,
+}
+
+pub const MAX_STATUS_TARGETS: usize = 4096;
+
+/// Content-free identifiers, generated without reading credentials.
+pub(crate) fn new_generation() -> Result<String, String> {
+    let mut bytes = [0; 16];
+    rustls::crypto::ring::default_provider()
+        .secure_random
+        .fill(&mut bytes)
+        .map_err(|_| "the system's random source failed".to_owned())?;
+    Ok(hex::encode(bytes))
+}
+
+pub fn is_generation(text: &str) -> bool {
+    text.len() == 32
+        && text
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
 pub fn sha256_hex(bytes: &[u8]) -> String {
