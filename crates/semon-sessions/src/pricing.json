@@ -1,5 +1,5 @@
 {
-  "as_of": "2026-09-29",
+  "as_of": "2026-10-01",
   "models": {
     "claude-3-5-haiku-20241022": {
       "input": 0.8,
@@ -456,6 +456,32 @@
         "output": 10.0,
         "cache_write": 2.5,
         "cache_read": 0.2
+      },
+      "source": "https://developers.openai.com/api/docs/pricing"
+    },
+    "gpt-6.1-sol": {
+      "input": 2.0,
+      "output": 10.0,
+      "cache_read": 0.1,
+      "cache_write_5m": 2.5,
+      "cache_write_1h": null,
+      "long_context": {
+        "threshold_tokens": 272000,
+        "input": 4.0,
+        "output": 15.0,
+        "cache_read": 0.2,
+        "cache_write_5m": 5.0,
+        "cache_write_1h": null
+      },
+      "fast": {
+        "multiplier": 2.0
+      },
+      "web_search_per_1k": 10.0,
+      "legacy": {
+        "input": 2.0,
+        "output": 10.0,
+        "cache_write": 2.5,
+        "cache_read": 0.1
       },
       "source": "https://developers.openai.com/api/docs/pricing"
     }
