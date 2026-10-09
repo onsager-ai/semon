@@ -68,7 +68,7 @@
 .sh-picker-body select { max-width: 100%; min-height: var(--tap); color: var(--ink); background: var(--ground); font: 400 var(--fs-sm)/1.2 var(--sans); }
 .sh-picker-body .field { display: grid; grid-template-columns: minmax(100px, 1fr) minmax(0, 1.25fr); align-items: center; gap: var(--s3); }
 /* Keep editable native fields at 16px on touch devices to avoid focus zoom. */
-@media (max-width: 760px), (any-pointer: coarse) { .sh-composer-toolbar { padding-inline: 10px; } .sh-composer-toolbar .sh-compact.sh-value { padding-inline: var(--s2); } .sh-picker-body select { min-height: 44px; } .sh-composer textarea, .sh-picker-body select { font-size: var(--fs-read); } }
+@media (max-width: 760px), (any-pointer: coarse) { .sh-composer-toolbar { padding-inline: 10px; } .sh-composer-toolbar .sh-compact.sh-value { padding-inline: 6px; gap: var(--s1); } .sh-picker-body select { min-height: 44px; } .sh-composer textarea, .sh-picker-body select { font-size: var(--fs-read); } }
 .btn-row { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: 8px; }
 .copy.copied { width: auto; padding-inline: 9px; background: var(--sunken); color: var(--ink-2); }
 .copy.copied::after { content: "Copied"; margin-left: 5px; font: 500 var(--fs-cap)/1 var(--sans); }

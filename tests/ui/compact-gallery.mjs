@@ -13,7 +13,7 @@ const out = path.resolve(process.env.SEMON_UI_OUT ?? 'out', 'compact-gallery');
 fs.mkdirSync(out, { recursive: true });
 const svg =
   '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M4 18h16M8 3v6M16 15v6" stroke="currentColor" fill="none"></path></svg>';
-const html = `<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="stylesheet" href="/viewer.css"><link rel="stylesheet" href="/shell.css"><link rel="stylesheet" href="/select.css"><script src="/gallery.js" defer></script></head><body><main class="page"><h1>Compact composer</h1><form class="sh-composer"><textarea aria-label="Task" placeholder="What would you like to work on?"></textarea><div class="sh-composer-toolbar"><details class="sh-picker"><summary class="sh-compact" aria-label="Model: a long catalog model label; effort: high" data-tip="Model: a long catalog model label; effort: high">${svg}</summary><div class="sh-picker-body"><h2>Model and effort</h2><label class="field">Model<select name="model" aria-label="Model"><option value="default">A long catalog model label with additional account qualification detail</option><option value="second">Second qualified model</option></select></label></div></details><details class="sh-picker"><summary class="sh-compact sh-value" aria-label="Approval permissions" data-tip="Approval permissions">${svg}Managed</summary><div class="sh-picker-body"><h2>Approval permissions</h2><p>Read-only pending independent qualification.</p></div></details><button class="sh-compact sh-composer-send primary" disabled aria-label="Review launch">${svg}</button></div></form><p><button id="remount" class="btn">Remount</button></p></main></body></html>`;
+const html = `<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="stylesheet" href="/viewer.css"><link rel="stylesheet" href="/shell.css"><link rel="stylesheet" href="/select.css"><script src="/gallery.js" defer></script></head><body><main class="page"><h1>Compact composer</h1><form class="sh-composer"><textarea aria-label="Task" placeholder="What would you like to work on?"></textarea><div class="sh-composer-toolbar"><details class="sh-picker"><summary class="sh-compact sh-value" aria-label="Model: a long catalog model label; effort: high" data-tip="Model: a long catalog model label; effort: high">${svg}Codex</summary><div class="sh-picker-body"><h2>Model and effort</h2><label class="field">Model<select name="model" aria-label="Model"><option value="default">A long catalog model label with additional account qualification detail</option><option value="second">Second qualified model</option></select></label></div></details><details class="sh-picker"><summary class="sh-compact sh-value" aria-label="Approval permissions" data-tip="Approval permissions">${svg}Managed</summary><div class="sh-picker-body"><h2>Approval permissions</h2><p>Read-only pending independent qualification.</p></div></details><details class="sh-picker"><summary class="sh-compact sh-value" aria-label="Runtime">${svg}E2B</summary><div class="sh-picker-body"><h2>Runtime</h2><p>Read-only runtime configuration.</p></div></details><button class="sh-compact sh-composer-send primary" disabled aria-label="Review launch">${svg}</button></div></form><p><button id="remount" class="btn">Remount</button></p></main></body></html>`;
 const browser = await launch();
 try {
   for (const width of [390, 820, 1280])
@@ -121,10 +121,36 @@ try {
       await page.keyboard.press('Escape');
       await page.locator('.sh-picker[open]').waitFor({ state: 'detached' });
       assert.equal(await page.locator('.sh-picker[open]').count(), 0);
+      // Real consumer labels must fit without spending the send action's inset.
+      for (const agent of ['Codex', 'Copilot']) {
+        await trigger.evaluate((node, value) => {
+          node.lastChild.textContent = value;
+        }, agent);
+        const geometry = await page.locator('.sh-composer-toolbar').evaluate((node) => {
+          const frame = node.parentElement.getBoundingClientRect();
+          const controls = [
+            ...node.querySelectorAll(':scope > button, :scope > details > summary'),
+          ];
+          const first = controls[0],
+            last = controls.at(-1);
+          return {
+            left:
+              first.getBoundingClientRect().left -
+              frame.left +
+              parseFloat(getComputedStyle(first, '::before').left),
+            right:
+              frame.right -
+              last.getBoundingClientRect().right +
+              parseFloat(getComputedStyle(last, '::before').right),
+          };
+        });
+        assert(Math.abs(geometry.left - 17) < 1, `${agent}: left inset ${geometry.left}`);
+        assert(Math.abs(geometry.right - 17) < 1, `${agent}: right inset ${geometry.right}`);
+      }
       await context.close();
     }
   console.log(
-    'Compact gallery: 6 light/dark/width cases; growth, targets, centers, text, keyboard and remount passed',
+    'Compact gallery: 6 light/dark/width cases; growth, targets, centers, three labeled controls/insets, text, keyboard and remount passed',
   );
 } finally {
   await browser.close();
