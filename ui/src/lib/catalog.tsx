@@ -253,7 +253,18 @@ export function renderCatalogList(
         !snapshot.searchPartial &&
         !snapshot.candidates?.length &&
         !snapshot.candidateUpdating && (
-          <p class="catalog-note">No recorded sessions match these filters.</p>
+          <p class="catalog-note">
+            {filtered ? (
+              'No recorded sessions match these filters.'
+            ) : (
+              <>
+                No recorded sessions in this source yet.{' '}
+                <button class="link" type="button" onClick={() => host.retry()}>
+                  Refresh history
+                </button>
+              </>
+            )}
+          </p>
         )}
       {snapshot.more && (
         <button class="link" type="button" disabled={snapshot.updating} onClick={() => host.more()}>
