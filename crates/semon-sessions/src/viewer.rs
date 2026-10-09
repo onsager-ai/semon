@@ -405,13 +405,15 @@ impl ViewerReply {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct Stamp {
+    kind: fs::FileType,
     size: u64,
     modified_ns: u128,
 }
 
 fn stamp(path: &Path) -> Option<Stamp> {
-    let metadata = fs::metadata(path).ok()?;
+    let metadata = fs::symlink_metadata(path).ok()?;
     Some(Stamp {
+        kind: metadata.file_type(),
         size: metadata.len(),
         modified_ns: metadata
             .modified()
