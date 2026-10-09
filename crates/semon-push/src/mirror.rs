@@ -32,9 +32,13 @@ use std::{
 };
 
 use semon_sessions::{Facts, is_input_path, is_machine_name};
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use crate::wire::{Append, CHUNK_BYTES, HEAD_BYTES, base64_decode, sha256_hex};
+use crate::wire::{
+    Append, CHUNK_BYTES, HEAD_BYTES, MAX_STATUS_TARGETS, Status, base64_decode, is_generation,
+    sha256_hex,
+};
 
 /// Where each machine's copy lives under the receiver's directory.
 pub const MACHINES_DIR: &str = "machines";
@@ -56,6 +60,8 @@ pub enum Endpoint {
     Append,
     /// `POST <url>/v1/mirror/facts`
     Facts,
+    /// Optional partial observation; never commits full facts.
+    Status,
 }
 
 impl Endpoint {
@@ -64,6 +70,7 @@ impl Endpoint {
         match path {
             "/v1/mirror/append" => Some(Self::Append),
             "/v1/mirror/facts" => Some(Self::Facts),
+            "/v1/mirror/status" => Some(Self::Status),
             _ => None,
         }
     }
@@ -252,6 +259,10 @@ impl Receiver {
                 Ok(append) => self.append(machine, &append),
                 Err(error) => Reply::error(400, format!("the body is not an append: {error}")),
             },
+            Endpoint::Status => match serde_json::from_slice::<Status>(body) {
+                Ok(status) => self.status(machine, &status),
+                Err(error) => Reply::error(400, format!("the body is not status: {error}")),
+            },
             Endpoint::Facts => match serde_json::from_slice::<Facts>(body) {
                 Ok(facts) => self.facts(machine, &facts),
                 Err(error) => Reply::error(400, format!("the body is not facts: {error}")),
@@ -296,6 +307,13 @@ impl Receiver {
                 "head_sha256 is not a lowercase hex SHA-256".into(),
             ));
         }
+        if request
+            .generation
+            .as_ref()
+            .is_some_and(|g| !is_generation(g))
+        {
+            return Err(Refusal::Invalid("invalid transfer generation".into()));
+        }
         if request.replace && request.offset != 0 {
             return Err(Refusal::Invalid("a replace starts at offset 0".into()));
         }
@@ -326,13 +344,55 @@ impl Receiver {
             Some(file) => (file.metadata()?.len(), read_head(file)?),
             None => (0, Vec::new()),
         };
+        let marker_base = self.machine_dir(machine).join("sync-generations");
+        let marker_dir =
+            if request.generation.is_some() || fs::symlink_metadata(&marker_base).is_ok() {
+                self.directories(&[MACHINES_DIR, machine, "sync-generations"])?
+            } else {
+                marker_base
+            };
+        let marker_name = format!(
+            "{}.json",
+            sha256_hex(format!("{}/{}", request.root, request.path).as_bytes())
+        );
+        let marker_path = marker_dir.join(&marker_name);
+        let marker_present = fs::symlink_metadata(&marker_path).is_ok();
+        let previous = read_generation(&marker_path)?;
+        let current_generation = previous
+            .filter(|g| {
+                g.length == length
+                    && g.head_sha256 == sha256_hex(&head)
+                    && existing
+                        .as_ref()
+                        .and_then(|f| f.metadata().ok())
+                        .is_some_and(|m| crate::FileStat::from_metadata(&m) == g.identity)
+            })
+            .map(|g| g.generation);
         let conflict = || {
             Reply::new(
                 409,
-                json!({"length": length, "head_sha256": sha256_hex(&head)}),
+                serde_json::to_value(crate::wire::Length {
+                    length,
+                    head_sha256: if marker_present && current_generation.is_none() {
+                        None
+                    } else {
+                        Some(sha256_hex(&head))
+                    },
+                    generation: current_generation.clone(),
+                })
+                .expect("length serializes"),
             )
         };
-        if !request.replace && request.offset != length {
+        if !request.replace
+            && (request.offset != length || (marker_present && current_generation.is_none()))
+        {
+            return Ok(conflict());
+        }
+        if !request.replace
+            && current_generation.is_some()
+            && request.generation.is_some()
+            && request.generation != current_generation
+        {
             return Ok(conflict());
         }
         // The head of the copy as it will be: the first min(4096, offset +
@@ -349,13 +409,25 @@ impl Receiver {
         }
 
         let new_length = bytes.len() as u64 + if request.replace { 0 } else { request.offset };
-        let (grow, shrink) = (
-            new_length.saturating_sub(length),
-            length.saturating_sub(new_length),
-        );
-        self.counted(machine, grow, shrink, || {
+        let old_marker = fs::symlink_metadata(&marker_path).map_or(0, |m| m.len());
+        let old_total = length.saturating_add(old_marker);
+        // Reserve metadata before invalidation. Refused growth leaves proof intact.
+        let reserved_total = new_length.saturating_add(if request.generation.is_some() {
+            1024
+        } else {
+            0
+        });
+        let reservation = reserved_total.saturating_sub(old_total);
+        self.reserve(machine, reservation)?;
+        let outcome = (|| -> Result<(), Refusal> {
+            // Invalidate durably before admitted data mutation.
+            match fs::remove_file(&marker_path) {
+                Ok(()) => sync_dir(&marker_dir)?,
+                Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e.into()),
+            }
             if request.replace {
-                replace_file(&parent, name, bytes)?;
+                replace_file(&parent, name, bytes).map_err(|e| e.refusal)?;
             } else {
                 let created = existing.is_none();
                 let mut file = match existing {
@@ -367,19 +439,224 @@ impl Receiver {
                     request.offset,
                     bytes,
                     created.then_some(parent.as_path()),
-                )?;
+                )
+                .map_err(|e| e.refusal)?;
+            }
+            if let Some(generation) = &request.generation {
+                let marker = Generation {
+                    generation: generation.clone(),
+                    length: new_length,
+                    head_sha256: sha256_hex(&next),
+                    identity: crate::FileStat::from_metadata(&fs::metadata(&target)?),
+                };
+                let bytes =
+                    serde_json::to_vec(&marker).map_err(|e| Refusal::Invalid(e.to_string()))?;
+                if bytes.len() > 1024 {
+                    return Err(Refusal::TooLarge("generation metadata too large".into()));
+                }
+                replace_file(&marker_dir, &marker_name, &bytes).map_err(|e| e.refusal)?;
             }
             Ok(())
-        })?;
-        Ok(Reply::new(200, json!({"length": new_length})))
+        })();
+        // Settle from bounded owned-path metadata even after a partial failure.
+        let actual = fs::symlink_metadata(&target)
+            .map_or(0, |m| m.len())
+            .saturating_add(fs::symlink_metadata(&marker_path).map_or(0, |m| m.len()));
+        let release = if actual >= old_total {
+            reservation.saturating_sub(actual - old_total)
+        } else {
+            reservation.saturating_add(old_total - actual)
+        };
+        self.release(machine, release);
+        outcome?;
+        Ok(Reply::new(
+            200,
+            serde_json::to_value(crate::wire::Length {
+                length: new_length,
+                head_sha256: None,
+                generation: request.generation.clone(),
+            })
+            .expect("length serializes"),
+        ))
+    }
+
+    /// Stores partial observations separately. Returned confirmed targets have
+    /// been checked under the same locks as append, including a durable marker.
+    pub fn status(&self, machine: &str, status: &Status) -> Reply {
+        self.try_status(machine, status)
+            .unwrap_or_else(Refusal::reply)
+    }
+
+    fn try_status(&self, machine: &str, status: &Status) -> Result<Reply, Refusal> {
+        check_machine(machine)?;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as i64;
+        if status.version != 1
+            || !is_generation(&status.observation_id)
+            || status.sequence == 0
+            || status.targets.len() > MAX_STATUS_TARGETS
+            || status.observed_at_ms > now.saturating_add(60_000)
+            || status.observed_at_ms < now.saturating_sub(60_000)
+            || status.runtime.mirror_observation_id.is_some()
+            || status.runtime.mirror_sequence.is_some()
+            || status.runtime.codex_rollouts.is_some()
+            || status.runtime.codex_provisional_rollouts.is_some()
+            || !status.runtime.repos.is_empty()
+            || !status.runtime.reported_runs.is_empty()
+        {
+            return Err(Refusal::Invalid("invalid partial observation".into()));
+        }
+        let mut unique = std::collections::BTreeSet::new();
+        for target in &status.targets {
+            if !is_input_path(&target.root, &target.path)
+                || !unique.insert((&target.root, &target.path))
+                || target.acked_bytes > target.target_bytes
+                || !is_sha256_hex(&target.head_sha256)
+                || !(is_generation(&target.generation)
+                    || (target.generation.is_empty() && target.acked_bytes == 0))
+            {
+                return Err(Refusal::Invalid("invalid sync target".into()));
+            }
+        }
+        self.locks.with(&format!("{machine}/status.json"), || {
+            let dir = self.directories(&[MACHINES_DIR, machine])?;
+            let fence = read_stored_facts(&dir.join(FACTS_FILE))?;
+            if fence.as_ref().is_some_and(|facts| facts.mirror_observation_id.as_ref() == Some(&status.observation_id) && facts.mirror_sequence.is_some_and(|seq| status.sequence <= seq)) {
+                return Ok(Reply::new(409, json!({"error":"stale_observation"})));
+            }
+            let prior = read_stored_status(&dir.join("status.json"))?;
+            let mut retired = prior.as_ref().map_or_else(Vec::new, |p| p.retired.clone());
+            retired.retain(|(_, at)| *at >= now.saturating_sub(60_000));
+            if retired.iter().any(|(id, _)| id == &status.observation_id) { return Ok(Reply::new(409, json!({"error":"stale_observation"}))); }
+            if let Some(prior) = prior {
+                if status.observed_at_ms <= prior.observation.observed_at_ms || (status.observation_id == prior.observation.observation_id && status.sequence <= prior.observation.sequence) {
+                    return Ok(Reply::new(409, json!({"error":"stale_observation"})));
+                }
+                if status.observation_id != prior.observation.observation_id { retired.push((prior.observation.observation_id, prior.observation.observed_at_ms)); }
+            }
+            if retired.len() > 64 { return Err(Refusal::Invalid("too many recent observation epochs".into())); }
+            let mut confirmed = Vec::new();
+            for (index, target) in status.targets.iter().enumerate() {
+                if target.acked_bytes == 0 {
+                    continue;
+                }
+                let key = format!("{machine}/{}/{}", target.root, target.path);
+                let verified = self.locks.with(&key, || -> Result<bool, Refusal> {
+                    let marker_dir =
+                        self.directories(&[MACHINES_DIR, machine, "sync-generations"])?;
+                    let marker_path = marker_dir.join(format!(
+                        "{}.json",
+                        sha256_hex(format!("{}/{}", target.root, target.path).as_bytes())
+                    ));
+                    let Some(marker) = read_generation(&marker_path)? else {
+                        return Ok(false);
+                    };
+                    if marker.generation != target.generation || marker.length < target.acked_bytes
+                    {
+                        return Ok(false);
+                    }
+                    let mut parts = vec![MACHINES_DIR, machine, target.root.as_str()];
+                    parts.extend(target.path.split('/'));
+                    let (name, dirs) = parts.split_last().expect("target path");
+                    let path = self.directories(dirs)?.join(name);
+                    let Some(file) = open_existing(&path)? else {
+                        return Ok(false);
+                    };
+                    let metadata = file.metadata()?;
+                    if metadata.len() != marker.length || crate::FileStat::from_metadata(&metadata) != marker.identity {
+                        return Ok(false);
+                    }
+                    let head = read_head(&file)?;
+                    if sha256_hex(&head) != marker.head_sha256
+                        || sha256_hex(&head[..head.len().min(target.acked_bytes as usize)])
+                            != target.head_sha256
+                    {
+                        return Ok(false);
+                    }
+                    if target.path.ends_with(".jsonl") {
+                        let mut log = semon_sessions::sealed::LogFile::open(&path)?;
+                        log.seek(SeekFrom::Start(target.acked_bytes - 1))?;
+                        let mut last = [0];
+                        log.read_exact(&mut last)?;
+                        if last[0] != b'\n' {
+                            return Ok(false);
+                        }
+                    }
+                    Ok(true)
+                })?;
+                if verified {
+                    confirmed.push(index);
+                }
+            }
+            let stored = StoredStatus {
+                observation: status.clone(),
+                confirmed,
+                retired,
+            };
+            let bytes = serde_json::to_vec(&stored).map_err(|e| Refusal::Invalid(e.to_string()))?;
+            if bytes.len() > MAX_BODY_BYTES {
+                return Err(Refusal::TooLarge("stored status too large".into()));
+            }
+            let old = fs::symlink_metadata(dir.join("status.json")).map_or(0, |m| m.len());
+            let new = bytes.len() as u64;
+            self.counted(machine, new.saturating_sub(old), old.saturating_sub(new), || replace_file(&dir, "status.json", &bytes))?;
+            Ok(Reply::new(200, json!({"confirmed": stored.confirmed.iter().map(|index| &status.targets[*index]).collect::<Vec<_>>()})))
+        })
     }
 
     fn try_facts(&self, machine: &str, facts: &Facts) -> Result<Reply, Refusal> {
         check_machine(machine)?;
+        if facts.codex_provisional_rollouts.is_some() {
+            return Err(Refusal::Invalid(
+                "authoritative facts cannot carry a provisional overlay".into(),
+            ));
+        }
         let bytes =
             serde_json::to_vec(facts).map_err(|error| Refusal::Invalid(error.to_string()))?;
-        self.locks.with(&format!("{machine}/{FACTS_FILE}"), || {
-            self.write_facts(machine, &bytes)
+        let paired = match (&facts.mirror_observation_id, facts.mirror_sequence) {
+            (None, None) => true,
+            (Some(id), Some(sequence)) => is_generation(id) && sequence > 0,
+            _ => false,
+        };
+        if !paired {
+            return Err(Refusal::Invalid("invalid full-facts fence".into()));
+        }
+        self.locks.with(&format!("{machine}/status.json"), || {
+            let dir = self.directories(&[MACHINES_DIR, machine])?;
+            let prior = read_stored_status(&dir.join("status.json"))?;
+            if let Some(id) = &facts.mirror_observation_id {
+                if prior
+                    .as_ref()
+                    .is_some_and(|p| p.retired.iter().any(|(old, _)| old == id))
+                {
+                    return Ok(Reply::new(409, json!({"error":"stale_observation"})));
+                }
+                if read_stored_facts(&dir.join(FACTS_FILE))?.is_some_and(|p| {
+                    p.mirror_observation_id.as_ref() == Some(id)
+                        && p.mirror_sequence >= facts.mirror_sequence
+                }) {
+                    return Ok(Reply::new(409, json!({"error":"stale_observation"})));
+                }
+            }
+            let reply = self.locks.with(&format!("{machine}/{FACTS_FILE}"), || {
+                self.write_facts(machine, &bytes)
+            })?;
+            if let Some(mut prior) = prior {
+                prior.confirmed.clear();
+                let updated =
+                    serde_json::to_vec(&prior).map_err(|e| Refusal::Invalid(e.to_string()))?;
+                let old = fs::symlink_metadata(dir.join("status.json")).map_or(0, |m| m.len());
+                let new = updated.len() as u64;
+                self.counted(
+                    machine,
+                    new.saturating_sub(old),
+                    old.saturating_sub(new),
+                    || replace_file(&dir, "status.json", &updated),
+                )?;
+            }
+            Ok(reply)
         })
     }
 
@@ -426,6 +703,49 @@ impl Receiver {
         }
         Ok(dir)
     }
+}
+
+#[derive(Serialize, Deserialize)]
+struct Generation {
+    identity: crate::FileStat,
+    generation: String,
+    length: u64,
+    head_sha256: String,
+}
+#[derive(Serialize, Deserialize)]
+struct StoredStatus {
+    observation: Status,
+    confirmed: Vec<usize>,
+    #[serde(default)]
+    retired: Vec<(String, i64)>,
+}
+fn read_stored_status(path: &Path) -> Result<Option<StoredStatus>, Refusal> {
+    read_control(path)
+}
+fn read_stored_facts(path: &Path) -> Result<Option<Facts>, Refusal> {
+    read_control(path)
+}
+fn read_control<T: serde::de::DeserializeOwned>(path: &Path) -> Result<Option<T>, Refusal> {
+    let Some(file) = open_existing(path)? else {
+        return Ok(None);
+    };
+    let mut bytes = Vec::new();
+    file.take(MAX_BODY_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() > MAX_BODY_BYTES {
+        return Err(Refusal::TooLarge("stored observation too large".into()));
+    }
+    let decoded = serde_json::from_slice(&bytes)
+        .map_err(|_| Refusal::Invalid("stored observation unavailable".into()))?;
+    Ok(Some(decoded))
+}
+fn read_generation(path: &Path) -> Result<Option<Generation>, Refusal> {
+    let Some(file) = open_existing(path)? else {
+        return Ok(None);
+    };
+    let mut bytes = Vec::new();
+    file.take(4096).read_to_end(&mut bytes)?;
+    Ok(serde_json::from_slice::<Generation>(&bytes).ok())
 }
 
 fn check_machine(machine: &str) -> Result<(), Refusal> {
@@ -639,10 +959,16 @@ fn measure(machines: &Path) -> HashMap<String, u64> {
                 let _ = fs::remove_file(inner.path());
             }
         }
-        let bytes: u64 = ["claude", "codex", FACTS_FILE]
-            .iter()
-            .map(|part| tree_size(&dir.join(part), 0))
-            .sum();
+        let bytes: u64 = [
+            "claude",
+            "codex",
+            FACTS_FILE,
+            "status.json",
+            "sync-generations",
+        ]
+        .iter()
+        .map(|part| tree_size(&dir.join(part), 0))
+        .sum();
         usage.insert(name, bytes);
     }
     usage
@@ -785,6 +1111,7 @@ mod tests {
         let mut head = if replace { Vec::new() } else { before.to_vec() };
         head.extend_from_slice(bytes);
         Append {
+            generation: None,
             root: "claude".into(),
             path: path.into(),
             offset,
@@ -1294,5 +1621,273 @@ mod tests {
             receiver.locks.map().is_empty(),
             "no lock outlives its writers"
         );
+    }
+}
+
+#[cfg(test)]
+mod status_tests {
+    use super::*;
+    use crate::wire::{Status, SyncPhase, SyncTarget, base64_encode, head_sha256};
+
+    fn fixture() -> (PathBuf, Receiver) {
+        let dir = std::env::temp_dir().join(format!(
+            "semon-status-{}-{}",
+            std::process::id(),
+            NEXT_TEMPORARY.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let receiver = Receiver::new(&dir);
+        (dir, receiver)
+    }
+    fn observation(bytes: &[u8], generation: &str) -> Status {
+        Status {
+            version: 1,
+            observation_id: "a".repeat(32),
+            sequence: 1,
+            observed_at_ms: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as i64,
+            phase: SyncPhase::Syncing,
+            runtime: Facts {
+                version: semon_sessions::FACTS_VERSION,
+                ..Facts::default()
+            },
+            inventory_complete: true,
+            targets: vec![SyncTarget {
+                root: "codex".into(),
+                path: "sessions/native.jsonl".into(),
+                generation: generation.into(),
+                target_bytes: bytes.len() as u64,
+                acked_bytes: bytes.len() as u64,
+                head_sha256: head_sha256(bytes),
+            }],
+        }
+    }
+    fn request(bytes: &[u8], generation: &str) -> Append {
+        Append {
+            root: "codex".into(),
+            path: "sessions/native.jsonl".into(),
+            generation: Some(generation.into()),
+            offset: 0,
+            replace: true,
+            bytes: base64_encode(bytes),
+            head_sha256: head_sha256(bytes),
+        }
+    }
+    #[test]
+    fn proof_is_generation_bound_and_durable_and_never_commits_facts() {
+        let (dir, receiver) = fixture();
+        let bytes = b"{\"type\":\"session_meta\",\"payload\":{\"id\":\"native-id\"}}\n";
+        let generation = "b".repeat(32);
+        let append = request(bytes, &generation);
+        assert_eq!(
+            receiver.append("laptop", &append).body["generation"],
+            generation
+        );
+        let status = observation(bytes, &generation);
+        assert_eq!(
+            receiver.status("laptop", &status).body["confirmed"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(!receiver.machine_dir("laptop").join(FACTS_FILE).exists());
+        let resumed = Receiver::new(&dir);
+        let mut next = status.clone();
+        next.sequence += 1;
+        next.observed_at_ms += 1;
+        assert_eq!(
+            resumed.status("laptop", &next).body["confirmed"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        next.sequence += 1;
+        next.observed_at_ms += 1;
+        next.targets[0].generation = "c".repeat(32);
+        assert!(
+            resumed.status("laptop", &next).body["confirmed"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn interrupted_metadata_commit_and_same_head_rewrite_fail_closed() {
+        let (dir, receiver) = fixture();
+        let bytes = b"{}\n";
+        let generation = "b".repeat(32);
+        receiver.append("laptop", &request(bytes, &generation));
+        // Simulate a crash after durable bytes but before the generation marker.
+        let marker = receiver
+            .machine_dir("laptop")
+            .join("sync-generations")
+            .join(format!(
+                "{}.json",
+                sha256_hex(b"codex/sessions/native.jsonl")
+            ));
+        fs::remove_file(&marker).unwrap();
+        let status = observation(bytes, &generation);
+        assert!(
+            Receiver::new(&dir).status("laptop", &status).body["confirmed"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        receiver.append("laptop", &request(bytes, &generation));
+        // Replacing a copy with identical bytes still changes its identity.
+        let path = receiver
+            .machine_dir("laptop")
+            .join("codex/sessions/native.jsonl");
+        fs::rename(&path, path.with_extension("retained")).unwrap();
+        fs::write(&path, bytes).unwrap();
+        let mut next = status;
+        next.sequence += 1;
+        next.observed_at_ms += 1;
+        assert!(
+            receiver.status("laptop", &next).body["confirmed"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn stale_heartbeats_cannot_restore_old_run_liveness_or_unknown_inventory() {
+        let (dir, receiver) = fixture();
+        let mut status = observation(b"{}\n", &"b".repeat(32));
+        assert_eq!(receiver.status("laptop", &status).status, 200);
+        assert_eq!(receiver.status("laptop", &status).status, 409);
+        status.observation_id = "d".repeat(32);
+        status.observed_at_ms += 1;
+        assert_eq!(receiver.status("laptop", &status).status, 200);
+        status.observation_id = "a".repeat(32);
+        status.sequence += 1;
+        status.observed_at_ms += 1;
+        assert_eq!(receiver.status("laptop", &status).status, 409);
+        status.observation_id = "d".repeat(32);
+        status.runtime.codex_rollouts = Some(Default::default());
+        assert_eq!(receiver.status("laptop", &status).status, 400);
+        fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn full_facts_fences_delayed_status_and_permits_later_verified_source_changes() {
+        let (dir, receiver) = fixture();
+        let bytes = b"{}\n";
+        let generation = "b".repeat(32);
+        receiver.append("laptop", &request(bytes, &generation));
+        let status = observation(bytes, &generation);
+        assert_eq!(receiver.status("laptop", &status).status, 200);
+        let facts = Facts {
+            version: semon_sessions::FACTS_VERSION,
+            codex_rollouts: Some(Default::default()),
+            mirror_observation_id: Some(status.observation_id.clone()),
+            mirror_sequence: Some(2),
+            ..Facts::default()
+        };
+        assert_eq!(receiver.facts("laptop", &facts).status, 200);
+        let persisted: StoredStatus = serde_json::from_slice(
+            &fs::read(receiver.machine_dir("laptop").join("status.json")).unwrap(),
+        )
+        .unwrap();
+        assert!(persisted.confirmed.is_empty());
+        let mut delayed = status.clone();
+        delayed.observed_at_ms += 1;
+        assert_eq!(receiver.status("laptop", &delayed).status, 409);
+        let mut archive = request(bytes, &"c".repeat(32));
+        archive.path = "archived_sessions/native.jsonl".into();
+        assert_eq!(receiver.append("laptop", &archive).status, 200);
+        let mut later = status;
+        later.sequence = 3;
+        later.observed_at_ms += 2;
+        later.targets[0].path = archive.path;
+        later.targets[0].generation = archive.generation.unwrap();
+        assert_eq!(
+            receiver.status("laptop", &later).body["confirmed"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        let committed: Facts = serde_json::from_slice(
+            &fs::read(receiver.machine_dir("laptop").join(FACTS_FILE)).unwrap(),
+        )
+        .unwrap();
+        assert!(committed.codex_rollouts.unwrap().is_empty());
+        let orphan = Facts {
+            mirror_observation_id: Some(later.observation_id.clone()),
+            ..Facts::default()
+        };
+        assert_eq!(receiver.facts("laptop", &orphan).status, 400);
+        later.sequence = 4;
+        later.runtime.mirror_sequence = Some(1);
+        assert_eq!(receiver.status("laptop", &later).status, 400);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn generation_and_status_metadata_obey_quota_and_refused_growth_keeps_proof() {
+        let (dir, receiver) = fixture();
+        let receiver = receiver.with_max_bytes(4096);
+        let generation = "b".repeat(32);
+        let bytes = b"{}\n";
+        assert_eq!(
+            receiver
+                .append("laptop", &request(bytes, &generation))
+                .status,
+            200
+        );
+        let before = receiver.used_bytes("laptop");
+        assert!(before > bytes.len() as u64);
+        assert_eq!(Receiver::new(&dir).used_bytes("laptop"), before);
+        let mut grow = request(&vec![b'x'; 4096], &generation);
+        grow.offset = 3;
+        grow.replace = false;
+        grow.head_sha256 = head_sha256(&[bytes.as_slice(), &vec![b'x'; 4096]].concat());
+        assert_eq!(receiver.append("laptop", &grow).status, 507);
+        assert_eq!(receiver.used_bytes("laptop"), before);
+        assert_eq!(
+            receiver
+                .status("laptop", &observation(bytes, &generation))
+                .body["confirmed"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            Receiver::new(&dir).used_bytes("laptop"),
+            receiver.used_bytes("laptop")
+        );
+        let zero = receiver.with_max_bytes(0);
+        assert_eq!(zero.append("empty", &request(b"", &generation)).status, 507);
+        let mut status = observation(b"", &generation);
+        status.targets.clear();
+        assert_eq!(zero.status("empty", &status).status, 507);
+        assert_eq!(zero.used_bytes("empty"), 0);
+        assert!(!zero.machine_dir("empty").join("status.json").exists());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn split_line_intermediate_bytes_and_duplicate_targets_are_unproved() {
+        let (dir, receiver) = fixture();
+        let bytes = b"{\"partial\":";
+        let generation = "b".repeat(32);
+        receiver.append("laptop", &request(bytes, &generation));
+        let mut status = observation(bytes, &generation);
+        assert!(
+            receiver.status("laptop", &status).body["confirmed"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        status.targets.push(status.targets[0].clone());
+        assert_eq!(receiver.status("laptop", &status).status, 400);
+        fs::remove_dir_all(dir).unwrap();
     }
 }

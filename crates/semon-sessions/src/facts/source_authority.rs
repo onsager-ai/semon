@@ -90,8 +90,17 @@ pub(crate) fn publish(path: &Path, facts: &Facts, identity: &Identity) -> io::Re
         Err(error) => return Err(error),
     }
     let mut digest = Sha256::new();
-    digest.update([u8::from(facts.codex_rollouts.is_some())]);
+    digest.update([
+        u8::from(facts.codex_rollouts.is_some()),
+        u8::from(facts.codex_provisional_rollouts.is_some()),
+    ]);
     if let Some(paths) = &facts.codex_rollouts {
+        for native in paths {
+            digest.update((native.len() as u64).to_le_bytes());
+            digest.update(native.as_bytes());
+        }
+    }
+    if let Some(paths) = &facts.codex_provisional_rollouts {
         for native in paths {
             digest.update((native.len() as u64).to_le_bytes());
             digest.update(native.as_bytes());
@@ -128,7 +137,13 @@ pub(crate) fn publish(path: &Path, facts: &Facts, identity: &Identity) -> io::Re
             });
         if !unchanged {
             tx.execute("DELETE FROM current_codex", [])?;
-            if let Some(paths) = &facts.codex_rollouts {
+            let paths = facts
+                .codex_rollouts
+                .iter()
+                .chain(facts.codex_provisional_rollouts.iter())
+                .flat_map(|paths| paths.iter())
+                .collect::<std::collections::BTreeSet<_>>();
+            {
                 let mut insert = tx.prepare("INSERT INTO current_codex(path) VALUES(?1)")?;
                 for native in paths {
                     insert.execute([native])?;
@@ -287,6 +302,43 @@ mod tests {
             assert_eq!(source.hostname().is_some(), facts.version == FACTS_VERSION);
         }
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn provisional_overlay_does_not_make_full_inventory_known() {
+        let root = root();
+        let path = root.join("facts.json");
+        let mut facts = fixture(None);
+        facts.codex_provisional_rollouts = Some(std::collections::BTreeSet::from([
+            "sessions/new.jsonl".into(),
+        ]));
+        write_facts(&path, &facts).unwrap();
+        let unknown = CurrentSources::open(&path).unwrap();
+        assert!(!unknown.selection_known());
+        assert_eq!(unknown.codex_current("sessions/new.jsonl").unwrap(), None);
+        drop(unknown);
+        facts.codex_rollouts = Some(Default::default());
+        write_facts(&path, &facts).unwrap();
+        let explicit_empty = CurrentSources::open(&path).unwrap();
+        assert!(explicit_empty.selection_known());
+        assert_eq!(
+            explicit_empty.codex_current("sessions/new.jsonl").unwrap(),
+            Some(true)
+        );
+        assert_eq!(
+            explicit_empty
+                .codex_current("sessions/retired.jsonl")
+                .unwrap(),
+            Some(false)
+        );
+        assert!(
+            crate::facts::read_facts(&path)
+                .unwrap()
+                .codex_rollouts
+                .unwrap()
+                .is_empty()
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
