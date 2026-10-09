@@ -220,6 +220,9 @@ handoff sessions, agent communication, metadata/configuration and composer.
   Its textarea keeps a 1px inset boundary and the existing 6px corner role;
   the enclosing border becomes transparent while retaining its geometry.
   Input growth, insets, toolbar, recovery, readiness and billing order do not move.
+  Touch value chips use 6px horizontal padding and a 4px internal gap so the
+  Codex/Copilot, Managed and E2B labels plus launch action fit at 390px within
+  the existing 17px visual insets. All toolbar targets remain at least 44px.
 - Composer enhanced selects use 13px text, 36px desktop triggers and 32px
   desktop option rows. Narrow/coarse-pointer triggers and rows use 40px, an
   explicit user-requested exception scoped to this composer dropdown. Generic
