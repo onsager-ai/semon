@@ -11330,7 +11330,7 @@ globalThis.__semonUIShared = __semonUIShared;
           analytics: host2.bootstrapOwner.urlOf({ v: "analytics" }),
           machines: host2.machinesPath ?? host2.bootstrapOwner.urlOf({ v: "machines" })
         },
-        host2.nativePage || host2.sidebarOnly ? {} : {
+        host2.nativePage ? {} : {
           home: host2.domain.inbox().length,
           machines: Object.keys(host2.modelStore.machines).filter(
             (m) => !host2.modelStore.machineUp[m]
@@ -17496,10 +17496,20 @@ globalThis.__semonUIShared = __semonUIShared;
   function createNativePageShell(host2) {
     const scope = new EffectScope(), account = parseAccount(host2.account);
     const app = document.querySelector(".app");
+    const content2 = host2.initialMachines;
+    if (content2) {
+      const page = app.querySelector("#page");
+      if (page && !page.contains(content2.element)) page.replaceChildren(content2.element);
+      scope.own(() => {
+        content2.destroy();
+        content2.element.remove();
+      });
+    }
     let rail = readShellPreference("rail"), wide = readShellPreference("wide");
     let destinations = projectShellNavigation(
       host2.navigation ?? { leading: host2.nativeNavigation },
-      host2.nativePage?.nav ?? "machines"
+      host2.nativePage?.nav ?? "machines",
+      { machines: host2.machinesPath }
     );
     const shell = createShellChrome({
       account: {
@@ -17536,7 +17546,8 @@ globalThis.__semonUIShared = __semonUIShared;
     const refresh = () => {
       destinations = projectShellNavigation(
         host2.navigation ?? { leading: host2.nativeNavigation },
-        host2.nativePage?.nav ?? "machines"
+        host2.nativePage?.nav ?? "machines",
+        { machines: host2.machinesPath }
       );
       shell.update(destinations, rail);
     };

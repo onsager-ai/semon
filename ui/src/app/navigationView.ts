@@ -47,7 +47,7 @@ export function createNavigationView(host: NavigationViewHost) {
         analytics: host.bootstrapOwner.urlOf({ v: 'analytics' }),
         machines: host.machinesPath ?? host.bootstrapOwner.urlOf({ v: 'machines' }),
       },
-      host.nativePage || host.sidebarOnly
+      host.nativePage
         ? {}
         : {
             home: host.domain.inbox().length,

@@ -12,7 +12,7 @@ export interface ViewerHost {
   subscribeNavigation?(changed: () => void): () => void;
   /** Host-owned links use native navigation; shared chrome validates paths. */
   nativeNavigation?: readonly ShellDestination[];
-  /** A native administrative page uses shared chrome/Recent, with native destination links. */
+  /** A native administrative page uses shared chrome and native links without a reader/model. */
   nativePage?: { title: string; nav: string };
   /** Advertise source inventory so an unselected reader can choose without a failing probe. */
   catalogSources?: boolean;

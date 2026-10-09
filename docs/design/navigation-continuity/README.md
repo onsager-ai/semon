@@ -19,7 +19,9 @@ geometry and controls. These captures document the new destination projection;
 they do not replace approved pixel references or relax comparison thresholds.
 
 Local verification: 92 UI unit tests; 12 focused browser cases across phone and
-desktop in both themes; 13 shared browser lifecycle cases; the actual compiled
+desktop in both themes; 13 shared browser lifecycle cases; nine application
+lifecycle cases (including native content teardown and zero model requests);
+the unchanged embedding sidebar parity check; the actual compiled
 bounded-producer browser suite; types, architecture, design policy, generated
 freshness, bundle sizes, Rust formatting and all-target Clippy. Full locked Rust
 testing reached 528 passing session tests and one failing archive-snapshot test:

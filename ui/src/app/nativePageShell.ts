@@ -16,11 +16,21 @@ export function createNativePageShell(host: ViewerHost): ViewerApplication {
   const scope = new EffectScope(),
     account = parseAccount(host.account);
   const app = document.querySelector<HTMLElement>('.app')!;
+  const content = host.initialMachines;
+  if (content) {
+    const page = app.querySelector('#page');
+    if (page && !page.contains(content.element)) page.replaceChildren(content.element);
+    scope.own(() => {
+      content.destroy();
+      content.element.remove();
+    });
+  }
   let rail = readShellPreference('rail'),
     wide = readShellPreference('wide');
   let destinations = projectShellNavigation(
     host.navigation ?? { leading: host.nativeNavigation },
     host.nativePage?.nav ?? 'machines',
+    { machines: host.machinesPath },
   );
   const shell = createShellChrome({
     account: {
@@ -54,6 +64,7 @@ export function createNativePageShell(host: ViewerHost): ViewerApplication {
     destinations = projectShellNavigation(
       host.navigation ?? { leading: host.nativeNavigation },
       host.nativePage?.nav ?? 'machines',
+      { machines: host.machinesPath },
     );
     shell.update(destinations, rail);
   };
