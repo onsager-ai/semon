@@ -23,12 +23,14 @@ desktop in both themes; 13 shared browser lifecycle cases; nine application
 lifecycle cases (including native content teardown and zero model requests);
 the unchanged embedding sidebar parity check; the actual compiled
 bounded-producer browser suite; types, architecture, design policy, generated
-freshness, bundle sizes, Rust formatting and all-target Clippy. Full locked Rust
-testing reached 528 passing session tests and one failing archive-snapshot test:
+freshness, bundle sizes, Rust formatting and all-target Clippy. Synchronization
+with main `721078a6f68d8cebb034c6b3626fc68abe1ec340` also passes all 27 focused,
+application-lifecycle and continuity-refinement browser cases and full locked Rust
+testing. An earlier filesystem run failed the archive-snapshot test:
 `viewer::tests::a_refused_archive_root_replaced_by_a_directory_invalidates_the_snapshot`.
 The exact failure also reproduces at baseline
-`282007f96c60061a9e8539b5c7570909ebeb61fe` on this filesystem. It remains a failing
-gate. The full compatibility pixel aggregate was not run locally.
+`282007f96c60061a9e8539b5c7570909ebeb61fe` on this filesystem. The synchronized
+tree's current Rust gate passes. The full compatibility pixel aggregate was not run locally.
 
 Ownership review: library code imports no application state; host policy is
 validated at its boundary; chrome owns only its existing descendants and keeps

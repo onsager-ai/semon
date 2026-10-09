@@ -5704,6 +5704,10 @@ globalThis.__semonUIShared = __semonUIShared;
                 )
               ] }),
               /* @__PURE__ */ jsxs("div", { class: "cc-details", hidden: !open, children: [
+                /* @__PURE__ */ jsxs("span", { class: "cc-context", children: [
+                  /* @__PURE__ */ jsx("span", { class: "cc-context-name", children: screenText(entry2.name) }),
+                  /* @__PURE__ */ jsx("span", { class: "cc-context-meta", children: screenText(entry2.meta) })
+                ] }),
                 /* @__PURE__ */ jsx("span", { class: "cc-brief", children: /* @__PURE__ */ jsx(Inline, { text: entry2.brief }) }),
                 entry2.result ? /* @__PURE__ */ jsxs("span", { class: "cc-result" + (entry2.failed ? " err" : ""), children: [
                   /* @__PURE__ */ jsx("span", { class: "rl", children: entry2.failed ? "Result: " : "Returned: " }),
@@ -15822,7 +15826,11 @@ globalThis.__semonUIShared = __semonUIShared;
           item2.key
         )) }),
         /* @__PURE__ */ jsx("p", { class: "catalog-note", children: /* @__PURE__ */ jsx("a", { class: "link", href: snapshot.compatibilityHref, children: "Open compatibility view (loads workspace history)" }) }),
-        !snapshot.updating && !snapshot.items.length && !snapshot.note && !snapshot.discovering && !snapshot.searchIndexIncomplete && !snapshot.searchPartial && !snapshot.candidates?.length && !snapshot.candidateUpdating && /* @__PURE__ */ jsx("p", { class: "catalog-note", children: "No recorded sessions match these filters." }),
+        !snapshot.updating && !snapshot.items.length && !snapshot.note && !snapshot.discovering && !snapshot.searchIndexIncomplete && !snapshot.searchPartial && !snapshot.candidates?.length && !snapshot.candidateUpdating && /* @__PURE__ */ jsx("p", { class: "catalog-note", children: filtered ? "No recorded sessions match these filters." : /* @__PURE__ */ jsxs(Fragment2, { children: [
+          "No recorded sessions in this source yet.",
+          " ",
+          /* @__PURE__ */ jsx("button", { class: "link", type: "button", onClick: () => host2.retry(), children: "Refresh history" })
+        ] }) }),
         snapshot.more && /* @__PURE__ */ jsx("button", { class: "link", type: "button", disabled: snapshot.updating, onClick: () => host2.more(), children: "Load more sessions" })
       ] }),
       root

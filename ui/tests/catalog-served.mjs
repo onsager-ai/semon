@@ -18,6 +18,77 @@ test(
       { encoding: 'utf8' },
     );
     assert.equal(fixture.status, 0, fixture.stderr);
+    // Source-shaped synthetic Codex desktop records: private bodies replaced.
+    // Exercise the native producer, saved recipes and served reader together.
+    const nativeAt = new Date(Number(fixture.stdout.trim()) - 1000).toISOString();
+    const native = (type, payload) => ({ timestamp: nativeAt, type, payload });
+    await writeFile(
+      join(home, 'codex/sessions/2026/09/28/rollout-native-tools.jsonl'),
+      [
+        native('session_meta', {
+          id: 'native-tools',
+          parent_thread_id: 'h-codex',
+          thread_source: 'subagent',
+          agent_path: '/root/inspect_tools',
+          agent_nickname: 'Socrates',
+        }),
+        native('response_item', {
+          type: 'message',
+          role: 'user',
+          content: [{ type: 'input_text', text: 'Inspect native tools' }],
+        }),
+        native('response_item', {
+          type: 'reasoning',
+          summary: [{ type: 'summary_text', text: 'Before native tools' }],
+        }),
+        native('response_item', {
+          type: 'custom_tool_call',
+          name: 'exec',
+          call_id: 'wrapper',
+          input: "await tools.search({query:'parser'});",
+        }),
+        native('event_msg', {
+          type: 'item_completed',
+          item: {
+            type: 'McpToolCall',
+            id: 'mcp',
+            server: 'github',
+            tool: 'search',
+            arguments: { query: 'parser' },
+            status: 'completed',
+            result: {
+              content: [{ type: 'text', text: 'Tool output stays a tool' }],
+              isError: false,
+            },
+            duration: { secs: 2, nanos: 0 },
+          },
+        }),
+        native('event_msg', {
+          type: 'item_completed',
+          item: {
+            type: 'DynamicToolCall',
+            id: 'dynamic',
+            namespace: 'functions',
+            tool: 'lookup',
+            arguments: { key: 'parser' },
+            status: 'completed',
+            success: false,
+            content_items: [{ type: 'input_text', text: 'Lookup failed' }],
+          },
+        }),
+        native('response_item', {
+          type: 'custom_tool_call_output',
+          call_id: 'wrapper',
+          output: [{ type: 'input_text', text: 'Script completed' }],
+        }),
+        native('response_item', {
+          type: 'reasoning',
+          summary: [{ type: 'summary_text', text: 'After native tools' }],
+        }),
+      ]
+        .map((record) => JSON.stringify(record))
+        .join('\n') + '\n',
+    );
     const paths = await readdir(join(home, 'claude'), { recursive: true });
     const backlog = paths.find((path) => path.endsWith('/backlog.jsonl'));
     assert.ok(backlog, 'Native long conversation fixture is missing');
@@ -238,9 +309,18 @@ test(
         }
       }
       const representative = [];
-      for (const session of ['harbor', 'q-codex', 'h-failed']) {
+      for (const session of ['harbor', 'q-codex', 'h-failed', 'native-tools']) {
         const check = await browser.newPage({ viewport: { width: 1280, height: 860 } });
         check.on('pageerror', (e) => errors.push(e.message));
+        const nativeRanges = [];
+        check.on('response', (response) => {
+          if (
+            session === 'native-tools' &&
+            new URL(response.url()).pathname === '/api/session-transcript' &&
+            response.status() === 200
+          )
+            nativeRanges.push(response.json());
+        });
         await check.goto(url[1] + '/?t=' + url[2]);
         const row = check.locator(`#page [data-id="${session}"]`);
         await row.waitFor();
@@ -263,6 +343,36 @@ test(
         const body = await check.locator('#page').innerText();
         if (session === 'harbor')
           assert.ok(body.includes('Original action prompt is unavailable.'));
+        if (session === 'native-tools') {
+          const nativeEntries = (await Promise.all(nativeRanges)).flatMap((range) => range.entries);
+          const tools = nativeEntries.filter((entry) => entry.k === 'tool');
+          assert.deepEqual(
+            tools.map((entry) => entry.name),
+            ['github.search', 'functions.lookup'],
+          );
+          assert.deepEqual(
+            tools.map((entry) => entry.ok),
+            [true, false],
+          );
+          assert.deepEqual(
+            tools.map((entry) => entry.out),
+            ['Tool output stays a tool', 'Lookup failed'],
+          );
+          assert.deepEqual(
+            nativeEntries.filter((entry) => entry.k === 'think').map((entry) => entry.text),
+            ['Before native tools', 'After native tools'],
+          );
+          assert.ok(
+            (await check.locator('#topbar').innerText()).includes('inspect_tools'),
+            'The task path is the session title',
+          );
+          assert.equal(
+            body.includes('Socrates'),
+            false,
+            'A nickname must not replace the task title',
+          );
+          assert.equal(await check.locator('#page .step').count(), 2);
+        }
         representative.push({ session, readable: true, failedTool: !!(await failed.count()) });
         await check.close();
       }
