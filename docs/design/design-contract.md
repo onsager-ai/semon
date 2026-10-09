@@ -34,7 +34,7 @@ Composer task text uses the 14px UI role on a desktop, rather than the 16px
 transcript reading role. Compact buttons, setting labels and enhanced select
 values use the 13px secondary role. Native editable fields (textarea and select)
 retain 16px on narrow/coarse-pointer devices to avoid browser focus zoom. Text
-size does not determine target size: preserve the 96–280px task area, existing
+size does not determine target size: generic composers preserve the 96–280px task area, existing
 32px visible toolbar surfaces and at least 44px touch targets. Keep transcript
 reading text at 16px. These shared rules belong in `shell.css`, including the
 native fallback; consumers must not introduce typography overrides.
@@ -90,3 +90,9 @@ lifecycle checks, fallback parity and production-page visual comparisons. Review
 both apps' visual evidence whenever a shared token/control changes. A green source
 suite does not replace Hub acceptance. Preserve same-origin forms, no-JS content,
 host/chrome ownership, focus and scroll behavior.
+
+The explicitly requested Codex/ChatGPT unified composer variant is documented in
+`.stitch/DESIGN.md` section 10. It uses 12px prompt padding, a 45px desktop/48px
+native-touch initial height, a 280px scroll cap, an 8px toolbar bottom inset and
+13px visual edge insets. Other composer variants retain their existing geometry;
+44px touch toolbar targets and native 16px mobile input text remain required.

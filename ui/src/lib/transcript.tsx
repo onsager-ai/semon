@@ -536,53 +536,70 @@ function Entry({ entry, owner }: { entry: EntryView; owner: SessionOwner }): Com
           data-entry-key={entry.entryKey}
           data-h={entry.handoff}
         >
-          <span class="cc-head">
-            <button
-              class="cc-name who-link"
-              type="button"
-              aria-label={'Open ' + entry.name}
-              onClick={(event) => {
-                if (event.currentTarget.isConnected) owner.host.session(entry.id, entry.turn);
-              }}
-            >
-              {screenText(entry.name)}
-            </button>
-            <State state={entry.state} label={entry.stateLabel} text={entry.stateLabel} />
-            <Glyph path={entry.chevron} className="chev" />
-          </span>
-          <span class="cc-meta">
-            {entry.mark && <Harness mark={entry.mark} />}
-            {screenText(entry.meta)}
-          </span>
-          <span class="cc-brief">
-            <Inline text={entry.brief} />
-          </span>
-          {entry.result ? (
-            <span class={'cc-result' + (entry.failed ? ' err' : '')}>
-              <span class="rl">{entry.failed ? 'Result: ' : 'Returned: '}</span>
-              <Inline text={entry.result} />
-            </span>
-          ) : (
-            entry.activity && (
-              <span class="cc-now">
-                <span class="spin" />
-                <span>{screenText(entry.activity[0])}</span>
-                <code>{entry.activity[1]}</code>
+          <div class="cc-head">
+            <span class="cc-identity">
+              <button
+                class="cc-name who-link"
+                type="button"
+                aria-label={'Open ' + entry.name}
+                onClick={(event) => {
+                  if (event.currentTarget.isConnected) owner.host.session(entry.id, entry.turn);
+                }}
+              >
+                {screenText(entry.name)}
+              </button>
+              <span class="cc-meta">
+                {entry.mark && <Harness mark={entry.mark} />}
+                {screenText(entry.meta)}
               </span>
-            )
-          )}
-          {entry.trace && (
+            </span>
+            <State state={entry.state} label={entry.stateLabel} text={entry.stateLabel} />
             <button
-              class="link cc-run"
+              class="ibtn cc-toggle"
               type="button"
-              aria-label={entry.traceLabel}
+              aria-label={(open ? 'Collapse ' : 'Expand ') + entry.name + ' details'}
+              aria-expanded={open}
               onClick={(event) => {
-                if (event.currentTarget.isConnected) owner.host.trace(entry.trace!);
+                if (!event.currentTarget.isConnected || owner.disposed) return;
+                if (open) owner.open.delete(key);
+                else owner.open.add(key);
+                owner.change(key);
               }}
             >
-              Run view
+              <Glyph path={entry.chevron} className="chev" />
             </button>
-          )}
+          </div>
+          <div class="cc-details" hidden={!open}>
+            <span class="cc-brief">
+              <Inline text={entry.brief} />
+            </span>
+            {entry.result ? (
+              <span class={'cc-result' + (entry.failed ? ' err' : '')}>
+                <span class="rl">{entry.failed ? 'Result: ' : 'Returned: '}</span>
+                <Inline text={entry.result} />
+              </span>
+            ) : (
+              entry.activity && (
+                <span class="cc-now">
+                  <span class="spin" />
+                  <span>{screenText(entry.activity[0])}</span>
+                  <code>{entry.activity[1]}</code>
+                </span>
+              )
+            )}
+            {entry.trace && (
+              <button
+                class="link cc-run"
+                type="button"
+                aria-label={entry.traceLabel}
+                onClick={(event) => {
+                  if (event.currentTarget.isConnected) owner.host.trace(entry.trace!);
+                }}
+              >
+                Run view
+              </button>
+            )}
+          </div>
         </div>
       );
     case 'event':

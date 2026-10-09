@@ -211,11 +211,9 @@ scale, spacing and interaction owners. Flatten repeated informational enclosures
 without rearranging the workflow. Preserve grouped tools, thinking, child and
 handoff sessions, agent communication, metadata/configuration and composer.
 
-- Linked child sessions retain their existing dimensions, padding, content,
-  state dots and navigation actions. Replace the rounded perimeter with a
-  neutral top separator and left context rule. Hover remains a quiet fill;
-  buttons retain the shared visible keyboard outline. Message bubbles, tool
-  output and modal boundaries keep their existing functional treatments.
+- Linked child sessions use the compact disclosure pattern in section 10.
+  Message bubbles, tool output and modal boundaries keep their existing
+  functional treatments.
 - A shared composer containing supporting notes has open supporting regions.
   Its textarea keeps a 1px inset boundary and the existing 6px corner role;
   the enclosing border becomes transparent while retaining its geometry.
@@ -229,7 +227,7 @@ handoff sessions, agent communication, metadata/configuration and composer.
   selects, toolbar buttons, native fallback fields and other touch controls
   retain their existing 44px target contract. Long option labels wrap and grow.
 - Selection is a trailing 14px check and 500 weight. Keyboard-active options
-  also have a 2px ink inset rule and the existing hover fill; moving active
+  use the existing hover fill without a left rule; moving active
   focus must not silently change selection. Preserve arrows, Home/End,
   typeahead, Enter, nested Escape, mobile Back and native form value ownership.
   The mobile sheet heading is 13px and its close control is 40px with a 16px icon.
@@ -242,3 +240,58 @@ message bubble and navigation shapes rather than adopting those redraw changes.
 The native session canvas records the linked-session surface component; actual
 before/after images verify unchanged reader geometry at 390/1280px in both themes.
 Hub consumes these shared styles only after reviewed source adoption.
+
+## 10. Annotation refinement: compact related sessions
+
+Baseline: merged `defe9d791a197902c5bebcba2e2b7fe87dd9a075`.
+The October 2026 review requested less prominent subagent/handoff entries and
+removed the composer dropdown's active left border. These are deliberate
+incremental changes to section 9, not a new type scale or shell layout.
+
+In relationship-capable transcripts, show a quiet row containing the session
+name, existing harness/run metadata, labeled status and an expansion control.
+Use the 13px secondary role for the name at 500 weight and the existing 12px
+metadata/state role. Keep the original harness artwork and working/failed state
+indicators. No card perimeter, left rail or default task/result paragraph is
+needed. Hover applies to the summary; keyboard focus uses the shared outline.
+
+The name opens the session. A separately labeled button expands complete task,
+current activity/result and the existing Run view action in place, without
+changing route or silently navigating. Enter/Space work through native buttons;
+`aria-expanded` communicates disclosure state. Expanded text wraps without a
+two-line clamp. Expanding/collapsing reuses the transcript owner's keyed state;
+disposed or detached controls cannot mutate it. Errors remain visible as a
+labeled state even while their full explanation is collapsed.
+
+At narrow/coarse-pointer widths, stack name and metadata within the identity
+column and retain 44px navigation/disclosure targets. Keep metadata ellipsis,
+full text in the expanded context and direct session navigation. Preserve
+messages, tool aggregation, thinking, relays, configuration and composer owners.
+The bounded catalog does not expose complete relationship context: do not
+fabricate subagent/handoff links there. This pattern applies where real resolved
+relationships already exist.
+
+The editable canvas remains `../docs/design/session-inspection/session-inspection.pen`.
+Its current compact disclosure board supersedes the explicitly historical
+linked-session board. Annotation screenshots/checks are in
+`../docs/design/session-inspection/annotation-refinement/`; previous Image Gen
+proposals are retained as historical exploration, not implementation references.
+
+The later Codex/ChatGPT composer reference requests one continuous rounded input
+surface around prompt and bottom toolbar. Use `sh-composer-surface` inside the
+native form: existing `--sunken`, a quiet `--line` border and the composed
+`--r3 + --s2` radius (22px). The textarea has no separate inset outline and the
+toolbar values use `--muted`; text still meets AA contrast. A circular send face
+keeps the existing compact control's target and visual insets. Supporting details
+remain outside this input surface. Keep a visible textarea keyboard outline,
+45px desktop/48px native touch initial prompt height, growing to 280px before internal scrolling, 14px desktop/16px native touch input, 13px values and 44px toolbar
+targets. This explicit reference supersedes section 9's separate textarea outline
+for this composed prompt variant; conversation and generic composer variants
+retain their existing contracts.
+
+The spacing follow-up intentionally reduces the unified variant to 12px prompt
+insets and 8px toolbar bottom padding. Its visual toolbar inset is 13px including
+the surface border; coarse-pointer targets stay 44px (6px toolbar padding plus
+the 6px compact-control visual inset). Generic composers retain their existing
+96px minimum and 17px toolbar insets. This exception follows the supplied
+Codex/ChatGPT reference and does not change transcript density.

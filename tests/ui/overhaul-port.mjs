@@ -221,7 +221,7 @@ export function overhaulPortReference(D, html) {
   out = swapLine(
     out,
     '    else if (c.state === "work") { const last = (TX[c.id] ?? []).filter',
-    '    else if (c.state === "work" && c.activity) { const n = el("span", "cc-now"); n.append(el("span", "spin"), el("span", null, verbNow(c.activity[0])), el("code", null, c.activity[1])); b.append(n); }',
+    '    else if (c.state === "work" && c.activity) { const n = el("span", "cc-now"); n.append(el("span", "spin"), el("span", null, verbNow(c.activity[0])), el("code", null, c.activity[1])); details.append(n); }',
   );
   // Each of the mockup's histories is inside the served sessions' busy intervals already.
   const histories =

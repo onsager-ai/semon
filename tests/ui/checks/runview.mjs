@@ -166,6 +166,32 @@ export default async function runView(browser) {
         ids[0],
       );
       await goto(page, { v: 'session', id: 'harbor' }, D);
+      const child = page.locator('.child-card').first();
+      const toggle = child.locator('.cc-toggle');
+      r.expect(
+        (await toggle.getAttribute('aria-expanded')) === 'false',
+        tag + ': linked context starts compact',
+      );
+      r.expect(
+        !(await child.locator('.cc-brief').isVisible()),
+        tag + ': full task is disclosed on demand',
+      );
+      await toggle.focus();
+      await page.keyboard.press('Enter');
+      r.expect(
+        await child.locator('.cc-brief').isVisible(),
+        tag + ': keyboard expansion reveals retained task',
+      );
+      r.expect(
+        await child.locator('.cc-result').isVisible(),
+        tag + ': expansion reveals retained result',
+      );
+      await page.keyboard.press('Enter');
+      r.expect(
+        !(await child.locator('.cc-result').isVisible()),
+        tag + ': keyboard collapse restores compact row',
+      );
+      await toggle.click();
       await page.locator('.child-card .cc-run').click();
       await page.waitForSelector('.agents-panel');
       r.expect(
