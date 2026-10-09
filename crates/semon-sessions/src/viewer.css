@@ -379,6 +379,9 @@ dialog.panel::backdrop { background: color-mix(in srgb, #000 40%, transparent); 
 .cc-meta { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--fs-cap); line-height: var(--lh-cap); color: var(--muted); }
 .cc-details { display: grid; gap: var(--s2); padding: var(--s2) 0 var(--s3); }
 .cc-details[hidden] { display: none; }
+.cc-context { display: grid; min-width: 0; overflow-wrap: anywhere; }
+.cc-context-name { font-size: var(--fs-sm); font-weight: 500; }
+.cc-context-meta { font-size: var(--fs-cap); line-height: var(--lh-cap); color: var(--muted); }
 .cc-brief { font-size: var(--fs-sm); line-height: 1.45; color: var(--ink-2); overflow-wrap: anywhere; }
 @media (max-width: 760px), (any-pointer: coarse) {
   .cc-identity { flex-direction: column; align-items: flex-start; gap: 0; }

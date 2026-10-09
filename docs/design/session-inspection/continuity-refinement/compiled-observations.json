@@ -1,0 +1,197 @@
+{
+  "baseline": "282007f96c60061a9e8539b5c7570909ebeb61fe",
+  "cases": [
+    {
+      "width": 390,
+      "colorScheme": "light",
+      "before": true,
+      "compiledExecutable": true,
+      "frontendSubstitution": false,
+      "keyboardDisclosure": true,
+      "directChildNavigationAndBack": true,
+      "textAudit": {
+        "texts": 69,
+        "small": [],
+        "smallCount": 0,
+        "low": [],
+        "lowCount": 0
+      }
+    },
+    {
+      "width": 390,
+      "colorScheme": "light",
+      "before": false,
+      "compiledExecutable": true,
+      "frontendSubstitution": false,
+      "keyboardDisclosure": true,
+      "directChildNavigationAndBack": true,
+      "textAudit": {
+        "texts": 71,
+        "small": [],
+        "smallCount": 0,
+        "low": [],
+        "lowCount": 0
+      }
+    },
+    {
+      "width": 390,
+      "colorScheme": "dark",
+      "before": true,
+      "compiledExecutable": true,
+      "frontendSubstitution": false,
+      "keyboardDisclosure": true,
+      "directChildNavigationAndBack": true,
+      "textAudit": {
+        "texts": 69,
+        "small": [],
+        "smallCount": 0,
+        "low": [],
+        "lowCount": 0
+      }
+    },
+    {
+      "width": 390,
+      "colorScheme": "dark",
+      "before": false,
+      "compiledExecutable": true,
+      "frontendSubstitution": false,
+      "keyboardDisclosure": true,
+      "directChildNavigationAndBack": true,
+      "textAudit": {
+        "texts": 71,
+        "small": [],
+        "smallCount": 0,
+        "low": [],
+        "lowCount": 0
+      }
+    },
+    {
+      "width": 820,
+      "colorScheme": "light",
+      "before": true,
+      "compiledExecutable": true,
+      "frontendSubstitution": false,
+      "keyboardDisclosure": true,
+      "directChildNavigationAndBack": true,
+      "textAudit": {
+        "texts": 144,
+        "small": [],
+        "smallCount": 0,
+        "low": [],
+        "lowCount": 0
+      }
+    },
+    {
+      "width": 820,
+      "colorScheme": "light",
+      "before": false,
+      "compiledExecutable": true,
+      "frontendSubstitution": false,
+      "keyboardDisclosure": true,
+      "directChildNavigationAndBack": true,
+      "textAudit": {
+        "texts": 144,
+        "small": [],
+        "smallCount": 0,
+        "low": [],
+        "lowCount": 0
+      }
+    },
+    {
+      "width": 820,
+      "colorScheme": "dark",
+      "before": true,
+      "compiledExecutable": true,
+      "frontendSubstitution": false,
+      "keyboardDisclosure": true,
+      "directChildNavigationAndBack": true,
+      "textAudit": {
+        "texts": 144,
+        "small": [],
+        "smallCount": 0,
+        "low": [],
+        "lowCount": 0
+      }
+    },
+    {
+      "width": 820,
+      "colorScheme": "dark",
+      "before": false,
+      "compiledExecutable": true,
+      "frontendSubstitution": false,
+      "keyboardDisclosure": true,
+      "directChildNavigationAndBack": true,
+      "textAudit": {
+        "texts": 144,
+        "small": [],
+        "smallCount": 0,
+        "low": [],
+        "lowCount": 0
+      }
+    },
+    {
+      "width": 1280,
+      "colorScheme": "light",
+      "before": true,
+      "compiledExecutable": true,
+      "frontendSubstitution": false,
+      "keyboardDisclosure": true,
+      "directChildNavigationAndBack": true,
+      "textAudit": {
+        "texts": 146,
+        "small": [],
+        "smallCount": 0,
+        "low": [],
+        "lowCount": 0
+      }
+    },
+    {
+      "width": 1280,
+      "colorScheme": "light",
+      "before": false,
+      "compiledExecutable": true,
+      "frontendSubstitution": false,
+      "keyboardDisclosure": true,
+      "directChildNavigationAndBack": true,
+      "textAudit": {
+        "texts": 156,
+        "small": [],
+        "smallCount": 0,
+        "low": [],
+        "lowCount": 0
+      }
+    },
+    {
+      "width": 1280,
+      "colorScheme": "dark",
+      "before": true,
+      "compiledExecutable": true,
+      "frontendSubstitution": false,
+      "keyboardDisclosure": true,
+      "directChildNavigationAndBack": true,
+      "textAudit": {
+        "texts": 146,
+        "small": [],
+        "smallCount": 0,
+        "low": [],
+        "lowCount": 0
+      }
+    },
+    {
+      "width": 1280,
+      "colorScheme": "dark",
+      "before": false,
+      "compiledExecutable": true,
+      "frontendSubstitution": false,
+      "keyboardDisclosure": true,
+      "directChildNavigationAndBack": true,
+      "textAudit": {
+        "texts": 146,
+        "small": [],
+        "smallCount": 0,
+        "low": [],
+        "lowCount": 0
+      }
+    }
+  ]
+}
