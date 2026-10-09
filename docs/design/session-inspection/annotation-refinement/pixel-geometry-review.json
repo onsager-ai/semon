@@ -1,0 +1,77 @@
+{
+  "note": "Reviewed intentional page-height changes after compact default disclosures. Widths, ratio thresholds, all other records and strict region limits remain unchanged. All 40 named transcript/topbar/menu regions match exactly. Quill becomes shorter and its full-page served/reference height difference changes from 66px to 30px.",
+  "changes": [
+    {
+      "key": "phone-dark|session-atlas-ingest",
+      "before": [
+        "780\u00d74442",
+        "780\u00d74376"
+      ],
+      "after": [
+        "780\u00d72500",
+        "780\u00d72434"
+      ],
+      "ratioThresholdUnchanged": 0.06099
+    },
+    {
+      "key": "phone-dark|session-harbor",
+      "before": [
+        "780\u00d72946",
+        "780\u00d72880"
+      ],
+      "after": [
+        "780\u00d71982",
+        "780\u00d71916"
+      ],
+      "ratioThresholdUnchanged": 0.06165
+    },
+    {
+      "key": "phone-dark|session-quill",
+      "before": [
+        "780\u00d72404",
+        "780\u00d72338"
+      ],
+      "after": [
+        "780\u00d71718",
+        "780\u00d71688"
+      ],
+      "ratioThresholdUnchanged": 0.04982
+    },
+    {
+      "key": "phone-light|session-atlas-ingest",
+      "before": [
+        "780\u00d74442",
+        "780\u00d74376"
+      ],
+      "after": [
+        "780\u00d72500",
+        "780\u00d72434"
+      ],
+      "ratioThresholdUnchanged": 0.05945
+    },
+    {
+      "key": "phone-light|session-harbor",
+      "before": [
+        "780\u00d72946",
+        "780\u00d72880"
+      ],
+      "after": [
+        "780\u00d71982",
+        "780\u00d71916"
+      ],
+      "ratioThresholdUnchanged": 0.05991
+    },
+    {
+      "key": "phone-light|session-quill",
+      "before": [
+        "780\u00d72404",
+        "780\u00d72338"
+      ],
+      "after": [
+        "780\u00d71718",
+        "780\u00d71688"
+      ],
+      "ratioThresholdUnchanged": 0.04863
+    }
+  ]
+}

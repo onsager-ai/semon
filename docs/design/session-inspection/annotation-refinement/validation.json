@@ -1,0 +1,48 @@
+{
+  "rust_fmt": "passed",
+  "rust_clippy_locked_all_targets": "passed",
+  "rust_locked_tests": "passed",
+  "typed_ui": "passed",
+  "architecture": "passed",
+  "design_contract": "passed",
+  "ui_unit_tests": 89,
+  "compact_gallery_cases": 6,
+  "runview_cases": 4,
+  "full_transcript_screens": 32,
+  "full_transcript_traces": 9,
+  "harness_icon_cases": 4,
+  "panel_lifecycle": "passed",
+  "matched_viewer_cases": 8,
+  "pixel_comparison": {
+    "affected_session_cases": 16,
+    "strict_regions": 40,
+    "strict_region_differences": 0,
+    "ratchet_failures": 0,
+    "page_errors": 0,
+    "ratio_thresholds_changed": false
+  },
+  "limitations": [
+    "Bounded catalog does not expose complete linked-session relationships; this refinement applies to the existing compatibility reader.",
+    "Other browser groups and aggregate remote CI are not represented by selected local checks.",
+    "No measured usability gain is claimed."
+  ],
+  "reviewed_baseline_changes": "Six phone height records only; ratio thresholds, widths, other baselines and strict regions preserved.",
+  "source_base": "defe9d791a197902c5bebcba2e2b7fe87dd9a075",
+  "artifact_hashes": {
+    "crates/semon-sessions/src/viewer.css": "15b8d11293435b695f27171185a71a1789b1b379ed43d0b2f902e05471dd5c1b",
+    "crates/semon-sessions/src/shell.css": "aa430cbc4ea40c2fbef7020a237565e97e6d7cdcead0d30be98d006108b82fe3",
+    "crates/semon-sessions/src/viewer.generated.js": "64e02bfdf40d8e3bd02c73cd9583e98c0baa233c03edb6a786f8cd8f9980f7f7",
+    "docs/design/session-inspection/session-inspection.pen": "f8a0fc9bea788dd16ebbc39c56bef17fb50e41e7057c7e7b5f84d3120110c63b"
+  },
+  "turn_navigation": {
+    "passed": true,
+    "light_and_dark_screens": 134,
+    "handoff_navigation_cases": 4,
+    "page_errors": 0,
+    "note": "CI exposed an obsolete top-left content coordinate now occupied by the session-name button. The test clicks noninteractive metadata and preserves route/name assertions; the full turns check passes locally."
+  },
+  "remote_ci": {
+    "previous_head": "82e09eb335e7d5aac8b0e53a7aebe0c6bb905c0f",
+    "status": "All jobs except navigation/aggregate passed. The navigation fixture is corrected in this follow-up; final-head checks are pending."
+  }
+}

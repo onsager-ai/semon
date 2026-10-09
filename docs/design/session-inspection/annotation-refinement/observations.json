@@ -1,0 +1,119 @@
+{
+  "baseline": "defe9d791a197902c5bebcba2e2b7fe87dd9a075",
+  "sourceCssSha256": "15b8d11293435b695f27171185a71a1789b1b379ed43d0b2f902e05471dd5c1b",
+  "bundleSha256": "64e02bfdf40d8e3bd02c73cd9583e98c0baa233c03edb6a786f8cd8f9980f7f7",
+  "cases": [
+    {
+      "width": 390,
+      "colorScheme": "light",
+      "before": true,
+      "heights": [
+        217.234375,
+        217.78125,
+        232.375
+      ],
+      "compiledFrontend": false,
+      "baselineOverlay": true,
+      "keyboardExpansion": false,
+      "directNavigationAndBack": false
+    },
+    {
+      "width": 390,
+      "colorScheme": "light",
+      "before": false,
+      "heights": [
+        62,
+        62,
+        62
+      ],
+      "compiledFrontend": true,
+      "baselineOverlay": false,
+      "keyboardExpansion": true,
+      "directNavigationAndBack": true
+    },
+    {
+      "width": 390,
+      "colorScheme": "dark",
+      "before": true,
+      "heights": [
+        217.234375,
+        217.78125,
+        232.375
+      ],
+      "compiledFrontend": false,
+      "baselineOverlay": true,
+      "keyboardExpansion": false,
+      "directNavigationAndBack": false
+    },
+    {
+      "width": 390,
+      "colorScheme": "dark",
+      "before": false,
+      "heights": [
+        62,
+        62,
+        62
+      ],
+      "compiledFrontend": true,
+      "baselineOverlay": false,
+      "keyboardExpansion": true,
+      "directNavigationAndBack": true
+    },
+    {
+      "width": 1280,
+      "colorScheme": "light",
+      "before": true,
+      "heights": [
+        183.78125,
+        164.390625,
+        162.6875
+      ],
+      "compiledFrontend": false,
+      "baselineOverlay": true,
+      "keyboardExpansion": false,
+      "directNavigationAndBack": false
+    },
+    {
+      "width": 1280,
+      "colorScheme": "light",
+      "before": false,
+      "heights": [
+        36,
+        36,
+        36
+      ],
+      "compiledFrontend": true,
+      "baselineOverlay": false,
+      "keyboardExpansion": true,
+      "directNavigationAndBack": true
+    },
+    {
+      "width": 1280,
+      "colorScheme": "dark",
+      "before": true,
+      "heights": [
+        183.78125,
+        164.390625,
+        162.6875
+      ],
+      "compiledFrontend": false,
+      "baselineOverlay": true,
+      "keyboardExpansion": false,
+      "directNavigationAndBack": false
+    },
+    {
+      "width": 1280,
+      "colorScheme": "dark",
+      "before": false,
+      "heights": [
+        36,
+        36,
+        36
+      ],
+      "compiledFrontend": true,
+      "baselineOverlay": false,
+      "keyboardExpansion": true,
+      "directNavigationAndBack": true
+    }
+  ]
+}

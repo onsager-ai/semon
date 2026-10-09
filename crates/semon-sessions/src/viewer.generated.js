@@ -5666,47 +5666,66 @@ globalThis.__semonUIShared = __semonUIShared;
             "data-entry-key": entry2.entryKey,
             "data-h": entry2.handoff,
             children: [
-              /* @__PURE__ */ jsxs("span", { class: "cc-head", children: [
+              /* @__PURE__ */ jsxs("div", { class: "cc-head", children: [
+                /* @__PURE__ */ jsxs("span", { class: "cc-identity", children: [
+                  /* @__PURE__ */ jsx(
+                    "button",
+                    {
+                      class: "cc-name who-link",
+                      type: "button",
+                      "aria-label": "Open " + entry2.name,
+                      onClick: (event) => {
+                        if (event.currentTarget.isConnected) owner.host.session(entry2.id, entry2.turn);
+                      },
+                      children: screenText(entry2.name)
+                    }
+                  ),
+                  /* @__PURE__ */ jsxs("span", { class: "cc-meta", children: [
+                    entry2.mark && /* @__PURE__ */ jsx(Harness, { mark: entry2.mark }),
+                    screenText(entry2.meta)
+                  ] })
+                ] }),
+                /* @__PURE__ */ jsx(State, { state: entry2.state, label: entry2.stateLabel, text: entry2.stateLabel }),
                 /* @__PURE__ */ jsx(
                   "button",
                   {
-                    class: "cc-name who-link",
+                    class: "ibtn cc-toggle",
                     type: "button",
-                    "aria-label": "Open " + entry2.name,
+                    "aria-label": (open ? "Collapse " : "Expand ") + entry2.name + " details",
+                    "aria-expanded": open,
                     onClick: (event) => {
-                      if (event.currentTarget.isConnected) owner.host.session(entry2.id, entry2.turn);
+                      if (!event.currentTarget.isConnected || owner.disposed) return;
+                      if (open) owner.open.delete(key2);
+                      else owner.open.add(key2);
+                      owner.change(key2);
                     },
-                    children: screenText(entry2.name)
+                    children: /* @__PURE__ */ jsx(Glyph, { path: entry2.chevron, className: "chev" })
                   }
-                ),
-                /* @__PURE__ */ jsx(State, { state: entry2.state, label: entry2.stateLabel, text: entry2.stateLabel }),
-                /* @__PURE__ */ jsx(Glyph, { path: entry2.chevron, className: "chev" })
+                )
               ] }),
-              /* @__PURE__ */ jsxs("span", { class: "cc-meta", children: [
-                entry2.mark && /* @__PURE__ */ jsx(Harness, { mark: entry2.mark }),
-                screenText(entry2.meta)
-              ] }),
-              /* @__PURE__ */ jsx("span", { class: "cc-brief", children: /* @__PURE__ */ jsx(Inline, { text: entry2.brief }) }),
-              entry2.result ? /* @__PURE__ */ jsxs("span", { class: "cc-result" + (entry2.failed ? " err" : ""), children: [
-                /* @__PURE__ */ jsx("span", { class: "rl", children: entry2.failed ? "Result: " : "Returned: " }),
-                /* @__PURE__ */ jsx(Inline, { text: entry2.result })
-              ] }) : entry2.activity && /* @__PURE__ */ jsxs("span", { class: "cc-now", children: [
-                /* @__PURE__ */ jsx("span", { class: "spin" }),
-                /* @__PURE__ */ jsx("span", { children: screenText(entry2.activity[0]) }),
-                /* @__PURE__ */ jsx("code", { children: entry2.activity[1] })
-              ] }),
-              entry2.trace && /* @__PURE__ */ jsx(
-                "button",
-                {
-                  class: "link cc-run",
-                  type: "button",
-                  "aria-label": entry2.traceLabel,
-                  onClick: (event) => {
-                    if (event.currentTarget.isConnected) owner.host.trace(entry2.trace);
-                  },
-                  children: "Run view"
-                }
-              )
+              /* @__PURE__ */ jsxs("div", { class: "cc-details", hidden: !open, children: [
+                /* @__PURE__ */ jsx("span", { class: "cc-brief", children: /* @__PURE__ */ jsx(Inline, { text: entry2.brief }) }),
+                entry2.result ? /* @__PURE__ */ jsxs("span", { class: "cc-result" + (entry2.failed ? " err" : ""), children: [
+                  /* @__PURE__ */ jsx("span", { class: "rl", children: entry2.failed ? "Result: " : "Returned: " }),
+                  /* @__PURE__ */ jsx(Inline, { text: entry2.result })
+                ] }) : entry2.activity && /* @__PURE__ */ jsxs("span", { class: "cc-now", children: [
+                  /* @__PURE__ */ jsx("span", { class: "spin" }),
+                  /* @__PURE__ */ jsx("span", { children: screenText(entry2.activity[0]) }),
+                  /* @__PURE__ */ jsx("code", { children: entry2.activity[1] })
+                ] }),
+                entry2.trace && /* @__PURE__ */ jsx(
+                  "button",
+                  {
+                    class: "link cc-run",
+                    type: "button",
+                    "aria-label": entry2.traceLabel,
+                    onClick: (event) => {
+                      if (event.currentTarget.isConnected) owner.host.trace(entry2.trace);
+                    },
+                    children: "Run view"
+                  }
+                )
+              ] })
             ]
           }
         );
@@ -6650,6 +6669,7 @@ globalThis.__semonUIShared = __semonUIShared;
 
   // src/lib/geometry.ts
   var properties2 = {
+    minHeight: "min-height",
     paddingBottom: "padding-bottom",
     scrollPaddingTop: "scroll-padding-top",
     barHeight: "--barh",

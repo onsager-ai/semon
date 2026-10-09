@@ -154,12 +154,14 @@ export default async function full(browser) {
     await page.screenshot({ path: path.join(ENV.out, 'full-relay.png') });
   }
 
-  // A spawn card's brief is clamped to two lines whatever its length (the card opens the session; there is no "Show more"), and the
-  // card keeps its own box: what follows it starts below it.
+  // A compact linked row discloses its complete brief in place; long content stays
+  // within the expanded region and the following transcript stays below it.
   {
     let probe = null;
     for (const id of lanes) {
       await openLane(id);
+      if (await page.locator('.cc-toggle').count())
+        await page.locator('.cc-toggle').first().click();
       probe = await page.evaluate(() => {
         const c = document.querySelector('.child-card');
         if (!c) return null;
@@ -196,14 +198,13 @@ export default async function full(browser) {
     r.expect(!!probe, 'the fixture needs a spawn card on some session');
     if (probe) {
       r.expect(
-        probe.clamp === '2' &&
-          probe.scroll > probe.client + 1 &&
-          probe.client <= probe.line * 2 + 2,
-        'the spawn brief is clamped to two lines: ' + JSON.stringify(probe),
+        probe.clamp === 'none' && probe.client >= probe.scroll - 1 && probe.client > probe.line * 2,
+        'the expanded linked brief retains its complete text: ' + JSON.stringify(probe),
       );
       r.expect(
         probe.cardInside && probe.nextBelow && probe.sideways <= 0,
-        'a long brief stays inside its card, with what follows below it: ' + JSON.stringify(probe),
+        'a long brief stays inside its disclosure, with what follows below it: ' +
+          JSON.stringify(probe),
       );
     }
   }
