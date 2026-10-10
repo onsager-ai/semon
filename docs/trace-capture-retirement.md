@@ -27,6 +27,30 @@ cargo build --release --locked --manifest-path /path/to/legacy-semon/Cargo.toml 
   -p semon-codex -p semon-claude -p semon-copilot -p semon-cli
 ```
 
+This revision also preserves historical `semon log`, selected `semon forensic`,
+the complete `--export-store` alias and explicit `semon forget --forensic`,
+including durable queued Relay deletion. They are retired from the current CLI,
+along with the `semon-store` package. Use the exact preserved binary by its
+private absolute path, with an explicit `--store`; follow the
+[historical inspection/deletion procedure](trace-store-export.md#legacy-inspection-and-deliberate-deletion).
+Current session/query/MCP commands use native sources and the Session Event
+Index/Catalog, with no historical Store dependency.
+
+The Linux x86_64 `semon-linux-x86_64` artifact from
+[release run 38050996502](https://github.com/onsager-ai/semon/actions/runs/38050996502)
+was qualified against 12 synthetic inspection/export/deletion cases, including
+shared traces and source lines, unprojected/unlinked rows, private excerpts,
+confirmation refusal, unchanged occurrence logs after deletion and a durable
+offline Relay deletion request. Artifact ID `11669627595` has ZIP SHA-256
+`bb733325e53587478517011fad9e9165100b18edf9f4064d67d6a7f02ccabc7e`;
+its extracted `semon` has SHA-256
+`94958ab5b3ec22578cc1f509b003bf5cafe0b174288cb713ca78d9b32e19725f`.
+Actions retention expires November 9, 2026; preserve a checksummed source/binary
+copy rather than treating a temporary CI artifact as historical-data custody.
+Other platforms can build the locked pinned source above. Qualification used
+synthetic private stores only and does not establish that an existing deployment
+has been migrated.
+
 The pinned [Codex capture/repair/backfill guide](https://github.com/onsager-ai/semon/blob/0648a99f977971fb177a5dda7a445c4941d64b57/README.md#capture-codex-sessions)
 and [Copilot capture contract](https://github.com/onsager-ai/semon/blob/0648a99f977971fb177a5dda7a445c4941d64b57/docs/copilot-cli.md#existing-experimental-capture)
 document the historical behavior. `--repair-subagent-keys` and `--backfill-raw`
@@ -59,10 +83,9 @@ With explicit operator control, quiesce all writers before using the standalone
 [private forensic exporter](trace-store-export.md). Verify its versioned complete
 artifact using the documented verifier and preserve the original files. Export
 does not require a collector, does not open SQLite on the original, and refuses
-changed sources or newer schemas. Ordinary `semon log`, explicitly named
-`semon forensic`, and the existing export alias remain available in the main CLI
-for this migration stage. Preserve the standalone export tool beyond temporary
-CI artifact retention.
+changed sources or newer schemas. Historical inspection/deletion is supplied by
+the qualified pinned CLI above; the complete exporter remains an independent
+current tool. Preserve both exact tools beyond temporary CI artifact retention.
 
 The current CLI no longer accepts `semon ship` or reads its endpoint environment
 variable. Inventory scheduled invocations and downstream canonical-only receivers;

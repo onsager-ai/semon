@@ -9,8 +9,8 @@
 //! refused here instead ([`CanonicalError::UnsafeNumber`]), and a request
 //! carrying one is shown read-only.
 //!
-//! The encoder is `serde_json_canonicalizer`, already used by semon-store;
-//! the tests below pin it to the RFC's own vectors.
+//! The encoder is `serde_json_canonicalizer`; the tests below pin it to the
+//! RFC's own vectors independently of historical trace storage.
 
 use serde_json::Value;
 use sha2::{Digest, Sha256};

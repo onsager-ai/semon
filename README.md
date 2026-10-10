@@ -212,129 +212,31 @@ session mirrors. Their readable redacted copies are not end-to-end encrypted
 and are not complete workspace/harness recovery artifacts. Native agent handoff
 and peer communication events remain supported independently of Relay transport.
 
-## Read the log
+## Historical Trace Store data
 
-`semon log` renders the occurrence log — what was captured, joined to its
-semantics, in session/sequence order:
+The experimental Canonical Trace Store, its collector packages and `semon
+log`/`forensic`/`forget`/`ship` commands are retired from the current product.
+Native session browsing, query/MCP, generic Push/receive, SSH and runtime
+integration retain the separate Session Event Index and Catalog.
 
-```sh
-cargo run --locked -p semon-cli --bin semon -- log \
-  --store /path/to/traces.sqlite3 \
-  --repo repository-name \
-  --day 2026-09-20 \
-  --limit 100
-```
-
-`--repo`, `--day`, and `--limit` are all optional filters; an unfiltered call
-renders everything. This is an ordinary read: it queries only `occurrences`
-joined to `canonical_traces`, and is structurally unable to reach
-`raw_carrier_records` — enforced by a test that drops that table entirely and
-checks the output is byte-for-byte unchanged.
-
-## Read forensic records
-
-`semon forensic` is the only command that reads `raw_carrier_records` — the
-verbatim carrier bytes, including whatever prompts, responses, source code,
-credentials, and machine paths passed through a captured session. Every
-invocation writes a one-line warning to stderr before any output, so
-redirecting stdout to a file still shows it.
-
-Select exactly one of `--trace`, `--session`, or `--day`:
+Export an existing Store with the independent offline tool:
 
 ```sh
-cargo run --locked -p semon-cli --bin semon -- forensic \
-  --store /path/to/traces.sqlite3 \
-  --day 2026-09-20
-
-cargo run --locked -p semon-cli --bin semon -- forensic \
-  --store /path/to/traces.sqlite3 \
-  --session codex-session-id \
-  --out /path/to/forensic-excerpt.txt
+semon-forensic-export --store /private/history/traces.sqlite3 \
+  --out /private/history/trace-export-v1
 ```
 
-Output is one complete source line per raw record, verbatim bytes as stored. A Claude line with several projected blocks appears once, and replaying identical bytes at the same line key does not add another raw row. `--out FILE` writes to a file created (and re-tightened) `0600` instead of stdout; it is an option, not a requirement — bulk selection to stdout works without it, by design, so the command's honest bulk capability isn't fenced off behind a narrower one nobody chose. See `docs/design/forensic-retention-and-exposure.md` for the full reasoning.
+Quiesce writers under explicit operator control, verify the complete private
+artifact, and preserve original DB/WAL/SHM/journal files and cursors. The tool
+copies every table, including unprojected/unlinked forensic records, without
+opening SQLite on or modifying originals. It never stops services or deletes
+data. See [export, verification, inspection and deliberate deletion](docs/trace-store-export.md).
 
-`--session` and `--day` select each raw row's own session and timestamp, so they include complete lines that produced no semantic trace or occurrence. When a line has no source timestamp, capture time is used. `--trace` selects by projected content and therefore cannot select unprojected raw rows, which have no trace links; the command states that limit when the selector is used.
-
-## Export historical Trace Store
-
-For a complete historical backup, use `semon forensic --store PATH
---export-store NEW_DIRECTORY`. This creates a private, versioned SQLite artifact
-with all trace, occurrence and forensic tables, including unlinked raw records,
-without migrating or modifying the original. Pause store writers while exporting;
-the command refuses observed source changes and never stops services or deletes
-original data. See [the export and verification contract](docs/trace-store-export.md).
-
-## Forget forensic records
-
-
-`semon forget --forensic` permanently deletes rows from `raw_carrier_records`
-— the only supported way to remove forensic data. `canonical_traces` and
-`occurrences` (the log) are never touched, so `semon log` renders
-byte-for-byte identically before and after, including after the store is
-reopened. This is what makes the occurrence region's whole point reachable:
-see `docs/design/trace-identity-and-occurrences.md` on why the log is
-designed to survive forensic deletion.
-
-`--forensic` is required, and so is exactly one selector:
-
-```sh
-cargo run --locked -p semon-cli --bin semon -- forget --forensic \
-  --store /path/to/traces.sqlite3 \
-  --before 2026-01-01
-
-cargo run --locked -p semon-cli --bin semon -- forget --forensic \
-  --store /path/to/traces.sqlite3 \
-  --session codex-session-id \
-  --yes
-```
-
-To delete the relay's stored session payloads too, add `--relay-endpoint URL
---relay-state PATH --relay-config PATH` (and `--relay-ca CERT` for pinned HTTPS).
-Use the same state path, endpoint origin and enrolled identity as the running
-sender. `--session` and `--before` propagate; semantic `--trace` selectors cannot
-select replicated carrier frames. Each request is saved privately before it is
-sent, and offline requests remain visible as `pending_on_server` until a sender
-pass acknowledges them. Local-only deletion reports that server copies remain.
-
-The relay command also works independently of the forensic store:
-
-```sh
-semon-relay forget --session SESSION --endpoint https://receiver.example \
-  --state ~/.local/state/semon/relay.json --config ~/.config/semon --tls-ca receiver.pem
-```
-
-Relay deletion removes live and orphan frame payloads across generations and
-epochs. Body-free sequence tombstones, content hashes/tags, lease metadata and
-wrapped data-key envelopes remain so a sender can continue and old retransmits
-cannot restore forgotten bytes. Carrier files and copies another machine already
-restored are unaffected. `semon-relay forget --memory ROOT` (or `--memory-id ID`)
-queues a separate snapshot deletion; its cutoff is fixed when queued so retries
-do not delete newly created snapshots. Snapshot deletion requires a receiver
-with the snapshot protocol enabled.
-
-A bare `semon forget --forensic` with no selector is refused rather than
-deleting everything — this is the first destructive, irreversible command in
-the tool, so it never defaults to the maximal action.
-
-`--session` and `--before` select each raw record's own provenance, not by content: `--session ID` deletes exactly that session's own raw records, and `--before YYYY-MM-DD` deletes exactly the raw rows whose own timestamp is strictly before that UTC day's start, including unprojected lines. A trace that recurs after the cutoff keeps only its later capture. `--trace ID` is the exception: it matches projected content, so it removes every complete raw source line linked to that trace across sessions. If that line projected other traces, its bytes are deleted too; those traces and their occurrences remain. It cannot remove unprojected rows because they have no trace links. A raw record written before the schema-v3 session/sequence link existed cannot have its timestamp backfilled during the schema-v4 migration and cannot be reached by `--session` or `--before`; the command reports how many such records exist and that only `--trace` can remove them individually.
-
-Without `--yes`, the command prompts interactively, stating exactly how many
-raw records will be deleted and that it cannot be undone. If stdin is not a
-terminal and `--yes` is absent, it errors instead of proceeding
-non-interactively.
-
-The delete itself runs under `PRAGMA secure_delete = ON` (deleted content is
-overwritten with zeroes before its page is freed) and is followed by
-`VACUUM` (which rewrites the file without the freed pages at all), because a
-plain SQLite `DELETE` leaves deleted bytes readable on disk until the page is
-reused — theatre for a command whose purpose is removing credentials and
-source text.
-
-This does not change retention policy: nothing calls this automatically, and
-`docs/design/forensic-retention-and-exposure.md` Decision 1 still retains
-everything indefinitely by default. This adds a deliberate operator action,
-not a schedule.
+Existing installations can inspect private working copies or explicitly delete
+forensic records through the [qualified pinned legacy CLI/source](docs/trace-capture-retirement.md#pinned-legacy-tools).
+Preserve its checksum and existing Relay deletion queues before replacing an
+installed binary. Current commands fail explicitly before historical data
+access; installed services, databases, records, keys and queues remain untouched.
 
 ## Copilot CLI saved-state support
 
