@@ -13,7 +13,7 @@ Other versions and schemas produce an unsupported-format diagnostic. An SDK
 schema alone is insufficient to add support. Windows/macOS, IDE/cloud sessions,
 execution/recovery and other adapters are outside this release slice.
 
-## Read and collect
+## Read native sessions
 
 `COPILOT_HOME` overrides `~/.copilot`; `--copilot-home` overrides that default.
 Only `session-state/<sessionId>/events.jsonl` is authoritative. The first complete
@@ -22,15 +22,23 @@ matching its directory. Links and non-regular files are rejected. SQLite/WAL,
 workspace YAML, checkpoint Markdown, rewind snapshots and debug stores are never
 mirrored or used to infer relationships.
 
-Build both tools from the same checkout:
+Build the session CLI; native browsing does not require a capture adapter:
 
 ```sh
 cargo build --release --locked -p semon-cli --bin semon
-cargo build --release --locked -p semon-copilot
-semon-copilot --copilot-home /path/to/copilot
 semon sessions --copilot-home /path/to/copilot --all
 semon sessions --copilot-home /path/to/copilot --serve
 ```
+
+## Existing experimental capture
+
+`semon-copilot` writes the experimental Canonical Trace Store, separately from
+native source discovery and the retained Session Event Index/Catalog. New
+capture setup is no longer part of the session product. The following behavior
+is retained for existing installations and historical-data migration. Inventory
+any collector service, its store/cursor paths and replication destinations;
+follow the [private export contract](trace-store-export.md) before removal.
+No installed service, native home, cursor or database is changed automatically.
 
 A one-shot collection drains complete records. Continuous collection uses
 `semon-copilot --watch`, polling every two seconds. The default store is the

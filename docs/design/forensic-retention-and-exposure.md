@@ -102,7 +102,7 @@ The measured limitation above was resolved by `semon forget --forensic`: deliber
 
 ## What this does not decide
 
-Whether capture is installed. That is a separate decision: running `scripts/install-user-timer.sh` creates the credential-bearing artifact described above on a schedule, and this document only establishes the policy that was its precondition.
+Whether capture is installed. The former `scripts/install-user-timer.sh` created the credential-bearing artifact described above on a schedule. New periodic capture setup is retired; existing installed timers can still write and require explicit inventory and quiescence for export. This document preserves the retention and exposure policy for historical data; source-template removal does not stop a service or delete data.
 
 ## Capture custody for source revisions
 

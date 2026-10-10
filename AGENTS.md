@@ -32,7 +32,6 @@ cargo clippy --all-targets --locked -- --no-deps -D warnings
 cargo test --locked
 ```
 
-Installer changes also require `sh -n scripts/install-user-timer.sh`.
 Viewer changes require applicable fixture/browser suites and reviewed pixel
 baselines. Do not loosen existing thresholds or remove required checks.
 Use Node 22+ and the foundation lane's locked tooling: `npm --prefix ui ci
