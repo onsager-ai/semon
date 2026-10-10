@@ -2,6 +2,8 @@
 
 Encrypted Relay is being retired under [#380](https://github.com/onsager-ai/semon/issues/380).
 These commands remain available to inspect existing encrypted data during migration.
+New service setup is retired; follow the [retirement and custody contract](encrypted-relay-retirement.md)
+before changing an installed service or its data.
 Core and hosted source readers do not depend on Relay. Library users of
 `collect_remote` must explicitly enable `semon-sessions/encrypted-relay`; the
 existing `semon` CLI enables it while historical decryption/export is retained.
