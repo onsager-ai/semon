@@ -53,6 +53,14 @@ Permissions are set at creation and re-asserted on open, so an existing store wi
 
 `semon forensic` is the only path from the CLI to raw records. It selects by trace, by session, or by day.
 
+Retirement adds the explicit `--export-store NEW_DIRECTORY` mode on that same
+command. It exports every table, including unlinked raw records, to a private
+versioned SQLite artifact. Original files are opened only as read-only files;
+SQLite operates on generation-verified private copies. Selected modes and their
+existing stdout behavior remain unchanged. See [the migration export
+contract](../trace-store-export.md) for quiescence, schema versions, permissions,
+verification and incomplete-export handling. This adds no pruning or deletion.
+
 Session and day selection use the raw row's own provenance and therefore include unprojected lines. Trace selection follows `raw_record_traces` and returns each complete source line linked to the named trace once. An unprojected raw row has no trace link. The command states this limit when `--trace` is used.
 
 **Bulk selection is deliberate.** Reconstructing an incident means reading a whole session, and a tool that can only return one record at a time forces whoever needs that into `sqlite3` — an unaudited path with no guardrails at all. Honest capability beats a bar that is theatre against anyone who knows SQL.
