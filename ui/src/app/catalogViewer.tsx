@@ -20,6 +20,7 @@ import { renderCatalogList } from '../lib/catalog';
 import {
   renderSessionScreen,
   updateSessionControl,
+  updateSessionName,
   updateSessionPager,
   updateSessionRuntime,
   updateSessionJump,
@@ -46,6 +47,7 @@ interface SelectedView {
   root: HTMLElement;
   store: CatalogTranscriptStore;
   meta: CatalogSession | null;
+  observedName?: string;
   scroll: number;
   loading: boolean;
   note: string;
@@ -75,6 +77,7 @@ export function createCatalogViewer(
     selection = new CatalogSelectionStore(),
     navigation = new NavigationController({}),
     updates = new ViewUpdates();
+  let nameRefreshOffset = 0;
   let listRetry: number | undefined,
     listRetryDelay = 1000;
   let disposed = false,
@@ -204,17 +207,18 @@ export function createCatalogViewer(
       identity?.catalog_key === view.key &&
       identity.owner_qualification !== 'provisional' &&
       identity.native_id
-        ? control.view(identity.native_id)
+        ? control.view(identity.native_id, identity.source_key + ':' + view.key)
         : undefined;
     if (current) view.lastControl = current;
     const runtime = runtimeFor(view)?.observation,
       terminal = runtime && runtime.state !== 'active';
-    if ((current && !terminal) || !view.lastControl) return current;
+    if ((current && !terminal) || !view.lastControl)
+      return current ?? control.readOnly(view.key, view.sourceKey + ':' + view.key);
     const previous = current ?? view.lastControl;
     return {
       ...previous,
       busy: false,
-      uncertain: true,
+      uncertain: previous.uncertain,
       canReconnect: false,
       snapshot: {
         ...previous.snapshot,
@@ -327,7 +331,7 @@ export function createCatalogViewer(
       if (active) title.prepend(back);
       shell.topbar({
         titleSlot: title,
-        actions: active ? [sources, jumpActions] : sourcesOpen ? [] : [sources],
+        actions: sourcesOpen ? [] : [sources],
         session: !!active,
         lead: { label: 'Open menu', icon: I.menu },
         account: account
@@ -971,7 +975,10 @@ export function createCatalogViewer(
       view.store.destroy();
       view.store = candidate;
       view.renderedRevision = -1;
-      view.meta = candidate.selectedPage()!.session;
+      view.meta = {
+        ...candidate.selectedPage()!.session,
+        ...(view.observedName === undefined ? {} : { name: view.observedName }),
+      };
       view.note = '';
       view.retryDelay = 1000;
       if (active === view) {
@@ -1014,7 +1021,10 @@ export function createCatalogViewer(
         view.retryDelay = 1000;
         const current = view.store.selectedPage()!;
         const previousName = view.meta?.name;
-        view.meta = current.session;
+        view.meta = {
+          ...current.session,
+          ...(view.observedName === undefined ? {} : { name: view.observedName }),
+        };
         if (active === view) {
           void loadIdentity(view);
           if (previousName !== view.meta.name) chrome();
@@ -1160,6 +1170,91 @@ export function createCatalogViewer(
       if (capabilities.selected_transcript) await loadSelected(view);
     }
   }
+  async function refreshNames(sourceKey: string, epoch: number) {
+    const p = params();
+    p.set('limit', '60');
+    if (harness) p.set('harness', harness);
+    if (repo) p.set('repo', repo);
+    if (query && capabilities.metadata_search) p.set('q', query);
+    const value = parseCatalogPage(await api('/api/sessions?' + p));
+    if (
+      disposed ||
+      epoch !== sourcesEpoch ||
+      sourceKey !== capabilities.source_key ||
+      value.machine !== sourceKey ||
+      value.read_scope !== 'retained_history'
+    )
+      return;
+    const names = new Map(value.items.map((item) => [item.key, item.name]));
+    const view = active;
+    if (view && !names.has(view.key)) {
+      const selectedParams = params();
+      selectedParams.set('sid', view.key);
+      const selectedMeta = parseCatalogPage(await api('/api/sessions?' + selectedParams));
+      if (
+        disposed ||
+        epoch !== sourcesEpoch ||
+        sourceKey !== capabilities.source_key ||
+        selectedMeta.machine !== sourceKey ||
+        selectedMeta.read_scope !== 'retained_history'
+      )
+        return;
+      const match = selectedMeta.items.find((item) => item.key === view.key);
+      if (match) names.set(match.key, match.name);
+    }
+    // Rotate bounded exact lookups for loaded history and retained Recent views
+    // outside the first page. The active reader is always checked above.
+    const remaining = [
+      ...new Set([
+        ...items.map((item) => item.key),
+        ...[...selected.values()]
+          .filter((view) => view.sourceKey === sourceKey)
+          .map((view) => view.key),
+      ]),
+    ].filter((key) => !names.has(key));
+    for (let i = 0; i < Math.min(8, remaining.length); i++) {
+      const key = remaining[(nameRefreshOffset + i) % remaining.length];
+      const lookup = params();
+      lookup.set('sid', key);
+      const metadata = parseCatalogPage(await api('/api/sessions?' + lookup));
+      if (
+        disposed ||
+        epoch !== sourcesEpoch ||
+        sourceKey !== capabilities.source_key ||
+        metadata.machine !== sourceKey ||
+        metadata.read_scope !== 'retained_history'
+      )
+        return;
+      const item = metadata.items.find((item) => item.key === key);
+      if (item) names.set(key, item.name);
+    }
+    if (remaining.length) nameRefreshOffset = (nameRefreshOffset + 8) % remaining.length;
+    let changed = false;
+    items = items.map((item) => {
+      const name = names.get(item.key);
+      if (name === undefined || name === item.name) return item;
+      changed = true;
+      return { ...item, name };
+    });
+    for (const cached of selected.values()) {
+      const name = names.get(cached.key);
+      if (
+        cached.sourceKey === sourceKey &&
+        cached.meta &&
+        name !== undefined &&
+        cached.meta.name !== name
+      ) {
+        cached.observedName = name;
+        cached.meta = { ...cached.meta, name };
+        updateSessionName(cached.root, name);
+        changed = true;
+      }
+    }
+    if (changed) {
+      if (!active && !sourcesOpen) drawList();
+      chrome();
+    }
+  }
   async function recheckCapabilities() {
     const observedSource = capabilities.source_key,
       observedEpoch = sourcesEpoch;
@@ -1177,6 +1272,7 @@ export function createCatalogViewer(
         void loadCandidates(false);
       if (active) void loadIdentity(active);
       if (ready && active && !active.store.selectedPage()) void loadSelected(active);
+      await refreshNames(observedSource, observedEpoch);
     } catch (error) {
       if (disposed || observedEpoch !== sourcesEpoch || observedSource !== capabilities.source_key)
         return;

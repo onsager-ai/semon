@@ -17,11 +17,16 @@ const { outputFiles } = await build({
 });
 const html = (
   await readFile(new URL('../../crates/semon-sessions/src/viewer.html', import.meta.url), 'utf8')
-).replace('<script src="/viewer.js" defer></script>', '');
-const css = await readFile(
-  new URL('../../crates/semon-sessions/src/viewer.css', import.meta.url),
-  'utf8',
-);
+)
+  .replace('<script src="/viewer.js" defer></script>', '')
+  .replace('<link rel="stylesheet" href="/shell.css">', '');
+const css = (
+  await Promise.all(
+    ['viewer', 'shell'].map((name) =>
+      readFile(new URL(`../../crates/semon-sessions/src/${name}.css`, import.meta.url), 'utf8'),
+    ),
+  )
+).join('\n');
 const source = (key) => ({
   root: 'claude',
   path: key + '.jsonl',
@@ -517,11 +522,15 @@ test('temporary boot failure and pending projection recover without starting glo
     await page.getByText('Session history is unavailable.', { exact: false }).waitFor();
     await page.clock.runFor(1100);
     await page.locator('#page [data-id="one"]').click();
-    await page.getByText('This session has ended.', { exact: true }).waitFor();
+    await page
+      .getByRole('region', { name: 'Environment status' })
+      .getByText('This session has ended.', { exact: true })
+      .waitFor();
     await page
       .getByText('Current native session selection is unavailable.', { exact: false })
       .waitFor();
-    assert.equal(await page.locator('textarea').count(), 0);
+    assert.equal(await page.locator('.composer-unavailable').isVisible(), true);
+    assert.equal(await page.locator('textarea').isVisible(), false);
     assert.equal(
       requests.some((p) => p === '/api/model' || p === '/api/session-transcript'),
       false,
@@ -533,7 +542,10 @@ test('temporary boot failure and pending projection recover without starting glo
       .waitFor();
     await page.clock.runFor(1100);
     await page.locator('#page [data-entry-key="one:5"]').waitFor();
-    await page.getByText('This session has ended.', { exact: true }).waitFor();
+    await page
+      .getByRole('region', { name: 'Environment status' })
+      .getByText('This session has ended.', { exact: true })
+      .waitFor();
     assert.equal(requests.includes('/api/model'), false);
     await page.evaluate(() => app.destroy());
     const afterDestroy = requests.length;
@@ -1005,6 +1017,87 @@ for (const width of [390, 1280])
         false,
       );
       await page.evaluate(() => app.destroy());
+    } finally {
+      await browser.close();
+    }
+  });
+for (const width of [390, 1280])
+  test(`late name metadata updates list Recent and header without transcript reads at ${width}px`, async () => {
+    const browser = await chromium.launch();
+    try {
+      const page = await browser.newPage({ viewport: { width, height: 860 } });
+      let name = 'Initial native name',
+        reads = 0;
+      await page.route('http://catalog.test/**', (route) => {
+        const url = new URL(route.request().url());
+        if (url.pathname === '/api/session-capabilities')
+          return route.fulfill({ json: capabilities(true) });
+        if (url.pathname === '/api/sessions')
+          return route.fulfill({ json: list([{ ...meta('one'), name }]) });
+        if (url.pathname === '/api/session-identity')
+          return route.fulfill({ json: { api: 1, identity: identity('one') } });
+        if (url.pathname === '/api/session-transcript') {
+          reads++;
+          return route.fulfill({
+            json: {
+              ...transcript('one', url.searchParams),
+              session: { ...meta('one'), name: 'Initial native name' },
+            },
+          });
+        }
+        return route.fulfill({
+          contentType: url.pathname === '/viewer.css' ? 'text/css' : 'text/html',
+          body: url.pathname === '/viewer.css' ? css : html,
+        });
+      });
+      await page.goto('http://catalog.test/sessions');
+      await page.clock.install({ time: new Date('2026-10-10T00:00:00Z') });
+      await page.clock.pauseAt(new Date('2026-10-10T00:01:00Z'));
+      await page.addScriptTag({ content: outputFiles[0].text });
+      await page.evaluate(() => {
+        window.app = CatalogViewer.mountViewerApplication();
+      });
+      await page.locator('[data-session-row="list"][data-id="one"]').click();
+      await page.locator('[data-entry-key]').first().waitFor();
+      // Suppress only the existing content poll: name observations must work independently.
+      await page.evaluate(() =>
+        Object.defineProperty(document, 'visibilityState', {
+          configurable: true,
+          get: () => 'hidden',
+        }),
+      );
+      const firstReads = reads;
+      await page.evaluate(() => {
+        window.body = document.querySelector('.turns');
+        window.position = document.querySelector('#main').scrollTop;
+      });
+      name = 'Meaningful later name';
+      await page.clock.runFor(8100);
+      await page.waitForFunction(
+        () =>
+          document.querySelector('.catalog-session-name')?.textContent === 'Meaningful later name',
+      );
+      assert.equal(reads, firstReads);
+      assert.equal(await page.evaluate(() => body === document.querySelector('.turns')), true);
+      assert.match(await page.locator('#side-list').textContent(), /Meaningful later name/);
+      // Unchanged content can still carry its old brief during a later content poll.
+      await page.evaluate(() =>
+        Object.defineProperty(document, 'visibilityState', {
+          configurable: true,
+          get: () => 'visible',
+        }),
+      );
+      await page.clock.runFor(3100);
+      assert.equal(
+        await page.locator('.catalog-session-name').textContent(),
+        'Meaningful later name',
+      );
+      assert.equal(await page.evaluate(() => body === document.querySelector('.turns')), true);
+      await page.getByRole('button', { name: 'Back to sessions' }).click();
+      assert.match(
+        await page.locator('[data-session-row="list"][data-id="one"] .nm').innerText(),
+        /Meaningful later name/,
+      );
     } finally {
       await browser.close();
     }

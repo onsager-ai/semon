@@ -1,6 +1,6 @@
 import type { EffectScope } from './effects';
 import type { JsonObject } from '../lib/model';
-import { parseControl } from '../lib/control';
+import { parseControl, unavailableControl } from '../lib/control';
 import type { ControlSnapshot, ControlView } from '../lib/control';
 export type { ControlView } from '../lib/control';
 function record(value: unknown): value is JsonObject {
@@ -8,6 +8,7 @@ function record(value: unknown): value is JsonObject {
 }
 /** Live control owner. Uses accepted model transactions and the existing effect scope; no poller. */
 export function createLocalControl(scope: EffectScope, refresh: () => void) {
+  const drafts = new Map<string, string>();
   let current: ControlSnapshot | null = null;
   let busy = false;
   let note = '';
@@ -110,7 +111,7 @@ export function createLocalControl(scope: EffectScope, refresh: () => void) {
       }
     }
   }
-  function view(sid?: string): ControlView | undefined {
+  function view(sid?: string, draftKey = sid ?? current?.thread ?? ''): ControlView | undefined {
     if (!current || (sid && sid !== current.thread)) return undefined;
     const target = current;
     const selected = selection;
@@ -121,6 +122,12 @@ export function createLocalControl(scope: EffectScope, refresh: () => void) {
         ? write(op, extra)
         : Promise.resolve(false);
     return {
+      get draft() {
+        return drafts.get(draftKey) ?? '';
+      },
+      setDraft(text: string) {
+        drafts.set(draftKey, text);
+      },
       snapshot: current,
       busy,
       uncertain,
@@ -148,6 +155,17 @@ export function createLocalControl(scope: EffectScope, refresh: () => void) {
     current = value;
   }
   return {
+    readOnly(sid: string, draftKey = sid): ControlView {
+      return {
+        ...unavailableControl(sid),
+        get draft() {
+          return drafts.get(draftKey) ?? '';
+        },
+        setDraft(text) {
+          drafts.set(draftKey, text);
+        },
+      };
+    },
     prepare: parseControl,
     adopt: apply,
     unavailable() {

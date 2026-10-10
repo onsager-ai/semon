@@ -1,3 +1,4 @@
+import { toolInfo } from '../domain/toolNames';
 import { STATE } from './registry';
 import { I } from './registry';
 import type { ViewerModelStore } from '../state/model';
@@ -182,45 +183,6 @@ export function createTranscriptView(host: TranscriptViewHost) {
 
   // What a tool call did: an icon and verb for its step row, and a phrase and nouns for a group summary
   // ("ran 2 commands, asked you 1 question"). An unknown tool keeps its own name ("TodoWrite 1 step").
-  const RUN = ['run', 'Ran', 'ran', 'command', 'commands'],
-    FIND = ['find', 'Searched for', 'searched', 'time', 'times'];
-  const TOOLS: Record<string, string[]> = {
-    Bash: RUN,
-    shell: RUN,
-    exec_command: RUN,
-    local_shell: RUN,
-    write_stdin: ['run', 'Sent input to', 'sent input to', 'time', 'times'],
-    Grep: FIND,
-    Glob: FIND,
-    Read: ['read', 'Read', 'read', 'file', 'files'],
-    Edit: ['edit', 'Edited', 'edited', 'file', 'files'],
-    MultiEdit: ['edit', 'Edited', 'edited', 'file', 'files'],
-    Write: ['edit', 'Wrote', 'wrote', 'file', 'files'],
-    apply_patch: ['edit', 'Patched', 'patched', 'file', 'files'],
-    NotebookEdit: ['edit', 'Edited', 'edited', 'notebook', 'notebooks'],
-    AskUserQuestion: ['q', 'Asked you', 'asked you', 'question', 'questions'],
-    ToolSearch: ['find', 'Loaded', 'loaded', 'tool', 'tools'],
-    SendMessage: ['out', 'Sent', 'sent', 'message', 'messages'],
-    SendUserFile: ['out', 'Sent you', 'sent you', 'file', 'files'],
-    Agent: ['out', 'Started', 'started', 'agent', 'agents'],
-    Task: ['out', 'Started', 'started', 'agent', 'agents'],
-    Monitor: ['now', 'Watched', 'watched', 'process', 'processes'],
-    ScheduleWakeup: ['now', 'Scheduled', 'scheduled', 'wake-up', 'wake-ups'],
-    TaskStop: ['x', 'Stopped', 'stopped', 'task', 'tasks'],
-    Artifact: ['ext', 'Published', 'published', 'page', 'pages'],
-    WebFetch: ['ext', 'Fetched', 'fetched', 'page', 'pages'],
-    WebSearch: ['search', 'Searched the web for', 'searched the web', 'time', 'times'],
-    Skill: ['stack', 'Used skill', 'used', 'skill', 'skills'],
-  };
-  const toolInfo = (name: string) => {
-    if (TOOLS[name]) return TOOLS[name];
-    const m = /^mcp__(.+?)__/.exec(name);
-    if (m) {
-      const srv = m[1].replace(/^claude_ai_/, '').replace(/_/g, ' ');
-      return ['ext', 'Used ' + srv, 'used ' + srv, 'time', 'times'];
-    }
-    return ['run', name, name, 'step', 'steps'];
-  };
   const verb = (name: string) => toolInfo(name).slice(0, 2);
   const NOW_VERB: Record<string, string> = {
     Ran: 'Running',

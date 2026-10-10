@@ -201,6 +201,33 @@ export function overhaulPortReference(D, html) {
     'thoughtSeconds',
     '  function thoughtSeconds(entries, i, sid) { const secs = entries[i]?.secs; return Number.isFinite(secs) && secs >= 0 ? secs : null; }',
   );
+  // Approved staging reader contract: retain the independent mockup renderer,
+  // with the compact recorded-thinking disclosure and categorized one-line summary.
+  out = swapLine(
+    out,
+    '        g.append(el("div", "think-label", thoughtLabel(secs)), markdown(thoughtText(e), "think-text")); tx.append(g);',
+    '        const disclosure = btn("think-label think-disclosure"); disclosure.setAttribute("aria-expanded", "false"); disclosure.append(icon("m9 5 7 7-7 7", "chev"), document.createTextNode(thoughtLabel(secs).replace(/ · /g, "\u2009 · \u2009"))); disclosure.addEventListener("click", () => { const open = disclosure.getAttribute("aria-expanded") === "true"; disclosure.setAttribute("aria-expanded", String(!open)); disclosure.querySelector(".chev").classList.toggle("open", !open); if (open) g.querySelector(".think-text")?.remove(); else g.append(markdown(thoughtText(e), "think-text")); }); g.append(disclosure); tx.append(g);',
+  );
+  out = swapLine(
+    out,
+    '    const t = transcript(sid); t.append(jumpWrap); page.append(t);',
+    '    const t = transcript(sid), dock = el("div", "session-dock"), jumpSlot = el("div", "session-jump-slot"), controls = el("section", "local-control"), unavailable = btn("composer-unavailable"); jumpSlot.append(jumpWrap); unavailable.append(el("span", null, "Native session controls are unavailable."), el("span", null, "⌄")); controls.append(unavailable); dock.append(jumpSlot, controls); page.append(t, dock);',
+  );
+  const stagingStyles = `
+.think-disclosure { display: flex; align-items: center; gap: var(--s2); min-height: var(--tap); padding: 0; border: 0; background: transparent; text-align: left; }
+.think-disclosure .chev { flex: none; width: 16px; height: 16px; }
+.think-disclosure .chev.open { transform: rotate(90deg); }
+.tsum .tt { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tsum .chev { flex: none; }
+.step .sv { flex: none; max-width: 60%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.page:has(> .transcript) { display: flex; flex-direction: column; min-height: calc(100dvh - 56px); padding-bottom: calc(var(--s4) + env(safe-area-inset-bottom, 0px)); }
+.page > .transcript { flex: none; }
+.session-dock { position: sticky; bottom: calc(var(--s4) + env(safe-area-inset-bottom, 0px)); margin-top: auto; padding-top: var(--s2); background: var(--ground); }
+.session-jump-slot { display: flex; justify-content: center; }
+.composer-unavailable { display: flex; align-items: center; justify-content: space-between; gap: var(--s2); width: 100%; min-height: var(--tap); padding: var(--s2) var(--s3); border: 0; background: transparent; color: var(--muted); font-size: var(--fs-sm); text-align: left; }
+@media (pointer: coarse) { .composer-unavailable { min-height: 44px; } }
+`;
+  out = out.replace('</style>', stagingStyles + '</style>');
   // The mockup sets inline code in a transcript at .86em of 13px (11.2px), under the 12px floor its own principle P3 sets (and
   // the tokens check enforces); the viewer floors it at the caption size, so the reference does too.
   out = swapLine(

@@ -112,7 +112,28 @@ export function createPagerController<Route extends object, Range extends Paging
         if (state.busy || state.failed) continue;
         const observer = new IntersectionObserver(
           (entries) => {
-            if (observers.get(button) === observer && entries.some((entry) => entry.isIntersecting))
+            // The dock clips transcript paint, including the pager's prefetched
+            // area. Keep the existing 800px loading margin in scroll geometry.
+            const transcript = button.closest('.transcript');
+            let near = false;
+            if (transcript && getComputedStyle(transcript).clipPath.startsWith('inset(')) {
+              const box = button.getBoundingClientRect();
+              const viewport = scrollRoot?.getBoundingClientRect() ?? {
+                top: 0,
+                bottom: innerHeight,
+                left: 0,
+                right: innerWidth,
+              };
+              near =
+                box.right > viewport.left &&
+                box.left < viewport.right &&
+                box.bottom > viewport.top - (direction === 'before' ? 800 : 0) &&
+                box.top < viewport.bottom + (direction === 'after' ? 800 : 0);
+            }
+            if (
+              observers.get(button) === observer &&
+              (near || entries.some((entry) => entry.isIntersecting))
+            )
               void load(button, false);
           },
           {

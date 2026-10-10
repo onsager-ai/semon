@@ -302,3 +302,35 @@ rather than cutting a glyph at the canvas edge; expanded tasks/results wrap
 without a clamp. This corrects the native demonstration, not product typography
 or row density. Hosts may use the shared finite `minHeight` geometry slot for
 visible-viewport fitting; layout policy and listener lifetime remain host-owned.
+
+
+## 11. Approved staging reader corrections
+
+Keep the existing typography, shell, tool categories, icons and tool input/output
+surfaces. Recorded readable Thinking starts as a compact keyboard disclosure;
+pending and masked thinking retain their existing meaning. Expansion follows
+stable record/slot identities through pagination, renaming and incremental updates.
+Built-in MCP labels show provider and action for dotted and double-underscore
+formats; unfamiliar identities retain the original name.
+
+Tool category summaries occupy one line. Ellipsis applies to summary text only;
+failure counts and disclosure controls stay visible. Expanded rows keep complete
+recorded information. Names update from source-qualified native metadata without
+replacing a transcript or its draft.
+
+Jump to latest belongs at the lower center of the reading region, above the
+conversation input or its unavailable row. The dock fits the visible viewport,
+safe area and expanded composer. Its measured transcript paint boundary leaves
+text above the dock while retaining the document/desktop scroll owners and
+anchor calculations. It disappears at the latest output.
+
+Available conversation input starts at one line and expands on focus. Unavailable
+input becomes a quiet reason row, labeled with a saved draft when present. A
+keyboard-accessible disclosure reveals the disabled input and retained draft.
+Capability recovery restores input; readable history never grants send authority.
+Drafts belong to source and session identity and clear only after confirmed
+acceptance of that exact draft. Unknown delivery remains blocked from replay.
+
+The written staging requirements are the implementation contract when the owner
+authenticated Site cannot be opened. This section changes the conversation reader
+only; new-task composer variants retain their existing design contracts.
