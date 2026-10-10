@@ -213,6 +213,15 @@ does not mark unmerged implementation or unrun recovery drills complete.
 
 ## Evidence and remaining gates
 
+The staged catalog producer separates shared native derivation from legacy
+analytics, window transport and model serialization. Bounded source preparation
+and complete catalog observation return native rows/slot recipes before those
+compatibility phases. Catalog-only background demand refreshes its own source
+snapshot without publishing a `Built` model. Explicit legacy reads and model
+warmers remain supported until their consumers migrate. Complete observation
+still discovers and joins all native sources; this slice does not claim bounded
+incremental reconciliation or removal of Hub hydration and MCP dependencies.
+
 Extraction must preserve authored CLI/test bytes and all existing command
 behavior. Feature isolation must test both core and explicit encrypted-reader
 builds; whole-workspace feature unification alone cannot prove core independence.

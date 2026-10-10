@@ -6459,6 +6459,105 @@ fn read_catalog(home: &Home) -> (String, Vec<summary::CatalogRow>) {
     (generation, rows)
 }
 
+#[test]
+fn catalog_observation_preserves_model_projections_without_compatibility_preparation() {
+    let home = Home::new();
+    home.top(
+        "root",
+        &[
+            human("root", ts(0, 0), "native prompt"),
+            assistant(
+                "root",
+                ts(0, 1),
+                vec![tool("spawn", "Agent", json!({"prompt":"child task"}))],
+            ),
+        ],
+    );
+    home.agent(
+        "root",
+        "child",
+        "spawn",
+        &[user("root", ts(0, 2), "child prompt")],
+    );
+    home.codex("codex-root", json!({}), &[]);
+    home.codex("codex-fork", json!({"forked_from_id":"codex-root"}), &[]);
+    home.live(42, "root", "working", json!({}));
+    let projection = || {
+        let catalog = read_catalog(&home);
+        let connection = rusqlite::Connection::open(EventCache::path(&home.options.cache)).unwrap();
+        let mut statement = connection
+            .prepare("SELECT metadata FROM session_slots ORDER BY session_key,slot")
+            .unwrap();
+        let slots: Vec<String> = statement
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        (catalog.0, serde_json::to_string(&catalog.1).unwrap(), slots)
+    };
+    let observe = || {
+        let before = COMPAT_BUILDS.with(std::cell::Cell::get);
+        let pids = observe_catalog(
+            &home.options,
+            &mut EventCache::open_scoped(&home.options.cache).unwrap(),
+            &mut false,
+            &mut Texts::default(),
+            NOW,
+        )
+        .unwrap();
+        assert_eq!(COMPAT_BUILDS.with(std::cell::Cell::get), before);
+        assert!(pids.contains(&42));
+    };
+    home.build();
+    let original = projection();
+    observe();
+    assert_eq!(projection(), original);
+    append_records(
+        &home,
+        "root",
+        &[assistant("root", ts(0, 3), vec![text("new source answer")])],
+    );
+    observe();
+    let appended = projection();
+    assert_ne!(appended.0, original.0);
+    home.build();
+    assert_eq!(projection(), appended);
+    let reply = crate::session_transcript_range(
+        &home.options,
+        "fixture",
+        "sid=root&after=0&limit=100",
+        None,
+    );
+    assert_eq!(reply.status, 200);
+    assert!(String::from_utf8_lossy(&reply.body).contains("new source answer"));
+    fs::remove_file(
+        home.root
+            .join("claude/projects/-work-proj/root/subagents/agent-child.jsonl"),
+    )
+    .unwrap();
+    observe();
+    let removed = projection();
+    assert!(
+        read_catalog(&home)
+            .1
+            .iter()
+            .any(|row| row.lifecycle == summary::CatalogLifecycle::Retained)
+    );
+    home.build();
+    assert_eq!(projection(), removed);
+    let before = COMPAT_BUILDS.with(std::cell::Cell::get);
+    let mut inputs = crate::inputs::inputs(&home.options).unwrap();
+    inputs.retain(|input| input.path.ends_with(".jsonl"));
+    prepare_sources(
+        &home.options,
+        &mut EventCache::open_scoped(&home.options.cache).unwrap(),
+        &inputs,
+        NOW,
+    )
+    .unwrap();
+    assert_eq!(COMPAT_BUILDS.with(std::cell::Cell::get), before);
+}
+
 #[cfg(unix)]
 #[test]
 fn unsupported_summary_path_encoding_preserves_native_model_without_panic() {
