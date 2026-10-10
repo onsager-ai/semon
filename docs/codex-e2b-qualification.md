@@ -8,16 +8,19 @@ dependencies for #250–#256; Daytona #257 remains deferred.
 ## Reconciliation against main
 
 Reviewed main `cd5b6a3` on 2026-10-03, together with #248–#257 and #10.
-`semon-relay` already discovers Codex rollouts, handles rewrite generations,
-restores verified original rollout bytes, and checks the target's OS writer
-lock. It does not restore the workspace, authentication, or SQLite state.
+At that historical revision, `semon-relay` discovered Codex rollouts, handled
+rewrite generations, restored verified rollout bytes, and checked the target's
+OS writer lock. It did not restore the workspace, authentication or SQLite state.
+Current product builds retire Relay under the [custody contract](encrypted-relay-retirement.md).
+Independent recovery in #255 requires explicit verified/versioned artifacts;
+retaining the old transport is not a runtime dependency.
 [The existing spike](codex-resume-spike.md) qualifies a minimal synthetic
 thread on CLI `0.159.0-alpha.3`, not authenticated model work.
 
 The [Push protocol](mirror-protocol.md) already provides cursor restart and
 receiver-prefix reconciliation. Its mirror contains redacted inputs and facts;
-it is not a complete harness/workspace backup. Relay fencing fences streams,
-not workspace writers. No Push WAL or replication redesign is justified by
+it is not a complete harness/workspace backup. Historical Relay fencing fenced
+streams; it did not establish workspace writer authority. No Push WAL or replication redesign is justified by
 the evidence available here.
 
 Core lifecycle contracts belong in Semon. Durable embedding-server records,

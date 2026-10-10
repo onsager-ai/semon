@@ -9,11 +9,16 @@ templates. Removing source templates does not stop installed units, change
 configuration, revoke identities or remove data. External deployment locations
 are not yet known; checked-in units are not evidence that installations are absent.
 
-Core Sessions/Push and Hub exclude Encrypted Relay. The CLI still enables the
-transitional encrypted reader and retains Relay access/deletion commands while
-historical data migration is qualified. Hub's independent credential-vault
-encryption remains supported. Generic Push/receive, hosted synchronization, SSH,
-native agent handoff/peer events and runtime lifecycle remain supported.
+The current product workspace no longer includes `semon-relay`, its transport,
+identity/enrollment, sender/receiver, snapshot, lease, takeover or restore code.
+Sessions removes `collect_remote`, the `encrypted-relay` feature and its exclusive
+lease metadata; the CLI rejects retired encrypted-view flags before discovering
+sources or opening keys. Normal builds no longer resolve the Relay crypto stack.
+The independent custody exporter and offline history reader remain available;
+the latter builds against a clean historical source outside this workspace.
+Hub's independent credential-vault encryption remains supported. Generic
+Push/receive, hosted synchronization, SSH, native agent handoff/peer events and
+runtime lifecycle remain supported.
 
 ## Inventory before changing an installation
 
@@ -38,12 +43,17 @@ its key or assume that new recipient enrollment covers historical ciphertext.
 
 ## Retained inspection and migration limits
 
-The existing `semon-relay keys show --config PATH` reports public identity and
-fingerprint values. [Encrypted remote trees](encrypted-remote-sessions.md) and
-`semon-relay verify --session SESSION --endpoint URL --config PATH` retain their
-authenticated decryption, continuity and tip checks. Snapshot listing/restore and
-other legacy commands remain available with their existing explicit targets and
-authorization. A metadata tree or stream verification does not prove that every
+Retain the legacy source at commit
+`0648a99f977971fb177a5dda7a445c4941d64b57` and a working legacy binary before
+upgrading an installation that uses Relay. Build `semon-relay` and `semon-cli`
+with `cargo build --locked --release -p semon-relay -p semon-cli --bins` in that
+clean historical checkout, never in the current product workspace. Its
+`semon-relay keys show --config PATH` reports public identity/fingerprint values.
+[Historical encrypted remote trees](history/encrypted-remote-sessions.md) and
+`semon-relay verify --session SESSION --endpoint URL --config PATH` preserve the
+old authenticated decryption, continuity and tip checks. Snapshot listing/restore
+and explicit deletion likewise belong to those retained legacy tools and their
+original authorization boundaries. A metadata tree or stream verification does not prove that every
 historical blob, orphan generation or divergent snapshot is recoverable.
 
 The independent [Relay custody exporter](relay-custody-export.md) preserves every

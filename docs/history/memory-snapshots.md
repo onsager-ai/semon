@@ -1,4 +1,13 @@
-# Mutable memory snapshots
+# Historical mutable memory snapshots
+
+This records snapshot behavior at source commit
+`0648a99f977971fb177a5dda7a445c4941d64b57`. These commands are available only
+in retained legacy tools. Current product builds remove the Relay snapshot
+protocol. Follow the [retirement and custody contract](../encrypted-relay-retirement.md)
+and [offline history export](../relay-history-export.md) before changing existing
+artifacts. Future recovery follows explicit verified/versioned artifacts in
+[#255](https://github.com/onsager-ai/semon/issues/255). The behavior below does
+not establish complete workspace or native-harness recovery.
 
 `semon-relay snapshot` keeps an encrypted history of explicitly selected file or
 directory roots. It uses the relay's enrolled age recipients and signed TLS
