@@ -5,6 +5,12 @@ identity_impact: replaces the product's scope, storage substrate, and transport
 
 # Carrier-neutral trace storage and lossy reactivation
 
+Historical architecture, superseded by the
+[Session foundation retirement](session-foundation-retirement.md). Reactivation,
+capability negotiation and cue retrieval are not current delivery requirements.
+Existing storage/identity/forensic contracts remain migration obligations; the
+periodic capture installer and source unit templates are retired.
+
 **Semon captures an agent's own working memory from one carrier, stores it in a
 carrier-neutral form addressed by content, and re-activates it into a different
 carrier — accepting that every re-activation is lossy and making the loss
@@ -55,7 +61,7 @@ remain design decisions before those interfaces can ship.
 
 **Removed.** `otlp_payload:391`, `export:454`, `any_value:381` — OTLP transport. `clickhouse/schema.sql` entire, including the `events_from_otel_logs` materialized view. `otel-collector-config.yaml`. `docker-compose.yml`. `analysis/queries.sql` — five cost and usage queries belonging to the product being abandoned.
 
-**Re-scoped.** `systemd/devlog-codex-tailer.*` keeps its shape as a periodic capture trigger and loses both its name and its OTLP assumption.
+**Retired.** The former `systemd/devlog-codex-tailer.*` periodic capture templates and installer are removed from the source tree. Existing installed services are untouched and require explicit inventory and historical-data export before uninstall.
 
 ## The trace schema
 
