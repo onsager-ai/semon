@@ -8,6 +8,14 @@ are available only at the [pinned historical revision](../trace-capture-retireme
 Historical `traces.sqlite3` records retain their forensic custody/export policy.
 This decision preserves the core Session Event Index and Catalog.
 
+Current native queries also consume a generation-bound, allowlisted Codex header
+from the existing index metadata region. It preserves first-record identity and
+ancestry without storing message bodies or changing the schema. Verified Codex
+eviction binds that persisted header; prior archive markers retain their event
+rows. See the [current query contract](../../crates/semon-sessions/src/query/README.md)
+for repair, size limits and remaining provider/dependency work. The historical
+Phase B and compatibility-serving proposals below remain historical.
+
 Read at `c4ec3f5`, with #104 (refresh pool) and #105 (server-side analytics) read from their open branches. Claims marked *measured* were measured on 2026-09-29; claims marked *inference* were not.
 
 ## The recommendation in brief

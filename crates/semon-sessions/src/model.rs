@@ -28,7 +28,7 @@ pub(crate) mod summary;
 use serde_json::Value;
 
 use crate::{
-    Marker, Options, attachments, codex_meta, events,
+    Marker, Options, attachments, events,
     events::{
         ACK, ANSWERED, ASYNC, DENIED, Event, EventCache, FileIndex, Kind, PIN, SEND_FAILED, UNKNOWN,
     },
@@ -1057,8 +1057,9 @@ struct AgentMeta {
     branch: Option<String>,
 }
 
-#[derive(Default, Debug)]
-struct CodexMeta {
+#[derive(Clone, Default, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct CodexMeta {
     history: Option<CodexHistory>,
     parent_thread: Option<String>,
     nickname: Option<String>,
@@ -1067,6 +1068,29 @@ struct CodexMeta {
     cwd: Option<String>,
     branch: Option<String>,
     guardian_review: bool,
+}
+
+impl CodexMeta {
+    pub(crate) fn from_meta(meta: &Value) -> Self {
+        Self {
+            history: CodexHistory::from_meta(meta),
+            parent_thread: field(meta, "parent_thread_id").map(str::to_owned),
+            nickname: field(meta, "agent_nickname").map(str::to_owned),
+            path: field(meta, "agent_path").map(str::to_owned),
+            subagent: field(meta, "thread_source") == Some("subagent"),
+            cwd: field(meta, "cwd").map(str::to_owned),
+            branch: meta
+                .get("git")
+                .and_then(|git| field(git, "branch"))
+                .map(str::to_owned),
+            guardian_review: field(meta, "thread_source") == Some("guardian_review")
+                || meta
+                    .get("source")
+                    .and_then(|source| source.get("subagent"))
+                    .and_then(|subagent| field(subagent, "other"))
+                    == Some("guardian"),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -1395,27 +1419,19 @@ fn scan(
             seen.insert(path.to_string_lossy().into_owned());
             continue;
         }
-        let Ok(meta) = texts.meta(&path, true, codex_meta) else {
-            continue;
-        };
-        let Some(id) = meta
-            .as_ref()
-            .and_then(|meta| field(meta, "id"))
-            .map(str::to_owned)
-            .or_else(|| crate::codex_id_from_filename(&path))
-        else {
-            continue;
-        };
         let stamp = stamp_of(&path);
         let Ok(summary) = events::scan_file(&path, "codex", cache, dirty) else {
             continue;
         };
-        let meta = if cache.replaced(&path) {
-            texts.invalidate(&path);
-            texts.meta(&path, true, codex_meta)?.unwrap_or(Value::Null)
-        } else {
-            meta.unwrap_or(Value::Null)
+        let Some(header) = summary.codex_header.as_ref() else {
+            return Err(io::Error::other("native Codex header was not observed"));
         };
+        let Some(id) = header.native_id(&path) else {
+            continue;
+        };
+        if cache.replaced(&path) {
+            texts.invalidate(&path);
+        }
         texts.generation(&path, stamp);
         seen.insert(path.to_string_lossy().into_owned());
         files.push(SourceFile {
@@ -1425,24 +1441,7 @@ fn scan(
             id,
             first: summary.first,
             last: summary.last,
-            role: Role::Codex(CodexMeta {
-                history: CodexHistory::from_meta(&meta),
-                parent_thread: field(&meta, "parent_thread_id").map(str::to_owned),
-                nickname: field(&meta, "agent_nickname").map(str::to_owned),
-                path: field(&meta, "agent_path").map(str::to_owned),
-                subagent: field(&meta, "thread_source") == Some("subagent"),
-                cwd: field(&meta, "cwd").map(str::to_owned),
-                branch: meta
-                    .get("git")
-                    .and_then(|git| field(git, "branch"))
-                    .map(str::to_owned),
-                guardian_review: field(&meta, "thread_source") == Some("guardian_review")
-                    || meta
-                        .get("source")
-                        .and_then(|source| source.get("subagent"))
-                        .and_then(|subagent| field(subagent, "other"))
-                        == Some("guardian"),
-            }),
+            role: Role::Codex(header.metadata.clone()),
             path,
             summary,
         });

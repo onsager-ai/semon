@@ -54,6 +54,7 @@ mod read_path;
 pub(crate) use read_path::open_input;
 mod model_delta;
 mod native_field;
+mod native_header;
 mod read_capabilities;
 mod source_inventory;
 pub use source_inventory::SessionSourceInventory;
@@ -828,12 +829,15 @@ fn codex_meta(path: &Path) -> io::Result<Option<Value>> {
     let mut reader = BufReader::new(sealed::LogFile::open(path)?);
     let mut line = Vec::new();
     reader.read_until(b'\n', &mut line)?;
-    let meta = serde_json::from_slice::<Value>(&line).ok().filter(|value| {
-        value.is_object()
-            && field(value, "type") == Some("session_meta")
-            && field(&value["payload"], "id").is_some()
-    });
-    Ok(meta.map(|value| value["payload"].clone()))
+    let record = serde_json::from_slice::<Value>(&line).ok();
+    Ok(record.as_ref().and_then(codex_meta_payload).cloned())
+}
+
+fn codex_meta_payload(record: &Value) -> Option<&Value> {
+    (record.is_object()
+        && field(record, "type") == Some("session_meta")
+        && field(&record["payload"], "id").is_some())
+    .then(|| &record["payload"])
 }
 
 fn codex_id_from_filename(path: &Path) -> Option<String> {

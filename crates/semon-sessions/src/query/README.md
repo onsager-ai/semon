@@ -69,5 +69,22 @@ costs requires scoped dependency selection and independently authorized provider
 access for the producer. Verified archive eviction now explicitly retains an
 exact existing native index generation in the same database, instead of letting
 missing-source reconciliation discard it. This metadata does not make a source
-current, contain bodies or supply native headers and relationship closure by
-itself. No full-workspace discovery or archive cost is claimed retired yet.
+current, contain bodies or select the query's relationship closure by itself.
+
+The native producer now reads Codex identity, ancestry, guardian/subagent role,
+cwd and branch from an allowlisted first-record header committed with the event
+ledger in the existing index metadata region. Cold queries reuse unchanged
+headers. Missing, unsupported or mismatched metadata is repaired from the native
+first physical record without replaying unchanged event rows. Header bytes are
+rechecked before commit; valid unterminated headers retain the original identity
+behavior without advancing the complete-line offset. Unknown fields and message
+bodies are excluded. This is a private implementation detail, with no schema or
+parser version bump.
+
+New Codex archive eviction requires that generation's persisted header and binds
+its exact encoding into the archive marker. Earlier markers still preserve their
+event rows; they cannot qualify another Codex eviction without native header
+repair. Metadata larger than 1 MiB remains complete in memory, is not persisted
+or truncated, and cannot qualify eviction. This does not supply Claude sidecars,
+Semon parent markers or authorized provider reads. No full-workspace discovery
+or archive cost is claimed retired yet.

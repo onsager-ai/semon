@@ -35,6 +35,13 @@ pub(crate) use store::{archive_index_retained, retain_archive_index};
 thread_local! {
     /// Reads of the persisted event cache on this thread.
     pub(crate) static CACHE_READS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    pub(crate) static CODEX_HEADER_READS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    static AFTER_CODEX_HEADER: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) fn set_codex_header_hook(hook: impl FnOnce() + 'static) {
+    AFTER_CODEX_HEADER.with(|value| *value.borrow_mut() = Some(Box::new(hook)));
 }
 
 /// The parser's version: what the fold functions derive from a line. The
@@ -271,6 +278,8 @@ impl DirtyRows {
 #[derive(Clone, Debug, Default)]
 pub(crate) struct FileIndex {
     pub(crate) dirty_rows: Option<DirtyRows>,
+    /// Allowlisted first-record metadata observed on the same native generation.
+    pub(crate) codex_header: Option<crate::native_header::CodexHeader>,
     pub(crate) events: Vec<Event>,
     /// Transcript-only items the model's rules never read: thinking blocks,
     /// harness text added before a Codex prompt, and completed Codex operations.
@@ -1642,6 +1651,7 @@ pub(crate) fn scan_file(
     let key = path.to_string_lossy().into_owned();
     if let Some(entry) = cache.files.get(&key)
         && !cache.unpersisted.contains(&key)
+        && (harness != "codex" || entry.index.codex_header.is_some())
         && entry.ledger.stat == Stat::of(path)?
     {
         trace("unchanged");
@@ -1669,6 +1679,7 @@ pub(crate) fn scan_file(
             // Another process already read it as it is now.
             if ledger.stat == stat
                 && let Some(index) = &base
+                && (harness != "codex" || index.codex_header.is_some())
             {
                 trace("unchanged");
                 // The store holds it as it is now: nothing waits to be written.
@@ -1703,6 +1714,29 @@ pub(crate) fn scan_file(
         if shared {
             cache.index_clone += clone_started.elapsed();
         }
+        let header_bytes = if harness == "codex" {
+            // Preserve first-physical-line and unfinished-header semantics.
+            // The same open native handle supplies the event ledger and header.
+            file.seek(SeekFrom::Start(0))?;
+            let mut line = Vec::new();
+            BufReader::new(&mut file).read_until(b'\n', &mut line)?;
+            #[cfg(test)]
+            CODEX_HEADER_READS.with(|reads| reads.set(reads.get() + 1));
+            writable.codex_header = Some(
+                serde_json::from_slice::<Value>(&line)
+                    .ok()
+                    .as_ref()
+                    .map(crate::native_header::CodexHeader::from_record)
+                    .unwrap_or_default(),
+            );
+            #[cfg(test)]
+            if let Some(hook) = AFTER_CODEX_HEADER.with(|hook| hook.borrow_mut().take()) {
+                hook();
+            }
+            Some(line)
+        } else {
+            None
+        };
         writable.dirty_rows = Some(DirtyRows::begin(writable));
         let offset = parse(&mut file, from, harness, writable)?;
         let changes = writable
@@ -1710,6 +1744,22 @@ pub(crate) fn scan_file(
             .take()
             .expect("parser tracks dirty rows");
         let (prefix, tail) = consumed_hashes(&mut file, offset)?;
+        if let Some(header) = header_bytes {
+            file.seek(SeekFrom::Start(0))?;
+            let mut verified = Vec::new();
+            BufReader::new(&mut file).read_until(b'\n', &mut verified)?;
+            #[cfg(test)]
+            CODEX_HEADER_READS.with(|reads| reads.set(reads.get() + 1));
+            if verified != header {
+                if last {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "native Codex header changed while indexing",
+                    ));
+                }
+                continue;
+            }
+        }
         let ledger = Ledger {
             stat,
             offset,
