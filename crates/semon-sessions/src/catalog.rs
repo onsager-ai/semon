@@ -381,6 +381,14 @@ pub fn session_catalog_page(options: &Options, machine: &str, query: &str) -> Vi
     }
 }
 
+/// Validate focused catalog arguments before selecting source custody. This
+/// performs no I/O and returns the same argument errors as the page reader.
+/// It grants no authority; source scope, cursor generation and access still
+/// require validation by the host and `session_catalog_page`.
+pub fn validate_session_catalog_query(query: &str) -> Result<(), ViewerReply> {
+    Request::parse(query).map(|_| ())
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Cursor {
