@@ -195,6 +195,8 @@ fn export_with_hook(
             );
         }
         let root = fs::canonicalize(&supplied)?;
+        root.to_str()
+            .ok_or("non-UTF-8 custody input roots are unsupported; originals remain untouched")?;
         if original != stamp(&fs::symlink_metadata(&root)?)? {
             return Err("source generation changed during resolution".into());
         }
@@ -593,6 +595,26 @@ mod tests {
         assert_eq!(
             fs::read_to_string(strange).unwrap(),
             "unknown private bytes"
+        );
+        let non_utf8_root = root.0.join(std::ffi::OsString::from_vec(vec![0xff]));
+        fs::create_dir(&non_utf8_root).unwrap();
+        fs::write(non_utf8_root.join("identity.age"), "private root bytes").unwrap();
+        let before = inventory(&non_utf8_root).unwrap();
+        let target = root.0.join("unsupported-root");
+        let error = export(
+            &[Input {
+                kind: Kind::Config,
+                path: non_utf8_root.clone(),
+            }],
+            &target,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("non-UTF-8 custody input roots"));
+        assert!(!target.exists());
+        assert_eq!(inventory(&non_utf8_root).unwrap(), before);
+        assert_eq!(
+            fs::read_to_string(non_utf8_root.join("identity.age")).unwrap(),
+            "private root bytes"
         );
     }
 }
