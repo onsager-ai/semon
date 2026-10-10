@@ -14,6 +14,266 @@ use super::*;
 
 static NEXT: AtomicU64 = AtomicU64::new(0);
 
+/// A retired native cohort cannot be refreshed after the source mutation.
+/// This also reproduces an active call racing a writer after its index build.
+fn retained_query(home: &Home) -> Query {
+    let core = Arc::new(ViewerCore::new(home.options.clone()));
+    let mut query = Query::from_native_core(core.clone());
+    query.call_at("list_sessions", &json!({}), NOW).unwrap();
+    core.close();
+    query
+}
+
+#[test]
+fn query_source_reads_allow_append_without_reading_beyond_the_cohort() {
+    use std::io::Write;
+    let home = fixture();
+    let mut query = retained_query(&home);
+    let args = json!({"id":"lead"});
+    let before = query.call_at("read_transcript", &args, NOW).unwrap();
+    let search = json!({"text":"new evidence"});
+    let missing = query.call_at("find", &search, NOW).unwrap();
+    let path = home
+        .options
+        .claude_home
+        .join("projects/-work-proj/lead.jsonl");
+    let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
+    writeln!(
+        file,
+        "{}",
+        assistant("lead", ts(2, 0), vec![text("new evidence")])
+    )
+    .unwrap();
+    assert_eq!(
+        query.call_at("read_transcript", &args, NOW).unwrap(),
+        before
+    );
+    assert_eq!(query.call_at("find", &search, NOW).unwrap(), missing);
+    assert!(
+        !home.query().call_at("find", &search, NOW).unwrap()["matches"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn query_source_reads_reject_interior_rewrites_even_with_restored_mtime() {
+    let home = Home::new("rewritten");
+    home.top(
+        "lead",
+        &[assistant(
+            "lead",
+            ts(1, 0),
+            vec![text(
+                &("x".repeat(5000) + "old evidence" + &"y".repeat(5000)),
+            )],
+        )],
+    );
+    let mut query = retained_query(&home);
+    let path = home
+        .options
+        .claude_home
+        .join("projects/-work-proj/lead.jsonl");
+    let before = fs::metadata(&path).unwrap();
+    let bytes = fs::read_to_string(&path).unwrap();
+    fs::write(&path, bytes.replace("old evidence", "new evidence")).unwrap();
+    fs::File::options()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_modified(before.modified().unwrap())
+        .unwrap();
+    assert_eq!(fs::metadata(&path).unwrap().len(), before.len());
+    assert_eq!(
+        query
+            .call_at("read_transcript", &json!({"id":"lead"}), NOW)
+            .unwrap_err()
+            .code,
+        "io"
+    );
+    assert_eq!(
+        query
+            .call_at("find", &json!({"text":"new evidence"}), NOW)
+            .unwrap_err()
+            .code,
+        "io"
+    );
+}
+
+#[test]
+fn query_source_reads_reject_replacement_and_deletion() {
+    for delete in [false, true] {
+        let home = fixture();
+        let mut query = retained_query(&home);
+        let path = home
+            .options
+            .claude_home
+            .join("projects/-work-proj/lead.jsonl");
+        let before = fs::metadata(&path).unwrap();
+        let bytes = fs::read(&path).unwrap();
+        // Keep the original inode alive to avoid inode reuse in the fixture.
+        fs::rename(&path, path.with_extension("retired")).unwrap();
+        if !delete {
+            fs::write(&path, bytes).unwrap();
+            fs::File::options()
+                .write(true)
+                .open(&path)
+                .unwrap()
+                .set_modified(before.modified().unwrap())
+                .unwrap();
+        }
+        assert_eq!(
+            query
+                .call_at("read_transcript", &json!({"id":"lead"}), NOW)
+                .unwrap_err()
+                .code,
+            "io"
+        );
+        assert_eq!(
+            query
+                .call_at("find", &json!({"text":"parser"}), NOW)
+                .unwrap_err()
+                .code,
+            "io"
+        );
+    }
+}
+
+#[test]
+fn query_source_paging_checks_only_touched_sources_and_rechecks_cached_lines() {
+    let home = fixture();
+    let mut query = retained_query(&home);
+    let before = query
+        .call_at("read_transcript", &json!({"id":"lead"}), NOW)
+        .unwrap();
+    fs::remove_file(
+        home.options
+            .claude_home
+            .join("projects/-work-proj/done.jsonl"),
+    )
+    .unwrap();
+    assert_eq!(
+        query
+            .call_at("read_transcript", &json!({"id":"lead"}), NOW)
+            .unwrap(),
+        before
+    );
+
+    let data = &query.evidence().parts[0].data;
+    let records = data.sources.reader();
+    let mut read = |path: &std::path::Path, offset| records.read(path, offset);
+    let mut lines = tx::Lines::provider(&mut read);
+    let slot = data.tx["lead"]
+        .slots
+        .iter()
+        .find(|slot| matches!(slot.kind, SlotKind::A))
+        .unwrap();
+    let texts = tx::slot_texts(&mut lines, slot);
+    let path = home
+        .options
+        .claude_home
+        .join("projects/-work-proj/lead.jsonl");
+    let bytes = fs::read_to_string(&path).unwrap();
+    fs::write(&path, bytes.replace("On it.", "Oh no.")).unwrap();
+    assert_eq!(
+        tx::slot_texts(&mut lines, slot),
+        texts,
+        "exercise the pager's native record cache"
+    );
+    assert!(
+        records.finish().is_err(),
+        "cached bytes cannot hide a changed source at completion"
+    );
+}
+
+#[test]
+fn query_source_paging_preserves_large_prompts_and_cached_image_ranges() {
+    let home = Home::new("images");
+    let mut png = vec![0xFF; 4 * 1024 * 1024];
+    png[..8].copy_from_slice(b"\x89PNG\r\n\x1a\n");
+    let encoded = crate::attachments::tests::encode(&png);
+    let record = json!({"type":"user","sessionId":"images","timestamp":ts(1,0),"message":{"role":"user","content":[
+        text("Inspect both images"),
+        {"type":"image","source":{"type":"base64","media_type":"image/png","data":encoded}},
+        {"type":"image","source":{"type":"base64","media_type":"image/png","data":encoded}},
+    ]}});
+    let raw = record.to_string().replace('/', "\\/") + "\n";
+    assert!(raw.len() as u64 > tx::LINE_MAX);
+    home.write("claude/projects/-work-proj/images.jsonl", &raw);
+    let core = Arc::new(ViewerCore::new(home.options.clone()));
+    let legacy = core.respond("GET", "/api/tx", "sid=images", None);
+    assert_eq!(legacy.status, 200);
+    let mut expected: Value = serde_json::from_slice(&legacy.body).unwrap();
+    expected["window_start"] = Value::Null;
+    assert_eq!(expected["entries"][0]["img"].as_array().unwrap().len(), 2);
+    let mut query = Query::from_native_core(core.clone());
+    let before = crate::model::COMPAT_BUILDS.with(|count| count.get());
+    let actual = query
+        .call_at("read_transcript", &json!({"id":"images"}), NOW)
+        .unwrap();
+    // The served pager uses wall time only for an unfinished background tool;
+    // this fixed prompt fixture has no such entries.
+    assert_eq!(actual, expected);
+    assert_eq!(
+        crate::model::COMPAT_BUILDS.with(|count| count.get()),
+        before
+    );
+    let data = &query.evidence().parts[0].data;
+    let slot = data.tx["images"]
+        .slots
+        .iter()
+        .find(|slot| slot.file.is_some())
+        .unwrap();
+    let records = data.sources.reader();
+    let (prompt, bytes) = records
+        .prompt(slot.file.as_deref().unwrap(), slot.offset)
+        .unwrap();
+    assert!(
+        bytes < 1024,
+        "authenticated prompt reads must retain image-range elision"
+    );
+    assert_eq!(
+        prompt["message"]["content"][0]["text"],
+        "Inspect both images"
+    );
+    assert_eq!(prompt["message"]["content"][1]["source"]["data"], "");
+    records.finish().unwrap();
+}
+
+#[test]
+fn query_source_reads_preserve_log_sealing_without_rebuilding_the_cohort() {
+    let home = Home::new("sealed");
+    home.top(
+        "lead",
+        &[assistant(
+            "lead",
+            ts(1, 0),
+            vec![text(&"source evidence ".repeat(1000))],
+        )],
+    );
+    let mut query = retained_query(&home);
+    let args = json!({"id":"lead"});
+    let before = query.call_at("read_transcript", &args, NOW).unwrap();
+    let search = json!({"text":"source evidence"});
+    let found = query.call_at("find", &search, NOW).unwrap();
+    let path = home
+        .options
+        .claude_home
+        .join("projects/-work-proj/lead.jsonl");
+    assert!(
+        crate::sealed::seal(&path, 1, u64::MAX)
+            .unwrap()
+            .added
+            .is_some()
+    );
+    assert_eq!(
+        query.call_at("read_transcript", &args, NOW).unwrap(),
+        before
+    );
+    assert_eq!(query.call_at("find", &search, NOW).unwrap(), found);
+}
+
 /// 2026-09-24T00:00:00Z.
 const BASE: i64 = 1_790_208_000_000;
 /// A day later: every session in the home has been quiet for hours.

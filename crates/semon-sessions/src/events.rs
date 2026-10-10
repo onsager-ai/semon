@@ -741,7 +741,7 @@ impl Stat {
         Self::from_metadata(&fs::metadata(path)?)
     }
 
-    fn from_metadata(metadata: &fs::Metadata) -> io::Result<Self> {
+    pub(crate) fn from_metadata(metadata: &fs::Metadata) -> io::Result<Self> {
         let modified_ns = metadata
             .modified()?
             .duration_since(UNIX_EPOCH)
@@ -794,7 +794,7 @@ impl Ledger {
     /// offset: the same identity, at least as long, and the consumed prefix
     /// unchanged. That covers a file that grew and one only touched; any
     /// other change (a rewrite, a truncation, a new inode) rereads it.
-    fn resumes(&self, stat: &Stat, file: &mut LogFile) -> bool {
+    pub(crate) fn resumes(&self, stat: &Stat, file: &mut LogFile) -> bool {
         self.stat.dev == stat.dev
             && self.stat.ino == stat.ino
             && self.offset <= stat.size
