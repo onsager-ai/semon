@@ -11,10 +11,11 @@ The core CLI lives in `semon-cli`; session discovery/parsing and focused reads l
 in `semon-sessions`, generic mirror synchronization in `semon-push`, SSH onboarding
 in `semon-ssh`, and runtime/control integration in `semon-runtime`/`semon-control`.
 
-The experimental Canonical Trace Store (`semon-store` and Codex/Claude/Copilot
-capture adapters), Encrypted Relay (`semon-relay`), and full-workspace Viewer
-compatibility are being retired in dependency-safe stages. Existing trace,
-forensic and encrypted-data commands remain available during migration. The CLI
+The experimental Canonical Trace Store (`semon-store`), Encrypted Relay
+(`semon-relay`), and full-workspace Viewer compatibility are being retired in
+dependency-safe stages. The three Trace Store capture packages are retired.
+Existing trace, forensic and encrypted-data commands remain available during
+migration. The CLI
 temporarily retains those dependencies; extraction alone does not remove them.
 See the [verified assessment, component decisions and migration path](docs/design/session-foundation-retirement.md).
 The Session Event Index and source-backed reads are retained.
@@ -23,10 +24,10 @@ The former OTLP, OpenTelemetry Collector, ClickHouse, and analytics pipeline is
 intentionally gone. Semon is local-first and does not configure or assume a
 central endpoint.
 
-Raw forensic records can contain prompts, responses, source code, credentials,
-commercial data, and machine paths. They are retained in full and
-indefinitely — every complete source line, with no pruning, opt-out, or
-sampling — so the store file is created `0600` and its parent directory
+Historical raw forensic records can contain prompts, responses, source code,
+credentials, commercial data, and machine paths. They are retained in full and
+indefinitely, with no automatic pruning. The legacy collectors retained every
+complete consumed source line. The store file is created `0600` and its parent directory
 `0700`, and both are re-tightened on every open rather than trusted from a
 prior run. That access control is the only remaining protection; keep the
 database local, and a private repository is not a safe destination for
@@ -173,69 +174,15 @@ Or put it in a project's `.mcp.json`:
 }
 ```
 
-## Capture Codex sessions
+## Historical Trace Store collectors
 
-The following capture commands document existing installations during retirement.
-They are unnecessary for session browsing or synchronization. Preserve existing
-state and export historical data before changing an installation.
-
-Run one cursor-aware capture pass with:
-
-```sh
-cargo run --locked -p semon-codex -- --verbose
-```
-
-On current Codex installations, the adapter captures session rollouts from
-`~/.codex/sessions/**/*.jsonl`. It also reads the legacy `~/.codex/history.jsonl`
-when that file exists, for compatibility with older versions, and writes traces to
-`~/.local/share/semon/traces.sqlite3`, and preserves the existing tailer's
-cursor location at `~/.local/state/devlog/codex-tailer.json`. The corresponding
-XDG base-directory variables override those roots.
-
-Command action traces keep the first parsed action/path for compatibility. A
-compound command additionally carries ordered `components: [{action, path}]`
-for every `parsed_cmd` entry; its exit code describes the whole command, not
-each component. Simple command identities are unchanged; compound identities
-include their complete projected component list. The path rule normalizes
-relative and absolute action paths and marks escapes as `<external>`.
-Human-authored intent/outcome text stays verbatim, including any paths the
-author typed, so machine independence applies to action projection rather than
-to arbitrary authored prose.
-
-Recent Codex versions do not write the legacy history file. Its absence is normal
-and the adapter skips it without an error. User turns recorded in session rollouts
-are still captured; separate legacy history-entry traces are absent. The adapter
-does not read Codex SQLite history databases. The isolated
-[resume spike](docs/codex-resume-spike.md) measures minimal paginated rollout
-replay and database reconstruction, rather than assuming a database is a drop-in
-replacement for the old history file.
-
-Useful source and destination overrides are:
-
-```sh
-cargo run --locked -p semon-codex -- \
-  --sessions /path/to/sessions \
-  --history /path/to/history.jsonl \
-  --state /path/to/cursor.json \
-  --store /path/to/traces.sqlite3 \
-  --repo repository-name \
-  --verbose
-```
-
-Only complete JSONL records advance the cursor. Truncated files restart at
-offset zero, and an incomplete final line waits for the next pass. The semantic
-projection contains only authored work intent/outcome. Codex session IDs,
-timestamps, repository inference, machine paths, token counts, tool framing,
-and the full source object stay out of content identity. The exact original
-line is retained only through the store's explicit forensic read surface.
-
-For stores that captured Codex subagent rollouts before the subagent session key fix, run `semon-codex --repair-subagent-keys --dry-run` first with the same `--store`, `--state`, and source path options used for capture, then omit `--dry-run` to repair the stored keys and occurrences. The repair uses only source lines up to saved cursor offsets and skips a parent group if any tracked source file is missing or shorter than its saved offset. Opening the store for the dry run can still migrate an older schema.
-
-## Backfilling raw lines from before schema v4
-
-Run this after upgrading a store whose adapter cursors advanced past unprojected lines before schema v4. Back up the store first, then run each adapter with `--backfill-raw --dry-run` and the same `--store`, `--state`, and source path options used for capture. For example, run `semon-codex --backfill-raw --dry-run --store /path/to/traces.sqlite3 --state /path/to/codex-state.json --sessions /path/to/sessions --history /path/to/history.jsonl` and `semon-claude --backfill-raw --dry-run --store /path/to/traces.sqlite3 --state /path/to/claude-state.json --projects /path/to/projects`. Omit `--dry-run` to insert the missing raw lines. Both commands replay only files recorded in their cursor state and stop at each saved offset; live capture handles newer lines. They never advance the cursor or create traces, occurrences, or raw trace links.
-
-The report counts files and complete lines scanned, raw rows already present, and rows inserted (or rows that would be inserted for a dry run). It lists each missing file, each file shorter than its saved offset as rewritten, and each misaligned file with its first mismatching sequence. A misaligned file has a stored raw row at that line key with different bytes and no matching row; the command inserts nothing for that file. Inspect those files before retrying. An aligned second run inserts zero rows. Opening the store, including during a dry run, performs any pending schema migration; a live v3 store migrates to v5 when opened.
+The experimental `semon-codex`, `semon-claude` and `semon-copilot` packages are
+retired. Native session parsing, browsing, queries and synchronization remain
+supported independently of `traces.sqlite3`. Existing collectors and data are
+not changed automatically. Preserve a pinned legacy source/binary for historical
+repair/backfill, inventory writers and export the Store privately before changing
+an installation. See the [capture custody and pinned-tool reference](docs/trace-capture-retirement.md)
+and [independent forensic exporter](docs/trace-store-export.md).
 
 ## Replicate canonical traces
 
@@ -410,8 +357,9 @@ acceptance limitations](docs/copilot-cli.md).
 
 ## Existing capture installations
 
-New periodic Trace Store capture installation is retired. The repository no
-longer ships `install-user-timer.sh` or `devlog-codex-tailer` unit templates.
+Trace Store collector packages and new periodic capture installation are retired.
+The repository no longer ships `install-user-timer.sh` or `devlog-codex-tailer`
+unit templates.
 Session browsing and generic Push read native logs directly and need no capture
 adapter or `traces.sqlite3`.
 
@@ -421,8 +369,8 @@ can still write to the store; inventory them and any manually configured
 Claude/Copilot collectors and ship endpoints. Preserve the installed unit/config
 and cursor paths, then follow the [private export contract](docs/trace-store-export.md)
 with explicit writer quiescence before deciding to uninstall capture. Existing
-adapter repair/backfill and historical log/forensic commands remain available
-through this migration stage.
+adapter repair/backfill commands require the [pinned legacy tools](docs/trace-capture-retirement.md).
+Historical log/forensic/export commands remain in the main CLI during migration.
 
 ## Development checks
 

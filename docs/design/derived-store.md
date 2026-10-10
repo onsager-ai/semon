@@ -2,6 +2,12 @@
 
 Status: historical design, reconciled for #320. The event SQLite store, incremental ledgers and in-memory session reuse are implemented; the first persisted description slice is documented in [incremental-model.md](incremental-model.md). The remaining Phase B/shadow-serving plan below is proposed, not a current implementation inventory. The Product Foundation task authorizes the scoped implementation work; this design grants no additional scope.
 
+The separate Canonical Trace Store capture pipeline is retired under the
+[Session foundation direction](session-foundation-retirement.md); its collectors
+are available only at the [pinned historical revision](../trace-capture-retirement.md).
+Historical `traces.sqlite3` records retain their forensic custody/export policy.
+This decision preserves the core Session Event Index and Catalog.
+
 Read at `c4ec3f5`, with #104 (refresh pool) and #105 (server-side analytics) read from their open branches. Claims marked *measured* were measured on 2026-09-29; claims marked *inference* were not.
 
 ## The recommendation in brief
@@ -88,7 +94,7 @@ The path is derived from `Options::cache` as the event cache's is today: `sessio
 | Writer | The capture adapters, on a timer | The viewer's machine view, on each change |
 | Location | `$XDG_DATA_HOME` (data) | `$XDG_STATE_HOME` (state, deletable) |
 
-A shared file would mean a version bump either can't drop tables freely or risks the forensic rows, and every derived table would widen what the forensic boundary test has to prove unreachable. Keep them apart; share conventions (bundled `rusqlite`, `user_version` checks that refuse a newer schema, owner-only permissions). Whether the capture pipeline itself should later read action labels from the derived store, or be retired, is a product question ([open questions](#open-questions)).
+A shared file would mean a version bump either can't drop tables freely or risks the forensic rows, and every derived table would widen what the forensic boundary test has to prove unreachable. Keep them apart; share conventions (bundled `rusqlite`, `user_version` checks that refuse a newer schema, owner-only permissions). The separate capture pipeline is now retired; the historical-data boundary remains.
 
 **Code location.** `semon-sessions` owns both native derivation and its Session Event Index/Catalog. The historical `semon-store` is a separate trace library; binary ownership has moved to `semon-cli` and the trace library no longer depends on session tooling. Do not merge these storage foundations. `semon-sessions` gains the `rusqlite` (bundled) dependency the Cargo workspace already has and a `derived` module. No trait is needed: every consumer, an embedding server included, uses this SQLite store through `Options`.
 
@@ -308,5 +314,5 @@ Order: (a) → (b) → (c) are the spine; (d) needs (b); (e) needs only (a) and 
 These are Marvin's to answer; everything else above is a recommendation that can change in review.
 
 1. **Deleted logs.** Should the store keep the metadata of a log file the harness has deleted (marked `source_gone`), so analytics and history outlive the harness's retention? That breaks invariant 1 for those rows (they can't be rebuilt), and turns the cache into an archive. The recommendation is no: follow the source.
-2. **The capture pipeline.** `traces.sqlite3` and its adapters are a parallel pipeline the viewer never reads. Should they stay as they are (the recommendation here), later read action labels from the derived store, or be retired? This is a positioning decision more than a storage one.
+2. **The capture pipeline — resolved by the foundation retirement.** Retire its producers and dependencies after preserving historical inspection/export; retain the separate Session Event Index/Catalog. Do not finish the old reactivation roadmap.
 3. **Order against the Session Intelligence MVP.** The proposal's MVP says "no new store": labels on the JSON cache, flags in `SessionFacts`. The recommendation is to land (a) first, so labels go into the store (e) rather than into one more version of the 84 MB JSON file, and keep Tier 1 in memory until (f).

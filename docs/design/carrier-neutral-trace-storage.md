@@ -9,7 +9,9 @@ Historical architecture, superseded by the
 [Session foundation retirement](session-foundation-retirement.md). Reactivation,
 capability negotiation and cue retrieval are not current delivery requirements.
 Existing storage/identity/forensic contracts remain migration obligations; the
-periodic capture installer and source unit templates are retired.
+periodic capture installer, source unit templates and collector packages are
+retired. Their repair/backfill source and tests remain at the
+[pinned historical revision](../trace-capture-retirement.md).
 
 **Semon captures an agent's own working memory from one carrier, stores it in a
 carrier-neutral form addressed by content, and re-activates it into a different
@@ -21,7 +23,8 @@ Codex/Claude record parsers survive, re-scoped as carrier adapters.**
 ## Implementation status
 
 This document states the intended carrier interface, not the current API.
-Capture and forensic retention are implemented, with ordered occurrences
+Capture was implemented at the pinned historical revision; forensic retention
+remains a migration obligation, with ordered occurrences
 specified separately in [trace-identity-and-occurrences.md](trace-identity-and-occurrences.md).
 Capability references, declared capability sets, reactivation with loss reports,
 and cue retrieval remain unfinished. The three field classes below are distinct

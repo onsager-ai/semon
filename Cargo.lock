@@ -1958,18 +1958,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2ab42ca02749e120097e328d91d415325bdf43b1c72c4c8badf37375fe40a813"
 
 [[package]]
-name = "semon-claude"
-version = "0.1.0"
-dependencies = [
- "semon-codex",
- "semon-sessions",
- "semon-store",
- "serde_json",
- "sha2 0.10.9",
- "thiserror 2.0.19",
-]
-
-[[package]]
 name = "semon-cli"
 version = "0.1.0"
 dependencies = [
@@ -1981,16 +1969,6 @@ dependencies = [
  "semon-sessions",
  "semon-store",
  "serde_json",
-]
-
-[[package]]
-name = "semon-codex"
-version = "0.1.0"
-dependencies = [
- "semon-store",
- "serde_json",
- "sha2 0.10.9",
- "thiserror 2.0.19",
 ]
 
 [[package]]
@@ -2006,19 +1984,6 @@ dependencies = [
  "thiserror 2.0.19",
  "toml",
  "tungstenite",
-]
-
-[[package]]
-name = "semon-copilot"
-version = "0.1.0"
-dependencies = [
- "semon-push",
- "semon-sessions",
- "semon-store",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "thiserror 2.0.19",
 ]
 
 [[package]]

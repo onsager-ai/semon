@@ -1,8 +1,6 @@
-# Guards crates/semon-store, the content-addressed two-region trace store.
-# Its correctness claim -- "two captures of the same semantics converge on
-# one identity" -- has no protection besides this workflow: there is no other
-# CI in this repository. Runs fmt, clippy, and the test suite on every pull
-# request and on every push to main.
+# Guards the session foundation and retained migration tools with workspace
+# formatting, lint and tests on every pull request and push to main. Historical
+# Store reads retain their identity/forensic boundary checks during retirement.
 name: Rust CI
 
 on:

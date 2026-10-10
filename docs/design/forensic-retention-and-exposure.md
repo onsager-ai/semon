@@ -9,6 +9,12 @@ identity_impact: none — this governs the forensic region only, which never par
 
 Decided 2026-09-20. This closes the P4 question from the September roadmap: *what the forensic region retains, what can be read out, by what command, and what is refused.*
 
+The three experimental collector packages are now retired. Capture behavior and
+schema-v7 custody described here refer to the [pinned historical implementation](../trace-capture-retirement.md).
+Retention, private inspection/export and deliberate deletion remain obligations
+for existing records; collector removal neither prunes them nor changes the core
+Session Event Index/Catalog or native logs.
+
 ## What the region actually holds
 
 *(measured 2026-09-20, one real captured Codex session)*

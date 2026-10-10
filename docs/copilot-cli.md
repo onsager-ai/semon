@@ -30,36 +30,17 @@ semon sessions --copilot-home /path/to/copilot --all
 semon sessions --copilot-home /path/to/copilot --serve
 ```
 
-## Existing experimental capture
+## Historical Trace Store capture
 
-`semon-copilot` writes the experimental Canonical Trace Store, separately from
-native source discovery and the retained Session Event Index/Catalog. New
-capture setup is no longer part of the session product. The following behavior
-is retained for existing installations and historical-data migration. Inventory
-any collector service, its store/cursor paths and replication destinations;
-follow the [private export contract](trace-store-export.md) before removal.
-No installed service, native home, cursor or database is changed automatically.
+The experimental `semon-copilot` collector is retired from the current workspace.
+Its historical source, watch/cursor behavior, schema-v7 custody tests and capture
+measurements remain at the [pinned capture revision](trace-capture-retirement.md).
+Native Copilot session parsing, identity, transcripts, mirror synchronization and
+shared fixtures remain supported. Installed collectors, cursors and databases
+are untouched; inventory writers and follow the [private export contract](trace-store-export.md)
+before changing an installation.
 
-A one-shot collection drains complete records. Continuous collection uses
-`semon-copilot --watch`, polling every two seconds. The default store is the
-shared `$XDG_DATA_HOME/semon/traces.sqlite3` (or
-`~/.local/share/semon/traces.sqlite3`), and the cursor lives at
-`$XDG_STATE_HOME/semon/copilot-capture.json` (or the corresponding
-`~/.local/state` path). Explicit `--store` and `--state` paths are supported;
-outputs inside the native home are refused. An exclusive cursor lock prevents
-concurrent collectors. No native files are created, changed or removed.
-
-Full complete frames, including unknown and malformed records after a validated
-header, enter private forensic custody before the cursor advances. Partial frames
-remain unconsumed. Cursor writes are atomic, owner-only and synced. Prefix
-checksums, inode/device and change metadata detect ordinary truncation,
-replacement, equal-size interior mutation and longer-prefix replacement.
-Source-owned projections are retired on replacement; older raw generations remain
-retained. Missing sources do not prune retained data. Lost cursors replay safely.
-An unchanged source uses metadata checks without prefix hashing or JSON replay;
-restart and changed-source verification intentionally read the consumed prefix.
-Polling is a latency target, not proof that a process is alive or that a source
-which has not yet flushed a record has completed work.
+## Native reader behavior
 
 `semon sessions --model-json`, the query/MCP session tools, modern paged
 transcripts, legacy transcript/entry routes and multi-machine views share the
@@ -116,19 +97,17 @@ length-preserving secret-shape redaction runs on source bytes before transport
 encoding; local originals remain private and unchanged. Unknown secret shapes
 are not guaranteed redacted. Received data is a viewing copy, not a recovery
 source. Native identities are scoped by machine and harness; no cross-machine
-ownership is inferred. Claude/Codex encrypted relay and restore behavior remains
-covered by its existing regressions; this slice adds Copilot to the persisted-home
-mirror, not an encrypted native-session execution adapter.
+ownership is inferred. Encrypted Relay is retiring separately under its [custody contract](encrypted-relay-retirement.md).
+This native mirror is receiver-readable and is not end-to-end encrypted.
 
 ## Acceptance evidence
 
-`semon-copilot` tests exercise both releases across seven native fixture families,
-assert exact call/result IDs, protocol versus shell outcomes, latest shutdown
-snapshot accounting, unknown cancellation/lineage/approvals, unchanged originals,
-and all three ingestion paths: cold, incremental half-frame with restart, and
-actual retained source-custody rebuild. Replacement, interior mutation, lost
-cursor, missing source, unsupported version and strict allowlist/link tests use
-isolated disposable homes. Source-shaped negative records remain synthetic.
+Current `semon-sessions` and mirror tests exercise the native fixtures for both
+supported releases, including exact call/result IDs, protocol versus shell
+outcomes, latest shutdown usage, missing results, unknown lineage/approvals and
+strict source allowlists. Fixture manifests and native probe provenance remain.
+Legacy cold/incremental/retained-raw Store capture oracles are preserved in the
+pinned revision; they are not current native-reader acceptance tests.
 
 The HTTP mirror regression commits an append and loses its acknowledgement,
 restarts the sender, interrupts a frame, replaces its source and deliberately
@@ -140,15 +119,3 @@ phone/desktop, light/dark, command failure, missing result, child-task browsing,
 unknown cost and live resume/restart coverage. No baseline or threshold was
 relaxed. Passing probes alone is not release acceptance; PR/check evidence and
 remaining limitations are recorded on #235 and the child issues.
-
-The synthetic collection regression also measures cold capture, metadata-only idle
-passes and append collection with four isolated sessions and 1,004 complete initial
-records. Run `cargo test --locked -p semon-copilot
-synthetic_collection_measures_idle_and_growing_sources -- --nocapture` (on one
-line) to reproduce the measurements. One local Linux run on 2026-10-04 measured
-639.47 ms cold capture, 0.051 ms mean idle pass over 20 passes, and 19.50 ms to
-collect four appends. These measurements depend on the host and workload; they
-are not performance gates or service guarantees. Watch adds a polling delay of
-up to two seconds before collection begins. The regression verifies an unchanged
-idle cursor and recovery when raw evidence is durable but the checkpoint still
-contains the previous offset.

@@ -2,10 +2,7 @@
 resolver = "3"
 members = [
     "crates/semon-cli",
-    "crates/semon-claude",
-    "crates/semon-codex",
     "crates/semon-control",
-    "crates/semon-copilot",
     "crates/semon-forensic-export",
     "crates/semon-push",
     "crates/semon-ssh",
