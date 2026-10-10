@@ -2275,9 +2275,24 @@ impl MachineView {
         Ok(cache.built.clone())
     }
 
-    /// Local query reads refresh native evidence in this view's existing source
+    /// Native query reads refresh evidence in this view's existing source
     /// cache. They never show a compatibility model or start its refresh loop.
     pub(crate) fn query_at(&self, now: i64) -> io::Result<Arc<model::QueryData>> {
+        let retained = || {
+            let closed = lock(&self.live.state).closed;
+            closed.then(|| {
+                read_lock(&self.shown)
+                    .query
+                    .as_ref()
+                    .map(|query| query.data.clone())
+                    .ok_or_else(|| {
+                        io::Error::new(io::ErrorKind::BrokenPipe, "native query source is closed")
+                    })
+            })
+        };
+        if let Some(data) = retained() {
+            return data;
+        }
         let unchanged = || {
             let query = read_lock(&self.shown).query.clone();
             query.filter(|query| !self.changed(&query.snapshot))
@@ -2286,6 +2301,9 @@ impl MachineView {
             return Ok(query.data.clone());
         }
         let mut work = lock(&self.work);
+        if let Some(data) = retained() {
+            return data;
+        }
         if let Some(query) = unchanged() {
             return Ok(query.data.clone());
         }

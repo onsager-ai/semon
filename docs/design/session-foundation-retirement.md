@@ -312,9 +312,20 @@ This slice still discovers and joins every native source eligible for the local
 file-selection window. It does not establish constant-cost selected-session
 dependency closure or replace all query metadata with persisted Catalog rows.
 `Query::from_core` retains the embedding server's cached compatibility contract;
-Hub MCP still needs authorized selected archive/provider access and source-generation
-fencing before that path can be removed. These obligations remain in #383/#384
-and Hub #226; preserving the old hosted path during migration does not retire it.
+`Query::from_native_core` lets the host reuse that core's native source cache
+without preparing a Viewer model. It preserves the configured output window,
+active sessions, retained relationships and existing tool/window errors, rather
+than enabling the local CLI's file-mtime scan. Each call retains one native
+evidence cohort; closed sources serve only an already retained query snapshot
+or refuse, without rebuilding behind retirement. This API does not start the
+compatibility refresh loop. The host still owns admission and source custody.
+
+Hub MCP must adopt the native constructor, stop requesting compatibility push
+warming and implement authorized selected archive/provider access with source
+generation fencing before the legacy constructor can be removed. Native query
+discovery/joins still cover eligible sources. These obligations remain in
+#383/#384/#385 and Hub #226; the shared native API alone does not retire hosted
+workspace hydration or establish bounded dependency closure.
 
 The remaining blockers are consumer migration, shared semantic extraction,
 remaining encrypted-data export qualification and external deployment inventories.
