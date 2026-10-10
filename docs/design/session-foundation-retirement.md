@@ -346,6 +346,17 @@ Catalog observation and scoped source preparation share this body-reader and
 publication boundary. Shared native parsers and text caches remain; compatibility
 Model preparation retains its reader until its consumers have migrated.
 
+Verified archive eviction now retains the exact existing Session Event Index
+generation as well as its catalog/slot recipes. A versioned marker in the index's
+existing metadata region binds the consumed prefix, physical observation, parser
+version and source-bound projection. Ordinary missing sources still lose their
+index rows; marked archives retain event, signal and usage metadata without
+becoming current catalog members. A new native index write clears the marker.
+Unsupported or undecodable indexes cannot qualify another eviction. This stores
+no transcript bodies, adds no database or schema, and grants no archive access.
+It does not yet provide native header inputs or select a query's relationship
+closure; hosted MCP restoration remains until those consumers migrate.
+
 Hub MCP still acquires a workspace core and restores tenant archives; native
 query discovery/joins still cover eligible sources. Implement authorized
 selected archive/provider access, generation fencing and bounded dependency

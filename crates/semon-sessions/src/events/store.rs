@@ -270,6 +270,7 @@ DELETE FROM usage_identity;
 DELETE FROM usage;
 DELETE FROM codex_usage;
 DELETE FROM files;
+DELETE FROM meta WHERE key GLOB 'archive_event_index:*';
 ";
 
 const FILE_COLUMNS: &str = "file_id, path, dev, ino, size, mtime_ns, resume_at, head_sha256, \
@@ -1153,9 +1154,7 @@ impl SqliteStore {
                 sources.insert(source.path.to_string_lossy().into_owned(), source);
             }
             let committed: i64 = if claims.is_none() {
-                transaction
-                    .query_row("SELECT COUNT(*) FROM files", [], |row| row.get(0))
-                    .map_err(failure)?
+                current_file_count(&transaction, &sources).map_err(failure)?
             } else {
                 i64::try_from(sources.len()).unwrap_or(-1)
             };
@@ -1739,6 +1738,7 @@ impl SqliteStore {
             ..super::DirtyRows::default()
         };
         write_file(&transaction, path, ledger, changes.unwrap_or(&full), index)?;
+        transaction.execute("DELETE FROM meta WHERE key=?1", [archive_index_key(path)])?;
         invalidate_catalog_source(&transaction, path, "changed")?;
         transaction.commit()?;
         Ok(Outcome::Written)
@@ -1755,7 +1755,16 @@ impl SqliteStore {
         }
         for (path, expected) in files {
             match (ledger_row(&transaction, path), expected) {
-                (Ok(Some((_, found))), Some(expected)) if found == *expected => {}
+                (Ok(Some((_, found))), Some(expected)) if found == *expected => {
+                    if archived_index(&transaction, path)?
+                        .is_some_and(|record| record.matches(&found))
+                    {
+                        // Explicit archive retention does not make this source
+                        // current. Complete catalog observation still retires
+                        // its membership; only the existing event rows survive.
+                        continue;
+                    }
+                }
                 // Moved on by another process, rewritten, or already gone.
                 (Ok(_), _) => continue,
                 (Err(error), _) if is_data_error(&error) => {}
@@ -1778,6 +1787,7 @@ impl SqliteStore {
                 )?;
             }
             transaction.execute("DELETE FROM files WHERE path = ?1", [path])?;
+            transaction.execute("DELETE FROM meta WHERE key=?1", [archive_index_key(path)])?;
             invalidate_catalog_source(&transaction, path, "removed")?;
         }
         transaction.commit()?;
@@ -2128,6 +2138,156 @@ fn parser_version(connection: &Connection) -> rusqlite::Result<Option<u32>> {
 fn current(connection: &Connection) -> rusqlite::Result<bool> {
     let schema: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
     Ok(schema == SCHEMA_VERSION && parser_version(connection)? == Some(CACHE_VERSION))
+}
+
+/// A versioned retention marker in the existing metadata region. Event rows
+/// remain in their original tables; no duplicate index or body store is created.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ArchivedIndex {
+    version: u32,
+    parser_version: u32,
+    source: crate::SessionSourceRef,
+    stat: Stat,
+    projection_version: u32,
+    projection_generation: String,
+}
+
+impl ArchivedIndex {
+    fn matches(&self, ledger: &Ledger) -> bool {
+        self.version == 1
+            && self.parser_version == CACHE_VERSION
+            && crate::is_input_path(&self.source.root, &self.source.path)
+            && !self.source.native_id.is_empty()
+            && self.source.native_id.len() <= 256
+            && self.stat == ledger.stat
+            && self.source.offset == ledger.offset
+            && self.source.prefix_sha256 == ledger.prefix
+            && self.source.tail_sha256 == ledger.tail
+    }
+}
+
+fn archive_index_key(path: &str) -> String {
+    format!("archive_event_index:{path}")
+}
+
+/// Complete publication still fences all current ledgers. Only exact archived
+/// generations absent from this observation may remain outside its membership;
+/// an unmarked or concurrently advanced source still causes a conflict.
+fn current_file_count(
+    connection: &Connection,
+    sources: &BTreeMap<String, &crate::model::summary::CatalogSource>,
+) -> rusqlite::Result<i64> {
+    let mut count: i64 =
+        connection.query_row("SELECT count(*) FROM files", [], |row| row.get(0))?;
+    let mut statement = connection.prepare(
+        "SELECT f.file_id,f.dev,f.ino,f.size,f.mtime_ns,f.resume_at,f.head_sha256,f.tail_sha256,f.ctime_ns,f.path,\
+         CASE WHEN octet_length(m.value)<=16384 THEN m.value ELSE NULL END \
+         FROM meta m JOIN files f ON f.path=substr(m.key,length(?1)+1) WHERE m.key GLOB ?2",
+    )?;
+    let mut rows = statement.query(["archive_event_index:", "archive_event_index:*"])?;
+    while let Some(row) = rows.next()? {
+        let path: String = row.get(9)?;
+        if sources.contains_key(&path) {
+            continue;
+        }
+        let encoded: Option<String> = row.get(10)?;
+        let record =
+            encoded.and_then(|encoded| serde_json::from_str::<ArchivedIndex>(&encoded).ok());
+        if let Some(record) = record {
+            let (_, ledger) = read_ledger(row)?;
+            if record.matches(&ledger) {
+                count -= 1;
+            }
+        }
+    }
+    Ok(count)
+}
+
+fn archived_index(connection: &Connection, path: &str) -> rusqlite::Result<Option<ArchivedIndex>> {
+    let encoded: Option<Option<String>> = connection.query_row(
+        "SELECT CASE WHEN octet_length(value)<=16384 THEN value ELSE NULL END FROM meta WHERE key=?1",
+        [archive_index_key(path)], |row| row.get(0),
+    ).optional()?;
+    Ok(encoded
+        .flatten()
+        .and_then(|value| serde_json::from_str(&value).ok()))
+}
+
+fn proof_ledger(proof: &crate::SessionSourceProof) -> Ledger {
+    Ledger {
+        stat: Stat {
+            dev: proof.dev,
+            ino: proof.ino,
+            size: proof.size,
+            modified_ns: proof.modified_ns,
+            changed_ns: proof.changed_ns,
+        },
+        offset: proof.source.offset,
+        prefix: proof.source.prefix_sha256,
+        tail: proof.source.tail_sha256,
+    }
+}
+
+/// Called under the caller's immediate transaction and source-bound projection
+/// check. Decode the entire selected index before agreeing to keep it; a ledger
+/// alone cannot stand in for missing or malformed event metadata.
+pub(crate) fn retain_archive_index(
+    connection: &Connection,
+    path: &str,
+    proof: &crate::SessionSourceProof,
+    projection: &crate::SourceProjectionReady,
+) -> rusqlite::Result<bool> {
+    if !current(connection)? {
+        return Ok(false);
+    }
+    let expected = proof_ledger(proof);
+    {
+        let mut readers = Readers::new(connection)?;
+        let mut statement =
+            connection.prepare(&format!("SELECT {FILE_COLUMNS} FROM files WHERE path=?1"))?;
+        let mut rows = statement.query([path])?;
+        let Some(row) = rows.next()? else {
+            return Ok(false);
+        };
+        let (_, ledger, _) = read_file(&mut readers, row)?;
+        if ledger != expected {
+            return Ok(false);
+        }
+    }
+    let record = ArchivedIndex {
+        version: 1,
+        parser_version: CACHE_VERSION,
+        source: proof.source.clone(),
+        stat: expected.stat,
+        projection_version: projection.projection_version,
+        projection_generation: projection.projection_generation.clone(),
+    };
+    let encoded = serde_json::to_string(&record)
+        .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+    connection.execute("INSERT INTO meta(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value", params![archive_index_key(path), encoded])?;
+    Ok(true)
+}
+
+pub(crate) fn archive_index_retained(
+    connection: &Connection,
+    path: &str,
+    proof: &crate::SessionSourceProof,
+    projection: &crate::SourceProjectionReady,
+) -> rusqlite::Result<bool> {
+    if !current(connection)? {
+        return Ok(false);
+    }
+    let Some((_, ledger)) = ledger_row(connection, path)? else {
+        return Ok(false);
+    };
+    Ok(ledger == proof_ledger(proof)
+        && archived_index(connection, path)?.is_some_and(|record| {
+            record.matches(&ledger)
+                && record.source == proof.source
+                && record.projection_version == projection.projection_version
+                && record.projection_generation == projection.projection_generation
+        }))
 }
 
 // ---- Values --------------------------------------------------------------------------------

@@ -1146,6 +1146,236 @@ mod tests {
         )
     }
 
+    fn native_refresh(fixture: &Fixture) -> Value {
+        let core = std::sync::Arc::new(ViewerCore::new(fixture.options.clone()));
+        let result = crate::Query::from_native_core(core.clone())
+            .call("list_sessions", &json!({}))
+            .unwrap();
+        core.close();
+        result
+    }
+
+    fn indexed_rows(connection: &Connection, path: &str) -> Vec<Vec<SqlValue>> {
+        let id: i64 = connection
+            .query_row("SELECT file_id FROM files WHERE path=?1", [path], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        let mut all = Vec::new();
+        for table in [
+            "files",
+            "events",
+            "signals",
+            "usage_identity",
+            "usage",
+            "codex_usage",
+        ] {
+            let mut statement = connection
+                .prepare(&format!(
+                    "SELECT * FROM {table} WHERE file_id=?1 ORDER BY 1,2"
+                ))
+                .unwrap();
+            let columns = statement.column_count();
+            all.extend(
+                statement
+                    .query_map([id], |row| {
+                        (0..columns)
+                            .map(|column| row.get(column))
+                            .collect::<rusqlite::Result<Vec<SqlValue>>>()
+                    })
+                    .unwrap()
+                    .collect::<Result<Vec<_>, _>>()
+                    .unwrap(),
+            );
+        }
+        all
+    }
+
+    #[test]
+    fn archived_event_index_survives_absence_without_current_membership() {
+        let fixture = Fixture::new();
+        fixture.publish(2);
+        let relative = "projects/project/session-00000.jsonl";
+        let path = fixture.options.claude_home.join(relative);
+        use std::io::Write;
+        let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
+        for line in [
+            json!({"type":"assistant","uuid":"indexed-tool","timestamp":"2026-10-01T00:00:01Z","message":{"id":"indexed-message","role":"assistant","model":"claude-opus-4-6","usage":{"input_tokens":10,"output_tokens":2},"content":[{"type":"tool_use","id":"retained-call","name":"Bash","input":{"command":"echo private-native-body-synthetic"}}]}}),
+            json!({"type":"user","uuid":"indexed-result","timestamp":"2026-10-01T00:00:02Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"retained-call","content":"private-native-result-synthetic"}]}}),
+        ] {
+            writeln!(file, "{line}").unwrap();
+        }
+        drop(file);
+        native_refresh(&fixture);
+        let proof = session_source_proof(&fixture.options, "claude", relative)
+            .unwrap()
+            .unwrap();
+        let ready = crate::source_projection_ready(&fixture.options, "claude", relative)
+            .unwrap()
+            .unwrap();
+        let connection = Connection::open(EventCache::path(&fixture.options.cache)).unwrap();
+        let before = indexed_rows(&connection, path.to_str().unwrap());
+        assert!(
+            before.len() >= 5,
+            "fixture includes event and token metadata"
+        );
+        assert!(!crate::source_event_index_retained(&fixture.options, &proof, &ready).unwrap());
+        crate::retain_source_event_index(&fixture.options, &proof, &ready).unwrap();
+        assert!(crate::source_event_index_retained(&fixture.options, &proof, &ready).unwrap());
+        let marker: String = connection
+            .query_row(
+                "SELECT value FROM meta WHERE key GLOB 'archive_event_index:*'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(!marker.contains("private-native-body-synthetic"));
+        assert!(!marker.contains("private-native-result-synthetic"));
+        fs::remove_file(&path).unwrap();
+        fs::remove_file(
+            fixture
+                .options
+                .claude_home
+                .join("projects/project/session-00001.jsonl"),
+        )
+        .unwrap();
+        for _ in 0..2 {
+            assert_eq!(native_refresh(&fixture)["sessions"], json!([]));
+            assert_eq!(indexed_rows(&connection, path.to_str().unwrap()), before);
+            let count: i64 = connection
+                .query_row("SELECT count(*) FROM files", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(
+                count, 1,
+                "ordinary disappearance still removes unmarked indexes"
+            );
+            assert!(crate::source_event_index_retained(&fixture.options, &proof, &ready).unwrap());
+        }
+        let retained = crate::source_projection_ready(&fixture.options, "claude", relative)
+            .unwrap()
+            .unwrap();
+        assert_eq!(retained.lifecycle, "retained");
+        assert_eq!(retained.source, ready.source);
+        assert_eq!(fixture.body("").1["items"], json!([]));
+    }
+
+    #[test]
+    fn archived_event_index_marker_does_not_cover_a_new_native_generation() {
+        let fixture = Fixture::new();
+        fixture.publish(1);
+        let relative = "projects/project/session-00000.jsonl";
+        let path = fixture.options.claude_home.join(relative);
+        let proof = session_source_proof(&fixture.options, "claude", relative)
+            .unwrap()
+            .unwrap();
+        let ready = crate::source_projection_ready(&fixture.options, "claude", relative)
+            .unwrap()
+            .unwrap();
+        crate::retain_source_event_index(&fixture.options, &proof, &ready).unwrap();
+        use std::io::Write;
+        writeln!(fs::OpenOptions::new().append(true).open(&path).unwrap(), "{}", json!({"type":"user","uuid":"new-prefix","message":{"role":"user","content":"new generation"}})).unwrap();
+        native_refresh(&fixture);
+        assert!(!crate::source_event_index_retained(&fixture.options, &proof, &ready).unwrap());
+        assert_eq!(
+            crate::retain_source_event_index(&fixture.options, &proof, &ready),
+            Err(CatalogIdentityError::ScopeChanged)
+        );
+        let connection = Connection::open(EventCache::path(&fixture.options.cache)).unwrap();
+        let count: i64 = connection
+            .query_row(
+                "SELECT count(*) FROM meta WHERE key GLOB 'archive_event_index:*'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 0);
+        fs::remove_file(path).unwrap();
+        native_refresh(&fixture);
+        let count: i64 = connection
+            .query_row("SELECT count(*) FROM files", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn archived_event_index_refuses_mixed_projection_and_ledger_proofs() {
+        let fixture = Fixture::new();
+        fixture.publish(1);
+        let relative = "projects/project/session-00000.jsonl";
+        let proof = session_source_proof(&fixture.options, "claude", relative)
+            .unwrap()
+            .unwrap();
+        let ready = crate::source_projection_ready(&fixture.options, "claude", relative)
+            .unwrap()
+            .unwrap();
+        let mut changed = proof.clone();
+        changed.ino = changed.ino.wrapping_add(1);
+        assert_eq!(
+            crate::retain_source_event_index(&fixture.options, &changed, &ready),
+            Err(CatalogIdentityError::ScopeChanged)
+        );
+        let mut changed = ready.clone();
+        changed.projection_generation = "0".repeat(64);
+        assert_eq!(
+            crate::retain_source_event_index(&fixture.options, &proof, &changed),
+            Err(CatalogIdentityError::ScopeChanged)
+        );
+        let mut changed = proof.clone();
+        changed.source.path = "../outside.jsonl".into();
+        let mut projection = ready.clone();
+        projection.source = changed.source.clone();
+        assert_eq!(
+            crate::retain_source_event_index(&fixture.options, &changed, &projection),
+            Err(CatalogIdentityError::InvalidArguments)
+        );
+        let missing = Fixture::new();
+        assert_eq!(
+            crate::retain_source_event_index(&missing.options, &proof, &ready),
+            Err(CatalogIdentityError::Unavailable)
+        );
+        assert!(!EventCache::path(&missing.options.cache).exists());
+        assert!(!crate::source_event_index_retained(&fixture.options, &proof, &ready).unwrap());
+    }
+
+    #[test]
+    fn archived_event_index_requires_decodable_rows_and_supported_parser() {
+        let fixture = Fixture::new();
+        fixture.publish(1);
+        let relative = "projects/project/session-00000.jsonl";
+        let proof = session_source_proof(&fixture.options, "claude", relative)
+            .unwrap()
+            .unwrap();
+        let ready = crate::source_projection_ready(&fixture.options, "claude", relative)
+            .unwrap()
+            .unwrap();
+        let connection = Connection::open(EventCache::path(&fixture.options.cache)).unwrap();
+        connection
+            .execute("UPDATE files SET pending='malformed'", [])
+            .unwrap();
+        assert_eq!(
+            crate::retain_source_event_index(&fixture.options, &proof, &ready),
+            Err(CatalogIdentityError::Unavailable)
+        );
+        connection
+            .execute("UPDATE files SET pending='{}'", [])
+            .unwrap();
+        connection
+            .execute("UPDATE meta SET value='0' WHERE key='cache_version'", [])
+            .unwrap();
+        assert_eq!(
+            crate::retain_source_event_index(&fixture.options, &proof, &ready),
+            Err(CatalogIdentityError::ScopeChanged)
+        );
+        let count: i64 = connection
+            .query_row(
+                "SELECT count(*) FROM meta WHERE key GLOB 'archive_event_index:*'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 0);
+    }
+
     #[test]
     fn exact_source_proof_requires_current_native_mapping_and_consumed_ledger() {
         let fixture = Fixture::new();
