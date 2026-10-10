@@ -29,6 +29,8 @@ jobs:
       - name: Install Rust toolchain
         id: rust-toolchain
         uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
 
       - name: Cache cargo registry and target
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -54,6 +56,16 @@ jobs:
       - name: Smoke test standalone Relay custody exporter
         run: ./target/release/semon-relay-export --help | grep -q -- '--receiver-dir DIR'
 
+      - name: Build and qualify standalone offline historical Relay reader
+        env:
+          CARGO_TARGET_DIR: ${{ github.workspace }}/target
+        run: |
+          git fetch --no-tags origin 0648a99f977971fb177a5dda7a445c4941d64b57
+          git worktree add --detach "$RUNNER_TEMP/relay-history-source" 0648a99f977971fb177a5dda7a445c4941d64b57
+          python3 scripts/export-relay-history.py --legacy-source "$RUNNER_TEMP/relay-history-source" --build-only --artifact "$RUNNER_TEMP/semon-relay-history"
+          "$RUNNER_TEMP/semon-relay-history" --help | grep -q -- '--custody DIRECTORY'
+          python3 scripts/qualify-relay-custody.py --legacy-source "$RUNNER_TEMP/relay-history-source" --history-binary "$RUNNER_TEMP/semon-relay-history"
+
       - name: Upload the binary
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -75,5 +87,15 @@ jobs:
         with:
           name: semon-relay-export-linux-x86_64
           path: target/release/semon-relay-export
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload standalone offline historical Relay reader and build receipt
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: semon-relay-history-linux-x86_64
+          path: |
+            ${{ runner.temp }}/semon-relay-history
+            ${{ runner.temp }}/semon-relay-history.json
           if-no-files-found: error
           retention-days: 30

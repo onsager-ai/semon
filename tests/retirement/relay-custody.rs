@@ -2,6 +2,7 @@
 use std::{
     collections::BTreeMap,
     fs,
+    io::Write,
     net::TcpListener,
     os::unix::fs::{MetadataExt, PermissionsExt},
     path::{Path, PathBuf},
@@ -134,22 +135,604 @@ fn tree(root: &Path) -> Tree {
     result
 }
 
+fn inputs(custody: &Path) -> Vec<Input> {
+    [
+        Kind::Receiver,
+        Kind::Config,
+        Kind::Sender,
+        Kind::RecoveryKey,
+    ]
+    .into_iter()
+    .enumerate()
+    .map(|(index, kind)| Input {
+        kind,
+        path: custody
+            .join("inputs")
+            .join(format!("{}-{index}", kind.name())),
+    })
+    .collect()
+}
+
+fn history(custody: &Path, output: &Path, complete: bool) -> Value {
+    let before = tree(custody);
+    let result = Command::new(history_binary())
+        .arg("--custody")
+        .arg(custody)
+        .arg("--out")
+        .arg(output)
+        .output()
+        .unwrap();
+    assert_eq!(
+        result.status.code(),
+        Some(if complete { 0 } else { 1 }),
+        "{}: {}",
+        output.display(),
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&result.stderr).contains("plaintext evidence, credentials, keys")
+    );
+    assert!(!String::from_utf8_lossy(&result.stdout).contains("AGE-SECRET-KEY"));
+    assert!(!String::from_utf8_lossy(&result.stderr).contains("AGE-SECRET-KEY"));
+    assert_eq!(tree(custody), before);
+    let report: Value =
+        serde_json::from_slice(&fs::read(output.join("manifest.json")).unwrap()).unwrap();
+    assert_eq!(report["format"], "semon.relay-history-export");
+    assert_eq!(report["version"], 1);
+    assert_eq!(report["legacy_source"], semon_relay_export::LEGACY_SOURCE);
+    assert_eq!(
+        report["custody_manifest_sha256"],
+        format!(
+            "{:x}",
+            Sha256::digest(fs::read(custody.join("manifest.json")).unwrap())
+        )
+    );
+    assert_eq!(report["decryption_verified"], complete);
+    assert_eq!(report["verification_complete"], complete);
+    assert_eq!(report["recovery_verified"], false);
+    assert_eq!(report["failures"].as_array().unwrap().is_empty(), complete);
+    for (path, (mode, _, _, _, _)) in tree(output) {
+        let expected = if output.join(path).is_dir() {
+            0o700
+        } else {
+            0o600
+        };
+        assert_eq!(mode & 0o777, expected);
+    }
+    report
+}
+fn history_binary() -> std::ffi::OsString {
+    std::env::var_os("SEMON_RELAY_HISTORY_BINARY")
+        .unwrap_or_else(|| env!("CARGO_BIN_EXE_semon-relay-history").into())
+}
+
+fn failure(report: &Value, reason: &str) -> bool {
+    report["failures"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|f| f["reason"] == reason)
+}
+
+fn qualify_history(
+    custody: &Path,
+    scratch: &Path,
+    root: &str,
+    lines: &[&[u8]],
+    packets: &[&SnapshotPacket],
+) {
+    let recovery = load_age_identity(&custody.join("inputs/recovery-key-3")).unwrap();
+    for (args, code) in [
+        (vec!["--help"], 0),
+        (vec![], 2),
+        (vec!["--custody", "--out", "unused"], 2),
+        (
+            vec![
+                "--custody",
+                "first",
+                "--custody",
+                "second",
+                "--out",
+                "unused",
+            ],
+            2,
+        ),
+        (
+            vec!["--custody", "first", "--out", "unused", "--network"],
+            2,
+        ),
+    ] {
+        assert_eq!(
+            Command::new(history_binary())
+                .args(args)
+                .output()
+                .unwrap()
+                .status
+                .code(),
+            Some(code)
+        );
+    }
+    // Unknown receiver bytes remain in custody and must block full verification.
+    let partial = scratch.join("history-unknown");
+    let report = history(custody, &partial, false);
+    assert!(failure(
+        &report,
+        "unclassified_receiver_record_preserved_in_custody"
+    ));
+    assert_eq!(
+        fs::read(partial.join("custody/inputs/receiver-0/future-unrecognized-record")).unwrap(),
+        b"opaque future bytes"
+    );
+
+    // Remove only the synthetic unknown record on a private disposable copy.
+    let known = scratch.join("known-inputs");
+    export(&inputs(custody), &known);
+    fs::remove_file(known.join("inputs/receiver-0/future-unrecognized-record")).unwrap();
+    let recovery_file = known.join("inputs/recovery-key-3");
+    let original_key = fs::read_to_string(&recovery_file).unwrap();
+    fs::write(
+        &recovery_file,
+        format!(
+            "# original age recovery identities\n\n{}\n{}\n",
+            x25519::Identity::generate().to_string().expose_secret(),
+            original_key
+        ),
+    )
+    .unwrap();
+    let artifact = scratch.join("known-custody");
+    export(&inputs(&known), &artifact);
+    let output = scratch.join("history-complete");
+    let report = history(&artifact, &output, true);
+    assert_eq!(report["frames"].as_array().unwrap().len(), 5);
+    assert_eq!(report["snapshots"].as_array().unwrap().len(), 4);
+    assert_eq!(
+        report["snapshots"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|m| m["input"] == "receiver-0" && m["fork_head"] == true)
+            .count(),
+        2
+    );
+    let scopes = [
+        (false, 0, 0, 0),
+        (false, 0, 1, 1),
+        (false, 1, 1, 0),
+        (true, 0, 0, 1),
+    ];
+    for (line, (orphan, generation, epoch, seq)) in lines.iter().zip(scopes) {
+        let record = report["frames"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| {
+                f["session"] == "session"
+                    && f["orphan"] == orphan
+                    && f["generation"] == generation
+                    && f["epoch"] == epoch
+                    && f["seq"] == seq
+            })
+            .unwrap();
+        assert_eq!(record["continuity_verified"], true);
+        assert_eq!(
+            fs::read(output.join(record["output_path"].as_str().unwrap())).unwrap(),
+            *line
+        );
+    }
+    let plain = report["frames"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["session"] == "plaintext")
+        .unwrap();
+    assert_eq!(plain["encrypted"], false);
+    assert_eq!(plain["continuity_verified"], true);
+    assert_eq!(
+        fs::read(output.join(plain["output_path"].as_str().unwrap())).unwrap(),
+        b"plaintext evidence\n"
+    );
+    let leftover = report["blobs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|blob| {
+            blob["input"] == "config-1"
+                && blob["id"] == format!("{:x}", Sha256::digest(b"pending-unreferenced"))
+        })
+        .unwrap();
+    assert_eq!(
+        fs::read(output.join(leftover["output_path"].as_str().unwrap())).unwrap(),
+        b"pending-unreferenced"
+    );
+    for (packet, bytes) in
+        packets
+            .iter()
+            .zip([b"first".as_slice(), b"fork-a", b"fork-b", b"pending"])
+    {
+        let record = report["snapshots"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["id"] == packet.manifest["id"])
+            .unwrap();
+        assert_eq!(
+            fs::read(
+                output
+                    .join(record["output_path"].as_str().unwrap())
+                    .join("files/nested.txt")
+            )
+            .unwrap(),
+            bytes
+        );
+    }
+    assert!(
+        report["unavailable"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|m| m["reason"] == "explicitly_deleted_body")
+    );
+    for input in inputs(&artifact) {
+        let private = output
+            .join("custody/inputs")
+            .join(input.path.file_name().unwrap());
+        // Compare byte inventory, including pending deletion state and all keys.
+        let bytes = |root: &Path| {
+            tree(root)
+                .into_iter()
+                .map(|(p, (_, _, _, _, b))| (p, b))
+                .collect::<BTreeMap<_, _>>()
+        };
+        assert_eq!(bytes(&input.path), bytes(&private));
+    }
+    let nested = scratch.join("nested-state-inputs");
+    export(&inputs(&artifact), &nested);
+    let sender = nested.join("inputs/sender-2");
+    fs::create_dir_all(sender.join("custom/nested")).unwrap();
+    fs::rename(
+        sender.join("relay.json"),
+        sender.join("custom/nested/state-without-extension"),
+    )
+    .unwrap();
+    fs::rename(
+        sender.join("relay.json.forget"),
+        sender.join("custom/nested/state-without-extension.forget"),
+    )
+    .unwrap();
+    let nested_custody = scratch.join("nested-state-custody");
+    export(&inputs(&nested), &nested_custody);
+    history(&nested_custody, &scratch.join("nested-state-output"), true);
+
+    let live = PathBuf::from(format!(
+        "{}/{}/generation-0/epoch-0/frames/00000000000000000000.json",
+        hex::encode("session"),
+        hex::encode("main")
+    ));
+    let manifest_path = PathBuf::from("snapshots")
+        .join(root)
+        .join("manifests")
+        .join(packets[2].manifest["id"].as_str().unwrap());
+    let blob_path = PathBuf::from("snapshots")
+        .join(root)
+        .join("blobs")
+        .join(packets[2].blobs.keys().next().unwrap());
+    for case in [
+        "wrong-recovery-key",
+        "missing-recovery-key",
+        "gap",
+        "substitution",
+        "blob-corrupt",
+        "manifest-substitution",
+        "state-version",
+        "state-malformed",
+        "outbox-version",
+        "unknown-key-file",
+        "missing-parent",
+        "missing-checkpoint-tail",
+        "invalid-deletion-queue",
+        "snapshot-version",
+        "snapshot-path",
+    ] {
+        let mutated = scratch.join(format!("history-inputs-{case}"));
+        export(&inputs(&artifact), &mutated);
+        let receiver = mutated.join("inputs/receiver-0");
+        let mut selected = inputs(&mutated);
+        match case {
+            "wrong-recovery-key" => fs::write(
+                mutated.join("inputs/recovery-key-3"),
+                x25519::Identity::generate().to_string().expose_secret(),
+            )
+            .unwrap(),
+            "missing-recovery-key" => {
+                selected.pop();
+            }
+            "gap" => fs::remove_file(receiver.join(&live)).unwrap(),
+            "missing-checkpoint-tail" => {
+                let path = receiver.join(format!(
+                    "{}/{}/generation-0/state.json",
+                    hex::encode("deleted"),
+                    hex::encode("main")
+                ));
+                let mut value: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+                value["acked"] = json!(999);
+                fs::write(path, serde_json::to_vec(&value).unwrap()).unwrap();
+            }
+            "invalid-deletion-queue" => {
+                let queue = mutated.join("inputs/sender-2/relay.json.forget");
+                let file = tree(&queue)
+                    .into_iter()
+                    .find(|(path, _)| path.extension().is_some_and(|v| v == "json"))
+                    .unwrap()
+                    .0;
+                let path = queue.join(file);
+                let mut value: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+                value["id"] = json!("00".repeat(32));
+                fs::write(path, serde_json::to_vec(&value).unwrap()).unwrap();
+            }
+            "substitution" => {
+                let path = receiver.join(&live);
+                let mut value: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+                value["generation"] = json!(20);
+                fs::write(path, serde_json::to_vec(&value).unwrap()).unwrap();
+            }
+            "blob-corrupt" => {
+                let path = receiver.join(&blob_path);
+                let mut value: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+                value["ciphertext"] = json!("00");
+                value["digest"] = json!(format!("{:x}", Sha256::digest(b"00")));
+                fs::write(path, serde_json::to_vec(&value).unwrap()).unwrap();
+            }
+            "manifest-substitution" => {
+                let path = receiver.join(&manifest_path);
+                let mut value: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+                value["root"] = json!(snapshot_root_id("substitution"));
+                fs::write(path, serde_json::to_vec(&value).unwrap()).unwrap();
+            }
+            "snapshot-version" | "snapshot-path" => {
+                let path = receiver.join(&manifest_path);
+                let mut wire: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+                let mut clear = inspect_snapshot_manifest(&wire, &recovery).unwrap();
+                if case == "snapshot-version" {
+                    clear["version"] = json!(999);
+                } else {
+                    clear["entries"][0]["path"] = json!("../../escaped-private-file");
+                }
+                let bytes = serde_json::to_vec(&clear).unwrap();
+                wire["id"] = json!(format!("{:x}", Sha256::digest(&bytes)));
+                let recipient = recovery.to_public();
+                let encryptor = age::Encryptor::with_recipients(std::iter::once(
+                    &recipient as &dyn age::Recipient,
+                ))
+                .unwrap();
+                let mut ciphertext = Vec::new();
+                let mut writer = encryptor.wrap_output(&mut ciphertext).unwrap();
+                writer.write_all(&bytes).unwrap();
+                writer.finish().unwrap();
+                wire["ciphertext"] = json!(hex::encode(ciphertext));
+                fs::remove_file(&path).unwrap();
+                fs::write(
+                    path.parent().unwrap().join(wire["id"].as_str().unwrap()),
+                    serde_json::to_vec(&wire).unwrap(),
+                )
+                .unwrap();
+            }
+            "state-version" => fs::write(
+                mutated.join("inputs/sender-2/relay.json"),
+                b"{\"version\":999,\"streams\":[]}",
+            )
+            .unwrap(),
+            "state-malformed" => {
+                fs::remove_file(mutated.join("inputs/sender-2/relay.json")).unwrap();
+                fs::write(
+                    mutated.join("inputs/sender-2/custom-state"),
+                    b"{malformed-private-state",
+                )
+                .unwrap();
+            }
+            "outbox-version" => {
+                let path = mutated.join(format!(
+                    "inputs/config-1/snapshot-outbox/synthetic/{root}.json"
+                ));
+                let mut value: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+                value["version"] = json!(999);
+                fs::write(path, serde_json::to_vec(&value).unwrap()).unwrap();
+            }
+            "unknown-key-file" => {
+                fs::write(receiver.join("keys/unrecognized.payload"), b"opaque key").unwrap()
+            }
+            "missing-parent" => fs::remove_file(
+                receiver
+                    .join("snapshots")
+                    .join(root)
+                    .join("manifests")
+                    .join(packets[0].manifest["id"].as_str().unwrap()),
+            )
+            .unwrap(),
+            _ => unreachable!(),
+        }
+        let next_custody = scratch.join(format!("history-custody-{case}"));
+        export(&selected, &next_custody);
+        let report = history(
+            &next_custody,
+            &scratch.join(format!("history-output-{case}")),
+            false,
+        );
+        let reason = match case {
+            "wrong-recovery-key"
+            | "missing-recovery-key"
+            | "manifest-substitution"
+            | "snapshot-version"
+            | "snapshot-path" => "snapshot_manifest_recipient_header_or_integrity_failure",
+            "gap" => "missing_prefix_gap_or_chain_mismatch",
+            "substitution" => "frame_identity_decryption_or_integrity_failure",
+            "blob-corrupt" => "snapshot_blob_recipient_checksum_or_format_failure",
+            "state-version" | "state-malformed" | "invalid-deletion-queue" => {
+                "unsupported_sender_state_or_deletion_queue"
+            }
+            "outbox-version" => "pending_snapshot_recipient_or_integrity_failure",
+            "unknown-key-file" | "missing-checkpoint-tail" => "unsupported_receiver_metadata",
+            "missing-parent" => "snapshot_parent_missing",
+            _ => unreachable!(),
+        };
+        assert!(failure(&report, reason), "missing reason for {case}");
+        assert!(!scratch.join("escaped-private-file").exists());
+    }
+
+    // Crash-interrupted deletions can leave a body beside its durable tombstone.
+    for case in [
+        "frame-tombstone",
+        "snapshot-pruned",
+        "snapshot-cutoff",
+        "snapshot-invalid-cutoff",
+        "pending-pruned",
+        "pending-cutoff",
+    ] {
+        let mutated = scratch.join(format!("history-inputs-{case}"));
+        export(&inputs(&artifact), &mutated);
+        let receiver = mutated.join("inputs/receiver-0");
+        let base = receiver.join("snapshots").join(root);
+        if case == "frame-tombstone" {
+            let target = receiver.join(format!(
+                "{}/{}/generation-0/epoch-0/frames/00000000000000000000.json",
+                hex::encode("deleted"),
+                hex::encode("main")
+            ));
+            // Real original-format ciphertext, with matching body-free receipt.
+            fs::copy(receiver.join(&live), target).unwrap();
+        } else if case == "snapshot-pruned" || case == "pending-pruned" {
+            let packet = if case == "pending-pruned" {
+                packets[3]
+            } else {
+                packets[2]
+            };
+            fs::write(
+                base.join("pruned")
+                    .join(packet.manifest["id"].as_str().unwrap()),
+                b"forgotten",
+            )
+            .unwrap();
+        } else {
+            fs::write(
+                base.join("forget-before"),
+                if case == "pending-cutoff" {
+                    b"5".as_slice()
+                } else if case == "snapshot-cutoff" {
+                    b"4".as_slice()
+                } else {
+                    b"invalid-cutoff"
+                },
+            )
+            .unwrap();
+        }
+        let next_custody = scratch.join(format!("history-custody-{case}"));
+        export(&inputs(&mutated), &next_custody);
+        let output = scratch.join(format!("history-output-{case}"));
+        let report = history(&next_custody, &output, case != "snapshot-invalid-cutoff");
+        let reason = match case {
+            "frame-tombstone" => "body_shadowed_by_delete_receipt",
+            "pending-pruned" | "pending-cutoff" => {
+                "pending_snapshot_shadowed_by_receiver_deletion_state"
+            }
+            _ => "snapshot_shadowed_by_deletion_state",
+        };
+        assert!(
+            report["unavailable"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|r| r["reason"] == reason)
+        );
+        if case.starts_with("pending-") {
+            assert!(
+                !output
+                    .join(format!(
+                        "config-1/snapshots/snapshot-outbox/synthetic/{root}.json"
+                    ))
+                    .exists()
+            );
+            assert!(
+                output
+                    .join(format!(
+                        "custody/inputs/config-1/snapshot-outbox/synthetic/{root}.json"
+                    ))
+                    .exists()
+            );
+        }
+        if case != "frame-tombstone" && case != "pending-pruned" {
+            assert!(
+                !output
+                    .join("receiver-0/snapshots")
+                    .join(&manifest_path)
+                    .exists()
+            );
+            assert!(
+                !output
+                    .join("receiver-0/blobs")
+                    .join(root)
+                    .join(packets[2].blobs.keys().next().unwrap())
+                    .exists()
+            );
+            assert!(
+                output
+                    .join("custody/inputs/receiver-0")
+                    .join(&manifest_path)
+                    .exists()
+            );
+        }
+    }
+
+    for case in ["hash", "extra", "missing", "version", "path"] {
+        let invalid = scratch.join(format!("history-invalid-{case}"));
+        export(&inputs(&artifact), &invalid);
+        match case {
+            "hash" => {
+                fs::write(invalid.join("inputs/receiver-0").join(&live), b"tampered").unwrap()
+            }
+            "extra" => fs::write(invalid.join("undeclared"), b"extra").unwrap(),
+            "missing" => fs::remove_file(invalid.join("inputs/receiver-0").join(&live)).unwrap(),
+            _ => {
+                let path = invalid.join("manifest.json");
+                let mut value: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+                if case == "version" {
+                    value["version"] = json!(999);
+                } else {
+                    value["inputs"][0]["entries"][1]["path"] = json!("../../escape");
+                }
+                fs::write(path, serde_json::to_vec(&value).unwrap()).unwrap();
+            }
+        }
+        let before = tree(&invalid);
+        let output = scratch.join(format!("history-refused-{case}"));
+        let result = Command::new(history_binary())
+            .arg("--custody")
+            .arg(&invalid)
+            .arg("--out")
+            .arg(&output)
+            .output()
+            .unwrap();
+        assert_eq!(result.status.code(), Some(1));
+        assert!(
+            !output.exists(),
+            "invalid custody must fail before output creation: {case}"
+        );
+        assert_eq!(tree(&invalid), before);
+    }
+}
+
 fn frame(
     key: &DataKey,
     machine: &str,
     session: &str,
-    generation: u64,
-    epoch: u64,
-    seq: u64,
+    position: (u64, u64, u64),
     previous: &[u8; 32],
     line: &[u8],
 ) -> Frame {
     let frame_key = FrameKey {
         session: session.into(),
         stream: "main".into(),
-        generation,
-        epoch,
-        seq,
+        generation: position.0,
+        epoch: position.1,
+        seq: position.2,
     };
     Frame {
         content: FrameContent::Encrypted(
@@ -205,9 +788,7 @@ fn complete_custody_and_pinned_readback_cover_retained_frames_orphans_forks_and_
             &key,
             &machine,
             "session",
-            0,
-            0,
-            0,
+            (0, 0, 0),
             &ZERO_CHAIN,
             lines[0],
         ))
@@ -218,9 +799,7 @@ fn complete_custody_and_pinned_readback_cover_retained_frames_orphans_forks_and_
             &key,
             &machine,
             "session",
-            0,
-            1,
-            1,
+            (0, 1, 1),
             &chain_line(&ZERO_CHAIN, lines[0]),
             lines[1],
         ))
@@ -230,9 +809,7 @@ fn complete_custody_and_pinned_readback_cover_retained_frames_orphans_forks_and_
             &key,
             &machine,
             "session",
-            1,
-            1,
-            0,
+            (1, 1, 0),
             &ZERO_CHAIN,
             lines[2],
         ))
@@ -242,9 +819,7 @@ fn complete_custody_and_pinned_readback_cover_retained_frames_orphans_forks_and_
             &key,
             &machine,
             "session",
-            0,
-            0,
-            1,
+            (0, 0, 1),
             &chain_line(&ZERO_CHAIN, lines[0]),
             lines[3],
         ))
@@ -264,9 +839,7 @@ fn complete_custody_and_pinned_readback_cover_retained_frames_orphans_forks_and_
             &key,
             &machine,
             "deleted",
-            0,
-            0,
-            0,
+            (0, 0, 0),
             &ZERO_CHAIN,
             b"deleted-private-line\n",
         ))
@@ -279,6 +852,25 @@ fn complete_custody_and_pinned_readback_cover_retained_frames_orphans_forks_and_
                 ..Default::default()
             },
         )
+        .unwrap();
+    receiver.acquire("plaintext", &machine).unwrap();
+    let plain = b"plaintext evidence\n";
+    receiver
+        .accept(&Frame::plaintext(
+            FrameKey {
+                session: "plaintext".into(),
+                stream: "main".into(),
+                generation: 0,
+                epoch: 0,
+                seq: 0,
+            },
+            machine.clone(),
+            chain_line(&ZERO_CHAIN, plain),
+            10,
+            10,
+            "synthetic".into(),
+            plain.to_vec(),
+        ))
         .unwrap();
     drop(receiver);
 
@@ -314,7 +906,11 @@ fn complete_custody_and_pinned_readback_cover_retained_frames_orphans_forks_and_
         &[identity.age.to_public(), recovery.to_public()],
     );
     let fork_b = capture(b"fork-b", Some(parent), 3, &[recovery.to_public()]);
-    let pending = capture(b"pending", Some(parent), 4, &[recovery.to_public()]);
+    let mut pending = capture(b"pending", Some(parent), 4, &[recovery.to_public()]);
+    // The real outbox format permits unreferenced retained blobs as well.
+    pending
+        .blobs
+        .extend(capture(b"pending-unreferenced", None, 5, &[recovery.to_public()]).blobs);
     let (server, transport) = Server::start(&receiver_root, &identity);
     for packet in [&first, &fork_a, &fork_b] {
         publish_snapshot(packet, &transport).unwrap();
@@ -323,12 +919,7 @@ fn complete_custody_and_pinned_readback_cover_retained_frames_orphans_forks_and_
     drop(transport);
     let outbox = config.join("snapshot-outbox/synthetic");
     fs::create_dir_all(&outbox).unwrap();
-    persist_snapshot_packet(&outbox.join("pending.json"), &pending).unwrap();
-    fs::write(
-        outbox.join("head.json"),
-        serde_json::to_vec(&fork_a.manifest).unwrap(),
-    )
-    .unwrap();
+    persist_snapshot_packet(&outbox.join(format!("{root_id}.json")), &pending).unwrap();
     fs::create_dir(&sender).unwrap();
     let mut sender_state = RelayState::default();
     sender_state.streams.insert(
@@ -380,6 +971,13 @@ fn complete_custody_and_pinned_readback_cover_retained_frames_orphans_forks_and_
         [&receiver_root, &config, &sender, &recovery_path].map(|root| tree(root))
     );
     let custody_before = tree(&destination);
+    qualify_history(
+        &destination,
+        &scratch.0,
+        &root_id,
+        &lines,
+        &[&first, &fork_a, &fork_b, &pending],
+    );
     let manifest: Value =
         serde_json::from_slice(&fs::read(destination.join("manifest.json")).unwrap()).unwrap();
     assert_eq!(manifest["decryption_verified"], false);
@@ -557,9 +1155,9 @@ fn complete_custody_and_pinned_readback_cover_retained_frames_orphans_forks_and_
         )
         .is_err()
     );
-    let restored = load_snapshot_packet(
-        &working.join("inputs/config-1/snapshot-outbox/synthetic/pending.json"),
-    )
+    let restored = load_snapshot_packet(&working.join(format!(
+        "inputs/config-1/snapshot-outbox/synthetic/{root_id}.json"
+    )))
     .unwrap();
     assert_eq!(restored.to_value(), pending.to_value());
     inspect_snapshot_manifest(&restored.manifest, &recovery).unwrap();

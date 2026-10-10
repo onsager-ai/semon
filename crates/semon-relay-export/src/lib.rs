@@ -158,6 +158,153 @@ pub fn export(inputs: &[Input], destination: &Path) -> Result<()> {
     export_with_hook(inputs, destination, || {})
 }
 
+/// Read only a complete version-1 custody artifact, checking every declared
+/// byte and the exact tree before and after the callback. The callback receives
+/// paths inside the artifact, never the historical `source` paths in its JSON.
+/// Keep the artifact immutable; write derived output outside it.
+pub fn with_verified_inputs<T>(root: &Path, read: impl FnOnce(&[Input]) -> Result<T>) -> Result<T> {
+    let supplied: PathBuf = root.components().collect();
+    let supplied_stamp = stamp(&fs::symlink_metadata(&supplied)?)?;
+    if !supplied_stamp.directory {
+        return Err("custody artifact must be a real directory".into());
+    }
+    let root = fs::canonicalize(supplied)?;
+    let before = inventory(&root)?;
+    if before.get(Path::new("")) != Some(&supplied_stamp) {
+        return Err("custody artifact generation changed during resolution".into());
+    }
+    let manifest_path = Path::new("manifest.json");
+    let manifest_stamp = before
+        .get(manifest_path)
+        .ok_or("custody manifest is missing")?;
+    if manifest_stamp.directory || manifest_stamp.length > 64 * 1024 * 1024 {
+        return Err("custody manifest is not a supported regular file (maximum 64 MiB)".into());
+    }
+    let mut manifest_file = source_file(&root.join(manifest_path), manifest_stamp)?;
+    let mut bytes = Vec::new();
+    manifest_file.read_to_end(&mut bytes)?;
+    let manifest: Value = serde_json::from_slice(&bytes)?;
+    if manifest["format"] != "semon.relay-custody-export"
+        || manifest["version"] != 1
+        || manifest["legacy_source"] != LEGACY_SOURCE
+        || manifest["decryption_verified"] != false
+    {
+        return Err(
+            "unsupported custody artifact format/version/source or decryption claim".into(),
+        );
+    }
+    let declarations = manifest["inputs"]
+        .as_array()
+        .ok_or("custody inputs are missing")?;
+    if declarations.is_empty() {
+        return Err("custody artifact declares no inputs".into());
+    }
+    let mut expected = BTreeMap::from([
+        (PathBuf::new(), (true, None, None)),
+        (PathBuf::from("inputs"), (true, None, None)),
+        (
+            manifest_path.to_owned(),
+            (
+                false,
+                Some(manifest_stamp.length),
+                Some(format!("{:x}", Sha256::digest(&bytes))),
+            ),
+        ),
+    ]);
+    let mut inputs = Vec::new();
+    for (index, declaration) in declarations.iter().enumerate() {
+        let kind = match declaration["kind"].as_str() {
+            Some("receiver") => Kind::Receiver,
+            Some("config") => Kind::Config,
+            Some("sender") => Kind::Sender,
+            Some("recovery-key") => Kind::RecoveryKey,
+            _ => return Err("unsupported custody input role".into()),
+        };
+        let id = format!("{}-{index}", kind.name());
+        let artifact = format!("inputs/{id}");
+        if declaration["id"] != id || declaration["artifact"] != artifact {
+            return Err("custody input identity/path does not match its declared role".into());
+        }
+        let base = PathBuf::from(artifact);
+        let entries = declaration["entries"]
+            .as_array()
+            .ok_or("custody entries missing")?;
+        for entry in entries {
+            let relative = entry["path"].as_str().ok_or("custody entry path missing")?;
+            let relative = Path::new(relative);
+            if relative
+                .components()
+                .any(|part| !matches!(part, std::path::Component::Normal(_)))
+            {
+                return Err("unsafe custody entry path".into());
+            }
+            let directory = match entry["kind"].as_str() {
+                Some("directory") => true,
+                Some("file") => false,
+                _ => return Err("unsupported custody entry type".into()),
+            };
+            let (length, digest) = if directory {
+                if !entry["bytes"].is_null() || !entry["sha256"].is_null() {
+                    return Err("directory has unsupported custody byte/hash fields".into());
+                }
+                (None, None)
+            } else {
+                (
+                    Some(entry["bytes"].as_u64().ok_or("custody length missing")?),
+                    Some(
+                        entry["sha256"]
+                            .as_str()
+                            .ok_or("custody digest missing")?
+                            .to_owned(),
+                    ),
+                )
+            };
+            if expected
+                .insert(under(&base, relative), (directory, length, digest))
+                .is_some()
+            {
+                return Err("duplicate custody path declaration".into());
+            }
+        }
+        if expected.get(&base).map(|entry| entry.0) != Some(kind != Kind::RecoveryKey) {
+            return Err("custody input root has the wrong declared type".into());
+        }
+        inputs.push(Input {
+            kind,
+            path: root.join(base),
+        });
+    }
+    let verify = || -> Result<()> {
+        if inventory(&root)? != before || expected.len() != before.len() {
+            return Err("custody tree changed or contains undeclared/missing entries".into());
+        }
+        for (relative, (directory, length, digest)) in &expected {
+            let actual = before
+                .get(relative)
+                .ok_or("declared custody entry missing")?;
+            if actual.directory != *directory
+                || length.is_some_and(|length| length != actual.length)
+            {
+                return Err("custody entry type/length mismatch".into());
+            }
+            if let Some(digest) = digest {
+                let mut file = source_file(&root.join(relative), actual)?;
+                if hash(&mut file, None)? != *digest {
+                    return Err("custody entry checksum mismatch".into());
+                }
+            }
+        }
+        if inventory(&root)? != before {
+            return Err("custody generation changed during verification".into());
+        }
+        Ok(())
+    };
+    verify()?;
+    let result = read(&inputs);
+    verify()?;
+    result
+}
+
 fn export_with_hook(
     inputs: &[Input],
     destination: &Path,
@@ -328,6 +475,99 @@ mod tests {
         fn drop(&mut self) {
             fs::remove_dir_all(&self.0).unwrap();
         }
+    }
+
+    #[test]
+    fn verified_artifact_reads_never_use_source_paths_and_reject_tampering_or_mutation() {
+        let root = Scratch::new();
+        let source = root.0.join("source");
+        fs::create_dir(&source).unwrap();
+        fs::write(source.join("record"), b"private evidence").unwrap();
+        let out = root.0.join("artifact");
+        export(
+            &[Input {
+                kind: Kind::Config,
+                path: source.clone(),
+            }],
+            &out,
+        )
+        .unwrap();
+        let baseline = inventory(&out).unwrap();
+        with_verified_inputs(&out, |inputs| {
+            assert_eq!(inputs.len(), 1);
+            assert_eq!(inputs[0].path, out.join("inputs/config-0"));
+            assert_ne!(inputs[0].path, source);
+            assert_eq!(
+                fs::read(inputs[0].path.join("record"))?,
+                b"private evidence"
+            );
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(baseline, inventory(&out).unwrap());
+        assert!(
+            with_verified_inputs(&out, |inputs| {
+                fs::write(inputs[0].path.join("record"), b"changed evidence")?;
+                Ok(())
+            })
+            .is_err()
+        );
+        let mut invoked = false;
+        assert!(
+            with_verified_inputs(&out, |_| {
+                invoked = true;
+                Ok(())
+            })
+            .is_err()
+        );
+        assert!(!invoked);
+
+        for change in ["path", "duplicate", "role", "version", "extra", "missing"] {
+            let artifact = root.0.join(change);
+            export(
+                &[Input {
+                    kind: Kind::Config,
+                    path: source.clone(),
+                }],
+                &artifact,
+            )
+            .unwrap();
+            let manifest_path = artifact.join("manifest.json");
+            let mut manifest: Value =
+                serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+            match change {
+                "path" => {
+                    manifest["inputs"][0]["entries"][1]["path"] = json!("../../source/record")
+                }
+                "duplicate" => {
+                    let duplicate = manifest["inputs"][0]["entries"][1].clone();
+                    manifest["inputs"][0]["entries"]
+                        .as_array_mut()
+                        .unwrap()
+                        .push(duplicate);
+                }
+                "role" => manifest["inputs"][0]["artifact"] = json!(source),
+                "version" => manifest["version"] = json!(999),
+                "extra" => fs::write(artifact.join("undeclared"), b"extra").unwrap(),
+                "missing" => fs::remove_file(artifact.join("inputs/config-0/record")).unwrap(),
+                _ => unreachable!(),
+            }
+            fs::write(manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+            let mut invoked = false;
+            assert!(
+                with_verified_inputs(&artifact, |_| {
+                    invoked = true;
+                    Ok(())
+                })
+                .is_err(),
+                "{change}"
+            );
+            assert!(!invoked, "{change}");
+        }
+        assert_eq!(
+            fs::read(source.join("record")).unwrap(),
+            b"private evidence"
+        );
     }
 
     #[test]

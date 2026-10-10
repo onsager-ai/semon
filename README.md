@@ -209,6 +209,11 @@ and [historical deployment reference](docs/history/encrypted-relay-deployment.md
 The independent [Relay custody exporter](docs/relay-custody-export.md) preserves
 all explicitly selected receiver/configuration/sender trees and recovery keys;
 its byte-integrity result is separate from decryption qualification.
+The separate [offline history reader](docs/relay-history-export.md) provides
+decrypted historical inspection/export from that artifact, including retained
+generations, orphan branches, snapshot forks and pending outboxes. It builds
+against the pinned historical source outside the product workspace and records
+missing keys, integrity failures and deletion boundaries explicitly.
 
 Use generic `semon push`/`semon receive` or hosted source synchronization for
 session mirrors. Their readable redacted copies are not end-to-end encrypted
@@ -266,7 +271,9 @@ Claude/Copilot collectors and ship endpoints. Preserve the installed unit/config
 and cursor paths, then follow the [private export contract](docs/trace-store-export.md)
 with explicit writer quiescence before deciding to uninstall capture. Existing
 adapter repair/backfill commands require the [pinned legacy tools](docs/trace-capture-retirement.md).
-Historical log/forensic/export commands remain in the main CLI during migration.
+Historical log/forensic/export commands remain in the qualified pinned CLI.
+The current product CLI excludes the experimental Store; complete private
+historical export remains available through `semon-forensic-export`.
 
 ## Development checks
 
