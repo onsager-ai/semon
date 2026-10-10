@@ -7,14 +7,6 @@ use semon_relay::{
 };
 use sha2::{Digest, Sha256};
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct RemoteLease {
-    pub holder_machine: String,
-    pub epoch: u64,
-    pub last_renewal_ms: u64,
-    pub expires_at_ms: u64,
-    pub active: bool,
-}
 #[derive(Clone, Default, Serialize, Deserialize)]
 struct RemoteIndex {
     version: u32,
