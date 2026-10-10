@@ -1,19 +1,18 @@
 //! The agent read surface (#14): `semon query <tool>` and `semon mcp` answer
-//! the same tools, as JSON, from the session model `--model-json` and
-//! `/api/model` serve, so a field means the same thing in all of them.
+//! the same tools, as JSON, from native session evidence. Hosted callers still
+//! use the embedding core's compatibility snapshot during source-provider migration.
 //!
 //! - **Facts, not verdicts.** Every field is something a log line, a process
 //!   or a lock says. A field Semon can't know exactly is `null`, or the state
 //!   `unknown`; it is never inferred. `stalls` is a convenience: it names its
 //!   rule and gives closed reason codes, never prose.
-//! - **One model.** Sessions, turns and handoffs are the model's; the few
-//!   facts the model holds but doesn't serve (a session's process, its parent
-//!   and exact token counts) come from the same build.
+//! - **One evidence generation.** Sessions, turns, handoffs, process facts and
+//!   source-backed transcript offsets come from the same native build.
 //! - **Read-only.** No listener and no network. Nothing is written but the
 //!   metadata cache the viewer keeps too.
 
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap},
     fmt, io,
     sync::Arc,
     time::Duration,
@@ -23,9 +22,9 @@ use serde_json::{Map, Value, json};
 
 use crate::{
     Options,
-    model::{SessionFacts, SlotKind, now_ms, one_line},
+    model::{SessionFacts, SlotKind, Transcript, now_ms, one_line},
     tx,
-    union::{Owner, ViewerCore},
+    union::{Owner, QueryRead, ViewerCore},
     viewer::Reading,
 };
 
@@ -401,7 +400,162 @@ struct View {
     children: BTreeMap<String, Vec<String>>,
 }
 
+enum ReadShape<'a> {
+    Summaries,
+    Session(&'a str),
+    Search,
+}
+
 impl View {
+    fn native(read: &QueryRead, now: i64, shape: ReadShape<'_>) -> Result<Self, QueryError> {
+        let mut conflicts = read.conflicts();
+        let multiple = read.parts.len() > 1;
+        let mut sessions = BTreeMap::new();
+        let mut facts = BTreeMap::new();
+        let mut handoffs = Vec::new();
+        let mut turns = Vec::new();
+        let mut handoff_ids = BTreeSet::new();
+        let mut turn_ids = BTreeSet::new();
+        for part in &read.parts {
+            for (id, session) in &part.data.sessions {
+                if part.dropped.contains(id) {
+                    continue;
+                }
+                // The tools expose only these session fields. Pricing tables,
+                // workspace transport and per-transcript growth marks stay out.
+                let mut row = json!({
+                    "name": session.name, "harness": session.harness,
+                    "model": session.model, "repo": session.repo,
+                    "branch": session.branch, "state": session.state,
+                    "machine": part.machine.as_ref().unwrap_or(&session.machine),
+                    "busy": session.busy,
+                });
+                if let Some(evidence) = &session.copilot {
+                    row["copilot"] = json!(evidence);
+                }
+                if let Some(evidence) = &session.claude_usage {
+                    row["claude_usage"] = json!(evidence);
+                }
+                if !session.signals.is_empty() {
+                    row["signals"] = json!(session.signals);
+                }
+                sessions.insert(part.served(id), row);
+            }
+            for (id, own) in &part.data.facts {
+                let mut own = own.clone();
+                own.parent = own.parent.map(|parent| part.served(&parent));
+                facts.insert(part.served(id), own);
+            }
+            for handoff in &part.data.handoffs {
+                if part.dropped.contains(&handoff.from)
+                    || handoff
+                        .to
+                        .as_ref()
+                        .is_some_and(|to| part.dropped.contains(to))
+                    || (part.droppable && handoff_ids.contains(&handoff.id))
+                {
+                    continue;
+                }
+                if !handoff_ids.insert(handoff.id.clone()) && multiple {
+                    conflicts.insert(handoff.id.clone());
+                }
+                let question = handoff.kind == "toyou"
+                    && handoff.ask == Some("question")
+                    && handoff.status == "wait";
+                let requested = match shape {
+                    ReadShape::Session(id) => {
+                        part.served(&handoff.from) == id
+                            || handoff.to.as_ref().is_some_and(|to| part.served(to) == id)
+                    }
+                    ReadShape::Search => true,
+                    ReadShape::Summaries => false,
+                };
+                if !requested && !question {
+                    continue;
+                }
+                let mut handoff = handoff.clone();
+                handoff.from = part.served(&handoff.from);
+                handoff.to = handoff.to.map(|to| part.served(&to));
+                handoffs.push(json!(handoff));
+            }
+            for turn in &part.data.turns {
+                if part.dropped.contains(&turn.sid)
+                    || (part.droppable && turn_ids.contains(&turn.id))
+                {
+                    continue;
+                }
+                if !turn_ids.insert(turn.id.clone()) && multiple {
+                    conflicts.insert(turn.id.clone());
+                }
+                if !matches!(shape, ReadShape::Session(id) if part.served(&turn.sid) == id) {
+                    continue;
+                }
+                let mut turn = turn.clone();
+                turn.sid = part.served(&turn.sid);
+                turns.push(json!(turn));
+            }
+        }
+        if !conflicts.is_empty() {
+            return Err(QueryError::new(
+                "id_conflict",
+                format!(
+                    "two machines both have {}",
+                    conflicts.into_iter().collect::<Vec<_>>().join(", ")
+                ),
+            ));
+        }
+        Ok(Self::from_evidence(
+            now,
+            sessions.into_iter().collect(),
+            handoffs,
+            turns,
+            facts,
+        ))
+    }
+
+    fn from_evidence(
+        now: i64,
+        sessions: Vec<(String, Value)>,
+        handoffs: Vec<Value>,
+        turns: Vec<Value>,
+        facts: BTreeMap<String, SessionFacts>,
+    ) -> Self {
+        let mut open = HashMap::new();
+        for handoff in &handoffs {
+            if handoff["kind"] == "toyou"
+                && handoff["ask"] == "question"
+                && handoff["status"] == "wait"
+                && let Some(from) = handoff["from"].as_str()
+            {
+                open.insert(
+                    from.to_owned(),
+                    json!({"text": handoff["brief"], "asked_at": handoff["at"], "handoff": handoff["id"]}),
+                );
+            }
+        }
+        let index = sessions
+            .iter()
+            .enumerate()
+            .map(|(position, (id, _))| (id.clone(), position))
+            .collect();
+        let mut children = BTreeMap::<String, Vec<String>>::new();
+        for (id, _) in &sessions {
+            if let Some(parent) = facts.get(id).and_then(|facts| facts.parent.clone()) {
+                children.entry(parent).or_default().push(id.clone());
+            }
+        }
+        Self {
+            now,
+            sessions,
+            index,
+            handoffs,
+            turns,
+            facts,
+            open,
+            children,
+        }
+    }
+
     fn session(&self, id: &str) -> Option<&Value> {
         self.index
             .get(id)
@@ -514,13 +668,17 @@ fn snippet(text: &str, at: usize, length: usize) -> String {
 }
 
 /// The agent read surface over one machine's homes or several: the tools
-/// `semon query` and `semon mcp` answer. It keeps the viewer's model and
-/// caches between calls, rebuilding only what changed.
+/// `semon query` and `semon mcp` answer. Local calls share the native source
+/// index and snapshots between calls, rebuilding only what changed. Hosted
+/// calls retain the embedding core's refresh policy during migration.
 pub struct Query {
     core: Arc<ViewerCore>,
     cached: bool,
     /// The current call's window start (epoch ms), as the model was built.
     start: Option<i64>,
+    /// Local reads retain one cohort for the entire call. Hosted reads use
+    /// their existing cached policy until the provider migration lands.
+    native: Option<QueryRead>,
 }
 
 impl Query {
@@ -529,8 +687,8 @@ impl Query {
         Self::with_machines(vec![(String::new(), options)])
     }
 
-    /// The tools over several machines' homes, as one model: the union
-    /// [`ViewerCore::with_machines`] serves.
+    /// The tools over several machines' native evidence, using the same
+    /// identity and ownership rules as [`ViewerCore::with_machines`].
     ///
     /// Each machine keeps its own window: its `since`, or every file with
     /// `all`. Only log files modified within it are read
@@ -556,6 +714,7 @@ impl Query {
             core: Arc::new(ViewerCore::with_machines(machines)),
             cached: false,
             start: None,
+            native: None,
         }
     }
 
@@ -567,6 +726,7 @@ impl Query {
             core,
             cached: true,
             start: None,
+            native: None,
         }
     }
 
@@ -582,6 +742,19 @@ impl Query {
     /// (epoch ms): the latest machine's start; `None` when every machine
     /// has an unbounded model.
     fn window_start(&mut self, now: i64) -> Result<Option<i64>, QueryError> {
+        if !self.cached {
+            let native = self
+                .core
+                .query_at(now)
+                .map_err(|error| QueryError::io(&error))?;
+            let start = native
+                .parts
+                .iter()
+                .filter_map(|part| part.data.window_start)
+                .max();
+            self.native = Some(native);
+            return Ok(start);
+        }
         Ok(self
             .core
             .served(self.reading(now))
@@ -650,7 +823,10 @@ impl Query {
         Ok(answer)
     }
 
-    fn view(&mut self, now: i64) -> Result<View, QueryError> {
+    fn view(&mut self, now: i64, shape: ReadShape<'_>) -> Result<View, QueryError> {
+        if let Some(native) = &self.native {
+            return View::native(native, now, shape);
+        }
         let model = match self
             .core
             .model_at(now, self.reading(now))
@@ -690,45 +866,11 @@ impl Query {
             Value::Array(turns) => turns,
             _ => Vec::new(),
         };
-        let mut open = HashMap::new();
-        for handoff in &handoffs {
-            if handoff["kind"] == "toyou"
-                && handoff["ask"] == "question"
-                && handoff["status"] == "wait"
-                && let Some(from) = handoff["from"].as_str()
-            {
-                // Handoffs are in time order: the latest open question wins.
-                open.insert(
-                    from.to_owned(),
-                    json!({"text": handoff["brief"], "asked_at": handoff["at"], "handoff": handoff["id"]}),
-                );
-            }
-        }
-        let index = sessions
-            .iter()
-            .enumerate()
-            .map(|(position, (id, _))| (id.clone(), position))
-            .collect();
-        let mut children = BTreeMap::<String, Vec<String>>::new();
-        for (id, _) in &sessions {
-            if let Some(parent) = facts.get(id).and_then(|facts| facts.parent.clone()) {
-                children.entry(parent).or_default().push(id.clone());
-            }
-        }
-        Ok(View {
-            now,
-            sessions,
-            index,
-            handoffs,
-            turns,
-            facts,
-            open,
-            children,
-        })
+        Ok(View::from_evidence(now, sessions, handoffs, turns, facts))
     }
 
     fn list_sessions(&mut self, args: &Value, now: i64) -> Result<Value, QueryError> {
-        let view = self.view(now)?;
+        let view = self.view(now, ReadShape::Summaries)?;
         let since = self.since(args, now)?;
         let state = string(args, "state");
         let repo = string(args, "repo");
@@ -772,8 +914,8 @@ impl Query {
     }
 
     fn get_session(&mut self, args: &Value, now: i64) -> Result<Value, QueryError> {
-        let view = self.view(now)?;
         let id = string(args, "id").unwrap_or_default();
+        let view = self.view(now, ReadShape::Session(&id))?;
         let Some(session) = view.session(&id) else {
             return Err(QueryError::unknown_session(&id));
         };
@@ -802,11 +944,14 @@ impl Query {
         let anchor = tx::Anchor::of(position("before"), position("after"), string(args, "turn"))
             .ok_or_else(|| QueryError::invalid("before, after and turn are exclusive"))?;
         let limit = integer(args, "limit").map_or(tx::PAGE_ENTRIES, |limit| limit as usize);
-        let own = match self
-            .core
-            .owner(&id, self.reading(now))
-            .map_err(|error| QueryError::io(&error))?
-        {
+        let owner = if let Some(native) = &self.native {
+            native.owner(&id)
+        } else {
+            self.core
+                .owner(&id, self.reading(now))
+                .map_err(|error| QueryError::io(&error))?
+        };
+        let (index, own) = match owner {
             Owner::At(index, own) => (index, own),
             Owner::Missing => return Err(QueryError::unknown_session(&id)),
             Owner::Conflict => {
@@ -816,23 +961,41 @@ impl Query {
                 ));
             }
         };
-        let built = self
-            .core
-            .built_at(own.0, self.reading(now))
-            .map_err(|error| QueryError::io(&error))?;
-        if !built.tx.contains_key(&own.1) {
-            return Err(QueryError::unknown_session(&id));
+        let page = if let Some(native) = &self.native {
+            let data = &native.parts[index].data;
+            let transcript = data
+                .tx
+                .get(&own)
+                .ok_or_else(|| QueryError::unknown_session(&id))?;
+            tx::page_from(
+                &tx::RenderContext {
+                    home: data.home.as_deref(),
+                    harness: data.sessions.get(&own).map(|session| session.harness),
+                    bounded: false,
+                },
+                transcript,
+                &own,
+                &anchor,
+                now,
+                limit,
+            )
+        } else {
+            let built = self
+                .core
+                .built_at(index, self.reading(now))
+                .map_err(|error| QueryError::io(&error))?;
+            if !built.tx.contains_key(&own) {
+                return Err(QueryError::unknown_session(&id));
+            }
+            tx::page_limited(&built, &own, &anchor, now, limit)
         }
-        let page =
-            tx::page_limited(&built, &own.1, &anchor, now, limit).map_err(|error| {
-                match (&anchor, error.kind()) {
-                    (tx::Anchor::Turn(turn), io::ErrorKind::NotFound) => QueryError::new(
-                        "unknown_turn",
-                        format!("session {id:?} has no turn {turn:?}"),
-                    ),
-                    _ => QueryError::io(&error),
-                }
-            })?;
+        .map_err(|error| match (&anchor, error.kind()) {
+            (tx::Anchor::Turn(turn), io::ErrorKind::NotFound) => QueryError::new(
+                "unknown_turn",
+                format!("session {id:?} has no turn {turn:?}"),
+            ),
+            _ => QueryError::io(&error),
+        })?;
         serde_json::from_str(&page).map_err(|error| QueryError::new("io", error.to_string()))
     }
 
@@ -842,7 +1005,7 @@ impl Query {
         let since = self.since(args, now)?;
         let limit = integer(args, "limit").unwrap_or(FIND_LIMIT) as usize;
         let max_bytes = integer(args, "max_bytes").unwrap_or(FIND_BYTES) as u64;
-        let view = self.view(now)?;
+        let view = self.view(now, ReadShape::Search)?;
         let handoffs: HashMap<&str, &Value> = view
             .handoffs
             .iter()
@@ -870,35 +1033,48 @@ impl Query {
         }
         // Every session's transcript, the most recently active first, each
         // from its newest entry back. Stubs have no activity of their own.
-        let parts = self
-            .core
-            .served(self.reading(now))
-            .map_err(|error| QueryError::io(&error))?;
-        let mut order: Vec<(Option<i64>, String, usize, &str)> = Vec::new();
-        for (index, part) in parts.iter().enumerate() {
-            for own in part.built.tx.keys() {
-                let served = part.served(own);
-                if view.session(&served).is_none()
-                    || view
-                        .facts
-                        .get(&served)
-                        .is_some_and(|facts| facts.kind == "stub")
-                    || !recent(&served)
-                {
-                    continue;
-                }
-                order.push((view.last(&served), served, index, own.as_str()));
+        let transcripts: Vec<(String, Arc<Transcript>)> = if let Some(native) = &self.native {
+            native
+                .parts
+                .iter()
+                .flat_map(|part| {
+                    part.data
+                        .tx
+                        .iter()
+                        .map(|(own, tx)| (part.served(own), tx.clone()))
+                })
+                .collect()
+        } else {
+            self.core
+                .served(self.reading(now))
+                .map_err(|error| QueryError::io(&error))?
+                .iter()
+                .flat_map(|part| {
+                    part.built
+                        .tx
+                        .iter()
+                        .map(|(own, tx)| (part.served(own), tx.clone()))
+                })
+                .collect()
+        };
+        let mut order = Vec::new();
+        for (served, transcript) in transcripts {
+            if view.session(&served).is_none()
+                || view
+                    .facts
+                    .get(&served)
+                    .is_some_and(|facts| facts.kind == "stub")
+                || !recent(&served)
+            {
+                continue;
             }
+            order.push((view.last(&served), served, transcript));
         }
         order.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
         let mut lines = tx::Lines::default();
         let mut matches = Vec::new();
         let mut stopped = None;
-        'sessions: for (_, served, index, own) in &order {
-            let built = &*parts[*index].built;
-            let Some(transcript) = built.tx.get(*own) else {
-                continue;
-            };
+        'sessions: for (_, served, transcript) in &order {
             for (position, slot) in transcript.slots.iter().enumerate().rev() {
                 if since.is_some_and(|since| !slot.t.is_some_and(|t| t >= since)) {
                     continue;
@@ -929,13 +1105,13 @@ impl Query {
                         }
                         ("h", texts)
                     }
-                    SlotKind::U => ("u", tx::slot_texts(built, &mut lines, slot)),
-                    SlotKind::A => ("a", tx::slot_texts(built, &mut lines, slot)),
-                    SlotKind::Think => ("think", tx::slot_texts(built, &mut lines, slot)),
+                    SlotKind::U => ("u", tx::slot_texts(&mut lines, slot)),
+                    SlotKind::A => ("a", tx::slot_texts(&mut lines, slot)),
+                    SlotKind::Think => ("think", tx::slot_texts(&mut lines, slot)),
                     SlotKind::Tool { .. }
                     | SlotKind::Operation { .. }
                     | SlotKind::Yielded { .. }
-                    | SlotKind::Sent { .. } => ("tool", tx::slot_texts(built, &mut lines, slot)),
+                    | SlotKind::Sent { .. } => ("tool", tx::slot_texts(&mut lines, slot)),
                     _ => continue,
                 };
                 let Some((part, text, at)) = texts
@@ -1001,7 +1177,7 @@ impl Query {
     }
 
     fn stalls(&mut self, args: &Value, now: i64) -> Result<Value, QueryError> {
-        let view = self.view(now)?;
+        let view = self.view(now, ReadShape::Summaries)?;
         let idle_minutes = integer(args, "idle_minutes").unwrap_or(1);
         let since = self.since(args, now)?;
         let threshold = idle_minutes.saturating_mul(60_000);

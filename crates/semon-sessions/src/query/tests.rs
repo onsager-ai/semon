@@ -1405,3 +1405,153 @@ fn shared_queries_read_the_viewer_cache_and_expose_its_output_window() {
         answer
     );
 }
+
+#[test]
+fn local_tools_match_legacy_evidence_without_compatibility_preparation() {
+    let home = fixture();
+    // Same hostname exercises presentation disambiguation independently of the
+    // authoritative source keys. The second source has its own native evidence.
+    let peer = Home::new("testbox");
+    peer.top(
+        "other",
+        &[
+            human("other", ts(6, 0), "Review the lexer change"),
+            assistant("other", ts(6, 1), vec![text("Looks right.")]),
+        ],
+    );
+    for multiple in [false, true] {
+        let mut machines = vec![("a".to_owned(), home.options.clone())];
+        if multiple {
+            machines.push(("b".to_owned(), peer.options.clone()));
+        }
+        let mut native = Query::with_machines(machines.clone());
+        for revision in 0..3 {
+            if revision == 1 {
+                home.top(
+                    "done",
+                    &[
+                        human("done", ts(4, 0), "Summarize the design doc"),
+                        assistant("done", ts(4, 1), vec![text("Updated lexer evidence.")]),
+                        assistant("done", ts(7, 0), vec![text("A later response.")]),
+                    ],
+                );
+            }
+            if revision == 2 {
+                let path = home.root.join("proc/30/stat");
+                if path.exists() {
+                    fs::remove_file(path).unwrap();
+                }
+            }
+            let calls = [
+                ("list_sessions", json!({})),
+                ("list_sessions", json!({"parent":"lead", "limit":1})),
+                ("get_session", json!({"id":"lead"})),
+                ("get_session", json!({"id":"scan"})),
+                ("get_session", json!({"id":"asker"})),
+                ("get_session", json!({"id":"cx"})),
+                ("read_transcript", json!({"id":"done", "limit":1})),
+                (
+                    "read_transcript",
+                    json!({"id":"scan", "after":0, "limit":2}),
+                ),
+                ("read_transcript", json!({"id":"done", "turn":"absent"})),
+                ("get_session", json!({"id":"absent"})),
+                ("find", json!({"text":"lexer", "limit":2})),
+                ("find", json!({"text":"cargo", "max_bytes":1})),
+                ("stalls", json!({"idle_minutes":1})),
+            ];
+            let before = crate::model::COMPAT_BUILDS.with(|count| count.get());
+            let actual: Vec<_> = calls
+                .iter()
+                .map(|(tool, args)| native.call_at(tool, args, NOW))
+                .collect();
+            assert_eq!(
+                crate::model::COMPAT_BUILDS.with(|count| count.get()),
+                before
+            );
+            let snapshot = native.native.as_ref().unwrap().parts[0].data.clone();
+            native.call_at("list_sessions", &json!({}), NOW).unwrap();
+            assert!(Arc::ptr_eq(
+                &snapshot,
+                &native.native.as_ref().unwrap().parts[0].data
+            ));
+
+            // Use the old production consumer as the independent transport
+            // reference, with the same file-selection window and clock.
+            let machines = machines
+                .iter()
+                .map(|(key, options)| {
+                    (
+                        key.clone(),
+                        Options {
+                            scan_window: true,
+                            session: None,
+                            ..options.clone()
+                        },
+                    )
+                })
+                .collect();
+            let core = Arc::new(ViewerCore::with_machines(machines));
+            core.model_at(NOW, Reading::At(NOW)).unwrap().unwrap();
+            core.close();
+            let mut legacy = Query::from_core(core);
+            for ((tool, args), actual) in calls.iter().zip(actual) {
+                assert_eq!(
+                    actual,
+                    legacy.call_at(tool, args, NOW),
+                    "{tool} {args}, multiple={multiple}, revision={revision}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn local_query_conflicts_and_source_removal_use_native_snapshots() {
+    let first = Home::new("same");
+    let second = Home::new("same");
+    for home in [&first, &second] {
+        home.top(
+            "duplicate",
+            &[
+                human("duplicate", ts(1, 0), "Same native session ID"),
+                assistant("duplicate", ts(1, 1), vec![text("Evidence")]),
+            ],
+        );
+    }
+    let mut native = Query::with_machines(vec![
+        ("a".into(), first.options.clone()),
+        ("b".into(), second.options.clone()),
+    ]);
+    let before = crate::model::COMPAT_BUILDS.with(|count| count.get());
+    for tool in ["list_sessions", "get_session", "read_transcript"] {
+        let args = if tool == "list_sessions" {
+            json!({})
+        } else {
+            json!({"id":"duplicate"})
+        };
+        assert_eq!(
+            native.call_at(tool, &args, NOW).unwrap_err().code,
+            "id_conflict"
+        );
+    }
+    fs::remove_file(
+        second
+            .root
+            .join("claude/projects/-work-proj/duplicate.jsonl"),
+    )
+    .unwrap();
+    assert_eq!(
+        native.call_at("list_sessions", &json!({}), NOW).unwrap()["total"],
+        1
+    );
+    assert!(
+        native
+            .call_at("read_transcript", &json!({"id":"duplicate"}), NOW)
+            .is_ok()
+    );
+    assert_eq!(
+        crate::model::COMPAT_BUILDS.with(|count| count.get()),
+        before
+    );
+}

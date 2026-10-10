@@ -386,6 +386,21 @@ pub(crate) struct Built {
     pub(crate) texts: BTreeMap<String, Vec<(usize, u64, u32)>>,
 }
 
+/// Native query evidence and source offsets, without compatibility transport,
+/// growth marks or workspace analytics. The producer applies the same native
+/// relationships and window rules as the legacy model.
+pub(crate) struct QueryData {
+    pub(crate) sessions: BTreeMap<String, Session>,
+    pub(crate) handoffs: Vec<Handoff>,
+    pub(crate) turns: Vec<Turn>,
+    pub(crate) facts: BTreeMap<String, SessionFacts>,
+    pub(crate) tx: BTreeMap<String, Arc<Transcript>>,
+    pub(crate) home: Option<String>,
+    pub(crate) machine_id: String,
+    pub(crate) pids: Vec<u32>,
+    pub(crate) window_start: Option<i64>,
+}
+
 impl Built {
     /// The model as served at `now`: a running tool's `activity[2]` is its
     /// age in seconds, and a tool without a result for [`LIVE_MS`] is no
@@ -5883,14 +5898,34 @@ pub(crate) fn build_sources(
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum BuildTarget {
     Model,
+    Query,
     Catalog,
     Sources,
 }
 
 enum BuildOutput {
     Model(Box<Built>),
+    Query(Box<QueryData>),
     Catalog(BTreeSet<u32>),
     Sources(PreparedSources),
+}
+
+/// Build native query evidence using the existing incremental source index.
+/// Scan-window callers still discover and join every eligible native source;
+/// selected-session dependency closure is a separate retirement stage.
+pub(crate) fn build_query(
+    options: &Options,
+    cache: &mut EventCache,
+    dirty: &mut bool,
+    texts: &mut Texts,
+    now: i64,
+) -> io::Result<QueryData> {
+    match build_sources_inner(options, cache, dirty, texts, now, None, BuildTarget::Query)? {
+        BuildOutput::Query(data) => Ok(*data),
+        _ => Err(io::Error::other(
+            "native producer did not build query evidence",
+        )),
+    }
 }
 
 /// Reconcile native metadata and transcript slots without preparing legacy
@@ -6110,8 +6145,9 @@ fn build_sources_inner(
         .collect();
     // A scan-window build is intentionally incomplete: it cannot replace a
     // source-complete catalog. Publication itself is delayed until success.
-    let catalog = ((!options.scan_window && selected.is_none()) || target != BuildTarget::Model)
-        .then(|| summary::catalog(&builder, &handoffs));
+    let catalog = ((!options.scan_window && selected.is_none())
+        || matches!(target, BuildTarget::Catalog | BuildTarget::Sources))
+    .then(|| summary::catalog(&builder, &handoffs));
     let slot_projections = catalog
         .as_ref()
         .map(|rows| crate::slot_projection::capture(&tx, rows));
@@ -6137,10 +6173,12 @@ fn build_sources_inner(
                 pids.iter().map(|pid| pid.pid).collect(),
             ));
         }
-        BuildTarget::Model => {}
+        BuildTarget::Model | BuildTarget::Query => {}
     }
     #[cfg(test)]
-    COMPAT_BUILDS.with(|builds| builds.set(builds.get() + 1));
+    if target == BuildTarget::Model {
+        COMPAT_BUILDS.with(|builds| builds.set(builds.get() + 1));
+    }
     #[cfg(test)]
     let texts = builder.texts_by_turn();
     let run_of = |pid, start| facts.run(options, pid, start);
@@ -6178,7 +6216,8 @@ fn build_sources_inner(
         .collect();
     // Analytics reads a month and the month before it, whatever the model's
     // window: taken from every session before the window trims them.
-    let activity = crate::analytics::activity(&sessions, &tx, &turns, &handoffs, now);
+    let activity = (target == BuildTarget::Model)
+        .then(|| crate::analytics::activity(&sessions, &tx, &turns, &handoffs, now));
     // A scan window already chose the files; what it read is returned
     // whole, so an answer is never trimmed inside a session.
     if !options.all && !options.scan_window {
@@ -6273,12 +6312,6 @@ fn build_sources_inner(
             .collect()
     };
     turns.sort_by_key(|turn| order.get(turn.sid.as_str()).copied().unwrap_or(usize::MAX));
-    let all_busy = events::busy_merge(
-        sessions
-            .values()
-            .flat_map(|session| session.busy.iter().copied())
-            .collect(),
-    );
     // A failed send reached no one. The page draws a stub for the addressee
     // as written, `unsent:<target>`; its transcript lists those sends.
     let mut unsent: BTreeMap<String, Vec<&Handoff>> = BTreeMap::new();
@@ -6315,6 +6348,39 @@ fn build_sources_inner(
             session.tool_calls = transcript.tools.clone();
         }
     }
+    if target == BuildTarget::Query {
+        if let Some(catalog) = catalog {
+            cache.publish_session_projection(
+                &crate::slot_projection::Publication {
+                    rows: &catalog,
+                    transcripts: slot_projections.as_deref(),
+                },
+                catalog_base.as_deref(),
+            );
+        }
+        cache.publish_session_descriptions();
+        return Ok(BuildOutput::Query(Box::new(QueryData {
+            sessions,
+            handoffs,
+            turns,
+            facts: session_facts,
+            tx,
+            home,
+            machine_id: machine,
+            pids: pids.iter().map(|pid| pid.pid).collect(),
+            window_start: window_start.or_else(|| {
+                (!options.all).then(|| {
+                    now.saturating_sub(i64::try_from(options.since.as_millis()).unwrap_or(i64::MAX))
+                })
+            }),
+        })));
+    }
+    let all_busy = events::busy_merge(
+        sessions
+            .values()
+            .flat_map(|session| session.busy.iter().copied())
+            .collect(),
+    );
     let busy = BTreeMap::from([(machine.clone(), all_busy)]);
     let file_sizes: HashMap<&Path, u64> = files
         .iter()
@@ -6414,7 +6480,7 @@ fn build_sources_inner(
                 now.saturating_sub(i64::try_from(options.since.as_millis()).unwrap_or(i64::MAX))
             })
         }),
-        activity,
+        activity: activity.expect("model analytics prepared"),
         #[cfg(test)]
         handoffs,
         #[cfg(test)]

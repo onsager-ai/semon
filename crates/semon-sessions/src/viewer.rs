@@ -216,6 +216,7 @@ struct Work {
 struct Shown {
     model: Option<Arc<ModelCache>>,
     tree: Option<Arc<TreeCache>>,
+    query: Option<Arc<QueryCache>>,
 }
 
 /// Transcript files by session, and each Codex file's harness offsets.
@@ -486,6 +487,11 @@ struct TreeCache {
 
 struct ModelCache {
     built: Arc<Built>,
+    snapshot: Snapshot,
+}
+
+struct QueryCache {
+    data: Arc<model::QueryData>,
     snapshot: Snapshot,
 }
 
@@ -2267,6 +2273,40 @@ impl MachineView {
             Reading::At(now) => self.fresh_model(now)?,
         };
         Ok(cache.built.clone())
+    }
+
+    /// Local query reads refresh native evidence in this view's existing source
+    /// cache. They never show a compatibility model or start its refresh loop.
+    pub(crate) fn query_at(&self, now: i64) -> io::Result<Arc<model::QueryData>> {
+        let unchanged = || {
+            let query = read_lock(&self.shown).query.clone();
+            query.filter(|query| !self.changed(&query.snapshot))
+        };
+        if let Some(query) = unchanged() {
+            return Ok(query.data.clone());
+        }
+        let mut work = lock(&self.work);
+        if let Some(query) = unchanged() {
+            return Ok(query.data.clone());
+        }
+        let work = &mut *work;
+        self.prepare_events(work, now)?;
+        let cache = work.events.as_mut().expect("event cache initialized");
+        let mut snapshot = Snapshot::capture_pids(&self.options, BTreeSet::new(), cache.paths());
+        let data = model::build_query(&self.options, cache, &mut false, &mut work.texts, now)?;
+        if self.options.facts.is_none() {
+            snapshot.pids = data
+                .pids
+                .iter()
+                .map(|pid| (*pid, proc_start(&self.options.proc_root, *pid)))
+                .collect();
+        }
+        let data = Arc::new(data);
+        write_lock(&self.shown).query = Some(Arc::new(QueryCache {
+            data: data.clone(),
+            snapshot,
+        }));
+        Ok(data)
     }
 
     /// The model built last, as it is: no stat pass, no build, no lock but
