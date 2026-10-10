@@ -1,6 +1,10 @@
 # Semon
 
-Local-first, carrier-neutral agent memory, capture, relay and session tooling.
+Harness-native session collection, synchronization, browsing, queries and runtime
+integration, forming the foundation for Session Intelligence. Experimental trace
+capture and encrypted Relay are being retired in stages; see
+docs/design/session-foundation-retirement.md. Preserve their historical-data
+access and existing retention/security boundaries during migration.
 The former OTLP/Collector/ClickHouse pipeline is intentionally gone.
 
 ## Repository invariants

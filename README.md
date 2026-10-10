@@ -2,17 +2,22 @@
 
 # Semon
 
-Semon captures an agent's working memory in a carrier-neutral, content-addressed
-form. The local SQLite store keeps transferable semantics structurally separate
-from raw carrier records: ordinary trace reads cannot return the raw bytes or
-their carrier labels.
+Semon collects, synchronizes, browses and queries harness-native agent sessions.
+Native source logs, the incremental Session Event Index, and Session Catalog form
+the foundation for Viewer, CLI, MCP, runtime integration and future Session
+Intelligence.
 
-The workspace currently contains:
+The core CLI lives in `semon-cli`; session discovery/parsing and focused reads live
+in `semon-sessions`, generic mirror synchronization in `semon-push`, SSH onboarding
+in `semon-ssh`, and runtime/control integration in `semon-runtime`/`semon-control`.
 
-- `semon-store`, the two-region trace store
-- `semon-codex`, an incremental adapter for Codex session and history JSONL
-- `semon-claude`, an incremental adapter for Claude Code session JSONL
-- `semon-relay`, loopback failover replication for complete Claude Code streams
+The experimental Canonical Trace Store (`semon-store` and Codex/Claude/Copilot
+capture adapters), Encrypted Relay (`semon-relay`), and full-workspace Viewer
+compatibility are being retired in dependency-safe stages. Existing trace,
+forensic and encrypted-data commands remain available during migration. The CLI
+temporarily retains those dependencies; extraction alone does not remove them.
+See the [verified assessment, component decisions and migration path](docs/design/session-foundation-retirement.md).
+The Session Event Index and source-backed reads are retained.
 
 The former OTLP, OpenTelemetry Collector, ClickHouse, and analytics pipeline is
 intentionally gone. Semon is local-first and does not configure or assume a
@@ -32,12 +37,12 @@ captured session data. No real session fixture should be committed.
 Run `semon sessions` to see a local read-only tree of Claude Code sessions and subagents alongside Codex runs and subagents. Live Claude sessions are checked against process start times, and Codex runs are checked against `/proc/locks`; the command never acquires their locks or writes to either agent home. A Codex run joins a Claude session only when its first user message carries a `Semon-Parent` marker. `Semon-Handoff` links it to the launching Bash or Skill call when that call can be found.
 
 ```sh
-cargo run --locked -p semon-store --bin semon -- sessions
-cargo run --locked -p semon-store --bin semon -- sessions --since 3d --json
-cargo run --locked -p semon-store --bin semon -- sessions --session THREAD_ID
-cargo run --locked -p semon-store --bin semon -- sessions --watch
-cargo run --locked -p semon-store --bin semon -- sessions --serve
-cargo run --locked -p semon-store --bin semon -- sessions --model-json --all
+cargo run --locked -p semon-cli --bin semon -- sessions
+cargo run --locked -p semon-cli --bin semon -- sessions --since 3d --json
+cargo run --locked -p semon-cli --bin semon -- sessions --session THREAD_ID
+cargo run --locked -p semon-cli --bin semon -- sessions --watch
+cargo run --locked -p semon-cli --bin semon -- sessions --serve
+cargo run --locked -p semon-cli --bin semon -- sessions --model-json --all
 ```
 
 `--model-json` writes the viewer's session model: sessions, the handoffs between them (your messages, subagent and Codex spawns, relays, and questions and results to you), each session's turns, and busy intervals. The server returns the same JSON at `/api/model`, with an `ETag`; `?since=<version>` or `If-None-Match` answers 304 while nothing changed. Links come only from ids the logs record (`toolUseId`, `msg_id`, `session_id`, `continued-in`, `bridgeSessionId`, the Codex marker or `parent_thread_id`); when the other end isn't in the logs, a stub stands in and the handoff is marked `unmatched`. It indexes every log so links resolve; `--all` or `--since` only trim what it returns, and it doesn't take `--session`. Its event index is kept beside the tree's cache in a SQLite file (`sessions-index.sqlite3`, owner-only, WAL), so the tree, `--watch` and `--json` never load it; it holds kinds, byte offsets and ids only, and each file's change commits in one transaction as it is read, so a viewer and `semon query` can share it. If the file can't be opened, the index is kept in memory for that run; a damaged file is set aside as `sessions-index.sqlite3.corrupt` and rebuilt. The JSON event cache older versions kept (`sessions-index.events.json`) is imported whenever it is found (its reported runs, which `~/.claude.json` no longer holds, without replacing any the index has) and then removed; one that can't be read is kept as `sessions-index.events.json.corrupt`. Briefs, answers and results are read back from the source line when the model is built and kept in memory, in a bounded cache.
@@ -234,7 +239,7 @@ The report counts files and complete lines scanned, raw rows already present, an
 configured HTTP endpoint:
 
 ```sh
-cargo run --locked -p semon-store --bin semon -- ship \
+cargo run --locked -p semon-cli --bin semon -- ship \
   --store /path/to/traces.sqlite3 \
   --endpoint http://127.0.0.1:8080/traces
 ```
@@ -601,7 +606,7 @@ only to `semon ship`; the relay is a resident process by decision.
 semantics, in session/sequence order:
 
 ```sh
-cargo run --locked -p semon-store --bin semon -- log \
+cargo run --locked -p semon-cli --bin semon -- log \
   --store /path/to/traces.sqlite3 \
   --repo repository-name \
   --day 2026-09-20 \
@@ -625,11 +630,11 @@ redirecting stdout to a file still shows it.
 Select exactly one of `--trace`, `--session`, or `--day`:
 
 ```sh
-cargo run --locked -p semon-store --bin semon -- forensic \
+cargo run --locked -p semon-cli --bin semon -- forensic \
   --store /path/to/traces.sqlite3 \
   --day 2026-09-20
 
-cargo run --locked -p semon-store --bin semon -- forensic \
+cargo run --locked -p semon-cli --bin semon -- forensic \
   --store /path/to/traces.sqlite3 \
   --session codex-session-id \
   --out /path/to/forensic-excerpt.txt
@@ -652,11 +657,11 @@ designed to survive forensic deletion.
 `--forensic` is required, and so is exactly one selector:
 
 ```sh
-cargo run --locked -p semon-store --bin semon -- forget --forensic \
+cargo run --locked -p semon-cli --bin semon -- forget --forensic \
   --store /path/to/traces.sqlite3 \
   --before 2026-01-01
 
-cargo run --locked -p semon-store --bin semon -- forget --forensic \
+cargo run --locked -p semon-cli --bin semon -- forget --forensic \
   --store /path/to/traces.sqlite3 \
   --session codex-session-id \
   --yes
