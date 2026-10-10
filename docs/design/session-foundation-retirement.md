@@ -170,7 +170,9 @@ versioned all-table snapshots for schemas 0 through 7, preserving original
 DB/WAL/SHM/journal bytes and permissions. It requires quiescent source files,
 verifies private input copies against their generations and full digests, and
 uses SQLite only on those copies. Publication refuses source changes and newer
-schemas. No capture service is stopped and no original is deleted.
+schemas. No capture service is stopped and no original is deleted. New periodic capture
+installation and source timer templates are retired; installed units and manual
+collectors still require explicit inventory before export or uninstall.
 
 For legacy trace inspection, first make a consistent owner-private SQLite
 backup using its backup API (including committed WAL state), and inspect that
@@ -225,7 +227,11 @@ compatibility phases. Catalog-only background demand refreshes its own source
 snapshot without publishing a `Built` model. Explicit legacy reads and model
 warmers remain supported until their consumers migrate. Complete observation
 still discovers and joins all native sources; this slice does not claim bounded
-incremental reconciliation or removal of Hub hydration and MCP dependencies.
+incremental reconciliation or removal of Hub legacy hydration and MCP dependencies.
+[Hub #232](https://github.com/onsager-ai/semon-hub/pull/232) separately removes
+startup tenant enumeration, full-model warming and archive hydration. Restart
+tests retain Catalog and selected archived Transcript reads without a ViewerCore;
+explicit legacy reads and push warmers remain until their consumers migrate.
 
 Extraction must preserve authored CLI/test bytes and all existing command
 behavior. Feature isolation must test both core and explicit encrypted-reader
@@ -241,6 +247,9 @@ deletion, source replacement, partial/corrupt archive data and cancellation must
 fail safely. Existing fixture thresholds and approved pixel baselines remain.
 
 The remaining blockers are consumer migration, shared semantic extraction,
-unqualified full historical export and external deployment inventories. No merge,
+remaining encrypted-data export qualification and external deployment inventories.
+The versioned forensic Store export is qualified in
+[#392](https://github.com/onsager-ai/semon/pull/392); capture/Store removal awaits
+its delivery and operator migration, not completion of the old memory roadmap. No merge,
 deployment, live infrastructure change, paid harness/provider drill or user-data
 deletion is authorized by this assessment.
