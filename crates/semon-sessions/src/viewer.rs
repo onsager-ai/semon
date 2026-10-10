@@ -3522,6 +3522,7 @@ mod tests {
         };
         let parsed = || crate::events::PARSED.with(std::cell::Cell::get);
         let metas = || crate::model::META_READS.with(std::cell::Cell::get);
+        let headers = || crate::events::CODEX_HEADER_READS.with(std::cell::Cell::get);
         let marks =
             |routed: &Routed| serde_json::from_slice::<Value>(&routed.2).unwrap()["tx"].clone();
         let append = |path: &Path, line: Value| {
@@ -3535,7 +3536,7 @@ mod tests {
         );
         assert_eq!(first.0, 200);
         let v1 = version(&first);
-        let (lines, reads) = (parsed(), metas());
+        let (lines, reads, header_reads) = (parsed(), metas(), headers());
         for _ in 0..3 {
             let poll = viewer.model(&format!("since={v1}"), None).unwrap();
             assert_eq!(poll.0, 304);
@@ -3543,8 +3544,8 @@ mod tests {
             assert_eq!(poll.3, Some(format!("\"{v1}\"")));
         }
         assert_eq!(
-            (parsed(), metas()),
-            (lines, reads),
+            (parsed(), metas(), headers()),
+            (lines, reads, header_reads),
             "idle polls parse nothing"
         );
 
@@ -3565,6 +3566,11 @@ mod tests {
         assert_eq!(changed.3, Some(format!("\"{v2}\"")));
         assert_eq!(parsed(), lines + 1, "only the appended line is parsed");
         assert_eq!(metas(), reads, "no unchanged file's metadata is read again");
+        assert_eq!(
+            headers(),
+            header_reads,
+            "unchanged Codex headers stay indexed"
+        );
         // Only the grown transcript's mark moves: the page tails only it.
         let marks2 = marks(&changed);
         assert_ne!(marks2["lane"], marks1["lane"]);
@@ -3590,8 +3596,8 @@ mod tests {
         assert_eq!(parsed(), lines + 2);
         assert_eq!(viewer.model(&format!("since={v3}"), None).unwrap().0, 304);
 
-        // A Codex file that grows keeps its session_meta: its line is parsed,
-        // its metadata isn't read again.
+        // Codex growth parses only the new event and binds its first-record
+        // header to the new ledger, with a final raw-header recheck.
         append(
             &codex,
             json!({"type":"response_item","timestamp":"2026-09-24T00:06:00Z",
@@ -3603,8 +3609,9 @@ mod tests {
         assert_eq!(
             metas(),
             reads,
-            "a Codex file that grew keeps its session_meta"
+            "a Codex file that grew does not use the separate metadata cache"
         );
+        assert_eq!(headers(), header_reads + 2);
         // A subagent's .meta.json that changes is read again, and only it.
         fs::write(
             &meta,
@@ -3616,6 +3623,7 @@ mod tests {
             .unwrap();
         assert_eq!(renamed.0, 200);
         assert_eq!(metas(), reads + 1, "only the changed .meta.json is read");
+        assert_eq!(headers(), header_reads + 2);
         assert_eq!(parsed(), lines + 3);
     }
 

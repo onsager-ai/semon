@@ -36,6 +36,7 @@ use rusqlite::{
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 use super::{
     BillingUsage, CACHE_VERSION, CodexUsageEvent, Event, FileIndex, IndexStore, Ledger, Loaded,
@@ -271,6 +272,7 @@ DELETE FROM usage;
 DELETE FROM codex_usage;
 DELETE FROM files;
 DELETE FROM meta WHERE key GLOB 'archive_event_index:*';
+DELETE FROM meta WHERE key GLOB 'native_codex_header:*';
 ";
 
 const FILE_COLUMNS: &str = "file_id, path, dev, ino, size, mtime_ns, resume_at, head_sha256, \
@@ -1788,6 +1790,7 @@ impl SqliteStore {
             }
             transaction.execute("DELETE FROM files WHERE path = ?1", [path])?;
             transaction.execute("DELETE FROM meta WHERE key=?1", [archive_index_key(path)])?;
+            transaction.execute("DELETE FROM meta WHERE key=?1", [codex_header_key(path)])?;
             invalidate_catalog_source(&transaction, path, "removed")?;
         }
         transaction.commit()?;
@@ -2151,11 +2154,18 @@ struct ArchivedIndex {
     stat: Stat,
     projection_version: u32,
     projection_generation: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    native_header_sha256: Option<String>,
 }
 
 impl ArchivedIndex {
     fn matches(&self, ledger: &Ledger) -> bool {
-        self.version == 1
+        ((self.version == 1 && self.native_header_sha256.is_none())
+            || (self.version == 2
+                && self.source.root == "codex"
+                && self.native_header_sha256.as_ref().is_some_and(|hash| {
+                    hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_hexdigit())
+                })))
             && self.parser_version == CACHE_VERSION
             && crate::is_input_path(&self.source.root, &self.source.path)
             && !self.source.native_id.is_empty()
@@ -2242,6 +2252,7 @@ pub(crate) fn retain_archive_index(
         return Ok(false);
     }
     let expected = proof_ledger(proof);
+    let native_header_sha256;
     {
         let mut readers = Readers::new(connection)?;
         let mut statement =
@@ -2250,18 +2261,36 @@ pub(crate) fn retain_archive_index(
         let Some(row) = rows.next()? else {
             return Ok(false);
         };
-        let (_, ledger, _) = read_file(&mut readers, row)?;
+        let (_, ledger, index) = read_file(&mut readers, row)?;
         if ledger != expected {
             return Ok(false);
         }
+        native_header_sha256 = if proof.source.root == "codex" {
+            if index
+                .codex_header
+                .as_ref()
+                .and_then(|header| header.native_id(Path::new(path)))
+                .as_deref()
+                != Some(proof.source.native_id.as_str())
+            {
+                return Ok(false);
+            }
+            let Some(digest) = codex_header_digest(connection, path)? else {
+                return Ok(false);
+            };
+            Some(digest)
+        } else {
+            None
+        };
     }
     let record = ArchivedIndex {
-        version: 1,
+        version: if native_header_sha256.is_some() { 2 } else { 1 },
         parser_version: CACHE_VERSION,
         source: proof.source.clone(),
         stat: expected.stat,
         projection_version: projection.projection_version,
         projection_generation: projection.projection_generation.clone(),
+        native_header_sha256,
     };
     let encoded = serde_json::to_string(&record)
         .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
@@ -2281,13 +2310,22 @@ pub(crate) fn archive_index_retained(
     let Some((_, ledger)) = ledger_row(connection, path)? else {
         return Ok(false);
     };
-    Ok(ledger == proof_ledger(proof)
-        && archived_index(connection, path)?.is_some_and(|record| {
-            record.matches(&ledger)
-                && record.source == proof.source
-                && record.projection_version == projection.projection_version
-                && record.projection_generation == projection.projection_generation
-        }))
+    let Some(record) = archived_index(connection, path)? else {
+        return Ok(false);
+    };
+    let header_matches = if proof.source.root == "codex" {
+        record.version == 2
+            && record.native_header_sha256.is_some()
+            && record.native_header_sha256 == codex_header_digest(connection, path)?
+    } else {
+        record.version == 1
+    };
+    Ok(header_matches
+        && ledger == proof_ledger(proof)
+        && record.matches(&ledger)
+        && record.source == proof.source
+        && record.projection_version == projection.projection_version
+        && record.projection_generation == projection.projection_generation)
 }
 
 // ---- Values --------------------------------------------------------------------------------
@@ -2339,6 +2377,91 @@ fn untag<T: DeserializeOwned>(column: usize, text: String) -> rusqlite::Result<T
     })
 }
 
+const CODEX_HEADER_MAX: usize = 1024 * 1024;
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CodexHeaderRecord {
+    version: u32,
+    parser_version: u32,
+    ledger: String,
+    header: crate::native_header::CodexHeader,
+}
+
+fn codex_header_key(path: &str) -> String {
+    format!("native_codex_header:{path}")
+}
+
+fn header_ledger(ledger: &Ledger) -> String {
+    let mut digest = Sha256::new();
+    for value in [
+        ledger.stat.dev,
+        ledger.stat.ino,
+        ledger.stat.size,
+        ledger.offset,
+    ] {
+        digest.update(value.to_be_bytes());
+    }
+    digest.update(ledger.stat.modified_ns.to_be_bytes());
+    digest.update([u8::from(ledger.stat.changed_ns.is_some())]);
+    if let Some(changed) = ledger.stat.changed_ns {
+        digest.update(changed.to_be_bytes());
+    }
+    digest.update(ledger.prefix);
+    digest.update(ledger.tail);
+    format!("{:x}", digest.finalize())
+}
+
+fn read_codex_header(
+    statement: &mut Statement<'_>,
+    path: &str,
+    ledger: &Ledger,
+) -> rusqlite::Result<Option<crate::native_header::CodexHeader>> {
+    let encoded: Option<Option<String>> = statement
+        .query_row([codex_header_key(path)], |row| row.get(0))
+        .optional()?;
+    Ok(encoded.flatten().and_then(|text| {
+        let record: CodexHeaderRecord = serde_json::from_str(&text).ok()?;
+        (record.version == 1
+            && record.parser_version == CACHE_VERSION
+            && record.ledger == header_ledger(ledger))
+        .then_some(record.header)
+    }))
+}
+
+fn codex_header_digest(connection: &Connection, path: &str) -> rusqlite::Result<Option<String>> {
+    let encoded: Option<Option<String>> = connection.query_row("SELECT CASE WHEN octet_length(value)<=1048576 THEN value ELSE NULL END FROM meta WHERE key=?1", [codex_header_key(path)], |row| row.get(0)).optional()?;
+    Ok(encoded
+        .flatten()
+        .map(|value| format!("{:x}", Sha256::digest(value.as_bytes()))))
+}
+
+fn write_codex_header(
+    transaction: &Transaction<'_>,
+    path: &str,
+    ledger: &Ledger,
+    header: Option<&crate::native_header::CodexHeader>,
+) -> rusqlite::Result<()> {
+    let encoded = header
+        .map(|header| {
+            json(&CodexHeaderRecord {
+                version: 1,
+                parser_version: CACHE_VERSION,
+                ledger: header_ledger(ledger),
+                header: header.clone(),
+            })
+        })
+        .transpose()?;
+    if let Some(encoded) = encoded.filter(|text| text.len() <= CODEX_HEADER_MAX) {
+        transaction.execute("INSERT INTO meta(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value", params![codex_header_key(path), encoded])?;
+    } else {
+        // Current readers keep their complete in-memory header. An oversized
+        // projection cannot authorize eviction; do not truncate native fields.
+        transaction.execute("DELETE FROM meta WHERE key=?1", [codex_header_key(path)])?;
+    }
+    Ok(())
+}
+
 /// Rows of one sequence must number 0, 1, 2, …; anything else was written
 /// by something else, and the file is read from its log again.
 fn gap(what: &str) -> rusqlite::Error {
@@ -2386,6 +2509,7 @@ struct Readers<'c> {
     signals: Statement<'c>,
     usage: Statement<'c>,
     codex_usage: Statement<'c>,
+    codex_header: Statement<'c>,
 }
 
 impl<'c> Readers<'c> {
@@ -2403,6 +2527,7 @@ impl<'c> Readers<'c> {
             codex_usage: connection.prepare(&format!(
                 "SELECT {CODEX_USAGE_COLUMNS} FROM codex_usage WHERE file_id = ?1 ORDER BY seq"
             ))?,
+            codex_header: connection.prepare("SELECT CASE WHEN octet_length(value)<=1048576 THEN value ELSE NULL END FROM meta WHERE key=?1")?,
         })
     }
 }
@@ -2482,6 +2607,7 @@ fn read_file(
 
     let index = FileIndex {
         dirty_rows: None,
+        codex_header: read_codex_header(&mut readers.codex_header, &path, &ledger)?,
         events,
         extras,
         signals,
@@ -2698,6 +2824,7 @@ fn write_file(
 ) -> rusqlite::Result<()> {
     let FileIndex {
         dirty_rows: _,
+        codex_header,
         events,
         extras,
         signals,
@@ -2736,6 +2863,7 @@ fn write_file(
         prefix,
         tail,
     } = ledger;
+    write_codex_header(transaction, path, ledger, codex_header.as_ref())?;
     let rate_limits = rate_limits.as_ref().map(json).transpose()?;
     let file_id: i64 = transaction.query_row(
         PUT_FILE,
@@ -3201,6 +3329,7 @@ mod tests {
     fn full() -> FileIndex {
         FileIndex {
             dirty_rows: None,
+            codex_header: Some(crate::native_header::CodexHeader::default()),
             events: vec![
                 Event {
                     k: Kind::Tool,
@@ -3877,8 +4006,11 @@ mod tests {
         let root = scratch("change-time-migration");
         let path = root.join("index.sqlite3");
         let (mut store, _) = opened(&path);
+        // This historical schema did not persist portable native headers.
+        let mut index = full();
+        index.codex_header = None;
         store
-            .write_one("original.jsonl", None, None, &ledger(1), &full())
+            .write_one("original.jsonl", None, None, &ledger(1), &index)
             .unwrap();
         store
             .connection
@@ -3890,7 +4022,7 @@ mod tests {
         let mut expected = ledger(1);
         expected.stat.changed_ns = None;
         assert_eq!(migrated, expected);
-        assert_eq!(format!("{original:?}"), format!("{:?}", full()));
+        assert_eq!(format!("{original:?}"), format!("{index:?}"));
         assert_eq!(
             versions(&store.connection).unwrap(),
             (SCHEMA_VERSION, Some(CACHE_VERSION))

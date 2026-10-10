@@ -354,8 +354,22 @@ index rows; marked archives retain event, signal and usage metadata without
 becoming current catalog members. A new native index write clears the marker.
 Unsupported or undecodable indexes cannot qualify another eviction. This stores
 no transcript bodies, adds no database or schema, and grants no archive access.
-It does not yet provide native header inputs or select a query's relationship
-closure; hosted MCP restoration remains until those consumers migrate.
+The native producer now also consumes an allowlisted Codex first-record header
+committed with its event ledger in the existing metadata region. Unchanged cold
+queries reuse it; missing, unsupported or generation-mismatched headers are
+repaired from native evidence without replaying unchanged event rows. The header
+contains native identity/ancestry, guardian/subagent role, cwd and branch, with
+unknown fields and message bodies excluded. Header bytes are rechecked before
+commit. Complete-line offsets retain their existing meaning, including a valid
+unterminated first record. No schema or parser version changes.
+
+New Codex eviction binds the exact persisted header into a versioned archive
+marker. Earlier markers continue retaining their event rows; they do not qualify
+another Codex eviction until a native header can be repaired. Headers larger
+than 1 MiB stay complete in memory and cannot qualify eviction; fields are not
+truncated. No archived evidence is automatically backfilled or deleted. Claude
+sidecars, private Semon parent markers and a query's relationship closure remain
+to be extracted; hosted MCP restoration remains until those consumers migrate.
 
 Hub MCP still acquires a workspace core and restores tenant archives; native
 query discovery/joins still cover eligible sources. Implement authorized
