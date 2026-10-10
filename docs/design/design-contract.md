@@ -83,8 +83,13 @@ missing cases and missing baseline images fail.
 
 ## Consumer pin updates
 
-Update Hub's `semon` gitlink and `semon.rev` to the same source commit. Regenerate
-its shell consumer with that commit's locked toolchain. Run static design checks,
+Update Hub's `semon` submodule gitlink, its sole Semon pin, to the reviewed source
+commit. Check out that exact source and verify it with Hub's
+`scripts/verify-source-pair.sh`; Docker consumes the verified checkout. Hub no
+longer uses `semon.rev` or fetches Semon inside its Dockerfile. For coordinated
+PRs, test the exact Hub/Semon source pair. If the upstream merge changes the
+Semon SHA, repin Hub and rerun affected validation. Regenerate its shell consumer
+with that commit's locked toolchain. Run static design checks,
 consumer freshness, Rust/PostgreSQL checks, page text/touch audits, navigation and
 lifecycle checks, fallback parity and production-page visual comparisons. Review
 both apps' visual evidence whenever a shared token/control changes. A green source
