@@ -1,6 +1,6 @@
 //! The agent read surface (#14): `semon query <tool>` and `semon mcp` answer
 //! the same tools, as JSON, from native session evidence. Hosted callers still
-//! use the embedding core's compatibility snapshot during source-provider migration.
+//! can reuse their embedding core's native evidence during source-provider migration.
 //!
 //! - **Facts, not verdicts.** Every field is something a log line, a process
 //!   or a lock says. A field Semon can't know exactly is `null`, or the state
@@ -670,14 +670,15 @@ fn snippet(text: &str, at: usize, length: usize) -> String {
 /// The agent read surface over one machine's homes or several: the tools
 /// `semon query` and `semon mcp` answer. Local calls share the native source
 /// index and snapshots between calls, rebuilding only what changed. Hosted
-/// calls retain the embedding core's refresh policy during migration.
+/// calls can reuse the embedding core's native source cache and output window.
 pub struct Query {
     core: Arc<ViewerCore>,
     cached: bool,
+    compatibility: bool,
     /// The current call's window start (epoch ms), as the model was built.
     start: Option<i64>,
-    /// Local reads retain one cohort for the entire call. Hosted reads use
-    /// their existing cached policy until the provider migration lands.
+    /// Native reads retain one cohort for the entire call. The compatibility
+    /// constructor remains until hosted consumers adopt the native constructor.
     native: Option<QueryRead>,
 }
 
@@ -713,6 +714,7 @@ impl Query {
         Self {
             core: Arc::new(ViewerCore::with_machines(machines)),
             cached: false,
+            compatibility: false,
             start: None,
             native: None,
         }
@@ -725,6 +727,22 @@ impl Query {
         Self {
             core,
             cached: true,
+            compatibility: true,
+            start: None,
+            native: None,
+        }
+    }
+
+    /// Reads an embedding core's native evidence without preparing a Viewer
+    /// model. Its existing options preserve the hosted output window, active
+    /// sessions and retained relationships; unlike `with_machines`, this does
+    /// not enable a file-mtime scan window. Each call retains one native cohort
+    /// in the core's existing source cache. The host owns admission and custody.
+    pub fn from_native_core(core: Arc<ViewerCore>) -> Self {
+        Self {
+            core,
+            cached: true,
+            compatibility: false,
             start: None,
             native: None,
         }
@@ -742,7 +760,7 @@ impl Query {
     /// (epoch ms): the latest machine's start; `None` when every machine
     /// has an unbounded model.
     fn window_start(&mut self, now: i64) -> Result<Option<i64>, QueryError> {
-        if !self.cached {
+        if !self.compatibility {
             let native = self
                 .core
                 .query_at(now)

@@ -1809,8 +1809,8 @@ impl ViewerCore {
             .collect())
     }
 
-    /// Local CLI/MCP evidence without building or serializing Viewer models.
-    /// Hosted callers retain `Reading::Served` until source-provider migration.
+    /// Native CLI/MCP evidence without building or serializing Viewer models.
+    /// Options retain either a local scan window or an embedding output window.
     pub(crate) fn query_at(&self, now: i64) -> io::Result<QueryRead> {
         self.follow();
         let views = self.views();
