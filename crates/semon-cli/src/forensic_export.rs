@@ -101,21 +101,13 @@ pub fn export(source: &Path, directory: &Path) -> Result<()> {
     fs::remove_dir_all(snapshot)?;
     let mut input = File::open(&database)?;
     input.sync_all()?;
-    let mut hash = Sha256::new();
-    let mut buffer = [0_u8; 64 * 1024];
-    loop {
-        let n = input.read(&mut buffer)?;
-        if n == 0 {
-            break;
-        }
-        hash.update(&buffer[..n]);
-    }
+    let hash = stream_hash(&mut input, None)?;
     let manifest = json!({
         "format": "semon.forensic-store-export",
         "version": 1,
         "source_schema_version": version,
         "includes_forensic": true,
-        "database": {"file": "traces.sqlite3", "bytes": input.metadata()?.len(), "sha256": format!("{:x}", hash.finalize())},
+        "database": {"file": "traces.sqlite3", "bytes": input.metadata()?.len(), "sha256": hash},
         "tables": tables,
         "source_files": source_files,
     });
@@ -429,6 +421,32 @@ mod tests {
                 .contains("Session Event Index")
         );
         assert!(!root.join("index/manifest.json").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn removed_forensic_region_is_not_recreated_by_export() {
+        let root = directory("removed-raw");
+        let source = root.join("source.sqlite3");
+        let original = Connection::open(&source).unwrap();
+        original
+            .execute_batch("CREATE TABLE canonical_traces(id TEXT); PRAGMA user_version=5;")
+            .unwrap();
+        original.close().unwrap();
+        let before = fs::read(&source).unwrap();
+        export(&source, &root.join("export")).unwrap();
+        assert_eq!(fs::read(&source).unwrap(), before);
+        let copy = Connection::open(root.join("export/traces.sqlite3")).unwrap();
+        assert_eq!(
+            copy.query_row::<i64, _, _>(
+                "SELECT count(*) FROM sqlite_schema WHERE name='raw_carrier_records'",
+                [],
+                |r| r.get(0)
+            )
+            .unwrap(),
+            0
+        );
+        drop(copy);
         fs::remove_dir_all(root).unwrap();
     }
 }
