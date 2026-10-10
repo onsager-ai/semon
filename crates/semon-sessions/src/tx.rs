@@ -1795,11 +1795,7 @@ fn strings(value: &Value, out: &mut String) {
 /// same parts a page shows (`text`, or a call's `in` and `out`), uncapped.
 /// A handoff's text is the model's (its brief, result and answer), so a
 /// handoff slot has none here; neither do markers.
-pub(crate) fn slot_texts(
-    _built: &Built,
-    lines: &mut Lines,
-    slot: &Slot,
-) -> Vec<(&'static str, String)> {
+pub(crate) fn slot_texts(lines: &mut Lines, slot: &Slot) -> Vec<(&'static str, String)> {
     let Some(file) = slot.file.as_deref() else {
         return Vec::new();
     };
@@ -1918,8 +1914,32 @@ pub(crate) fn page_limited(
     now: i64,
     limit: usize,
 ) -> io::Result<String> {
-    let limit = limit.clamp(1, PAGE_ENTRIES);
     let transcript = built.tx.get(sid).ok_or(io::ErrorKind::NotFound)?;
+    page_from(
+        &RenderContext {
+            home: built.home.as_deref(),
+            harness: built.sessions.get(sid).map(|session| session.harness),
+            bounded: false,
+        },
+        transcript,
+        sid,
+        anchor,
+        now,
+        limit,
+    )
+}
+
+/// The shared source-backed pager needs one transcript and its native rendering
+/// context. Query callers do not need a workspace transport model.
+pub(crate) fn page_from(
+    context: &RenderContext<'_>,
+    transcript: &model::Transcript,
+    sid: &str,
+    anchor: &Anchor,
+    now: i64,
+    limit: usize,
+) -> io::Result<String> {
+    let limit = limit.clamp(1, PAGE_ENTRIES);
     let slots = &transcript.slots;
     let total = slots.len();
     let first_of = |turn: &str| {
@@ -1938,18 +1958,7 @@ pub(crate) fn page_limited(
     let mut bytes = 0;
     let (mut low, mut high) = (from, from);
     let mut take = |index: usize, picked: &mut Vec<(usize, Value)>| -> bool {
-        let Some(entry) = render(
-            &RenderContext {
-                home: built.home.as_deref(),
-                harness: built.sessions.get(sid).map(|session| session.harness),
-                bounded: false,
-            },
-            &mut lines,
-            slots,
-            &slots[index],
-            index,
-            now,
-        ) else {
+        let Some(entry) = render(context, &mut lines, slots, &slots[index], index, now) else {
             return true;
         };
         let size = entry.to_string().len() + 1;
