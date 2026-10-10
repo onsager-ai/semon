@@ -367,11 +367,10 @@ pub(crate) struct Built {
     /// Each session's transcript index, for `/api/tx`: metadata and offsets
     /// only, the text is read back per page.
     pub(crate) tx: BTreeMap<String, Arc<Transcript>>,
-    /// Each session's facts for the agent read surface, by session key.
+    /// Native facts observed by incremental-index equivalence tests.
+    /// Production query readers retain these in QueryData, not Built.
+    #[cfg(test)]
     pub(crate) facts: BTreeMap<String, SessionFacts>,
-    /// Where the model window started (epoch ms), whether applied at scan
-    /// time or by trimming output. `None` only for an unbounded model.
-    pub(crate) window_start: Option<i64>,
     /// What `/api/analytics` reads of each session active in the last
     /// [`crate::analytics::KEEP_MS`], taken before the model is trimmed to
     /// its window. Never served by `/api/model`: its JSON and version don't
@@ -6182,28 +6181,32 @@ fn build_sources_inner(
     #[cfg(test)]
     let texts = builder.texts_by_turn();
     let run_of = |pid, start| facts.run(options, pid, start);
-    let session_facts = timed!(
-        "session_facts",
-        builder.session_facts(
-            &skipped,
-            |id| match lock_pids.as_ref() {
-                Some(locks) => match locks.get(id) {
-                    Some(pid) => (Some(*pid), Some(true)),
-                    // A lock file no process holds: its writer is gone. Without a
-                    // lock file there is no process record.
-                    None => (
-                        None,
-                        facts
-                            .codex_lock_file(options, id)
-                            .filter(|exists| *exists)
-                            .map(|_| false),
-                    ),
+    let session_facts = if target == BuildTarget::Query || cfg!(test) {
+        timed!(
+            "session_facts",
+            builder.session_facts(
+                &skipped,
+                |id| match lock_pids.as_ref() {
+                    Some(locks) => match locks.get(id) {
+                        Some(pid) => (Some(*pid), Some(true)),
+                        // A lock file no process holds: its writer is gone. Without a
+                        // lock file there is no process record.
+                        None => (
+                            None,
+                            facts
+                                .codex_lock_file(options, id)
+                                .filter(|exists| *exists)
+                                .map(|_| false),
+                        ),
+                    },
+                    None => (None, None),
                 },
-                None => (None, None),
-            },
-            run_of,
+                run_of,
+            )
         )
-    );
+    } else {
+        BTreeMap::new()
+    };
     let handoff_by_id: HashMap<&str, &Handoff> = builder
         .handoffs
         .iter()
@@ -6474,12 +6477,8 @@ fn build_sources_inner(
         home,
         machine_id,
         tx,
+        #[cfg(test)]
         facts: session_facts,
-        window_start: window_start.or_else(|| {
-            (!options.all).then(|| {
-                now.saturating_sub(i64::try_from(options.since.as_millis()).unwrap_or(i64::MAX))
-            })
-        }),
         activity: activity.expect("model analytics prepared"),
         #[cfg(test)]
         handoffs,

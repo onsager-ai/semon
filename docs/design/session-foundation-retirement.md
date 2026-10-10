@@ -311,7 +311,6 @@ event pipeline is added.
 This slice still discovers and joins every native source eligible for the local
 file-selection window. It does not establish constant-cost selected-session
 dependency closure or replace all query metadata with persisted Catalog rows.
-`Query::from_core` retains the embedding server's cached compatibility contract;
 `Query::from_native_core` lets the host reuse that core's native source cache
 without preparing a Viewer model. It preserves the configured output window,
 active sessions, retained relationships and existing tool/window errors, rather
@@ -320,12 +319,21 @@ evidence cohort; closed sources serve only an already retained query snapshot
 or refuse, without rebuilding behind retirement. This API does not start the
 compatibility refresh loop. The host still owns admission and source custody.
 
-Hub MCP must adopt the native constructor, stop requesting compatibility push
-warming and implement authorized selected archive/provider access with source
-generation fencing before the legacy constructor can be removed. Native query
-discovery/joins still cover eligible sources. These obligations remain in
-#383/#384/#385 and Hub #226; the shared native API alone does not retire hosted
-workspace hydration or establish bounded dependency closure.
+The review migration in [Hub #252](https://github.com/onsager-ai/semon-hub/pull/252)
+uses this native constructor for all five tools and stops requesting compatibility
+push warming. The Source follow-up removes `Query::from_core` and its model,
+identity and transcript fallbacks, including their exclusive union helpers.
+There is no compatibility query mode or alias. Existing tool/window behavior
+remains covered by 134 frozen responses captured from the old production engine
+at `7ce1ac4d4f34af9143aa292b631a07fd797890b1`, plus the semantic query fixtures.
+See [query contract evidence](../../crates/semon-sessions/src/query/README.md).
+
+Hub MCP still acquires a workspace core and restores tenant archives; native
+query discovery/joins still cover eligible sources. Implement authorized
+selected archive/provider access, generation fencing and bounded dependency
+closure next. Those obligations and remaining Viewer compatibility transport
+stay in #383/#384/#385 and Hub #226. Unmerged API/consumer changes do not establish
+production adoption or retire workspace hydration.
 
 The remaining blockers are consumer migration, shared semantic extraction,
 remaining encrypted-data export qualification and external deployment inventories.

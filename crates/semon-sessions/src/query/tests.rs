@@ -1368,7 +1368,7 @@ fn an_empty_union_answers_without_creating_a_home() {
 }
 
 #[test]
-fn shared_queries_read_the_viewer_cache_and_expose_its_output_window() {
+fn shared_native_queries_reuse_cached_cohorts_and_expose_the_output_window() {
     use crate::Refresh;
     let home = Home::new("shared");
     let mut options = home.options.clone();
@@ -1377,12 +1377,13 @@ fn shared_queries_read_the_viewer_cache_and_expose_its_output_window() {
     let mut viewer = ViewerCore::new(options);
     viewer.set_refresh(Refresh::OnInvalidate);
     let core = Arc::new(viewer);
-    let mut first = Query::from_core(core.clone());
+    let mut first = Query::from_native_core(core.clone());
     let answer = first.call_at("list_sessions", &json!({}), NOW).unwrap();
     let start = answer["window_start"]
         .as_i64()
-        .expect("output-trimmed models have a window too");
-    let second = Query::from_core(core.clone())
+        .expect("output-trimmed native cohorts have a window too");
+    assert_eq!(start, NOW - 86_400_000);
+    let second = Query::from_native_core(core.clone())
         .call_at("list_sessions", &json!({}), NOW)
         .unwrap();
     assert_eq!(answer, second);
@@ -1467,16 +1468,8 @@ fn embedded_native_queries_preserve_output_windows_and_legacy_tool_answers() {
                 &second.native.as_ref().unwrap().parts[0].data
             ));
 
-            // The existing production constructor remains the independent
-            // compatibility reference until Hub switches its consumer.
-            core.model_at(NOW, Reading::At(NOW)).unwrap().unwrap();
-            let mut legacy = Query::from_core(core.clone());
             for ((tool, args), answer) in calls.iter().zip(actual) {
-                assert_eq!(
-                    answer,
-                    legacy.call_at(tool, args, NOW),
-                    "{tool} {args}, seconds={seconds}, multiple={multiple}"
-                );
+                assert_contract_reference("output", seconds, multiple, tool, args, answer);
             }
             core.close();
         }
@@ -1579,31 +1572,8 @@ fn local_tools_match_legacy_evidence_without_compatibility_preparation() {
                 &native.native.as_ref().unwrap().parts[0].data
             ));
 
-            // Use the old production consumer as the independent transport
-            // reference, with the same file-selection window and clock.
-            let machines = machines
-                .iter()
-                .map(|(key, options)| {
-                    (
-                        key.clone(),
-                        Options {
-                            scan_window: true,
-                            session: None,
-                            ..options.clone()
-                        },
-                    )
-                })
-                .collect();
-            let core = Arc::new(ViewerCore::with_machines(machines));
-            core.model_at(NOW, Reading::At(NOW)).unwrap().unwrap();
-            core.close();
-            let mut legacy = Query::from_core(core);
-            for ((tool, args), actual) in calls.iter().zip(actual) {
-                assert_eq!(
-                    actual,
-                    legacy.call_at(tool, args, NOW),
-                    "{tool} {args}, multiple={multiple}, revision={revision}"
-                );
+            for ((tool, args), answer) in calls.iter().zip(actual) {
+                assert_contract_reference("scan", revision, multiple, tool, args, answer);
             }
         }
     }
@@ -1656,5 +1626,55 @@ fn local_query_conflicts_and_source_removal_use_native_snapshots() {
     assert_eq!(
         crate::model::COMPAT_BUILDS.with(|count| count.get()),
         before
+    );
+}
+
+/// Frozen responses from the retired production engine, captured before its
+/// removal. These preserve an independent oracle without retaining that engine.
+fn assert_contract_reference(
+    scope: &str,
+    scenario: u64,
+    multiple: bool,
+    tool: &str,
+    args: &Value,
+    actual: Result<Value, QueryError>,
+) {
+    static REFERENCE: std::sync::OnceLock<Value> = std::sync::OnceLock::new();
+    let reference = REFERENCE.get_or_init(|| {
+        let reference: Value =
+            serde_json::from_str(include_str!("contract-reference.json")).unwrap();
+        assert_eq!(reference["format"], "semon.query-contract-reference.v1");
+        assert_eq!(
+            reference["source_revision"],
+            "7ce1ac4d4f34af9143aa292b631a07fd797890b1"
+        );
+        assert_eq!(reference["clock"], NOW);
+        assert_eq!(reference["responses"].as_array().unwrap().len(), 134);
+        reference
+    });
+    let rows: Vec<_> = reference["responses"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|row| {
+            row["scope"] == scope
+                && row["scenario"] == scenario
+                && row["multiple"] == multiple
+                && row["tool"] == tool
+                && &row["args"] == args
+        })
+        .collect();
+    assert_eq!(
+        rows.len(),
+        1,
+        "unique {scope} reference: {scenario}, multiple={multiple}, {tool} {args}"
+    );
+    let actual = match actual {
+        Ok(value) => json!({"ok":value}),
+        Err(error) => json!({"err":error.to_json()}),
+    };
+    assert_eq!(
+        actual, rows[0]["response"],
+        "{scope}: {scenario}, multiple={multiple}, {tool} {args}"
     );
 }

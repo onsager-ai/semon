@@ -1,6 +1,6 @@
 //! The agent read surface (#14): `semon query <tool>` and `semon mcp` answer
-//! the same tools, as JSON, from native session evidence. Hosted callers still
-//! can reuse their embedding core's native evidence during source-provider migration.
+//! the same tools, as JSON, from native session evidence. Hosted callers reuse
+//! their embedding core's native source cache and output window.
 //!
 //! - **Facts, not verdicts.** Every field is something a log line, a process
 //!   or a lock says. A field Semon can't know exactly is `null`, or the state
@@ -25,7 +25,6 @@ use crate::{
     model::{SessionFacts, SlotKind, Transcript, now_ms, one_line},
     tx,
     union::{Owner, QueryRead, ViewerCore},
-    viewer::Reading,
 };
 
 /// A session's state: a closed set.
@@ -673,12 +672,11 @@ fn snippet(text: &str, at: usize, length: usize) -> String {
 /// calls can reuse the embedding core's native source cache and output window.
 pub struct Query {
     core: Arc<ViewerCore>,
-    cached: bool,
-    compatibility: bool,
-    /// The current call's window start (epoch ms), as the model was built.
+    /// Keeps embedding window-error text; source scope comes from the options.
+    embedded: bool,
+    /// The current call's window start (epoch ms), from its native cohort.
     start: Option<i64>,
-    /// Native reads retain one cohort for the entire call. The compatibility
-    /// constructor remains until hosted consumers adopt the native constructor.
+    /// One native evidence cohort supplies the entire call.
     native: Option<QueryRead>,
 }
 
@@ -713,21 +711,7 @@ impl Query {
             .collect();
         Self {
             core: Arc::new(ViewerCore::with_machines(machines)),
-            cached: false,
-            compatibility: false,
-            start: None,
-            native: None,
-        }
-    }
-
-    /// Reads an embedding server's existing core, following its refresh and
-    /// window policy. Calls share its cached models; no second builder or
-    /// cache is created. Each request should own its own Query.
-    pub fn from_core(core: Arc<ViewerCore>) -> Self {
-        Self {
-            core,
-            cached: true,
-            compatibility: true,
+            embedded: false,
             start: None,
             native: None,
         }
@@ -741,45 +725,32 @@ impl Query {
     pub fn from_native_core(core: Arc<ViewerCore>) -> Self {
         Self {
             core,
-            cached: true,
-            compatibility: false,
+            embedded: true,
             start: None,
             native: None,
         }
     }
 
-    fn reading(&self, now: i64) -> Reading {
-        if self.cached {
-            Reading::Served
-        } else {
-            Reading::At(now)
-        }
+    /// The latest machine's output or scan window start, from this call's
+    /// exact native source snapshots. `None` means every part is unbounded.
+    fn window_start(&mut self, now: i64) -> Result<Option<i64>, QueryError> {
+        let native = self
+            .core
+            .query_at(now)
+            .map_err(|error| QueryError::io(&error))?;
+        let start = native
+            .parts
+            .iter()
+            .filter_map(|part| part.data.window_start)
+            .max();
+        self.native = Some(native);
+        Ok(start)
     }
 
-    /// Where the window starts, as the current models were built with it
-    /// (epoch ms): the latest machine's start; `None` when every machine
-    /// has an unbounded model.
-    fn window_start(&mut self, now: i64) -> Result<Option<i64>, QueryError> {
-        if !self.compatibility {
-            let native = self
-                .core
-                .query_at(now)
-                .map_err(|error| QueryError::io(&error))?;
-            let start = native
-                .parts
-                .iter()
-                .filter_map(|part| part.data.window_start)
-                .max();
-            self.native = Some(native);
-            return Ok(start);
-        }
-        Ok(self
-            .core
-            .served(self.reading(now))
-            .map_err(|error| QueryError::io(&error))?
-            .iter()
-            .filter_map(|part| part.built.window_start)
-            .max())
+    fn evidence(&self) -> &QueryRead {
+        self.native
+            .as_ref()
+            .expect("call prepares one native evidence cohort")
     }
 
     /// A tool's `since`, which must not reach before the window's start.
@@ -792,7 +763,7 @@ impl Query {
                 window_start: Some(start),
                 ..QueryError::new(
                     "outside_window",
-                    if self.cached {
+                    if self.embedded {
                         format!(
                             "since reaches before the cached model window, which starts at {start} (epoch ms)"
                         )
@@ -841,50 +812,8 @@ impl Query {
         Ok(answer)
     }
 
-    fn view(&mut self, now: i64, shape: ReadShape<'_>) -> Result<View, QueryError> {
-        if let Some(native) = &self.native {
-            return View::native(native, now, shape);
-        }
-        let model = match self
-            .core
-            .model_at(now, self.reading(now))
-            .map_err(|error| QueryError::io(&error))?
-        {
-            Ok(model) => model,
-            Err(ids) => {
-                return Err(QueryError::new(
-                    "id_conflict",
-                    format!("two machines both have {}", ids.join(", ")),
-                ));
-            }
-        };
-        let mut model: Value = serde_json::from_str(&model)
-            .map_err(|error| QueryError::new("io", error.to_string()))?;
-        let mut facts = BTreeMap::new();
-        for part in self
-            .core
-            .served(self.reading(now))
-            .map_err(|error| QueryError::io(&error))?
-        {
-            for (id, own) in &part.built.facts {
-                let mut own = own.clone();
-                own.parent = own.parent.map(|parent| part.served(&parent));
-                facts.insert(part.served(id), own);
-            }
-        }
-        let sessions: Vec<(String, Value)> = match model["sessions"].take() {
-            Value::Object(sessions) => sessions.into_iter().collect(),
-            _ => Vec::new(),
-        };
-        let handoffs = match model["handoffs"].take() {
-            Value::Array(handoffs) => handoffs,
-            _ => Vec::new(),
-        };
-        let turns = match model["turns"].take() {
-            Value::Array(turns) => turns,
-            _ => Vec::new(),
-        };
-        Ok(View::from_evidence(now, sessions, handoffs, turns, facts))
+    fn view(&self, now: i64, shape: ReadShape<'_>) -> Result<View, QueryError> {
+        View::native(self.evidence(), now, shape)
     }
 
     fn list_sessions(&mut self, args: &Value, now: i64) -> Result<Value, QueryError> {
@@ -962,13 +891,7 @@ impl Query {
         let anchor = tx::Anchor::of(position("before"), position("after"), string(args, "turn"))
             .ok_or_else(|| QueryError::invalid("before, after and turn are exclusive"))?;
         let limit = integer(args, "limit").map_or(tx::PAGE_ENTRIES, |limit| limit as usize);
-        let owner = if let Some(native) = &self.native {
-            native.owner(&id)
-        } else {
-            self.core
-                .owner(&id, self.reading(now))
-                .map_err(|error| QueryError::io(&error))?
-        };
+        let owner = self.evidence().owner(&id);
         let (index, own) = match owner {
             Owner::At(index, own) => (index, own),
             Owner::Missing => return Err(QueryError::unknown_session(&id)),
@@ -979,34 +902,23 @@ impl Query {
                 ));
             }
         };
-        let page = if let Some(native) = &self.native {
-            let data = &native.parts[index].data;
-            let transcript = data
-                .tx
-                .get(&own)
-                .ok_or_else(|| QueryError::unknown_session(&id))?;
-            tx::page_from(
-                &tx::RenderContext {
-                    home: data.home.as_deref(),
-                    harness: data.sessions.get(&own).map(|session| session.harness),
-                    bounded: false,
-                },
-                transcript,
-                &own,
-                &anchor,
-                now,
-                limit,
-            )
-        } else {
-            let built = self
-                .core
-                .built_at(index, self.reading(now))
-                .map_err(|error| QueryError::io(&error))?;
-            if !built.tx.contains_key(&own) {
-                return Err(QueryError::unknown_session(&id));
-            }
-            tx::page_limited(&built, &own, &anchor, now, limit)
-        }
+        let data = &self.evidence().parts[index].data;
+        let transcript = data
+            .tx
+            .get(&own)
+            .ok_or_else(|| QueryError::unknown_session(&id))?;
+        let page = tx::page_from(
+            &tx::RenderContext {
+                home: data.home.as_deref(),
+                harness: data.sessions.get(&own).map(|session| session.harness),
+                bounded: false,
+            },
+            transcript,
+            &own,
+            &anchor,
+            now,
+            limit,
+        )
         .map_err(|error| match (&anchor, error.kind()) {
             (tx::Anchor::Turn(turn), io::ErrorKind::NotFound) => QueryError::new(
                 "unknown_turn",
@@ -1051,30 +963,17 @@ impl Query {
         }
         // Every session's transcript, the most recently active first, each
         // from its newest entry back. Stubs have no activity of their own.
-        let transcripts: Vec<(String, Arc<Transcript>)> = if let Some(native) = &self.native {
-            native
-                .parts
-                .iter()
-                .flat_map(|part| {
-                    part.data
-                        .tx
-                        .iter()
-                        .map(|(own, tx)| (part.served(own), tx.clone()))
-                })
-                .collect()
-        } else {
-            self.core
-                .served(self.reading(now))
-                .map_err(|error| QueryError::io(&error))?
-                .iter()
-                .flat_map(|part| {
-                    part.built
-                        .tx
-                        .iter()
-                        .map(|(own, tx)| (part.served(own), tx.clone()))
-                })
-                .collect()
-        };
+        let transcripts: Vec<(String, Arc<Transcript>)> = self
+            .evidence()
+            .parts
+            .iter()
+            .flat_map(|part| {
+                part.data
+                    .tx
+                    .iter()
+                    .map(|(own, tx)| (part.served(own), tx.clone()))
+            })
+            .collect();
         let mut order = Vec::new();
         for (served, transcript) in transcripts {
             if view.session(&served).is_none()

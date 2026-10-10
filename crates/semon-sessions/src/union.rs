@@ -522,24 +522,6 @@ pub(crate) enum Owner {
     Conflict,
 }
 
-/// One machine's part of what a core serves: its model, and the machine id
-/// its machine-local ids are served under (`None` with one machine, where
-/// no id is renamed).
-pub(crate) struct Served {
-    pub(crate) built: Arc<Built>,
-    pub(crate) machine: Option<String>,
-}
-
-impl Served {
-    /// The id the core serves this machine's session `id` under.
-    pub(crate) fn served(&self, id: &str) -> String {
-        match &self.machine {
-            Some(machine) if machine_local(&self.built, id) => format!("{id}@{machine}"),
-            _ => id.to_owned(),
-        }
-    }
-}
-
 /// Whether `id` is a stand-in only its own machine knows: a stub for the
 /// far end of a handoff, or an unsent send's.
 fn machine_local(built: &Built, id: &str) -> bool {
@@ -1721,44 +1703,6 @@ impl ViewerCore {
         }
     }
 
-    /// The machine that answers for session `sid`, under the caller's
-    /// refresh policy.
-    pub(crate) fn owner(&self, sid: &str, read: Reading) -> io::Result<Owner> {
-        self.follow();
-        self.owner_in(&self.views(), sid, read)
-    }
-
-    /// Machine `index`'s model, under the caller's refresh policy.
-    pub(crate) fn built_at(&self, index: usize, read: Reading) -> io::Result<Arc<Built>> {
-        self.follow();
-        self.views()
-            .get(index)
-            .ok_or(io::ErrorKind::NotFound)?
-            .1
-            .built(read)
-    }
-
-    /// The model `/api/model` serves (without an admin link) at `now`, or
-    /// the ids two machines both claim.
-    pub(crate) fn model_at(
-        &self,
-        now: i64,
-        read: Reading,
-    ) -> io::Result<Result<String, Vec<String>>> {
-        self.follow();
-        let views = self.views();
-        match views.len() {
-            0 => Ok(Ok(
-                serde_json::json!({"sessions":{}, "turns":[], "handoffs":[]}).to_string(),
-            )),
-            1 => Ok(Ok(views[0].1.built(read)?.json(now))),
-            _ => {
-                let (models, plan) = self.refresh_at(&views, read)?;
-                Ok(union_json(&parts(&views, &models), &plan, now))
-            }
-        }
-    }
-
     /// The caller-supplied machine key that owns a served session. Hostnames
     /// are presentation labels; embedders use this key to bind native controls.
     /// Missing or ambiguous native IDs never select a writable destination.
@@ -1782,31 +1726,6 @@ impl ViewerCore {
             .owners
             .get(id)
             .map(|(index, _)| (views[*index].0.clone(), plan.machine_ids[*index].clone())))
-    }
-
-    /// Every machine's model, under the caller's refresh policy, with how the core serves
-    /// its session ids.
-    pub(crate) fn served(&self, read: Reading) -> io::Result<Vec<Served>> {
-        self.follow();
-        let views = self.views();
-        let (models, machine_ids) = if views.len() > 1 {
-            let (models, plan) = self.refresh_at(&views, read)?;
-            (models, plan.machine_ids.clone())
-        } else {
-            let models = views
-                .iter()
-                .map(|(_, view)| view.built(read))
-                .collect::<io::Result<Vec<_>>>()?;
-            (models, Vec::new())
-        };
-        Ok(models
-            .into_iter()
-            .enumerate()
-            .map(|(index, built)| Served {
-                built,
-                machine: machine_ids.get(index).cloned(),
-            })
-            .collect())
     }
 
     /// Native CLI/MCP evidence without building or serializing Viewer models.
