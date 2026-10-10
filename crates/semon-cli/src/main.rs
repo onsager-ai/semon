@@ -11,8 +11,8 @@ use std::{
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
 use semon_store::{
-    ForgetSelector, LogFilter, OccurrenceSelector, REPLICATION_ENDPOINT_ENV, TraceId, TraceStore,
-    day_bounds_ns, format_day_ns, render_occurrence_line, ship,
+    ForgetSelector, LogFilter, OccurrenceSelector, TraceId, TraceStore, day_bounds_ns,
+    format_day_ns, render_occurrence_line,
 };
 
 fn main() -> ExitCode {
@@ -27,7 +27,6 @@ fn main() -> ExitCode {
 
 enum Command {
     Version,
-    Ship(ShipArgs),
     Log(LogArgs),
     Forensic(ForensicArgs),
     Forget(ForgetArgs),
@@ -140,11 +139,6 @@ struct SessionsArgs {
     listen: String,
 }
 
-struct ShipArgs {
-    store: PathBuf,
-    endpoint: Option<String>,
-}
-
 struct LogArgs {
     store: PathBuf,
     repo: Option<String>,
@@ -201,7 +195,6 @@ fn parse_args() -> Result<Command, String> {
         Some("receive") => parse_receive_args(arguments).map(Command::Receive),
         Some("query") => parse_query_args(arguments).map(Command::Query),
         Some("mcp") => parse_mcp_args(arguments).map(Command::Mcp),
-        Some("ship") => parse_ship_args(arguments).map(Command::Ship),
         Some("log") => parse_log_args(arguments).map(Command::Log),
         Some("forensic") => parse_forensic_args(arguments).map(Command::Forensic),
         Some("forget") => parse_forget_args(arguments).map(Command::Forget),
@@ -632,27 +625,6 @@ fn run_receive(args: ReceiveArgs) -> Result<(), String> {
     }
 }
 
-fn parse_ship_args(mut arguments: impl Iterator<Item = String>) -> Result<ShipArgs, String> {
-    let mut store = default_store_path();
-    let mut endpoint = env::var(REPLICATION_ENDPOINT_ENV)
-        .ok()
-        .filter(|value| !value.trim().is_empty());
-    while let Some(argument) = arguments.next() {
-        let mut value = || {
-            arguments
-                .next()
-                .ok_or_else(|| format!("{argument} requires a value"))
-        };
-        match argument.as_str() {
-            "--store" => store = value()?.into(),
-            "--endpoint" => endpoint = Some(value()?),
-            "-h" | "--help" => return Err(usage()),
-            _ => return Err(format!("unknown argument: {argument}")),
-        }
-    }
-    Ok(ShipArgs { store, endpoint })
-}
-
 fn parse_log_args(mut arguments: impl Iterator<Item = String>) -> Result<LogArgs, String> {
     let mut store = default_store_path();
     let mut repo = None;
@@ -843,7 +815,6 @@ fn run(command: Command) -> Result<(), String> {
         Command::Receive(args) => run_receive(args),
         Command::Query(args) => run_query(args),
         Command::Mcp(home) => run_mcp(&home),
-        Command::Ship(args) => run_ship(args).map(|message| println!("{message}")),
         Command::Log(args) => run_log(args).map(|message| println!("{message}")),
         Command::Forensic(args) => run_forensic(args),
         Command::Forget(args) => run_forget(args),
@@ -1273,26 +1244,6 @@ fn run_mcp(home: &HomeArgs) -> Result<(), String> {
         .map_err(|error| error.to_string())
 }
 
-fn run_ship(args: ShipArgs) -> Result<String, String> {
-    let Some(endpoint) = args
-        .endpoint
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    else {
-        return Ok(format!(
-            "ship: no endpoint configured ({REPLICATION_ENDPOINT_ENV} unset); skipping"
-        ));
-    };
-
-    let store = TraceStore::open(&args.store).map_err(|error| error.to_string())?;
-    let report = ship(&store, Some(endpoint)).map_err(|error| error.to_string())?;
-    Ok(format!(
-        "shipped {} trace(s) to {endpoint}",
-        report.shipped()
-    ))
-}
-
 /// Renders the occurrence log for `semon log`.
 ///
 /// This reads only [`TraceStore::log`], which never touches
@@ -1347,7 +1298,7 @@ const TRACE_SELECTOR_NOTE: &str = "--trace selects complete source lines linked 
 
 /// The only CLI path that reads `raw_carrier_records`, directly or via
 /// [`semon_store::TraceStore::fetch_raw_carrier_records_for_occurrences`].
-/// `run_log` and `run_ship` must never gain such a call — behaviorally
+/// `run_log` must never gain such a call — behaviorally
 /// enforced (drop the table, and only the raw-reading calls this delegates
 /// to may fail) by `semon-store`'s own
 /// `raw_reads_fail_but_log_and_canonical_reads_survive_dropping_the_raw_region`;
@@ -1638,12 +1589,11 @@ fn query_usage() -> String {
 }
 
 fn usage() -> String {
-    format!(
-        "Usage: semon sessions [--remote ENDPOINT --remote-config PATH --remote-ca CERT] [--claude-home PATH] [--claude-json PATH] [--codex-home PATH] [--proc-root PATH] [--cache PATH] [--all | --since DURATION] [--session ID] [--facts FILE] [--json | --model-json] [--watch] [--serve [--listen 127.0.0.1:PORT]] [--machines DIR [--no-local]]\n\
+    "Usage: semon sessions [--remote ENDPOINT --remote-config PATH --remote-ca CERT] [--claude-home PATH] [--claude-json PATH] [--codex-home PATH] [--proc-root PATH] [--cache PATH] [--all | --since DURATION] [--session ID] [--facts FILE] [--json | --model-json] [--watch] [--serve [--listen 127.0.0.1:PORT]] [--machines DIR [--no-local]]\n\
          Shows a read-only tree of local Claude Code and Codex sessions. --model-json writes the viewer's\n\
          session model (sessions, handoffs, turns, busy) instead; it reads every log, --all/--since trim the output.\n\
          --facts takes the machine's side (hostname, live processes, repositories) from FILE instead of this machine.\n\
-         --machine DIR (repeated, with --model-json or --serve): one view over several machines' homes, DIR/{{claude,codex,proc}}.\n\
+         --machine DIR (repeated, with --model-json or --serve): one view over several machines' homes, DIR/{claude,codex,proc}.\n\
          --machines DIR (with --serve, --model-json or --json): this machine and every machine `semon receive` wrote under\n\
          DIR/machines/, followed while serving; --no-local leaves this machine out. DIR is only read.\n\
          \n\
@@ -1666,9 +1616,6 @@ fn usage() -> String {
          DIR/machines/NAME/. It listens on 127.0.0.1:8735 by default; another address needs TLS (an operator-supplied\n\
          certificate and key) and at least one token. A token, printed once by token add, decides its machine.\n\
          --max-bytes caps each machine's copy (20G by default); a push past it gets 507.\n\
-         \n\
-         Usage: semon ship [--store PATH] [--endpoint URL]\n\
-         Endpoint defaults to ${REPLICATION_ENDPOINT_ENV}; when unset, ship succeeds without reading the store.\n\
          \n\
          Usage: semon log [--store PATH] [--repo NAME] [--day YYYY-MM-DD] [--limit N]\n\
          Renders the occurrence log. Never reads raw_carrier_records. --day is a UTC\n\
@@ -1701,7 +1648,7 @@ fn usage() -> String {
          source line linked to that trace, including bytes for other traces\n\
          on those lines. Their canonical traces and occurrences remain.\n\
          Unprojected raw records have no trace links, so --trace cannot select them."
-    )
+.to_owned()
 }
 
 #[cfg(test)]
@@ -1762,18 +1709,6 @@ mod tests {
         ] {
             assert!(parse(refused).is_err(), "{refused:?}");
         }
-    }
-
-    #[test]
-    fn unconfigured_ship_succeeds_without_opening_the_store() {
-        let args = ShipArgs {
-            store: PathBuf::from("this-store-does-not-exist.sqlite3"),
-            endpoint: None,
-        };
-
-        let message = run_ship(args).unwrap();
-
-        assert!(message.contains("skipping"));
     }
 
     fn unique_temp_db_path(label: &str) -> PathBuf {
@@ -2144,12 +2079,12 @@ mod tests {
     }
 
     // The behavioral mirror of `log_renders_identically_after_the_raw_region_is_dropped`
-    // — that `run_log`/`run_ship` never depend on `raw_carrier_records`
+    // — that `run_log` never depends on `raw_carrier_records`
     // while `run_forensic` fails hard once it's gone — lives in
     // `semon-store`'s own tests as
     // `raw_reads_fail_but_log_and_canonical_reads_survive_dropping_the_raw_region`,
-    // not here. `run_log`, `run_ship`, and `run_forensic` are thin wrappers
-    // over `TraceStore::log`, `ship`, and
+    // not here. `run_log` and `run_forensic` are thin wrappers
+    // over `TraceStore::log` and
     // `TraceStore::fetch_raw_carrier_records[_for_occurrences]` respectively
     // (each opens the store, delegates to exactly one of those, and maps
     // the error) — so a test pinning which of *those* touch raw already
@@ -2161,7 +2096,7 @@ mod tests {
     // silently recreating an externally-dropped table, empty, the moment
     // *any* command (including `run_forensic` itself) next opens the store.
     // A CLI-process-level version of this test — drop the table, then call
-    // `run_log`/`run_ship`/`run_forensic` as if they were separate `semon`
+    // `run_log`/`run_forensic` as if they were separate `semon`
     // invocations against the same file — was tried and does not fail as
     // expected: the first such call's own `TraceStore::open` heals the
     // table before its query runs, so `run_forensic` observes an empty

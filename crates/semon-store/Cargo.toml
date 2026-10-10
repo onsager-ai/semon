@@ -8,7 +8,6 @@ description = "Content-addressed SQLite storage for carrier-neutral traces."
 
 [dependencies]
 hex.workspace = true
-reqwest.workspace = true
 rusqlite.workspace = true
 serde_json.workspace = true
 serde_json_canonicalizer.workspace = true

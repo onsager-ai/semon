@@ -16,7 +16,7 @@ obligation; checked-in source removal cannot establish that a writer is absent.
 
 Revision `0648a99f977971fb177a5dda7a445c4941d64b57` contains the last capture
 implementation before this removal, its locked dependencies, repair/backfill
-commands and regression tests. Preserve an exact source/binary copy and checksum
+commands, the legacy `semon ship` sender and regression tests. Preserve an exact source/binary copy and checksum
 for any installation that still requires those tools. A disposable checkout of
 that revision can build them without launching capture:
 
@@ -24,7 +24,7 @@ that revision can build them without launching capture:
 git clone https://github.com/onsager-ai/semon.git /path/to/legacy-semon
 git -C /path/to/legacy-semon checkout --detach 0648a99f977971fb177a5dda7a445c4941d64b57
 cargo build --release --locked --manifest-path /path/to/legacy-semon/Cargo.toml \
-  -p semon-codex -p semon-claude -p semon-copilot
+  -p semon-codex -p semon-claude -p semon-copilot -p semon-cli
 ```
 
 The pinned [Codex capture/repair/backfill guide](https://github.com/onsager-ai/semon/blob/0648a99f977971fb177a5dda7a445c4941d64b57/README.md#capture-codex-sessions)
@@ -48,7 +48,7 @@ to scan or alter them. XDG variables and explicit flags may select other paths.
 | Claude cursor | `$XDG_STATE_HOME/semon/claude-cursor.json`, otherwise `~/.local/state/semon/claude-cursor.json`, or `--state` |
 | Copilot cursor | `$XDG_STATE_HOME/semon/copilot-capture.json`, otherwise `~/.local/state/semon/copilot-capture.json`, or `--state` |
 | Periodic/manual writers | Installed `devlog-codex-tailer.timer`/service, custom Claude/Copilot services, shell jobs and collector `--watch` processes |
-| Canonical replication | Configured `semon ship --endpoint` or `SEMON_REPLICATION_ENDPOINT`; Store replication remains for a later slice |
+| Canonical replication | Configured `semon ship --endpoint` or `SEMON_REPLICATION_ENDPOINT`; sender/command are retired from the current workspace |
 
 Preserve the database and present WAL/SHM/journal files, cursor/configuration
 files, units and exact legacy tools. Historical raw rows may be unique after
@@ -63,6 +63,13 @@ changed sources or newer schemas. Ordinary `semon log`, explicitly named
 `semon forensic`, and the existing export alias remain available in the main CLI
 for this migration stage. Preserve the standalone export tool beyond temporary
 CI artifact retention.
+
+The current CLI no longer accepts `semon ship` or reads its endpoint environment
+variable. Inventory scheduled invocations and downstream canonical-only receivers;
+a current binary fails explicitly rather than silently reporting a successful sync.
+Removing the sender does not modify a downstream service or its data. Generic Push
+is the supported native-source mirror protocol, not a replacement endpoint for the
+old trace documents or a complete forensic export.
 
 Only after inventory and export verification should an operator decide whether
 to stop/uninstall a collector. Deleting a database or sensitive forensic record
