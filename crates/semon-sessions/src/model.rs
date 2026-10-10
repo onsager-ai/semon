@@ -562,6 +562,8 @@ thread_local! {
     pub(crate) static META_READS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
     /// Builds on this thread.
     pub(crate) static BUILDS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// Full compatibility model preparation, excluding native catalog observation.
+    pub(crate) static COMPAT_BUILDS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
     static SESSION_DESCRIPTIONS: std::cell::RefCell<BTreeMap<String, u64>> = const { std::cell::RefCell::new(BTreeMap::new()) };
     static SESSION_DERIVATIONS: std::cell::RefCell<BTreeMap<String, u64>> = const { std::cell::RefCell::new(BTreeMap::new()) };
     /// Runs once right after the scan read the files: a test appends there,
@@ -5864,7 +5866,60 @@ pub(crate) fn build_sources(
     now: i64,
     selected: Option<&[crate::inputs::Input]>,
 ) -> io::Result<Built> {
-    build_sources_inner(options, cache, dirty, texts, now, selected, None)
+    match build_sources_inner(
+        options,
+        cache,
+        dirty,
+        texts,
+        now,
+        selected,
+        BuildTarget::Model,
+    )? {
+        BuildOutput::Model(built) => Ok(*built),
+        _ => Err(io::Error::other("native producer did not build model")),
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BuildTarget {
+    Model,
+    Catalog,
+    Sources,
+}
+
+enum BuildOutput {
+    Model(Box<Built>),
+    Catalog(BTreeSet<u32>),
+    Sources(PreparedSources),
+}
+
+/// Reconcile native metadata and transcript slots without preparing legacy
+/// model analytics or transport. Complete observation still discovers all sources.
+pub(crate) fn observe_catalog(
+    options: &Options,
+    cache: &mut EventCache,
+    dirty: &mut bool,
+    texts: &mut Texts,
+    now: i64,
+) -> io::Result<BTreeSet<u32>> {
+    if options.scan_window {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "complete catalog observation cannot use a scan window",
+        ));
+    }
+    match build_sources_inner(
+        options,
+        cache,
+        dirty,
+        texts,
+        now,
+        None,
+        BuildTarget::Catalog,
+    )? {
+        BuildOutput::Catalog(pids) => Ok(pids),
+        _ => Err(io::Error::other("native producer did not observe catalog")),
+    }
 }
 
 /// Native producer output captured before compatibility-window trimming.
@@ -5895,17 +5950,20 @@ pub(crate) fn prepare_sources(
             "native producer source batch must contain at most 64 distinct sources",
         ));
     }
-    let mut prepared = None;
-    build_sources_inner(
+    match build_sources_inner(
         options,
         cache,
         &mut false,
         &mut Texts::default(),
         now,
         Some(inputs),
-        Some(&mut prepared),
-    )?;
-    prepared.ok_or_else(|| io::Error::other("native producer did not capture projection"))
+        BuildTarget::Sources,
+    )? {
+        BuildOutput::Sources(prepared) => Ok(prepared),
+        _ => Err(io::Error::other(
+            "native producer did not capture projection",
+        )),
+    }
 }
 
 fn build_sources_inner(
@@ -5915,8 +5973,8 @@ fn build_sources_inner(
     texts: &mut Texts,
     now: i64,
     selected: Option<&[crate::inputs::Input]>,
-    mut prepared: Option<&mut Option<PreparedSources>>,
-) -> io::Result<Built> {
+    target: BuildTarget,
+) -> io::Result<BuildOutput> {
     let catalog_base = cache.session_catalog_generation();
     let mut timings = Vec::with_capacity(18);
     macro_rules! timed {
@@ -5949,7 +6007,7 @@ fn build_sources_inner(
             hook();
         }
     }
-    let claims = if prepared.is_some() {
+    let claims = if target == BuildTarget::Sources {
         cache.catalog_claims(
             &files
                 .iter()
@@ -6024,8 +6082,6 @@ fn build_sources_inner(
     timed!("asks", builder.asks());
     timed!("questions", builder.questions());
     timed!("lineage_states", builder.lineage_states());
-    #[cfg(test)]
-    let texts = builder.texts_by_turn();
     let (mut turns, mut tx) = timed!("turns", builder.turns());
     timed!("wait_edges", builder.wait_edges(&tx));
 
@@ -6046,6 +6102,47 @@ fn build_sources_inner(
             }
         }
     });
+    let post_started = std::time::Instant::now();
+    let mut handoffs: Vec<Handoff> = builder
+        .handoffs
+        .iter()
+        .map(|handoff| handoff.out.clone())
+        .collect();
+    // A scan-window build is intentionally incomplete: it cannot replace a
+    // source-complete catalog. Publication itself is delayed until success.
+    let catalog = ((!options.scan_window && selected.is_none()) || target != BuildTarget::Model)
+        .then(|| summary::catalog(&builder, &handoffs));
+    let slot_projections = catalog
+        .as_ref()
+        .map(|rows| crate::slot_projection::capture(&tx, rows));
+    match target {
+        BuildTarget::Sources => {
+            return Ok(BuildOutput::Sources(PreparedSources {
+                base_generation: catalog_base,
+                claims,
+                rows: catalog.unwrap_or_default(),
+                transcripts: slot_projections.unwrap_or_default(),
+            }));
+        }
+        BuildTarget::Catalog => {
+            cache.publish_session_projection(
+                &crate::slot_projection::Publication {
+                    rows: catalog.as_deref().unwrap_or_default(),
+                    transcripts: slot_projections.as_deref(),
+                },
+                catalog_base.as_deref(),
+            );
+            cache.publish_session_descriptions();
+            return Ok(BuildOutput::Catalog(
+                pids.iter().map(|pid| pid.pid).collect(),
+            ));
+        }
+        BuildTarget::Model => {}
+    }
+    #[cfg(test)]
+    COMPAT_BUILDS.with(|builds| builds.set(builds.get() + 1));
+    #[cfg(test)]
+    let texts = builder.texts_by_turn();
     let run_of = |pid, start| facts.run(options, pid, start);
     let session_facts = timed!(
         "session_facts",
@@ -6069,13 +6166,6 @@ fn build_sources_inner(
             run_of,
         )
     );
-
-    let post_started = std::time::Instant::now();
-    let mut handoffs: Vec<Handoff> = builder
-        .handoffs
-        .iter()
-        .map(|handoff| handoff.out.clone())
-        .collect();
     let handoff_by_id: HashMap<&str, &Handoff> = builder
         .handoffs
         .iter()
@@ -6086,13 +6176,6 @@ fn build_sources_inner(
         .iter()
         .map(|session| (session.key.clone(), session.out.clone()))
         .collect();
-    // A scan-window build is intentionally incomplete: it cannot replace a
-    // source-complete catalog. Publication itself is delayed until success.
-    let catalog = ((!options.scan_window && selected.is_none()) || prepared.is_some())
-        .then(|| summary::catalog(&builder, &handoffs));
-    let slot_projections = catalog
-        .as_ref()
-        .map(|rows| crate::slot_projection::capture(&tx, rows));
     // Analytics reads a month and the month before it, whatever the model's
     // window: taken from every session before the window trims them.
     let activity = crate::analytics::activity(&sessions, &tx, &turns, &handoffs, now);
@@ -6344,14 +6427,7 @@ fn build_sources_inner(
         "post",
         u32::try_from(post_started.elapsed().as_millis()).unwrap_or(u32::MAX),
     ));
-    if let Some(destination) = prepared.as_mut() {
-        **destination = Some(PreparedSources {
-            base_generation: catalog_base,
-            claims,
-            rows: catalog.unwrap_or_default(),
-            transcripts: slot_projections.unwrap_or_default(),
-        });
-    } else if let Some(catalog) = catalog {
+    if let Some(catalog) = catalog {
         cache.publish_session_projection(
             &crate::slot_projection::Publication {
                 rows: &catalog,
@@ -6363,7 +6439,7 @@ fn build_sources_inner(
     if selected.is_none() {
         cache.publish_session_descriptions();
     }
-    Ok(built)
+    Ok(BuildOutput::Model(Box::new(built)))
 }
 
 #[cfg(test)]
