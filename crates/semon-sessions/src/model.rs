@@ -579,14 +579,20 @@ thread_local! {
     pub(crate) static BUILDS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
     /// Full compatibility model preparation, excluding native catalog observation.
     pub(crate) static COMPAT_BUILDS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// Direct source body reads, excluding native discovery/index parsing.
+    pub(crate) static DIRECT_SOURCE_READS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
     static SESSION_DESCRIPTIONS: std::cell::RefCell<BTreeMap<String, u64>> = const { std::cell::RefCell::new(BTreeMap::new()) };
     static SESSION_DERIVATIONS: std::cell::RefCell<BTreeMap<String, u64>> = const { std::cell::RefCell::new(BTreeMap::new()) };
     /// Runs once right after the scan read the files: a test appends there,
     /// as a writer would while a build runs.
     pub(crate) static AFTER_SCAN: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+    /// Races after native query derivation, before projection publication.
+    pub(crate) static AFTER_QUERY_DERIVATION: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
 }
 
 pub(crate) fn read_line(path: &Path, offset: u64) -> Option<Value> {
+    #[cfg(test)]
+    DIRECT_SOURCE_READS.with(|reads| reads.set(reads.get() + 1));
     let mut file = crate::sealed::LogFile::open(path).ok()?;
     file.seek(SeekFrom::Start(offset)).ok()?;
     let mut reader = BufReader::new(file).take(MAX_LINE);
@@ -627,6 +633,7 @@ impl Texts {
         offset: u64,
         block: u32,
         what: &str,
+        records: Option<&crate::query_source::Records<'_>>,
         extract: impl FnOnce(&Value, usize) -> Option<String>,
     ) -> Option<String> {
         let key = TextKey {
@@ -641,7 +648,11 @@ impl Texts {
             *used = self.tick;
             return value.clone();
         }
-        let value = read_line(&file.path, offset)
+        let value = records
+            .map_or_else(
+                || read_line(&file.path, offset),
+                |records| records.derive(&file.path, offset).ok().flatten(),
+            )
             .and_then(|record| extract(&record, block as usize))
             .map(|text| {
                 // `json:` values are built capped, and must stay whole.
@@ -1671,6 +1682,7 @@ struct Builder<'a> {
     files: &'a [SourceFile],
     slot_files: Vec<Arc<SlotFile>>,
     texts: &'a mut Texts,
+    records: Option<&'a crate::query_source::Records<'a>>,
     now: i64,
     machine: String,
     facts: &'a MachineFacts,
@@ -1746,6 +1758,7 @@ impl<'a> Builder<'a> {
                 .collect(),
             files,
             texts,
+            records: None,
             now,
             machine,
             home: facts.home(),
@@ -1892,7 +1905,8 @@ impl<'a> Builder<'a> {
     ) -> Option<String> {
         let file = &self.files[at.0];
         let event = &file.summary.events[at.1];
-        self.texts.read(file, event.o, event.b, what, extract)
+        self.texts
+            .read(file, event.o, event.b, what, self.records, extract)
     }
 
     fn result_text(
@@ -1903,7 +1917,8 @@ impl<'a> Builder<'a> {
     ) -> Option<String> {
         let file = &self.files[at.0];
         let reply = file.summary.events[at.1].r.as_ref()?;
-        self.texts.read(file, reply.o, reply.b, what, extract)
+        self.texts
+            .read(file, reply.o, reply.b, what, self.records, extract)
     }
 
     /// A session's events in order.
@@ -2582,7 +2597,7 @@ impl<'a> Builder<'a> {
                                 .iter()
                                 .find(|event| event.k == Kind::U)?;
                             self.texts
-                                .read(file, event.o, event.b, "user", |record, _| {
+                                .read(file, event.o, event.b, "user", self.records, |record, _| {
                                     prompt_text(record)
                                 })
                                 .filter(|text| !text.trim().is_empty())
@@ -6085,6 +6100,15 @@ fn build_sources_inner(
         MachineFacts::Local => cache.reported_runs().cloned().collect(),
         MachineFacts::Recorded(facts) => facts.reported_runs.clone(),
     };
+    let source_proofs = (target != BuildTarget::Model)
+        .then(|| crate::query_source::Sources::capture(options, files.iter().map(summary::source)))
+        .transpose()?;
+    let source_records = source_proofs
+        .as_ref()
+        .map(crate::query_source::Sources::reader);
+    if let Some(records) = &source_records {
+        records.verify_all()?;
+    }
     let mut builder = Builder::new(
         &files,
         texts,
@@ -6094,6 +6118,7 @@ fn build_sources_inner(
         &reported_runs,
         cache,
     );
+    builder.records = source_records.as_ref();
     timed!("sessions", builder.sessions(groups, &pids, &held));
     for name in facts.native_names(options) {
         if name.valid()
@@ -6151,6 +6176,12 @@ fn build_sources_inner(
     let slot_projections = catalog
         .as_ref()
         .map(|rows| crate::slot_projection::capture(&tx, rows));
+    if matches!(target, BuildTarget::Catalog | BuildTarget::Sources) {
+        source_records
+            .as_ref()
+            .expect("native source reader captured")
+            .finish()?;
+    }
     match target {
         BuildTarget::Sources => {
             return Ok(BuildOutput::Sources(PreparedSources {
@@ -6353,6 +6384,15 @@ fn build_sources_inner(
         }
     }
     if target == BuildTarget::Query {
+        #[cfg(test)]
+        if let Some(hook) = AFTER_QUERY_DERIVATION.with(|hook| hook.borrow_mut().take()) {
+            hook();
+        }
+        source_records
+            .as_ref()
+            .expect("native query reader captured")
+            .finish()?;
+        drop(source_records);
         if let Some(catalog) = catalog {
             cache.publish_session_projection(
                 &crate::slot_projection::Publication {
@@ -6364,10 +6404,7 @@ fn build_sources_inner(
         }
         cache.publish_session_descriptions();
         return Ok(BuildOutput::Query(Box::new(QueryData {
-            sources: crate::query_source::Sources::capture(
-                options,
-                files.iter().map(summary::source),
-            )?,
+            sources: source_proofs.expect("native query sources captured"),
             sessions,
             handoffs,
             turns,

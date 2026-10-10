@@ -51,8 +51,20 @@ and range elision: repeated pages do not parse megabytes of base64 again. Source
 proofs contain no bodies or credentials; readers and their verification caches
 belong to one call. No query table, new database or public transport is added.
 
-This migration covers body consumption after native cohort construction. The
-producer still discovers and joins eligible native sources and reads query text;
-Hub MCP still restores archives before admission. Removing those costs requires
-scoped dependency selection and independently authorized provider access for
-that producer; the generation reader alone does not establish their retirement.
+Native query derivation also borrows the generation-bound reader for names,
+handoffs, questions, briefs and results. It preserves the producer's separate
+64 MiB native-record limit and existing text extractors. Every contributing
+source is fenced before derivation and rechecked before catalog/slot publication,
+including cached derivations and empty sources that supply native identity.
+A failed cohort is not installed as a query snapshot or published to the catalog.
+The proof contains the same complete consumed prefix used by paging and search.
+Catalog observation and bounded source preparation use the same reader and
+publication fence. The legacy Model target retains its existing body reader
+while its remaining Viewer consumers are migrated.
+
+The producer still discovers, indexes and joins eligible native sources. Hub MCP
+still restores archives before admission; this local reader does not supply
+missing archived index metadata or grant provider authority. Removing those
+costs requires scoped dependency selection and independently authorized provider
+access for the producer. No full-workspace discovery or archive cost is claimed
+retired by this reader migration.

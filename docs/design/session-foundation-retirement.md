@@ -334,8 +334,17 @@ It removes their direct-file fallback, preserves the shared pager and native
 prompt/image parsing, and fences touched records at completion. Appends may retain
 the verified prefix; replacement, deletion or interior rewrite refuse a body read.
 It adds no persisted query payload, credentials or runtime authority. Native
-cohort construction still needs source bodies, broad dependency joins and Hub's
-archive restoration; that remaining producer migration is explicitly outstanding.
+cohort construction still needs broad dependency joins and Hub's archive
+restoration. Its next slice also moves native Query body derivation through the
+generation-bound reader, preserving the producer's 64 MiB record limit and
+native name, handoff, question and result extractors. It fences all contributing
+sources before derivation and before projection publication, including cached
+derivations and empty-source identities. Query discovery and index parsing still
+use native files; retained archived index evidence and scoped provider access
+remain required before Hub can remove restoration.
+Catalog observation and scoped source preparation share this body-reader and
+publication boundary. Shared native parsers and text caches remain; compatibility
+Model preparation retains its reader until its consumers have migrated.
 
 Hub MCP still acquires a workspace core and restores tenant archives; native
 query discovery/joins still cover eligible sources. Implement authorized
