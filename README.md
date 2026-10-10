@@ -644,7 +644,17 @@ Output is one complete source line per raw record, verbatim bytes as stored. A C
 
 `--session` and `--day` select each raw row's own session and timestamp, so they include complete lines that produced no semantic trace or occurrence. When a line has no source timestamp, capture time is used. `--trace` selects by projected content and therefore cannot select unprojected raw rows, which have no trace links; the command states that limit when the selector is used.
 
+## Export historical Trace Store
+
+For a complete historical backup, use `semon forensic --store PATH
+--export-store NEW_DIRECTORY`. This creates a private, versioned SQLite artifact
+with all trace, occurrence and forensic tables, including unlinked raw records,
+without migrating or modifying the original. Pause store writers while exporting;
+the command refuses observed source changes and never stops services or deletes
+original data. See [the export and verification contract](docs/trace-store-export.md).
+
 ## Forget forensic records
+
 
 `semon forget --forensic` permanently deletes rows from `raw_carrier_records`
 — the only supported way to remove forensic data. `canonical_traces` and

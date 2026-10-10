@@ -164,8 +164,15 @@ deletion outboxes, state/cursor directories and configured replication endpoints
 Record private locations and version/checksum inventories without publishing keys
 or payloads. No live service is stopped or uninstalled by these PRs.
 
-Until a dedicated exporter is qualified, retain a pinned legacy binary/source
-revision. For trace inspection, first make a consistent owner-private SQLite
+Retain a pinned legacy binary/source revision while migration is qualified.
+The [forensic Store exporter](../trace-store-export.md) provides complete,
+versioned all-table snapshots for schemas 0 through 7, preserving original
+DB/WAL/SHM/journal bytes and permissions. It requires quiescent source files,
+verifies private input copies against their generations and full digests, and
+uses SQLite only on those copies. Publication refuses source changes and newer
+schemas. No capture service is stopped and no original is deleted.
+
+For legacy trace inspection, first make a consistent owner-private SQLite
 backup using its backup API (including committed WAL state), and inspect that
 copy. `TraceStore::open` reasserts permissions and may migrate schema or recreate
 tables, so existing CLI access is **not read-only at the database level**. Do not
@@ -174,10 +181,8 @@ run it against the sole historical original when preserving exact database bytes
 `semon log --store COPY` reads canonical occurrences. `semon forensic --store
 COPY --session SESSION --out PRIVATE_FILE` exports linked and unprojected raw
 records for the selected session; trace selection alone misses unprojected rows.
-This is inspection access, not a complete all-table/versioned export. The planned
-exporter must cover all traces, occurrences/provenance, raw/unlinked rows and
-version metadata, refuse unknown schemas, create private non-overwriting outputs
-and leave source DB/WAL/SHM unchanged. `ship` is not a forensic backup.
+This selected access is not a complete all-table/versioned export; use the
+dedicated exporter for that migration obligation. `ship` is not a forensic backup.
 
 Retain Relay signing/age identities, recipient enrollment, ciphertext and exact
 legacy protocol version until decryption/export verification succeeds. Historical

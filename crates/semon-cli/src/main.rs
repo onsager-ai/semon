@@ -1691,7 +1691,7 @@ fn usage() -> String {
          Usage: semon forensic [--store PATH] --export-store NEW_DIRECTORY\n\
          Exports all trace, occurrence and forensic tables as a verified SQLite snapshot\n\
          plus a versioned checksum manifest. Source is opened read-only without migration;\n\
-         existing database connections must be closed. NEW_DIRECTORY must not exist.\n\
+         pause store writers during the snapshot. NEW_DIRECTORY must not exist.\n\
          The directory is created 0700 and its files 0600. No data is removed.\n\
          \n\
          Usage: semon forget --forensic [--store PATH] (--before YYYY-MM-DD | --session ID | --trace ID) [--yes] [--relay-endpoint URL --relay-state PATH --relay-config PATH [--relay-ca CERT]]\n\
