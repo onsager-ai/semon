@@ -51,8 +51,12 @@ file/directory in explicitly declared inputs with private permissions and
 checksummed read-back, without depending on the Relay protocol. Its pinned
 synthetic qualification covers retained frames, orphans, snapshot history/forks,
 recovery identities and pending state. Copy integrity is explicitly separate from
-decryption, and complete operator-facing offline decrypted access remains pending
-in #386. Before removing writers/readers, inventory and quiesce all related writers,
+decryption. The [offline history reader](relay-history-export.md) supplies
+operator-facing decrypted access using the fixed historical implementation
+outside the product workspace. It checks all declared supported scopes, preserves
+opaque originals and reports unsupported data, missing keys, gaps and deletion
+boundaries. Its synthetic qualification does not qualify an existing deployment.
+Before removing writers/readers, inventory and quiesce all related writers,
 preserve consistent private copies of their complete custody trees, and qualify
 read-back/decryption using the retained versions and original recipients. Record
 missing keys, gaps, divergent heads, unsupported versions and integrity failures

@@ -213,10 +213,13 @@ dedicated exporter for that migration obligation. `ship` is not a forensic backu
 The [independent Relay custody exporter](../relay-custody-export.md) preserves
 all explicitly declared receiver/config/sender trees and recovery-key files;
 its complete byte inventory and checksums do not assert decryption or recovery.
-Pinned synthetic read-back covers retained generations/epochs, orphans and
-snapshot forks/history. Complete operator-facing offline decrypted access and
-deployment-specific inventory/recipient qualification remain prerequisites for
-protocol/reader removal; no Relay removal is claimed by this custody slice.
+The separate [offline history reader](../relay-history-export.md) builds against
+the clean historical pin outside the product workspace. Actual-binary synthetic
+qualification covers retained generations/epochs, orphans, snapshot forks/history,
+recovery-only pending outboxes, unsupported/corrupt data and crash-interrupted
+deletion boundaries. Deployment-specific inventory/recipient qualification and
+retention of this usable reader remain prerequisites for losing working access;
+no Relay protocol/reader removal is claimed by the historical export slice.
 
 Retain Relay signing/age identities, recipient enrollment, ciphertext and exact
 legacy protocol version until decryption/export verification succeeds. Historical
