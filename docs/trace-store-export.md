@@ -5,6 +5,23 @@ its capture and replication code is retired. It does not export the core Session
 Event Index, restore a harness workspace, or provide runtime recovery.
 
 ```sh
+semon-forensic-export --store /private/history/traces.sqlite3 \
+  --out /private/history/trace-export-v1
+```
+
+The standalone tool owns this offline export contract. It builds independently
+of `semon-store`, capture adapters, Sessions, Viewer, Relay and Runtime:
+
+```sh
+cargo build --locked --release -p semon-forensic-export
+```
+
+The release-binary workflow supplies a separate
+`semon-forensic-export-linux-x86_64` artifact. Neither build nor download starts
+capture or reads historical files. The existing migration command delegates to
+the same exporter and remains supported while the main CLI is decoupled:
+
+```sh
 semon forensic --store /private/history/traces.sqlite3 \
   --export-store /private/history/trace-export-v1
 ```
@@ -18,9 +35,11 @@ committed evidence may still live in the WAL.
 
 The destination must not exist; its parent must already exist. On Unix, the
 command creates the directory with mode `0700` and files with mode `0600`.
-The existing forensic warning is printed before output. No raw records are
+The forensic warning is printed before output. No raw records are
 printed to stdout. Selected `--session`, `--trace`, `--day` and `--out` modes
-remain available and cannot be combined with `--export-store`.
+on `semon forensic` remain available and cannot be combined with `--export-store`.
+The standalone tool exports the complete store only and requires both explicit
+paths; it has no capture, synchronization, network, pruning or deletion command.
 
 Original files are opened only through read-only file handles. Private input
 copies must match the originals' full SHA-256 hashes and file generation stamps
