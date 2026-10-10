@@ -19,3 +19,5 @@ semon-relay = { path = "../semon-relay" }
 # Preserve encrypted viewing/deletion until the migration path is qualified (#386).
 semon-sessions = { path = "../semon-sessions", features = ["encrypted-relay"] }
 serde_json.workspace = true
+rusqlite = { workspace = true, features = ["backup"] }
+sha2.workspace = true

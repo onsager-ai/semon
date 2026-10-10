@@ -15,6 +15,8 @@ use semon_store::{
     day_bounds_ns, format_day_ns, render_occurrence_line, ship,
 };
 
+mod forensic_export;
+
 fn main() -> ExitCode {
     match parse_args().and_then(run) {
         Ok(()) => ExitCode::SUCCESS,
@@ -152,7 +154,7 @@ struct LogArgs {
     limit: Option<u32>,
 }
 
-/// Arguments for `semon forensic`. Exactly one of `trace`, `session`, `day`
+/// Arguments for `semon forensic`. Exactly one selector or `export_store`
 /// is `Some` by the time parsing succeeds — enforced in
 /// [`parse_forensic_args`], not left to `run_forensic` to discover.
 struct ForensicArgs {
@@ -161,6 +163,7 @@ struct ForensicArgs {
     session: Option<String>,
     day: Option<String>,
     out: Option<PathBuf>,
+    export_store: Option<PathBuf>,
 }
 
 /// Arguments for `semon forget --forensic`. Exactly one of `trace`,
@@ -694,6 +697,7 @@ fn parse_forensic_args(
     let mut session = None;
     let mut day = None;
     let mut out = None;
+    let mut export_store = None;
     while let Some(argument) = arguments.next() {
         let mut value = || {
             arguments
@@ -706,21 +710,30 @@ fn parse_forensic_args(
             "--session" => session = Some(value()?),
             "--day" => day = Some(value()?),
             "--out" => out = Some(value()?.into()),
+            "--export-store" if export_store.is_none() => export_store = Some(value()?.into()),
             "-h" | "--help" => return Err(usage()),
             _ => return Err(format!("unknown argument: {argument}")),
         }
     }
 
-    let selected = [trace.is_some(), session.is_some(), day.is_some()]
-        .into_iter()
-        .filter(|is_set| *is_set)
-        .count();
+    let selected = [
+        trace.is_some(),
+        session.is_some(),
+        day.is_some(),
+        export_store.is_some(),
+    ]
+    .into_iter()
+    .filter(|is_set| *is_set)
+    .count();
     if selected != 1 {
         return Err(format!(
-            "forensic: exactly one of --trace, --session, or --day is required (got {selected})\n\
+            "forensic: exactly one of --trace, --session, --day, or --export-store is required (got {selected})\n\
              {}",
             usage()
         ));
+    }
+    if export_store.is_some() && out.is_some() {
+        return Err("forensic: --export-store writes a new directory and cannot use --out".into());
     }
 
     Ok(ForensicArgs {
@@ -729,6 +742,7 @@ fn parse_forensic_args(
         session,
         day,
         out,
+        export_store,
     })
 }
 
@@ -1351,6 +1365,15 @@ const TRACE_SELECTOR_NOTE: &str = "--trace selects complete source lines linked 
 fn run_forensic(args: ForensicArgs) -> Result<(), String> {
     eprintln!("{FORENSIC_WARNING}");
 
+    if let Some(directory) = args.export_store {
+        forensic_export::export(&args.store, &directory).map_err(|error| error.to_string())?;
+        println!(
+            "semon forensic: complete store export written to {}",
+            directory.display()
+        );
+        return Ok(());
+    }
+
     let store = TraceStore::open(&args.store).map_err(|error| error.to_string())?;
     let records = if let Some(trace) = args.trace.as_deref() {
         eprintln!("semon forensic: {TRACE_SELECTOR_NOTE}");
@@ -1664,6 +1687,12 @@ fn usage() -> String {
          Reads raw_carrier_records — the only command that does. Exactly one\n\
          of --trace, --session, --day is required. Without --out, writes to\n\
          stdout; with it, writes to FILE created 0600 instead.\n\
+         \n\
+         Usage: semon forensic [--store PATH] --export-store NEW_DIRECTORY\n\
+         Exports all trace, occurrence and forensic tables as a verified SQLite snapshot\n\
+         plus a versioned checksum manifest. Source is opened read-only without migration;\n\
+         existing database connections must be closed. NEW_DIRECTORY must not exist.\n\
+         The directory is created 0700 and its files 0600. No data is removed.\n\
          \n\
          Usage: semon forget --forensic [--store PATH] (--before YYYY-MM-DD | --session ID | --trace ID) [--yes] [--relay-endpoint URL --relay-state PATH --relay-config PATH [--relay-ca CERT]]\n\
          Permanently deletes matching rows from raw_carrier_records only;\n\
@@ -2005,6 +2034,7 @@ mod tests {
         let out_path = unique_temp_path("forensic-trace", "out");
 
         run_forensic(ForensicArgs {
+            export_store: None,
             store: store_path.clone(),
             trace: Some(trace_id),
             session: None,
@@ -2054,6 +2084,7 @@ mod tests {
         let out_path = unique_temp_path("forensic-session", "out");
 
         run_forensic(ForensicArgs {
+            export_store: None,
             store: store_path.clone(),
             trace: None,
             session: Some("session-a".to_owned()),
@@ -2100,6 +2131,7 @@ mod tests {
         let out_path = unique_temp_path("forensic-day", "out");
 
         run_forensic(ForensicArgs {
+            export_store: None,
             store: store_path.clone(),
             trace: None,
             session: None,
@@ -2357,6 +2389,7 @@ mod tests {
         let out_path = unique_temp_path("forensic-session-shared", "out");
 
         run_forensic(ForensicArgs {
+            export_store: None,
             store: store_path.clone(),
             trace: None,
             session: Some("session-a".to_owned()),
