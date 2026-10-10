@@ -7,6 +7,7 @@ members = [
     "crates/semon-push",
     "crates/semon-ssh",
     "crates/semon-relay",
+    "crates/semon-relay-export",
     "crates/semon-runtime",
     "crates/semon-sessions",
 ]

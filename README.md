@@ -206,6 +206,9 @@ readers remain available while deployment inventory and decryption/export are
 qualified. Preserve identities, recipients, ciphertext, receipts, snapshots,
 lease/epoch and deletion state. See the [retirement and custody contract](docs/encrypted-relay-retirement.md)
 and [historical deployment reference](docs/history/encrypted-relay-deployment.md).
+The independent [Relay custody exporter](docs/relay-custody-export.md) preserves
+all explicitly selected receiver/configuration/sender trees and recovery keys;
+its byte-integrity result is separate from decryption qualification.
 
 Use generic `semon push`/`semon receive` or hosted source synchronization for
 session mirrors. Their readable redacted copies are not end-to-end encrypted

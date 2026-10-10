@@ -42,7 +42,7 @@ jobs:
             ${{ runner.os }}-release-cargo-${{ steps.rust-toolchain.outputs.cachekey }}-
 
       - name: Build semon
-        run: cargo build --locked --release -p semon-cli -p semon-forensic-export --bins
+        run: cargo build --locked --release -p semon-cli -p semon-forensic-export -p semon-relay-export --bins
 
       # `--help` prints the usage and exits nonzero, so only the grep's status counts.
       - name: Smoke test
@@ -50,6 +50,9 @@ jobs:
 
       - name: Smoke test standalone forensic exporter
         run: ./target/release/semon-forensic-export --help | grep -q -- '--store PATH'
+
+      - name: Smoke test standalone Relay custody exporter
+        run: ./target/release/semon-relay-export --help | grep -q -- '--receiver-dir DIR'
 
       - name: Upload the binary
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -64,5 +67,13 @@ jobs:
         with:
           name: semon-forensic-export-linux-x86_64
           path: target/release/semon-forensic-export
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload standalone Relay custody exporter
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: semon-relay-export-linux-x86_64
+          path: target/release/semon-relay-export
           if-no-files-found: error
           retention-days: 30

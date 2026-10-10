@@ -46,8 +46,13 @@ other legacy commands remain available with their existing explicit targets and
 authorization. A metadata tree or stream verification does not prove that every
 historical blob, orphan generation or divergent snapshot is recoverable.
 
-A complete version-qualified Relay export is still pending in #386. Before
-removing writers/readers, explicitly inventory and quiesce all related writers,
+The independent [Relay custody exporter](relay-custody-export.md) preserves every
+file/directory in explicitly declared inputs with private permissions and
+checksummed read-back, without depending on the Relay protocol. Its pinned
+synthetic qualification covers retained frames, orphans, snapshot history/forks,
+recovery identities and pending state. Copy integrity is explicitly separate from
+decryption, and complete operator-facing offline decrypted access remains pending
+in #386. Before removing writers/readers, inventory and quiesce all related writers,
 preserve consistent private copies of their complete custody trees, and qualify
 read-back/decryption using the retained versions and original recipients. Record
 missing keys, gaps, divergent heads, unsupported versions and integrity failures
