@@ -6,7 +6,6 @@ members = [
     "crates/semon-forensic-export",
     "crates/semon-push",
     "crates/semon-ssh",
-    "crates/semon-relay",
     "crates/semon-relay-export",
     "crates/semon-runtime",
     "crates/semon-sessions",
@@ -22,12 +21,7 @@ license = "Apache-2.0"
 
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
-age = "=0.12.1"
-chacha20poly1305 = "=0.10.1"
-ed25519-dalek = "=2.2.0"
 hex = "0.4.3"
-hkdf = "=0.12.4"
-hmac = "=0.12.1"
 libc = "0.2.189"
 # Held at 0.39: its libsqlite3-sys ^0.37 must fit the embedding server's sqlx 0.9 (<0.38); both link sqlite3.
 rusqlite = { version = "0.39.0", default-features = false, features = ["bundled"] }

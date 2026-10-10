@@ -103,14 +103,7 @@ enum ReceiveArgs {
     TokenList { dir: PathBuf },
 }
 
-struct RemoteSessionsArgs {
-    endpoint: String,
-    config: PathBuf,
-    tls_ca: Option<PathBuf>,
-}
-
 struct SessionsArgs {
-    remote: Option<RemoteSessionsArgs>,
     options: semon_sessions::Options,
     /// `--machine DIR`, repeated: several machines' homes in one model.
     machines: Vec<PathBuf>,
@@ -155,26 +148,16 @@ fn parse_sessions_args(
     let mut machines = Vec::new();
     let mut received = None;
     let mut local = true;
-    let mut remote_endpoint = None;
-    let mut remote_config = None;
-    let mut remote_ca = None;
-    let mut local_sources_given = false;
     while let Some(argument) = arguments.next() {
         let mut value = || {
             arguments
                 .next()
                 .ok_or_else(|| format!("{argument} requires a value"))
         };
-        if matches!(
-            argument.as_str(),
-            "--claude-home" | "--claude-json" | "--codex-home" | "--proc-root" | "--facts"
-        ) {
-            local_sources_given = true;
-        }
         match argument.as_str() {
-            "--remote" => remote_endpoint = Some(value()?),
-            "--remote-config" => remote_config = Some(PathBuf::from(value()?)),
-            "--remote-ca" | "--tls-ca" => remote_ca = Some(PathBuf::from(value()?)),
+            "--remote" | "--remote-config" | "--remote-ca" | "--tls-ca" => return Err(
+                "Encrypted Relay viewing is retired. Preserve existing keys/data and use the pinned legacy reader or semon-relay-history; see docs/encrypted-relay-retirement.md. Use --machines for generic mirrored sources.".into()
+            ),
             "--machines" => received = Some(PathBuf::from(value()?)),
             "--no-local" => local = false,
             "--claude-home" => options.claude_home = value()?.into(),
@@ -200,38 +183,6 @@ fn parse_sessions_args(
             _ => return Err(format!("unknown argument: {argument}")),
         }
     }
-    let remote = if let Some(endpoint) = remote_endpoint {
-        if serve
-            || model_json
-            || !machines.is_empty()
-            || received.is_some()
-            || !local
-            || local_sources_given
-        {
-            return Err("--remote supports the metadata tree (--json/--watch/--all/--since/--session); local machine roots, --serve and --model-json are exclusive".into());
-        }
-        let config = match remote_config {
-            Some(config) => config,
-            None => {
-                let root = env::var_os("XDG_CONFIG_HOME")
-                    .filter(|value| !value.is_empty())
-                    .map(PathBuf::from)
-                    .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
-                    .ok_or("--remote-config is required when HOME is unset")?;
-                root.join("semon")
-            }
-        };
-        Some(RemoteSessionsArgs {
-            endpoint,
-            config,
-            tls_ca: remote_ca,
-        })
-    } else {
-        if remote_config.is_some() || remote_ca.is_some() {
-            return Err("--remote-config and --remote-ca require --remote".into());
-        }
-        None
-    };
     if serve && (json || watch) {
         return Err("--serve cannot be combined with --json or --watch".into());
     }
@@ -260,7 +211,6 @@ fn parse_sessions_args(
         return Err("--no-local requires --machines".into());
     }
     Ok(SessionsArgs {
-        remote,
         options,
         machines,
         received,
@@ -871,9 +821,6 @@ fn run_control(args: Vec<String>) -> Result<(), String> {
 }
 
 fn run_sessions(args: SessionsArgs) -> Result<(), String> {
-    if let Some(remote) = &args.remote {
-        return run_remote_sessions(&args, remote);
-    }
     if let Some(dir) = args.received.clone() {
         if !args.serve {
             return print_received(&args, &dir);
@@ -915,52 +862,6 @@ fn run_sessions(args: SessionsArgs) -> Result<(), String> {
             print!("{}", semon_sessions::render_text(&nodes));
         }
         io::stdout().flush().map_err(|error| error.to_string())?;
-        if !args.watch {
-            return Ok(());
-        }
-        std::thread::sleep(std::time::Duration::from_secs(2));
-    }
-}
-
-fn run_remote_sessions(args: &SessionsArgs, remote: &RemoteSessionsArgs) -> Result<(), String> {
-    let identity =
-        semon_relay::MachineIdentity::load(&remote.config).map_err(|error| error.to_string())?;
-    let transport = semon_relay::HttpTransport::secure(
-        remote.endpoint.clone(),
-        std::time::Duration::from_secs(10),
-        semon_relay::RequestSigner::new(identity.signing.clone()),
-        remote.tls_ca.as_deref(),
-    )
-    .map_err(|error| error.to_string())?;
-    let mut last = None;
-    let mut last_error = None;
-    loop {
-        match semon_sessions::collect_remote(&args.options, &identity, &transport) {
-            Ok(nodes) => {
-                last_error = None;
-                let rendered = if args.json {
-                    semon_sessions::render_json(&nodes)
-                } else {
-                    semon_sessions::render_text(&nodes)
-                };
-                if last.as_ref() != Some(&rendered) {
-                    if args.watch {
-                        print!("\x1b[2J\x1b[H");
-                    }
-                    println!("{rendered}");
-                    io::stdout().flush().map_err(|error| error.to_string())?;
-                    last = Some(rendered);
-                }
-            }
-            Err(error) if args.watch => {
-                let error = error.to_string();
-                if last_error.as_ref() != Some(&error) {
-                    eprintln!("remote view unavailable: {error}");
-                    last_error = Some(error);
-                }
-            }
-            Err(error) => return Err(error.to_string()),
-        }
         if !args.watch {
             return Ok(());
         }
@@ -1036,7 +937,7 @@ fn query_usage() -> String {
 }
 
 fn usage() -> String {
-    "Usage: semon sessions [--remote ENDPOINT --remote-config PATH --remote-ca CERT] [--claude-home PATH] [--claude-json PATH] [--codex-home PATH] [--proc-root PATH] [--cache PATH] [--all | --since DURATION] [--session ID] [--facts FILE] [--json | --model-json] [--watch] [--serve [--listen 127.0.0.1:PORT]] [--machines DIR [--no-local]]\n\
+    "Usage: semon sessions [--claude-home PATH] [--claude-json PATH] [--codex-home PATH] [--proc-root PATH] [--cache PATH] [--all | --since DURATION] [--session ID] [--facts FILE] [--json | --model-json] [--watch] [--serve [--listen 127.0.0.1:PORT]] [--machines DIR [--no-local]]\n\
          Shows a read-only tree of local Claude Code and Codex sessions. --model-json writes the viewer's\n\
          session model (sessions, handoffs, turns, busy) instead; it reads every log, --all/--since trim the output.\n\
          --facts takes the machine's side (hostname, live processes, repositories) from FILE instead of this machine.\n\
@@ -1071,41 +972,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn remote_sessions_accept_metadata_flags_and_refuse_local_surface_combinations() {
-        let args = parse_sessions_args(
-            [
-                "--remote",
-                "https://receiver",
-                "--remote-config",
-                "/keys",
-                "--remote-ca",
-                "/ca",
-                "--json",
-                "--watch",
-                "--session",
-                "s",
-                "--since",
-                "2h",
-            ]
-            .map(str::to_owned)
-            .into_iter(),
-        )
-        .unwrap();
-        assert!(args.remote.is_some() && args.json && args.watch);
-        assert_eq!(args.options.session.as_deref(), Some("s"));
-        for flag in ["--serve", "--model-json", "--no-local"] {
-            assert!(
-                parse_sessions_args(
-                    ["--remote", "https://receiver", flag]
-                        .map(str::to_owned)
-                        .into_iter()
-                )
-                .is_err()
-            );
+    fn retired_encrypted_flags_fail_before_default_source_discovery() {
+        for flag in ["--remote", "--remote-config", "--remote-ca", "--tls-ca"] {
+            let error = match parse_sessions_args(
+                [flag, "/private/untouched"].map(str::to_owned).into_iter(),
+            ) {
+                Err(error) => error,
+                Ok(_) => panic!("retired flag accepted: {flag}"),
+            };
+            assert!(error.contains("Encrypted Relay viewing is retired"));
+            assert!(error.contains("semon-relay-history"));
+            assert!(!usage().contains(flag));
         }
-        assert!(
-            parse_sessions_args(["--remote-ca", "/ca"].map(str::to_owned).into_iter()).is_err()
-        );
     }
 
     #[test]

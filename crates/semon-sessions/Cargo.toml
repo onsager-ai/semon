@@ -8,7 +8,6 @@ description = "Read-only local Claude Code and Codex session tree."
 
 [dependencies]
 semon-control = { path = "../semon-control" }
-semon-relay = { path = "../semon-relay", optional = true }
 libc.workspace = true
 rusqlite = { workspace = true, features = ["hooks", "limits"] }
 serde = { version = "1.0.229", features = ["derive"] }
@@ -18,9 +17,6 @@ tiny_http.workspace = true
 zstd.workspace = true
 
 [features]
-# Transitional access to existing encrypted Relay data. Core and hosted source
-# reads do not use this protocol; remove after the retirement/export work (#386).
-encrypted-relay = ["dep:semon-relay"]
 # Lets `SEMON_TEST_NOW` (epoch ms) pin the viewer's clock. Only CI's browser
 # suite builds with it, to serve a fixture whose times must stand still.
 test-clock = []
@@ -30,7 +26,3 @@ test-ui-account-server = []
 [[example]]
 name = "ui-account-server"
 required-features = ["test-ui-account-server"]
-
-[[test]]
-name = "remote"
-required-features = ["encrypted-relay"]

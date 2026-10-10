@@ -20,11 +20,18 @@ The created rollout advertises `history_mode: "paginated"`. Nevertheless, rollou
 
 The restored thread has the same ID. Existing SQLite state can make an otherwise valid restored rollout harder to discover when its recorded absolute location is stale. Restore should not copy whole state databases over a target's existing databases or claim that verbatim backups are portable. The tested writer lock is an advisory OS lock held by another process, not merely the existence of a `.lock` file.
 
-This supports designing the rollout-only relay path for the tested CLI version, with an explicit writer-lock check and a discovery plan for an existing target state index. It does not establish sufficiency for arbitrary Codex threads: compaction, long paginated history, attachments, pending tools, subagents, rewritten rollouts, non-Linux lock implementations, and older CLI versions remain untested. In particular, #10 describes version 0.156.1; these results apply to 0.159.0-alpha.3. Replaying earlier turns into a synthetic provider proves the CLI supplied those turns, not that a production model/provider will recover every kind of session. The M5b relay implementation and its rollout/state discovery policy remain a separate checkpoint.
+This informs a future verified rollout recovery artifact for the tested CLI version, with an explicit writer-lock check and a discovery plan for an existing target state index. Independent recovery is tracked in [#255](https://github.com/onsager-ai/semon/issues/255); current product builds remove the Relay protocol. It does not establish sufficiency for arbitrary Codex threads: compaction, long paginated history, attachments, pending tools, subagents, rewritten rollouts, non-Linux lock implementations, and older CLI versions remain untested. In particular, #10 describes version 0.156.1; these results apply to 0.159.0-alpha.3. Replaying earlier turns into a synthetic provider proves the CLI supplied those turns, not that a production model/provider will recover every kind of session. The historical M5b implementation below does not satisfy that independent recovery contract.
 
-## M5b rollout relay
+## Historical M5b rollout relay
 
-Codex rollouts can now be selected explicitly:
+The following records the implementation at pinned source
+`0648a99f977971fb177a5dda7a445c4941d64b57`, for inspecting existing artifacts.
+These commands and transport are absent from current product builds. Follow the
+[retirement and custody contract](encrypted-relay-retirement.md) before changing
+legacy tools or data. The M5a harness experiment above remains useful native
+evidence; it does not require Relay.
+
+In the historical implementation, Codex rollouts could be selected explicitly:
 
 ```sh
 semon-relay send --once --codex-sessions /chosen/.codex/sessions

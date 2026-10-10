@@ -267,7 +267,7 @@ encrypted snapshot root with `--memory-root-id ROOT_SHA256 --memory-target NEW_D
 and never overwrites existing paths. JSON `recovery_status.memory` states whether
 memory was selected, restored or failed; sidecars outside that selected root are
 omitted. A selected memory failure reports partial recovery and suppresses the
-resume command. See [mutable memory snapshots](../memory-snapshots.md) for
+resume command. See [historical mutable memory snapshots](memory-snapshots.md) for
 capture, session/epoch association, conflicts and limits.
 
 The receiver cannot verify encrypted chain values because each chain value is

@@ -57,7 +57,7 @@ The Rust and UI workflow files supply exact CI setup and aggregate semantics.
   User-level Stitch/pen.dev tooling is optional; keep vendor skills and credentials
   outside the checkout and preserve the existing visual/implementation contract.
 - Relay/protocol changes: docs/mirror-protocol.md and
-  docs/encrypted-remote-sessions.md.
+  docs/encrypted-relay-retirement.md.
 
 Pass an exact ref or isolated checkout path when delegating.
 

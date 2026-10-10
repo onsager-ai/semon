@@ -146,8 +146,9 @@ state, endpoint origin, enrolled signing/age identity and trust configuration.
 The pinned CLI requires explicit `--relay-endpoint`, `--relay-state` and
 `--relay-config` (and pinned HTTPS `--relay-ca` when configured), queues the
 request before local deletion and keeps offline requests pending. Semantic trace
-IDs cannot select carrier frames. The dedicated `semon-relay forget` remains
-available at this stage. Local-only deletion leaves server copies; neither
+IDs cannot select carrier frames. The dedicated `semon-relay forget` is
+available in the retained pinned legacy tools; current product builds remove
+that protocol. Local-only deletion leaves server copies; neither
 source retirement nor export acknowledges or drops a pending request. Follow
 the [Relay custody contract](encrypted-relay-retirement.md) before replacing
 those tools or making a separate explicit remote deletion decision.

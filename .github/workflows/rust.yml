@@ -112,15 +112,22 @@ jobs:
           git worktree add --detach "$RUNNER_TEMP/relay-history-source" 0648a99f977971fb177a5dda7a445c4941d64b57
           python3 scripts/qualify-relay-custody.py --legacy-source "$RUNNER_TEMP/relay-history-source"
 
-      - name: Verify product CLI excludes historical trace storage
+      - name: Verify product CLI and workspace exclude retired subsystems
         run: |
           cargo tree --locked -p semon-cli --edges normal,build --prefix none --format '{p}' > "$RUNNER_TEMP/product-cli-dependencies.txt"
-          python3 - "$RUNNER_TEMP/product-cli-dependencies.txt" <<'PY'
-          import pathlib, sys
-          retired = {"semon-store", "semon-codex", "semon-claude", "semon-copilot", "semon-forensic-export", "semon-relay-export"}
+          cargo metadata --locked --no-deps --format-version 1 > "$RUNNER_TEMP/product-workspace.json"
+          python3 - "$RUNNER_TEMP/product-cli-dependencies.txt" "$RUNNER_TEMP/product-workspace.json" <<'PY'
+          import json, pathlib, sys
+          subsystems = {"semon-store", "semon-codex", "semon-claude", "semon-copilot", "semon-relay"}
+          retired = subsystems | {"semon-forensic-export", "semon-relay-export"}
           unexpected = [line for line in pathlib.Path(sys.argv[1]).read_text().splitlines() if line.split()[0] in retired]
           if unexpected:
-              raise SystemExit("Product CLI gained historical storage/export dependencies: " + ", ".join(unexpected))
+              raise SystemExit("Product CLI gained retired subsystem/export dependencies: " + ", ".join(unexpected))
+          metadata = json.loads(pathlib.Path(sys.argv[2]).read_text())
+          members = set(metadata["workspace_members"])
+          unexpected = [p["name"] for p in metadata["packages"] if p["id"] in members and p["name"] in subsystems]
+          if unexpected:
+              raise SystemExit("Retired workspace packages returned: " + ", ".join(unexpected))
           PY
 
       - name: Codex private device-login process checks
