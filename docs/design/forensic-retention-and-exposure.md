@@ -9,8 +9,13 @@ identity_impact: none — this governs the forensic region only, which never par
 
 Decided 2026-09-20. This closes the P4 question from the September roadmap: *what the forensic region retains, what can be read out, by what command, and what is refused.*
 
-The three experimental collector packages are now retired. Capture behavior and
-schema-v7 custody described here refer to the [pinned historical implementation](../trace-capture-retirement.md).
+The experimental Store, collector packages and Store-backed main CLI commands
+are now retired. Inspection, explicit deletion, capture behavior and schema-v7
+custody described here refer to the [qualified pinned historical implementation](../trace-capture-retirement.md).
+The independent `semon-forensic-export` tool preserves complete historical data;
+the [migration procedure](../trace-store-export.md) requires verified private
+working copies for legacy inspection. The decisions below preserve the historical
+contract and do not authorize new capture or removal of existing records.
 Retention, private inspection/export and deliberate deletion remain obligations
 for existing records; collector removal neither prunes them nor changes the core
 Session Event Index/Catalog or native logs.
@@ -57,17 +62,19 @@ Permissions are set at creation and re-asserted on open, so an existing store wi
 
 ## Decision 3 — one named command, bulk-capable
 
-`semon forensic` is the only path from the CLI to raw records. It selects by trace, by session, or by day.
+In the pinned legacy CLI, `semon forensic` is the only path to raw records. It
+selects by trace, by session, or by day.
 
 Retirement adds the explicit `--export-store NEW_DIRECTORY` mode on that same
-command. It exports every table, including unlinked raw records, to a private
+historical command. It exports every table, including unlinked raw records, to a private
 versioned SQLite artifact. Original files are opened only as read-only files;
 SQLite operates on generation-verified private copies. Selected modes and their
 existing stdout behavior remain unchanged. Retirement also extracts that same
 exporter into the explicitly named `semon-forensic-export` tool so historical
 access can survive removal of Store/capture dependencies from the main CLI.
-Both named commands print the same warning before forensic access; ordinary
-session/log/query reads gain no raw-data path. See [the migration export
+The alias is retired from the current main CLI; complete export remains in the
+independent tool. Both exact named tools print the same warning before forensic
+access; current session/query reads have no historical Store dependency. See [the migration export
 contract](../trace-store-export.md) for quiescence, schema versions, permissions,
 verification and incomplete-export handling. This adds no pruning or deletion.
 

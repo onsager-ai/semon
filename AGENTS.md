@@ -9,10 +9,11 @@ The former OTLP/Collector/ClickHouse pipeline is intentionally gone.
 
 ## Repository invariants
 
-- Transferable trace semantics and raw forensic records are separate regions.
-  Ordinary trace reads cannot expose raw bytes or their carrier labels.
-- Preserve canonical identity and occurrence/provenance semantics. An identity
+- Preserve native session identity, lineage and provenance semantics. An identity
   change must update the relevant fixtures and documented contract together.
+- Historical canonical traces and raw forensic records remain separate regions
+  in the pinned migration tools. Current session reads must not acquire access to
+  historical forensic data; see docs/trace-store-export.md.
 - Preserve documented forensic permissions, exposure and retention. Full raw
   records may contain credentials. Deletion remains an explicit operator action;
   do not introduce automatic pruning or maximal deletion defaults.

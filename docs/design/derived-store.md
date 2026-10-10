@@ -96,7 +96,7 @@ The path is derived from `Options::cache` as the event cache's is today: `sessio
 
 A shared file would mean a version bump either can't drop tables freely or risks the forensic rows, and every derived table would widen what the forensic boundary test has to prove unreachable. Keep them apart; share conventions (bundled `rusqlite`, `user_version` checks that refuse a newer schema, owner-only permissions). The separate capture pipeline is now retired; the historical-data boundary remains.
 
-**Code location.** `semon-sessions` owns both native derivation and its Session Event Index/Catalog. The historical `semon-store` is a separate trace library; binary ownership has moved to `semon-cli` and the trace library no longer depends on session tooling. Do not merge these storage foundations. `semon-sessions` gains the `rusqlite` (bundled) dependency the Cargo workspace already has and a `derived` module. No trait is needed: every consumer, an embedding server included, uses this SQLite store through `Options`.
+**Code location.** `semon-sessions` owns both native derivation and its Session Event Index/Catalog. The separate Canonical Trace Store package is retired after historical export/inspection qualification; the product binary lives in `semon-cli` without that dependency. Do not merge these storage foundations. `semon-sessions` gains the `rusqlite` (bundled) dependency the Cargo workspace already has and a `derived` module. No trait is needed: every consumer, an embedding server included, uses this SQLite store through `Options`.
 
 ## 3. Schema sketch
 

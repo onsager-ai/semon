@@ -9,7 +9,6 @@ members = [
     "crates/semon-relay",
     "crates/semon-runtime",
     "crates/semon-sessions",
-    "crates/semon-store",
 ]
 # Patched in through [patch.crates-io] below, not a member: fmt, clippy and
 # tests leave its upstream code as published.

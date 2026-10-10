@@ -17,7 +17,8 @@ Audited on October 10, 2026:
 
 The refreshed main revisions are Semon
 `263a02da278716ab2309b8e34a463419e5c781e5` and Hub
-`45a9a5d4d705775c6f65daf59058f4984c8b5cff`. Their source-pin contract and
+`96ae028b7f95625bf82e0453881ac2a51b8b5878` (gitlink Semon
+`263a02da278716ab2309b8e34a463419e5c781e5`). Their source-pin contract and
 Hub navigation/native-picker changes are retained in the staged PRs; the
 retirement components audited below remain present on main until those PRs land.
 
@@ -174,8 +175,8 @@ Retain a pinned legacy binary/source revision while migration is qualified.
 The [forensic Store exporter](../trace-store-export.md) provides complete,
 versioned all-table snapshots for schemas 0 through 7. Its standalone
 `semon-forensic-export` package builds without Store, capture, Sessions, Relay or
-Runtime; the existing `semon forensic --export-store` alias delegates to the
-same implementation during migration. It preserves original
+Runtime. The pinned legacy `semon forensic --export-store` alias delegates to
+the same implementation; the current main CLI retires that alias. Export preserves original
 DB/WAL/SHM/journal bytes and permissions. It requires quiescent source files,
 verifies private input copies against their generations and full digests, and
 uses SQLite only on those copies. Publication refuses source changes and newer
@@ -184,18 +185,23 @@ installation, source timer templates and the three collector packages are
 retired. Installed units and manual collectors still require explicit inventory
 before export or uninstall. The [capture custody reference](../trace-capture-retirement.md)
 pins the legacy source, locked build and repair/backfill contracts. Shared native
-parsers/fixtures and the main CLI's historical log/forensic/export/forget commands
-remain. The canonical-only `semon ship` sender is retired; no Store HTTP client or
-replication setup remains. Store reader removal is a later dependency slice.
+parsers/fixtures remain. The Canonical Trace Store package and current main CLI's
+historical log/forensic/export/forget commands are now retired after qualification
+of the pinned CLI's actual CI artifact against 12 synthetic historical access,
+export and explicit deletion cases, including a durable offline Relay request.
+The independent exporter preserves historical data without a product dependency.
+The canonical-only `semon ship` sender, Store HTTP client and replication setup
+are retired. Installed binaries/services/data and pending deletion queues remain
+untouched; external inventory and operator migration remain outstanding.
 
 For legacy trace inspection, first make a consistent owner-private SQLite
 backup using its backup API (including committed WAL state), and inspect that
-copy. `TraceStore::open` reasserts permissions and may migrate schema or recreate
-tables, so existing CLI access is **not read-only at the database level**. Do not
+copy. The pinned `TraceStore::open` reasserts permissions and may migrate schema or recreate
+tables, so historical CLI access is **not read-only at the database level**. Do not
 run it against the sole historical original when preserving exact database bytes.
 
-`semon log --store COPY` reads canonical occurrences. `semon forensic --store
-COPY --session SESSION --out PRIVATE_FILE` exports linked and unprojected raw
+The pinned `semon log --store COPY` reads canonical occurrences. Its
+`semon forensic --store COPY --session SESSION --out PRIVATE_FILE` exports linked and unprojected raw
 records for the selected session; trace selection alone misses unprojected rows.
 This selected access is not a complete all-table/versioned export; use the
 dedicated exporter for that migration obligation. `ship` is not a forensic backup.

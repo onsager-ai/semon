@@ -9,8 +9,9 @@ Historical architecture, superseded by the
 [Session foundation retirement](session-foundation-retirement.md). Reactivation,
 capability negotiation and cue retrieval are not current delivery requirements.
 Existing storage/identity/forensic contracts remain migration obligations; the
-periodic capture installer, source unit templates and collector packages are
-retired. Their repair/backfill source and tests remain at the
+Store implementation, Store-backed CLI commands, periodic capture installer,
+source unit templates and collector packages are retired. Historical inspection,
+explicit deletion, repair/backfill source and tests remain at the
 [pinned historical revision](../trace-capture-retirement.md).
 
 **Semon captures an agent's own working memory from one carrier, stores it in a
@@ -30,7 +31,7 @@ Capability references, declared capability sets, reactivation with loss reports,
 and cue retrieval remain unfinished. The three field classes below are distinct
 from the store's three tables/regions; the occurrence table does not implement
 capability references. The unresolved reactivation behavior and cue mechanism
-remain design decisions before those interfaces can ship.
+are superseded proposals; do not implement those interfaces as part of retirement.
 
 ## Constraints
 

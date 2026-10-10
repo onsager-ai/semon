@@ -1,7 +1,7 @@
 # Historical Trace Store export
 
 This migration command preserves the experimental Canonical Trace Store before
-its capture and replication code is retired. It does not export the core Session
+its Store, capture and replication code is retired. It does not export the core Session
 Event Index, restore a harness workspace, or provide runtime recovery.
 
 ```sh
@@ -18,13 +18,10 @@ cargo build --locked --release -p semon-forensic-export
 
 The release-binary workflow supplies a separate
 `semon-forensic-export-linux-x86_64` artifact. Neither build nor download starts
-capture or reads historical files. The existing migration command delegates to
-the same exporter and remains supported while the main CLI is decoupled:
-
-```sh
-semon forensic --store /private/history/traces.sqlite3 \
-  --export-store /private/history/trace-export-v1
-```
+capture or reads historical files. The main CLI's historical `log`, `forensic`,
+`forget` and export alias are retired. The qualified pinned legacy CLI preserves
+those contracts for existing data; see the procedure below. Normal session
+commands have no Canonical Trace Store dependency.
 
 Pause capture writers and other access to that store during the snapshot. The
 command never stops services, uninstalls timers, changes original permissions,
@@ -37,7 +34,7 @@ The destination must not exist; its parent must already exist. On Unix, the
 command creates the directory with mode `0700` and files with mode `0600`.
 The forensic warning is printed before output. No raw records are
 printed to stdout. Selected `--session`, `--trace`, `--day` and `--out` modes
-on `semon forensic` remain available and cannot be combined with `--export-store`.
+remain available in the pinned CLI and cannot be combined with its `--export-store`.
 The standalone tool exports the complete store only and requires both explicit
 paths; it has no capture, synchronization, network, pruning or deletion command.
 
@@ -102,8 +99,55 @@ print("Verified complete forensic Store export v1")
 PY
 ```
 
-Use SQLite read-only access on the exported file to inspect historical tables.
-Legacy `semon log`/selected `semon forensic` still use a schema-migrating open;
-give those commands a separate working copy of the verified artifact. Preserve
-the verified artifact as exported, including its manifest. The retired legacy
-`semon ship` sender omitted forensic data and was not a substitute for this export.
+## Legacy inspection and deliberate deletion
+
+Preserve the [qualified pinned CLI/source](trace-capture-retirement.md#pinned-legacy-tools)
+and its checksum before replacing an installed binary that still serves
+historical commands. Inventory jobs that invoke those commands: the current
+binary refuses them before opening a database, and does not redirect them to
+native session queries or mutate existing files. No installed binary, service,
+database, cursor, key or Relay deletion queue is removed by source retirement.
+
+Use SQLite read-only access on the verified exported file to inspect historical
+tables. Legacy `log`, selected `forensic` and `forget` use a schema-migrating open
+that can recreate tables or tighten permissions. Give those commands a separate
+owner-private working copy; preserve the verified artifact and manifest intact:
+
+```sh
+mkdir -m 700 /private/history/inspection
+cp /private/history/trace-export-v1/traces.sqlite3 /private/history/inspection/traces.sqlite3
+chmod 600 /private/history/inspection/traces.sqlite3
+/private/tools/semon-legacy log --store /private/history/inspection/traces.sqlite3
+/private/tools/semon-legacy forensic --store /private/history/inspection/traces.sqlite3 \
+  --session SESSION --out /private/history/inspection/excerpt.txt
+```
+
+The example assumes `/private/tools/semon-legacy` is the exact preserved binary,
+not the current `semon`. Ordinary `log` reads only canonical traces/occurrences;
+forensic access warns before output and creates excerpts `0600`. Session/day
+selection includes the raw row's own unprojected lines. Trace selection returns
+each complete linked source line once and cannot select unprojected rows.
+Neither selected access nor the retired `ship` sender is a complete forensic
+backup; use the all-table exporter and verifier above.
+
+Only an explicit operator decision may delete historical records. The pinned
+`forget --forensic` still requires exactly one selector and interactive
+confirmation or `--yes`. Session/time selectors operate on each raw row's own
+provenance; trace selection deletes every complete linked raw line across
+sessions, including its other projected blocks. Canonical traces/occurrences
+survive. Secure-delete plus vacuum removes freed SQLite payloads; deletion from
+a working copy does not erase originals, exported artifacts, native logs or
+other previously restored copies. No deletion or pruning happens automatically.
+The pinned [forensic policy](design/forensic-retention-and-exposure.md) records
+the full historical selection and exposure contract.
+
+For existing queued/coordinated Relay deletion, preserve the original sender
+state, endpoint origin, enrolled signing/age identity and trust configuration.
+The pinned CLI requires explicit `--relay-endpoint`, `--relay-state` and
+`--relay-config` (and pinned HTTPS `--relay-ca` when configured), queues the
+request before local deletion and keeps offline requests pending. Semantic trace
+IDs cannot select carrier frames. The dedicated `semon-relay forget` remains
+available at this stage. Local-only deletion leaves server copies; neither
+source retirement nor export acknowledges or drops a pending request. Follow
+the [Relay custody contract](encrypted-relay-retirement.md) before replacing
+those tools or making a separate explicit remote deletion decision.

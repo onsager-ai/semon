@@ -1961,13 +1961,10 @@ checksum = "2ab42ca02749e120097e328d91d415325bdf43b1c72c4c8badf37375fe40a813"
 name = "semon-cli"
 version = "0.1.0"
 dependencies = [
- "rusqlite",
  "semon-control",
- "semon-forensic-export",
  "semon-push",
  "semon-relay",
  "semon-sessions",
- "semon-store",
  "serde_json",
 ]
 
@@ -2067,18 +2064,6 @@ dependencies = [
  "thiserror 2.0.19",
  "tokio",
  "zeroize",
-]
-
-[[package]]
-name = "semon-store"
-version = "0.1.0"
-dependencies = [
- "hex",
- "rusqlite",
- "serde_json",
- "serde_json_canonicalizer",
- "sha2 0.10.9",
- "thiserror 2.0.19",
 ]
 
 [[package]]

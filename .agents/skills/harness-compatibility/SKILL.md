@@ -1,14 +1,16 @@
 ---
 name: harness-compatibility
-description: Verify Semon's Claude/Codex capture and control compatibility against sanitized real-format fixtures and carrier-neutral storage invariants. This tests product integrations, not the coding agent's tool adapter.
+description: Verify Semon's native session discovery, synchronization and control against sanitized harness fixtures, identity, provenance and source-backed read contracts. Historical trace and Relay migration must preserve private evidence access. This tests product integrations, not the coding agent's tool adapter.
 ---
 
 # Semon harness compatibility
 
 ## Scope
 
-Owns Semon's supported capture/control/session/relay formats. AGENTS.md owns
-trace/raw separation, identity, retention and Rust gates. This skill does not
+Owns Semon's supported native source/control/session formats and migration
+evidence. AGENTS.md owns identity, provenance, forensic retention and Rust gates.
+Experimental Trace Store capture is retired; its exact contracts and tests live
+at the pinned revision in docs/trace-capture-retirement.md. This skill does not
 configure the current coding harness; use harness-operations for tool mapping.
 
 ## Prerequisites
@@ -20,13 +22,17 @@ retaining credentials or private raw records.
 
 ## Procedure
 
-1. Select the affected capture, control, session or relay path and its real input
-   format. Reproduce the defect or establish an unchanged control before edits.
+1. Select the affected native discovery, synchronization, control or session path
+   and its real input format. For historical trace/Relay migration, read the
+   custody/export contract and use private synthetic working copies. Reproduce
+   the defect or establish an unchanged control before edits.
 2. Add the smallest sanitized real-format fixture that distinguishes intended
    compatibility from malformed/refused input. Preserve parent/session and
-   occurrence relationships; cover the refusal path as well as the accepted one.
-3. Verify unchanged semantics retain canonical identity. Ordinary trace reads must
-   still exclude raw bytes/carrier labels; consult the owning design for boundary
+   provenance relationships; cover the refusal path as well as the accepted one.
+3. Verify native session identity, lineage and source-generation validation.
+   Preserve the core Session Event Index/Catalog and source-backed reads. Current
+   session reads cannot acquire historical forensic access; pinned trace tools
+   preserve canonical/raw separation. Consult the owning design for boundary
    changes rather than making parser fixtures the whole contract.
 4. Run affected crate tests and the root Rust gates with exact flags/prerequisites
    from .github/workflows/rust.yml. Include any supported-feature lane affected by
@@ -36,5 +42,5 @@ retaining credentials or private raw records.
 ## Completion
 
 Report carrier/version, sanitized fixture origin, accepted/refused cases, identity
-and exposure evidence, actual gate results and blocked coverage. Product capture
+and exposure evidence, actual gate results and blocked coverage. Product harness
 compatibility is distinct from native agent instruction/skill discovery.

@@ -5,6 +5,13 @@ identity_impact: closes the trace-granularity question without changing what ide
 
 # Trace identity and the occurrence index
 
+Historical Store identity contract, preserved for existing data and the
+[qualified pinned inspection/deletion tools](../trace-capture-retirement.md).
+The Store implementation and its current CLI commands are retired. This ordered
+occurrence region is distinct from the retained core Session Event Index and
+Catalog. Native session identity and lineage remain supported independently;
+see the [current architecture](session-foundation-retirement.md).
+
 **A trace's identity stays exactly what it is: the content hash of its carrier-neutral semantic core. The log is carried by a new ordered region — occurrences — that records, for each time a trace was seen, where and when it was seen. The same sentence spoken in two sessions is one trace with two occurrences.**
 
 Decided 2026-09-20. This closes the **OPEN — Trace granularity** row in [`carrier-neutral-trace-storage.md`](carrier-neutral-trace-storage.md), and it closes it with an argument about *what identity ranges over* rather than with a granularity number.
