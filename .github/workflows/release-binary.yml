@@ -42,7 +42,7 @@ jobs:
             ${{ runner.os }}-release-cargo-${{ steps.rust-toolchain.outputs.cachekey }}-
 
       - name: Build semon
-        run: cargo build --locked --release -p semon-store --bin semon
+        run: cargo build --locked --release -p semon-cli --bin semon
 
       # `--help` prints the usage and exits nonzero, so only the grep's status counts.
       - name: Smoke test

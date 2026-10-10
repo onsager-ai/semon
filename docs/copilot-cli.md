@@ -25,7 +25,7 @@ mirrored or used to infer relationships.
 Build both tools from the same checkout:
 
 ```sh
-cargo build --release --locked -p semon-store --bin semon
+cargo build --release --locked -p semon-cli --bin semon
 cargo build --release --locked -p semon-copilot
 semon-copilot --copilot-home /path/to/copilot
 semon sessions --copilot-home /path/to/copilot --all
