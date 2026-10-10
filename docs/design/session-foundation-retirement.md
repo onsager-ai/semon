@@ -172,7 +172,10 @@ or payloads. No live service is stopped or uninstalled by these PRs.
 
 Retain a pinned legacy binary/source revision while migration is qualified.
 The [forensic Store exporter](../trace-store-export.md) provides complete,
-versioned all-table snapshots for schemas 0 through 7, preserving original
+versioned all-table snapshots for schemas 0 through 7. Its standalone
+`semon-forensic-export` package builds without Store, capture, Sessions, Relay or
+Runtime; the existing `semon forensic --export-store` alias delegates to the
+same implementation during migration. It preserves original
 DB/WAL/SHM/journal bytes and permissions. It requires quiescent source files,
 verifies private input copies against their generations and full digests, and
 uses SQLite only on those copies. Publication refuses source changes and newer
