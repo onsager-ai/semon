@@ -76,8 +76,8 @@ pub use source_reader::{SESSION_SOURCE_CHUNK_MAX, SessionSourceRange, SessionSou
 mod union;
 mod viewer;
 pub use facts::{
-    FACTS_VERSION, Facts, FactsSource, RUN_VARIABLES, ReportedModelUsage, ReportedRunSnapshot,
-    local_facts, local_runtime_facts, read_facts, write_facts,
+    FACTS_VERSION, Facts, FactsSource, NativeName, RUN_VARIABLES, ReportedModelUsage,
+    ReportedRunSnapshot, local_facts, local_runtime_facts, read_facts, write_facts,
 };
 pub use harness::{HARNESS_ICONS, HARNESSES, HarnessDefinition, harness};
 pub use inputs::{Input, InputRoot, inputs, is_input_path};

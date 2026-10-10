@@ -3473,6 +3473,7 @@ fn recorded_facts_decide_liveness_hostname_home_and_repos() {
         offline_since: None,
         runs: BTreeMap::new(),
         reported_runs: Vec::new(),
+        native_names: Vec::new(),
         process_ancestors: BTreeMap::new(),
     };
     crate::write_facts(&path, &facts).unwrap();
@@ -7145,4 +7146,42 @@ fn schema_six_catalog_migration_populates_relationship_indexes_on_next_complete_
         )
         .unwrap();
     assert_eq!(source, ("root".into(), "root".into()));
+}
+
+#[test]
+fn native_name_updates_do_not_change_transcripts_and_remain_source_qualified() {
+    let home = Home::new();
+    let other = Home::new();
+    let id = "00000000-0000-0000-0000-000000000077";
+    home.codex(id, json!({}), &[]);
+    other.codex(id, json!({}), &[]);
+    home.top(id, &[human(id, ts(0, 0), "Claude prompt")]);
+    let before = home.build();
+    home.lines(
+        "codex/session_index.jsonl",
+        &[json!({"id":id,"thread_name":"Meaningful name","updated_at":"2026-10-10T00:00:00Z"})],
+    );
+    let after = home.build();
+    let native = |built: &Built| {
+        built
+            .sessions
+            .iter()
+            .find(|(_, s)| s.harness == "codex")
+            .map(|(key, s)| (key.clone(), s.name.clone()))
+            .unwrap()
+    };
+    assert_eq!(native(&after).1, "Meaningful name");
+    assert_eq!(native(&before).0, native(&after).0);
+    assert_ne!(native(&other.build()).1, "Meaningful name");
+    assert!(
+        after
+            .sessions
+            .values()
+            .filter(|s| s.harness == "claude")
+            .all(|s| s.name != "Meaningful name")
+    );
+    let sid = native(&after).0;
+    let tx_before = crate::tx::page(&before, &sid, &crate::tx::Anchor::Last, NOW);
+    let tx_after = crate::tx::page(&after, &sid, &crate::tx::Anchor::Last, NOW);
+    assert_eq!(tx_before.unwrap(), tx_after.unwrap());
 }

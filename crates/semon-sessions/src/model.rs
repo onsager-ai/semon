@@ -6002,6 +6002,15 @@ fn build_sources_inner(
         cache,
     );
     timed!("sessions", builder.sessions(groups, &pids, &held));
+    for name in facts.native_names(options) {
+        if name.valid()
+            && let Some(&index) = builder.by_native.get(&("codex", name.native_id.clone()))
+        {
+            let session = &mut builder.sessions[index];
+            session.out.name.clone_from(&name.name);
+            session.names.insert(plain_name(&name.name));
+        }
+    }
     timed!("index_tools", builder.index_tools());
     timed!("background_commands", builder.background_commands());
     timed!("claude_spawns", builder.claude_spawns());

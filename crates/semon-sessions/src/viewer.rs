@@ -620,6 +620,14 @@ impl Snapshot {
                 pids: BTreeMap::new(),
             };
         }
+        for name in [
+            "session_index.jsonl",
+            "state_5.sqlite",
+            "state_5.sqlite-wal",
+        ] {
+            let path = options.codex_home.join(name);
+            watched.insert(path.clone(), stamp(&path));
+        }
         let pids = ids
             .into_iter()
             .map(|pid| (pid, proc_start(&options.proc_root, pid)))
@@ -3285,6 +3293,28 @@ mod tests {
         let random = random_token().unwrap();
         assert_eq!(random.len(), 32);
         assert!(random.bytes().all(|byte| byte.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn late_native_name_refreshes_model_without_moving_transcript_marks() {
+        let fixture = Fixture::new();
+        let id = "00000000-0000-0000-0000-000000000077";
+        fixture.codex(id, &[]);
+        let viewer = fixture.viewer();
+        let first = viewer.model("", None).unwrap();
+        let before: Value = serde_json::from_slice(&first.2).unwrap();
+        fixture.write("codex/session_index.jsonl", &(json!({"id":id,"thread_name":"Meaningful late name","updated_at":"2026-10-10T00:00:00Z"}).to_string() + "\n"));
+        let changed = viewer
+            .model(
+                &format!("since={}", before["version"].as_str().unwrap()),
+                None,
+            )
+            .unwrap();
+        assert_eq!(changed.0, 200);
+        let after: Value = serde_json::from_slice(&changed.2).unwrap();
+        assert_eq!(after["sessions"][id]["name"], "Meaningful late name");
+        assert_eq!(before["tx"], after["tx"]);
+        assert_eq!(before["turns"], after["turns"]);
     }
 
     #[test]

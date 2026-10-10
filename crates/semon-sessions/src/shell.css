@@ -251,3 +251,6 @@ dialog.sh-composer-panel { background: var(--ground); }
 .sh-form-card .check-field input[type="checkbox"]:checked::after { opacity: 1; }
 .sh-form-card .check-field input[type="checkbox"]:focus-visible { outline: 2px solid var(--ink); outline-offset: 3px; }
 @media (forced-colors: active) { .sh-form-card .check-field input[type="checkbox"] { appearance: auto; } .sh-form-card .check-field input[type="checkbox"]::after { content: none; } }
+
+.sh-composer-conversation[hidden] { display: none; }
+.sh-composer-conversation:not(.sh-composer-focused) textarea { height: 44px; overflow-y: hidden; }

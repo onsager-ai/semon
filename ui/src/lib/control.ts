@@ -116,6 +116,8 @@ export function parseControl(value: unknown): ControlSnapshot | null {
   return value as unknown as ControlSnapshot;
 }
 export interface ControlView {
+  draft?: string;
+  setDraft?(text: string): void;
   canReconnect?: boolean;
   snapshot: ControlSnapshot;
   busy: boolean;
@@ -125,4 +127,38 @@ export interface ControlView {
   interrupt(): void;
   answer(request: ControlRequest, answer: JsonObject): void;
   reconnect(): void;
+}
+
+/** Reading history supplies no write authority. Keep a reason visible before discovery. */
+export function unavailableControl(
+  thread: string,
+  reason = 'Native session controls are unavailable.',
+): ControlView {
+  return {
+    snapshot: {
+      thread,
+      generation: '',
+      activeTurn: null,
+      connected: false,
+      capabilities: {
+        input: false,
+        steer: false,
+        interrupt: false,
+        commandApproval: false,
+        fileApproval: false,
+        questions: false,
+      },
+      reason,
+      requests: [],
+      actions: {},
+    },
+    busy: false,
+    uncertain: false,
+    note: '',
+    canReconnect: false,
+    send: async () => false,
+    interrupt() {},
+    answer() {},
+    reconnect() {},
+  };
 }

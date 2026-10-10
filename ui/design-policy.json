@@ -3,7 +3,9 @@
     "--account-bottom": "Measured account menu placement, set by the shell host.",
     "--account-left": "Measured account menu placement, set by the shell host.",
     "--account-width": "Measured account menu width, set by the shell host.",
-    "--barh": "Measured topbar height, set by application layout."
+    "--barh": "Measured topbar height, set by application layout.",
+    "--reading-bottom": "Visible viewport occlusion beneath the reader dock, set and released by its owner.",
+    "--reading-clip": "Measured transcript paint boundary above the dock; scroll ownership and height remain unchanged."
   },
   "approvedLiterals": [
     "color:#000",

@@ -1,5 +1,6 @@
+import { setGeometry, releaseGeometry } from './geometry';
 import { LocalControl } from './localControl';
-import type { ControlView } from './control';
+import { unavailableControl, type ControlView } from './control';
 import type { RuntimeObservationView } from './runtimeObservation';
 import { commitApplicationView } from './application-view';
 import { Component, Fragment, render } from 'preact';
@@ -186,10 +187,31 @@ class SessionControls extends Component<{ owner: SessionOwner }> {
     this.props.owner.controls = null;
   }
   render() {
-    const view = this.props.owner.snapshot.control;
-    return view ? (
-      <LocalControl view={view} runtimeObserved={!!this.props.owner.snapshot.runtime} />
-    ) : null;
+    const snapshot = this.props.owner.snapshot;
+    let view =
+      snapshot.control ??
+      unavailableControl(snapshot.id, 'Native session controls are unavailable.');
+    const runtime = snapshot.runtime?.observation;
+    if (runtime?.freshness === 'current' && ['ended', 'failed'].includes(runtime.state)) {
+      const blocked = unavailableControl(
+        snapshot.id,
+        runtime.state === 'ended'
+          ? 'This session has ended.'
+          : runtime.state === 'failed'
+            ? 'This environment needs attention.'
+            : 'Current environment controls are unavailable.',
+      );
+      view = {
+        ...view,
+        canReconnect: false,
+        snapshot: blocked.snapshot,
+        send: blocked.send,
+        interrupt: blocked.interrupt,
+        answer: blocked.answer,
+        reconnect: blocked.reconnect,
+      };
+    }
+    return <LocalControl view={view} runtimeObserved={!!snapshot.runtime} />;
   }
 }
 /** Durable status stays observable even when no current native control identity exists. */
@@ -389,8 +411,29 @@ function Entry({ entry, owner }: { entry: EntryView; owner: SessionOwner }): Com
           data-e={entry.key}
           data-entry-key={entry.entryKey}
         >
-          <div class="think-label">{screenText(entry.label ?? '')}</div>
-          {entry.mode === 'readable' && <Markdown text={entry.text ?? ''} className="think-text" />}
+          {entry.mode === 'readable' ? (
+            <>
+              <button
+                type="button"
+                class="think-label think-disclosure"
+                aria-expanded={open}
+                onClick={(event) => {
+                  if (!event.currentTarget.isConnected || owner.disposed) return;
+                  if (open) owner.open.delete(key);
+                  else owner.open.add(key);
+                  owner.change(key);
+                }}
+              >
+                <Glyph path="m9 5 7 7-7 7" className={'chev' + (open ? ' open' : '')} />
+                {screenText(entry.label ?? 'Thinking')}
+              </button>
+              {open && <Markdown text={entry.text ?? ''} className="think-text" />}
+            </>
+          ) : (
+            <div class="think-label">
+              {screenText(entry.label ?? 'Thinking hidden by the harness')}
+            </div>
+          )}
         </div>
       );
     case 'label':
@@ -776,6 +819,8 @@ export function updateSessionJump(
     if (owner.jump) render(null, owner.jump);
     owner.jump = target;
   }
+  const slot = root.querySelector('.session-jump-slot');
+  if (owner.jump && slot && owner.jump.parentNode !== slot) slot.append(owner.jump);
   owner.jumpVisible = visible;
   owner.jumpCount = count;
   owner.jumpBusy = busy;
@@ -840,7 +885,61 @@ export function renderSessionScreen(
     };
     state.observer.disconnect();
     state.observer = new ResizeObserver(state.measure);
+    const viewport = window.visualViewport;
+    let dockFrame = 0;
+    const fitDock = () => {
+      const dock = root.querySelector<HTMLElement>('.session-dock');
+      if (!dock || !root.isConnected || !root.getClientRects().length) return;
+      const note = document.querySelector<HTMLElement>(
+        'body > .livenote, body > .viewer-status-slot > .livenote',
+      );
+      setGeometry(
+        dock,
+        'readingBottom',
+        Math.max(
+          viewport ? Math.max(0, innerHeight - viewport.height - viewport.offsetTop) : 0,
+          note?.getClientRects().length ? innerHeight - note.getBoundingClientRect().top : 0,
+        ),
+      );
+      const transcript = root.querySelector<HTMLElement>('.transcript');
+      if (transcript) {
+        // Paint only the reading region, keeping the host's existing scroll height and anchors.
+        const clipped =
+          getComputedStyle(dock).position === 'sticky'
+            ? Math.max(
+                0,
+                transcript.getBoundingClientRect().bottom - dock.getBoundingClientRect().top,
+              )
+            : 0;
+        setGeometry(transcript, 'readingClip', clipped);
+      }
+    };
+    const scheduleDock = () => {
+      cancelAnimationFrame(dockFrame);
+      dockFrame = requestAnimationFrame(fitDock);
+    };
+    document.addEventListener('scroll', scheduleDock, { capture: true, passive: true });
+    const notices = new MutationObserver(fitDock);
+    notices.observe(document.body, { childList: true });
+    viewport?.addEventListener('resize', fitDock);
+    viewport?.addEventListener('scroll', fitDock);
+    const dockObserver = new ResizeObserver(fitDock);
+    requestAnimationFrame(() => {
+      if (state.disposed) return;
+      const dock = root.querySelector('.session-dock');
+      if (dock) dockObserver.observe(dock);
+      const transcript = root.querySelector('.transcript');
+      if (transcript) dockObserver.observe(transcript);
+      fitDock();
+    });
     claimScreen(root, 'session', () => {
+      cancelAnimationFrame(dockFrame);
+      document.removeEventListener('scroll', scheduleDock, true);
+      viewport?.removeEventListener('resize', fitDock);
+      viewport?.removeEventListener('scroll', fitDock);
+      dockObserver.disconnect();
+      notices.disconnect();
+      releaseGeometry(root);
       state.disposed = true;
       state.observer.disconnect();
       cancelAnimationFrame(state.frame);
@@ -912,7 +1011,15 @@ export function renderSessionScreen(
           </div>
         </section>
         <SessionRuntime owner={state} />
-        <SessionControls owner={state} />
+        <div class="session-dock">
+          <div
+            class="session-jump-slot"
+            ref={(node) => {
+              if (node && state.jump && state.jump.parentNode !== node) node.append(state.jump);
+            }}
+          />
+          <SessionControls owner={state} />
+        </div>
         {view.footer && (
           <div class="session-foot">
             <span class={'stat ' + view.footer.state}>
@@ -989,10 +1096,9 @@ export function updateSessionRuntime(
 ) {
   const owner = owners.get(root);
   if (!owner || owner.disposed) return;
-  const hadRuntime = !!owner.snapshot.runtime;
   owner.snapshot = { ...owner.snapshot, runtime };
   owner.runtime?.();
-  if (hadRuntime !== !!runtime) owner.controls?.();
+  owner.controls?.();
 }
 
 export function updateSessionPager(root: HTMLElement, view: PagerView) {
@@ -1056,4 +1162,13 @@ export function updateSessionClock(
 
 export function measureSessionScreen(root: HTMLElement) {
   owners.get(root)?.measure();
+}
+
+/** Name metadata updates never prepare blocks or replace input/scroll owners. */
+export function updateSessionName(root: HTMLElement, name: string) {
+  const owner = owners.get(root);
+  if (!owner || owner.disposed) return;
+  owner.snapshot = { ...owner.snapshot, name };
+  const heading = root.querySelector('.ph > h1');
+  if (heading) heading.textContent = screenText(name);
 }

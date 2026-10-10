@@ -1,4 +1,4 @@
-import { useState } from 'preact/hooks';
+import { useState, useRef } from 'preact/hooks';
 import type { ControlRequest, ControlView } from './control';
 import type { JsonObject } from './model';
 function visible(value: unknown): string {
@@ -109,13 +109,37 @@ export function LocalControl({
   view: ControlView;
   runtimeObserved?: boolean;
 }) {
-  const [text, setText] = useState('');
+  const input = useRef<HTMLTextAreaElement>(null);
+  const [localText, setLocalText] = useState('');
+  const text = view.draft ?? localText;
+  const setText = (next: string | ((current: string) => string)) => {
+    const value = typeof next === 'function' ? next(view.draft ?? localText) : next;
+    view.setDraft?.(value);
+    setLocalText(value);
+  };
+  const [disclosed, setDisclosed] = useState(false);
+  const [focused, setFocused] = useState(false);
   const s = view.snapshot;
   const canWrite =
     !view.busy &&
     !view.uncertain &&
     s.connected &&
     (s.activeTurn ? s.capabilities.steer : s.capabilities.input);
+  const available =
+    s.connected && (s.activeTurn ? s.capabilities.steer : s.capabilities.input) && !view.uncertain;
+  const reason =
+    s.runtime?.state === 'ended'
+      ? 'This session has ended.'
+      : s.runtime?.state === 'failed'
+        ? 'This environment needs attention.'
+        : view.uncertain
+          ? 'Delivery is unconfirmed. Inspect the session before sending again.'
+          : (s.reason ??
+            (s.connected
+              ? 'Input is unavailable for this session.'
+              : 'Native session controls are unavailable.'));
+  const collapsed =
+    !available && !disclosed && !focused && input.current !== document.activeElement;
   const canSend = canWrite && !!text.trim();
   const showStop = !!s.activeTurn && s.capabilities.interrupt && !text.trim();
   const pending = s.requests.filter((r) => r.state.state === 'open' || r.state.state === 'claimed');
@@ -124,7 +148,21 @@ export function LocalControl({
     .slice(-10);
   return (
     <section class="local-control" aria-label="Conversation controls">
-      {!s.connected && (
+      {!available && (
+        <button
+          type="button"
+          class="composer-unavailable"
+          aria-expanded={!collapsed}
+          onClick={() => setDisclosed(!disclosed)}
+        >
+          <span role="status">
+            {visible(reason)}
+            {text ? ' · Draft saved' : ''}
+          </span>
+          <span aria-hidden="true">{disclosed ? '⌃' : '⌄'}</span>
+        </button>
+      )}
+      {!collapsed && !s.connected && (
         <p role="status">
           {runtimeObserved
             ? 'Native session controls are unavailable.'
@@ -139,8 +177,8 @@ export function LocalControl({
                     : 'Reconnecting to your session…'}
         </p>
       )}
-      {s.reason && <p>{s.reason}</p>}
-      {s.runtime && s.runtime.freshness !== 'current' && (
+      {!collapsed && s.reason && <p>{s.reason}</p>}
+      {!collapsed && s.runtime && s.runtime.freshness !== 'current' && (
         <p role="status">
           {s.runtime.freshness === 'updating'
             ? 'Checking the environment…'
@@ -149,7 +187,7 @@ export function LocalControl({
               : 'Current environment observation is unavailable.'}
         </p>
       )}
-      {s.runtime?.observationError && <p>{s.runtime.observationError}</p>}
+      {!collapsed && s.runtime?.observationError && <p>{s.runtime.observationError}</p>}
       {pending.map((request) => {
         const supported =
           request.kind === 'question'
@@ -198,7 +236,8 @@ export function LocalControl({
         );
       })}
       <form
-        class="sh-composer sh-composer-conversation"
+        class={'sh-composer sh-composer-conversation' + (focused ? ' sh-composer-focused' : '')}
+        hidden={collapsed}
         aria-label="Send a follow-up"
         aria-busy={view.busy || undefined}
         onSubmit={async (event) => {
@@ -212,10 +251,19 @@ export function LocalControl({
         }}
       >
         <textarea
+          ref={input}
           class="sh-composer-input"
           aria-label="Message to Codex"
-          aria-description="Enter to send. Shift+Enter for a new line."
-          rows={Math.min(6, Math.max(1, text.split('\n').length))}
+          aria-description={
+            available
+              ? 'Enter to send. Shift+Enter for a new line.'
+              : 'Sending is unavailable. Retained draft can be selected and copied.'
+          }
+          rows={focused ? Math.min(6, Math.max(2, text.split('\n').length)) : 1}
+          readOnly={!available}
+          aria-disabled={!available || undefined}
+          onFocus={() => setFocused(true)}
+          onBlur={() => setFocused(false)}
           placeholder={s.activeTurn ? 'Add instructions…' : 'Message Codex…'}
           value={text}
           onInput={(event) => setText(event.currentTarget.value)}
@@ -258,7 +306,8 @@ export function LocalControl({
           )}
         </button>
       </form>
-      {(!s.connected || view.uncertain) &&
+      {!collapsed &&
+        (!s.connected || view.uncertain) &&
         view.canReconnect !== false &&
         s.runtime?.reconnectable !== false && (
           <div class="local-control-actions">
