@@ -175,6 +175,10 @@ Or put it in a project's `.mcp.json`:
 
 ## Capture Codex sessions
 
+The following capture commands document existing installations during retirement.
+They are unnecessary for session browsing or synchronization. Preserve existing
+state and export historical data before changing an installation.
+
 Run one cursor-aware capture pass with:
 
 ```sh
@@ -726,26 +730,29 @@ not a schedule.
 
 ## Copilot CLI saved-state support
 
-Linux Copilot CLI 1.0.90/1.0.91 schema 1 sessions can be collected with
-`semon-copilot --watch` and browsed with `semon sessions --copilot-home PATH`.
+Linux Copilot CLI 1.0.90/1.0.91 schema 1 sessions are browsed directly with
+`semon sessions --copilot-home PATH`, without running `semon-copilot` capture.
 `COPILOT_HOME` supplies the default override. Copilot event files also participate
 in redacted `semon push`/receive and multi-machine viewing. Usage is a cumulative
 saved snapshot; missing outcomes, approvals, fresh usage and logical lineage stay
 unknown. Native homes are read-only. See [supported versions, commands and
 acceptance limitations](docs/copilot-cli.md).
 
-## Periodic capture
+## Existing capture installations
 
-The existing systemd user-timer installer now builds and installs the Rust
-adapter instead of the removed Python/OTLP tailer:
+New periodic Trace Store capture installation is retired. The repository no
+longer ships `install-user-timer.sh` or `devlog-codex-tailer` unit templates.
+Session browsing and generic Push read native logs directly and need no capture
+adapter or `traces.sqlite3`.
 
-```sh
-./scripts/install-user-timer.sh
-systemctl --user status devlog-codex-tailer.timer
-```
-
-The legacy unit filename is retained so existing user installations can be
-updated in place; its service now runs `~/.local/bin/semon-codex`.
+This source change does not stop installed services or remove binaries, unit
+files, cursors or databases. Existing `devlog-codex-tailer.timer` installations
+can still write to the store; inventory them and any manually configured
+Claude/Copilot collectors and ship endpoints. Preserve the installed unit/config
+and cursor paths, then follow the [private export contract](docs/trace-store-export.md)
+with explicit writer quiescence before deciding to uninstall capture. Existing
+adapter repair/backfill and historical log/forensic commands remain available
+through this migration stage.
 
 ## Development checks
 
@@ -753,7 +760,6 @@ updated in place; its service now runs `~/.local/bin/semon-codex`.
 cargo fmt --all --check
 cargo clippy --all-targets --locked -- -D warnings
 cargo test --locked
-sh -n scripts/install-user-timer.sh
 ```
 
 Browser checks use the locked tooling in `tests/ui/` (`npm ci` and
