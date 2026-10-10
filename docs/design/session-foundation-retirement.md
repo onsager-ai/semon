@@ -15,6 +15,12 @@ Audited on October 10, 2026:
 | Semon | `02a9ac17d525eb134b5952f7e55d30b47b16b8ec` | Not applicable |
 | Hub | `9623986977ec69869276fa4224a939e0c9fa4312` | `8d38fbbf254d52a9b9bac123d47df8b9c593800d` |
 
+The refreshed main revisions are Semon
+`263a02da278716ab2309b8e34a463419e5c781e5` and Hub
+`45a9a5d4d705775c6f65daf59058f4984c8b5cff`. Their source-pin contract and
+Hub navigation/native-picker changes are retained in the staged PRs; the
+retirement components audited below remain present on main until those PRs land.
+
 Hub's gitlink is its sole source pin. Latest Semon and the adopted Hub/Semon pair
 are distinct validation targets. Adoption PRs must run
 `scripts/verify-source-pair.sh` on their clean committed pair and record both SHAs.
