@@ -92,6 +92,17 @@ jobs:
       - name: cargo test
         run: cargo test --locked
 
+      - name: Verify historical exporter builds without product or capture crates
+        run: |
+          cargo tree --locked -p semon-forensic-export --edges normal,build --prefix none --format '{p}' > "$RUNNER_TEMP/forensic-export-dependencies.txt"
+          python3 - "$RUNNER_TEMP/forensic-export-dependencies.txt" <<'PY'
+          import pathlib, sys
+          dependencies = pathlib.Path(sys.argv[1]).read_text().splitlines()
+          unexpected = [line for line in dependencies if line.startswith("semon-") and not line.startswith("semon-forensic-export ")]
+          if unexpected:
+              raise SystemExit("Historical exporter gained product/capture dependencies: " + ", ".join(unexpected))
+          PY
+
       - name: Codex private device-login process checks
         run: |
           cargo clippy -p semon-runtime --all-targets --features codex-process --locked -- --no-deps -D warnings

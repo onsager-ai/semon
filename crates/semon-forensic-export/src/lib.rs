@@ -18,6 +18,11 @@ use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
 
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
+/// Print before explicit forensic access. Neither command prints raw data in
+/// ordinary output; exported private databases can contain the original bytes.
+pub const FORENSIC_WARNING: &str = "raw output may contain prompts, responses, \
+    source code, credentials, and machine paths captured verbatim.";
+
 pub fn export(source: &Path, directory: &Path) -> Result<()> {
     if !fs::metadata(source)?.is_file() {
         return Err("the trace store must be an existing regular SQLite file".into());

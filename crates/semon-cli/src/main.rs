@@ -15,8 +15,6 @@ use semon_store::{
     day_bounds_ns, format_day_ns, render_occurrence_line, ship,
 };
 
-mod forensic_export;
-
 fn main() -> ExitCode {
     match parse_args().and_then(run) {
         Ok(()) => ExitCode::SUCCESS,
@@ -1344,13 +1342,6 @@ fn run_log(args: LogArgs) -> Result<String, String> {
         .join("\n"))
 }
 
-/// The one-line stderr warning `semon forensic` writes before any output —
-/// on every invocation, before touching stdout or `--out`, so redirecting
-/// stdout to a file still shows it (see
-/// `docs/design/forensic-retention-and-exposure.md`, Decision 3).
-const FORENSIC_WARNING: &str = "semon forensic: raw output may contain prompts, responses, \
-     source code, credentials, and machine paths captured verbatim.";
-
 const TRACE_SELECTOR_NOTE: &str = "--trace selects complete source lines linked to the trace; \
      unprojected raw records have no trace links and must be selected by session or time.";
 
@@ -1363,10 +1354,14 @@ const TRACE_SELECTOR_NOTE: &str = "--trace selects complete source lines linked 
 /// see the comment on this file's (test-only) trailing note for why that
 /// check has to live at the store layer rather than here.
 fn run_forensic(args: ForensicArgs) -> Result<(), String> {
-    eprintln!("{FORENSIC_WARNING}");
+    eprintln!(
+        "semon forensic: {}",
+        semon_forensic_export::FORENSIC_WARNING
+    );
 
     if let Some(directory) = args.export_store {
-        forensic_export::export(&args.store, &directory).map_err(|error| error.to_string())?;
+        semon_forensic_export::export(&args.store, &directory)
+            .map_err(|error| error.to_string())?;
         println!(
             "semon forensic: complete store export written to {}",
             directory.display()

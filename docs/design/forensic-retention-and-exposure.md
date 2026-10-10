@@ -57,7 +57,11 @@ Retirement adds the explicit `--export-store NEW_DIRECTORY` mode on that same
 command. It exports every table, including unlinked raw records, to a private
 versioned SQLite artifact. Original files are opened only as read-only files;
 SQLite operates on generation-verified private copies. Selected modes and their
-existing stdout behavior remain unchanged. See [the migration export
+existing stdout behavior remain unchanged. Retirement also extracts that same
+exporter into the explicitly named `semon-forensic-export` tool so historical
+access can survive removal of Store/capture dependencies from the main CLI.
+Both named commands print the same warning before forensic access; ordinary
+session/log/query reads gain no raw-data path. See [the migration export
 contract](../trace-store-export.md) for quiescence, schema versions, permissions,
 verification and incomplete-export handling. This adds no pruning or deletion.
 
