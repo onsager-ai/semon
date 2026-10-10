@@ -665,11 +665,19 @@ async function regionShot(page, region) {
   // clamp that scroll differently on the two pages. Expand both first, preserving width and transcript geometry, then reset.
   const viewport = page.viewportSize(),
     box = await target.boundingBox();
-  const expand = region.name === 'transcript' && box && box.y + box.height > viewport.height;
+  const dock = page.locator('.session-dock').first();
+  const dockHeight = (await dock.count()) ? ((await dock.boundingBox())?.height ?? 0) : 0;
+  const expand =
+    region.name === 'transcript' && box && box.y + box.height + dockHeight + 80 > viewport.height;
   let png;
   try {
     if (expand) {
-      await page.setViewportSize({ width: viewport.width, height: Math.ceil(box.y + box.height) });
+      // The reading dock occupies its own space below the full transcript.
+      // Include it while fitting the viewport so a sticky dock cannot enter this text-only crop.
+      await page.setViewportSize({
+        width: viewport.width,
+        height: Math.ceil(box.y + box.height + dockHeight + 80),
+      });
       await page.evaluate(() => {
         window.scrollTo(0, 0);
         document.querySelector('#main').scrollTop = 0;

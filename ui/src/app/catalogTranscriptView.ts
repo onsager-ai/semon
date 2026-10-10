@@ -1,5 +1,6 @@
 import type { CatalogTranscriptEntry } from '../state/catalog-transcript-wire';
 import type { TranscriptBlock, EntryView } from '../lib/transcript';
+import { toolInfo } from '../domain/toolNames';
 import { I } from './registry';
 export interface CatalogFieldView {
   text?: string;
@@ -62,13 +63,13 @@ export function catalogTranscriptBlocks(
           waiting: false,
           label: entry.title ?? entry.arg,
           named: !!entry.title,
-          verb: entry.name,
+          verb: toolInfo(entry.name)[1],
           status: entry.unfinished
             ? 'Result not recorded'
             : entry.exit == null
               ? null
               : 'exit ' + entry.exit,
-          icon: I.run,
+          icon: I[toolInfo(entry.name)[0]],
           chevron: I.chev,
           data: preview,
         },

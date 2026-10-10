@@ -168,7 +168,7 @@ async function checkLongSessionOpenEnd(page) {
   const raised = await page.evaluate(() => {
     const button = document.querySelector('#jump-bottom'),
       rect = button.getBoundingClientRect(),
-      bar = document.querySelector('#topbar').getBoundingClientRect();
+      bar = document.querySelector('.session-dock').getBoundingClientRect();
     const sc = matchMedia('(max-width: 760px)').matches
       ? document.scrollingElement
       : document.querySelector('#main');
@@ -182,7 +182,7 @@ async function checkLongSessionOpenEnd(page) {
       gap: sc.scrollHeight - sc.scrollTop - sc.clientHeight,
       inside:
         rect.left >= 0 && rect.top >= 0 && rect.right <= innerWidth && rect.bottom <= innerHeight,
-      insideBar:
+      insideDock:
         rect.left >= bar.left &&
         rect.right <= bar.right &&
         rect.top >= bar.top &&
@@ -190,20 +190,21 @@ async function checkLongSessionOpenEnd(page) {
       overlapsComposer: overlaps(rect, composer),
     };
   });
-  // The jump action belongs to the sticky toolbar, clear of the transcript and
+  // The jump action belongs to the reading dock, clear of the transcript and
   // composer in default, wide and rail layouts. Keep the scroller contract.
   const positioned = async (mode) =>
     page.evaluate((mode) => {
       const button = document.querySelector('#jump-bottom'),
-        bar = document.querySelector('#topbar');
+        bar = document.querySelector('.session-dock');
       if (!button || button.closest('.jump-wrap')?.hidden || !bar)
-        return { mode, visible: false, insideBar: false };
+        return { mode, visible: false, insideDock: false };
       const b = button.getBoundingClientRect(),
         c = bar.getBoundingClientRect();
       return {
         mode,
         visible: true,
-        insideBar: b.left >= c.left && b.right <= c.right && b.top >= c.top && b.bottom <= c.bottom,
+        insideDock:
+          b.left >= c.left && b.right <= c.right && b.top >= c.top && b.bottom <= c.bottom,
       };
     }, mode);
   const toolbarPositions = [await positioned('default')];
@@ -258,7 +259,16 @@ async function checkLongSessionOpenEnd(page) {
       shownThere,
       probeBottom: Math.round(innerHeight - r.bottom),
       buttonTop: Math.round(innerHeight - b.top),
-      overlaps: r.left < b.right && r.right > b.left && r.top < b.bottom && r.bottom > b.top,
+      // Transcript paint ends above the dock; retain the host's full scroll bounds.
+      overlaps:
+        r.left < b.right &&
+        r.right > b.left &&
+        r.top < b.bottom &&
+        Math.min(
+          r.bottom,
+          section.getBoundingClientRect().bottom -
+            (parseFloat(getComputedStyle(section).getPropertyValue('--reading-clip')) || 0),
+        ) > b.top,
     };
   });
   const returnedGap = await page.evaluate(() => {
@@ -273,7 +283,7 @@ async function checkLongSessionOpenEnd(page) {
     scrollUpDistance: opened.top - raised.top,
     raisedGap: raised.gap,
     jumpInsideViewport: raised.inside,
-    insideBar: raised.insideBar,
+    insideDock: raised.insideDock,
     overlapsComposer: raised.overlapsComposer,
     toolbarPositions,
     tail,
@@ -284,9 +294,9 @@ async function checkLongSessionOpenEnd(page) {
       opened.top - raised.top >= 2 * (await page.evaluate(() => innerHeight)) - 1 &&
       raised.gap > 80 &&
       raised.inside &&
-      raised.insideBar &&
+      raised.insideDock &&
       !raised.overlapsComposer &&
-      toolbarPositions.every((c) => c.visible && c.insideBar) &&
+      toolbarPositions.every((c) => c.visible && c.insideDock) &&
       tail.hiddenAtEnd &&
       tail.shownThere &&
       !tail.overlaps &&

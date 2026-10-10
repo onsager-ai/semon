@@ -1770,7 +1770,7 @@ export default async function barCheck(browser) {
       childAssertions.length,
   );
 
-  // Thinking shows inline. Readable thinking is drawn in full, with no control to open (no button, nothing hidden), under a
+  // Recorded thinking starts collapsed. Disclosure shows the complete recorded body under a
   // "Thinking" label that carries a duration only from one second up. Masked thinking (Claude redacts it, Codex encrypts it) is
   // one quiet line, "Thinking hidden by the harness", at most one per turn. Checked at 390 and 1280.
   // Injected through the served /api/tx path: a readable thought timed 0 s holding one very long unbroken token, two masked
@@ -1832,13 +1832,12 @@ export default async function barCheck(browser) {
               (b) => b.querySelectorAll('.thought.masked').length,
             ),
           ),
-          inline:
+          collapsed:
             readable.length > 0 &&
             readable.every(
               (x) =>
-                shown(x.querySelector('.think-text')) &&
-                !x.querySelector('button, [aria-expanded], [hidden]') &&
-                x.querySelector('.think-text').textContent.trim().length > 0,
+                !x.querySelector('.think-text') &&
+                x.querySelector('.think-disclosure')?.getAttribute('aria-expanded') === 'false',
             ),
           maskedLines: masked.every(
             (x) =>
@@ -1862,12 +1861,15 @@ export default async function barCheck(browser) {
       await closePage(page);
       thoughtsBySize[size] = t;
     }
-  // The fixture's harbor session has real readable thinking: it is on the page with no click, at both sizes.
+  // Harbor keeps its full recorded thinking behind a disclosure at both sizes.
   const harborThinking = {};
   if (D.SESS.harbor)
     for (const size of ['phone', 'desktop']) {
       const page = await served(browser, { size });
       await goto(page, { v: 'session', id: 'harbor' }, D);
+      await page
+        .locator('.think-disclosure')
+        .evaluateAll((nodes) => nodes.forEach((node) => node.click()));
       harborThinking[size] = await page.evaluate(() => {
         const x = document.querySelector('.turns .thought:not(.masked) .think-text'),
           b = x?.getBoundingClientRect();
@@ -2322,8 +2324,8 @@ export default async function barCheck(browser) {
         JSON.stringify(t),
     );
     r.expect(
-      t.inline === true,
-      size + ': readable thinking is not shown in full without a click: ' + JSON.stringify(t),
+      t.collapsed === true,
+      size + ': recorded thinking did not start as a compact disclosure: ' + JSON.stringify(t),
     );
     r.expect(
       t.maskedLines === true && t.pairs === 0,
@@ -2332,7 +2334,7 @@ export default async function barCheck(browser) {
     r.expect(
       t.zero.length === 0 && t.oldRows === 0,
       size +
-        ': a thinking label names a zero duration, or the collapsed row is back: ' +
+        ': a thinking label names a zero duration or uses an obsolete row: ' +
         JSON.stringify(t),
     );
     r.expect(
@@ -2349,14 +2351,14 @@ export default async function barCheck(browser) {
   }
   r.expect(
     !D.SESS.harbor || Object.keys(harborThinking).length === 2,
-    "harbor's inline thinking was not checked at both sizes",
+    "harbor's disclosed thinking was not checked at both sizes",
   );
   for (const [size, t] of Object.entries(harborThinking)) {
     r.expect(t.errors.length === 0, size + ' harbor: page errors: ' + t.errors.join(' | '));
     r.expect(
       t.text > 0 && t.visible && t.fits,
       size +
-        ": harbor's readable thinking is not on the page without a click: " +
+        ": harbor's full recorded thinking is unavailable after disclosure: " +
         JSON.stringify(t),
     );
     r.expect(t.overflow === 0, size + ': harbor scrolls sideways: ' + t.overflow);

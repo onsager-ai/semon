@@ -47,9 +47,9 @@ for (const width of [390, 1280])
             thread: 'native',
             generation: 'g',
             activeTurn: null,
-            connected: false,
+            connected: true,
             capabilities: {
-              input: false,
+              input: true,
               steer: false,
               interrupt: false,
               commandApproval: false,
@@ -113,7 +113,10 @@ for (const width of [390, 1280])
           delivery: 'current',
         }),
       );
-      await page.getByText('This session has ended.', { exact: true }).waitFor();
+      await page
+        .getByRole('region', { name: 'Environment status' })
+        .getByText('This session has ended.', { exact: true })
+        .waitFor();
       assert.equal(await draft.inputValue(), 'Retained draft');
       assert.equal(await page.evaluate((node) => node === document.activeElement, input), true);
       assert.equal(
@@ -166,7 +169,10 @@ for (const width of [390, 1280])
         }),
       );
       await page.getByText('Last environment observation is stale.', { exact: true }).waitFor();
-      await page.getByText('This session has ended.', { exact: true }).waitFor();
+      await page
+        .getByRole('region', { name: 'Environment status' })
+        .getByText('This session has ended.', { exact: true })
+        .waitFor();
       assert.equal(await draft.inputValue(), 'Retained draft');
       assert.equal(await page.locator('button[type="submit"]').isEnabled(), false);
     } finally {

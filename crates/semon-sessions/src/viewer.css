@@ -324,6 +324,9 @@ dialog.panel::backdrop { background: color-mix(in srgb, #000 40%, transparent); 
 .harness-note { font-size: var(--fs-cap); color: var(--muted); }
 .thought { display: grid; gap: 3px; max-width: 68ch; padding-left: 12px; border-left: 1px solid var(--line-2); color: var(--muted); font-family: var(--sans); }
 .thought.masked { padding-block: 0; }
+.think-disclosure { display: flex; align-items: center; gap: var(--s2); min-height: var(--tap); padding: 0; border: 0; background: transparent; text-align: left; }
+.think-disclosure .chev { flex: none; width: 16px; height: 16px; }
+.think-disclosure .chev.open { transform: rotate(90deg); }
 .think-label { font-size: var(--fs-cap); font-weight: 600; letter-spacing: .04em; line-height: 1.4; color: var(--muted); }
 .thought.masked .think-label { font-weight: 400; letter-spacing: 0; font-size: var(--fs-sm); }
 .think-pending { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: var(--fs-sm); }
@@ -336,15 +339,15 @@ dialog.panel::backdrop { background: color-mix(in srgb, #000 40%, transparent); 
 .tsum, .step > button { display: flex; align-items: center; gap: 8px; width: 100%; min-width: 0; min-height: var(--tap); border: 0; background: none; margin: -4px 0; padding: 4px 8px; margin-left: -8px; width: calc(100% + 16px); border-radius: 8px; text-align: left; color: var(--ink-2); font-size: var(--fs-sm); line-height: 20px; }
 @media (hover: hover) { .tsum:hover, .step > button:hover { background: var(--hover); } }
 .tsum > svg:first-child, .step > button > svg:not(.chev) { width: 16px; height: 16px; flex: none; color: var(--muted); }
-.tsum .tt { flex: 0 1 auto; min-width: 0; }
+.tsum .tt { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tsum .tf { flex: none; color: var(--err); }
 .tsum .tl { flex: none; color: var(--work); }
-.tsum .chev, .step .chev { margin-left: auto; }
+.tsum .chev, .step .chev { margin-left: auto; flex: none; }
 .steps { display: grid; grid-template-columns: minmax(0, 1fr); gap: 2px; }
 /* A lone call reads like a folded group's line: its output lines up with the verb, after the 16px icon and the 8px gap. */
 .steps.lone .step > .out { margin: 4px 0 8px 24px; }
 .tgroup > .steps { padding: 6px 0 2px 12px; }
-.step .sv { flex: none; color: var(--ink-2); }
+.step .sv { flex: none; max-width: 60%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink-2); }
 .step .sa { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink-2); font-size: 12.5px; }
 .step .sa.st { font: inherit; color: var(--ink-2); }
 .step .sd { flex: none; margin-left: auto; padding-left: 8px; font-size: var(--fs-cap); color: var(--muted); font-variant-numeric: tabular-nums; }
@@ -984,6 +987,7 @@ dialog.viewer::backdrop { background: rgb(0 0 0 / .45); }
 }
 .analytics-split { display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; min-width: 0; }
 .analytics-session { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; gap: 8px; width: 100%; min-width: 0; min-height: 44px; border: 0; border-bottom: 1px solid var(--line); background: none; padding: 5px 0; text-align: left; }
+html .page a.analytics-session.ranked:any-link { text-decoration: none; }
 .analytics-session .session-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; font-size: var(--fs-sm); color: var(--ink-2); }
 .analytics-session .session-value { color: var(--muted); font: var(--fs-cap) var(--mono); white-space: nowrap; }
 .analytics-session .no-price { grid-column: 1 / -1; margin-top: -3px; } .analytics-slice .session-name { white-space: normal; overflow-wrap: anywhere; }
@@ -1115,7 +1119,7 @@ html.viewer-open, html.viewer-open body { overflow: hidden; }
   .menu-item, .vclose, .groupby button, .facet-btn,
   .facet-chip, .fclear, .fdone, .disclose, .run-row, .cw-toggle, .show-all,
   .tracebtn, .hop, .turn-h .from, .more, .jump-bottom, .order-pill,
-  .step > button, .tsum, .chip { min-height: 44px; min-width: 44px; }
+  .step > button, .tsum, .chip, .think-disclosure, .composer-unavailable { min-height: 44px; min-width: 44px; }
   .tree-toggle { width: 44px; height: 44px; }
   .tree-row.has-toggle .srow-main, .tree-row.has-toggle .srow-meta { padding-right: 44px; }
   .session-meta, .meta-line { min-height: 44px; overflow: visible; }
@@ -1315,11 +1319,14 @@ html.viewer-open, html.viewer-open body { overflow: hidden; }
 
 /* Local control shares the page commit owner; exact native payloads remain plain text. */
 .local-control { margin: var(--s3) 0 0; }
-.page:has(> .transcript):has(> .local-control), .page:has(> .catalog-session > .transcript):has(> .catalog-session > .local-control) { display: flex; flex-direction: column; min-height: calc(100dvh - 56px); padding-bottom: calc(var(--s4) + env(safe-area-inset-bottom, 0px)); }
-.catalog-session:has(> .local-control) { display: flex; flex: 1; flex-direction: column; }
-:is(.page, .catalog-session):has(> .local-control) > .transcript { flex: 1 0 auto; align-content: start; }
-:is(.page, .catalog-session):has(> .transcript) > .local-control { position: sticky; bottom: calc(var(--s4) + env(safe-area-inset-bottom, 0px)); z-index: 7; padding-top: var(--s2); background: var(--ground); }
-:is(.page, .catalog-session):has(> .transcript) > .local-control:has(article), :is(.page, .catalog-session):has(> .transcript) > .local-control:has(details[open]) { position: static; }
+.page:has(> .transcript), .page:has(> .catalog-session > .transcript) { display: flex; flex-direction: column; min-height: calc(100dvh - 56px); padding-bottom: calc(var(--s4) + env(safe-area-inset-bottom, 0px)); }
+.catalog-session { display: flex; flex: 1; flex-direction: column; }
+:is(.page, .catalog-session) > .transcript { flex: none; align-content: start; }
+.transcript { clip-path: inset(0 0 var(--reading-clip, 0px) 0); }
+.session-dock { position: sticky; bottom: calc(var(--s4) + env(safe-area-inset-bottom, 0px) + var(--reading-bottom, 0px)); z-index: 7; margin-top: auto; padding-top: var(--s2); background: var(--ground); }
+.session-jump-slot { display: flex; justify-content: center; }
+.session-dock .local-control { margin-top: 0; }
+.session-dock:has(article), .session-dock:has(details[open]) { position: static; }
 .local-control-actions { display: flex; align-items: center; gap: var(--s2); margin-top: var(--s2); }
 .local-control h2, .local-control h3 { margin: var(--s2) 0; font-size: var(--fs-title); }
 .local-control p { font-size: var(--fs-ui); color: var(--ink-2); }
@@ -1354,3 +1361,8 @@ html.viewer-open, html.viewer-open body { overflow: hidden; }
 @media (any-pointer: coarse) {
   .catalog-filters .search, .catalog-scope summary, .catalog-result-header .link, .catalog-back { min-height: 44px; }
 }
+
+.composer-unavailable { display: flex; align-items: center; justify-content: space-between; gap: var(--s2); width: 100%; min-height: var(--tap); padding: var(--s2) var(--s3); border: 0; background: transparent; color: var(--muted); font-size: var(--fs-sm); text-align: left; }
+.composer-unavailable > span:first-child { min-width: 0; overflow-wrap: anywhere; }
+
+@media (pointer: coarse) { .composer-unavailable { min-height: 44px; } }

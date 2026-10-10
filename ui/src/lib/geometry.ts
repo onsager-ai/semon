@@ -1,5 +1,7 @@
 /** Measured host geometry. Fixed property names and finite numbers are the entire input language. */
 export type GeometrySlot =
+  | 'readingBottom'
+  | 'readingClip'
   | 'minHeight'
   | 'paddingBottom'
   | 'scrollPaddingTop'
@@ -9,6 +11,8 @@ export type GeometrySlot =
   | 'accountBottom'
   | 'intrinsicHeight';
 const properties: Record<GeometrySlot, string> = {
+  readingBottom: '--reading-bottom',
+  readingClip: '--reading-clip',
   minHeight: 'min-height',
   paddingBottom: 'padding-bottom',
   scrollPaddingTop: 'scroll-padding-top',
