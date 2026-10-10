@@ -97,7 +97,12 @@ deletion receipts and report intentionally removed payloads as unavailable;
 never reconstruct or replay them. Record missing keys, gaps, unsupported versions,
 divergent heads and integrity failures explicitly before retiring working access.
 
-An all-scope operator-facing offline decrypted export remains a separate #386
-deliverable. Protocol/reader removal must preserve a usable qualified historical
-access path. No service uninstall, identity replacement, data pruning or live
-recovery is authorized by running this custody exporter or synthetic qualification.
+The separate [offline history reader](relay-history-export.md) verifies and
+decodes every supported scope declared by this artifact, while preserving the
+artifact itself. It builds against the clean legacy pin outside the product
+workspace and can be retained as a standalone binary. Its explicit failures and
+deletion boundaries are distinct from this exporter's byte-custody result.
+Protocol/reader removal must preserve this usable qualified historical access
+path and deployment-specific original-recipient qualification. No service
+uninstall, identity replacement, data pruning or live recovery is authorized by
+running either exporter or synthetic qualification.

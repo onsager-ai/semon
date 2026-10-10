@@ -103,11 +103,11 @@ jobs:
                   raise SystemExit(owner + " gained product/protocol dependencies: " + ", ".join(unexpected))
           PY
 
-      - name: Qualify Relay custody against the exact historical implementation
+      - name: Qualify Relay custody and offline decrypted history against the exact historical implementation
         env:
           CARGO_TARGET_DIR: ${{ github.workspace }}/target
         run: |
-          rustfmt --edition 2024 --check tests/retirement/relay-custody.rs
+          rustfmt --edition 2024 --check scripts/relay-history.rs tests/retirement/relay-custody.rs
           git fetch --no-tags origin 0648a99f977971fb177a5dda7a445c4941d64b57
           git worktree add --detach "$RUNNER_TEMP/relay-history-source" 0648a99f977971fb177a5dda7a445c4941d64b57
           python3 scripts/qualify-relay-custody.py --legacy-source "$RUNNER_TEMP/relay-history-source"
