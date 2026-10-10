@@ -29,6 +29,7 @@ use crate::{Tokens, attachments, field, sealed::LogFile};
 
 mod store;
 pub(crate) use store::open_regular;
+pub(crate) use store::{archive_index_retained, retain_archive_index};
 
 #[cfg(test)]
 thread_local! {
@@ -727,7 +728,7 @@ impl FileIndex {
 }
 
 /// A file as last stat'ed: its identity, size and modified time.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Stat {
     pub(crate) dev: u64,
     pub(crate) ino: u64,

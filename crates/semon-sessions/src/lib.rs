@@ -1742,4 +1742,7 @@ mod native_home_tests {
 }
 
 mod retention;
-pub use retention::{SourceProjectionReady, source_projection_ready};
+pub use retention::{
+    SourceProjectionReady, retain_source_event_index, source_event_index_retained,
+    source_projection_ready,
+};
