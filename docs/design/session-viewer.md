@@ -2,6 +2,11 @@
 
 Status: draft for review, 2026-09-26. Part of #40. It supersedes #47's UI and keeps #47's security model.
 
+Historical Viewer plan. The Canonical Trace Store described at the original
+baseline is retired; current multi-machine browsing uses native source mirrors.
+See [the current Session foundation](session-foundation-retirement.md) for the
+retained Event Index/Catalog and staged compatibility consumer migration.
+
 ## Goal
 
 `semon sessions --serve` shows exactly what the approved mockup shows, on this machine's live logs. The target is a 100% mirror: the same screens, layout, type, colours, interactions and wording. The mockup is not a picture to reimplement; its HTML, CSS and JavaScript become the viewer's frontend.

@@ -1,6 +1,6 @@
 # Guards the session foundation and retained migration tools with workspace
 # formatting, lint and tests on every pull request and push to main. Historical
-# Store reads retain their identity/forensic boundary checks during retirement.
+# Store export remains independent of the product CLI and retired capture code.
 name: Rust CI
 
 on:
@@ -99,6 +99,17 @@ jobs:
           unexpected = [line for line in dependencies if line.startswith("semon-") and not line.startswith("semon-forensic-export ")]
           if unexpected:
               raise SystemExit("Historical exporter gained product/capture dependencies: " + ", ".join(unexpected))
+          PY
+
+      - name: Verify product CLI excludes historical trace storage
+        run: |
+          cargo tree --locked -p semon-cli --edges normal,build --prefix none --format '{p}' > "$RUNNER_TEMP/product-cli-dependencies.txt"
+          python3 - "$RUNNER_TEMP/product-cli-dependencies.txt" <<'PY'
+          import pathlib, sys
+          retired = {"semon-store", "semon-codex", "semon-claude", "semon-copilot", "semon-forensic-export"}
+          unexpected = [line for line in pathlib.Path(sys.argv[1]).read_text().splitlines() if line.split()[0] in retired]
+          if unexpected:
+              raise SystemExit("Product CLI gained historical trace dependencies: " + ", ".join(unexpected))
           PY
 
       - name: Codex private device-login process checks

@@ -13,13 +13,7 @@ path = "src/main.rs"
 [dependencies]
 semon-control = { path = "../semon-control" }
 semon-push = { path = "../semon-push" }
-semon-forensic-export = { path = "../semon-forensic-export" }
-# Transitional historical-data commands; removal follows verified export (#387).
-semon-store = { path = "../semon-store" }
 semon-relay = { path = "../semon-relay" }
 # Preserve encrypted viewing/deletion until the migration path is qualified (#386).
 semon-sessions = { path = "../semon-sessions", features = ["encrypted-relay"] }
 serde_json.workspace = true
-
-[dev-dependencies]
-rusqlite.workspace = true
