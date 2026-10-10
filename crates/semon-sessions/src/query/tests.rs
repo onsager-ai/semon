@@ -14,6 +14,258 @@ use super::*;
 
 static NEXT: AtomicU64 = AtomicU64::new(0);
 
+fn catalog_generation(home: &Home) -> Option<String> {
+    crate::events::EventCache::open_scoped(&home.options.cache)
+        .unwrap()
+        .session_catalog_generation()
+}
+
+#[test]
+fn native_producer_catalog_rejects_rewrites_after_indexing() {
+    let home = Home::new("catalog-derivation");
+    home.top("lead", &[user("lead", ts(1, 0), "old evidence")]);
+    let mut cache = crate::events::EventCache::open_scoped(&home.options.cache).unwrap();
+    let mut texts = crate::model::Texts::default();
+    crate::model::observe_catalog(&home.options, &mut cache, &mut false, &mut texts, NOW).unwrap();
+    let generation = catalog_generation(&home);
+    let path = home
+        .options
+        .claude_home
+        .join("projects/-work-proj/lead.jsonl");
+    crate::model::AFTER_SCAN.with(|hook| {
+        *hook.borrow_mut() = Some(Box::new(move || {
+            let bytes = fs::read_to_string(&path).unwrap();
+            std::thread::sleep(Duration::from_millis(2));
+            fs::write(path, bytes.replace("old evidence", "new evidence")).unwrap();
+        }));
+    });
+    assert!(
+        crate::model::observe_catalog(&home.options, &mut cache, &mut false, &mut texts, NOW)
+            .is_err()
+    );
+    assert_eq!(catalog_generation(&home), generation);
+}
+
+#[test]
+fn native_producer_scoped_preparation_rejects_deleted_evidence() {
+    let home = Home::new("scoped-derivation");
+    home.top("lead", &[user("lead", ts(1, 0), "old evidence")]);
+    let mut cache = crate::events::EventCache::open_scoped(&home.options.cache).unwrap();
+    let input = crate::inputs::Input {
+        root: crate::inputs::InputRoot::Claude,
+        path: "projects/-work-proj/lead.jsonl".to_owned(),
+    };
+    let path = input.full_path(&home.options);
+    crate::model::AFTER_SCAN.with(|hook| {
+        *hook.borrow_mut() = Some(Box::new(move || fs::remove_file(path).unwrap()));
+    });
+    assert!(crate::model::prepare_sources(&home.options, &mut cache, &[input], NOW).is_err());
+    assert_eq!(catalog_generation(&home), None);
+}
+
+#[test]
+fn query_producer_rejects_source_changes_after_indexing_before_publication() {
+    use std::io::Write;
+    for mutation in 0..3 {
+        let home = Home::new("producer-race");
+        home.top("lead", &[user("lead", ts(1, 0), "old evidence")]);
+        let mut query = Query::from_native_core(Arc::new(ViewerCore::new(home.options.clone())));
+        query.call_at("list_sessions", &json!({}), NOW).unwrap();
+        let generation = catalog_generation(&home);
+        assert!(generation.is_some());
+        let path = home
+            .options
+            .claude_home
+            .join("projects/-work-proj/lead.jsonl");
+        writeln!(
+            fs::OpenOptions::new().append(true).open(&path).unwrap(),
+            "{}",
+            assistant("lead", ts(1, 1), vec![text("appended answer")])
+        )
+        .unwrap();
+        crate::model::AFTER_SCAN.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                let before = fs::metadata(&path).unwrap();
+                let bytes = fs::read_to_string(&path).unwrap();
+                assert!(bytes.contains("old evidence"));
+                // Distinguish the mutation on filesystems with coarse ctime.
+                std::thread::sleep(Duration::from_millis(2));
+                match mutation {
+                    0 => fs::write(&path, bytes.replace("old evidence", "new evidence")).unwrap(),
+                    1 => {
+                        let replacement = path.with_extension("replacement");
+                        fs::write(&replacement, bytes).unwrap();
+                        fs::rename(replacement, &path).unwrap();
+                    }
+                    _ => fs::remove_file(&path).unwrap(),
+                }
+                if mutation < 2 {
+                    fs::File::options()
+                        .write(true)
+                        .open(&path)
+                        .unwrap()
+                        .set_modified(before.modified().unwrap())
+                        .unwrap();
+                }
+            }));
+        });
+        let result = query.call_at("list_sessions", &json!({}), NOW);
+        crate::model::AFTER_SCAN.with(|hook| assert!(hook.borrow().is_none(), "race must run"));
+        assert!(
+            result.is_err(),
+            "mutation {mutation} must reject the cohort"
+        );
+        assert_eq!(result.unwrap_err().code, "io");
+        assert_eq!(catalog_generation(&home), generation);
+    }
+}
+
+#[test]
+fn query_producer_rechecks_cached_and_unread_sources_before_publication() {
+    use std::io::Write;
+    for mutation in 0..2 {
+        let home = Home::new("producer-completion");
+        home.top("lead", &[user("lead", ts(1, 0), "old evidence")]);
+        // A source with no body derivation still contributes native identity.
+        home.top("empty", &[]);
+        let mut query = Query::from_native_core(Arc::new(ViewerCore::new(home.options.clone())));
+        query
+            .call_at("get_session", &json!({"id":"lead"}), NOW)
+            .unwrap();
+        let generation = catalog_generation(&home);
+        let path = home
+            .options
+            .claude_home
+            .join("projects/-work-proj/lead.jsonl");
+        writeln!(
+            fs::OpenOptions::new().append(true).open(&path).unwrap(),
+            "{}",
+            assistant("lead", ts(1, 1), vec![text("appended answer")])
+        )
+        .unwrap();
+        let empty = home
+            .options
+            .claude_home
+            .join("projects/-work-proj/empty.jsonl");
+        crate::model::AFTER_QUERY_DERIVATION.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                if mutation == 0 {
+                    let before = fs::metadata(&path).unwrap();
+                    let bytes = fs::read_to_string(&path).unwrap();
+                    fs::write(&path, bytes.replace("old evidence", "new evidence")).unwrap();
+                    fs::File::options()
+                        .write(true)
+                        .open(path)
+                        .unwrap()
+                        .set_modified(before.modified().unwrap())
+                        .unwrap();
+                } else {
+                    fs::remove_file(empty).unwrap();
+                }
+            }));
+        });
+        assert_eq!(
+            query
+                .call_at("get_session", &json!({"id":"lead"}), NOW)
+                .unwrap_err()
+                .code,
+            "io"
+        );
+        assert_eq!(catalog_generation(&home), generation);
+        // A failed derivation is not installed as the next query snapshot.
+        let recovered = query
+            .call_at("get_session", &json!({"id":"lead"}), NOW)
+            .unwrap();
+        if mutation == 0 {
+            assert!(recovered.to_string().contains("new evidence"));
+        }
+    }
+}
+
+#[test]
+fn query_producer_allows_verified_append_without_extending_the_cohort() {
+    use std::io::Write;
+    let home = Home::new("producer-append");
+    home.top("lead", &[user("lead", ts(1, 0), "old evidence")]);
+    let before = home
+        .query()
+        .call_at("get_session", &json!({"id":"lead"}), NOW)
+        .unwrap();
+    let path = home
+        .options
+        .claude_home
+        .join("projects/-work-proj/lead.jsonl");
+    crate::model::AFTER_SCAN.with(|hook| {
+        *hook.borrow_mut() = Some(Box::new(move || {
+            writeln!(
+                fs::OpenOptions::new().append(true).open(path).unwrap(),
+                "{}",
+                assistant("lead", ts(1, 1), vec![text("appended answer")])
+            )
+            .unwrap();
+        }));
+    });
+    let mut query = home.query();
+    assert_eq!(
+        query
+            .call_at("get_session", &json!({"id":"lead"}), NOW)
+            .unwrap(),
+        before
+    );
+    assert_ne!(
+        query
+            .call_at("get_session", &json!({"id":"lead"}), NOW)
+            .unwrap(),
+        before
+    );
+}
+
+#[test]
+fn query_producer_preserves_large_native_tool_record_derivation() {
+    crate::model::DIRECT_SOURCE_READS.with(|reads| reads.set(0));
+    let home = Home::new("producer-large-record");
+    let mut record = assistant(
+        "lead",
+        ts(1, 0),
+        vec![tool(
+            "t1",
+            "Agent",
+            json!({"description":"Scan parser", "prompt":"Find parser panics", "subagent_type":"general-purpose"}),
+        )],
+    );
+    home.top(
+        "lead",
+        &[user("lead", ts(0, 0), "Fix parser"), record.clone()],
+    );
+    home.agent(
+        "lead",
+        "scan",
+        "t1",
+        &[user("scan", ts(1, 1), "Find parser panics")],
+    );
+    let expected = home
+        .query()
+        .call_at("get_session", &json!({"id":"lead"}), NOW)
+        .unwrap();
+    record["padding"] = json!("x".repeat(crate::tx::LINE_MAX as usize + 1024));
+    home.top("lead", &[user("lead", ts(0, 0), "Fix parser"), record]);
+    let answer = home
+        .query()
+        .call_at("get_session", &json!({"id":"lead"}), NOW)
+        .unwrap();
+    assert!(answer.to_string().contains("Find parser panics"));
+    assert_eq!(answer, expected);
+    crate::model::DIRECT_SOURCE_READS.with(|reads| assert_eq!(reads.get(), 0));
+    // The legacy control still exercises its existing direct-read path.
+    assert_eq!(
+        ViewerCore::new(home.options.clone())
+            .respond("GET", "/api/model", "", None)
+            .status,
+        200
+    );
+    crate::model::DIRECT_SOURCE_READS.with(|reads| assert!(reads.get() > 0));
+}
+
 /// A retired native cohort cannot be refreshed after the source mutation.
 /// This also reproduces an active call racing a writer after its index build.
 fn retained_query(home: &Home) -> Query {
