@@ -184,8 +184,9 @@ installation, source timer templates and the three collector packages are
 retired. Installed units and manual collectors still require explicit inventory
 before export or uninstall. The [capture custody reference](../trace-capture-retirement.md)
 pins the legacy source, locked build and repair/backfill contracts. Shared native
-parsers/fixtures and the main CLI's historical log/forensic/export/ship commands
-remain; Store/replication removal is a later dependency slice.
+parsers/fixtures and the main CLI's historical log/forensic/export/forget commands
+remain. The canonical-only `semon ship` sender is retired; no Store HTTP client or
+replication setup remains. Store reader removal is a later dependency slice.
 
 For legacy trace inspection, first make a consistent owner-private SQLite
 backup using its backup API (including committed WAL state), and inspect that

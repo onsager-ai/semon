@@ -105,5 +105,5 @@ PY
 Use SQLite read-only access on the exported file to inspect historical tables.
 Legacy `semon log`/selected `semon forensic` still use a schema-migrating open;
 give those commands a separate working copy of the verified artifact. Preserve
-the verified artifact as exported, including its manifest. `semon ship` omits
-forensic data and is not a substitute for this export.
+the verified artifact as exported, including its manifest. The retired legacy
+`semon ship` sender omitted forensic data and was not a substitute for this export.
