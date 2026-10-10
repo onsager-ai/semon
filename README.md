@@ -201,9 +201,10 @@ remain supported independently.
 
 New Encrypted Relay service setup is retired. The source sender/follow/timer unit
 templates and active deployment tutorial are removed; this does not stop or
-uninstall any existing service. Legacy Relay commands and encrypted remote
-readers remain available while deployment inventory and decryption/export are
-qualified. Preserve identities, recipients, ciphertext, receipts, snapshots,
+uninstall any existing service. The current product workspace removes the Relay
+crate, protocol and encrypted-view feature; `semon sessions --remote` is retired.
+Existing installations must retain working pinned legacy tools while deployment
+inventory and decryption/export are qualified. Preserve identities, recipients, ciphertext, receipts, snapshots,
 lease/epoch and deletion state. See the [retirement and custody contract](docs/encrypted-relay-retirement.md)
 and [historical deployment reference](docs/history/encrypted-relay-deployment.md).
 The independent [Relay custody exporter](docs/relay-custody-export.md) preserves
@@ -301,13 +302,6 @@ Semon shows each harness's official icon to identify where a session came from. 
 repository's Apache-2.0 license.
 
 Third-party trademarks are the property of their respective owners. Semon is not affiliated with or endorsed by these companies.
-
-Encrypted relay session trees are available locally through
-`semon sessions --remote ENDPOINT [--remote-config PATH] [--remote-ca CERT]`.
-They decrypt and verify bounded pages locally and persist metadata only, with
-machine roots, exact cross-harness links, lease liveness and incremental reads.
-See [encrypted remote session trees](docs/encrypted-remote-sessions.md) for
-identity enrollment, snapshots and the content boundary.
 
 Reusable SSH checks and mirror bootstrap for embedding applications are documented
 in [SSH bootstrap](docs/ssh-bootstrap.md). SSH enrollment grants no agent execution.

@@ -1,16 +1,13 @@
-# Encrypted remote session trees
+# Historical encrypted remote session trees
 
-Encrypted Relay is being retired under [#380](https://github.com/onsager-ai/semon/issues/380).
-These commands remain available to inspect existing encrypted data during migration.
-New service setup is retired; follow the [retirement and custody contract](encrypted-relay-retirement.md)
-before changing an installed service or its data.
-Core and hosted source readers do not depend on Relay. Library users of
-`collect_remote` must explicitly enable `semon-sessions/encrypted-relay`; the
-existing `semon` CLI enables it while historical decryption/export is retained.
-This transitional feature is scheduled for removal with
-[#386](https://github.com/onsager-ai/semon/issues/386), after the deployment
-inventory and legacy-data migration path are qualified. Do not delete identities,
-keys, ciphertext, snapshots or recovery artifacts as part of upgrading.
+This describes the retired reader at source commit
+`0648a99f977971fb177a5dda7a445c4941d64b57`. Its CLI flags and
+`semon-sessions/encrypted-relay` feature are absent from current product builds.
+Preserve a working pinned legacy binary for installations that still need this
+access. Follow the [retirement and custody contract](../encrypted-relay-retirement.md)
+before changing an installation; use the [offline history reader](../relay-history-export.md)
+for qualified private export. The descriptions below record the historical
+protocol, not a current installation recommendation or complete recovery claim.
 
 `semon sessions --remote ENDPOINT` builds the metadata tree from the encrypted
 relay, using the local machine's enrolled signing and age identities. This is a

@@ -17,11 +17,12 @@ Audited on October 10, 2026:
 
 The refreshed main revisions are Semon
 `263a02da278716ab2309b8e34a463419e5c781e5` and Hub
-`f2889d056c24cc4d5e6eaf10fbbd0108b12c34d0` (gitlink Semon
+`3500d59f44d93cbc4cdbd9fd83663df91f281b67` (gitlink Semon
 `263a02da278716ab2309b8e34a463419e5c781e5`). Their source-pin contract and
 Hub navigation/native-picker changes through `96ae028` are retained in the staged
 PRs. Later Hub registry credential/CI changes (#244/#246) and approved native
-Recent references (#236) are separate main work requiring final stack integration
+Recent references (#236), and pull-only Node qualification (#248) are separate
+main work requiring final stack integration
 and exact-pair qualification. Preserve those authored contracts and approved
 baselines. The retirement components audited below remain present on main until
 the staged PRs land.
@@ -31,6 +32,10 @@ are distinct validation targets. Adoption PRs must run
 `scripts/verify-source-pair.sh` on their clean committed pair and record both SHAs.
 
 ## Actual architecture and consumers
+
+This section records the audited main baseline. The staged removal and extraction
+status appears under historical-data migration below; it does not imply that
+unmerged changes are deployed.
 
 Semon Sessions discovers native Claude, Codex and Copilot inputs. Its per-file
 Session Event Index (`crates/semon-sessions/src/events.rs` and `events/store.rs`)
@@ -220,6 +225,18 @@ recovery-only pending outboxes, unsupported/corrupt data and crash-interrupted
 deletion boundaries. Deployment-specific inventory/recipient qualification and
 retention of this usable reader remain prerequisites for losing working access;
 no Relay protocol/reader removal is claimed by the historical export slice.
+
+The subsequent protocol-retirement slice removes `crates/semon-relay`, the
+Sessions encrypted reader/feature, CLI encrypted-view dispatch and exclusive Node
+lease metadata. All receiver/sender/enrollment/crypto/snapshot/takeover/restore
+implementation and protocol-only tests leave the product workspace. The pinned
+offline history reader, custody exporter and usable legacy source remain separate
+migration tools. CI rejects a returning Relay workspace member or CLI dependency.
+The native `relay`/handoff/peer semantics, generic mirror, SSH, Event Index,
+Catalog and runtime authority are retained. Installed binaries, processes,
+identities, queues and data remain untouched. This source slice is reviewable;
+losing installed working access remains gated on real deployment inventory and
+original-recipient qualification, which synthetic fixtures do not establish.
 
 Retain Relay signing/age identities, recipient enrollment, ciphertext and exact
 legacy protocol version until decryption/export verification succeeds. Historical
