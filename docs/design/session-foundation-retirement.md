@@ -252,6 +252,24 @@ reader-position/focus, runtime/control and no-JavaScript equivalence. Revocation
 deletion, source replacement, partial/corrupt archive data and cancellation must
 fail safely. Existing fixture thresholds and approved pixel baselines remain.
 
+The next local Query slice returns typed native evidence before compatibility
+analytics, growth marks, pricing transport, serialization and version hashing.
+All five local CLI/stdio MCP tools read that evidence; a call's window, identity,
+facts and transcript offsets belong to the same cached source snapshot. The
+shared ownership planner still qualifies machine-local stubs and refuses native
+identity conflicts. Transcript paging and search read the original source lines.
+Summary reads serialize summary fields and open questions; selected-session
+reads serialize that session's turns and handoffs. No database or generalized
+event pipeline is added.
+
+This slice still discovers and joins every native source eligible for the local
+file-selection window. It does not establish constant-cost selected-session
+dependency closure or replace all query metadata with persisted Catalog rows.
+`Query::from_core` retains the embedding server's cached compatibility contract;
+Hub MCP still needs authorized selected archive/provider access and source-generation
+fencing before that path can be removed. These obligations remain in #383/#384
+and Hub #226; preserving the old hosted path during migration does not retire it.
+
 The remaining blockers are consumer migration, shared semantic extraction,
 remaining encrypted-data export qualification and external deployment inventories.
 The versioned forensic Store export is qualified in
