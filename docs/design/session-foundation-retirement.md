@@ -17,10 +17,14 @@ Audited on October 10, 2026:
 
 The refreshed main revisions are Semon
 `263a02da278716ab2309b8e34a463419e5c781e5` and Hub
-`96ae028b7f95625bf82e0453881ac2a51b8b5878` (gitlink Semon
+`f2889d056c24cc4d5e6eaf10fbbd0108b12c34d0` (gitlink Semon
 `263a02da278716ab2309b8e34a463419e5c781e5`). Their source-pin contract and
-Hub navigation/native-picker changes are retained in the staged PRs; the
-retirement components audited below remain present on main until those PRs land.
+Hub navigation/native-picker changes through `96ae028` are retained in the staged
+PRs. Later Hub registry credential/CI changes (#244/#246) and approved native
+Recent references (#236) are separate main work requiring final stack integration
+and exact-pair qualification. Preserve those authored contracts and approved
+baselines. The retirement components audited below remain present on main until
+the staged PRs land.
 
 Hub's gitlink is its sole source pin. Latest Semon and the adopted Hub/Semon pair
 are distinct validation targets. Adoption PRs must run
@@ -205,6 +209,14 @@ The pinned `semon log --store COPY` reads canonical occurrences. Its
 records for the selected session; trace selection alone misses unprojected rows.
 This selected access is not a complete all-table/versioned export; use the
 dedicated exporter for that migration obligation. `ship` is not a forensic backup.
+
+The [independent Relay custody exporter](../relay-custody-export.md) preserves
+all explicitly declared receiver/config/sender trees and recovery-key files;
+its complete byte inventory and checksums do not assert decryption or recovery.
+Pinned synthetic read-back covers retained generations/epochs, orphans and
+snapshot forks/history. Complete operator-facing offline decrypted access and
+deployment-specific inventory/recipient qualification remain prerequisites for
+protocol/reader removal; no Relay removal is claimed by this custody slice.
 
 Retain Relay signing/age identities, recipient enrollment, ciphertext and exact
 legacy protocol version until decryption/export verification succeeds. Historical

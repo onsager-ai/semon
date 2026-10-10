@@ -90,26 +90,37 @@ jobs:
       - name: cargo test
         run: cargo test --locked
 
-      - name: Verify historical exporter builds without product or capture crates
+      - name: Verify historical exporters build without product or protocol crates
         run: |
           cargo tree --locked -p semon-forensic-export --edges normal,build --prefix none --format '{p}' > "$RUNNER_TEMP/forensic-export-dependencies.txt"
-          python3 - "$RUNNER_TEMP/forensic-export-dependencies.txt" <<'PY'
+          cargo tree --locked -p semon-relay-export --edges normal,build --prefix none --format '{p}' > "$RUNNER_TEMP/relay-export-dependencies.txt"
+          python3 - "$RUNNER_TEMP/forensic-export-dependencies.txt" "$RUNNER_TEMP/relay-export-dependencies.txt" <<'PY'
           import pathlib, sys
-          dependencies = pathlib.Path(sys.argv[1]).read_text().splitlines()
-          unexpected = [line for line in dependencies if line.startswith("semon-") and not line.startswith("semon-forensic-export ")]
-          if unexpected:
-              raise SystemExit("Historical exporter gained product/capture dependencies: " + ", ".join(unexpected))
+          for path, owner in zip(sys.argv[1:], ("semon-forensic-export", "semon-relay-export")):
+              dependencies = pathlib.Path(path).read_text().splitlines()
+              unexpected = [line for line in dependencies if line.startswith("semon-") and line.split()[0] != owner]
+              if unexpected:
+                  raise SystemExit(owner + " gained product/protocol dependencies: " + ", ".join(unexpected))
           PY
+
+      - name: Qualify Relay custody against the exact historical implementation
+        env:
+          CARGO_TARGET_DIR: ${{ github.workspace }}/target
+        run: |
+          rustfmt --edition 2024 --check tests/retirement/relay-custody.rs
+          git fetch --no-tags origin 0648a99f977971fb177a5dda7a445c4941d64b57
+          git worktree add --detach "$RUNNER_TEMP/relay-history-source" 0648a99f977971fb177a5dda7a445c4941d64b57
+          python3 scripts/qualify-relay-custody.py --legacy-source "$RUNNER_TEMP/relay-history-source"
 
       - name: Verify product CLI excludes historical trace storage
         run: |
           cargo tree --locked -p semon-cli --edges normal,build --prefix none --format '{p}' > "$RUNNER_TEMP/product-cli-dependencies.txt"
           python3 - "$RUNNER_TEMP/product-cli-dependencies.txt" <<'PY'
           import pathlib, sys
-          retired = {"semon-store", "semon-codex", "semon-claude", "semon-copilot", "semon-forensic-export"}
+          retired = {"semon-store", "semon-codex", "semon-claude", "semon-copilot", "semon-forensic-export", "semon-relay-export"}
           unexpected = [line for line in pathlib.Path(sys.argv[1]).read_text().splitlines() if line.split()[0] in retired]
           if unexpected:
-              raise SystemExit("Product CLI gained historical trace dependencies: " + ", ".join(unexpected))
+              raise SystemExit("Product CLI gained historical storage/export dependencies: " + ", ".join(unexpected))
           PY
 
       - name: Codex private device-login process checks
