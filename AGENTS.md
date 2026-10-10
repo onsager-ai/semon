@@ -16,7 +16,10 @@ The former OTLP/Collector/ClickHouse pipeline is intentionally gone.
 - Preserve documented forensic permissions, exposure and retention. Full raw
   records may contain credentials. Deletion remains an explicit operator action;
   do not introduce automatic pruning or maximal deletion defaults.
-- Preserve golden capture/adapter behavior for Claude and Codex inputs.
+- Preserve native session/control parser behavior and the shared, sanitized
+  harness fixtures. Experimental trace collectors are retired; their historical
+  repair/capture contracts live at the pinned revision in
+  docs/trace-capture-retirement.md.
 - Vendored tiny_http remains governed by vendor/tiny_http/SEMON-PATCH.md.
 - Viewer UI sources live in ui/src/; generated bundles embedded by Rust are
   produced by ui/build.mjs. Edit sources and regenerate; do not hand-edit bundles.
