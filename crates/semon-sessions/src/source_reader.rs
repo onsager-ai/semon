@@ -57,15 +57,14 @@ impl fmt::Debug for SessionSourceRange {
     }
 }
 
-/// Native line oracle for provider integration. Normal range rendering will
-/// reuse this parser after the persisted slot projection is available; it must
-/// not use a full selected FileIndex decode as its per-page fallback.
-#[cfg(test)]
-fn read_record(
+/// Read one indexed native record through the same bounded range contract as
+/// focused transcript reads. This never discovers sources or decodes an index.
+pub(crate) fn read_native_record(
     reader: &dyn SessionSourceReader,
     source: &SessionSourceRef,
+    expected_generation: &str,
     offset: u64,
-) -> io::Result<serde_json::Value> {
+) -> io::Result<(Option<serde_json::Value>, u64)> {
     let invalid = || {
         io::Error::new(
             io::ErrorKind::InvalidData,
@@ -76,35 +75,31 @@ fn read_record(
         return Err(invalid());
     }
     let mut bytes = Vec::new();
-    let mut generation = None::<String>;
     let mut length = None;
     let mut at = offset;
     loop {
         let remaining = (crate::tx::LINE_MAX + 1).saturating_sub(bytes.len() as u64);
-        let max = SESSION_SOURCE_CHUNK_MAX
+        // Match the native file pager's read-ahead, rather than fetching a
+        // maximum provider chunk for every short source line.
+        let max = (8 * 1024)
             .min(usize::try_from(source.offset - at).unwrap_or(usize::MAX))
             .min(usize::try_from(remaining).unwrap_or(usize::MAX));
         if max == 0 {
             return Err(invalid());
         }
-        let part = reader.read_range(source, generation.as_deref(), at, max)?;
+        let part = reader.read_range(source, Some(expected_generation), at, max)?;
         if part.offset != at
             || part.bytes.len() > max
             || part.bytes.is_empty()
             || part.generation.is_empty()
             || part.generation.len() > 4096
             || part.length < source.offset
-            || generation
-                .as_ref()
-                .is_some_and(|expected| *expected != part.generation)
+            || part.generation != expected_generation
             || length.is_some_and(|expected| expected != part.length)
         {
             return Err(invalid());
         }
-        if generation.is_none() {
-            generation = Some(part.generation);
-            length = Some(part.length);
-        }
+        length.get_or_insert(part.length);
         let end = part
             .bytes
             .iter()
@@ -114,16 +109,29 @@ fn read_record(
         bytes.extend_from_slice(&part.bytes[..take]);
         at += take as u64;
         if bytes.len() as u64 > crate::tx::LINE_MAX {
-            return Err(invalid());
+            // Query paging/search preserve the native pager's oversized-line
+            // behavior. Focused field expansion uses its separate span reader.
+            return Ok((None, bytes.len() as u64));
         }
         if end.is_some() {
-            return crate::tx::parse_native_record(&bytes).ok_or_else(invalid);
+            return Ok((crate::tx::parse_native_record(&bytes), bytes.len() as u64));
         }
         if at == source.offset {
             // The consumed boundary consists of complete native lines only.
             return Err(invalid());
         }
     }
+}
+
+#[cfg(test)]
+fn read_record(
+    reader: &dyn SessionSourceReader,
+    source: &SessionSourceRef,
+    offset: u64,
+) -> io::Result<serde_json::Value> {
+    read_native_record(reader, source, "verified", offset)?
+        .0
+        .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidData))
 }
 
 #[cfg(test)]
@@ -185,11 +193,15 @@ mod tests {
         };
         assert_eq!(read_record(&reader, &reference, 0).unwrap(), record);
         let calls = reader.calls.lock().unwrap();
-        assert_eq!(calls.len(), 3);
-        assert_eq!(calls[0].0, None);
+        assert!(calls.len() > 1);
+        assert_eq!(calls[0].0.as_deref(), Some("verified"));
         assert_eq!(calls[1].0.as_deref(), Some("verified"));
         assert_eq!(calls[2].0.as_deref(), Some("verified"));
-        assert_eq!(calls[2].1 + calls[2].2 as u64, reference.offset);
+        assert!(calls.iter().all(
+            |call| call.0.as_deref() == Some("verified") && call.2 <= SESSION_SOURCE_CHUNK_MAX
+        ));
+        let last = calls.last().unwrap();
+        assert_eq!(last.1 + last.2 as u64, reference.offset);
         drop(calls);
         let replaced = Reader {
             bytes,

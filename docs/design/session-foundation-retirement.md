@@ -328,6 +328,15 @@ remains covered by 134 frozen responses captured from the old production engine
 at `7ce1ac4d4f34af9143aa292b631a07fd797890b1`, plus the semantic query fixtures.
 See [query contract evidence](../../crates/semon-sessions/src/query/README.md).
 
+The next body-consumption slice routes native Query transcript paging and search
+through request-owned `SessionSourceReader` ranges over the same indexed cohort.
+It removes their direct-file fallback, preserves the shared pager and native
+prompt/image parsing, and fences touched records at completion. Appends may retain
+the verified prefix; replacement, deletion or interior rewrite refuse a body read.
+It adds no persisted query payload, credentials or runtime authority. Native
+cohort construction still needs source bodies, broad dependency joins and Hub's
+archive restoration; that remaining producer migration is explicitly outstanding.
+
 Hub MCP still acquires a workspace core and restores tenant archives; native
 query discovery/joins still cover eligible sources. Implement authorized
 selected archive/provider access, generation fencing and bounded dependency

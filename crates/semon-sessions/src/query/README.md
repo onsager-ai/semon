@@ -34,3 +34,25 @@ current/retained windows, closed-source retirement and source-backed
 reads. Do not regenerate the reference from the current implementation merely
 to make a changed result pass; an intentional public contract change needs its
 own reviewed expectations.
+
+Native query transcript paging and search now borrow request-owned readers over
+the cohort's indexed source proofs. They use the `SessionSourceReader` range
+contract and native parsers, with no direct-file fallback in the Query consumer.
+Reads stop at complete consumed lines, validate before/after I/O and recheck
+touched sources before returning cached records. A verified append preserves
+the original prefix; replacement, deletion and interior rewrite refuse a body
+read. Unchanged Unix metadata uses the index's generation shortcut; changed
+metadata verifies the complete consumed prefix using the existing index rule.
+Platforms without change-time proof verify the prefix instead of trusting mtime.
+
+The original pager's anchors, counts, entry rendering and line/search budgets
+remain shared. Prompt reads retain the 64 MiB native prompt limit, image metadata
+and range elision: repeated pages do not parse megabytes of base64 again. Source
+proofs contain no bodies or credentials; readers and their verification caches
+belong to one call. No query table, new database or public transport is added.
+
+This migration covers body consumption after native cohort construction. The
+producer still discovers and joins eligible native sources and reads query text;
+Hub MCP still restores archives before admission. Removing those costs requires
+scoped dependency selection and independently authorized provider access for
+that producer; the generation reader alone does not establish their retirement.

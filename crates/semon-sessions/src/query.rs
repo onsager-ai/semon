@@ -907,7 +907,10 @@ impl Query {
             .tx
             .get(&own)
             .ok_or_else(|| QueryError::unknown_session(&id))?;
-        let page = tx::page_from(
+        let records = data.sources.reader();
+        let mut read = |path: &std::path::Path, offset| records.read(path, offset);
+        let mut prompts = |file: &crate::model::SlotFile, offset| records.prompt(file, offset);
+        let page = tx::page_from_lines(
             &tx::RenderContext {
                 home: data.home.as_deref(),
                 harness: data.sessions.get(&own).map(|session| session.harness),
@@ -918,6 +921,7 @@ impl Query {
             &anchor,
             now,
             limit,
+            &mut tx::Lines::provider_with_prompts(&mut read, &mut prompts),
         )
         .map_err(|error| match (&anchor, error.kind()) {
             (tx::Anchor::Turn(turn), io::ErrorKind::NotFound) => QueryError::new(
@@ -926,6 +930,7 @@ impl Query {
             ),
             _ => QueryError::io(&error),
         })?;
+        records.finish().map_err(|error| QueryError::io(&error))?;
         serde_json::from_str(&page).map_err(|error| QueryError::new("io", error.to_string()))
     }
 
@@ -963,19 +968,20 @@ impl Query {
         }
         // Every session's transcript, the most recently active first, each
         // from its newest entry back. Stubs have no activity of their own.
-        let transcripts: Vec<(String, Arc<Transcript>)> = self
+        let transcripts: Vec<(usize, String, Arc<Transcript>)> = self
             .evidence()
             .parts
             .iter()
-            .flat_map(|part| {
+            .enumerate()
+            .flat_map(|(index, part)| {
                 part.data
                     .tx
                     .iter()
-                    .map(|(own, tx)| (part.served(own), tx.clone()))
+                    .map(move |(own, tx)| (index, part.served(own), tx.clone()))
             })
             .collect();
         let mut order = Vec::new();
-        for (served, transcript) in transcripts {
+        for (index, served, transcript) in transcripts {
             if view.session(&served).is_none()
                 || view
                     .facts
@@ -985,13 +991,23 @@ impl Query {
             {
                 continue;
             }
-            order.push((view.last(&served), served, transcript));
+            order.push((view.last(&served), served, transcript, index));
         }
         order.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
-        let mut lines = tx::Lines::default();
+        let records: Vec<_> = self
+            .evidence()
+            .parts
+            .iter()
+            .map(|part| part.data.sources.reader())
+            .collect();
+        let source_part = std::cell::Cell::new(0);
+        let mut read =
+            |path: &std::path::Path, offset| records[source_part.get()].read(path, offset);
+        let mut lines = tx::Lines::provider(&mut read);
         let mut matches = Vec::new();
         let mut stopped = None;
-        'sessions: for (_, served, transcript) in &order {
+        'sessions: for (_, served, transcript, index) in &order {
+            source_part.set(*index);
             for (position, slot) in transcript.slots.iter().enumerate().rev() {
                 if since.is_some_and(|since| !slot.t.is_some_and(|t| t >= since)) {
                     continue;
@@ -1066,6 +1082,9 @@ impl Query {
                     None => sessions.push((served.clone(), Vec::new(), 1)),
                 }
             }
+        }
+        for records in &records {
+            records.finish().map_err(|error| QueryError::io(&error))?;
         }
         let mut sessions: Vec<Value> = sessions
             .into_iter()
