@@ -133,7 +133,7 @@ Use Node 22+ and Rust from the repository toolchain. From the repository root:
 ```sh
 npm --prefix ui ci --no-audit --no-fund
 npm --prefix ui run build
-cargo build --locked -p semon-store --bin semon --features semon-sessions/test-clock
+cargo build --locked -p semon-cli --bin semon --features semon-sessions/test-clock
 fixture_dir=$(mktemp -d)
 fixture_now=$(node tests/ui/fixture.mjs "$fixture_dir" --extras)
 SEMON_TEST_NOW="$fixture_now" target/debug/semon sessions --serve \
