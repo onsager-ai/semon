@@ -1407,6 +1407,109 @@ fn shared_queries_read_the_viewer_cache_and_expose_its_output_window() {
 }
 
 #[test]
+fn embedded_native_queries_preserve_output_windows_and_legacy_tool_answers() {
+    let home = fixture();
+    let peer = Home::new("testbox");
+    peer.top(
+        "other",
+        &[human("other", ts(6, 0), "Review the lexer change")],
+    );
+    for seconds in [86_400, 21_600] {
+        for multiple in [false, true] {
+            let options = |home: &Home| Options {
+                all: false,
+                since: Duration::from_secs(seconds),
+                scan_window: false,
+                ..home.options.clone()
+            };
+            let mut machines = vec![("a".into(), options(&home))];
+            if multiple {
+                machines.push(("b".into(), options(&peer)));
+            }
+            let mut viewer = ViewerCore::with_machines(machines);
+            viewer.set_refresh(crate::Refresh::OnInvalidate);
+            let core = Arc::new(viewer);
+            let calls = [
+                ("list_sessions", json!({})),
+                ("list_sessions", json!({"parent":"lead", "limit":1})),
+                ("list_sessions", json!({"since":"1970-01-01T00:00:00Z"})),
+                ("get_session", json!({"id":"lead"})),
+                ("get_session", json!({"id":"scan"})),
+                ("get_session", json!({"id":"asker"})),
+                ("get_session", json!({"id":"cx"})),
+                ("get_session", json!({"id":"absent"})),
+                ("read_transcript", json!({"id":"done", "limit":1})),
+                (
+                    "read_transcript",
+                    json!({"id":"scan", "after":0, "limit":2}),
+                ),
+                ("read_transcript", json!({"id":"done", "turn":"absent"})),
+                ("find", json!({"text":"lexer", "limit":2})),
+                ("find", json!({"text":"cargo", "max_bytes":1})),
+                ("stalls", json!({"idle_minutes":1})),
+            ];
+            let mut native = Query::from_native_core(core.clone());
+            let before = crate::model::COMPAT_BUILDS.with(|count| count.get());
+            let actual: Vec<_> = calls
+                .iter()
+                .map(|(tool, args)| native.call_at(tool, args, NOW))
+                .collect();
+            assert_eq!(
+                crate::model::COMPAT_BUILDS.with(|count| count.get()),
+                before
+            );
+            let snapshot = native.native.as_ref().unwrap().parts[0].data.clone();
+            assert_eq!(snapshot.window_start, Some(NOW - seconds as i64 * 1000));
+            let mut second = Query::from_native_core(core.clone());
+            second.call_at("list_sessions", &json!({}), NOW).unwrap();
+            assert!(Arc::ptr_eq(
+                &snapshot,
+                &second.native.as_ref().unwrap().parts[0].data
+            ));
+
+            // The existing production constructor remains the independent
+            // compatibility reference until Hub switches its consumer.
+            core.model_at(NOW, Reading::At(NOW)).unwrap().unwrap();
+            let mut legacy = Query::from_core(core.clone());
+            for ((tool, args), answer) in calls.iter().zip(actual) {
+                assert_eq!(
+                    answer,
+                    legacy.call_at(tool, args, NOW),
+                    "{tool} {args}, seconds={seconds}, multiple={multiple}"
+                );
+            }
+            core.close();
+        }
+    }
+}
+
+#[test]
+fn embedded_native_query_retirement_serves_only_retained_snapshots() {
+    let home = fixture();
+    let core = Arc::new(ViewerCore::new(home.options.clone()));
+    let mut native = Query::from_native_core(core.clone());
+    let before = native.call_at("list_sessions", &json!({}), NOW).unwrap();
+    core.close();
+    home.top(
+        "after-close",
+        &[human("after-close", ts(6, 0), "Closed source")],
+    );
+    assert_eq!(
+        native.call_at("list_sessions", &json!({}), NOW).unwrap(),
+        before
+    );
+    let unopened = Arc::new(ViewerCore::new(home.options.clone()));
+    unopened.close();
+    assert_eq!(
+        Query::from_native_core(unopened)
+            .call_at("list_sessions", &json!({}), NOW)
+            .unwrap_err()
+            .code,
+        "io"
+    );
+}
+
+#[test]
 fn local_tools_match_legacy_evidence_without_compatibility_preparation() {
     let home = fixture();
     // Same hostname exercises presentation disambiguation independently of the
