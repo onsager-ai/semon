@@ -160,6 +160,13 @@ export function measure({ selector, min }) {
     if (x < own.left || x >= own.right || y < own.top || y >= own.bottom) return false;
     for (let n = e.parentElement; n && n !== document.documentElement; n = n.parentElement) {
       const o = getComputedStyle(n);
+      // The reading dock clips transcript paint without changing scroll geometry.
+      // Audit the visible portion of each target, as with ordinary scroll clips.
+      if (n.matches('.transcript') && o.clipPath.startsWith('inset(')) {
+        const r = n.getBoundingClientRect();
+        const bottom = parseFloat(o.getPropertyValue('--reading-clip')) || 0;
+        if (y >= r.bottom - bottom) return true;
+      }
       if (o.overflowX === 'visible' && o.overflowY === 'visible') continue;
       const r = n.getBoundingClientRect();
       if (

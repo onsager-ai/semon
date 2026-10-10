@@ -231,6 +231,15 @@ export default async function codexThinkingCheck(browser) {
     'the original Codex transcript response changed before display preparation',
   );
 
+  R.collapsed = await page
+    .locator('.think-disclosure')
+    .evaluateAll((nodes) => nodes.every((node) => node.getAttribute('aria-expanded') === 'false'));
+  r.expect(R.collapsed, 'recorded thinking must initially be collapsed');
+  // Existing coalescing assertions inspect the complete disclosed recorded content.
+  await page
+    .locator('.think-disclosure')
+    .evaluateAll((nodes) => nodes.forEach((node) => node.click()));
+
   R.initial = await page.evaluate(
     ({ firstTurn, secondTurn }) => {
       const turns = [...document.querySelectorAll('.turns > .turn')];
@@ -495,6 +504,13 @@ export default async function codexThinkingCheck(browser) {
   await page.reload();
   await settled(page);
   await goto(page, { v: 'session', id: CODEX_SID }, D);
+  r.expect(
+    (await page.locator('.think-text').count()) === 0,
+    'a fresh document should reset Thinking to collapsed',
+  );
+  await page
+    .locator('.think-disclosure')
+    .evaluateAll((nodes) => nodes.forEach((node) => node.click()));
   R.reload = await page.evaluate((id) => {
     const turn = [...document.querySelectorAll('.turn')].find((x) => x.dataset.turn === id),
       thought = turn?.querySelector('.thought:not(.masked)'),
@@ -536,6 +552,9 @@ export default async function codexThinkingCheck(browser) {
   await page.reload();
   await settled(page);
   await goto(page, { v: 'session', id: CLAUDE_SID }, D);
+  await page
+    .locator('.think-disclosure')
+    .evaluateAll((nodes) => nodes.forEach((node) => node.click()));
   R.claude = await page.evaluate((id) => {
     const turn = [...document.querySelectorAll('.turn')].find((x) => x.dataset.turn === id);
     return [...(turn?.querySelectorAll('.thought:not(.masked)') ?? [])].map((n) =>

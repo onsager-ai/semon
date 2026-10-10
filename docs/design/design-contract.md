@@ -96,3 +96,11 @@ The explicitly requested Codex/ChatGPT unified composer variant is documented in
 native-touch initial height, a 280px scroll cap, an 8px toolbar bottom inset and
 13px visual edge insets. Other composer variants retain their existing geometry;
 44px touch toolbar targets and native 16px mobile input text remain required.
+
+
+The approved staging conversation-reader changes are recorded in `.stitch/DESIGN.md`
+section 11. They retain category/tool styling and shared tokens while adding
+collapsed Thinking, one-line summaries, a lower reading dock and an availability
+disclosure for retained drafts. `ui/tests/staging-viewer-browser.mjs` covers
+390/820/1280px in both themes, keyboard disclosures, text contrast, viewport
+occlusion and composer expansion; the existing galleries remain required.

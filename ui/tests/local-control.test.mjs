@@ -237,3 +237,20 @@ test('runtime presence, observation freshness and availability are validated sep
   ])
     assert.throws(() => owner.prepare(invalid));
 });
+test('drafts retain qualified identity through absent control and recovery', () => {
+  const owner = createLocalControl(
+    { request: () => new AbortController(), releaseRequest() {} },
+    () => {},
+  );
+  const one = owner.readOnly('native', 'source-one:native');
+  one.setDraft('retained');
+  assert.equal(one.draft, 'retained');
+  assert.equal(owner.readOnly('native', 'source-two:native').draft, '');
+  owner.adopt(owner.prepare(model()));
+  assert.equal(owner.view('native', 'source-one:native').draft, 'retained');
+  owner.adopt(null);
+  assert.equal(owner.readOnly('native', 'source-one:native').draft, 'retained');
+  owner.adopt(owner.prepare(model()));
+  assert.equal(owner.view('native', 'source-one:native').draft, 'retained');
+  owner.destroy();
+});

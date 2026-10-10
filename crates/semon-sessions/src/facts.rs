@@ -16,7 +16,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::{Options, events::EventCache, lock_pid, model, proc_start};
 
+mod native_names;
 pub(crate) mod source_authority;
+pub use native_names::NativeName;
 
 pub const FACTS_VERSION: u32 = 2;
 
@@ -78,6 +80,9 @@ pub struct Facts {
     /// reader retains only the session/run fields and model usage allowlist.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub reported_runs: Vec<ReportedRunSnapshot>,
+    /// Name-only observations, qualified by this machine's source and native harness/id.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub native_names: Vec<NativeName>,
 }
 
 /// The allowlisted values of one `projects.*` last-run record. The project
@@ -121,6 +126,15 @@ impl Facts {
             codex_locks: BTreeMap::new(),
             runs: BTreeMap::new(),
             offline_since: Some(last_seen),
+            native_names: self
+                .native_names
+                .iter()
+                .cloned()
+                .map(|mut name| {
+                    name.freshness = "stale".into();
+                    name
+                })
+                .collect(),
             ..self.clone()
         }
     }
@@ -197,6 +211,7 @@ fn collect_facts(
             .collect(),
     );
     facts.reported_runs = cache.reported_runs().cloned().collect();
+    facts.native_names = native_names::read(&options.codex_home);
     Ok(facts)
 }
 
@@ -257,6 +272,7 @@ pub fn local_runtime_facts(options: &crate::Options) -> io::Result<Facts> {
         offline_since: None,
         runs,
         reported_runs: Vec::new(),
+        native_names: Vec::new(),
     })
 }
 
@@ -322,6 +338,19 @@ pub(crate) enum Lock {
 }
 
 impl MachineFacts {
+    pub(crate) fn native_names(&self, options: &Options) -> Vec<NativeName> {
+        match self {
+            Self::Local => native_names::read(&options.codex_home),
+            Self::Recorded(facts) => facts
+                .native_names
+                .iter()
+                .filter(|name| name.valid())
+                .take(4096)
+                .cloned()
+                .collect(),
+        }
+    }
+
     /// A facts file that is missing or unreadable reads as a machine with
     /// nothing running and nothing known.
     pub(crate) fn of(options: &Options) -> Self {

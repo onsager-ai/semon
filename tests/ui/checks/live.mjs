@@ -641,12 +641,20 @@ async function scheme(browser, name, opts, r, protocol) {
         vh: innerHeight,
       };
     }, beforeEntries);
+    await S.locator('.think-disclosure[aria-expanded="false"]').evaluateAll((nodes) =>
+      nodes.forEach((node) => node.click()),
+    );
     // The new thought is an entry like any other: it counts toward "N new" (the message and the thought make at least two).
     R.thought = await S.evaluate((t) => {
       const n = [...document.querySelectorAll('#page .turns .thought[data-e]')].find((x) =>
         x.querySelector('.think-text')?.textContent.includes(t),
       );
-      return n ? { key: n.dataset.e, open: !n.querySelector('button, [hidden]') } : null;
+      return n
+        ? {
+            key: n.dataset.e,
+            open: n.querySelector('.think-disclosure')?.getAttribute('aria-expanded') === 'true',
+          }
+        : null;
     }, THOUGHT);
     r.expect(
       !!R.thought && R.thought.open && !beforeEntries.includes(R.thought.key),
@@ -1139,6 +1147,9 @@ async function scheme(browser, name, opts, r, protocol) {
     );
 
     // ---- 3. a subagent starts while View all is open ----
+    await S.locator('.viewall:visible')
+      .first()
+      .evaluate((node) => node.scrollIntoView({ block: 'center' }));
     await S.locator('.viewall:visible').first().click();
     await S.waitForFunction(() => document.querySelector('dialog.panel.full')?.open === true);
     const sheet0 = await S.evaluate(() => document.querySelector('dialog.panel.full').textContent);

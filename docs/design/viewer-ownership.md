@@ -248,3 +248,41 @@ Sessions, Analytics and Machines destinations. These links retain the explicitly
 selected complete-model reader across navigation; omitting the marker selects
 the focused reader. Complete-model embedding and storage-failure tests must
 enter that reader explicitly rather than waiting for its DOM on a focused page.
+
+
+## Staging reader ownership
+
+The shared transcript owns Thinking disclosure by stable entry identity and the
+reading dock's viewport/resize/scroll listeners, measurements and teardown.
+`readingBottom` and `readingClip` are finite geometry values; they change paint
+and dock placement, never scroll ownership or transcript identity. Catalog names
+refresh through the existing bounded capability cadence (60 metadata rows, the
+active exact lookup, and at most eight rotating exact lookups for loaded/cached
+history outside the first page). Observed names survive unchanged older content
+briefs until a later metadata observation. A name update changes
+the cached metadata, header and Recent leaf without rerendering transcript entries.
+
+The local control owner holds drafts by source-qualified session identity. The
+composer consumes observed control authority and runtime state; an initial missing
+control has a read-only disclosure instead of an absent input surface. Recovery
+retains the same draft. Acceptance clears only the submitted draft if the reader
+has not edited it meanwhile. Uncertain delivery is never retried automatically.
+
+
+Codex name observations were checked against installed Codex 0.162.0 and its
+[session index](https://github.com/openai/codex/blob/rust-v0.162.0/codex-rs/rollout/src/session_index.rs)
+and [thread state](https://github.com/openai/codex/blob/rust-v0.162.0/codex-rs/state/src/runtime/threads.rs).
+The latest complete valid `session_index.jsonl` record wins; `state_5.sqlite`
+`threads.name` supplies a fallback. `threads.title` is prompt-derived, and
+`updated_at` is activity time: updating `name` does not advance it, so it cannot
+rank a database name against an index rename. Unsupported schemas fail closed.
+Claude's existing `custom-title`/`customTitle` transcript naming remains supported.
+
+Extraction reads at most a 4 MiB index tail, 16,384 records and 4,096 names; each
+name is at most 1,024 bytes. Database reads are read-only, limited to 4,096 rows,
+25 ms lock wait and a 50 ms VM progress deadline, with a 256 MiB file cap. A WAL
+without an existing shared-memory sidecar is skipped to avoid creating native
+files. Only validated name observations are carried in machine facts, with native
+harness/ID, metadata source, observation time and explicit current/stale freshness.
+Received sources use their own facts and never the viewer host's native database.
+Metadata changes invalidate the model snapshot but preserve transcript marks.

@@ -91,7 +91,9 @@ export class TranscriptStore {
       )
         return;
       const page = parseTranscriptPage(response),
-        entries = page.entries.map((entry) => this.host.entry({ ...entry, sid })),
+        entries = page.entries.map((entry, index) =>
+          this.host.entry({ ...entry, sid, slot: entry.slot ?? page.from + index }),
+        ),
         meta = this.meta[sid];
       if (direction === 'before' && meta) {
         this.entries[sid] = entries.concat(this.entries[sid]);

@@ -24,14 +24,14 @@ const css = await readFile(
 );
 for (const width of [320, 390, 1280])
   for (const colorScheme of ['light', 'dark'])
-    test(`toolbar jump preserves content and focus ${width} ${colorScheme}`, async () => {
+    test(`reading dock jump preserves content and focus ${width} ${colorScheme}`, async () => {
       const browser = await chromium.launch();
       try {
         const page = await browser.newPage({ viewport: { width, height: 844 }, colorScheme });
         await page.route('http://jump.test/**', (r) =>
           r.fulfill({
             contentType: 'text/html',
-            body: `<!doctype html><style>${css}</style><body><div id="topbar" class="topbar session-bar"></div><div id="page"></div><textarea id="draft">retained draft</textarea>`,
+            body: `<!doctype html><style>${css}</style><body><div id="topbar" class="topbar session-bar"></div><div id="page" class="page"></div><textarea id="draft">retained draft</textarea>`,
           }),
         );
         await page.goto('http://jump.test/');
@@ -101,13 +101,13 @@ for (const width of [320, 390, 1280])
         assert.equal(await button.getAttribute('aria-label'), 'Jump to bottom; 4 new entries');
         const geometry = await page.evaluate(() => {
           const b = button.getBoundingClientRect(),
-            t = topbar.getBoundingClientRect(),
+            t = document.querySelector('.session-dock').getBoundingClientRect(),
             c = content.getBoundingClientRect(),
             f = document.querySelector('#find-btn').getBoundingClientRect(),
             m = document.querySelector('#more-btn').getBoundingClientRect();
           return {
             inside: b.top >= t.top && b.bottom <= t.bottom && b.left >= 0 && b.right <= innerWidth,
-            clear: b.bottom <= c.top,
+            clear: b.top >= c.bottom,
             targets:
               b.width >= (innerWidth <= 760 ? 44 : 40) && b.height >= (innerWidth <= 760 ? 44 : 40),
             actions: b.right <= f.left && f.right <= m.left,

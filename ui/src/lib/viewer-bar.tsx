@@ -167,14 +167,6 @@ export function createViewerBar() {
     );
     render(
       <>
-        {view.session && !view.trace && (
-          <span
-            class="viewer-jump"
-            ref={(node) => {
-              if (node && jumpTarget.parentNode !== node) node.append(jumpTarget);
-            }}
-          />
-        )}
         {view.mode === 'normal' ? (
           view.analytics ? (
             <div class="analytics-range" role="group" aria-label="Analytics range">
