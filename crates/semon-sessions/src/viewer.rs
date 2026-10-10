@@ -206,6 +206,7 @@ struct Work {
     last_save: Option<Instant>,
     events: Option<EventCache>,
     texts: Texts,
+    catalog_snapshot: Option<Snapshot>,
     /// When the last rebuild of either model started.
     built_at: Option<Instant>,
 }
@@ -1222,15 +1223,8 @@ impl MachineView {
         Ok(())
     }
 
-    /// Rebuilds the model at `now` if its logs or facts changed. The caller
-    /// holds `work`.
-    fn refresh_model_locked(&self, work: &mut Work, now: i64) -> io::Result<Arc<ModelCache>> {
-        if let Some(model) = self.shown_model()
-            && !self.changed(&model.snapshot)
-        {
-            return Ok(model);
-        }
-        work.built_at = Some(Instant::now());
+    /// Initialize the source index and publish a bounded cold catalog page.
+    fn prepare_events(&self, work: &mut Work, now: i64) -> io::Result<()> {
         if work.events.is_none() {
             work.events = Some(match EventCache::open_scoped(&self.options.cache) {
                 Ok(cache) => cache,
@@ -1242,7 +1236,7 @@ impl MachineView {
         }
         let cache = work.events.as_mut().expect("event cache initialized");
         // Cold catalog demand publishes a small explicit source batch before the
-        // compatibility model reads unrelated native history. Source discovery is
+        // complete native observer reads unrelated history. Source discovery is
         // still a filesystem metadata walk; incomplete native lineage cannot grant
         // control authority until the subsequent complete reconciliation.
         if self.catalog_demand.load(Ordering::Relaxed)
@@ -1279,6 +1273,46 @@ impl MachineView {
         if self.options.facts.is_none() {
             cache.refresh_reported_runs(&self.options.claude_json, now, &mut dirty);
         }
+        Ok(())
+    }
+
+    /// Refresh focused metadata without showing or serializing a legacy model.
+    fn refresh_catalog_locked(&self, work: &mut Work, now: i64) -> io::Result<()> {
+        if let Some(snapshot) = &work.catalog_snapshot
+            && !self.changed(snapshot)
+        {
+            return Ok(());
+        }
+        work.built_at = Some(Instant::now());
+        self.prepare_events(work, now)?;
+        let cache = work.events.as_mut().expect("event cache initialized");
+        // Stamp before native reads so concurrent appends remain observable.
+        let mut snapshot = Snapshot::capture_pids(&self.options, BTreeSet::new(), cache.paths());
+        #[cfg(test)]
+        self.hooks.building()?;
+        let pids = model::observe_catalog(&self.options, cache, &mut false, &mut work.texts, now)?;
+        if self.options.facts.is_none() {
+            snapshot.pids = pids
+                .iter()
+                .map(|pid| (*pid, proc_start(&self.options.proc_root, *pid)))
+                .collect();
+        }
+        work.catalog_snapshot = Some(snapshot);
+        Ok(())
+    }
+
+    /// Rebuilds the model at `now` if its logs or facts changed. The caller
+    /// holds `work`.
+    fn refresh_model_locked(&self, work: &mut Work, now: i64) -> io::Result<Arc<ModelCache>> {
+        if let Some(model) = self.shown_model()
+            && !self.changed(&model.snapshot)
+        {
+            return Ok(model);
+        }
+        work.built_at = Some(Instant::now());
+        self.prepare_events(work, now)?;
+        let cache = work.events.as_mut().expect("event cache initialized");
+        let mut dirty = false;
         // The files are stamped before the build reads them: a line that
         // lands while it runs is then a change the next check sees, never
         // one that is neither parsed nor noticed. (A file created meanwhile
@@ -1626,7 +1660,17 @@ impl MachineView {
                 self.is_shown(*kind)
                     || (matches!(kind, Kind::Model) && self.catalog_demand.load(Ordering::Relaxed))
             })
-            .map(|kind| (kind, self.refresh_kind(&mut work, kind)))
+            .map(|kind| {
+                let result = if matches!(kind, Kind::Model)
+                    && !self.is_shown(kind)
+                    && !self.options.scan_window
+                {
+                    self.refresh_catalog_locked(&mut work, model::now_ms())
+                } else {
+                    self.refresh_kind(&mut work, kind)
+                };
+                (kind, result)
+            })
             .collect();
         let built_at = work.built_at;
         drop(work);
@@ -6975,6 +7019,41 @@ mod tests {
             1,
             "never more threads than its size"
         );
+        view.close();
+    }
+
+    #[test]
+    fn catalog_demand_refreshes_sources_without_showing_a_compatibility_model() {
+        let fixture = lane_fixture();
+        let pool = RefreshPool::new(1);
+        let view = pooled(&fixture, Refresh::Background, &pool);
+        view.note_catalog_read().unwrap();
+        let generation = || {
+            let reply = crate::session_catalog_page(&fixture.options, "fixture", "limit=60");
+            let body: Value = serde_json::from_slice(&reply.body).ok()?;
+            (reply.status == 200 && body["completeness"]["state"] == "complete")
+                .then(|| body["generation"].clone())
+        };
+        let before = eventually("catalog-only complete observation", generation);
+        assert!(view.shown_model().is_none());
+        say(&fixture, "lane", 1, "catalog-only append");
+        view.invalidate();
+        view.note_catalog_read().unwrap();
+        eventually("catalog-only appended generation", || {
+            generation().filter(|next| next != &before)
+        });
+        let reply = crate::session_transcript_range(
+            &fixture.options,
+            "fixture",
+            "sid=lane&after=0&limit=100",
+            None,
+        );
+        assert_eq!(reply.status, 200);
+        assert!(String::from_utf8_lossy(&reply.body).contains("catalog-only append"));
+        assert!(view.shown_model().is_none());
+        // Explicit legacy reads remain supported until their consumers migrate.
+        assert_eq!(view.respond("GET", "/api/model", "", None).status, 200);
+        assert!(view.shown_model().is_some());
         view.close();
     }
 
