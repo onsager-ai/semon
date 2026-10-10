@@ -8,6 +8,13 @@ The delivery in #297/#298 was reconciled through main #294 and the landed #297
 on 2026-10-04. The bounded supported contract is documented below; issue
 acceptance and final check evidence are tracked in #235.
 
+Trace capture/occurrence oracles described below are historical: their three
+collector packages are retired, with repair/backfill source and tests preserved
+at the [pinned capture revision](trace-capture-retirement.md). Native session,
+control, mirror, namespace and transcript/usage contracts and their shared
+fixtures remain current. Historical capture results do not qualify current
+native readers or authorize rebuilding a Store from possibly rotated logs.
+
 ## Evidence contract
 
 A source identity includes machine, harness, native session/thread identity,
@@ -225,9 +232,10 @@ remains unknown; an explicit empty inventory selects no current sources.
 Received archive roots behind symbolic links are refused, and native source
 bytes remain read-only.
 
-Compressed native rollouts are outside this supported subset. To capture a
-plain archived tree explicitly, select it with `semon-codex --sessions PATH`;
-this fixture does not establish native archive lifecycle or logical lineage.
+Compressed native rollouts are outside this supported subset. Current session
+discovery includes plain archived files under the configured Codex home; this
+fixture does not establish native archive lifecycle or logical lineage. Legacy
+collector source selection is documented at the pinned capture revision.
 
 ## Retained source revision selection
 

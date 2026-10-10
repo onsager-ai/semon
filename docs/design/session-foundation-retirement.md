@@ -180,8 +180,12 @@ DB/WAL/SHM/journal bytes and permissions. It requires quiescent source files,
 verifies private input copies against their generations and full digests, and
 uses SQLite only on those copies. Publication refuses source changes and newer
 schemas. No capture service is stopped and no original is deleted. New periodic capture
-installation and source timer templates are retired; installed units and manual
-collectors still require explicit inventory before export or uninstall.
+installation, source timer templates and the three collector packages are
+retired. Installed units and manual collectors still require explicit inventory
+before export or uninstall. The [capture custody reference](../trace-capture-retirement.md)
+pins the legacy source, locked build and repair/backfill contracts. Shared native
+parsers/fixtures and the main CLI's historical log/forensic/export/ship commands
+remain; Store/replication removal is a later dependency slice.
 
 For legacy trace inspection, first make a consistent owner-private SQLite
 backup using its backup API (including committed WAL state), and inspect that
@@ -276,7 +280,9 @@ and Hub #226; preserving the old hosted path during migration does not retire it
 The remaining blockers are consumer migration, shared semantic extraction,
 remaining encrypted-data export qualification and external deployment inventories.
 The versioned forensic Store export is qualified in
-[#392](https://github.com/onsager-ai/semon/pull/392); capture/Store removal awaits
-its delivery and operator migration, not completion of the old memory roadmap. No merge,
+[#392](https://github.com/onsager-ai/semon/pull/392) and the independent exporter in
+[#396](https://github.com/onsager-ai/semon/pull/396). Collector source retirement
+depends on that qualified export; existing installations and subsequent Store
+removal still require operator migration, not completion of the old memory roadmap. No merge,
 deployment, live infrastructure change, paid harness/provider drill or user-data
 deletion is authorized by this assessment.
