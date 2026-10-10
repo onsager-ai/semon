@@ -66,5 +66,8 @@ The producer still discovers, indexes and joins eligible native sources. Hub MCP
 still restores archives before admission; this local reader does not supply
 missing archived index metadata or grant provider authority. Removing those
 costs requires scoped dependency selection and independently authorized provider
-access for the producer. No full-workspace discovery or archive cost is claimed
-retired by this reader migration.
+access for the producer. Verified archive eviction now explicitly retains an
+exact existing native index generation in the same database, instead of letting
+missing-source reconciliation discard it. This metadata does not make a source
+current, contain bodies or supply native headers and relationship closure by
+itself. No full-workspace discovery or archive cost is claimed retired yet.
