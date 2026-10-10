@@ -184,27 +184,18 @@ repair/backfill, inventory writers and export the Store privately before changin
 an installation. See the [capture custody and pinned-tool reference](docs/trace-capture-retirement.md)
 and [independent forensic exporter](docs/trace-store-export.md).
 
-## Replicate canonical traces
+## Historical canonical replication
 
-`semon ship` makes one replication pass from the local store to an explicitly
-configured HTTP endpoint:
-
-```sh
-cargo run --locked -p semon-cli --bin semon -- ship \
-  --store /path/to/traces.sqlite3 \
-  --endpoint http://127.0.0.1:8080/traces
-```
-
-The endpoint can instead be supplied through `SEMON_REPLICATION_ENDPOINT`.
-When neither is configured, `ship` prints a skip message and exits successfully
-without opening the store. This permits an unconditional local workflow while
-keeping the SQLite file as the source of truth; there is no daemon and no
-default remote.
-
-Each canonical semantic document is sent as JSON with its existing trace ID in
-the `X-Semon-Content-Hash` header. An endpoint can therefore upsert by content
-hash, making repeated replication idempotent. The replication path never reads
-or transmits raw forensic records or carrier labels.
+The experimental `semon ship` command and Trace Store HTTP sender are retired.
+It previously sent canonical semantics only and never represented a complete
+historical or forensic export. Preserve any configured endpoint/jobs in the
+[historical inventory](docs/trace-capture-retirement.md) and use the
+[private complete Store exporter](docs/trace-store-export.md) for custody.
+Existing jobs are not stopped automatically; current `semon ship` invocations
+fail as an unknown command before opening a Store or sending anything. The
+pinned legacy source remains available if an operator needs to inspect its old
+protocol. Generic `semon push`/receive and hosted native-source synchronization
+remain supported independently.
 
 ## Existing Encrypted Relay installations
 

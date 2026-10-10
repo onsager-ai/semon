@@ -79,7 +79,6 @@
 mod canonical;
 mod model;
 mod render;
-mod replication;
 mod store;
 
 pub use model::{
@@ -87,7 +86,6 @@ pub use model::{
     OccurrenceRecord, RawCarrierRecord, RepoSource, SemanticCore, TraceId,
 };
 pub use render::{day_bounds_ns, format_day_ns, format_timestamp_ns, render_occurrence_line};
-pub use replication::{REPLICATION_ENDPOINT_ENV, ReplicationError, ShipReport, ship};
 pub use store::{
     CLAUDE_MAX_BLOCKS_PER_RECORD, ForgetSelector, OccurrenceSelector, RawBackfillLine,
     RawBackfillResult, RawSessionRekeyLine, SessionRepairCounts, StoreError, TraceStore,

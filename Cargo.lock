@@ -2074,7 +2074,6 @@ name = "semon-store"
 version = "0.1.0"
 dependencies = [
  "hex",
- "reqwest",
  "rusqlite",
  "serde_json",
  "serde_json_canonicalizer",

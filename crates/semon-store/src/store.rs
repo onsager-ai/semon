@@ -1538,7 +1538,6 @@ mod tests {
     use serde_json::{Map, Value, json};
 
     use super::*;
-    use crate::ship;
 
     fn semantic(json: &str) -> SemanticCore {
         SemanticCore::from_json_slice(json.as_bytes()).unwrap()
@@ -3434,8 +3433,7 @@ mod tests {
         );
     }
 
-    /// The mirror of the test above: `log` (and, by the same read, `ship`,
-    /// which only ever reads `canonical_traces`) must survive dropping
+    /// The mirror of the test above: log and canonical reads must survive dropping
     /// `raw_carrier_records` intact, while both of the store's raw-reading
     /// methods — the ones `semon forensic` is built on — must fail hard
     /// rather than silently return nothing.
@@ -3445,7 +3443,7 @@ mod tests {
     /// additive schema (every statement is `CREATE ... IF NOT EXISTS`) on
     /// every open, so a `DROP TABLE` made through a separate connection —
     /// which is what happens if this were driven through `semon log` /
-    /// `semon ship` / `semon forensic` as three separate process-level
+    /// `semon forensic` as separate process-level
     /// invocations — gets silently healed (as an empty table) the moment
     /// the *next* command opens the store, before that command's own query
     /// ever runs. That is a real, load-bearing property of `open` (it is
@@ -3481,13 +3479,11 @@ mod tests {
             .execute("DROP TABLE raw_carrier_records", [])
             .unwrap();
 
-        // The ordinary reads `semon log` and `semon ship` are built on stay
-        // exactly as they were.
+        // Ordinary log and canonical reads stay exactly as they were.
         let after_log = store.log(&LogFilter::default()).unwrap();
         assert_eq!(before_log, after_log);
         let after_canonical = store.list_traces(None, 10).unwrap();
         assert_eq!(before_canonical, after_canonical);
-        assert!(ship(&store, None).unwrap().shipped() == 0);
 
         // Both of the reads `semon forensic` is built on must fail loudly —
         // not return an empty, silently-wrong result.
