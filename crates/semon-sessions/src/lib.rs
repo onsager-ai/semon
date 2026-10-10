@@ -89,8 +89,10 @@ pub use refresh::RefreshPool;
 pub use union::{
     AccountLink, AccountMenu, AccountWorkspace, AdminLink, Extras, LinkMethod, Refresh, ViewerCore,
 };
+#[cfg(feature = "encrypted-relay")]
 mod remote;
-pub use remote::{RemoteLease, collect_remote};
+#[cfg(feature = "encrypted-relay")]
+pub use remote::collect_remote;
 pub use viewer::{
     SECURITY_HEADERS, ServeOptions, ViewerReply, serve, serve_listener, serve_with_control,
 };
@@ -206,6 +208,17 @@ pub struct Tokens {
 pub struct ToolCall {
     pub id: String,
     pub name: String,
+}
+
+/// Historical encrypted-tree metadata. Keeping the Node wire shape available
+/// does not enable Relay transport or treat its stream lease as writer authority.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RemoteLease {
+    pub holder_machine: String,
+    pub epoch: u64,
+    pub last_renewal_ms: u64,
+    pub expires_at_ms: u64,
+    pub active: bool,
 }
 
 /// JSON schema v1. `last_activity` and `first_activity` are source RFC 3339 strings;

@@ -10,7 +10,9 @@ description = "Content-addressed SQLite storage for carrier-neutral traces."
 semon-control = { path = "../semon-control" }
 semon-relay = { path = "../semon-relay" }
 semon-push = { path = "../semon-push" }
-semon-sessions = { path = "../semon-sessions" }
+# Keep existing CLI decryption access during Relay retirement. The CLI moves
+# out of this crate before the historical trace store is removed (#381/#387).
+semon-sessions = { path = "../semon-sessions", features = ["encrypted-relay"] }
 hex.workspace = true
 reqwest.workspace = true
 rusqlite.workspace = true
