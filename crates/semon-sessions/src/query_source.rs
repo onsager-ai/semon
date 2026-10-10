@@ -1,4 +1,4 @@
-//! Request-owned, generation-bound local reads of a native query cohort.
+//! Generation-bound local reads for native Query/Catalog/source derivation.
 //! Source proofs contain no host credentials or runtime authority.
 use crate::{
     Options, SessionSourceRange, SessionSourceReader, SessionSourceRef,
@@ -9,7 +9,7 @@ use crate::{
 };
 use std::{
     collections::BTreeMap,
-    io::{self, Read, Seek, SeekFrom},
+    io::{self, BufRead, BufReader, Read, Seek, SeekFrom},
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
 };
@@ -106,6 +106,58 @@ pub(crate) struct Records<'a> {
 }
 
 impl Records<'_> {
+    /// Derivation preserves the shared producer's 64 MiB native-record limit.
+    /// Its short text cap is applied by Texts after the unchanged extractor.
+    pub(crate) fn derive(&self, path: &Path, offset: u64) -> io::Result<Option<serde_json::Value>> {
+        let result = (|| {
+            let proof = self.sources.proofs.get(path).ok_or_else(unavailable)?;
+            if offset >= proof.source.offset {
+                return Err(unavailable());
+            }
+            let mut reader = BufReader::new(RangeFile {
+                records: self,
+                proof,
+                position: offset,
+            })
+            .take(crate::model::MAX_LINE);
+            let mut bytes = Vec::new();
+            reader.read_until(b'\n', &mut bytes)?;
+            Ok(serde_json::from_slice(&bytes).ok())
+        })();
+        if result.is_err() {
+            *self.failed.lock().map_err(|_| unavailable())? = true;
+        }
+        result
+    }
+
+    /// Metadata and cached derivations also belong to the captured cohort.
+    /// Fence every contributing source before deriving, then finish rechecks
+    /// these same sources before any query projection can be published.
+    pub(crate) fn verify_all(&self) -> io::Result<()> {
+        for (path, proof) in &self.sources.proofs {
+            self.verify(path, proof)?;
+        }
+        Ok(())
+    }
+
+    fn verify(&self, path: &Path, proof: &Proof) -> io::Result<()> {
+        if proof.source.offset > 0 {
+            self.read_range(&proof.source, Some(&proof.generation), 0, 1)?;
+        } else {
+            let mut file = LogFile::open(path)?;
+            let before = Stat::from_metadata(&file.metadata()?)?;
+            if !proof.ledger.resumes(&before, &mut file)
+                || Stat::from_metadata(&file.metadata()?)? != before
+            {
+                return Err(unavailable());
+            }
+            self.checked
+                .lock()
+                .map_err(|_| unavailable())?
+                .insert(path.to_owned(), before);
+        }
+        Ok(())
+    }
     pub(crate) fn read(
         &self,
         path: &Path,
@@ -155,7 +207,7 @@ impl Records<'_> {
             .collect();
         for path in paths {
             let proof = self.sources.proofs.get(&path).ok_or_else(unavailable)?;
-            self.read_range(&proof.source, Some(&proof.generation), 0, 1)?;
+            self.verify(&path, proof)?;
         }
         Ok(())
     }
