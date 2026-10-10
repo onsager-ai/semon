@@ -101,12 +101,14 @@ pub(crate) fn parse_native_record(bytes: &[u8]) -> Option<Value> {
 }
 
 type NativeLineReader<'a> = dyn FnMut(&Path, u64) -> io::Result<(Option<Value>, u64)> + 'a;
+type NativePromptReader<'a> = dyn FnMut(&SlotFile, u64) -> Option<(Value, u64)> + 'a;
 
 /// Source lines read for one page: a line holding several blocks, or a call
 /// and its result, is read once. Only the last few lines are kept.
 #[derive(Default)]
 pub(crate) struct Lines<'a> {
     provider: Option<&'a mut NativeLineReader<'a>>,
+    prompt_provider: Option<&'a mut NativePromptReader<'a>>,
     pub(crate) failures: usize,
     recent: VecDeque<(LineKey, Option<Rc<Value>>)>,
     /// Bytes read from source files so far.
@@ -121,6 +123,16 @@ impl<'a> Lines<'a> {
         Self {
             provider: Some(reader),
             ..Self::default()
+        }
+    }
+
+    pub(crate) fn provider_with_prompts(
+        reader: &'a mut NativeLineReader<'a>,
+        prompts: &'a mut NativePromptReader<'a>,
+    ) -> Self {
+        Self {
+            prompt_provider: Some(prompts),
+            ..Self::provider(reader)
         }
     }
     const KEEP: usize = 16;
@@ -1738,6 +1750,11 @@ pub(crate) fn render(
 /// that long, and its text and images still show.
 fn prompt_record(lines: &mut Lines, file: Option<&SlotFile>, offset: u64) -> Option<Rc<Value>> {
     let file = file?;
+    if let Some(provider) = lines.prompt_provider.as_mut() {
+        let (record, bytes) = provider(file, offset)?;
+        lines.bytes += bytes;
+        return Some(Rc::new(record));
+    }
     if lines.provider.is_some() {
         return lines.get(&file.path, offset);
     }
@@ -1939,6 +1956,28 @@ pub(crate) fn page_from(
     now: i64,
     limit: usize,
 ) -> io::Result<String> {
+    page_from_lines(
+        context,
+        transcript,
+        sid,
+        anchor,
+        now,
+        limit,
+        &mut Lines::default(),
+    )
+}
+
+/// The native pager with request-owned source access. Its slots, rendering,
+/// anchors and wire contract are shared with the existing local pager.
+pub(crate) fn page_from_lines(
+    context: &RenderContext<'_>,
+    transcript: &model::Transcript,
+    sid: &str,
+    anchor: &Anchor,
+    now: i64,
+    limit: usize,
+    lines: &mut Lines<'_>,
+) -> io::Result<String> {
     let limit = limit.clamp(1, PAGE_ENTRIES);
     let slots = &transcript.slots;
     let total = slots.len();
@@ -1953,12 +1992,11 @@ pub(crate) fn page_from(
         Anchor::After(after) => (true, (*after).min(total)),
         Anchor::Turn(turn) => (true, first_of(turn).ok_or(io::ErrorKind::NotFound)?),
     };
-    let mut lines = Lines::default();
     let mut picked: Vec<(usize, Value)> = Vec::new();
     let mut bytes = 0;
     let (mut low, mut high) = (from, from);
     let mut take = |index: usize, picked: &mut Vec<(usize, Value)>| -> bool {
-        let Some(entry) = render(context, &mut lines, slots, &slots[index], index, now) else {
+        let Some(entry) = render(context, lines, slots, &slots[index], index, now) else {
             return true;
         };
         let size = entry.to_string().len() + 1;

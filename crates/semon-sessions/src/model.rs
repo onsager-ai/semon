@@ -398,6 +398,7 @@ pub(crate) struct QueryData {
     pub(crate) machine_id: String,
     pub(crate) pids: Vec<u32>,
     pub(crate) window_start: Option<i64>,
+    pub(crate) sources: crate::query_source::Sources,
 }
 
 impl Built {
@@ -6363,6 +6364,10 @@ fn build_sources_inner(
         }
         cache.publish_session_descriptions();
         return Ok(BuildOutput::Query(Box::new(QueryData {
+            sources: crate::query_source::Sources::capture(
+                options,
+                files.iter().map(summary::source),
+            )?,
             sessions,
             handoffs,
             turns,

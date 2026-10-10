@@ -166,6 +166,22 @@ pub(crate) struct CatalogSource {
 
 pub(crate) const CATALOG_VERSION: u32 = 3;
 
+pub(super) fn source(file: &super::SourceFile) -> CatalogSource {
+    let (dev, ino, offset, prefix_sha256, tail_sha256, changed_ns) = file.revision;
+    CatalogSource {
+        path: file.path.clone(),
+        native_id: file.id.clone(),
+        dev,
+        ino,
+        size: file.stamp.size,
+        modified_ns: file.stamp.modified_ns,
+        changed_ns,
+        offset,
+        prefix_sha256,
+        tail_sha256,
+    }
+}
+
 pub(super) fn catalog(builder: &Builder<'_>, handoffs: &[Handoff]) -> Vec<CatalogRow> {
     let mut rows = Vec::new();
     for session in &builder.sessions {
@@ -176,22 +192,7 @@ pub(super) fn catalog(builder: &Builder<'_>, handoffs: &[Handoff]) -> Vec<Catalo
         let mut sources: Vec<_> = session
             .files
             .iter()
-            .map(|position| {
-                let file = &builder.files[*position];
-                let (dev, ino, offset, prefix_sha256, tail_sha256, changed_ns) = file.revision;
-                CatalogSource {
-                    path: file.path.clone(),
-                    native_id: file.id.clone(),
-                    dev,
-                    ino,
-                    size: file.stamp.size,
-                    modified_ns: file.stamp.modified_ns,
-                    changed_ns,
-                    offset,
-                    prefix_sha256,
-                    tail_sha256,
-                }
-            })
+            .map(|position| source(&builder.files[*position]))
             .collect();
         sources.sort_by(|a, b| a.path.cmp(&b.path));
         let native_ids = sources
