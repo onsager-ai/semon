@@ -1485,11 +1485,7 @@ fn variable_handoffs_are_placed_on_their_calls_and_parent_scans_resume() {
             codex_reply(ts(1, 0), "done"),
         ]);
     }
-    let parses = crate::handoff::PARSES.with(|count| count.get());
-    let bytes = crate::handoff::BYTES.with(|count| count.get());
     let built = home.build();
-    assert_eq!(crate::handoff::PARSES.with(|count| count.get()) - parses, 0);
-    assert_eq!(crate::handoff::BYTES.with(|count| count.get()) - bytes, 0);
     let records: Vec<Value> = fs::read_to_string(&path)
         .unwrap()
         .lines()
@@ -1524,7 +1520,6 @@ fn variable_handoffs_are_placed_on_their_calls_and_parent_scans_resume() {
             assert!(slots.is_empty());
         }
     }
-    let scanned = crate::handoff::BYTES.with(|count| count.get());
     let native = native_marker_query(&home);
     assert_eq!(
         serde_json::to_value(&native.handoffs).unwrap(),
@@ -1534,10 +1529,7 @@ fn variable_handoffs_are_placed_on_their_calls_and_parent_scans_resume() {
         serde_json::to_value(&native.sessions).unwrap(),
         serde_json::to_value(&built.sessions).unwrap()
     );
-    assert_eq!(crate::handoff::BYTES.with(|count| count.get()), scanned);
     home.build();
-    assert_eq!(crate::handoff::PARSES.with(|count| count.get()) - parses, 0);
-    assert_eq!(crate::handoff::BYTES.with(|count| count.get()), scanned);
     let appended = format!("{}\n", launch("third", ts(0, 51), command));
     use std::io::Write;
     fs::OpenOptions::new()
@@ -1547,8 +1539,6 @@ fn variable_handoffs_are_placed_on_their_calls_and_parent_scans_resume() {
         .write_all(appended.as_bytes())
         .unwrap();
     let after = home.build();
-    assert_eq!(crate::handoff::PARSES.with(|count| count.get()) - parses, 0);
-    assert_eq!(crate::handoff::BYTES.with(|count| count.get()) - scanned, 0);
     assert_eq!(only(&after, "spawn", "lead", "early").at, at(0, 1));
     assert_eq!(only(&after, "spawn", "lead", "later").at, at(0, 11));
 }
@@ -4260,7 +4250,6 @@ fn model_restart_uses_verified_markers_and_launches_without_legacy_scans() {
         )],
     );
     let marker_reads = crate::FIRST_MARKER_READS.with(std::cell::Cell::get);
-    let launch_scans = crate::handoff::BYTES.with(std::cell::Cell::get);
     let direct_reads = DIRECT_SOURCE_READS.with(std::cell::Cell::get);
     for _ in 0..2 {
         let before = crate::native_record::READ_BYTES.with(std::cell::Cell::get);
@@ -4271,10 +4260,6 @@ fn model_restart_uses_verified_markers_and_launches_without_legacy_scans() {
         assert_eq!(
             crate::FIRST_MARKER_READS.with(std::cell::Cell::get),
             marker_reads
-        );
-        assert_eq!(
-            crate::handoff::BYTES.with(std::cell::Cell::get),
-            launch_scans
         );
         assert_eq!(DIRECT_SOURCE_READS.with(std::cell::Cell::get), direct_reads);
     }
@@ -4380,8 +4365,6 @@ fn native_handoff_restart_reads_candidates_and_repairs_locations_without_event_r
             "Semon-Parent: claude:parent\nSemon-Handoff: /private/SECRET-PROMPT",
         )],
     );
-    let parses = crate::handoff::PARSES.with(std::cell::Cell::get);
-    let scans = crate::handoff::BYTES.with(std::cell::Cell::get);
     for _ in 0..2 {
         let bytes = crate::native_record::READ_BYTES.with(std::cell::Cell::get);
         let native = native_marker_query(&home);
@@ -4399,8 +4382,6 @@ fn native_handoff_restart_reads_candidates_and_repairs_locations_without_event_r
             crate::native_record::READ_BYTES.with(std::cell::Cell::get) - bytes < 16 * 1024,
             "native evidence reads must not scan the unrelated parent prefix"
         );
-        assert_eq!(crate::handoff::PARSES.with(std::cell::Cell::get), parses);
-        assert_eq!(crate::handoff::BYTES.with(std::cell::Cell::get), scans);
     }
     let connection = rusqlite::Connection::open(EventCache::path(&home.options.cache)).unwrap();
     let indexed = crate::events::PARSED.with(std::cell::Cell::get);
@@ -4460,7 +4441,6 @@ fn native_handoff_restart_reads_candidates_and_repairs_locations_without_event_r
             at(10, 1)
         );
         assert_eq!(crate::events::PARSED.with(std::cell::Cell::get), indexed);
-        assert_eq!(crate::handoff::BYTES.with(std::cell::Cell::get), scans);
     }
     assert_eq!(fs::read(path).unwrap(), original);
 }

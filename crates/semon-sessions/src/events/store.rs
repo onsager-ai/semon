@@ -279,6 +279,7 @@ DELETE FROM meta WHERE key GLOB 'native_codex_header:*';
 DELETE FROM meta WHERE key GLOB 'native_claude_sidecar:*';
 DELETE FROM meta WHERE key GLOB 'native_source_chunks:*';
 DELETE FROM meta WHERE key GLOB 'native_parent_marker:*';
+DELETE FROM meta WHERE key GLOB 'native_tree_summary:*';
 DELETE FROM meta WHERE key GLOB 'native_launch_calls:*';
 ";
 
@@ -1802,6 +1803,7 @@ impl SqliteStore {
             chunk_proofs::clear(&transaction, path)?;
             launch_calls::clear(&transaction, path)?;
             transaction.execute("DELETE FROM meta WHERE key=?1", [parent_marker_key(path)])?;
+            transaction.execute("DELETE FROM meta WHERE key=?1", [tree_summary_key(path)])?;
             invalidate_catalog_source(&transaction, path, "removed")?;
         }
         transaction.commit()?;
@@ -2502,6 +2504,61 @@ const NATIVE_METADATA_VALUE: &str =
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+struct TreeSummaryRecord {
+    version: u32,
+    parser_version: u32,
+    ledger: String,
+    summary: crate::native_tree::Summary,
+}
+
+fn tree_summary_key(path: &str) -> String {
+    format!("native_tree_summary:{path}")
+}
+
+fn read_tree_summary(
+    statement: &mut Statement<'_>,
+    path: &str,
+    ledger: &Ledger,
+) -> rusqlite::Result<Option<crate::native_tree::Summary>> {
+    let encoded: Option<Option<String>> = statement
+        .query_row([tree_summary_key(path)], |row| row.get(0))
+        .optional()?;
+    Ok(encoded.flatten().and_then(|text| {
+        let record: TreeSummaryRecord = serde_json::from_str(&text).ok()?;
+        (record.version == 1
+            && record.parser_version == CACHE_VERSION
+            && record.ledger == header_ledger(ledger))
+        .then_some(record.summary)
+    }))
+}
+
+fn write_tree_summary(
+    transaction: &Transaction<'_>,
+    path: &str,
+    ledger: &Ledger,
+    summary: Option<&crate::native_tree::Summary>,
+) -> rusqlite::Result<()> {
+    let encoded = summary
+        .map(|summary| {
+            json(&TreeSummaryRecord {
+                version: 1,
+                parser_version: CACHE_VERSION,
+                ledger: header_ledger(ledger),
+                summary: summary.clone(),
+            })
+        })
+        .transpose()?;
+    if let Some(encoded) = encoded.filter(|text| text.len() <= NATIVE_METADATA_MAX) {
+        transaction.execute("INSERT INTO meta(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value", params![tree_summary_key(path), encoded])?;
+    } else {
+        // Never truncate native model labels, tool state or usage accounting.
+        transaction.execute("DELETE FROM meta WHERE key=?1", [tree_summary_key(path)])?;
+    }
+    Ok(())
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct CodexHeaderRecord {
     version: u32,
     parser_version: u32,
@@ -2769,6 +2826,7 @@ struct Readers<'c> {
     codex_header: Statement<'c>,
     claude_sidecar: Statement<'c>,
     parent_marker: Statement<'c>,
+    tree_summary: Statement<'c>,
 }
 
 impl<'c> Readers<'c> {
@@ -2790,6 +2848,7 @@ impl<'c> Readers<'c> {
             codex_header: connection.prepare(NATIVE_METADATA_VALUE)?,
             claude_sidecar: connection.prepare(NATIVE_METADATA_VALUE)?,
             parent_marker: connection.prepare(NATIVE_METADATA_VALUE)?,
+            tree_summary: connection.prepare(NATIVE_METADATA_VALUE)?,
         })
     }
 }
@@ -2871,6 +2930,7 @@ fn read_file(
         dirty_rows: None,
         source_chunks: chunk_proofs::read(readers.connection, &path, &ledger)?,
         marker_index: read_parent_marker(&mut readers.parent_marker, &path, &ledger)?,
+        tree_summary: read_tree_summary(&mut readers.tree_summary, &path, &ledger)?,
         handoff_index: launch_calls::read(readers.connection, &path, &ledger)?,
         codex_header: read_codex_header(&mut readers.codex_header, &path, &ledger)?,
         claude_sidecar: if crate::native_sidecar::agent_path(Path::new(&path)) {
@@ -3094,6 +3154,7 @@ fn write_file(
 ) -> rusqlite::Result<()> {
     let FileIndex {
         dirty_rows: _,
+        tree_summary,
         source_chunks,
         marker_index,
         handoff_index,
@@ -3138,6 +3199,7 @@ fn write_file(
         tail,
     } = ledger;
     write_codex_header(transaction, path, ledger, codex_header.as_ref())?;
+    write_tree_summary(transaction, path, ledger, tree_summary.as_ref())?;
     write_claude_sidecar(transaction, path, ledger, claude_sidecar.as_ref())?;
     chunk_proofs::write(transaction, path, ledger, source_chunks.as_deref())?;
     write_parent_marker(transaction, path, ledger, marker_index.as_ref())?;
@@ -3609,6 +3671,7 @@ mod tests {
             dirty_rows: None,
             source_chunks: None,
             marker_index: Some(crate::native_marker::Index::default()),
+            tree_summary: None,
             handoff_index: Some(crate::native_handoff::Index::default()),
             codex_header: Some(crate::native_header::CodexHeader::default()),
             claude_sidecar: None,

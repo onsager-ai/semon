@@ -188,6 +188,14 @@ impl Records<'_> {
         self.with_evidence(path, record, |file| record.read(file))
     }
 
+    pub(crate) fn verify_evidence(
+        &self,
+        path: &Path,
+        record: &crate::native_record::Record,
+    ) -> io::Result<()> {
+        self.with_evidence(path, record, |file| record.verify(file))
+    }
+
     fn with_evidence<T>(
         &self,
         path: &Path,
@@ -247,7 +255,7 @@ impl Records<'_> {
                 .get(path)
                 .is_some_and(|records| records.contains(call.record()));
             if !checked {
-                self.with_evidence(path, call.record(), |file| call.record().verify(file))?;
+                self.verify_evidence(path, call.record())?;
             }
             call.read(path, self)
         })();
