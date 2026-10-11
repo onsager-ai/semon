@@ -3,7 +3,21 @@
 Embedding callers replace `Query::from_core(core)` with
 `Query::from_native_core(core)`. The host still owns authorization, admission and
 source custody; the native constructor preserves its configured output window.
-CLI/stdio callers keep `Query::new` or `Query::with_machines`. Existing hosted
+CLI/stdio callers keep `Query::new` or `Query::with_machines`; these construct
+native evidence owners directly, without ViewerCore, machine views, compatibility
+state or refresh workers. Construction and argument rejection do not open the
+source cache. The same native owner supplies the Viewer producer's complete
+Event Index, text preparation and query cohort, so alternating Query, Catalog,
+tree and Model reads do not create a second producer cache. Source snapshots keep
+the existing file, process, facts and writer-lock observations; request-owned
+readers still verify source bytes and completion independently.
+
+Hosted `from_native_core` remains a transitional admission/custody adapter for
+Hub #226. It borrows each existing machine's native owner and preserves output
+windows, union ownership and closed-source behavior. The host's workspace guard,
+blocking-worker lifetime and archive restoration still need a separate migration;
+substituting local scan-window construction would change the hosted contract.
+Existing hosted
 production pins keep their original API until the paired consumer adopts the
 new Semon revision. No constructor alias or full-model fallback remains.
 
@@ -52,7 +66,7 @@ arbitrary whole-file byte immutability. Changed metadata retains the original
 complete-prefix check. Platforms without a change-time observation also keep
 their existing complete-prefix verification. The block proof establishes the identity of bytes the
 native reader actually consumes independently of that timestamp shortcut.
-Removing the duplicate launch scan and qualifying hosted generation ownership
+Qualifying hosted generation ownership and scoped dependency reconciliation
 remain separate migration work.
 
 Block digests contain no source text. They are paged within the current Event

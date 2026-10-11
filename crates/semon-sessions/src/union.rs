@@ -641,6 +641,31 @@ impl QueryPart {
 }
 
 impl QueryRead {
+    pub(crate) fn new(machines: Vec<(String, Arc<QueryData>)>, droppable: usize) -> Self {
+        let identities: Vec<_> = machines
+            .iter()
+            .map(|(key, data)| IdentityPart {
+                key,
+                machine: &data.machine_id,
+                sessions: &data.sessions,
+                transcripts: &data.tx,
+            })
+            .collect();
+        let plan = identity_plan(&identities, droppable);
+        let multiple = machines.len() > 1;
+        let parts = machines
+            .into_iter()
+            .enumerate()
+            .map(|(index, (_, data))| QueryPart {
+                data,
+                machine: multiple.then(|| plan.machine_ids[index].clone()),
+                dropped: plan.dropped[index].clone(),
+                droppable: multiple && index >= plan.droppable,
+            })
+            .collect();
+        Self { parts, plan }
+    }
+
     pub(crate) fn owner(&self, id: &str) -> Owner {
         match self.parts.len() {
             0 => Owner::Missing,
@@ -1735,31 +1760,16 @@ impl ViewerCore {
         let views = self.views();
         let data = views
             .iter()
-            .map(|(_, view)| view.query_at(now))
+            .map(|(_, view)| view.evidence.query_at(now))
             .collect::<io::Result<Vec<_>>>()?;
-        let identities: Vec<_> = views
-            .iter()
-            .zip(&data)
-            .map(|((key, _), data)| IdentityPart {
-                key,
-                machine: &data.machine_id,
-                sessions: &data.sessions,
-                transcripts: &data.tx,
-            })
-            .collect();
-        let plan = identity_plan(&identities, self.droppable());
-        let multiple = data.len() > 1;
-        let parts = data
-            .into_iter()
-            .enumerate()
-            .map(|(index, data)| QueryPart {
-                data,
-                machine: multiple.then(|| plan.machine_ids[index].clone()),
-                dropped: plan.dropped[index].clone(),
-                droppable: multiple && index >= plan.droppable,
-            })
-            .collect();
-        Ok(QueryRead { parts, plan })
+        Ok(QueryRead::new(
+            views
+                .iter()
+                .zip(data)
+                .map(|((key, _), data)| (key.clone(), data))
+                .collect(),
+            self.droppable(),
+        ))
     }
 
     /// The V1 routes that name a transcript by harness and id: the machine

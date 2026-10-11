@@ -314,6 +314,23 @@ Summary reads serialize summary fields and open questions; selected-session
 reads serialize that session's turns and handoffs. No database or generalized
 event pipeline is added.
 
+Native source ownership is now extracted from MachineView. `NativeEvidence`
+owns one complete Event Index, native text preparation, catalog observation and
+query cohort per machine; Viewer producers borrow it under the same producer
+lock. Shared source snapshots retain directory/file, facts, process-start and
+writer-lock freshness observations. Local Query/stdio MCP construct native
+owners directly, with no ViewerCore, compatibility caches or refresh pool.
+Their source-selection/window and union identity rules are unchanged. Retirement
+prevents a waiting cold query from creating an index; a warm retired owner retains
+only its already verified cohort, whose body reads still refuse deleted evidence.
+No persisted schema, API, parser or archive version changes.
+
+Hosted `from_native_core` still borrows these owners through existing admission
+and source custody. Removing this adapter and tenant-wide archive restoration is
+tracked in Hub #226; it must preserve output windows, capacity, cancellation-safe
+blocking lifetime and deletion fencing. This extraction does not establish
+bounded discovery, relationship reconciliation or full compatibility retirement.
+
 This slice still discovers and joins every native source eligible for the local
 file-selection window. It does not establish constant-cost selected-session
 dependency closure or replace all query metadata with persisted Catalog rows.

@@ -77,6 +77,7 @@ pub use transcript_range::{
     SessionSourceReadMode, session_entry_field, session_entry_field_with_mode,
     session_transcript_range, session_transcript_range_with_mode,
 };
+mod native_evidence;
 mod query_source;
 mod source_chunks;
 mod source_reader;
