@@ -32,7 +32,7 @@ impl Chunks {
     }
 
     pub(crate) fn read(&self, file: &mut (impl Read + Seek), index: usize) -> io::Result<Vec<u8>> {
-        let expected = self.hashes.get(index).ok_or_else(unavailable)?;
+        self.hashes.get(index).ok_or_else(unavailable)?;
         let start = (index as u64)
             .checked_mul(SIZE as u64)
             .filter(|start| *start < self.offset)
@@ -43,11 +43,24 @@ impl Chunks {
         file.read_exact(&mut bytes)?;
         #[cfg(test)]
         READ_BYTES.with(|count| count.set(count.get() + len as u64));
-        let actual: [u8; 32] = Sha256::digest(&bytes).into();
-        if actual != *expected {
+        self.verify(index, &bytes)?;
+        Ok(bytes)
+    }
+
+    /// Local files and request-owned archive readers verify the same indexed
+    /// block proof. Provider generation names never replace this byte proof.
+    pub(crate) fn verify(&self, index: usize, bytes: &[u8]) -> io::Result<()> {
+        let expected = self.hashes.get(index).ok_or_else(unavailable)?;
+        let start = (index as u64)
+            .checked_mul(SIZE as u64)
+            .filter(|start| *start < self.offset)
+            .ok_or_else(unavailable)?;
+        let len = (self.offset - start).min(SIZE as u64) as usize;
+        let actual: [u8; 32] = Sha256::digest(bytes).into();
+        if bytes.len() != len || actual != *expected {
             return Err(unavailable());
         }
-        Ok(bytes)
+        Ok(())
     }
 }
 

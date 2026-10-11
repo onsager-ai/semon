@@ -259,6 +259,42 @@ fn selection(db: &Connection, key: &str) -> io::Result<Selection> {
     Ok(selection)
 }
 
+fn query_selection(db: &Connection, key: &str) -> io::Result<Selection> {
+    let mut selected = selection(db, key)?;
+    // Query needs the endpoints of the selected session's actual handoffs too.
+    // Reuse the indexed native trace, rather than discovering unrelated files.
+    let mut statement = db.prepare("SELECT endpoint FROM (SELECT json_extract(metadata,'$.from') AS endpoint FROM session_trace_edges WHERE session_key=?1 UNION SELECT json_extract(metadata,'$.to') AS endpoint FROM session_trace_edges WHERE session_key=?1) WHERE endpoint IS NOT NULL ORDER BY endpoint LIMIT 65").map_err(failure)?;
+    let endpoints = statement
+        .query_map([key], |row| row.get::<_, String>(0))
+        .map_err(failure)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(failure)?;
+    selected.incomplete |= endpoints.len() == 65;
+    for endpoint in endpoints {
+        if selected.rows.iter().any(|row| row.key == endpoint) {
+            continue;
+        }
+        // Far-end stubs have no source owner. The shared native producer
+        // derives those from the selected launch/handoff evidence itself.
+        let Some(row) = catalog(db, &endpoint)? else {
+            continue;
+        };
+        let paths: std::collections::BTreeSet<_> = selected
+            .rows
+            .iter()
+            .chain(std::iter::once(&row))
+            .flat_map(|row| row.sources.iter())
+            .map(|source| &source.path)
+            .collect();
+        if paths.len() > SOURCES_MAX || selected.rows.len() >= 64 {
+            selected.incomplete = true;
+            continue;
+        }
+        selected.rows.push(row);
+    }
+    Ok(selected)
+}
+
 /// Server-selected original references for one producer migration. The host
 /// checks machine authority and binds these references to its private custody.
 pub fn overview_repair_sources(
@@ -271,6 +307,28 @@ pub fn overview_repair_sources(
     if ready(&tx, &rows[0])? {
         return Ok(None);
     }
+    Ok(Some(source_refs(options, &rows)?))
+}
+
+/// Original native references for one focused Query and its bounded
+/// relationship context. References carry evidence, never source authority.
+pub fn session_query_sources(
+    options: &Options,
+    key: &str,
+) -> io::Result<Vec<crate::SessionSourceRef>> {
+    let mut db = connection(options)?;
+    let tx = db.transaction().map_err(failure)?;
+    let selected = query_selection(&tx, key)?;
+    if selected.incomplete {
+        return Err(io::Error::new(
+            io::ErrorKind::WouldBlock,
+            "Selected query relationship closure exceeds its source bound",
+        ));
+    }
+    source_refs(options, &selected.rows)
+}
+
+fn source_refs(options: &Options, rows: &[CatalogRow]) -> io::Result<Vec<crate::SessionSourceRef>> {
     let mut selected = BTreeMap::new();
     for row in rows {
         let home = match row.harness.as_str() {
@@ -279,7 +337,7 @@ pub fn overview_repair_sources(
             "copilot" => &options.copilot_home,
             _ => return Err(failure("Unsupported producer source")),
         };
-        for source in row.sources {
+        for source in &row.sources {
             let relative = source
                 .path
                 .strip_prefix(home)
@@ -290,12 +348,12 @@ pub fn overview_repair_sources(
             let reference = crate::SessionSourceRef {
                 root: row.harness.clone(),
                 path: relative.into(),
-                native_id: source.native_id,
+                native_id: source.native_id.clone(),
                 offset: source.offset,
                 prefix_sha256: source.prefix_sha256,
                 tail_sha256: source.tail_sha256,
             };
-            if let Some(prior) = selected.insert(source.path, reference.clone())
+            if let Some(prior) = selected.insert(source.path.clone(), reference.clone())
                 && prior != reference
             {
                 return Err(failure("Conflicting native migration source"));
@@ -305,7 +363,7 @@ pub fn overview_repair_sources(
     if selected.is_empty() || selected.len() > SOURCES_MAX {
         return Err(failure("Native migration source bound exceeded"));
     }
-    Ok(Some(selected.into_values().collect()))
+    Ok(selected.into_values().collect())
 }
 
 /// Cheap migration candidates. A host authorizes the machine and supplies its
@@ -397,6 +455,106 @@ pub fn repair_session_overview(
         .iter()
         .map(|row| (row.key.clone(), row.sources.clone()))
         .collect();
+    let mut producer_options = options.clone();
+    producer_options.all = true;
+    producer_options.scan_window = false;
+    let prepared = with_records(options, &rows, provider, mode, tx, |native| {
+        crate::model::prepare_history(&producer_options, &rows, native, crate::model::now_ms())
+    })?;
+    let mut repaired = Vec::new();
+    // Related inputs qualify the selected owner's relationships. They cannot
+    // replace another owner's publication with this selected, partial closure.
+    for mut row in prepared.rows.into_iter().filter(|row| row.key == key) {
+        let Some(sources) = original.get(&row.key) else {
+            continue;
+        };
+        let paths: std::collections::BTreeSet<_> = row
+            .sources
+            .iter()
+            .map(|source| (&source.path, &source.native_id))
+            .collect();
+        if paths
+            != sources
+                .iter()
+                .map(|source| (&source.path, &source.native_id))
+                .collect()
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Native migration identity changed",
+            ));
+        }
+        row.sources = sources.clone();
+        if selection.incomplete
+            && let Some(trace) = row.trace.as_mut()
+        {
+            trace.relationships_incomplete();
+        }
+        row.overview = row
+            .overview
+            .take()
+            .map(|summary| summary.with_sources(sources))
+            .transpose()?;
+        repaired.push(row);
+    }
+    if !repaired.iter().any(|row| row.key == key) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Native migration owner unavailable",
+        ));
+    }
+    // Initialize through the owning schema migration. It preserves independent
+    // current/history membership; the publication below does not touch either.
+    let _schema = EventCache::open_scoped(&options.cache).map_err(failure)?;
+    let mut writable = Connection::open(EventCache::path(&options.cache)).map_err(failure)?;
+    writable.busy_timeout(Duration::ZERO).map_err(failure)?;
+    let tx = writable
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(failure)?;
+    let current: String = tx
+        .query_row(
+            "SELECT value FROM meta WHERE key='catalog_generation'",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(failure)?;
+    if current != generation {
+        return Ok(false);
+    }
+    for row in &repaired {
+        let Some(current) = catalog(&tx, &row.key)? else {
+            return Ok(false);
+        };
+        if current.sources != row.sources {
+            return Ok(false);
+        }
+    }
+    for row in &repaired {
+        if let Some(summary) = &row.overview {
+            crate::overview::publish(&tx, &row.key, row.last.unwrap_or(0), summary)
+                .map_err(failure)?;
+        }
+        if let Some(trace) = &row.trace {
+            crate::causal_trace::publish(&tx, row, trace).map_err(failure)?;
+        }
+        tx.execute(
+            "DELETE FROM meta WHERE key=?1",
+            [format!("overview_needed:{}", row.key)],
+        )
+        .map_err(failure)?;
+    }
+    tx.commit().map_err(failure)?;
+    Ok(true)
+}
+
+fn with_records<T>(
+    options: &Options,
+    rows: &[CatalogRow],
+    provider: Option<&dyn SessionSourceReader>,
+    mode: SessionSourceReadMode,
+    tx: rusqlite::Transaction<'_>,
+    derive: impl FnOnce(&NativeRecords<'_>) -> io::Result<T>,
+) -> io::Result<T> {
     let mut unique = BTreeMap::new();
     for source in rows.iter().flat_map(|row| &row.sources) {
         if let Some(prior) = unique.insert(source.path.clone(), source.clone())
@@ -422,7 +580,7 @@ pub fn repair_session_overview(
     let mut fields = BTreeMap::new();
     if selected.is_some() {
         let mut field_bytes = 0;
-        for row in &rows {
+        for row in rows {
             let source = crate::retention::source_generation(&row.sources).map_err(failure)?;
             let history = tx.query_row("SELECT EXISTS(SELECT 1 FROM session_history_projections WHERE session_key=?1 AND source_generation=?2 AND version=5)",rusqlite::params![row.key,source],|r|r.get::<_,bool>(0)).map_err(failure)?;
             let current = tx.query_row("SELECT EXISTS(SELECT 1 FROM session_slot_projections WHERE session_key=?1 AND source_generation=?2 AND version=5)",rusqlite::params![row.key,source],|r|r.get::<_,bool>(0)).map_err(failure)?;
@@ -598,98 +756,51 @@ pub fn repair_session_overview(
             },
         )?;
     }
-    let mut producer_options = options.clone();
-    producer_options.all = true;
-    producer_options.scan_window = false;
-    let prepared =
-        crate::model::prepare_history(&producer_options, &rows, &native, crate::model::now_ms())?;
+    let result = derive(&native)?;
     if let Some(error) = native.error.take() {
         return Err(error);
     }
-    let mut repaired = Vec::new();
-    // Related inputs qualify the selected owner's relationships. They cannot
-    // replace another owner's publication with this selected, partial closure.
-    for mut row in prepared.rows.into_iter().filter(|row| row.key == key) {
-        let Some(sources) = original.get(&row.key) else {
-            continue;
-        };
-        let paths: std::collections::BTreeSet<_> = row
-            .sources
-            .iter()
-            .map(|source| (&source.path, &source.native_id))
-            .collect();
-        if paths
-            != sources
-                .iter()
-                .map(|source| (&source.path, &source.native_id))
-                .collect()
-        {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "Native migration identity changed",
-            ));
-        }
-        row.sources = sources.clone();
-        if selection.incomplete
-            && let Some(trace) = row.trace.as_mut()
-        {
-            trace.relationships_incomplete();
-        }
-        row.overview = row
-            .overview
-            .take()
-            .map(|summary| summary.with_sources(sources))
-            .transpose()?;
-        repaired.push(row);
-    }
-    if !repaired.iter().any(|row| row.key == key) {
+    Ok(result)
+}
+
+/// Selected native Query evidence uses the same original-generation reader as
+/// Home/Trace repair. No provider or credentials escape this request.
+pub(crate) fn with_query<T>(
+    options: &Options,
+    key: &str,
+    provider: Option<&dyn SessionSourceReader>,
+    mode: SessionSourceReadMode,
+    now: i64,
+    read: impl FnOnce(crate::model::QueryData) -> T,
+) -> io::Result<T> {
+    let mut db = connection(options)?;
+    let tx = db.transaction().map_err(failure)?;
+    let selection = query_selection(&tx, key)?;
+    if selection.incomplete {
         return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "Native migration owner unavailable",
+            io::ErrorKind::WouldBlock,
+            "Selected query relationship closure exceeds its source bound",
         ));
     }
-    // Initialize through the owning schema migration. It preserves independent
-    // current/history membership; the publication below does not touch either.
-    let _schema = EventCache::open_scoped(&options.cache).map_err(failure)?;
-    let mut writable = Connection::open(EventCache::path(&options.cache)).map_err(failure)?;
-    writable.busy_timeout(Duration::ZERO).map_err(failure)?;
-    let tx = writable
-        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-        .map_err(failure)?;
-    let current: String = tx
-        .query_row(
-            "SELECT value FROM meta WHERE key='catalog_generation'",
-            [],
-            |row| row.get(0),
-        )
-        .map_err(failure)?;
-    if current != generation {
-        return Ok(false);
+    let rows = selection.rows;
+    let data = with_records(options, &rows, provider, mode, tx, |native| {
+        crate::model::query_history(options, &rows, native, now)
+    })?;
+    let result = read(data);
+    let tx = db.transaction().map_err(failure)?;
+    let current = query_selection(&tx, key)?;
+    let footprint = |rows: &[CatalogRow]| -> BTreeMap<_, _> {
+        rows.iter()
+            .map(|row| (row.key.clone(), row.sources.clone()))
+            .collect()
+    };
+    if current.incomplete || footprint(&current.rows) != footprint(&rows) {
+        return Err(io::Error::new(
+            io::ErrorKind::WouldBlock,
+            "Selected query source or relationship generation changed; resynchronize",
+        ));
     }
-    for row in &repaired {
-        let Some(current) = catalog(&tx, &row.key)? else {
-            return Ok(false);
-        };
-        if current.sources != row.sources {
-            return Ok(false);
-        }
-    }
-    for row in &repaired {
-        if let Some(summary) = &row.overview {
-            crate::overview::publish(&tx, &row.key, row.last.unwrap_or(0), summary)
-                .map_err(failure)?;
-        }
-        if let Some(trace) = &row.trace {
-            crate::causal_trace::publish(&tx, row, trace).map_err(failure)?;
-        }
-        tx.execute(
-            "DELETE FROM meta WHERE key=?1",
-            [format!("overview_needed:{}", row.key)],
-        )
-        .map_err(failure)?;
-    }
-    tx.commit().map_err(failure)?;
-    Ok(true)
+    Ok(result)
 }
 
 #[cfg(test)]

@@ -24,6 +24,21 @@ The paired Hub consumer admits native sources directly; the preceding
 removed. Query owns only native sources. Substituting local scan-window
 construction would change the hosted contract. No full-model query fallback remains.
 
+Focused embedding reads use `Query::call_selected` with a host-selected machine
+and Catalog key. `session_query_sources` returns the original references for its
+parent, children and indexed handoff endpoints; references grant no authority.
+The native producer reuses qualified current or retained Event Index generations.
+It does not construct a workspace producer, restore files or publish metadata.
+The request lends its reader and shares a 1,024-request budget through derivation,
+paging and completion. Source context is limited to 64 sources and native
+semantic reads to 64 MiB. An incomplete relationship closure refuses the request.
+Provider generation and length stay pinned across separate semantic reads;
+transcript bytes additionally verify the existing native block proofs. Completion
+rechecks the selected source/relationship footprint, so an unrelated Catalog
+publication does not invalidate a focused answer. Union machine labels and
+configured windows remain metadata inputs; unrelated native bodies are not read.
+Workspace listing, search and stalls still use the complete native query cohort.
+
 Recorded human-ask briefs remain content-free source offsets in the Query cohort.
 Metadata and transcript paging do not materialize every ask's prompt. Selected
 session reads resolve their requested briefs through the cohort's verified reader;

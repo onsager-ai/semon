@@ -406,6 +406,29 @@ pub(crate) struct QueryData {
     pub(crate) sources: crate::query_source::Sources,
 }
 
+impl QueryData {
+    /// Preserve union machine labels and configured windows without reading a
+    /// machine's native evidence. Selected queries supply evidence for one part.
+    pub(crate) fn identity(options: &Options, now: i64) -> Self {
+        let facts = MachineFacts::of(options);
+        Self {
+            sessions: BTreeMap::new(),
+            handoffs: Vec::new(),
+            ask_briefs: BTreeMap::new(),
+            turns: Vec::new(),
+            facts: BTreeMap::new(),
+            tx: BTreeMap::new(),
+            home: facts.home(),
+            machine_id: facts.hostname(options),
+            pids: Vec::new(),
+            window_start: (!options.all).then(|| {
+                now.saturating_sub(i64::try_from(options.since.as_millis()).unwrap_or(i64::MAX))
+            }),
+            sources: crate::query_source::Sources::default(),
+        }
+    }
+}
+
 pub(crate) struct PromptBrief {
     path: PathBuf,
     offset: u64,
@@ -6388,6 +6411,37 @@ pub(crate) fn prepare_history(
     records: &crate::overview_repair::NativeRecords,
     now: i64,
 ) -> io::Result<PreparedSources> {
+    match prepare_history_inner(options, rows, records, now, BuildTarget::Sources)? {
+        BuildOutput::Sources(prepared) => Ok(prepared),
+        _ => Err(io::Error::other(
+            "Qualified producer did not capture metadata",
+        )),
+    }
+}
+
+/// Query the same qualified original generations as native presentation reads.
+/// The source proofs remain credential-free; callers own subsequent byte reads.
+pub(crate) fn query_history(
+    options: &Options,
+    rows: &[summary::CatalogRow],
+    records: &crate::overview_repair::NativeRecords,
+    now: i64,
+) -> io::Result<QueryData> {
+    match prepare_history_inner(options, rows, records, now, BuildTarget::Query)? {
+        BuildOutput::Query(data) => Ok(*data),
+        _ => Err(io::Error::other(
+            "Qualified producer did not derive query evidence",
+        )),
+    }
+}
+
+fn prepare_history_inner(
+    options: &Options,
+    rows: &[summary::CatalogRow],
+    records: &crate::overview_repair::NativeRecords,
+    now: i64,
+    target: BuildTarget,
+) -> io::Result<BuildOutput> {
     let mut files = Vec::new();
     let mut seen = BTreeSet::new();
     for row in rows {
@@ -6530,20 +6584,15 @@ pub(crate) fn prepare_history(
             });
         }
     }
-    match build_sources_inner(
+    build_sources_inner(
         options,
         &mut EventCache::default(),
         &mut false,
         &mut Texts::default(),
         now,
         BuildSelection::History { files, records },
-        BuildTarget::Sources,
-    )? {
-        BuildOutput::Sources(prepared) => Ok(prepared),
-        _ => Err(io::Error::other(
-            "Qualified producer did not capture metadata",
-        )),
-    }
+        target,
+    )
 }
 
 fn build_sources_inner(
@@ -6744,27 +6793,29 @@ fn build_sources_inner(
                 .then_some((&*builder.cache, catalog_base.as_deref())),
         )
     });
-    let family_costs = crate::causal_trace::family_costs(builder.sessions.iter().map(|session| {
-        (
-            session.key.as_str(),
-            session.parent.map(|at| builder.sessions[at].key.as_str()),
-            session.out.cost.usd,
-        )
-    }));
-    let publication_sessions = builder
-        .sessions
-        .iter()
-        .map(|session| (session.key.clone(), session.out.clone()))
-        .collect();
-    let activity = crate::analytics::activity(&publication_sessions, &tx, &turns, &handoffs, now);
-    let preview_owners: BTreeMap<_,_>=builder.handoffs.iter().map(|h| {
-        let owner=|field:&str| match &h.previews {
-            Some(previews)=>previews.get(field).map(|preview|builder.sessions[builder.of_file[preview.at.0]].key.as_str()),
-            None=>(field=="brief" || h.out.result.is_some()).then_some(h.out.from.as_str()),
-        };
-        (h.out.id.clone(),serde_json::json!({"brief_session":owner("brief"),"result_session":owner("result")}))
-    }).collect();
     if let Some(rows) = &mut catalog {
+        let family_costs =
+            crate::causal_trace::family_costs(builder.sessions.iter().map(|session| {
+                (
+                    session.key.as_str(),
+                    session.parent.map(|at| builder.sessions[at].key.as_str()),
+                    session.out.cost.usd,
+                )
+            }));
+        let publication_sessions = builder
+            .sessions
+            .iter()
+            .map(|session| (session.key.clone(), session.out.clone()))
+            .collect();
+        let activity =
+            crate::analytics::activity(&publication_sessions, &tx, &turns, &handoffs, now);
+        let preview_owners: BTreeMap<_,_>=builder.handoffs.iter().map(|h| {
+            let owner=|field:&str| match &h.previews {
+                Some(previews)=>previews.get(field).map(|preview|builder.sessions[builder.of_file[preview.at.0]].key.as_str()),
+                None=>(field=="brief" || h.out.result.is_some()).then_some(h.out.from.as_str()),
+            };
+            (h.out.id.clone(),serde_json::json!({"brief_session":owner("brief"),"result_session":owner("result")}))
+        }).collect();
         for row in rows {
             // The local model remains usable for native paths that cannot be
             // represented by the portable catalog. Never publish a lossy alias.
@@ -7039,8 +7090,8 @@ fn build_sources_inner(
         if let Some(hook) = AFTER_QUERY_DERIVATION.with(|hook| hook.borrow_mut().take()) {
             hook();
         }
-        verify_sidecars(&files)?;
         if history_records.is_none() {
+            verify_sidecars(&files)?;
             source_records.finish()?;
         }
         drop(source_records);
