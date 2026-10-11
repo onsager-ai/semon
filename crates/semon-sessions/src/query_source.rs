@@ -8,7 +8,7 @@ use crate::{
     sealed::LogFile,
 };
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     io::{self, BufRead, BufReader, Read, Seek, SeekFrom},
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
@@ -18,6 +18,7 @@ struct Proof {
     source: SessionSourceRef,
     ledger: Ledger,
     generation: String,
+    chunks: Arc<crate::source_chunks::Chunks>,
 }
 
 #[derive(Default)]
@@ -36,10 +37,13 @@ fn unavailable() -> io::Error {
 impl Sources {
     pub(crate) fn capture(
         options: &Options,
-        sources: impl Iterator<Item = CatalogSource>,
+        sources: impl Iterator<Item = (CatalogSource, Option<Arc<crate::source_chunks::Chunks>>)>,
     ) -> io::Result<Self> {
         let mut captured = Self::default();
-        for source in sources {
+        for (source, chunks) in sources {
+            let chunks = chunks
+                .filter(|chunks| chunks.valid(source.offset))
+                .ok_or_else(unavailable)?;
             let (root, path) = [InputRoot::Claude, InputRoot::Codex, InputRoot::Copilot]
                 .into_iter()
                 .find_map(|root| {
@@ -82,6 +86,7 @@ impl Sources {
                     tail: source.tail_sha256,
                 },
                 generation,
+                chunks,
             };
             captured.paths.insert((root, path), source.path.clone());
             captured.proofs.insert(source.path, proof);
@@ -93,6 +98,7 @@ impl Sources {
         Records {
             sources: self,
             checked: Mutex::default(),
+            checked_chunks: Mutex::default(),
             failed: Mutex::new(false),
         }
     }
@@ -102,10 +108,40 @@ impl Sources {
 pub(crate) struct Records<'a> {
     sources: &'a Sources,
     checked: Mutex<BTreeMap<PathBuf, Stat>>,
+    checked_chunks: Mutex<BTreeMap<PathBuf, BTreeSet<usize>>>,
     failed: Mutex<bool>,
 }
 
 impl Records<'_> {
+    /// Native scalar-recipe preparation keeps its original bounded complete-line
+    /// rule while borrowing the same source proof as the other native reads.
+    pub(crate) fn record_bytes(
+        &self,
+        path: &Path,
+        offset: u64,
+        max: u64,
+    ) -> io::Result<Option<Vec<u8>>> {
+        let proof = self.sources.proofs.get(path).ok_or_else(unavailable)?;
+        if offset >= proof.source.offset {
+            return Ok(None);
+        }
+        let mut reader = BufReader::with_capacity(
+            crate::source_chunks::SIZE,
+            RangeFile {
+                records: self,
+                proof,
+                position: offset,
+            },
+        )
+        .take(max + 1);
+        let mut bytes = Vec::new();
+        reader.read_until(b'\n', &mut bytes)?;
+        if bytes.len() as u64 > max || bytes.last() != Some(&b'\n') {
+            return Ok(None);
+        }
+        Ok(Some(bytes))
+    }
+
     /// Derivation preserves the shared producer's 64 MiB native-record limit.
     /// Its short text cap is applied by Texts after the unchanged extractor.
     pub(crate) fn derive(&self, path: &Path, offset: u64) -> io::Result<Option<serde_json::Value>> {
@@ -114,11 +150,14 @@ impl Records<'_> {
             if offset >= proof.source.offset {
                 return Err(unavailable());
             }
-            let mut reader = BufReader::new(RangeFile {
-                records: self,
-                proof,
-                position: offset,
-            })
+            let mut reader = BufReader::with_capacity(
+                crate::source_chunks::SIZE,
+                RangeFile {
+                    records: self,
+                    proof,
+                    position: offset,
+                },
+            )
             .take(crate::model::MAX_LINE);
             let mut bytes = Vec::new();
             reader.read_until(b'\n', &mut bytes)?;
@@ -141,21 +180,17 @@ impl Records<'_> {
     }
 
     fn verify(&self, path: &Path, proof: &Proof) -> io::Result<()> {
-        if proof.source.offset > 0 {
-            self.read_range(&proof.source, Some(&proof.generation), 0, 1)?;
-        } else {
-            let mut file = LogFile::open(path)?;
-            let before = Stat::from_metadata(&file.metadata()?)?;
-            if !proof.ledger.resumes(&before, &mut file)
-                || Stat::from_metadata(&file.metadata()?)? != before
-            {
-                return Err(unavailable());
-            }
-            self.checked
-                .lock()
-                .map_err(|_| unavailable())?
-                .insert(path.to_owned(), before);
+        let mut file = LogFile::open(path)?;
+        let before = Stat::from_metadata(&file.metadata()?)?;
+        let mut checked = self.checked.lock().map_err(|_| unavailable())?;
+        let unchanged = before.changed_ns.is_some()
+            && (before == proof.ledger.stat || checked.get(path) == Some(&before));
+        if (!unchanged && !proof.ledger.resumes(&before, &mut file))
+            || Stat::from_metadata(&file.metadata()?)? != before
+        {
+            return Err(unavailable());
         }
+        checked.insert(path.to_owned(), before);
         Ok(())
     }
     pub(crate) fn read(
@@ -209,6 +244,28 @@ impl Records<'_> {
             let proof = self.sources.proofs.get(&path).ok_or_else(unavailable)?;
             self.verify(&path, proof)?;
         }
+        for (path, indices) in self
+            .checked_chunks
+            .lock()
+            .map_err(|_| unavailable())?
+            .iter()
+        {
+            let proof = self.sources.proofs.get(path).ok_or_else(unavailable)?;
+            let mut file = LogFile::open(path)?;
+            let before = Stat::from_metadata(&file.metadata()?)?;
+            if before.dev != proof.ledger.stat.dev
+                || before.ino != proof.ledger.stat.ino
+                || before.size < proof.source.offset
+            {
+                return Err(unavailable());
+            }
+            for index in indices {
+                proof.chunks.read(&mut file, *index)?;
+            }
+            if Stat::from_metadata(&file.metadata()?)? != before {
+                return Err(unavailable());
+            }
+        }
         Ok(())
     }
     fn range(
@@ -248,15 +305,31 @@ impl Records<'_> {
         if !unchanged && !proof.ledger.resumes(&before, &mut file) {
             return Err(unavailable());
         }
-        file.seek(SeekFrom::Start(offset))?;
-        let mut bytes = vec![0; max];
-        file.read_exact(&mut bytes)?;
+        let first = usize::try_from(offset / crate::source_chunks::SIZE as u64)
+            .map_err(|_| unavailable())?;
+        let end = offset + max as u64;
+        let last = usize::try_from((end - 1) / crate::source_chunks::SIZE as u64)
+            .map_err(|_| unavailable())?;
+        let mut bytes = Vec::with_capacity(max);
+        for index in first..=last {
+            let part = proof.chunks.read(&mut file, index)?;
+            let start = index as u64 * crate::source_chunks::SIZE as u64;
+            let lo = offset.saturating_sub(start) as usize;
+            let hi = (end - start).min(part.len() as u64) as usize;
+            bytes.extend_from_slice(&part[lo..hi]);
+        }
         if Stat::from_metadata(&file.metadata()?)? != before
             || (before.changed_ns.is_none() && !proof.ledger.resumes(&before, &mut file))
         {
             return Err(unavailable());
         }
         checked.insert(path.clone(), before);
+        self.checked_chunks
+            .lock()
+            .map_err(|_| unavailable())?
+            .entry(path.clone())
+            .or_default()
+            .extend(first..=last);
         Ok(SessionSourceRange {
             generation: proof.generation.clone(),
             // The cohort exposes its complete consumed prefix, even if the
@@ -328,5 +401,177 @@ impl Seek for RangeFile<'_, '_> {
         };
         self.position = position;
         Ok(position)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sha2::{Digest, Sha256};
+    use std::fs;
+
+    #[test]
+    fn a_fixed_range_and_completion_do_not_hash_unrelated_source_bytes() {
+        struct Fixture(PathBuf);
+        impl Drop for Fixture {
+            fn drop(&mut self) {
+                let _ = fs::remove_dir_all(&self.0);
+            }
+        }
+        let root =
+            std::env::temp_dir().join(format!("semon-native-range-budget-{}", std::process::id()));
+        fs::create_dir(&root).unwrap();
+        let fixture = Fixture(root);
+        let path = fixture.0.join("lead.jsonl");
+        for length in [1024 * 1024, 16 * 1024 * 1024] {
+            let bytes = format!(
+                "{}\n",
+                serde_json::json!({"type":"assistant","message":{"content":[{"type":"text","text":"x".repeat(length)}]}})
+            );
+            fs::write(&path, &bytes).unwrap();
+            let captured = crate::source_chunks::capture(
+                &mut LogFile::open(&path).unwrap(),
+                bytes.len() as u64,
+                0,
+            )
+            .unwrap();
+            let stat = Stat::from_metadata(&fs::metadata(&path).unwrap()).unwrap();
+            let reference = SessionSourceRef {
+                root: "claude".into(),
+                path: "lead.jsonl".into(),
+                native_id: "lead".into(),
+                offset: captured.chunks.offset,
+                prefix_sha256: captured.prefix,
+                tail_sha256: captured.tail,
+            };
+            let generation: String = captured
+                .prefix
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect();
+            let mut sources = Sources::default();
+            sources.paths.insert(
+                (reference.root.clone(), reference.path.clone()),
+                path.clone(),
+            );
+            sources.proofs.insert(
+                path.clone(),
+                Proof {
+                    source: reference.clone(),
+                    ledger: Ledger {
+                        stat,
+                        offset: reference.offset,
+                        prefix: captured.prefix,
+                        tail: captured.tail,
+                    },
+                    generation: generation.clone(),
+                    chunks: Arc::new(captured.chunks),
+                },
+            );
+            let records = sources.reader();
+            let read_before = crate::source_chunks::READ_BYTES.with(std::cell::Cell::get);
+            let hash_before = crate::events::HASHED_BYTES.with(std::cell::Cell::get);
+            records.verify_all().unwrap();
+            let range = records
+                .read_range(&reference, Some(&generation), 17, 1)
+                .unwrap();
+            assert_eq!(&*range.bytes, &bytes.as_bytes()[17..18]);
+            records.finish().unwrap();
+            assert_eq!(
+                crate::source_chunks::READ_BYTES.with(std::cell::Cell::get) - read_before,
+                2 * crate::source_chunks::SIZE as u64
+            );
+            assert_eq!(
+                crate::events::HASHED_BYTES.with(std::cell::Cell::get),
+                hash_before,
+                "normal read must not invoke a complete-prefix hash"
+            );
+        }
+    }
+
+    #[test]
+    fn native_ranges_refuse_a_rewrite_with_an_identical_observed_stamp() {
+        let _time = crate::events::fixed_change_time_for_test(0);
+        struct Fixture(PathBuf);
+        impl Drop for Fixture {
+            fn drop(&mut self) {
+                let _ = fs::remove_dir_all(&self.0);
+            }
+        }
+        let fixture_path = std::env::temp_dir().join(format!(
+            "semon-native-range-generation-{}",
+            std::process::id()
+        ));
+        fs::create_dir(&fixture_path).unwrap();
+        let fixture = Fixture(fixture_path);
+        let path = fixture.0.join("lead.jsonl");
+        let original = b"{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"old evidence\"}]}}\n";
+        let replacement = b"{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"new evidence\"}]}}\n";
+        assert_eq!(original.len(), replacement.len());
+        let digest: [u8; 32] = Sha256::digest(original).into();
+        fs::write(&path, original).unwrap();
+        let before = fs::metadata(&path).unwrap();
+        let stat = Stat::from_metadata(&before).unwrap();
+        let reference = SessionSourceRef {
+            root: "claude".into(),
+            path: "lead.jsonl".into(),
+            native_id: "lead".into(),
+            offset: original.len() as u64,
+            prefix_sha256: digest,
+            tail_sha256: digest,
+        };
+        let generation = digest.iter().map(|byte| format!("{byte:02x}")).collect();
+        let mut sources = Sources::default();
+        sources.paths.insert(
+            (reference.root.clone(), reference.path.clone()),
+            path.clone(),
+        );
+        sources.proofs.insert(
+            path.clone(),
+            Proof {
+                source: reference,
+                ledger: Ledger {
+                    stat,
+                    offset: original.len() as u64,
+                    prefix: digest,
+                    tail: digest,
+                },
+                generation,
+                chunks: Arc::new(crate::source_chunks::Chunks {
+                    offset: original.len() as u64,
+                    hashes: vec![digest],
+                }),
+            },
+        );
+        let records = sources.reader();
+        assert_eq!(
+            records.derive(&path, 0).unwrap().unwrap()["message"]["content"][0]["text"],
+            "old evidence"
+        );
+        fs::write(&path, replacement).unwrap();
+        fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(before.modified().unwrap())
+            .unwrap();
+        let after = Stat::from_metadata(&fs::metadata(&path).unwrap()).unwrap();
+        assert_eq!(stat, after, "every captured stamp field must match");
+        let proof = sources.proofs.get(&path).unwrap();
+        assert!(
+            !proof
+                .ledger
+                .resumes(&after, &mut LogFile::open(&path).unwrap())
+        );
+        assert!(
+            records.finish().is_err(),
+            "completion must recheck used bytes"
+        );
+        let result = records.derive(&path, 0);
+        let finished = records.finish();
+        assert!(
+            result.is_err() && finished.is_err(),
+            "captured old-generation proof admitted: {result:?}; finish={finished:?}"
+        );
     }
 }

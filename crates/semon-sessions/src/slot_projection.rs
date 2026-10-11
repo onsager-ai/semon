@@ -185,6 +185,7 @@ impl SavedSlot {
     fn capture(
         slot: &Slot,
         sources: &BTreeMap<PathBuf, &crate::model::summary::CatalogSource>,
+        records: Option<&crate::query_source::Records<'_>>,
     ) -> Self {
         let recipe = match &slot.kind {
             SlotKind::H(id) => Recipe::H { id: id.clone() },
@@ -274,7 +275,13 @@ impl SavedSlot {
             SlotKind::NoActivity => Recipe::NoActivity,
         };
         let field = slot.file.as_ref().and_then(|file| {
-            crate::native_field::capture(sources.get(&file.path)?, slot.offset, slot.block, &recipe)
+            crate::native_field::capture(
+                sources.get(&file.path)?,
+                slot.offset,
+                slot.block,
+                &recipe,
+                records,
+            )
         });
         let native_event_id = field
             .as_ref()
@@ -282,8 +289,11 @@ impl SavedSlot {
             .and_then(|field| field.native_event_id.clone())
             .or_else(|| {
                 let file = slot.file.as_ref()?;
-                let bytes =
-                    crate::native_field::read_source_record(sources.get(&file.path)?, slot.offset)?;
+                let bytes = crate::native_field::read_source_record(
+                    sources.get(&file.path)?,
+                    slot.offset,
+                    records,
+                )?;
                 let record = crate::tx::parse_native_record(&bytes)?;
                 record
                     .get("uuid")
@@ -408,6 +418,7 @@ pub(crate) struct Projection {
 pub(crate) fn capture(
     transcripts: &BTreeMap<String, Arc<Transcript>>,
     rows: &[crate::model::summary::CatalogRow],
+    records: Option<&crate::query_source::Records<'_>>,
 ) -> Vec<Projection> {
     let sources: BTreeMap<_, _> = rows
         .iter()
@@ -421,7 +432,7 @@ pub(crate) fn capture(
             slots: transcript
                 .slots
                 .iter()
-                .map(|slot| SavedSlot::capture(slot, &sources))
+                .map(|slot| SavedSlot::capture(slot, &sources, records))
                 .collect(),
         })
         .collect()

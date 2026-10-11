@@ -73,6 +73,7 @@ pub use transcript_range::{
     session_transcript_range, session_transcript_range_with_mode,
 };
 mod query_source;
+mod source_chunks;
 mod source_reader;
 mod tx;
 pub use source_reader::{SESSION_SOURCE_CHUNK_MAX, SessionSourceRange, SessionSourceReader};

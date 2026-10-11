@@ -335,7 +335,7 @@ mod tests {
                 .unwrap(),
         )
         .unwrap();
-        assert_eq!(marker["version"], 2);
+        assert_eq!(marker["version"], 4);
         connection
             .execute(
                 "UPDATE meta SET value=value || ' ' WHERE key=?1",
@@ -349,6 +349,10 @@ mod tests {
         // Earlier markers retain their native index rows even without portable
         // headers. They cannot qualify another eviction in the new binary.
         marker["version"] = json!(1);
+        marker
+            .as_object_mut()
+            .unwrap()
+            .remove("source_chunks_sha256");
         marker
             .as_object_mut()
             .unwrap()

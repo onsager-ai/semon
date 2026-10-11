@@ -377,7 +377,7 @@ changes to the sidecar alone repair metadata without replaying unchanged log
 rows. Safe descriptor opens refuse links through any ancestor, and generation
 checks fence indexing and publication races. `Texts::meta` is removed.
 
-New subagent eviction requires a version-three marker binding the persisted
+New subagent eviction requires a version-four marker binding the persisted
 sidecar encoding and a final check of its independent observation. Prior markers
 still keep existing event rows. Unreadable, linked, oversized or unpersistable
 sidecars defer new eviction without truncating parsed fields or hiding the
@@ -385,6 +385,19 @@ session. Source sidecars are not deleted. Unknown fields, raw JSON, bodies and
 runtime authority are excluded. See the [query contract](../../crates/semon-sessions/src/query/README.md)
 for rollout/downgrade obligations. This is a review branch change, without a new
 database, schema or automatic migration of archived evidence.
+
+Native body reads now use 64 KiB block digests committed with the existing event
+ledger, including native scalar-recipe preparation. They reject changed bytes
+even if file timestamps collide, and recheck only used blocks on completion.
+Unchanged Unix range reads do not hash unrelated source bytes. Proof metadata contains
+no bodies and is paged in the existing index; repair of unchanged native evidence
+does not replay event rows. New eviction binds the proof header in version-four
+archive markers; prior versions retain existing rows. The [query contract](../../crates/semon-sessions/src/query/README.md)
+owns limits, rollout/downgrade rules and the remaining generation boundaries.
+File-stamp freshness still observes metadata; it does not prove arbitrary
+whole-file byte immutability. Native parent/EOF evidence and hosted generation
+ownership remain to be qualified. No database, table, schema, parser version or
+generalized event pipeline is added.
 
 Private Semon parent markers and a query's relationship closure remain to be
 extracted; hosted MCP restoration remains until those consumers migrate.

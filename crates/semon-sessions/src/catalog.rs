@@ -1260,6 +1260,61 @@ mod tests {
     }
 
     #[test]
+    fn archive_eviction_refuses_changed_or_missing_native_byte_proofs() {
+        let fixture = Fixture::new();
+        fixture.publish(1);
+        let relative = "projects/project/session-00000.jsonl";
+        let proof = session_source_proof(&fixture.options, "claude", relative)
+            .unwrap()
+            .unwrap();
+        let ready = crate::source_projection_ready(&fixture.options, "claude", relative)
+            .unwrap()
+            .unwrap();
+        crate::retain_source_event_index(&fixture.options, &proof, &ready).unwrap();
+        let connection = Connection::open(EventCache::path(&fixture.options.cache)).unwrap();
+        let mut statement = connection
+            .prepare("SELECT key,value FROM meta WHERE key GLOB 'native_source_chunks:*'")
+            .unwrap();
+        let records: Vec<(String, String)> = statement
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(records.len(), 2, "one proof header and one hash page");
+        for (key, encoded) in records {
+            connection
+                .execute("UPDATE meta SET value=value || ' ' WHERE key=?1", [&key])
+                .unwrap();
+            if key.ends_with("header") {
+                assert!(
+                    !crate::source_event_index_retained(&fixture.options, &proof, &ready).unwrap()
+                );
+            } else {
+                // A differently encoded but identical page remains covered by
+                // the bound header's digest fingerprint.
+                assert!(
+                    crate::source_event_index_retained(&fixture.options, &proof, &ready).unwrap()
+                );
+            }
+            connection
+                .execute("DELETE FROM meta WHERE key=?1", [&key])
+                .unwrap();
+            assert!(!crate::source_event_index_retained(&fixture.options, &proof, &ready).unwrap());
+            assert_eq!(
+                crate::retain_source_event_index(&fixture.options, &proof, &ready),
+                Err(CatalogIdentityError::ScopeChanged)
+            );
+            connection
+                .execute(
+                    "INSERT INTO meta VALUES (?1,?2)",
+                    rusqlite::params![key, encoded],
+                )
+                .unwrap();
+            assert!(crate::source_event_index_retained(&fixture.options, &proof, &ready).unwrap());
+        }
+    }
+
+    #[test]
     fn archived_event_index_marker_does_not_cover_a_new_native_generation() {
         let fixture = Fixture::new();
         fixture.publish(1);
@@ -2175,16 +2230,16 @@ mod tests {
         let row: CatalogRow = serde_json::from_str(&metadata).unwrap();
         let original = &row.sources[0];
         assert!(
-            crate::native_field::capture(original, 0, 0, &crate::slot_projection::Recipe::U)
+            crate::native_field::capture(original, 0, 0, &crate::slot_projection::Recipe::U, None)
                 .is_some()
         );
-        assert!(crate::native_field::read_source_record(original, 0).is_some());
+        assert!(crate::native_field::read_source_record(original, 0, None).is_some());
         let mut unqualified = original.clone();
         unqualified.changed_ns = None;
-        assert!(crate::native_field::read_source_record(&unqualified, 0).is_none());
+        assert!(crate::native_field::read_source_record(&unqualified, 0, None).is_none());
         let mut partial = original.clone();
         partial.offset = bytes.iter().position(|byte| *byte == b'\n').unwrap() as u64;
-        assert!(crate::native_field::read_source_record(&partial, 0).is_none());
+        assert!(crate::native_field::read_source_record(&partial, 0, None).is_none());
         fs::remove_file(&path).unwrap();
         fs::write(
             &path,
@@ -2195,10 +2250,10 @@ mod tests {
         )
         .unwrap();
         assert!(
-            crate::native_field::capture(original, 0, 0, &crate::slot_projection::Recipe::U)
+            crate::native_field::capture(original, 0, 0, &crate::slot_projection::Recipe::U, None)
                 .is_none()
         );
-        assert!(crate::native_field::read_source_record(original, 0).is_none());
+        assert!(crate::native_field::read_source_record(original, 0, None).is_none());
         fs::remove_file(&path).unwrap();
         drop(connection);
         // A closed/reopened background model retires the native index. History

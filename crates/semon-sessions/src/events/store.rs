@@ -20,6 +20,8 @@
 //! let Row { kept } = row;
 //! ```
 
+mod chunk_proofs;
+
 use std::{
     collections::BTreeMap,
     fmt, fs, io,
@@ -274,6 +276,7 @@ DELETE FROM files;
 DELETE FROM meta WHERE key GLOB 'archive_event_index:*';
 DELETE FROM meta WHERE key GLOB 'native_codex_header:*';
 DELETE FROM meta WHERE key GLOB 'native_claude_sidecar:*';
+DELETE FROM meta WHERE key GLOB 'native_source_chunks:*';
 ";
 
 const FILE_COLUMNS: &str = "file_id, path, dev, ino, size, mtime_ns, resume_at, head_sha256, \
@@ -1793,6 +1796,7 @@ impl SqliteStore {
             transaction.execute("DELETE FROM meta WHERE key=?1", [archive_index_key(path)])?;
             transaction.execute("DELETE FROM meta WHERE key=?1", [codex_header_key(path)])?;
             transaction.execute("DELETE FROM meta WHERE key=?1", [claude_sidecar_key(path)])?;
+            chunk_proofs::clear(&transaction, path)?;
             invalidate_catalog_source(&transaction, path, "removed")?;
         }
         transaction.commit()?;
@@ -2158,6 +2162,8 @@ struct ArchivedIndex {
     projection_generation: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     native_header_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    source_chunks_sha256: Option<String>,
 }
 
 impl ArchivedIndex {
@@ -2173,7 +2179,22 @@ impl ArchivedIndex {
                 && crate::native_sidecar::agent_path(Path::new(&self.source.path))
                 && self.native_header_sha256.as_ref().is_some_and(|hash| {
                     hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_hexdigit())
+                }))
+            || (self.version == 4
+                && self.source_chunks_sha256.as_ref().is_some_and(|hash| {
+                    hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_hexdigit())
+                })
+                && (if self.source.root == "codex"
+                    || (self.source.root == "claude"
+                        && crate::native_sidecar::agent_path(Path::new(&self.source.path)))
+                {
+                    self.native_header_sha256.as_ref().is_some_and(|hash| {
+                        hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_hexdigit())
+                    })
+                } else {
+                    self.native_header_sha256.is_none()
                 })))
+            && (self.version == 4 || self.source_chunks_sha256.is_none())
             && self.parser_version == CACHE_VERSION
             && crate::is_input_path(&self.source.root, &self.source.path)
             && !self.source.native_id.is_empty()
@@ -2261,6 +2282,7 @@ pub(crate) fn retain_archive_index(
     }
     let expected = proof_ledger(proof);
     let native_header_sha256;
+    let source_chunks_sha256;
     {
         let mut readers = Readers::new(connection)?;
         let mut statement =
@@ -2273,6 +2295,13 @@ pub(crate) fn retain_archive_index(
         if ledger != expected {
             return Ok(false);
         }
+        if index.source_chunks.is_none() {
+            return Ok(false);
+        }
+        let Some(digest) = chunk_proofs::digest(connection, path)? else {
+            return Ok(false);
+        };
+        source_chunks_sha256 = Some(digest);
         native_header_sha256 = if proof.source.root == "codex" {
             if index
                 .codex_header
@@ -2305,19 +2334,14 @@ pub(crate) fn retain_archive_index(
         };
     }
     let record = ArchivedIndex {
-        version: if native_header_sha256.is_none() {
-            1
-        } else if proof.source.root == "codex" {
-            2
-        } else {
-            3
-        },
+        version: 4,
         parser_version: CACHE_VERSION,
         source: proof.source.clone(),
         stat: expected.stat,
         projection_version: projection.projection_version,
         projection_generation: projection.projection_generation.clone(),
         native_header_sha256,
+        source_chunks_sha256,
     };
     let encoded = serde_json::to_string(&record)
         .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
@@ -2341,20 +2365,23 @@ pub(crate) fn archive_index_retained(
         return Ok(false);
     };
     let header_matches = if proof.source.root == "codex" {
-        record.version == 2
+        record.version == 4
             && record.native_header_sha256.is_some()
             && record.native_header_sha256 == codex_header_digest(connection, path)?
     } else if proof.source.root == "claude" && crate::native_sidecar::agent_path(Path::new(path)) {
         let mut statement = connection.prepare(NATIVE_METADATA_VALUE)?;
         let sidecar = read_claude_sidecar(&mut statement, path, &ledger)?;
-        record.version == 3
+        record.version == 4
             && record.native_header_sha256.is_some()
             && record.native_header_sha256 == claude_sidecar_digest(connection, path)?
             && sidecar.is_some_and(|sidecar| sidecar.verified(Path::new(path)))
     } else {
-        record.version == 1
+        record.version == 4
     };
     Ok(header_matches
+        && record.source_chunks_sha256.is_some()
+        && record.source_chunks_sha256 == chunk_proofs::digest(connection, path)?
+        && chunk_proofs::read(connection, path, &ledger)?.is_some()
         && ledger == proof_ledger(proof)
         && record.matches(&ledger)
         && record.source == proof.source
@@ -2614,6 +2641,7 @@ fn read_ledger(row: &Row<'_>) -> rusqlite::Result<(i64, Ledger)> {
 
 /// The per-file child queries, prepared once per read.
 struct Readers<'c> {
+    connection: &'c Connection,
     events: Statement<'c>,
     signals: Statement<'c>,
     usage: Statement<'c>,
@@ -2625,6 +2653,7 @@ struct Readers<'c> {
 impl<'c> Readers<'c> {
     fn new(connection: &'c Connection) -> rusqlite::Result<Self> {
         Ok(Self {
+            connection,
             events: connection.prepare(&format!(
                 "SELECT {EVENT_COLUMNS} FROM events WHERE file_id = ?1 ORDER BY extra, seq"
             ))?,
@@ -2718,6 +2747,7 @@ fn read_file(
 
     let index = FileIndex {
         dirty_rows: None,
+        source_chunks: chunk_proofs::read(readers.connection, &path, &ledger)?,
         codex_header: read_codex_header(&mut readers.codex_header, &path, &ledger)?,
         claude_sidecar: if crate::native_sidecar::agent_path(Path::new(&path)) {
             read_claude_sidecar(&mut readers.claude_sidecar, &path, &ledger)?
@@ -2940,6 +2970,7 @@ fn write_file(
 ) -> rusqlite::Result<()> {
     let FileIndex {
         dirty_rows: _,
+        source_chunks,
         codex_header,
         claude_sidecar,
         events,
@@ -2982,6 +3013,7 @@ fn write_file(
     } = ledger;
     write_codex_header(transaction, path, ledger, codex_header.as_ref())?;
     write_claude_sidecar(transaction, path, ledger, claude_sidecar.as_ref())?;
+    chunk_proofs::write(transaction, path, ledger, source_chunks.as_deref())?;
     let rate_limits = rate_limits.as_ref().map(json).transpose()?;
     let file_id: i64 = transaction.query_row(
         PUT_FILE,
@@ -3447,6 +3479,7 @@ mod tests {
     fn full() -> FileIndex {
         FileIndex {
             dirty_rows: None,
+            source_chunks: None,
             codex_header: Some(crate::native_header::CodexHeader::default()),
             claude_sidecar: None,
             events: vec![

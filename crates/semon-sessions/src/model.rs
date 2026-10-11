@@ -6068,7 +6068,14 @@ fn build_sources_inner(
         MachineFacts::Recorded(facts) => facts.reported_runs.clone(),
     };
     let source_proofs = (target != BuildTarget::Model)
-        .then(|| crate::query_source::Sources::capture(options, files.iter().map(summary::source)))
+        .then(|| {
+            crate::query_source::Sources::capture(
+                options,
+                files
+                    .iter()
+                    .map(|file| (summary::source(file), file.summary.source_chunks.clone())),
+            )
+        })
         .transpose()?;
     let source_records = source_proofs
         .as_ref()
@@ -6142,7 +6149,7 @@ fn build_sources_inner(
     .then(|| summary::catalog(&builder, &handoffs));
     let slot_projections = catalog
         .as_ref()
-        .map(|rows| crate::slot_projection::capture(&tx, rows));
+        .map(|rows| crate::slot_projection::capture(&tx, rows, source_records.as_ref()));
     if target != BuildTarget::Model {
         verify_sidecars(&files)?;
     }
