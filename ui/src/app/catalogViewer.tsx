@@ -2406,7 +2406,7 @@ export function createCatalogViewer(
           jumpLatest(view);
         },
         pager() {
-          void loadSelected(view, Math.max(0, view.store.loadedRanges()[0].first - 60));
+          void loadSelected(view, Math.max(0, view.store.loadedRanges()[0].first - 100));
         },
       },
     );
@@ -2581,16 +2581,19 @@ export function createCatalogViewer(
     };
     try {
       await read(null, 60);
-      const total = candidate.selectedPage()!.projection.total;
+      // The new tail already contains current-generation entries. Re-read
+      // only the earlier portion of the previously loaded ranges.
+      const tailFirst = candidate.selectedPage()!.range.first;
       for (const range of view.store.loadedRanges())
-        for (let after = range.first; after < Math.min(range.end, total); after += 100)
-          await read(after, Math.min(100, Math.min(range.end, total) - after));
+        for (let after = range.first; after < Math.min(range.end, tailFirst); after += 100)
+          await read(after, Math.min(100, Math.min(range.end, tailFirst) - after));
       if (disposed) {
         candidate.destroy();
         return;
       }
       view.store.destroy();
       view.store = candidate;
+      pruneSelectedFields(view);
       view.renderedRevision = -1;
       view.meta = {
         ...candidate.selectedPage()!.session,
@@ -2605,6 +2608,10 @@ export function createCatalogViewer(
       candidate.destroy();
       throw error;
     }
+  }
+  function pruneSelectedFields(view: SelectedView) {
+    const retainedEntries = new Set(view.store.entries().map((item) => item.entry_id));
+    for (const key of view.fields.keys()) if (!retainedEntries.has(key)) view.fields.delete(key);
   }
   async function loadSelected(view: SelectedView, after: number | null = null) {
     if (view.loading && !disposed && capabilities.selected_transcript) {
@@ -2621,7 +2628,7 @@ export function createCatalogViewer(
     }
     if (after !== null) view.following = false;
     scope.clearTimeout(view.retry);
-    const request = view.store.request(after),
+    const request = view.store.request(after, after === null ? 60 : 100),
       p = params();
     p.set('sid', view.key);
     p.set('limit', String(request.limit));
@@ -2638,9 +2645,7 @@ export function createCatalogViewer(
         void hydrateContext(view);
         view.retryDelay = 1000;
         const current = view.store.selectedPage()!;
-        const retainedEntries = new Set(view.store.entries().map((item) => item.entry_id));
-        for (const key of view.fields.keys())
-          if (!retainedEntries.has(key)) view.fields.delete(key);
+        pruneSelectedFields(view);
         view.meta = {
           ...current.session,
           ...(view.observedName === undefined ? {} : { name: view.observedName }),

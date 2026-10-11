@@ -3,6 +3,9 @@
 Native Preact/TSX sources and deterministic production esbuild bundles. Rust embeds
 `crates/semon-sessions/src/viewer.generated.js`, which includes the shared runtime,
 Select and tooltip prefix. Cargo builds and installations need no JavaScript tooling.
+The Viewer bundle is minified for production. Its emitted module boundaries remain
+inline so the Rust sink audit can isolate the exact pinned Preact core and scan
+every application module; the runtime exemption and injection assertions are unchanged.
 
 ```sh
 npm --prefix ui ci --no-audit --no-fund
