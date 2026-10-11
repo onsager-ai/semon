@@ -3060,3 +3060,129 @@ fn selected_query_uses_verified_local_bytes_and_never_hides_a_rewrite_with_archi
         "a changed current source fell back to old archive bytes"
     );
 }
+
+#[test]
+fn focused_far_end_and_unsent_handoffs_use_native_owner_evidence_and_union_aliases() {
+    let home = Home::new("same-host");
+    home.top("lead", &[
+        human("lead", ts(1, 0), "Delegate the work"),
+        assistant("lead", ts(1, 1), vec![
+            tool("far", "SendMessage", json!({"to":"remote","message":"Far-end context"})),
+            tool("lost", "SendMessage", json!({"to":"missing","message":"Failed delivery"})),
+        ]),
+        json!({"type":"user","sessionId":"lead","timestamp":ts(1,2),
+            "message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"far","content":"sent"}]},
+            "toolUseResult":{"success":true,"message":"sent"}}),
+        json!({"type":"user","sessionId":"lead","timestamp":ts(1,2),
+            "message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"lost","content":"missing peer"}]},
+            "toolUseResult":{"success":false,"message":"missing peer"}}),
+    ]);
+    let mut cache = crate::events::EventCache::open_scoped(&home.options.cache).unwrap();
+    crate::model::observe_catalog(
+        &home.options,
+        &mut cache,
+        &mut false,
+        &mut crate::model::Texts::default(),
+        NOW,
+    )
+    .unwrap();
+    let peer = Home::new("same-host");
+    peer.top("other", &[human("other", ts(1, 0), "Other machine")]);
+    for multiple in [false, true] {
+        let mut machines = vec![("a".into(), home.options.clone())];
+        if multiple {
+            machines.push(("b".into(), peer.options.clone()));
+        }
+        let mut legacy = Query::with_machines(machines.clone());
+        let listing = legacy.call_at("list_sessions", &json!({}), NOW).unwrap();
+        let id = listing["sessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["kind"] == "stub")
+            .unwrap()["id"]
+            .as_str()
+            .unwrap();
+        let raw = if multiple {
+            id.rsplit_once('@').unwrap().0
+        } else {
+            id
+        };
+        let refs = crate::session_query_sources(&home.options, raw).unwrap();
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].native_id, "lead");
+        let sources = Arc::new(SessionSources::with_machines(machines));
+        let mut focused = Query::from_sources(sources.clone());
+        let labels = focused.source_labels();
+        assert_eq!(labels[0], ("a".into(), "same-host".into()));
+        if multiple {
+            assert_eq!(labels[1], ("b".into(), "same-host~b".into()));
+        }
+        for tool in ["get_session", "read_transcript"] {
+            let args = json!({"id":id});
+            assert_eq!(
+                focused.call_selected_at(
+                    "a",
+                    raw,
+                    tool,
+                    &args,
+                    None,
+                    crate::SessionSourceReadMode::LocalThenProvider,
+                    NOW
+                ),
+                legacy.call_at(tool, &args, NOW),
+                "{multiple}: {tool} {args}"
+            );
+        }
+        for (_, source) in &sources.machines {
+            assert!(source.work.lock().unwrap().events.is_none());
+        }
+    }
+}
+
+#[test]
+fn unsent_query_uses_indexed_bookmark_evidence() {
+    // A failed peer send is a transcript address, not a session Catalog row.
+    let home = Home::new("unsent-host");
+    home.top("lead", &[
+        human("lead", ts(1,0), "Send the result"),
+        assistant("lead", ts(1,1), vec![tool("lost", "SendMessage",
+            json!({"to":"missing","message":"Failed delivery"}))]),
+        json!({"type":"user","sessionId":"lead","timestamp":ts(1,2),
+            "message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"lost","content":"missing peer"}]},
+            "toolUseResult":{"success":false,"message":"missing peer"}}),
+    ]);
+    let mut cache = crate::events::EventCache::open_scoped(&home.options.cache).unwrap();
+    crate::model::observe_catalog(
+        &home.options,
+        &mut cache,
+        &mut false,
+        &mut crate::model::Texts::default(),
+        NOW,
+    )
+    .unwrap();
+    let mut normal = home.query();
+    let args = json!({"id":"unsent:missing"});
+    let expected = normal.call_at("read_transcript", &args, NOW).unwrap();
+    assert_eq!(expected["total"], 2);
+    let refs = crate::session_query_sources(&home.options, "unsent:missing").unwrap();
+    assert_eq!(refs.len(), 1);
+    assert_eq!(refs[0].native_id, "lead");
+    let sources = admitted(home.options.clone());
+    let mut focused = Query::from_sources(sources.clone());
+    assert_eq!(
+        focused
+            .call_selected_at(
+                "local",
+                "unsent:missing",
+                "read_transcript",
+                &args,
+                None,
+                crate::SessionSourceReadMode::LocalThenProvider,
+                NOW
+            )
+            .unwrap(),
+        expected
+    );
+    assert!(sources.machines[0].1.work.lock().unwrap().events.is_none());
+}
