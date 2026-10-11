@@ -285,6 +285,7 @@ impl DirtyRows {
 #[derive(Clone, Debug, Default)]
 pub(crate) struct FileIndex {
     pub(crate) dirty_rows: Option<DirtyRows>,
+    pub(crate) source_chunks: Option<Arc<crate::source_chunks::Chunks>>,
     /// Allowlisted first-record metadata observed on the same native generation.
     pub(crate) codex_header: Option<crate::native_header::CodexHeader>,
     /// A subagent sidecar has its own generation, separate from the native log.
@@ -783,6 +784,10 @@ impl Stat {
 /// Filesystem change time fences metadata-identical rewrites without reading
 /// source bodies. None means this platform/legacy observation cannot prove it.
 pub(crate) fn change_time_ns(metadata: &fs::Metadata) -> Option<i128> {
+    #[cfg(test)]
+    if let Some(value) = FIXED_CHANGE_TIME.with(std::cell::Cell::get) {
+        return Some(value);
+    }
     #[cfg(unix)]
     {
         Some(i128::from(metadata.ctime()) * 1_000_000_000 + i128::from(metadata.ctime_nsec()))
@@ -794,8 +799,30 @@ pub(crate) fn change_time_ns(metadata: &fs::Metadata) -> Option<i128> {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    static FIXED_CHANGE_TIME: std::cell::Cell<Option<i128>> = const { std::cell::Cell::new(None) };
+}
+
+/// Model indistinguishable change stamps deterministically across filesystems.
+#[cfg(test)]
+pub(crate) fn fixed_change_time_for_test(value: i128) -> impl Drop {
+    struct Restore(Option<i128>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            FIXED_CHANGE_TIME.with(|time| time.set(self.0));
+        }
+    }
+    Restore(FIXED_CHANGE_TIME.with(|time| time.replace(Some(value))))
+}
+
 /// How many bytes the ledger's tail hash covers before its offset.
 const WINDOW: u64 = 4096;
+
+#[cfg(test)]
+thread_local! {
+    pub(crate) static HASHED_BYTES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
 
 /// What the index records about a file it has read: the stat it was read
 /// at, the offset its complete lines end at, and SHA-256 hashes of the
@@ -828,7 +855,10 @@ impl Ledger {
 fn consumed_hashes(file: &mut LogFile, offset: u64) -> io::Result<([u8; 32], [u8; 32])> {
     file.seek(SeekFrom::Start(0))?;
     let mut prefix = Sha256::new();
-    if io::copy(&mut (&mut *file).take(offset), &mut prefix)? != offset {
+    let bytes = io::copy(&mut (&mut *file).take(offset), &mut prefix)?;
+    #[cfg(test)]
+    HASHED_BYTES.with(|count| count.set(count.get() + bytes));
+    if bytes != offset {
         return Err(io::Error::new(
             io::ErrorKind::UnexpectedEof,
             "consumed prefix shortened",
@@ -1661,6 +1691,7 @@ pub(crate) fn scan_file(
     let agent = harness == "claude" && crate::native_sidecar::agent_path(path);
     if let Some(entry) = cache.files.get(&key)
         && !cache.unpersisted.contains(&key)
+        && entry.index.source_chunks.is_some()
         && (harness != "codex" || entry.index.codex_header.is_some())
         && (!agent
             || entry
@@ -1675,6 +1706,7 @@ pub(crate) fn scan_file(
     }
     *dirty = true;
     let mut attempt = 0;
+    let mut force_replace = false;
     loop {
         attempt += 1;
         let last = attempt >= COMMIT_ATTEMPTS;
@@ -1685,6 +1717,7 @@ pub(crate) fn scan_file(
         let recorded = cache.recorded(&key);
         let mut base = None;
         if let Some(ledger) = &recorded
+            && !force_replace
             && (ledger.stat == stat || ledger.resumes(&stat, &mut file))
         {
             match cache.base(&key, ledger) {
@@ -1716,6 +1749,7 @@ pub(crate) fn scan_file(
         if let Some(ledger) = &recorded
             && ledger.stat == stat
             && let Some(index) = &base
+            && index.source_chunks.is_some()
             && (harness != "codex" || index.codex_header.is_some())
             && (!agent
                 || sidecar
@@ -1783,12 +1817,29 @@ pub(crate) fn scan_file(
             hook();
         }
         writable.dirty_rows = Some(DirtyRows::begin(writable));
-        let offset = parse(&mut file, from, harness, writable)?;
+        let (offset, parsed) = parse(&mut file, from, harness, writable)?;
         let changes = writable
             .dirty_rows
             .take()
             .expect("parser tracks dirty rows");
-        let (prefix, tail) = consumed_hashes(&mut file, offset)?;
+        let captured = crate::source_chunks::capture(&mut file, offset, from)?;
+        if captured.parsed != parsed
+            || (append
+                && recorded
+                    .as_ref()
+                    .is_some_and(|ledger| captured.before != ledger.prefix))
+        {
+            if last {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "native source changed while indexing",
+                ));
+            }
+            force_replace = true;
+            continue;
+        }
+        let (prefix, tail) = (captured.prefix, captured.tail);
+        writable.source_chunks = Some(Arc::new(captured.chunks));
         if let Some(header) = header_bytes {
             file.seek(SeekFrom::Start(0))?;
             let mut verified = Vec::new();
@@ -1855,11 +1906,17 @@ pub(crate) fn scan_file(
 /// Folds the complete lines of `file` from `from` into `index`, and returns
 /// the offset they end at. A last line without its newline is left for the
 /// next read.
-fn parse(file: &mut LogFile, from: u64, harness: &str, index: &mut FileIndex) -> io::Result<u64> {
+fn parse(
+    file: &mut LogFile,
+    from: u64,
+    harness: &str,
+    index: &mut FileIndex,
+) -> io::Result<(u64, [u8; 32])> {
     let mut reader = BufReader::new(file);
     reader.seek(SeekFrom::Start(from))?;
     let mut offset = from;
     let mut line = Vec::new();
+    let mut parsed = Sha256::new();
     loop {
         line.clear();
         let length = reader.read_until(b'\n', &mut line)?;
@@ -1868,6 +1925,7 @@ fn parse(file: &mut LogFile, from: u64, harness: &str, index: &mut FileIndex) ->
         }
         let line_offset = offset;
         offset += length as u64;
+        parsed.update(&line);
         #[cfg(test)]
         PARSED.with(|parsed| parsed.set(parsed.get() + 1));
         match serde_json::from_slice::<Value>(&line) {
@@ -1883,7 +1941,7 @@ fn parse(file: &mut LogFile, from: u64, harness: &str, index: &mut FileIndex) ->
             _ => gap(index, line_offset),
         }
     }
-    Ok(offset)
+    Ok((offset, parsed.finalize().into()))
 }
 
 /// Busy clustering: consecutive line timestamps no more than this far apart
@@ -5616,6 +5674,47 @@ mod tests {
             text.push('\n');
         }
         fs::write(path, text).unwrap();
+    }
+
+    #[test]
+    fn missing_or_unsupported_source_proofs_repair_without_event_replay() {
+        let root = scratch("chunk-proof-repair");
+        let path = root.join("lead.jsonl");
+        let cache_path = root.join("index.json");
+        write_lines(&path, &[claude_tool("call")]);
+        let mut cache = EventCache::open(&cache_path);
+        let initial = scan_file(&path, "claude", &mut cache, &mut false).unwrap();
+        let proof = initial.source_chunks.clone().unwrap();
+        let ledger = cache.revision(&path).unwrap();
+        drop(cache);
+        let key = format!(
+            "native_source_chunks:{:x}:header",
+            Sha256::digest(path.to_string_lossy().as_bytes())
+        );
+        for missing in [false, true] {
+            let connection = rusqlite::Connection::open(EventCache::path(&cache_path)).unwrap();
+            if missing {
+                connection
+                    .execute("DELETE FROM meta WHERE key=?1", [&key])
+                    .unwrap();
+            } else {
+                connection
+                    .execute(
+                        "UPDATE meta SET value=json_set(value,'$.version',99) WHERE key=?1",
+                        [&key],
+                    )
+                    .unwrap();
+            }
+            drop(connection);
+            let mut cache = EventCache::open(&cache_path);
+            let parsed = PARSED.with(std::cell::Cell::get);
+            let repaired = scan_file(&path, "claude", &mut cache, &mut false).unwrap();
+            assert_eq!(PARSED.with(std::cell::Cell::get), parsed);
+            assert_eq!(repaired.events.len(), initial.events.len());
+            assert_eq!(repaired.source_chunks, Some(proof.clone()));
+            assert_eq!(cache.revision(&path), Some(ledger));
+        }
+        fs::remove_dir_all(root).unwrap();
     }
 
     fn append_lines(path: &Path, lines: &[Value]) {

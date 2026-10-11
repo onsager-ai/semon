@@ -277,6 +277,41 @@ fn retained_query(home: &Home) -> Query {
 }
 
 #[test]
+fn native_tools_refuse_changed_bytes_even_with_indistinguishable_file_stamps() {
+    let _time = crate::events::fixed_change_time_for_test(0);
+    let home = Home::new("coarse-native-generation");
+    home.top(
+        "lead",
+        &[assistant("lead", ts(1, 0), vec![text("old evidence")])],
+    );
+    let mut query = retained_query(&home);
+    let path = home
+        .options
+        .claude_home
+        .join("projects/-work-proj/lead.jsonl");
+    let before = fs::metadata(&path).unwrap();
+    let stamp = crate::events::Stat::from_metadata(&before).unwrap();
+    let bytes = fs::read_to_string(&path).unwrap();
+    fs::write(&path, bytes.replace("old evidence", "new evidence")).unwrap();
+    fs::File::options()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_modified(before.modified().unwrap())
+        .unwrap();
+    assert_eq!(
+        crate::events::Stat::from_metadata(&fs::metadata(&path).unwrap()).unwrap(),
+        stamp
+    );
+    for (tool, args) in [
+        ("read_transcript", json!({"id":"lead"})),
+        ("find", json!({"text":"new evidence"})),
+    ] {
+        assert_eq!(query.call_at(tool, &args, NOW).unwrap_err().code, "io");
+    }
+}
+
+#[test]
 fn query_source_reads_allow_append_without_reading_beyond_the_cohort() {
     use std::io::Write;
     let home = fixture();

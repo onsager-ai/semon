@@ -593,7 +593,7 @@ mod tests {
             })
             .unwrap();
         let mut marker: Value = serde_json::from_str(&encoded).unwrap();
-        assert_eq!(marker["version"], 3);
+        assert_eq!(marker["version"], 4);
         fs::write(&home.meta, metadata().to_string() + " ").unwrap();
         assert!(!crate::source_event_index_retained(&home.options, &proof, &ready).unwrap());
         home.refuse_eviction();
@@ -611,6 +611,10 @@ mod tests {
         assert!(!crate::source_event_index_retained(&home.options, &proof, &ready).unwrap());
         // Prior v1 markers retain already evicted rows even without sidecar proof.
         marker["version"] = json!(1);
+        marker
+            .as_object_mut()
+            .unwrap()
+            .remove("source_chunks_sha256");
         marker
             .as_object_mut()
             .unwrap()

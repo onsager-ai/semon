@@ -35,15 +35,33 @@ reads. Do not regenerate the reference from the current implementation merely
 to make a changed result pass; an intentional public contract change needs its
 own reviewed expectations.
 
-Native query transcript paging and search now borrow request-owned readers over
+Native query transcript paging and search borrow request-owned readers over
 the cohort's indexed source proofs. They use the `SessionSourceReader` range
 contract and native parsers, with no direct-file fallback in the Query consumer.
-Reads stop at complete consumed lines, validate before/after I/O and recheck
-touched sources before returning cached records. A verified append preserves
-the original prefix; replacement, deletion and interior rewrite refuse a body
-read. Unchanged Unix metadata uses the index's generation shortcut; changed
-metadata verifies the complete consumed prefix using the existing index rule.
-Platforms without change-time proof verify the prefix instead of trusting mtime.
+Reads stop at complete consumed lines and verify the requested bytes against
+64 KiB block digests captured with the existing event ledger. The final partial
+block stops at the original consumed offset, so a verified append preserves the
+old cohort. Replacement and deletion remain fenced by file identity. A rewrite
+of a requested block refuses the read even when size, mtime and change time all
+match. Completion rechecks blocks actually used by this request; unchanged
+Unix range reads do not hash an entire parent log or unrelated workspace sources.
+
+File metadata still fences native discovery, cached metadata and publication.
+Its unchanged-stat shortcut is an observation of freshness, not proof of
+arbitrary whole-file byte immutability. Changed metadata retains the original
+complete-prefix check. Platforms without a change-time observation also keep
+their existing complete-prefix verification. The block proof establishes the identity of bytes the
+native reader actually consumes independently of that timestamp shortcut.
+Removing the duplicate launch scan and qualifying parent-marker/EOF evidence
+and hosted generation ownership remain separate migration work.
+
+Block digests contain no source text. They are paged within the current Event
+Index metadata region, bounded by the same metadata-value limit, and committed
+atomically with the native ledger. Missing, unsupported or corrupt proofs are
+repaired from an unchanged verified prefix without replaying event rows. Indexing
+also checks the already indexed prefix and newly parsed bytes independently
+against the final hash pass before committing. No database, table, schema,
+parser version, public transport or body store is added.
 
 The original pager's anchors, counts, entry rendering and line/search budgets
 remain shared. Prompt reads retain the 64 MiB native prompt limit, image metadata
@@ -58,8 +76,9 @@ source is fenced before derivation and rechecked before catalog/slot publication
 including cached derivations and empty sources that supply native identity.
 A failed cohort is not installed as a query snapshot or published to the catalog.
 The proof contains the same complete consumed prefix used by paging and search.
-Catalog observation and bounded source preparation use the same reader and
-publication fence. The legacy Model target retains its existing body reader
+Catalog observation, bounded source preparation and native scalar-recipe
+preparation use the same reader and publication fence. The legacy Model target
+retains its existing body reader
 while its remaining Viewer consumers are migrated.
 
 The producer still discovers, indexes and joins eligible native sources. Hub MCP
@@ -100,7 +119,8 @@ churn keeps the native session and defers a portable proof until a stable scan. 
 `Texts::meta` cache is removed.
 
 New Claude subagent eviction requires a supported sidecar observation and a
-version-three marker binding its exact persisted encoding. The host rechecks the
+version-four marker binding its exact persisted encoding and the source byte
+proof. The host rechecks the
 sidecar observation and full bounded-file digest before local removal. Earlier markers still retain existing
 event rows, but cannot qualify a new subagent eviction. Unreadable, linked or
 oversized sidecars keep the native metadata fallback and defer eviction; parsed
@@ -110,6 +130,14 @@ this operation. Deployments must retain the matching producer before creating
 new markers; restore verified archive sources before using an older producer
 that cannot recognize their version. No deployment or automatic data migration
 is part of this change.
+
+New archive eviction also requires valid paged byte proofs and binds their exact
+header encoding in the version-four marker. Prior version-one, version-two and
+version-three markers still retain their existing event rows; they cannot
+qualify another eviction without current proof repair and custody verification.
+Restore verified original archive sources before downgrading to a producer
+that cannot recognize version four. Native logs, sidecars and existing original
+databases are never removed by this proof migration.
 
 Semon parent markers, bounded relationship closure and authorized provider reads
 remain. No full-workspace discovery or archive cost is claimed retired yet.
