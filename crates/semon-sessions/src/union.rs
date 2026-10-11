@@ -1867,15 +1867,21 @@ impl ViewerCore {
     /// The V1 tree: every machine's roots, each node with its machine's
     /// id as `machine`.
     fn tree(&self, views: &Views) -> io::Result<ViewerReply> {
-        let (_, plan) = self.refresh_at(views, Reading::Served)?;
+        // Tree identity depends on configured machine names and keys, not a
+        // full Viewer model or its transcript/analytics ownership projection.
+        let mut machine_ids = Vec::with_capacity(views.len());
+        for (index, (key, view)) in views.iter().enumerate() {
+            let hostname = crate::facts::MachineFacts::of(view.options()).hostname(view.options());
+            machine_ids.push(machine_id(&hostname, key, index, &machine_ids));
+        }
         let droppable = self.droppable();
         let mut roots = Vec::new();
         let mut seen = BTreeSet::new();
         for (index, (_, view)) in views.iter().enumerate() {
-            let machine = plan.machine_ids.get(index).cloned().unwrap_or_default();
+            let machine = machine_ids.get(index).cloned().unwrap_or_default();
             for root in view.tree_roots()? {
                 // A received machine's copy of a root an earlier machine
-                // has is left out, as in the model.
+                // has is left out using the existing received-copy policy.
                 if !seen.insert((root.harness.clone(), root.id.clone())) && index >= droppable {
                     continue;
                 }
@@ -2077,6 +2083,16 @@ mod tests {
         ]);
         core.set_refresh(Refresh::OnInvalidate);
         let views = core.views();
+        let builds = model::COMPAT_BUILDS.with(std::cell::Cell::get);
+        let native_tree = core.respond("GET", "/api/tree", "", None);
+        assert_eq!(native_tree.status, 200);
+        let native_tree: Value = serde_json::from_slice(&native_tree.body).unwrap();
+        let roots = native_tree["roots"].as_array().unwrap();
+        assert_eq!(roots.len(), 2);
+        assert!(roots.iter().all(|root| root["id"] == "shared"));
+        assert_ne!(roots[0]["machine"], roots[1]["machine"]);
+        assert_eq!(model::COMPAT_BUILDS.with(std::cell::Cell::get), builds);
+        assert!(views.iter().all(|(_, view)| view.shown_built().is_none()));
         let (models, original) = core.refresh_at(&views, Reading::Served).unwrap();
         assert_eq!(*original, plan(&parts(&views, &models), core.droppable()));
         assert!(original.conflicts.contains("shared"));
