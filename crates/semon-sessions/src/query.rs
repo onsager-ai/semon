@@ -684,6 +684,25 @@ fn snippet(text: &str, at: usize, length: usize) -> String {
     out
 }
 
+/// Validate the shared five-tool contract before admitting source/archive work.
+/// This performs no I/O and grants no source authority. Window membership and
+/// generation checks still belong to the actual Query call.
+pub fn validate_query_call(tool: &str, args: &Value) -> Result<(), QueryError> {
+    let tools = query_tools();
+    let Some(spec) = tools.iter().find(|spec| spec.name == tool) else {
+        let names: Vec<&str> = tools.iter().map(|spec| spec.name).collect();
+        return Err(QueryError::new(
+            "unknown_tool",
+            format!("no tool {tool:?}; the tools are {}", names.join(", ")),
+        ));
+    };
+    let empty = json!({});
+    let args = if args.is_null() { &empty } else { args };
+    validate(&spec.input_schema, args)?;
+    since_ms(args, now_ms())?;
+    Ok(())
+}
+
 /// The agent read surface over one machine's homes or several: the tools
 /// `semon query` and `semon mcp` answer. Local calls share the native source
 /// index and snapshots between calls, rebuilding only what changed. Hosted
@@ -802,17 +821,9 @@ impl Query {
     /// [`Query::call`] at a fixed `now` (epoch ms), for fixtures.
     #[doc(hidden)]
     pub fn call_at(&mut self, tool: &str, args: &Value, now: i64) -> Result<Value, QueryError> {
-        let tools = query_tools();
-        let Some(spec) = tools.iter().find(|spec| spec.name == tool) else {
-            let names: Vec<&str> = tools.iter().map(|spec| spec.name).collect();
-            return Err(QueryError::new(
-                "unknown_tool",
-                format!("no tool {tool:?}; the tools are {}", names.join(", ")),
-            ));
-        };
         let empty = json!({});
         let args = if args.is_null() { &empty } else { args };
-        validate(&spec.input_schema, args)?;
+        validate_query_call(tool, args)?;
         // Once per call: the answer's window and the check of `since` belong
         // to the same native evidence cohort.
         self.start = self.window_start(now)?;
@@ -864,12 +875,9 @@ impl Query {
         mode: crate::SessionSourceReadMode,
         now: i64,
     ) -> Result<Value, QueryError> {
-        let tools = query_tools();
-        let spec = tools
-            .iter()
-            .find(|spec| spec.name == tool)
-            .ok_or_else(|| QueryError::new("unknown_tool", format!("no tool {tool:?}")))?;
-        validate(&spec.input_schema, args)?;
+        let empty = json!({});
+        let args = if args.is_null() { &empty } else { args };
+        validate_query_call(tool, args)?;
         if !matches!(tool, "get_session" | "read_transcript")
             || !args["id"].as_str().is_some_and(|id| {
                 id == catalog_key
