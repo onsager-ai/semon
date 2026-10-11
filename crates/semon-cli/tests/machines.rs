@@ -142,6 +142,29 @@ impl Root {
         serde_json::from_slice(&output.stdout).unwrap()
     }
 
+    fn overview(&self, local: bool) -> Value {
+        let options = semon_sessions::Options {
+            claude_home: self.0.join("claude"),
+            codex_home: self.0.join("codex"),
+            copilot_home: self.0.join("copilot"),
+            proc_root: self.0.join("proc"),
+            cache: self.0.join("state/index.json"),
+            all: true,
+            ..Default::default()
+        };
+        let received = semon_sessions::ReceivedMachines::new(self.0.join("received"), &options);
+        let local = if local {
+            vec![(String::new(), options)]
+        } else {
+            Vec::new()
+        };
+        let core = semon_sessions::ViewerCore::with_received(local, received);
+        let reply = core.respond("GET", "/api/viewer/home", "", None);
+        assert_eq!(reply.status, 200);
+        core.close();
+        serde_json::from_slice(&reply.body).unwrap()
+    }
+
     /// Everything under DIR, links not followed.
     fn received(&self) -> BTreeMap<PathBuf, Vec<u8>> {
         fn walk(dir: &Path, out: &mut BTreeMap<PathBuf, Vec<u8>>) {
@@ -167,12 +190,12 @@ impl Drop for Root {
     }
 }
 
-fn machine_ids(model: &Value) -> Vec<&str> {
-    model["machines"]
+fn machine_ids(overview: &Value) -> Vec<&str> {
+    overview["machines"]
         .as_array()
         .unwrap()
         .iter()
-        .map(|machine| machine["id"].as_str().unwrap())
+        .map(|machine| machine["label"].as_str().unwrap())
         .collect()
 }
 
@@ -198,26 +221,18 @@ fn machines_shows_this_machine_and_every_received_one_and_only_reads_dir() {
     let dir = dir.as_str();
     let before = root.received();
 
-    let output = root.semon(&["sessions", "--model-json", "--all", "--machines", dir]);
+    let output = root.semon(&["sessions", "--json", "--all", "--machines", dir]);
     assert!(output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         stderr.contains("received machine bravo") && stderr.contains("offline"),
         "{stderr}"
     );
-    let model: Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(machine_ids(&model), ["homebox", "alpha", "bravo"]);
-    assert_eq!(model["machines"][1]["up"], true);
-    assert_eq!(model["machines"][2]["up"], false);
-    for (sid, machine) in [
-        ("lane-home", "homebox"),
-        ("lane-alpha", "alpha"),
-        ("lane-bravo", "bravo"),
-    ] {
-        assert_eq!(model["sessions"][sid]["machine"], machine, "{sid}");
-    }
-
-    let tree = root.json(&["sessions", "--json", "--all", "--machines", dir]);
+    let overview = root.overview(true);
+    assert_eq!(machine_ids(&overview), ["homebox", "alpha", "bravo"]);
+    assert_eq!(overview["machines"][1]["up"], true);
+    assert_eq!(overview["machines"][2]["up"], false);
+    let tree: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(tree["schema_version"], 1);
     let expected: BTreeMap<String, String> = [
         ("lane-home", "homebox"),
@@ -230,16 +245,18 @@ fn machines_shows_this_machine_and_every_received_one_and_only_reads_dir() {
     assert_eq!(roots(&tree), expected);
 
     // --no-local leaves this machine out.
-    let model = root.json(&[
+    let tree = root.json(&[
         "sessions",
-        "--model-json",
+        "--json",
         "--all",
         "--machines",
         dir,
         "--no-local",
     ]);
-    assert_eq!(machine_ids(&model), ["alpha", "bravo"]);
-    assert!(model["sessions"].get("lane-home").is_none());
+    let overview = root.overview(false);
+    assert_eq!(machine_ids(&overview), ["alpha", "bravo"]);
+    assert!(!roots(&tree).contains_key("lane-home"));
+    assert_eq!(roots(&tree).len(), 2);
 
     // DIR is only read: the reader's own files go beside the cache.
     assert_eq!(root.received(), before);
@@ -277,25 +294,18 @@ fn machines_flags_are_checked() {
     for (args, message) in [
         (
             vec!["sessions", "--machines", dir],
-            "--machines works with --serve, --model-json or --json",
+            "--machines works with --serve or --json",
         ),
         (
             vec!["sessions", "--json", "--watch", "--machines", dir],
-            "--machines works with --serve, --model-json or --json",
+            "--machines works with --serve or --json",
         ),
         (
-            vec!["sessions", "--model-json", "--no-local"],
+            vec!["sessions", "--json", "--no-local"],
             "--no-local requires --machines",
         ),
         (
-            vec![
-                "sessions",
-                "--model-json",
-                "--machine",
-                dir,
-                "--machines",
-                dir,
-            ],
+            vec!["sessions", "--json", "--machine", dir, "--machines", dir],
             "--machine and --machines are exclusive",
         ),
     ] {
@@ -307,11 +317,11 @@ fn machines_flags_are_checked() {
             String::from_utf8_lossy(&output.stderr)
         );
     }
-    // Nothing to show at all is an error, not an empty model.
+    // Nothing to show at all is an error, not an empty native tree.
     let empty = root.0.join("empty").to_string_lossy().into_owned();
     let output = root.semon(&[
         "sessions",
-        "--model-json",
+        "--json",
         "--machines",
         empty.as_str(),
         "--no-local",

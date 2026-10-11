@@ -30,7 +30,7 @@ enum Command {
 #[derive(Default)]
 struct HomeArgs {
     options: semon_sessions::Options,
-    /// `--machine DIR`, repeated: several machines' homes in one model.
+    /// `--machine DIR`, repeated: several machines' native session homes.
     machines: Vec<PathBuf>,
     /// `--since DURATION`: how far back the model reads (the window).
     /// `--all` (in `options`) reads everything.
@@ -105,7 +105,7 @@ enum ReceiveArgs {
 
 struct SessionsArgs {
     options: semon_sessions::Options,
-    /// `--machine DIR`, repeated: several machines' homes in one model.
+    /// `--machine DIR`, repeated: several machines' native session homes.
     machines: Vec<PathBuf>,
     /// `--machines DIR`: every machine a receiver wrote under
     /// `DIR/machines/`, followed while serving.
@@ -113,7 +113,6 @@ struct SessionsArgs {
     /// This machine's own homes too; `--no-local` leaves them out.
     local: bool,
     json: bool,
-    model_json: bool,
     watch: bool,
     serve: bool,
     listen: String,
@@ -140,7 +139,6 @@ fn parse_sessions_args(
 ) -> Result<SessionsArgs, String> {
     let mut options = semon_sessions::Options::default();
     let mut json = false;
-    let mut model_json = false;
     let mut watch = false;
     let mut serve = false;
     let mut listen = "127.0.0.1:0".to_owned();
@@ -169,7 +167,6 @@ fn parse_sessions_args(
             "--facts" => options.facts = Some(value()?.into()),
             "--machine" => machines.push(PathBuf::from(value()?)),
             "--json" => json = true,
-            "--model-json" => model_json = true,
             "--watch" => watch = true,
             "--serve" => serve = true,
             "--listen" => {
@@ -183,26 +180,18 @@ fn parse_sessions_args(
     if serve && (json || watch) {
         return Err("--serve cannot be combined with --json or --watch".into());
     }
-    if model_json && (serve || json || watch) {
-        return Err("--model-json cannot be combined with --serve, --json or --watch".into());
-    }
-    if model_json && options.session.is_some() {
-        return Err(
-            "--model-json returns every session; --session is not supported with it".into(),
-        );
-    }
     if !serve && listen_given {
         return Err("--listen requires --serve".into());
     }
-    if !machines.is_empty() && !(model_json || serve) {
-        return Err("--machine works with --model-json or --serve".into());
+    if !machines.is_empty() && !(json || serve) {
+        return Err("--machine works with --json or --serve".into());
     }
     if received.is_some() {
         if !machines.is_empty() {
             return Err("--machine and --machines are exclusive".into());
         }
-        if watch || !(model_json || serve || json) {
-            return Err("--machines works with --serve, --model-json or --json".into());
+        if watch || !(serve || json) {
+            return Err("--machines works with --serve or --json".into());
         }
     } else if !local {
         return Err("--no-local requires --machines".into());
@@ -213,7 +202,6 @@ fn parse_sessions_args(
         received,
         local,
         json,
-        model_json,
         watch,
         serve,
         listen,
@@ -631,17 +619,7 @@ mod interrupt {
     pub fn raise_received() {}
 }
 
-/// The model of several machines' homes, as one viewer serves it: each
-/// `DIR` holds `claude/`, `codex/` and `proc/`, and `facts.json` when its
-/// facts were recorded elsewhere; the metadata cache goes in `DIR/.semon/`.
-fn print_machines_model(args: &SessionsArgs) -> Result<(), String> {
-    let mut core =
-        semon_sessions::ViewerCore::with_machines(machine_options(&args.options, &args.machines));
-    print_route(&mut core, "/api/model", "the model of these machines")
-}
-
-/// Prints one of a core's routes, the viewer's model or its tree, as it
-/// would serve it.
+/// Prints a native route as the Viewer would serve it.
 fn print_route(
     core: &mut semon_sessions::ViewerCore,
     path: &str,
@@ -682,17 +660,11 @@ fn received_machines(
     )
 }
 
-/// `--machines DIR` with `--model-json` or `--json`: the model, or the tree,
-/// of every machine at once.
+/// `--machines DIR` with `--json`: the native tree of every machine.
 fn print_received(args: &SessionsArgs, dir: &Path) -> Result<(), String> {
     let (local, received) = received_machines(args, dir);
     let mut core = semon_sessions::ViewerCore::with_received(local, received);
-    let (path, what) = if args.model_json {
-        ("/api/model", "the model of these machines")
-    } else {
-        ("/api/tree", "the tree of these machines")
-    };
-    let printed = print_route(&mut core, path, what);
+    let printed = print_route(&mut core, "/api/tree", "the tree of these machines");
     if core.machines() == 0 {
         return Err(format!(
             "no machines: none under {} and --no-local",
@@ -840,13 +812,12 @@ fn run_sessions(args: SessionsArgs) -> Result<(), String> {
         })
         .map_err(|error| error.to_string());
     }
-    if args.model_json && !args.machines.is_empty() {
-        return print_machines_model(&args);
-    }
-    if args.model_json {
-        let json = semon_sessions::model_json(&args.options).map_err(|error| error.to_string())?;
-        println!("{json}");
-        return Ok(());
+    if !args.machines.is_empty() {
+        let mut core = semon_sessions::ViewerCore::with_machines(machine_options(
+            &args.options,
+            &args.machines,
+        ));
+        return print_route(&mut core, "/api/tree", "the tree of these machines");
     }
     loop {
         let nodes = semon_sessions::collect(&args.options).map_err(|error| error.to_string())?;
@@ -934,16 +905,15 @@ fn query_usage() -> String {
 }
 
 fn usage() -> String {
-    "Usage: semon sessions [--claude-home PATH] [--claude-json PATH] [--codex-home PATH] [--proc-root PATH] [--cache PATH] [--all | --since DURATION] [--session ID] [--facts FILE] [--json | --model-json] [--watch] [--serve [--listen 127.0.0.1:PORT]] [--machines DIR [--no-local]]\n\
-         Shows a read-only tree of local Claude Code and Codex sessions. --model-json writes the viewer's\n\
-         session model (sessions, handoffs, turns, busy) instead; it reads every log, --all/--since trim the output.\n\
+    "Usage: semon sessions [--claude-home PATH] [--claude-json PATH] [--codex-home PATH] [--proc-root PATH] [--cache PATH] [--all | --since DURATION] [--session ID] [--facts FILE] [--json] [--watch] [--serve [--listen 127.0.0.1:PORT]] [--machines DIR [--no-local]]\n\
+         Shows a read-only tree of native Claude Code, Codex and Copilot sessions.\n\
          --facts takes the machine's side (hostname, live processes, repositories) from FILE instead of this machine.\n\
-         --machine DIR (repeated, with --model-json or --serve): one view over several machines' homes, DIR/{claude,codex,proc}.\n\
-         --machines DIR (with --serve, --model-json or --json): this machine and every machine `semon receive` wrote under\n\
+         --machine DIR (repeated, with --json or --serve): one view over several machines' homes, DIR/{claude,codex,proc}.\n\
+         --machines DIR (with --serve or --json): this machine and every machine `semon receive` wrote under\n\
          DIR/machines/, followed while serving; --no-local leaves this machine out. DIR is only read.\n\
          \n\
          Usage: semon query TOOL [ARGUMENTS] [--json] [--since DURATION | --all] [home options as for sessions, and --machine DIR]\n\
-         The agent read surface over the same session model: list_sessions, get_session, read_transcript, find,\n\
+         The agent read surface over native session evidence: list_sessions, get_session, read_transcript, find,\n\
          stalls. `semon query` alone lists each tool's arguments.\n\
          \n\
          Usage: semon mcp [--since DURATION | --all] [--claude-home PATH] [--claude-json PATH] [--codex-home PATH] [--proc-root PATH] [--cache PATH] [--facts FILE] [--machine DIR]...\n\
@@ -983,12 +953,13 @@ mod tests {
     }
 
     #[test]
-    fn model_json_refuses_flags_it_cannot_honour() {
+    fn retired_model_flag_is_not_a_product_option() {
         let parse = |arguments: &[&str]| {
             parse_sessions_args(arguments.iter().map(|argument| (*argument).to_owned()))
         };
-        assert!(parse(&["--model-json", "--all"]).is_ok_and(|args| args.model_json));
         for refused in [
+            &["--model-json"][..],
+            &["--model-json", "--all"][..],
             &["--model-json", "--session", "abc"][..],
             &["--model-json", "--json"][..],
             &["--model-json", "--serve"][..],

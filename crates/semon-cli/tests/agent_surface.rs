@@ -164,10 +164,10 @@ impl Home {
         serde_json::from_str(&text).unwrap()
     }
 
-    fn model(&self) -> Value {
-        let output = self.semon(&["sessions", "--model-json", "--all"]);
-        assert!(output.status.success());
-        serde_json::from_slice(&output.stdout).unwrap()
+    fn native_contract(&self) -> Value {
+        // Captured before compatibility retirement; independent of the Query
+        // implementation under test, including turn and handoff ids.
+        serde_json::from_str(include_str!("fixtures/agent-native-contract.json")).unwrap()
     }
 
     /// Every file under the home but the cache, with its bytes.
@@ -411,7 +411,7 @@ fn matching(expected: &Value, value: &Value) -> Value {
 fn semon_query_pins_every_tool_and_writes_only_its_cache() {
     let home = Home::new();
     let before = home.inputs();
-    let model = home.model();
+    let model = home.native_contract();
     for (tool, _, args, answer) in expected(&model) {
         let mut all = vec!["query", tool];
         all.extend(args.iter().copied());
@@ -642,7 +642,7 @@ fn check_schema(tool: &str, schema: &Value) {
 fn semon_mcp_speaks_the_protocol_and_serves_every_tool() {
     let home = Home::new();
     let before = home.inputs();
-    let model = home.model();
+    let model = home.native_contract();
     let mut server = Server::start(&home);
 
     let init = server.request(json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
