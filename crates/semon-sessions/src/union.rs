@@ -826,6 +826,27 @@ fn tag(node: &mut Value, machine: &str) {
     }
 }
 
+fn account_json(account: &AccountMenu) -> Value {
+    json!({
+        "name": account.name,
+        "login": account.login,
+        "initials": account.initials,
+        "avatar_href": account.avatar_href,
+        "workspaces": account.workspaces.iter().map(|workspace| json!({
+            "name": workspace.name,
+            "role": workspace.role,
+            "current": workspace.current,
+            "switch_href": workspace.switch_href,
+        })).collect::<Vec<_>>(),
+        "links": account.links.iter().map(|link| json!({
+            "label": link.label,
+            "href": link.href,
+            "method": link.method.as_str(),
+            "danger": link.danger,
+        })).collect::<Vec<_>>(),
+    })
+}
+
 /// Adds per-request embedding values at the front of a model's JSON object.
 fn with_model_extras(
     body: &[u8],
@@ -849,27 +870,7 @@ fn with_model_extras(
         add("admin", json!({ "label": admin.label, "href": admin.href }));
     }
     if let Some(account) = account {
-        add(
-            "account",
-            json!({
-                "name": account.name,
-                "login": account.login,
-                "initials": account.initials,
-                "avatar_href": account.avatar_href,
-                "workspaces": account.workspaces.iter().map(|workspace| json!({
-                    "name": workspace.name,
-                    "role": workspace.role,
-                    "current": workspace.current,
-                    "switch_href": workspace.switch_href,
-                })).collect::<Vec<_>>(),
-                "links": account.links.iter().map(|link| json!({
-                    "label": link.label,
-                    "href": link.href,
-                    "method": link.method.as_str(),
-                    "danger": link.danger,
-                })).collect::<Vec<_>>(),
-            }),
-        );
+        add("account", account_json(account));
     }
     if let Some(href) = nav_machines {
         add("nav", json!({ "machines": href }));
@@ -954,10 +955,9 @@ impl ViewerCore {
     /// The host closes this Viewer before draining sources or removing custody.
     pub fn from_sources(sources: Arc<crate::SessionSources>) -> Self {
         let views = Arc::new(sources.machine_views());
-        let inventory = sources.inventory.clone();
         let core = Self {
             views: RwLock::new(views.clone()),
-            source_inventory: Mutex::new(Some((Arc::downgrade(&views), inventory))),
+            source_inventory: Mutex::new(None),
             received: None,
             extras: Extras::default(),
             refresh: Refresh::OnRead,
@@ -1022,13 +1022,18 @@ impl ViewerCore {
     fn configured_source_inventory(views: &Views) -> Arc<crate::SessionSourceInventory> {
         let local = views.len() == 1 && views[0].0.is_empty();
         Arc::new(crate::SessionSourceInventory::new(views.iter().map(
-            |(key, _)| {
+            |(key, view)| {
                 let key = if local {
                     "local".to_owned()
                 } else {
                     key.clone()
                 };
-                (key.clone(), key)
+                let label = if local {
+                    crate::facts::MachineFacts::of(view.options()).hostname(view.options())
+                } else {
+                    key.clone()
+                };
+                (key, label)
             },
         )))
     }
@@ -1312,18 +1317,73 @@ impl ViewerCore {
         let Some(_entered) = self.open.enter() else {
             return text(404, "Not found");
         };
+        if path == "/api/viewer/chrome" {
+            // Standalone embedding metadata is independent of source/model
+            // observation. Hosted consumers provide their authenticated host.
+            return ViewerReply { status:200,content_type:"application/json; charset=utf-8",body:json!({"api":1,"account":extras.account.as_ref().map(account_json),"navigation":{"paths":{"machines":extras.nav_machines.as_deref().unwrap_or("/machines")}}}).to_string().into_bytes(),etag:None };
+        }
         self.follow();
         let views = self.views();
         if path == "/api/session-sources" {
             return self.source_inventory(&views).page(query);
         }
+        if matches!(path, "/api/viewer/home" | "/api/viewer/analytics") {
+            let sources: Vec<_> = views
+                .iter()
+                .map(|(key, view)| {
+                    let _ = view.note_catalog_read();
+                    let key = if key.is_empty() { "local" } else { key };
+                    {
+                        let facts = view
+                            .options()
+                            .facts
+                            .as_ref()
+                            .and_then(|path| crate::read_facts(path).ok());
+                        crate::OverviewSource {
+                            key: key.into(),
+                            label: facts
+                                .as_ref()
+                                .map(|facts| facts.hostname.clone())
+                                .unwrap_or_else(|| {
+                                    if view.options().facts.is_none() {
+                                        crate::facts::MachineFacts::Local.hostname(view.options())
+                                    } else {
+                                        key.into()
+                                    }
+                                }),
+                            options: view.options().clone(),
+                            up: facts
+                                .as_ref()
+                                .is_none_or(|facts| facts.offline_since.is_none()),
+                        }
+                    }
+                })
+                .collect();
+            return crate::session_overview_reply(
+                &sources,
+                if path.ends_with("analytics") {
+                    "analytics"
+                } else {
+                    "home"
+                },
+                query,
+                crate::model::now_ms(),
+            )
+            .unwrap_or_else(|error| failed(&error));
+        }
         if matches!(
             path,
             "/api/sessions"
+                | "/api/session-locate"
                 | "/api/session-transcript"
                 | "/api/session-entry"
                 | "/api/session-capabilities"
                 | "/api/session-identity"
+                | "/api/session-anchor"
+                | "/api/session-annotations"
+                | "/api/session-trace"
+                | "/api/session-home"
+                | "/api/session-observe"
                 | "/api/session-resolve"
         ) {
             return self.catalog(&views, path, query);
@@ -1447,6 +1507,18 @@ impl ViewerCore {
         // OnRead callers retain their explicit warm()/api/model contract.
         let refresh_error = view.note_catalog_read().err();
         let mut reply = match path {
+            "/api/session-locate" => crate::session_bookmark(view.options(), key, query),
+            "/api/session-observe" => crate::session_overview_observe(view.options(), key, query),
+            "/api/session-home" => crate::session_home_details_with_mode(
+                view.options(),
+                key,
+                query,
+                None,
+                crate::SessionSourceReadMode::ProviderOnly,
+            ),
+            "/api/session-anchor" => crate::session_turn_anchor(view.options(), key, query),
+            "/api/session-annotations" => crate::session_annotations(view.options(), key, query),
+            "/api/session-trace" => crate::session_causal_trace(view.options(), key, query),
             "/api/session-resolve" => crate::native_resolution::page(view.options(), key, query),
             "/api/session-identity" => {
                 let sid = query_value(query, "sid").and_then(decoded);

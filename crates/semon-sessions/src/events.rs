@@ -80,7 +80,7 @@ pub(crate) fn set_claude_sidecar_hook(hook: impl FnOnce() + 'static) {
 /// v19: ledgers verify the full consumed prefix instead of just two windows.
 /// v23: native connector completions and tool search are tools, including
 /// their exact code-mode parent; only explicitly typed reasoning is thinking.
-const CACHE_VERSION: u32 = 23;
+const CACHE_VERSION: u32 = 24;
 
 /// The four token categories the model serves for an exact model id.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -853,6 +853,7 @@ impl Ledger {
             offset: self.offset,
             prefix_sha256: self.prefix,
             tail_sha256: self.tail,
+            native_role: None,
         }
     }
 
@@ -1139,13 +1140,18 @@ impl EventCache {
     /// A read-only request-local cache of selected source generations. The
     /// caller keeps catalog metadata and these ledgers in one SQLite snapshot.
     /// No store is attached, so native projection cannot mutate global rows.
-    #[cfg(test)]
     pub(crate) fn from_selected(
         connection: &rusqlite::Connection,
         sources: &[crate::model::summary::CatalogSource],
         native_ids: &BTreeSet<String>,
     ) -> rusqlite::Result<Self> {
         store::read_selected(connection, sources, native_ids).map(Self::from_loaded)
+    }
+
+    pub(crate) fn selected_index(&self, path: &Path) -> Option<Arc<FileIndex>> {
+        self.files
+            .get(path.to_str()?)
+            .map(|file| Arc::clone(&file.index))
     }
 
     /// The shared Session Event Index. Preserve the configured cache stem:
@@ -4203,7 +4209,7 @@ pub(crate) fn codex(summary: &mut FileIndex, record: &Value, offset: u64) {
 }
 
 /// Native Copilot records preserve exact physical event and call identities.
-fn copilot(summary: &mut FileIndex, record: &Value, offset: u64) {
+pub(crate) fn copilot(summary: &mut FileIndex, record: &Value, offset: u64) {
     let Some(identity) = field(record, "id").filter(|id| !id.is_empty()) else {
         gap(summary, offset);
         return;

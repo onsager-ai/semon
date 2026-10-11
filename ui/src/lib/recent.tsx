@@ -226,7 +226,15 @@ export function createRecentRenderer(root: HTMLElement, host: RecentHost): Recen
               aria-label={'Show fewer sessions under ' + item.name}
               onClick={(event) => {
                 event.stopPropagation();
-                if (active(event.currentTarget)) host.fewer(item.id);
+                if (active(event.currentTarget)) {
+                  host.fewer(item.id);
+                  const parent = [...root.querySelectorAll<HTMLElement>('.treeitem')].find(
+                    (node) => node.dataset.id === item.id,
+                  );
+                  const row = parent?.querySelector<HTMLElement>(':scope > .tree-row .srow');
+                  row?.focus({ preventScroll: true });
+                  row?.scrollIntoView({ block: 'nearest' });
+                }
               }}
             >
               <span>Show fewer</span>

@@ -1,3 +1,4 @@
+import { catalogFilterCheck } from '../catalog-filter-check.mjs';
 // The Analytics and Sessions filters are the shell's Select, not native selects (feat/select-component). The four Selects sit in the
 // filters' sheet, which the Filter button opens (checks/filters.mjs covers the button, the chips and the sheet itself); here the
 // sheet is opened first and closed with "Done" after the choice.
@@ -26,6 +27,7 @@ import {
 const REPO = '.facet-filters .sh-select[data-label="Repo"]';
 
 export default async function selectCheck(browser) {
+  await catalogFilterCheck(browser, 'select');
   const r = reporter('select'),
     results = {};
   const state = (page) =>
@@ -84,7 +86,7 @@ export default async function selectCheck(browser) {
   ]) {
     const phone = size === 'phone',
       scheme = dark ? 'dark' : 'light';
-    for (const screen of ['analytics', 'sessions']) {
+    for (const screen of ['analytics']) {
       const key = screen + '-' + (phone ? '390' : '1280') + '-' + scheme,
         rec = (results[key] = {});
       const page = await served(browser, { size, dark, path: '/' + screen });

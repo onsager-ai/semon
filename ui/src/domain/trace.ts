@@ -1,6 +1,5 @@
-import type { Session, Handoff, Turn } from './types';
+import type { Session, Handoff, Turn, Cost } from './types';
 import type { AgentRow, AgentChart } from '../lib/trace';
-import type { createDomain } from './calculations';
 import { clock as formatClock, dur as formatDuration, tok, shortModel } from './format';
 interface AgentNode {
   sid: string;
@@ -24,22 +23,23 @@ export function createTraceCalculations(
     turns: Record<string, Turn[]>;
     starts: Map<string, Turn>;
   },
-  domain: Pick<
-    ReturnType<typeof createDomain>,
-    | 'costForSessions'
-    | 'costForSession'
-    | 'costText'
-    | 'shortMoney'
-    | 'hcls'
-    | 'usageTotal'
-    | 'nameOf'
-  >,
+  domain: {
+    costForSessions(sessions: Session[]): Cost;
+    costForSession(id: string): Cost;
+    costText(cost: Cost): string;
+    shortMoney(usd: number): string;
+    hcls(id: string): string;
+    usageTotal(session: Session): number;
+    nameOf(id: string): string;
+  },
   now: () => number,
   RUN_EXPANDED: Map<string, Set<string>>,
   HARNESS: Record<string, string>,
   STATE: Record<string, string>,
 ) {
   const { sessions: SESS, turns: TURNS, starts: STARTS } = state;
+  const workingEnd = (session: Session) =>
+    session.state === 'work' && session.liveObservation !== false ? now() : session.last;
   const { costForSessions, costForSession, costText, shortMoney, hcls, usageTotal, nameOf } =
     domain;
   const clock = (at: number) => formatClock(at, now()),
@@ -118,8 +118,7 @@ export function createTraceCalculations(
       session = SESS[root.sid];
     const start = root.at ?? root.start?.at ?? session.start;
     const nextTurn = (TURNS[root.sid] ?? []).find((t) => (t.at ?? 0) > start);
-    const upper =
-      root.end?.at ?? nextTurn?.at ?? (session.state === 'work' ? now() : session.last) ?? start;
+    const upper = root.end?.at ?? nextTurn?.at ?? workingEnd(session) ?? start;
     const end = Math.max(
       start,
       upper,
@@ -127,7 +126,9 @@ export function createTraceCalculations(
       ...allRunNodes(model)
         .filter((n) => n.kind !== 'root')
         .map((n) =>
-          SESS[n.sid]?.state === 'work' ? now() : (n.handoff?.done ?? SESS[n.sid]?.last),
+          SESS[n.sid]?.state === 'work' && SESS[n.sid]?.liveObservation !== false
+            ? now()
+            : (n.handoff?.done ?? SESS[n.sid]?.last),
         )
         .filter(finite),
     );
@@ -211,7 +212,7 @@ export function createTraceCalculations(
         to =
           node.kind === 'root'
             ? end
-            : s.state === 'work'
+            : s.state === 'work' && s.liveObservation !== false
               ? now()
               : (handoff!.done ?? s.last ?? from);
       const duration = dur(from, to),
@@ -221,7 +222,9 @@ export function createTraceCalculations(
             .map((x) => SESS[x.sid])
             .filter(Boolean),
         ),
-        status = STATE[s.state] ?? s.state;
+        status =
+          (s.liveObservation === false && ['work', 'wait'].includes(s.state) ? 'Recorded: ' : '') +
+          (STATE[s.state] ?? s.state);
       const segments: { left: number; width: number; kind: string }[] = [],
         segment = (a: number, b: number, kind: string) => {
           if (b > a) segments.push({ left: pct(a), width: Math.max(0.2, pct(b) - pct(a)), kind });
@@ -273,7 +276,7 @@ export function createTraceCalculations(
           ? {
               parent,
               started: pct(handoff!.at),
-              done: pct(handoff!.done ?? (s.state === 'work' ? now() : s.last)),
+              done: pct(handoff!.done ?? workingEnd(s)),
               returned: Number.isFinite(handoff!.done),
             }
           : undefined,

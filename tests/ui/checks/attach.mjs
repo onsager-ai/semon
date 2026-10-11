@@ -172,7 +172,7 @@ export default async function attachCheck(browser) {
     const gate = new Promise((done) => {
       release = done;
     });
-    await page.route(/\/api\/attachment\?/, async (route) => {
+    await page.route(/\/api\/session-entry\?.*part=attachment/, async (route) => {
       await gate;
       await route.continue();
     });
@@ -239,8 +239,11 @@ export default async function attachCheck(browser) {
         JSON.stringify(c.thumbs.map((t) => t.alt)),
     );
     r.expect(
-      c.thumbs.every((t) =>
-        /^\/api\/attachment\?sid=attach&o=\d+&b=\d+&v=[0-9a-f]{16}$/.test(t.src ?? ''),
+      c.thumbs.every(
+        (t) =>
+          t.src?.startsWith('/api/session-entry?') &&
+          new URLSearchParams(t.src.split('?')[1]).get('part') === 'attachment' &&
+          /^[a-f0-9]{64}$/.test(new URLSearchParams(t.src.split('?')[1]).get('generation') ?? ''),
       ),
       tag +
         ": each thumbnail's src is its /api/attachment URL: " +

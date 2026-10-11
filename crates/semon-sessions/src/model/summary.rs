@@ -123,12 +123,18 @@ impl CatalogLifecycle {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct CatalogRow {
+    #[serde(skip)]
+    pub(crate) overview: Option<crate::overview::Summary>,
+    #[serde(skip)]
+    pub(crate) trace: Option<crate::causal_trace::Projection>,
     #[serde(default)]
     pub(crate) lifecycle: CatalogLifecycle,
     pub(crate) key: String,
     pub(crate) name: String,
     pub(crate) harness: String,
     pub(crate) kind: String,
+    #[serde(default)]
+    pub(crate) presentation_kind: Option<String>,
     pub(crate) native_ids: Vec<String>,
     pub(crate) parent: Option<String>,
     pub(crate) parent_source: Option<String>,
@@ -162,6 +168,8 @@ pub(crate) struct CatalogSource {
     pub(crate) offset: u64,
     pub(crate) prefix_sha256: [u8; 32],
     pub(crate) tail_sha256: [u8; 32],
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) native_role: Option<Value>,
 }
 
 pub(crate) const CATALOG_VERSION: u32 = 3;
@@ -179,6 +187,9 @@ pub(super) fn source(file: &super::SourceFile) -> CatalogSource {
         offset,
         prefix_sha256,
         tail_sha256,
+        native_role: serde_json::to_value(&file.role)
+            .ok()
+            .filter(|role| serde_json::to_vec(role).is_ok_and(|bytes| bytes.len() <= 64 * 1024)),
     }
 }
 
@@ -202,10 +213,13 @@ pub(super) fn catalog(builder: &Builder<'_>, handoffs: &[Handoff]) -> Vec<Catalo
             .into_iter()
             .collect();
         rows.push(CatalogRow {
+            overview: None,
+            trace: None,
             lifecycle: CatalogLifecycle::Current,
             key: session.key.clone(),
             name: out.name.clone(),
             harness: out.harness.into(),
+            presentation_kind: out.kind.map(str::to_owned),
             kind: match session.kind {
                 SessKind::Lineage => "session",
                 SessKind::Agent => "subagent",

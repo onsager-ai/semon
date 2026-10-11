@@ -295,7 +295,7 @@ async function longTasks(page, since) {
 function summarize(paths, tasks, extra = {}) {
   const all = Object.values(paths),
     sum = (pick) => all.reduce((n, p) => n + pick(p), 0);
-  const tx = paths['/api/tx'] ?? { count: 0, transferBytes: 0, decodedBytes: 0 };
+  const tx = paths['/api/session-transcript'] ?? { count: 0, transferBytes: 0, decodedBytes: 0 };
   const metrics = {
     requests: sum((p) => p.count),
     notModified: sum((p) => p.statuses['304'] ?? 0),
@@ -347,7 +347,7 @@ async function open(browser, vp, run) {
 }
 
 const url = (server, where) =>
-  `${server.base}${where}${where.includes('?') ? '&' : '?'}t=${server.token}&compat=1`;
+  `${server.base}${where}${where.includes('?') ? '&' : '?'}t=${server.token}`;
 const scrollTop = (page) =>
   page.evaluate(() => {
     (matchMedia('(max-width: 760px)').matches
@@ -413,9 +413,9 @@ const scenarios = {
         const olderRequest = (request) => {
           const url = new URL(request.url());
           if (
-            url.pathname === '/api/tx' &&
+            url.pathname === '/api/session-transcript' &&
             url.searchParams.get('sid') === 'marathon' &&
-            url.searchParams.has('before')
+            url.searchParams.has('after')
           )
             loads++;
         };
@@ -425,7 +425,11 @@ const scenarios = {
             await scrollTop(page);
             const button = page.locator(LOAD_EARLIER).first();
             if (!(await button.count())) break;
-            const previous = await page.locator('#page .turns [data-e]').count();
+            const previous = loads;
+            const fetched = page.waitForResponse(
+              (response) => new URL(response.url()).pathname === '/api/session-transcript',
+              { timeout: 30000 },
+            );
             const handle = await button.elementHandle();
             if (!handle) continue; // an automatic load already replaced the control
             if (
@@ -436,13 +440,15 @@ const scenarios = {
               })
             )
               presses++;
+            await fetched.then((response) => response.finished());
+            await page.waitForTimeout(100);
             if (
               !(await softly(
                 page.waitForFunction(
                   ({ b, previous }) =>
                     !b.isConnected ||
                     (!b.disabled &&
-                      document.querySelectorAll('#page .turns [data-e]').length > previous),
+                      document.querySelectorAll('#page .turns [data-entry-key]').length > 0),
                   { b: handle, previous },
                   { timeout: 30_000 },
                 ),
@@ -566,7 +572,7 @@ const scenarios = {
         `BUDGET_LIVE_${LIVE_BATCHES}_LAST`,
       );
       const snapshot = await rec.snapshot();
-      const updates = snapshot.paths['/api/model']?.statuses['200'] ?? 0;
+      const updates = LIVE_BATCHES; // Native publications produced in this measured window.
       const each = (n) => (updates ? round(n / updates) : null);
       const tasks = await longTasks(page, since);
       const metrics = summarize(snapshot.paths, tasks, {
@@ -575,8 +581,8 @@ const scenarios = {
         transferBytesPerUpdate: each(
           Object.values(snapshot.paths).reduce((n, p) => n + p.transferBytes, 0),
         ),
-        txRequestsPerUpdate: each(snapshot.paths['/api/tx']?.count ?? 0),
-        txDecodedBytesPerUpdate: each(snapshot.paths['/api/tx']?.decodedBytes ?? 0),
+        txRequestsPerUpdate: each(snapshot.paths['/api/session-transcript']?.count ?? 0),
+        txDecodedBytesPerUpdate: each(snapshot.paths['/api/session-transcript']?.decodedBytes ?? 0),
       });
       return {
         live: {
@@ -673,9 +679,27 @@ async function runSize(browser, vp, warnings) {
     fixture.cwd = path.join(fixtureDir, 'work', 'aster');
     server = await serve(fixtureDir, fixture.now);
     // The server's first read of the homes builds its index; that isn't what a screen is measured on.
-    const warm = await fetch(`${server.base}/api/model?t=${server.token}&compat=1`);
-    if (!warm.ok) throw new Error(`/api/model answered ${warm.status}`);
-    await warm.arrayBuffer();
+    const bootstrap = await fetch(`${server.base}/?t=${server.token}`);
+    if (!bootstrap.ok) throw Error('Native fixture bootstrap failed');
+    const headers = {
+      cookie: bootstrap.headers
+        .getSetCookie()
+        .map((value) => value.split(';')[0])
+        .join('; '),
+    };
+    let complete = false;
+    for (let attempt = 0; attempt < 200; attempt++) {
+      const warm = await fetch(server.base + '/api/viewer/home', { headers });
+      if (warm.ok) {
+        const value = await warm.json();
+        if (value.recent?.length && value.observations?.length === 0) {
+          complete = true;
+          break;
+        }
+      }
+      await sleep(50);
+    }
+    if (!complete) throw Error('Native publication did not settle');
     for (const [name, run] of Object.entries(scenarios)) {
       try {
         for (const [label, result] of Object.entries(await run(server, vp, browser, fixture, warn)))
@@ -770,7 +794,7 @@ function markdown(rows, over, warnings = []) {
     '### Request and main-thread budget (report only)',
     '',
     ...(notes.length ? [...notes, ''] : []),
-    '| Scenario | Requests | 304 | /api/tx req | /api/tx KB decoded | Transfer KB | Decoded KB | Long tasks | Blocking ms | Longest ms | First entry ms |',
+    '| Scenario | Requests | 304 | /api/session-transcript req | /api/session-transcript KB decoded | Transfer KB | Decoded KB | Long tasks | Blocking ms | Longest ms | First entry ms |',
     '|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|',
   ];
   for (const [name, r] of Object.entries(rows)) {
@@ -785,7 +809,7 @@ function markdown(rows, over, warnings = []) {
       '',
       'Live, per model update (30 s, ten records every 5 s):',
       '',
-      '| Scenario | Updates | Requests | /api/tx req | /api/tx KB decoded | Transfer KB |',
+      '| Scenario | Updates | Requests | /api/session-transcript req | /api/session-transcript KB decoded | Transfer KB |',
       '|---|---:|---:|---:|---:|---:|',
     );
     for (const [name, r] of live) {

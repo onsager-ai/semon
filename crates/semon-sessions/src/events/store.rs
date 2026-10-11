@@ -50,7 +50,7 @@ use crate::{Tokens, facts::ReportedRunSnapshot};
 
 /// `PRAGMA user_version`: the shape of the tables. The parser's version is
 /// [`CACHE_VERSION`], kept in `meta`.
-const SCHEMA_VERSION: i64 = 19;
+const SCHEMA_VERSION: i64 = 21;
 
 /// How long a write waits for another process's transaction. Tests wait
 /// less, so the busy paths they drive stay quick.
@@ -79,6 +79,7 @@ CREATE TABLE IF NOT EXISTS session_slots (
     PRIMARY KEY(session_key,slot)
 ) STRICT, WITHOUT ROWID;
 
+CREATE INDEX IF NOT EXISTS session_slots_turn ON session_slots(session_key,CASE WHEN json_valid(metadata) THEN json_extract(metadata,'$.turn') END,slot);
 CREATE TABLE IF NOT EXISTS session_catalog (
     session_key TEXT PRIMARY KEY,
     lifecycle TEXT NOT NULL DEFAULT 'current' CHECK(lifecycle IN ('current','retained')),
@@ -98,6 +99,14 @@ CREATE INDEX IF NOT EXISTS session_catalog_current_harness ON session_catalog(ha
 CREATE INDEX IF NOT EXISTS session_catalog_current_repo ON session_catalog(repo, last_ms DESC, session_key ASC) WHERE lifecycle='current';
 CREATE INDEX IF NOT EXISTS session_catalog_current_harness_repo ON session_catalog(harness, repo, last_ms DESC, session_key ASC) WHERE lifecycle='current';
 CREATE INDEX IF NOT EXISTS session_catalog_current_parent ON session_catalog(parent_key, last_ms DESC, session_key ASC) WHERE lifecycle='current';
+CREATE INDEX IF NOT EXISTS session_catalog_order_model ON session_catalog(json_extract(metadata,'$.model'), last_ms DESC, session_key ASC);
+CREATE INDEX IF NOT EXISTS session_catalog_harness_model ON session_catalog(harness, json_extract(metadata,'$.model'), last_ms DESC, session_key ASC);
+CREATE INDEX IF NOT EXISTS session_catalog_repo_model ON session_catalog(repo, json_extract(metadata,'$.model'), last_ms DESC, session_key ASC);
+CREATE INDEX IF NOT EXISTS session_catalog_harness_repo_model ON session_catalog(harness, repo, json_extract(metadata,'$.model'), last_ms DESC, session_key ASC);
+CREATE INDEX IF NOT EXISTS session_catalog_current_order_model ON session_catalog(json_extract(metadata,'$.model'), last_ms DESC, session_key ASC) WHERE lifecycle='current';
+CREATE INDEX IF NOT EXISTS session_catalog_current_harness_model ON session_catalog(harness, json_extract(metadata,'$.model'), last_ms DESC, session_key ASC) WHERE lifecycle='current';
+CREATE INDEX IF NOT EXISTS session_catalog_current_repo_model ON session_catalog(repo, json_extract(metadata,'$.model'), last_ms DESC, session_key ASC) WHERE lifecycle='current';
+CREATE INDEX IF NOT EXISTS session_catalog_current_harness_repo_model ON session_catalog(harness, repo, json_extract(metadata,'$.model'), last_ms DESC, session_key ASC) WHERE lifecycle='current';
 CREATE TABLE IF NOT EXISTS session_catalog_sources (
     session_key TEXT NOT NULL,
     lifecycle TEXT NOT NULL DEFAULT 'current' CHECK(lifecycle IN ('current','retained')),
@@ -394,7 +403,6 @@ pub(super) fn open_scoped(
 /// Load only the selected native sources in the caller's existing read snapshot.
 /// This never opens a writable store, imports legacy data, walks roots or prunes
 /// source membership. Catalog identities and event ledgers must agree exactly.
-#[cfg(test)]
 pub(super) fn read_selected(
     connection: &Connection,
     sources: &[crate::model::summary::CatalogSource],
@@ -1377,6 +1385,7 @@ impl SqliteStore {
                         .map_err(failure)?;
                     let mut put_source = transaction.prepare("INSERT INTO session_catalog_sources(session_key,harness,native_id,source_path) VALUES (?1,?2,?3,?4) ON CONFLICT(session_key,source_path) DO UPDATE SET lifecycle='current',harness=excluded.harness,native_id=excluded.native_id").map_err(failure)?;
                     for (row, metadata) in rows.iter().zip(&metadata) {
+                        crate::overview::publish_current(&transaction, row).map_err(failure)?;
                         member.execute([&row.key]).map_err(failure)?;
                         let changed = put
                             .execute(params![
@@ -2168,6 +2177,8 @@ fn init(connection: &mut Connection) -> rusqlite::Result<Init> {
             )?;
         }
         transaction.execute_batch(SCHEMA)?;
+        transaction.execute_batch(crate::overview::SCHEMA)?;
+        transaction.execute_batch(crate::causal_trace::SCHEMA)?;
         transaction.execute_batch(crate::history_projection::SCHEMA)?;
         transaction.execute_batch(crate::catalog_search::SCHEMA)?;
         transaction.execute_batch(crate::catalog_changes::SCHEMA)?;
@@ -2223,6 +2234,9 @@ fn init(connection: &mut Connection) -> rusqlite::Result<Init> {
                     }
                 }
             }
+        }
+        if schema < 21 {
+            transaction.execute_batch("INSERT OR IGNORE INTO meta(key,value) SELECT 'overview_needed:'||c.session_key,'1' FROM session_catalog c LEFT JOIN session_overview o USING(session_key) LEFT JOIN session_trace_headers t USING(session_key) WHERE o.session_key IS NULL OR t.session_key IS NULL;")?;
         }
         transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     }

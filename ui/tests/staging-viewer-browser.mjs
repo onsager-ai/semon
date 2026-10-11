@@ -96,6 +96,7 @@ for (const width of [390, 820, 1280])
             actions: {},
           };
           window.snapshot = {
+            composerTarget: document.querySelector('#topbar'),
             id: 'native',
             name: 'Initial session',
             order: [],
@@ -178,6 +179,7 @@ for (const width of [390, 820, 1280])
           target.className = 'jump-wrap';
           ViewerFixes.updateSessionJump(root, true, 2, false, target);
         });
+        await page.getByRole('button', { name: 'Open Composer' }).click();
         const row = page.locator('.composer-unavailable'),
           input = page.getByLabel('Message to Codex');
         assert.equal(await row.isVisible(), true);
@@ -187,6 +189,7 @@ for (const width of [390, 820, 1280])
         assert.equal(await input.getAttribute('readonly'), '');
         await row.click();
         assert.equal(await input.isVisible(), false);
+        await page.keyboard.press('Escape');
         assert.equal(
           await page.locator('.think-disclosure').getAttribute('aria-expanded'),
           'false',
@@ -228,6 +231,7 @@ for (const width of [390, 820, 1280])
           control.adopt(native);
           ViewerFixes.updateSessionControl(root, control.view('native', 'source:native'));
         });
+        await page.getByRole('button', { name: 'Open Composer' }).click();
         const compact = await input.boundingBox();
         await input.focus();
         await input.fill('Retained draft\nSecond line\nThird line');
@@ -260,10 +264,7 @@ for (const width of [390, 820, 1280])
         });
         assert.equal(await input.isVisible(), true);
         assert.equal(await input.getAttribute('readonly'), '');
-        await page.locator('#page h1').evaluate((node) => {
-          node.tabIndex = -1;
-          node.focus();
-        });
+        await page.getByRole('button', { name: 'Close', exact: true }).focus();
         await page.waitForTimeout(40);
         assert.equal(await input.isVisible(), false);
         assert.match(await row.innerText(), /controller is disconnected.*Draft saved/);
@@ -294,10 +295,12 @@ for (const width of [390, 820, 1280])
         await page.waitForTimeout(30);
         const geometry = await page.evaluate(() => {
           const b = document.querySelector('#jump-bottom').getBoundingClientRect(),
-            c = document.querySelector('.sh-composer').getBoundingClientRect(),
+            c = document.querySelector('dialog.session-composer-panel').getBoundingClientRect(),
             d = document.querySelector('.session-dock').getBoundingClientRect();
           return {
-            clear: b.bottom <= c.top,
+            readingEmpty: !document.querySelector('#page [aria-label="Conversation controls"]'),
+            trigger: !!document.querySelector('#topbar .session-composer-trigger'),
+            panelInside: c.top >= 0 && c.bottom <= innerHeight,
             center: Math.abs((b.left + b.right - d.left - d.right) / 2) < 1,
             inside: b.top >= 0 && b.bottom <= innerHeight,
             header: !!document.querySelector('#topbar #jump-bottom'),
@@ -305,7 +308,9 @@ for (const width of [390, 820, 1280])
           };
         });
         assert.deepEqual(geometry, {
-          clear: true,
+          readingEmpty: true,
+          trigger: true,
+          panelInside: true,
           center: true,
           inside: true,
           header: false,

@@ -215,14 +215,25 @@ export default async function hiconsCheck(browser) {
       rec = (results[tag] = {}),
       page = await served(browser, { size, dark });
     // Reports the fixture's most recent Claude sessions as OpenCode ones. Polls (?since=) are answered as they are.
-    await page.route('**/api/model*', async (route) => {
-      const response = await route.fetch();
-      if (response.status() !== 200 || new URL(route.request().url()).searchParams.has('since'))
-        return route.fulfill({ response });
-      const body = await response.json();
-      for (const id of opencode) if (body.sessions?.[id]) body.sessions[id].harness = 'opencode';
-      await route.fulfill({ response, json: body });
-    });
+    for (const endpoint of ['viewer/home', 'sessions', 'session-transcript'])
+      await page.route('**/api/' + endpoint + '**', async (route) => {
+        const response = await route.fetch();
+        if (response.status() !== 200) return route.fulfill({ response });
+        const body = await response.json();
+        if (endpoint === 'viewer/home') {
+          for (const section of ['recent', 'working', 'inbox', 'answered'])
+            for (const row of body[section])
+              if (opencode.includes(row.catalog_key)) row.session.harness = 'opencode';
+        } else if (endpoint === 'sessions') {
+          for (const row of body.items) if (opencode.includes(row.key)) row.harness = 'opencode';
+          const filter = new URL(route.request().url()).searchParams.get('harness');
+          if (filter) body.items = body.items.filter((row) => row.harness === filter);
+        } else if (opencode.includes(body.identity?.catalog_key)) {
+          body.session.harness = 'opencode';
+          body.identity.harness = 'opencode';
+        }
+        await route.fulfill({ response, json: body });
+      });
     await page.reload({ waitUntil: 'load' });
     await settled(page);
     const shot = (name) => page.screenshot({ path: path.join(OUT, name + '-' + tag + '.png') });
@@ -334,7 +345,7 @@ export default async function hiconsCheck(browser) {
     );
     const dots = await page.evaluate(() => ({
       rows: document.querySelectorAll('#lanes .srow').length,
-      dots: document.querySelectorAll('#lanes .srow-main > .dot').length,
+      dots: document.querySelectorAll('#lanes .srow-main > .dot:first-child').length,
       marks: document.querySelectorAll('#lanes .session-row-meta > .hicon').length,
       dotFirst: [...document.querySelectorAll('#lanes .srow-main')].every((m) =>
         m.firstElementChild?.classList.contains('dot'),
@@ -374,18 +385,28 @@ export default async function hiconsCheck(browser) {
     await goto(page, { v: 'sessions' }, D);
     await loaded(page);
     judge('sessions-row', await read(page, PLACES['sessions-row'].selector), { need: 3 });
-    await page.click('.page .groupby button[data-g="harness"]');
-    await page.waitForTimeout(150);
+    await page.getByLabel('Harness', { exact: true }).fill('claude');
+    await page.getByRole('button', { name: 'Apply filters', exact: true }).click();
+    await page.waitForFunction(() => !document.querySelector('#page[aria-busy="true"]'));
+    await page.waitForFunction(
+      () =>
+        [...document.querySelectorAll('#page .nrow .hicon')].length > 0 &&
+        [...document.querySelectorAll('#page .nrow .hicon')].every(
+          (mark) => mark.dataset.harness === 'claude',
+        ),
+    );
     await loaded(page);
-    const groups = await read(page, PLACES['sessions-group'].selector);
-    const grouped = judge('sessions-group', groups, { need: 3 });
+    const filtered = judge('sessions-row', await read(page, PLACES['sessions-row'].selector), {
+      need: 3,
+    });
     r.expect(
-      ['claude', 'codex', 'opencode'].every((h) => grouped.has(h)),
-      tag + ' sessions-group: headings for ' + [...grouped].join(', '),
+      filtered.has('claude') && filtered.size === 1,
+      tag + ': source-scoped harness filter retains Claude marks',
     );
     await shot('sessions-by-harness');
-    await page.click('.page .groupby button[data-g="recent"]');
-    await page.waitForTimeout(100);
+    await page.getByLabel('Harness', { exact: true }).fill('');
+    await page.getByRole('button', { name: 'Apply filters', exact: true }).click();
+    await page.waitForFunction(() => !document.querySelector('#page[aria-busy="true"]'));
     await shot('sessions');
 
     // ---- Home: a working row names its harness, and an inbox item's context line ----

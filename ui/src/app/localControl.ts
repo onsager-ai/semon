@@ -1,5 +1,5 @@
 import type { EffectScope } from './effects';
-import type { JsonObject } from '../lib/model';
+import type { JsonObject } from '../lib/api';
 import { parseControl, unavailableControl } from '../lib/control';
 import type { ControlSnapshot, ControlView } from '../lib/control';
 export type { ControlView } from '../lib/control';

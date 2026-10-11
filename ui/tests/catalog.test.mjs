@@ -61,6 +61,20 @@ const page = () => ({
   items: [session()],
   next_cursor: 'opaque cursor',
 });
+test('selected transcript observations validate generation and exact safe totals', () => {
+  const input = page();
+  input.items[0].transcript = { generation: 'a'.repeat(64), total: 3000 };
+  assert.deepEqual(parseCatalogPage(input).items[0].transcript, input.items[0].transcript);
+  for (const projection of [
+    { generation: 'legacy', total: 1 },
+    { generation: 'a'.repeat(64), total: -1 },
+    { generation: 'a'.repeat(64), total: 0.5 },
+    { generation: 'a'.repeat(64), total: Number.MAX_SAFE_INTEGER + 1 },
+  ]) {
+    input.items[0].transcript = projection;
+    assert.throws(() => parseCatalogPage(input), /Invalid/);
+  }
+});
 test('catalog retains unknown timestamps, source disappearance and independent capabilities', () => {
   const input = page(),
     parsed = parseCatalogPage(input);

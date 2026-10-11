@@ -1,28 +1,27 @@
 import assert from 'node:assert/strict';
 import { fileURLToPath } from 'node:url';
 import { launch, served, data, goto } from '../lib.mjs';
+import { selectedFixture } from '../selected-fixture.mjs';
 export default async function signalsCheck(browser) {
   const D = await data(),
     sid = Object.keys(D.TX).find((id) => D.TX[id].some((e) => e.k === 'tool'));
   for (const size of ['phone', 'desktop']) {
     const page = await served(browser, { size });
     try {
-      const model = structuredClone(D.model);
-      model.sessions[sid].signals = { compact: 1, effort: 1 };
-      model.version += '-signals';
-      await page.route('**/api/model**', (r) => r.fulfill({ json: model }));
-      await page.route('**/api/tx?**', async (r) => {
-        const q = new URL(r.request().url()).searchParams;
-        if (q.get('sid') !== sid) return r.continue();
-        if (q.has('signals'))
-          return r.fulfill({ json: { version: model.version, signals: 2, slots: [1, 2] } });
-        const response = await r.fetch(),
-          tx = await response.json(),
-          tool = tx.entries.find((e) => e.k === 'tool');
+      await selectedFixture(page, sid, (tx) => {
+        tx.session.details.signals = { compact: 1, effort: 1 };
+        const tool = tx.entries.find((e) => e.k === 'tool');
         tx.entries = [
           { ...tool, slot: 0 },
-          { k: 'signal', slot: 1, signal: { kind: 'compact', value: 180000 }, at: tool.at },
           {
+            ...tool,
+            k: 'signal',
+            slot: 1,
+            signal: { kind: 'compact', value: 180000 },
+            at: tool.at,
+          },
+          {
+            ...tool,
             k: 'signal',
             slot: 2,
             signal: { kind: 'effort', previous: 'high', tag: 'max' },
@@ -30,10 +29,6 @@ export default async function signalsCheck(browser) {
           },
           { ...tool, slot: 3 },
         ];
-        tx.from = 0;
-        tx.to = 4;
-        tx.total = 4;
-        await r.fulfill({ json: tx });
       });
       await page.reload();
       await page.waitForFunction(() => history.state?.v === 'home');
@@ -47,7 +42,14 @@ export default async function signalsCheck(browser) {
       // Annotation rows precede a gathered run rather than breaking it in two.
       assert.equal(await page.locator('.tgroup').count(), 1);
       await page.locator('#more-btn').click();
-      assert.match(await page.locator('.session-menu .kv').textContent(), /Signals\s*·\s*compact1/);
+      assert.match(
+        await page
+          .locator('.session-menu .kv dt')
+          .filter({ hasText: 'Signals' })
+          .locator('+ dd')
+          .textContent(),
+        /compact1.*effort1/,
+      );
       await page.locator('.menu-signals').click();
       await page.waitForSelector('.signal-marker.err-current');
       assert.equal(await page.locator('.errnav-count').textContent(), 'Signal 1 of 2');

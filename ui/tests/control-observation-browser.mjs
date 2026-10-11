@@ -6,7 +6,7 @@ const bundle = await build({
   absWorkingDir: new URL('../', import.meta.url).pathname,
   stdin: {
     contents:
-      "export {createControlObservation} from './src/app/controlObservation';export {createLocalControl} from './src/app/localControl';export {EffectScope} from './src/app/effects';export {ViewUpdates} from './src/state/viewUpdates';export {renderSessionScreen,updateSessionControl} from './src/lib/transcript';",
+      "export {createControlObservation} from './src/app/controlObservation';export {createLocalControl} from './src/app/localControl';export {EffectScope} from './src/app/effects';export {renderSessionScreen,updateSessionControl} from './src/lib/transcript';",
     resolveDir: new URL('../', import.meta.url).pathname,
   },
   bundle: true,
@@ -21,7 +21,10 @@ for (const width of [390, 1280])
     try {
       const page = await browser.newPage({ viewport: { width, height: 900 } });
       await page.route('https://controls.test/**', (route) =>
-        route.fulfill({ contentType: 'text/html', body: '<!doctype html><div id="page"></div>' }),
+        route.fulfill({
+          contentType: 'text/html',
+          body: '<!doctype html><div id="topbar"></div><div id="page"></div>',
+        }),
       );
       await page.goto('https://controls.test/');
       await page.clock.install({ time: new Date('2026-10-07T00:00:00Z') });
@@ -51,6 +54,7 @@ for (const width of [390, 1280])
         Controls.renderSessionScreen(
           root,
           {
+            composerTarget: document.querySelector('#topbar'),
             id: 'one',
             name: 'Conversation',
             blocks: [],
@@ -78,6 +82,7 @@ for (const width of [390, 1280])
         });
       });
       await page.clock.runFor(100);
+      await page.getByRole('button', { name: 'Open Composer' }).click();
       await page.locator('textarea').waitFor();
       await page.evaluate(() => {
         const input = document.querySelector('textarea');
@@ -123,7 +128,10 @@ for (const width of [390, 1280])
     try {
       const page = await browser.newPage({ viewport: { width, height: 900 } });
       await page.route('http://controls.test/**', (route) =>
-        route.fulfill({ contentType: 'text/html', body: '<!doctype html><div id="page"></div>' }),
+        route.fulfill({
+          contentType: 'text/html',
+          body: '<!doctype html><div id="topbar"></div><div id="page"></div>',
+        }),
       );
       await page.goto('http://controls.test/');
       await page.clock.install({ time: new Date('2026-10-07T00:00:00Z') });
@@ -173,11 +181,10 @@ for (const width of [390, 1280])
           refreshes++;
           Controls.updateSessionControl(document.querySelector('#page'), owner.view(route.id));
         }));
-        const updates = new Controls.ViewUpdates();
+
         window.host = {
           scope,
           controlOwner: owner,
-          updates,
           navigation: {
             get route() {
               return window.route;
@@ -187,11 +194,24 @@ for (const width of [390, 1280])
               return () => (window.changed = null);
             },
           },
-          modelStore: { sessions: { one: { machine: 'a' }, two: { machine: 'b' } } },
-          viewerHost: { controlStream: '/status' },
+          catalogSelection: {
+            selectedIdentity: () => ({
+              source_key: route.id === 'one' ? 'a' : 'b',
+              catalog_key: route.id,
+              native_id: route.id,
+              harness: 'codex',
+              owner_qualification: 'owner',
+              read_scope: 'current',
+            }),
+            subscribe() {
+              return () => {};
+            },
+          },
+          viewerHost: { catalogControlStream: '/status' },
         };
         window.observation = Controls.createControlObservation(host);
         const snapshot = {
+          composerTarget: document.querySelector('#topbar'),
           id: 'one',
           name: 'Retained conversation',
           blocks: [],
@@ -205,19 +225,24 @@ for (const width of [390, 1280])
         };
 
         sources[0].emit('control', {
-          selected: 'one',
-          machine: 'a',
+          source_key: 'a',
+          catalog_key: 'one',
+          native_id: 'one',
+          harness: 'codex',
           revision: 'r1',
           control: native('one'),
         });
       });
+      await page.getByRole('button', { name: 'Open Composer' }).click();
       await page.locator('textarea').fill('retained draft');
       await page.locator('textarea').focus();
       await page.evaluate(() => {
         window.input = document.querySelector('textarea');
         sources[0].emit('control', {
-          selected: 'one',
-          machine: 'a',
+          source_key: 'a',
+          catalog_key: 'one',
+          native_id: 'one',
+          harness: 'codex',
           revision: 'r2',
           control: { ...native('one'), connected: false, reason: 'Provider observation stale' },
         });
@@ -233,8 +258,10 @@ for (const width of [390, 1280])
       );
       await page.evaluate(() =>
         sources[0].emit('control', {
-          selected: 'one',
-          machine: 'a',
+          source_key: 'a',
+          catalog_key: 'one',
+          native_id: 'one',
+          harness: 'codex',
           revision: 'final',
           control: {
             ...native('one'),
@@ -253,7 +280,7 @@ for (const width of [390, 1280])
           same: input === document.querySelector('textarea'),
           focus: input === document.activeElement,
           draft: input.value,
-          ended: document.querySelector('#page').textContent.includes('This session has ended.'),
+          ended: document.body.textContent.includes('This session has ended.'),
           reconnect: [...document.querySelectorAll('button')].some(
             (button) => button.textContent.trim() === 'Reconnect',
           ),
@@ -266,16 +293,20 @@ for (const width of [390, 1280])
       assert.equal(await page.evaluate(() => sources.length), 2);
       await page.evaluate(() => {
         sources[1].emit('control', {
-          selected: 'one',
-          machine: 'a',
+          source_key: 'a',
+          catalog_key: 'one',
+          native_id: 'one',
+          harness: 'codex',
           revision: 'r3',
           control: native('one'),
         });
         window.route = { v: 'session', id: 'two' };
         changed();
         sources[1].emit('control', {
-          selected: 'one',
-          machine: 'a',
+          source_key: 'a',
+          catalog_key: 'one',
+          native_id: 'one',
+          harness: 'codex',
           revision: 'late',
           control: native('one'),
         });
@@ -283,13 +314,15 @@ for (const width of [390, 1280])
       });
       assert.equal(
         await page.evaluate(() => sources.at(-1).path),
-        '/status?selected=two&machine=b',
+        '/status?source_key=b&catalog_key=two&native_id=two&harness=codex',
       );
       assert.equal(await page.evaluate(() => owner.view('one')), undefined);
       await page.evaluate(() =>
         sources.at(-1).emit('control', {
-          selected: 'two',
-          machine: 'b',
+          source_key: 'b',
+          catalog_key: 'two',
+          native_id: 'two',
+          harness: 'codex',
           revision: 'two-r1',
           control: native('two'),
         }),
@@ -306,8 +339,10 @@ for (const width of [390, 1280])
         observation.destroy();
         effect.destroy();
         sources.at(-1).emit('control', {
-          selected: 'two',
-          machine: 'b',
+          source_key: 'b',
+          catalog_key: 'two',
+          native_id: 'two',
+          harness: 'codex',
           revision: 'after',
           control: native('two'),
         });

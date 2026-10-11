@@ -15,6 +15,15 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 mod analytics;
+mod causal_trace;
+mod overview;
+mod overview_repair;
+pub use causal_trace::session_causal_trace;
+pub use overview::{OverviewSource, session_home_details_with_mode, session_overview_reply};
+pub use overview_repair::{
+    overview_repair_candidates, overview_repair_sources, repair_session_overview,
+    session_overview_observe,
+};
 mod catalog;
 mod catalog_changes;
 mod catalog_observer;
@@ -24,6 +33,7 @@ pub use catalog_changes::{
 };
 mod catalog_search;
 mod native_resolution;
+mod session_bookmark;
 pub use catalog::{
     CatalogFreshness, CatalogIdentityError, CatalogOwnerQualification, CatalogReadScope,
     CatalogSessionIdentity, CatalogSourceObservation, SessionSourceProof, SessionSourceRef,
@@ -34,6 +44,7 @@ pub use catalog_observer::SessionCatalogObserver;
 pub use native_resolution::{
     CatalogNativeResolution, CatalogNativeResolutionState, session_catalog_resolve_native,
 };
+pub use session_bookmark::session_bookmark;
 mod claude_usage;
 pub mod copilot;
 pub use claude_usage::ClaudeUsageEvidence;
@@ -74,8 +85,8 @@ mod slot_projection;
 pub use read_capabilities::{SessionReadEndpoints, session_catalog_capabilities};
 mod transcript_range;
 pub use transcript_range::{
-    SessionSourceReadMode, session_entry_field, session_entry_field_with_mode,
-    session_transcript_range, session_transcript_range_with_mode,
+    SessionSourceReadMode, session_annotations, session_entry_field, session_entry_field_with_mode,
+    session_transcript_range, session_transcript_range_with_mode, session_turn_anchor,
 };
 mod native_evidence;
 pub use native_evidence::SessionSources;

@@ -1,17 +1,13 @@
 import type { EffectScope } from './effects';
 import type { NavigationController } from '../navigation/routes';
-import type { ViewerModelStore } from '../state/model';
-import type { ViewUpdates } from '../state/viewUpdates';
 import type { ViewerHost } from '../viewer-host';
 import type { createLocalControl } from './localControl';
 import type { CatalogSessionIdentity } from '../domain/catalog';
 interface ControlObservationHost {
   scope: EffectScope;
   navigation: NavigationController;
-  modelStore: Pick<ViewerModelStore, 'sessions'>;
-  updates: ViewUpdates;
   viewerHost: ViewerHost | null;
-  catalogSelection?: {
+  catalogSelection: {
     selectedIdentity(): CatalogSessionIdentity | null;
     subscribe(listener: () => void): () => void;
   };
@@ -19,8 +15,7 @@ interface ControlObservationHost {
 }
 /** Navigation-owned native status; never adopts or rebuilds a content model. */
 export function createControlObservation(host: ControlObservationHost) {
-  if (!host.viewerHost?.controlStream && !host.viewerHost?.catalogControlStream)
-    return { destroy() {} };
+  if (!host.viewerHost?.catalogControlStream) return { destroy() {} };
   let stream: EventSource | null = null;
   let identity = '';
   let timer: number | undefined;
@@ -55,14 +50,9 @@ export function createControlObservation(host: ControlObservationHost) {
         thread: accepted?.native_id ?? '',
       };
     }
-    const session = route.v === 'session' ? host.modelStore.sessions[route.id] : undefined;
-    const thread = session && route.v === 'session' ? route.id : '';
-    return {
-      path: host.viewerHost?.controlStream,
-      params: { selected: thread, machine: session?.machine ?? '' },
-      thread,
-    };
+    return { path: undefined, params: {}, thread: '' };
   }
+
   function cancel() {
     stream?.close();
     stream = null;
@@ -130,7 +120,6 @@ export function createControlObservation(host: ControlObservationHost) {
         delay = 1000;
         if (revision === value.revision) return;
         revision = value.revision;
-        if (!host.catalogSelection) host.viewerHost?.modelNavigation?.(value);
         if (control || !scope.thread) host.controlOwner.observe(control);
         else host.controlOwner.unavailable();
       } catch {
@@ -144,14 +133,12 @@ export function createControlObservation(host: ControlObservationHost) {
     connect();
   }
   const route = host.navigation.subscribeRoute(changed);
-  const model = host.updates.subscribe(changed);
   const catalog = host.catalogSelection?.subscribe(changed);
   connect();
   return {
     destroy() {
       disposed = true;
       route();
-      model();
       catalog?.();
       cancel();
     },

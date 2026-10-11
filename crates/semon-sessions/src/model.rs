@@ -642,13 +642,17 @@ impl Texts {
 
     fn read(
         &mut self,
+        evidence: (
+            &crate::query_source::Records<'_>,
+            Option<&crate::overview_repair::NativeRecords>,
+        ),
         file: &SourceFile,
         offset: u64,
         block: u32,
         what: &str,
-        records: &crate::query_source::Records<'_>,
         extract: impl FnOnce(&Value, usize) -> Option<String>,
     ) -> Option<String> {
+        let (records, history_records) = evidence;
         let key = TextKey {
             path: file.path.clone(),
             generation: self.generation(&file.path, file.stamp),
@@ -661,10 +665,11 @@ impl Texts {
             *used = self.tick;
             return value.clone();
         }
-        let value = records
-            .derive(&file.path, offset)
-            .ok()
-            .flatten()
+        let value = history_records
+            .map_or_else(
+                || records.derive(&file.path, offset).ok().flatten(),
+                |history| history.record(&file.path, offset),
+            )
             .and_then(|record| extract(&record, block as usize))
             .map(|text| {
                 // `json:` values are built capped, and must stay whole.
@@ -1017,7 +1022,7 @@ pub(crate) fn local_hostname(options: &Options) -> String {
 
 // ---- Scan: every file's metadata summary --------------------------------------------------
 
-#[derive(Default, Debug)]
+#[derive(Clone, Default, Debug, Serialize, Deserialize)]
 struct AgentMeta {
     parent: String,
     tool_use_id: Option<String>,
@@ -1063,7 +1068,7 @@ impl CodexMeta {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 enum Role {
     Top { slug: String },
     Agent(AgentMeta),
@@ -1598,6 +1603,26 @@ struct H {
     out: Handoff,
     from: Option<usize>,
     to: Option<usize>,
+    previews: Option<BTreeMap<&'static str, PreviewRef>>,
+}
+
+struct PreviewRef {
+    at: Ref,
+    reply: bool,
+    kind: &'static str,
+    arg: Option<String>,
+    skip: usize,
+}
+impl PreviewRef {
+    fn new(at: Ref, kind: &'static str) -> Self {
+        Self {
+            at,
+            reply: false,
+            kind,
+            arg: None,
+            skip: 0,
+        }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -1651,6 +1676,7 @@ struct SessionDerived {
 
 struct Builder<'a> {
     files: &'a [SourceFile],
+    history_records: Option<&'a crate::overview_repair::NativeRecords<'a>>,
     slot_files: Vec<Arc<SlotFile>>,
     texts: &'a mut Texts,
     records: &'a crate::query_source::Records<'a>,
@@ -1729,6 +1755,7 @@ impl<'a> Builder<'a> {
                 })
                 .collect(),
             files,
+            history_records: None,
             texts,
             records,
             now,
@@ -1878,8 +1905,14 @@ impl<'a> Builder<'a> {
     ) -> Option<String> {
         let file = &self.files[at.0];
         let event = &file.summary.events[at.1];
-        self.texts
-            .read(file, event.o, event.b, what, self.records, extract)
+        self.texts.read(
+            (self.records, self.history_records),
+            file,
+            event.o,
+            event.b,
+            what,
+            extract,
+        )
     }
 
     fn result_text(
@@ -1890,8 +1923,14 @@ impl<'a> Builder<'a> {
     ) -> Option<String> {
         let file = &self.files[at.0];
         let reply = file.summary.events[at.1].r.as_ref()?;
-        self.texts
-            .read(file, reply.o, reply.b, what, self.records, extract)
+        self.texts.read(
+            (self.records, self.history_records),
+            file,
+            reply.o,
+            reply.b,
+            what,
+            extract,
+        )
     }
 
     /// A session's events in order.
@@ -1987,6 +2026,7 @@ impl<'a> Builder<'a> {
             out: handoff,
             from,
             to,
+            previews: None,
         });
         self.handoffs.len() - 1
     }
@@ -2570,9 +2610,14 @@ impl<'a> Builder<'a> {
                                 .iter()
                                 .find(|event| event.k == Kind::U)?;
                             self.texts
-                                .read(file, event.o, event.b, "user", self.records, |record, _| {
-                                    prompt_text(record)
-                                })
+                                .read(
+                                    (self.records, self.history_records),
+                                    file,
+                                    event.o,
+                                    event.b,
+                                    "user",
+                                    |record, _| prompt_text(record),
+                                )
                                 .filter(|text| !text.trim().is_empty())
                         })
                     })
@@ -2788,10 +2833,17 @@ impl<'a> Builder<'a> {
                     input_string(record, block, &["prompt"])
                 })
             });
+            let mut previews = BTreeMap::new();
+            if brief.is_some()
+                && let Some(at) = call
+            {
+                previews.insert("brief", PreviewRef::new(at, "spawn"));
+            }
             if brief.is_none()
                 && let Some(at) = first_prompt
             {
                 brief = self.text(at, "user", |record, _| prompt_text(record));
+                previews.insert("brief", PreviewRef::new(at, "trace_prompt"));
             }
             let at = call
                 .and_then(|at| event(self.files, at).t)
@@ -2810,6 +2862,9 @@ impl<'a> Builder<'a> {
                 });
                 let failed = !matches!(status.as_str(), "completed" | "success" | "done");
                 result = Some((text, event(self.files, found).t, failed));
+                let mut preview = PreviewRef::new(found, "notification");
+                preview.arg = Some(id);
+                previews.insert("result", preview);
             }
             // Both forms of receipt, by either id, in time order (a receipt
             // with no time last).
@@ -2834,6 +2889,7 @@ impl<'a> Builder<'a> {
                 let found = received[index];
                 let text = self.receipt_body(&key, &received, index);
                 result = Some((text, event(self.files, found).t, false));
+                previews.insert("result", self.receipt_preview(&key, &received, index));
             }
             if result.is_none()
                 && let Some(at) = call
@@ -2842,6 +2898,9 @@ impl<'a> Builder<'a> {
             {
                 let text = self.result_text(at, "result", tool_result_text);
                 result = Some((text, reply.t, reply.e));
+                let mut preview = PreviewRef::new(at, "tool_result");
+                preview.reply = true;
+                previews.insert("result", preview);
             }
             if result.is_none()
                 && let Some(at) = child_events.iter().rev().copied().find(|at| {
@@ -2853,6 +2912,7 @@ impl<'a> Builder<'a> {
                     input_string(record, block, &["message"])
                 });
                 result = Some((text, event(self.files, at).t, false));
+                previews.insert("result", PreviewRef::new(at, "handback"));
             }
             let root = self.root(spawner);
             let running = self.sessions[root].alive;
@@ -2878,6 +2938,7 @@ impl<'a> Builder<'a> {
                 )
             };
             let handoff = self.add_handoff(handoff, Some(spawner), Some(child));
+            self.handoffs[handoff].previews = Some(previews);
             if let Some(at) = call {
                 self.place(at, handoff, Place::Out);
             }
@@ -3007,7 +3068,13 @@ impl<'a> Builder<'a> {
             let file = &self.files[*position];
             let index = file.summary.handoff_index.as_ref()?;
             for location in index.calls() {
-                let call = self.records.launch(&file.path, location).ok()?;
+                let call = self
+                    .history_records
+                    .map_or_else(
+                        || self.records.launch(&file.path, location),
+                        |history| history.launch(&file.path, location),
+                    )
+                    .ok()?;
                 if let Some(tool) = matcher.consider(&call) {
                     return Some(tool.id);
                 }
@@ -3052,6 +3119,10 @@ impl<'a> Builder<'a> {
                 .find(|at| event(self.files, *at).k == Kind::U);
             let brief =
                 first_prompt.and_then(|at| self.text(at, "user", |record, _| prompt_text(record)));
+            let mut previews = BTreeMap::new();
+            if let Some(at) = first_prompt {
+                previews.insert("brief", PreviewRef::new(at, "trace_prompt"));
+            }
             let key = self.sessions[child].key.clone();
             let mut result = None;
             if let Role::Codex(meta) = &self.files[self.sessions[child].files[0]].role
@@ -3072,6 +3143,7 @@ impl<'a> Builder<'a> {
                             received_body(record, "agent-message", None, 0)
                         });
                         result = Some((text, event(self.files, at).t));
+                        previews.insert("result", PreviewRef::new(at, "received_agent"));
                     }
                 }
             }
@@ -3085,6 +3157,7 @@ impl<'a> Builder<'a> {
             {
                 let text = self.text(at, "a", assistant_text);
                 result = Some((text, Some(self.sessions[child].out.last)));
+                previews.insert("result", PreviewRef::new(at, "assistant"));
             }
             let handoff = Handoff {
                 done: result.as_ref().and_then(|result| result.1),
@@ -3101,6 +3174,7 @@ impl<'a> Builder<'a> {
                 )
             };
             let handoff = self.add_handoff(handoff, Some(spawner), Some(child));
+            self.handoffs[handoff].previews = Some(previews);
             if let Some(at) = call {
                 self.place(at, handoff, Place::Out);
             }
@@ -3301,6 +3375,10 @@ impl<'a> Builder<'a> {
             };
             let handoff = self.add_handoff(handoff, Some(from), Some(to));
             self.place(at, handoff, Place::In);
+            self.handoffs[handoff].previews = Some(BTreeMap::from([(
+                "brief",
+                PreviewRef::new(at, "received_cross"),
+            )]));
         }
     }
 
@@ -3441,6 +3519,24 @@ impl<'a> Builder<'a> {
             // `<agent-message>` may be another agent's.
             received_body(record, "agent-message", Some(from), skip)
         })
+    }
+
+    fn receipt_preview(&self, from: &str, received: &[Ref], index: usize) -> PreviewRef {
+        let at = received[index];
+        let offset = event(self.files, at).o;
+        let skip = received
+            .iter()
+            .filter(|other| {
+                other.0 == at.0 && other.1 < at.1 && event(self.files, **other).o == offset
+            })
+            .count();
+        PreviewRef {
+            at,
+            reply: false,
+            kind: "received_agent",
+            arg: Some(from.to_owned()),
+            skip,
+        }
     }
 
     fn send_target(&mut self, at: Ref) -> String {
@@ -3680,6 +3776,10 @@ impl<'a> Builder<'a> {
                     text.as_deref().unwrap_or(""),
                 );
                 let handoff = self.add_handoff(handoff, None, Some(index));
+                self.handoffs[handoff].previews = Some(BTreeMap::from([(
+                    "brief",
+                    PreviewRef::new(at, "trace_prompt"),
+                )]));
                 self.place(at, handoff, Place::In);
             }
         }
@@ -4136,6 +4236,171 @@ impl<'a> Builder<'a> {
     }
 
     // -- turns --
+
+    /// Content-free recipes for the Home previews. Text stays in native logs.
+    fn overview_content(
+        &self,
+        key: &str,
+        turns: &[Turn],
+        tx: &Transcript,
+        saved: Option<&crate::slot_projection::Projection>,
+    ) -> Value {
+        let decorate = |mut recipe: Value| {
+            let kind = recipe["kind"].as_str().unwrap_or("");
+            if let Some(field) = saved
+                .into_iter()
+                .flat_map(|saved| &saved.slots)
+                .find_map(|slot| {
+                    let field = slot.field.as_ref()?;
+                    (slot.file.as_ref()?.path.to_str() == recipe["path"].as_str()
+                        && Some(field.record_offset) == recipe["offset"].as_u64()
+                        && Some(u64::from(field.block)) == recipe["block"].as_u64()
+                        && matches!(
+                            (kind, field.kind),
+                            (
+                                "assistant" | "prompt" | "trace_prompt",
+                                crate::native_field::NativeFieldKind::Text
+                            ) | (
+                                "tool_result",
+                                crate::native_field::NativeFieldKind::ClaudeResult
+                                    | crate::native_field::NativeFieldKind::CodexResult
+                                    | crate::native_field::NativeFieldKind::CodexResultObject
+                            )
+                        ))
+                    .then_some(field)
+                })
+            {
+                recipe["field"] = serde_json::to_value(field).expect("owned native descriptor");
+            }
+            recipe
+        };
+        let recipe = |at: Ref, kind: &str| {
+            let file = &self.files[at.0];
+            let found = event(self.files, at);
+            let Some(path) = file.path.to_str() else {
+                return Value::Null;
+            };
+            decorate(
+                serde_json::json!({"path":path,"offset":found.o,"block":found.b,"kind":kind,"tool":found.n,"cwd":file.summary.cwd}),
+            )
+        };
+        let placed = |id: &str, place: Place| {
+            self.placed.iter().find_map(|(at, entries)| {
+                entries
+                    .iter()
+                    .any(|(h, p)| self.handoffs[*h].out.id == id && *p == place)
+                    .then_some(*at)
+            })
+        };
+        let origin = |turn: &Turn| {
+            turn.start.as_deref().and_then(|start| placed(start, Place::In)).map(|at| recipe(at, "prompt"))
+                .or_else(|| tx.slots.iter().find(|slot| slot.turn.as_deref()==Some(&turn.id) && matches!(slot.kind, SlotKind::U)).and_then(|slot| slot.file.as_ref().and_then(|file| file.path.to_str().map(|path|decorate(serde_json::json!({"path":path,"offset":slot.offset,"block":slot.block,"kind":"prompt"}))))))
+        };
+        let mut events = serde_json::Map::new();
+        for h in self.handoffs.iter().filter(|h| {
+            h.out.from == key
+                || h.out.to.as_deref() == Some(key)
+                || h.previews.as_ref().is_some_and(|previews| {
+                    previews
+                        .values()
+                        .any(|preview| self.sessions[self.of_file[preview.at.0]].key == key)
+                })
+        }) {
+            let mut fields = serde_json::json!({});
+            if let Some(previews) = &h.previews {
+                for (field, preview) in previews {
+                    if self.sessions[self.of_file[preview.at.0]].key != key {
+                        continue;
+                    }
+                    let mut value = recipe(preview.at, preview.kind);
+                    if value.is_null() {
+                        continue;
+                    }
+                    if preview.reply
+                        && let Some(reply) = event(self.files, preview.at).r.as_ref()
+                    {
+                        value["offset"] = serde_json::json!(reply.o);
+                        value["block"] = serde_json::json!(reply.b);
+                    }
+                    value["arg"] = serde_json::json!(preview.arg);
+                    value["skip"] = serde_json::json!(preview.skip);
+                    fields[*field] = decorate(value);
+                }
+            } else if h.out.from == key {
+                let brief_at = placed(&h.out.id, Place::Out).or_else(|| {
+                    (h.out.ask == Some("result"))
+                        .then(|| {
+                            self.files
+                                .iter()
+                                .enumerate()
+                                .flat_map(|(f, file)| {
+                                    file.summary
+                                        .events
+                                        .iter()
+                                        .enumerate()
+                                        .map(move |(e, event)| (f, e, event, file))
+                                })
+                                .find_map(|(f, e, event, file)| {
+                                    (event.k == Kind::A
+                                        && stable_id(
+                                            "q",
+                                            &format!(
+                                                "toyou:result:{}:{}:{}",
+                                                file.id, event.o, event.b
+                                            ),
+                                        ) == h.out.id)
+                                        .then_some((f, e))
+                                })
+                        })
+                        .flatten()
+                });
+                let Some(at) = brief_at else {
+                    continue;
+                };
+                let kind = if h.out.ask == Some("question") {
+                    "question"
+                } else if h.out.kind == "spawn" {
+                    "spawn"
+                } else if h.out.kind == "relay" {
+                    "relay"
+                } else {
+                    "assistant"
+                };
+                fields = serde_json::json!({"brief":recipe(at, kind)});
+                if let Some(reply) = event(self.files, at).r.as_ref() {
+                    let field = if h.out.ask == Some("question") {
+                        "answer"
+                    } else {
+                        "result"
+                    };
+                    let mut answer = recipe(
+                        at,
+                        if field == "answer" {
+                            "answer"
+                        } else {
+                            "tool_result"
+                        },
+                    );
+                    answer["offset"] = serde_json::json!(reply.o);
+                    answer["block"] = serde_json::json!(reply.b);
+                    answer["structured"] = serde_json::json!(reply.f & ANSWERED != 0);
+                    fields[field] = decorate(answer);
+                }
+            }
+            if let Some(turn) = turns
+                .iter()
+                .find(|turn| turn.sid == key && turn.sent.contains(&h.out.id))
+            {
+                fields["origin"] = origin(turn).unwrap_or(Value::Null);
+            }
+            events.insert(h.out.id.clone(), fields);
+        }
+        let current = turns.iter().rev().find(|turn| turn.sid == key);
+        let activity=self.sessions.iter().find(|session|session.key==key).and_then(|session|session.out.activity.as_ref()).and_then(|(name,_,_,at)| {
+            tx.slots.iter().rev().find(|slot|slot.call_name()==Some(name.as_str()) && slot.t==Some(*at)).and_then(|slot|slot.file.as_ref().and_then(|file|file.path.to_str().map(|path|serde_json::json!({"path":path,"offset":slot.offset,"block":slot.block,"kind":"activity","tool":name,"cwd":file.cwd}))))
+        });
+        serde_json::json!({"events":events,"detail":current.and_then(origin),"activity":activity})
+    }
 
     #[cfg(test)]
     fn texts_by_turn(&self) -> BTreeMap<String, Vec<(usize, u64, u32)>> {
@@ -5563,6 +5828,95 @@ fn compact_questions(input: &Value) -> Value {
     serde_json::json!({ "questions": questions })
 }
 
+/// Reuse native question/answer semantics for bounded Home recipe reads.
+pub(crate) fn overview_text(recipe: &Value, record: &Value, question: Option<&Value>) -> Value {
+    let block = recipe["block"].as_u64().unwrap_or(0) as usize;
+    let questions = |record: &Value, block| {
+        tool_input(record, block)
+            .map(|input| questions_of(&compact_questions(&input)))
+            .unwrap_or_default()
+    };
+    match recipe["kind"].as_str() {
+        Some("question") => serde_json::json!(cap(
+            &questions(record, block)
+                .iter()
+                .map(|q| q.question.as_str())
+                .collect::<Vec<_>>()
+                .join("\n"),
+            MSG_MAX
+        )),
+        Some("answer") => {
+            let questions = question
+                .map(|record| {
+                    questions(
+                        record,
+                        recipe["question_block"].as_u64().unwrap_or(0) as usize,
+                    )
+                })
+                .unwrap_or_default();
+            let raw = compact_answers(record, block);
+            let answers = if recipe["structured"] == true {
+                structured_answers(&questions, &raw["tur"])
+            } else {
+                text_answers(&questions, field(&raw, "text").unwrap_or(""))
+            };
+            serde_json::json!(
+                answers
+                    .iter()
+                    .take(100)
+                    .map(|answer| cap(&answer.values.join(", "), MSG_MAX))
+                    .collect::<Vec<_>>()
+            )
+        }
+        Some("assistant") => {
+            serde_json::json!(assistant_text(record, block).map(|text| cap(&text, MSG_MAX)))
+        }
+        Some("spawn") => serde_json::json!(
+            input_string(record, block, &["prompt", "message", "instructions"])
+                .map(|text| cap(&text, MSG_MAX))
+        ),
+        Some("relay") => serde_json::json!(
+            input_string(record, block, &["message", "content"]).map(|text| cap(&text, MSG_MAX))
+        ),
+        Some("tool_result") => {
+            serde_json::json!(tool_result_text(record, block).map(|text| cap(&text, MSG_MAX)))
+        }
+        Some("trace_prompt") => {
+            serde_json::json!(prompt_text(record).map(|text| cap(&text, MSG_MAX)))
+        }
+        Some("notification") => serde_json::json!(
+            notification_result(record, recipe["arg"].as_str().unwrap_or(""))
+                .map(|text| cap(&text, MSG_MAX))
+        ),
+        Some("received_agent") => serde_json::json!(
+            received_body(
+                record,
+                "agent-message",
+                recipe["arg"].as_str(),
+                recipe["skip"].as_u64().unwrap_or(0) as usize
+            )
+            .map(|text| cap(&text, MSG_MAX))
+        ),
+        Some("received_cross") => serde_json::json!(
+            received_body(record, "cross-session-message", None, 0).map(|text| cap(&text, MSG_MAX))
+        ),
+        Some("handback") => serde_json::json!(
+            input_string(record, block, &["message"]).map(|text| cap(&text, MSG_MAX))
+        ),
+        Some("prompt") => serde_json::json!(prompt_text(record).map(|text| cap(&text, 500))),
+        Some("activity") => serde_json::json!(tool_input(record, block).map(|input| cap(
+            &arg_summary(
+                recipe["tool"].as_str().unwrap_or("tool"),
+                &input,
+                recipe["cwd"].as_str(),
+                None
+            ),
+            500
+        ))),
+        _ => Value::Null,
+    }
+}
+
 /// A question's result, reduced to capped answers, previews and text.
 fn compact_answers(record: &Value, block: usize) -> Value {
     let result = record.get("toolUseResult").unwrap_or(&Value::Null);
@@ -5896,7 +6250,7 @@ pub(crate) fn build_sources(
         dirty,
         texts,
         now,
-        selected,
+        BuildSelection::Current(selected),
         BuildTarget::Model,
     )? {
         BuildOutput::Model(built) => Ok(*built),
@@ -5929,7 +6283,15 @@ pub(crate) fn build_query(
     texts: &mut Texts,
     now: i64,
 ) -> io::Result<QueryData> {
-    match build_sources_inner(options, cache, dirty, texts, now, None, BuildTarget::Query)? {
+    match build_sources_inner(
+        options,
+        cache,
+        dirty,
+        texts,
+        now,
+        BuildSelection::Current(None),
+        BuildTarget::Query,
+    )? {
         BuildOutput::Query(data) => Ok(*data),
         _ => Err(io::Error::other(
             "native producer did not build query evidence",
@@ -5958,7 +6320,7 @@ pub(crate) fn observe_catalog(
         dirty,
         texts,
         now,
-        None,
+        BuildSelection::Current(None),
         BuildTarget::Catalog,
     )? {
         BuildOutput::Catalog(pids) => Ok(pids),
@@ -6000,12 +6362,186 @@ pub(crate) fn prepare_sources(
         &mut false,
         &mut Texts::default(),
         now,
-        Some(inputs),
+        BuildSelection::Current(Some(inputs)),
         BuildTarget::Sources,
     )? {
         BuildOutput::Sources(prepared) => Ok(prepared),
         _ => Err(io::Error::other(
             "native producer did not capture projection",
+        )),
+    }
+}
+
+enum BuildSelection<'a> {
+    Current(Option<&'a [crate::inputs::Input]>),
+    History {
+        files: Vec<SourceFile>,
+        records: &'a crate::overview_repair::NativeRecords<'a>,
+    },
+}
+
+/// Reuses the native producer over qualified original generations. It cannot
+/// scan a workspace, infer current control ownership or publish catalog rows.
+pub(crate) fn prepare_history(
+    options: &Options,
+    rows: &[summary::CatalogRow],
+    records: &crate::overview_repair::NativeRecords,
+    now: i64,
+) -> io::Result<PreparedSources> {
+    let mut files = Vec::new();
+    let mut seen = BTreeSet::new();
+    for row in rows {
+        for source in &row.sources {
+            if !seen.insert(source.path.clone()) {
+                continue;
+            }
+            let mut header = Value::Null;
+            let summary = if let Some(summary) = records.index(&source.path) {
+                if source.native_role.is_none() && row.harness == "codex" {
+                    header =
+                        records.record(&source.path, 0).unwrap_or(Value::Null)["payload"].clone();
+                }
+                summary
+            } else {
+                let bytes = records
+                    .bytes(&source.path)
+                    .ok_or_else(|| io::Error::other("Missing qualified producer source"))?;
+                let mut summary = FileIndex::default();
+                let mut offset = 0u64;
+
+                for line in bytes.split_inclusive(|byte| *byte == b'\n') {
+                    if line.len() > 32 * 1024 * 1024 || line.last() != Some(&b'\n') {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "Qualified producer record exceeds its bound",
+                        ));
+                    }
+                    match crate::tx::parse_native_record(line) {
+                        Some(value) => {
+                            if value["type"] == "session_meta" {
+                                header = value["payload"].clone();
+                            }
+                            match row.harness.as_str() {
+                                "claude" => events::claude(&mut summary, &value, offset),
+                                "codex" => events::codex(&mut summary, &value, offset),
+                                "copilot" => events::copilot(&mut summary, &value, offset),
+                                _ => {
+                                    return Err(io::Error::new(
+                                        io::ErrorKind::InvalidData,
+                                        "Unknown native producer",
+                                    ));
+                                }
+                            }
+                        }
+                        None => events::gap(&mut summary, offset),
+                    }
+                    offset += line.len() as u64;
+                }
+                if offset != source.offset {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "Qualified producer boundary changed",
+                    ));
+                }
+                let proofs = crate::source_chunks::capture(
+                    &mut std::io::Cursor::new(bytes),
+                    source.offset,
+                    0,
+                )?;
+                if proofs.prefix != source.prefix_sha256 || proofs.tail != source.tail_sha256 {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "Qualified source proof changed",
+                    ));
+                }
+                summary.source_chunks = Some(Arc::new(proofs.chunks));
+                Arc::new(summary)
+            };
+            let role = if let Some(value) = &source.native_role {
+                serde_json::from_value(value.clone()).map_err(io::Error::other)?
+            } else {
+                match row.harness.as_str() {
+                    "claude" if row.kind == "subagent" => Role::Agent(AgentMeta {
+                        parent: source
+                            .path
+                            .parent()
+                            .and_then(Path::parent)
+                            .and_then(Path::file_name)
+                            .and_then(|value| value.to_str())
+                            .unwrap_or("")
+                            .to_owned(),
+                        label: Some(row.name.clone()),
+                        ..AgentMeta::default()
+                    }),
+                    "claude" => Role::Top {
+                        slug: source
+                            .path
+                            .parent()
+                            .and_then(Path::file_name)
+                            .and_then(|value| value.to_str())
+                            .unwrap_or("")
+                            .to_owned(),
+                    },
+                    "codex" => Role::Codex(CodexMeta {
+                        history: CodexHistory::from_meta(&header),
+                        parent_thread: field(&header, "parent_thread_id").map(str::to_owned),
+                        nickname: field(&header, "agent_nickname").map(str::to_owned),
+                        path: field(&header, "agent_path").map(str::to_owned),
+                        subagent: field(&header, "thread_source") == Some("subagent"),
+                        cwd: field(&header, "cwd").map(str::to_owned),
+                        branch: header
+                            .get("git")
+                            .and_then(|git| field(git, "branch"))
+                            .map(str::to_owned),
+                        guardian_review: field(&header, "thread_source") == Some("guardian_review"),
+                    }),
+                    "copilot" => Role::Copilot,
+                    _ => {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "Unknown native role",
+                        ));
+                    }
+                }
+            };
+            files.push(SourceFile {
+                revision: (
+                    source.dev,
+                    source.ino,
+                    source.offset,
+                    source.prefix_sha256,
+                    source.tail_sha256,
+                    source.changed_ns,
+                ),
+                path: source.path.clone(),
+                stamp: Stamp {
+                    dev: source.dev,
+                    ino: source.ino,
+                    size: source.size,
+                    modified_ns: source.modified_ns,
+                    changed_ns: source.changed_ns,
+                },
+                id: source.native_id.clone(),
+                first: summary.first,
+                last: summary.last,
+                summary,
+                role,
+                marker: records.marker(&source.path),
+            });
+        }
+    }
+    match build_sources_inner(
+        options,
+        &mut EventCache::default(),
+        &mut false,
+        &mut Texts::default(),
+        now,
+        BuildSelection::History { files, records },
+        BuildTarget::Sources,
+    )? {
+        BuildOutput::Sources(prepared) => Ok(prepared),
+        _ => Err(io::Error::other(
+            "Qualified producer did not capture metadata",
         )),
     }
 }
@@ -6016,7 +6552,7 @@ fn build_sources_inner(
     dirty: &mut bool,
     texts: &mut Texts,
     now: i64,
-    selected: Option<&[crate::inputs::Input]>,
+    selection: BuildSelection<'_>,
     target: BuildTarget,
 ) -> io::Result<BuildOutput> {
     let catalog_base = cache.session_catalog_generation();
@@ -6035,10 +6571,22 @@ fn build_sources_inner(
 
     let facts = MachineFacts::of(options);
     let window_start = scan_cutoff(options, now);
-    let (mut files, skipped, index_clone) = timed!(
-        "scan",
-        scan(options, cache, dirty, texts, window_start, &facts, selected)?
-    );
+    let (selected, history_records, mut files, skipped, index_clone) = match selection {
+        BuildSelection::Current(selected) => {
+            let (files, skipped, duration) = timed!(
+                "scan",
+                scan(options, cache, dirty, texts, window_start, &facts, selected)?
+            );
+            (selected, None, files, skipped, duration)
+        }
+        BuildSelection::History { files, records } => (
+            Some([].as_slice()),
+            Some(records),
+            files,
+            BTreeSet::new(),
+            std::time::Duration::ZERO,
+        ),
+    };
     timings.push((
         "index_clone",
         u32::try_from(index_clone.as_millis()).unwrap_or(u32::MAX),
@@ -6051,10 +6599,10 @@ fn build_sources_inner(
             hook();
         }
     }
-    if target != BuildTarget::Model {
+    if target != BuildTarget::Model && history_records.is_none() {
         verify_sidecars(&files)?;
     }
-    let claims = if target == BuildTarget::Sources {
+    let claims = if target == BuildTarget::Sources && history_records.is_none() {
         cache.catalog_claims(
             &files
                 .iter()
@@ -6106,18 +6654,20 @@ fn build_sources_inner(
         crate::query_source::Sources::capture(options, sources)?
     };
     let source_records = source_proofs.reader();
-    source_records.verify_all()?;
-    for file in &mut files {
-        if file.summary.handoff_index.is_none() {
-            return Err(io::Error::other("native launch calls were not indexed"));
-        }
-        if file.harness() != "copilot" {
-            let index = file
-                .summary
-                .marker_index
-                .as_ref()
-                .ok_or_else(|| io::Error::other("native parent marker was not indexed"))?;
-            file.marker = source_records.marker(&file.path, index)?;
+    if history_records.is_none() {
+        source_records.verify_all()?;
+        for file in &mut files {
+            if file.summary.handoff_index.is_none() {
+                return Err(io::Error::other("native launch calls were not indexed"));
+            }
+            if file.harness() != "copilot" {
+                let index = file
+                    .summary
+                    .marker_index
+                    .as_ref()
+                    .ok_or_else(|| io::Error::other("native parent marker was not indexed"))?;
+                file.marker = source_records.marker(&file.path, index)?;
+            }
         }
     }
     let mut builder = Builder::new(
@@ -6129,6 +6679,7 @@ fn build_sources_inner(
         &reported_runs,
         cache,
     );
+    builder.history_records = history_records;
     timed!("sessions", builder.sessions(groups, &pids, &held));
     for name in facts.native_names(options) {
         if name.valid()
@@ -6180,7 +6731,7 @@ fn build_sources_inner(
         .collect();
     // A scan-window build is intentionally incomplete: it cannot replace a
     // source-complete catalog. Publication itself is delayed until success.
-    let catalog = ((!options.scan_window && selected.is_none())
+    let mut catalog = ((!options.scan_window && selected.is_none())
         || matches!(target, BuildTarget::Catalog | BuildTarget::Sources))
     .then(|| summary::catalog(&builder, &handoffs));
     let slot_projections = catalog.as_ref().map(|rows| {
@@ -6188,13 +6739,95 @@ fn build_sources_inner(
             &tx,
             rows,
             Some(&source_records),
-            (target != BuildTarget::Model).then_some((&*builder.cache, catalog_base.as_deref())),
+            history_records,
+            (target != BuildTarget::Model && history_records.is_none())
+                .then_some((&*builder.cache, catalog_base.as_deref())),
         )
     });
-    if target != BuildTarget::Model {
+    let family_costs = crate::causal_trace::family_costs(builder.sessions.iter().map(|session| {
+        (
+            session.key.as_str(),
+            session.parent.map(|at| builder.sessions[at].key.as_str()),
+            session.out.cost.usd,
+        )
+    }));
+    let publication_sessions = builder
+        .sessions
+        .iter()
+        .map(|session| (session.key.clone(), session.out.clone()))
+        .collect();
+    let activity = crate::analytics::activity(&publication_sessions, &tx, &turns, &handoffs, now);
+    let preview_owners: BTreeMap<_,_>=builder.handoffs.iter().map(|h| {
+        let owner=|field:&str| match &h.previews {
+            Some(previews)=>previews.get(field).map(|preview|builder.sessions[builder.of_file[preview.at.0]].key.as_str()),
+            None=>(field=="brief" || h.out.result.is_some()).then_some(h.out.from.as_str()),
+        };
+        (h.out.id.clone(),serde_json::json!({"brief_session":owner("brief"),"result_session":owner("result")}))
+    }).collect();
+    if let Some(rows) = &mut catalog {
+        for row in rows {
+            // The local model remains usable for native paths that cannot be
+            // represented by the portable catalog. Never publish a lossy alias.
+            if row
+                .sources
+                .iter()
+                .any(|source| source.path.to_str().is_none())
+            {
+                continue;
+            }
+            if let Some(session) = builder
+                .by_key
+                .get(&row.key)
+                .map(|at| &builder.sessions[*at])
+            {
+                row.trace = Some(
+                    crate::causal_trace::Projection::capture(
+                        &row.key,
+                        &session.out,
+                        &turns,
+                        &handoffs,
+                        &preview_owners,
+                        builder
+                            .by_key
+                            .get(&row.key)
+                            .and_then(|index| builder.sessions[*index].files.first())
+                            .and_then(|index| builder.files[*index].summary.cwd.as_deref()),
+                        tx.get(&row.key).map(Arc::as_ref),
+                    )
+                    .with_family_cost(family_costs[&row.key.as_str()]),
+                );
+                row.overview = Some(
+                    crate::overview::Summary::capture(
+                        &row.key,
+                        &session.out,
+                        activity.get(&row.key),
+                        &handoffs,
+                        &turns,
+                        tx.get(&row.key)
+                            .map(|tx| {
+                                builder.overview_content(
+                                    &row.key,
+                                    &turns,
+                                    tx,
+                                    slot_projections.as_ref().and_then(|projections| {
+                                        projections
+                                            .iter()
+                                            .find(|projection| projection.key == row.key)
+                                    }),
+                                )
+                            })
+                            .unwrap_or(Value::Null),
+                        row.parent.as_deref(),
+                    )
+                    .with_sources(&row.sources)?,
+                );
+            }
+        }
+    }
+    if target != BuildTarget::Model && history_records.is_none() {
         verify_sidecars(&files)?;
     }
-    if matches!(target, BuildTarget::Catalog | BuildTarget::Sources) {
+    if matches!(target, BuildTarget::Catalog | BuildTarget::Sources) && history_records.is_none() {
         source_records.finish()?;
     }
     match target {
@@ -6407,7 +7040,9 @@ fn build_sources_inner(
             hook();
         }
         verify_sidecars(&files)?;
-        source_records.finish()?;
+        if history_records.is_none() {
+            source_records.finish()?;
+        }
         drop(source_records);
         if let Some(catalog) = catalog {
             cache.publish_session_projection(
@@ -6555,7 +7190,9 @@ fn build_sources_inner(
     if let Some(hook) = AFTER_MODEL_DERIVATION.with(|hook| hook.borrow_mut().take()) {
         hook();
     }
-    source_records.finish()?;
+    if history_records.is_none() {
+        source_records.finish()?;
+    }
     if let Some(catalog) = catalog {
         cache.publish_session_projection(
             &crate::slot_projection::Publication {

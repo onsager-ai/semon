@@ -186,29 +186,19 @@ export default async function detailsCheck(browser) {
           await page.waitForSelector('dialog.session-menu[open]');
         }
         let polled = 0;
-        // Every poll now gets the model as it would be a moment later: 400k more cache reads, in the summary and in the table.
-        await page.route('**/api/model**', async (route) => {
-          if (!new URL(route.request().url()).searchParams.has('since')) return route.fallback();
-          const url = new URL(route.request().url()),
-            headers = { ...route.request().headers() };
-          url.search = '';
-          delete headers['if-none-match'];
-          const res = await route.fetch({ url: url.toString(), headers }),
-            m = await res.json(),
-            s = m.sessions[claude.id];
-          s.tokens = [
-            s.tokens[0],
-            Math.round((s.tokens[1] + more / 1e6) * 1000) / 1000,
-            s.tokens[2],
-          ];
-          s.cost.by_model[modelId].tokens.cache_read += more;
-          m.version += '-grown';
+        // Exact metadata observations carry 400k more cache reads without rereading native content.
+        await page.route('**/api/sessions?**', async (route) => {
+          if (new URL(route.request().url()).searchParams.get('sid') !== claude.id)
+            return route.continue();
+          const response = await route.fetch(),
+            data = await response.json();
+          data.items[0].details.cost.by_model[modelId].tokens.cache_read += more;
           polled++;
-          await route.fulfill({ response: res, json: m });
+          await route.fulfill({ response, json: data });
         });
         const t0 = Date.now();
         while (polled < 2 && Date.now() - t0 < 8000) await page.waitForTimeout(100);
-        r.expect(polled >= 2, tag + ': the page did not poll the model');
+        r.expect(polled >= 2, tag + ': the selected metadata was not observed');
         await page.waitForTimeout(400);
         if (order !== 'menu after the update') {
           await page.keyboard.press('Escape');

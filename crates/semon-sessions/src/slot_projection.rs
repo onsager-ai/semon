@@ -169,6 +169,8 @@ pub(crate) struct SavedSlot {
     pub(crate) field: Option<crate::native_field::NativeField>,
     #[serde(default)]
     pub(crate) native_event_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) images: Vec<serde_json::Value>,
 }
 impl SavedSlot {
     /// Source paths referenced by this recipe, including background edges.
@@ -217,6 +219,7 @@ impl SavedSlot {
         slot: &Slot,
         sources: &BTreeMap<PathBuf, &crate::model::summary::CatalogSource>,
         records: Option<&crate::query_source::Records<'_>>,
+        history: Option<&crate::overview_repair::NativeRecords<'_>>,
         previous: &BTreeMap<SlotKey, Self>,
     ) -> Self {
         let recipe = match &slot.kind {
@@ -311,6 +314,7 @@ impl SavedSlot {
             .and_then(|key| previous.get(&key))
         {
             return Self {
+                images: previous.images.clone(),
                 native_event_id: previous.native_event_id.clone(),
                 field: previous.field.clone(),
                 recipe,
@@ -323,6 +327,17 @@ impl SavedSlot {
             };
         }
         let field = slot.file.as_ref().and_then(|file| {
+            if let Some(history) = history {
+                if history.index(&file.path).is_some() {
+                    return history.field(&file.path, slot.offset, slot.block);
+                }
+                return crate::native_field::capture_with_read(
+                    slot.offset,
+                    slot.block,
+                    &recipe,
+                    |at| history.record_bytes(&file.path, at),
+                );
+            }
             crate::native_field::capture(
                 sources.get(&file.path)?,
                 slot.offset,
@@ -331,27 +346,51 @@ impl SavedSlot {
                 records,
             )
         });
+        let mut native_record = None;
         let native_event_id = field
             .as_ref()
             .filter(|field| matches!(field.kind, crate::native_field::NativeFieldKind::Text))
             .and_then(|field| field.native_event_id.clone())
             .or_else(|| {
                 let file = slot.file.as_ref()?;
-                let bytes = crate::native_field::read_source_record(
-                    sources.get(&file.path)?,
-                    slot.offset,
-                    records,
-                )?;
+                let bytes = if let Some(history) = history {
+                    history.record_bytes(&file.path, slot.offset)?
+                } else {
+                    crate::native_field::read_source_record(
+                        sources.get(&file.path)?,
+                        slot.offset,
+                        records,
+                    )?
+                };
                 let record = crate::tx::parse_native_record(&bytes)?;
-                record
+                let id = record
                     .get("uuid")
                     .or_else(|| record.get("id"))
                     .and_then(|value| value.as_str())
                     .filter(|value| !value.is_empty() && value.len() <= 4096)
-                    .map(str::to_owned)
+                    .map(str::to_owned);
+                native_record = Some(record);
+                id
             });
+        let mut images = if matches!(&slot.kind, SlotKind::U | SlotKind::H(_)) {
+            slot.file
+                .as_ref()
+                .and_then(|file| file.prompts.refs(slot.offset))
+                .unwrap_or_else(|| {
+                    native_record
+                        .as_ref()
+                        .map(crate::attachments::refs)
+                        .unwrap_or_default()
+                })
+        } else {
+            Vec::new()
+        };
+        for image in &mut images {
+            image["o"] = serde_json::json!(slot.offset);
+        }
         Self {
             native_event_id,
+            images,
             field,
             recipe,
             file: slot.file.as_deref().map(File::capture),
@@ -470,6 +509,7 @@ pub(crate) fn capture(
     transcripts: &BTreeMap<String, Arc<Transcript>>,
     rows: &[crate::model::summary::CatalogRow],
     records: Option<&crate::query_source::Records<'_>>,
+    history: Option<&crate::overview_repair::NativeRecords<'_>>,
     reuse: Option<(&crate::events::EventCache, Option<&str>)>,
 ) -> Vec<Projection> {
     let sources: BTreeMap<_, _> = rows
@@ -504,7 +544,7 @@ pub(crate) fn capture(
                 slots: transcript
                     .slots
                     .iter()
-                    .map(|slot| SavedSlot::capture(slot, &sources, records, &previous))
+                    .map(|slot| SavedSlot::capture(slot, &sources, records, history, &previous))
                     .collect(),
             }
         })

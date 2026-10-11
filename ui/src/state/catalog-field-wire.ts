@@ -11,6 +11,7 @@ export interface CatalogFieldRequest {
 /** Qualified native string chunks never use a workspace tool or transcript endpoint. */
 export function parseCatalogField(value: unknown, request: CatalogFieldRequest) {
   if (!request.entry.provenance) throw new Error('Native text requires source provenance');
+  const anchor = request.entry.field?.provenance ?? request.entry.provenance;
   const row = object(value),
     identity = parseCatalogIdentity(row.identity),
     projection = object(row.projection),
@@ -47,10 +48,10 @@ export function parseCatalogField(value: unknown, request: CatalogFieldRequest) 
     sourceBytes < 0 ||
     sourceBytes > sourceLimit ||
     new TextEncoder().encode(body).byteLength > 131072 ||
-    JSON.stringify(source) !== JSON.stringify(request.entry.provenance.source) ||
-    provenance.offset !== request.entry.provenance.offset ||
-    provenance.block !== request.entry.provenance.block ||
-    provenance.native_event_id !== request.entry.provenance.native_event_id
+    JSON.stringify(source) !== JSON.stringify(anchor.source) ||
+    provenance.offset !== anchor.offset ||
+    provenance.block !== anchor.block ||
+    provenance.native_event_id !== anchor.native_event_id
   )
     throw new Error('Native field chunk does not match the selected source projection');
   return { text: body, next, complete };

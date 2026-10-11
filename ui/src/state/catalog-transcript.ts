@@ -40,6 +40,11 @@ export class CatalogTranscriptStore {
   private disposed = false;
   private requests = new Set<CatalogRangeRequest>();
   private pages: CatalogTranscriptPage[] = [];
+  private access = new Map<string, number>();
+  private pageKey(page: CatalogTranscriptPage) {
+    return `${page.range.first}:${page.range.end}`;
+  }
+  private clock = 0;
   private listeners = new Set<() => void>();
   select(scope: CatalogSelectionScope, readScope: CatalogReadScope = 'current'): void {
     if (this.disposed) throw new Error('Catalog transcript is destroyed');
@@ -57,6 +62,7 @@ export class CatalogTranscriptStore {
     this.readScope = readScope;
     this.requests.clear();
     this.pages = [];
+    this.access.clear();
     this.changed();
   }
   request(after: number | null = null, limit = 60): CatalogRangeRequest {
@@ -96,6 +102,7 @@ export class CatalogTranscriptStore {
       (generation !== null && page.projection.generation !== generation)
     )
       throw new Error('Catalog transcript response does not match the requested range');
+    this.access.set(this.pageKey(page), ++this.clock);
     const sameRange = this.pages.find(
       (old) => old.range.first === page.range.first && old.range.end === page.range.end,
     );
@@ -106,6 +113,14 @@ export class CatalogTranscriptStore {
     ) {
       this.requests.delete(request);
       this.pages[this.pages.indexOf(sameRange)] = page;
+      if (
+        JSON.stringify(sameRange.relationship_context) !==
+          JSON.stringify(page.relationship_context) ||
+        sameRange.session.details?.live_observation !== page.session.details?.live_observation
+      ) {
+        ++this.contentVersion;
+        this.changed();
+      }
       return true;
     }
     const existing = new Map<number, CatalogTranscriptEntry>(),
@@ -143,6 +158,12 @@ export class CatalogTranscriptStore {
     if (sameRange && JSON.stringify(sameRange.entries) === JSON.stringify(page.entries)) {
       this.requests.delete(request);
       this.pages[this.pages.indexOf(sameRange)] = page;
+      if (
+        JSON.stringify(sameRange.relationship_context) !== JSON.stringify(page.relationship_context)
+      ) {
+        ++this.contentVersion;
+        this.changed();
+      }
       return true;
     }
     const observed = new Map(page.entries.map((item) => [item.slot, item]));
@@ -156,6 +177,13 @@ export class CatalogTranscriptStore {
         })),
       page,
     ].sort((a, b) => a.range.first - b.range.first);
+    while (this.pages.length > 5 || this.entries().length > 300) {
+      const oldest = this.pages.reduce((a, b) =>
+        (this.access.get(this.pageKey(a)) ?? 0) < (this.access.get(this.pageKey(b)) ?? 0) ? a : b,
+      );
+      this.pages = this.pages.filter((value) => value !== oldest);
+      this.access.delete(this.pageKey(oldest));
+    }
     ++this.contentVersion;
     this.changed();
     return true;
@@ -163,8 +191,43 @@ export class CatalogTranscriptStore {
   reject(request: CatalogRangeRequest): void {
     this.requests.delete(request);
   }
+  retainRanges(ranges: readonly CatalogLoadedRange[]): void {
+    this.pages = this.pages.filter((page) =>
+      ranges.some((range) => page.range.first >= range.first && page.range.end <= range.end),
+    );
+    const keys = new Set(this.pages.map((page) => this.pageKey(page)));
+    for (const key of this.access.keys()) if (!keys.has(key)) this.access.delete(key);
+    ++this.contentVersion;
+    this.changed();
+  }
   selectedPage(): CatalogTranscriptPage | null {
     return this.pages.at(-1) ?? null;
+  }
+  context(): CatalogTranscriptPage['relationship_context'] {
+    const handoffs = new Map<
+      string,
+      CatalogTranscriptPage['relationship_context']['handoffs'][number]
+    >();
+    const sessions: CatalogTranscriptPage['relationship_context']['sessions'] = {};
+    const previews: Record<string, string> = {};
+    const turns = new Map<string, CatalogTranscriptPage['relationship_context']['turns'][number]>();
+    for (const page of this.pages) {
+      for (const relationship of page.relationship_context.handoffs)
+        handoffs.set(relationship.edge.id, relationship);
+      Object.assign(sessions, page.relationship_context.sessions);
+      Object.assign(previews, page.relationship_context.previews);
+      for (const turn of page.relationship_context.turns) turns.set(turn.id, turn);
+    }
+    return {
+      state: this.pages.some((page) => page.relationship_context.state === 'incomplete')
+        ? 'incomplete'
+        : 'complete',
+      turn_ids: [...new Set(this.pages.flatMap((page) => page.relationship_context.turn_ids))],
+      turns: [...turns.values()],
+      handoffs: [...handoffs.values()],
+      sessions,
+      previews,
+    };
   }
   loadedRanges(): CatalogLoadedRange[] {
     const ranges: CatalogLoadedRange[] = [];
@@ -191,6 +254,7 @@ export class CatalogTranscriptStore {
     ++this.epoch;
     this.requests.clear();
     this.pages = [];
+    this.access.clear();
     this.scope = null;
     this.listeners.clear();
   }

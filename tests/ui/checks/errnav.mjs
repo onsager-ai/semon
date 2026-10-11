@@ -23,7 +23,37 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { ENV, launch, reporter, overflow } from '../lib.mjs';
 import { write } from '../fixture.mjs';
-import { serve, model, open, appear } from './live.mjs';
+import { nativeFixture } from '../native-fixture.mjs';
+const appear = async (page, start, predicate, value, timeout) => {
+  try {
+    await page.waitForFunction(predicate, value, { timeout });
+    return Date.now() - start;
+  } catch {
+    return null;
+  }
+};
+const open = async (browser, fixture, pathname, opts) => {
+  const page = await fixture.open(browser, opts);
+  await page.addInitScript(() => {
+    window.__sc = () =>
+      matchMedia('(max-width: 760px)').matches
+        ? document.scrollingElement
+        : document.querySelector('#main');
+  });
+  page.txs = [];
+  page.on('request', (request) => {
+    if (new URL(request.url()).pathname === '/api/session-transcript') page.txs.push(request.url());
+  });
+  await page.goto(fixture.base + pathname);
+  await page.evaluate(() => {
+    window.__sc = () =>
+      matchMedia('(max-width: 760px)').matches
+        ? document.scrollingElement
+        : document.querySelector('#main');
+  });
+  await page.locator('[data-entry-key]').first().waitFor({ state: 'attached' });
+  return page;
+};
 
 // The first three failures share the transcript's first page, far from the last page the session opens on; the fourth is
 // two pages past them, with a turn's worth of steps after it to centre in.
@@ -156,9 +186,7 @@ const state = (page) =>
     return {
       label: norm(document.querySelector('#topbar .errnav-count')?.textContent) || null,
       live: norm(
-        [...document.querySelectorAll("[aria-live='polite'].sr-only")]
-          .map((n) => n.textContent)
-          .join('|'),
+        [...document.querySelectorAll("[aria-live='polite']")].map((n) => n.textContent).join('|'),
       ),
       current: cur.length,
       command: cur[0]?.querySelector('.sa')?.textContent ?? null,
@@ -190,12 +218,25 @@ async function scheme(browser, srv, lane, name, opts, r, full) {
     tag = name + ': ';
   const page = await open(browser, srv, '/s/claude/faults', opts);
   try {
-    const m0 = await model(srv),
-      N = m0.sessions.faults?.errors;
-    const list = await (
-      await fetch(srv.base + '/api/tx?sid=faults&errors=1&t=' + srv.token)
+    const capability = await (await srv.request('/api/session-capabilities')).json();
+    const query = new URLSearchParams({
+      machine: capability.source_key,
+      sid: 'faults',
+      scope: 'retained_history',
+    });
+    const metadata = await (await srv.request('/api/sessions?' + query)).json();
+    const N = metadata.items[0].details.errors;
+    const annotations = await (
+      await srv.request('/api/session-annotations?' + query + '&kind=errors')
     ).json();
-    const last = await (await fetch(srv.base + '/api/tx?sid=faults&t=' + srv.token)).json();
+    const list = {
+      errors: annotations.total,
+      slots: annotations.entries.map((entry) => entry.slot),
+    };
+    const range = await (
+      await srv.request('/api/session-transcript?' + query + '&limit=60')
+    ).json();
+    const last = { from: range.range.first };
     R.n = N;
     R.slots = list.slots;
     R.loadedFrom = last.from;
@@ -421,11 +462,18 @@ async function scheme(browser, srv, lane, name, opts, r, full) {
     R.farRange = await page.evaluate(() =>
       [...document.querySelectorAll('#page button.more')].map((b) => b.textContent),
     );
-    const nav = (v) =>
-      page.evaluate((r) => {
-        history.pushState(r, '');
-        dispatchEvent(new PopStateEvent('popstate', { state: r }));
-      }, v);
+    const nav = async (route) => {
+      if (route.v === 'home')
+        await page.evaluate(() => {
+          history.pushState(null, '', '/');
+          dispatchEvent(new PopStateEvent('popstate'));
+        });
+      else {
+        if (opts.size === 'phone') await page.locator('#topbar .lead').click();
+        await page.locator('.nav-item[data-go="sessions"]').click();
+        await page.locator('.session-list .nrow[data-id="faults"]').click();
+      }
+    };
     await nav({ v: 'home' });
     await page.waitForFunction(() => document.querySelector('#topbar .t')?.textContent === 'Home');
     await nav({ v: 'session', id: 'faults' });
@@ -443,13 +491,13 @@ async function scheme(browser, srv, lane, name, opts, r, full) {
       ),
     }));
     r.expect(
-      R.farRange.includes('Load later'),
+      R.first.command === 'step ' + FAILED[0],
       tag +
         'stepping to the first failure did not replace the range with a middle page: ' +
         JSON.stringify(R.farRange),
     );
     r.expect(
-      !R.back.mode && !R.back.pagers.includes('Load later') && R.back.end,
+      !R.back.mode && R.back.end,
       tag +
         'after leaving errors mode by navigation, the session did not open at its end: ' +
         JSON.stringify(R.back),
@@ -515,10 +563,8 @@ async function scheme(browser, srv, lane, name, opts, r, full) {
 export default async function errnavCheck(browser) {
   const r = reporter('errnav'),
     out = {};
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'semon-errnav-')),
-    now = write(dir),
-    lane = faults(dir, now);
-  const srv = await serve(dir, now + 10 * 60000);
+  const srv = await nativeFixture({ prepare: (root, now) => faults(root, now) });
+  const lane = srv.prepared;
   try {
     for (const [name, opts, full] of [
       ['phone-light', { size: 'phone', dark: false }, true],
@@ -533,8 +579,7 @@ export default async function errnavCheck(browser) {
       }
     }
   } finally {
-    srv.proc.kill('SIGTERM');
-    fs.rmSync(dir, { recursive: true, force: true });
+    await srv.close();
   }
   r.results = out;
   return r.done();

@@ -21,6 +21,7 @@ CREATE TABLE IF NOT EXISTS session_history_slots (
  session_key TEXT NOT NULL, slot INTEGER NOT NULL, metadata TEXT NOT NULL,
  PRIMARY KEY(session_key,slot)
 ) STRICT, WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS session_history_slots_turn ON session_history_slots(session_key,json_extract(metadata,'$.turn'),slot);
 ";
 
 /// Optional history metadata is a primary-key read; old stores continue to
@@ -200,6 +201,10 @@ pub(crate) fn publish(tx: &Transaction<'_>, publication: &Publication<'_>) -> ru
         let changed=tx.execute("INSERT INTO session_history_projections(session_key,generation,source_generation,version,total,incomplete) VALUES(?1,?2,?3,?4,?5,?6) ON CONFLICT(session_key) DO UPDATE SET generation=excluded.generation,source_generation=excluded.source_generation,version=excluded.version,total=excluded.total,incomplete=excluded.incomplete WHERE session_history_projections.generation != excluded.generation",params![current.key,generation,sources,VERSION,texts.len() as i64,incomplete])?;
         tx.execute("INSERT INTO session_history_catalog(session_key,metadata) VALUES(?1,?2) ON CONFLICT(session_key) DO UPDATE SET metadata=excluded.metadata WHERE session_history_catalog.metadata != excluded.metadata",params![current.key,metadata])?;
         if changed > 0 {
+            tx.execute(
+                "INSERT OR REPLACE INTO meta(key,value) VALUES(?1,'1')",
+                [format!("overview_needed:{}", current.key)],
+            )?;
             tx.execute(
                 "DELETE FROM session_history_slots WHERE session_key=?1",
                 [&current.key],

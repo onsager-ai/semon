@@ -62,14 +62,6 @@ export async function context(browser, { size = 'phone', dark = false, viewport 
   });
 }
 
-// These existing suites exercise the complete-model compatibility surface.
-// Default catalog coverage owns its own bounded producer/browser fixtures.
-export function compatibilityUrl(value) {
-  const url = new URL(value);
-  url.searchParams.set('compat', '1');
-  return url.href;
-}
-
 // A page on the served viewer at `path` (such as "/" or "/s/claude/harbor"), signed in with the token. Only the served
 // origin is reachable. `page.errors` collects page errors. `extras: true` opens the extras fixture's server.
 export async function served(browser, opts = {}) {
@@ -93,9 +85,7 @@ export async function served(browser, opts = {}) {
       : r.abort(),
   );
   await page.goto(
-    compatibilityUrl(
-      base + (opts.path ?? '/') + ((opts.path ?? '/').includes('?') ? '&' : '?') + 't=' + token,
-    ),
+    base + (opts.path ?? '/') + ((opts.path ?? '/').includes('?') ? '&' : '?') + 't=' + token,
     { waitUntil: 'load' },
   );
   await settled(page);
@@ -125,6 +115,7 @@ export async function settled(page) {
       document.querySelector('#topbar .t, #topbar #find') &&
       panel?.childElementCount > 0 &&
       !panel.hasAttribute('aria-busy') &&
+      !panel.querySelector('[aria-busy="true"]') &&
       (history.state.v !== 'session' || panel.querySelector("section[aria-label='Transcript']"))
     );
   });
@@ -143,18 +134,42 @@ export async function closePage(page) {
 
 // Goes to a route the way the mockup's check scripts did: a history entry and a popstate, then waits for its screen.
 export async function goto(page, route, D) {
-  await page.evaluate((r) => {
-    history.pushState(r, '');
-    dispatchEvent(new PopStateEvent('popstate', { state: r }));
-  }, route);
-  const title = titleOf(route, D);
+  const sid = route.id ?? route.sid,
+    session = D.SESS[sid],
+    machine = session ? (D.SOURCES?.[session.machine] ?? session.machine) : undefined,
+    paths = { home: '/', analytics: '/analytics', sessions: '/sessions', machines: '/machines' },
+    destination =
+      route.v === 'session'
+        ? '/s/' + (session?.harness ?? 'native') + '/' + encodeURIComponent(sid)
+        : route.v === 'trace'
+          ? '/trace/' +
+            (session?.harness ?? 'native') +
+            '/' +
+            encodeURIComponent(sid) +
+            '/' +
+            encodeURIComponent(route.turn)
+          : route.v === 'machine'
+            ? '/machines/' + encodeURIComponent(route.id)
+            : paths[route.v];
+  const url = new URL(destination, page.url());
+  if (machine && ['session', 'trace'].includes(route.v)) url.searchParams.set('machine', machine);
+  if (route.v === 'session' && route.turn) url.hash = 'turn=' + encodeURIComponent(route.turn);
+  await page.evaluate(
+    ({ r, url }) => {
+      history.pushState(r, '', url);
+      dispatchEvent(new PopStateEvent('popstate', { state: r }));
+    },
+    { r: route, url: url.pathname + url.search + url.hash },
+  );
+  const title = route.v === 'machine' ? 'Sessions' : titleOf(route, D);
   // A session's title is in the bar as soon as it is opened; its page is ready once it is no longer aria-busy.
   if (title) {
     try {
       await page.waitForFunction(
         (t) =>
           document.querySelector('#topbar .t')?.textContent === t &&
-          !document.querySelector('#page').hasAttribute('aria-busy'),
+          !document.querySelector('#page').hasAttribute('aria-busy') &&
+          !document.querySelector('#page [aria-busy="true"]'),
         title,
       );
     } catch (error) {
@@ -176,13 +191,31 @@ export async function goto(page, route, D) {
   }
   if (route.v === 'session')
     await page.waitForFunction(
-      () => !!document.querySelector("#page section[aria-label='Transcript']"),
+      () =>
+        !!document.querySelector("#page section[aria-label='Transcript']") &&
+        !!document.querySelector('#page [data-entry-key]'),
     );
   // Analytics draws whole once the server's answer for its range is in (/api/analytics).
   if (route.v === 'analytics')
     await page.waitForFunction(() =>
       document.querySelector('.analytics-metrics[data-analytics-ready]'),
     );
+  if (route.v === 'trace') {
+    try {
+      await page.waitForFunction(() => document.querySelector('#page .trace-summary'));
+    } catch (error) {
+      throw Error(
+        'Trace ' +
+          sid +
+          ' turn ' +
+          route.turn +
+          ': ' +
+          (await page.locator('#page').innerText()) +
+          '; ' +
+          error.message,
+      );
+    }
+  }
   await page.evaluate(() => document.fonts.ready);
   await page.waitForTimeout(60);
 }
@@ -198,12 +231,66 @@ export async function data({ extras = false } = {}) {
     return r.json();
   };
   const model = await get('/api/model');
+  const landing = await fetch(base + '/?t=' + token);
+  const cookie = landing.headers
+    .getSetCookie()
+    .map((value) => value.split(';')[0])
+    .join('; ');
+  const inventory = await (
+    await fetch(base + '/api/session-sources', { headers: cookie ? { cookie } : {} })
+  ).json();
+  const sourceKeys = new Set(inventory.items.map((item) => item.source_key));
+  const nativeKeys = new Set();
+  const catalogByKey = new Map();
+  for (const source of inventory.items) {
+    let cursor = null;
+    do {
+      const query = new URLSearchParams({
+        machine: source.source_key,
+        scope: 'retained_history',
+        limit: '100',
+      });
+      if (cursor) query.set('cursor', cursor);
+      const response = await fetch(base + '/api/sessions?' + query, {
+        headers: cookie ? { cookie } : {},
+      });
+      if (!response.ok) throw Error('Native fixture inventory: ' + response.status);
+      const page = await response.json();
+      for (const item of page.items) {
+        nativeKeys.add(item.key);
+        catalogByKey.set(item.key, { source: source.source_key, metadata: item });
+      }
+      cursor = page.next_cursor;
+    } while (cursor);
+  }
+  const sourceFor = (machine) =>
+    sourceKeys.has(machine)
+      ? machine
+      : inventory.items.length === 1 && !inventory.next_cursor
+        ? inventory.items[0].source_key
+        : machine;
   const SESS = model.sessions,
     H = model.handoffs,
     TX = {},
     TXM = {};
   for (const [id, s] of Object.entries(SESS)) s.id = id;
   for (const sid of Object.keys(SESS)) {
+    const catalog = catalogByKey.get(sid);
+    if (catalog) {
+      const query = new URLSearchParams({
+        machine: catalog.source,
+        scope: 'retained_history',
+        sid,
+        limit: '1',
+      });
+      const response = await fetch(base + '/api/sessions?' + query, {
+        headers: cookie ? { cookie } : {},
+      });
+      if (!response.ok) throw Error('Selected fixture metadata: ' + response.status);
+      const selected = (await response.json()).items[0];
+      if (selected?.key !== sid) throw Error('Selected fixture metadata identity changed');
+      SESS[sid].cwd = selected.details?.cwd;
+    }
     let page = await get('/api/tx?sid=' + encodeURIComponent(sid)),
       entries = page.entries;
     while (page.from > 0) {
@@ -216,7 +303,11 @@ export async function data({ extras = false } = {}) {
   const machines = model.machines ?? [model.machine];
   return {
     model,
+    SOURCES: Object.fromEntries(
+      Object.values(SESS).map((session) => [session.machine, sourceFor(session.machine)]),
+    ),
     SESS,
+    nativeKeys,
     H,
     TX,
     TXM,

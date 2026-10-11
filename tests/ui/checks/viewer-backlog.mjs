@@ -9,7 +9,8 @@ const ready = (page, view) =>
     (v) =>
       history.state?.v === v &&
       !document.querySelector('#page[aria-busy="true"]') &&
-      document.querySelector('#topbar .t'),
+      document.querySelector('#topbar .t') &&
+      (v !== 'trace' || document.querySelector('#page .trace-summary')),
     view,
   );
 const closePage = async (page) => {
@@ -90,26 +91,21 @@ export default async function viewerBacklog(browser) {
         );
       }
       await goto(page, { v: 'sessions' }, D);
-      for (const [close, label, value] of [
-        ['escape', 'Harness', 'claude'],
-        ['back', 'Repo', 'harbor'],
+      for (const [name, value] of [
+        ['harness', 'claude'],
+        ['repo', 'harbor'],
       ]) {
-        await page.locator('.facet-btn').click();
-        const select = page.locator('.filters-sheet .sh-select[data-label="' + label + '"]');
-        await select.locator('.sh-select-trigger').click();
-        await select.locator('[role="option"][data-value="' + value + '"]').click();
-        if (close === 'escape') await page.keyboard.press('Escape');
-        else await page.goBack();
-        await page.waitForFunction(
-          () => !document.querySelector('dialog[open]') && !history.state?.sheet,
+        await page.locator('input[name="' + name + '"]').fill(value);
+        await page.locator('.catalog-apply').click();
+        await ready(page, 'sessions');
+        assert.equal(
+          new URL(page.url()).searchParams.get(name),
+          value,
+          'source filters are bookmarked in the canonical URL',
         );
-        const chip = page.locator('.facet-chip[data-facet="' + label.toLowerCase() + '"]');
-        await chip.waitFor({ state: 'visible' });
-        assert(
-          (await chip.getAttribute('aria-label')).includes((await chip.textContent()).trim()),
-          'chip accessible name contains its visible text',
-        );
-        await chip.click();
+        await page.locator('input[name="' + name + '"]').fill('');
+        await page.locator('.catalog-apply').click();
+        await ready(page, 'sessions');
       }
       const sid = Object.keys(D.TX).find((sid) => D.TX[sid].length > 20) ?? Object.keys(D.SESS)[0];
       await goto(page, { v: 'session', id: sid }, D);
@@ -166,23 +162,47 @@ export default async function viewerBacklog(browser) {
   // A pid permission wait with no handoff must still appear once on Home.
   const page = await served(browser, { size: 'desktop' });
   try {
-    const model = structuredClone(D.model),
-      sid = Object.keys(model.sessions).find((id) => model.sessions[id].lane);
-    const versions = Object.keys(model.sessions).slice(0, 2);
-    model.sessions[versions[0]].model = 'gpt-6-sol';
-    model.sessions[versions[1]].model = 'gpt-6.1-sol';
-    model.sessions[sid].state = 'wait';
-    model.sessions[sid].waiting_for = 'permission prompt';
-    model.handoffs = model.handoffs.filter((h) => h.from !== sid || h.status !== 'wait');
-    model.version += '-wait';
-    await page.route('**/api/model**', (r) => r.fulfill({ json: model }));
+    const home = await (await page.request.get(ENV.base + '/api/viewer/home')).json(),
+      row = structuredClone(home.recent[0]),
+      waitId = 'wait:' + JSON.stringify([row.source_key, row.catalog_key]);
+    row.session.state = 'wait';
+    row.session.waiting_for = 'permission prompt';
+    row.event = {
+      id: waitId,
+      at: home.now,
+      done: null,
+      ask: 'decision',
+      status: 'wait',
+      brief: 'permission prompt',
+      answer: null,
+      declined: false,
+    };
+    home.inbox = home.inbox.filter((item) => item.catalog_key !== row.catalog_key);
+    home.inbox.push(row);
+    home.totals.waiting = home.inbox.length;
+    home.version += '-wait';
+    const retired = [];
+    page.on('request', (request) => {
+      if (/\/api\/(model|tx|events)(?:[?/#]|$)/.test(request.url())) retired.push(request.url());
+    });
+    await page.route('**/api/viewer/home**', (r) => r.fulfill({ json: home }));
     await page.reload();
     await ready(page, 'home');
-    assert.equal(await page.locator('[data-h="wait:' + sid + '"]').count(), 1);
-    assert.match(
-      await page.locator('[data-h="wait:' + sid + '"]').textContent(),
-      /permission prompt/,
-    );
+    const inbox = page.locator('[data-h]').filter({ hasText: 'permission prompt' });
+    assert.equal(await inbox.count(), 1);
+    assert.equal(await inbox.getAttribute('data-h'), JSON.stringify([row.source_key, waitId]));
+    const versions = [];
+    await page.route('**/api/sessions?**', async (route) => {
+      const response = await route.fetch();
+      if (response.status() !== 200) return route.fulfill({ response });
+      const catalog = await response.json();
+      if (!new URL(route.request().url()).searchParams.has('sid')) {
+        versions.splice(0, versions.length, ...catalog.items.slice(0, 2).map((item) => item.key));
+        catalog.items[0].model = 'gpt-6-sol';
+        catalog.items[1].model = 'gpt-6.1-sol';
+      }
+      await route.fulfill({ response, json: catalog });
+    });
     await goto(page, { v: 'sessions' }, D);
     assert.equal(
       await page.locator('.nrow[data-id="' + versions[0] + '"] .row-model').textContent(),
@@ -192,6 +212,7 @@ export default async function viewerBacklog(browser) {
       await page.locator('.nrow[data-id="' + versions[1] + '"] .row-model').textContent(),
       'sol 6.1',
     );
+    assert.equal(retired.length, 0);
   } finally {
     await closePage(page);
   }

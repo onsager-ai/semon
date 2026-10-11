@@ -685,7 +685,9 @@ impl Viewer {
             respond(request, reply, None);
             return;
         }
-        let accepted = if self.control.is_some() {
+        let accepted = if request.method() == &Method::Post && path == "/api/viewer/home" {
+            control_authorized(&request, &self.token, self.port).then_some(false)
+        } else if self.control.is_some() {
             // A spent URL nonce is not a cookie secret and never authorizes writes.
             authorized(&request, "", &self.token, self.port).or_else(|| {
                 authorized(&request, query, &self.bootstrap, self.port).filter(|set| *set)
@@ -722,7 +724,59 @@ impl Viewer {
             *used = true;
         }
         let if_none_match = request_header(&request, "If-None-Match").map(str::to_owned);
-        let reply = if let Some(control) = self.control.as_ref().filter(|_| path == "/api/model") {
+        let reply = if path == "/api/viewer/home" && request.method() == &Method::Post {
+            let mut bytes = Vec::new();
+            let body = request
+                .as_reader()
+                .take(512 * 1024 + 1)
+                .read_to_end(&mut bytes);
+            let value = serde_json::from_slice::<Value>(&bytes);
+            if body.is_err()
+                || bytes.len() > 512 * 1024
+                || value
+                    .as_ref()
+                    .ok()
+                    .and_then(|value| value["seen"].as_array())
+                    .is_none()
+            {
+                control_reply(
+                    400,
+                    serde_json::json!({"error":"Invalid Home read arguments"}),
+                )
+            } else {
+                let value = value.unwrap();
+                let joined = format!(
+                    "{}{}seen={}",
+                    query,
+                    if query.is_empty() { "" } else { "&" },
+                    percent_encode(&value["seen"].to_string())
+                );
+                self.core.respond("GET", path, &joined, None)
+            }
+        } else if path == "/api/session-control" {
+            let identity = self
+                .core
+                .respond("GET", "/api/session-identity", query, None);
+            let selected = serde_json::from_slice::<Value>(&identity.body).unwrap_or(Value::Null);
+            let status = self
+                .control
+                .as_ref()
+                .map(|control| {
+                    control
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .snapshot()
+                })
+                .filter(|snapshot| {
+                    selected["identity"]["source_key"] == "local"
+                        && selected["identity"]["harness"] == "codex"
+                        && selected["identity"]["owner_qualification"] != "provisional"
+                        && selected["identity"]["native_id"]
+                            .as_str()
+                            .is_some_and(|id| snapshot["thread"].as_str() == Some(id))
+                });
+            control_reply(200, serde_json::json!({"control":status}))
+        } else if let Some(control) = self.control.as_ref().filter(|_| path == "/api/model") {
             // Full model while control is opted in. The existing poller owns both revisions.
             let mut reply = self.core.respond("GET", path, "", None);
             if reply.status == 200
@@ -3674,24 +3728,18 @@ mod tests {
             "src/lib/richtext.tsx",
             "src/lib/tool-details.tsx",
             "src/lib/tool-step.tsx",
-            "src/lib/attachments.tsx",
-            "src/lib/session-menu.tsx",
-            "src/lib/sheets.tsx",
             "src/lib/analytics.tsx",
             "src/lib/layout.ts",
-            "src/lib/trace.tsx",
             "src/lib/sentence.tsx",
             "src/lib/transcript.tsx",
-            "src/lib/viewer-bar.tsx",
-            "src/lib/placeholder.tsx",
             "src/lib/geometry.ts",
             "src/lib/select.tsx",
             "src/lib/tooltip.tsx",
-            "src/lib/model.ts",
-            "src/lib/live.ts",
-            "src/lib/routes.ts",
-            "src/lib/paging.ts",
-            "src/lib/ordering.ts",
+            "src/lib/api.ts",
+            "src/app/catalogViewer.tsx",
+            "src/app/overviewPages.tsx",
+            "src/app/controlObservation.ts",
+            "src/state/catalog-selection.ts",
         ] {
             assert!(
                 app.contains(&format!("  // {module}\n")),

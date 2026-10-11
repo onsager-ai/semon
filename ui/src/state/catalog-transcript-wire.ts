@@ -1,4 +1,10 @@
-import { array, boolean, number, object, text } from '../domain/validate';
+import { array, boolean, dictionary, number, object, text } from '../domain/validate';
+import {
+  parseRecordedRelationship,
+  parseRecordedTurn,
+  type RecordedRelationship,
+  type RecordedTurn,
+} from '../domain/relationships';
 import type { Entry } from '../domain/types';
 import type {
   CatalogSessionIdentity,
@@ -15,10 +21,17 @@ import { parseEntry } from './transcript-wire';
 export interface CatalogTranscriptEntry {
   entry_id: string;
   slot: number;
+  observed_at?: number | null;
   entry: Entry;
   native_action_text?: string;
   clipped?: boolean;
-  field?: { name: 'text' | 'out'; chunks: number; complete: boolean; layers: 1 | 2 };
+  field?: {
+    name: 'text' | 'out';
+    chunks: number;
+    complete: boolean;
+    layers: 1 | 2;
+    provenance?: NonNullable<CatalogTranscriptEntry['provenance']>;
+  };
   freshness?: { state: CatalogFreshness };
   provenance: {
     source: CatalogSourceReference['source'];
@@ -26,6 +39,18 @@ export interface CatalogTranscriptEntry {
     offset: number;
     block: number;
   } | null;
+}
+export interface RecordedSessionPresentation {
+  name: string;
+  harness: string;
+  model: string;
+  kind?: string;
+  state?: string;
+  start?: number;
+  last?: number;
+  calls?: number;
+  usd?: number;
+  live_observation?: boolean;
 }
 /** Selected native content is a ranged read view, not a complete model graph. */
 export interface CatalogTranscriptPage {
@@ -36,7 +61,14 @@ export interface CatalogTranscriptPage {
   range: { first: number; end: number; next: number | null };
   entries: CatalogTranscriptEntry[];
   freshness: { state: CatalogFreshness };
-  relationship_context: { state: 'incomplete'; turn_ids: string[]; handoffs: [] };
+  relationship_context: {
+    state: 'incomplete' | 'complete';
+    turn_ids: string[];
+    turns: RecordedTurn[];
+    handoffs: RecordedRelationship[];
+    sessions: Record<string, RecordedSessionPresentation>;
+    previews: Record<string, string>;
+  };
 }
 function ordinal(value: unknown): number {
   const v = number(value);
@@ -64,6 +96,29 @@ function entry(value: unknown): CatalogTranscriptEntry {
       name: reference.name,
       chunks: ordinal(reference.chunks),
       complete: boolean(reference.complete),
+      provenance:
+        reference.provenance === undefined
+          ? undefined
+          : (() => {
+              const anchor = object(reference.provenance),
+                source = parseCatalogSource(anchor.source);
+              if (
+                !provenance ||
+                JSON.stringify(source) !== JSON.stringify(parseCatalogSource(provenance.source))
+              )
+                throw Error('Native field must belong to its selected source');
+              const offset = ordinal(anchor.offset),
+                block = ordinal(anchor.block);
+              if (offset > source.offset || block > 1024)
+                throw Error('Invalid native field anchor');
+              return {
+                source,
+                offset,
+                block,
+                native_event_id:
+                  anchor.native_event_id === null ? null : text(anchor.native_event_id),
+              };
+            })(),
     };
   }
   let freshness: CatalogTranscriptEntry['freshness'];
@@ -83,6 +138,7 @@ function entry(value: unknown): CatalogTranscriptEntry {
   return {
     entry_id: entryId,
     slot,
+    observed_at: row.observed_at == null ? null : number(row.observed_at),
     entry: parsed,
     clipped: row.clipped === undefined ? undefined : boolean(row.clipped),
     field,
@@ -128,12 +184,40 @@ export function parseCatalogTranscriptPage(value: unknown): CatalogTranscriptPag
     next !== (end < total ? end : null) ||
     entries.some((item, i) => item.slot !== first + i) ||
     new Set(entries.map((item) => item.entry_id)).size !== entries.length ||
-    context.state !== 'incomplete' ||
+    (context.state !== 'incomplete' && context.state !== 'complete') ||
     !Array.isArray(context.handoffs) ||
-    context.handoffs.length !== 0 ||
+    context.handoffs.length > 200 ||
     (state !== 'cached' && state !== 'stale' && state !== 'incomplete' && state !== 'unavailable')
   )
     throw new Error('Invalid catalog transcript page');
+  const relationships = array(context.handoffs, parseRecordedRelationship);
+  const turns = array(context.turns ?? [], (value) => {
+      const row = object(value);
+      if (row.sid !== identity.catalog_key) throw Error('Invalid ranged turn owner');
+      return parseRecordedTurn(row);
+    }),
+    turnIds = new Set(entries.flatMap((item) => (item.entry.turn ? [item.entry.turn] : []))),
+    starts = new Set(turns.flatMap((turn) => (turn.start ? [turn.start] : [])));
+  if (
+    turns.length > 100 ||
+    new Set(turns.map((turn) => turn.id)).size !== turns.length ||
+    turns.some((turn) => !turnIds.has(turn.id))
+  )
+    throw Error('Invalid ranged turn scope');
+  const named = new Set(relationships.map((row) => row.edge.id));
+  const actions = new Set(entries.flatMap((item) => (item.entry.k === 'h' ? [item.entry.id] : [])));
+  if (
+    named.size !== relationships.length ||
+    relationships.some(
+      (row) =>
+        (!actions.has(row.edge.id) && !starts.has(row.edge.id)) ||
+        (row.edge.from !== identity.catalog_key && row.edge.to !== identity.catalog_key),
+    ) ||
+    (context.state === 'complete' && [...actions].some((id) => !named.has(id))) ||
+    Object.keys(object(context.sessions ?? {})).length > 201 ||
+    Object.keys(object(context.previews ?? {})).length > 128
+  )
+    throw Error('Invalid ranged relationship scope');
   return {
     api: 1,
     identity,
@@ -143,9 +227,37 @@ export function parseCatalogTranscriptPage(value: unknown): CatalogTranscriptPag
     entries,
     freshness: { state },
     relationship_context: {
-      state: 'incomplete',
+      state: context.state,
       turn_ids: array(context.turn_ids, text),
-      handoffs: [],
+      turns,
+      handoffs: relationships,
+      sessions: dictionary(context.sessions ?? {}, (value) => {
+        const row = object(value);
+        return {
+          name: text(row.name),
+          harness: text(row.harness),
+          model: text(row.model),
+          kind: row.kind == null ? undefined : text(row.kind),
+          state: row.state == null ? undefined : text(row.state),
+          start: row.start == null ? undefined : number(row.start),
+          last: row.last == null ? undefined : number(row.last),
+          calls: row.calls == null ? undefined : ordinal(row.calls),
+          usd: row.usd == null ? undefined : number(row.usd),
+          live_observation:
+            row.live_observation == null
+              ? undefined
+              : row.live_observation === 0
+                ? false
+                : row.live_observation === 1
+                  ? true
+                  : boolean(row.live_observation),
+        };
+      }),
+      previews: dictionary(context.previews ?? {}, (value) => {
+        const generation = text(value);
+        if (!/^[a-f0-9]{64}$/.test(generation)) throw Error('Invalid context generation');
+        return generation;
+      }),
     },
   };
 }

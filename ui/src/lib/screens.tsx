@@ -148,6 +148,7 @@ export interface ActivityHost {
   committed(): void;
 }
 export interface HomeSnapshot {
+  observation?: string;
   control?: ControlView;
   waiting: number;
   working: number;
@@ -158,9 +159,13 @@ export interface HomeSnapshot {
   answered: readonly InboxRow[];
   totalAnswered: number;
   allAnswered: boolean;
+  moreInbox?: boolean;
+  moreLive?: boolean;
+  moreAnswered?: boolean;
 }
 export interface HomeHost extends ActivityHost {
   answered(): void;
+  more?(section: 'inbox' | 'working' | 'answered'): void;
 }
 export interface MachineSnapshot {
   name: string;
@@ -338,6 +343,11 @@ function Inbox({ row, host }: { row: InboxRow; host: ActivityHost }) {
 export function HomeView({ snapshot, host }: { snapshot: HomeSnapshot; host: HomeHost }) {
   return (
     <>
+      {snapshot.observation && (
+        <p class="catalog-note" role="status">
+          {snapshot.observation}
+        </p>
+      )}
       <div class="ph">
         <h1>Home</h1>
         <div class="sub">
@@ -359,6 +369,11 @@ export function HomeView({ snapshot, host }: { snapshot: HomeSnapshot; host: Hom
         {snapshot.inbox.map((row) => (
           <Inbox key={row.id} row={row} host={host} />
         ))}
+        {snapshot.moreInbox && (
+          <button class="more" type="button" onClick={() => host.more?.('inbox')}>
+            Load more requests
+          </button>
+        )}
         {!snapshot.waiting && <p class="empty">Nothing is waiting on you.</p>}
       </div>
       <Section heading="Working now" count={snapshot.working} />
@@ -366,6 +381,11 @@ export function HomeView({ snapshot, host }: { snapshot: HomeSnapshot; host: Hom
         {snapshot.live.map((row) => (
           <Live key={row.id} row={row} host={host} />
         ))}
+        {snapshot.moreLive && (
+          <button class="more" type="button" onClick={() => host.more?.('working')}>
+            Load more working sessions
+          </button>
+        )}
         {!snapshot.working && <p class="empty">Nothing is running.</p>}
       </div>
       {snapshot.totalAnswered > 0 && (
@@ -375,6 +395,11 @@ export function HomeView({ snapshot, host }: { snapshot: HomeSnapshot; host: Hom
             {snapshot.answered.map((row) => (
               <Inbox key={row.id} row={row} host={host} />
             ))}
+            {snapshot.allAnswered && snapshot.moreAnswered && (
+              <button class="more" type="button" onClick={() => host.more?.('answered')}>
+                Load more answered
+              </button>
+            )}
             {!snapshot.allAnswered && snapshot.totalAnswered > 3 && (
               <button
                 class="more"
@@ -504,7 +529,13 @@ export function fitSessionRows(root: ParentNode) {
     }
   }
 }
-function Session({ row, host }: { row: SessionRow; host: SessionsHost }) {
+export function SessionRowView({
+  row,
+  host,
+}: {
+  row: SessionRow;
+  host: Pick<SessionsHost, 'session'>;
+}) {
   return (
     <button
       class="nrow"
@@ -705,7 +736,7 @@ export function renderSessionsScreen(
             )}
             <div class="list">
               {group.rows.map((row) => (
-                <Session key={row.id} row={row} host={host} />
+                <SessionRowView key={row.id} row={row} host={host} />
               ))}
             </div>
           </div>

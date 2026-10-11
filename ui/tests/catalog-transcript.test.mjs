@@ -236,6 +236,34 @@ test('retained-history range intent cannot silently accept a current-scope proje
   assert.equal(store.accept(store.request(0, 2), historical), true);
   assert.equal(store.selectedPage().identity.native_selection.state, 'retired');
 });
+test('losing current source observation invalidates live presentation while native content remains unchanged', () => {
+  const store = new CatalogTranscriptStore();
+  store.select({ source_key: 'source', catalog_key: 'session' });
+  const initial = page();
+  initial.session.details = {
+    state: 'work',
+    turns: 1,
+    calls: 0,
+    errors: 0,
+    tool_calls: {},
+    signals: {},
+    cost: { usd: null },
+    copied_usage: false,
+    copilot: null,
+    reported_runs: [],
+    cost_check: [],
+    live_observation: true,
+  };
+  store.accept(store.request(0, 2), initial);
+  const revision = store.revision,
+    content = store.entries();
+  const offline = structuredClone(initial);
+  offline.session.details.live_observation = false;
+  assert.equal(store.accept(store.request(0, 2), offline), true);
+  assert.ok(store.revision > revision);
+  assert.deepEqual(store.entries(), content);
+  assert.equal(store.selectedPage().session.details.live_observation, false);
+});
 
 test('incomplete action prompts and derived boundaries stay readable without source authority', () => {
   const raw = page();
@@ -250,4 +278,39 @@ test('incomplete action prompts and derived boundaries stay readable without sou
   raw.entries[1].k = 'u';
   raw.entries[1].text = 'Unprovenanced native message';
   assert.throws(() => parseCatalogTranscriptPage(raw));
+});
+
+test('visiting distant native ranges evicts old windows while preserving accepted identity and restoration', () => {
+  const store = new CatalogTranscriptStore();
+  store.select({ source_key: 'source', catalog_key: 'session' });
+  const window = (first, count = 60) => {
+    const value = page();
+    value.projection.total = 2000;
+    value.range = { first, end: first + count, next: first + count };
+    value.entries = Array.from({ length: count }, (_, index) => ({
+      k: 'a',
+      text: 'Original native ' + (first + index),
+      slot: first + index,
+      entry_id: 'native-' + (first + index),
+      provenance: provenance(),
+    }));
+    return value;
+  };
+  for (let first = 0; first < 900; first += 100) {
+    store.accept(store.request(first, 60), window(first));
+    assert.ok(store.entries().length <= 300);
+    assert.ok(store.loadedRanges().length <= 5);
+  }
+  assert.equal(store.entries()[0].slot, 400);
+  const ticket = store.request(800, 60);
+  store.accept(ticket, window(800));
+  store.accept(store.request(1200, 100), window(1200, 100));
+  assert.ok(
+    store.entries().some((entry) => entry.slot === 800),
+    'recently revisited window is retained',
+  );
+  assert.ok(store.entries().length <= 300);
+  store.retainRanges([{ first: 800, end: 860 }]);
+  assert.deepEqual(store.loadedRanges(), [{ first: 800, end: 860 }]);
+  assert.equal(store.request(700).generation, 'b'.repeat(64));
 });

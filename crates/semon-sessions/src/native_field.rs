@@ -46,14 +46,24 @@ impl NativeFieldKind {
     }
 }
 
-/// Plain Claude text only. Structured bodies, native formatting wrappers and
-/// arbitrary JSON keys are deliberately excluded from persisted metadata.
+/// Allowlisted plain native text. Structured bodies, native formatting wrappers
+/// and arbitrary JSON keys are deliberately excluded from persisted metadata.
 pub(crate) fn capture(
     source: &crate::model::summary::CatalogSource,
     offset: u64,
     block: u32,
     recipe: &Recipe,
     records: Option<&crate::query_source::Records<'_>>,
+) -> Option<NativeField> {
+    capture_with_read(offset, block, recipe, |at| {
+        read_source_record(source, at, records)
+    })
+}
+pub(crate) fn capture_with_read(
+    offset: u64,
+    block: u32,
+    recipe: &Recipe,
+    read: impl FnOnce(u64) -> Option<Vec<u8>>,
 ) -> Option<NativeField> {
     let (offset, block, kind) = match recipe {
         Recipe::U | Recipe::A | Recipe::Think => (offset, block, NativeFieldKind::Text),
@@ -67,7 +77,7 @@ pub(crate) fn capture(
     if block > 1024 {
         return None;
     }
-    let bytes = read_source_record(source, offset, records)?;
+    let bytes = read(offset)?;
     let value = crate::tx::parse_native_record(&bytes)?;
     let mut kind = kind;
     let mut layers = 1;
@@ -76,6 +86,35 @@ pub(crate) fn capture(
         .and_then(|value| value.as_str())
         .and_then(|text| serde_json::from_str::<serde_json::Value>(text).ok());
     let pointer = match recipe {
+        Recipe::U | Recipe::A
+            if value
+                .pointer("/data/content")
+                .is_some_and(serde_json::Value::is_string)
+                && matches!(
+                    value["type"].as_str(),
+                    Some("user.message" | "assistant.message")
+                ) =>
+        {
+            "/data/content".to_owned()
+        }
+        Recipe::U | Recipe::A
+            if value
+                .pointer("/payload/content")
+                .is_some_and(serde_json::Value::is_array) =>
+        {
+            let parts = value.pointer("/payload/content")?.as_array()?;
+            if parts.len() != 1
+                || block != 0
+                || !matches!(
+                    parts[0]["type"].as_str(),
+                    Some("input_text" | "output_text" | "text")
+                )
+                || !parts[0]["text"].is_string()
+            {
+                return None;
+            }
+            "/payload/content/0/text".to_owned()
+        }
         Recipe::U if value.pointer("/message/content")?.is_string() => {
             "/message/content".to_owned()
         }
@@ -179,6 +218,145 @@ pub(crate) fn capture(
         checkpoints: span.checkpoints,
         native_event_id,
     })
+}
+
+/// A small, qualified string preview reuses the selected transcript's scalar
+/// descriptor. It never reads a complete large native record.
+pub(crate) fn preview(
+    reader: &dyn crate::SessionSourceReader,
+    source: &crate::SessionSourceRef,
+    field: &NativeField,
+    kind: &str,
+    bytes_left: &mut usize,
+) -> std::io::Result<String> {
+    let invalid = || {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "Native preview generation or field changed",
+        )
+    };
+    let start = field
+        .record_offset
+        .checked_add(field.start)
+        .ok_or_else(invalid)?;
+    let end = field
+        .record_offset
+        .checked_add(field.end)
+        .ok_or_else(invalid)?;
+    if field.block > 1024
+        || field.checkpoints.first() != Some(&field.start)
+        || field.checkpoints.last() != Some(&field.end)
+        || start > end
+        || end > source.offset
+    {
+        return Err(invalid());
+    }
+    if start == end {
+        return Ok(String::new());
+    }
+    let mut at = start;
+    let mut text = String::new();
+    let mut generation = None::<String>;
+    let mut length = None;
+    while at < end {
+        let max = usize::try_from(end - at)
+            .unwrap_or(usize::MAX)
+            .min(8192 + field.scalar_slack())
+            .min(*bytes_left);
+        if max == 0 || text.len() >= 128 * 1024 {
+            return Err(invalid());
+        }
+        let part = reader.read_range(source, generation.as_deref(), at, max)?;
+        if part.offset != at
+            || part.bytes.is_empty()
+            || part.bytes.len() > max
+            || part.length < source.offset
+            || part.generation.is_empty()
+            || part.generation.len() > 4096
+            || generation
+                .as_ref()
+                .is_some_and(|value| value != &part.generation)
+            || length.is_some_and(|value| value != part.length)
+        {
+            return Err(invalid());
+        }
+        *bytes_left -= part.bytes.len();
+        generation = Some(part.generation);
+        length = Some(part.length);
+        let chunk = json_string::decode_json_string_layered_chunk(
+            &part.bytes,
+            field.layers,
+            at + part.bytes.len() as u64 == end,
+            (128 * 1024 - text.len()).min(8192),
+        )?;
+        if chunk.consumed == 0 {
+            return Err(invalid());
+        }
+        at += chunk.consumed as u64;
+        text.push_str(&chunk.text);
+        let record = preview_record(field, &text, kind).ok_or_else(invalid)?;
+        let visible = match kind {
+            "prompt" | "trace_prompt" => crate::model::prompt_text(&record),
+            "assistant" => crate::model::assistant_text(&record, field.block as usize),
+            "tool_result" => crate::model::tool_result_text(&record, field.block as usize),
+            _ => None,
+        }
+        .ok_or_else(invalid)?;
+        // One byte beyond the display cap distinguishes a complete value from
+        // a capped prefix and preserves the established truncation marker.
+        if visible.len() > crate::model::MSG_MAX || at == end {
+            return Ok(text);
+        }
+    }
+    Ok(text)
+}
+
+/// Minimal records feed the existing native text parsers. No caller-defined
+/// pointer becomes a field read; descriptors use the producer's allowlist.
+pub(crate) fn preview_record(
+    field: &NativeField,
+    text: &str,
+    kind: &str,
+) -> Option<serde_json::Value> {
+    use serde_json::{Value, json};
+    match field.kind {
+        NativeFieldKind::Text => {
+            if field.pointer == "/message/content" {
+                return Some(json!({"message":{"content":text}}));
+            }
+            if field.pointer == "/data/content" {
+                return Some(
+                    json!({"type":if kind=="assistant" {"assistant.message"} else {"user.message"},"data":{"content":text}}),
+                );
+            }
+            if field.pointer == "/payload/content/0/text" {
+                return Some(json!({"payload":{"content":[{"type":"input_text","text":text}]}}));
+            }
+            let member = if field.pointer == format!("/message/content/{}/text", field.block) {
+                "text"
+            } else if field.pointer == format!("/message/content/{}/thinking", field.block) {
+                "thinking"
+            } else {
+                return None;
+            };
+            let mut blocks = vec![Value::Null; field.block as usize + 1];
+            let mut part = json!({"type":member});
+            part[member] = json!(text);
+            blocks[field.block as usize] = part;
+            Some(json!({"message":{"content":blocks}}))
+        }
+        NativeFieldKind::ClaudeResult => {
+            let mut blocks = vec![Value::Null; field.block as usize + 1];
+            blocks[field.block as usize] = json!({"type":"tool_result","content":text});
+            Some(json!({"message":{"content":blocks}}))
+        }
+        NativeFieldKind::CodexResult => {
+            Some(json!({"payload":{"type":"function_call_output","output":text}}))
+        }
+        NativeFieldKind::CodexResultObject => {
+            Some(json!({"payload":{"type":"function_call_output","output":{"output":text}}}))
+        }
+    }
 }
 
 /// Producer-only record read bound to the exact ledger observation, not merely

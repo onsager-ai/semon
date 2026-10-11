@@ -115,27 +115,8 @@ async function openInstrumented(browser, { base, token, size, dark, path: routeP
   return page;
 }
 
-async function dataFrom(base, token) {
-  const get = async (p) => {
-    const r = await fetch(base + p + (p.includes('?') ? '&' : '?') + 't=' + token);
-    if (!r.ok) throw new Error(p + ': ' + r.status);
-    return r.json();
-  };
-  const model = await get('/api/model');
-  const SESS = model.sessions,
-    H = model.handoffs,
-    TX = {};
-  for (const [id, s] of Object.entries(SESS)) s.id = id;
-  for (const sid of Object.keys(SESS)) {
-    let page = await get('/api/tx?sid=' + encodeURIComponent(sid)),
-      entries = page.entries;
-    while (page.from > 0) {
-      page = await get('/api/tx?sid=' + encodeURIComponent(sid) + '&before=' + page.from);
-      entries = page.entries.concat(entries);
-    }
-    TX[sid] = entries;
-  }
-  return { model, SESS, H, TX };
+async function dataFrom(base) {
+  return data({ extras: base === ENV.extraBase });
 }
 
 async function runPass(page, D, tag, scheme) {
@@ -164,7 +145,7 @@ async function runPass(page, D, tag, scheme) {
           ) &&
           !(
             x.matches('button.attach > img.attach-img, dialog.image-viewer img.attach-full') &&
-            /^\/api\/attachment\?sid=[^&]*&o=\d+&b=\d+&v=[0-9a-f]{16}$/.test(
+            /^\/api\/session-entry\?[^#]+part=attachment(?:&|$)/.test(
               x.getAttribute('src') ?? '',
             ) &&
             [...x.attributes].every((a) =>
