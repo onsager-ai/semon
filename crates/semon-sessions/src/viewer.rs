@@ -996,7 +996,11 @@ impl MachineView {
     /// caller holds `work`.
     fn refresh_tree_locked(&self, work: &mut Work) -> io::Result<Arc<TreeCache>> {
         if let Some(tree) = self.shown_tree()
-            && !self.changed(&tree.snapshot)
+            && !{
+                #[cfg(test)]
+                self.hooks.stats.fetch_add(1, Ordering::SeqCst);
+                tree.snapshot.metadata_changed(&self.evidence.options)
+            }
         {
             return Ok(tree);
         }
@@ -6874,6 +6878,49 @@ mod tests {
             assert!(view.shown_model().is_some());
             view.close();
         }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn catalog_refresh_detects_same_size_rewrites_with_restored_modification_time() {
+        let fixture = Fixture::new();
+        let record = json!({"type":"user","sessionId":"rewrite","uuid":"rewrite","cwd":"/tmp/project","timestamp":"2026-10-01T00:00:00Z","message":{"role":"user","content":"old prompt"}});
+        let path = fixture.claude("rewrite", &[record]);
+        let pool = RefreshPool::new(1);
+        let view = pooled(&fixture, Refresh::OnInvalidate, &pool);
+        let generation = || {
+            let reply = crate::session_catalog_page(&fixture.options, "fixture", "limit=60");
+            let body: Value = serde_json::from_slice(&reply.body).ok()?;
+            (reply.status == 200 && body["completeness"]["state"] == "complete")
+                .then(|| body["generation"].clone())
+        };
+        view.note_catalog_read().unwrap();
+        let before = eventually("complete Catalog before rewrite", generation);
+        let modified = fs::metadata(&path).unwrap().modified().unwrap();
+        let old = fs::read_to_string(&path).unwrap();
+        let replacement = old.replace("old prompt", "new prompt");
+        assert_eq!(old.len(), replacement.len());
+        fs::write(&path, replacement).unwrap();
+        fs::File::open(&path)
+            .unwrap()
+            .set_times(fs::FileTimes::new().set_modified(modified))
+            .unwrap();
+        view.invalidate();
+        view.note_catalog_read().unwrap();
+        eventually(
+            "Catalog observes an equal-size rewrite with restored mtime",
+            || generation().filter(|next| next != &before),
+        );
+        let reply = crate::session_transcript_range(
+            &fixture.options,
+            "fixture",
+            "sid=rewrite&after=0&limit=100",
+            None,
+        );
+        assert_eq!(reply.status, 200);
+        assert!(String::from_utf8_lossy(&reply.body).contains("new prompt"));
+        assert!(view.shown_model().is_none());
+        view.close();
     }
 
     #[test]
