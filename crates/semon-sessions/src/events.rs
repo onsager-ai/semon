@@ -984,13 +984,14 @@ pub(crate) trait IndexStore: Send {
         expected_generation: Option<&str>,
         claims: &[(String, Option<i64>)],
     ) -> Result<(Outcome, Option<String>), StoreError>;
-    fn publish_isolated_catalog(
+    fn publish_closed_catalog(
         &mut self,
         publication: &crate::slot_projection::Publication<'_>,
         expected_generation: Option<&str>,
         claims: &[(String, Option<i64>)],
     ) -> Result<Option<Outcome>, StoreError>;
     fn catalog_claims(&self, paths: &[String]) -> Result<Vec<(String, Option<i64>)>, StoreError>;
+    fn catalog_component_paths(&self, paths: &[String]) -> Result<Option<Vec<String>>, StoreError>;
 
     /// `path`'s ledger as committed now.
     fn ledger(&self, path: &str) -> Result<Option<Ledger>, StoreError>;
@@ -1250,6 +1251,39 @@ impl EventCache {
             .map_err(|error| io::Error::other(error.to_string()))
     }
 
+    pub(crate) fn catalog_component_paths(
+        &self,
+        inputs: &[crate::inputs::Input],
+        options: &crate::Options,
+    ) -> io::Result<Option<Vec<crate::inputs::Input>>> {
+        let paths = inputs
+            .iter()
+            .map(|input| input.full_path(options).to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        let paths = self
+            .store
+            .as_ref()
+            .ok_or_else(|| io::Error::other("scoped producer store unavailable"))?
+            .catalog_component_paths(&paths)
+            .map_err(|error| io::Error::other(error.to_string()))?;
+        paths
+            .map(|paths| {
+                paths
+                    .into_iter()
+                    .map(|path| {
+                        crate::native_evidence::catalog_input(Path::new(&path), options).ok_or_else(
+                            || {
+                                io::Error::other(
+                                    "Catalog component source is outside the native allowlist",
+                                )
+                            },
+                        )
+                    })
+                    .collect()
+            })
+            .transpose()
+    }
+
     #[cfg(test)]
     pub(crate) fn publish_partial_catalog(
         &mut self,
@@ -1284,7 +1318,7 @@ impl EventCache {
             .map_err(|error| io::Error::other(error.to_string()))
     }
 
-    pub(crate) fn publish_isolated_catalog(
+    pub(crate) fn publish_closed_catalog(
         &mut self,
         prepared: &crate::model::PreparedSources,
     ) -> io::Result<Option<Outcome>> {
@@ -1297,7 +1331,7 @@ impl EventCache {
         self.store
             .as_mut()
             .ok_or_else(|| io::Error::other("scoped producer store unavailable"))?
-            .publish_isolated_catalog(
+            .publish_closed_catalog(
                 &crate::slot_projection::Publication {
                     rows: &prepared.rows,
                     transcripts: Some(&prepared.transcripts),

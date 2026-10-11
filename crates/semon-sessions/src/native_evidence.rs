@@ -480,7 +480,7 @@ fn node_pids(nodes: &[Node], output: &mut BTreeSet<u32>) {
     }
 }
 
-fn catalog_input(path: &Path, options: &Options) -> Option<crate::inputs::Input> {
+pub(crate) fn catalog_input(path: &Path, options: &Options) -> Option<crate::inputs::Input> {
     if path
         .extension()
         .is_none_or(|extension| extension != "jsonl")
