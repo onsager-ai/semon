@@ -1069,17 +1069,96 @@ impl IndexStore for SqliteStore {
         self.publish_catalog_with_generation(publication, expected_generation, Some(claims), false)
     }
 
-    fn publish_isolated_catalog(
+    fn publish_closed_catalog(
         &mut self,
         publication: &crate::slot_projection::Publication<'_>,
         expected_generation: Option<&str>,
         claims: &[(String, Option<i64>)],
     ) -> Result<Option<Outcome>, StoreError> {
-        if !isolated_catalog(&self.connection, publication).map_err(failure)? {
+        if !closed_catalog(&self.connection, publication).map_err(failure)? {
             return Ok(None);
         }
         self.publish_catalog(publication, expected_generation, Some(claims), true)
             .map(Some)
+    }
+
+    fn catalog_component_paths(&self, paths: &[String]) -> Result<Option<Vec<String>>, StoreError> {
+        if paths.is_empty() || paths.len() > 64 {
+            return Ok(None);
+        }
+        let tx = self.connection.unchecked_transaction().map_err(failure)?;
+        let mut pending = std::collections::BTreeSet::new();
+        for path in paths {
+            let mut statement = tx.prepare("SELECT DISTINCT session_key FROM session_catalog_sources WHERE source_path=?1 AND lifecycle='current' LIMIT 65").map_err(failure)?;
+            let owners = statement
+                .query_map([path], |row| row.get::<_, String>(0))
+                .map_err(failure)?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(failure)?;
+            if owners.is_empty() || owners.len() > 64 {
+                return Ok(None);
+            }
+            pending.extend(owners);
+        }
+        let mut visited = std::collections::BTreeSet::new();
+        let mut sources = std::collections::BTreeSet::new();
+        while let Some(key) = pending.pop_first() {
+            if !visited.insert(key.clone()) {
+                continue;
+            }
+            if visited.len() > 64 {
+                return Ok(None);
+            }
+            let Some(row) = current_catalog_row(&tx, &key).map_err(failure)? else {
+                continue;
+            };
+            if row.native_ids.len() > 64 || row.sources.len() > 64 {
+                return Ok(None);
+            }
+            sources.extend(
+                row.sources
+                    .iter()
+                    .map(|source| source.path.to_string_lossy().into_owned()),
+            );
+            if sources.len() > 64 {
+                return Ok(None);
+            }
+            let mut related = tx.prepare("SELECT endpoint FROM (SELECT parent_key AS endpoint FROM session_catalog WHERE session_key=?1 AND lifecycle='current' UNION SELECT session_key FROM session_catalog WHERE parent_key=?1 AND lifecycle='current' UNION SELECT CASE WHEN json_valid(metadata) THEN json_extract(metadata,'$.from') END FROM session_trace_edges WHERE session_key=?1 UNION SELECT CASE WHEN json_valid(metadata) THEN json_extract(metadata,'$.to') END FROM session_trace_edges WHERE session_key=?1 UNION SELECT session_key FROM session_trace_edges WHERE CASE WHEN json_valid(metadata) THEN json_extract(metadata,'$.from') END=?1 UNION SELECT session_key FROM session_trace_edges WHERE CASE WHEN json_valid(metadata) THEN json_extract(metadata,'$.to') END=?1) WHERE endpoint IS NOT NULL AND endpoint!='you' ORDER BY endpoint LIMIT 65").map_err(failure)?;
+            let endpoints = related
+                .query_map([&key], |row| row.get::<_, String>(0))
+                .map_err(failure)?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(failure)?;
+            if endpoints.len() > 64 {
+                return Ok(None);
+            }
+            pending.extend(
+                endpoints
+                    .into_iter()
+                    .filter(|endpoint| !visited.contains(endpoint)),
+            );
+            for id in &row.native_ids {
+                let mut aliases = tx.prepare("SELECT DISTINCT session_key FROM session_catalog_sources WHERE lifecycle='current' AND harness=?1 AND native_id=?2 LIMIT 65").map_err(failure)?;
+                let aliases = aliases
+                    .query_map(params![row.harness, id], |row| row.get::<_, String>(0))
+                    .map_err(failure)?
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(failure)?;
+                if aliases.len() > 64 {
+                    return Ok(None);
+                }
+                pending.extend(
+                    aliases
+                        .into_iter()
+                        .filter(|endpoint| !visited.contains(endpoint)),
+                );
+            }
+            if visited.len() + pending.len() > 64 {
+                return Ok(None);
+            }
+        }
+        tx.commit().map_err(failure)?;
+        Ok(Some(sources.into_iter().collect()))
     }
 
     fn catalog_claims(&self, paths: &[String]) -> Result<Vec<(String, Option<i64>)>, StoreError> {
@@ -1226,7 +1305,20 @@ enum Init {
 
 /// A closed, unchanged identity component can advance without revisiting other
 /// event indexes. Repeat this metadata check inside the publication transaction.
-fn isolated_catalog(
+fn current_catalog_row(
+    connection: &Connection,
+    key: &str,
+) -> rusqlite::Result<Option<crate::model::summary::CatalogRow>> {
+    let previous: Option<Option<String>> = connection.query_row(
+        "SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata ELSE NULL END FROM session_catalog WHERE session_key=?1 AND lifecycle='current'",
+        [key], |row| row.get(0),
+    ).optional()?;
+    Ok(previous
+        .flatten()
+        .and_then(|text| serde_json::from_str(&text).ok()))
+}
+
+fn closed_catalog(
     connection: &Connection,
     publication: &crate::slot_projection::Publication<'_>,
 ) -> rusqlite::Result<bool> {
@@ -1237,44 +1329,59 @@ fn isolated_catalog(
     if !complete || publication.rows.is_empty() || publication.rows.len() > 64 {
         return Ok(false);
     }
+    let keys = publication
+        .rows
+        .iter()
+        .map(|row| row.key.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    if keys.len() != publication.rows.len() {
+        return Ok(false);
+    }
+    let encoded_keys = serde_json::to_string(&keys).map_err(|_| rusqlite::Error::InvalidQuery)?;
     for row in publication.rows {
-        if row.parent.is_some()
-            || row.sources.len() != 1
-            || row.native_ids.len() != 1
+        if row
+            .parent
+            .as_deref()
+            .is_some_and(|parent| !keys.contains(parent))
+            || row.sources.is_empty()
+            || row.native_ids.is_empty()
             || !row
                 .trace
                 .as_ref()
-                .is_some_and(|trace| trace.is_isolated(&row.key))
+                .is_some_and(|trace| trace.closed_over(&keys))
         {
             return Ok(false);
         }
-        let previous: Option<Option<String>> = connection.query_row(
-            "SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata ELSE NULL END FROM session_catalog WHERE session_key=?1 AND lifecycle='current'",
-            [&row.key], |row| row.get(0),
-        ).optional()?;
-        let Some(previous) = previous
-            .flatten()
-            .and_then(|text| serde_json::from_str::<crate::model::summary::CatalogRow>(&text).ok())
-        else {
+        let Some(previous) = current_catalog_row(connection, &row.key)? else {
             return Ok(false);
         };
         if previous.harness != row.harness
             || previous.kind != row.kind
             || previous.native_ids != row.native_ids
             || previous.parent != row.parent
-            || previous.sources.len() != 1
-            || previous.sources[0].path != row.sources[0].path
-            || previous.sources[0].native_id != row.sources[0].native_id
-            || previous.sources[0].native_role != row.sources[0].native_role
+            || previous.sources.len() != row.sources.len()
+            || previous.sources.iter().any(|previous| {
+                !row.sources.iter().any(|source| {
+                    source.path == previous.path
+                        && source.native_id == previous.native_id
+                        && source.native_role == previous.native_role
+                })
+            })
         {
             return Ok(false);
         }
         let related: bool = connection.query_row(
-            "SELECT EXISTS(SELECT 1 FROM session_catalog WHERE parent_key=?1) OR EXISTS(SELECT 1 FROM session_trace_edges WHERE session_key=?1 AND CASE WHEN json_valid(metadata) THEN ((json_extract(metadata,'$.kind')='toyou' AND json_extract(metadata,'$.from')=?1 AND json_extract(metadata,'$.to') IS NULL) OR (json_extract(metadata,'$.kind')='ask' AND json_extract(metadata,'$.from')='you' AND json_extract(metadata,'$.to')=?1)) ELSE 0 END IS NOT 1) OR EXISTS(SELECT 1 FROM session_trace_bookmarks WHERE session_key=?1) OR (SELECT count(DISTINCT session_key) FROM session_catalog_sources WHERE lifecycle='current' AND harness=?2 AND native_id=?3)!=1",
-            params![row.key, row.harness, row.native_ids[0]], |row| row.get(0),
+            "SELECT EXISTS(SELECT 1 FROM session_catalog WHERE lifecycle='current' AND parent_key=?1 AND session_key NOT IN (SELECT value FROM json_each(?2))) OR EXISTS(SELECT 1 FROM session_trace_edges WHERE session_key=?1 AND CASE WHEN json_valid(metadata) THEN ((json_extract(metadata,'$.from') IS NULL OR json_extract(metadata,'$.from')='you' OR json_extract(metadata,'$.from') IN (SELECT value FROM json_each(?2))) AND (json_extract(metadata,'$.to') IS NULL OR json_extract(metadata,'$.to')='you' OR json_extract(metadata,'$.to') IN (SELECT value FROM json_each(?2)))) ELSE 0 END IS NOT 1) OR EXISTS(SELECT 1 FROM session_trace_edges WHERE (CASE WHEN json_valid(metadata) THEN json_extract(metadata,'$.from') END=?1 OR CASE WHEN json_valid(metadata) THEN json_extract(metadata,'$.to') END=?1) AND session_key NOT IN (SELECT value FROM json_each(?2))) OR EXISTS(SELECT 1 FROM session_trace_bookmarks WHERE session_key=?1)",
+            params![row.key, encoded_keys], |row| row.get(0),
         )?;
         if related {
             return Ok(false);
+        }
+        for id in &row.native_ids {
+            let external: bool = connection.query_row("SELECT EXISTS(SELECT 1 FROM session_catalog_sources WHERE lifecycle='current' AND harness=?1 AND native_id=?2 AND session_key NOT IN (SELECT value FROM json_each(?3)))", params![row.harness,id,encoded_keys], |row| row.get(0))?;
+            if external {
+                return Ok(false);
+            }
         }
     }
     Ok(true)
@@ -1340,7 +1447,7 @@ impl SqliteStore {
             if previous.as_deref() != expected_generation {
                 return Ok(Outcome::Conflict);
             }
-            if preserve_complete && !isolated_catalog(&transaction, publication).map_err(failure)? {
+            if preserve_complete && !closed_catalog(&transaction, publication).map_err(failure)? {
                 return Ok(Outcome::Conflict);
             }
             // Do not let a slow builder overwrite a newer complete catalog.

@@ -6909,6 +6909,15 @@ fn build_sources_inner(
     if matches!(target, BuildTarget::Catalog | BuildTarget::Sources) && history_records.is_none() {
         source_records.finish()?;
     }
+    let native_timing = matches!(target, BuildTarget::Catalog | BuildTarget::Sources)
+        && std::env::var("SEMON_BUILD_TIMING").is_ok_and(|value| value == "1");
+    if native_timing {
+        eprintln!(
+            "semon sessions native: sources={} preparation={timings:?} projections={}",
+            files.len(),
+            post_started.elapsed().as_millis()
+        );
+    }
     match target {
         BuildTarget::Sources => {
             return Ok(BuildOutput::Sources(PreparedSources {
@@ -6920,6 +6929,7 @@ fn build_sources_inner(
             }));
         }
         BuildTarget::Catalog => {
+            let publication_started = std::time::Instant::now();
             cache.publish_catalog_projection(
                 &crate::slot_projection::Publication {
                     rows: catalog.as_deref().unwrap_or_default(),
@@ -6927,6 +6937,12 @@ fn build_sources_inner(
                 },
                 catalog_base.as_deref(),
             )?;
+            if native_timing {
+                eprintln!(
+                    "semon sessions native: publish_catalog={}",
+                    publication_started.elapsed().as_millis()
+                );
+            }
             cache.publish_session_descriptions();
             return Ok(BuildOutput::Catalog(
                 pids.iter().map(|pid| pid.pid).collect(),

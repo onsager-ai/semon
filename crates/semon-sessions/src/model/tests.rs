@@ -7317,7 +7317,7 @@ fn isolated_catalog_publication_fences_competing_generations_and_pending_sources
     let mut other_cache = EventCache::open_scoped(&home.options.cache).unwrap();
     let other = prepare_sources(&home.options, &mut other_cache, &[input("other")], NOW).unwrap();
     assert_eq!(
-        root_cache.publish_isolated_catalog(&prepared).unwrap(),
+        root_cache.publish_closed_catalog(&prepared).unwrap(),
         Some(crate::events::Outcome::Conflict),
         "unacknowledged unrelated evidence cannot qualify a complete publication"
     );
@@ -7327,7 +7327,7 @@ fn isolated_catalog_publication_fences_competing_generations_and_pending_sources
         "failed component publication rolls back all projections"
     );
     assert_eq!(
-        other_cache.publish_isolated_catalog(&other).unwrap(),
+        other_cache.publish_closed_catalog(&other).unwrap(),
         Some(crate::events::Outcome::Conflict),
         "the other pending source also prevents completeness"
     );
@@ -7340,7 +7340,7 @@ fn isolated_catalog_publication_fences_competing_generations_and_pending_sources
     )
     .unwrap();
     assert_eq!(
-        root_cache.publish_isolated_catalog(&prepared).unwrap(),
+        root_cache.publish_closed_catalog(&prepared).unwrap(),
         Some(crate::events::Outcome::Conflict),
         "a newer complete generation fences an older component"
     );

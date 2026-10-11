@@ -43,22 +43,29 @@ discovery for disappearance reconciliation. It removes a disappeared file only i
 that observed ledger still matches, preserving newly committed concurrent sources.
 Selected batches neither restore unrelated FileIndexes nor prune membership.
 
-An already complete Catalog can republish up to 64 changed isolated sources
+An already complete Catalog can republish a closed component of up to 64 sources
 without reloading unrelated event indexes. Before native reads, the producer
 captures a new filesystem/runtime snapshot and compares it with the last
 acknowledged snapshot. Discovery membership, sidecars and runtime inputs must be
 unchanged. Both snapshots are retained as observations; a write arriving after
 capture remains visible to the next refresh.
 
+The producer expands changed paths through indexed current owners, parent/child
+relationships, handoff endpoints and native aliases in a deterministic read
+transaction. It loads event rows only for that component. Retained rows cannot
+stand in for current producer evidence.
+
 The write transaction rechecks completeness, canonical/native identity, source
-membership and isolation against persisted parent/handoff/bookmark metadata.
+membership and closure against persisted parent/handoff/bookmark metadata.
 Human asks and questions remain part of the selected session. It uses the
 existing partial-publication ledger, generation and revision fences, acknowledges
 only its claims, and rolls back if any unrelated source revision remains pending.
 It preserves complete qualification only after those checks succeed. Identity or
 relationship changes and initial discovery still use complete reconciliation.
-The changed-source regression loads one event index with zero or 256 unrelated
-sources; the former complete path loaded 257 in the latter case. This is event-row
+The isolated regression loads one event index with zero or 256 unrelated
+sources; the former complete path loaded 257 in the latter case. A changed-child
+fixture loads its two-source parent/child component with zero or 256 unrelated
+sources, compared with 258 indexes before. This is event-row
 reuse evidence; filesystem snapshot work and cold reconciliation still scale.
 
 ## Qualified workload
