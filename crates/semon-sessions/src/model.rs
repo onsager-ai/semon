@@ -1208,7 +1208,10 @@ pub(crate) fn working_dirs(
         &mut Texts::default(),
         cutoff,
         &MachineFacts::Local,
-        None,
+        ScanSelection {
+            inputs: None,
+            legacy_markers: false,
+        },
     )?;
     let mut cwds = BTreeSet::new();
     for file in &files {
@@ -1235,6 +1238,11 @@ fn modified_ms(path: &Path) -> Option<i64> {
     i64::try_from(time.duration_since(UNIX_EPOCH).ok()?.as_millis()).ok()
 }
 
+struct ScanSelection<'a> {
+    inputs: Option<&'a [crate::inputs::Input]>,
+    legacy_markers: bool,
+}
+
 /// Every source file, with its event index. A file last modified before
 /// `cutoff` isn't read at all: its cached index is kept (it counts as seen)
 /// for builds that read every file. Also returns the ids of the top-level
@@ -1246,8 +1254,10 @@ fn scan(
     texts: &mut Texts,
     cutoff: Option<i64>,
     machine: &MachineFacts,
-    selected: Option<&[crate::inputs::Input]>,
+    selection: ScanSelection<'_>,
 ) -> io::Result<(Vec<SourceFile>, BTreeSet<String>, std::time::Duration)> {
+    let selected = selection.inputs;
+    let legacy_markers = selection.legacy_markers;
     if selected.is_some_and(|inputs| {
         inputs.iter().any(|input| {
             !crate::is_input_path(input.root.as_str(), &input.path)
@@ -1353,7 +1363,7 @@ fn scan(
             id: id.to_owned(),
             first: summary.first,
             last: summary.last,
-            marker: texts.marker(&path, stamp),
+            marker: legacy_markers.then(|| texts.marker(&path, stamp)).flatten(),
             path,
             role,
             summary,
@@ -1395,7 +1405,7 @@ fn scan(
         seen.insert(path.to_string_lossy().into_owned());
         files.push(SourceFile {
             revision: cache.revision(&path).expect("scanned file has a ledger"),
-            marker: texts.marker(&path, stamp),
+            marker: legacy_markers.then(|| texts.marker(&path, stamp)).flatten(),
             stamp,
             id,
             first: summary.first,
@@ -6005,9 +6015,20 @@ fn build_sources_inner(
 
     let facts = MachineFacts::of(options);
     let window_start = scan_cutoff(options, now);
-    let (files, skipped, index_clone) = timed!(
+    let (mut files, skipped, index_clone) = timed!(
         "scan",
-        scan(options, cache, dirty, texts, window_start, &facts, selected)?
+        scan(
+            options,
+            cache,
+            dirty,
+            texts,
+            window_start,
+            &facts,
+            ScanSelection {
+                inputs: selected,
+                legacy_markers: target == BuildTarget::Model
+            }
+        )?
     );
     timings.push((
         "index_clone",
@@ -6082,6 +6103,16 @@ fn build_sources_inner(
         .map(crate::query_source::Sources::reader);
     if let Some(records) = &source_records {
         records.verify_all()?;
+        for file in &mut files {
+            if file.harness() != "copilot" {
+                let index = file
+                    .summary
+                    .marker_index
+                    .as_ref()
+                    .ok_or_else(|| io::Error::other("native parent marker was not indexed"))?;
+                file.marker = records.marker(&file.path, index)?;
+            }
+        }
     }
     let mut builder = Builder::new(
         &files,

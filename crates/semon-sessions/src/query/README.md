@@ -52,8 +52,8 @@ arbitrary whole-file byte immutability. Changed metadata retains the original
 complete-prefix check. Platforms without a change-time observation also keep
 their existing complete-prefix verification. The block proof establishes the identity of bytes the
 native reader actually consumes independently of that timestamp shortcut.
-Removing the duplicate launch scan and qualifying parent-marker/EOF evidence
-and hosted generation ownership remain separate migration work.
+Removing the duplicate launch scan and qualifying hosted generation ownership
+remain separate migration work.
 
 Block digests contain no source text. They are paged within the current Event
 Index metadata region, bounded by the same metadata-value limit, and committed
@@ -127,7 +127,7 @@ churn keeps the native session and defers a portable proof until a stable scan. 
 `Texts::meta` cache is removed.
 
 New Claude subagent eviction requires a supported sidecar observation and a
-version-four marker binding its exact persisted encoding and the source byte
+version-five marker binding its exact persisted encoding and the source byte
 proof. The host rechecks the
 sidecar observation and full bounded-file digest before local removal. Earlier markers still retain existing
 event rows, but cannot qualify a new subagent eviction. Unreadable, linked or
@@ -140,12 +140,32 @@ that cannot recognize their version. No deployment or automatic data migration
 is part of this change.
 
 New archive eviction also requires valid paged byte proofs and binds their exact
-header encoding in the version-four marker. Prior version-one, version-two and
-version-three markers still retain their existing event rows; they cannot
+header encoding in the version-five marker. Prior version-one through
+version-four markers still retain their existing event rows; they cannot
 qualify another eviction without current proof repair and custody verification.
 Restore verified original archive sources before downgrading to a producer
-that cannot recognize version four. Native logs, sidecars and existing original
+that cannot recognize version five. Native logs, sidecars and existing original
 databases are never removed by this proof migration.
 
-Semon parent markers, bounded relationship closure and authorized provider reads
-remain. No full-workspace discovery or archive cost is claimed retired yet.
+Native Catalog, Query and source preparation now resolve Semon parent markers
+from content-free locations committed with the event ledger. The event parser
+observes the first marker or preceding agent output, preserving the shared
+first-output stopping rule. Only offsets, lengths and exact record digests are
+persisted; handoff prompt paths and message content remain in the original log.
+Missing or unsupported metadata is repaired without replaying unchanged event
+rows. Every selected record is independently verified before commit, read and
+publication, including timestamp collisions, replacement and deletion.
+
+Valid JSON at EOF without a newline retains its marker behavior through a
+separate exact-record digest. It does not advance the complete-line offset or
+change transcript paging. Incomplete EOF JSON is reconsidered on append. Marker
+reads preserve the legacy parser's uncapped record size; they read only the
+selected record, and completion verifies it with bounded scratch memory.
+File metadata remains an observation of freshness for cached negative results.
+
+New Claude/Codex eviction also requires supported parent-marker metadata and
+binds its exact encoding into the version-five archive marker. Prior markers
+continue preserving their existing rows; missing or corrupt metadata defers new
+eviction. The legacy Model/tree marker scanner and launch cache remain until
+their consumers migrate. Bounded relationship closure and authorized provider
+reads remain; full-workspace discovery and archive costs are still present.

@@ -99,6 +99,7 @@ impl Sources {
             sources: self,
             checked: Mutex::default(),
             checked_chunks: Mutex::default(),
+            checked_markers: Mutex::default(),
             prepared: Mutex::default(),
             failed: Mutex::new(false),
         }
@@ -110,6 +111,7 @@ pub(crate) struct Records<'a> {
     sources: &'a Sources,
     checked: Mutex<BTreeMap<PathBuf, Stat>>,
     checked_chunks: Mutex<BTreeMap<PathBuf, BTreeSet<usize>>>,
+    checked_markers: Mutex<BTreeMap<PathBuf, crate::native_marker::Record>>,
     // Scalar preparation visits adjacent short records. Reuse at most one
     // immutable, verified block; completion still checks every used block.
     prepared: Mutex<Option<PreparedBlock>>,
@@ -123,6 +125,45 @@ struct PreparedBlock {
 }
 
 impl Records<'_> {
+    /// Read only the indexed decisive record. Unlike transcript offsets, a
+    /// marker may be valid JSON at EOF before its terminating newline arrives.
+    pub(crate) fn marker(
+        &self,
+        path: &Path,
+        index: &crate::native_marker::Index,
+    ) -> io::Result<Option<crate::Marker>> {
+        let result = (|| {
+            let proof = self.sources.proofs.get(path).ok_or_else(unavailable)?;
+            if !index.valid(&proof.ledger) {
+                return Err(unavailable());
+            }
+            self.verify(path, proof)?;
+            let Some(record) = index.record() else {
+                return Ok(None);
+            };
+            let mut file = LogFile::open(path)?;
+            let before = Stat::from_metadata(&file.metadata()?)?;
+            if before.dev != proof.ledger.stat.dev
+                || before.ino != proof.ledger.stat.ino
+                || record.end().is_none_or(|end| end > before.size)
+            {
+                return Err(unavailable());
+            }
+            let marker = record.read(&mut file)?;
+            if Stat::from_metadata(&file.metadata()?)? != before {
+                return Err(unavailable());
+            }
+            self.checked_markers
+                .lock()
+                .map_err(|_| unavailable())?
+                .insert(path.to_owned(), record.clone());
+            Ok(marker)
+        })();
+        if result.is_err() {
+            *self.failed.lock().map_err(|_| unavailable())? = true;
+        }
+        result
+    }
     /// Native scalar-recipe preparation keeps its original bounded complete-line
     /// rule while borrowing the same source proof as the other native reads.
     pub(crate) fn record_bytes(
@@ -275,6 +316,23 @@ impl Records<'_> {
             for index in indices {
                 proof.chunks.read(&mut file, *index)?;
             }
+            if Stat::from_metadata(&file.metadata()?)? != before {
+                return Err(unavailable());
+            }
+        }
+        for (path, record) in self
+            .checked_markers
+            .lock()
+            .map_err(|_| unavailable())?
+            .iter()
+        {
+            let proof = self.sources.proofs.get(path).ok_or_else(unavailable)?;
+            let mut file = LogFile::open(path)?;
+            let before = Stat::from_metadata(&file.metadata()?)?;
+            if before.dev != proof.ledger.stat.dev || before.ino != proof.ledger.stat.ino {
+                return Err(unavailable());
+            }
+            record.verify(&mut file)?;
             if Stat::from_metadata(&file.metadata()?)? != before {
                 return Err(unavailable());
             }
@@ -478,13 +536,13 @@ mod tests {
             }
         }
         fn sources(&self) -> (Sources, SessionSourceRef, String) {
+            self.sources_at(fs::metadata(&self.path).unwrap().len())
+        }
+        fn sources_at(&self, consumed: u64) -> (Sources, SessionSourceRef, String) {
             let stat = Stat::from_metadata(&fs::metadata(&self.path).unwrap()).unwrap();
-            let captured = crate::source_chunks::capture(
-                &mut LogFile::open(&self.path).unwrap(),
-                stat.size,
-                0,
-            )
-            .unwrap();
+            let captured =
+                crate::source_chunks::capture(&mut LogFile::open(&self.path).unwrap(), consumed, 0)
+                    .unwrap();
             let reference = SessionSourceRef {
                 root: "claude".into(),
                 path: "lead.jsonl".into(),
@@ -535,6 +593,51 @@ mod tests {
                 "every captured stamp field must match"
             );
             after
+        }
+    }
+
+    #[test]
+    fn parent_marker_read_and_completion_verify_identical_stat_bytes_including_eof() {
+        let _clock = crate::events::fixed_change_time_for_test(0);
+        for eof in [false, true] {
+            let fixture = Fixture::new(if eof {
+                "marker-eof-proof"
+            } else {
+                "marker-line-proof"
+            });
+            let record = serde_json::json!({"type":"user","message":{"content":"Semon-Parent: claude:parent\nSemon-Handoff: /private/OLD"}});
+            fs::write(
+                &fixture.path,
+                format!("{record}{}", if eof { "" } else { "\n" }),
+            )
+            .unwrap();
+            let mut cache =
+                crate::events::EventCache::open_scoped(&fixture.root.join("index.json")).unwrap();
+            let index =
+                crate::events::scan_file(&fixture.path, "claude", &mut cache, &mut false).unwrap();
+            let consumed = cache.revision(&fixture.path).unwrap().2;
+            assert_eq!(consumed == 0, eof);
+            let (sources, _, _) = fixture.sources_at(consumed);
+            let reader = sources.reader();
+            let markers = index.marker_index.as_ref().unwrap();
+            assert_eq!(
+                reader
+                    .marker(&fixture.path, markers)
+                    .unwrap()
+                    .unwrap()
+                    .handoff
+                    .as_deref(),
+                Some("/private/OLD")
+            );
+            reader.finish().unwrap();
+            let replacement = fs::read_to_string(&fixture.path)
+                .unwrap()
+                .replace("/private/OLD", "/private/NEW");
+            fixture.rewrite(replacement.as_bytes());
+            assert!(reader.finish().is_err());
+            let fresh = sources.reader();
+            assert!(fresh.marker(&fixture.path, markers).is_err());
+            assert!(fresh.finish().is_err());
         }
     }
     impl Drop for Fixture {

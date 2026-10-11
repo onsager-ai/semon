@@ -593,7 +593,7 @@ mod tests {
             })
             .unwrap();
         let mut marker: Value = serde_json::from_str(&encoded).unwrap();
-        assert_eq!(marker["version"], 4);
+        assert_eq!(marker["version"], 5);
         fs::write(&home.meta, metadata().to_string() + " ").unwrap();
         assert!(!crate::source_event_index_retained(&home.options, &proof, &ready).unwrap());
         home.refuse_eviction();
@@ -615,6 +615,10 @@ mod tests {
             .as_object_mut()
             .unwrap()
             .remove("source_chunks_sha256");
+        marker
+            .as_object_mut()
+            .unwrap()
+            .remove("parent_marker_sha256");
         marker
             .as_object_mut()
             .unwrap()

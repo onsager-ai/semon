@@ -55,6 +55,7 @@ pub(crate) use read_path::open_input;
 mod model_delta;
 mod native_field;
 mod native_header;
+mod native_marker;
 mod native_sidecar;
 mod read_capabilities;
 mod source_inventory;
@@ -813,7 +814,14 @@ fn update_codex(summary: &mut Summary, record: &Value) {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    static FIRST_MARKER_READS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
 fn read_first_marker(path: &Path) -> io::Result<Option<Marker>> {
+    #[cfg(test)]
+    FIRST_MARKER_READS.with(|reads| reads.set(reads.get() + 1));
     let mut reader = BufReader::new(sealed::LogFile::open(path)?);
     let mut line = Vec::new();
     while reader.read_until(b'\n', &mut line)? != 0 {
