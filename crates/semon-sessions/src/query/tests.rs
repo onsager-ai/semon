@@ -256,14 +256,14 @@ fn query_producer_preserves_large_native_tool_record_derivation() {
     assert!(answer.to_string().contains("Find parser panics"));
     assert_eq!(answer, expected);
     crate::model::DIRECT_SOURCE_READS.with(|reads| assert_eq!(reads.get(), 0));
-    // The legacy control still exercises its existing direct-read path.
+    // Full Model preparation now shares the verified native body reader too.
     assert_eq!(
         ViewerCore::new(home.options.clone())
             .respond("GET", "/api/model", "", None)
             .status,
         200
     );
-    crate::model::DIRECT_SOURCE_READS.with(|reads| assert!(reads.get() > 0));
+    crate::model::DIRECT_SOURCE_READS.with(|reads| assert_eq!(reads.get(), 0));
 }
 
 /// A retired native cohort cannot be refreshed after the source mutation.

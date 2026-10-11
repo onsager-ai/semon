@@ -17,7 +17,7 @@ Audited on October 10, 2026:
 
 The main revisions verified on October 11, 2026 are Semon
 `263a02da278716ab2309b8e34a463419e5c781e5` and Hub
-`039c0fdaf5239a1fe8a6b1cd9662686bc23851f1` (gitlink Semon
+`cf02945bd279d7cb4fc611507cf28c91b3b36293` (gitlink Semon
 `263a02da278716ab2309b8e34a463419e5c781e5`). Their source-pin contract and
 Hub navigation/native-picker changes through `96ae028` are retained in the staged
 PRs. Later Hub registry credential/CI changes (#244/#246) and approved native
@@ -26,6 +26,12 @@ main work requiring final stack integration
 and exact-pair qualification. Preserve those authored contracts and approved
 baselines. The retirement components audited below remain present on main until
 the staged PRs land.
+
+Hub #256 adds staging-only read-only agent PAT browser access, workspace deletion
+protection and isolated cold Viewer fixtures. It is newer than the qualified
+`ebcc4d0` / Semon `ca786e1` review pair. Preserve its authorization and browser
+checks during the next main integration; the earlier image does not qualify that
+new combined revision.
 
 Hub's gitlink is its sole source pin. Latest Semon and the adopted Hub/Semon pair
 are distinct validation targets. Adoption PRs must run
@@ -343,8 +349,12 @@ derivations and empty-source identities. Query discovery and index parsing still
 use native files; retained archived index evidence and scoped provider access
 remain required before Hub can remove restoration.
 Catalog observation and scoped source preparation share this body-reader and
-publication boundary. Shared native parsers and text caches remain; compatibility
-Model preparation retains its reader until its consumers have migrated.
+publication boundary. Full Model preparation now uses the same verified cohort
+for source bodies and indexed markers/launch calls, and rechecks it before
+publishing Catalog/slot projections. Its direct body-reader fallback and private
+marker cache are removed. Local native paths without a lossless UTF-8 encoding
+retain private verified reads without becoming a lossy public source alias.
+Shared native parsers and text caches remain.
 
 Verified archive eviction now retains the exact existing Session Event Index
 generation as well as its catalog/slot recipes. A versioned marker in the index's
@@ -401,16 +411,19 @@ generalized event pipeline is added.
 
 Native parent-marker reads now use content-free locations observed by the event
 parser and verified against the selected original record, including valid JSON
-at EOF without a newline. Native Catalog, Query and source preparation no longer
-use the independent full-log marker scan; its legacy Model/tree consumers remain.
+at EOF without a newline. All producer targets, including Model preparation, use
+these indexed reads. Normal CLI and Viewer tree consumers retain the separate
+JSON summary cache and its marker scanner until their diagnostic, usage and tool
+semantics migrate.
 Marker text and private handoff prompt paths are not persisted. New archive
 eviction also binds this metadata; prior markers preserve existing rows. The
 [query contract](../../crates/semon-sessions/src/query/README.md) owns exact limits
 and downgrade obligations. Native launch lookup now uses bounded content-free
 locations from the same event parser and verifies the original candidate record
 before using its allowlisted fields. Shared literal/filename/worktree ambiguity
-rules and valid EOF behavior remain. The legacy Model/tree launch cache still
-serves its unmigrated consumers. New eviction binds launch metadata in version-six
+rules and valid EOF behavior remain. Model preparation also uses indexed launch
+evidence; the remaining launch scanner serves the unmigrated CLI/tree summary
+path. New eviction binds launch metadata in version-six
 custody markers; earlier markers retain existing index rows. Bounded relationship
 closure and hosted MCP restoration remain until those consumers migrate.
 

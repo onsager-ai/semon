@@ -77,9 +77,15 @@ including cached derivations and empty sources that supply native identity.
 A failed cohort is not installed as a query snapshot or published to the catalog.
 The proof contains the same complete consumed prefix used by paging and search.
 Catalog observation, bounded source preparation and native scalar-recipe
-preparation use the same reader and publication fence. The legacy Model target
-retains its existing body reader
-while its remaining Viewer consumers are migrated.
+preparation use the same reader and publication fence. Full Model preparation
+also uses this cohort for body, parent-marker and launch reads, with no direct
+body-reader or independent marker/launch fallback. It checks used source bytes
+before publishing Catalog/slot projections. Existing independent sidecar fences
+for native targets and the Model metadata publication CAS remain unchanged.
+Local paths without
+a lossless UTF-8 encoding keep private, generation-bound reads; they never enter
+the public source-reference lookup under a lossy alias. Public query/source
+reference validation remains unchanged.
 
 Native text and scalar preparation reuse at most one immutable, verified 64 KiB block within
 the current preparation request. Adjacent short records do not repeatedly read
@@ -190,6 +196,9 @@ launch metadata and binds its fingerprint into version-six archive markers;
 versions one through five still preserve already retained index rows but cannot
 qualify another eviction. Restore verified original archives before downgrading.
 
-The legacy Model/tree marker scanner and launch cache remain until their
-consumers migrate. Bounded relationship closure and authorized provider reads
-remain; full-workspace discovery and archive costs are still present.
+The separate JSON summary cache and marker/launch scans still serve normal
+`semon sessions` and Viewer tree reads. Their model lists, raw activity timestamps,
+usage deduplication, open-tool state and malformed-line diagnostics require an
+explicit migration before that cache is removed. Bounded relationship closure
+and authorized provider reads remain; full-workspace Model construction, Viewer
+transport, discovery and archive costs are still present.
