@@ -287,6 +287,7 @@ pub(crate) struct FileIndex {
     pub(crate) dirty_rows: Option<DirtyRows>,
     pub(crate) source_chunks: Option<Arc<crate::source_chunks::Chunks>>,
     pub(crate) marker_index: Option<crate::native_marker::Index>,
+    pub(crate) handoff_index: Option<crate::native_handoff::Index>,
     /// Allowlisted first-record metadata observed on the same native generation.
     pub(crate) codex_header: Option<crate::native_header::CodexHeader>,
     /// A subagent sidecar has its own generation, separate from the native log.
@@ -1694,6 +1695,7 @@ pub(crate) fn scan_file(
         && !cache.unpersisted.contains(&key)
         && entry.index.source_chunks.is_some()
         && (harness == "copilot" || entry.index.marker_index.is_some())
+        && entry.index.handoff_index.is_some()
         && (harness != "codex" || entry.index.codex_header.is_some())
         && (!agent
             || entry
@@ -1753,6 +1755,7 @@ pub(crate) fn scan_file(
             && let Some(index) = &base
             && index.source_chunks.is_some()
             && (harness == "copilot" || index.marker_index.is_some())
+            && index.handoff_index.is_some()
             && (harness != "codex" || index.codex_header.is_some())
             && (!agent
                 || sidecar
@@ -1826,6 +1829,12 @@ pub(crate) fn scan_file(
         if let Some(markers) = &mut writable.marker_index {
             markers.begin_append();
         }
+        if writable.handoff_index.is_none() {
+            writable.handoff_index = Some(crate::native_handoff::Index::repair(&mut file, from)?);
+        }
+        if let Some(handoffs) = &mut writable.handoff_index {
+            handoffs.begin_append();
+        }
         let (offset, parsed) = parse(&mut file, from, harness, writable)?;
         let changes = writable
             .dirty_rows
@@ -1896,6 +1905,18 @@ pub(crate) fn scan_file(
             force_replace = true;
             continue;
         }
+        if let Some(handoffs) = &writable.handoff_index
+            && (!handoffs.valid(&ledger) || handoffs.verify(&mut file).is_err())
+        {
+            if last {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "native launch evidence changed while indexing",
+                ));
+            }
+            force_replace = true;
+            continue;
+        }
         #[cfg(test)]
         {
             if let Some(hook) = BEFORE_COMMIT.with(|hook| hook.borrow_mut().take()) {
@@ -1950,6 +1971,11 @@ fn parse(
             {
                 markers.observe(&line, offset, false, &value);
             }
+            if let Some(handoffs) = &mut index.handoff_index
+                && let Ok(value) = serde_json::from_slice(&line)
+            {
+                handoffs.observe(&line, offset, false, &value)?;
+            }
             break;
         }
         let line_offset = offset;
@@ -1961,6 +1987,9 @@ fn parse(
             Ok(record) if record.is_object() => {
                 if let Some(markers) = &mut index.marker_index {
                     markers.observe(&line, line_offset, true, &record);
+                }
+                if let Some(handoffs) = &mut index.handoff_index {
+                    handoffs.observe(&line, line_offset, true, &record)?;
                 }
                 if harness == "copilot" {
                     copilot(index, &record, line_offset);

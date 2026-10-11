@@ -1,4 +1,4 @@
-//! Launch calls shared by the tree and model, kept in memory only.
+//! Shared launch matching and the remaining legacy Model/tree scan cache.
 
 use std::{
     collections::{BTreeMap, VecDeque},
@@ -21,9 +21,9 @@ use crate::{ToolCall, events, field};
 /// Invariant: the scan cache holds at most this many parents, evicting LRU.
 const MAX_PARENTS: usize = 256;
 /// Invariant: each parent retains at most this many calls, keeping the newest.
-const MAX_CALLS: usize = 4096;
+pub(crate) const MAX_CALLS: usize = 4096;
 /// Inputs are transient, but must not grow the cache without a byte limit.
-const MAX_INPUT_BYTES: usize = 2 * 1024 * 1024;
+pub(crate) const MAX_INPUT_BYTES: usize = 2 * 1024 * 1024;
 const CLOCK_SKEW_MS: i64 = 2000;
 
 #[cfg(test)]
@@ -54,10 +54,75 @@ impl Stamp {
     }
 }
 
-struct Call {
-    tool: ToolCall,
-    time: Option<i64>,
-    input: String,
+pub(crate) struct Call {
+    pub(crate) tool: ToolCall,
+    pub(crate) time: Option<i64>,
+    pub(crate) input: String,
+}
+
+pub(crate) struct Matcher<'a> {
+    prompt: &'a str,
+    prompt_name: Option<&'a str>,
+    cwd: Option<&'a str>,
+    start: Option<i64>,
+    named: Vec<ToolCall>,
+    fallback: Vec<(i64, ToolCall)>,
+}
+
+impl<'a> Matcher<'a> {
+    pub(crate) fn new(prompt: &'a str, cwd: Option<&'a str>, start: Option<i64>) -> Self {
+        Self {
+            prompt,
+            prompt_name: Path::new(prompt).file_name().and_then(|name| name.to_str()),
+            cwd: cwd.filter(|cwd| {
+                Path::new(cwd).components().count() >= 3
+                    && std::env::var_os("HOME")
+                        .is_none_or(|home| Path::new(cwd) != Path::new(&home))
+            }),
+            start,
+            named: Vec::new(),
+            fallback: Vec::new(),
+        }
+    }
+
+    pub(crate) fn consider(&mut self, call: &Call) -> Option<ToolCall> {
+        if call.input.contains(self.prompt) {
+            return Some(call.tool.clone());
+        }
+        if self
+            .prompt_name
+            .is_some_and(|name| matches_segment(&call.input, name))
+        {
+            self.named.push(call.tool.clone());
+        }
+        if let (Some(cwd), Some(start), Some(time)) = (self.cwd, self.start, call.time)
+            && time <= start.saturating_add(CLOCK_SKEW_MS)
+            && matches_cwd(&call.input, cwd)
+        {
+            self.fallback.push((time, call.tool.clone()));
+        }
+        None
+    }
+
+    pub(crate) fn finish(mut self) -> Option<ToolCall> {
+        if self.named.len() == 1 {
+            self.named.pop()
+        } else if self.named.is_empty() {
+            self.fallback.sort_by_key(|(time, _)| *time);
+            let (time, call) = self.fallback.pop()?;
+            if self
+                .fallback
+                .last()
+                .is_some_and(|(other, _)| time.saturating_sub(*other) <= CLOCK_SKEW_MS)
+            {
+                None
+            } else {
+                Some(call)
+            }
+        } else {
+            None
+        }
+    }
 }
 
 struct Parent {
@@ -222,50 +287,18 @@ impl ScanCache {
         cwd: Option<&str>,
         start: Option<i64>,
     ) -> Option<ToolCall> {
-        let mut named = Vec::new();
-        let mut fallback = Vec::new();
-        let prompt_name = Path::new(prompt).file_name().and_then(|name| name.to_str());
-        let cwd = cwd.filter(|cwd| {
-            Path::new(cwd).components().count() >= 3
-                && std::env::var_os("HOME").is_none_or(|home| Path::new(cwd) != Path::new(&home))
-        });
+        let mut matcher = Matcher::new(prompt, cwd, start);
         for path in paths {
             let Ok(parent) = self.parent(path) else {
                 continue;
             };
-            if let Some(call) = parent.calls.iter().find(|call| call.input.contains(prompt)) {
-                return Some(call.tool.clone());
-            }
             for call in &parent.calls {
-                if prompt_name.is_some_and(|name| matches_segment(&call.input, name)) {
-                    named.push(call.tool.clone());
-                }
-                if let (Some(cwd), Some(start), Some(time)) = (cwd, start, call.time)
-                    && time <= start.saturating_add(CLOCK_SKEW_MS)
-                    && matches_cwd(&call.input, cwd)
-                {
-                    fallback.push((time, call.tool.clone()));
+                if let Some(tool) = matcher.consider(call) {
+                    return Some(tool);
                 }
             }
         }
-        // A filename still identifies a variable-built prompt path. Neither
-        // filename nor worktree evidence chooses arbitrarily between launches.
-        if named.len() == 1 {
-            named.pop()
-        } else if named.is_empty() {
-            fallback.sort_by_key(|(time, _)| *time);
-            let (time, call) = fallback.pop()?;
-            if fallback
-                .last()
-                .is_some_and(|(other, _)| time.saturating_sub(*other) <= CLOCK_SKEW_MS)
-            {
-                None
-            } else {
-                Some(call)
-            }
-        } else {
-            None
-        }
+        matcher.finish()
     }
 }
 
