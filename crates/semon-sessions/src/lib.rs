@@ -104,7 +104,7 @@ pub use harness::{HARNESS_ICONS, HARNESSES, HarnessDefinition, harness};
 pub use inputs::{Input, InputRoot, inputs, is_input_path};
 pub use mcp::serve_mcp;
 pub use model::{MODEL_API, model_json, model_json_at};
-pub use query::{DEFAULT_WINDOW, Query, QueryError, QueryTool, query_tools};
+pub use query::{DEFAULT_WINDOW, Query, QueryError, QueryTool, query_tools, validate_query_call};
 pub use received::{ReceivedMachines, is_machine_name};
 pub use refresh::RefreshPool;
 pub use union::{
