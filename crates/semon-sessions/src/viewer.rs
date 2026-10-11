@@ -5712,6 +5712,20 @@ mod tests {
             ("one".into(), first.options.clone()),
             ("two".into(), offline),
         ]);
+        let inventory = body_of(&core.respond("GET", "/api/session-sources", "", None));
+        assert_eq!(
+            inventory["items"],
+            json!([
+                {"source_key":"one", "label":"twin"},
+                {"source_key":"two", "label":"twin~two"}
+            ])
+        );
+        assert!(
+            core.machine_views()
+                .iter()
+                .all(|view| view.shown_model().is_none()),
+            "native source identity does not prepare workspace models"
+        );
         let model = body_of(&core.respond("GET", "/api/model", "", None));
         let machines = model["machines"].as_array().unwrap();
         assert_eq!(machines[0]["id"], "twin");

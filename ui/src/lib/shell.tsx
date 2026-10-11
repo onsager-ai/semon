@@ -386,6 +386,7 @@ export function createShellChrome(host: ShellHost): ShellChrome {
     },
     topbar(props) {
       ready();
+      const leadFocused = lead !== null && document.activeElement === lead;
       account.close();
       dropDesktop();
       lead = null;
@@ -436,6 +437,7 @@ export function createShellChrome(host: ShellHost): ShellChrome {
         cursor.remove();
         cursor = next;
       }
+      if (leadFocused) lead?.focus();
       measureBar();
     },
     drawerAccount,

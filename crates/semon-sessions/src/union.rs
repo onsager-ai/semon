@@ -1029,21 +1029,18 @@ impl ViewerCore {
 
     fn configured_source_inventory(views: &Views) -> Arc<crate::SessionSourceInventory> {
         let local = views.len() == 1 && views[0].0.is_empty();
-        Arc::new(crate::SessionSourceInventory::new(views.iter().map(
-            |(key, view)| {
+        let labels = native_machine_ids(views);
+        Arc::new(crate::SessionSourceInventory::new(
+            views.iter().enumerate().map(|(index, (key, _))| {
                 let key = if local {
                     "local".to_owned()
                 } else {
                     key.clone()
                 };
-                let label = if local {
-                    crate::facts::MachineFacts::of(view.options()).hostname(view.options())
-                } else {
-                    key.clone()
-                };
+                let label = labels[index].clone();
                 (key, label)
-            },
-        )))
+            }),
+        ))
     }
 
     /// Each machine's view, in order: for tests that read its hooks.
