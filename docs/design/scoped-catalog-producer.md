@@ -23,6 +23,14 @@ cursors bind the opaque 64-hex-character publication epoch. Existing databases
 without the additive completeness marker are treated as complete. A successful
 full reconciliation publishes `complete` and changes the cursor generation.
 
+When bounded discovery has found the entire cohort (at most 64 inputs), the
+producer checks that membership against the filesystem snapshot captured before
+native reads. It reuses that batch's prepared projections for complete publication;
+it does not derive the same native sources again. The partial transaction returns
+its committed generation directly, so a competing producer cannot be mistaken for
+the batch's own publication between the two writes. Complete publication still
+checks every current ledger and rejects newer source or Catalog generations.
+
 A partial collection returns `owner_qualification: "provisional"` and null
 `native_id` in identity responses, preserving the declared `native_ids` and source
 references as read context. It cannot qualify native control selection or an eviction

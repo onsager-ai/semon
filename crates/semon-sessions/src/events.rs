@@ -983,7 +983,7 @@ pub(crate) trait IndexStore: Send {
         publication: &crate::slot_projection::Publication<'_>,
         expected_generation: Option<&str>,
         claims: &[(String, Option<i64>)],
-    ) -> Result<Outcome, StoreError>;
+    ) -> Result<(Outcome, Option<String>), StoreError>;
     fn publish_isolated_catalog(
         &mut self,
         publication: &crate::slot_projection::Publication<'_>,
@@ -1250,10 +1250,21 @@ impl EventCache {
             .map_err(|error| io::Error::other(error.to_string()))
     }
 
+    #[cfg(test)]
     pub(crate) fn publish_partial_catalog(
         &mut self,
         prepared: &crate::model::PreparedSources,
     ) -> io::Result<Outcome> {
+        self.publish_partial_catalog_fenced(prepared)
+            .map(|(outcome, _)| outcome)
+    }
+
+    /// Return this transaction's generation, rather than reading a generation
+    /// another producer may already have replaced after the commit.
+    pub(crate) fn publish_partial_catalog_fenced(
+        &mut self,
+        prepared: &crate::model::PreparedSources,
+    ) -> io::Result<(Outcome, Option<String>)> {
         if self.busy || !self.unpersisted.is_empty() {
             return Err(io::Error::other(
                 "native producer sources not durably observed",

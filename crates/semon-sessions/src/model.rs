@@ -6358,6 +6358,7 @@ pub(crate) struct PreparedSources {
     pub(crate) claims: Vec<(String, Option<i64>)>,
     pub(crate) rows: Vec<summary::CatalogRow>,
     pub(crate) transcripts: Vec<crate::slot_projection::Projection>,
+    pub(crate) pids: BTreeSet<u32>,
 }
 
 pub(crate) fn prepare_sources(
@@ -6915,6 +6916,7 @@ fn build_sources_inner(
                 claims,
                 rows: catalog.unwrap_or_default(),
                 transcripts: slot_projections.unwrap_or_default(),
+                pids: pids.iter().map(|pid| pid.pid).collect(),
             }));
         }
         BuildTarget::Catalog => {
