@@ -3521,7 +3521,7 @@ mod tests {
                 .to_owned()
         };
         let parsed = || crate::events::PARSED.with(std::cell::Cell::get);
-        let metas = || crate::model::META_READS.with(std::cell::Cell::get);
+        let metas = || crate::events::CLAUDE_SIDECAR_READS.with(std::cell::Cell::get);
         let headers = || crate::events::CODEX_HEADER_READS.with(std::cell::Cell::get);
         let marks =
             |routed: &Routed| serde_json::from_slice::<Value>(&routed.2).unwrap()["tx"].clone();
@@ -3609,7 +3609,7 @@ mod tests {
         assert_eq!(
             metas(),
             reads,
-            "a Codex file that grew does not use the separate metadata cache"
+            "a Codex file that grew does not reread unchanged Claude sidecars"
         );
         assert_eq!(headers(), header_reads + 2);
         // A subagent's .meta.json that changes is read again, and only it.

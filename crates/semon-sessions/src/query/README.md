@@ -85,6 +85,31 @@ New Codex archive eviction requires that generation's persisted header and binds
 its exact encoding into the archive marker. Earlier markers still preserve their
 event rows; they cannot qualify another Codex eviction without native header
 repair. Metadata larger than 1 MiB remains complete in memory, is not persisted
-or truncated, and cannot qualify eviction. This does not supply Claude sidecars,
-Semon parent markers or authorized provider reads. No full-workspace discovery
-or archive cost is claimed retired yet.
+or truncated, and cannot qualify eviction.
+
+Claude subagents now use allowlisted sidecar metadata in the same index region:
+call identity, description/agent type, model, worktree cwd and branch. The parent
+identity still derives from the supported native path. A separate sidecar
+observation records known absence or its physical-generation fingerprint and
+full bounded-file digest, bound to the native event ledger in the same commit.
+Safe descriptor reads refuse links at every path component. Cold queries reuse
+unchanged sidecars; creation, removal, rewrite and malformed JSON preserve the
+native fallback behavior without replaying unchanged log events. Generation
+checks fence changes during indexing and native preparation. Repeated sidecar
+churn keeps the native session and defers a portable proof until a stable scan. The former
+`Texts::meta` cache is removed.
+
+New Claude subagent eviction requires a supported sidecar observation and a
+version-three marker binding its exact persisted encoding. The host rechecks the
+sidecar observation and full bounded-file digest before local removal. Earlier markers still retain existing
+event rows, but cannot qualify a new subagent eviction. Unreadable, linked or
+oversized sidecars keep the native metadata fallback and defer eviction; parsed
+values too large to persist remain complete in memory. No raw sidecar JSON,
+unknown fields or authority is stored, and sidecar files are never removed by
+this operation. Deployments must retain the matching producer before creating
+new markers; restore verified archive sources before using an older producer
+that cannot recognize their version. No deployment or automatic data migration
+is part of this change.
+
+Semon parent markers, bounded relationship closure and authorized provider reads
+remain. No full-workspace discovery or archive cost is claimed retired yet.

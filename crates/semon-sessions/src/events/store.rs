@@ -273,6 +273,7 @@ DELETE FROM codex_usage;
 DELETE FROM files;
 DELETE FROM meta WHERE key GLOB 'archive_event_index:*';
 DELETE FROM meta WHERE key GLOB 'native_codex_header:*';
+DELETE FROM meta WHERE key GLOB 'native_claude_sidecar:*';
 ";
 
 const FILE_COLUMNS: &str = "file_id, path, dev, ino, size, mtime_ns, resume_at, head_sha256, \
@@ -1791,6 +1792,7 @@ impl SqliteStore {
             transaction.execute("DELETE FROM files WHERE path = ?1", [path])?;
             transaction.execute("DELETE FROM meta WHERE key=?1", [archive_index_key(path)])?;
             transaction.execute("DELETE FROM meta WHERE key=?1", [codex_header_key(path)])?;
+            transaction.execute("DELETE FROM meta WHERE key=?1", [claude_sidecar_key(path)])?;
             invalidate_catalog_source(&transaction, path, "removed")?;
         }
         transaction.commit()?;
@@ -2165,6 +2167,12 @@ impl ArchivedIndex {
                 && self.source.root == "codex"
                 && self.native_header_sha256.as_ref().is_some_and(|hash| {
                     hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_hexdigit())
+                }))
+            || (self.version == 3
+                && self.source.root == "claude"
+                && crate::native_sidecar::agent_path(Path::new(&self.source.path))
+                && self.native_header_sha256.as_ref().is_some_and(|hash| {
+                    hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_hexdigit())
                 })))
             && self.parser_version == CACHE_VERSION
             && crate::is_input_path(&self.source.root, &self.source.path)
@@ -2279,12 +2287,31 @@ pub(crate) fn retain_archive_index(
                 return Ok(false);
             };
             Some(digest)
+        } else if proof.source.root == "claude"
+            && crate::native_sidecar::agent_path(Path::new(path))
+        {
+            let Some(sidecar) = index.claude_sidecar.as_ref() else {
+                return Ok(false);
+            };
+            if !sidecar.verified(Path::new(path)) {
+                return Ok(false);
+            }
+            let Some(digest) = claude_sidecar_digest(connection, path)? else {
+                return Ok(false);
+            };
+            Some(digest)
         } else {
             None
         };
     }
     let record = ArchivedIndex {
-        version: if native_header_sha256.is_some() { 2 } else { 1 },
+        version: if native_header_sha256.is_none() {
+            1
+        } else if proof.source.root == "codex" {
+            2
+        } else {
+            3
+        },
         parser_version: CACHE_VERSION,
         source: proof.source.clone(),
         stat: expected.stat,
@@ -2317,6 +2344,13 @@ pub(crate) fn archive_index_retained(
         record.version == 2
             && record.native_header_sha256.is_some()
             && record.native_header_sha256 == codex_header_digest(connection, path)?
+    } else if proof.source.root == "claude" && crate::native_sidecar::agent_path(Path::new(path)) {
+        let mut statement = connection.prepare(NATIVE_METADATA_VALUE)?;
+        let sidecar = read_claude_sidecar(&mut statement, path, &ledger)?;
+        record.version == 3
+            && record.native_header_sha256.is_some()
+            && record.native_header_sha256 == claude_sidecar_digest(connection, path)?
+            && sidecar.is_some_and(|sidecar| sidecar.verified(Path::new(path)))
     } else {
         record.version == 1
     };
@@ -2377,7 +2411,9 @@ fn untag<T: DeserializeOwned>(column: usize, text: String) -> rusqlite::Result<T
     })
 }
 
-const CODEX_HEADER_MAX: usize = 1024 * 1024;
+const NATIVE_METADATA_MAX: usize = 1024 * 1024;
+const NATIVE_METADATA_VALUE: &str =
+    "SELECT CASE WHEN octet_length(value)<=1048576 THEN value ELSE NULL END FROM meta WHERE key=?1";
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -2430,7 +2466,11 @@ fn read_codex_header(
 }
 
 fn codex_header_digest(connection: &Connection, path: &str) -> rusqlite::Result<Option<String>> {
-    let encoded: Option<Option<String>> = connection.query_row("SELECT CASE WHEN octet_length(value)<=1048576 THEN value ELSE NULL END FROM meta WHERE key=?1", [codex_header_key(path)], |row| row.get(0)).optional()?;
+    let encoded: Option<Option<String>> = connection
+        .query_row(NATIVE_METADATA_VALUE, [codex_header_key(path)], |row| {
+            row.get(0)
+        })
+        .optional()?;
     Ok(encoded
         .flatten()
         .map(|value| format!("{:x}", Sha256::digest(value.as_bytes()))))
@@ -2452,12 +2492,81 @@ fn write_codex_header(
             })
         })
         .transpose()?;
-    if let Some(encoded) = encoded.filter(|text| text.len() <= CODEX_HEADER_MAX) {
+    if let Some(encoded) = encoded.filter(|text| text.len() <= NATIVE_METADATA_MAX) {
         transaction.execute("INSERT INTO meta(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value", params![codex_header_key(path), encoded])?;
     } else {
         // Current readers keep their complete in-memory header. An oversized
         // projection cannot authorize eviction; do not truncate native fields.
         transaction.execute("DELETE FROM meta WHERE key=?1", [codex_header_key(path)])?;
+    }
+    Ok(())
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ClaudeSidecarRecord {
+    version: u32,
+    parser_version: u32,
+    ledger: String,
+    sidecar: crate::native_sidecar::ClaudeSidecar,
+}
+
+fn claude_sidecar_key(path: &str) -> String {
+    format!("native_claude_sidecar:{path}")
+}
+
+fn read_claude_sidecar(
+    statement: &mut Statement<'_>,
+    path: &str,
+    ledger: &Ledger,
+) -> rusqlite::Result<Option<crate::native_sidecar::ClaudeSidecar>> {
+    let encoded: Option<Option<String>> = statement
+        .query_row([claude_sidecar_key(path)], |row| row.get(0))
+        .optional()?;
+    Ok(encoded.flatten().and_then(|text| {
+        let record: ClaudeSidecarRecord = serde_json::from_str(&text).ok()?;
+        (record.version == 1
+            && record.parser_version == CACHE_VERSION
+            && record.ledger == header_ledger(ledger)
+            && record.sidecar.valid())
+        .then_some(record.sidecar)
+    }))
+}
+
+fn claude_sidecar_digest(connection: &Connection, path: &str) -> rusqlite::Result<Option<String>> {
+    let encoded: Option<Option<String>> = connection
+        .query_row(NATIVE_METADATA_VALUE, [claude_sidecar_key(path)], |row| {
+            row.get(0)
+        })
+        .optional()?;
+    Ok(encoded
+        .flatten()
+        .map(|value| format!("{:x}", Sha256::digest(value.as_bytes()))))
+}
+
+fn write_claude_sidecar(
+    transaction: &Transaction<'_>,
+    path: &str,
+    ledger: &Ledger,
+    sidecar: Option<&crate::native_sidecar::ClaudeSidecar>,
+) -> rusqlite::Result<()> {
+    if sidecar.is_none() && !crate::native_sidecar::agent_path(Path::new(path)) {
+        return Ok(());
+    }
+    let encoded = sidecar
+        .map(|sidecar| {
+            json(&ClaudeSidecarRecord {
+                version: 1,
+                parser_version: CACHE_VERSION,
+                ledger: header_ledger(ledger),
+                sidecar: sidecar.clone(),
+            })
+        })
+        .transpose()?;
+    if let Some(encoded) = encoded.filter(|text| text.len() <= NATIVE_METADATA_MAX) {
+        transaction.execute("INSERT INTO meta(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value", params![claude_sidecar_key(path), encoded])?;
+    } else {
+        transaction.execute("DELETE FROM meta WHERE key=?1", [claude_sidecar_key(path)])?;
     }
     Ok(())
 }
@@ -2510,6 +2619,7 @@ struct Readers<'c> {
     usage: Statement<'c>,
     codex_usage: Statement<'c>,
     codex_header: Statement<'c>,
+    claude_sidecar: Statement<'c>,
 }
 
 impl<'c> Readers<'c> {
@@ -2527,7 +2637,8 @@ impl<'c> Readers<'c> {
             codex_usage: connection.prepare(&format!(
                 "SELECT {CODEX_USAGE_COLUMNS} FROM codex_usage WHERE file_id = ?1 ORDER BY seq"
             ))?,
-            codex_header: connection.prepare("SELECT CASE WHEN octet_length(value)<=1048576 THEN value ELSE NULL END FROM meta WHERE key=?1")?,
+            codex_header: connection.prepare(NATIVE_METADATA_VALUE)?,
+            claude_sidecar: connection.prepare(NATIVE_METADATA_VALUE)?,
         })
     }
 }
@@ -2608,6 +2719,11 @@ fn read_file(
     let index = FileIndex {
         dirty_rows: None,
         codex_header: read_codex_header(&mut readers.codex_header, &path, &ledger)?,
+        claude_sidecar: if crate::native_sidecar::agent_path(Path::new(&path)) {
+            read_claude_sidecar(&mut readers.claude_sidecar, &path, &ledger)?
+        } else {
+            None
+        },
         events,
         extras,
         signals,
@@ -2825,6 +2941,7 @@ fn write_file(
     let FileIndex {
         dirty_rows: _,
         codex_header,
+        claude_sidecar,
         events,
         extras,
         signals,
@@ -2864,6 +2981,7 @@ fn write_file(
         tail,
     } = ledger;
     write_codex_header(transaction, path, ledger, codex_header.as_ref())?;
+    write_claude_sidecar(transaction, path, ledger, claude_sidecar.as_ref())?;
     let rate_limits = rate_limits.as_ref().map(json).transpose()?;
     let file_id: i64 = transaction.query_row(
         PUT_FILE,
@@ -3330,6 +3448,7 @@ mod tests {
         FileIndex {
             dirty_rows: None,
             codex_header: Some(crate::native_header::CodexHeader::default()),
+            claude_sidecar: None,
             events: vec![
                 Event {
                     k: Kind::Tool,
