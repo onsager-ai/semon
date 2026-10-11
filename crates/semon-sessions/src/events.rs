@@ -29,11 +29,28 @@ use crate::{Tokens, attachments, field, sealed::LogFile};
 
 mod store;
 pub(crate) use store::open_regular;
+pub(crate) use store::{archive_index_retained, retain_archive_index};
 
 #[cfg(test)]
 thread_local! {
     /// Reads of the persisted event cache on this thread.
     pub(crate) static CACHE_READS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// Full per-file event/signal row decodes, including exact-path loads.
+    pub(crate) static FILE_READS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    pub(crate) static CODEX_HEADER_READS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    pub(crate) static CLAUDE_SIDECAR_READS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    static AFTER_CLAUDE_SIDECAR: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+    static AFTER_CODEX_HEADER: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) fn set_codex_header_hook(hook: impl FnOnce() + 'static) {
+    AFTER_CODEX_HEADER.with(|value| *value.borrow_mut() = Some(Box::new(hook)));
+}
+
+#[cfg(test)]
+pub(crate) fn set_claude_sidecar_hook(hook: impl FnOnce() + 'static) {
+    AFTER_CLAUDE_SIDECAR.with(|value| *value.borrow_mut() = Some(Box::new(hook)));
 }
 
 /// The parser's version: what the fold functions derive from a line. The
@@ -270,6 +287,14 @@ impl DirtyRows {
 #[derive(Clone, Debug, Default)]
 pub(crate) struct FileIndex {
     pub(crate) dirty_rows: Option<DirtyRows>,
+    pub(crate) tree_summary: Option<crate::native_tree::Summary>,
+    pub(crate) source_chunks: Option<Arc<crate::source_chunks::Chunks>>,
+    pub(crate) marker_index: Option<crate::native_marker::Index>,
+    pub(crate) handoff_index: Option<crate::native_handoff::Index>,
+    /// Allowlisted first-record metadata observed on the same native generation.
+    pub(crate) codex_header: Option<crate::native_header::CodexHeader>,
+    /// A subagent sidecar has its own generation, separate from the native log.
+    pub(crate) claude_sidecar: Option<crate::native_sidecar::ClaudeSidecar>,
     pub(crate) events: Vec<Event>,
     /// Transcript-only items the model's rules never read: thinking blocks,
     /// harness text added before a Codex prompt, and completed Codex operations.
@@ -727,7 +752,7 @@ impl FileIndex {
 }
 
 /// A file as last stat'ed: its identity, size and modified time.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Stat {
     pub(crate) dev: u64,
     pub(crate) ino: u64,
@@ -741,7 +766,7 @@ impl Stat {
         Self::from_metadata(&fs::metadata(path)?)
     }
 
-    fn from_metadata(metadata: &fs::Metadata) -> io::Result<Self> {
+    pub(crate) fn from_metadata(metadata: &fs::Metadata) -> io::Result<Self> {
         let modified_ns = metadata
             .modified()?
             .duration_since(UNIX_EPOCH)
@@ -764,6 +789,10 @@ impl Stat {
 /// Filesystem change time fences metadata-identical rewrites without reading
 /// source bodies. None means this platform/legacy observation cannot prove it.
 pub(crate) fn change_time_ns(metadata: &fs::Metadata) -> Option<i128> {
+    #[cfg(test)]
+    if let Some(value) = FIXED_CHANGE_TIME.with(std::cell::Cell::get) {
+        return Some(value);
+    }
     #[cfg(unix)]
     {
         Some(i128::from(metadata.ctime()) * 1_000_000_000 + i128::from(metadata.ctime_nsec()))
@@ -775,8 +804,30 @@ pub(crate) fn change_time_ns(metadata: &fs::Metadata) -> Option<i128> {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    static FIXED_CHANGE_TIME: std::cell::Cell<Option<i128>> = const { std::cell::Cell::new(None) };
+}
+
+/// Model indistinguishable change stamps deterministically across filesystems.
+#[cfg(test)]
+pub(crate) fn fixed_change_time_for_test(value: i128) -> impl Drop {
+    struct Restore(Option<i128>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            FIXED_CHANGE_TIME.with(|time| time.set(self.0));
+        }
+    }
+    Restore(FIXED_CHANGE_TIME.with(|time| time.replace(Some(value))))
+}
+
 /// How many bytes the ledger's tail hash covers before its offset.
 const WINDOW: u64 = 4096;
+
+#[cfg(test)]
+thread_local! {
+    pub(crate) static HASHED_BYTES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
 
 /// What the index records about a file it has read: the stat it was read
 /// at, the offset its complete lines end at, and SHA-256 hashes of the
@@ -790,11 +841,26 @@ pub(crate) struct Ledger {
 }
 
 impl Ledger {
+    fn source(&self, path: &Path, native_id: &str) -> crate::model::summary::CatalogSource {
+        crate::model::summary::CatalogSource {
+            path: path.to_owned(),
+            native_id: native_id.to_owned(),
+            dev: self.stat.dev,
+            ino: self.stat.ino,
+            size: self.stat.size,
+            modified_ns: self.stat.modified_ns,
+            changed_ns: self.stat.changed_ns,
+            offset: self.offset,
+            prefix_sha256: self.prefix,
+            tail_sha256: self.tail,
+        }
+    }
+
     /// The file still holds what was read, so reading resumes at the
     /// offset: the same identity, at least as long, and the consumed prefix
     /// unchanged. That covers a file that grew and one only touched; any
     /// other change (a rewrite, a truncation, a new inode) rereads it.
-    fn resumes(&self, stat: &Stat, file: &mut LogFile) -> bool {
+    pub(crate) fn resumes(&self, stat: &Stat, file: &mut LogFile) -> bool {
         self.stat.dev == stat.dev
             && self.stat.ino == stat.ino
             && self.offset <= stat.size
@@ -809,7 +875,10 @@ impl Ledger {
 fn consumed_hashes(file: &mut LogFile, offset: u64) -> io::Result<([u8; 32], [u8; 32])> {
     file.seek(SeekFrom::Start(0))?;
     let mut prefix = Sha256::new();
-    if io::copy(&mut (&mut *file).take(offset), &mut prefix)? != offset {
+    let bytes = io::copy(&mut (&mut *file).take(offset), &mut prefix)?;
+    #[cfg(test)]
+    HASHED_BYTES.with(|count| count.set(count.get() + bytes));
+    if bytes != offset {
         return Err(io::Error::new(
             io::ErrorKind::UnexpectedEof,
             "consumed prefix shortened",
@@ -892,6 +961,15 @@ pub(crate) trait IndexStore: Send {
     /// The committed catalog observed before a model build starts.
     fn session_catalog_generation(&self) -> Result<Option<String>, StoreError>;
 
+    /// Existing scalar recipes at the exact source and catalog generations.
+    /// Optional reuse never grants source access or changes publication CAS.
+    fn session_slots(
+        &self,
+        row: &crate::model::summary::CatalogRow,
+        expected_generation: Option<&str>,
+        max: usize,
+    ) -> Result<Option<Vec<crate::slot_projection::SavedSlot>>, StoreError>;
+
     /// Replaces one complete source-validated metadata catalog atomically.
     fn publish_session_catalog(
         &mut self,
@@ -912,6 +990,13 @@ pub(crate) trait IndexStore: Send {
 
     /// `path`'s committed ledger and index, read together.
     fn load_file(&self, path: &str) -> Result<Option<(Ledger, FileIndex)>, StoreError>;
+
+    /// A committed tree summary and its evidence, without event/signal rows.
+    fn load_tree(
+        &self,
+        path: &str,
+        expected: &Stat,
+    ) -> Result<Option<(Ledger, crate::native_tree::Metadata)>, StoreError>;
 
     /// Commits `path`'s new ledger and index if its ledger is still
     /// `expected`. `changes` names rows the append parser touched. Without
@@ -1063,9 +1148,9 @@ impl EventCache {
         store::read_selected(connection, sources, native_ids).map(Self::from_loaded)
     }
 
-    /// The store beside V1's metadata cache: `sessions-index.json` gives
-    /// `sessions-index.sqlite3`. `semon sessions`, `--watch` and `--json`
-    /// never open it.
+    /// The shared Session Event Index. Preserve the configured cache stem:
+    /// `sessions-index.json` gives `sessions-index.sqlite3`. The retired tree
+    /// JSON file is left untouched; tree and focused reads use this store.
     pub(crate) fn path(v1_cache: &Path) -> PathBuf {
         v1_cache.with_extension("sqlite3")
     }
@@ -1254,6 +1339,19 @@ impl EventCache {
             .flatten()
     }
 
+    pub(crate) fn session_slots(
+        &self,
+        row: &crate::model::summary::CatalogRow,
+        expected_generation: Option<&str>,
+        max: usize,
+    ) -> Option<Vec<crate::slot_projection::SavedSlot>> {
+        self.store
+            .as_ref()?
+            .session_slots(row, expected_generation, max)
+            .ok()
+            .flatten()
+    }
+
     #[cfg(test)]
     pub(crate) fn publish_session_catalog(
         &mut self,
@@ -1387,6 +1485,65 @@ impl EventCache {
 
     pub(crate) fn paths(&self) -> impl Iterator<Item = &str> {
         self.files.keys().map(String::as_str)
+    }
+
+    pub(crate) fn source(
+        &self,
+        path: &Path,
+        native_id: &str,
+    ) -> Option<crate::model::summary::CatalogSource> {
+        let file = self.files.get(path.to_string_lossy().as_ref())?;
+        Some(file.ledger.source(path, native_id))
+    }
+
+    /// Warm trees read the existing metadata regions only. Changed sources or
+    /// incomplete metadata use the ordinary parser/ledger CAS; never put a
+    /// partial FileIndex in the producer cache.
+    pub(crate) fn tree(
+        &mut self,
+        path: &Path,
+        harness: &str,
+        native_id: &str,
+        dirty: &mut bool,
+    ) -> io::Result<(
+        crate::model::summary::CatalogSource,
+        crate::native_tree::Metadata,
+    )> {
+        let key = path.to_string_lossy();
+        let stat = Stat::of(path)?;
+        if !self.unpersisted.contains(key.as_ref()) {
+            if let Some(file) = self.files.get(key.as_ref())
+                && file.ledger.stat == stat
+                && let Some(metadata) = crate::native_tree::Metadata::from_index(&file.index)
+            {
+                return Ok((file.ledger.source(path, native_id), metadata));
+            }
+            match self
+                .store
+                .as_ref()
+                .map(|store| store.load_tree(&key, &stat))
+            {
+                Some(Ok(Some((ledger, metadata)))) if ledger.stat == stat => {
+                    return Ok((ledger.source(path, native_id), metadata));
+                }
+                Some(Err(StoreError::Data(_))) | Some(Ok(_)) | None => {}
+                Some(Err(error)) => self.store_failed(&error),
+            }
+        }
+        let index = scan_file(path, harness, self, dirty)?;
+        let metadata = crate::native_tree::Metadata::from_index(&index)
+            .ok_or_else(|| io::Error::other("native tree metadata unavailable"))?;
+        let source = self
+            .source(path, native_id)
+            .ok_or_else(|| io::Error::other("native tree source unavailable"))?;
+        Ok((source, metadata))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn file_index(&self, path: &Path) -> Option<&FileIndex> {
+        self.files
+            .get(path.to_string_lossy().as_ref())
+            .map(|file| file.index.as_ref())
     }
 
     pub(crate) fn reported_runs(&self) -> impl Iterator<Item = &crate::facts::ReportedRunSnapshot> {
@@ -1639,8 +1796,20 @@ pub(crate) fn scan_file(
     dirty: &mut bool,
 ) -> io::Result<Arc<FileIndex>> {
     let key = path.to_string_lossy().into_owned();
+    let agent = harness == "claude" && crate::native_sidecar::agent_path(path);
     if let Some(entry) = cache.files.get(&key)
         && !cache.unpersisted.contains(&key)
+        && (harness == "copilot" || entry.index.tree_summary.is_some())
+        && entry.index.source_chunks.is_some()
+        && (harness == "copilot" || entry.index.marker_index.is_some())
+        && entry.index.handoff_index.is_some()
+        && (harness != "codex" || entry.index.codex_header.is_some())
+        && (!agent
+            || entry
+                .index
+                .claude_sidecar
+                .as_ref()
+                .is_some_and(|sidecar| sidecar.current(path)))
         && entry.ledger.stat == Stat::of(path)?
     {
         trace("unchanged");
@@ -1648,6 +1817,7 @@ pub(crate) fn scan_file(
     }
     *dirty = true;
     let mut attempt = 0;
+    let mut force_replace = false;
     loop {
         attempt += 1;
         let last = attempt >= COMMIT_ATTEMPTS;
@@ -1658,6 +1828,7 @@ pub(crate) fn scan_file(
         let recorded = cache.recorded(&key);
         let mut base = None;
         if let Some(ledger) = &recorded
+            && !force_replace
             && (ledger.stat == stat || ledger.resumes(&stat, &mut file))
         {
             match cache.base(&key, ledger) {
@@ -1665,22 +1836,51 @@ pub(crate) fn scan_file(
                 Base::Moved if !last => continue,
                 Base::Moved | Base::Unreadable => {}
             }
-            // Another process already read it as it is now.
-            if ledger.stat == stat
-                && let Some(index) = &base
-            {
-                trace("unchanged");
-                // The store holds it as it is now: nothing waits to be written.
-                cache.unpersisted.remove(&key);
-                cache.files.insert(
-                    key,
-                    CachedFile {
-                        ledger: ledger.clone(),
-                        index: Arc::clone(index),
-                    },
-                );
-                return Ok(Arc::clone(index));
+        }
+        let sidecar = if agent {
+            match crate::native_sidecar::ClaudeSidecar::observe(
+                path,
+                base.as_ref()
+                    .and_then(|index| index.claude_sidecar.as_ref()),
+            ) {
+                Ok(sidecar) => sidecar,
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => {
+                    if last {
+                        None
+                    } else {
+                        continue;
+                    }
+                }
+                Err(error) => return Err(error),
             }
+        } else {
+            None
+        };
+        // Another process already read it as it is now.
+        if let Some(ledger) = &recorded
+            && ledger.stat == stat
+            && let Some(index) = &base
+            && (harness == "copilot" || index.tree_summary.is_some())
+            && index.source_chunks.is_some()
+            && (harness == "copilot" || index.marker_index.is_some())
+            && index.handoff_index.is_some()
+            && (harness != "codex" || index.codex_header.is_some())
+            && (!agent
+                || sidecar
+                    .as_ref()
+                    .is_some_and(|observed| index.claude_sidecar.as_ref() == Some(observed)))
+        {
+            trace("unchanged");
+            // The store holds it as it is now: nothing waits to be written.
+            cache.unpersisted.remove(&key);
+            cache.files.insert(
+                key,
+                CachedFile {
+                    ledger: ledger.clone(),
+                    index: Arc::clone(index),
+                },
+            );
+            return Ok(Arc::clone(index));
         }
         let from = match (&recorded, &base) {
             (Some(ledger), Some(_)) => ledger.offset,
@@ -1702,19 +1902,148 @@ pub(crate) fn scan_file(
         if shared {
             cache.index_clone += clone_started.elapsed();
         }
+        let header_bytes = if harness == "codex" {
+            // Preserve first-physical-line and unfinished-header semantics.
+            // The same open native handle supplies the event ledger and header.
+            file.seek(SeekFrom::Start(0))?;
+            let mut line = Vec::new();
+            BufReader::new(&mut file).read_until(b'\n', &mut line)?;
+            #[cfg(test)]
+            CODEX_HEADER_READS.with(|reads| reads.set(reads.get() + 1));
+            writable.codex_header = Some(
+                serde_json::from_slice::<Value>(&line)
+                    .ok()
+                    .as_ref()
+                    .map(crate::native_header::CodexHeader::from_record)
+                    .unwrap_or_default(),
+            );
+            #[cfg(test)]
+            if let Some(hook) = AFTER_CODEX_HEADER.with(|hook| hook.borrow_mut().take()) {
+                hook();
+            }
+            Some(line)
+        } else {
+            None
+        };
+        writable.claude_sidecar = sidecar;
+        #[cfg(test)]
+        if agent && let Some(hook) = AFTER_CLAUDE_SIDECAR.with(|hook| hook.borrow_mut().take()) {
+            hook();
+        }
+        if harness != "copilot" && writable.tree_summary.is_none() {
+            let (summary, observed) =
+                crate::native_tree::Summary::repair(&mut file, from, harness)?;
+            if append
+                && recorded
+                    .as_ref()
+                    .is_some_and(|ledger| observed != ledger.prefix)
+            {
+                if last {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "native tree metadata generation changed",
+                    ));
+                }
+                force_replace = true;
+                continue;
+            }
+            writable.tree_summary = Some(summary);
+        }
         writable.dirty_rows = Some(DirtyRows::begin(writable));
-        let offset = parse(&mut file, from, harness, writable)?;
+        if harness != "copilot" && writable.marker_index.is_none() {
+            writable.marker_index = Some(crate::native_marker::Index::repair(&mut file, from)?);
+        }
+        if let Some(markers) = &mut writable.marker_index {
+            markers.begin_append();
+        }
+        if writable.handoff_index.is_none() {
+            writable.handoff_index = Some(crate::native_handoff::Index::repair(&mut file, from)?);
+        }
+        if let Some(handoffs) = &mut writable.handoff_index {
+            handoffs.begin_append();
+        }
+        let (offset, parsed) = parse(&mut file, from, harness, writable)?;
         let changes = writable
             .dirty_rows
             .take()
             .expect("parser tracks dirty rows");
-        let (prefix, tail) = consumed_hashes(&mut file, offset)?;
+        let captured = crate::source_chunks::capture(&mut file, offset, from)?;
+        if captured.parsed != parsed
+            || (append
+                && recorded
+                    .as_ref()
+                    .is_some_and(|ledger| captured.before != ledger.prefix))
+        {
+            if last {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "native source changed while indexing",
+                ));
+            }
+            force_replace = true;
+            continue;
+        }
+        let (prefix, tail) = (captured.prefix, captured.tail);
+        writable.source_chunks = Some(Arc::new(captured.chunks));
+        if let Some(header) = header_bytes {
+            file.seek(SeekFrom::Start(0))?;
+            let mut verified = Vec::new();
+            BufReader::new(&mut file).read_until(b'\n', &mut verified)?;
+            #[cfg(test)]
+            CODEX_HEADER_READS.with(|reads| reads.set(reads.get() + 1));
+            if verified != header {
+                if last {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "native Codex header changed while indexing",
+                    ));
+                }
+                continue;
+            }
+        }
+        if writable
+            .claude_sidecar
+            .as_ref()
+            .is_some_and(|sidecar| !sidecar.current(path))
+        {
+            if last {
+                // Keep the native session under bounded sidecar churn, using
+                // its existing metadata fallback without an eviction proof.
+                writable.claude_sidecar = None;
+            } else {
+                continue;
+            }
+        }
         let ledger = Ledger {
             stat,
             offset,
             prefix,
             tail,
         };
+        if let Some(markers) = &writable.marker_index
+            && (!markers.valid(&ledger) || markers.verify(&mut file).is_err())
+        {
+            if last {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "native parent marker changed while indexing",
+                ));
+            }
+            force_replace = true;
+            continue;
+        }
+        if let Some(handoffs) = &writable.handoff_index
+            && (!handoffs.valid(&ledger) || handoffs.verify(&mut file).is_err())
+        {
+            if last {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "native launch evidence changed while indexing",
+                ));
+            }
+            force_replace = true;
+            continue;
+        }
         #[cfg(test)]
         {
             if let Some(hook) = BEFORE_COMMIT.with(|hook| hook.borrow_mut().take()) {
@@ -1746,23 +2075,53 @@ pub(crate) fn scan_file(
 /// Folds the complete lines of `file` from `from` into `index`, and returns
 /// the offset they end at. A last line without its newline is left for the
 /// next read.
-fn parse(file: &mut LogFile, from: u64, harness: &str, index: &mut FileIndex) -> io::Result<u64> {
+fn parse(
+    file: &mut LogFile,
+    from: u64,
+    harness: &str,
+    index: &mut FileIndex,
+) -> io::Result<(u64, [u8; 32])> {
     let mut reader = BufReader::new(file);
     reader.seek(SeekFrom::Start(from))?;
     let mut offset = from;
     let mut line = Vec::new();
+    let mut parsed = Sha256::new();
     loop {
         line.clear();
         let length = reader.read_until(b'\n', &mut line)?;
-        if length == 0 || !line.ends_with(b"\n") {
+        if length == 0 {
+            break;
+        }
+        if !line.ends_with(b"\n") {
+            if let Some(markers) = &mut index.marker_index
+                && let Ok(value) = serde_json::from_slice(&line)
+            {
+                markers.observe(&line, offset, false, &value);
+            }
+            if let Some(handoffs) = &mut index.handoff_index
+                && let Ok(value) = serde_json::from_slice(&line)
+            {
+                handoffs.observe(&line, offset, false, &value)?;
+            }
             break;
         }
         let line_offset = offset;
         offset += length as u64;
+        parsed.update(&line);
         #[cfg(test)]
         PARSED.with(|parsed| parsed.set(parsed.get() + 1));
-        match serde_json::from_slice::<Value>(&line) {
+        let record = serde_json::from_slice::<Value>(&line);
+        if let Some(summary) = &mut index.tree_summary {
+            summary.observe(record.as_ref().ok(), harness);
+        }
+        match record {
             Ok(record) if record.is_object() => {
+                if let Some(markers) = &mut index.marker_index {
+                    markers.observe(&line, line_offset, true, &record);
+                }
+                if let Some(handoffs) = &mut index.handoff_index {
+                    handoffs.observe(&line, line_offset, true, &record)?;
+                }
                 if harness == "copilot" {
                     copilot(index, &record, line_offset);
                 } else if harness == "claude" {
@@ -1774,7 +2133,7 @@ fn parse(file: &mut LogFile, from: u64, harness: &str, index: &mut FileIndex) ->
             _ => gap(index, line_offset),
         }
     }
-    Ok(offset)
+    Ok((offset, parsed.finalize().into()))
 }
 
 /// Busy clustering: consecutive line timestamps no more than this far apart
@@ -5507,6 +5866,47 @@ mod tests {
             text.push('\n');
         }
         fs::write(path, text).unwrap();
+    }
+
+    #[test]
+    fn missing_or_unsupported_source_proofs_repair_without_event_replay() {
+        let root = scratch("chunk-proof-repair");
+        let path = root.join("lead.jsonl");
+        let cache_path = root.join("index.json");
+        write_lines(&path, &[claude_tool("call")]);
+        let mut cache = EventCache::open(&cache_path);
+        let initial = scan_file(&path, "claude", &mut cache, &mut false).unwrap();
+        let proof = initial.source_chunks.clone().unwrap();
+        let ledger = cache.revision(&path).unwrap();
+        drop(cache);
+        let key = format!(
+            "native_source_chunks:{:x}:header",
+            Sha256::digest(path.to_string_lossy().as_bytes())
+        );
+        for missing in [false, true] {
+            let connection = rusqlite::Connection::open(EventCache::path(&cache_path)).unwrap();
+            if missing {
+                connection
+                    .execute("DELETE FROM meta WHERE key=?1", [&key])
+                    .unwrap();
+            } else {
+                connection
+                    .execute(
+                        "UPDATE meta SET value=json_set(value,'$.version',99) WHERE key=?1",
+                        [&key],
+                    )
+                    .unwrap();
+            }
+            drop(connection);
+            let mut cache = EventCache::open(&cache_path);
+            let parsed = PARSED.with(std::cell::Cell::get);
+            let repaired = scan_file(&path, "claude", &mut cache, &mut false).unwrap();
+            assert_eq!(PARSED.with(std::cell::Cell::get), parsed);
+            assert_eq!(repaired.events.len(), initial.events.len());
+            assert_eq!(repaired.source_chunks, Some(proof.clone()));
+            assert_eq!(cache.revision(&path), Some(ledger));
+        }
+        fs::remove_dir_all(root).unwrap();
     }
 
     fn append_lines(path: &Path, lines: &[Value]) {

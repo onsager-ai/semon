@@ -8,7 +8,6 @@ description = "Read-only local Claude Code and Codex session tree."
 
 [dependencies]
 semon-control = { path = "../semon-control" }
-semon-relay = { path = "../semon-relay" }
 libc.workspace = true
 rusqlite = { workspace = true, features = ["hooks", "limits"] }
 serde = { version = "1.0.229", features = ["derive"] }

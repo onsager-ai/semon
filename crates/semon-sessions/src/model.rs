@@ -12,8 +12,7 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
-    fs,
-    io::{self, BufRead, BufReader, Read, Seek, SeekFrom},
+    fs, io,
     path::{Path, PathBuf},
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
@@ -27,13 +26,16 @@ use serde::{Deserialize, Serialize};
 pub(crate) mod summary;
 use serde_json::Value;
 
+#[cfg(test)]
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
+
 use crate::{
-    Marker, Options, attachments, codex_meta, events,
+    Marker, Options, attachments, events,
     events::{
         ACK, ANSWERED, ASYNC, DENIED, Event, EventCache, FileIndex, Kind, PIN, SEND_FAILED, UNKNOWN,
     },
     facts::{MachineFacts, ReportedModelUsage, ReportedRunSnapshot},
-    field, file_list, handoff, read_first_marker,
+    field, file_list, handoff,
 };
 
 /// Version of the `/api/model` JSON shape. Embedders and clients compare it;
@@ -367,11 +369,10 @@ pub(crate) struct Built {
     /// Each session's transcript index, for `/api/tx`: metadata and offsets
     /// only, the text is read back per page.
     pub(crate) tx: BTreeMap<String, Arc<Transcript>>,
-    /// Each session's facts for the agent read surface, by session key.
+    /// Native facts observed by incremental-index equivalence tests.
+    /// Production query readers retain these in QueryData, not Built.
+    #[cfg(test)]
     pub(crate) facts: BTreeMap<String, SessionFacts>,
-    /// Where the model window started (epoch ms), whether applied at scan
-    /// time or by trimming output. `None` only for an unbounded model.
-    pub(crate) window_start: Option<i64>,
     /// What `/api/analytics` reads of each session active in the last
     /// [`crate::analytics::KEEP_MS`], taken before the model is trimmed to
     /// its window. Never served by `/api/model`: its JSON and version don't
@@ -384,6 +385,41 @@ pub(crate) struct Built {
     /// Each session's assistant texts by turn: (turn number, offset, block).
     #[cfg(test)]
     pub(crate) texts: BTreeMap<String, Vec<(usize, u64, u32)>>,
+}
+
+/// Native query evidence and source offsets, without compatibility transport,
+/// growth marks or workspace analytics. The producer applies the same native
+/// relationships and window rules as the legacy model.
+pub(crate) struct QueryData {
+    pub(crate) sessions: BTreeMap<String, Session>,
+    pub(crate) handoffs: Vec<Handoff>,
+    /// Human prompt bodies are read only by the requesting session/search.
+    /// These offsets carry no host authority and belong to `sources` below.
+    pub(crate) ask_briefs: BTreeMap<String, PromptBrief>,
+    pub(crate) turns: Vec<Turn>,
+    pub(crate) facts: BTreeMap<String, SessionFacts>,
+    pub(crate) tx: BTreeMap<String, Arc<Transcript>>,
+    pub(crate) home: Option<String>,
+    pub(crate) machine_id: String,
+    pub(crate) pids: Vec<u32>,
+    pub(crate) window_start: Option<i64>,
+    pub(crate) sources: crate::query_source::Sources,
+}
+
+pub(crate) struct PromptBrief {
+    path: PathBuf,
+    offset: u64,
+}
+
+impl PromptBrief {
+    pub(crate) fn read(&self, records: &crate::query_source::Records<'_>) -> io::Result<String> {
+        Ok(records
+            .derive(&self.path, self.offset)?
+            .as_ref()
+            .and_then(prompt_text)
+            .map(|text| cap(&cap(&text, TEXT_MAX), MSG_MAX))
+            .unwrap_or_default())
+    }
 }
 
 impl Built {
@@ -548,28 +584,31 @@ pub(crate) struct Texts {
     descriptions: HashMap<String, (DescriptionInputs, Description)>,
     prompt_caches: HashMap<PathBuf, (u64, Arc<crate::attachments::PromptCache>)>,
     repos: HashMap<String, Option<String>>,
-    markers: HashMap<PathBuf, (Stamp, Option<Marker>)>,
-    /// Each Codex file's `session_meta` and each subagent's `.meta.json`, by
-    /// the file's stamp: a rebuild after one file grew re-reads neither for
-    /// the files that didn't change.
-    metas: HashMap<PathBuf, (Stamp, Option<Value>)>,
 }
 
 #[cfg(test)]
 thread_local! {
-    /// Metadata files read by [`Texts::meta`] on this thread: a rebuild reads
-    /// only the changed ones.
-    pub(crate) static META_READS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
     /// Builds on this thread.
     pub(crate) static BUILDS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// Full compatibility model preparation, excluding native catalog observation.
+    pub(crate) static COMPAT_BUILDS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// Direct source body reads, excluding native discovery/index parsing.
+    pub(crate) static DIRECT_SOURCE_READS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
     static SESSION_DESCRIPTIONS: std::cell::RefCell<BTreeMap<String, u64>> = const { std::cell::RefCell::new(BTreeMap::new()) };
     static SESSION_DERIVATIONS: std::cell::RefCell<BTreeMap<String, u64>> = const { std::cell::RefCell::new(BTreeMap::new()) };
     /// Runs once right after the scan read the files: a test appends there,
     /// as a writer would while a build runs.
     pub(crate) static AFTER_SCAN: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+    /// Races after native query derivation, before projection publication.
+    pub(crate) static AFTER_QUERY_DERIVATION: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+    /// Races after model derivation, before its projection is published.
+    static AFTER_MODEL_DERIVATION: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
 }
 
+#[cfg(test)]
 pub(crate) fn read_line(path: &Path, offset: u64) -> Option<Value> {
+    #[cfg(test)]
+    DIRECT_SOURCE_READS.with(|reads| reads.set(reads.get() + 1));
     let mut file = crate::sealed::LogFile::open(path).ok()?;
     file.seek(SeekFrom::Start(offset)).ok()?;
     let mut reader = BufReader::new(file).take(MAX_LINE);
@@ -580,10 +619,7 @@ pub(crate) fn read_line(path: &Path, offset: u64) -> Option<Value> {
 
 impl Texts {
     fn invalidate(&mut self, path: &Path) {
-        if self.generations.remove(path).is_some() {
-            self.metas.remove(path);
-            self.markers.remove(path);
-        }
+        self.generations.remove(path);
     }
 
     fn generation(&mut self, path: &Path, stamp: Stamp) -> u64 {
@@ -610,6 +646,7 @@ impl Texts {
         offset: u64,
         block: u32,
         what: &str,
+        records: &crate::query_source::Records<'_>,
         extract: impl FnOnce(&Value, usize) -> Option<String>,
     ) -> Option<String> {
         let key = TextKey {
@@ -624,7 +661,10 @@ impl Texts {
             *used = self.tick;
             return value.clone();
         }
-        let value = read_line(&file.path, offset)
+        let value = records
+            .derive(&file.path, offset)
+            .ok()
+            .flatten()
             .and_then(|record| extract(&record, block as usize))
             .map(|text| {
                 // `json:` values are built capped, and must stay whole.
@@ -675,48 +715,6 @@ impl Texts {
         }
         self.repos.insert(cwd.to_owned(), repo.clone());
         repo
-    }
-
-    /// A Codex run's marker, re-read only when the file changed.
-    fn marker(&mut self, path: &Path, stamp: Stamp) -> Option<Marker> {
-        if let Some((seen, marker)) = self.markers.get(path)
-            && *seen == stamp
-        {
-            return marker.clone();
-        }
-        let marker = read_first_marker(path).ok().flatten();
-        self.markers
-            .insert(path.to_owned(), (stamp, marker.clone()));
-        marker
-    }
-
-    /// A file's metadata, read by `read` only when its stamp changed. A Codex
-    /// file that only grew keeps its first line, so a `session_meta` already
-    /// read is kept (the event cache's rule); one not yet complete is read
-    /// again. A read error isn't kept, so the file is tried again next time.
-    fn meta(
-        &mut self,
-        path: &Path,
-        grows: bool,
-        read: impl FnOnce(&Path) -> io::Result<Option<Value>>,
-    ) -> io::Result<Option<Value>> {
-        let stamp = stamp_of(path);
-        if let Some((seen, meta)) = self.metas.get_mut(path)
-            && (*seen == stamp
-                || (grows
-                    && meta.is_some()
-                    && seen.dev == stamp.dev
-                    && seen.ino == stamp.ino
-                    && stamp.size > seen.size))
-        {
-            *seen = stamp;
-            return Ok(meta.clone());
-        }
-        #[cfg(test)]
-        META_READS.with(|reads| reads.set(reads.get() + 1));
-        let meta = read(path)?;
-        self.metas.insert(path.to_owned(), (stamp, meta.clone()));
-        Ok(meta)
     }
 }
 
@@ -1029,8 +1027,9 @@ struct AgentMeta {
     branch: Option<String>,
 }
 
-#[derive(Default, Debug)]
-struct CodexMeta {
+#[derive(Clone, Default, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct CodexMeta {
     history: Option<CodexHistory>,
     parent_thread: Option<String>,
     nickname: Option<String>,
@@ -1039,6 +1038,29 @@ struct CodexMeta {
     cwd: Option<String>,
     branch: Option<String>,
     guardian_review: bool,
+}
+
+impl CodexMeta {
+    pub(crate) fn from_meta(meta: &Value) -> Self {
+        Self {
+            history: CodexHistory::from_meta(meta),
+            parent_thread: field(meta, "parent_thread_id").map(str::to_owned),
+            nickname: field(meta, "agent_nickname").map(str::to_owned),
+            path: field(meta, "agent_path").map(str::to_owned),
+            subagent: field(meta, "thread_source") == Some("subagent"),
+            cwd: field(meta, "cwd").map(str::to_owned),
+            branch: meta
+                .get("git")
+                .and_then(|git| field(git, "branch"))
+                .map(str::to_owned),
+            guardian_review: field(meta, "thread_source") == Some("guardian_review")
+                || meta
+                    .get("source")
+                    .and_then(|source| source.get("subagent"))
+                    .and_then(|subagent| field(subagent, "other"))
+                    == Some("guardian"),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -1280,7 +1302,7 @@ fn scan(
             continue;
         };
         let parent = path.parent();
-        let role = if parent.and_then(Path::parent) == Some(projects.as_path()) {
+        let mut role = if parent.and_then(Path::parent) == Some(projects.as_path()) {
             Role::Top {
                 slug: parent
                     .and_then(Path::file_name)
@@ -1292,29 +1314,13 @@ fn scan(
             .is_some_and(|name| name == "subagents")
             && stem.starts_with("agent-")
         {
-            let meta = texts
-                .meta(&path.with_extension("meta.json"), false, |meta| {
-                    Ok(crate::read_regular(meta)
-                        .ok()
-                        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
-                        .filter(Value::is_object))
-                })
-                .ok()
-                .flatten()
-                .unwrap_or(Value::Null);
             Role::Agent(AgentMeta {
                 parent: parent
                     .and_then(Path::parent)
                     .and_then(Path::file_name)
                     .map(|name| name.to_string_lossy().into_owned())
                     .unwrap_or_default(),
-                tool_use_id: field(&meta, "toolUseId").map(str::to_owned),
-                label: field(&meta, "description")
-                    .or_else(|| field(&meta, "agentType"))
-                    .map(str::to_owned),
-                model: field(&meta, "model").map(str::to_owned),
-                cwd: field(&meta, "worktreePath").map(str::to_owned),
-                branch: field(&meta, "worktreeBranch").map(str::to_owned),
+                ..AgentMeta::default()
             })
         } else {
             continue;
@@ -1329,6 +1335,18 @@ fn scan(
         let Ok(summary) = events::scan_file(&path, "claude", cache, dirty) else {
             continue;
         };
+        if let Role::Agent(agent) = &mut role {
+            let metadata = summary
+                .claude_sidecar
+                .as_ref()
+                .map(|sidecar| sidecar.metadata.clone())
+                .unwrap_or_default();
+            agent.tool_use_id = metadata.tool_use_id;
+            agent.label = metadata.label;
+            agent.model = metadata.model;
+            agent.cwd = metadata.cwd;
+            agent.branch = metadata.branch;
+        }
         if cache.replaced(&path) {
             texts.invalidate(&path);
         }
@@ -1342,7 +1360,7 @@ fn scan(
             id: id.to_owned(),
             first: summary.first,
             last: summary.last,
-            marker: texts.marker(&path, stamp),
+            marker: None,
             path,
             role,
             summary,
@@ -1367,54 +1385,29 @@ fn scan(
             seen.insert(path.to_string_lossy().into_owned());
             continue;
         }
-        let Ok(meta) = texts.meta(&path, true, codex_meta) else {
-            continue;
-        };
-        let Some(id) = meta
-            .as_ref()
-            .and_then(|meta| field(meta, "id"))
-            .map(str::to_owned)
-            .or_else(|| crate::codex_id_from_filename(&path))
-        else {
-            continue;
-        };
         let stamp = stamp_of(&path);
         let Ok(summary) = events::scan_file(&path, "codex", cache, dirty) else {
             continue;
         };
-        let meta = if cache.replaced(&path) {
-            texts.invalidate(&path);
-            texts.meta(&path, true, codex_meta)?.unwrap_or(Value::Null)
-        } else {
-            meta.unwrap_or(Value::Null)
+        let Some(header) = summary.codex_header.as_ref() else {
+            return Err(io::Error::other("native Codex header was not observed"));
         };
+        let Some(id) = header.native_id(&path) else {
+            continue;
+        };
+        if cache.replaced(&path) {
+            texts.invalidate(&path);
+        }
         texts.generation(&path, stamp);
         seen.insert(path.to_string_lossy().into_owned());
         files.push(SourceFile {
             revision: cache.revision(&path).expect("scanned file has a ledger"),
-            marker: texts.marker(&path, stamp),
+            marker: None,
             stamp,
             id,
             first: summary.first,
             last: summary.last,
-            role: Role::Codex(CodexMeta {
-                history: CodexHistory::from_meta(&meta),
-                parent_thread: field(&meta, "parent_thread_id").map(str::to_owned),
-                nickname: field(&meta, "agent_nickname").map(str::to_owned),
-                path: field(&meta, "agent_path").map(str::to_owned),
-                subagent: field(&meta, "thread_source") == Some("subagent"),
-                cwd: field(&meta, "cwd").map(str::to_owned),
-                branch: meta
-                    .get("git")
-                    .and_then(|git| field(git, "branch"))
-                    .map(str::to_owned),
-                guardian_review: field(&meta, "thread_source") == Some("guardian_review")
-                    || meta
-                        .get("source")
-                        .and_then(|source| source.get("subagent"))
-                        .and_then(|subagent| field(subagent, "other"))
-                        == Some("guardian"),
-            }),
+            role: Role::Codex(header.metadata.clone()),
             path,
             summary,
         });
@@ -1468,16 +1461,22 @@ fn scan(
     texts
         .prompt_caches
         .retain(|path, _| seen.contains(path.to_string_lossy().as_ref()));
-    // Metadata of files that are gone is dropped with them.
-    texts.metas.retain(|path, _| {
-        let file = if path.extension().is_some_and(|ext| ext == "json") {
-            path.with_extension("").with_extension("jsonl")
-        } else {
-            path.clone()
-        };
-        seen.contains(file.to_string_lossy().as_ref())
-    });
     Ok((files, skipped, cache.index_clone_duration()))
+}
+
+fn verify_sidecars(files: &[SourceFile]) -> io::Result<()> {
+    if files.iter().any(|file| {
+        file.summary
+            .claude_sidecar
+            .as_ref()
+            .is_some_and(|sidecar| !sidecar.current(&file.path))
+    }) {
+        return Err(io::Error::new(
+            io::ErrorKind::Interrupted,
+            "Claude sidecar changed during native preparation",
+        ));
+    }
+    Ok(())
 }
 
 // ---- Lineages: exact links only (M0, D4, D5) ---------------------------------------------
@@ -1654,6 +1653,7 @@ struct Builder<'a> {
     files: &'a [SourceFile],
     slot_files: Vec<Arc<SlotFile>>,
     texts: &'a mut Texts,
+    records: &'a crate::query_source::Records<'a>,
     now: i64,
     machine: String,
     facts: &'a MachineFacts,
@@ -1666,6 +1666,7 @@ struct Builder<'a> {
     by_native: HashMap<(&'static str, String), usize>,
     native_harnesses: HashMap<String, BTreeSet<&'static str>>,
     handoffs: Vec<H>,
+    ask_briefs: BTreeMap<String, PromptBrief>,
     placed: HashMap<Ref, Vec<(usize, Place)>>,
     head: HashMap<usize, usize>,
     after: HashMap<Ref, usize>,
@@ -1691,7 +1692,7 @@ fn event(files: &[SourceFile], at: Ref) -> &Event {
 
 impl<'a> Builder<'a> {
     fn new(
-        files: &'a [SourceFile],
+        (files, records): (&'a [SourceFile], &'a crate::query_source::Records<'a>),
         texts: &'a mut Texts,
         now: i64,
         machine: String,
@@ -1729,6 +1730,7 @@ impl<'a> Builder<'a> {
                 .collect(),
             files,
             texts,
+            records,
             now,
             machine,
             home: facts.home(),
@@ -1746,6 +1748,7 @@ impl<'a> Builder<'a> {
                 ids
             }),
             handoffs: Vec::new(),
+            ask_briefs: BTreeMap::new(),
             placed: HashMap::new(),
             head: HashMap::new(),
             after: HashMap::new(),
@@ -1875,7 +1878,8 @@ impl<'a> Builder<'a> {
     ) -> Option<String> {
         let file = &self.files[at.0];
         let event = &file.summary.events[at.1];
-        self.texts.read(file, event.o, event.b, what, extract)
+        self.texts
+            .read(file, event.o, event.b, what, self.records, extract)
     }
 
     fn result_text(
@@ -1886,7 +1890,8 @@ impl<'a> Builder<'a> {
     ) -> Option<String> {
         let file = &self.files[at.0];
         let reply = file.summary.events[at.1].r.as_ref()?;
-        self.texts.read(file, reply.o, reply.b, what, extract)
+        self.texts
+            .read(file, reply.o, reply.b, what, self.records, extract)
     }
 
     /// A session's events in order.
@@ -2565,7 +2570,7 @@ impl<'a> Builder<'a> {
                                 .iter()
                                 .find(|event| event.k == Kind::U)?;
                             self.texts
-                                .read(file, event.o, event.b, "user", |record, _| {
+                                .read(file, event.o, event.b, "user", self.records, |record, _| {
                                     prompt_text(record)
                                 })
                                 .filter(|text| !text.trim().is_empty())
@@ -2989,7 +2994,7 @@ impl<'a> Builder<'a> {
         (Some(spawner), call, false)
     }
 
-    /// Match through the same incremental parent scan used by the tree.
+    /// All producer targets borrow the same indexed source evidence.
     fn handoff_tool(
         &self,
         spawner: usize,
@@ -2997,12 +3002,18 @@ impl<'a> Builder<'a> {
         cwd: Option<&str>,
         start: Option<i64>,
     ) -> Option<String> {
-        let paths: Vec<PathBuf> = self.sessions[spawner]
-            .files
-            .iter()
-            .map(|file| self.files[*file].path.clone())
-            .collect();
-        handoff::find(&paths, prompt, cwd, start).map(|tool| tool.id)
+        let mut matcher = handoff::Matcher::new(prompt, cwd, start);
+        for position in &self.sessions[spawner].files {
+            let file = &self.files[*position];
+            let index = file.summary.handoff_index.as_ref()?;
+            for location in index.calls() {
+                let call = self.records.launch(&file.path, location).ok()?;
+                if let Some(tool) = matcher.consider(&call) {
+                    return Some(tool.id);
+                }
+            }
+        }
+        matcher.finish().map(|tool| tool.id)
     }
 
     fn codex_spawns(&mut self) {
@@ -3631,7 +3642,7 @@ impl<'a> Builder<'a> {
 
     // -- your messages and messages to you --
 
-    fn asks(&mut self) {
+    fn asks(&mut self, target: BuildTarget) {
         for index in 0..self.sessions.len() {
             if self.sessions[index].kind != SessKind::Lineage {
                 continue;
@@ -3640,11 +3651,26 @@ impl<'a> Builder<'a> {
                 if event(self.files, at).k != Kind::Ask {
                     continue;
                 }
-                let text = self.text(at, "user", |record, _| prompt_text(record));
+                // The Catalog and slot recipes contain only the relationship.
+                // Query reads its brief from the same captured generation when
+                // a selected session or searched slot actually requests it.
+                let text = (target == BuildTarget::Model)
+                    .then(|| self.text(at, "user", |record, _| prompt_text(record)))
+                    .flatten();
                 let file = &self.files[at.0];
                 let source = format!("ask:{}:{}", file.id, event(self.files, at).o);
+                let id = stable_id(ASK_PREFIX, &source);
+                if target == BuildTarget::Query {
+                    self.ask_briefs.insert(
+                        id.clone(),
+                        PromptBrief {
+                            path: file.path.clone(),
+                            offset: event(self.files, at).o,
+                        },
+                    );
+                }
                 let handoff = Handoff::new(
-                    stable_id(ASK_PREFIX, &source),
+                    id,
                     "ask",
                     ("you".into(), self.sessions[index].key.clone()),
                     event(self.files, at)
@@ -5864,7 +5890,80 @@ pub(crate) fn build_sources(
     now: i64,
     selected: Option<&[crate::inputs::Input]>,
 ) -> io::Result<Built> {
-    build_sources_inner(options, cache, dirty, texts, now, selected, None)
+    match build_sources_inner(
+        options,
+        cache,
+        dirty,
+        texts,
+        now,
+        selected,
+        BuildTarget::Model,
+    )? {
+        BuildOutput::Model(built) => Ok(*built),
+        _ => Err(io::Error::other("native producer did not build model")),
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BuildTarget {
+    Model,
+    Query,
+    Catalog,
+    Sources,
+}
+
+enum BuildOutput {
+    Model(Box<Built>),
+    Query(Box<QueryData>),
+    Catalog(BTreeSet<u32>),
+    Sources(PreparedSources),
+}
+
+/// Build native query evidence using the existing incremental source index.
+/// Scan-window callers still discover and join every eligible native source;
+/// selected-session dependency closure is a separate retirement stage.
+pub(crate) fn build_query(
+    options: &Options,
+    cache: &mut EventCache,
+    dirty: &mut bool,
+    texts: &mut Texts,
+    now: i64,
+) -> io::Result<QueryData> {
+    match build_sources_inner(options, cache, dirty, texts, now, None, BuildTarget::Query)? {
+        BuildOutput::Query(data) => Ok(*data),
+        _ => Err(io::Error::other(
+            "native producer did not build query evidence",
+        )),
+    }
+}
+
+/// Reconcile native metadata and transcript slots without preparing legacy
+/// model analytics or transport. Complete observation still discovers all sources.
+pub(crate) fn observe_catalog(
+    options: &Options,
+    cache: &mut EventCache,
+    dirty: &mut bool,
+    texts: &mut Texts,
+    now: i64,
+) -> io::Result<BTreeSet<u32>> {
+    if options.scan_window {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "complete catalog observation cannot use a scan window",
+        ));
+    }
+    match build_sources_inner(
+        options,
+        cache,
+        dirty,
+        texts,
+        now,
+        None,
+        BuildTarget::Catalog,
+    )? {
+        BuildOutput::Catalog(pids) => Ok(pids),
+        _ => Err(io::Error::other("native producer did not observe catalog")),
+    }
 }
 
 /// Native producer output captured before compatibility-window trimming.
@@ -5895,17 +5994,20 @@ pub(crate) fn prepare_sources(
             "native producer source batch must contain at most 64 distinct sources",
         ));
     }
-    let mut prepared = None;
-    build_sources_inner(
+    match build_sources_inner(
         options,
         cache,
         &mut false,
         &mut Texts::default(),
         now,
         Some(inputs),
-        Some(&mut prepared),
-    )?;
-    prepared.ok_or_else(|| io::Error::other("native producer did not capture projection"))
+        BuildTarget::Sources,
+    )? {
+        BuildOutput::Sources(prepared) => Ok(prepared),
+        _ => Err(io::Error::other(
+            "native producer did not capture projection",
+        )),
+    }
 }
 
 fn build_sources_inner(
@@ -5915,8 +6017,8 @@ fn build_sources_inner(
     texts: &mut Texts,
     now: i64,
     selected: Option<&[crate::inputs::Input]>,
-    mut prepared: Option<&mut Option<PreparedSources>>,
-) -> io::Result<Built> {
+    target: BuildTarget,
+) -> io::Result<BuildOutput> {
     let catalog_base = cache.session_catalog_generation();
     let mut timings = Vec::with_capacity(18);
     macro_rules! timed {
@@ -5933,7 +6035,7 @@ fn build_sources_inner(
 
     let facts = MachineFacts::of(options);
     let window_start = scan_cutoff(options, now);
-    let (files, skipped, index_clone) = timed!(
+    let (mut files, skipped, index_clone) = timed!(
         "scan",
         scan(options, cache, dirty, texts, window_start, &facts, selected)?
     );
@@ -5949,7 +6051,10 @@ fn build_sources_inner(
             hook();
         }
     }
-    let claims = if prepared.is_some() {
+    if target != BuildTarget::Model {
+        verify_sidecars(&files)?;
+    }
+    let claims = if target == BuildTarget::Sources {
         cache.catalog_claims(
             &files
                 .iter()
@@ -5992,8 +6097,31 @@ fn build_sources_inner(
         MachineFacts::Local => cache.reported_runs().cloned().collect(),
         MachineFacts::Recorded(facts) => facts.reported_runs.clone(),
     };
+    let sources = files
+        .iter()
+        .map(|file| (summary::source(file), file.summary.source_chunks.clone()));
+    let source_proofs = if target == BuildTarget::Model {
+        crate::query_source::Sources::capture_native(options, sources)?
+    } else {
+        crate::query_source::Sources::capture(options, sources)?
+    };
+    let source_records = source_proofs.reader();
+    source_records.verify_all()?;
+    for file in &mut files {
+        if file.summary.handoff_index.is_none() {
+            return Err(io::Error::other("native launch calls were not indexed"));
+        }
+        if file.harness() != "copilot" {
+            let index = file
+                .summary
+                .marker_index
+                .as_ref()
+                .ok_or_else(|| io::Error::other("native parent marker was not indexed"))?;
+            file.marker = source_records.marker(&file.path, index)?;
+        }
+    }
     let mut builder = Builder::new(
-        &files,
+        (&files, &source_records),
         texts,
         now,
         machine.clone(),
@@ -6021,11 +6149,9 @@ fn build_sources_inner(
     );
     timed!("relays", builder.relays());
     timed!("codex_relays", builder.codex_relays());
-    timed!("asks", builder.asks());
+    timed!("asks", builder.asks(target));
     timed!("questions", builder.questions());
     timed!("lineage_states", builder.lineage_states());
-    #[cfg(test)]
-    let texts = builder.texts_by_turn();
     let (mut turns, mut tx) = timed!("turns", builder.turns());
     timed!("wait_edges", builder.wait_edges(&tx));
 
@@ -6046,36 +6172,88 @@ fn build_sources_inner(
             }
         }
     });
-    let run_of = |pid, start| facts.run(options, pid, start);
-    let session_facts = timed!(
-        "session_facts",
-        builder.session_facts(
-            &skipped,
-            |id| match lock_pids.as_ref() {
-                Some(locks) => match locks.get(id) {
-                    Some(pid) => (Some(*pid), Some(true)),
-                    // A lock file no process holds: its writer is gone. Without a
-                    // lock file there is no process record.
-                    None => (
-                        None,
-                        facts
-                            .codex_lock_file(options, id)
-                            .filter(|exists| *exists)
-                            .map(|_| false),
-                    ),
-                },
-                None => (None, None),
-            },
-            run_of,
-        )
-    );
-
     let post_started = std::time::Instant::now();
     let mut handoffs: Vec<Handoff> = builder
         .handoffs
         .iter()
         .map(|handoff| handoff.out.clone())
         .collect();
+    // A scan-window build is intentionally incomplete: it cannot replace a
+    // source-complete catalog. Publication itself is delayed until success.
+    let catalog = ((!options.scan_window && selected.is_none())
+        || matches!(target, BuildTarget::Catalog | BuildTarget::Sources))
+    .then(|| summary::catalog(&builder, &handoffs));
+    let slot_projections = catalog.as_ref().map(|rows| {
+        crate::slot_projection::capture(
+            &tx,
+            rows,
+            Some(&source_records),
+            (target != BuildTarget::Model).then_some((&*builder.cache, catalog_base.as_deref())),
+        )
+    });
+    if target != BuildTarget::Model {
+        verify_sidecars(&files)?;
+    }
+    if matches!(target, BuildTarget::Catalog | BuildTarget::Sources) {
+        source_records.finish()?;
+    }
+    match target {
+        BuildTarget::Sources => {
+            return Ok(BuildOutput::Sources(PreparedSources {
+                base_generation: catalog_base,
+                claims,
+                rows: catalog.unwrap_or_default(),
+                transcripts: slot_projections.unwrap_or_default(),
+            }));
+        }
+        BuildTarget::Catalog => {
+            cache.publish_session_projection(
+                &crate::slot_projection::Publication {
+                    rows: catalog.as_deref().unwrap_or_default(),
+                    transcripts: slot_projections.as_deref(),
+                },
+                catalog_base.as_deref(),
+            );
+            cache.publish_session_descriptions();
+            return Ok(BuildOutput::Catalog(
+                pids.iter().map(|pid| pid.pid).collect(),
+            ));
+        }
+        BuildTarget::Model | BuildTarget::Query => {}
+    }
+    #[cfg(test)]
+    if target == BuildTarget::Model {
+        COMPAT_BUILDS.with(|builds| builds.set(builds.get() + 1));
+    }
+    #[cfg(test)]
+    let texts = builder.texts_by_turn();
+    let run_of = |pid, start| facts.run(options, pid, start);
+    let session_facts = if target == BuildTarget::Query || cfg!(test) {
+        timed!(
+            "session_facts",
+            builder.session_facts(
+                &skipped,
+                |id| match lock_pids.as_ref() {
+                    Some(locks) => match locks.get(id) {
+                        Some(pid) => (Some(*pid), Some(true)),
+                        // A lock file no process holds: its writer is gone. Without a
+                        // lock file there is no process record.
+                        None => (
+                            None,
+                            facts
+                                .codex_lock_file(options, id)
+                                .filter(|exists| *exists)
+                                .map(|_| false),
+                        ),
+                    },
+                    None => (None, None),
+                },
+                run_of,
+            )
+        )
+    } else {
+        BTreeMap::new()
+    };
     let handoff_by_id: HashMap<&str, &Handoff> = builder
         .handoffs
         .iter()
@@ -6086,16 +6264,10 @@ fn build_sources_inner(
         .iter()
         .map(|session| (session.key.clone(), session.out.clone()))
         .collect();
-    // A scan-window build is intentionally incomplete: it cannot replace a
-    // source-complete catalog. Publication itself is delayed until success.
-    let catalog = ((!options.scan_window && selected.is_none()) || prepared.is_some())
-        .then(|| summary::catalog(&builder, &handoffs));
-    let slot_projections = catalog
-        .as_ref()
-        .map(|rows| crate::slot_projection::capture(&tx, rows));
     // Analytics reads a month and the month before it, whatever the model's
     // window: taken from every session before the window trims them.
-    let activity = crate::analytics::activity(&sessions, &tx, &turns, &handoffs, now);
+    let activity = (target == BuildTarget::Model)
+        .then(|| crate::analytics::activity(&sessions, &tx, &turns, &handoffs, now));
     // A scan window already chose the files; what it read is returned
     // whole, so an answer is never trimmed inside a session.
     if !options.all && !options.scan_window {
@@ -6190,12 +6362,6 @@ fn build_sources_inner(
             .collect()
     };
     turns.sort_by_key(|turn| order.get(turn.sid.as_str()).copied().unwrap_or(usize::MAX));
-    let all_busy = events::busy_merge(
-        sessions
-            .values()
-            .flat_map(|session| session.busy.iter().copied())
-            .collect(),
-    );
     // A failed send reached no one. The page draws a stub for the addressee
     // as written, `unsent:<target>`; its transcript lists those sends.
     let mut unsent: BTreeMap<String, Vec<&Handoff>> = BTreeMap::new();
@@ -6232,6 +6398,51 @@ fn build_sources_inner(
             session.tool_calls = transcript.tools.clone();
         }
     }
+    if target == BuildTarget::Query {
+        let mut ask_briefs = std::mem::take(&mut builder.ask_briefs);
+        let kept: BTreeSet<_> = handoffs.iter().map(|handoff| &handoff.id).collect();
+        ask_briefs.retain(|id, _| kept.contains(id));
+        #[cfg(test)]
+        if let Some(hook) = AFTER_QUERY_DERIVATION.with(|hook| hook.borrow_mut().take()) {
+            hook();
+        }
+        verify_sidecars(&files)?;
+        source_records.finish()?;
+        drop(source_records);
+        if let Some(catalog) = catalog {
+            cache.publish_session_projection(
+                &crate::slot_projection::Publication {
+                    rows: &catalog,
+                    transcripts: slot_projections.as_deref(),
+                },
+                catalog_base.as_deref(),
+            );
+        }
+        cache.publish_session_descriptions();
+        return Ok(BuildOutput::Query(Box::new(QueryData {
+            sources: source_proofs,
+            sessions,
+            handoffs,
+            ask_briefs,
+            turns,
+            facts: session_facts,
+            tx,
+            home,
+            machine_id: machine,
+            pids: pids.iter().map(|pid| pid.pid).collect(),
+            window_start: window_start.or_else(|| {
+                (!options.all).then(|| {
+                    now.saturating_sub(i64::try_from(options.since.as_millis()).unwrap_or(i64::MAX))
+                })
+            }),
+        })));
+    }
+    let all_busy = events::busy_merge(
+        sessions
+            .values()
+            .flat_map(|session| session.busy.iter().copied())
+            .collect(),
+    );
     let busy = BTreeMap::from([(machine.clone(), all_busy)]);
     let file_sizes: HashMap<&Path, u64> = files
         .iter()
@@ -6325,13 +6536,9 @@ fn build_sources_inner(
         home,
         machine_id,
         tx,
+        #[cfg(test)]
         facts: session_facts,
-        window_start: window_start.or_else(|| {
-            (!options.all).then(|| {
-                now.saturating_sub(i64::try_from(options.since.as_millis()).unwrap_or(i64::MAX))
-            })
-        }),
-        activity,
+        activity: activity.expect("model analytics prepared"),
         #[cfg(test)]
         handoffs,
         #[cfg(test)]
@@ -6344,14 +6551,12 @@ fn build_sources_inner(
         "post",
         u32::try_from(post_started.elapsed().as_millis()).unwrap_or(u32::MAX),
     ));
-    if let Some(destination) = prepared.as_mut() {
-        **destination = Some(PreparedSources {
-            base_generation: catalog_base,
-            claims,
-            rows: catalog.unwrap_or_default(),
-            transcripts: slot_projections.unwrap_or_default(),
-        });
-    } else if let Some(catalog) = catalog {
+    #[cfg(test)]
+    if let Some(hook) = AFTER_MODEL_DERIVATION.with(|hook| hook.borrow_mut().take()) {
+        hook();
+    }
+    source_records.finish()?;
+    if let Some(catalog) = catalog {
         cache.publish_session_projection(
             &crate::slot_projection::Publication {
                 rows: &catalog,
@@ -6363,7 +6568,7 @@ fn build_sources_inner(
     if selected.is_none() {
         cache.publish_session_descriptions();
     }
-    Ok(built)
+    Ok(BuildOutput::Model(Box::new(built)))
 }
 
 #[cfg(test)]

@@ -33,16 +33,10 @@ fn native_codex_fork_tree_reports_child_request_usage_without_inherited_counters
     assert_eq!(child.tokens.input, 5);
     assert_eq!(child.tokens.output, 3);
     assert_eq!(child.tokens.total, 8);
-    let mut old: Value =
-        serde_json::from_slice(&fs::read(&fixture.options.cache).unwrap()).unwrap();
-    old["version"] = json!(3);
-    for entry in old["files"].as_object_mut().unwrap().values_mut() {
-        entry["summary"]
-            .as_object_mut()
-            .unwrap()
-            .remove("codex_native_usage");
-    }
-    fs::write(&fixture.options.cache, serde_json::to_vec(&old).unwrap()).unwrap();
+    // A pre-migration tree cache has no authority over native evidence. Keep
+    // the historical file byte-for-byte, including its older usage semantics.
+    let old = br#"{"version":3,"files":{"child":{"summary":{"codex_tokens":{"input":999,"output":999}}}}}"#;
+    fs::write(&fixture.options.cache, old).unwrap();
     let reread = collect(&fixture.options).unwrap();
     assert_eq!(
         reread
@@ -52,9 +46,7 @@ fn native_codex_fork_tree_reports_child_request_usage_without_inherited_counters
             .tokens,
         child.tokens
     );
-    let current: Value =
-        serde_json::from_slice(&fs::read(&fixture.options.cache).unwrap()).unwrap();
-    assert_eq!(current["version"], 5);
+    assert_eq!(fs::read(&fixture.options.cache).unwrap(), old);
 }
 
 struct Fixture {
@@ -63,6 +55,20 @@ struct Fixture {
 }
 
 impl Fixture {
+    fn tree_metadata(&self) -> String {
+        let connection =
+            rusqlite::Connection::open(self.options.cache.with_extension("sqlite3")).unwrap();
+        let mut statement = connection
+            .prepare("SELECT value FROM meta WHERE key GLOB 'native_tree_summary:*' ORDER BY key")
+            .unwrap();
+        statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
     fn new() -> Self {
         let suffix = NEXT.fetch_add(1, Ordering::Relaxed);
         let root = std::env::temp_dir().join(format!(
@@ -224,7 +230,7 @@ fn claude_liveness_dedup_tools_and_secret_boundary() {
     for output in [
         render_text(&nodes),
         render_json(&nodes),
-        fs::read_to_string(&fixture.options.cache).unwrap(),
+        fixture.tree_metadata(),
     ] {
         assert!(!output.contains("SECRET_TEXT_42"));
         assert!(!output.contains("SECRET_INPUT_42"));
@@ -359,11 +365,7 @@ fn claude_skips_and_counts_nul_filled_complete_lines() {
             .malformed_lines,
         1
     );
-    assert!(
-        fs::read_to_string(&fixture.options.cache)
-            .unwrap()
-            .contains("\"malformed_lines\":1")
-    );
+    assert!(fixture.tree_metadata().contains("\"malformed_lines\":1"));
 }
 
 #[test]
@@ -591,7 +593,7 @@ fn links_new_and_old_markers_and_leaves_unmarked_unlinked() {
             .unwrap()
             .unlinked
     );
-    let cache = fs::read_to_string(&fixture.options.cache).unwrap();
+    let cache = fixture.tree_metadata();
     assert!(!cache.contains(prompt));
     assert_eq!(
         collect(&fixture.options)
@@ -1071,7 +1073,7 @@ fn planted_secrets_never_reach_the_cache_and_reach_the_model_only_as_their_sessi
     write_more_secrets(&fixture);
     let model: Value = serde_json::from_str(&model_json(&fixture.options).unwrap()).unwrap();
     let nodes = collect(&fixture.options).unwrap();
-    let cache = fs::read_to_string(&fixture.options.cache).unwrap();
+    let cache = fixture.tree_metadata();
     // The event index's bytes, and its WAL's if it has one: a secret stored
     // in any row would show here as plain UTF-8.
     let index = fixture.options.cache.with_extension("sqlite3");
@@ -1111,7 +1113,7 @@ fn planted_secrets_never_reach_the_cache_and_reach_the_model_only_as_their_sessi
     for (label, _) in owners {
         let secret = format!("SECRET_{label}_42");
         for (name, output) in [
-            ("V1 cache", &cache),
+            ("native tree metadata", &cache),
             ("event cache", &events),
             ("tree text", &render_text(&nodes)),
             ("tree json", &render_json(&nodes)),

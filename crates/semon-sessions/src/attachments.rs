@@ -489,8 +489,17 @@ impl PromptCache {
     /// Only metadata survives the request; subsequent pages skip the cached
     /// image ranges instead of parsing megabytes of base64 again.
     pub(crate) fn record(&self, path: &std::path::Path, offset: u64) -> Option<(Value, u64)> {
-        use std::io::{BufRead, Read, Seek, SeekFrom};
-        let mut file = crate::sealed::LogFile::open(path).ok()?;
+        self.record_from(&mut crate::sealed::LogFile::open(path).ok()?, offset)
+    }
+
+    /// Native prompt parsing and image-range elision with request-owned I/O.
+    /// Only the existing content-free image metadata enters this cache.
+    pub(crate) fn record_from(
+        &self,
+        mut file: &mut (impl std::io::Read + std::io::Seek),
+        offset: u64,
+    ) -> Option<(Value, u64)> {
+        use std::io::{BufRead, Read, SeekFrom};
         file.seek(SeekFrom::Start(offset)).ok()?;
         if let Some(metadata) = self.metadata(offset) {
             let mut bytes = Vec::new();

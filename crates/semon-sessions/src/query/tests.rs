@@ -11,8 +11,781 @@ use std::{
 use serde_json::{Value, json};
 
 use super::*;
+use crate::ViewerCore;
 
 static NEXT: AtomicU64 = AtomicU64::new(0);
+
+fn admitted(options: Options) -> Arc<SessionSources> {
+    Arc::new(SessionSources::with_machines(vec![(
+        String::new(),
+        options,
+    )]))
+}
+
+fn catalog_generation(home: &Home) -> Option<String> {
+    crate::events::EventCache::open_scoped(&home.options.cache)
+        .unwrap()
+        .session_catalog_generation()
+}
+
+#[test]
+fn native_producer_catalog_rejects_rewrites_after_indexing() {
+    let home = Home::new("catalog-derivation");
+    home.top("lead", &[user("lead", ts(1, 0), "old evidence")]);
+    let mut cache = crate::events::EventCache::open_scoped(&home.options.cache).unwrap();
+    let mut texts = crate::model::Texts::default();
+    crate::model::observe_catalog(&home.options, &mut cache, &mut false, &mut texts, NOW).unwrap();
+    let generation = catalog_generation(&home);
+    let path = home
+        .options
+        .claude_home
+        .join("projects/-work-proj/lead.jsonl");
+    crate::model::AFTER_SCAN.with(|hook| {
+        *hook.borrow_mut() = Some(Box::new(move || {
+            let bytes = fs::read_to_string(&path).unwrap();
+            std::thread::sleep(Duration::from_millis(2));
+            fs::write(path, bytes.replace("old evidence", "new evidence")).unwrap();
+        }));
+    });
+    assert!(
+        crate::model::observe_catalog(&home.options, &mut cache, &mut false, &mut texts, NOW)
+            .is_err()
+    );
+    assert_eq!(catalog_generation(&home), generation);
+}
+
+#[test]
+fn native_producer_scoped_preparation_rejects_deleted_evidence() {
+    let home = Home::new("scoped-derivation");
+    home.top("lead", &[user("lead", ts(1, 0), "old evidence")]);
+    let mut cache = crate::events::EventCache::open_scoped(&home.options.cache).unwrap();
+    let input = crate::inputs::Input {
+        root: crate::inputs::InputRoot::Claude,
+        path: "projects/-work-proj/lead.jsonl".to_owned(),
+    };
+    let path = input.full_path(&home.options);
+    crate::model::AFTER_SCAN.with(|hook| {
+        *hook.borrow_mut() = Some(Box::new(move || fs::remove_file(path).unwrap()));
+    });
+    assert!(crate::model::prepare_sources(&home.options, &mut cache, &[input], NOW).is_err());
+    assert_eq!(catalog_generation(&home), None);
+}
+
+#[test]
+fn query_producer_rejects_source_changes_after_indexing_before_publication() {
+    use std::io::Write;
+    for mutation in 0..3 {
+        let home = Home::new("producer-race");
+        home.top("lead", &[user("lead", ts(1, 0), "old evidence")]);
+        let mut query = Query::from_sources(admitted(home.options.clone()));
+        query.call_at("list_sessions", &json!({}), NOW).unwrap();
+        let generation = catalog_generation(&home);
+        assert!(generation.is_some());
+        let path = home
+            .options
+            .claude_home
+            .join("projects/-work-proj/lead.jsonl");
+        writeln!(
+            fs::OpenOptions::new().append(true).open(&path).unwrap(),
+            "{}",
+            assistant("lead", ts(1, 1), vec![text("appended answer")])
+        )
+        .unwrap();
+        crate::model::AFTER_SCAN.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                let before = fs::metadata(&path).unwrap();
+                let bytes = fs::read_to_string(&path).unwrap();
+                assert!(bytes.contains("old evidence"));
+                // Distinguish the mutation on filesystems with coarse ctime.
+                std::thread::sleep(Duration::from_millis(2));
+                match mutation {
+                    0 => fs::write(&path, bytes.replace("old evidence", "new evidence")).unwrap(),
+                    1 => {
+                        let replacement = path.with_extension("replacement");
+                        fs::write(&replacement, bytes).unwrap();
+                        fs::rename(replacement, &path).unwrap();
+                    }
+                    _ => fs::remove_file(&path).unwrap(),
+                }
+                if mutation < 2 {
+                    fs::File::options()
+                        .write(true)
+                        .open(&path)
+                        .unwrap()
+                        .set_modified(before.modified().unwrap())
+                        .unwrap();
+                }
+            }));
+        });
+        let result = query.call_at("list_sessions", &json!({}), NOW);
+        crate::model::AFTER_SCAN.with(|hook| assert!(hook.borrow().is_none(), "race must run"));
+        assert!(
+            result.is_err(),
+            "mutation {mutation} must reject the cohort"
+        );
+        assert_eq!(result.unwrap_err().code, "io");
+        assert_eq!(catalog_generation(&home), generation);
+    }
+}
+
+#[test]
+fn query_producer_rechecks_cached_and_unread_sources_before_publication() {
+    use std::io::Write;
+    for mutation in 0..2 {
+        let home = Home::new("producer-completion");
+        home.top("lead", &[user("lead", ts(1, 0), "old evidence")]);
+        // A source with no body derivation still contributes native identity.
+        home.top("empty", &[]);
+        let mut query = Query::from_sources(admitted(home.options.clone()));
+        query
+            .call_at("get_session", &json!({"id":"lead"}), NOW)
+            .unwrap();
+        let generation = catalog_generation(&home);
+        let path = home
+            .options
+            .claude_home
+            .join("projects/-work-proj/lead.jsonl");
+        writeln!(
+            fs::OpenOptions::new().append(true).open(&path).unwrap(),
+            "{}",
+            assistant("lead", ts(1, 1), vec![text("appended answer")])
+        )
+        .unwrap();
+        let empty = home
+            .options
+            .claude_home
+            .join("projects/-work-proj/empty.jsonl");
+        crate::model::AFTER_QUERY_DERIVATION.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                if mutation == 0 {
+                    let before = fs::metadata(&path).unwrap();
+                    let bytes = fs::read_to_string(&path).unwrap();
+                    fs::write(&path, bytes.replace("old evidence", "new evidence")).unwrap();
+                    fs::File::options()
+                        .write(true)
+                        .open(path)
+                        .unwrap()
+                        .set_modified(before.modified().unwrap())
+                        .unwrap();
+                } else {
+                    fs::remove_file(empty).unwrap();
+                }
+            }));
+        });
+        assert_eq!(
+            query
+                .call_at("get_session", &json!({"id":"lead"}), NOW)
+                .unwrap_err()
+                .code,
+            "io"
+        );
+        assert_eq!(catalog_generation(&home), generation);
+        // A failed derivation is not installed as the next query snapshot.
+        let recovered = query
+            .call_at("get_session", &json!({"id":"lead"}), NOW)
+            .unwrap();
+        if mutation == 0 {
+            assert!(recovered.to_string().contains("new evidence"));
+        }
+    }
+}
+
+#[test]
+fn query_producer_allows_verified_append_without_extending_the_cohort() {
+    use std::io::Write;
+    let home = Home::new("producer-append");
+    home.top("lead", &[user("lead", ts(1, 0), "old evidence")]);
+    let before = home
+        .query()
+        .call_at("get_session", &json!({"id":"lead"}), NOW)
+        .unwrap();
+    let path = home
+        .options
+        .claude_home
+        .join("projects/-work-proj/lead.jsonl");
+    crate::model::AFTER_SCAN.with(|hook| {
+        *hook.borrow_mut() = Some(Box::new(move || {
+            writeln!(
+                fs::OpenOptions::new().append(true).open(path).unwrap(),
+                "{}",
+                assistant("lead", ts(1, 1), vec![text("appended answer")])
+            )
+            .unwrap();
+        }));
+    });
+    let mut query = home.query();
+    assert_eq!(
+        query
+            .call_at("get_session", &json!({"id":"lead"}), NOW)
+            .unwrap(),
+        before
+    );
+    assert_ne!(
+        query
+            .call_at("get_session", &json!({"id":"lead"}), NOW)
+            .unwrap(),
+        before
+    );
+}
+
+#[test]
+fn query_producer_preserves_large_native_tool_record_derivation() {
+    crate::model::DIRECT_SOURCE_READS.with(|reads| reads.set(0));
+    let home = Home::new("producer-large-record");
+    let mut record = assistant(
+        "lead",
+        ts(1, 0),
+        vec![tool(
+            "t1",
+            "Agent",
+            json!({"description":"Scan parser", "prompt":"Find parser panics", "subagent_type":"general-purpose"}),
+        )],
+    );
+    home.top(
+        "lead",
+        &[user("lead", ts(0, 0), "Fix parser"), record.clone()],
+    );
+    home.agent(
+        "lead",
+        "scan",
+        "t1",
+        &[user("scan", ts(1, 1), "Find parser panics")],
+    );
+    let expected = home
+        .query()
+        .call_at("get_session", &json!({"id":"lead"}), NOW)
+        .unwrap();
+    record["padding"] = json!("x".repeat(crate::tx::LINE_MAX as usize + 1024));
+    home.top("lead", &[user("lead", ts(0, 0), "Fix parser"), record]);
+    let answer = home
+        .query()
+        .call_at("get_session", &json!({"id":"lead"}), NOW)
+        .unwrap();
+    assert!(answer.to_string().contains("Find parser panics"));
+    assert_eq!(answer, expected);
+    crate::model::DIRECT_SOURCE_READS.with(|reads| assert_eq!(reads.get(), 0));
+    // Full Model preparation now shares the verified native body reader too.
+    assert_eq!(
+        ViewerCore::new(home.options.clone())
+            .respond("GET", "/api/model", "", None)
+            .status,
+        200
+    );
+    crate::model::DIRECT_SOURCE_READS.with(|reads| assert_eq!(reads.get(), 0));
+}
+
+/// A retired native cohort cannot be refreshed after the source mutation.
+/// This also reproduces an active call racing a writer after its index build.
+fn retained_query(home: &Home) -> Query {
+    let sources = admitted(home.options.clone());
+    let mut query = Query::from_sources(sources.clone());
+    query.call_at("list_sessions", &json!({}), NOW).unwrap();
+    sources.close();
+    query
+}
+
+#[test]
+fn metadata_and_selected_session_reads_do_not_hydrate_unrelated_prompt_history() {
+    for count in [4, 128] {
+        let home = Home::new("prompt-read-scope");
+        home.top(
+            "selected",
+            &[human("selected", ts(1, 0), "selected evidence")],
+        );
+        let mut history = vec![human("history", ts(1, 0), "history title")];
+        history.extend((0..count).map(|_| human("history", ts(1, 1), &"x".repeat(64 * 1024))));
+        home.top("history", &history);
+        let path = home
+            .options
+            .claude_home
+            .join("projects/-work-proj/history.jsonl");
+        let original = fs::read(&path).unwrap();
+        let mut cache = crate::events::EventCache::open_scoped(&home.options.cache).unwrap();
+        crate::model::observe_catalog(
+            &home.options,
+            &mut cache,
+            &mut false,
+            &mut crate::model::Texts::default(),
+            NOW,
+        )
+        .unwrap();
+        // Indexing native records still reads their evidence. Once indexed,
+        // metadata observation and an unrelated selected session must not read
+        // every old prompt again to populate unused handoff briefs.
+        let before = crate::source_chunks::READ_BYTES.with(std::cell::Cell::get);
+        crate::model::observe_catalog(
+            &home.options,
+            &mut cache,
+            &mut false,
+            &mut crate::model::Texts::default(),
+            NOW,
+        )
+        .unwrap();
+        let mut query = home.query();
+        assert_eq!(
+            query.call_at("list_sessions", &json!({}), NOW).unwrap()["sessions"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+        query
+            .call_at("stalls", &json!({"idle_minutes":10}), NOW)
+            .unwrap();
+        let selected = query
+            .call_at("get_session", &json!({"id":"selected"}), NOW)
+            .unwrap();
+        assert_eq!(
+            selected["session"]["handoffs"][0]["brief"],
+            "selected evidence"
+        );
+        let bytes = crate::source_chunks::READ_BYTES.with(std::cell::Cell::get) - before;
+        println!("{count} unrelated prompts: {bytes} native body/proof bytes");
+        assert!(
+            bytes <= 12 * crate::source_chunks::SIZE as u64,
+            "unrelated history hydrated: {bytes} bytes"
+        );
+        assert_eq!(fs::read(&path).unwrap(), original);
+    }
+}
+
+#[test]
+fn limited_search_reads_prompt_briefs_only_when_their_slots_are_visited() {
+    let home = Home::new("prompt-search-scope");
+    let mut history = vec![human("lead", ts(1, 0), "history title")];
+    history.extend((0..128).map(|_| human("lead", ts(1, 1), &"x".repeat(64 * 1024))));
+    history.push(human("lead", ts(1, 2), "selected needle"));
+    home.top("lead", &history);
+    let mut cache = crate::events::EventCache::open_scoped(&home.options.cache).unwrap();
+    crate::model::observe_catalog(
+        &home.options,
+        &mut cache,
+        &mut false,
+        &mut crate::model::Texts::default(),
+        NOW,
+    )
+    .unwrap();
+    let mut query = home.query();
+    let before = crate::source_chunks::READ_BYTES.with(std::cell::Cell::get);
+    let result = query
+        .call_at("find", &json!({"text":"selected needle", "limit":1}), NOW)
+        .unwrap();
+    assert_eq!(result["matches"].as_array().unwrap().len(), 1);
+    assert_eq!(result["matches"][0]["part"], "brief");
+    assert_eq!(result["matches"][0]["snippet"], "selected needle");
+    assert_eq!(result["truncated_by"], "limit");
+    let bytes = crate::source_chunks::READ_BYTES.with(std::cell::Cell::get) - before;
+    println!("limited search over 128 old prompts: {bytes} native body/proof bytes");
+    assert!(
+        bytes <= 4 * crate::source_chunks::SIZE as u64,
+        "search hydrated unvisited prompts: {bytes} bytes"
+    );
+}
+
+#[test]
+fn source_backed_prompt_briefs_preserve_native_caps_and_completion_fences() {
+    let _time = crate::events::fixed_change_time_for_test(0);
+    let home = Home::new("prompt-brief-integrity");
+    home.top("lead", &[human("lead", ts(1, 0), &"é".repeat(50_000))]);
+    let sources = admitted(home.options.clone());
+    let core = ViewerCore::from_sources(sources.clone());
+    let model: Value =
+        serde_json::from_slice(&core.respond("GET", "/api/model", "", None).body).unwrap();
+    let mut query = Query::from_sources(sources.clone());
+    let selected = query
+        .call_at("get_session", &json!({"id":"lead"}), NOW)
+        .unwrap();
+    assert_eq!(
+        selected["session"]["handoffs"][0]["brief"],
+        model["handoffs"][0]["brief"]
+    );
+    sources.close();
+    let data = &query.evidence().parts[0].data;
+    let records = data.sources.reader();
+    let brief = data.ask_briefs.values().next().unwrap();
+    assert_eq!(brief.read(&records).unwrap(), model["handoffs"][0]["brief"]);
+    let path = home
+        .options
+        .claude_home
+        .join("projects/-work-proj/lead.jsonl");
+    let metadata = fs::metadata(&path).unwrap();
+    let stat = crate::events::Stat::from_metadata(&metadata).unwrap();
+    let raw = fs::read_to_string(&path).unwrap();
+    fs::write(&path, raw.replacen('é', "ê", 1)).unwrap();
+    fs::File::options()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_modified(metadata.modified().unwrap())
+        .unwrap();
+    assert_eq!(
+        crate::events::Stat::from_metadata(&fs::metadata(&path).unwrap()).unwrap(),
+        stat
+    );
+    assert!(
+        records.finish().is_err(),
+        "completion must reject changed cached prompt bytes"
+    );
+    for (name, args) in [
+        ("get_session", json!({"id":"lead"})),
+        ("find", json!({"text":"é"})),
+    ] {
+        assert_eq!(query.call_at(name, &args, NOW).unwrap_err().code, "io");
+    }
+}
+
+#[test]
+fn native_projection_reuse_rebuilds_unqualified_and_corrupt_recipes_from_evidence() {
+    for mutation in [
+        "UPDATE session_slot_projections SET version=version-1",
+        "UPDATE session_slot_projections SET source_generation='wrong'",
+        "UPDATE session_slot_projections SET generation='wrong'",
+        "UPDATE meta SET value='wrong' WHERE key='slot_projection_catalog_generation'",
+        "DELETE FROM session_slots WHERE slot=0",
+        "UPDATE session_slots SET metadata=json_set(metadata,'$.native_event_id','wrong')",
+        "UPDATE session_slots SET metadata='{'",
+    ] {
+        let home = Home::new("projection-repair");
+        home.top(
+            "lead",
+            &[
+                human("lead", ts(1, 0), "native evidence"),
+                human("lead", ts(1, 1), "later evidence"),
+            ],
+        );
+        let mut cache = crate::events::EventCache::open_scoped(&home.options.cache).unwrap();
+        let observe = |cache: &mut crate::events::EventCache| {
+            crate::model::observe_catalog(
+                &home.options,
+                cache,
+                &mut false,
+                &mut crate::model::Texts::default(),
+                NOW,
+            )
+            .unwrap();
+        };
+        observe(&mut cache);
+        let db = rusqlite::Connection::open(crate::events::EventCache::path(&home.options.cache))
+            .unwrap();
+        let slots = || {
+            db.prepare(
+                "SELECT session_key,slot,metadata FROM session_slots ORDER BY session_key,slot",
+            )
+            .unwrap()
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+        };
+        let original = slots();
+        assert!(!original.is_empty());
+        let before = home
+            .query()
+            .call_at("get_session", &json!({"id":"lead"}), NOW)
+            .unwrap();
+        db.execute(mutation, []).unwrap();
+        observe(&mut cache);
+        assert_eq!(slots(), original, "failed to repair {mutation}");
+        assert_eq!(
+            home.query()
+                .call_at("get_session", &json!({"id":"lead"}), NOW)
+                .unwrap(),
+            before
+        );
+    }
+}
+
+#[test]
+fn native_tools_refuse_changed_bytes_even_with_indistinguishable_file_stamps() {
+    let _time = crate::events::fixed_change_time_for_test(0);
+    let home = Home::new("coarse-native-generation");
+    home.top(
+        "lead",
+        &[assistant("lead", ts(1, 0), vec![text("old evidence")])],
+    );
+    let mut query = retained_query(&home);
+    let path = home
+        .options
+        .claude_home
+        .join("projects/-work-proj/lead.jsonl");
+    let before = fs::metadata(&path).unwrap();
+    let stamp = crate::events::Stat::from_metadata(&before).unwrap();
+    let bytes = fs::read_to_string(&path).unwrap();
+    fs::write(&path, bytes.replace("old evidence", "new evidence")).unwrap();
+    fs::File::options()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_modified(before.modified().unwrap())
+        .unwrap();
+    assert_eq!(
+        crate::events::Stat::from_metadata(&fs::metadata(&path).unwrap()).unwrap(),
+        stamp
+    );
+    for (tool, args) in [
+        ("read_transcript", json!({"id":"lead"})),
+        ("find", json!({"text":"new evidence"})),
+    ] {
+        assert_eq!(query.call_at(tool, &args, NOW).unwrap_err().code, "io");
+    }
+}
+
+#[test]
+fn query_source_reads_allow_append_without_reading_beyond_the_cohort() {
+    use std::io::Write;
+    let home = fixture();
+    let mut query = retained_query(&home);
+    let args = json!({"id":"lead"});
+    let before = query.call_at("read_transcript", &args, NOW).unwrap();
+    let search = json!({"text":"new evidence"});
+    let missing = query.call_at("find", &search, NOW).unwrap();
+    let path = home
+        .options
+        .claude_home
+        .join("projects/-work-proj/lead.jsonl");
+    let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
+    writeln!(
+        file,
+        "{}",
+        assistant("lead", ts(2, 0), vec![text("new evidence")])
+    )
+    .unwrap();
+    assert_eq!(
+        query.call_at("read_transcript", &args, NOW).unwrap(),
+        before
+    );
+    assert_eq!(query.call_at("find", &search, NOW).unwrap(), missing);
+    assert!(
+        !home.query().call_at("find", &search, NOW).unwrap()["matches"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn query_source_reads_reject_interior_rewrites_even_with_restored_mtime() {
+    let home = Home::new("rewritten");
+    home.top(
+        "lead",
+        &[assistant(
+            "lead",
+            ts(1, 0),
+            vec![text(
+                &("x".repeat(5000) + "old evidence" + &"y".repeat(5000)),
+            )],
+        )],
+    );
+    let mut query = retained_query(&home);
+    let path = home
+        .options
+        .claude_home
+        .join("projects/-work-proj/lead.jsonl");
+    let before = fs::metadata(&path).unwrap();
+    let bytes = fs::read_to_string(&path).unwrap();
+    fs::write(&path, bytes.replace("old evidence", "new evidence")).unwrap();
+    fs::File::options()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_modified(before.modified().unwrap())
+        .unwrap();
+    assert_eq!(fs::metadata(&path).unwrap().len(), before.len());
+    assert_eq!(
+        query
+            .call_at("read_transcript", &json!({"id":"lead"}), NOW)
+            .unwrap_err()
+            .code,
+        "io"
+    );
+    assert_eq!(
+        query
+            .call_at("find", &json!({"text":"new evidence"}), NOW)
+            .unwrap_err()
+            .code,
+        "io"
+    );
+}
+
+#[test]
+fn query_source_reads_reject_replacement_and_deletion() {
+    for delete in [false, true] {
+        let home = fixture();
+        let mut query = retained_query(&home);
+        let path = home
+            .options
+            .claude_home
+            .join("projects/-work-proj/lead.jsonl");
+        let before = fs::metadata(&path).unwrap();
+        let bytes = fs::read(&path).unwrap();
+        // Keep the original inode alive to avoid inode reuse in the fixture.
+        fs::rename(&path, path.with_extension("retired")).unwrap();
+        if !delete {
+            fs::write(&path, bytes).unwrap();
+            fs::File::options()
+                .write(true)
+                .open(&path)
+                .unwrap()
+                .set_modified(before.modified().unwrap())
+                .unwrap();
+        }
+        assert_eq!(
+            query
+                .call_at("read_transcript", &json!({"id":"lead"}), NOW)
+                .unwrap_err()
+                .code,
+            "io"
+        );
+        assert_eq!(
+            query
+                .call_at("find", &json!({"text":"parser"}), NOW)
+                .unwrap_err()
+                .code,
+            "io"
+        );
+    }
+}
+
+#[test]
+fn query_source_paging_checks_only_touched_sources_and_rechecks_cached_lines() {
+    let home = fixture();
+    let mut query = retained_query(&home);
+    let before = query
+        .call_at("read_transcript", &json!({"id":"lead"}), NOW)
+        .unwrap();
+    fs::remove_file(
+        home.options
+            .claude_home
+            .join("projects/-work-proj/done.jsonl"),
+    )
+    .unwrap();
+    assert_eq!(
+        query
+            .call_at("read_transcript", &json!({"id":"lead"}), NOW)
+            .unwrap(),
+        before
+    );
+
+    let data = &query.evidence().parts[0].data;
+    let records = data.sources.reader();
+    let mut read = |path: &std::path::Path, offset| records.read(path, offset);
+    let mut lines = tx::Lines::provider(&mut read);
+    let slot = data.tx["lead"]
+        .slots
+        .iter()
+        .find(|slot| matches!(slot.kind, SlotKind::A))
+        .unwrap();
+    let texts = tx::slot_texts(&mut lines, slot);
+    let path = home
+        .options
+        .claude_home
+        .join("projects/-work-proj/lead.jsonl");
+    let bytes = fs::read_to_string(&path).unwrap();
+    fs::write(&path, bytes.replace("On it.", "Oh no.")).unwrap();
+    assert_eq!(
+        tx::slot_texts(&mut lines, slot),
+        texts,
+        "exercise the pager's native record cache"
+    );
+    assert!(
+        records.finish().is_err(),
+        "cached bytes cannot hide a changed source at completion"
+    );
+}
+
+#[test]
+fn query_source_paging_preserves_large_prompts_and_cached_image_ranges() {
+    let home = Home::new("images");
+    let mut png = vec![0xFF; 4 * 1024 * 1024];
+    png[..8].copy_from_slice(b"\x89PNG\r\n\x1a\n");
+    let encoded = crate::attachments::tests::encode(&png);
+    let record = json!({"type":"user","sessionId":"images","timestamp":ts(1,0),"message":{"role":"user","content":[
+        text("Inspect both images"),
+        {"type":"image","source":{"type":"base64","media_type":"image/png","data":encoded}},
+        {"type":"image","source":{"type":"base64","media_type":"image/png","data":encoded}},
+    ]}});
+    let raw = record.to_string().replace('/', "\\/") + "\n";
+    assert!(raw.len() as u64 > tx::LINE_MAX);
+    home.write("claude/projects/-work-proj/images.jsonl", &raw);
+    let sources = admitted(home.options.clone());
+    let core = Arc::new(ViewerCore::from_sources(sources.clone()));
+    let legacy = core.respond("GET", "/api/tx", "sid=images", None);
+    assert_eq!(legacy.status, 200);
+    let mut expected: Value = serde_json::from_slice(&legacy.body).unwrap();
+    expected["window_start"] = Value::Null;
+    assert_eq!(expected["entries"][0]["img"].as_array().unwrap().len(), 2);
+    let mut query = Query::from_sources(sources);
+    let before = crate::model::COMPAT_BUILDS.with(|count| count.get());
+    let actual = query
+        .call_at("read_transcript", &json!({"id":"images"}), NOW)
+        .unwrap();
+    // The served pager uses wall time only for an unfinished background tool;
+    // this fixed prompt fixture has no such entries.
+    assert_eq!(actual, expected);
+    assert_eq!(
+        crate::model::COMPAT_BUILDS.with(|count| count.get()),
+        before
+    );
+    let data = &query.evidence().parts[0].data;
+    let slot = data.tx["images"]
+        .slots
+        .iter()
+        .find(|slot| slot.file.is_some())
+        .unwrap();
+    let records = data.sources.reader();
+    let (prompt, bytes) = records
+        .prompt(slot.file.as_deref().unwrap(), slot.offset)
+        .unwrap();
+    assert!(
+        bytes < 1024,
+        "authenticated prompt reads must retain image-range elision"
+    );
+    assert_eq!(
+        prompt["message"]["content"][0]["text"],
+        "Inspect both images"
+    );
+    assert_eq!(prompt["message"]["content"][1]["source"]["data"], "");
+    records.finish().unwrap();
+}
+
+#[test]
+fn query_source_reads_preserve_log_sealing_without_rebuilding_the_cohort() {
+    let home = Home::new("sealed");
+    home.top(
+        "lead",
+        &[assistant(
+            "lead",
+            ts(1, 0),
+            vec![text(&"source evidence ".repeat(1000))],
+        )],
+    );
+    let mut query = retained_query(&home);
+    let args = json!({"id":"lead"});
+    let before = query.call_at("read_transcript", &args, NOW).unwrap();
+    let search = json!({"text":"source evidence"});
+    let found = query.call_at("find", &search, NOW).unwrap();
+    let path = home
+        .options
+        .claude_home
+        .join("projects/-work-proj/lead.jsonl");
+    assert!(
+        crate::sealed::seal(&path, 1, u64::MAX)
+            .unwrap()
+            .added
+            .is_some()
+    );
+    assert_eq!(
+        query.call_at("read_transcript", &args, NOW).unwrap(),
+        before
+    );
+    assert_eq!(query.call_at("find", &search, NOW).unwrap(), found);
+}
 
 /// 2026-09-24T00:00:00Z.
 const BASE: i64 = 1_790_208_000_000;
@@ -1368,21 +2141,118 @@ fn an_empty_union_answers_without_creating_a_home() {
 }
 
 #[test]
-fn shared_queries_read_the_viewer_cache_and_expose_its_output_window() {
-    use crate::Refresh;
+fn native_owner_reuses_one_complete_index_across_query_tree_and_model_reads() {
+    use crate::viewer::{MachineView, Reading};
+    use std::io::Write;
+
+    let home = Home::new("shared-native-owner");
+    home.top("lead", &[human("lead", ts(1, 0), "Original evidence")]);
+    let path = home.root.join("claude/projects/-work-proj/lead.jsonl");
+    let original = fs::read(&path).unwrap();
+    let mut local = Query::new(home.options.clone());
+    assert!(
+        local.sources.machines[0]
+            .1
+            .work
+            .lock()
+            .unwrap()
+            .events
+            .is_none()
+    );
+    assert!(local.call_at("unknown", &json!({}), NOW).is_err());
+    assert!(!home.options.cache.exists());
+    assert!(!home.options.cache.with_extension("sqlite3").exists());
+
+    let view = MachineView::new(home.options.clone());
+    let parsed = || crate::events::PARSED.with(std::cell::Cell::get);
+    let first = view.evidence.query_at(NOW).unwrap();
+    let count = parsed();
+    assert!(count > 0);
+    assert!(Arc::ptr_eq(&first, &view.evidence.query_at(NOW).unwrap()));
+    let built = view.built(Reading::At(NOW)).unwrap();
+    assert!(built.sessions.contains_key("lead"));
+    assert_eq!(view.respond("GET", "/api/tree", "", None).status, 200);
+    assert_eq!(
+        parsed(),
+        count,
+        "all readers reuse the complete native index"
+    );
+    assert_eq!(fs::read(&path).unwrap(), original);
+
+    let added = assistant("lead", ts(1, 1), vec![text("New evidence")]);
+    writeln!(
+        fs::OpenOptions::new().append(true).open(&path).unwrap(),
+        "{added}"
+    )
+    .unwrap();
+    let next = view.evidence.query_at(NOW).unwrap();
+    assert!(!Arc::ptr_eq(&first, &next));
+    assert_eq!(
+        parsed(),
+        count + 1,
+        "only the appended native record is parsed"
+    );
+    view.built(Reading::At(NOW)).unwrap();
+    assert_eq!(view.respond("GET", "/api/tree", "", None).status, 200);
+    assert_eq!(parsed(), count + 1);
+    assert!(Arc::ptr_eq(&next, &view.evidence.query_at(NOW).unwrap()));
+    view.close();
+}
+
+#[test]
+fn native_owner_retirement_refuses_a_waiting_cold_read_and_keeps_a_warm_cohort() {
+    use std::sync::mpsc;
+    let home = Home::new("retired-native-owner");
+    home.top("lead", &[human("lead", ts(1, 0), "Verified evidence")]);
+    let evidence = crate::native_evidence::NativeEvidence::new(home.options.clone());
+    let work = evidence.work.lock().unwrap();
+    let (started, waiting) = mpsc::channel();
+    let worker = {
+        let evidence = evidence.clone();
+        std::thread::spawn(move || {
+            started.send(()).unwrap();
+            evidence.query_at(NOW)
+        })
+    };
+    waiting.recv_timeout(Duration::from_secs(5)).unwrap();
+    evidence.retire();
+    drop(work);
+    assert_eq!(
+        worker.join().unwrap().err().unwrap().kind(),
+        std::io::ErrorKind::BrokenPipe
+    );
+    assert!(!home.options.cache.exists());
+    assert!(!home.options.cache.with_extension("sqlite3").exists());
+
+    let warm = crate::native_evidence::NativeEvidence::new(home.options.clone());
+    let retained = warm.query_at(NOW).unwrap();
+    warm.retire();
+    fs::remove_file(home.root.join("claude/projects/-work-proj/lead.jsonl")).unwrap();
+    assert!(Arc::ptr_eq(&retained, &warm.query_at(NOW).unwrap()));
+    // Retaining metadata never permits serving removed source evidence.
+    let records = retained.sources.reader();
+    assert!(
+        records
+            .read(&home.root.join("claude/projects/-work-proj/lead.jsonl"), 0)
+            .is_err()
+    );
+    assert!(records.finish().is_err());
+}
+
+#[test]
+fn shared_native_queries_reuse_cached_cohorts_and_expose_the_output_window() {
     let home = Home::new("shared");
     let mut options = home.options.clone();
     options.all = false;
     options.since = Duration::from_secs(86400);
-    let mut viewer = ViewerCore::new(options);
-    viewer.set_refresh(Refresh::OnInvalidate);
-    let core = Arc::new(viewer);
-    let mut first = Query::from_core(core.clone());
+    let sources = admitted(options);
+    let mut first = Query::from_sources(sources.clone());
     let answer = first.call_at("list_sessions", &json!({}), NOW).unwrap();
     let start = answer["window_start"]
         .as_i64()
-        .expect("output-trimmed models have a window too");
-    let second = Query::from_core(core.clone())
+        .expect("output-trimmed native cohorts have a window too");
+    assert_eq!(start, NOW - 86_400_000);
+    let second = Query::from_sources(sources.clone())
         .call_at("list_sessions", &json!({}), NOW)
         .unwrap();
     assert_eq!(answer, second);
@@ -1397,11 +2267,386 @@ fn shared_queries_read_the_viewer_cache_and_expose_its_output_window() {
             .window_start,
         Some(start)
     );
-    // Closing keeps the last snapshot served: the Query does not instantiate
-    // or synchronously rebuild another core behind the embedding server.
-    core.close();
+    // Closing keeps the last snapshot served without rebuilding sources
+    // behind the embedding server.
+    sources.close();
     assert_eq!(
         first.call_at("list_sessions", &json!({}), NOW).unwrap(),
         answer
+    );
+}
+
+#[test]
+fn admitted_sources_share_the_index_with_a_later_viewer_and_drain_on_close() {
+    let home = fixture();
+    let sources = Arc::new(SessionSources::with_machines(vec![(
+        "a".into(),
+        Options {
+            all: false,
+            since: Duration::from_secs(86400),
+            ..home.options.clone()
+        },
+    )]));
+    let mut first = Query::from_sources(sources.clone());
+    assert!(sources.machines[0].1.work.lock().unwrap().events.is_none());
+    assert_eq!(
+        first.call_at("unknown", &json!({}), NOW).unwrap_err().code,
+        "unknown_tool"
+    );
+    assert!(!home.options.cache.with_extension("sqlite3").exists());
+    let builds = crate::model::COMPAT_BUILDS.with(std::cell::Cell::get);
+    let answer = first.call_at("list_sessions", &json!({}), NOW).unwrap();
+    assert_eq!(answer["window_start"], NOW - 86_400_000);
+    assert_eq!(
+        crate::model::COMPAT_BUILDS.with(std::cell::Cell::get),
+        builds
+    );
+    let snapshot = first.native.as_ref().unwrap().parts[0].data.clone();
+    let parsed = crate::events::PARSED.with(std::cell::Cell::get);
+    let core = ViewerCore::from_sources(sources.clone());
+    assert!(Arc::ptr_eq(
+        &core.machine_views()[0].evidence,
+        &sources.machines[0].1
+    ));
+    assert_eq!(core.respond("GET", "/api/model", "", None).status, 200);
+    assert_eq!(crate::events::PARSED.with(std::cell::Cell::get), parsed);
+    let mut second = Query::from_sources(sources.clone());
+    assert_eq!(
+        second.call_at("list_sessions", &json!({}), NOW).unwrap(),
+        answer
+    );
+    assert!(Arc::ptr_eq(
+        &snapshot,
+        &second.native.as_ref().unwrap().parts[0].data
+    ));
+    core.close();
+    sources.close();
+    home.top(
+        "after-close",
+        &[human("after-close", ts(6, 0), "Closed source")],
+    );
+    assert_eq!(
+        first.call_at("list_sessions", &json!({}), NOW).unwrap(),
+        answer
+    );
+}
+
+#[test]
+fn retired_admitted_sources_refuse_cold_reads_and_new_catalog_demand() {
+    let home = fixture();
+    let sources = Arc::new(SessionSources::with_machines(vec![(
+        "a".into(),
+        home.options.clone(),
+    )]));
+    assert!(sources.invalidate("a"));
+    assert!(!sources.invalidate("missing"));
+    assert!(sources.machines[0].1.work.lock().unwrap().events.is_none());
+    sources.close();
+    assert!(!sources.invalidate("a"));
+    assert!(
+        !sources
+            .demand_catalog_source("a", crate::RefreshPool::shared())
+            .unwrap()
+    );
+    assert_eq!(
+        Query::from_sources(sources.clone())
+            .call_at("list_sessions", &json!({}), NOW)
+            .unwrap_err()
+            .code,
+        "io"
+    );
+    let viewer = ViewerCore::from_sources(sources);
+    assert_ne!(viewer.respond("GET", "/api/model", "", None).status, 200);
+    assert!(!home.options.cache.with_extension("sqlite3").exists());
+}
+
+#[test]
+fn embedded_native_queries_preserve_output_windows_and_legacy_tool_answers() {
+    let home = fixture();
+    let peer = Home::new("testbox");
+    peer.top(
+        "other",
+        &[human("other", ts(6, 0), "Review the lexer change")],
+    );
+    for seconds in [86_400, 21_600] {
+        for multiple in [false, true] {
+            let options = |home: &Home| Options {
+                all: false,
+                since: Duration::from_secs(seconds),
+                scan_window: false,
+                ..home.options.clone()
+            };
+            let mut machines = vec![("a".into(), options(&home))];
+            if multiple {
+                machines.push(("b".into(), options(&peer)));
+            }
+            let sources = Arc::new(SessionSources::with_machines(machines));
+            let calls = [
+                ("list_sessions", json!({})),
+                ("list_sessions", json!({"parent":"lead", "limit":1})),
+                ("list_sessions", json!({"since":"1970-01-01T00:00:00Z"})),
+                ("get_session", json!({"id":"lead"})),
+                ("get_session", json!({"id":"scan"})),
+                ("get_session", json!({"id":"asker"})),
+                ("get_session", json!({"id":"cx"})),
+                ("get_session", json!({"id":"absent"})),
+                ("read_transcript", json!({"id":"done", "limit":1})),
+                (
+                    "read_transcript",
+                    json!({"id":"scan", "after":0, "limit":2}),
+                ),
+                ("read_transcript", json!({"id":"done", "turn":"absent"})),
+                ("find", json!({"text":"lexer", "limit":2})),
+                ("find", json!({"text":"cargo", "max_bytes":1})),
+                ("stalls", json!({"idle_minutes":1})),
+            ];
+            let mut native = Query::from_sources(sources.clone());
+            let before = crate::model::COMPAT_BUILDS.with(|count| count.get());
+            let actual: Vec<_> = calls
+                .iter()
+                .map(|(tool, args)| native.call_at(tool, args, NOW))
+                .collect();
+            assert_eq!(
+                crate::model::COMPAT_BUILDS.with(|count| count.get()),
+                before
+            );
+            let snapshot = native.native.as_ref().unwrap().parts[0].data.clone();
+            assert_eq!(snapshot.window_start, Some(NOW - seconds as i64 * 1000));
+            let mut second = Query::from_sources(sources.clone());
+            second.call_at("list_sessions", &json!({}), NOW).unwrap();
+            assert!(Arc::ptr_eq(
+                &snapshot,
+                &second.native.as_ref().unwrap().parts[0].data
+            ));
+
+            for ((tool, args), answer) in calls.iter().zip(actual) {
+                assert_contract_reference("output", seconds, multiple, tool, args, answer);
+            }
+            let mut configured = vec![("a".into(), options(&home))];
+            if multiple {
+                configured.push(("b".into(), options(&peer)));
+            }
+            let independent_sources = Arc::new(SessionSources::with_machines(configured));
+            let mut admitted = Query::from_sources(independent_sources.clone());
+            for (tool, args) in &calls {
+                assert_contract_reference(
+                    "output",
+                    seconds,
+                    multiple,
+                    tool,
+                    args,
+                    admitted.call_at(tool, args, NOW),
+                );
+            }
+            assert_eq!(
+                crate::model::COMPAT_BUILDS.with(|count| count.get()),
+                before
+            );
+            sources.close();
+            independent_sources.close();
+        }
+    }
+}
+
+#[test]
+fn embedded_native_query_retirement_serves_only_retained_snapshots() {
+    let home = fixture();
+    let sources = admitted(home.options.clone());
+    let mut native = Query::from_sources(sources.clone());
+    let before = native.call_at("list_sessions", &json!({}), NOW).unwrap();
+    sources.close();
+    home.top(
+        "after-close",
+        &[human("after-close", ts(6, 0), "Closed source")],
+    );
+    assert_eq!(
+        native.call_at("list_sessions", &json!({}), NOW).unwrap(),
+        before
+    );
+    let unopened = admitted(home.options.clone());
+    unopened.close();
+    assert_eq!(
+        Query::from_sources(unopened)
+            .call_at("list_sessions", &json!({}), NOW)
+            .unwrap_err()
+            .code,
+        "io"
+    );
+}
+
+#[test]
+fn local_tools_match_legacy_evidence_without_compatibility_preparation() {
+    let home = fixture();
+    // Same hostname exercises presentation disambiguation independently of the
+    // authoritative source keys. The second source has its own native evidence.
+    let peer = Home::new("testbox");
+    peer.top(
+        "other",
+        &[
+            human("other", ts(6, 0), "Review the lexer change"),
+            assistant("other", ts(6, 1), vec![text("Looks right.")]),
+        ],
+    );
+    for multiple in [false, true] {
+        let mut machines = vec![("a".to_owned(), home.options.clone())];
+        if multiple {
+            machines.push(("b".to_owned(), peer.options.clone()));
+        }
+        let mut native = Query::with_machines(machines.clone());
+        for revision in 0..3 {
+            if revision == 1 {
+                home.top(
+                    "done",
+                    &[
+                        human("done", ts(4, 0), "Summarize the design doc"),
+                        assistant("done", ts(4, 1), vec![text("Updated lexer evidence.")]),
+                        assistant("done", ts(7, 0), vec![text("A later response.")]),
+                    ],
+                );
+            }
+            if revision == 2 {
+                let path = home.root.join("proc/30/stat");
+                if path.exists() {
+                    fs::remove_file(path).unwrap();
+                }
+            }
+            let calls = [
+                ("list_sessions", json!({})),
+                ("list_sessions", json!({"parent":"lead", "limit":1})),
+                ("get_session", json!({"id":"lead"})),
+                ("get_session", json!({"id":"scan"})),
+                ("get_session", json!({"id":"asker"})),
+                ("get_session", json!({"id":"cx"})),
+                ("read_transcript", json!({"id":"done", "limit":1})),
+                (
+                    "read_transcript",
+                    json!({"id":"scan", "after":0, "limit":2}),
+                ),
+                ("read_transcript", json!({"id":"done", "turn":"absent"})),
+                ("get_session", json!({"id":"absent"})),
+                ("find", json!({"text":"lexer", "limit":2})),
+                ("find", json!({"text":"cargo", "max_bytes":1})),
+                ("stalls", json!({"idle_minutes":1})),
+            ];
+            let before = crate::model::COMPAT_BUILDS.with(|count| count.get());
+            let actual: Vec<_> = calls
+                .iter()
+                .map(|(tool, args)| native.call_at(tool, args, NOW))
+                .collect();
+            assert_eq!(
+                crate::model::COMPAT_BUILDS.with(|count| count.get()),
+                before
+            );
+            let snapshot = native.native.as_ref().unwrap().parts[0].data.clone();
+            native.call_at("list_sessions", &json!({}), NOW).unwrap();
+            assert!(Arc::ptr_eq(
+                &snapshot,
+                &native.native.as_ref().unwrap().parts[0].data
+            ));
+
+            for ((tool, args), answer) in calls.iter().zip(actual) {
+                assert_contract_reference("scan", revision, multiple, tool, args, answer);
+            }
+        }
+    }
+}
+
+#[test]
+fn local_query_conflicts_and_source_removal_use_native_snapshots() {
+    let first = Home::new("same");
+    let second = Home::new("same");
+    for home in [&first, &second] {
+        home.top(
+            "duplicate",
+            &[
+                human("duplicate", ts(1, 0), "Same native session ID"),
+                assistant("duplicate", ts(1, 1), vec![text("Evidence")]),
+            ],
+        );
+    }
+    let mut native = Query::with_machines(vec![
+        ("a".into(), first.options.clone()),
+        ("b".into(), second.options.clone()),
+    ]);
+    let before = crate::model::COMPAT_BUILDS.with(|count| count.get());
+    for tool in ["list_sessions", "get_session", "read_transcript"] {
+        let args = if tool == "list_sessions" {
+            json!({})
+        } else {
+            json!({"id":"duplicate"})
+        };
+        assert_eq!(
+            native.call_at(tool, &args, NOW).unwrap_err().code,
+            "id_conflict"
+        );
+    }
+    fs::remove_file(
+        second
+            .root
+            .join("claude/projects/-work-proj/duplicate.jsonl"),
+    )
+    .unwrap();
+    assert_eq!(
+        native.call_at("list_sessions", &json!({}), NOW).unwrap()["total"],
+        1
+    );
+    assert!(
+        native
+            .call_at("read_transcript", &json!({"id":"duplicate"}), NOW)
+            .is_ok()
+    );
+    assert_eq!(
+        crate::model::COMPAT_BUILDS.with(|count| count.get()),
+        before
+    );
+}
+
+/// Frozen responses from the retired production engine, captured before its
+/// removal. These preserve an independent oracle without retaining that engine.
+fn assert_contract_reference(
+    scope: &str,
+    scenario: u64,
+    multiple: bool,
+    tool: &str,
+    args: &Value,
+    actual: Result<Value, QueryError>,
+) {
+    static REFERENCE: std::sync::OnceLock<Value> = std::sync::OnceLock::new();
+    let reference = REFERENCE.get_or_init(|| {
+        let reference: Value =
+            serde_json::from_str(include_str!("contract-reference.json")).unwrap();
+        assert_eq!(reference["format"], "semon.query-contract-reference.v1");
+        assert_eq!(
+            reference["source_revision"],
+            "7ce1ac4d4f34af9143aa292b631a07fd797890b1"
+        );
+        assert_eq!(reference["clock"], NOW);
+        assert_eq!(reference["responses"].as_array().unwrap().len(), 134);
+        reference
+    });
+    let rows: Vec<_> = reference["responses"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|row| {
+            row["scope"] == scope
+                && row["scenario"] == scenario
+                && row["multiple"] == multiple
+                && row["tool"] == tool
+                && &row["args"] == args
+        })
+        .collect();
+    assert_eq!(
+        rows.len(),
+        1,
+        "unique {scope} reference: {scenario}, multiple={multiple}, {tool} {args}"
+    );
+    let actual = match actual {
+        Ok(value) => json!({"ok":value}),
+        Err(error) => json!({"err":error.to_json()}),
+    };
+    assert_eq!(
+        actual, rows[0]["response"],
+        "{scope}: {scenario}, multiple={multiple}, {tool} {args}"
     );
 }

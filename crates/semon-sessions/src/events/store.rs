@@ -20,6 +20,9 @@
 //! let Row { kept } = row;
 //! ```
 
+mod chunk_proofs;
+mod launch_calls;
+
 use std::{
     collections::BTreeMap,
     fmt, fs, io,
@@ -36,6 +39,7 @@ use rusqlite::{
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 use super::{
     BillingUsage, CACHE_VERSION, CodexUsageEvent, Event, FileIndex, IndexStore, Ledger, Loaded,
@@ -270,6 +274,13 @@ DELETE FROM usage_identity;
 DELETE FROM usage;
 DELETE FROM codex_usage;
 DELETE FROM files;
+DELETE FROM meta WHERE key GLOB 'archive_event_index:*';
+DELETE FROM meta WHERE key GLOB 'native_codex_header:*';
+DELETE FROM meta WHERE key GLOB 'native_claude_sidecar:*';
+DELETE FROM meta WHERE key GLOB 'native_source_chunks:*';
+DELETE FROM meta WHERE key GLOB 'native_parent_marker:*';
+DELETE FROM meta WHERE key GLOB 'native_tree_summary:*';
+DELETE FROM meta WHERE key GLOB 'native_launch_calls:*';
 ";
 
 const FILE_COLUMNS: &str = "file_id, path, dev, ino, size, mtime_ns, resume_at, head_sha256, \
@@ -471,6 +482,7 @@ thread_local! {
     /// Runs once, after the JSON cache is claimed and before the claimed
     /// file is checked and removed.
     pub(super) static AFTER_CLAIM: Hook = const { std::cell::RefCell::new(None) };
+    static AFTER_TREE_LEDGER: Hook = const { std::cell::RefCell::new(None) };
 }
 
 #[cfg(test)]
@@ -960,6 +972,86 @@ impl IndexStore for SqliteStore {
         self.publish_catalog(publication, expected_generation, None)
     }
 
+    fn session_slots(
+        &self,
+        row: &crate::model::summary::CatalogRow,
+        expected_generation: Option<&str>,
+        max: usize,
+    ) -> Result<Option<Vec<crate::slot_projection::SavedSlot>>, StoreError> {
+        let Some(expected) = expected_generation else {
+            return Ok(None);
+        };
+        // Optional metadata reuse must not add another writer-lock wait.
+        self.connection
+            .busy_timeout(Duration::ZERO)
+            .map_err(failure)?;
+        let result = (|| {
+            let tx = self.connection.unchecked_transaction().map_err(failure)?;
+            if !current(&tx).map_err(failure)? {
+                return Ok(None);
+            }
+            let coherent: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM meta WHERE key='catalog_generation' AND value=?1) AND EXISTS(SELECT 1 FROM meta WHERE key='slot_projection_catalog_generation' AND value=?1)",
+                [expected], |record| record.get(0),
+            ).map_err(failure)?;
+            if !coherent {
+                return Ok(None);
+            }
+            let header: Option<(String, u32, i64, Option<String>)> = tx.query_row(
+                "SELECT generation,version,total,source_generation FROM session_slot_projections WHERE session_key=?1",
+                [&row.key], |record| Ok((record.get(0)?, record.get(1)?, record.get(2)?, record.get(3)?)),
+            ).optional().map_err(failure)?;
+            let Some((generation, version, total, sources)) = header else {
+                return Ok(None);
+            };
+            let Ok(total) = usize::try_from(total) else {
+                return Ok(None);
+            };
+            let source_generation = crate::retention::source_generation(&row.sources)
+                .map_err(|error| StoreError::Data(error.to_string()))?;
+            if version != crate::slot_projection::VERSION
+                || total > max
+                || sources.as_deref() != Some(&source_generation)
+            {
+                return Ok(None);
+            }
+            let mut statement = tx.prepare(
+                "SELECT slot,CASE WHEN octet_length(metadata)<=65536 THEN metadata ELSE NULL END FROM session_slots WHERE session_key=?1 ORDER BY slot",
+            ).map_err(failure)?;
+            let rows = statement
+                .query_map([&row.key], |record| {
+                    Ok((record.get::<_, i64>(0)?, record.get::<_, String>(1)?))
+                })
+                .map_err(failure)?;
+            let mut metadata = Vec::with_capacity(total);
+            for record in rows {
+                let (slot, text) = record.map_err(failure)?;
+                if usize::try_from(slot).ok() != Some(metadata.len()) || metadata.len() >= total {
+                    return Ok(None);
+                }
+                metadata.push(text);
+            }
+            if metadata.len() != total
+                || crate::slot_projection::generation(&metadata, &row.sources)
+                    .map_err(|error| StoreError::Data(error.to_string()))?
+                    != generation
+            {
+                return Ok(None);
+            }
+            metadata
+                .into_iter()
+                .map(|text| {
+                    serde_json::from_str(&text).map_err(|error| StoreError::Data(error.to_string()))
+                })
+                .collect::<Result<Vec<_>, _>>()
+                .map(Some)
+        })();
+        self.connection
+            .busy_timeout(BUSY_TIMEOUT)
+            .map_err(failure)?;
+        result
+    }
+
     fn publish_partial_catalog(
         &mut self,
         publication: &crate::slot_projection::Publication<'_>,
@@ -996,6 +1088,14 @@ impl IndexStore for SqliteStore {
 
     fn load_file(&self, path: &str) -> Result<Option<(Ledger, FileIndex)>, StoreError> {
         self.read_one(path).map_err(failure)
+    }
+
+    fn load_tree(
+        &self,
+        path: &str,
+        expected: &Stat,
+    ) -> Result<Option<(Ledger, crate::native_tree::Metadata)>, StoreError> {
+        self.read_tree(path, expected).map_err(failure)
     }
 
     fn commit_file(
@@ -1153,9 +1253,7 @@ impl SqliteStore {
                 sources.insert(source.path.to_string_lossy().into_owned(), source);
             }
             let committed: i64 = if claims.is_none() {
-                transaction
-                    .query_row("SELECT COUNT(*) FROM files", [], |row| row.get(0))
-                    .map_err(failure)?
+                current_file_count(&transaction, &sources).map_err(failure)?
             } else {
                 i64::try_from(sources.len()).unwrap_or(-1)
             };
@@ -1447,29 +1545,19 @@ impl SqliteStore {
                     .map_err(|_| {
                         StoreError::Data("source projection metadata cannot serialize".into())
                     })?;
-                    let slot_generation = format!(
-                        "{:x}",
-                        Sha256::digest(
-                            format!(
-                                "{}|{}|{}",
-                                crate::slot_projection::VERSION,
-                                json(&metadata).map_err(failure)?,
-                                json(
-                                    &rows
-                                        .iter()
-                                        .find(|row| row.key == projection.key)
-                                        .expect("catalog membership checked")
-                                        .sources
-                                )
-                                .map_err(failure)?
-                            )
-                            .as_bytes()
-                        )
-                    );
+                    let slot_generation = crate::slot_projection::generation(
+                        &metadata,
+                        &rows
+                            .iter()
+                            .find(|row| row.key == projection.key)
+                            .expect("catalog membership checked")
+                            .sources,
+                    )
+                    .map_err(|error| StoreError::Data(error.to_string()))?;
                     let changed = transaction.execute(
                         "INSERT INTO session_slot_projections(session_key,generation,version,total,source_generation) VALUES (?1,?2,?3,?4,?5) ON CONFLICT(session_key) DO UPDATE SET generation=excluded.generation,version=excluded.version,total=excluded.total,source_generation=excluded.source_generation WHERE session_slot_projections.generation != excluded.generation OR session_slot_projections.version != excluded.version OR session_slot_projections.source_generation IS NOT excluded.source_generation",
                         params![projection.key,slot_generation,crate::slot_projection::VERSION,i64::try_from(metadata.len()).map_err(|_| StoreError::Data("slot count exceeds SQL range".into()))?,source_generation]).map_err(failure)?;
-                    if changed > 0 {
+                    if changed > 0 || projection.repair {
                         transaction
                             .execute(
                                 "DELETE FROM session_slots WHERE session_key=?1",
@@ -1676,7 +1764,50 @@ impl SqliteStore {
         })
     }
 
-    /// `path`'s committed ledger and index, read in one transaction.
+    /// Tree metadata and its ledger, without reading event/signal rows.
+    fn read_tree(
+        &self,
+        path: &str,
+        expected: &Stat,
+    ) -> rusqlite::Result<Option<(Ledger, crate::native_tree::Metadata)>> {
+        // The ledger and every evidence record belong to one SQLite snapshot.
+        let transaction = self.connection.unchecked_transaction()?;
+        if !current(&transaction)? {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        let Some((_, ledger)) = ledger_row(&transaction, path)? else {
+            return Ok(None);
+        };
+        if ledger.stat != *expected {
+            return Ok(None);
+        }
+        #[cfg(test)]
+        hook(&AFTER_TREE_LEDGER);
+        let mut statement = transaction.prepare(NATIVE_METADATA_VALUE)?;
+        let Some(summary) = read_tree_summary(&mut statement, path, &ledger)? else {
+            return Ok(None);
+        };
+        let Some(chunks) = chunk_proofs::read(&transaction, path, &ledger)? else {
+            return Ok(None);
+        };
+        let Some(marker) = read_parent_marker(&mut statement, path, &ledger)? else {
+            return Ok(None);
+        };
+        let Some(calls) = launch_calls::read(&transaction, path, &ledger)? else {
+            return Ok(None);
+        };
+        Ok(Some((
+            ledger,
+            crate::native_tree::Metadata {
+                summary,
+                chunks,
+                marker,
+                calls: std::sync::Arc::new(calls),
+            },
+        )))
+    }
+
+    /// `path`'s committed ledger and full index, read in one transaction.
     fn read_one(&self, path: &str) -> rusqlite::Result<Option<(Ledger, FileIndex)>> {
         // Dropped in reverse order, so the read transaction ends last.
         let transaction = self.connection.unchecked_transaction()?;
@@ -1739,6 +1870,7 @@ impl SqliteStore {
             ..super::DirtyRows::default()
         };
         write_file(&transaction, path, ledger, changes.unwrap_or(&full), index)?;
+        transaction.execute("DELETE FROM meta WHERE key=?1", [archive_index_key(path)])?;
         invalidate_catalog_source(&transaction, path, "changed")?;
         transaction.commit()?;
         Ok(Outcome::Written)
@@ -1755,7 +1887,16 @@ impl SqliteStore {
         }
         for (path, expected) in files {
             match (ledger_row(&transaction, path), expected) {
-                (Ok(Some((_, found))), Some(expected)) if found == *expected => {}
+                (Ok(Some((_, found))), Some(expected)) if found == *expected => {
+                    if archived_index(&transaction, path)?
+                        .is_some_and(|record| record.matches(&found))
+                    {
+                        // Explicit archive retention does not make this source
+                        // current. Complete catalog observation still retires
+                        // its membership; only the existing event rows survive.
+                        continue;
+                    }
+                }
                 // Moved on by another process, rewritten, or already gone.
                 (Ok(_), _) => continue,
                 (Err(error), _) if is_data_error(&error) => {}
@@ -1778,6 +1919,13 @@ impl SqliteStore {
                 )?;
             }
             transaction.execute("DELETE FROM files WHERE path = ?1", [path])?;
+            transaction.execute("DELETE FROM meta WHERE key=?1", [archive_index_key(path)])?;
+            transaction.execute("DELETE FROM meta WHERE key=?1", [codex_header_key(path)])?;
+            transaction.execute("DELETE FROM meta WHERE key=?1", [claude_sidecar_key(path)])?;
+            chunk_proofs::clear(&transaction, path)?;
+            launch_calls::clear(&transaction, path)?;
+            transaction.execute("DELETE FROM meta WHERE key=?1", [parent_marker_key(path)])?;
+            transaction.execute("DELETE FROM meta WHERE key=?1", [tree_summary_key(path)])?;
             invalidate_catalog_source(&transaction, path, "removed")?;
         }
         transaction.commit()?;
@@ -2130,6 +2278,299 @@ fn current(connection: &Connection) -> rusqlite::Result<bool> {
     Ok(schema == SCHEMA_VERSION && parser_version(connection)? == Some(CACHE_VERSION))
 }
 
+/// A versioned retention marker in the existing metadata region. Event rows
+/// remain in their original tables; no duplicate index or body store is created.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ArchivedIndex {
+    version: u32,
+    parser_version: u32,
+    source: crate::SessionSourceRef,
+    stat: Stat,
+    projection_version: u32,
+    projection_generation: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    native_header_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    source_chunks_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    parent_marker_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    launch_calls_sha256: Option<String>,
+}
+
+impl ArchivedIndex {
+    fn matches(&self, ledger: &Ledger) -> bool {
+        ((self.version == 1 && self.native_header_sha256.is_none())
+            || (self.version == 2
+                && self.source.root == "codex"
+                && self.native_header_sha256.as_ref().is_some_and(|hash| {
+                    hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_hexdigit())
+                }))
+            || (self.version == 3
+                && self.source.root == "claude"
+                && crate::native_sidecar::agent_path(Path::new(&self.source.path))
+                && self.native_header_sha256.as_ref().is_some_and(|hash| {
+                    hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_hexdigit())
+                }))
+            || (matches!(self.version, 4..=6)
+                && self.source_chunks_sha256.as_ref().is_some_and(|hash| {
+                    hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_hexdigit())
+                })
+                && (if self.source.root == "codex"
+                    || (self.source.root == "claude"
+                        && crate::native_sidecar::agent_path(Path::new(&self.source.path)))
+                {
+                    self.native_header_sha256.as_ref().is_some_and(|hash| {
+                        hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_hexdigit())
+                    })
+                } else {
+                    self.native_header_sha256.is_none()
+                })))
+            && (matches!(self.version, 4..=6) || self.source_chunks_sha256.is_none())
+            && (if matches!(self.version, 5 | 6)
+                && matches!(self.source.root.as_str(), "claude" | "codex")
+            {
+                self.parent_marker_sha256.as_ref().is_some_and(|hash| {
+                    hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_hexdigit())
+                })
+            } else {
+                self.parent_marker_sha256.is_none()
+            })
+            && (if self.version == 6 {
+                self.launch_calls_sha256.as_ref().is_some_and(|hash| {
+                    hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_hexdigit())
+                })
+            } else {
+                self.launch_calls_sha256.is_none()
+            })
+            && self.parser_version == CACHE_VERSION
+            && crate::is_input_path(&self.source.root, &self.source.path)
+            && !self.source.native_id.is_empty()
+            && self.source.native_id.len() <= 256
+            && self.stat == ledger.stat
+            && self.source.offset == ledger.offset
+            && self.source.prefix_sha256 == ledger.prefix
+            && self.source.tail_sha256 == ledger.tail
+    }
+}
+
+fn archive_index_key(path: &str) -> String {
+    format!("archive_event_index:{path}")
+}
+
+/// Complete publication still fences all current ledgers. Only exact archived
+/// generations absent from this observation may remain outside its membership;
+/// an unmarked or concurrently advanced source still causes a conflict.
+fn current_file_count(
+    connection: &Connection,
+    sources: &BTreeMap<String, &crate::model::summary::CatalogSource>,
+) -> rusqlite::Result<i64> {
+    let mut count: i64 =
+        connection.query_row("SELECT count(*) FROM files", [], |row| row.get(0))?;
+    let mut statement = connection.prepare(
+        "SELECT f.file_id,f.dev,f.ino,f.size,f.mtime_ns,f.resume_at,f.head_sha256,f.tail_sha256,f.ctime_ns,f.path,\
+         CASE WHEN octet_length(m.value)<=16384 THEN m.value ELSE NULL END \
+         FROM meta m JOIN files f ON f.path=substr(m.key,length(?1)+1) WHERE m.key GLOB ?2",
+    )?;
+    let mut rows = statement.query(["archive_event_index:", "archive_event_index:*"])?;
+    while let Some(row) = rows.next()? {
+        let path: String = row.get(9)?;
+        if sources.contains_key(&path) {
+            continue;
+        }
+        let encoded: Option<String> = row.get(10)?;
+        let record =
+            encoded.and_then(|encoded| serde_json::from_str::<ArchivedIndex>(&encoded).ok());
+        if let Some(record) = record {
+            let (_, ledger) = read_ledger(row)?;
+            if record.matches(&ledger) {
+                count -= 1;
+            }
+        }
+    }
+    Ok(count)
+}
+
+fn archived_index(connection: &Connection, path: &str) -> rusqlite::Result<Option<ArchivedIndex>> {
+    let encoded: Option<Option<String>> = connection.query_row(
+        "SELECT CASE WHEN octet_length(value)<=16384 THEN value ELSE NULL END FROM meta WHERE key=?1",
+        [archive_index_key(path)], |row| row.get(0),
+    ).optional()?;
+    Ok(encoded
+        .flatten()
+        .and_then(|value| serde_json::from_str(&value).ok()))
+}
+
+fn proof_ledger(proof: &crate::SessionSourceProof) -> Ledger {
+    Ledger {
+        stat: Stat {
+            dev: proof.dev,
+            ino: proof.ino,
+            size: proof.size,
+            modified_ns: proof.modified_ns,
+            changed_ns: proof.changed_ns,
+        },
+        offset: proof.source.offset,
+        prefix: proof.source.prefix_sha256,
+        tail: proof.source.tail_sha256,
+    }
+}
+
+/// Called under the caller's immediate transaction and source-bound projection
+/// check. Decode the entire selected index before agreeing to keep it; a ledger
+/// alone cannot stand in for missing or malformed event metadata.
+pub(crate) fn retain_archive_index(
+    connection: &Connection,
+    path: &str,
+    proof: &crate::SessionSourceProof,
+    projection: &crate::SourceProjectionReady,
+) -> rusqlite::Result<bool> {
+    if !current(connection)? {
+        return Ok(false);
+    }
+    let expected = proof_ledger(proof);
+    let native_header_sha256;
+    let source_chunks_sha256;
+    let parent_marker_sha256;
+    let launch_calls_sha256;
+    {
+        let mut readers = Readers::new(connection)?;
+        let mut statement =
+            connection.prepare(&format!("SELECT {FILE_COLUMNS} FROM files WHERE path=?1"))?;
+        let mut rows = statement.query([path])?;
+        let Some(row) = rows.next()? else {
+            return Ok(false);
+        };
+        let (_, ledger, index) = read_file(&mut readers, row)?;
+        if ledger != expected {
+            return Ok(false);
+        }
+        if index.source_chunks.is_none() {
+            return Ok(false);
+        }
+        let Some(digest) = chunk_proofs::digest(connection, path)? else {
+            return Ok(false);
+        };
+        source_chunks_sha256 = Some(digest);
+        if index.handoff_index.is_none() {
+            return Ok(false);
+        }
+        let Some(digest) = launch_calls::digest(connection, path)? else {
+            return Ok(false);
+        };
+        launch_calls_sha256 = Some(digest);
+        parent_marker_sha256 = if matches!(proof.source.root.as_str(), "claude" | "codex") {
+            if index.marker_index.is_none() {
+                return Ok(false);
+            }
+            let Some(digest) = parent_marker_digest(connection, path)? else {
+                return Ok(false);
+            };
+            Some(digest)
+        } else {
+            None
+        };
+        native_header_sha256 = if proof.source.root == "codex" {
+            if index
+                .codex_header
+                .as_ref()
+                .and_then(|header| header.native_id(Path::new(path)))
+                .as_deref()
+                != Some(proof.source.native_id.as_str())
+            {
+                return Ok(false);
+            }
+            let Some(digest) = codex_header_digest(connection, path)? else {
+                return Ok(false);
+            };
+            Some(digest)
+        } else if proof.source.root == "claude"
+            && crate::native_sidecar::agent_path(Path::new(path))
+        {
+            let Some(sidecar) = index.claude_sidecar.as_ref() else {
+                return Ok(false);
+            };
+            if !sidecar.verified(Path::new(path)) {
+                return Ok(false);
+            }
+            let Some(digest) = claude_sidecar_digest(connection, path)? else {
+                return Ok(false);
+            };
+            Some(digest)
+        } else {
+            None
+        };
+    }
+    let record = ArchivedIndex {
+        version: 6,
+        parser_version: CACHE_VERSION,
+        source: proof.source.clone(),
+        stat: expected.stat,
+        projection_version: projection.projection_version,
+        projection_generation: projection.projection_generation.clone(),
+        native_header_sha256,
+        source_chunks_sha256,
+        parent_marker_sha256,
+        launch_calls_sha256,
+    };
+    let encoded = serde_json::to_string(&record)
+        .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+    connection.execute("INSERT INTO meta(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value", params![archive_index_key(path), encoded])?;
+    Ok(true)
+}
+
+pub(crate) fn archive_index_retained(
+    connection: &Connection,
+    path: &str,
+    proof: &crate::SessionSourceProof,
+    projection: &crate::SourceProjectionReady,
+) -> rusqlite::Result<bool> {
+    if !current(connection)? {
+        return Ok(false);
+    }
+    let Some((_, ledger)) = ledger_row(connection, path)? else {
+        return Ok(false);
+    };
+    let Some(record) = archived_index(connection, path)? else {
+        return Ok(false);
+    };
+    let header_matches = if proof.source.root == "codex" {
+        record.version == 6
+            && record.native_header_sha256.is_some()
+            && record.native_header_sha256 == codex_header_digest(connection, path)?
+    } else if proof.source.root == "claude" && crate::native_sidecar::agent_path(Path::new(path)) {
+        let mut statement = connection.prepare(NATIVE_METADATA_VALUE)?;
+        let sidecar = read_claude_sidecar(&mut statement, path, &ledger)?;
+        record.version == 6
+            && record.native_header_sha256.is_some()
+            && record.native_header_sha256 == claude_sidecar_digest(connection, path)?
+            && sidecar.is_some_and(|sidecar| sidecar.verified(Path::new(path)))
+    } else {
+        record.version == 6
+    };
+    Ok(header_matches
+        && record.launch_calls_sha256.is_some()
+        && record.launch_calls_sha256 == launch_calls::digest(connection, path)?
+        && launch_calls::read(connection, path, &ledger)?.is_some()
+        && (if matches!(proof.source.root.as_str(), "claude" | "codex") {
+            let mut statement = connection.prepare(NATIVE_METADATA_VALUE)?;
+            record.parent_marker_sha256.is_some()
+                && record.parent_marker_sha256 == parent_marker_digest(connection, path)?
+                && read_parent_marker(&mut statement, path, &ledger)?.is_some()
+        } else {
+            record.parent_marker_sha256.is_none()
+        })
+        && record.source_chunks_sha256.is_some()
+        && record.source_chunks_sha256 == chunk_proofs::digest(connection, path)?
+        && chunk_proofs::read(connection, path, &ledger)?.is_some()
+        && ledger == proof_ledger(proof)
+        && record.matches(&ledger)
+        && record.source == proof.source
+        && record.projection_version == projection.projection_version
+        && record.projection_generation == projection.projection_generation)
+}
+
 // ---- Values --------------------------------------------------------------------------------
 
 /// SQLite integers are signed: a `u64` is stored by its bits, so every value
@@ -2179,6 +2620,283 @@ fn untag<T: DeserializeOwned>(column: usize, text: String) -> rusqlite::Result<T
     })
 }
 
+const NATIVE_METADATA_MAX: usize = 1024 * 1024;
+const NATIVE_METADATA_VALUE: &str =
+    "SELECT CASE WHEN octet_length(value)<=1048576 THEN value ELSE NULL END FROM meta WHERE key=?1";
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TreeSummaryRecord {
+    version: u32,
+    parser_version: u32,
+    ledger: String,
+    summary: crate::native_tree::Summary,
+}
+
+fn tree_summary_key(path: &str) -> String {
+    format!("native_tree_summary:{path}")
+}
+
+fn read_tree_summary(
+    statement: &mut Statement<'_>,
+    path: &str,
+    ledger: &Ledger,
+) -> rusqlite::Result<Option<crate::native_tree::Summary>> {
+    let encoded: Option<Option<String>> = statement
+        .query_row([tree_summary_key(path)], |row| row.get(0))
+        .optional()?;
+    Ok(encoded.flatten().and_then(|text| {
+        let record: TreeSummaryRecord = serde_json::from_str(&text).ok()?;
+        (record.version == 1
+            && record.parser_version == CACHE_VERSION
+            && record.ledger == header_ledger(ledger))
+        .then_some(record.summary)
+    }))
+}
+
+fn write_tree_summary(
+    transaction: &Transaction<'_>,
+    path: &str,
+    ledger: &Ledger,
+    summary: Option<&crate::native_tree::Summary>,
+) -> rusqlite::Result<()> {
+    let encoded = summary
+        .map(|summary| {
+            json(&TreeSummaryRecord {
+                version: 1,
+                parser_version: CACHE_VERSION,
+                ledger: header_ledger(ledger),
+                summary: summary.clone(),
+            })
+        })
+        .transpose()?;
+    if let Some(encoded) = encoded.filter(|text| text.len() <= NATIVE_METADATA_MAX) {
+        transaction.execute("INSERT INTO meta(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value", params![tree_summary_key(path), encoded])?;
+    } else {
+        // Never truncate native model labels, tool state or usage accounting.
+        transaction.execute("DELETE FROM meta WHERE key=?1", [tree_summary_key(path)])?;
+    }
+    Ok(())
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CodexHeaderRecord {
+    version: u32,
+    parser_version: u32,
+    ledger: String,
+    header: crate::native_header::CodexHeader,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ParentMarkerRecord {
+    version: u32,
+    parser_version: u32,
+    ledger: String,
+    index: crate::native_marker::Index,
+}
+
+fn parent_marker_key(path: &str) -> String {
+    format!("native_parent_marker:{path}")
+}
+
+fn read_parent_marker(
+    statement: &mut Statement<'_>,
+    path: &str,
+    ledger: &Ledger,
+) -> rusqlite::Result<Option<crate::native_marker::Index>> {
+    let encoded: Option<Option<String>> = statement
+        .query_row([parent_marker_key(path)], |row| row.get(0))
+        .optional()?;
+    Ok(encoded.flatten().and_then(|text| {
+        let record: ParentMarkerRecord = serde_json::from_str(&text).ok()?;
+        (record.version == 1
+            && record.parser_version == CACHE_VERSION
+            && record.ledger == header_ledger(ledger)
+            && record.index.valid(ledger))
+        .then_some(record.index)
+    }))
+}
+
+fn parent_marker_digest(connection: &Connection, path: &str) -> rusqlite::Result<Option<String>> {
+    let text: Option<Option<String>> = connection
+        .query_row(NATIVE_METADATA_VALUE, [parent_marker_key(path)], |row| {
+            row.get(0)
+        })
+        .optional()?;
+    Ok(text
+        .flatten()
+        .map(|text| format!("{:x}", Sha256::digest(text.as_bytes()))))
+}
+
+fn write_parent_marker(
+    transaction: &Transaction<'_>,
+    path: &str,
+    ledger: &Ledger,
+    index: Option<&crate::native_marker::Index>,
+) -> rusqlite::Result<()> {
+    if let Some(index) = index.filter(|index| index.valid(ledger)) {
+        let encoded = json(&ParentMarkerRecord {
+            version: 1,
+            parser_version: CACHE_VERSION,
+            ledger: header_ledger(ledger),
+            index: index.clone(),
+        })?;
+        transaction.execute("INSERT INTO meta(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value", params![parent_marker_key(path), encoded])?;
+    } else {
+        transaction.execute("DELETE FROM meta WHERE key=?1", [parent_marker_key(path)])?;
+    }
+    Ok(())
+}
+
+fn codex_header_key(path: &str) -> String {
+    format!("native_codex_header:{path}")
+}
+
+fn header_ledger(ledger: &Ledger) -> String {
+    let mut digest = Sha256::new();
+    for value in [
+        ledger.stat.dev,
+        ledger.stat.ino,
+        ledger.stat.size,
+        ledger.offset,
+    ] {
+        digest.update(value.to_be_bytes());
+    }
+    digest.update(ledger.stat.modified_ns.to_be_bytes());
+    digest.update([u8::from(ledger.stat.changed_ns.is_some())]);
+    if let Some(changed) = ledger.stat.changed_ns {
+        digest.update(changed.to_be_bytes());
+    }
+    digest.update(ledger.prefix);
+    digest.update(ledger.tail);
+    format!("{:x}", digest.finalize())
+}
+
+fn read_codex_header(
+    statement: &mut Statement<'_>,
+    path: &str,
+    ledger: &Ledger,
+) -> rusqlite::Result<Option<crate::native_header::CodexHeader>> {
+    let encoded: Option<Option<String>> = statement
+        .query_row([codex_header_key(path)], |row| row.get(0))
+        .optional()?;
+    Ok(encoded.flatten().and_then(|text| {
+        let record: CodexHeaderRecord = serde_json::from_str(&text).ok()?;
+        (record.version == 1
+            && record.parser_version == CACHE_VERSION
+            && record.ledger == header_ledger(ledger))
+        .then_some(record.header)
+    }))
+}
+
+fn codex_header_digest(connection: &Connection, path: &str) -> rusqlite::Result<Option<String>> {
+    let encoded: Option<Option<String>> = connection
+        .query_row(NATIVE_METADATA_VALUE, [codex_header_key(path)], |row| {
+            row.get(0)
+        })
+        .optional()?;
+    Ok(encoded
+        .flatten()
+        .map(|value| format!("{:x}", Sha256::digest(value.as_bytes()))))
+}
+
+fn write_codex_header(
+    transaction: &Transaction<'_>,
+    path: &str,
+    ledger: &Ledger,
+    header: Option<&crate::native_header::CodexHeader>,
+) -> rusqlite::Result<()> {
+    let encoded = header
+        .map(|header| {
+            json(&CodexHeaderRecord {
+                version: 1,
+                parser_version: CACHE_VERSION,
+                ledger: header_ledger(ledger),
+                header: header.clone(),
+            })
+        })
+        .transpose()?;
+    if let Some(encoded) = encoded.filter(|text| text.len() <= NATIVE_METADATA_MAX) {
+        transaction.execute("INSERT INTO meta(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value", params![codex_header_key(path), encoded])?;
+    } else {
+        // Current readers keep their complete in-memory header. An oversized
+        // projection cannot authorize eviction; do not truncate native fields.
+        transaction.execute("DELETE FROM meta WHERE key=?1", [codex_header_key(path)])?;
+    }
+    Ok(())
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ClaudeSidecarRecord {
+    version: u32,
+    parser_version: u32,
+    ledger: String,
+    sidecar: crate::native_sidecar::ClaudeSidecar,
+}
+
+fn claude_sidecar_key(path: &str) -> String {
+    format!("native_claude_sidecar:{path}")
+}
+
+fn read_claude_sidecar(
+    statement: &mut Statement<'_>,
+    path: &str,
+    ledger: &Ledger,
+) -> rusqlite::Result<Option<crate::native_sidecar::ClaudeSidecar>> {
+    let encoded: Option<Option<String>> = statement
+        .query_row([claude_sidecar_key(path)], |row| row.get(0))
+        .optional()?;
+    Ok(encoded.flatten().and_then(|text| {
+        let record: ClaudeSidecarRecord = serde_json::from_str(&text).ok()?;
+        (record.version == 1
+            && record.parser_version == CACHE_VERSION
+            && record.ledger == header_ledger(ledger)
+            && record.sidecar.valid())
+        .then_some(record.sidecar)
+    }))
+}
+
+fn claude_sidecar_digest(connection: &Connection, path: &str) -> rusqlite::Result<Option<String>> {
+    let encoded: Option<Option<String>> = connection
+        .query_row(NATIVE_METADATA_VALUE, [claude_sidecar_key(path)], |row| {
+            row.get(0)
+        })
+        .optional()?;
+    Ok(encoded
+        .flatten()
+        .map(|value| format!("{:x}", Sha256::digest(value.as_bytes()))))
+}
+
+fn write_claude_sidecar(
+    transaction: &Transaction<'_>,
+    path: &str,
+    ledger: &Ledger,
+    sidecar: Option<&crate::native_sidecar::ClaudeSidecar>,
+) -> rusqlite::Result<()> {
+    if sidecar.is_none() && !crate::native_sidecar::agent_path(Path::new(path)) {
+        return Ok(());
+    }
+    let encoded = sidecar
+        .map(|sidecar| {
+            json(&ClaudeSidecarRecord {
+                version: 1,
+                parser_version: CACHE_VERSION,
+                ledger: header_ledger(ledger),
+                sidecar: sidecar.clone(),
+            })
+        })
+        .transpose()?;
+    if let Some(encoded) = encoded.filter(|text| text.len() <= NATIVE_METADATA_MAX) {
+        transaction.execute("INSERT INTO meta(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value", params![claude_sidecar_key(path), encoded])?;
+    } else {
+        transaction.execute("DELETE FROM meta WHERE key=?1", [claude_sidecar_key(path)])?;
+    }
+    Ok(())
+}
+
 /// Rows of one sequence must number 0, 1, 2, …; anything else was written
 /// by something else, and the file is read from its log again.
 fn gap(what: &str) -> rusqlite::Error {
@@ -2222,15 +2940,21 @@ fn read_ledger(row: &Row<'_>) -> rusqlite::Result<(i64, Ledger)> {
 
 /// The per-file child queries, prepared once per read.
 struct Readers<'c> {
+    connection: &'c Connection,
     events: Statement<'c>,
     signals: Statement<'c>,
     usage: Statement<'c>,
     codex_usage: Statement<'c>,
+    codex_header: Statement<'c>,
+    claude_sidecar: Statement<'c>,
+    parent_marker: Statement<'c>,
+    tree_summary: Statement<'c>,
 }
 
 impl<'c> Readers<'c> {
     fn new(connection: &'c Connection) -> rusqlite::Result<Self> {
         Ok(Self {
+            connection,
             events: connection.prepare(&format!(
                 "SELECT {EVENT_COLUMNS} FROM events WHERE file_id = ?1 ORDER BY extra, seq"
             ))?,
@@ -2243,6 +2967,10 @@ impl<'c> Readers<'c> {
             codex_usage: connection.prepare(&format!(
                 "SELECT {CODEX_USAGE_COLUMNS} FROM codex_usage WHERE file_id = ?1 ORDER BY seq"
             ))?,
+            codex_header: connection.prepare(NATIVE_METADATA_VALUE)?,
+            claude_sidecar: connection.prepare(NATIVE_METADATA_VALUE)?,
+            parent_marker: connection.prepare(NATIVE_METADATA_VALUE)?,
+            tree_summary: connection.prepare(NATIVE_METADATA_VALUE)?,
         })
     }
 }
@@ -2252,6 +2980,8 @@ fn read_file(
     readers: &mut Readers<'_>,
     row: &Row<'_>,
 ) -> rusqlite::Result<(String, Ledger, FileIndex)> {
+    #[cfg(test)]
+    super::FILE_READS.with(|reads| reads.set(reads.get() + 1));
     let file_id: i64 = row.get(0)?;
     let path: String = row.get(1)?;
     let ledger = Ledger {
@@ -2322,6 +3052,16 @@ fn read_file(
 
     let index = FileIndex {
         dirty_rows: None,
+        source_chunks: chunk_proofs::read(readers.connection, &path, &ledger)?,
+        marker_index: read_parent_marker(&mut readers.parent_marker, &path, &ledger)?,
+        tree_summary: read_tree_summary(&mut readers.tree_summary, &path, &ledger)?,
+        handoff_index: launch_calls::read(readers.connection, &path, &ledger)?,
+        codex_header: read_codex_header(&mut readers.codex_header, &path, &ledger)?,
+        claude_sidecar: if crate::native_sidecar::agent_path(Path::new(&path)) {
+            read_claude_sidecar(&mut readers.claude_sidecar, &path, &ledger)?
+        } else {
+            None
+        },
         events,
         extras,
         signals,
@@ -2538,6 +3278,12 @@ fn write_file(
 ) -> rusqlite::Result<()> {
     let FileIndex {
         dirty_rows: _,
+        tree_summary,
+        source_chunks,
+        marker_index,
+        handoff_index,
+        codex_header,
+        claude_sidecar,
         events,
         extras,
         signals,
@@ -2576,6 +3322,12 @@ fn write_file(
         prefix,
         tail,
     } = ledger;
+    write_codex_header(transaction, path, ledger, codex_header.as_ref())?;
+    write_tree_summary(transaction, path, ledger, tree_summary.as_ref())?;
+    write_claude_sidecar(transaction, path, ledger, claude_sidecar.as_ref())?;
+    chunk_proofs::write(transaction, path, ledger, source_chunks.as_deref())?;
+    write_parent_marker(transaction, path, ledger, marker_index.as_ref())?;
+    launch_calls::write(transaction, path, ledger, handoff_index.as_ref())?;
     let rate_limits = rate_limits.as_ref().map(json).transpose()?;
     let file_id: i64 = transaction.query_row(
         PUT_FILE,
@@ -3034,6 +3786,63 @@ mod tests {
         }
     }
 
+    #[test]
+    fn tree_metadata_and_evidence_share_one_snapshot_during_concurrent_commit() {
+        let root = scratch("tree-snapshot");
+        let path = root.join("index.sqlite3");
+        let (mut store, _) = opened(&path);
+        let index = |model: &str| FileIndex {
+            tree_summary: Some(crate::native_tree::Summary {
+                models: [model.to_owned()].into_iter().collect(),
+                ..Default::default()
+            }),
+            source_chunks: Some(std::sync::Arc::new(crate::source_chunks::Chunks {
+                offset: 3,
+                hashes: vec![[1; 32]],
+            })),
+            marker_index: Some(crate::native_marker::Index::default()),
+            handoff_index: Some(crate::native_handoff::Index::default()),
+            ..Default::default()
+        };
+        let old = ledger(1);
+        let new = ledger(2);
+        assert_eq!(
+            store
+                .write_one("a.jsonl", None, None, &old, &index("old"))
+                .unwrap(),
+            Outcome::Written
+        );
+        let (mut writer, _) = opened(&path);
+        let old_copy = old.clone();
+        let new_copy = new.clone();
+        AFTER_TREE_LEDGER.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                assert_eq!(
+                    writer
+                        .write_one("a.jsonl", Some(&old_copy), None, &new_copy, &index("new"))
+                        .unwrap(),
+                    Outcome::Written
+                );
+            }))
+        });
+        let reads = super::super::FILE_READS.with(std::cell::Cell::get);
+        let (observed, metadata) = store.read_tree("a.jsonl", &old.stat).unwrap().unwrap();
+        assert_eq!(observed, old);
+        assert_eq!(
+            metadata.summary.models,
+            ["old".to_owned()].into_iter().collect()
+        );
+        assert!(store.read_tree("a.jsonl", &old.stat).unwrap().is_none());
+        let (observed, metadata) = store.read_tree("a.jsonl", &new.stat).unwrap().unwrap();
+        assert_eq!(observed, new);
+        assert_eq!(
+            metadata.summary.models,
+            ["new".to_owned()].into_iter().collect()
+        );
+        assert_eq!(super::super::FILE_READS.with(std::cell::Cell::get), reads);
+        fs::remove_dir_all(root).unwrap();
+    }
+
     /// A file index with every field set, and every value at an edge where
     /// one exists. Written without `..`: a field added to `FileIndex` or
     /// `Event` fails to compile here until it is set, and the round trip
@@ -3041,6 +3850,12 @@ mod tests {
     fn full() -> FileIndex {
         FileIndex {
             dirty_rows: None,
+            source_chunks: None,
+            marker_index: Some(crate::native_marker::Index::default()),
+            tree_summary: None,
+            handoff_index: Some(crate::native_handoff::Index::default()),
+            codex_header: Some(crate::native_header::CodexHeader::default()),
+            claude_sidecar: None,
             events: vec![
                 Event {
                     k: Kind::Tool,
@@ -3717,8 +4532,13 @@ mod tests {
         let root = scratch("change-time-migration");
         let path = root.join("index.sqlite3");
         let (mut store, _) = opened(&path);
+        // This historical schema did not persist portable native metadata.
+        let mut index = full();
+        index.codex_header = None;
+        index.marker_index = None;
+        index.handoff_index = None;
         store
-            .write_one("original.jsonl", None, None, &ledger(1), &full())
+            .write_one("original.jsonl", None, None, &ledger(1), &index)
             .unwrap();
         store
             .connection
@@ -3730,7 +4550,7 @@ mod tests {
         let mut expected = ledger(1);
         expected.stat.changed_ns = None;
         assert_eq!(migrated, expected);
-        assert_eq!(format!("{original:?}"), format!("{:?}", full()));
+        assert_eq!(format!("{original:?}"), format!("{index:?}"));
         assert_eq!(
             versions(&store.connection).unwrap(),
             (SCHEMA_VERSION, Some(CACHE_VERSION))

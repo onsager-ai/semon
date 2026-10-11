@@ -1,0 +1,521 @@
+//! Native evidence ownership, independent of Viewer transport and refresh workers.
+//! Viewer, Catalog and Query share one complete source index per machine.
+use crate::{
+    Node, Options,
+    events::EventCache,
+    model::{self, Texts},
+    proc_start,
+};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fs, io,
+    path::{Path, PathBuf},
+    sync::{
+        Arc, Mutex, MutexGuard, OnceLock, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::{Instant, UNIX_EPOCH},
+};
+
+pub(crate) struct NativeEvidence {
+    pub(crate) options: Options,
+    pub(crate) work: Mutex<Work>,
+    pub(crate) catalog_demand: AtomicBool,
+    query: RwLock<Option<Arc<QueryCache>>>,
+    closed: AtomicBool,
+}
+
+/// Native source ownership for an admitted machine set. This constructs no
+/// Viewer state, refresh pool or worker and opens no files. Embedding hosts keep
+/// their authorization, admission and source-custody guards around actual reads.
+/// Options are preserved, including output windows and received machine facts.
+pub struct SessionSources {
+    pub(crate) machines: Vec<(String, Arc<NativeEvidence>)>,
+    views: Vec<OnceLock<Arc<crate::viewer::MachineView>>>,
+    pub(crate) inventory: Arc<crate::SessionSourceInventory>,
+    retired: AtomicBool,
+}
+
+impl SessionSources {
+    pub fn with_machines(machines: Vec<(String, Options)>) -> Self {
+        let local = machines.len() == 1 && machines[0].0.is_empty();
+        let inventory = crate::SessionSourceInventory::new(machines.iter().map(|(key, _)| {
+            let key = if local {
+                "local".to_owned()
+            } else {
+                key.clone()
+            };
+            (key.clone(), key)
+        }));
+        let views = machines.iter().map(|_| OnceLock::new()).collect();
+        Self {
+            machines: machines
+                .into_iter()
+                .map(|(key, options)| (key, NativeEvidence::new(options)))
+                .collect(),
+            views,
+            inventory: Arc::new(inventory),
+            retired: AtomicBool::new(false),
+        }
+    }
+
+    /// Stop native refreshes without blocking. A warm query retains its last
+    /// cohort; its source-backed reads still verify evidence independently.
+    pub fn retire(&self) {
+        self.retired.store(true, Ordering::Release);
+        for (_, evidence) in &self.machines {
+            evidence.retire();
+        }
+        for view in self.views.iter().filter_map(OnceLock::get) {
+            view.retire();
+        }
+    }
+
+    /// Drain native preparation before custody changes. The host first prevents
+    /// new requests and closes attached Viewer transports, if any. This drains
+    /// the shared native/catalog producers too. Async hosts call it off-reactor.
+    pub fn close(&self) {
+        self.retire();
+        for view in self.views.iter().filter_map(OnceLock::get) {
+            view.close();
+        }
+        for (_, evidence) in &self.machines {
+            drop(lock(&evidence.work));
+        }
+    }
+
+    /// Queue the existing source-scoped Catalog producer without a ViewerCore
+    /// or native body reads. The host authorizes custody and supplies its bounded
+    /// refresh pool. Query and any later Viewer borrow this same producer/index.
+    pub fn demand_catalog_source(
+        &self,
+        source_key: &str,
+        pool: Arc<crate::RefreshPool>,
+    ) -> io::Result<bool> {
+        if self.is_retired() || !self.inventory.valid() {
+            return Ok(false);
+        }
+        let Some(index) = self.inventory.index(source_key) else {
+            return Ok(false);
+        };
+        let view = self.view(index);
+        view.set_pool(pool);
+        view.set_refresh(crate::Refresh::OnInvalidate);
+        if self.is_retired() {
+            view.retire();
+            return Ok(false);
+        }
+        view.note_catalog_read()?;
+        Ok(true)
+    }
+
+    pub(crate) fn is_retired(&self) -> bool {
+        self.retired.load(Ordering::Acquire)
+    }
+
+    /// Notify an already demanded source producer after an authorized push.
+    /// This never constructs a producer or starts compatibility warming.
+    /// True means the source is configured and open, even before demand.
+    pub fn invalidate(&self, machine: &str) -> bool {
+        if self.is_retired() {
+            return false;
+        }
+        let Some(index) = self.machines.iter().position(|(key, _)| key == machine) else {
+            return false;
+        };
+        if self.machines[index].1.closed.load(Ordering::Acquire) {
+            return false;
+        }
+        let Some(view) = self.views[index].get() else {
+            return true;
+        };
+        view.invalidate();
+        true
+    }
+
+    fn view(&self, index: usize) -> Arc<crate::viewer::MachineView> {
+        self.views[index]
+            .get_or_init(|| {
+                crate::viewer::MachineView::from_evidence(self.machines[index].1.clone())
+            })
+            .clone()
+    }
+
+    pub(crate) fn machine_views(&self) -> Vec<(String, Arc<crate::viewer::MachineView>)> {
+        self.machines
+            .iter()
+            .enumerate()
+            .map(|(index, (key, _))| (key.clone(), self.view(index)))
+            .collect()
+    }
+
+    pub(crate) fn query_at(&self, now: i64) -> io::Result<crate::union::QueryRead> {
+        let parts = self
+            .machines
+            .iter()
+            .map(|(key, evidence)| Ok((key.clone(), evidence.query_at(now)?)))
+            .collect::<io::Result<Vec<_>>>()?;
+        Ok(crate::union::QueryRead::new(parts, usize::MAX))
+    }
+}
+
+impl NativeEvidence {
+    /// Construction is lazy: no source, cache or refresh worker is opened.
+    pub(crate) fn new(options: Options) -> Arc<Self> {
+        Arc::new(Self {
+            options,
+            work: Mutex::default(),
+            catalog_demand: AtomicBool::new(false),
+            query: RwLock::default(),
+            closed: AtomicBool::new(false),
+        })
+    }
+
+    /// Retired sources can only answer from their last verified cohort.
+    /// The embedding host still waits out readers before removing source custody.
+    pub(crate) fn retire(&self) {
+        self.closed.store(true, Ordering::Release);
+    }
+
+    /// Initialize the source index and publish a bounded cold catalog page.
+    pub(crate) fn prepare_events(&self, work: &mut Work, now: i64) -> io::Result<()> {
+        if work.events.is_none() {
+            work.events = Some(match EventCache::open_scoped(&self.options.cache) {
+                Ok(cache) => cache,
+                Err(error) if self.catalog_demand.load(Ordering::Relaxed) => {
+                    return Err(io::Error::other(error));
+                }
+                Err(_) => EventCache::open(&self.options.cache),
+            });
+        }
+        let cache = work.events.as_mut().expect("event cache initialized");
+        // Cold catalog demand publishes a small explicit source batch before the
+        // complete native observer reads unrelated history. Source discovery is
+        // still a filesystem metadata walk; incomplete native lineage cannot grant
+        // control authority until the subsequent complete reconciliation.
+        if self.catalog_demand.load(Ordering::Relaxed)
+            && !self.options.scan_window
+            && cache.is_scoped()
+            && cache.session_catalog_generation().is_none()
+        {
+            let mut inputs = crate::inputs::inputs(&self.options)?;
+            inputs.retain(|input| input.path.ends_with(".jsonl"));
+            inputs.sort_by_cached_key(|input| {
+                std::cmp::Reverse(
+                    fs::metadata(input.full_path(&self.options))
+                        .and_then(|metadata| metadata.modified())
+                        .ok(),
+                )
+            });
+            inputs.truncate(64);
+            if !inputs.is_empty() {
+                let prepared = model::prepare_sources(&self.options, cache, &inputs, now)?;
+                match cache.publish_partial_catalog(&prepared)? {
+                    crate::events::Outcome::Written => {}
+                    _ => {
+                        return Err(io::Error::other(
+                            "initial native catalog publication changed; retry observation",
+                        ));
+                    }
+                }
+                cache.end_scan();
+            }
+        }
+        // The index commits each file's change as it reads it: nothing is
+        // left to save.
+        let mut dirty = false;
+        if self.options.facts.is_none() {
+            cache.refresh_reported_runs(&self.options.claude_json, now, &mut dirty);
+        }
+        Ok(())
+    }
+
+    /// Native queries refresh this owner's source cache and coherent cohort.
+    /// This owner has no compatibility transport or background refresh workers.
+    pub(crate) fn query_at(&self, now: i64) -> io::Result<Arc<model::QueryData>> {
+        let retained = || {
+            self.closed.load(Ordering::Acquire).then(|| {
+                read_lock(&self.query)
+                    .as_ref()
+                    .map(|query| query.data.clone())
+                    .ok_or_else(|| {
+                        io::Error::new(io::ErrorKind::BrokenPipe, "native query source is closed")
+                    })
+            })
+        };
+        if let Some(data) = retained() {
+            return data;
+        }
+        let unchanged = || {
+            let query = read_lock(&self.query).clone();
+            query.filter(|query| !query.snapshot.changed(&self.options))
+        };
+        if let Some(query) = unchanged() {
+            return Ok(query.data.clone());
+        }
+        let mut work = lock(&self.work);
+        if let Some(data) = retained() {
+            return data;
+        }
+        if let Some(query) = unchanged() {
+            return Ok(query.data.clone());
+        }
+        let work = &mut *work;
+        self.prepare_events(work, now)?;
+        let cache = work.events.as_mut().expect("event cache initialized");
+        let mut snapshot = Snapshot::capture_pids(&self.options, BTreeSet::new(), cache.paths());
+        let data = model::build_query(&self.options, cache, &mut false, &mut work.texts, now)?;
+        if self.options.facts.is_none() {
+            snapshot.pids = data
+                .pids
+                .iter()
+                .map(|pid| (*pid, proc_start(&self.options.proc_root, *pid)))
+                .collect();
+        }
+        let data = Arc::new(data);
+        *write_lock(&self.query) = Some(Arc::new(QueryCache {
+            data: data.clone(),
+            snapshot,
+        }));
+        Ok(data)
+    }
+}
+
+struct QueryCache {
+    data: Arc<model::QueryData>,
+    snapshot: Snapshot,
+}
+
+fn lock<T>(value: &Mutex<T>) -> MutexGuard<'_, T> {
+    value.lock().unwrap_or_else(PoisonError::into_inner)
+}
+fn read_lock<T>(value: &RwLock<T>) -> RwLockReadGuard<'_, T> {
+    value.read().unwrap_or_else(PoisonError::into_inner)
+}
+fn write_lock<T>(value: &RwLock<T>) -> RwLockWriteGuard<'_, T> {
+    value.write().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// The single native source index and producer state shared by supported readers.
+#[derive(Default)]
+pub(crate) struct Work {
+    pub(crate) events: Option<EventCache>,
+    pub(crate) texts: Texts,
+    pub(crate) catalog_snapshot: Option<Snapshot>,
+    /// When the last rebuild of either model started.
+    pub(crate) built_at: Option<Instant>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Stamp {
+    kind: fs::FileType,
+    size: u64,
+    modified_ns: u128,
+}
+
+fn stamp(path: &Path) -> Option<Stamp> {
+    let metadata = fs::symlink_metadata(path).ok()?;
+    Some(Stamp {
+        kind: metadata.file_type(),
+        size: metadata.len(),
+        modified_ns: metadata
+            .modified()
+            .ok()?
+            .duration_since(UNIX_EPOCH)
+            .ok()?
+            .as_nanos(),
+    })
+}
+
+pub(crate) struct Snapshot {
+    pub(crate) watched: BTreeMap<PathBuf, Option<Stamp>>,
+    /// The Codex writer-lock files' identities, and the `/proc/locks` lines
+    /// that name them. Other locks on the machine (a browser's, SQLite's)
+    /// come and go all the time and change nothing here.
+    lock_ids: BTreeSet<(u64, u64, u64)>,
+    locks: Option<String>,
+    pub(crate) pids: BTreeMap<u32, Option<u64>>,
+}
+
+/// A `/proc/locks` line's `major:minor:inode`, as `lock_pid` reads it.
+fn lock_key(line: &str) -> Option<(u64, u64, u64)> {
+    let words: Vec<_> = line.split_whitespace().collect();
+    let parts: Vec<_> = words.get(5)?.split(':').collect();
+    if parts.len() != 3 {
+        return None;
+    }
+    Some((
+        u64::from_str_radix(parts[0], 16).ok()?,
+        u64::from_str_radix(parts[1], 16).ok()?,
+        parts[2].parse().ok()?,
+    ))
+}
+
+/// The lines of `/proc/locks` on the writer-lock files, and nothing else.
+fn writer_locks(options: &Options, ids: &BTreeSet<(u64, u64, u64)>) -> Option<String> {
+    let locks = fs::read_to_string(options.proc_root.join("locks")).ok()?;
+    Some(
+        locks
+            .lines()
+            .filter(|line| lock_key(line).is_some_and(|key| ids.contains(&key)))
+            .collect::<Vec<_>>()
+            .join("\n"),
+    )
+}
+
+fn lock_ids(options: &Options) -> BTreeSet<(u64, u64, u64)> {
+    let mut ids = BTreeSet::new();
+    #[cfg(unix)]
+    if let Ok(entries) = fs::read_dir(options.codex_home.join("thread-writer-locks")) {
+        for entry in entries.flatten() {
+            if entry.path().extension().is_some_and(|ext| ext == "lock")
+                && let Ok(id) = crate::lock_identity(&entry.path())
+            {
+                ids.insert(id);
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = options;
+    ids
+}
+
+fn watch_tree(path: &Path, suffixes: &[&str], watched: &mut BTreeMap<PathBuf, Option<Stamp>>) {
+    watched.insert(path.to_owned(), stamp(path));
+    if fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
+        if let Some(parent) = path.parent() {
+            watched
+                .entry(parent.to_owned())
+                .or_insert_with(|| stamp(parent));
+        }
+        return;
+    }
+    let Ok(entries) = fs::read_dir(path) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Ok(kind) = entry.file_type() else {
+            continue;
+        };
+        // A symbolic link is neither: it is never followed.
+        if kind.is_dir() {
+            watch_tree(&path, suffixes, watched);
+        } else if kind.is_file()
+            && path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| suffixes.iter().any(|suffix| name.ends_with(suffix)))
+        {
+            watched.insert(path.clone(), stamp(&path));
+        }
+    }
+}
+
+fn node_pids(nodes: &[Node], output: &mut BTreeSet<u32>) {
+    for node in nodes {
+        if let Some(pid) = node.pid {
+            output.insert(pid);
+        }
+        node_pids(&node.children, output);
+    }
+}
+
+impl Snapshot {
+    pub(crate) fn capture(options: &Options, roots: &[Node], index: &EventCache) -> Self {
+        let mut ids = BTreeSet::new();
+        node_pids(roots, &mut ids);
+        Self::capture_pids(options, ids, index.paths())
+    }
+
+    pub(crate) fn capture_pids<'a>(
+        options: &Options,
+        ids: BTreeSet<u32>,
+        paths: impl Iterator<Item = &'a str>,
+    ) -> Self {
+        let mut watched = BTreeMap::new();
+        watch_tree(
+            &options.claude_home.join("projects"),
+            &[".jsonl", ".meta.json"],
+            &mut watched,
+        );
+        watch_tree(
+            &options.claude_home.join("sessions"),
+            &[".json"],
+            &mut watched,
+        );
+        for root in crate::inputs::codex_rollout_dirs(options) {
+            watch_tree(&root, &[".jsonl"], &mut watched);
+        }
+        watch_tree(
+            &options.codex_home.join("thread-writer-locks"),
+            &[".lock"],
+            &mut watched,
+        );
+        let copilot_root = options.copilot_home.join("session-state");
+        watched.insert(copilot_root.clone(), stamp(&copilot_root));
+        if let Ok(entries) = fs::read_dir(&copilot_root) {
+            for entry in entries
+                .flatten()
+                .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+            {
+                let dir = entry.path();
+                watched.insert(dir.clone(), stamp(&dir));
+                let file = dir.join("events.jsonl");
+                watched.insert(file.clone(), stamp(&file));
+            }
+        }
+        watched.insert(options.claude_json.clone(), stamp(&options.claude_json));
+        for path in paths {
+            let path = PathBuf::from(path);
+            watched.entry(path.clone()).or_insert_with(|| stamp(&path));
+        }
+        // With a facts file, it is the machine: nothing here reads `/proc`.
+        if let Some(facts) = &options.facts {
+            watched.insert(facts.clone(), stamp(facts));
+            return Self {
+                watched,
+                lock_ids: BTreeSet::new(),
+                locks: None,
+                pids: BTreeMap::new(),
+            };
+        }
+        for name in [
+            "session_index.jsonl",
+            "state_5.sqlite",
+            "state_5.sqlite-wal",
+        ] {
+            let path = options.codex_home.join(name);
+            watched.insert(path.clone(), stamp(&path));
+        }
+        let pids = ids
+            .into_iter()
+            .map(|pid| (pid, proc_start(&options.proc_root, pid)))
+            .collect();
+        let lock_ids = lock_ids(options);
+        Self {
+            watched,
+            locks: writer_locks(options, &lock_ids),
+            lock_ids,
+            pids,
+        }
+    }
+
+    pub(crate) fn changed(&self, options: &Options) -> bool {
+        if self
+            .watched
+            .iter()
+            .any(|(path, original)| stamp(path) != *original)
+        {
+            return true;
+        }
+        if options.facts.is_some() {
+            return false;
+        }
+        writer_locks(options, &self.lock_ids) != self.locks
+            || self
+                .pids
+                .iter()
+                .any(|(pid, original)| proc_start(&options.proc_root, *pid) != *original)
+    }
+}
