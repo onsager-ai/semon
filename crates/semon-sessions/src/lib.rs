@@ -63,7 +63,6 @@ pub mod pricing;
 mod query;
 mod read_path;
 pub(crate) use read_path::open_input;
-mod model_delta;
 mod native_field;
 mod native_handoff;
 mod native_header;
