@@ -1065,8 +1065,8 @@ impl IndexStore for SqliteStore {
         publication: &crate::slot_projection::Publication<'_>,
         expected_generation: Option<&str>,
         claims: &[(String, Option<i64>)],
-    ) -> Result<Outcome, StoreError> {
-        self.publish_catalog(publication, expected_generation, Some(claims), false)
+    ) -> Result<(Outcome, Option<String>), StoreError> {
+        self.publish_catalog_with_generation(publication, expected_generation, Some(claims), false)
     }
 
     fn publish_isolated_catalog(
@@ -1288,6 +1288,22 @@ impl SqliteStore {
         claims: Option<&[(String, Option<i64>)]>,
         preserve_complete: bool,
     ) -> Result<Outcome, StoreError> {
+        self.publish_catalog_with_generation(
+            publication,
+            expected_generation,
+            claims,
+            preserve_complete,
+        )
+        .map(|(outcome, _)| outcome)
+    }
+
+    fn publish_catalog_with_generation(
+        &mut self,
+        publication: &crate::slot_projection::Publication<'_>,
+        expected_generation: Option<&str>,
+        claims: Option<&[(String, Option<i64>)]>,
+        preserve_complete: bool,
+    ) -> Result<(Outcome, Option<String>), StoreError> {
         let rows = publication.rows;
         if claims.is_some_and(|claims| claims.len() > 64) || (claims.is_some() && rows.len() > 64) {
             return Err(StoreError::Data(
@@ -1304,6 +1320,7 @@ impl SqliteStore {
         self.connection
             .busy_timeout(Duration::ZERO)
             .map_err(failure)?;
+        let mut published = None;
         let result = (|| {
             let transaction = self
                 .connection
@@ -1723,12 +1740,13 @@ impl SqliteStore {
                 )
                 .map_err(failure)?;
             transaction.commit().map_err(failure)?;
+            published = Some(generation);
             Ok(Outcome::Written)
         })();
         self.connection
             .busy_timeout(BUSY_TIMEOUT)
             .map_err(failure)?;
-        result
+        result.map(|outcome| (outcome, published))
     }
 
     fn attempt(path: &Path, legacy: Option<&Path>) -> Result<(Self, Loaded), Unopened> {

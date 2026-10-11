@@ -25,6 +25,18 @@ pub(crate) struct NativeEvidence {
     closed: AtomicBool,
 }
 
+pub(crate) enum CatalogPreparation {
+    Pending,
+    Reconcile,
+    Complete(Box<CompleteCatalog>),
+}
+
+pub(crate) struct CompleteCatalog {
+    pub(crate) prepared: model::PreparedSources,
+    pub(crate) snapshot: Snapshot,
+    pub(crate) generation: String,
+}
+
 /// Native source ownership for an admitted machine set. This constructs no
 /// Viewer state, refresh pool or worker and opens no files. Embedding hosts keep
 /// their authorization, admission and source-custody guards around actual reads.
@@ -203,17 +215,22 @@ impl NativeEvidence {
     /// enumeration order cannot displace recent sessions with old history.
     /// Workers yield after 512 entries or 64 accepted candidates; only the 64
     /// newest candidates remain resident between steps.
-    pub(crate) fn prepare_catalog(&self, work: &mut Work, now: i64) -> io::Result<bool> {
+    pub(crate) fn prepare_catalog(
+        &self,
+        work: &mut Work,
+        now: i64,
+    ) -> io::Result<CatalogPreparation> {
         self.prepare_events(work, now)?;
         let cache = work.events.as_mut().expect("event cache initialized");
         if !cache.is_scoped() || cache.session_catalog_generation().is_some() {
             work.cold_catalog = None;
-            return Ok(true);
+            return Ok(CatalogPreparation::Reconcile);
         }
         let discovery = work.cold_catalog.get_or_insert_with(ColdCatalog::default);
         let page = discovery.cursor.next(&self.options, 64, 512)?;
         debug_assert!(page.examined <= 512);
         for input in page.inputs {
+            discovery.count += 1;
             let modified = fs::metadata(input.full_path(&self.options))
                 .and_then(|metadata| metadata.modified())
                 .ok();
@@ -225,7 +242,7 @@ impl NativeEvidence {
             }
         }
         if !page.complete {
-            return Ok(false);
+            return Ok(CatalogPreparation::Pending);
         }
         let discovery = work.cold_catalog.take().expect("discovery initialized");
         let inputs: Vec<_> = discovery
@@ -233,6 +250,11 @@ impl NativeEvidence {
             .into_iter()
             .map(|(_, input)| input)
             .collect();
+        let snapshot = (discovery.count <= 64)
+            .then(|| Snapshot::capture_pids(&self.options, BTreeSet::new(), cache.paths()))
+            .filter(|snapshot| {
+                snapshot.catalog_inputs(&self.options) == inputs.iter().cloned().collect()
+            });
         if !inputs.is_empty() {
             // Catalog owns physical membership independently of a Query scan
             // window; each consumer still applies its configured output window.
@@ -241,14 +263,22 @@ impl NativeEvidence {
                 ..self.options.clone()
             };
             let prepared = model::prepare_sources(&options, cache, &inputs, now)?;
-            if cache.publish_partial_catalog(&prepared)? != crate::events::Outcome::Written {
+            let (outcome, generation) = cache.publish_partial_catalog_fenced(&prepared)?;
+            if outcome != crate::events::Outcome::Written {
                 return Err(io::Error::other(
                     "Initial native catalog publication changed; retry observation",
                 ));
             }
             cache.end_scan();
+            if let (Some(snapshot), Some(generation)) = (snapshot, generation) {
+                return Ok(CatalogPreparation::Complete(Box::new(CompleteCatalog {
+                    prepared,
+                    snapshot,
+                    generation,
+                })));
+            }
         }
-        Ok(true)
+        Ok(CatalogPreparation::Reconcile)
     }
 
     /// Native queries refresh this owner's source cache and coherent cohort.
@@ -335,6 +365,7 @@ pub(crate) struct Work {
 #[derive(Default)]
 struct ColdCatalog {
     cursor: crate::inputs::Discovery,
+    count: usize,
     newest: BTreeSet<(
         std::cmp::Reverse<Option<std::time::SystemTime>>,
         crate::inputs::Input,
@@ -449,7 +480,42 @@ fn node_pids(nodes: &[Node], output: &mut BTreeSet<u32>) {
     }
 }
 
+fn catalog_input(path: &Path, options: &Options) -> Option<crate::inputs::Input> {
+    if path
+        .extension()
+        .is_none_or(|extension| extension != "jsonl")
+    {
+        return None;
+    }
+    [
+        crate::inputs::InputRoot::Claude,
+        crate::inputs::InputRoot::Codex,
+        crate::inputs::InputRoot::Copilot,
+    ]
+    .into_iter()
+    .find_map(|root| {
+        let relative = path
+            .strip_prefix(root.home(options))
+            .ok()?
+            .to_str()?
+            .replace(std::path::MAIN_SEPARATOR, "/");
+        crate::inputs::is_input_path(root.as_str(), &relative).then_some(crate::inputs::Input {
+            root,
+            path: relative,
+        })
+    })
+}
+
 impl Snapshot {
+    fn catalog_inputs(&self, options: &Options) -> BTreeSet<crate::inputs::Input> {
+        self.watched
+            .iter()
+            .filter_map(|(path, stamp)| {
+                stamp.filter(|stamp| stamp.kind.is_file())?;
+                catalog_input(path, options)
+            })
+            .collect()
+    }
     /// A bounded rewrite/append set with unchanged discovery and process inputs.
     /// New or disappeared sources, sidecars and runtime changes need discovery.
     pub(crate) fn changed_catalog_inputs(
@@ -478,25 +544,7 @@ impl Snapshot {
             {
                 return None;
             }
-            let input = [
-                crate::inputs::InputRoot::Claude,
-                crate::inputs::InputRoot::Codex,
-                crate::inputs::InputRoot::Copilot,
-            ]
-            .into_iter()
-            .find_map(|root| {
-                let relative = path
-                    .strip_prefix(root.home(options))
-                    .ok()?
-                    .to_str()?
-                    .replace(std::path::MAIN_SEPARATOR, "/");
-                crate::inputs::is_input_path(root.as_str(), &relative).then_some(
-                    crate::inputs::Input {
-                        root,
-                        path: relative,
-                    },
-                )
-            })?;
+            let input = catalog_input(path, options)?;
             inputs.push(input);
             if inputs.len() > 64 {
                 return None;

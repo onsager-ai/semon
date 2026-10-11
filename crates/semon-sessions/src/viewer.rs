@@ -1085,8 +1085,33 @@ impl MachineView {
                 }
             }
         }
-        if !self.evidence.prepare_catalog(work, now)? {
-            return Ok(false);
+        match self.evidence.prepare_catalog(work, now)? {
+            crate::native_evidence::CatalogPreparation::Pending => return Ok(false),
+            crate::native_evidence::CatalogPreparation::Complete(complete) => {
+                #[cfg(test)]
+                self.hooks.building()?;
+                let cache = work.events.as_mut().expect("event cache initialized");
+                cache.publish_catalog_projection(
+                    &crate::slot_projection::Publication {
+                        rows: &complete.prepared.rows,
+                        transcripts: Some(&complete.prepared.transcripts),
+                    },
+                    Some(&complete.generation),
+                )?;
+                cache.publish_session_descriptions();
+                let mut snapshot = complete.snapshot;
+                if self.evidence.options.facts.is_none() {
+                    snapshot.pids = complete
+                        .prepared
+                        .pids
+                        .iter()
+                        .map(|pid| (*pid, proc_start(&self.evidence.options.proc_root, *pid)))
+                        .collect();
+                }
+                work.catalog_snapshot = Some(snapshot);
+                return Ok(true);
+            }
+            crate::native_evidence::CatalogPreparation::Reconcile => {}
         }
         let cache = work.events.as_mut().expect("event cache initialized");
         // Stamp before native reads so concurrent appends remain observable.
@@ -6922,6 +6947,72 @@ mod tests {
             assert!(view.shown_model().is_some());
             view.close();
         }
+    }
+
+    #[test]
+    fn a_complete_bounded_cold_catalog_derives_its_sources_once() {
+        let fixture = lane_fixture();
+        let view = fixture.viewer();
+        let mut work = Work::default();
+        let before = crate::model::BUILDS.with(std::cell::Cell::get);
+        while !view
+            .refresh_catalog_locked(&mut work, model::now_ms())
+            .unwrap()
+        {}
+        assert_eq!(crate::model::BUILDS.with(std::cell::Cell::get) - before, 1);
+        let reply = crate::session_catalog_page(&fixture.options, "fixture", "limit=60");
+        let page: Value = serde_json::from_slice(&reply.body).unwrap();
+        assert_eq!(page["completeness"]["state"], "complete");
+        assert!(work.catalog_snapshot.is_some());
+        assert!(view.shown_model().is_none());
+        view.close();
+    }
+
+    #[test]
+    fn a_bounded_cold_catalog_cannot_acknowledge_a_competing_publication() {
+        let fixture = lane_fixture();
+        let view = fixture.viewer();
+        let options = fixture.options.clone();
+        *lock(&view.hooks.building) = Some(Arc::new(move || {
+            let mut other = EventCache::open_scoped(&options.cache).unwrap();
+            model::observe_catalog(
+                &options,
+                &mut other,
+                &mut false,
+                &mut model::Texts::default(),
+                model::now_ms(),
+            )
+            .unwrap();
+        }));
+        let mut work = Work::default();
+        let error = view
+            .refresh_catalog_locked(&mut work, model::now_ms())
+            .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
+        assert!(work.catalog_snapshot.is_none());
+        let connection =
+            rusqlite::Connection::open(EventCache::path(&fixture.options.cache)).unwrap();
+        let published: String = connection
+            .query_row(
+                "SELECT value FROM meta WHERE key='catalog_generation'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let mut other = EventCache::open_scoped(&fixture.options.cache).unwrap();
+        model::observe_catalog(
+            &fixture.options,
+            &mut other,
+            &mut false,
+            &mut model::Texts::default(),
+            model::now_ms(),
+        )
+        .unwrap();
+        assert_eq!(
+            other.session_catalog_generation().as_deref(),
+            Some(published.as_str())
+        );
+        view.close();
     }
 
     #[test]
