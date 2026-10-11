@@ -853,7 +853,8 @@ impl Viewer {
 pub(crate) enum Reading {
     /// As a request is answered, in the view's [`Refresh`] mode.
     Served,
-    /// Brought up to date first, built at `now` if it must be rebuilt.
+    /// Fixed-clock semantic fixture oracle.
+    #[cfg(test)]
     At(i64),
 }
 
@@ -2056,6 +2057,7 @@ impl MachineView {
     pub(crate) fn built(&self, read: Reading) -> io::Result<Arc<Built>> {
         let cache = match read {
             Reading::Served => self.served_model()?,
+            #[cfg(test)]
             Reading::At(now) => self.fresh_model(now)?,
         };
         Ok(cache.built.clone())
@@ -2063,6 +2065,7 @@ impl MachineView {
 
     /// The model built last, as it is: no stat pass, no build, no lock but
     /// the one that clones the `Arc`. `None` before the first build.
+    #[cfg(test)]
     pub(crate) fn shown_built(&self) -> Option<Arc<Built>> {
         self.shown_model().map(|model| model.built.clone())
     }
@@ -7346,6 +7349,75 @@ mod tests {
         String::from_utf8_lossy(&page.body).contains(text)
     }
 
+    #[test]
+    fn native_permalinks_use_indexed_identity_without_workspace_models() {
+        let (alpha, bravo) = (machine("twin", "lane-a"), machine("twin", "lane-b"));
+        for fixture in [&alpha, &bravo] {
+            let observer = crate::SessionCatalogObserver::new(fixture.options.clone());
+            observer.changed().unwrap();
+            eventually("native permalink publication", || {
+                let reply = crate::session_catalog_page(&fixture.options, "source", "limit=1");
+                let body: Value = serde_json::from_slice(&reply.body).ok()?;
+                (reply.status == 200 && body["completeness"]["state"] == "complete").then_some(())
+            });
+            observer.close();
+        }
+        let mut query = crate::Query::new(alpha.options.clone());
+        let details = query.call("get_session", &json!({"id":"lane-a"})).unwrap();
+        let turn = details["session"]["turns"][0]["id"].as_str().unwrap();
+        let core = Arc::new(ViewerCore::with_machines(vec![
+            ("a".into(), alpha.options.clone()),
+            ("b".into(), bravo.options.clone()),
+        ]));
+        let views = core.machine_views();
+        crate::events::CACHE_READS.with(|reads| reads.set(0));
+        for path in [
+            "/s/claude/lane-a".to_owned(),
+            "/s/claude/lane-b@twin~b".into(),
+            "/machines/twin".into(),
+            "/machines/twin~b".into(),
+            format!("/trace/claude/lane-a/{turn}"),
+        ] {
+            let reply = core.respond("GET", &path, "", None);
+            assert_eq!(
+                reply.status,
+                200,
+                "{path}: {}",
+                String::from_utf8_lossy(&reply.body)
+            );
+            assert_eq!(reply.body, PAGE.as_bytes());
+        }
+        for path in [
+            "/s/claude/missing",
+            "/s/codex/lane-a",
+            "/s/claude/lane-b@unconfigured",
+            "/machines/missing",
+            "/trace/claude/lane-a/missing-turn",
+            "/s/claude/lane-a/extra",
+        ] {
+            assert_eq!(core.respond("GET", path, "", None).status, 404, "{path}");
+        }
+        assert_eq!(core.respond("GET", "/s/claude/%FF", "", None).status, 400);
+        assert_eq!(crate::events::CACHE_READS.with(|reads| reads.get()), 0);
+        for view in &views {
+            assert!(view.shown_model().is_none());
+            assert!(lock(&view.evidence.work).events.is_none());
+            assert_eq!(refresh_counts(view), (0, 0, 0));
+        }
+        // Identity may be newly discovered by an in-flight native producer.
+        // The shell answers at once and lets focused APIs await publication.
+        let observing = lock(&views[0].evidence.work);
+        let during = {
+            let core = core.clone();
+            at_once("native permalink during observation", move || {
+                core.respond("GET", "/s/claude/brand-new", "", None)
+            })
+        };
+        assert_eq!(during.status, 200);
+        drop(observing);
+        core.close();
+    }
+
     /// Outside OnRead a page never waits for a build, nor takes a stat pass:
     /// before the first model it is the shell (its own /api/model builds
     /// the model), and once a model is built it answers from that one even
@@ -7573,11 +7645,9 @@ mod tests {
         assert_eq!(views[0].hooks.builds(), 2, "a closed core built");
     }
 
-    /// A session newer than the built model, on a view that went idle, is
-    /// opened while a warm that already took its invalidation is still
-    /// building it. The page, which the built model lacks, is checked
-    /// against a fresh model: it waits for that warm, then finds the
-    /// session (200), where the model before the warm would answer 404.
+    /// A native shell opens immediately while source observation is running.
+    /// Focused client APIs resolve its identity after publication; the page
+    /// must never join a full-model build or return a premature missing id.
     fn a_new_session_opens_during_its_warm(mut core: ViewerCore, key: &str, fixture: &Fixture) {
         core.set_refresh_pool(RefreshPool::new(1));
         core.set_refresh(Refresh::OnInvalidate);
@@ -7617,11 +7687,11 @@ mod tests {
         };
         thread::sleep(Duration::from_millis(300));
         assert!(
-            !page.is_finished(),
-            "the page answered from the model before the warm"
+            page.is_finished(),
+            "native shell waited for a workspace model"
         );
-        drop(release);
         assert_eq!(page.join().expect("the page request panicked"), 200);
+        drop(release);
         assert!(
             warming
                 .join()
