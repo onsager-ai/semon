@@ -179,7 +179,11 @@ struct Saved {
 fn failed(error: impl std::fmt::Display) -> io::Error {
     io::Error::other(error.to_string())
 }
-fn read(source: &OverviewSource, since: i64) -> io::Result<(Vec<Saved>, bool, String)> {
+fn read(
+    source: &OverviewSource,
+    since: i64,
+    analytics: bool,
+) -> io::Result<(Vec<Saved>, bool, String)> {
     let mut connection = Connection::open_with_flags(
         EventCache::path(&source.options.cache),
         OpenFlags::SQLITE_OPEN_READ_ONLY,
@@ -211,9 +215,11 @@ fn read(source: &OverviewSource, since: i64) -> io::Result<(Vec<Saved>, bool, St
         .unwrap_or_default();
     generation.push('/');
     generation.push_str(&overview_generation);
-    let mut statement = db.prepare("SELECT o.session_key,CASE WHEN octet_length(o.summary)<=4194304 THEN json_remove(o.summary,'$.home.content') ELSE NULL END,COALESCE(c.lifecycle,'retained'),json_extract(h.metadata,'$.content_generation'),json_extract(c.metadata,'$.presentation_kind') FROM session_overview o JOIN session_catalog c USING(session_key) LEFT JOIN session_trace_headers h USING(session_key) WHERE o.session_key IN (SELECT session_key FROM session_overview WHERE last_ms>=?1 UNION SELECT session_key FROM session_overview WHERE state IN ('work','wait') UNION SELECT session_key FROM (SELECT session_key FROM session_catalog ORDER BY last_ms DESC,session_key LIMIT 60)) ORDER BY o.last_ms DESC,o.session_key").map_err(failed)?;
+    // Home needs its compact timing and event summaries, but never the
+    // Analytics activity intervals, usage series or comparison workloads.
+    let mut statement = db.prepare("SELECT o.session_key,CASE WHEN octet_length(o.summary)<=4194304 THEN CASE WHEN ?2 THEN json_remove(o.summary,'$.home.content') ELSE json_remove(o.summary,'$.home.content','$.activity') END ELSE NULL END,COALESCE(c.lifecycle,'retained'),json_extract(h.metadata,'$.content_generation'),json_extract(c.metadata,'$.presentation_kind') FROM session_overview o JOIN session_catalog c USING(session_key) LEFT JOIN session_trace_headers h USING(session_key) WHERE o.session_key IN (SELECT session_key FROM session_overview WHERE last_ms>=?1 UNION SELECT session_key FROM session_overview WHERE state IN ('work','wait') UNION SELECT session_key FROM (SELECT session_key FROM session_catalog ORDER BY last_ms DESC,session_key LIMIT 60)) ORDER BY o.last_ms DESC,o.session_key").map_err(failed)?;
     let rows = statement
-        .query_map([since], |row| {
+        .query_map(params![since, analytics], |row| {
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
@@ -717,7 +723,11 @@ pub fn session_overview_reply(
         }
     }
     for source in sources {
-        match read(source, now.saturating_sub(analytics::KEEP_MS)) {
+        match read(
+            source,
+            now.saturating_sub(analytics::KEEP_MS),
+            page == "analytics",
+        ) {
             Ok((rows, complete, generation)) => {
                 versions.push(json!([source.key, generation, source.up]));
                 records.extend(rows);
@@ -960,11 +970,11 @@ mod tests {
         let second = Fixture::new("second");
         first.put("same", "work", "current");
         second.put("same", "work", "retained");
-        let rows = read(&first.source, 0).unwrap().0;
+        let rows = read(&first.source, 0, false).unwrap().0;
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].id, r#"["first","same"]"#);
         assert_eq!(
-            read(&second.source, 0).unwrap().0[0].summary.home["state"],
+            read(&second.source, 0, false).unwrap().0[0].summary.home["state"],
             "off"
         );
         let output = home(

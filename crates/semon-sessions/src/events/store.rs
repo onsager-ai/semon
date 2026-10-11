@@ -1656,14 +1656,14 @@ impl SqliteStore {
                     let row: crate::model::summary::CatalogRow = serde_json::from_str(&encoded)
                         .map_err(|_| failure(rusqlite::Error::InvalidQuery))?;
                     if row.lifecycle == crate::model::summary::CatalogLifecycle::Current {
-                        crate::catalog_search::publish_row(
+                        crate::catalog_search::backfill_row(
                             &transaction,
                             crate::CatalogReadScope::Current,
                             &row,
                         )
                         .map_err(failure)?;
                     }
-                    crate::catalog_search::publish_row(
+                    crate::catalog_search::backfill_row(
                         &transaction,
                         crate::CatalogReadScope::RetainedHistory,
                         &row,
@@ -1672,6 +1672,7 @@ impl SqliteStore {
                 }
             }
             if rebuild_search {
+                crate::catalog_search::finish_backfill(&transaction).map_err(failure)?;
                 transaction.execute("INSERT OR REPLACE INTO meta(key,value) VALUES('search_backfill_complete','1')",[]).map_err(failure)?;
             }
             if claims.is_none() {
