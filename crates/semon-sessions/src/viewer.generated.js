@@ -2476,6 +2476,7 @@ globalThis.__semonUIShared = __semonUIShared;
       },
       topbar(props) {
         ready();
+        const leadFocused = lead !== null && document.activeElement === lead;
         account.close();
         dropDesktop();
         lead = null;
@@ -2525,6 +2526,7 @@ globalThis.__semonUIShared = __semonUIShared;
           cursor.remove();
           cursor = next;
         }
+        if (leadFocused) lead?.focus();
         measureBar();
       },
       drawerAccount,
