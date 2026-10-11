@@ -728,6 +728,7 @@ function saveMismatch(row, name, scheme, p) {
 
 (async () => {
   const D = await data(),
+    referenceData = REF_BASE ? await data({ base: REF_BASE, token: REF_TOKEN }) : D,
     S = sample('semon-sample.html'),
     ids = sampleIds(D, S),
     list = screens(D, S, ids);
@@ -765,7 +766,7 @@ function saveMismatch(row, name, scheme, p) {
       const port = other ?? (await portFor(ref));
       await nav(page, s.served, D, false);
       const a = await shot(page, size);
-      if (other) await nav(port, s.served, D, false);
+      if (other) await nav(port, s.served, referenceData, false);
       else await nav(port, s.port, D, true);
       const b = await shot(port, size);
       const p = compare(a, b);

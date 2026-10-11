@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import assert from 'node:assert/strict';
 import { chromium } from '../../tests/ui/node_modules/playwright/index.mjs';
 import { test } from 'node:test';
+import { build } from 'esbuild';
 import { auditText } from '../../tests/ui/text-audit.mjs';
 const root = new URL('../../', import.meta.url).pathname;
 test(
@@ -145,6 +146,51 @@ test(
         await new Promise((r) => setTimeout(r, 50));
       }
       assert.ok(url, output);
+      // A supported host can resolve a bookmark while its native Catalog is
+      // still publishing. Keep the real authorized response, marking only the
+      // first two successful replies incomplete as a slow producer would.
+      const bookmark = await browser.newPage();
+      const { outputFiles } = await build({
+        absWorkingDir: join(root, 'ui'),
+        stdin: {
+          contents:
+            "import {mountViewerApplication} from './src/application'; queueMicrotask(()=>mountViewerApplication({catalogSources:true}));",
+          resolveDir: join(root, 'ui'),
+        },
+        bundle: true,
+        write: false,
+        format: 'iife',
+      });
+      let bookmarkReads = 0;
+      const bookmarkRequests = [];
+      bookmark.on('request', (request) => bookmarkRequests.push(new URL(request.url()).pathname));
+      await bookmark.route('**/viewer.js', (route) =>
+        route.fulfill({ contentType: 'text/javascript', body: outputFiles[0].text }),
+      );
+      await bookmark.route('**/api/session-locate?*', async (route) => {
+        const response = await route.fetch();
+        if (!response.ok()) return route.fulfill({ response });
+        const body = await response.json();
+        bookmarkReads++;
+        return route.fulfill({
+          response,
+          json: bookmarkReads <= 2 ? { ...body, unavailable: 1 } : body,
+        });
+      });
+      await bookmark.goto(url[1] + '/s/codex/deps?t=' + url[2]);
+      await bookmark.getByText('The recorded session index is updating. Retrying…').waitFor();
+      await bookmark.waitForFunction(
+        () => document.querySelector('#topbar .t')?.textContent === 'deps audit',
+        {},
+        { timeout: 5000 },
+      );
+      assert.ok(bookmarkReads >= 3, 'incomplete native lookups retry before selection');
+      assert.equal(new URL(bookmark.url()).searchParams.get('machine'), 'local');
+      assert.ok(
+        bookmarkRequests.every((path) => !/^\/api\/(model|tx|events)(?:\/|$)/.test(path)),
+        'bookmark resolution does not warm a workspace model',
+      );
+      await bookmark.close();
       const page = await browser.newPage({ viewport: { width: 1280, height: 860 } }),
         errors = [],
         requests = [],
