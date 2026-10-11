@@ -1411,7 +1411,13 @@ impl MachineView {
         // A stall counts from here, with `work` taken: a warm or a page's
         // fresh check holding it meanwhile isn't this view's build hanging.
         lock(&self.live.state).running_since = Some(started);
-        if let Some(built) = work.built_at
+        // Cold discovery steps are continuations of one bounded observation,
+        // not repeated rebuilds. Requeue each step behind already due work.
+        let discovery_only = self.evidence.catalog_pending(&work)
+            && !self.is_shown(Kind::Model)
+            && !self.is_shown(Kind::Tree);
+        if !discovery_only
+            && let Some(built) = work.built_at
             && started < built + REBUILD_SPACING
         {
             drop(work);
@@ -1442,6 +1448,7 @@ impl MachineView {
                 (kind, result)
             })
             .collect();
+        let pending = self.evidence.catalog_pending(&work);
         let built_at = work.built_at;
         drop(work);
         let mut state = lock(&self.live.state);
@@ -1450,7 +1457,12 @@ impl MachineView {
             state.record(*kind, result);
         }
         let failing = results.iter().any(|(_, result)| result.is_err());
-        let due = self.next_due(&state, started, built_at, failing);
+        state.invalidated |= pending;
+        let due = if pending && !failing {
+            Instant::now()
+        } else {
+            self.next_due(&state, started, built_at, failing)
+        };
         self.checked(&mut state, due);
     }
 
@@ -6853,8 +6865,8 @@ mod tests {
                     )
                     .unwrap();
             }
-            let view = MachineView::new(fixture.options.clone());
-            view.evidence.catalog_demand.store(true, Ordering::Relaxed);
+            let pool = RefreshPool::new(1);
+            let view = pooled(&fixture, Refresh::OnInvalidate, &pool);
             let options = fixture.options.clone();
             let start = Instant::now();
             *lock(&view.hooks.building) = Some(Arc::new(move || {
@@ -6881,14 +6893,18 @@ mod tests {
                     page.body.len()
                 );
             }));
-            loop {
-                let ready = view
-                    .refresh_catalog_locked(&mut lock(&view.evidence.work), model::now_ms())
-                    .unwrap();
-                if ready {
-                    break;
-                }
-            }
+            view.note_catalog_read().unwrap();
+            eventually(
+                "queued bounded discovery reaches complete observation",
+                || {
+                    assert!(pool.threads() <= 1);
+                    assert!(pool.entries_for(&view) <= 1);
+                    let page = crate::session_catalog_page(&fixture.options, "fixture", "limit=60");
+                    let body: Value = serde_json::from_slice(&page.body).ok()?;
+                    (page.status == 200 && body["completeness"]["state"] == "complete")
+                        .then_some(())
+                },
+            );
             let page = crate::session_catalog_page(&fixture.options, "fixture", "limit=60");
             let body: Value = serde_json::from_slice(&page.body).unwrap();
             assert_eq!(body["completeness"]["state"], "complete");
