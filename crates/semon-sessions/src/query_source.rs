@@ -1,4 +1,4 @@
-//! Generation-bound local reads for native Query/Catalog/source derivation.
+//! Generation-bound local reads for shared session derivation.
 //! Source proofs contain no host credentials or runtime authority.
 use crate::{
     Options, SessionSourceRange, SessionSourceReader, SessionSourceRef,
@@ -15,7 +15,7 @@ use std::{
 };
 
 struct Proof {
-    source: SessionSourceRef,
+    source: Option<SessionSourceRef>,
     ledger: Ledger,
     generation: String,
     chunks: Arc<crate::source_chunks::Chunks>,
@@ -39,12 +39,35 @@ impl Sources {
         options: &Options,
         sources: impl Iterator<Item = (CatalogSource, Option<Arc<crate::source_chunks::Chunks>>)>,
     ) -> io::Result<Self> {
+        Self::capture_inner(options, sources, true)
+    }
+
+    /// Local native paths can have no lossless public source-reference encoding.
+    /// Keep their verified evidence without admitting a lossy alias for requests.
+    pub(crate) fn capture_native(
+        options: &Options,
+        sources: impl Iterator<Item = (CatalogSource, Option<Arc<crate::source_chunks::Chunks>>)>,
+    ) -> io::Result<Self> {
+        Self::capture_inner(options, sources, false)
+    }
+
+    fn capture_inner(
+        options: &Options,
+        sources: impl Iterator<Item = (CatalogSource, Option<Arc<crate::source_chunks::Chunks>>)>,
+        require_references: bool,
+    ) -> io::Result<Self> {
         let mut captured = Self::default();
         for (source, chunks) in sources {
             let chunks = chunks
                 .filter(|chunks| chunks.valid(source.offset))
                 .ok_or_else(unavailable)?;
-            let (root, path) = [InputRoot::Claude, InputRoot::Codex, InputRoot::Copilot]
+            if ![InputRoot::Claude, InputRoot::Codex, InputRoot::Copilot]
+                .into_iter()
+                .any(|root| source.path.starts_with(root.home(options)))
+            {
+                return Err(unavailable());
+            }
+            let reference = [InputRoot::Claude, InputRoot::Codex, InputRoot::Copilot]
                 .into_iter()
                 .find_map(|root| {
                     let relative = source
@@ -55,18 +78,19 @@ impl Sources {
                     // These paths came from native discovery, not a request.
                     // Exact captured references are the only admitted reads;
                     // do not narrow the local CLI's existing discovery rules.
-                    Some((root.as_str().to_owned(), relative.to_owned()))
-                })
-                .ok_or_else(unavailable)?;
-            let reference = SessionSourceRef {
-                root: root.clone(),
-                path: path.clone(),
-                native_id: source.native_id,
-                offset: source.offset,
-                prefix_sha256: source.prefix_sha256,
-                tail_sha256: source.tail_sha256,
-            };
-            let generation = reference
+                    Some(SessionSourceRef {
+                        root: root.as_str().to_owned(),
+                        path: relative.to_owned(),
+                        native_id: source.native_id.clone(),
+                        offset: source.offset,
+                        prefix_sha256: source.prefix_sha256,
+                        tail_sha256: source.tail_sha256,
+                    })
+                });
+            if require_references && reference.is_none() {
+                return Err(unavailable());
+            }
+            let generation = source
                 .prefix_sha256
                 .iter()
                 .map(|byte| format!("{byte:02x}"))
@@ -88,7 +112,12 @@ impl Sources {
                 generation,
                 chunks,
             };
-            captured.paths.insert((root, path), source.path.clone());
+            if let Some(reference) = &proof.source {
+                captured.paths.insert(
+                    (reference.root.clone(), reference.path.clone()),
+                    source.path.clone(),
+                );
+            }
             captured.proofs.insert(source.path, proof);
         }
         Ok(captured)
@@ -169,7 +198,7 @@ impl Records<'_> {
             let proof = self.sources.proofs.get(path).ok_or_else(unavailable)?;
             if record
                 .end()
-                .is_none_or(|end| end > proof.ledger.stat.size.max(proof.source.offset))
+                .is_none_or(|end| end > proof.ledger.stat.size.max(proof.ledger.offset))
             {
                 return Err(unavailable());
             }
@@ -237,7 +266,7 @@ impl Records<'_> {
         max: u64,
     ) -> io::Result<Option<Vec<u8>>> {
         let proof = self.sources.proofs.get(path).ok_or_else(unavailable)?;
-        if offset >= proof.source.offset {
+        if offset >= proof.ledger.offset {
             return Ok(None);
         }
         let mut reader = BufReader::with_capacity(
@@ -245,6 +274,7 @@ impl Records<'_> {
             RangeFile {
                 records: self,
                 proof,
+                path,
                 position: offset,
                 prepared: true,
             },
@@ -263,7 +293,7 @@ impl Records<'_> {
     pub(crate) fn derive(&self, path: &Path, offset: u64) -> io::Result<Option<serde_json::Value>> {
         let result = (|| {
             let proof = self.sources.proofs.get(path).ok_or_else(unavailable)?;
-            if offset >= proof.source.offset {
+            if offset >= proof.ledger.offset {
                 return Err(unavailable());
             }
             let mut reader = BufReader::with_capacity(
@@ -271,6 +301,7 @@ impl Records<'_> {
                 RangeFile {
                     records: self,
                     proof,
+                    path,
                     position: offset,
                     prepared: true,
                 },
@@ -317,7 +348,12 @@ impl Records<'_> {
     ) -> io::Result<(Option<serde_json::Value>, u64)> {
         let result = (|| {
             let proof = self.sources.proofs.get(path).ok_or_else(unavailable)?;
-            crate::source_reader::read_native_record(self, &proof.source, &proof.generation, offset)
+            crate::source_reader::read_native_record(
+                self,
+                proof.source.as_ref().ok_or_else(unavailable)?,
+                &proof.generation,
+                offset,
+            )
         })();
         if result.is_err() {
             *self.failed.lock().map_err(|_| unavailable())? = true;
@@ -338,6 +374,7 @@ impl Records<'_> {
             &mut RangeFile {
                 records: self,
                 proof,
+                path: &file.path,
                 position: offset,
                 prepared: false,
             },
@@ -373,7 +410,7 @@ impl Records<'_> {
             let before = Stat::from_metadata(&file.metadata()?)?;
             if before.dev != proof.ledger.stat.dev
                 || before.ino != proof.ledger.stat.ino
-                || before.size < proof.source.offset
+                || before.size < proof.ledger.offset
             {
                 return Err(unavailable());
             }
@@ -419,13 +456,27 @@ impl Records<'_> {
             .get(&(source.root.clone(), source.path.clone()))
             .ok_or_else(unavailable)?;
         let proof = self.sources.proofs.get(path).ok_or_else(unavailable)?;
-        if source != &proof.source
+        if proof.source.as_ref() != Some(source)
             || expected.is_some_and(|value| value != proof.generation)
-            || max > crate::SESSION_SOURCE_CHUNK_MAX
+        {
+            return Err(unavailable());
+        }
+        self.range_native(path, proof, offset, max, prepare)
+    }
+
+    fn range_native(
+        &self,
+        path: &Path,
+        proof: &Proof,
+        offset: u64,
+        max: usize,
+        prepare: bool,
+    ) -> io::Result<SessionSourceRange> {
+        if max > crate::SESSION_SOURCE_CHUNK_MAX
             || max == 0
             || offset
                 .checked_add(max as u64)
-                .is_none_or(|end| end > source.offset)
+                .is_none_or(|end| end > proof.ledger.offset)
         {
             return Err(unavailable());
         }
@@ -433,7 +484,7 @@ impl Records<'_> {
         let before = Stat::from_metadata(&file.metadata()?)?;
         if before.dev != proof.ledger.stat.dev
             || before.ino != proof.ledger.stat.ino
-            || before.size < source.offset
+            || before.size < proof.ledger.offset
         {
             return Err(unavailable());
         }
@@ -456,14 +507,14 @@ impl Records<'_> {
             let part = if let Some(block) = prepared
                 .as_deref()
                 .and_then(Option::as_ref)
-                .filter(|block| block.path == *path && block.index == index)
+                .filter(|block| block.path == path && block.index == index)
             {
                 block.bytes.clone()
             } else {
                 let part: Arc<[u8]> = Arc::from(proof.chunks.read(&mut file, index)?);
                 if let Some(prepared) = prepared.as_deref_mut() {
                     *prepared = Some(PreparedBlock {
-                        path: path.clone(),
+                        path: path.to_owned(),
                         index,
                         bytes: part.clone(),
                     });
@@ -480,18 +531,18 @@ impl Records<'_> {
         {
             return Err(unavailable());
         }
-        checked.insert(path.clone(), before);
+        checked.insert(path.to_owned(), before);
         self.checked_chunks
             .lock()
             .map_err(|_| unavailable())?
-            .entry(path.clone())
+            .entry(path.to_owned())
             .or_default()
             .extend(first..=last);
         Ok(SessionSourceRange {
             generation: proof.generation.clone(),
             // The cohort exposes its complete consumed prefix, even if the
             // native writer has appended more bytes since observation.
-            length: source.offset,
+            length: proof.ledger.offset,
             offset,
             bytes: Arc::from(bytes),
             cached: true,
@@ -520,6 +571,7 @@ impl SessionSourceReader for Records<'_> {
 struct RangeFile<'a, 'b> {
     records: &'a Records<'b>,
     proof: &'b Proof,
+    path: &'a Path,
     position: u64,
     prepared: bool,
 }
@@ -529,7 +581,7 @@ impl Read for RangeFile<'_, '_> {
         let mut max = buffer
             .len()
             .min(crate::SESSION_SOURCE_CHUNK_MAX)
-            .min(usize::try_from(self.proof.source.offset - self.position).unwrap_or(usize::MAX));
+            .min(usize::try_from(self.proof.ledger.offset - self.position).unwrap_or(usize::MAX));
         if self.prepared {
             max = max.min(
                 crate::source_chunks::SIZE
@@ -539,26 +591,13 @@ impl Read for RangeFile<'_, '_> {
         if max == 0 {
             return Ok(0);
         }
-        let part = if self.prepared {
-            let result = self.records.range(
-                &self.proof.source,
-                Some(&self.proof.generation),
-                self.position,
-                max,
-                true,
-            );
-            if result.is_err() {
-                *self.records.failed.lock().map_err(|_| unavailable())? = true;
-            }
-            result?
-        } else {
-            self.records.read_range(
-                &self.proof.source,
-                Some(&self.proof.generation),
-                self.position,
-                max,
-            )?
-        };
+        let result =
+            self.records
+                .range_native(self.path, self.proof, self.position, max, self.prepared);
+        if result.is_err() {
+            *self.records.failed.lock().map_err(|_| unavailable())? = true;
+        }
+        let part = result?;
         buffer[..part.bytes.len()].copy_from_slice(&part.bytes);
         self.position += part.bytes.len() as u64;
         Ok(part.bytes.len())
@@ -570,9 +609,9 @@ impl Seek for RangeFile<'_, '_> {
         let position = match from {
             SeekFrom::Start(offset) => Some(offset),
             SeekFrom::Current(offset) => self.position.checked_add_signed(offset),
-            SeekFrom::End(offset) => self.proof.source.offset.checked_add_signed(offset),
+            SeekFrom::End(offset) => self.proof.ledger.offset.checked_add_signed(offset),
         }
-        .filter(|position| *position <= self.proof.source.offset);
+        .filter(|position| *position <= self.proof.ledger.offset);
         let Some(position) = position else {
             *self.records.failed.lock().map_err(|_| unavailable())? = true;
             return Err(unavailable());
@@ -630,7 +669,7 @@ mod tests {
             sources.proofs.insert(
                 self.path.clone(),
                 Proof {
-                    source: reference.clone(),
+                    source: Some(reference.clone()),
                     ledger: Ledger {
                         stat,
                         offset: reference.offset,
@@ -660,6 +699,68 @@ mod tests {
             );
             after
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_native_path_reads_never_admit_a_lossy_public_alias() {
+        use std::os::unix::ffi::OsStringExt;
+        let mut fixture = Fixture::new("private-path-reference");
+        fs::write(&fixture.path, b"{\"content\":\"native evidence\"}\n").unwrap();
+        let path = fixture
+            .root
+            .join(std::ffi::OsString::from_vec(b"lead-\xff.jsonl".to_vec()));
+        fs::rename(&fixture.path, &path).unwrap();
+        fixture.path = path;
+        let (old, mut reference, _) = fixture.sources();
+        let proof = old.proofs.get(&fixture.path).unwrap();
+        let stat = proof.ledger.stat;
+        let source = CatalogSource {
+            path: fixture.path.clone(),
+            native_id: "lead".into(),
+            dev: stat.dev,
+            ino: stat.ino,
+            size: stat.size,
+            modified_ns: stat.modified_ns,
+            changed_ns: stat.changed_ns,
+            offset: proof.ledger.offset,
+            prefix_sha256: proof.ledger.prefix,
+            tail_sha256: proof.ledger.tail,
+        };
+        let options = Options {
+            claude_home: fixture.root.clone(),
+            claude_json: fixture.root.join(".claude.json"),
+            codex_home: fixture.root.join("codex"),
+            copilot_home: fixture.root.join("copilot"),
+            proc_root: fixture.root.join("proc"),
+            cache: fixture.root.join("index.json"),
+            all: true,
+            since: std::time::Duration::from_secs(86400),
+            session: None,
+            facts: None,
+            scan_window: false,
+        };
+        let inputs = || std::iter::once((source.clone(), Some(proof.chunks.clone())));
+        assert!(Sources::capture(&options, inputs()).is_err());
+        let sources = Sources::capture_native(&options, inputs()).unwrap();
+        assert!(sources.paths.is_empty());
+        let reader = sources.reader();
+        assert_eq!(
+            reader.derive(&fixture.path, 0).unwrap().unwrap()["content"],
+            "native evidence"
+        );
+        reader.finish().unwrap();
+        reference.path = fixture
+            .path
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        assert!(reader.read_range(&reference, None, 0, 1).is_err());
+        assert!(reader.finish().is_err());
+        let mut outside = options;
+        outside.claude_home = fixture.root.join("other-root");
+        assert!(Sources::capture_native(&outside, inputs()).is_err());
     }
 
     #[test]

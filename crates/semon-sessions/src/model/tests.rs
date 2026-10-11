@@ -1488,11 +1488,8 @@ fn variable_handoffs_are_placed_on_their_calls_and_parent_scans_resume() {
     let parses = crate::handoff::PARSES.with(|count| count.get());
     let bytes = crate::handoff::BYTES.with(|count| count.get());
     let built = home.build();
-    assert_eq!(crate::handoff::PARSES.with(|count| count.get()) - parses, 5);
-    assert_eq!(
-        crate::handoff::BYTES.with(|count| count.get()) - bytes,
-        fs::metadata(&path).unwrap().len()
-    );
+    assert_eq!(crate::handoff::PARSES.with(|count| count.get()) - parses, 0);
+    assert_eq!(crate::handoff::BYTES.with(|count| count.get()) - bytes, 0);
     let records: Vec<Value> = fs::read_to_string(&path)
         .unwrap()
         .lines()
@@ -1539,7 +1536,7 @@ fn variable_handoffs_are_placed_on_their_calls_and_parent_scans_resume() {
     );
     assert_eq!(crate::handoff::BYTES.with(|count| count.get()), scanned);
     home.build();
-    assert_eq!(crate::handoff::PARSES.with(|count| count.get()) - parses, 5);
+    assert_eq!(crate::handoff::PARSES.with(|count| count.get()) - parses, 0);
     assert_eq!(crate::handoff::BYTES.with(|count| count.get()), scanned);
     let appended = format!("{}\n", launch("third", ts(0, 51), command));
     use std::io::Write;
@@ -1550,11 +1547,8 @@ fn variable_handoffs_are_placed_on_their_calls_and_parent_scans_resume() {
         .write_all(appended.as_bytes())
         .unwrap();
     let after = home.build();
-    assert_eq!(crate::handoff::PARSES.with(|count| count.get()) - parses, 6);
-    assert_eq!(
-        crate::handoff::BYTES.with(|count| count.get()) - scanned,
-        appended.len() as u64
-    );
+    assert_eq!(crate::handoff::PARSES.with(|count| count.get()) - parses, 0);
+    assert_eq!(crate::handoff::BYTES.with(|count| count.get()) - scanned, 0);
     assert_eq!(only(&after, "spawn", "lead", "early").at, at(0, 1));
     assert_eq!(only(&after, "spawn", "lead", "later").at, at(0, 11));
 }
@@ -4239,6 +4233,127 @@ fn native_marker_query(home: &Home) -> QueryData {
         NOW,
     )
     .unwrap()
+}
+
+#[test]
+fn model_restart_uses_verified_markers_and_launches_without_legacy_scans() {
+    let home = Home::new();
+    let mut parent = vec![human("parent", ts(10, 0), "parent task")];
+    parent.extend((0..1024).map(|_| json!({"type":"progress","padding":"x".repeat(1024)})));
+    parent.push(assistant(
+        "parent",
+        ts(10, 1),
+        vec![tool(
+            "launch",
+            "Bash",
+            json!({"command":"codex exec < /private/prompt"}),
+        )],
+    ));
+    let path = home.top("parent", &parent);
+    let original = fs::read(&path).unwrap();
+    home.codex(
+        "child",
+        json!({}),
+        &[codex_user(
+            ts(10, 2),
+            "Semon-Parent: claude:parent\nSemon-Handoff: /private/prompt",
+        )],
+    );
+    let marker_reads = crate::FIRST_MARKER_READS.with(std::cell::Cell::get);
+    let launch_scans = crate::handoff::BYTES.with(std::cell::Cell::get);
+    let direct_reads = DIRECT_SOURCE_READS.with(std::cell::Cell::get);
+    for _ in 0..2 {
+        let before = crate::native_record::READ_BYTES.with(std::cell::Cell::get);
+        let built = home.build();
+        assert_eq!(built.sessions["child"].parent.as_deref(), Some("parent"));
+        assert_eq!(only(&built, "spawn", "parent", "child").at, at(10, 1));
+        assert!(crate::native_record::READ_BYTES.with(std::cell::Cell::get) - before < 16 * 1024);
+        assert_eq!(
+            crate::FIRST_MARKER_READS.with(std::cell::Cell::get),
+            marker_reads
+        );
+        assert_eq!(
+            crate::handoff::BYTES.with(std::cell::Cell::get),
+            launch_scans
+        );
+        assert_eq!(DIRECT_SOURCE_READS.with(std::cell::Cell::get), direct_reads);
+    }
+    assert_eq!(fs::read(path).unwrap(), original);
+}
+
+#[test]
+fn model_source_rewrites_before_and_after_derivation_refuse_catalog_publication() {
+    let _clock = crate::events::fixed_change_time_for_test(0);
+    for after_derivation in [false, true] {
+        for (from, to) in [
+            ("EVIDENCE-A", "EVIDENCE-B"),
+            ("Bash", "Task"),
+            ("10:01:00", "10:03:00"),
+        ] {
+            let home = Home::new();
+            let path = home.top(
+                "parent",
+                &[
+                    human("parent", ts(10, 0), "EVIDENCE-A"),
+                    assistant(
+                        "parent",
+                        ts(10, 1),
+                        vec![tool(
+                            "launch",
+                            "Bash",
+                            json!({"command":"codex exec < /private/prompt"}),
+                        )],
+                    ),
+                ],
+            );
+            home.codex(
+                "child",
+                json!({}),
+                &[codex_user(
+                    ts(10, 2),
+                    "Semon-Parent: claude:parent\nSemon-Handoff: /private/prompt",
+                )],
+            );
+            home.build();
+            let mut cache = EventCache::open_scoped(&home.options.cache).unwrap();
+            let generation = cache.session_catalog_generation();
+            let mutation: Box<dyn FnOnce()> = Box::new(move || {
+                let before = fs::metadata(&path).unwrap();
+                let original = fs::read_to_string(&path).unwrap();
+                assert!(original.contains(from));
+                let rewritten = original.replace(from, to);
+                assert_eq!(rewritten.len(), original.len());
+                fs::write(&path, rewritten).unwrap();
+                fs::File::options()
+                    .write(true)
+                    .open(&path)
+                    .unwrap()
+                    .set_modified(before.modified().unwrap())
+                    .unwrap();
+                assert_eq!(
+                    crate::events::Stat::from_metadata(&before).unwrap(),
+                    crate::events::Stat::from_metadata(&fs::metadata(&path).unwrap()).unwrap()
+                );
+            });
+            if after_derivation {
+                AFTER_MODEL_DERIVATION.with(|hook| *hook.borrow_mut() = Some(mutation));
+            } else {
+                AFTER_SCAN.with(|hook| *hook.borrow_mut() = Some(mutation));
+            }
+            assert!(
+                build(
+                    &home.options,
+                    &mut cache,
+                    &mut false,
+                    &mut Texts::default(),
+                    NOW
+                )
+                .is_err(),
+                "{after_derivation}: {from}"
+            );
+            assert_eq!(cache.session_catalog_generation(), generation);
+        }
+    }
 }
 
 #[test]

@@ -12,8 +12,7 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
-    fs,
-    io::{self, BufRead, BufReader, Read, Seek, SeekFrom},
+    fs, io,
     path::{Path, PathBuf},
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
@@ -27,13 +26,16 @@ use serde::{Deserialize, Serialize};
 pub(crate) mod summary;
 use serde_json::Value;
 
+#[cfg(test)]
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
+
 use crate::{
     Marker, Options, attachments, events,
     events::{
         ACK, ANSWERED, ASYNC, DENIED, Event, EventCache, FileIndex, Kind, PIN, SEND_FAILED, UNKNOWN,
     },
     facts::{MachineFacts, ReportedModelUsage, ReportedRunSnapshot},
-    field, file_list, handoff, read_first_marker,
+    field, file_list, handoff,
 };
 
 /// Version of the `/api/model` JSON shape. Embedders and clients compare it;
@@ -563,7 +565,6 @@ pub(crate) struct Texts {
     descriptions: HashMap<String, (DescriptionInputs, Description)>,
     prompt_caches: HashMap<PathBuf, (u64, Arc<crate::attachments::PromptCache>)>,
     repos: HashMap<String, Option<String>>,
-    markers: HashMap<PathBuf, (Stamp, Option<Marker>)>,
 }
 
 #[cfg(test)]
@@ -581,8 +582,11 @@ thread_local! {
     pub(crate) static AFTER_SCAN: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
     /// Races after native query derivation, before projection publication.
     pub(crate) static AFTER_QUERY_DERIVATION: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+    /// Races after model derivation, before its projection is published.
+    static AFTER_MODEL_DERIVATION: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
 }
 
+#[cfg(test)]
 pub(crate) fn read_line(path: &Path, offset: u64) -> Option<Value> {
     #[cfg(test)]
     DIRECT_SOURCE_READS.with(|reads| reads.set(reads.get() + 1));
@@ -596,9 +600,7 @@ pub(crate) fn read_line(path: &Path, offset: u64) -> Option<Value> {
 
 impl Texts {
     fn invalidate(&mut self, path: &Path) {
-        if self.generations.remove(path).is_some() {
-            self.markers.remove(path);
-        }
+        self.generations.remove(path);
     }
 
     fn generation(&mut self, path: &Path, stamp: Stamp) -> u64 {
@@ -625,7 +627,7 @@ impl Texts {
         offset: u64,
         block: u32,
         what: &str,
-        records: Option<&crate::query_source::Records<'_>>,
+        records: &crate::query_source::Records<'_>,
         extract: impl FnOnce(&Value, usize) -> Option<String>,
     ) -> Option<String> {
         let key = TextKey {
@@ -641,10 +643,9 @@ impl Texts {
             return value.clone();
         }
         let value = records
-            .map_or_else(
-                || read_line(&file.path, offset),
-                |records| records.derive(&file.path, offset).ok().flatten(),
-            )
+            .derive(&file.path, offset)
+            .ok()
+            .flatten()
             .and_then(|record| extract(&record, block as usize))
             .map(|text| {
                 // `json:` values are built capped, and must stay whole.
@@ -695,19 +696,6 @@ impl Texts {
         }
         self.repos.insert(cwd.to_owned(), repo.clone());
         repo
-    }
-
-    /// A Codex run's marker, re-read only when the file changed.
-    fn marker(&mut self, path: &Path, stamp: Stamp) -> Option<Marker> {
-        if let Some((seen, marker)) = self.markers.get(path)
-            && *seen == stamp
-        {
-            return marker.clone();
-        }
-        let marker = read_first_marker(path).ok().flatten();
-        self.markers
-            .insert(path.to_owned(), (stamp, marker.clone()));
-        marker
     }
 }
 
@@ -1208,10 +1196,7 @@ pub(crate) fn working_dirs(
         &mut Texts::default(),
         cutoff,
         &MachineFacts::Local,
-        ScanSelection {
-            inputs: None,
-            legacy_markers: false,
-        },
+        None,
     )?;
     let mut cwds = BTreeSet::new();
     for file in &files {
@@ -1238,11 +1223,6 @@ fn modified_ms(path: &Path) -> Option<i64> {
     i64::try_from(time.duration_since(UNIX_EPOCH).ok()?.as_millis()).ok()
 }
 
-struct ScanSelection<'a> {
-    inputs: Option<&'a [crate::inputs::Input]>,
-    legacy_markers: bool,
-}
-
 /// Every source file, with its event index. A file last modified before
 /// `cutoff` isn't read at all: its cached index is kept (it counts as seen)
 /// for builds that read every file. Also returns the ids of the top-level
@@ -1254,10 +1234,8 @@ fn scan(
     texts: &mut Texts,
     cutoff: Option<i64>,
     machine: &MachineFacts,
-    selection: ScanSelection<'_>,
+    selected: Option<&[crate::inputs::Input]>,
 ) -> io::Result<(Vec<SourceFile>, BTreeSet<String>, std::time::Duration)> {
-    let selected = selection.inputs;
-    let legacy_markers = selection.legacy_markers;
     if selected.is_some_and(|inputs| {
         inputs.iter().any(|input| {
             !crate::is_input_path(input.root.as_str(), &input.path)
@@ -1363,7 +1341,7 @@ fn scan(
             id: id.to_owned(),
             first: summary.first,
             last: summary.last,
-            marker: legacy_markers.then(|| texts.marker(&path, stamp)).flatten(),
+            marker: None,
             path,
             role,
             summary,
@@ -1405,7 +1383,7 @@ fn scan(
         seen.insert(path.to_string_lossy().into_owned());
         files.push(SourceFile {
             revision: cache.revision(&path).expect("scanned file has a ledger"),
-            marker: legacy_markers.then(|| texts.marker(&path, stamp)).flatten(),
+            marker: None,
             stamp,
             id,
             first: summary.first,
@@ -1656,7 +1634,7 @@ struct Builder<'a> {
     files: &'a [SourceFile],
     slot_files: Vec<Arc<SlotFile>>,
     texts: &'a mut Texts,
-    records: Option<&'a crate::query_source::Records<'a>>,
+    records: &'a crate::query_source::Records<'a>,
     now: i64,
     machine: String,
     facts: &'a MachineFacts,
@@ -1694,7 +1672,7 @@ fn event(files: &[SourceFile], at: Ref) -> &Event {
 
 impl<'a> Builder<'a> {
     fn new(
-        files: &'a [SourceFile],
+        (files, records): (&'a [SourceFile], &'a crate::query_source::Records<'a>),
         texts: &'a mut Texts,
         now: i64,
         machine: String,
@@ -1732,7 +1710,7 @@ impl<'a> Builder<'a> {
                 .collect(),
             files,
             texts,
-            records: None,
+            records,
             now,
             machine,
             home: facts.home(),
@@ -2995,8 +2973,7 @@ impl<'a> Builder<'a> {
         (Some(spawner), call, false)
     }
 
-    /// Native callers borrow indexed source evidence. Legacy Model/tree consumers
-    /// retain their scan until their remaining transport is migrated.
+    /// All producer targets borrow the same indexed source evidence.
     fn handoff_tool(
         &self,
         spawner: usize,
@@ -3004,26 +2981,18 @@ impl<'a> Builder<'a> {
         cwd: Option<&str>,
         start: Option<i64>,
     ) -> Option<String> {
-        if let Some(records) = &self.records {
-            let mut matcher = handoff::Matcher::new(prompt, cwd, start);
-            for position in &self.sessions[spawner].files {
-                let file = &self.files[*position];
-                let index = file.summary.handoff_index.as_ref()?;
-                for location in index.calls() {
-                    let call = records.launch(&file.path, location).ok()?;
-                    if let Some(tool) = matcher.consider(&call) {
-                        return Some(tool.id);
-                    }
+        let mut matcher = handoff::Matcher::new(prompt, cwd, start);
+        for position in &self.sessions[spawner].files {
+            let file = &self.files[*position];
+            let index = file.summary.handoff_index.as_ref()?;
+            for location in index.calls() {
+                let call = self.records.launch(&file.path, location).ok()?;
+                if let Some(tool) = matcher.consider(&call) {
+                    return Some(tool.id);
                 }
             }
-            return matcher.finish().map(|tool| tool.id);
         }
-        let paths: Vec<PathBuf> = self.sessions[spawner]
-            .files
-            .iter()
-            .map(|file| self.files[*file].path.clone())
-            .collect();
-        handoff::find(&paths, prompt, cwd, start).map(|tool| tool.id)
+        matcher.finish().map(|tool| tool.id)
     }
 
     fn codex_spawns(&mut self) {
@@ -6032,18 +6001,7 @@ fn build_sources_inner(
     let window_start = scan_cutoff(options, now);
     let (mut files, skipped, index_clone) = timed!(
         "scan",
-        scan(
-            options,
-            cache,
-            dirty,
-            texts,
-            window_start,
-            &facts,
-            ScanSelection {
-                inputs: selected,
-                legacy_markers: target == BuildTarget::Model
-            }
-        )?
+        scan(options, cache, dirty, texts, window_start, &facts, selected)?
     );
     timings.push((
         "index_clone",
@@ -6103,37 +6061,31 @@ fn build_sources_inner(
         MachineFacts::Local => cache.reported_runs().cloned().collect(),
         MachineFacts::Recorded(facts) => facts.reported_runs.clone(),
     };
-    let source_proofs = (target != BuildTarget::Model)
-        .then(|| {
-            crate::query_source::Sources::capture(
-                options,
-                files
-                    .iter()
-                    .map(|file| (summary::source(file), file.summary.source_chunks.clone())),
-            )
-        })
-        .transpose()?;
-    let source_records = source_proofs
-        .as_ref()
-        .map(crate::query_source::Sources::reader);
-    if let Some(records) = &source_records {
-        records.verify_all()?;
-        for file in &mut files {
-            if file.summary.handoff_index.is_none() {
-                return Err(io::Error::other("native launch calls were not indexed"));
-            }
-            if file.harness() != "copilot" {
-                let index = file
-                    .summary
-                    .marker_index
-                    .as_ref()
-                    .ok_or_else(|| io::Error::other("native parent marker was not indexed"))?;
-                file.marker = records.marker(&file.path, index)?;
-            }
+    let sources = files
+        .iter()
+        .map(|file| (summary::source(file), file.summary.source_chunks.clone()));
+    let source_proofs = if target == BuildTarget::Model {
+        crate::query_source::Sources::capture_native(options, sources)?
+    } else {
+        crate::query_source::Sources::capture(options, sources)?
+    };
+    let source_records = source_proofs.reader();
+    source_records.verify_all()?;
+    for file in &mut files {
+        if file.summary.handoff_index.is_none() {
+            return Err(io::Error::other("native launch calls were not indexed"));
+        }
+        if file.harness() != "copilot" {
+            let index = file
+                .summary
+                .marker_index
+                .as_ref()
+                .ok_or_else(|| io::Error::other("native parent marker was not indexed"))?;
+            file.marker = source_records.marker(&file.path, index)?;
         }
     }
     let mut builder = Builder::new(
-        &files,
+        (&files, &source_records),
         texts,
         now,
         machine.clone(),
@@ -6141,7 +6093,6 @@ fn build_sources_inner(
         &reported_runs,
         cache,
     );
-    builder.records = source_records.as_ref();
     timed!("sessions", builder.sessions(groups, &pids, &held));
     for name in facts.native_names(options) {
         if name.valid()
@@ -6198,15 +6149,12 @@ fn build_sources_inner(
     .then(|| summary::catalog(&builder, &handoffs));
     let slot_projections = catalog
         .as_ref()
-        .map(|rows| crate::slot_projection::capture(&tx, rows, source_records.as_ref()));
+        .map(|rows| crate::slot_projection::capture(&tx, rows, Some(&source_records)));
     if target != BuildTarget::Model {
         verify_sidecars(&files)?;
     }
     if matches!(target, BuildTarget::Catalog | BuildTarget::Sources) {
-        source_records
-            .as_ref()
-            .expect("native source reader captured")
-            .finish()?;
+        source_records.finish()?;
     }
     match target {
         BuildTarget::Sources => {
@@ -6415,10 +6363,7 @@ fn build_sources_inner(
             hook();
         }
         verify_sidecars(&files)?;
-        source_records
-            .as_ref()
-            .expect("native query reader captured")
-            .finish()?;
+        source_records.finish()?;
         drop(source_records);
         if let Some(catalog) = catalog {
             cache.publish_session_projection(
@@ -6431,7 +6376,7 @@ fn build_sources_inner(
         }
         cache.publish_session_descriptions();
         return Ok(BuildOutput::Query(Box::new(QueryData {
-            sources: source_proofs.expect("native query sources captured"),
+            sources: source_proofs,
             sessions,
             handoffs,
             turns,
@@ -6561,6 +6506,11 @@ fn build_sources_inner(
         "post",
         u32::try_from(post_started.elapsed().as_millis()).unwrap_or(u32::MAX),
     ));
+    #[cfg(test)]
+    if let Some(hook) = AFTER_MODEL_DERIVATION.with(|hook| hook.borrow_mut().take()) {
+        hook();
+    }
+    source_records.finish()?;
     if let Some(catalog) = catalog {
         cache.publish_session_projection(
             &crate::slot_projection::Publication {
