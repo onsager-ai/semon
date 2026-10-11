@@ -3322,6 +3322,16 @@ export function createCatalogViewer(
     if (locating) return;
     locating = true;
     const path = location.pathname;
+    const current = () =>
+      !disposed &&
+      location.pathname === path &&
+      (sourceKey
+        ? capabilities.source_key === sourceKey
+        : !new URLSearchParams(location.search).has('machine'));
+    const retry = () =>
+      scope.timeout(() => {
+        if (current()) void locateBookmark(key, sourceKey);
+      }, 1000);
     try {
       const reply = object(
         await api(
@@ -3329,15 +3339,13 @@ export function createCatalogViewer(
             new URLSearchParams({ sid: key, ...(sourceKey ? { machine: sourceKey } : {}) }),
         ),
       );
+      if (!current()) return;
       if (
-        disposed ||
-        location.pathname !== path ||
-        (sourceKey
-          ? capabilities.source_key !== sourceKey
-          : new URLSearchParams(location.search).has('machine'))
+        reply.api !== 1 ||
+        !Array.isArray(reply.matches) ||
+        !Number.isSafeInteger(reply.unavailable) ||
+        Number(reply.unavailable) < 0
       )
-        return;
-      if (reply.api !== 1 || !Array.isArray(reply.matches))
         throw Error('Bookmark lookup unavailable');
       if (reply.matches.length === 1 && reply.unavailable === 0) {
         const match = object(reply.matches[0]);
@@ -3368,15 +3376,19 @@ export function createCatalogViewer(
         navigation.route = { v: 'sessions' };
         sourcesOpen = true;
         sourcesNote =
-          reply.matches.length > 1
-            ? 'This bookmark has several recorded origins. Choose a session.'
-            : 'Choose a machine to resolve this recorded session.';
+          Number(reply.unavailable) > 0
+            ? 'The recorded session index is updating. Retrying…'
+            : reply.matches.length > 1
+              ? 'This bookmark has several recorded origins. Choose a session.'
+              : 'Choose a machine to resolve this recorded session.';
         drawSources();
+        if (Number(reply.unavailable) > 0) retry();
       }
     } catch (error) {
-      if (!disposed) {
+      if (current()) {
         sourcesNote = readError(error);
         drawSources();
+        if (retryable(error)) retry();
       }
     } finally {
       locating = false;

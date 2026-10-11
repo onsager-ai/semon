@@ -222,9 +222,9 @@ export async function goto(page, route, D) {
 
 // The served data in the mockup's shapes: SESS, H, MACHINE, MACHINE_UP, NOW, every transcript in full as TX, and the
 // server's turn index.
-export async function data({ extras = false } = {}) {
-  const base = extras ? ENV.extraBase : ENV.base,
-    token = extras ? ENV.extraToken : ENV.token;
+export async function data({ extras = false, base: sourceBase, token: sourceToken } = {}) {
+  const base = sourceBase ?? (extras ? ENV.extraBase : ENV.base),
+    token = sourceToken ?? (extras ? ENV.extraToken : ENV.token);
   const get = async (p) => {
     const r = await fetch(base + p + (p.includes('?') ? '&' : '?') + 't=' + token);
     if (!r.ok) throw new Error(p + ': ' + r.status);
