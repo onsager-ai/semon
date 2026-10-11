@@ -15,9 +15,9 @@ Audited on October 10, 2026:
 | Semon | `02a9ac17d525eb134b5952f7e55d30b47b16b8ec` | Not applicable |
 | Hub | `9623986977ec69869276fa4224a939e0c9fa4312` | `8d38fbbf254d52a9b9bac123d47df8b9c593800d` |
 
-The refreshed main revisions are Semon
+The main revisions verified on October 11, 2026 are Semon
 `263a02da278716ab2309b8e34a463419e5c781e5` and Hub
-`3500d59f44d93cbc4cdbd9fd83663df91f281b67` (gitlink Semon
+`039c0fdaf5239a1fe8a6b1cd9662686bc23851f1` (gitlink Semon
 `263a02da278716ab2309b8e34a463419e5c781e5`). Their source-pin contract and
 Hub navigation/native-picker changes through `96ae028` are retained in the staged
 PRs. Later Hub registry credential/CI changes (#244/#246) and approved native
@@ -377,7 +377,7 @@ changes to the sidecar alone repair metadata without replaying unchanged log
 rows. Safe descriptor opens refuse links through any ancestor, and generation
 checks fence indexing and publication races. `Texts::meta` is removed.
 
-New subagent eviction requires a version-four marker binding the persisted
+New subagent eviction requires a version-five marker binding the persisted
 sidecar encoding and a final check of its independent observation. Prior markers
 still keep existing event rows. Unreadable, linked, oversized or unpersistable
 sidecars defer new eviction without truncating parsed fields or hiding the
@@ -391,16 +391,24 @@ ledger, including native scalar-recipe preparation. They reject changed bytes
 even if file timestamps collide, and recheck only used blocks on completion.
 Unchanged Unix range reads do not hash unrelated source bytes. Proof metadata contains
 no bodies and is paged in the existing index; repair of unchanged native evidence
-does not replay event rows. New eviction binds the proof header in version-four
+does not replay event rows. New eviction binds the proof header in version-five
 archive markers; prior versions retain existing rows. The [query contract](../../crates/semon-sessions/src/query/README.md)
 owns limits, rollout/downgrade rules and the remaining generation boundaries.
 File-stamp freshness still observes metadata; it does not prove arbitrary
-whole-file byte immutability. Native parent/EOF evidence and hosted generation
-ownership remain to be qualified. No database, table, schema, parser version or
+whole-file byte immutability. Hosted generation ownership remains to be
+qualified. No database, table, schema, parser version or
 generalized event pipeline is added.
 
-Private Semon parent markers and a query's relationship closure remain to be
-extracted; hosted MCP restoration remains until those consumers migrate.
+Native parent-marker reads now use content-free locations observed by the event
+parser and verified against the selected original record, including valid JSON
+at EOF without a newline. Native Catalog, Query and source preparation no longer
+use the independent full-log marker scan; its legacy Model/tree consumers remain.
+Marker text and private handoff prompt paths are not persisted. New archive
+eviction also binds this metadata; prior markers preserve existing rows. The
+[query contract](../../crates/semon-sessions/src/query/README.md) owns exact limits
+and downgrade obligations. The duplicate launch cache and bounded relationship
+closure remain to be extracted; hosted MCP restoration remains until those
+consumers migrate.
 
 Hub MCP still acquires a workspace core and restores tenant archives; native
 query discovery/joins still cover eligible sources. Implement authorized

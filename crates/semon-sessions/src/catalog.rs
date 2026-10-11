@@ -1315,6 +1315,82 @@ mod tests {
     }
 
     #[test]
+    fn archive_eviction_binds_parent_marker_metadata_and_preserves_prior_v4_rows() {
+        let fixture = Fixture::new();
+        fixture.publish(1);
+        let relative = "projects/project/session-00000.jsonl";
+        let path = fixture.options.claude_home.join(relative);
+        let proof = session_source_proof(&fixture.options, "claude", relative)
+            .unwrap()
+            .unwrap();
+        let ready = crate::source_projection_ready(&fixture.options, "claude", relative)
+            .unwrap()
+            .unwrap();
+        crate::retain_source_event_index(&fixture.options, &proof, &ready).unwrap();
+        let connection = Connection::open(EventCache::path(&fixture.options.cache)).unwrap();
+        let key = format!("native_parent_marker:{}", path.display());
+        let encoded: String = connection
+            .query_row("SELECT value FROM meta WHERE key=?1", [&key], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        connection
+            .execute("UPDATE meta SET value=value || ' ' WHERE key=?1", [&key])
+            .unwrap();
+        assert!(!crate::source_event_index_retained(&fixture.options, &proof, &ready).unwrap());
+        connection
+            .execute("DELETE FROM meta WHERE key=?1", [&key])
+            .unwrap();
+        assert!(!crate::source_event_index_retained(&fixture.options, &proof, &ready).unwrap());
+        assert_eq!(
+            crate::retain_source_event_index(&fixture.options, &proof, &ready),
+            Err(CatalogIdentityError::ScopeChanged)
+        );
+        connection
+            .execute(
+                "INSERT INTO meta(key,value) VALUES(?1,?2)",
+                rusqlite::params![key, encoded],
+            )
+            .unwrap();
+        assert!(crate::source_event_index_retained(&fixture.options, &proof, &ready).unwrap());
+        let archive_key = format!("archive_event_index:{}", path.display());
+        let encoded: String = connection
+            .query_row(
+                "SELECT value FROM meta WHERE key=?1",
+                [&archive_key],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let mut marker: Value = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(marker["version"], 5);
+        marker["version"] = json!(4);
+        marker
+            .as_object_mut()
+            .unwrap()
+            .remove("parent_marker_sha256");
+        connection
+            .execute(
+                "UPDATE meta SET value=?2 WHERE key=?1",
+                rusqlite::params![archive_key, marker.to_string()],
+            )
+            .unwrap();
+        assert!(!crate::source_event_index_retained(&fixture.options, &proof, &ready).unwrap());
+        let before = indexed_rows(&connection, path.to_str().unwrap());
+        fs::remove_file(&path).unwrap();
+        for _ in 0..2 {
+            assert_eq!(native_refresh(&fixture)["sessions"], json!([]));
+            assert_eq!(indexed_rows(&connection, path.to_str().unwrap()), before);
+            let count: i64 = connection
+                .query_row("SELECT count(*) FROM files", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(
+                count, 1,
+                "old v4 custody still preserves the existing index"
+            );
+        }
+    }
+
+    #[test]
     fn archived_event_index_marker_does_not_cover_a_new_native_generation() {
         let fixture = Fixture::new();
         fixture.publish(1);

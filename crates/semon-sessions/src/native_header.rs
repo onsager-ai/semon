@@ -335,7 +335,7 @@ mod tests {
                 .unwrap(),
         )
         .unwrap();
-        assert_eq!(marker["version"], 4);
+        assert_eq!(marker["version"], 5);
         connection
             .execute(
                 "UPDATE meta SET value=value || ' ' WHERE key=?1",
@@ -353,6 +353,10 @@ mod tests {
             .as_object_mut()
             .unwrap()
             .remove("source_chunks_sha256");
+        marker
+            .as_object_mut()
+            .unwrap()
+            .remove("parent_marker_sha256");
         marker
             .as_object_mut()
             .unwrap()

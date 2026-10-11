@@ -4220,6 +4220,217 @@ fn a_general_marker_overrides_environment_and_native_parent_and_cycles_stay_unli
     assert!(tree.iter().any(|node| node.id == "cycle-b"));
 }
 
+fn native_marker_query(home: &Home) -> QueryData {
+    build_query(
+        &home.options,
+        &mut EventCache::open_scoped(&home.options.cache).unwrap(),
+        &mut false,
+        &mut Texts::default(),
+        NOW,
+    )
+    .unwrap()
+}
+
+#[test]
+fn native_parent_marker_restart_reads_only_its_location_and_repairs_metadata_without_event_replay()
+{
+    let home = Home::new();
+    home.top("parent", &[human("parent", ts(10, 0), "parent task")]);
+    let marker = human(
+        "child",
+        ts(10, 1),
+        "Semon-Parent: claude:parent\nSemon-Handoff: /private/SECRET-PROMPT\nSECRET-BODY",
+    );
+    let mut records = vec![json!({"type":"progress","padding":"x".repeat(1024)}); 1024];
+    records.push(marker.clone());
+    records.push(assistant("child", ts(10, 2), vec![text("answer")]));
+    let path = home.top("child", &records);
+    let original = fs::read(&path).unwrap();
+    let raw = crate::FIRST_MARKER_READS.with(std::cell::Cell::get);
+    let bytes = || crate::native_marker::READ_BYTES.with(std::cell::Cell::get);
+    for iteration in 0..2 {
+        let before = bytes();
+        let query = native_marker_query(&home);
+        assert_eq!(query.sessions["child"].parent.as_deref(), Some("parent"));
+        assert_eq!(
+            query.sessions["child"].parent_source.as_deref(),
+            Some("marker")
+        );
+        assert_eq!(
+            bytes() - before,
+            (if iteration == 0 { 3 } else { 2 }) * (marker.to_string().len() as u64 + 1)
+        );
+        assert_eq!(crate::FIRST_MARKER_READS.with(std::cell::Cell::get), raw);
+    }
+    let connection = rusqlite::Connection::open(EventCache::path(&home.options.cache)).unwrap();
+    let key = format!("native_parent_marker:{}", path.display());
+    let encoded: String = connection
+        .query_row("SELECT value FROM meta WHERE key=?1", [&key], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert!(!encoded.contains("SECRET"));
+    assert!(!encoded.contains("private"));
+    let indexed = crate::events::PARSED.with(std::cell::Cell::get);
+    for mutation in 0..4 {
+        match mutation {
+            0 => {
+                connection
+                    .execute("DELETE FROM meta WHERE key=?1", [&key])
+                    .unwrap();
+            }
+            1 => {
+                connection
+                    .execute("UPDATE meta SET value='{' WHERE key=?1", [&key])
+                    .unwrap();
+            }
+            2 => {
+                connection
+                    .execute(
+                        "UPDATE meta SET value=json_set(value,'$.version',99) WHERE key=?1",
+                        [&key],
+                    )
+                    .unwrap();
+            }
+            _ => {
+                connection
+                    .execute(
+                        "UPDATE meta SET value=json_set(value,'$.ledger','mismatch') WHERE key=?1",
+                        [&key],
+                    )
+                    .unwrap();
+            }
+        }
+        assert_eq!(
+            native_marker_query(&home).sessions["child"]
+                .parent
+                .as_deref(),
+            Some("parent")
+        );
+        assert_eq!(crate::events::PARSED.with(std::cell::Cell::get), indexed);
+    }
+    assert_eq!(fs::read(path).unwrap(), original);
+}
+
+#[test]
+fn native_parent_markers_keep_valid_eof_and_first_agent_output_semantics() {
+    for eof in [false, true] {
+        let home = Home::new();
+        home.top("parent", &[human("parent", ts(10, 0), "parent task")]);
+        home.codex("child", json!({}), &[]);
+        let path = home
+            .options
+            .codex_home
+            .join("sessions/2026/09/24/rollout-child.jsonl");
+        let marker = codex_user(
+            ts(10, 1),
+            "Semon-Parent: claude:parent\nSemon-Handoff: /private/prompt",
+        )
+        .to_string();
+        let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
+        if eof {
+            let split = marker.len() / 2;
+            write!(file, "{}", &marker[..split]).unwrap();
+            assert!(
+                native_marker_query(&home).sessions["child"]
+                    .parent
+                    .is_none()
+            );
+            write!(file, "{}", &marker[split..]).unwrap();
+        } else {
+            writeln!(file, "{marker}").unwrap();
+        }
+        let original = fs::read(&path).unwrap();
+        assert_eq!(
+            native_marker_query(&home).sessions["child"]
+                .parent
+                .as_deref(),
+            Some("parent")
+        );
+        assert_eq!(
+            native_marker_query(&home).sessions["child"]
+                .parent
+                .as_deref(),
+            Some("parent")
+        );
+        assert_eq!(fs::read(&path).unwrap(), original);
+        if eof {
+            writeln!(file).unwrap();
+            assert_eq!(
+                native_marker_query(&home).sessions["child"]
+                    .parent
+                    .as_deref(),
+                Some("parent")
+            );
+        }
+        home.codex(
+            "stopped",
+            json!({}),
+            &[
+                codex_reply(ts(10, 0), "output before marker"),
+                codex_user(ts(10, 1), "Semon-Parent: claude:parent"),
+            ],
+        );
+        assert!(
+            native_marker_query(&home).sessions["stopped"]
+                .parent
+                .is_none()
+        );
+    }
+}
+
+#[test]
+fn native_parent_marker_rewrite_with_identical_stat_refuses_catalog_publication_including_eof() {
+    let _clock = crate::events::fixed_change_time_for_test(0);
+    for eof in [false, true] {
+        let home = Home::new();
+        home.top("parent", &[human("parent", ts(10, 0), "parent task")]);
+        let marker = human(
+            "child",
+            ts(10, 1),
+            "Semon-Parent: claude:parent\nSemon-Handoff: /private/OLD",
+        );
+        let path = home.top("child", &[marker]);
+        if eof {
+            let mut original = fs::read(&path).unwrap();
+            original.pop();
+            fs::write(&path, original).unwrap();
+        }
+        native_marker_query(&home);
+        let mut cache = EventCache::open_scoped(&home.options.cache).unwrap();
+        let generation = cache.session_catalog_generation();
+        AFTER_SCAN.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                let before = fs::metadata(&path).unwrap();
+                let original = fs::read_to_string(&path).unwrap();
+                assert!(original.contains("/private/OLD"));
+                fs::write(&path, original.replace("/private/OLD", "/private/NEW")).unwrap();
+                fs::File::options()
+                    .write(true)
+                    .open(&path)
+                    .unwrap()
+                    .set_modified(before.modified().unwrap())
+                    .unwrap();
+                assert_eq!(
+                    crate::events::Stat::from_metadata(&before).unwrap(),
+                    crate::events::Stat::from_metadata(&fs::metadata(&path).unwrap()).unwrap()
+                );
+            }))
+        });
+        assert!(
+            build_query(
+                &home.options,
+                &mut cache,
+                &mut false,
+                &mut Texts::default(),
+                NOW
+            )
+            .is_err()
+        );
+        assert_eq!(cache.session_catalog_generation(), generation);
+    }
+}
+
 #[test]
 fn model_comparison_uses_indexed_per_message_models_for_launched_work() {
     let home = Home::new();

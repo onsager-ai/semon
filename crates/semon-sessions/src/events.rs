@@ -286,6 +286,7 @@ impl DirtyRows {
 pub(crate) struct FileIndex {
     pub(crate) dirty_rows: Option<DirtyRows>,
     pub(crate) source_chunks: Option<Arc<crate::source_chunks::Chunks>>,
+    pub(crate) marker_index: Option<crate::native_marker::Index>,
     /// Allowlisted first-record metadata observed on the same native generation.
     pub(crate) codex_header: Option<crate::native_header::CodexHeader>,
     /// A subagent sidecar has its own generation, separate from the native log.
@@ -1692,6 +1693,7 @@ pub(crate) fn scan_file(
     if let Some(entry) = cache.files.get(&key)
         && !cache.unpersisted.contains(&key)
         && entry.index.source_chunks.is_some()
+        && (harness == "copilot" || entry.index.marker_index.is_some())
         && (harness != "codex" || entry.index.codex_header.is_some())
         && (!agent
             || entry
@@ -1750,6 +1752,7 @@ pub(crate) fn scan_file(
             && ledger.stat == stat
             && let Some(index) = &base
             && index.source_chunks.is_some()
+            && (harness == "copilot" || index.marker_index.is_some())
             && (harness != "codex" || index.codex_header.is_some())
             && (!agent
                 || sidecar
@@ -1817,6 +1820,12 @@ pub(crate) fn scan_file(
             hook();
         }
         writable.dirty_rows = Some(DirtyRows::begin(writable));
+        if harness != "copilot" && writable.marker_index.is_none() {
+            writable.marker_index = Some(crate::native_marker::Index::repair(&mut file, from)?);
+        }
+        if let Some(markers) = &mut writable.marker_index {
+            markers.begin_append();
+        }
         let (offset, parsed) = parse(&mut file, from, harness, writable)?;
         let changes = writable
             .dirty_rows
@@ -1875,6 +1884,18 @@ pub(crate) fn scan_file(
             prefix,
             tail,
         };
+        if let Some(markers) = &writable.marker_index
+            && (!markers.valid(&ledger) || markers.verify(&mut file).is_err())
+        {
+            if last {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "native parent marker changed while indexing",
+                ));
+            }
+            force_replace = true;
+            continue;
+        }
         #[cfg(test)]
         {
             if let Some(hook) = BEFORE_COMMIT.with(|hook| hook.borrow_mut().take()) {
@@ -1920,7 +1941,15 @@ fn parse(
     loop {
         line.clear();
         let length = reader.read_until(b'\n', &mut line)?;
-        if length == 0 || !line.ends_with(b"\n") {
+        if length == 0 {
+            break;
+        }
+        if !line.ends_with(b"\n") {
+            if let Some(markers) = &mut index.marker_index
+                && let Ok(value) = serde_json::from_slice(&line)
+            {
+                markers.observe(&line, offset, false, &value);
+            }
             break;
         }
         let line_offset = offset;
@@ -1930,6 +1959,9 @@ fn parse(
         PARSED.with(|parsed| parsed.set(parsed.get() + 1));
         match serde_json::from_slice::<Value>(&line) {
             Ok(record) if record.is_object() => {
+                if let Some(markers) = &mut index.marker_index {
+                    markers.observe(&line, line_offset, true, &record);
+                }
                 if harness == "copilot" {
                     copilot(index, &record, line_offset);
                 } else if harness == "claude" {
