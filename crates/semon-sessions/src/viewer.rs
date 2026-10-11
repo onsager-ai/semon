@@ -3174,6 +3174,77 @@ mod tests {
     }
 
     #[test]
+    fn native_html_uses_selected_history_without_showing_a_workspace_model() {
+        let fixture = Fixture::new();
+        fixture.claude("native-html", &[
+            json!({"type":"user","sessionId":"native-html","uuid":"u","origin":{"kind":"human"},"timestamp":"2026-10-01T00:00:00Z","message":{"role":"user","content":"<script>private prompt</script>"}}),
+            json!({"type":"assistant","sessionId":"native-html","uuid":"a","timestamp":"2026-10-01T00:01:00Z","message":{"role":"assistant","content":[{"type":"thinking","thinking":"collapsed reasoning"},{"type":"tool_use","id":"read-call","name":"Read","input":{"file_path":"safe-file.txt"}}]}}),
+            json!({"type":"user","sessionId":"native-html","uuid":"result","timestamp":"2026-10-01T00:02:00Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"read-call","content":"native tool output"}]}}),
+        ]);
+        let core = ViewerCore::new(fixture.options.clone());
+        core.demand_catalog_source("local").unwrap();
+        eventually("native HTML fixture publication", || {
+            let reply = core.respond("GET", "/api/sessions", "limit=60", None);
+            let page: Value = serde_json::from_slice(&reply.body).ok()?;
+            (reply.status == 200 && page["completeness"]["state"] == "complete").then_some(())
+        });
+        let listing = core.respond("GET", "/sessions", "native=1", None);
+        assert_eq!(listing.status, 200);
+        let listing = String::from_utf8(listing.body).unwrap();
+        assert!(listing.contains("/s/claude/native-html?machine=local&amp;native=1"));
+        let selected = core.respond(
+            "GET",
+            "/s/claude/native-html",
+            "native=1&machine=local&t=secret-bootstrap",
+            None,
+        );
+        assert_eq!(selected.status, 200);
+        let html = String::from_utf8(selected.body).unwrap();
+        assert!(
+            html.contains("&lt;script&gt;private prompt&lt;/script&gt;"),
+            "{html}"
+        );
+        assert!(html.contains("<summary>Thinking</summary>"), "{html}");
+        assert!(html.contains("<summary>Read</summary>"), "{html}");
+        assert!(html.contains("native tool output"), "{html}");
+        assert!(!html.contains("<script") && !html.contains("secret-bootstrap"));
+        for view in core.machine_views() {
+            assert!(view.shown_model().is_none());
+        }
+        assert_eq!(
+            core.respond(
+                "GET",
+                "/s/codex/native-html",
+                "native=1&machine=local",
+                None
+            )
+            .status,
+            404
+        );
+        assert_eq!(
+            core.respond(
+                "GET",
+                "/sessions",
+                "native=1&machine=local&machine=local",
+                None
+            )
+            .status,
+            400
+        );
+        assert_eq!(
+            core.respond(
+                "GET",
+                "/s/claude/native-html",
+                "native=1&machine=local&after=0&generation=obsolete",
+                None
+            )
+            .status,
+            409
+        );
+        core.close();
+    }
+
+    #[test]
     fn http_guards_and_headers() {
         let fixture = Fixture::new();
         let token = "0123456789abcdef0123456789abcdef";
