@@ -27,8 +27,8 @@ use crate::{
     received::{Listing, ReceivedMachines},
     refresh::RefreshPool,
     viewer::{
-        MachineView, Reading, ViewerReply, decoded, has_page, has_session_page, has_trace_page,
-        is_named_page, lock, page_parts, percent_encode, query_value, read_lock, write_lock,
+        MachineView, Reading, ViewerReply, decoded, is_named_page, lock, page_parts,
+        percent_encode, query_value, read_lock, write_lock,
     },
 };
 
@@ -546,6 +546,16 @@ fn machine_id(hostname: &str, key: &str, index: usize, taken: &[String]) -> Stri
         .chain((2..).map(|n| format!("{hostname}~{index}~{n}")))
         .find(|id| !taken.contains(id))
         .expect("an unbounded list of distinct ids")
+}
+
+/// Presentation aliases depend only on configured native machine identity.
+fn native_machine_ids(views: &Views) -> Vec<String> {
+    let mut labels = Vec::with_capacity(views.len());
+    for (index, (key, view)) in views.iter().enumerate() {
+        let hostname = crate::facts::MachineFacts::of(view.options()).hostname(view.options());
+        labels.push(machine_id(&hostname, key, index, &labels));
+    }
+    labels
 }
 
 /// The union's plan. Machines from `droppable` on (the received ones) lose
@@ -1417,7 +1427,6 @@ impl ViewerCore {
                 self.by_transcript(&views, path, query, if_none_match)
             }
             "/api/tree" => self.tree(&views),
-            _ if is_named_page(path) => self.page(&views, path),
             _ => Ok(views[0].1.respond(method, path, query, if_none_match)),
         };
         let reply = answer.unwrap_or_else(|error| failed(&error));
@@ -1865,11 +1874,7 @@ impl ViewerCore {
     fn tree(&self, views: &Views) -> io::Result<ViewerReply> {
         // Tree identity depends on configured machine names and keys, not a
         // full Viewer model or its transcript/analytics ownership projection.
-        let mut machine_ids = Vec::with_capacity(views.len());
-        for (index, (key, view)) in views.iter().enumerate() {
-            let hostname = crate::facts::MachineFacts::of(view.options()).hostname(view.options());
-            machine_ids.push(machine_id(&hostname, key, index, &machine_ids));
-        }
+        let machine_ids = native_machine_ids(views);
         let droppable = self.droppable();
         let mut roots = Vec::new();
         let mut seen = BTreeSet::new();
@@ -1896,55 +1901,122 @@ impl ViewerCore {
         })
     }
 
-    /// A page URL that names something in the union: a machine, a session
-    /// or a trace. Checked against every model brought up to date first,
-    /// whatever the refresh mode: outside OnRead only a URL the built
-    /// models lack comes here, and it may name a session newer than them
-    /// (see [`ViewerCore::page_at_once`]).
-    fn page(&self, views: &Views, path: &str) -> io::Result<ViewerReply> {
-        let Some(parts) = page_parts(path) else {
-            return Ok(text(400, "Invalid request"));
-        };
-        let parts: Vec<&str> = parts.iter().map(String::as_str).collect();
-        let (models, plan) = self.refresh_at(views, Reading::At(crate::model::now_ms()))?;
-        Ok(if union_has_page(&plan, &models, &parts) {
-            views[0].1.respond("GET", "/", "", None)
-        } else {
-            text(404, "Not found")
-        })
-    }
-
-    /// A page URL that names something (`/machines/…`, `/s/…`, `/trace/…`),
-    /// answered from the models already built, without refreshing one,
-    /// outside [`Refresh::OnRead`]. The page is the same shell whatever it
-    /// names, and it asks for the model itself, so it never waits for a
-    /// build: it is served when the models built so far have what it names,
-    /// and when a machine has no model yet (the page's own `/api/model`
-    /// builds it, and a URL that names nothing there shows the home screen).
-    /// `None` leaves the answer to the usual route, which is exact:
-    /// refreshed on read, a URL the built models lack (checked against
-    /// models brought up to date first, since it may name a session newer
-    /// than them, even one a warm in progress already took the invalidation
-    /// for; 404 if it still names nothing), and one that doesn't decode
-    /// (400).
+    /// Native page shells use indexed identity and turn addresses only. A
+    /// missing/partial publication is resolved by the focused client APIs;
+    /// opening the shell never waits for native bodies or a workspace model.
     fn page_at_once(&self, views: &Views, path: &str) -> Option<ViewerReply> {
-        if self.refresh == Refresh::OnRead || !is_named_page(path) {
+        if !is_named_page(path) {
             return None;
         }
-        let segments = page_parts(path)?;
-        let segments: Vec<&str> = segments.iter().map(String::as_str).collect();
-        let models: Option<Vec<Arc<Built>>> =
-            views.iter().map(|(_, view)| view.shown_built()).collect();
-        let named = match models {
-            None => true,
-            // One machine is served as the machine itself, no id renamed.
-            Some(models) if views.len() == 1 => has_page(&models[0], &segments),
-            Some(models) => {
-                let plan = self.ownership_plan(views, &models);
-                union_has_page(&plan, &models, &segments)
-            }
+        let Some(parts) = page_parts(path) else {
+            return Some(text(400, "Invalid request"));
         };
-        named.then(|| views[0].1.respond("GET", "/", "", None))
+        let parts: Vec<&str> = parts.iter().map(String::as_str).collect();
+        let shell = || views[0].1.respond("GET", "/", "", None);
+        let labels = native_machine_ids(views);
+        let (harness, id, turn) = match parts.as_slice() {
+            ["machines", id] => {
+                return Some(if labels.iter().any(|label| label == id) {
+                    shell()
+                } else {
+                    text(404, "Not found")
+                });
+            }
+            ["s", harness, id] => (*harness, *id, None),
+            ["trace", harness, id, turn] => (*harness, *id, Some(*turn)),
+            _ => return Some(text(404, "Not found")),
+        };
+        if !matches!(harness, "claude" | "codex" | "copilot")
+            || id.is_empty()
+            || id.len() > 4096
+            || id.chars().any(char::is_control)
+            || turn.is_some_and(|turn| {
+                turn.is_empty() || turn.len() > 4096 || turn.chars().any(char::is_control)
+            })
+        {
+            return Some(text(404, "Not found"));
+        }
+        // A literal native id wins before interpreting a multi-machine alias.
+        let aliases = id.rsplit_once('@').filter(|(_, label)| {
+            views.len() > 1 && labels.iter().any(|candidate| candidate == label)
+        });
+        for (own, selected_label) in
+            std::iter::once((id, None)).chain(aliases.map(|(own, label)| (own, Some(label))))
+        {
+            let mut found = Vec::new();
+            let mut unavailable = false;
+            for (index, (key, view)) in views.iter().enumerate() {
+                let source_key = if key.is_empty() && views.len() == 1 {
+                    "local"
+                } else {
+                    key
+                };
+                let query = format!("sid={}", percent_encode(own));
+                // A publication in progress can contain a newly discovered id.
+                // Serve the shell while its focused APIs wait for that index.
+                unavailable |= view.evidence.work.try_lock().is_err();
+                let reply = crate::session_bookmark(view.options(), source_key, &query);
+                let body = serde_json::from_slice::<Value>(&reply.body).unwrap_or(Value::Null);
+                unavailable |= reply.status >= 500
+                    || body["unavailable"].as_u64().is_some_and(|count| count > 0);
+                let matches = body["matches"].as_array().into_iter().flatten();
+                let mut matched = false;
+                for item in matches {
+                    if item["harness"] != harness {
+                        continue;
+                    }
+                    if let Some(turn) = turn {
+                        let Some(catalog_key) = item["catalog_key"].as_str() else {
+                            continue;
+                        };
+                        let anchor = crate::session_turn_anchor(
+                            view.options(),
+                            source_key,
+                            &format!(
+                                "sid={}&turn={}&scope=retained_history",
+                                percent_encode(catalog_key),
+                                percent_encode(turn)
+                            ),
+                        );
+                        let value =
+                            serde_json::from_slice::<Value>(&anchor.body).unwrap_or(Value::Null);
+                        unavailable |= anchor.status >= 500 || anchor.status == 409;
+                        matched |= anchor.status == 200 && value["slot"].is_number();
+                    } else {
+                        matched = true;
+                    }
+                }
+                // Far-end handoff stubs have indexed owners but no native file.
+                if !matched
+                    && turn.is_none()
+                    && harness == "claude"
+                    && body["matches"].as_array().is_some_and(Vec::is_empty)
+                {
+                    matched = crate::session_query_sources(view.options(), own).is_ok();
+                }
+                if matched && (index < self.droppable() || found.is_empty()) {
+                    found.push(index);
+                }
+            }
+            let candidates: Vec<_> = found
+                .into_iter()
+                .filter(|index| selected_label.is_none_or(|label| labels[*index] == label))
+                .collect();
+            if candidates.len() == 1 {
+                return Some(shell());
+            }
+            if candidates.len() > 1 {
+                return Some(text(404, "Not found"));
+            }
+            if selected_label.is_some() || aliases.is_none() {
+                return Some(if unavailable {
+                    shell()
+                } else {
+                    text(404, "Not found")
+                });
+            }
+        }
+        Some(text(404, "Not found"))
     }
 
     /// Brings every machine's model up to date now, on the calling thread,
@@ -1999,27 +2071,6 @@ impl ViewerCore {
         };
         view.warm()?;
         Ok(true)
-    }
-}
-
-/// Whether the union these models and plan serve has the page the decoded
-/// path segments name: a machine, a session or a trace.
-fn union_has_page(plan: &Plan, models: &[Arc<Built>], parts: &[&str]) -> bool {
-    let built = |id: &str| {
-        plan.owners
-            .get(id)
-            .filter(|_| !plan.conflicts.contains(id))
-            .map(|(index, own)| (&*models[*index], own.clone()))
-    };
-    match parts {
-        ["machines", id] => plan.machine_ids.iter().any(|machine| machine == id),
-        ["s", harness, id] => {
-            built(id).is_some_and(|(built, own)| has_session_page(built, harness, &own))
-        }
-        ["trace", harness, id, turn] => {
-            built(id).is_some_and(|(built, own)| has_trace_page(built, harness, &own, turn))
-        }
-        _ => false,
     }
 }
 
