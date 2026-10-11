@@ -393,6 +393,9 @@ pub(crate) struct Built {
 pub(crate) struct QueryData {
     pub(crate) sessions: BTreeMap<String, Session>,
     pub(crate) handoffs: Vec<Handoff>,
+    /// Human prompt bodies are read only by the requesting session/search.
+    /// These offsets carry no host authority and belong to `sources` below.
+    pub(crate) ask_briefs: BTreeMap<String, PromptBrief>,
     pub(crate) turns: Vec<Turn>,
     pub(crate) facts: BTreeMap<String, SessionFacts>,
     pub(crate) tx: BTreeMap<String, Arc<Transcript>>,
@@ -401,6 +404,22 @@ pub(crate) struct QueryData {
     pub(crate) pids: Vec<u32>,
     pub(crate) window_start: Option<i64>,
     pub(crate) sources: crate::query_source::Sources,
+}
+
+pub(crate) struct PromptBrief {
+    path: PathBuf,
+    offset: u64,
+}
+
+impl PromptBrief {
+    pub(crate) fn read(&self, records: &crate::query_source::Records<'_>) -> io::Result<String> {
+        Ok(records
+            .derive(&self.path, self.offset)?
+            .as_ref()
+            .and_then(prompt_text)
+            .map(|text| cap(&cap(&text, TEXT_MAX), MSG_MAX))
+            .unwrap_or_default())
+    }
 }
 
 impl Built {
@@ -1647,6 +1666,7 @@ struct Builder<'a> {
     by_native: HashMap<(&'static str, String), usize>,
     native_harnesses: HashMap<String, BTreeSet<&'static str>>,
     handoffs: Vec<H>,
+    ask_briefs: BTreeMap<String, PromptBrief>,
     placed: HashMap<Ref, Vec<(usize, Place)>>,
     head: HashMap<usize, usize>,
     after: HashMap<Ref, usize>,
@@ -1728,6 +1748,7 @@ impl<'a> Builder<'a> {
                 ids
             }),
             handoffs: Vec::new(),
+            ask_briefs: BTreeMap::new(),
             placed: HashMap::new(),
             head: HashMap::new(),
             after: HashMap::new(),
@@ -3621,7 +3642,7 @@ impl<'a> Builder<'a> {
 
     // -- your messages and messages to you --
 
-    fn asks(&mut self) {
+    fn asks(&mut self, target: BuildTarget) {
         for index in 0..self.sessions.len() {
             if self.sessions[index].kind != SessKind::Lineage {
                 continue;
@@ -3630,11 +3651,26 @@ impl<'a> Builder<'a> {
                 if event(self.files, at).k != Kind::Ask {
                     continue;
                 }
-                let text = self.text(at, "user", |record, _| prompt_text(record));
+                // The Catalog and slot recipes contain only the relationship.
+                // Query reads its brief from the same captured generation when
+                // a selected session or searched slot actually requests it.
+                let text = (target == BuildTarget::Model)
+                    .then(|| self.text(at, "user", |record, _| prompt_text(record)))
+                    .flatten();
                 let file = &self.files[at.0];
                 let source = format!("ask:{}:{}", file.id, event(self.files, at).o);
+                let id = stable_id(ASK_PREFIX, &source);
+                if target == BuildTarget::Query {
+                    self.ask_briefs.insert(
+                        id.clone(),
+                        PromptBrief {
+                            path: file.path.clone(),
+                            offset: event(self.files, at).o,
+                        },
+                    );
+                }
                 let handoff = Handoff::new(
-                    stable_id(ASK_PREFIX, &source),
+                    id,
                     "ask",
                     ("you".into(), self.sessions[index].key.clone()),
                     event(self.files, at)
@@ -6113,7 +6149,7 @@ fn build_sources_inner(
     );
     timed!("relays", builder.relays());
     timed!("codex_relays", builder.codex_relays());
-    timed!("asks", builder.asks());
+    timed!("asks", builder.asks(target));
     timed!("questions", builder.questions());
     timed!("lineage_states", builder.lineage_states());
     let (mut turns, mut tx) = timed!("turns", builder.turns());
@@ -6147,9 +6183,14 @@ fn build_sources_inner(
     let catalog = ((!options.scan_window && selected.is_none())
         || matches!(target, BuildTarget::Catalog | BuildTarget::Sources))
     .then(|| summary::catalog(&builder, &handoffs));
-    let slot_projections = catalog
-        .as_ref()
-        .map(|rows| crate::slot_projection::capture(&tx, rows, Some(&source_records)));
+    let slot_projections = catalog.as_ref().map(|rows| {
+        crate::slot_projection::capture(
+            &tx,
+            rows,
+            Some(&source_records),
+            (target != BuildTarget::Model).then_some((&*builder.cache, catalog_base.as_deref())),
+        )
+    });
     if target != BuildTarget::Model {
         verify_sidecars(&files)?;
     }
@@ -6358,6 +6399,9 @@ fn build_sources_inner(
         }
     }
     if target == BuildTarget::Query {
+        let mut ask_briefs = std::mem::take(&mut builder.ask_briefs);
+        let kept: BTreeSet<_> = handoffs.iter().map(|handoff| &handoff.id).collect();
+        ask_briefs.retain(|id, _| kept.contains(id));
         #[cfg(test)]
         if let Some(hook) = AFTER_QUERY_DERIVATION.with(|hook| hook.borrow_mut().take()) {
             hook();
@@ -6379,6 +6423,7 @@ fn build_sources_inner(
             sources: source_proofs,
             sessions,
             handoffs,
+            ask_briefs,
             turns,
             facts: session_facts,
             tx,

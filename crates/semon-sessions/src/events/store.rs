@@ -972,6 +972,86 @@ impl IndexStore for SqliteStore {
         self.publish_catalog(publication, expected_generation, None)
     }
 
+    fn session_slots(
+        &self,
+        row: &crate::model::summary::CatalogRow,
+        expected_generation: Option<&str>,
+        max: usize,
+    ) -> Result<Option<Vec<crate::slot_projection::SavedSlot>>, StoreError> {
+        let Some(expected) = expected_generation else {
+            return Ok(None);
+        };
+        // Optional metadata reuse must not add another writer-lock wait.
+        self.connection
+            .busy_timeout(Duration::ZERO)
+            .map_err(failure)?;
+        let result = (|| {
+            let tx = self.connection.unchecked_transaction().map_err(failure)?;
+            if !current(&tx).map_err(failure)? {
+                return Ok(None);
+            }
+            let coherent: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM meta WHERE key='catalog_generation' AND value=?1) AND EXISTS(SELECT 1 FROM meta WHERE key='slot_projection_catalog_generation' AND value=?1)",
+                [expected], |record| record.get(0),
+            ).map_err(failure)?;
+            if !coherent {
+                return Ok(None);
+            }
+            let header: Option<(String, u32, i64, Option<String>)> = tx.query_row(
+                "SELECT generation,version,total,source_generation FROM session_slot_projections WHERE session_key=?1",
+                [&row.key], |record| Ok((record.get(0)?, record.get(1)?, record.get(2)?, record.get(3)?)),
+            ).optional().map_err(failure)?;
+            let Some((generation, version, total, sources)) = header else {
+                return Ok(None);
+            };
+            let Ok(total) = usize::try_from(total) else {
+                return Ok(None);
+            };
+            let source_generation = crate::retention::source_generation(&row.sources)
+                .map_err(|error| StoreError::Data(error.to_string()))?;
+            if version != crate::slot_projection::VERSION
+                || total > max
+                || sources.as_deref() != Some(&source_generation)
+            {
+                return Ok(None);
+            }
+            let mut statement = tx.prepare(
+                "SELECT slot,CASE WHEN octet_length(metadata)<=65536 THEN metadata ELSE NULL END FROM session_slots WHERE session_key=?1 ORDER BY slot",
+            ).map_err(failure)?;
+            let rows = statement
+                .query_map([&row.key], |record| {
+                    Ok((record.get::<_, i64>(0)?, record.get::<_, String>(1)?))
+                })
+                .map_err(failure)?;
+            let mut metadata = Vec::with_capacity(total);
+            for record in rows {
+                let (slot, text) = record.map_err(failure)?;
+                if usize::try_from(slot).ok() != Some(metadata.len()) || metadata.len() >= total {
+                    return Ok(None);
+                }
+                metadata.push(text);
+            }
+            if metadata.len() != total
+                || crate::slot_projection::generation(&metadata, &row.sources)
+                    .map_err(|error| StoreError::Data(error.to_string()))?
+                    != generation
+            {
+                return Ok(None);
+            }
+            metadata
+                .into_iter()
+                .map(|text| {
+                    serde_json::from_str(&text).map_err(|error| StoreError::Data(error.to_string()))
+                })
+                .collect::<Result<Vec<_>, _>>()
+                .map(Some)
+        })();
+        self.connection
+            .busy_timeout(BUSY_TIMEOUT)
+            .map_err(failure)?;
+        result
+    }
+
     fn publish_partial_catalog(
         &mut self,
         publication: &crate::slot_projection::Publication<'_>,
@@ -1465,29 +1545,19 @@ impl SqliteStore {
                     .map_err(|_| {
                         StoreError::Data("source projection metadata cannot serialize".into())
                     })?;
-                    let slot_generation = format!(
-                        "{:x}",
-                        Sha256::digest(
-                            format!(
-                                "{}|{}|{}",
-                                crate::slot_projection::VERSION,
-                                json(&metadata).map_err(failure)?,
-                                json(
-                                    &rows
-                                        .iter()
-                                        .find(|row| row.key == projection.key)
-                                        .expect("catalog membership checked")
-                                        .sources
-                                )
-                                .map_err(failure)?
-                            )
-                            .as_bytes()
-                        )
-                    );
+                    let slot_generation = crate::slot_projection::generation(
+                        &metadata,
+                        &rows
+                            .iter()
+                            .find(|row| row.key == projection.key)
+                            .expect("catalog membership checked")
+                            .sources,
+                    )
+                    .map_err(|error| StoreError::Data(error.to_string()))?;
                     let changed = transaction.execute(
                         "INSERT INTO session_slot_projections(session_key,generation,version,total,source_generation) VALUES (?1,?2,?3,?4,?5) ON CONFLICT(session_key) DO UPDATE SET generation=excluded.generation,version=excluded.version,total=excluded.total,source_generation=excluded.source_generation WHERE session_slot_projections.generation != excluded.generation OR session_slot_projections.version != excluded.version OR session_slot_projections.source_generation IS NOT excluded.source_generation",
                         params![projection.key,slot_generation,crate::slot_projection::VERSION,i64::try_from(metadata.len()).map_err(|_| StoreError::Data("slot count exceeds SQL range".into()))?,source_generation]).map_err(failure)?;
-                    if changed > 0 {
+                    if changed > 0 || projection.repair {
                         transaction
                             .execute(
                                 "DELETE FROM session_slots WHERE session_key=?1",

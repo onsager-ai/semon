@@ -339,6 +339,18 @@ the admitted native owner. Tenant-wide archive restoration remains in Hub #226.
 This extraction does not establish bounded discovery, relationship reconciliation
 or full compatibility retirement.
 
+Native Query now retains recorded human-ask brief offsets instead of reading all
+their prompt bodies during cohort preparation. Selected session and searched-slot
+reads derive requested briefs through the existing verified reader and completion
+fence. Catalog keeps the relationship without its private brief. Native scalar
+projection preparation can also reuse previously published recipes at the exact
+catalog/source generations, with version, completeness and digest checks. Fresh
+turn/state metadata remains authoritative; unqualified metadata is reconstructed
+from source evidence. The projection encoding and database schema are unchanged.
+This removes eager prompt hydration from these metadata reads, while complete
+native discovery, other relationship context and tenant archive restoration still
+require the subsequent migrations.
+
 This slice still discovers and joins every native source eligible for the local
 file-selection window. It does not establish constant-cost selected-session
 dependency closure or replace all query metadata with persisted Catalog rows.

@@ -24,6 +24,25 @@ The paired Hub consumer admits native sources directly; the preceding
 removed. Query owns only native sources. Substituting local scan-window
 construction would change the hosted contract. No full-model query fallback remains.
 
+Recorded human-ask briefs remain content-free source offsets in the Query cohort.
+Metadata and transcript paging do not materialize every ask's prompt. Selected
+session reads resolve their requested briefs through the cohort's verified reader;
+search resolves a brief only when its slot is visited, preserving native caps,
+ordering, stopping and response fields. Completion rechecks the used source bytes.
+Catalog observation and scoped preparation retain only the ask relationships.
+The remaining compatibility Model still obtains its supported brief contents.
+
+Native preparation also reuses existing scalar recipes only when their catalog
+and complete source generations, version, row count and projection digest agree.
+The source path, offset, block and complete recipe must match the new slot; current
+turn placement and state still come from fresh native derivation. Reuse carries
+no source authority: Transcript/Entry and Query bodies retain independent byte
+and completion checks. Missing, stale, corrupt or contended metadata falls back
+to source derivation; damaged rows are repaired even when their stored digest was
+unchanged. The index schema, projection version and digest encoding are unchanged.
+Discovery, relationship derivation and metadata preparation still visit eligible
+native sources; this reduces body reads rather than proving bounded total work.
+
 `contract-reference.json` contains 134 synthetic tool responses from the retired
 production `Query::from_core` engine at Semon
 `7ce1ac4d4f34af9143aa292b631a07fd797890b1`. It preserves the independent oracle
