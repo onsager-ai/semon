@@ -27,9 +27,14 @@ export default async function viewerBacklog(browser) {
       await page.evaluate(() => document.querySelector('.nav-item[data-go="sessions"]').click());
       await ready(page, 'sessions');
       await page.locator('#sq').fill('harbor');
-      assert.equal(new URL(page.url()).searchParams.get('q'), 'harbor');
+      // Read the browser's URL directly: Playwright's frame URL cache can lag
+      // a synchronous replaceState when typing intentionally starts no request.
+      assert.equal(
+        await page.evaluate(() => new URL(location.href).searchParams.get('q')),
+        'harbor',
+      );
       await page.locator('#sq').fill('');
-      assert.equal(new URL(page.url()).searchParams.has('q'), false);
+      assert.equal(await page.evaluate(() => new URL(location.href).searchParams.has('q')), false);
       await page.reload();
       await ready(page, 'sessions');
       assert.equal(await page.locator('#sq').inputValue(), '');
