@@ -11,17 +11,37 @@ use std::{
     sync::Arc,
 };
 
+/// The tree's existing metadata regions, read together with their ledger.
+/// This is request-owned evidence, never a partial producer FileIndex/cache.
+pub(crate) struct Metadata {
+    pub(crate) summary: Summary,
+    pub(crate) chunks: Arc<crate::source_chunks::Chunks>,
+    pub(crate) marker: crate::native_marker::Index,
+    pub(crate) calls: Arc<crate::native_handoff::Index>,
+}
+
+impl Metadata {
+    pub(crate) fn from_index(index: &events::FileIndex) -> Option<Self> {
+        Some(Self {
+            summary: index.tree_summary.clone()?,
+            chunks: index.source_chunks.clone()?,
+            marker: index.marker_index.clone()?,
+            calls: Arc::new(index.handoff_index.clone()?),
+        })
+    }
+}
+
+struct SourceEvidence {
+    source: crate::model::summary::CatalogSource,
+    chunks: Option<Arc<crate::source_chunks::Chunks>>,
+    calls: Option<Arc<crate::native_handoff::Index>>,
+}
+
 /// Evidence used by this tree build, rechecked together before publication.
 /// No prompts or tool inputs outlive their verified reads.
 #[derive(Default)]
 pub(crate) struct Evidence {
-    sources: BTreeMap<
-        PathBuf,
-        (
-            crate::model::summary::CatalogSource,
-            Option<Arc<crate::source_chunks::Chunks>>,
-        ),
-    >,
+    sources: BTreeMap<PathBuf, SourceEvidence>,
     records: BTreeMap<PathBuf, BTreeSet<crate::native_record::Record>>,
 }
 
@@ -30,23 +50,35 @@ impl Evidence {
         &mut self,
         source: crate::model::summary::CatalogSource,
         chunks: Option<Arc<crate::source_chunks::Chunks>>,
+        calls: Option<Arc<crate::native_handoff::Index>>,
     ) -> io::Result<()> {
-        if let Some((previous, _)) = self.sources.get(&source.path) {
-            if previous != &source {
+        if let Some(previous) = self.sources.get(&source.path) {
+            if previous.source != source {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
                     "native tree source changed",
                 ));
             }
         } else {
-            self.sources.insert(source.path.clone(), (source, chunks));
+            self.sources.insert(
+                source.path.clone(),
+                SourceEvidence {
+                    source,
+                    chunks,
+                    calls,
+                },
+            );
         }
         Ok(())
     }
 
     pub(crate) fn finish(&self, options: &crate::Options) -> io::Result<()> {
-        let sources =
-            crate::query_source::Sources::capture_native(options, self.sources.values().cloned())?;
+        let sources = crate::query_source::Sources::capture_native(
+            options,
+            self.sources
+                .values()
+                .map(|evidence| (evidence.source.clone(), evidence.chunks.clone())),
+        )?;
         let records = sources.reader();
         records.verify_all()?;
         for (path, used) in &self.records {
@@ -316,34 +348,18 @@ pub(crate) fn read(
     dirty: &mut bool,
     evidence: &mut Evidence,
 ) -> io::Result<Summary> {
-    let index = events::scan_file(path, harness, cache, dirty)?;
-    let mut summary = index
-        .tree_summary
-        .clone()
-        .ok_or_else(|| io::Error::other("native tree metadata unavailable"))?;
-    let source = cache
-        .source(path, native_id)
-        .ok_or_else(|| io::Error::other("native tree source unavailable"))?;
+    let (source, metadata) = cache.tree(path, harness, native_id, dirty)?;
+    let mut summary = metadata.summary;
     let sources = crate::query_source::Sources::capture_native(
         options,
-        std::iter::once((source.clone(), index.source_chunks.clone())),
+        std::iter::once((source.clone(), Some(metadata.chunks.clone()))),
     )?;
     let records = sources.reader();
     records.verify_all()?;
-    summary.marker = records.marker(
-        path,
-        index
-            .marker_index
-            .as_ref()
-            .ok_or_else(|| io::Error::other("native tree marker unavailable"))?,
-    )?;
+    summary.marker = records.marker(path, &metadata.marker)?;
     records.finish()?;
-    evidence.source(source, index.source_chunks.clone())?;
-    if let Some(record) = index
-        .marker_index
-        .as_ref()
-        .and_then(|marker| marker.record())
-    {
+    evidence.source(source, Some(metadata.chunks), Some(metadata.calls))?;
+    if let Some(record) = metadata.marker.record() {
         evidence
             .records
             .entry(path.to_owned())
@@ -355,30 +371,25 @@ pub(crate) fn read(
 
 pub(crate) fn launch(
     options: &crate::Options,
-    cache: &events::EventCache,
     path: &std::path::Path,
     prompt: &str,
     cwd: Option<&str>,
     start: Option<i64>,
     evidence: &mut Evidence,
 ) -> io::Result<Option<ToolCall>> {
-    let index = cache
-        .file_index(path)
-        .ok_or_else(|| io::Error::other("native tree parent unavailable"))?;
-    let source = evidence
+    let parent = evidence
         .sources
         .get(path)
-        .map(|(source, _)| source.clone())
         .ok_or_else(|| io::Error::other("native tree parent source unavailable"))?;
     let sources = crate::query_source::Sources::capture_native(
         options,
-        std::iter::once((source, index.source_chunks.clone())),
+        std::iter::once((parent.source.clone(), parent.chunks.clone())),
     )?;
     let records = sources.reader();
     records.verify_all()?;
-    let calls = index
-        .handoff_index
-        .as_ref()
+    let calls = parent
+        .calls
+        .clone()
         .ok_or_else(|| io::Error::other("native tree launch metadata unavailable"))?;
     let mut matcher = crate::handoff::Matcher::new(prompt, cwd, start);
     let mut selected = None;

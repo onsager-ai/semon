@@ -82,6 +82,119 @@ fn line(value: Value) -> String {
 }
 
 #[test]
+fn warm_tree_does_not_decode_event_rows_or_fill_the_producer_cache_as_history_grows() {
+    for count in [4, 4096] {
+        let home = Home::new();
+        let text = line(
+            json!({"type":"assistant","message":{"model":"native","content":[{"type":"tool_use","id":"open","name":"Read"}]}}),
+        ) + &line(json!({"type":"user","message":{"content":"private native text"}}))
+            .repeat(count);
+        let path = home.write("claude/projects/repo/parent.jsonl", &text);
+        let expected = serde_json::to_value(collect(&home.options).unwrap()).unwrap();
+        let db = rusqlite::Connection::open(events::EventCache::path(&home.options.cache)).unwrap();
+        let rows: i64 = db
+            .query_row("SELECT count(*) FROM events", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(rows, (count + 1) as i64);
+        // A tree must not decode transcript rows, even an unsupported row tag.
+        db.execute("UPDATE events SET k='unsupported' WHERE seq=0", [])
+            .unwrap();
+        let reads = events::FILE_READS.with(std::cell::Cell::get);
+        let parsed = events::PARSED.with(std::cell::Cell::get);
+        for _ in 0..3 {
+            let mut cache = home.cache();
+            assert_eq!(
+                serde_json::to_value(crate::collect_with_index(&home.options, &mut cache).unwrap())
+                    .unwrap(),
+                expected
+            );
+            assert_eq!(
+                cache.paths().count(),
+                0,
+                "metadata cannot become a partial producer index"
+            );
+            assert_eq!(events::FILE_READS.with(std::cell::Cell::get), reads);
+            assert_eq!(events::PARSED.with(std::cell::Cell::get), parsed);
+        }
+        assert_eq!(fs::read(path).unwrap(), text.as_bytes());
+    }
+}
+
+#[test]
+fn tree_append_loads_only_the_changed_source_and_preserves_incremental_event_rows() {
+    let home = Home::new();
+    let path = home.write("claude/projects/repo/parent.jsonl", &line(json!({"type":"assistant","message":{"id":"one","model":"native","usage":{"output_tokens":2}}})));
+    home.write(
+        "claude/projects/repo/other.jsonl",
+        &line(json!({"type":"user","message":{"content":"other"}})),
+    );
+    collect(&home.options).unwrap();
+    let mut cache = home.cache();
+    crate::collect_with_index(&home.options, &mut cache).unwrap();
+    assert_eq!(cache.paths().count(), 0);
+    let reads = events::FILE_READS.with(std::cell::Cell::get);
+    let parsed = events::PARSED.with(std::cell::Cell::get);
+    fs::OpenOptions::new().append(true).open(&path).unwrap()
+        .write_all(line(json!({"type":"assistant","message":{"id":"two","usage":{"output_tokens":3},"content":[{"type":"tool_use","id":"open","name":"Read"}]}})).as_bytes()).unwrap();
+    let nodes = crate::collect_with_index(&home.options, &mut cache).unwrap();
+    let parent = nodes.iter().find(|node| node.id == "parent").unwrap();
+    assert_eq!(parent.tokens.output, 5);
+    assert_eq!(parent.models, ["native"]);
+    assert_eq!(parent.open_tools[0].id, "open");
+    assert_eq!(events::FILE_READS.with(std::cell::Cell::get), reads + 1);
+    assert_eq!(events::PARSED.with(std::cell::Cell::get), parsed + 1);
+    assert_eq!(cache.paths().collect::<Vec<_>>(), [path.to_str().unwrap()]);
+    assert_eq!(cache.file_index(&path).unwrap().events.len(), 1);
+}
+
+#[test]
+fn warm_tree_metadata_keeps_eof_marker_generation_fences() {
+    let _clock = events::fixed_change_time_for_test(0);
+    for eof in [false, true] {
+        let home = Home::new();
+        let value =
+            json!({"type":"user","message":{"content":"Semon-Parent: claude:old"}}).to_string();
+        let text = if eof { value } else { value + "\n" };
+        let path = home.write("claude/projects/repo/parent.jsonl", &text);
+        home.observe(&path, &mut home.cache(), &mut Evidence::default());
+        let mut cache = home.cache();
+        let mut evidence = Evidence::default();
+        let reads = events::FILE_READS.with(std::cell::Cell::get);
+        assert_eq!(
+            home.observe(&path, &mut cache, &mut evidence)
+                .marker
+                .unwrap()
+                .parent_id,
+            "old"
+        );
+        assert_eq!(events::FILE_READS.with(std::cell::Cell::get), reads);
+        assert_eq!(cache.paths().count(), 0);
+        evidence.finish(&home.options).unwrap();
+        let stamp = fs::metadata(&path).unwrap().modified().unwrap();
+        fs::write(&path, text.replace("claude:old", "claude:new")).unwrap();
+        fs::File::open(&path)
+            .unwrap()
+            .set_times(fs::FileTimes::new().set_modified(stamp))
+            .unwrap();
+        assert!(evidence.finish(&home.options).is_err());
+        // A metadata-only hit never weakens selected-record verification.
+        let mut evidence = Evidence::default();
+        assert!(
+            read(
+                &home.options,
+                &path,
+                "claude",
+                "parent",
+                &mut cache,
+                &mut false,
+                &mut evidence
+            )
+            .is_err()
+        );
+    }
+}
+
+#[test]
 fn tree_restart_preserves_raw_activity_all_models_and_historical_tool_accounting() {
     let home = Home::new();
     let legacy = b"historical tree metadata; retain unchanged";
@@ -95,6 +208,7 @@ fn tree_restart_preserves_raw_activity_all_models_and_historical_tool_accounting
     let old_reads = events::CACHE_READS.with(std::cell::Cell::get);
     for iteration in 0..2 {
         let parsed = events::PARSED.with(std::cell::Cell::get);
+        let reads = events::FILE_READS.with(std::cell::Cell::get);
         let nodes = collect(&home.options).unwrap();
         assert_eq!(nodes.len(), 1);
         let node = &nodes[0];
@@ -120,6 +234,7 @@ fn tree_restart_preserves_raw_activity_all_models_and_historical_tool_accounting
         assert_eq!(node.cwd.as_deref(), Some("/work/repo"));
         if iteration == 1 {
             assert_eq!(events::PARSED.with(std::cell::Cell::get), parsed);
+            assert_eq!(events::FILE_READS.with(std::cell::Cell::get), reads);
         }
     }
     assert_eq!(
