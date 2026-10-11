@@ -1324,6 +1324,11 @@ impl ViewerCore {
             // observation. Hosted consumers provide their authenticated host.
             return ViewerReply { status:200,content_type:"application/json; charset=utf-8",body:json!({"api":1,"account":extras.account.as_ref().map(account_json),"navigation":{"paths":{"machines":extras.nav_machines.as_deref().unwrap_or("/machines")}}}).to_string().into_bytes(),etag:None };
         }
+        if crate::shell::is_page_path(path) && query_value(query, "native") == Some("1") {
+            return crate::native_page::reply(path, query, |endpoint, args| {
+                self.respond_with(extras, "GET", endpoint, args, None)
+            });
+        }
         self.follow();
         let views = self.views();
         if path == "/api/session-sources" {
