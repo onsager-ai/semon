@@ -127,6 +127,9 @@ a.nav-item[aria-current="page"] { color: var(--ink); }
 /* Status text pairs with the viewer's colored dot states. */
 .status { display: inline-flex; align-items: center; gap: 7px; color: var(--muted); font-size: var(--fs-sm); white-space: nowrap; }
 
+/* Native disclosure stays keyboard- and touch-usable without JavaScript. */
+.sh-disclosure > summary { display: flex; align-items: center; gap: var(--s2); min-height: 44px; cursor: pointer; color: var(--ink-2); }
+
 /* Code stays readable without forcing a horizontal scroll. */
 .code { position: relative; min-width: 0; padding: 14px 56px 14px 14px; border-radius: 10px; background: var(--sunken); color: var(--ink-2); }
 .code[data-secret] { background: var(--wait-soft); }
