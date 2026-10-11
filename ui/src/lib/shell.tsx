@@ -1,5 +1,6 @@
 import { render } from 'preact';
 import { safePath } from './account';
+import { setGeometry, releaseGeometry } from './geometry';
 import { createAccountChrome, type AccountChromeHost, type AccountChrome } from './account-chrome';
 import type { AccountMenuProps } from './AccountMenu';
 
@@ -155,6 +156,10 @@ export function createShellChrome(host: ShellHost): ShellChrome {
   let lead: HTMLButtonElement | null = null,
     destroyed = false,
     sx: number | null = null;
+  let barObserver: ResizeObserver | null = null;
+  const measureBar = () => {
+    if (app && !destroyed) setGeometry(app, 'barHeight', bar.getBoundingClientRect().height);
+  };
   let destinations: ShellDestination[] = [],
     rail = false;
   const listeners: (() => void)[] = [];
@@ -268,6 +273,9 @@ export function createShellChrome(host: ShellHost): ShellChrome {
   }
   function unmount() {
     if (!app) return;
+    barObserver?.disconnect();
+    barObserver = null;
+    releaseGeometry(app, ['barHeight']);
     closeDrawer(true);
     dropDesktop();
     drawerAccount(null);
@@ -328,6 +336,9 @@ export function createShellChrome(host: ShellHost): ShellChrome {
       recent = required('#side-list');
       content = required('#page');
       app = container;
+      barObserver = new ResizeObserver(measureBar);
+      barObserver.observe(bar);
+      measureBar();
       paintHead();
       listen(scrim, 'click', () => closeDrawer());
       listen(
@@ -425,6 +436,7 @@ export function createShellChrome(host: ShellHost): ShellChrome {
         cursor.remove();
         cursor = next;
       }
+      measureBar();
     },
     drawerAccount,
     openDrawer,

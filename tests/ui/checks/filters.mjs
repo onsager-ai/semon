@@ -1,3 +1,4 @@
+import { catalogFilterCheck } from '../catalog-filter-check.mjs';
 // The filters of Analytics and Sessions: one Filter button, one chip per active filter, and a sheet (fix/filters-sheet).
 //
 // On each page, at 390×844 and 1280×860 in light and dark:
@@ -63,6 +64,7 @@ const chipTexts = (page) =>
   );
 
 export default async function filtersCheck(browser) {
+  await catalogFilterCheck(browser, 'filters');
   const r = reporter('filters'),
     results = {};
   for (const [size, dark] of [
@@ -73,7 +75,7 @@ export default async function filtersCheck(browser) {
   ]) {
     const phone = size === 'phone',
       scheme = dark ? 'dark' : 'light';
-    for (const screen of ['analytics', 'sessions']) {
+    for (const screen of ['analytics']) {
       const key = screen + '-' + (phone ? '390' : '1280') + '-' + scheme,
         rec = (results[key] = {});
       const shot = (name) =>

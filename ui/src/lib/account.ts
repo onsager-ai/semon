@@ -1,4 +1,4 @@
-/** Copied at the untrusted /api/model or window.semonEmbed boundary. */
+/** Validated copy of account data supplied through the untrusted host boundary. */
 export interface Account {
   name: string;
   login: string;

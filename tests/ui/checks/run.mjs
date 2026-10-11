@@ -47,12 +47,14 @@ import stepNamesCheck from './stepnames.mjs';
 import sidebarFocusCheck from './sidebarfocus.mjs';
 import accountLifecycle from './account-lifecycle.mjs';
 import panelLifecycle from './panel-lifecycle.mjs';
+import approvalReviews from './approval-reviews.mjs';
 
 import signalsCheck from './signals.mjs';
 import copiedUsageCheck from './copied-usage.mjs';
 import copilotCheck from './copilot.mjs';
 
 const checks = [
+  ['approval-reviews', approvalReviews],
   ['panel-lifecycle', panelLifecycle],
   ['account-lifecycle', accountLifecycle],
   ['runview', runView],

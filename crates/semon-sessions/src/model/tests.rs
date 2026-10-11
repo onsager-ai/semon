@@ -1126,6 +1126,94 @@ fn spawn_results_come_from_four_sources_in_order() {
     let child = turns_of(&built, "a1");
     assert_eq!(child[0].start.as_deref(), Some(one.id.as_str()));
     assert_eq!(child[0].end.why, "returned");
+    assert_bounded_causal_previews(&home, &built, parent_turns[0]);
+}
+
+fn assert_bounded_causal_previews(home: &Home, built: &Built, root: &Turn) {
+    let query = format!(
+        "sid={}&turn={}&scope=retained_history",
+        crate::viewer::percent_encode(&root.sid),
+        crate::viewer::percent_encode(&root.id)
+    );
+    let reply = crate::session_causal_trace(&home.options, "fixture", &query);
+    assert_eq!(
+        reply.status,
+        200,
+        "{}",
+        String::from_utf8_lossy(&reply.body)
+    );
+    let trace: Value = serde_json::from_slice(&reply.body).unwrap();
+    for edge in trace["handoffs"].as_array().unwrap() {
+        let native = built
+            .handoffs
+            .iter()
+            .find(|handoff| handoff.id == edge["id"])
+            .unwrap();
+        for (field, selector) in [("brief", "brief_session"), ("result", "result_session")] {
+            let Some(owner) = edge[selector].as_str() else {
+                continue;
+            };
+            let generation = trace["previews"][owner].as_str().unwrap_or_else(|| {
+                panic!(
+                    "missing preview owner {owner}: {edge}; registry {}",
+                    trace["previews"]
+                )
+            });
+            let query = format!(
+                "sid={}&generation={generation}&scope=retained_history&events={}",
+                crate::viewer::percent_encode(owner),
+                crate::viewer::percent_encode(&json!([native.id]).to_string())
+            );
+            let reply = crate::session_home_details_with_mode(
+                &home.options,
+                "fixture",
+                &query,
+                None,
+                crate::SessionSourceReadMode::LocalThenProvider,
+            );
+            assert_eq!(
+                reply.status,
+                200,
+                "{}",
+                String::from_utf8_lossy(&reply.body)
+            );
+            let details: Value = serde_json::from_slice(&reply.body).unwrap();
+            let expected = if field == "brief" {
+                json!(native.brief)
+            } else {
+                json!(native.result)
+            };
+            assert_eq!(
+                details["events"][&native.id][field], expected,
+                "{} {owner} {field}",
+                native.id
+            );
+        }
+    }
+}
+
+#[test]
+fn bounded_causal_previews_preserve_large_native_unicode_and_cleaned_prompt_caps() {
+    for prompt in [
+        "normal native text ".repeat(16000),
+        format!(
+            "<system-reminder>{}</system-reminder>\n{}",
+            "skip internal reminder ".repeat(1000),
+            "中文🚀 quoted \\\" body ".repeat(16000)
+        ),
+    ] {
+        let home = Home::new();
+        home.top(
+            "large",
+            &[uuid(
+                human("large", ts(1, 0), &prompt),
+                "large-native-event",
+            )],
+        );
+        let built = home.build();
+        assert!(prompt.len() > 128 * 1024);
+        assert_bounded_causal_previews(&home, &built, turns_of(&built, "large")[0]);
+    }
 }
 
 #[test]
@@ -1408,6 +1496,26 @@ fn guardian_reviews_get_a_stable_kind_and_name_without_losing_codex_data() {
         Some("Codex run")
     );
     assert_eq!(built.sessions["approval-review-name-only"].name, "helper");
+    let (_, catalog) = read_catalog(&home);
+    for id in ["guardian-canonical", "guardian-nested-source"] {
+        let row = catalog.iter().find(|row| row.key == id).unwrap();
+        assert_eq!(row.presentation_kind.as_deref(), Some("Approval review"));
+        assert_eq!(row.kind, "codex-run", "native identity kind remains stable");
+        assert_eq!(
+            serde_json::to_value(&row.cost).unwrap(),
+            serde_json::to_value(&built.sessions[id].cost).unwrap()
+        );
+        assert_eq!(row.parent.as_deref(), Some("codex-parent"));
+    }
+    assert_ne!(
+        catalog
+            .iter()
+            .find(|row| row.key == "approval-review-name-only")
+            .unwrap()
+            .presentation_kind
+            .as_deref(),
+        Some("Approval review")
+    );
     assert_eq!(
         built.sessions["guardian-canonical"].tokens_by_model["gpt-6-luna"],
         crate::events::ModelTokens {
@@ -6891,7 +6999,7 @@ fn schema_four_upgrade_preserves_event_indices_and_observed_runs() {
     let version: i64 = connection
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 19);
+    assert_eq!(version, 21);
 }
 
 #[test]
@@ -7395,6 +7503,68 @@ fn partial_lineage_source_disappearance_preserves_natural_history_context() {
     drop(file);
     home.build();
     home.build();
+    assert!(
+        crate::overview_repair_candidates(&home.options, 8)
+            .unwrap()
+            .contains(&"root".into())
+    );
+    assert!(
+        crate::repair_session_overview(
+            &home.options,
+            "fixture",
+            "root",
+            Some(&archive),
+            crate::SessionSourceReadMode::LocalThenProvider
+        )
+        .unwrap()
+    );
+    assert!(
+        !crate::overview_repair_candidates(&home.options, 8)
+            .unwrap()
+            .contains(&"root".into())
+    );
+    let reads = archive.calls.load(Ordering::Relaxed);
+    assert!(
+        !crate::repair_session_overview(
+            &home.options,
+            "fixture",
+            "root",
+            Some(&archive),
+            crate::SessionSourceReadMode::LocalThenProvider
+        )
+        .unwrap()
+    );
+    assert_eq!(archive.calls.load(Ordering::Relaxed), reads);
+    home.build();
+    assert!(
+        !crate::overview_repair_candidates(&home.options, 8)
+            .unwrap()
+            .contains(&"root".into()),
+        "an unchanged current observation must retain exact history metadata"
+    );
+    let causal = crate::session_causal_trace(
+        &home.options,
+        "fixture",
+        &format!(
+            "sid=root&scope=retained_history&turn={}",
+            crate::viewer::percent_encode(
+                before_body["entries"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|entry| entry["text"] == "original cleared prompt")
+                    .unwrap()["turn"]
+                    .as_str()
+                    .unwrap()
+            )
+        ),
+    );
+    assert_eq!(
+        causal.status,
+        200,
+        "{}",
+        String::from_utf8_lossy(&causal.body)
+    );
     let advanced = read();
     let entries = advanced["entries"].as_array().unwrap();
     assert_eq!(
@@ -7779,4 +7949,51 @@ fn native_name_updates_do_not_change_transcripts_and_remain_source_qualified() {
     let tx_before = crate::tx::page(&before, &sid, &crate::tx::Anchor::Last, NOW);
     let tx_after = crate::tx::page(&after, &sid, &crate::tx::Anchor::Last, NOW);
     assert_eq!(tx_before.unwrap(), tx_after.unwrap());
+}
+
+#[test]
+fn failed_send_bookmarks_resolve_indexed_real_owners_without_source_bytes() {
+    let home = relay_home();
+    home.build();
+    fs::remove_dir_all(&home.options.claude_home).unwrap();
+    let resolve = |query: &str| crate::session_bookmark(&home.options, "fixture", query);
+    let response = resolve("sid=unsent%3Anobody-9f");
+    assert_eq!(response.status, 200);
+    let value: Value = serde_json::from_slice(&response.body).unwrap();
+    assert_eq!(value["unavailable"], 0);
+    assert_eq!(
+        value["matches"],
+        json!([{"source_key":"fixture","catalog_key":"alpha","harness":"claude"}])
+    );
+    assert!(
+        !String::from_utf8(response.body)
+            .unwrap()
+            .contains("lost one")
+    );
+    let connection = rusqlite::Connection::open(EventCache::path(&home.options.cache)).unwrap();
+    let metadata: Vec<String> = connection
+        .prepare("SELECT metadata FROM session_trace_edges WHERE session_key='alpha'")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert!(
+        metadata.iter().all(|edge| !edge.contains("nobody-9f")),
+        "native failed-send aliases remain private to bookmark normalization"
+    );
+    let plan: String = connection.query_row("EXPLAIN QUERY PLAN SELECT DISTINCT session_key FROM session_trace_bookmarks WHERE target='nobody-9f' ORDER BY session_key LIMIT 3", [], |row| row.get(3)).unwrap();
+    assert!(
+        plan.contains("SEARCH") && plan.contains("session_trace_bookmarks"),
+        "{plan}"
+    );
+    for query in [
+        "sid=alpha&sid=alpha",
+        "sid=alpha&machine=elsewhere",
+        "sid=alpha&scope=current",
+    ] {
+        assert_eq!(resolve(query).status, 400);
+    }
+    let value: Value = serde_json::from_slice(&resolve("sid=unsent%3Amissing").body).unwrap();
+    assert_eq!(value["matches"], json!([]));
 }

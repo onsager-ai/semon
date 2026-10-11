@@ -1,5 +1,6 @@
 import { setGeometry, releaseGeometry } from './geometry';
 import { LocalControl } from './localControl';
+import { createPanelChrome, type PanelChrome } from './panel';
 import { unavailableControl, type ControlView } from './control';
 import type { RuntimeObservationView } from './runtimeObservation';
 import { commitApplicationView } from './application-view';
@@ -42,6 +43,7 @@ export interface ToolView extends Identity {
 }
 export interface BackgroundView extends Identity {
   kind: 'background';
+  state?: string;
   failed: boolean;
   label: string;
   call: string;
@@ -129,6 +131,7 @@ export interface FooterView {
   parent?: { id: string; turn?: string; name: string };
 }
 export interface SessionSnapshot {
+  composerTarget?: HTMLElement;
   control?: ControlView;
   runtime?: RuntimeObservationView;
   id: string;
@@ -139,12 +142,15 @@ export interface SessionSnapshot {
   before?: PagerView;
   after?: PagerView;
   empty?: string;
+  retry?: { label: string; run(): void };
   footer?: FooterView;
   dirty?: ReadonlySet<string>;
   order: readonly string[];
 }
 export interface TranscriptHost extends SentenceHost {
   committed(): void;
+  composerOpened?(panel: { destroy(): void }): void;
+  composerClosed?(panel: { destroy(): void }): void;
   trace(id: string): void;
   toolAll(key: string, label: string): void;
   script(key: string): void;
@@ -154,6 +160,9 @@ export interface TranscriptHost extends SentenceHost {
   jump(): void;
 }
 interface SessionOwner {
+  composer: HTMLElement;
+  composerTrigger: HTMLElement;
+  composerPanel: PanelChrome | null;
   disposed: boolean;
   snapshot: SessionSnapshot;
   host: TranscriptHost;
@@ -201,8 +210,12 @@ class SessionControls extends Component<{ owner: SessionOwner }> {
             ? 'This environment needs attention.'
             : 'Current environment controls are unavailable.',
       );
+      const retained = view;
       view = {
         ...view,
+        get draft() {
+          return retained.draft;
+        },
         canReconnect: false,
         snapshot: blocked.snapshot,
         send: blocked.send,
@@ -213,6 +226,59 @@ class SessionControls extends Component<{ owner: SessionOwner }> {
     }
     return <LocalControl view={view} runtimeObserved={!!snapshot.runtime} />;
   }
+}
+
+/** The transcript owner retains the existing input root across panel dismissal. */
+function paintComposer(owner: SessionOwner) {
+  if (owner.disposed) return;
+  const pending =
+    owner.snapshot.control?.snapshot.requests.filter(
+      (request) => request.state.state === 'open' || request.state.state === 'claimed',
+    ).length ?? 0;
+  render(
+    <button
+      type="button"
+      class="btn sh-quiet session-composer-trigger"
+      aria-label={pending ? 'Composer; ' + pending + ' pending requests' : 'Open Composer'}
+      aria-haspopup="dialog"
+      aria-expanded={!!owner.composerPanel}
+      onClick={(event) => {
+        if (owner.disposed || !event.currentTarget.isConnected || owner.composerPanel) return;
+        const trigger = event.currentTarget;
+        const panel = createPanelChrome(
+          {
+            title: 'Composer',
+            label: 'Session Composer',
+            className: 'anchored session-composer-panel',
+          },
+          {
+            opened() {
+              owner.host.composerOpened?.(panel);
+              paintComposer(owner);
+              owner.composer
+                .querySelector<HTMLTextAreaElement>('textarea')
+                ?.focus({ preventScroll: true });
+            },
+            closed() {
+              owner.host.composerClosed?.(panel);
+              owner.composer.remove();
+              owner.composerPanel = null;
+              if (!owner.disposed) {
+                paintComposer(owner);
+                if (trigger.isConnected) trigger.focus({ preventScroll: true });
+              }
+            },
+          },
+        );
+        owner.composerPanel = panel;
+        panel.body.append(owner.composer);
+        panel.show();
+      }}
+    >
+      Composer{pending ? ' · ' + pending : ''}
+    </button>,
+    owner.composerTrigger,
+  );
 }
 /** Durable status stays observable even when no current native control identity exists. */
 class SessionRuntime extends Component<{ owner: SessionOwner }> {
@@ -838,6 +904,9 @@ export function renderSessionScreen(
   }
   if (!owner) {
     const state: SessionOwner = {
+      composer: document.createElement('div'),
+      composerTrigger: document.createElement('span'),
+      composerPanel: null,
       snapshot,
       host,
       disposed: false,
@@ -863,6 +932,7 @@ export function renderSessionScreen(
     };
     owner = state;
     owners.set(root, state);
+    render(<SessionControls owner={state} />, state.composer);
     state.measure = () => {
       if (state.disposed) return;
       let changed = false;
@@ -886,10 +956,9 @@ export function renderSessionScreen(
     state.observer.disconnect();
     state.observer = new ResizeObserver(state.measure);
     const viewport = window.visualViewport;
-    let dockFrame = 0;
-    const fitDock = () => {
+    const fitJump = () => {
       const dock = root.querySelector<HTMLElement>('.session-dock');
-      if (!dock || !root.isConnected || !root.getClientRects().length) return;
+      if (state.disposed || !dock || !root.isConnected) return;
       const note = document.querySelector<HTMLElement>(
         'body > .livenote, body > .viewer-status-slot > .livenote',
       );
@@ -898,47 +967,24 @@ export function renderSessionScreen(
         'readingBottom',
         Math.max(
           viewport ? Math.max(0, innerHeight - viewport.height - viewport.offsetTop) : 0,
-          note?.getClientRects().length ? innerHeight - note.getBoundingClientRect().top : 0,
+          note ? Math.max(0, innerHeight - note.getBoundingClientRect().top) : 0,
         ),
       );
-      const transcript = root.querySelector<HTMLElement>('.transcript');
-      if (transcript) {
-        // Paint only the reading region, keeping the host's existing scroll height and anchors.
-        const clipped =
-          getComputedStyle(dock).position === 'sticky'
-            ? Math.max(
-                0,
-                transcript.getBoundingClientRect().bottom - dock.getBoundingClientRect().top,
-              )
-            : 0;
-        setGeometry(transcript, 'readingClip', clipped);
-      }
     };
-    const scheduleDock = () => {
-      cancelAnimationFrame(dockFrame);
-      dockFrame = requestAnimationFrame(fitDock);
-    };
-    document.addEventListener('scroll', scheduleDock, { capture: true, passive: true });
-    const notices = new MutationObserver(fitDock);
+    const notices = new MutationObserver(fitJump);
     notices.observe(document.body, { childList: true });
-    viewport?.addEventListener('resize', fitDock);
-    viewport?.addEventListener('scroll', fitDock);
-    const dockObserver = new ResizeObserver(fitDock);
-    requestAnimationFrame(() => {
-      if (state.disposed) return;
-      const dock = root.querySelector('.session-dock');
-      if (dock) dockObserver.observe(dock);
-      const transcript = root.querySelector('.transcript');
-      if (transcript) dockObserver.observe(transcript);
-      fitDock();
-    });
+    viewport?.addEventListener('resize', fitJump);
+    viewport?.addEventListener('scroll', fitJump);
+    requestAnimationFrame(fitJump);
     claimScreen(root, 'session', () => {
-      cancelAnimationFrame(dockFrame);
-      document.removeEventListener('scroll', scheduleDock, true);
-      viewport?.removeEventListener('resize', fitDock);
-      viewport?.removeEventListener('scroll', fitDock);
-      dockObserver.disconnect();
       notices.disconnect();
+      viewport?.removeEventListener('resize', fitJump);
+      viewport?.removeEventListener('scroll', fitJump);
+      state.disposed = true;
+      state.composerPanel?.destroy();
+      render(null, state.composer);
+      render(null, state.composerTrigger);
+      state.composerTrigger.remove();
       releaseGeometry(root);
       state.disposed = true;
       state.observer.disconnect();
@@ -954,6 +1000,10 @@ export function renderSessionScreen(
   state.host = host;
   state.blocks = mergeBlocks(state.blocks, snapshot);
   state.snapshot = snapshot;
+  if (snapshot.composerTarget && state.composerTrigger.parentElement !== snapshot.composerTarget)
+    snapshot.composerTarget.replaceChildren(state.composerTrigger);
+  state.controls?.();
+  paintComposer(state);
   state.change = (key) => {
     for (const block of state.blocks)
       if (
@@ -1007,7 +1057,22 @@ export function renderSessionScreen(
               ),
             )}
             <SessionPager owner={state} where="after" />
-            {view.empty && <p class="empty">{screenText(view.empty)}</p>}
+            {view.empty && (
+              <p class="empty">
+                {screenText(view.empty)}{' '}
+                {view.retry && (
+                  <button
+                    type="button"
+                    class="link"
+                    onClick={() => {
+                      if (!state.disposed) state.snapshot.retry?.run();
+                    }}
+                  >
+                    {view.retry.label}
+                  </button>
+                )}
+              </p>
+            )}
           </div>
         </section>
         <SessionRuntime owner={state} />
@@ -1018,7 +1083,6 @@ export function renderSessionScreen(
               if (node && state.jump && state.jump.parentNode !== node) node.append(state.jump);
             }}
           />
-          <SessionControls owner={state} />
         </div>
         {view.footer && (
           <div class="session-foot">
@@ -1088,7 +1152,13 @@ export function updateSessionControl(root: HTMLElement, control: ControlView | u
   const owner = owners.get(root);
   if (!owner || owner.disposed) return;
   owner.snapshot = { ...owner.snapshot, control };
+  if (
+    owner.snapshot.composerTarget &&
+    owner.composerTrigger.parentElement !== owner.snapshot.composerTarget
+  )
+    owner.snapshot.composerTarget.replaceChildren(owner.composerTrigger);
   owner.controls?.();
+  paintComposer(owner);
 }
 export function updateSessionRuntime(
   root: HTMLElement,
@@ -1161,6 +1231,14 @@ export function updateSessionClock(
 }
 
 export function measureSessionScreen(root: HTMLElement) {
+  // A retained content-visibility subtree can briefly report zero geometry
+  // when reattached. Commit bounded loaded turns before restoring reading position.
+  const turns = [...root.querySelectorAll<HTMLElement>('.turn')];
+  for (const turn of turns) turn.classList.add('semon-measuring-turn');
+  for (const turn of turns) {
+    if (turn.isConnected) setGeometry(turn, 'intrinsicHeight', turn.getBoundingClientRect().height);
+    turn.classList.remove('semon-measuring-turn');
+  }
   owners.get(root)?.measure();
 }
 
@@ -1171,4 +1249,9 @@ export function updateSessionName(root: HTMLElement, name: string) {
   owner.snapshot = { ...owner.snapshot, name };
   const heading = root.querySelector('.ph > h1');
   if (heading) heading.textContent = screenText(name);
+}
+
+/** Close the contextual controls when the reader leaves this session. */
+export function closeSessionComposer(root: HTMLElement) {
+  owners.get(root)?.composerPanel?.destroy();
 }

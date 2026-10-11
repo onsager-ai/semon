@@ -236,9 +236,16 @@ impl CallRef {
         path: &Path,
         records: &crate::query_source::Records<'_>,
     ) -> io::Result<handoff::Call> {
-        let id: String = serde_json::from_slice(&records.evidence(path, &self.fields[0])?)?;
-        let name: String = serde_json::from_slice(&records.evidence(path, &self.fields[1])?)?;
-        let input: Value = serde_json::from_slice(&records.evidence(path, &self.fields[2])?)?;
+        self.read_with(|location| records.evidence(path, location))
+    }
+
+    pub(crate) fn read_with(
+        &self,
+        mut evidence: impl FnMut(&Record) -> io::Result<Vec<u8>>,
+    ) -> io::Result<handoff::Call> {
+        let id: String = serde_json::from_slice(&evidence(&self.fields[0])?)?;
+        let name: String = serde_json::from_slice(&evidence(&self.fields[1])?)?;
+        let input: Value = serde_json::from_slice(&evidence(&self.fields[2])?)?;
         let input = input.to_string();
         if !matches!(name.as_str(), "Bash" | "Skill")
             || input

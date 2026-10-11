@@ -259,6 +259,7 @@ pub(crate) struct Query<'a> {
     pub(crate) query: &'a str,
     pub(crate) harness: Option<&'a str>,
     pub(crate) repo: Option<&'a str>,
+    pub(crate) model: Option<&'a str>,
     pub(crate) after: Option<Position>,
     pub(crate) limit: usize,
     pub(crate) index_complete: bool,
@@ -269,6 +270,7 @@ pub(crate) fn read(connection: &Connection, request: Query<'_>) -> rusqlite::Res
         query,
         harness,
         repo,
+        model,
         after,
         limit,
         index_complete,
@@ -348,7 +350,13 @@ pub(crate) fn read(connection: &Connection, request: Query<'_>) -> rusqlite::Res
         };
         bytes += usize::try_from(length).map_err(|_| rusqlite::Error::InvalidQuery)?;
         if harness.is_some_and(|wanted| wanted != row_harness)
-            || repo.is_some_and(|wanted| Some(wanted) != row_repo.as_deref())
+            || repo.is_some_and(|wanted| {
+                if wanted.is_empty() {
+                    row_repo.is_some()
+                } else {
+                    Some(wanted) != row_repo.as_deref()
+                }
+            })
         {
             candidates += 1;
             checked = Some(position.clone());
@@ -356,6 +364,11 @@ pub(crate) fn read(connection: &Connection, request: Query<'_>) -> rusqlite::Res
         }
         let row: CatalogRow =
             serde_json::from_str(&encoded).map_err(|_| rusqlite::Error::InvalidQuery)?;
+        if model.is_some_and(|wanted| wanted != row.model) {
+            candidates += 1;
+            checked = Some(position.clone());
+            continue;
+        }
         if row.key != position.key
             || row.last.unwrap_or(0) != last
             || last != position.last
@@ -468,11 +481,14 @@ mod sqlite_tests {
 
     fn row(key: &str, name: &str) -> CatalogRow {
         CatalogRow {
+            overview: None,
+            trace: None,
             lifecycle: CatalogLifecycle::Current,
             key: key.into(),
             name: name.into(),
             harness: "claude".into(),
             kind: "session".into(),
+            presentation_kind: None,
             native_ids: vec![key.into()],
             parent: None,
             parent_source: None,
@@ -536,6 +552,7 @@ mod sqlite_tests {
                 query: &normalize_query(query).unwrap(),
                 harness: None,
                 repo: None,
+                model: None,
                 after,
                 limit,
                 index_complete: true,
@@ -558,6 +575,7 @@ mod sqlite_tests {
             query: "harbor",
             harness: None,
             repo: None,
+            model: None,
             after: None,
             limit: 60,
             index_complete: true,
@@ -686,6 +704,7 @@ mod sqlite_tests {
                 query: "replacement",
                 harness: None,
                 repo: None,
+                model: None,
                 after: None,
                 limit: 2,
                 index_complete: true,
@@ -718,6 +737,7 @@ mod sqlite_tests {
                 query: "x",
                 harness: None,
                 repo: None,
+                model: None,
                 after: None,
                 limit: 2,
                 index_complete: false,

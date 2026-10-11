@@ -6,6 +6,7 @@ import type { HarnessMark } from './screens';
 import { MarkdownContent, Inline } from './richtext';
 import { Sentence } from './sentence';
 import type { SentencePart, SentenceHost } from './sentence';
+import { safePath } from './account';
 export interface Hop {
   key: string;
   className: string;
@@ -69,6 +70,8 @@ export interface TraceSnapshot {
   summary?: string;
   hops: readonly Hop[];
   agents?: AgentChart;
+  observation?: string;
+  continuations?: readonly { label: string; href: string }[];
 }
 export interface TraceHost extends SentenceHost {
   fold(id: string): void;
@@ -560,6 +563,21 @@ export function renderTraceScreen(root: HTMLElement, snapshot: TraceSnapshot, ho
               ))}
             </div>
           </>
+        )}
+        {snapshot.observation && (
+          <p class="catalog-note" role="status">
+            {screenText(snapshot.observation)}
+          </p>
+        )}
+        {!!snapshot.continuations?.length && (
+          <p class="catalog-note">
+            Continue with another recorded branch:{' '}
+            {snapshot.continuations.map((branch) => (
+              <a class="link" href={safePath(branch.href) ? branch.href : undefined}>
+                {screenText(branch.label)}{' '}
+              </a>
+            ))}
+          </p>
         )}
       </>,
     );

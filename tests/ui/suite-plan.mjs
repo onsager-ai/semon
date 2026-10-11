@@ -1,6 +1,7 @@
 // Assign every functional check exactly once. Adding a check without updating this plan fails CI.
 export const GROUPS = {
   navigation: [
+    'approval-reviews',
     'home',
     'bar',
     'turns',

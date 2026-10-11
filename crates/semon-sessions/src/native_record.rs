@@ -32,6 +32,18 @@ impl Record {
             .flatten()
     }
 
+    pub(crate) fn verify_bytes(&self, bytes: &[u8]) -> io::Result<()> {
+        if bytes.len() as u64 != self.length
+            || <[u8; 32]>::from(Sha256::digest(bytes)) != self.sha256
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "native evidence changed",
+            ));
+        }
+        Ok(())
+    }
+
     pub(crate) fn verify(&self, file: &mut LogFile) -> io::Result<()> {
         file.seek(SeekFrom::Start(self.offset))?;
         let mut reader = file.take(self.length);

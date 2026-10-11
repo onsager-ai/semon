@@ -8,14 +8,11 @@
 <link rel="icon" href="/favicon.svg" type="image/svg+xml">
 <link rel="stylesheet" href="/viewer.css">
 <link rel="stylesheet" href="/shell.css">
-<script src="/shell.js" defer></script>
-<script src="/viewer.js" defer></script>
+<script src="/sidebar-host.js" defer></script>
 </head>
 <body>
-<!-- An embedding page of its own beside the viewer, drawn with shell::session_sidebar("Semon", NAV's rows) and marked
-     data-viewer="sidebar" (a Rust test in shell.rs holds this markup to the API). tests/ui/checks/embedsidebar.mjs opens it
-     from the viewer's origin. Its nav rows are the viewer's paths; its own content stays its own. -->
-<div class="app" data-viewer="sidebar" data-viewer-nav="machines">
+<!-- Native content shares the canonical Viewer chrome through a typed consumer. -->
+<div class="app">
 <aside class="sidebar" id="sidebar" aria-label="Navigation">
 <div class="sidebar-head"><div class="brandrow"><span class="mark" aria-hidden="true"></span><span class="brandname">Semon</span><button class="ibtn close" id="drawer-close" type="button" aria-label="Close menu"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"></path></svg></button></div></div>
 <nav id="nav" aria-label="Pages">

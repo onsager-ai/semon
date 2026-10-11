@@ -147,6 +147,7 @@ code { overflow-wrap: anywhere; }
 .meta-line .lab + .lab::before { content: "·"; margin: 0 5px; color: var(--faint); }
 .meta-line .lab.state .dot { width: 7px; height: 7px; }
 .meta-line .lab.state { color: var(--ink-2); }
+.meta-line .lab.hname { font-weight: inherit; letter-spacing: normal; }
 .meta-line .lab.state.wait { color: var(--wait); } .meta-line .lab.state.err { color: var(--err); }
 .meta-line .lab[hidden] { display: none; }
 /* The reasoning-effort suffix is a separator like the labels': the dot has the label gap (5px) on each side. */
@@ -156,7 +157,7 @@ code { overflow-wrap: anywhere; }
 .topbar .l1-state { display: none; }
 .menu-item .dot { margin: 0 4px; }
 .menu-item .menu-note { margin-left: auto; color: var(--accent); font-size: var(--fs-sm); }
-@media (max-width: 760px) {
+@media (max-width: 760px), (pointer: coarse) {
   /* A session's bar is one row on a phone: the menu button, a back chevron for the parent, the title behind its small state dot, then ⋯. The line of
      labels leaves the bar (failed steps and runs are in the ⋯ menu, the rest in its Details). The chevron is a 44 px target like the buttons beside it. */
   .topbar.session-bar .meta-line { display: none; }
@@ -197,6 +198,7 @@ dialog.panel::backdrop { background: color-mix(in srgb, #000 40%, transparent); 
 @media (hover: hover) { .menu-item:hover { background: var(--hover); } }
 .menu-item .icon { color: var(--muted); }
 .menu-item > span:not(.switch) { flex: 1 1 auto; min-width: 0; }
+.menu-item > .dot { flex: none; }
 .menu-item .aside { flex: none; color: var(--muted); font-size: var(--fs-sm); }
 .switch { flex: none; position: relative; width: 34px; height: 20px; border-radius: 10px; background: var(--line-2); }
 .switch::after { content: ""; position: absolute; top: 2px; left: 2px; width: 16px; height: 16px; border-radius: 50%; background: var(--ground); box-shadow: 0 1px 2px color-mix(in srgb, #000 25%, transparent); }
@@ -494,6 +496,7 @@ dialog.panel::backdrop { background: color-mix(in srgb, #000 40%, transparent); 
 
 /* A handoff's sentence: who did what to whom. Used on Home, in traces and in transcripts. */
 .who { font-weight: 600; }
+.hop button.who { color: var(--ink); }
 .verb { color: var(--muted); }
 .chip-h { display: inline-flex; align-items: center; gap: 5px; font-size: var(--fs-cap); color: var(--muted); }
 .stat { display: inline-flex; align-items: center; gap: 6px; font-size: var(--fs-sm); font-weight: 500; white-space: nowrap; }
@@ -616,7 +619,7 @@ dialog.panel::backdrop { background: color-mix(in srgb, #000 40%, transparent); 
 @media (prefers-reduced-motion: reduce) { .account-switch-row .switch, .account-switch-row .switch-knob { transition: none; } }
 
 /* Transcript, modelled on Claude's chat */
-.divider .dv-text { display: flex; flex: 0 1 auto; min-width: 0; white-space: nowrap; }
+.divider .dv-text { display: flex; flex: 0 1 auto; min-width: 0; gap: var(--s1); white-space: nowrap; }
 .divider .dv-lead { flex: none; }
 .divider .dv-machine { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 /* Opening a session: the old page is held dimmed and inert, then (after 150 ms, in viewer.js) a skeleton of turn-shaped
@@ -1313,7 +1316,7 @@ html.viewer-open, html.viewer-open body { overflow: hidden; }
 
 /* Landscape touch reaches 44px without changing the compact header pitch. */
 @media (any-pointer: coarse) and (min-width: 761px) {
-  .viewer-b .vs .link { position: relative; }
+  .viewer-b .vs .link { position: relative; min-height: 44px; margin: 0; }
   .viewer-b .vs .link::before { content: ""; position: absolute; inset: min(0px, calc((100% - 44px) / 2)) 0; }
 }
 
@@ -1365,4 +1368,7 @@ html.viewer-open, html.viewer-open body { overflow: hidden; }
 .composer-unavailable { display: flex; align-items: center; justify-content: space-between; gap: var(--s2); width: 100%; min-height: var(--tap); padding: var(--s2) var(--s3); border: 0; background: transparent; color: var(--muted); font-size: var(--fs-sm); text-align: left; }
 .composer-unavailable > span:first-child { min-width: 0; overflow-wrap: anywhere; }
 
-@media (pointer: coarse) { .composer-unavailable { min-height: 44px; } }
+@media (pointer: coarse) {
+  :root { --tap: 44px; }
+  .composer-unavailable { min-height: var(--tap); }
+}

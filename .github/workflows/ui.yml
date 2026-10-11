@@ -140,7 +140,7 @@ jobs:
           npx playwright install --with-deps chromium
 
       - name: Browser-check infrastructure regression tests
-        run: node --test tests/ui/suite-plan.test.mjs tests/ui/pixel-diff.test.mjs tests/ui/tap-hit.test.mjs tests/ui/checks/viewer-cache.test.mjs tests/ui/checks/model-delta.test.mjs tests/ui/visual-contract.test.mjs
+        run: node --test tests/ui/suite-plan.test.mjs tests/ui/pixel-diff.test.mjs tests/ui/tap-hit.test.mjs tests/ui/checks/catalog-cache.test.mjs tests/ui/checks/catalog-wire.test.mjs tests/ui/visual-contract.test.mjs
 
       - name: Independent shared-account and application-shell lifecycle
         if: matrix.suite == 'interaction'
@@ -150,7 +150,7 @@ jobs:
           node tests/ui/gallery.mjs
           node tests/ui/compact-gallery.mjs
           node tests/ui/native-controls.mjs
-          node --test ui/tests/browser-lifecycle.mjs ui/tests/application-lifecycle.mjs ui/tests/native-shell-lifecycle.mjs ui/tests/recovery-browser.mjs ui/tests/select-lifecycle.mjs ui/tests/code-scroll.mjs ui/tests/control-observation-browser.mjs ui/tests/jump-toolbar.mjs ui/tests/catalog-viewer-browser.mjs ui/tests/runtime-leaf-browser.mjs ui/tests/continuity-refinement-browser.mjs ui/tests/staging-viewer-browser.mjs
+          node --test ui/tests/browser-lifecycle.mjs ui/tests/application-lifecycle.mjs ui/tests/native-shell-lifecycle.mjs ui/tests/select-lifecycle.mjs ui/tests/code-scroll.mjs ui/tests/control-observation-browser.mjs ui/tests/jump-toolbar.mjs ui/tests/catalog-viewer-browser.mjs ui/tests/runtime-leaf-browser.mjs ui/tests/continuity-refinement-browser.mjs ui/tests/staging-viewer-browser.mjs
 
       - name: Actual default catalog producer, keyboard and visual geometry
         if: matrix.suite == 'interaction'
@@ -158,8 +158,9 @@ jobs:
           SEMON_CATALOG_SERVED_BIN: ${{ github.workspace }}/target/debug/semon
           SEMON_CATALOG_SERVED_SOURCE: ${{ github.sha }}
           SEMON_CATALOG_SERVED_EVIDENCE: ${{ github.workspace }}/tests/ui/out/catalog-default.json
+          SEMON_OVERVIEW_VISUAL_OUT: ${{ github.workspace }}/tests/ui/out/overview-default
           SEMON_CATALOG_VISUAL_OUT: ${{ github.workspace }}/tests/ui/out/catalog-default
-        run: node --test ui/tests/catalog-served.mjs
+        run: node --test ui/tests/catalog-served.mjs ui/tests/overview-served.mjs
 
       - name: Write the sample fixtures
         run: |

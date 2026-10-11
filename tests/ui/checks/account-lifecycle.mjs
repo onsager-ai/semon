@@ -110,87 +110,24 @@ export default async function accountLifecycle(browser) {
           await page.locator('#lead-btn').click();
         } // synthetic pageshow has not restored history
 
-        const model = await page.evaluate(() =>
-          fetch('/api/model').then((response) => response.json()),
-        );
-        const originalModel = structuredClone(model);
-        const oldName = model.account.name;
-        model.account.name = 'Updated account';
-        model.version = 'account-lifecycle-' + label;
-        let polls = 0;
-        let updateEnabled = false;
-        let updateObserved = false;
-        let updateServed;
-        const updated = new Promise((resolve) => {
-          updateServed = resolve;
-        });
-        await page.route('**/api/model**', async (route) => {
-          polls++;
-          const changed = updateEnabled;
-          if (changed && !updateObserved) {
-            updateObserved = true;
-            await page.evaluate(() => {
-              window.__accountPolled = false;
-              addEventListener(
-                'semon:polled',
-                () => {
-                  window.__accountPolled = true;
-                },
-                { once: true },
-              );
-            });
-          }
-          await route.fulfill({ json: changed ? model : originalModel });
-          if (changed) updateServed();
+        // Account metadata belongs to the document/host; browsing has no model poller.
+        const retired = [];
+        page.on('request', (request) => {
+          if (/\/api\/(model|tx|events)(?:[?/#]|$)/.test(request.url()))
+            retired.push(request.url());
         });
         await trigger.click();
-        updateEnabled = true;
-        await page.evaluate(() => {
-          window.__oldAccountTrigger = document.querySelector(
-            '.account-trigger[aria-expanded="true"]',
-          );
-          dispatchEvent(new Event('semon:refresh'));
-        });
-        await Promise.race([
-          updated,
-          page.waitForTimeout(5000).then(() => {
-            throw new Error('Updated model poll did not finish');
-          }),
-        ]);
-        await page.waitForFunction(() => window.__accountPolled);
         const heldName = await page.locator('.account-name').textContent();
+        await page.waitForTimeout(3200);
         report.expect(
-          polls > 0 && heldName === oldName,
-          label +
-            ': a pending model remains held while menu is open: ' +
-            JSON.stringify({ polls, heldName, oldName }),
+          (await page.locator('.account-name').textContent()) === heldName,
+          label + ': native account metadata remains stable during bounded overview updates',
         );
         await page.keyboard.press('Escape');
-        await page.waitForFunction(
-          (selector) =>
-            document
-              .querySelector(selector)
-              ?.getAttribute('aria-label')
-              ?.startsWith('Updated account'),
-          selector,
-        );
         report.expect(
-          (await page.locator('.account-popover').count()) === 0,
-          label + ': close releases the pending model',
+          retired.length === 0,
+          label + ': account browsing has no workspace model poller',
         );
-        // Retain the removed trigger deliberately: it must not hold updates or affect a newly mounted widget.
-        await page.evaluate(() => window.__oldAccountTrigger.click());
-        if (
-          size === 'phone' &&
-          !(await page.evaluate(() => document.body.classList.contains('drawer-open')))
-        )
-          await page.locator('#lead-btn').click();
-        await trigger.click();
-        report.expect(
-          (await page.locator('.account-popover').count()) === 1,
-          label + ': removed trigger cannot reopen a stale root',
-        );
-        await page.keyboard.press('Escape');
         if (size === 'phone') {
           await page.waitForFunction(() => !history.state?.sheet);
           await page.route('**/account/profile', (route) =>
@@ -233,7 +170,7 @@ export default async function accountLifecycle(browser) {
           page.errors.length === 0,
           label + ': no browser errors: ' + page.errors.join(' | '),
         );
-        report.results[label] = { polls, errors: page.errors };
+        report.results[label] = { retiredReads: retired.length, errors: page.errors };
       } finally {
         await closePage(page);
       }

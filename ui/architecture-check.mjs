@@ -65,26 +65,26 @@ export function checkArchitecture(input, options = {}) {
       ).resolvedModule;
       return resolved && normalize(resolved.resolvedFileName);
     };
-    const compositionBindings = new Set();
-    // Type-only imports also couple features to composition. Only its mount owner may import it.
+    const readerBindings = new Set();
+    // Type-only imports also couple features to canonical reader. Only its mount owner may import it.
     modules(source, name, (specifier, node) => {
       const target = resolve(specifier);
-      if (target?.endsWith('/app/composition.ts')) {
+      if (target?.endsWith('/app/catalogViewer.tsx')) {
         const mount = normalize(path.join(path.dirname(target), 'viewer.ts'));
         if (name !== mount || ts.isExportDeclaration(node)) {
           throw new Error(
-            `${name}: only app/viewer.ts may import composition; it must not be re-exported`,
+            `${name}: only app/viewer.ts may import canonical reader; it must not be re-exported`,
           );
         }
         if (ts.isImportDeclaration(node) && node.importClause) {
           const clause = node.importClause;
-          if (clause.name) compositionBindings.add(clause.name.text);
+          if (clause.name) readerBindings.add(clause.name.text);
           if (clause.namedBindings) {
             if (ts.isNamespaceImport(clause.namedBindings))
-              compositionBindings.add(clause.namedBindings.name.text);
+              readerBindings.add(clause.namedBindings.name.text);
             else
               for (const binding of clause.namedBindings.elements)
-                compositionBindings.add(binding.name.text);
+                readerBindings.add(binding.name.text);
           }
         }
       }
@@ -97,10 +97,10 @@ export function checkArchitecture(input, options = {}) {
         statement.exportClause &&
         ts.isNamedExports(statement.exportClause) &&
         statement.exportClause.elements.some((binding) =>
-          compositionBindings.has((binding.propertyName ?? binding.name).text),
+          readerBindings.has((binding.propertyName ?? binding.name).text),
         )
       ) {
-        throw new Error(`${name}: composition must not be re-exported`);
+        throw new Error(`${name}: canonical reader must not be re-exported`);
       }
     }
     if (/\.d\.[cm]?ts$/.test(name)) continue;

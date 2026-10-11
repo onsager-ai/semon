@@ -2095,6 +2095,83 @@ globalThis.__semonUIShared = __semonUIShared;
     };
   }
 
+  // src/lib/geometry.ts
+  var properties = {
+    readingBottom: "--reading-bottom",
+    readingClip: "--reading-clip",
+    minHeight: "min-height",
+    paddingBottom: "padding-bottom",
+    scrollPaddingTop: "scroll-padding-top",
+    barHeight: "--barh",
+    accountLeft: "--account-left",
+    accountWidth: "--account-width",
+    accountBottom: "--account-bottom",
+    intrinsicHeight: "contain-intrinsic-block-size"
+  };
+  var sheet = null;
+  var observer = null;
+  var serial = 0;
+  var records = /* @__PURE__ */ new Map();
+  function paint() {
+    if (!sheet) {
+      sheet = new CSSStyleSheet();
+      document.adoptedStyleSheets = [...document.adoptedStyleSheets, sheet];
+    }
+    sheet.replaceSync("");
+    for (const [node, record4] of records) {
+      if (!node.isConnected) {
+        records.delete(node);
+        continue;
+      }
+      const declarations = [...record4.values].map(
+        ([slot, value]) => properties[slot] + ":" + (slot === "intrinsicHeight" ? "auto " : "") + value + "px !important"
+      ).join(";");
+      if (declarations)
+        sheet.insertRule(
+          '[data-semon-geometry="' + record4.id + '"]{' + declarations + "}",
+          sheet.cssRules.length
+        );
+    }
+  }
+  function setGeometry(node, slot, value) {
+    if (!Object.hasOwn(properties, slot) || value !== null && (!Number.isFinite(value) || Math.abs(value) > 1e8))
+      throw new Error("Invalid host geometry");
+    let record4 = records.get(node);
+    if (!record4) {
+      record4 = { id: ++serial, values: /* @__PURE__ */ new Map() };
+      records.set(node, record4);
+      node.dataset.semonGeometry = String(record4.id);
+    }
+    if (value === null) record4.values.delete(slot);
+    else record4.values.set(slot, value);
+    paint();
+    if (!observer) {
+      observer = new MutationObserver(() => {
+        if ([...records.keys()].some((node2) => !node2.isConnected)) paint();
+      });
+      observer.observe(document.documentElement, { childList: true, subtree: true });
+    }
+  }
+  function releaseGeometry(root, slots) {
+    for (const [node, record4] of records) {
+      if (slots ? node === root : node === root || root.contains(node) || !node.isConnected) {
+        if (slots) for (const slot of slots) record4.values.delete(slot);
+        if (!slots || !record4.values.size) {
+          records.delete(node);
+          delete node.dataset.semonGeometry;
+        }
+      }
+    }
+    if (records.size) paint();
+    else {
+      observer?.disconnect();
+      observer = null;
+      if (sheet)
+        document.adoptedStyleSheets = document.adoptedStyleSheets.filter((value) => value !== sheet);
+      sheet = null;
+    }
+  }
+
   // src/lib/shell.tsx
   var NS = "http://www.w3.org/2000/svg";
   function element(tag, className, id) {
@@ -2174,6 +2251,10 @@ globalThis.__semonUIShared = __semonUIShared;
     let recent, content2;
     let desktopAccount = null, phoneAccount = null;
     let lead = null, destroyed = false, sx = null;
+    let barObserver = null;
+    const measureBar = () => {
+      if (app && !destroyed) setGeometry(app, "barHeight", bar.getBoundingClientRect().height);
+    };
     let destinations = [], rail = false;
     const listeners = [];
     function listen(target, type, handler, options2) {
@@ -2284,6 +2365,9 @@ globalThis.__semonUIShared = __semonUIShared;
     }
     function unmount() {
       if (!app) return;
+      barObserver?.disconnect();
+      barObserver = null;
+      releaseGeometry(app, ["barHeight"]);
       closeDrawer(true);
       dropDesktop();
       drawerAccount(null);
@@ -2342,6 +2426,9 @@ globalThis.__semonUIShared = __semonUIShared;
         recent = required("#side-list");
         content2 = required("#page");
         app = container;
+        barObserver = new ResizeObserver(measureBar);
+        barObserver.observe(bar);
+        measureBar();
         paintHead();
         listen(scrim, "click", () => closeDrawer());
         listen(
@@ -2438,6 +2525,7 @@ globalThis.__semonUIShared = __semonUIShared;
           cursor.remove();
           cursor = next;
         }
+        measureBar();
       },
       drawerAccount,
       openDrawer,
@@ -2641,7 +2729,15 @@ globalThis.__semonUIShared = __semonUIShared;
                   "aria-label": "Show fewer sessions under " + item2.name,
                   onClick: (event) => {
                     event.stopPropagation();
-                    if (active(event.currentTarget)) host2.fewer(item2.id);
+                    if (active(event.currentTarget)) {
+                      host2.fewer(item2.id);
+                      const parent = [...root.querySelectorAll(".treeitem")].find(
+                        (node) => node.dataset.id === item2.id
+                      );
+                      const row = parent?.querySelector(":scope > .tree-row .srow");
+                      row?.focus({ preventScroll: true });
+                      row?.scrollIntoView({ block: "nearest" });
+                    }
                   },
                   children: [
                     /* @__PURE__ */ jsx("span", { children: "Show fewer" }),
@@ -3277,15 +3373,11 @@ globalThis.__semonUIShared = __semonUIShared;
   // src/lib/screens.tsx
   var owned = /* @__PURE__ */ new WeakSet();
   var kinds = /* @__PURE__ */ new WeakMap();
-  var screenKind = (root) => kinds.get(root);
   var cleanups = /* @__PURE__ */ new WeakMap();
   function claimScreen(root, kind, cleanup) {
     owned.add(root);
     kinds.set(root, kind);
     cleanups.set(root, cleanup);
-  }
-  function ownsScreen(root) {
-    return owned.has(root);
   }
   function releaseScreen(root) {
     cleanups.get(root)?.();
@@ -3382,7 +3474,7 @@ globalThis.__semonUIShared = __semonUIShared;
     );
   }
   function Harness({
-    mark,
+    mark: mark2,
     size = 14,
     lead = true
   }) {
@@ -3390,15 +3482,15 @@ globalThis.__semonUIShared = __semonUIShared;
       "span",
       {
         class: "hicon " + (size === 16 ? "hi-screen-16" : "hi-screen") + (lead ? " hi-lead" : ""),
-        "data-harness": mark.id,
+        "data-harness": mark2.id,
         "aria-hidden": "true",
-        children: mark.light === mark.dark ? /* @__PURE__ */ jsx("img", { src: mark.light, alt: "", draggable: false, decoding: "async" }) : /* @__PURE__ */ jsxs(Fragment2, { children: [
+        children: mark2.light === mark2.dark ? /* @__PURE__ */ jsx("img", { src: mark2.light, alt: "", draggable: false, decoding: "async" }) : /* @__PURE__ */ jsxs(Fragment2, { children: [
           /* @__PURE__ */ jsx(
             "img",
             {
               class: "hi-light",
-              loading: mark.darkTheme ? "lazy" : void 0,
-              src: mark.light,
+              loading: mark2.darkTheme ? "lazy" : void 0,
+              src: mark2.light,
               alt: "",
               draggable: false,
               decoding: "async"
@@ -3408,8 +3500,8 @@ globalThis.__semonUIShared = __semonUIShared;
             "img",
             {
               class: "hi-dark",
-              loading: mark.darkTheme ? void 0 : "lazy",
-              src: mark.dark,
+              loading: mark2.darkTheme ? void 0 : "lazy",
+              src: mark2.dark,
               alt: "",
               draggable: false,
               decoding: "async"
@@ -3419,10 +3511,10 @@ globalThis.__semonUIShared = __semonUIShared;
       }
     );
   }
-  function Section({ heading, count }) {
+  function Section({ heading, count: count2 }) {
     return /* @__PURE__ */ jsxs("div", { class: "sec-h", children: [
       screenText(heading),
-      /* @__PURE__ */ jsx("span", { class: "n", children: count })
+      /* @__PURE__ */ jsx("span", { class: "n", children: count2 })
     ] });
   }
   function Live({ row, host: host2 }) {
@@ -3517,6 +3609,7 @@ globalThis.__semonUIShared = __semonUIShared;
   }
   function HomeView({ snapshot, host: host2 }) {
     return /* @__PURE__ */ jsxs(Fragment2, { children: [
+      snapshot.observation && /* @__PURE__ */ jsx("p", { class: "catalog-note", role: "status", children: snapshot.observation }),
       /* @__PURE__ */ jsxs("div", { class: "ph", children: [
         /* @__PURE__ */ jsx("h1", { children: "Home" }),
         /* @__PURE__ */ jsxs("div", { class: "sub", children: [
@@ -3538,17 +3631,20 @@ globalThis.__semonUIShared = __semonUIShared;
       /* @__PURE__ */ jsx(Section, { heading: "Needs you", count: snapshot.waiting }),
       /* @__PURE__ */ jsxs("div", { class: "list", children: [
         snapshot.inbox.map((row) => /* @__PURE__ */ jsx(Inbox, { row, host: host2 }, row.id)),
+        snapshot.moreInbox && /* @__PURE__ */ jsx("button", { class: "more", type: "button", onClick: () => host2.more?.("inbox"), children: "Load more requests" }),
         !snapshot.waiting && /* @__PURE__ */ jsx("p", { class: "empty", children: "Nothing is waiting on you." })
       ] }),
       /* @__PURE__ */ jsx(Section, { heading: "Working now", count: snapshot.working }),
       /* @__PURE__ */ jsxs("div", { class: "list", children: [
         snapshot.live.map((row) => /* @__PURE__ */ jsx(Live, { row, host: host2 }, row.id)),
+        snapshot.moreLive && /* @__PURE__ */ jsx("button", { class: "more", type: "button", onClick: () => host2.more?.("working"), children: "Load more working sessions" }),
         !snapshot.working && /* @__PURE__ */ jsx("p", { class: "empty", children: "Nothing is running." })
       ] }),
       snapshot.totalAnswered > 0 && /* @__PURE__ */ jsxs(Fragment2, { children: [
         /* @__PURE__ */ jsx(Section, { heading: "Answered", count: snapshot.totalAnswered }),
         /* @__PURE__ */ jsxs("div", { class: "list", children: [
           snapshot.answered.map((row) => /* @__PURE__ */ jsx(Inbox, { row, host: host2 }, row.id)),
+          snapshot.allAnswered && snapshot.moreAnswered && /* @__PURE__ */ jsx("button", { class: "more", type: "button", onClick: () => host2.more?.("answered"), children: "Load more answered" }),
           !snapshot.allAnswered && snapshot.totalAnswered > 3 && /* @__PURE__ */ jsx(
             "button",
             {
@@ -3570,30 +3666,6 @@ globalThis.__semonUIShared = __semonUIShared;
     kinds.set(root, "home");
     host2.committed();
   }
-  function MachineView({ snapshot, host: host2 }) {
-    return /* @__PURE__ */ jsxs(Fragment2, { children: [
-      /* @__PURE__ */ jsx("div", { class: "ph sr", children: /* @__PURE__ */ jsx("h1", { children: screenText(snapshot.name) }) }),
-      snapshot.totalSessions > 0 && /* @__PURE__ */ jsxs(Fragment2, { children: [
-        /* @__PURE__ */ jsx(Section, { heading: "Sessions", count: snapshot.totalSessions }),
-        /* @__PURE__ */ jsx("div", { class: "list", children: snapshot.sessions.map((row) => /* @__PURE__ */ jsx(Live, { row, host: host2 }, row.id)) })
-      ] }),
-      snapshot.off.length > 0 && /* @__PURE__ */ jsxs(Fragment2, { children: [
-        /* @__PURE__ */ jsx(Section, { heading: "Moved off", count: snapshot.off.length }),
-        /* @__PURE__ */ jsx("div", { class: "list", children: snapshot.off.map((row) => /* @__PURE__ */ jsx(Live, { row, host: host2 }, row.id)) })
-      ] }),
-      snapshot.moves.length > 0 && /* @__PURE__ */ jsxs(Fragment2, { children: [
-        /* @__PURE__ */ jsx(Section, { heading: "Moves", count: snapshot.moves.length }),
-        /* @__PURE__ */ jsx("div", { class: "list", children: snapshot.moves.map((row) => /* @__PURE__ */ jsx(Inbox, { row, host: host2 }, row.id)) })
-      ] }),
-      !snapshot.totalSessions && !snapshot.off.length && /* @__PURE__ */ jsx("p", { class: "empty", children: "No sessions have run here." })
-    ] });
-  }
-  function renderMachineScreen(root, snapshot, host2) {
-    commitApplicationView(root, /* @__PURE__ */ jsx(MachineView, { snapshot, host: host2 }));
-    owned.add(root);
-    kinds.set(root, "machine");
-    host2.committed();
-  }
   function fitSessionRows(root) {
     for (const meta of root.querySelectorAll(".session-row-meta")) {
       if (!meta.isConnected || !meta.clientWidth) continue;
@@ -3605,7 +3677,10 @@ globalThis.__semonUIShared = __semonUIShared;
       }
     }
   }
-  function Session({ row, host: host2 }) {
+  function SessionRowView({
+    row,
+    host: host2
+  }) {
     return /* @__PURE__ */ jsxs(
       "button",
       {
@@ -3700,114 +3775,6 @@ globalThis.__semonUIShared = __semonUIShared;
     );
   }
   var sessionsState = /* @__PURE__ */ new WeakMap();
-  function renderSessionsScreen(root, snapshot, host2, focusSearch = false) {
-    let state2 = sessionsState.get(root);
-    if (!state2) {
-      state2 = { input: null, frame: 0, resize: () => fitSessionRows(root) };
-      sessionsState.set(root, state2);
-      window.addEventListener("resize", state2.resize, { passive: true });
-    }
-    const current = state2;
-    const fieldValue = current.input?.value.trim() === snapshot.query ? current.input.value : snapshot.query;
-    const facet = host2.facets();
-    commitApplicationView(
-      root,
-      /* @__PURE__ */ jsxs(Fragment2, { children: [
-        /* @__PURE__ */ jsxs("div", { class: "ph", children: [
-          /* @__PURE__ */ jsx("h1", { children: "Sessions" }),
-          /* @__PURE__ */ jsxs("div", { class: "sub", children: [
-            /* @__PURE__ */ jsxs("span", { children: [
-              /* @__PURE__ */ jsx("b", { children: snapshot.total }),
-              snapshot.total === 1 ? "session" : "sessions"
-            ] }),
-            /* @__PURE__ */ jsxs("span", { children: [
-              /* @__PURE__ */ jsx("b", { children: snapshot.working }),
-              "working"
-            ] }),
-            /* @__PURE__ */ jsxs("span", { children: [
-              /* @__PURE__ */ jsx("b", { children: snapshot.waiting }),
-              "waiting on you"
-            ] })
-          ] })
-        ] }),
-        /* @__PURE__ */ jsx(
-          "div",
-          {
-            class: "session-facet-slot",
-            ref: (node) => {
-              if (node && facet.parentElement !== node) node.append(facet);
-            }
-          }
-        ),
-        /* @__PURE__ */ jsxs("label", { class: "find", children: [
-          /* @__PURE__ */ jsx(Glyph, { path: "M11 18a7 7 0 1 1 0-14 7 7 0 0 1 0 14zM20 20l-4-4" }),
-          /* @__PURE__ */ jsx(
-            "input",
-            {
-              id: "sq",
-              type: "search",
-              placeholder: "Search sessions",
-              "aria-label": "Search sessions",
-              value: fieldValue,
-              ref: (node) => {
-                current.input = node;
-              },
-              onInput: (event) => {
-                if (event.currentTarget.isConnected) host2.search(event.currentTarget.value);
-              }
-            }
-          )
-        ] }),
-        /* @__PURE__ */ jsx("div", { class: "groupby", role: "group", "aria-label": "Group by", children: [
-          ["recent", "Recent"],
-          ["project", "Project"],
-          ["machine", "Machine"],
-          ["harness", "Harness"]
-        ].map(([key2, label]) => /* @__PURE__ */ jsx(
-          "button",
-          {
-            type: "button",
-            "data-g": key2,
-            "aria-pressed": snapshot.groupBy === key2,
-            onClick: (event) => {
-              if (event.currentTarget.isConnected) host2.group(key2);
-            },
-            children: label
-          },
-          key2
-        )) }),
-        snapshot.showReviews && /* @__PURE__ */ jsx("div", { class: "groupby", role: "group", "aria-label": "Session visibility", children: /* @__PURE__ */ jsx(
-          "button",
-          {
-            type: "button",
-            "data-show-approval-reviews": "",
-            "aria-pressed": snapshot.reviews,
-            onClick: (event) => {
-              if (event.currentTarget.isConnected) host2.reviews();
-            },
-            children: "Show approval reviews"
-          }
-        ) }),
-        /* @__PURE__ */ jsxs("div", { class: "sess session-groups", children: [
-          snapshot.groups.map((group) => /* @__PURE__ */ jsxs("div", { class: "session-group", children: [
-            group.title && /* @__PURE__ */ jsxs("div", { class: "sec-h", children: [
-              screenText(group.title),
-              /* @__PURE__ */ jsx("span", { class: "n", children: group.total }),
-              group.harness && /* @__PURE__ */ jsx(Harness, { mark: group.harness, lead: false })
-            ] }),
-            /* @__PURE__ */ jsx("div", { class: "list", children: group.rows.map((row) => /* @__PURE__ */ jsx(Session, { row, host: host2 }, row.id)) })
-          ] }, group.title)),
-          !snapshot.matches && /* @__PURE__ */ jsx("p", { class: "empty", children: "No sessions match \u201C" + screenText(snapshot.query) + "\u201D." })
-        ] })
-      ] })
-    );
-    owned.add(root);
-    kinds.set(root, "sessions");
-    host2.committed();
-    cancelAnimationFrame(current.frame);
-    current.frame = requestAnimationFrame(current.resize);
-    if (focusSearch) current.input?.focus({ preventScroll: true });
-  }
 
   // src/lib/attachments.tsx
   function createImageViewer(url, label, host2) {
@@ -3988,7 +3955,7 @@ globalThis.__semonUIShared = __semonUIShared;
   }) {
     const command = data.in ?? (isCommand(data.name) ? data.arg : null), inCut = typeof command === "string" && command.split("\n").length > 12;
     const inputLabel = command && isCommand(data.name) ? "Command" : "Input";
-    const lines = (data.out ?? "").split("\n"), cut2 = lines.length > 12, tail = data.ok === false, parts = !!data.cut?.parts?.length, more = !!data.more?.length;
+    const lines = (data.out ?? "").split("\n"), cut2 = lines.length > 12, tail = data.ok === false, parts = !!data.cut?.parts?.length, more = !!data.more?.length || data.expandable === true;
     const shown = !cut2 || parts ? lines : tail ? lines.slice(-12) : lines.slice(0, 12);
     const changed = !!data.changes || !!data.diff;
     const all = () => host2.all(inputLabel);
@@ -4064,56 +4031,57 @@ globalThis.__semonUIShared = __semonUIShared;
     ] });
   }
   function Note({ data, text: text2 }) {
-    return data.cut ? /* @__PURE__ */ jsx("p", { class: "vnote", children: screenText(cutNoteText(data.cut)) }) : !data.fullFailed && /…(\(truncated\))?\s*$/.test(text2 ?? "") ? /* @__PURE__ */ jsx("p", { class: "vnote", children: "Cut short in this copy of the logs." }) : null;
+    return data.cut ? /* @__PURE__ */ jsx("p", { class: "vnote", children: screenText(cutNoteText(data.cut)) }) : !data.fullFailed && !data.boundedPreview && /…(\(truncated\))?\s*$/.test(text2 ?? "") ? /* @__PURE__ */ jsx("p", { class: "vnote", children: "Cut short in this copy of the logs." }) : null;
   }
-  function renderFullTool(root, data, inputLabel, waiting) {
-    render(
-      /* @__PURE__ */ jsxs(Fragment2, { children: [
-        data.scriptText !== void 0 ? /* @__PURE__ */ jsxs(Fragment2, { children: [
-          /* @__PURE__ */ jsx(Header, { className: "vs", label: "Script", text: data.scriptText }),
-          /* @__PURE__ */ jsx("pre", { class: "script", children: data.scriptText }),
-          data.scriptTruncated && /* @__PURE__ */ jsx("p", { class: "vnote", children: "Cut at 8 MB: the rest isn't shown." })
-        ] }) : data.scriptFailed ? /* @__PURE__ */ jsx("p", { class: "vnote", children: "Couldn't load the script from these logs." }) : /* @__PURE__ */ jsxs(Fragment2, { children: [
-          data.in && /* @__PURE__ */ jsxs(Fragment2, { children: [
-            /* @__PURE__ */ jsx(Header, { className: "vs", label: inputLabel, text: data.in }),
-            /* @__PURE__ */ jsx("pre", { class: "in", children: data.in }),
-            /* @__PURE__ */ jsx(Note, { data, text: data.in })
-          ] }),
-          data.changes ? /* @__PURE__ */ jsxs(Fragment2, { children: [
-            data.changes.map((change, i) => /* @__PURE__ */ jsxs(Fragment2, { children: [
-              /* @__PURE__ */ jsx(
-                Header,
-                {
-                  className: "vs",
-                  label: "Change \xB7 " + change.path + (change.move ? " \u2192 " + change.move : "")
-                },
-                i
-              ),
-              /* @__PURE__ */ jsx(Diff, { rows: change.diff ?? [] })
-            ] })),
-            !data.changes.length && /* @__PURE__ */ jsx("p", { class: "vnote", children: "No changes recorded." })
-          ] }) : data.diff ? /* @__PURE__ */ jsxs(Fragment2, { children: [
-            /* @__PURE__ */ jsx(Header, { className: "vs", label: "Change" }),
-            /* @__PURE__ */ jsx(Diff, { rows: data.diff })
-          ] }) : /* @__PURE__ */ jsxs(Fragment2, { children: [
-            /* @__PURE__ */ jsx(Header, { className: "vs", label: "Output", text: data.out }),
-            data.out ? /* @__PURE__ */ jsxs(Fragment2, { children: [
-              /* @__PURE__ */ jsx(Output, { data }),
-              /* @__PURE__ */ jsx(Note, { data, text: data.out })
-            ] }) : /* @__PURE__ */ jsx("p", { class: "vnote", children: screenText(
-              data.live ? waiting ? "Waiting for your input or permission \xB7 no output yet" : "Running \xB7 no output yet" : data.unfinished ? "No result recorded." : "No output."
-            ) })
-          ] })
+  function FullTool({
+    data,
+    inputLabel,
+    waiting
+  }) {
+    return /* @__PURE__ */ jsxs(Fragment2, { children: [
+      data.scriptText !== void 0 ? /* @__PURE__ */ jsxs(Fragment2, { children: [
+        /* @__PURE__ */ jsx(Header, { className: "vs", label: "Script", text: data.scriptText }),
+        /* @__PURE__ */ jsx("pre", { class: "script", children: data.scriptText }),
+        data.scriptTruncated && /* @__PURE__ */ jsx("p", { class: "vnote", children: "The script preview is bounded; the remaining text is not shown." })
+      ] }) : data.scriptFailed ? /* @__PURE__ */ jsx("p", { class: "vnote", children: "Couldn't load the script from these logs." }) : /* @__PURE__ */ jsxs(Fragment2, { children: [
+        data.in && /* @__PURE__ */ jsxs(Fragment2, { children: [
+          /* @__PURE__ */ jsx(Header, { className: "vs", label: inputLabel, text: data.in }),
+          /* @__PURE__ */ jsx("pre", { class: "in", children: data.in }),
+          /* @__PURE__ */ jsx(Note, { data, text: data.in })
         ] }),
-        data.bg?.summary && /* @__PURE__ */ jsxs(Fragment2, { children: [
-          /* @__PURE__ */ jsx(Header, { className: "vs", label: "Finished", text: data.bg.summary }),
-          /* @__PURE__ */ jsx("pre", { children: data.bg.summary })
-        ] }),
-        data.fullFailed && /* @__PURE__ */ jsx("p", { class: "vnote", children: "Couldn't load the full text: this is the preview." }),
-        !!data.fullCut?.length && /* @__PURE__ */ jsx("p", { class: "vnote", children: "Cut at 8 MB: the rest isn't shown." })
+        data.changes ? /* @__PURE__ */ jsxs(Fragment2, { children: [
+          data.changes.map((change, i) => /* @__PURE__ */ jsxs(Fragment2, { children: [
+            /* @__PURE__ */ jsx(
+              Header,
+              {
+                className: "vs",
+                label: "Change \xB7 " + change.path + (change.move ? " \u2192 " + change.move : "")
+              },
+              i
+            ),
+            /* @__PURE__ */ jsx(Diff, { rows: change.diff ?? [] })
+          ] })),
+          !data.changes.length && /* @__PURE__ */ jsx("p", { class: "vnote", children: "No changes recorded." })
+        ] }) : data.diff ? /* @__PURE__ */ jsxs(Fragment2, { children: [
+          /* @__PURE__ */ jsx(Header, { className: "vs", label: "Change" }),
+          /* @__PURE__ */ jsx(Diff, { rows: data.diff })
+        ] }) : /* @__PURE__ */ jsxs(Fragment2, { children: [
+          /* @__PURE__ */ jsx(Header, { className: "vs", label: "Output", text: data.out }),
+          data.out ? /* @__PURE__ */ jsxs(Fragment2, { children: [
+            /* @__PURE__ */ jsx(Output, { data }),
+            /* @__PURE__ */ jsx(Note, { data, text: data.out })
+          ] }) : /* @__PURE__ */ jsx("p", { class: "vnote", children: screenText(
+            data.live ? waiting ? "Waiting for your input or permission \xB7 no output yet" : "Running \xB7 no output yet" : data.unfinished ? "No result recorded." : "No output."
+          ) })
+        ] })
       ] }),
-      root
-    );
+      data.bg?.summary && /* @__PURE__ */ jsxs(Fragment2, { children: [
+        /* @__PURE__ */ jsx(Header, { className: "vs", label: "Finished", text: data.bg.summary }),
+        /* @__PURE__ */ jsx("pre", { children: data.bg.summary })
+      ] }),
+      data.fullFailed && /* @__PURE__ */ jsx("p", { class: "vnote", children: "Couldn't load the full text: this is the preview." }),
+      !!data.fullCut?.length && /* @__PURE__ */ jsx("p", { class: "vnote", children: "The script preview is bounded; the remaining text is not shown." })
+    ] });
   }
 
   // src/lib/tool-step.tsx
@@ -4524,7 +4492,7 @@ globalThis.__semonUIShared = __semonUIShared;
   }
 
   // src/lib/layout.ts
-  var properties = [
+  var properties2 = [
     "width",
     "height",
     "left",
@@ -4534,9 +4502,9 @@ globalThis.__semonUIShared = __semonUIShared;
     "max-height",
     "max-width"
   ];
-  var serial = 0;
+  var serial2 = 0;
   function createMeasuredLayout() {
-    const sheet2 = new CSSStyleSheet(), prefix = "semon-geometry-" + ++serial + "-";
+    const sheet2 = new CSSStyleSheet(), prefix = "semon-geometry-" + ++serial2 + "-";
     const rules = /* @__PURE__ */ new Map();
     let disposed = false;
     document.adoptedStyleSheets = [...document.adoptedStyleSheets, sheet2];
@@ -4548,7 +4516,7 @@ globalThis.__semonUIShared = __semonUIShared;
       },
       className(property, value, unit) {
         if (disposed) throw new Error("Measured layout is destroyed");
-        if (!properties.includes(property) || !Number.isFinite(value) || Math.abs(value) > 1e8 || !["px", "%"].includes(unit))
+        if (!properties2.includes(property) || !Number.isFinite(value) || Math.abs(value) > 1e8 || !["px", "%"].includes(unit))
           throw new Error("Invalid measured geometry");
         const key2 = property + ":" + value + unit, existing = rules.get(key2);
         if (existing) return existing;
@@ -4942,11 +4910,11 @@ globalThis.__semonUIShared = __semonUIShared;
       ] }) })
     );
   }
-  function renderModelItems(root, count, items, more, host2) {
+  function renderModelItems(root, count2, items, more, host2) {
     commitApplicationView(
       root,
       /* @__PURE__ */ jsxs(Fragment2, { children: [
-        /* @__PURE__ */ jsx("p", { class: "panel-sub", children: screenText(count) }),
+        /* @__PURE__ */ jsx("p", { class: "panel-sub", children: screenText(count2) }),
         items.map((item2, i) => /* @__PURE__ */ jsxs("div", { class: "model-item", children: [
           item2.name ? /* @__PURE__ */ jsx(
             "button",
@@ -4984,7 +4952,7 @@ globalThis.__semonUIShared = __semonUIShared;
       (part, i) => part.action ? /* @__PURE__ */ jsx(
         "button",
         {
-          class: part.className,
+          class: part.className.split(/\s+/).includes("who") ? part.className + " who-link" : part.className,
           type: "button",
           "aria-label": part.label,
           "data-tip": part.tip,
@@ -4998,7 +4966,15 @@ globalThis.__semonUIShared = __semonUIShared;
           children: screenText(part.text)
         },
         i
-      ) : /* @__PURE__ */ jsx("span", { class: part.className, "data-tip": part.tip, children: screenText(part.text) }, i)
+      ) : /* @__PURE__ */ jsx(
+        "span",
+        {
+          class: part.className.split(/\s+/).filter((name) => name !== "who-link").join(" "),
+          "data-tip": part.tip,
+          children: screenText(part.text)
+        },
+        i
+      )
     ) });
   }
 
@@ -5360,7 +5336,7 @@ globalThis.__semonUIShared = __semonUIShared;
                       " \xB7 reply not in these logs"
                     ] }) : /* @__PURE__ */ jsxs(Fragment2, { children: [
                       /* @__PURE__ */ jsx("b", { children: hop.answers.length === 1 ? "You answered: " : "You answered:" }),
-                      hop.answers.length === 1 ? hop.answers[0] : /* @__PURE__ */ jsx("ol", { children: hop.answers.map((answer2, i) => /* @__PURE__ */ jsx("li", { children: screenText(answer2) }, i)) })
+                      hop.answers.length === 1 ? hop.answers[0] : /* @__PURE__ */ jsx("ol", { children: hop.answers.map((answer, i) => /* @__PURE__ */ jsx("li", { children: screenText(answer) }, i)) })
                     ] }) }),
                     hop.result && /* @__PURE__ */ jsxs("div", { class: "result", children: [
                       /* @__PURE__ */ jsx("span", { class: "rl", children: "Result:" }),
@@ -5398,6 +5374,15 @@ globalThis.__semonUIShared = __semonUIShared;
               },
               hop.key
             )) })
+          ] }),
+          snapshot.observation && /* @__PURE__ */ jsx("p", { class: "catalog-note", role: "status", children: screenText(snapshot.observation) }),
+          !!snapshot.continuations?.length && /* @__PURE__ */ jsxs("p", { class: "catalog-note", children: [
+            "Continue with another recorded branch:",
+            " ",
+            snapshot.continuations.map((branch) => /* @__PURE__ */ jsxs("a", { class: "link", href: safePath(branch.href) ? branch.href : void 0, children: [
+              screenText(branch.label),
+              " "
+            ] }))
           ] })
         ] })
       );
@@ -5408,89 +5393,6 @@ globalThis.__semonUIShared = __semonUIShared;
     };
     owner.paint();
     host2.committed();
-  }
-  function measureTraceScreen(root) {
-    states2.get(root)?.measure();
-  }
-
-  // src/lib/geometry.ts
-  var properties2 = {
-    readingBottom: "--reading-bottom",
-    readingClip: "--reading-clip",
-    minHeight: "min-height",
-    paddingBottom: "padding-bottom",
-    scrollPaddingTop: "scroll-padding-top",
-    barHeight: "--barh",
-    accountLeft: "--account-left",
-    accountWidth: "--account-width",
-    accountBottom: "--account-bottom",
-    intrinsicHeight: "contain-intrinsic-block-size"
-  };
-  var sheet = null;
-  var observer = null;
-  var serial2 = 0;
-  var records = /* @__PURE__ */ new Map();
-  function paint() {
-    if (!sheet) {
-      sheet = new CSSStyleSheet();
-      document.adoptedStyleSheets = [...document.adoptedStyleSheets, sheet];
-    }
-    sheet.replaceSync("");
-    for (const [node, record4] of records) {
-      if (!node.isConnected) {
-        records.delete(node);
-        continue;
-      }
-      const declarations = [...record4.values].map(
-        ([slot, value]) => properties2[slot] + ":" + (slot === "intrinsicHeight" ? "auto " : "") + value + "px !important"
-      ).join(";");
-      if (declarations)
-        sheet.insertRule(
-          '[data-semon-geometry="' + record4.id + '"]{' + declarations + "}",
-          sheet.cssRules.length
-        );
-    }
-  }
-  function setGeometry(node, slot, value) {
-    if (!Object.hasOwn(properties2, slot) || value !== null && (!Number.isFinite(value) || Math.abs(value) > 1e8))
-      throw new Error("Invalid host geometry");
-    let record4 = records.get(node);
-    if (!record4) {
-      record4 = { id: ++serial2, values: /* @__PURE__ */ new Map() };
-      records.set(node, record4);
-      node.dataset.semonGeometry = String(record4.id);
-    }
-    if (value === null) record4.values.delete(slot);
-    else record4.values.set(slot, value);
-    paint();
-    if (!observer) {
-      observer = new MutationObserver(() => {
-        if ([...records.keys()].some((node2) => !node2.isConnected)) paint();
-      });
-      observer.observe(document.documentElement, { childList: true, subtree: true });
-    }
-  }
-  function releaseGeometry(root, slots) {
-    for (const [node, record4] of records) {
-      if (slots ? node === root : node === root || root.contains(node) || !node.isConnected) {
-        if (slots) for (const slot of slots) record4.values.delete(slot);
-        if (!slots || !record4.values.size) {
-          records.delete(node);
-          delete node.dataset.semonGeometry;
-        }
-      }
-    }
-    if (records.size) paint();
-    else {
-      observer?.disconnect();
-      observer = null;
-      if (sheet)
-        document.adoptedStyleSheets = document.adoptedStyleSheets.filter((value) => value !== sheet);
-      sheet = null;
-    }
-  }
-  function revealMeasuredTurn(node, visible2) {
-    node.classList.toggle("semon-measuring-turn", visible2);
   }
 
   // src/lib/control.ts
@@ -5570,8 +5472,12 @@ globalThis.__semonUIShared = __semonUIShared;
           snapshot.id,
           runtime.state === "ended" ? "This session has ended." : runtime.state === "failed" ? "This environment needs attention." : "Current environment controls are unavailable."
         );
+        const retained = view;
         view = {
           ...view,
+          get draft() {
+            return retained.draft;
+          },
           canReconnect: false,
           snapshot: blocked.snapshot,
           send: blocked.send,
@@ -5583,6 +5489,59 @@ globalThis.__semonUIShared = __semonUIShared;
       return /* @__PURE__ */ jsx(LocalControl, { view, runtimeObserved: !!snapshot.runtime });
     }
   };
+  function paintComposer(owner) {
+    if (owner.disposed) return;
+    const pending = owner.snapshot.control?.snapshot.requests.filter(
+      (request) => request.state.state === "open" || request.state.state === "claimed"
+    ).length ?? 0;
+    render(
+      /* @__PURE__ */ jsxs(
+        "button",
+        {
+          type: "button",
+          class: "btn sh-quiet session-composer-trigger",
+          "aria-label": pending ? "Composer; " + pending + " pending requests" : "Open Composer",
+          "aria-haspopup": "dialog",
+          "aria-expanded": !!owner.composerPanel,
+          onClick: (event) => {
+            if (owner.disposed || !event.currentTarget.isConnected || owner.composerPanel) return;
+            const trigger = event.currentTarget;
+            const panel = createPanelChrome(
+              {
+                title: "Composer",
+                label: "Session Composer",
+                className: "anchored session-composer-panel"
+              },
+              {
+                opened() {
+                  owner.host.composerOpened?.(panel);
+                  paintComposer(owner);
+                  owner.composer.querySelector("textarea")?.focus({ preventScroll: true });
+                },
+                closed() {
+                  owner.host.composerClosed?.(panel);
+                  owner.composer.remove();
+                  owner.composerPanel = null;
+                  if (!owner.disposed) {
+                    paintComposer(owner);
+                    if (trigger.isConnected) trigger.focus({ preventScroll: true });
+                  }
+                }
+              }
+            );
+            owner.composerPanel = panel;
+            panel.body.append(owner.composer);
+            panel.show();
+          },
+          children: [
+            "Composer",
+            pending ? " \xB7 " + pending : ""
+          ]
+        }
+      ),
+      owner.composerTrigger
+    );
+  }
   var SessionRuntime = class extends Component {
     componentDidMount() {
       this.props.owner.runtime = () => this.forceUpdate();
@@ -6073,7 +6032,7 @@ globalThis.__semonUIShared = __semonUIShared;
       owner.jump
     );
   }
-  function updateSessionJump(root, visible2, count, busy2 = false, target) {
+  function updateSessionJump(root, visible2, count2, busy2 = false, target) {
     const owner = owners.get(root);
     if (!owner) return;
     if (target && owner.jump !== target) {
@@ -6083,7 +6042,7 @@ globalThis.__semonUIShared = __semonUIShared;
     const slot = root.querySelector(".session-jump-slot");
     if (owner.jump && slot && owner.jump.parentNode !== slot) slot.append(owner.jump);
     owner.jumpVisible = visible2;
-    owner.jumpCount = count;
+    owner.jumpCount = count2;
     owner.jumpBusy = busy2;
     paintJump(owner);
   }
@@ -6095,6 +6054,9 @@ globalThis.__semonUIShared = __semonUIShared;
     }
     if (!owner) {
       const state3 = {
+        composer: document.createElement("div"),
+        composerTrigger: document.createElement("span"),
+        composerPanel: null,
         snapshot,
         host: host2,
         disposed: false,
@@ -6124,6 +6086,7 @@ globalThis.__semonUIShared = __semonUIShared;
       };
       owner = state3;
       owners.set(root, state3);
+      render(/* @__PURE__ */ jsx(SessionControls, { owner: state3 }), state3.composer);
       state3.measure = () => {
         if (state3.disposed) return;
         let changed = false;
@@ -6144,10 +6107,9 @@ globalThis.__semonUIShared = __semonUIShared;
       state3.observer.disconnect();
       state3.observer = new ResizeObserver(state3.measure);
       const viewport = window.visualViewport;
-      let dockFrame = 0;
-      const fitDock = () => {
+      const fitJump = () => {
         const dock = root.querySelector(".session-dock");
-        if (!dock || !root.isConnected || !root.getClientRects().length) return;
+        if (state3.disposed || !dock || !root.isConnected) return;
         const note = document.querySelector(
           "body > .livenote, body > .viewer-status-slot > .livenote"
         );
@@ -6156,43 +6118,24 @@ globalThis.__semonUIShared = __semonUIShared;
           "readingBottom",
           Math.max(
             viewport ? Math.max(0, innerHeight - viewport.height - viewport.offsetTop) : 0,
-            note?.getClientRects().length ? innerHeight - note.getBoundingClientRect().top : 0
+            note ? Math.max(0, innerHeight - note.getBoundingClientRect().top) : 0
           )
         );
-        const transcript = root.querySelector(".transcript");
-        if (transcript) {
-          const clipped = getComputedStyle(dock).position === "sticky" ? Math.max(
-            0,
-            transcript.getBoundingClientRect().bottom - dock.getBoundingClientRect().top
-          ) : 0;
-          setGeometry(transcript, "readingClip", clipped);
-        }
       };
-      const scheduleDock = () => {
-        cancelAnimationFrame(dockFrame);
-        dockFrame = requestAnimationFrame(fitDock);
-      };
-      document.addEventListener("scroll", scheduleDock, { capture: true, passive: true });
-      const notices = new MutationObserver(fitDock);
+      const notices = new MutationObserver(fitJump);
       notices.observe(document.body, { childList: true });
-      viewport?.addEventListener("resize", fitDock);
-      viewport?.addEventListener("scroll", fitDock);
-      const dockObserver = new ResizeObserver(fitDock);
-      requestAnimationFrame(() => {
-        if (state3.disposed) return;
-        const dock = root.querySelector(".session-dock");
-        if (dock) dockObserver.observe(dock);
-        const transcript = root.querySelector(".transcript");
-        if (transcript) dockObserver.observe(transcript);
-        fitDock();
-      });
+      viewport?.addEventListener("resize", fitJump);
+      viewport?.addEventListener("scroll", fitJump);
+      requestAnimationFrame(fitJump);
       claimScreen(root, "session", () => {
-        cancelAnimationFrame(dockFrame);
-        document.removeEventListener("scroll", scheduleDock, true);
-        viewport?.removeEventListener("resize", fitDock);
-        viewport?.removeEventListener("scroll", fitDock);
-        dockObserver.disconnect();
         notices.disconnect();
+        viewport?.removeEventListener("resize", fitJump);
+        viewport?.removeEventListener("scroll", fitJump);
+        state3.disposed = true;
+        state3.composerPanel?.destroy();
+        render(null, state3.composer);
+        render(null, state3.composerTrigger);
+        state3.composerTrigger.remove();
         releaseGeometry(root);
         state3.disposed = true;
         state3.observer.disconnect();
@@ -6208,6 +6151,10 @@ globalThis.__semonUIShared = __semonUIShared;
     state2.host = host2;
     state2.blocks = mergeBlocks(state2.blocks, snapshot);
     state2.snapshot = snapshot;
+    if (snapshot.composerTarget && state2.composerTrigger.parentElement !== snapshot.composerTarget)
+      snapshot.composerTarget.replaceChildren(state2.composerTrigger);
+    state2.controls?.();
+    paintComposer(state2);
     state2.change = (key2) => {
       for (const block of state2.blocks)
         if (block.kind === "turn" && block.turn.entries.some(
@@ -6240,22 +6187,33 @@ globalThis.__semonUIShared = __semonUIShared;
                 ) : /* @__PURE__ */ jsx(Fragment, { children: block.entries.map((entry2, i) => /* @__PURE__ */ jsx(Entry, { entry: entry2, owner: state2 }, identity(entry2) || block.key + i)) }, block.key)
               ),
               /* @__PURE__ */ jsx(SessionPager, { owner: state2, where: "after" }),
-              view.empty && /* @__PURE__ */ jsx("p", { class: "empty", children: screenText(view.empty) })
+              view.empty && /* @__PURE__ */ jsxs("p", { class: "empty", children: [
+                screenText(view.empty),
+                " ",
+                view.retry && /* @__PURE__ */ jsx(
+                  "button",
+                  {
+                    type: "button",
+                    class: "link",
+                    onClick: () => {
+                      if (!state2.disposed) state2.snapshot.retry?.run();
+                    },
+                    children: view.retry.label
+                  }
+                )
+              ] })
             ] })
           ] }),
           /* @__PURE__ */ jsx(SessionRuntime, { owner: state2 }),
-          /* @__PURE__ */ jsxs("div", { class: "session-dock", children: [
-            /* @__PURE__ */ jsx(
-              "div",
-              {
-                class: "session-jump-slot",
-                ref: (node) => {
-                  if (node && state2.jump && state2.jump.parentNode !== node) node.append(state2.jump);
-                }
+          /* @__PURE__ */ jsx("div", { class: "session-dock", children: /* @__PURE__ */ jsx(
+            "div",
+            {
+              class: "session-jump-slot",
+              ref: (node) => {
+                if (node && state2.jump && state2.jump.parentNode !== node) node.append(state2.jump);
               }
-            ),
-            /* @__PURE__ */ jsx(SessionControls, { owner: state2 })
-          ] }),
+            }
+          ) }),
           view.footer && /* @__PURE__ */ jsxs("div", { class: "session-foot", children: [
             /* @__PURE__ */ jsxs("span", { class: "stat " + view.footer.state, children: [
               view.footer.state === "work" ? /* @__PURE__ */ jsx("span", { class: "spin" }) : /* @__PURE__ */ jsx(
@@ -6316,7 +6274,10 @@ globalThis.__semonUIShared = __semonUIShared;
     const owner = owners.get(root);
     if (!owner || owner.disposed) return;
     owner.snapshot = { ...owner.snapshot, control };
+    if (owner.snapshot.composerTarget && owner.composerTrigger.parentElement !== owner.snapshot.composerTarget)
+      owner.snapshot.composerTarget.replaceChildren(owner.composerTrigger);
     owner.controls?.();
+    paintComposer(owner);
   }
   function updateSessionRuntime(root, runtime) {
     const owner = owners.get(root);
@@ -6343,8 +6304,8 @@ globalThis.__semonUIShared = __semonUIShared;
         const since = entry2.step.since ?? starts[entry2.step.sid];
         if (!Number.isFinite(since)) return entry2;
         const text2 = elapsed(since), step = entry2.step;
-        const status2 = step.background ? step.status : text2, backgroundStatus = step.background ? "running " + text2 : step.backgroundStatus;
-        return status2 === step.status && backgroundStatus === step.backgroundStatus ? entry2 : { ...entry2, step: { ...step, status: status2, backgroundStatus } };
+        const status = step.background ? step.status : text2, backgroundStatus = step.background ? "running " + text2 : step.backgroundStatus;
+        return status === step.status && backgroundStatus === step.backgroundStatus ? entry2 : { ...entry2, step: { ...step, status, backgroundStatus } };
       }
       if (entry2.kind === "group") {
         const entries = entry2.entries.map((item2) => update(item2)), since = entries.filter(
@@ -6365,6 +6326,12 @@ globalThis.__semonUIShared = __semonUIShared;
     if (changed) owner.paint();
   }
   function measureSessionScreen(root) {
+    const turns = [...root.querySelectorAll(".turn")];
+    for (const turn of turns) turn.classList.add("semon-measuring-turn");
+    for (const turn of turns) {
+      if (turn.isConnected) setGeometry(turn, "intrinsicHeight", turn.getBoundingClientRect().height);
+      turn.classList.remove("semon-measuring-turn");
+    }
     owners.get(root)?.measure();
   }
   function updateSessionName(root, name) {
@@ -6373,6 +6340,9 @@ globalThis.__semonUIShared = __semonUIShared;
     owner.snapshot = { ...owner.snapshot, name };
     const heading = root.querySelector(".ph > h1");
     if (heading) heading.textContent = screenText(name);
+  }
+  function closeSessionComposer(root) {
+    owners.get(root)?.composerPanel?.destroy();
   }
 
   // src/lib/viewer-bar.tsx
@@ -6395,19 +6365,6 @@ globalThis.__semonUIShared = __semonUIShared;
       render(
         view.mode === "normal" ? /* @__PURE__ */ jsxs(Fragment2, { children: [
           /* @__PURE__ */ jsxs("div", { class: "l1", children: [
-            view.ancestors.map((item2) => /* @__PURE__ */ jsxs("span", { class: "viewer-crumb", children: [
-              /* @__PURE__ */ jsx(
-                "button",
-                {
-                  class: "crumb",
-                  type: "button",
-                  "aria-label": "Open " + item2.name,
-                  onClick: (event) => active(event.currentTarget, () => host2.ancestor(item2.id)),
-                  children: screenText(item2.name)
-                }
-              ),
-              /* @__PURE__ */ jsx("span", { class: "crumb-sep", children: "\u203A" })
-            ] }, item2.id)),
             view.crumb && /* @__PURE__ */ jsxs(Fragment2, { children: [
               /* @__PURE__ */ jsx(
                 "button",
@@ -6421,6 +6378,19 @@ globalThis.__semonUIShared = __semonUIShared;
               ),
               /* @__PURE__ */ jsx("span", { class: "crumb-sep", children: "\u203A" })
             ] }),
+            view.ancestors.map((item2) => /* @__PURE__ */ jsxs("span", { class: "viewer-crumb", children: [
+              /* @__PURE__ */ jsx(
+                "button",
+                {
+                  class: "crumb",
+                  type: "button",
+                  "aria-label": "Open " + item2.name,
+                  onClick: (event) => active(event.currentTarget, () => host2.ancestor(item2.id)),
+                  children: screenText(item2.name)
+                }
+              ),
+              /* @__PURE__ */ jsx("span", { class: "crumb-sep", children: "\u203A" })
+            ] }, item2.id)),
             view.showState && view.state && /* @__PURE__ */ jsx("span", { class: "l1-state", "data-tip": view.stateTip, children: state2(view.state, view.stateLabel ?? view.state) }),
             /* @__PURE__ */ jsx("span", { class: "t", "data-tip": view.name, "data-tip-clipped": "", children: screenText(view.name) })
           ] }),
@@ -6555,7 +6525,7 @@ globalThis.__semonUIShared = __semonUIShared;
             ["steps", "Steps", void 0],
             ...view.failed ? [["failures", "Failed steps", view.failed]] : [],
             ...view.signals ? [["signals", "Signals", view.signals]] : []
-          ].map(([key2, label, count]) => /* @__PURE__ */ jsxs(
+          ].map(([key2, label, count2]) => /* @__PURE__ */ jsxs(
             "button",
             {
               class: "chip",
@@ -6565,7 +6535,7 @@ globalThis.__semonUIShared = __semonUIShared;
               onClick: (event) => active(event.currentTarget, () => host2.filter(String(key2))),
               children: [
                 /* @__PURE__ */ jsx("span", { children: label }),
-                count !== void 0 && /* @__PURE__ */ jsx("span", { class: "n", children: count })
+                count2 !== void 0 && /* @__PURE__ */ jsx("span", { class: "n", children: count2 })
               ]
             },
             key2
@@ -6590,7 +6560,7 @@ globalThis.__semonUIShared = __semonUIShared;
               ),
               /* @__PURE__ */ jsxs("div", { class: "find errnav", children: [
                 /* @__PURE__ */ jsx("span", { class: "errs-dot", "aria-hidden": "true" }),
-                /* @__PURE__ */ jsx("span", { class: "errnav-count", children: view.errorText })
+                /* @__PURE__ */ jsx("span", { class: "errnav-count", role: "status", "aria-live": "polite", children: view.errorText })
               ] }),
               [-1, 1].map((direction) => /* @__PURE__ */ jsx(
                 "button",
@@ -6647,145 +6617,26 @@ globalThis.__semonUIShared = __semonUIShared;
   var enhanceSelect = globalThis.__semonUIShared.enhanceSelect;
   var installSelect = globalThis.__semonUIShared.installSelect;
 
-  // src/lib/placeholder.tsx
-  var shapes = [
-    [true, [1, 3, 5], true],
-    [false, [1, 2, 4], true],
-    [true, [2, 1, 3], false],
-    [false, [1, 1, 5], true]
-  ];
-  function renderPlaceholder(root, error, retry) {
-    releaseScreen(root);
-    claimScreen(root, "placeholder", () => {
-    });
-    render(
-      error ? /* @__PURE__ */ jsxs("div", { class: "load-error", role: "alert", children: [
-        /* @__PURE__ */ jsx("p", { class: "empty", children: screenText(error) }),
-        retry && /* @__PURE__ */ jsx(
-          "button",
-          {
-            class: "more",
-            type: "button",
-            onClick: (event) => {
-              if (event.currentTarget.isConnected) retry();
-            },
-            children: "Try again"
-          }
-        )
-      ] }) : /* @__PURE__ */ jsx("div", { class: "skeleton", "aria-hidden": "true", children: Array.from({ length: 6 }, (_, i) => {
-        const [bubble, lines, step] = shapes[i % shapes.length];
-        return /* @__PURE__ */ jsxs("div", { class: "sk-turn", children: [
-          bubble && /* @__PURE__ */ jsx("span", { class: "sk-line sk-bubble sk-w3" }),
-          /* @__PURE__ */ jsx("div", { class: "sk-text", children: lines.map((width, j) => /* @__PURE__ */ jsx("span", { class: "sk-line sk-w" + width }, j)) }),
-          step && /* @__PURE__ */ jsx("span", { class: "sk-line sk-step sk-w2" })
-        ] }, i);
-      }) }),
-      root
-    );
-  }
-  function createStatusNote(text2, className, role = "status") {
-    const root = document.createElement("div");
-    root.className = "viewer-status-slot";
-    render(
-      /* @__PURE__ */ jsx("p", { class: className, role, children: screenText(text2) }),
-      root
-    );
-    return root;
-  }
-  function createLiveRegion() {
-    const root = document.createElement("div");
-    root.className = "sr-only";
-    root.setAttribute("role", "status");
-    root.setAttribute("aria-live", "polite");
-    return root;
-  }
-
-  // src/lib/model.ts
-  function object(value) {
-    return !!value && typeof value === "object" && !Array.isArray(value);
-  }
-  var strings = (value) => Array.isArray(value) && value.every((item2) => typeof item2 === "string");
-  function machine(value) {
-    return object(value) && typeof value.id === "string" && typeof value.name === "string" && typeof value.up === "boolean";
-  }
-  function parseModel(value) {
-    if (!object(value) || !Number.isFinite(value.now) || typeof value.version !== "string" || !machine(value.machine) || !object(value.sessions) || !Array.isArray(value.handoffs) || !Array.isArray(value.turns))
-      throw new Error("Invalid model response");
-    if (value.machines !== void 0 && (!Array.isArray(value.machines) || !value.machines.every(machine)))
-      throw new Error("Invalid machine response");
-    for (const session of Object.values(value.sessions))
-      if (!object(session) || !["name", "harness", "state", "machine"].every(
-        (field) => typeof session[field] === "string"
-      ) || !Number.isFinite(session.start) || !Number.isFinite(session.last))
-        throw new Error("Invalid session response");
-    for (const handoff of value.handoffs)
-      if (!object(handoff) || !["id", "kind", "from", "status"].every((field) => typeof handoff[field] === "string") || !Number.isFinite(handoff.at))
-        throw new Error("Invalid handoff response");
-    for (const turn of value.turns)
-      if (!object(turn) || typeof turn.id !== "string" || typeof turn.sid !== "string" || !strings(turn.sent))
-        throw new Error("Invalid turn response");
-    return value;
-  }
-  var ModelStore = class {
-    current = null;
-    adopt(value) {
-      const model2 = parseModel(value);
-      this.current = structuredClone(model2);
-      return model2;
-    }
-    apply(value) {
-      if (!object(value)) throw new Error("Invalid model response");
-      if (value.delta !== 1) return parseModel(value);
-      if (!this.current || value.from !== this.current.version)
-        throw new Error("Model delta base expired");
-      if (value.set !== void 0 && !object(value.set)) throw new Error("Invalid model delta");
-      const next = { ...this.current, ...object(value.set) ? value.set : {} };
-      if (value.remove !== void 0 && !strings(value.remove))
-        throw new Error("Invalid model delta removals");
-      for (const field of value.remove ?? []) delete next[field];
-      if (value.collections !== void 0 && !object(value.collections))
-        throw new Error("Invalid model delta collections");
-      for (const [field, patch] of Object.entries(
-        object(value.collections) ? value.collections : {}
-      )) {
-        if (!object(patch) || patch.set !== void 0 && !object(patch.set) || patch.remove !== void 0 && !strings(patch.remove) || patch.order !== void 0 && !strings(patch.order))
-          throw new Error("Invalid collection patch");
-        const array2 = field === "handoffs" || field === "turns", previous = this.current[field];
-        const rows = /* @__PURE__ */ new Map();
-        if (array2) {
-          if (!Array.isArray(previous)) throw new Error("Invalid delta base");
-          for (const row of previous) {
-            if (!object(row) || typeof row.id !== "string") throw new Error("Invalid delta row");
-            rows.set(row.id, row);
-          }
-        } else {
-          if (previous !== void 0 && !object(previous)) throw new Error("Invalid delta base");
-          for (const [id, row] of Object.entries(object(previous) ? previous : {})) rows.set(id, row);
-        }
-        for (const id of patch.remove ?? []) rows.delete(id);
-        for (const [id, row] of Object.entries(object(patch.set) ? patch.set : {})) rows.set(id, row);
-        if (array2) {
-          const order = patch.order ?? [...rows.keys()];
-          if (order.length !== rows.size || new Set(order).size !== rows.size || order.some((id) => !rows.has(id)))
-            throw new Error("Incomplete model delta");
-          next[field] = order.map((id) => rows.get(id));
-        } else next[field] = Object.fromEntries(rows);
-      }
-      next.version = value.version ?? null;
-      return parseModel(next);
-    }
-  };
+  // src/lib/api.ts
   var ApiError = class extends Error {
-    constructor(message, status2) {
+    constructor(message, status) {
       super(message);
-      this.status = status2;
+      this.status = status;
     }
     status;
   };
-  async function requestJson(path, signal, unchanged = false) {
+  async function requestJson(path, signal, unchanged = false, body) {
     let response;
     try {
-      response = await fetch(path, { credentials: "same-origin", signal });
+      response = await fetch(path, {
+        credentials: "same-origin",
+        signal,
+        ...body === void 0 ? {} : {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body)
+        }
+      });
     } catch (error) {
       if (error instanceof Error && error.name === "AbortError") throw error;
       throw new ApiError(error instanceof Error ? error.message : "No response", 0);
@@ -6793,319 +6644,12 @@ globalThis.__semonUIShared = __semonUIShared;
     if (unchanged && response.status === 304) return null;
     if (!response.ok) {
       try {
-        void response.body?.cancel().catch(() => {
-        });
+        await response.body?.cancel();
       } catch {
       }
       throw new ApiError(response.status + " " + response.statusText, response.status);
     }
     return response.json();
-  }
-
-  // src/lib/live.ts
-  function createLiveController(host2) {
-    const state2 = {
-      late: null,
-      lateTries: 0,
-      retry: false,
-      version: null,
-      timer: null,
-      due: 0,
-      busy: false,
-      started: -Infinity,
-      delay: 2e3,
-      ended: false,
-      again: false,
-      pending: false,
-      fresh: 0,
-      turns: /* @__PURE__ */ new Map()
-    };
-    let disposed = false;
-    let streamed = false;
-    let recovering = false;
-    const visible2 = () => document.visibilityState === "visible", floorWait = () => Math.max(0, state2.started + 1e3 - performance.now());
-    function cancel() {
-      if (state2.timer !== null) clearTimeout(state2.timer);
-      state2.timer = null;
-    }
-    function schedule(ms) {
-      cancel();
-      if (!disposed && (!streamed || recovering) && !state2.ended && visible2()) {
-        state2.due = performance.now() + ms;
-        state2.timer = window.setTimeout(poll, ms);
-      }
-    }
-    function refresh() {
-      if (disposed || !state2.version || state2.ended) return;
-      if (state2.busy) {
-        state2.again = true;
-        return;
-      }
-      const wait = floorWait();
-      if (!state2.timer || performance.now() + wait < state2.due) schedule(wait);
-    }
-    async function poll() {
-      state2.timer = null;
-      if (disposed || state2.busy || state2.ended || !visible2()) return;
-      state2.busy = true;
-      state2.started = performance.now();
-      state2.retry = false;
-      let ok = false;
-      try {
-        await host2.poll();
-        state2.delay = state2.retry ? Math.min(3e4, state2.delay * 2) : 2e3;
-        ok = true;
-      } catch (error) {
-        if (disposed) return;
-        const status2 = typeof error === "object" && error !== null && "status" in error ? error.status : void 0;
-        if (host2.failed(error)) {
-          state2.ended = true;
-          cancel();
-        } else if (status2 === 403) host2.ended(403);
-        else {
-          state2.delay = Math.min(3e4, state2.delay * 2);
-        }
-      } finally {
-        state2.busy = false;
-        if (!disposed) {
-          schedule(state2.again ? floorWait() : state2.delay);
-          state2.again = false;
-          window.dispatchEvent(new CustomEvent("semon:polled", { detail: { ok } }));
-        }
-      }
-    }
-    function visibility() {
-      if (!visible2()) cancel();
-      else if (state2.version && !state2.busy && !state2.timer)
-        schedule(state2.delay > 2e3 ? state2.delay : 0);
-    }
-    document.addEventListener("visibilitychange", visibility);
-    window.addEventListener("semon:refresh", refresh);
-    return {
-      state: state2,
-      schedule,
-      recover() {
-        if (disposed || state2.ended) return;
-        recovering = true;
-        if (!state2.busy && state2.timer === null) schedule(floorWait());
-      },
-      synchronized() {
-        recovering = false;
-        state2.delay = 2e3;
-        if (streamed) cancel();
-      },
-      get recovering() {
-        return recovering;
-      },
-      useStream() {
-        streamed = true;
-        cancel();
-      },
-      stop() {
-        state2.ended = true;
-        cancel();
-      },
-      destroy() {
-        if (disposed) return;
-        disposed = true;
-        cancel();
-        document.removeEventListener("visibilitychange", visibility);
-        window.removeEventListener("semon:refresh", refresh);
-      }
-    };
-  }
-  function createPagingStore() {
-    const states3 = /* @__PURE__ */ new Map();
-    return {
-      states: states3,
-      get(sid, direction) {
-        let pair = states3.get(sid);
-        if (!pair) {
-          pair = { before: { busy: false, failed: false }, after: { busy: false, failed: false } };
-          states3.set(sid, pair);
-        }
-        return pair[direction];
-      },
-      clear(sid) {
-        for (const state2 of Object.values(states3.get(sid) ?? {})) state2.controller?.abort();
-        states3.delete(sid);
-      },
-      destroy() {
-        for (const sid of states3.keys()) this.clear(sid);
-      }
-    };
-  }
-
-  // src/lib/routes.ts
-  function routeUrl(route, model2) {
-    const enc = encodeURIComponent, harness = (id) => model2.session(id)?.harness ?? "claude";
-    switch (route.v) {
-      case "home":
-        return "/";
-      case "analytics":
-        return "/analytics";
-      case "sessions":
-        return "/sessions";
-      case "machines":
-        return model2.machinesPath ?? "/machines";
-      case "machine":
-        return "/machines/" + enc(route.id);
-      case "session":
-        return "/s/" + harness(route.id) + "/" + enc(route.id) + (route.turn ? "?turn=" + enc(route.turn) : "");
-      case "trace":
-        return "/trace/" + harness(route.sid) + "/" + enc(route.sid) + "/" + enc(route.turn);
-    }
-  }
-  function parseRoute(location2, model2) {
-    if (model2.machinesPath && location2.pathname === model2.machinesPath) return { v: "machines" };
-    const decode = (text2) => {
-      try {
-        return decodeURIComponent(text2);
-      } catch {
-        return text2;
-      }
-    }, parts = location2.pathname.split("/").filter(Boolean).map(decode), sid = parts[2], turn = new URLSearchParams(location2.search).get("turn");
-    if (parts[0] === "timeline" || parts[0] === "analytics") return { v: "analytics" };
-    if (parts[0] === "sessions") return { v: "sessions" };
-    if (parts[0] === "machines")
-      return parts[1] && model2.machine(parts[1]) ? { v: "machine", id: parts[1] } : { v: "machines" };
-    if (parts[0] === "s" && sid && model2.session(sid)) {
-      const candidate = model2.turn(turn ?? decode(location2.hash.slice(1)).split("#")[0] ?? ""), target = candidate?.sid === sid ? candidate.id : null;
-      return target ? { v: "session", id: sid, turn: target } : { v: "session", id: sid };
-    }
-    if (parts[0] === "trace" && sid && model2.session(sid) && parts[3] && model2.turn(parts[3])?.sid === sid)
-      return { v: "trace", sid, turn: parts[3] };
-    return { v: "home" };
-  }
-  var TranscriptCache = class extends Map {
-    constructor(maxEntries = 5, maxBytes = 2 * 1024 * 1024) {
-      super();
-      this.maxEntries = maxEntries;
-      this.maxBytes = maxBytes;
-    }
-    maxEntries;
-    maxBytes;
-    keep(sid, entries, meta) {
-      this.delete(sid);
-      let weight = 0;
-      for (const entry2 of entries)
-        for (const value of Object.values(entry2))
-          weight += typeof value === "string" ? value.length : value && typeof value === "object" ? JSON.stringify(value).length : 4;
-      const bytes = weight * 2;
-      if (bytes > this.maxBytes) return;
-      this.set(sid, { entries, meta, bytes });
-      let sum = 0;
-      for (const record4 of this.values()) sum += record4.bytes;
-      for (const [id, record4] of this) {
-        if (this.size <= this.maxEntries && sum <= this.maxBytes) break;
-        this.delete(id);
-        sum -= record4.bytes;
-      }
-    }
-  };
-
-  // src/lib/paging.ts
-  function createPagerController(host2) {
-    let disposed = false, frame = null;
-    const observers = /* @__PURE__ */ new Map();
-    const requests = /* @__PURE__ */ new Set();
-    function disconnect() {
-      if (frame !== null) cancelAnimationFrame(frame);
-      frame = null;
-      for (const observer2 of observers.values()) observer2.disconnect();
-      observers.clear();
-    }
-    async function load(button, manual) {
-      const sid = button.dataset.pagerSid, direction = button.dataset.pagerWhere;
-      if (disposed || !sid || direction !== "before" && direction !== "after" || !button.isConnected)
-        return;
-      const route = host2.route(sid), state2 = host2.state(sid, direction);
-      if (!route || state2.busy || !manual && (state2.failed || !host2.automatic())) return;
-      if (manual) host2.beginManual();
-      const range = host2.range(sid);
-      if (!range || (direction === "before" ? range.from <= 0 : range.to >= range.total)) return;
-      const boundary = direction === "before" ? range.from : range.to;
-      if (!manual) host2.countAutomatic();
-      state2.busy = true;
-      state2.controller = new AbortController();
-      const controller = state2.controller;
-      requests.add(controller);
-      host2.paint(button);
-      try {
-        let applied = false;
-        await host2.load(sid, direction, boundary, controller.signal, () => {
-          applied = true;
-        });
-        if (disposed || !applied || !host2.current(sid, direction, state2, route) || host2.range(sid) !== range)
-          return;
-        state2.failed = false;
-        if (host2.route(sid) === route) host2.commit(route, direction, manual);
-      } catch (error) {
-        if (!(error instanceof Error && error.name === "AbortError") && host2.current(sid, direction, state2, route))
-          state2.failed = true;
-      } finally {
-        requests.delete(controller);
-        state2.busy = false;
-        state2.controller = null;
-        if (!disposed && host2.current(sid, direction, state2, route)) {
-          for (const next of document.querySelectorAll("#page [data-pager-where]"))
-            if (next.dataset.pagerSid === sid && next.dataset.pagerWhere === direction)
-              host2.paint(next);
-          host2.queue();
-        }
-      }
-    }
-    function queue(root, scrollRoot, enabled) {
-      if (disposed || frame !== null) return;
-      frame = requestAnimationFrame(() => {
-        frame = null;
-        disconnect();
-        if (disposed || !root.isConnected || !enabled() || typeof IntersectionObserver === "undefined")
-          return;
-        for (const button of root.querySelectorAll("[data-pager-where]")) {
-          const sid = button.dataset.pagerSid, direction = button.dataset.pagerWhere;
-          if (!sid || direction !== "before" && direction !== "after") continue;
-          const state2 = host2.state(sid, direction);
-          if (state2.busy || state2.failed) continue;
-          const observer2 = new IntersectionObserver(
-            (entries) => {
-              const transcript = button.closest(".transcript");
-              let near = false;
-              if (transcript && getComputedStyle(transcript).clipPath.startsWith("inset(")) {
-                const box = button.getBoundingClientRect();
-                const viewport = scrollRoot?.getBoundingClientRect() ?? {
-                  top: 0,
-                  bottom: innerHeight,
-                  left: 0,
-                  right: innerWidth
-                };
-                near = box.right > viewport.left && box.left < viewport.right && box.bottom > viewport.top - (direction === "before" ? 800 : 0) && box.top < viewport.bottom + (direction === "after" ? 800 : 0);
-              }
-              if (observers.get(button) === observer2 && (near || entries.some((entry2) => entry2.isIntersecting)))
-                void load(button, false);
-            },
-            {
-              root: scrollRoot,
-              rootMargin: direction === "before" ? "800px 0px 0px 0px" : "0px 0px 800px 0px"
-            }
-          );
-          observers.set(button, observer2);
-          observer2.observe(button);
-        }
-      });
-    }
-    return {
-      load,
-      queue,
-      disconnect,
-      destroy() {
-        if (disposed) return;
-        disposed = true;
-        for (const controller of requests) controller.abort();
-        requests.clear();
-        disconnect();
-      }
-    };
   }
 
   // src/lib/ordering.ts
@@ -7194,6 +6738,40 @@ globalThis.__semonUIShared = __semonUIShared;
     url.searchParams.set("return_to", path.split("#")[0]);
     return url.pathname + url.search;
   }
+  function parseShellNavigation(value) {
+    if (!value || typeof value !== "object") return void 0;
+    const policy = {};
+    if ("paths" in value) {
+      if (!value.paths || typeof value.paths !== "object" || Array.isArray(value.paths))
+        return void 0;
+      const paths = {};
+      for (const [key2, path] of Object.entries(value.paths)) {
+        if (typeof path !== "string" || !safePath(path)) return void 0;
+        paths[key2] = path;
+      }
+      policy.paths = paths;
+    }
+    for (const position of ["leading", "trailing"]) {
+      const entries = position === "leading" ? "leading" in value ? value.leading : [] : "trailing" in value ? value.trailing : [];
+      if (!Array.isArray(entries)) return void 0;
+      const destinations = [];
+      for (const entry2 of entries) {
+        if (!entry2 || typeof entry2 !== "object" || typeof entry2.key !== "string" || typeof entry2.label !== "string" || typeof entry2.icon !== "string" || typeof entry2.href !== "string" || !safePath(entry2.href) || navigation_default.some((definition) => definition.key === entry2.key) || destinations.some((destination) => destination.key === entry2.key))
+          return void 0;
+        destinations.push({
+          key: entry2.key,
+          label: entry2.label,
+          icon: entry2.icon,
+          href: entry2.href,
+          current: false
+        });
+      }
+      policy[position] = destinations;
+    }
+    if (policy.leading?.some((entry2) => policy.trailing?.some((other) => other.key === entry2.key)))
+      return void 0;
+    return policy;
+  }
   function projectShellNavigation(policy, route, paths = {}, counts = {}) {
     const current = ["session", "trace", "sources"].includes(route) ? "sessions" : route === "machine" ? "machines" : route;
     return [
@@ -7221,926 +6799,8 @@ globalThis.__semonUIShared = __semonUIShared;
     return host;
   }
 
-  // src/app/controlObservation.ts
-  function createControlObservation(host2) {
-    if (!host2.viewerHost?.controlStream && !host2.viewerHost?.catalogControlStream)
-      return { destroy() {
-      } };
-    let stream = null;
-    let identity2 = "";
-    let timer;
-    let deadline;
-    let delay = 1e3;
-    let disposed = false;
-    function selected() {
-      const route2 = host2.navigation.route;
-      if (host2.catalogSelection) {
-        const selected2 = host2.catalogSelection.selectedIdentity();
-        const accepted = route2.v === "session" && selected2?.catalog_key === route2.id && selected2.owner_qualification !== "provisional" && selected2.read_scope !== "retained_history" ? selected2 : null;
-        return {
-          path: accepted?.native_id ? host2.viewerHost?.catalogControlStream : void 0,
-          params: accepted ? {
-            source_key: accepted.source_key,
-            catalog_key: accepted.catalog_key,
-            native_id: accepted.native_id ?? "",
-            harness: accepted.harness
-          } : {},
-          thread: accepted?.native_id ?? ""
-        };
-      }
-      const session = route2.v === "session" ? host2.modelStore.sessions[route2.id] : void 0;
-      const thread = session && route2.v === "session" ? route2.id : "";
-      return {
-        path: host2.viewerHost?.controlStream,
-        params: { selected: thread, machine: session?.machine ?? "" },
-        thread
-      };
-    }
-    function cancel() {
-      stream?.close();
-      stream = null;
-      host2.scope.clearTimeout(timer);
-      host2.scope.clearTimeout(deadline);
-    }
-    function connect() {
-      if (disposed) return;
-      cancel();
-      const scope = selected();
-      identity2 = JSON.stringify(scope);
-      const path = scope.path;
-      if (!path || typeof EventSource === "undefined") return;
-      if (!path.startsWith("/") || path.startsWith("//") || /[\\\s]/.test(path))
-        throw new Error("Invalid control stream");
-      const current = new EventSource(
-        path + (path.includes("?") ? "&" : "?") + new URLSearchParams(scope.params)
-      );
-      stream = current;
-      let revision = "";
-      const valid = () => !disposed && stream === current && identity2 === JSON.stringify(selected());
-      const recover = () => {
-        if (!valid()) return;
-        cancel();
-        host2.controlOwner.unavailable();
-        timer = host2.scope.timeout(connect, delay);
-        delay = Math.min(15e3, delay * 2);
-      };
-      const heartbeat = () => {
-        if (!valid()) return;
-        host2.scope.clearTimeout(deadline);
-        deadline = host2.scope.timeout(recover, 3e4);
-      };
-      heartbeat();
-      current.addEventListener("heartbeat", heartbeat);
-      current.addEventListener("error", recover);
-      current.addEventListener("unavailable", recover);
-      current.addEventListener("ended", () => {
-        if (!valid()) return;
-        cancel();
-        host2.controlOwner.observe(null);
-      });
-      current.addEventListener("control", (event) => {
-        if (!valid() || !(event instanceof MessageEvent)) return;
-        try {
-          if (String(event.data).length > 3e5) throw new Error("Control snapshot too large");
-          const value = JSON.parse(String(event.data));
-          if (!value || typeof value !== "object" || !("revision" in value) || typeof value.revision !== "string" || value.revision.length < 1 || value.revision.length > 128 || !Object.entries(scope.params).every(
-            ([key2, expected]) => key2 in value && value[key2] === expected
-          ) || !("control" in value))
-            throw new Error("Control identity changed");
-          const control = host2.controlOwner.prepare(value.control);
-          if (control && control.thread !== scope.thread) throw new Error("Control thread changed");
-          heartbeat();
-          delay = 1e3;
-          if (revision === value.revision) return;
-          revision = value.revision;
-          if (!host2.catalogSelection) host2.viewerHost?.modelNavigation?.(value);
-          if (control || !scope.thread) host2.controlOwner.observe(control);
-          else host2.controlOwner.unavailable();
-        } catch {
-          recover();
-        }
-      });
-    }
-    function changed() {
-      if (JSON.stringify(selected()) === identity2) return;
-      host2.controlOwner.observe(null);
-      connect();
-    }
-    const route = host2.navigation.subscribeRoute(changed);
-    const model2 = host2.updates.subscribe(changed);
-    const catalog = host2.catalogSelection?.subscribe(changed);
-    connect();
-    return {
-      destroy() {
-        disposed = true;
-        route();
-        model2();
-        catalog?.();
-        cancel();
-      }
-    };
-  }
-
-  // src/app/localControl.ts
-  function record3(value) {
-    return !!value && typeof value === "object" && !Array.isArray(value);
-  }
-  function createLocalControl(scope, refresh) {
-    const drafts = /* @__PURE__ */ new Map();
-    let current = null;
-    let busy2 = false;
-    let note = "";
-    let uncertain = false;
-    let revision = 0;
-    let selection = 0;
-    async function write(op, extra = {}) {
-      if (!current || busy2 || uncertain && op !== "reconnect") return false;
-      if (op === "send" && (!current.connected || !(current.activeTurn ? current.capabilities.steer : current.capabilities.input)))
-        return false;
-      if (op === "reconnect" && current.runtime?.reconnectable === false) return false;
-      if (op !== "reconnect" && !current.connected) return false;
-      if (op === "interrupt" && !current.capabilities.interrupt) return false;
-      if (op === "answer") {
-        const request = current.requests.find(
-          (request2) => request2.id === extra.request && request2.hash === extra.hash
-        );
-        if (!request || request.state.state !== "open") return false;
-        const supported = request.kind === "question" ? current.capabilities.questions : request.payload.method === "item/fileChange/requestApproval" ? current.capabilities.fileApproval : current.capabilities.commandApproval;
-        if (!supported) return false;
-      }
-      if (op === "send" && (!current.connected || !(current.activeTurn ? current.capabilities.steer : current.capabilities.input)))
-        return false;
-      const target = current;
-      const at = ++revision;
-      busy2 = true;
-      note = "Sending\u2026";
-      refresh();
-      const controller = scope.request();
-      try {
-        const command = {
-          id: crypto.randomUUID().replaceAll("-", ""),
-          op,
-          thread: target.thread,
-          generation: target.generation,
-          activeTurn: target.activeTurn,
-          expires: Date.now() + 25e3,
-          ...extra
-        };
-        const response = await fetch("/api/control", {
-          method: "POST",
-          credentials: "same-origin",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(command),
-          signal: controller.signal
-        });
-        const receipt = await response.json();
-        if (at !== revision) return false;
-        if (op === "reconnect" && response.ok) uncertain = false;
-        if (!response.ok || record3(receipt) && receipt.error) {
-          note = record3(receipt) && typeof receipt.error === "string" ? receipt.error : "Control refused. Inspect the session before sending again.";
-          uncertain = uncertain || note.includes("unknown");
-          return false;
-        } else {
-          if (op === "send") {
-            const snapshot = record3(receipt) && record3(receipt.snapshot) ? receipt.snapshot : null;
-            const action = snapshot && record3(snapshot.actions) ? snapshot.actions[command.id] : null;
-            if (!record3(action) || action.delivery !== "accepted") {
-              uncertain = true;
-              note = "Delivery unconfirmed. Inspect the session before sending again.";
-              return false;
-            }
-          }
-          note = op === "send" ? "" : op === "answer" ? "Response sent. Codex resolution means answered or cleared; the winning client is unknown." : "Native request accepted. Inspect the session for its outcome.";
-          return true;
-        }
-      } catch {
-        if (at === revision) {
-          uncertain = true;
-          note = "Delivery unknown. Inspect Codex and reconnect; this request will not be resent.";
-        }
-        return false;
-      } finally {
-        scope.releaseRequest(controller);
-        if (at === revision) {
-          busy2 = false;
-          refresh();
-        }
-      }
-    }
-    function view(sid, draftKey = sid ?? current?.thread ?? "") {
-      if (!current || sid && sid !== current.thread) return void 0;
-      const target = current;
-      const selected = selection;
-      const send = (op, extra = {}) => selection === selected && current?.thread === target.thread && current.generation === target.generation ? write(op, extra) : Promise.resolve(false);
-      return {
-        get draft() {
-          return drafts.get(draftKey) ?? "";
-        },
-        setDraft(text2) {
-          drafts.set(draftKey, text2);
-        },
-        snapshot: current,
-        busy: busy2,
-        uncertain,
-        note,
-        send: (text2) => send("send", { text: text2 }),
-        interrupt: () => void send("interrupt"),
-        answer: (request, answer2) => void send("answer", { request: request.id, hash: request.hash, answer: answer2 }),
-        reconnect: () => void send("reconnect")
-      };
-    }
-    function apply(value) {
-      if (current?.thread !== value?.thread) {
-        ++selection;
-        ++revision;
-        busy2 = false;
-        uncertain = false;
-        note = "";
-      }
-      if (value?.runtime?.state === "ended" && current?.runtime?.state !== "ended") {
-        ++revision;
-        busy2 = false;
-        note = "";
-      }
-      current = value;
-    }
-    return {
-      readOnly(sid, draftKey = sid) {
-        return {
-          ...unavailableControl(sid),
-          get draft() {
-            return drafts.get(draftKey) ?? "";
-          },
-          setDraft(text2) {
-            drafts.set(draftKey, text2);
-          }
-        };
-      },
-      prepare: parseControl,
-      adopt: apply,
-      unavailable() {
-        if (!current) return;
-        current = {
-          ...current,
-          connected: false,
-          capabilities: {
-            ...current.capabilities,
-            input: false,
-            steer: false,
-            interrupt: false,
-            commandApproval: false,
-            fileApproval: false,
-            questions: false
-          },
-          runtime: current.runtime ? { ...current.runtime, freshness: "stale" } : void 0,
-          reason: current.runtime?.state === "ended" || current.runtime?.state === "failed" ? current.reason : "Current connection status is unavailable. Reconnecting\u2026"
-        };
-        refresh();
-      },
-      observe(value) {
-        apply(value);
-        refresh();
-      },
-      view,
-      destroy() {
-        ++selection;
-        ++revision;
-        current = null;
-      }
-    };
-  }
-
-  // src/app/renderTransaction.ts
-  function createRenderTransaction(host2) {
-    return {
-      begin() {
-        host2.pagingOwner.resetPagerInput();
-        host2.pagingOwner.holdProgrammaticScroll();
-        host2.accountControlsOwner.closeAccountMenu();
-        host2.viewport.stopOpeningEndPin();
-        host2.orderingControlsOwner.ordPageState = host2.orderingControlsOwner.ordState("page");
-        host2.transportOwner.tick();
-      },
-      complete(r) {
-        const lanesKept = host2.destination.lanesFor && host2.destination.lanesFor.r === r && host2.destination.lanesFor.version === host2.liveModelOwner.LIVE.version;
-        host2.destination.lanesFor = null;
-        host2.layoutOwner.syncLayoutPrefs();
-        host2.sessionChrome.syncBarLine();
-        host2.navigationViewOwner.renderNav();
-        if (!lanesKept) host2.recentNavigation.renderLanes();
-        host2.accountControlsOwner.renderDrawerAccount();
-        host2.viewport.syncJump();
-        host2.orderingControlsOwner.ordPageState = null;
-      }
-    };
-  }
-
-  // src/state/viewUpdates.ts
-  var ViewUpdates = class {
-    listeners = /* @__PURE__ */ new Set();
-    disposed = false;
-    sequence = 0;
-    modelSequence = 0;
-    get revision() {
-      return this.sequence;
-    }
-    get modelRevision() {
-      return this.modelSequence;
-    }
-    subscribe(listener, session) {
-      if (this.disposed) return () => {
-      };
-      const selected = (change) => {
-        if (session === void 0 || change.kind === "model" || change.session === session)
-          listener(change);
-      };
-      this.listeners.add(selected);
-      return () => {
-        this.listeners.delete(selected);
-      };
-    }
-    model() {
-      if (this.disposed) return;
-      this.modelSequence++;
-      this.publish({ kind: "model", revision: ++this.sequence });
-    }
-    transcript(session) {
-      if (!this.disposed) this.publish({ kind: "transcript", session, revision: ++this.sequence });
-    }
-    publish(change) {
-      for (const listener of this.listeners) listener(change);
-    }
-    destroy() {
-      this.disposed = true;
-      this.listeners.clear();
-    }
-  };
-
-  // src/app/pageRoot.ts
-  function createPageRoot() {
-    return {
-      viewer(root, kind) {
-        if (ownsScreen(root) && screenKind(root) === kind) return;
-        releaseScreen(root);
-        root.replaceChildren();
-      },
-      native(root) {
-        releaseScreen(root);
-      },
-      destroy(root) {
-        releaseScreen(root);
-      }
-    };
-  }
-
-  // src/app/routeControls.ts
-  function createRouteControls(navigation) {
-    const SLOTS = /* @__PURE__ */ new Map();
-    function slot(key2, box, build) {
-      let s = SLOTS.get(key2);
-      if (!s || s.route !== navigation.route || s.box !== box || !box.contains(s.el)) {
-        s?.ctx.destroy?.();
-        const ctx = { sync() {
-        }, onChange() {
-        } };
-        s = { route: navigation.route, box, ctx, el: build(ctx) };
-        SLOTS.set(key2, s);
-      }
-      return s;
-    }
-    function retain(route) {
-      for (const [key2, control] of SLOTS)
-        if (control.route !== route) {
-          control.ctx.destroy?.();
-          SLOTS.delete(key2);
-        }
-    }
-    return {
-      slot,
-      retain,
-      destroy() {
-        retain(null);
-      }
-    };
-  }
-
-  // src/domain/format.ts
-  var clock = (t, NOW) => {
-    const d = new Date(t), n = new Date(NOW);
-    const hm = String(d.getHours()).padStart(2, "0") + ":" + String(d.getMinutes()).padStart(2, "0");
-    return d.toDateString() === n.toDateString() ? hm : d.toLocaleDateString(void 0, { weekday: "short" }) + " " + hm;
-  };
-  var ago = (t, NOW) => {
-    const d = Math.floor((NOW - t) / 6e4);
-    return d < 1 ? "now" : d < 60 ? d + "m" : d < 2880 ? Math.floor(d / 60) + "h" : Math.floor(d / 1440) + "d";
-  };
-  var dur = (a, b, NOW) => {
-    const d = Math.max(0, Math.floor(((b ?? NOW) - a) / 6e4));
-    return d >= 1440 ? Math.floor(d / 1440) + "d " + Math.floor(d % 1440 / 60) + "h" : d >= 60 ? Math.floor(d / 60) + "h " + d % 60 + "m" : d + "m";
-  };
-  var tok = (m) => m >= 1 ? m.toFixed(1) + "M" : Math.round(m * 1e3) + "k";
-  var shortName = (name) => {
-    const h2 = String(name).split(".")[0];
-    return h2.length > 14 ? h2.slice(0, 14) + "\u2026" : h2;
-  };
-  var machineShorts = (names) => {
-    const forms = (id, full) => {
-      const first = String(full).split(".")[0];
-      return [
-        shortName(first),
-        first.length > 14 ? first.slice(0, 6) + "\u2026" + first.slice(-7) : first,
-        first,
-        id
-      ];
-    };
-    const opts = new Map([...names].map(([id, full]) => [id, forms(id, full)])), level = new Map([...opts.keys()].map((id) => [id, 0]));
-    for (let step = 0; step < 3; step++) {
-      const groups = /* @__PURE__ */ new Map();
-      for (const [id, o] of opts) {
-        const l = o[level.get(id)];
-        if (!groups.has(l)) groups.set(l, []);
-        groups.get(l).push(id);
-      }
-      let clash = false;
-      for (const ids of groups.values())
-        if (ids.length > 1) {
-          clash = true;
-          for (const id of ids) level.set(id, level.get(id) + 1);
-        }
-      if (!clash) break;
-    }
-    return new Map([...opts].map(([id, o]) => [id, o[level.get(id)]]));
-  };
-  var shortModel = (model2) => String(model2 ?? "Unknown model").replace(/^gpt-(\d+\.\d+)-(.+)$/i, "$2 $1").replace(/^gpt-\d+-/i, "").replace(/^claude-/i, "").replace(/^(opus|sonnet|haiku)-(\d+)-(\d+)$/i, "$1 $2.$3").replace(/^(opus|sonnet|haiku)-(\d+)\.(\d+)$/i, "$1 $2.$3").replace(/^(opus|sonnet|haiku)-(\d+)$/i, "$1 $2");
-  var clean = (t) => t.replace(/[`*]/g, "");
-  var liveUrl = (u) => {
-    try {
-      return /^https?:$/.test(new URL(u).protocol) && /^https?:\/\//i.test(u) ? u : null;
-    } catch {
-      return null;
-    }
-  };
-  var preview = (t) => t.split("\n").map((l) => l.replace(/^\s*(#{1,6}\s+|>\s?|[-*]\s+|\d{1,3}[.)]\s+)/, "").trim()).filter((l) => l && !/^\s*\|?\s*:?-{2,}/.test(l)).join(" ");
-  var compactCount = (n) => {
-    if (n < 1e3) return String(n);
-    if (n < 1e4) return +(n / 1e3).toFixed(1) + "k";
-    const k = Math.round(n / 1e3);
-    return k < 1e3 ? k + "k" : +(n / 1e6).toFixed(1) + "M";
-  };
-  var niceStep = (max) => [0.25, 0.5, 1, 2, 5, 10, 20, 50, 100, 200, 500].find((x) => x * 3 >= max) ?? 1e3;
-  function timeText(ms) {
-    const mins = Math.max(0, Math.round(ms / 6e4)), days = Math.floor(mins / 1440), hours = Math.floor(mins % 1440 / 60), rem = mins % 60;
-    return days ? days + "d " + hours + "h" : hours ? hours + "h " + rem + "m" : mins + "m";
-  }
-  var countText = (n) => Math.round(n).toLocaleString();
-  var hLabel = (n) => n ? +n.toFixed(2) + " h" : "0";
-
-  // src/domain/calculations.ts
-  function createDomain(state2, now, SEEN_RESULTS) {
-    const {
-      sessions: SESS,
-      machines: MACHINE,
-      handoffs: H,
-      turns: TURNS,
-      turn: TURN,
-      starts: STARTS,
-      holds: HOLDS,
-      handoff: HID,
-      transcriptMeta: TXM
-    } = state2;
-    const clock2 = (at) => clock(at, now());
-    const nameOf = (id) => id === "you" ? "You" : SESS[id].name;
-    const hcls = (id) => id === "you" ? "h-you" : "h-" + SESS[id].harness;
-    const where = (s) => s.repo ? s.repo + (s.branch && s.branch !== "main" && s.branch !== s.name ? " \xB7 " + s.branch : "") : "No repo";
-    const hostOf = (s) => s.host ?? MACHINE[s.machine] ?? s.machine ?? "Unknown machine";
-    const machineLabels = (scope = Object.values(SESS)) => {
-      const names = /* @__PURE__ */ new Map();
-      for (const x of scope) {
-        const s = typeof x === "string" ? SESS[x] : x;
-        if (s?.machine != null && !names.has(s.machine))
-          names.set(s.machine, s.host ?? MACHINE[s.machine] ?? s.machine);
-      }
-      return names.size > 1 ? machineShorts([...names]) : /* @__PURE__ */ new Map();
-    };
-    const machineLabel = (s, scope) => s ? machineLabels(scope).get(s.machine) ?? "" : "";
-    const branchOf = (s) => s.worktree ?? s.branch ?? "No branch";
-    const shortHost = (s) => s.host == null && MACHINE[s.machine] == null && s.machine == null ? hostOf(s) : shortName(hostOf(s));
-    const parentOf = (sid) => SESS[sid]?.parent ?? H.find((h2) => h2.kind === "spawn" && h2.to === sid)?.from;
-    const originHandoff = (sid) => H.find(
-      (h2) => (h2.kind === "spawn" || h2.kind === "relay") && h2.to === sid && h2.from !== sid && (h2.kind === "spawn" || SESS[sid]?.kind === "Relayed" || !SESS[sid]?.lane)
-    );
-    const RANK = { wait: 0, work: 1, err: 2, done: 3 };
-    const isResult = (h2) => h2.kind === "toyou" && h2.ask === "result";
-    const inbox = () => {
-      const entries = H.filter(
-        (h2) => h2.kind === "toyou" && (h2.status === "wait" || isResult(h2) && !SEEN_RESULTS.has(h2.id))
-      );
-      const waiting = new Set(entries.filter((h2) => h2.status === "wait").map((h2) => h2.from));
-      for (const s of Object.values(SESS))
-        if (s.state === "wait" && !waiting.has(s.id))
-          entries.push({
-            id: "wait:" + s.id,
-            kind: "toyou",
-            from: s.id,
-            to: "you",
-            ask: "decision",
-            status: "wait",
-            at: s.waiting_since ?? s.last,
-            brief: s.waiting_for ?? "Waiting for your input or permission"
-          });
-      return entries.sort((a, b) => b.at - a.at);
-    };
-    const working = () => Object.values(SESS).filter((s) => s.state === "work");
-    const answersOf = (h2) => h2.kind === "toyou" && h2.ask !== "result" && h2.status === "done" ? (Array.isArray(h2.answers) ? h2.answers.map((a) => (a.values ?? []).join(", ")) : Array.isArray(h2.answer) ? h2.answer : h2.answer != null ? [h2.answer] : []).map((a) => String(a).trim()).filter(Boolean) : null;
-    const statWord = (h2) => isResult(h2) ? SEEN_RESULTS.has(h2.id) ? "read" : "new" : {
-      new: void 0,
-      work: "working",
-      wait: "waiting on you",
-      err: "failed",
-      done: h2.kind === "toyou" ? "answered" : h2.result ? "returned" : "delivered"
-    }[h2.status];
-    const hasTurn = (t) => !!t.end || !!(t.start || t.u) || t.entries.some((e) => e.k === "a" || e.k === "tool" || e.k === "h");
-    const oneLine = (s) => clean(s).replace(/\s+/g, " ").trim();
-    const TOYOU = {
-      question: "Asked you",
-      result: "Sent you a result",
-      decision: "Needs your decision"
-    };
-    function turnEnd2(t) {
-      if (!hasTurn(t)) return null;
-      if (!t.end) {
-        if (t.last && SESS[t.sid]?.state === "wait")
-          return { st: "wait", text: "Waiting on permission or input" };
-        if (t.last && SESS[t.sid]?.state === "work") return { st: "work", text: "Still working" };
-        const ty = t.out.filter((h3) => h3.kind === "toyou").at(-1);
-        if (ty)
-          return {
-            st: ty.status === "wait" ? "wait" : "done",
-            text: (TOYOU[ty.kind === "toyou" ? ty.ask : ""] ?? "Sent you a message") + " \xB7 " + statWord(ty) + " \xB7 " + clock2(ty.at)
-          };
-        const entries = t.entries.filter(
-          (e) => e.k === "a" || e.k === "tool" || e.k === "h" && t.out.includes(HID.get(e.id))
-        );
-        const last = entries.at(-1), h2 = last?.k === "h" ? HID.get(last.id) : null;
-        if (t.start?.status === "err")
-          return { st: "err", text: "Failed" + (t.start.done ? " \xB7 " + clock2(t.start.done) : "") };
-        if (last?.k === "tool" && last.ok === false && !last.live)
-          return {
-            st: "err",
-            text: last.unfinished ? "Stopped on a step with no result" : "Stopped on a failed step"
-          };
-        if (h2?.status === "err") return { st: "err", text: "Handoff to " + nameOf(h2.to) + " failed" };
-        if (t.start?.kind === "spawn" && t.start.status === "done")
-          return {
-            st: "done",
-            text: "Returned to " + nameOf(t.start.from) + (t.start.done ? " \xB7 " + clock2(t.start.done) : "")
-          };
-        if (entries.some((e) => e.k === "a")) return { st: "done", text: "Replied" };
-        return { st: "idle", text: "No reply in these logs" };
-      }
-      const { st, why } = t.end, mh = t.end.h ? HID.get(t.end.h) : null;
-      if (why === "input") return { st: "wait", text: "Waiting for your input" };
-      if (why === "permission" || why === "waiting" || why === "waiting_permission")
-        return { st: "wait", text: "Waiting on permission" };
-      if (why === "working") return { st: "work", text: "Still working" };
-      if (why === "toyou" && mh)
-        return {
-          st: mh.status === "wait" ? "wait" : "done",
-          text: (TOYOU[mh.kind === "toyou" ? mh.ask : ""] ?? "Sent you a message") + " \xB7 " + statWord(mh) + " \xB7 " + clock2(mh.at)
-        };
-      if (why === "failed")
-        return { st: "err", text: "Failed" + (t.start?.done ? " \xB7 " + clock2(t.start.done) : "") };
-      if (why === "unfinished_step") return { st: "err", text: "Stopped on a step with no result" };
-      if (why === "failed_step") return { st: "err", text: "Stopped on a failed step" };
-      if (why === "handoff_failed" && mh)
-        return { st: "err", text: "Handoff to " + nameOf(mh.to) + " failed" };
-      if (why === "returned" && t.start)
-        return {
-          st: "done",
-          text: "Returned to " + nameOf(t.start.from) + (t.start.done ? " \xB7 " + clock2(t.start.done) : "")
-        };
-      if (why === "replied") return { st: "done", text: "Replied" };
-      return { st: st ?? "idle", text: "No reply in these logs" };
-    }
-    function traceRoot(t) {
-      const seen = /* @__PURE__ */ new Set();
-      while (!seen.has(t.id)) {
-        seen.add(t.id);
-        const up = t.start && t.start.from !== "you" ? HOLDS.get(t.start.id) : null;
-        if (!up) break;
-        t = up;
-      }
-      return t;
-    }
-    const countOf = (s, key2) => {
-      const m = TXM[s.id];
-      return (m && m.to >= m.total ? m[key2] : void 0) ?? s[key2] ?? m?.[key2] ?? null;
-    };
-    const callsText = (calls) => (calls == null ? "\u2014" : calls) + (calls === 1 ? " tool call" : " tool calls");
-    let childrenCache = null;
-    const invalidate = () => {
-      childrenCache = null;
-    };
-    const sessionChildren = () => {
-      if (childrenCache) return childrenCache;
-      const children = /* @__PURE__ */ new Map();
-      for (const session of Object.values(SESS)) {
-        const parent = parentOf(session.id);
-        if (parent && SESS[parent]) {
-          const rows = children.get(parent) ?? [];
-          rows.push(session);
-          children.set(parent, rows);
-        }
-      }
-      for (const rows of children.values()) rows.sort((a, b) => b.last - a.last);
-      return childrenCache = children;
-    };
-    const childSessions = (sid) => [...sessionChildren().get(sid) ?? []].sort(
-      (a, b) => (originHandoff(a.id)?.at ?? a.last) - (originHandoff(b.id)?.at ?? b.last)
-    );
-    const descendantsOf = (sid, children, out = [], seen = /* @__PURE__ */ new Set([sid])) => {
-      for (const child of children.get(sid) ?? [])
-        if (!seen.has(child.id)) {
-          seen.add(child.id);
-          out.push(child);
-          descendantsOf(child.id, children, out, seen);
-        }
-      return out;
-    };
-    const TOTAL_TOKEN_KINDS = ["input", "output", "cache_write", "cache_read"];
-    const TOKEN_KINDS = [
-      ["input", "Input"],
-      ["output", "Output"],
-      ["cache_read", "Cache read"],
-      ["cache_write_5m", "Cache write \xB7 5m"],
-      ["cache_write_1h", "Cache write \xB7 1h"],
-      ["web_search", "Web search"]
-    ];
-    const asMoney = (usd) => "$" + usd.toFixed(2), shortMoney = (usd) => "$" + usd.toFixed(1);
-    const usageTotal = (s) => Object.values(s.tokens_by_model ?? {}).reduce(
-      (sum, usage2) => sum + TOTAL_TOKEN_KINDS.reduce((n, key2) => n + (Number(usage2[key2]) || 0), 0),
-      0
-    );
-    function costForSessions(sessions) {
-      const total = {
-        usd: 0,
-        unpriced_models: [],
-        split_unknown_messages: 0,
-        by_model: {},
-        by_day: {}
-      }, unpriced = /* @__PURE__ */ new Set();
-      let allPriced = true;
-      for (const s of sessions) {
-        const cost2 = s.cost ?? {};
-        if (cost2.usd == null) allPriced = false;
-        else total.usd = (total.usd ?? 0) + (Number(cost2.usd) || 0);
-        for (const model2 of cost2.unpriced_models ?? []) unpriced.add(model2);
-        total.split_unknown_messages += Number(cost2.split_unknown_messages) || 0;
-        for (const [day2, amount] of Object.entries(cost2.by_day ?? {}))
-          total.by_day[day2] = (total.by_day[day2] ?? 0) + (Number(amount) || 0);
-        for (const [modelId, model2] of Object.entries(cost2.by_model ?? {})) {
-          const current = Object.assign(
-            { tokens: {}, usd_by_kind: {} },
-            total.by_model[modelId] ?? { usd: 0, tokens: {}, usd_by_kind: {} }
-          );
-          if (model2.usd == null) current.usd = null;
-          else if (current.usd != null) current.usd += Number(model2.usd) || 0;
-          for (const [key2, amount] of Object.entries(model2.tokens ?? {}))
-            current.tokens[key2] = (current.tokens[key2] ?? 0) + (Number(amount) || 0);
-          for (const [key2, amount] of Object.entries(model2.usd_by_kind ?? {}))
-            current.usd_by_kind[key2] = (current.usd_by_kind[key2] ?? 0) + (Number(amount) || 0);
-          total.by_model[modelId] = current;
-        }
-      }
-      total.unpriced_models = [...unpriced].sort();
-      if (!allPriced || unpriced.size) total.usd = null;
-      return total;
-    }
-    const costForSession = (sid, includeRuns = false) => costForSessions(
-      SESS[sid] ? [SESS[sid], ...includeRuns ? descendantsOf(sid, sessionChildren()) : []] : []
-    );
-    const costText = (cost2) => cost2.usd == null || cost2.unpriced_models?.length ? "\u2014" : asMoney(cost2.usd);
-    const costMissing = (cost2) => cost2.unpriced_models ?? [];
-    const TREE_RANK = { wait: 0, work: 1, err: 2, idle: 3, done: 4 };
-    const urgentDescendant = (sid, children) => descendantsOf(sid, children).filter((s) => s.state in TREE_RANK).sort((a, b) => TREE_RANK[a.state] - TREE_RANK[b.state] || b.last - a.last)[0]?.state;
-    const childParts = (all) => {
-      const n = (state3) => all.filter((x) => x.state === state3).length, wait = n("wait"), work = n("work"), err = n("err");
-      return [
-        all.length + (all.length === 1 ? " run" : " runs"),
-        wait && wait + " needs you",
-        work && work + " working",
-        err && err + " failed"
-      ].filter(Boolean);
-    };
-    const defaultTreeOpen = (sid, children) => descendantsOf(sid, children).some((s) => s.state === "wait" || s.state === "work");
-    function kidRank(c, children) {
-      let rank = c.state === "wait" ? 0 : c.state === "work" ? 1 : 2;
-      if (rank)
-        for (const d of descendantsOf(c.id, children)) {
-          if (d.state === "wait") return 0;
-          if (d.state === "work") rank = 1;
-        }
-      return rank;
-    }
-    function lineageOf(sid) {
-      const path = [], seen = /* @__PURE__ */ new Set();
-      let id = sid;
-      while (id && SESS[id] && !seen.has(id)) {
-        seen.add(id);
-        path.push(SESS[id]);
-        id = parentOf(id);
-      }
-      return path.reverse();
-    }
-    const byState = (a, b) => (RANK[a.state] ?? 3) - (RANK[b.state] ?? 3) || b.last - a.last;
-    const onMachine = (m) => Object.values(SESS).filter((s) => s.machine === m).sort(byState);
-    const movedOff = (m) => Object.values(SESS).filter((s) => s.movedFrom === m);
-    const movesOf = (m) => H.filter((h2) => h2.kind === "move" && (h2.fromMachine === m || h2.toMachine === m)).sort(
-      (a, b) => b.at - a.at
-    );
-    return {
-      invalidate,
-      nameOf,
-      hcls,
-      where,
-      hostOf,
-      machineLabels,
-      machineLabel,
-      branchOf,
-      shortHost,
-      parentOf,
-      originHandoff,
-      RANK,
-      isResult,
-      inbox,
-      working,
-      answersOf,
-      statWord,
-      hasTurn,
-      oneLine,
-      TOYOU,
-      turnEnd: turnEnd2,
-      traceRoot,
-      countOf,
-      callsText,
-      sessionChildren,
-      childSessions,
-      descendantsOf,
-      TOTAL_TOKEN_KINDS,
-      TOKEN_KINDS,
-      asMoney,
-      usageTotal,
-      costForSessions,
-      costForSession,
-      costText,
-      costMissing,
-      TREE_RANK,
-      urgentDescendant,
-      childParts,
-      defaultTreeOpen,
-      kidRank,
-      lineageOf,
-      byState,
-      onMachine,
-      movedOff,
-      movesOf,
-      shortMoney
-    };
-  }
-
-  // src/navigation/routes.ts
-  var NavigationController = class {
-    constructor(host2, initial = null) {
-      this.host = host2;
-      this.content = initial;
-    }
-    host;
-    currentRoute = { v: "home" };
-    routeListeners = /* @__PURE__ */ new Set();
-    get route() {
-      return this.currentRoute;
-    }
-    set route(value) {
-      this.currentRoute = value;
-      for (const listener of this.routeListeners) listener();
-    }
-    subscribeRoute(listener) {
-      this.routeListeners.add(listener);
-      return () => this.routeListeners.delete(listener);
-    }
-    rendered = null;
-    content;
-    nativePending = null;
-    routePending = null;
-    disposed = false;
-    cancelNative() {
-      this.nativePending?.abort();
-      this.nativePending = null;
-    }
-    cancelRoute() {
-      this.routePending?.abort();
-      this.routePending = null;
-    }
-    loadNative(route, ready, failed) {
-      if (this.disposed || !this.host.loadMachines) return;
-      this.cancelNative();
-      const request = new AbortController();
-      this.nativePending = request;
-      this.host.loadMachines(request.signal).then(
-        (content2) => {
-          if (this.disposed || request.signal.aborted || this.nativePending !== request) {
-            content2.destroy();
-            return;
-          }
-          this.nativePending = null;
-          ready(content2);
-        },
-        () => {
-          if (!this.disposed && !request.signal.aborted && this.nativePending === request) {
-            this.nativePending = null;
-            failed();
-          }
-        }
-      );
-    }
-    replaceContent(route, next) {
-      if (next) {
-        this.content?.destroy();
-        this.content = next;
-      } else if (route.v !== "machines" && this.content) {
-        this.content.destroy();
-        this.content = null;
-      }
-    }
-    load(route, request, done, failed) {
-      if (this.disposed) return;
-      this.cancelRoute();
-      const controller = new AbortController();
-      this.routePending = controller;
-      const loaded = request(controller.signal);
-      const current = () => !this.disposed && !controller.signal.aborted && this.routePending === controller && this.route === route;
-      if (loaded)
-        loaded.then(
-          () => {
-            if (current()) {
-              this.routePending = null;
-              done();
-            }
-          },
-          (error) => {
-            if (current()) {
-              this.routePending = null;
-              failed(error);
-            }
-          }
-        );
-      else if (current()) {
-        this.routePending = null;
-        done();
-      }
-    }
-    historyRoute(value, fallback) {
-      if (!value || typeof value !== "object") return fallback;
-      let route = fallback;
-      if ("v" in value) {
-        const v = value.v;
-        if (v === "home" || v === "analytics" || v === "sessions" || v === "machines") route = { v };
-        else if (v === "timeline") route = { v: "analytics" };
-        else if (v === "session" && "id" in value && typeof value.id === "string" && this.host.model?.session(value.id)) {
-          const turn = "turn" in value && typeof value.turn === "string" ? this.host.model.turn(value.turn) : void 0;
-          route = turn?.sid === value.id ? { v, id: value.id, turn: turn.id } : { v, id: value.id };
-        } else if (v === "machine" && "id" in value && typeof value.id === "string" && this.host.model?.machine(value.id))
-          route = { v, id: value.id };
-        else if (v === "trace" && "sid" in value && typeof value.sid === "string" && "turn" in value && typeof value.turn === "string" && this.host.model?.session(value.sid) && this.host.model.turn(value.turn)?.sid === value.sid)
-          route = { v, sid: value.sid, turn: value.turn };
-      }
-      const out = { ...route };
-      if ("scrollTop" in value && typeof value.scrollTop === "number" && Number.isFinite(value.scrollTop))
-        out.scrollTop = value.scrollTop;
-      if ("hostFocus" in value && value.hostFocus && typeof value.hostFocus === "object") {
-        const focus = value.hostFocus;
-        out.hostFocus = {
-          id: "id" in focus && typeof focus.id === "string" ? focus.id : void 0,
-          row: "row" in focus && typeof focus.row === "string" ? focus.row : void 0,
-          label: "label" in focus && typeof focus.label === "string" ? focus.label : void 0
-        };
-      }
-      return out;
-    }
-    destroy() {
-      this.routeListeners.clear();
-      if (this.disposed) return;
-      this.disposed = true;
-      this.cancelNative();
-      this.cancelRoute();
-      this.content?.destroy();
-      this.content = null;
-      this.rendered = null;
-    }
-  };
-
   // src/domain/validate.ts
-  function object2(value) {
+  function object(value) {
     if (!value || typeof value !== "object" || Array.isArray(value))
       throw new Error("Invalid object");
     return Object.fromEntries(Object.entries(value));
@@ -8165,1029 +6825,212 @@ globalThis.__semonUIShared = __semonUIShared;
     return value.map(parse);
   }
   function dictionary(value, parse) {
-    return Object.fromEntries(Object.entries(object2(value)).map(([id, row]) => [id, parse(row)]));
-  }
-  function state(value) {
-    switch (value) {
-      case "work":
-      case "wait":
-      case "idle":
-      case "done":
-      case "err":
-        return value;
-      default:
-        throw new Error("Invalid session state");
-    }
-  }
-  function status(value) {
-    switch (value) {
-      case "work":
-      case "wait":
-      case "done":
-      case "err":
-      case "new":
-        return value;
-      default:
-        throw new Error("Invalid handoff status");
-    }
+    return Object.fromEntries(Object.entries(object(value)).map(([id, row]) => [id, parse(row)]));
   }
 
-  // src/domain/normalize.ts
-  var strings2 = (v) => array(v, text);
-  var numbers = (v) => dictionary(v, number);
-  function usage(value) {
-    const v = object2(value);
-    return {
-      input: optional(v.input, number),
-      output: optional(v.output, number),
-      cache_write: optional(v.cache_write, number),
-      cache_write_5m: optional(v.cache_write_5m, number),
-      cache_write_1h: optional(v.cache_write_1h, number),
-      cache_read: optional(v.cache_read, number),
-      web_search: optional(v.web_search, number)
-    };
+  // src/state/catalog-source-candidates.ts
+  var nullableText = (v) => v === null ? null : text(v);
+  function key(v) {
+    const value = text(v);
+    if (!value || value.length > 8192) throw new Error("Invalid source candidate identity");
+    return value;
   }
-  function modelCost(value) {
-    const v = object2(value);
-    return {
-      usd: v.usd == null ? null : number(v.usd),
-      tokens: optional(v.tokens, usage),
-      usd_by_kind: optional(v.usd_by_kind, usage)
-    };
+  function generation(v) {
+    const value = text(v);
+    if (!/^[a-f0-9]{64}$/.test(value)) throw new Error("Invalid source candidate generation");
+    return value;
   }
-  function cost(value) {
-    const v = object2(value);
-    return {
-      usd: v.usd == null ? null : number(v.usd),
-      unpriced_models: optional(v.unpriced_models, strings2),
-      split_unknown_messages: optional(v.split_unknown_messages, number),
-      by_model: optional(v.by_model, (v2) => dictionary(v2, modelCost)),
-      by_day: optional(v.by_day, numbers)
-    };
-  }
-  function tokenObservation(value) {
-    const v = object2(value);
-    return {
-      input: number(v.input),
-      cached_input: number(v.cached_input),
-      output: number(v.output),
-      reasoning_output: number(v.reasoning_output),
-      total: number(v.total)
-    };
-  }
-  function claudeUsage(value) {
-    const v = object2(value);
-    return {
-      observed: tokenObservation(v.observed),
-      exclusive: tokenObservation(v.exclusive),
-      shared: dictionary(v.shared, tokenObservation),
-      shared_models: dictionary(v.shared_models, (v2) => v2 == null ? null : text(v2)),
-      fresh: v.fresh == null ? null : tokenObservation(v.fresh),
-      shared_owner: v.shared_owner == null ? null : text(v.shared_owner)
-    };
-  }
-  function copilot(value) {
-    const v = object2(value);
-    const observed = v.usage == null ? null : object2(v.usage);
-    return {
-      usage_source: v.usage_source == null ? null : (() => {
-        const source = object2(v.usage_source);
-        return {
-          event_id: text(source.event_id),
-          offset: number(source.offset),
-          timestamp: source.timestamp == null ? null : number(source.timestamp)
-        };
-      })(),
-      version: text(v.version),
-      schema: number(v.schema),
-      usage: observed == null ? null : {
-        tokens: tokenObservation(observed.tokens),
-        by_model: dictionary(observed.by_model, (value2) => {
-          const v2 = object2(value2);
-          return {
-            input: number(v2.input),
-            output: number(v2.output),
-            cache_read: number(v2.cache_read),
-            cache_write: number(v2.cache_write)
-          };
-        }),
-        reasoning_by_model: numbers(observed.reasoning_by_model)
-      },
-      lifecycle: v.lifecycle == null ? null : text(v.lifecycle),
-      logical_parent: v.logical_parent == null ? null : text(v.logical_parent),
-      approvals: v.approvals == null ? null : text(v.approvals)
-    };
-  }
-  function activity(value) {
-    if (!Array.isArray(value) || value.length < 3 || value.length > 4)
-      throw new Error("Invalid activity");
-    return [text(value[0]), text(value[1]), number(value[2]), optional(value[3], number)];
-  }
-  function parseSession(id, value) {
-    const v = object2(value);
-    return {
-      id,
-      name: text(v.name),
-      harness: text(v.harness),
-      state: state(v.state),
-      machine: text(v.machine),
-      start: number(v.start),
-      last: number(v.last),
-      effort: optional(v.effort, text),
-      cwd: optional(v.cwd, text),
-      dir: optional(v.dir, text),
-      directory: optional(v.directory, text),
-      sessionId: optional(v.sessionId, text),
-      pid: optional(v.pid, number),
-      wait_edges_truncated: optional(v.wait_edges_truncated, boolean),
-      busy: optional(
-        v.busy,
-        (v2) => array(v2, (v3) => {
-          if (!Array.isArray(v3) || v3.length !== 2) throw new Error("Invalid interval");
-          return [number(v3[0]), number(v3[1])];
-        })
-      ),
-      wait_edges: optional(
-        v.wait_edges,
-        (v2) => array(v2, (v3) => {
-          const w = object2(v3);
-          return {
-            call: text(w.call),
-            tool: text(w.tool),
-            targets: strings2(w.targets),
-            start: number(w.start),
-            end: optional(w.end, number),
-            turn: optional(w.turn, text)
-          };
-        })
-      ),
-      reported_runs: optional(
-        v.reported_runs,
-        (v2) => array(v2, (v3) => {
-          const r = object2(v3);
-          return { start: number(r.start), cost_usd: optional(r.cost_usd, number) };
-        })
-      ),
-      cost_check: optional(
-        v.cost_check,
-        (v2) => array(v2, (v3) => {
-          const c = object2(v3);
-          return {
-            start: number(c.start),
-            computed_usd: optional(c.computed_usd, number),
-            reported_usd: optional(c.reported_usd, number),
-            ok: optional(c.ok, boolean)
-          };
-        })
-      ),
-      kind: optional(v.kind, text),
-      host: optional(v.host, text),
-      repo: optional(v.repo, text),
-      branch: optional(v.branch, text),
-      worktree: optional(v.worktree, text),
-      parent: optional(v.parent, text),
-      lane: optional(v.lane, boolean),
-      model: optional(v.model, text),
-      modelId: optional(v.modelId, text),
-      role: optional(v.role, boolean),
-      stub: optional(v.stub, boolean),
-      movedFrom: optional(v.movedFrom, text),
-      calls: optional(v.calls, number),
-      errors: optional(v.errors, number),
-      waiting_since: optional(v.waiting_since, number),
-      waiting_for: optional(v.waiting_for, text),
-      tokens: optional(v.tokens, (v2) => array(v2, number)),
-      tokens_by_model: optional(v.tokens_by_model, (v2) => dictionary(v2, usage)),
-      claude_usage: optional(v.claude_usage, claudeUsage),
-      copilot: optional(v.copilot, copilot),
-      cost: optional(v.cost, cost),
-      activity: optional(v.activity, activity),
-      tool_calls: optional(v.tool_calls, numbers),
-      signals: optional(v.signals, numbers)
-    };
-  }
-  function answer(value) {
-    return typeof value === "string" ? value : strings2(value);
-  }
-  function parseHandoff(value) {
-    const v = object2(value), common = {
-      id: text(v.id),
-      from: text(v.from),
-      to: v.to == null ? "" : text(v.to),
-      at: number(v.at),
-      status: status(v.status),
-      brief: text(v.brief),
-      done: optional(v.done, number),
-      result: optional(v.result, text),
-      target: optional(v.target, text),
-      declined: optional(v.declined, boolean)
-    };
-    switch (v.kind) {
-      case "ask":
-      case "spawn":
-      case "relay":
-        return { ...common, kind: v.kind };
-      case "move":
-        return {
-          ...common,
-          kind: "move",
-          fromMachine: text(v.fromMachine),
-          toMachine: text(v.toMachine)
-        };
-      case "toyou": {
-        if (v.ask !== "question" && v.ask !== "decision" && v.ask !== "result")
-          throw new Error("Invalid ask");
-        return {
-          ...common,
-          kind: "toyou",
-          ask: v.ask,
-          answer: optional(v.answer, answer),
-          answers: optional(
-            v.answers,
-            (v2) => array(v2, (v3) => ({ values: optional(object2(v3).values, strings2) }))
-          )
-        };
-      }
-      default:
-        throw new Error("Invalid handoff kind");
-    }
-  }
-  function turnEnd(value) {
-    const v = object2(value);
-    return {
-      st: optional(v.st, state),
-      why: text(v.why),
-      h: optional(v.h, text),
-      at: optional(v.at, number)
-    };
-  }
-  function normalizeModel(model2) {
-    const sessions = Object.fromEntries(
-      Object.entries(model2.sessions).map(([id, v]) => [id, parseSession(id, v)])
-    );
-    const handoffs = model2.handoffs.map(parseHandoff);
-    for (const h2 of handoffs)
-      if (!h2.to) {
-        const machine2 = sessions[h2.from]?.machine ?? model2.machine.id, id = "unsent:" + (h2.target ?? "") + (model2.machines ? "@" + machine2 : "");
-        const s = sessions[id] ??= {
-          id,
-          name: h2.target || "unknown",
-          harness: "claude",
-          stub: true,
-          machine: machine2,
-          state: "err",
-          model: "\u2014",
-          tokens: [0, 0, 0],
-          start: h2.at,
-          last: h2.at
-        };
-        s.start = Math.min(s.start, h2.at);
-        s.last = Math.max(s.last, h2.at);
-        h2.to = id;
-      }
-    const handoff = new Map(handoffs.map((h2) => [h2.id, h2])), turns = /* @__PURE__ */ Object.create(null), turn = /* @__PURE__ */ new Map(), starts = /* @__PURE__ */ new Map(), holds = /* @__PURE__ */ new Map();
-    for (const row of model2.turns) {
-      const x = object2(row), id = text(x.id), sid = text(x.sid), start = optional(x.start, text), sent = array(x.sent, text).flatMap((id2) => {
-        const h2 = handoff.get(id2);
-        return h2 ? [h2] : [];
-      });
-      const t = {
-        id,
-        sid,
-        start: start ? handoff.get(start) ?? null : null,
-        at: optional(x.at, number),
-        u: x.u ? { k: "u", text: optional(x.text, text) ?? "" } : null,
-        entries: [],
-        sent,
-        out: sent.filter((h2) => h2.kind !== "move"),
-        end: optional(x.end, turnEnd),
-        last: optional(x.last, boolean)
-      };
-      (turns[sid] ??= []).push(t);
-      turn.set(id, t);
-      if (t.start) starts.set(t.start.id, t);
-      for (const h2 of t.sent) holds.set(h2.id, t);
-    }
-    return { sessions, handoffs, handoff, turns, turn, starts, holds };
-  }
-
-  // src/state/model.ts
-  function replaceRecord(target, next) {
-    for (const id of Object.keys(target)) delete target[id];
-    Object.assign(target, next);
-  }
-  function replaceMap(target, next) {
-    target.clear();
-    for (const [id, row] of next) target.set(id, row);
-  }
-  var ViewerModelStore = class {
-    constructor(updates = new ViewUpdates()) {
-      this.updates = updates;
-    }
-    updates;
-    raw = new ModelStore();
-    sessions = /* @__PURE__ */ Object.create(null);
-    machines = /* @__PURE__ */ Object.create(null);
-    machineUp = /* @__PURE__ */ Object.create(null);
-    machineLast = /* @__PURE__ */ Object.create(null);
-    handoffs = [];
-    turns = /* @__PURE__ */ Object.create(null);
-    turn = /* @__PURE__ */ new Map();
-    starts = /* @__PURE__ */ new Map();
-    holds = /* @__PURE__ */ new Map();
-    handoff = /* @__PURE__ */ new Map();
-    apply(value) {
-      return this.raw.apply(value);
-    }
-    adopt(value, finalize) {
-      const model2 = parseModel(value), normalized = normalizeModel(model2);
-      const machines = model2.machines == null ? [parseModelMachine(model2.machine)] : array(model2.machines, parseModelMachine);
-      this.raw.adopt(model2);
-      replaceRecord(this.sessions, normalized.sessions);
-      replaceRecord(this.turns, normalized.turns);
-      this.handoffs.splice(0, this.handoffs.length, ...normalized.handoffs);
-      replaceMap(this.turn, normalized.turn);
-      replaceMap(this.starts, normalized.starts);
-      replaceMap(this.holds, normalized.holds);
-      replaceMap(this.handoff, normalized.handoff);
-      for (const table of [this.machines, this.machineUp, this.machineLast])
-        for (const id of Object.keys(table)) delete table[id];
-      for (const row of machines) {
-        this.machines[row.id] = row.name;
-        this.machineUp[row.id] = row.up;
-        if (row.last !== void 0) this.machineLast[row.id] = row.last;
-      }
-      finalize?.();
-      this.updates.model();
-      return model2;
-    }
-    domain(transcriptMeta) {
+  function parseCatalogSourceCandidates(v) {
+    const row = object(v);
+    const items = array(row.items, (value) => {
+      const candidate = object(value), source = object(candidate.source), path = text(source.path), root = text(source.root);
+      const observed = candidate.archive_observed_at === null ? null : number(candidate.archive_observed_at);
+      if (!root || !path || path.length > 4096 || path.startsWith("/") || path.includes("\\") || path.includes("\0") || path.split("/").includes("..") || observed !== null && (!Number.isSafeInteger(observed) || observed < 0))
+        throw new Error("Invalid archive source hint");
       return {
-        sessions: this.sessions,
-        machines: this.machines,
-        handoffs: this.handoffs,
-        turns: this.turns,
-        turn: this.turn,
-        starts: this.starts,
-        holds: this.holds,
-        handoff: this.handoff,
-        transcriptMeta
+        candidate_key: key(candidate.candidate_key),
+        source: { root, path },
+        native_name_hint: nullableText(candidate.native_name_hint),
+        generation: generation(candidate.generation),
+        archive_observed_at: observed
       };
-    }
-  };
-  function parseModelMachine(value) {
-    const v = object2(value);
-    return { id: text(v.id), name: text(v.name), up: boolean(v.up), last: optional(v.last, number) };
-  }
-
-  // src/state/transcript-wire.ts
-  var strings3 = (value) => array(value, text);
-  function background(value) {
-    const v = object2(value), state2 = v.state;
-    if (state2 !== "running" && state2 !== "unknown" && state2 !== "failed" && state2 !== "killed" && state2 !== "done")
-      throw new Error("Invalid background state");
-    return {
-      state: state2,
-      secs: optional(
-        v.secs,
-        (value2) => typeof value2 === "number" ? String(number(value2)) : text(value2)
-      ),
-      since: optional(v.since, number),
-      exit: optional(v.exit, number),
-      summary: optional(v.summary, text)
-    };
-  }
-  function image(value) {
-    const v = object2(value), base = {
-      o: number(v.o),
-      b: number(v.b),
-      w: optional(v.w, number),
-      h: optional(v.h, number),
-      type: optional(v.type, text),
-      size: optional(v.size, number)
-    };
-    return v.na === true ? { ...base, na: true, v: optional(v.v, text) } : {
-      ...base,
-      na: optional(v.na, (value2) => {
-        if (value2 !== false) throw new Error("Invalid image availability");
-        return false;
-      }),
-      v: text(v.v)
-    };
-  }
-  var diff = (value) => array(value, (value2) => {
-    if (!Array.isArray(value2) || value2.length !== 2) throw new Error("Invalid diff");
-    return [text(value2[0]), text(value2[1])];
-  });
-  function cut(value) {
-    const v = object2(value);
-    return {
-      original_tokens: optional(v.original_tokens, number),
-      parts: optional(
-        v.parts,
-        (v2) => array(v2, (v3) => {
-          const p = object2(v3);
-          return {
-            text: optional(p.text, text),
-            gap: optional(p.gap, (v4) => {
-              const g = object2(v4);
-              return { unit: text(g.unit), n: number(g.n), of: optional(g.of, number) };
-            })
-          };
-        })
-      )
-    };
-  }
-  function parseEntry(value) {
-    const v = object2(value), base = {
-      img: optional(v.img, (v2) => array(v2, image)),
-      turn: optional(v.turn, text),
-      slot: optional(v.slot, number),
-      live: optional(v.live, boolean),
-      unfinished: optional(v.unfinished, boolean),
-      tid: optional(v.tid, text),
-      bg: optional(v.bg, background)
-    };
-    switch (v.k) {
-      case "u":
-      case "a":
-        return { ...base, k: v.k, text: text(v.text), img: optional(v.img, (v2) => array(v2, image)) };
-      case "think":
-        return {
-          ...base,
-          k: "think",
-          text: optional(v.text, text),
-          pending: optional(v.pending, boolean),
-          status: optional(v.status, text),
-          secs: optional(v.secs, (v2) => typeof v2 === "string" ? v2 : number(v2))
-        };
-      case "h":
-        return { ...base, k: "h", id: text(v.id) };
-      case "end":
-        return {
-          ...base,
-          k: "end",
-          text: optional(v.text, text),
-          ret: optional(v.ret, (v2) => {
-            const r = object2(v2);
-            return {
-              to: text(r.to),
-              failed: optional(r.failed, boolean),
-              at: optional(r.at, number)
-            };
-          })
-        };
-      case "harness":
-        return { ...base, k: "harness", label: text(v.label) };
-      case "signal":
-        return {
-          ...base,
-          k: "signal",
-          signal: (() => {
-            const s = object2(v.signal);
-            return {
-              kind: text(s.kind),
-              tag: optional(s.tag, text),
-              tool: optional(s.tool, text),
-              value: optional(s.value, number),
-              previous: optional(s.previous, text)
-            };
-          })()
-        };
-      case "bgend":
-        return {
-          ...base,
-          k: "bgend",
-          call: text(v.call),
-          state: text(v.state),
-          label: optional(v.label, text)
-        };
-      case "tool":
-        return {
-          ...base,
-          k: "tool",
-          name: text(v.name),
-          arg: text(v.arg),
-          title: optional(v.title, text),
-          secs: optional(
-            v.secs,
-            (value2) => typeof value2 === "number" ? String(number(value2)) : text(value2)
-          ),
-          since: optional(v.since, number),
-          exit: optional(v.exit, number),
-          ok: v.ok == null ? v.ok : boolean(v.ok),
-          in: optional(v.in, text),
-          out: optional(v.out, text),
-          cwd: optional(v.cwd, text),
-          diff: optional(v.diff, diff),
-          changes: optional(
-            v.changes,
-            (v2) => array(v2, (v3) => {
-              const c = object2(v3);
-              return {
-                path: text(c.path),
-                move: optional(c.move, text),
-                diff: optional(c.diff, diff)
-              };
-            })
-          ),
-          more: optional(v.more, strings3),
-          script: v.script,
-          cut: optional(v.cut, cut)
-        };
-      default:
-        throw new Error("Invalid transcript entry");
-    }
-  }
-  function parseTranscriptPage(value) {
-    const v = object2(value), from = number(v.from), to = number(v.to), total = number(v.total);
-    if (![from, to, total].every(Number.isInteger) || from < 0 || to < from || total < to)
-      throw new Error("Invalid transcript range");
-    return {
-      entries: array(v.entries, parseEntry),
-      from,
-      to,
-      total,
-      calls: optional(v.calls, number),
-      errors: optional(v.errors, number),
-      bg_running: optional(v.bg_running, strings3)
-    };
-  }
-
-  // src/state/transcript.ts
-  var TranscriptStore = class {
-    constructor(host2, updates) {
-      this.host = host2;
-      this.ownsUpdates = updates === void 0;
-      this.updates = updates ?? new ViewUpdates();
-    }
-    host;
-    entries = /* @__PURE__ */ Object.create(null);
-    meta = /* @__PURE__ */ Object.create(null);
-    marks = /* @__PURE__ */ Object.create(null);
-    staleBriefs = /* @__PURE__ */ new Set();
-    cache = new TranscriptCache();
-    paging = createPagingStore();
-    requests = /* @__PURE__ */ new Set();
-    replacements = /* @__PURE__ */ new Map();
-    disposed = false;
-    updates;
-    ownsUpdates;
-    spread(sid) {
-      for (const turn2 of this.host.turns(sid)) turn2.entries = [];
-      let turn, pre = 0;
-      for (const entry2 of this.entries[sid] ?? []) {
-        if (entry2.turn) turn = this.host.turn(entry2.turn);
-        if (turn && turn.sid === sid) {
-          entry2.key = turn.id + "#" + turn.entries.length;
-          turn.entries.push(entry2);
-        } else entry2.key = sid + "#" + pre++;
-      }
-    }
-    clearPaging(sid) {
-      this.paging.clear(sid);
-      this.host.cleared(sid);
-    }
-    cancelReplacement(sid) {
-      this.replacements.get(sid)?.abort();
-      this.replacements.delete(sid);
-    }
-    drop(sid) {
-      this.cancelReplacement(sid);
-      this.clearPaging(sid);
-      delete this.entries[sid];
-      delete this.meta[sid];
-      this.updates.transcript(sid);
-    }
-    async fetch(sid, query = "", direction, signal, onPage) {
-      if (this.disposed || signal?.aborted) return;
-      const controller = new AbortController(), abort = () => controller.abort();
-      signal?.addEventListener("abort", abort, { once: true });
-      this.requests.add(controller);
-      if (!direction) {
-        this.cancelReplacement(sid);
-        this.replacements.set(sid, controller);
-      }
-      const mark = this.marks[sid], range = this.meta[sid], boundary = direction === "before" ? range?.from : range?.to;
-      try {
-        const response = await this.host.request(
-          "/api/tx?sid=" + encodeURIComponent(sid) + (query ? "&" + query : ""),
-          controller.signal
-        );
-        if (this.disposed || controller.signal.aborted || direction && (this.meta[sid] !== range || (direction === "before" ? this.meta[sid]?.from : this.meta[sid]?.to) !== boundary))
-          return;
-        const page = parseTranscriptPage(response), entries = page.entries.map(
-          (entry2, index) => this.host.entry({ ...entry2, sid, slot: entry2.slot ?? page.from + index })
-        ), meta = this.meta[sid];
-        if (direction === "before" && meta) {
-          this.entries[sid] = entries.concat(this.entries[sid]);
-          meta.from = page.from;
-        } else if (direction === "after" && meta) {
-          this.entries[sid] = this.entries[sid].concat(entries);
-          meta.to = page.to;
-        } else {
-          this.clearPaging(sid);
-          this.entries[sid] = entries;
-          this.meta[sid] = { from: page.from, to: page.to, total: page.total };
-          this.staleBriefs.delete(sid);
-        }
-        Object.assign(this.meta[sid], {
-          total: page.total,
-          calls: page.calls,
-          errors: page.errors,
-          watchTok: mark
-        });
-        if (direction !== "before" && page.to >= page.total) {
-          this.meta[sid].tok = mark;
-          this.meta[sid].newer = 0;
-        }
-        this.spread(sid);
-        this.updates.transcript(sid);
-        onPage?.();
-      } catch (error) {
-        if (!this.disposed && !controller.signal.aborted) throw error;
-      } finally {
-        this.requests.delete(controller);
-        signal?.removeEventListener("abort", abort);
-        if (this.replacements.get(sid) === controller) this.replacements.delete(sid);
-      }
-    }
-    keep(sid, entries, meta, origin) {
-      if (!entries || !meta || meta.to < meta.total || meta.tok == null || this.staleBriefs.has(sid) || meta.origin !== origin)
-        return;
-      this.cache.keep(sid, entries, meta);
-    }
-    adoptCached(sid, turn) {
-      const cached = this.cache.get(sid);
-      if (!cached) return false;
-      this.cancelReplacement(sid);
-      this.cache.delete(sid);
-      this.entries[sid] = cached.entries;
-      this.meta[sid] = cached.meta;
-      this.spread(sid);
-      if (!turn) {
-        this.updates.transcript(sid);
-        return true;
-      }
-      const target = this.host.turn(turn);
-      if (target && target.sid === sid && !target.entries.length) {
-        this.drop(sid);
-        return false;
-      }
-      this.updates.transcript(sid);
-      return true;
-    }
-    /** A coherent projection borrows accepted entries; no full-transcript copies. */
-    view(sid) {
-      return { entries: this.entries[sid], range: this.meta[sid], revision: this.updates.revision };
-    }
-    destroy() {
-      if (this.disposed) return;
-      this.disposed = true;
-      if (this.ownsUpdates) this.updates.destroy();
-      for (const request of this.requests) request.abort();
-      this.requests.clear();
-      this.replacements.clear();
-      this.paging.destroy();
-      this.cache.clear();
-      this.staleBriefs.clear();
-      for (const id of Object.keys(this.entries)) delete this.entries[id];
-      for (const id of Object.keys(this.meta)) delete this.meta[id];
-    }
-  };
-
-  // src/state/catalog-wire.ts
-  var nullable = (value, parse) => value === null ? null : parse(value);
-  var strings4 = (value) => array(value, text);
-  function integer(value) {
-    const parsed = number(value);
-    if (!Number.isSafeInteger(parsed)) throw new Error("Invalid catalog integer");
-    return parsed;
-  }
-  function freshness(value) {
-    if (value === "cached" || value === "stale" || value === "incomplete" || value === "unavailable")
-      return value;
-    throw new Error("Invalid catalog freshness");
-  }
-  function readScope(value) {
-    if (value === void 0 || value === "current") return "current";
-    if (value === "retained_history") return value;
-    throw new Error("Invalid catalog read scope");
-  }
-  function nativeSelection(value) {
-    return value === "retired" ? value : freshness(value);
-  }
-  function observations(row) {
-    return {
-      facts_observation: row.facts_observation === void 0 ? void 0 : { state: freshness(object2(row.facts_observation).state) },
-      native_selection: row.native_selection === void 0 ? void 0 : row.native_selection === null ? null : { state: nativeSelection(object2(row.native_selection).state) }
-    };
-  }
-  function digest(value) {
-    const bytes = array(value, integer);
-    if (bytes.length !== 32 || bytes.some((byte) => byte < 0 || byte > 255))
-      throw new Error("Invalid catalog source digest");
-    return bytes;
-  }
-  function parseCatalogSource(value) {
-    const source = object2(value), offset = integer(source.offset);
-    if (offset < 0) throw new Error("Invalid catalog source offset");
-    return {
-      root: text(source.root),
-      path: text(source.path),
-      native_id: text(source.native_id),
-      offset,
-      prefix_sha256: digest(source.prefix_sha256),
-      tail_sha256: digest(source.tail_sha256)
-    };
-  }
-  function sourceReference(value) {
-    const row = object2(value);
-    return { source: parseCatalogSource(row.source), state: freshness(row.state) };
-  }
-  function parseCatalogSession(value) {
-    const row = object2(value), cost2 = object2(row.cost), state2 = object2(row.freshness), tokens2 = array(row.tokens, number);
-    if (tokens2.length !== 3 || tokens2.some((token) => token < 0))
-      throw new Error("Invalid catalog tokens");
-    return {
-      key: text(row.key),
-      name: text(row.name),
-      harness: text(row.harness),
-      kind: text(row.kind),
-      native_ids: strings4(row.native_ids),
-      parent: nullable(row.parent, text),
-      parent_source: nullable(row.parent_source, text),
-      repo: nullable(row.repo, text),
-      branch: nullable(row.branch, text),
-      model: text(row.model),
-      effort: nullable(row.effort, text),
-      start: nullable(row.start, integer),
-      last: nullable(row.last, integer),
-      tokens: tokens2,
-      cost: { usd: nullable(cost2.usd, number), unpriced_models: strings4(cost2.unpriced_models) },
-      source_refs: array(row.source_refs, sourceReference),
-      freshness: { state: freshness(state2.state) },
-      ...observations(row)
-    };
-  }
-  function searchObservation(value) {
-    if (value === void 0 || value === null) return null;
-    const row = object2(value), fields = strings4(row.fields), candidates = integer(row.candidates);
-    if (row.semantics !== "unicode_lowercase_substring" || fields.length !== 6 || new Set(fields).size !== 6 || fields.some(
-      (field) => !["name", "key", "repo", "branch", "model", "harness"].includes(field)
-    ) || row.candidate_budget !== 512 || row.byte_budget !== 2097152 || candidates < 0 || candidates > 512)
-      throw new Error("Unsupported metadata search observation");
-    return {
-      semantics: "unicode_lowercase_substring",
-      fields,
-      partial: boolean(row.partial),
-      candidates,
-      index_complete: boolean(row.index_complete),
-      candidate_budget: 512,
-      byte_budget: 2097152
-    };
-  }
-  function parseCatalogPage(value) {
-    const page = object2(value), machine2 = text(page.machine), info = object2(page.machine_info), capabilities = object2(page.capabilities), generation2 = text(page.generation), items = array(page.items, parseCatalogSession), next = nullable(page.next_cursor, text), completeness = page.completeness === void 0 ? "complete" : object2(page.completeness).state, collectionFreshness = page.freshness === "updating" ? "updating" : freshness(page.freshness);
-    if (page.api !== 1 || completeness !== "partial" && completeness !== "complete" || collectionFreshness === "updating" && completeness !== "partial" || info.key !== machine2 || info.freshness !== "cached" || !/^[0-9a-f]{64}$/i.test(generation2) || items.length > 100 || new Set(items.map((item2) => item2.key)).size !== items.length || next !== null && (!next || next.length > 8192))
-      throw new Error("Invalid catalog page");
+    });
+    if (row.api !== 1 || items.length > 60 || new Set(items.map((item2) => item2.candidate_key)).size !== items.length)
+      throw new Error("Invalid source candidate page");
     return {
       api: 1,
-      machine: machine2,
-      read_scope: readScope(page.read_scope),
-      machine_info: { key: machine2, label: text(info.label), freshness: "cached" },
-      generation: generation2,
-      observed_at: nullable(page.observed_at, integer),
-      freshness: collectionFreshness,
-      completeness: { state: completeness },
-      capabilities: {
-        pagination: boolean(capabilities.pagination),
-        filters: strings4(capabilities.filters),
-        order: text(capabilities.order),
-        full_text_search: boolean(capabilities.full_text_search),
-        selected_session_lookup: boolean(capabilities.selected_session_lookup),
-        runtime_status: boolean(capabilities.runtime_status),
-        global_union: boolean(capabilities.global_union)
-      },
+      source_key: key(row.source_key),
       items,
-      next_cursor: next,
-      search: searchObservation(page.search)
+      next_cursor: row.next_cursor === null ? null : key(row.next_cursor)
     };
   }
-  function parseCatalogIdentity(value) {
-    const row = object2(value), refs = array(row.source_refs, sourceReference), nativeIds = strings4(row.native_ids), nativeId = nullable(row.native_id, text), ids = new Set(refs.map((ref) => ref.source.native_id)), generation2 = text(row.generation), state2 = object2(row.freshness), sourceKey = text(row.source_key), catalogKey = text(row.catalog_key), harness = text(row.harness), qualification = row.owner_qualification;
-    if (qualification !== void 0 && qualification !== "qualified" && qualification !== "provisional" || qualification === "provisional" && nativeId !== null || !sourceKey || !catalogKey || !harness || !/^[0-9a-f]{64}$/i.test(generation2) || nativeIds.some((id) => !id) || ids.has("") || new Set(nativeIds).size !== nativeIds.length || ids.size !== nativeIds.length || nativeIds.some((id) => !ids.has(id)) || nativeId !== null && (ids.size !== 1 || !ids.has(nativeId)))
-      throw new Error("Invalid catalog identity");
+  function parseCatalogSourceCandidateProgress(v) {
+    const row = object(v), catalogKey = row.catalog_key === null ? null : key(row.catalog_key);
+    if (row.api !== 1 || !["updating", "ready", "unavailable"].includes(text(row.state)) || row.state === "ready" !== (catalogKey !== null))
+      throw new Error("Invalid source candidate progress");
     return {
-      source_key: sourceKey,
-      read_scope: readScope(row.read_scope),
+      api: 1,
+      source_key: key(row.source_key),
+      candidate_key: key(row.candidate_key),
+      generation: generation(row.generation),
+      state: row.state,
       catalog_key: catalogKey,
-      harness,
-      native_id: nativeId,
-      owner_qualification: qualification,
-      native_ids: nativeIds,
-      source_refs: refs,
-      machine_label: nullable(row.machine_label, text),
-      generation: generation2,
-      observed_at: nullable(row.observed_at, integer),
-      freshness: { state: freshness(state2.state) },
-      ...observations(row)
+      retryable: boolean(row.retryable),
+      reason: nullableText(row.reason)
     };
   }
 
-  // src/state/catalog-selection.ts
-  var CatalogSelectionStore = class {
-    epoch = 0;
-    disposed = false;
-    pending = null;
-    scope = null;
-    identity = null;
-    listeners = /* @__PURE__ */ new Set();
-    begin(scope) {
-      if (this.disposed) throw new Error("Catalog selection is destroyed");
-      if (typeof scope.source_key !== "string" || !scope.source_key || typeof scope.catalog_key !== "string" || !scope.catalog_key)
-        throw new Error("Invalid catalog selection");
-      const request = Object.freeze({
-        source_key: scope.source_key,
-        catalog_key: scope.catalog_key,
-        epoch: ++this.epoch
-      });
-      this.pending = request;
-      if (this.scope?.source_key !== scope.source_key || this.scope?.catalog_key !== scope.catalog_key)
-        this.scope = Object.freeze({ source_key: scope.source_key, catalog_key: scope.catalog_key });
-      this.identity = null;
-      this.changed();
-      return request;
-    }
-    accept(request, value) {
-      if (request !== this.pending || request.epoch !== this.epoch) return false;
-      const identity2 = parseCatalogIdentity(value);
-      if (identity2.read_scope !== "current" || identity2.native_selection?.state === "retired")
-        throw new Error("Historical identity cannot supply current catalog authority");
-      if (identity2.source_key !== request.source_key || identity2.catalog_key !== request.catalog_key)
-        throw new Error("Catalog selection scope mismatch");
-      for (const ref of identity2.source_refs) {
-        Object.freeze(ref.source.prefix_sha256);
-        Object.freeze(ref.source.tail_sha256);
-        Object.freeze(ref.source);
-        Object.freeze(ref);
-      }
-      Object.freeze(identity2.source_refs);
-      Object.freeze(identity2.native_ids);
-      Object.freeze(identity2.freshness);
-      if (identity2.facts_observation) Object.freeze(identity2.facts_observation);
-      if (identity2.native_selection) Object.freeze(identity2.native_selection);
-      this.identity = Object.freeze(identity2);
-      this.changed();
-      return true;
-    }
-    selectedIdentity() {
-      return this.identity;
-    }
-    /** Read intent survives a failed current identity check; it grants no native authority. */
-    selectedScope() {
-      return this.scope;
-    }
-    subscribe(listener) {
-      if (this.disposed) throw new Error("Catalog selection is destroyed");
-      this.listeners.add(listener);
-      return () => this.listeners.delete(listener);
-    }
-    clear() {
-      ++this.epoch;
-      this.pending = null;
-      this.scope = null;
-      this.identity = null;
-      this.changed();
-    }
-    destroy() {
-      this.disposed = true;
-      this.listeners.clear();
-      this.clear();
-    }
-    changed() {
-      for (const listener of [...this.listeners]) listener();
+  // src/state/analytics-wire.ts
+  function shape(fields) {
+    return (value) => {
+      const source = object(value), parsed = Object.fromEntries(
+        Object.entries(fields).map(([key2, parse]) => [key2, parse(source[key2])])
+      );
+      return parsed;
+    };
+  }
+  var list = (parse) => (value) => array(value, parse);
+  var nullable = (parse) => (value) => value == null ? null : parse(value);
+  var optional2 = (parse) => (value) => value == null ? void 0 : parse(value);
+  var strings = list(text);
+  var money = shape({ usd: nullable(number), unpriced_models: strings });
+  var period = shape({
+    agent_ms: number,
+    started: number,
+    turns: number,
+    tools: number,
+    errors: number,
+    peak: number,
+    wait_ms: number,
+    median_wait_ms: number,
+    longest_wait_ms: number,
+    cost: money
+  });
+  var busy = shape({ sid: text, ms: number });
+  var priced = shape({ sid: text, usd: nullable(number), unpriced_models: strings });
+  var column = shape({
+    from: number,
+    to: number,
+    claude_ms: number,
+    codex_ms: number,
+    sessions: list(busy),
+    more: number
+  });
+  var day = shape({
+    from: number,
+    to: number,
+    claude_usd: number,
+    codex_usd: number,
+    sessions: list(priced),
+    more: number
+  });
+  var breakdown = shape({
+    repo: optional2(nullable(text)),
+    machine: optional2(text),
+    harness: optional2(text),
+    model: optional2(text),
+    ms: number,
+    usd: number,
+    sessions: number,
+    unpriced_models: strings,
+    incomplete_usage: optional2(boolean)
+  });
+  var tokens = shape({
+    input: optional2(number),
+    output: optional2(number),
+    cache_read: optional2(number),
+    cache_write: optional2(number)
+  });
+  var item = shape({
+    sid: text,
+    models: optional2(strings),
+    cost_usd: nullable(number),
+    pr_url: nullable(text)
+  });
+  var model = shape({
+    model: text,
+    band: text,
+    n: number,
+    small_sample: boolean,
+    first_pass_acceptance: nullable(number),
+    acceptance_n: number,
+    median_review_rounds: nullable(number),
+    review_rounds_n: number,
+    median_red_ci_heads: nullable(number),
+    red_ci_n: number,
+    median_model_ms: nullable(number),
+    model_time_n: number,
+    median_cost_usd: nullable(number),
+    cost_n: number,
+    allowance_per_million_input: nullable(number),
+    allowance_n: number,
+    tokens,
+    tokens_n: number,
+    items: list(item),
+    items_more: number
+  });
+  var parseAnalytics = shape({
+    days: number,
+    version: text,
+    current: period,
+    previous: period,
+    longest_current_wait: nullable(busy),
+    calls_unknown: number,
+    agents: shape({ unit: text, columns: list(column) }),
+    cost: nullable(
+      shape({ days: list(day), unpriced_models: strings, incomplete_usage: optional2(boolean) })
+    ),
+    breakdown: shape({ repo: list(breakdown), machine: list(breakdown), model: list(breakdown) }),
+    top: shape({ busy: list(busy), waited: list(busy), cost: list(priced) }),
+    sessions: (v) => dictionary(v, shape({ name: text, harness: text })),
+    models: optional2(
+      shape({ groups: list(model), unknown_reasons: (v) => dictionary(v, text) })
+    ),
+    allowance: nullable(
+      shape({
+        recorded_at: number,
+        windows: list(shape({ minutes: number, used_percent: number, resets_at: number }))
+      })
+    ),
+    facets: shape({ repo: list(nullable(text)), machine: strings, harness: strings, model: strings })
+  });
+
+  // src/domain/format.ts
+  var clock = (t, NOW) => {
+    const d = new Date(t), n = new Date(NOW);
+    const hm = String(d.getHours()).padStart(2, "0") + ":" + String(d.getMinutes()).padStart(2, "0");
+    return d.toDateString() === n.toDateString() ? hm : d.toLocaleDateString(void 0, { weekday: "short" }) + " " + hm;
+  };
+  var ago = (t, NOW) => {
+    const d = Math.floor((NOW - t) / 6e4);
+    return d < 1 ? "now" : d < 60 ? d + "m" : d < 2880 ? Math.floor(d / 60) + "h" : Math.floor(d / 1440) + "d";
+  };
+  var dur = (a, b, NOW) => {
+    const d = Math.max(0, Math.floor(((b ?? NOW) - a) / 6e4));
+    return d >= 1440 ? Math.floor(d / 1440) + "d " + Math.floor(d % 1440 / 60) + "h" : d >= 60 ? Math.floor(d / 60) + "h " + d % 60 + "m" : d + "m";
+  };
+  var tok = (m) => m >= 1 ? m.toFixed(1) + "M" : Math.round(m * 1e3) + "k";
+  var shortModel = (model2) => String(model2 ?? "Unknown model").replace(/^gpt-(\d+\.\d+)-(.+)$/i, "$2 $1").replace(/^gpt-\d+-/i, "").replace(/^claude-/i, "").replace(/^(opus|sonnet|haiku)-(\d+)-(\d+)$/i, "$1 $2.$3").replace(/^(opus|sonnet|haiku)-(\d+)\.(\d+)$/i, "$1 $2.$3").replace(/^(opus|sonnet|haiku)-(\d+)$/i, "$1 $2");
+  var liveUrl = (u) => {
+    try {
+      return /^https?:$/.test(new URL(u).protocol) && /^https?:\/\//i.test(u) ? u : null;
+    } catch {
+      return null;
     }
   };
-
-  // src/app/accountControls.ts
-  function createAccountControls(host2) {
-    const accountHost = {
-      place(widget, trigger) {
-        const at = trigger.getBoundingClientRect();
-        setGeometry(widget, "accountLeft", at.left);
-        setGeometry(widget, "accountWidth", at.width);
-        setGeometry(widget, "accountBottom", Math.max(0, innerHeight - at.top + 6));
-      },
-      opened(compact) {
-        if (compact)
-          try {
-            history.pushState(
-              {
-                ...host2.navigation.route,
-                sheet: 1,
-                scrollTop: host2.historyScrollOwner.currentScroll()
-              },
-              ""
-            );
-            host2.accountSheet = true;
-          } catch {
-          }
-      },
-      closed({ keepEntry, navigating }) {
-        if (host2.disposed) return;
-        if (host2.accountSheet) {
-          host2.accountSheet = false;
-          if (!keepEntry && history.state?.sheet) {
-            host2.toolViewsOwner.skipPop = true;
-            history.back();
-          }
-        }
-        if (host2.liveModelOwner.LIVE.pending && !navigating)
-          host2.scope.timeout(() => {
-            if (host2.liveModelOwner.LIVE.pending && !host2.toolViewsOwner.viewerEl && !accountChrome.open)
-              host2.applicationRefreshOwner.refresh();
-          }, 0);
-      },
-      navigate(href) {
-        if (!host2.accountSheet) return false;
-        leaveAccountSheet(() => location.assign(href));
-        return true;
-      },
-      submit(form) {
-        if (!host2.accountSheet) return false;
-        leaveAccountSheet(() => form.submit());
-        return true;
-      }
-    };
-    const shellChrome = host2.sidebarOnly ? null : createShellChrome({
-      account: accountHost,
-      navigate(destination) {
-        if (host2.viewerHost?.nativeNavigation?.some((item2) => item2.key === destination.key))
-          return false;
-        host2.destination.go(host2.navigation.historyRoute({ v: destination.key }, { v: "home" }));
-        return true;
-      },
-      drawerOpened() {
-        host2.orderingControlsOwner.orderApply("side");
-      },
-      drawerClosed() {
-        host2.scope.timeout(() => {
-          if (host2.phone.matches && !document.body.classList.contains("drawer-open"))
-            host2.orderingControlsOwner.orderApply("side");
-        }, host2.orderingControlsOwner.ORD_DRAWER_MS);
-      },
-      railChanged() {
-        host2.layoutOwner.setRailMode(!host2.layoutOwner.railMode);
-        host2.navigationViewOwner.renderNav();
-      }
-    });
-    if (shellChrome) shellChrome.mount(host2.layoutOwner.app);
-    const accountChrome = shellChrome?.account ?? createAccountChrome(accountHost);
-    function closeAccountMenu(keepEntry = void 0, navigating = void 0) {
-      accountChrome.close({ keepEntry, navigating });
-    }
-    function leaveAccountSheet(go) {
-      host2.accountSheet = false;
-      if (history.state?.sheet) {
-        host2.toolViewsOwner.skipPop = true;
-        host2.afterPop = go;
-        history.back();
-      } else go();
-    }
-    function accountWidget(compact) {
-      return host2.account ? accountChrome.mount({
-        account: host2.account,
-        compact,
-        wide: host2.layoutOwner.wideMode,
-        onWideChange: () => host2.layoutOwner.setWideMode(!host2.layoutOwner.wideMode)
-      }) : null;
-    }
-    function renderDrawerAccount() {
-      if (shellChrome) {
-        shellChrome.drawerAccount(
-          host2.account ? {
-            account: host2.account,
-            compact: true,
-            wide: host2.layoutOwner.wideMode,
-            onWideChange: () => host2.layoutOwner.setWideMode(!host2.layoutOwner.wideMode)
-          } : null
-        );
-        return;
-      }
-      const old = host2.$("#account-drawer");
-      if (old) {
-        accountChrome.unmount(old);
-        old.remove();
-      }
-      if (!host2.account) return;
-      const widget = accountWidget(true);
-      if (!widget) return;
-      widget.id = "account-drawer";
-      host2.$("#sidebar").append(widget);
-    }
-    return { shellChrome, accountChrome, closeAccountMenu, renderDrawerAccount };
+  var compactCount = (n) => {
+    if (n < 1e3) return String(n);
+    if (n < 1e4) return +(n / 1e3).toFixed(1) + "k";
+    const k = Math.round(n / 1e3);
+    return k < 1e3 ? k + "k" : +(n / 1e6).toFixed(1) + "M";
+  };
+  var niceStep = (max) => [0.25, 0.5, 1, 2, 5, 10, 20, 50, 100, 200, 500].find((x) => x * 3 >= max) ?? 1e3;
+  function timeText(ms) {
+    const mins = Math.max(0, Math.round(ms / 6e4)), days = Math.floor(mins / 1440), hours = Math.floor(mins % 1440 / 60), rem = mins % 60;
+    return days ? days + "d " + hours + "h" : hours ? hours + "h " + rem + "m" : mins + "m";
   }
+  var countText = (n) => Math.round(n).toLocaleString();
+  var hLabel = (n) => n ? +n.toFixed(2) + " h" : "0";
 
   // src/app/registry.ts
   var HARNESSES = {
@@ -9274,2890 +7117,1492 @@ globalThis.__semonUIShared = __semonUIShared;
     read: "Read result"
   };
 
-  // src/state/analytics-wire.ts
-  function shape(fields) {
-    return (value) => {
-      const source = object2(value), parsed = Object.fromEntries(
-        Object.entries(fields).map(([key2, parse]) => [key2, parse(source[key2])])
-      );
-      return parsed;
-    };
-  }
-  var list = (parse) => (value) => array(value, parse);
-  var nullable2 = (parse) => (value) => value == null ? null : parse(value);
-  var optional2 = (parse) => (value) => value == null ? void 0 : parse(value);
-  var strings5 = list(text);
-  var money = shape({ usd: nullable2(number), unpriced_models: strings5 });
-  var period = shape({
-    agent_ms: number,
-    started: number,
-    turns: number,
-    tools: number,
-    errors: number,
-    peak: number,
-    wait_ms: number,
-    median_wait_ms: number,
-    longest_wait_ms: number,
-    cost: money
-  });
-  var busy = shape({ sid: text, ms: number });
-  var priced = shape({ sid: text, usd: nullable2(number), unpriced_models: strings5 });
-  var column = shape({
-    from: number,
-    to: number,
-    claude_ms: number,
-    codex_ms: number,
-    sessions: list(busy),
-    more: number
-  });
-  var day = shape({
-    from: number,
-    to: number,
-    claude_usd: number,
-    codex_usd: number,
-    sessions: list(priced),
-    more: number
-  });
-  var breakdown = shape({
-    repo: optional2(nullable2(text)),
-    machine: optional2(text),
-    harness: optional2(text),
-    model: optional2(text),
-    ms: number,
-    usd: number,
-    sessions: number,
-    unpriced_models: strings5,
-    incomplete_usage: optional2(boolean)
-  });
-  var tokens = shape({
-    input: optional2(number),
-    output: optional2(number),
-    cache_read: optional2(number),
-    cache_write: optional2(number)
-  });
-  var item = shape({
-    sid: text,
-    models: optional2(strings5),
-    cost_usd: nullable2(number),
-    pr_url: nullable2(text)
-  });
-  var model = shape({
-    model: text,
-    band: text,
-    n: number,
-    small_sample: boolean,
-    first_pass_acceptance: nullable2(number),
-    acceptance_n: number,
-    median_review_rounds: nullable2(number),
-    review_rounds_n: number,
-    median_red_ci_heads: nullable2(number),
-    red_ci_n: number,
-    median_model_ms: nullable2(number),
-    model_time_n: number,
-    median_cost_usd: nullable2(number),
-    cost_n: number,
-    allowance_per_million_input: nullable2(number),
-    allowance_n: number,
-    tokens,
-    tokens_n: number,
-    items: list(item),
-    items_more: number
-  });
-  var parseAnalytics = shape({
-    days: number,
-    version: text,
-    current: period,
-    previous: period,
-    longest_current_wait: nullable2(busy),
-    calls_unknown: number,
-    agents: shape({ unit: text, columns: list(column) }),
-    cost: nullable2(
-      shape({ days: list(day), unpriced_models: strings5, incomplete_usage: optional2(boolean) })
-    ),
-    breakdown: shape({ repo: list(breakdown), machine: list(breakdown), model: list(breakdown) }),
-    top: shape({ busy: list(busy), waited: list(busy), cost: list(priced) }),
-    sessions: (v) => dictionary(v, shape({ name: text, harness: text })),
-    models: optional2(
-      shape({ groups: list(model), unknown_reasons: (v) => dictionary(v, text) })
-    ),
-    allowance: nullable2(
-      shape({
-        recorded_at: number,
-        windows: list(shape({ minutes: number, used_percent: number, resets_at: number }))
-      })
-    ),
-    facets: shape({ repo: list(nullable2(text)), machine: strings5, harness: strings5, model: strings5 })
-  });
-
-  // src/app/analytics.ts
-  function createAnalytics(host2) {
-    const MIN = 6e4, HOUR = 60 * MIN, AN_EVERY = 1e4, AN_KEEP = 8;
-    const AN = {
-      answers: /* @__PURE__ */ new Map(),
-      inflight: null,
-      again: false,
-      againAsked: false,
-      timer: void 0,
-      error: null,
-      failedAt: 0
-    };
-    function analyticsQuery() {
-      const q = ["range=" + (host2.analyticsRange === 1 ? "24h" : host2.analyticsRange + "d")];
-      if (host2.sessionFilters.repo)
-        q.push(
-          "repo=" + (host2.sessionFilters.repo === "__none__" ? "" : host2.transportOwner.enc(host2.sessionFilters.repo))
-        );
-      for (const key2 of ["machine", "harness", "model"])
-        if (host2.sessionFilters[key2])
-          q.push(key2 + "=" + host2.transportOwner.enc(host2.sessionFilters[key2]));
-      return q.join("&");
-    }
-    const analyticsData = () => AN.answers.get(analyticsQuery())?.data ?? null;
-    function fetchAnalytics(askedByUser = false) {
-      if (AN.inflight) {
-        AN.again = true;
-        AN.againAsked ||= askedByUser;
-        return AN.inflight;
-      }
-      const key2 = analyticsQuery(), kept = AN.answers.get(key2);
-      const controller = host2.scope.request();
-      const asked = fetch("/api/analytics?" + key2, {
-        signal: controller.signal,
-        credentials: "same-origin",
-        headers: kept?.etag ? { "If-None-Match": kept.etag } : {}
-      }).then((r) => {
-        if (host2.disposed) throw new DOMException("Viewer destroyed", "AbortError");
-        if (r.status === 304) {
-          const cleared = AN.error != null;
-          AN.error = null;
-          return cleared;
-        }
-        if (r.status === 403) {
-          host2.liveModelOwner.ended(403);
-          return false;
-        }
-        if (!r.ok)
-          throw Object.assign(new Error(r.status + " " + r.statusText), { status: r.status });
-        const etag = r.headers.get("ETag");
-        return r.json().then((value) => {
-          if (host2.disposed) return false;
-          const data = parseAnalytics(value);
-          AN.answers.delete(key2);
-          AN.answers.set(key2, { etag, data });
-          while (AN.answers.size > AN_KEEP) AN.answers.delete(AN.answers.keys().next().value);
-          const changed = AN.error != null || kept?.etag !== etag;
-          AN.error = null;
-          return changed;
-        });
-      }).catch((e) => {
-        if (host2.disposed) return false;
-        const changed = AN.error !== e.message;
-        AN.error = e.message;
-        AN.failedAt = performance.now();
-        return changed;
-      });
-      AN.inflight = asked.then((changed) => {
-        host2.scope.releaseRequest(controller);
-        AN.inflight = null;
-        if (host2.disposed || !AN.again) return changed;
-        const askedAgain = AN.againAsked;
-        AN.again = AN.againAsked = false;
-        if (!askedAgain && backingOff()) return changed;
-        return fetchAnalytics(askedAgain).then((more) => changed || more);
-      });
-      return AN.inflight;
-    }
-    const backingOff = () => AN.error != null && performance.now() - AN.failedAt < AN_EVERY;
-    function scheduleAnalytics() {
-      host2.scope.clearTimeout(AN.timer);
-      AN.timer = void 0;
-      if (host2.navigation.route.v !== "analytics" || host2.liveModelOwner.LIVE.ended || !host2.liveModelOwner.visible())
-        return;
-      const data = analyticsData(), behind = !AN.error && data && host2.liveModelOwner.LIVE.version && data.version !== host2.liveModelOwner.LIVE.version;
-      AN.timer = host2.scope.timeout(
-        () => {
-          AN.timer = void 0;
-          refreshAnalytics();
-        },
-        AN.error ? Math.max(0, AN.failedAt + AN_EVERY - performance.now()) : behind ? 1200 : AN_EVERY
-      );
-    }
-    function refreshAnalytics(asked = false) {
-      if (host2.navigation.route.v !== "analytics") return Promise.resolve();
-      if (asked !== true && backingOff()) {
-        if (!AN.timer) scheduleAnalytics();
-        return Promise.resolve();
-      }
-      host2.scope.clearTimeout(AN.timer);
-      AN.timer = void 0;
-      return fetchAnalytics(asked === true).then((changed) => {
-        if (changed && host2.navigation.route.v === "analytics" && host2.navigation.rendered === host2.navigation.route) {
-          if (host2.toolViewsOwner.viewerEl || host2.accountControlsOwner.accountChrome.open)
-            host2.liveModelOwner.LIVE.pending = true;
-          else {
-            const st = host2.viewport.capture();
-            host2.documentRendererOwner.render();
-            host2.viewport.restore(st);
-          }
-        }
-        scheduleAnalytics();
-      });
-    }
-    if (!host2.sidebarOnly)
-      host2.scope.listen(document, "visibilitychange", () => {
-        if (host2.liveModelOwner.visible() && host2.navigation.route.v === "analytics")
-          refreshAnalytics();
-        else if (!host2.liveModelOwner.visible()) {
-          host2.scope.clearTimeout(AN.timer);
-          AN.timer = void 0;
-        }
-      });
-    const nameOfSid = (A, sid) => host2.modelStore.sessions[sid]?.name ?? A.sessions[sid]?.name ?? sid;
-    const harnessOfSid = (A, sid) => host2.modelStore.sessions[sid]?.harness ?? A.sessions[sid]?.harness ?? "";
-    const sessionFacetValue = (s, key2) => key2 === "repo" ? s.repo ?? "__none__" : key2 === "model" ? s.model ?? s.modelId ?? "Unknown model" : s[key2] ?? "";
-    function matchesSessionFacets(s) {
-      return Object.keys(host2.sessionFilters).every(
-        (key2) => !host2.sessionFilters[key2] || sessionFacetValue(s, key2) === host2.sessionFilters[key2]
-      );
-    }
-    const rangeFacet = (key2) => host2.navigation.route.v !== "analytics" ? [] : (analyticsData()?.facets?.[key2] ?? []).map((v) => v ?? "__none__");
-    const FACETS = [
-      [
-        "repo",
-        "Repo",
-        "All repos",
-        () => [
-          .../* @__PURE__ */ new Set([
-            ...Object.values(host2.modelStore.sessions).map((s) => sessionFacetValue(s, "repo")),
-            ...rangeFacet("repo")
-          ])
-        ].sort((a, b) => a === "__none__" ? 1 : b === "__none__" ? -1 : a.localeCompare(b)),
-        (v) => v === "__none__" ? "No repo" : v
-      ],
-      [
-        "machine",
-        "Machine",
-        "All machines",
-        () => [
-          .../* @__PURE__ */ new Set([
-            ...Object.values(host2.modelStore.sessions).map((s) => s.machine ?? ""),
-            ...rangeFacet("machine")
-          ])
-        ].sort(),
-        (v) => host2.modelStore.machines[v] ?? v
-      ],
-      [
-        "harness",
-        "Harness",
-        "All harnesses",
-        () => [
-          .../* @__PURE__ */ new Set([
-            ...Object.values(host2.modelStore.sessions).map((s) => s.harness ?? ""),
-            ...rangeFacet("harness")
-          ])
-        ].sort(),
-        (v) => HARNESS[v] ?? v
-      ],
-      [
-        "model",
-        "Model",
-        "All models",
-        () => [
-          .../* @__PURE__ */ new Set([
-            ...Object.values(host2.modelStore.sessions).map((s) => sessionFacetValue(s, "model")),
-            ...rangeFacet("model")
-          ])
-        ].sort(),
-        shortModel
-      ]
-    ];
-    function renderFacetFilters(box, onChange) {
-      const s = host2.routeControls.slot("facets", box, (ctx) => {
-        let before = "";
-        const control = createFacetChrome({
-          select(label, value, onChange2) {
-            return createSelect({ label, value, options: [], onChange: onChange2 });
-          },
-          change(key2, value) {
-            host2.sessionFilters[key2] = value;
-          },
-          cleared(key2) {
-            host2.sessionFilters[key2] = "";
-            ctx.sync();
-            ctx.onChange();
-          },
-          canOpen() {
-            return !host2.toolViewsOwner.viewerEl;
-          },
-          opened(d) {
-            ctx.sync();
-            before = JSON.stringify(host2.sessionFilters);
-            host2.toolViewsOwner.viewerEl = d;
-            try {
-              history.pushState(
-                {
-                  ...host2.navigation.route,
-                  sheet: 1,
-                  scrollTop: host2.historyScrollOwner.currentScroll()
-                },
-                ""
-              );
-            } catch {
-            }
-          },
-          closed(d, reason) {
-            if (host2.disposed || reason === "destroyed") return;
-            if (host2.toolViewsOwner.viewerEl === d) {
-              host2.toolViewsOwner.viewerEl = null;
-              if (history.state?.sheet) {
-                host2.toolViewsOwner.skipPop = true;
-                history.back();
-              }
-            }
-            if (JSON.stringify(host2.sessionFilters) !== before) {
-              host2.liveModelOwner.LIVE.pending = false;
-              ctx.onChange();
-            } else if (host2.liveModelOwner.LIVE.pending) host2.applicationRefreshOwner.refresh();
-          },
-          clear() {
-            for (const key2 of Object.keys(host2.sessionFilters))
-              host2.sessionFilters[key2] = "";
-          }
-        });
-        ctx.destroy = () => control.destroy();
-        ctx.sync = () => control.update(
-          FACETS.map(([key2, label, allLabel, valuesOf, showValue]) => {
-            const current = host2.sessionFilters[key2], values = valuesOf().filter((value) => value !== ""), gone = current !== "" && !values.includes(current);
-            if (gone) values.push(current);
-            return {
-              key: key2,
-              label,
-              value: current,
-              display: showValue(current),
-              options: [
-                { value: "", label: allLabel },
-                ...values.map((value) => ({
-                  value,
-                  label: showValue(value) + (gone && value === current ? " (no sessions)" : "")
-                }))
-              ]
-            };
-          })
-        );
-        return control.element;
-      });
-      s.ctx.onChange = onChange;
-      s.ctx.sync();
-      return s.el;
-    }
-    const hoursText = (ms) => (ms / HOUR).toFixed(1) + " h", rangeName = () => host2.analyticsRange === 1 ? "24 h" : host2.analyticsRange + " d";
-    function chartWidth() {
-      const page = host2.$("#page"), style = getComputedStyle(page);
-      return Math.max(
-        280,
-        Math.round(page.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight))
-      );
-    }
-    const rangeAgo = (A) => A.days === 1 ? "24 h ago" : A.days + " d ago";
-    function openModelItems(group) {
-      const {
-        d,
-        body,
-        show: open
-      } = host2.sessionChrome.panel(shortModel(group.model) + " \xB7 " + group.band, {
-        label: "Work items for " + group.model + ", " + group.band
-      });
-      renderModelItems(
-        body,
-        group.n + " work items" + (group.small_sample ? " \xB7 small sample" : ""),
-        (group.items ?? []).map((item2) => ({
-          id: item2.sid,
-          name: host2.modelStore.sessions[item2.sid]?.name,
-          description: (item2.models ?? []).map(shortModel).join(" \u2192 ") + " \xB7 " + (item2.cost_usd == null ? "cost unknown" : host2.domain.asMoney(item2.cost_usd)),
-          trace: (host2.modelStore.turns[item2.sid] ?? []).find((t) => t.out.length)?.id,
-          url: liveUrl(item2.pr_url ?? "") ?? void 0
-        })),
-        group.items_more ? group.items_more + " more items in the selected range" : void 0,
-        {
-          session(id) {
-            host2.pendingSessionOpen = id;
-            d.close();
-          },
-          trace(id) {
-            host2.afterPop = () => host2.destination.goTrace(id);
-            d.close();
-          }
-        }
-      );
-      open();
-    }
-    function openAnalyticsSlice(A, a, b, items, more, costMode = false) {
-      const when = new Date(a).toLocaleString([], { weekday: "short", hour: "numeric", minute: "2-digit" }) + "\u2013" + new Date(b).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }), heading = costMode ? "Sessions with cost" : "Sessions busy";
-      const sheet2 = createNativeSheet(
-        {
-          className: "analytics-slice",
-          heading: heading + " \xB7 " + when,
-          label: heading + " " + when,
-          closeLabel: "Close sessions list"
-        },
-        {
-          opened(d) {
-            host2.toolViewsOwner.viewerEl = d;
-            document.documentElement.classList.add("viewer-open");
-            try {
-              history.pushState(
-                {
-                  ...host2.navigation.route,
-                  sheet: 1,
-                  scrollTop: host2.historyScrollOwner.currentScroll()
-                },
-                ""
-              );
-            } catch {
-            }
-          },
-          closed(d) {
-            host2.dialogs.delete(d);
-            if (host2.disposed) return;
-            document.documentElement.classList.remove("viewer-open");
-            if (host2.toolViewsOwner.viewerEl === d) {
-              host2.toolViewsOwner.viewerEl = null;
-              if (history.state?.sheet) {
-                host2.toolViewsOwner.skipPop = true;
-                history.back();
-              } else if (host2.pendingSessionOpen) {
-                const id = host2.pendingSessionOpen;
-                host2.pendingSessionOpen = null;
-                host2.destination.goSession(id);
-              }
-            }
-          }
-        }
-      );
-      const rows = items.map((item2) => {
-        const harness = harnessOfSid(A, item2.sid);
-        return {
-          id: item2.sid,
-          name: nameOfSid(A, item2.sid),
-          harness,
-          harnessName: HARNESS_SHORT[harness] ?? harness,
-          harnessTip: HARNESS[harness] && HARNESS[harness] !== HARNESS_SHORT[harness] ? HARNESS[harness] : void 0,
-          mark: host2.screenViews.harnessSnapshot(harness),
-          value: costMode ? host2.domain.asMoney("usd" in item2 ? item2.usd ?? 0 : 0) : timeText("ms" in item2 ? item2.ms : 0) + " busy",
-          href: host2.modelStore.sessions[item2.sid] ? host2.bootstrapOwner.urlOf({ v: "session", id: item2.sid }) : void 0,
-          className: "analytics-session analytics-slice",
-          missing: costMode && "unpriced_models" in item2 && item2.unpriced_models.length ? "no price for " + item2.unpriced_models.join(", ") : void 0
-        };
-      });
-      renderSliceBody(
-        sheet2.body,
-        rows,
-        more ?? 0,
-        costMode ? "No sessions had a recorded cost then." : "No sessions were busy then.",
-        (id) => {
-          host2.pendingSessionOpen = id;
-          sheet2.dialog.close();
-        }
-      );
-      sheet2.cleanup(() => render(null, sheet2.body));
-      host2.dialogs.set(sheet2.dialog, sheet2);
-      sheet2.show();
-    }
-    function renderAnalytics(page) {
-      const A = analyticsData(), metrics = [], charts = [], breakdowns = [], lists = [], modelGroups = /* @__PURE__ */ new Map(), slices = /* @__PURE__ */ new Map();
-      const heading = "Measured activity \xB7 Last " + (host2.analyticsRange === 1 ? "24 hours" : host2.analyticsRange + " days");
-      let error = AN.error ? A ? "Couldn't update Analytics: " + AN.error + ". Showing the last answer." : "Couldn't load Analytics: " + AN.error : A ? void 0 : "Loading\u2026";
-      const note = (value, previous, format) => {
-        const delta = value - previous;
-        return Math.abs(delta) < 1e-9 ? { text: "No change vs previous " + rangeName() } : {
-          lead: (delta > 0 ? "+" : "\u2212") + format(Math.abs(delta)),
-          tone: delta > 0 ? "up" : "down",
-          text: " vs previous " + rangeName()
-        };
+  // src/app/analyticsPresentation.ts
+  var HOUR = 36e5;
+  var hoursText = (ms) => (ms / HOUR).toFixed(1) + " h";
+  var nameOfSid = (data, sid) => data.sessions[sid]?.name ?? sid;
+  var harnessOfSid = (data, sid) => data.sessions[sid]?.harness ?? "";
+  function renderAnalyticsPresentation(page, A, failure, host2, actions) {
+    const rangeName = host2.range === 1 ? "24 h" : host2.range + " d";
+    const metrics = [], charts = [], breakdowns = [], lists = [], modelGroups = /* @__PURE__ */ new Map(), slices = /* @__PURE__ */ new Map();
+    const heading = "Measured activity \xB7 Last " + (host2.range === 1 ? "24 hours" : host2.range + " days");
+    let error = failure ? A ? "Couldn't update Analytics: " + failure + ". Showing the last answer." : "Couldn't load Analytics: " + failure : A ? void 0 : "Loading\u2026";
+    const note = (value, previous, format) => {
+      const delta = value - previous;
+      return Math.abs(delta) < 1e-9 ? { text: "No change vs previous " + rangeName } : {
+        lead: (delta > 0 ? "+" : "\u2212") + format(Math.abs(delta)),
+        tone: delta > 0 ? "up" : "down",
+        text: " vs previous " + rangeName
       };
-      const metric = (label, value, delta, explanation, info) => metrics.push({
-        id: "metric-more-analytics-" + metrics.length,
-        label,
-        value,
-        note: delta,
-        explanation,
-        info
-      });
-      const widthOf = (measure, max) => Math.max(measure ? 2 : 0, measure / max * 100);
-      const makeChart = (costMode) => {
-        if (!A) throw new Error("Analytics model unavailable");
-        const key2 = costMode ? "cost" : "agents", W = chartWidth(), left = costMode ? 46 : 40, right = W - 4;
-        if (costMode && !A.cost)
-          return {
-            key: key2,
-            heading: "Cost over time",
-            info: host2.recentNavigation.COST_TIP,
-            empty: "Cost is recorded per UTC day, so there is no hourly series. Pick 7 d or 30 d for a daily chart.",
-            width: W,
-            left,
-            right,
-            grid: [],
-            bins: [],
-            legend: [],
-            role: "img",
-            label: "",
-            ago: rangeAgo(A)
-          };
-        const raw = costMode ? A.cost.days.map((d) => ({
-          a: d.from,
-          b: d.to,
-          claude: d.claude_usd,
-          codex: d.codex_usd,
-          sessions: d.sessions,
-          more: d.more
-        })) : A.agents.columns.map((c) => ({
-          a: c.from,
-          b: c.to,
-          claude: c.claude_ms / HOUR,
-          codex: c.codex_ms / HOUR,
-          sessions: c.sessions,
-          more: c.more
-        }));
-        const most = Math.max(0, ...raw.map((b) => b.claude + b.codex)), stepY = niceStep(most || 1), max = costMode ? Math.max(0.01, most) : Math.max(stepY, Math.ceil(most / stepY) * stepY);
-        const grid = [];
-        if (costMode)
-          for (let i = 0; i <= 2; i++)
-            grid.push({ y: 151 - 139 * i / 2, label: "$" + (max * i / 2).toFixed(2) });
-        else
-          for (let n = 0; n <= max + 1e-9; n += stepY)
-            grid.push({ y: 151 - 139 * n / max, label: hLabel(n) });
-        const step = (right - left) / Math.max(1, raw.length), barWidth = Math.max(2, step * 0.64);
-        const bins = raw.map((bin, i) => {
-          const id = key2 + ":" + i, total = bin.claude + bin.codex, when = host2.clock(bin.a) + "\u2013" + host2.clock(bin.b), tip = when + ": " + hLabel(total);
-          slices.set(id, { bin, costMode });
-          return {
-            key: id,
-            x: left + i * step,
-            width: step,
-            barX: left + i * step + (step - barWidth) / 2,
-            barWidth,
-            claude: 139 * bin.claude / max,
-            codex: 139 * bin.codex / max,
-            active: costMode ? !!bin.sessions.length : total > 0,
-            tip: costMode ? void 0 : tip,
-            label: costMode ? host2.clock(bin.a) + " to " + host2.clock(bin.b) + ": " + host2.domain.asMoney(total) : tip + ". Open the sessions busy then",
-            when,
-            value: costMode ? host2.domain.asMoney(total) : hLabel(total) + " agent-hours"
-          };
-        });
+    };
+    const metric = (label, value, delta, explanation, info) => metrics.push({
+      id: "metric-more-analytics-" + metrics.length,
+      label,
+      value,
+      note: delta,
+      explanation,
+      info
+    });
+    const widthOf = (measure, max) => Math.max(measure ? 2 : 0, measure / max * 100);
+    const makeChart = (costMode) => {
+      if (!A) throw new Error("Analytics model unavailable");
+      const key2 = costMode ? "cost" : "agents", W = host2.width(), left = costMode ? 46 : 40, right = W - 4;
+      if (costMode && !A.cost)
         return {
           key: key2,
-          heading: costMode ? "Cost over time" : "Agents at work",
-          info: costMode ? host2.recentNavigation.COST_TIP : void 0,
-          sub: costMode ? "API-equivalent cost per UTC day \xB7 today so far \xB7 stacked by harness" : "Agent-hours " + A.agents.unit + " \xB7 stacked by harness",
+          heading: "Cost over time",
+          info: host2.costTip,
+          empty: "Cost is recorded per UTC day, so there is no hourly series. Pick 7 d or 30 d for a daily chart.",
           width: W,
           left,
           right,
-          grid,
-          bins,
-          label: costMode ? "API-equivalent cost per day, stacked by harness" : "Agent-hours " + A.agents.unit + " over the selected range, stacked by harness",
-          role: costMode ? "img" : "group",
-          ago: rangeAgo(A),
-          legend: [
-            ["claude", "Claude"],
-            ["codex", "Codex"]
-          ].map(([id, label]) => ({ id, label, mark: host2.screenViews.harnessSnapshot(id) })),
-          missing: costMode && A.cost.incomplete_usage ? "Copied usage is omitted from bars. Its original owner and the full cost are unknown." : costMode && A.cost.unpriced_models.length ? "no price for " + A.cost.unpriced_models.join(", ") + "; unpriced usage is omitted from bars." : void 0
+          grid: [],
+          bins: [],
+          legend: [],
+          role: "img",
+          label: "",
+          ago: A.days === 1 ? "24 h ago" : A.days + " d ago"
         };
+      const raw = costMode ? A.cost.days.map((d) => ({
+        a: d.from,
+        b: d.to,
+        claude: d.claude_usd,
+        codex: d.codex_usd,
+        sessions: d.sessions,
+        more: d.more
+      })) : A.agents.columns.map((c) => ({
+        a: c.from,
+        b: c.to,
+        claude: c.claude_ms / HOUR,
+        codex: c.codex_ms / HOUR,
+        sessions: c.sessions,
+        more: c.more
+      }));
+      const most = Math.max(0, ...raw.map((b) => b.claude + b.codex)), stepY = niceStep(most || 1), max = costMode ? Math.max(0.01, most) : Math.max(stepY, Math.ceil(most / stepY) * stepY);
+      const grid = [];
+      if (costMode)
+        for (let i = 0; i <= 2; i++)
+          grid.push({ y: 151 - 139 * i / 2, label: "$" + (max * i / 2).toFixed(2) });
+      else
+        for (let n = 0; n <= max + 1e-9; n += stepY)
+          grid.push({ y: 151 - 139 * n / max, label: hLabel(n) });
+      const step = (right - left) / Math.max(1, raw.length), barWidth = Math.max(2, step * 0.64);
+      const bins = raw.map((bin, i) => {
+        const id = key2 + ":" + i, total = bin.claude + bin.codex, when = host2.clock(bin.a) + "\u2013" + host2.clock(bin.b), tip = when + ": " + hLabel(total);
+        slices.set(id, { bin, costMode });
+        return {
+          key: id,
+          x: left + i * step,
+          width: step,
+          barX: left + i * step + (step - barWidth) / 2,
+          barWidth,
+          claude: 139 * bin.claude / max,
+          codex: 139 * bin.codex / max,
+          active: costMode ? !!bin.sessions.length : total > 0,
+          tip: costMode ? void 0 : tip,
+          label: costMode ? host2.clock(bin.a) + " to " + host2.clock(bin.b) + ": " + host2.money(total) : tip + ". Open the sessions busy then",
+          when,
+          value: costMode ? host2.money(total) : hLabel(total) + " agent-hours"
+        };
+      });
+      return {
+        key: key2,
+        heading: costMode ? "Cost over time" : "Agents at work",
+        info: costMode ? host2.costTip : void 0,
+        sub: costMode ? "API-equivalent cost per UTC day \xB7 today so far \xB7 stacked by harness" : "Agent-hours " + A.agents.unit + " \xB7 stacked by harness",
+        width: W,
+        left,
+        right,
+        grid,
+        bins,
+        label: costMode ? "API-equivalent cost per day, stacked by harness" : "Agent-hours " + A.agents.unit + " over the selected range, stacked by harness",
+        role: costMode ? "img" : "group",
+        ago: A.days === 1 ? "24 h ago" : A.days + " d ago",
+        legend: [
+          ["claude", "Claude"],
+          ["codex", "Codex"]
+        ].map(([id, label]) => ({ id, label, mark: host2.mark(id) })),
+        missing: costMode && A.cost.incomplete_usage ? "Copied usage is omitted from bars. Its original owner and the full cost are unknown." : costMode && A.cost.unpriced_models.length ? "no price for " + A.cost.unpriced_models.join(", ") + "; unpriced usage is omitted from bars." : void 0
       };
-      let models, allowance;
-      const measures = [
+    };
+    let models, allowance;
+    const measures = [
+      [
+        "Acceptance",
+        "first_pass_acceptance",
+        "acceptance_n",
+        "acceptance",
+        (n) => (n * 100).toFixed(0) + "%"
+      ],
+      ["Review rounds", "median_review_rounds", "review_rounds_n", "review_rounds", String],
+      ["Red CI heads", "median_red_ci_heads", "red_ci_n", "ci", String],
+      ["Model time", "median_model_ms", "model_time_n", "model_time", timeText],
+      [
+        "API cost",
+        "median_cost_usd",
+        "cost_n",
+        "cost",
+        (...args) => host2.money(...args)
+      ],
+      [
+        "Allowance / M input",
+        "allowance_per_million_input",
+        "allowance_n",
+        "allowance",
+        (n) => n.toFixed(2) + "%"
+      ]
+    ];
+    if (A) {
+      const now = A.current, previous = A.previous, pct = (errors, tools) => tools ? Math.round(errors / tools * 100) + "%" : "0%";
+      metric(
+        "Agent-hours",
+        hoursText(now.agent_ms),
+        note(now.agent_ms, previous.agent_ms, hoursText),
+        "Busy time summed across sessions; two sessions busy for an hour count two hours."
+      );
+      metric(
+        A.days === 1 ? "Cost today (UTC)" : "Cost, last " + A.days + " UTC days",
+        now.cost.usd == null ? "\u2014" : host2.money(now.cost.usd),
+        now.cost.usd == null || previous.cost.usd == null ? {
+          text: "no price for " + [.../* @__PURE__ */ new Set([...now.cost.unpriced_models, ...previous.cost.unpriced_models])].join(
+            ", "
+          )
+        } : note(
+          now.cost.usd,
+          previous.cost.usd,
+          (...args) => host2.money(...args)
+        ),
+        A.days === 1 ? "API-equivalent cost. Cost is recorded per UTC day: this is the whole current UTC day so far, compared with the whole day before." : "API-equivalent cost. Cost is recorded per UTC day: the last " + A.days + " UTC days count, today so far, compared with the " + A.days + " whole UTC days before.",
+        host2.costTip
+      );
+      metric(
+        "Sessions started",
+        countText(now.started),
+        note(now.started, previous.started, countText)
+      );
+      metric("Turns", countText(now.turns), note(now.turns, previous.turns, countText));
+      const toolNote = note(now.tools, previous.tools, countText);
+      if (A.calls_unknown)
+        toolNote.tail = " \xB7 \u2014 for " + A.calls_unknown + (A.calls_unknown === 1 ? " session" : " sessions");
+      metric(
+        "Tool calls",
+        countText(now.tools),
+        toolNote,
+        countText(now.errors) + " failed (" + pct(now.errors, now.tools) + ") \xB7 previous " + rangeName + ": " + countText(previous.errors) + " failed (" + pct(previous.errors, previous.tools) + ")"
+      );
+      metric(
+        "Peak concurrency",
+        countText(now.peak),
+        note(now.peak, previous.peak, countText),
+        "The most sessions busy at the same moment."
+      );
+      metric(
+        "Waited on you",
+        timeText(now.wait_ms),
+        note(now.wait_ms, previous.wait_ms, timeText),
+        "Median wait " + timeText(now.median_wait_ms) + " \xB7 previous " + rangeName + ": " + timeText(previous.median_wait_ms)
+      );
+      const wait = A.longest_current_wait;
+      metric(
+        "Longest current wait",
+        wait ? timeText(wait.ms) : "\u2014",
+        note(wait ? wait.ms : 0, previous.longest_wait_ms, timeText),
+        wait ? nameOfSid(A, wait.sid) + " has waited on you for " + timeText(wait.ms) : "No session is waiting on you"
+      );
+      charts.push(makeChart(false), makeChart(true));
+      for (const [key2, title, groups] of [
+        ["repo", "By repo", A.breakdown.repo],
+        ["machine", "By machine", A.breakdown.machine],
+        ["harness", "By harness and model", A.breakdown.model]
+      ]) {
+        const keyFor = (g) => key2 === "repo" ? g.repo ?? "__none__" : key2 === "machine" ? g.machine ?? "" : g.harness + "\0" + g.model;
+        const labelFor = (id) => key2 === "repo" ? id === "__none__" ? "No repo (roles)" : id : key2 === "machine" ? host2.machines[id] ?? id : (HARNESS[id.split("\0")[0]] ?? id.split("\0")[0]) + " \xB7 " + shortModel(id.split("\0")[1]);
+        const selected = (g) => host2.measure === "cost" ? g.usd : g.ms, rows = [...groups].sort(
+          (a, b) => selected(b) - selected(a) || labelFor(keyFor(a)).localeCompare(labelFor(keyFor(b)))
+        ), max = Math.max(1, ...rows.map(selected));
+        breakdowns.push({
+          key: key2,
+          heading: title,
+          rows: rows.map((g) => ({
+            key: keyFor(g),
+            name: labelFor(keyFor(g)),
+            count: g.sessions + (g.sessions === 1 ? " session" : " sessions"),
+            width: widthOf(selected(g), max),
+            color: key2 === "harness" ? keyFor(g).startsWith("claude") ? "claude" : "codex" : void 0,
+            hours: hoursText(g.ms),
+            cost: g.incomplete_usage || g.unpriced_models.length ? "\u2014" : host2.money(g.usd),
+            missing: g.incomplete_usage ? "copied usage; original owner unknown" : g.unpriced_models.length ? "no price for " + g.unpriced_models.join(", ") : void 0
+          }))
+        });
+      }
+      const topLists = [
         [
-          "Acceptance",
-          "first_pass_acceptance",
-          "acceptance_n",
-          "acceptance",
-          (n) => (n * 100).toFixed(0) + "%"
+          "Top sessions \xB7 busy time",
+          A.top.busy,
+          (x) => timeText("ms" in x ? x.ms : 0),
+          (x) => "ms" in x ? x.ms : 0
         ],
-        ["Review rounds", "median_review_rounds", "review_rounds_n", "review_rounds", String],
-        ["Red CI heads", "median_red_ci_heads", "red_ci_n", "ci", String],
-        ["Model time", "median_model_ms", "model_time_n", "model_time", timeText],
         [
-          "API cost",
-          "median_cost_usd",
-          "cost_n",
-          "cost",
-          (...args) => host2.domain.asMoney(...args)
+          "Top sessions \xB7 waited on",
+          A.top.waited,
+          (x) => timeText("ms" in x ? x.ms : 0),
+          (x) => "ms" in x ? x.ms : 0
         ],
         [
-          "Allowance / M input",
-          "allowance_per_million_input",
-          "allowance_n",
-          "allowance",
-          (n) => n.toFixed(2) + "%"
+          "Most expensive sessions \xB7 API-equivalent cost",
+          A.top.cost,
+          (x) => "usd" in x && x.usd != null ? host2.money(x.usd) : "\u2014",
+          (x) => "usd" in x ? x.usd ?? 0 : 0
         ]
       ];
-      if (A) {
-        const now = A.current, previous = A.previous, pct = (errors, tools) => tools ? Math.round(errors / tools * 100) + "%" : "0%";
-        metric(
-          "Agent-hours",
-          hoursText(now.agent_ms),
-          note(now.agent_ms, previous.agent_ms, hoursText),
-          "Busy time summed across sessions; two sessions busy for an hour count two hours."
-        );
-        metric(
-          A.days === 1 ? "Cost today (UTC)" : "Cost, last " + A.days + " UTC days",
-          now.cost.usd == null ? "\u2014" : host2.domain.asMoney(now.cost.usd),
-          now.cost.usd == null || previous.cost.usd == null ? {
-            text: "no price for " + [.../* @__PURE__ */ new Set([...now.cost.unpriced_models, ...previous.cost.unpriced_models])].join(
-              ", "
-            )
-          } : note(
-            now.cost.usd,
-            previous.cost.usd,
-            (...args) => host2.domain.asMoney(...args)
-          ),
-          A.days === 1 ? "API-equivalent cost. Cost is recorded per UTC day: this is the whole current UTC day so far, compared with the whole day before." : "API-equivalent cost. Cost is recorded per UTC day: the last " + A.days + " UTC days count, today so far, compared with the " + A.days + " whole UTC days before.",
-          host2.recentNavigation.COST_TIP
-        );
-        metric(
-          "Sessions started",
-          countText(now.started),
-          note(now.started, previous.started, countText)
-        );
-        metric("Turns", countText(now.turns), note(now.turns, previous.turns, countText));
-        const toolNote = note(now.tools, previous.tools, countText);
-        if (A.calls_unknown)
-          toolNote.tail = " \xB7 \u2014 for " + A.calls_unknown + (A.calls_unknown === 1 ? " session" : " sessions");
-        metric(
-          "Tool calls",
-          countText(now.tools),
-          toolNote,
-          countText(now.errors) + " failed (" + pct(now.errors, now.tools) + ") \xB7 previous " + rangeName() + ": " + countText(previous.errors) + " failed (" + pct(previous.errors, previous.tools) + ")"
-        );
-        metric(
-          "Peak concurrency",
-          countText(now.peak),
-          note(now.peak, previous.peak, countText),
-          "The most sessions busy at the same moment."
-        );
-        metric(
-          "Waited on you",
-          timeText(now.wait_ms),
-          note(now.wait_ms, previous.wait_ms, timeText),
-          "Median wait " + timeText(now.median_wait_ms) + " \xB7 previous " + rangeName() + ": " + timeText(previous.median_wait_ms)
-        );
-        const wait = A.longest_current_wait;
-        metric(
-          "Longest current wait",
-          wait ? timeText(wait.ms) : "\u2014",
-          note(wait ? wait.ms : 0, previous.longest_wait_ms, timeText),
-          wait ? nameOfSid(A, wait.sid) + " has waited on you for " + timeText(wait.ms) : "No session is waiting on you"
-        );
-        charts.push(makeChart(false), makeChart(true));
-        for (const [key2, title, groups] of [
-          ["repo", "By repo", A.breakdown.repo],
-          ["machine", "By machine", A.breakdown.machine],
-          ["harness", "By harness and model", A.breakdown.model]
-        ]) {
-          const keyFor = (g) => key2 === "repo" ? g.repo ?? "__none__" : key2 === "machine" ? g.machine ?? "" : g.harness + "\0" + g.model;
-          const labelFor = (id) => key2 === "repo" ? id === "__none__" ? "No repo (roles)" : id : key2 === "machine" ? host2.modelStore.machines[id] ?? id : (HARNESS[id.split("\0")[0]] ?? id.split("\0")[0]) + " \xB7 " + shortModel(id.split("\0")[1]);
-          const selected = (g) => host2.analyticsMeasure === "cost" ? g.usd : g.ms, rows = [...groups].sort(
-            (a, b) => selected(b) - selected(a) || labelFor(keyFor(a)).localeCompare(labelFor(keyFor(b)))
-          ), max = Math.max(1, ...rows.map(selected));
-          breakdowns.push({
-            key: key2,
-            heading: title,
-            rows: rows.map((g) => ({
-              key: keyFor(g),
-              name: labelFor(keyFor(g)),
-              count: g.sessions + (g.sessions === 1 ? " session" : " sessions"),
-              width: widthOf(selected(g), max),
-              color: key2 === "harness" ? keyFor(g).startsWith("claude") ? "claude" : "codex" : void 0,
-              hours: hoursText(g.ms),
-              cost: g.incomplete_usage || g.unpriced_models.length ? "\u2014" : host2.domain.asMoney(g.usd),
-              missing: g.incomplete_usage ? "copied usage; original owner unknown" : g.unpriced_models.length ? "no price for " + g.unpriced_models.join(", ") : void 0
+      for (const [title, items, value, measure] of topLists) {
+        const max = Math.max(1, ...items.map(measure));
+        lists.push({
+          heading: title,
+          rows: items.map((item2) => {
+            const harness = harnessOfSid(A, item2.sid), missing = "unpriced_models" in item2 ? item2.unpriced_models : [];
+            return {
+              id: item2.sid,
+              name: nameOfSid(A, item2.sid),
+              harness,
+              harnessName: HARNESS_SHORT[harness] ?? harness,
+              harnessTip: HARNESS[harness] && HARNESS[harness] !== HARNESS_SHORT[harness] ? HARNESS[harness] : void 0,
+              mark: host2.mark(harness),
+              value: value(item2),
+              href: host2.sessionHref(item2.sid),
+              rank: widthOf(measure(item2), max),
+              missing: missing.length ? "no price for " + missing.join(", ") : void 0
+            };
+          })
+        });
+      }
+      if (A.models) {
+        const reasons = A.models.unknown_reasons ?? {};
+        models = [];
+        for (const band of ["easy", "medium", "hard", "unknown"]) {
+          const rows = (A.models.groups ?? []).filter((g) => g.band === band);
+          if (!rows.length) continue;
+          const points = rows.filter(
+            (g) => g.first_pass_acceptance != null && g.median_cost_usd != null
+          ), W = Math.max(280, host2.width()), maxCost = Math.max(0.01, ...points.map((g) => g.median_cost_usd ?? 0));
+          models.push({
+            key: band,
+            heading: band === "unknown" ? "Unknown difficulty" : band[0].toUpperCase() + band.slice(1),
+            width: W,
+            rows: rows.map((g) => {
+              const key2 = band + "\0" + g.model;
+              modelGroups.set(key2, g);
+              const tokens2 = g.tokens ?? {};
+              return {
+                key: key2,
+                name: shortModel(g.model),
+                tip: g.model,
+                count: g.n + (g.small_sample ? " \xB7 small sample" : ""),
+                cells: [
+                  ...measures.map(([, valueKey, nKey, reason, format]) => ({
+                    text: g[valueKey] == null ? "Unknown" : format(g[valueKey]),
+                    n: g[nKey] ?? 0,
+                    tip: g[valueKey] == null ? reasons[reason] : void 0
+                  })),
+                  {
+                    text: g.tokens_n ? [
+                      tokens2.input ?? 0,
+                      tokens2.output ?? 0,
+                      (tokens2.cache_read ?? 0) + (tokens2.cache_write ?? 0)
+                    ].map(countText).join(" / ") : "Unknown",
+                    n: g.tokens_n ?? 0
+                  }
+                ]
+              };
+            }),
+            points: points.map((g) => ({
+              x: 42 + g.median_cost_usd / maxCost * (W - 58),
+              y: 150 - g.first_pass_acceptance * 130,
+              label: shortModel(g.model),
+              tip: g.model + ": " + host2.money(g.median_cost_usd ?? 0) + ", " + (g.first_pass_acceptance * 100).toFixed(0) + "% accepted; acceptance n=" + g.acceptance_n + ", cost n=" + g.cost_n
             }))
           });
         }
-        const topLists = [
-          [
-            "Top sessions \xB7 busy time",
-            A.top.busy,
-            (x) => timeText("ms" in x ? x.ms : 0),
-            (x) => "ms" in x ? x.ms : 0
-          ],
-          [
-            "Top sessions \xB7 waited on",
-            A.top.waited,
-            (x) => timeText("ms" in x ? x.ms : 0),
-            (x) => "ms" in x ? x.ms : 0
-          ],
-          [
-            "Most expensive sessions \xB7 API-equivalent cost",
-            A.top.cost,
-            (x) => "usd" in x && x.usd != null ? host2.domain.asMoney(x.usd) : "\u2014",
-            (x) => "usd" in x ? x.usd ?? 0 : 0
-          ]
-        ];
-        for (const [title, items, value, measure] of topLists) {
-          const max = Math.max(1, ...items.map(measure));
-          lists.push({
-            heading: title,
-            rows: items.map((item2) => {
-              const harness = harnessOfSid(A, item2.sid), missing = "unpriced_models" in item2 ? item2.unpriced_models : [];
-              return {
-                id: item2.sid,
-                name: nameOfSid(A, item2.sid),
-                harness,
-                harnessName: HARNESS_SHORT[harness] ?? harness,
-                harnessTip: HARNESS[harness] && HARNESS[harness] !== HARNESS_SHORT[harness] ? HARNESS[harness] : void 0,
-                mark: host2.screenViews.harnessSnapshot(harness),
-                value: value(item2),
-                href: host2.modelStore.sessions[item2.sid] ? host2.bootstrapOwner.urlOf({ v: "session", id: item2.sid }) : void 0,
-                rank: widthOf(measure(item2), max),
-                missing: missing.length ? "no price for " + missing.join(", ") : void 0
-              };
-            })
-          });
-        }
-        if (A.models) {
-          const reasons = A.models.unknown_reasons ?? {};
-          models = [];
-          for (const band of ["easy", "medium", "hard", "unknown"]) {
-            const rows = (A.models.groups ?? []).filter((g) => g.band === band);
-            if (!rows.length) continue;
-            const points = rows.filter(
-              (g) => g.first_pass_acceptance != null && g.median_cost_usd != null
-            ), W = Math.max(280, chartWidth()), maxCost = Math.max(0.01, ...points.map((g) => g.median_cost_usd ?? 0));
-            models.push({
-              key: band,
-              heading: band === "unknown" ? "Unknown difficulty" : band[0].toUpperCase() + band.slice(1),
-              width: W,
-              rows: rows.map((g) => {
-                const key2 = band + "\0" + g.model;
-                modelGroups.set(key2, g);
-                const tokens2 = g.tokens ?? {};
-                return {
-                  key: key2,
-                  name: shortModel(g.model),
-                  tip: g.model,
-                  count: g.n + (g.small_sample ? " \xB7 small sample" : ""),
-                  cells: [
-                    ...measures.map(([, valueKey, nKey, reason, format]) => ({
-                      text: g[valueKey] == null ? "Unknown" : format(g[valueKey]),
-                      n: g[nKey] ?? 0,
-                      tip: g[valueKey] == null ? reasons[reason] : void 0
-                    })),
-                    {
-                      text: g.tokens_n ? [
-                        tokens2.input ?? 0,
-                        tokens2.output ?? 0,
-                        (tokens2.cache_read ?? 0) + (tokens2.cache_write ?? 0)
-                      ].map(countText).join(" / ") : "Unknown",
-                      n: g.tokens_n ?? 0
-                    }
-                  ]
-                };
-              }),
-              points: points.map((g) => ({
-                x: 42 + g.median_cost_usd / maxCost * (W - 58),
-                y: 150 - g.first_pass_acceptance * 130,
-                label: shortModel(g.model),
-                tip: g.model + ": " + host2.domain.asMoney(g.median_cost_usd ?? 0) + ", " + (g.first_pass_acceptance * 100).toFixed(0) + "% accepted; acceptance n=" + g.acceptance_n + ", cost n=" + g.cost_n
-              }))
-            });
-          }
-        }
-        const limits = A.allowance;
-        if (limits?.recorded_at != null && limits.windows?.length)
-          allowance = {
-            when: new Date(limits.recorded_at).toLocaleString([], {
+      }
+      const limits = A.allowance;
+      if (limits?.recorded_at != null && limits.windows?.length)
+        allowance = {
+          when: new Date(limits.recorded_at).toLocaleString([], {
+            hour: "numeric",
+            minute: "2-digit"
+          }),
+          windows: limits.windows.map((limit) => ({
+            label: limit.minutes === 300 ? "5-hour window" : limit.minutes === 10080 ? "Weekly window" : limit.minutes + "-minute window",
+            used: limit.used_percent + "% used",
+            reset: "Resets " + new Date(limit.resets_at).toLocaleString([], {
+              weekday: "short",
               hour: "numeric",
               minute: "2-digit"
-            }),
-            windows: limits.windows.map((limit) => ({
-              label: limit.minutes === 300 ? "5-hour window" : limit.minutes === 10080 ? "Weekly window" : limit.minutes + "-minute window",
-              used: limit.used_percent + "% used",
-              reset: "Resets " + new Date(limit.resets_at).toLocaleString([], {
-                weekday: "short",
-                hour: "numeric",
-                minute: "2-digit"
-              })
-            }))
-          };
+            })
+          }))
+        };
+    }
+    renderAnalyticsScreen(
+      page,
+      {
+        heading,
+        error,
+        ready: !!A,
+        query: host2.query,
+        metrics,
+        charts,
+        breakdowns,
+        lists,
+        models,
+        measure: host2.measure,
+        allowance,
+        modelHeaders: [
+          "Model",
+          "Work items",
+          ...measures.map((m) => m[0]),
+          "Tokens \xB7 input / output / cache"
+        ]
+      },
+      {
+        committed: actions.committed,
+        facets: actions.facets,
+        session: actions.session,
+        measure: actions.measure,
+        breakdown: actions.breakdown,
+        slice(key2) {
+          const slice = slices.get(key2);
+          if (slice && A) actions.slice(A, slice.bin, slice.costMode);
+        },
+        model(key2) {
+          const group = modelGroups.get(key2);
+          if (group) actions.model(group);
+        }
       }
-      renderAnalyticsScreen(
-        page,
+    );
+  }
+
+  // src/app/seenResults.ts
+  function createSeenResults(host2) {
+    const SEEN_KEY = "semon.seen", SEEN_LIMIT = 2e3;
+    const SEEN_RESULTS = (() => {
+      try {
+        const ids = JSON.parse(window.localStorage.getItem(SEEN_KEY) ?? "[]");
+        if (!Array.isArray(ids)) return /* @__PURE__ */ new Set();
+        const clean = ids.filter((id) => typeof id === "string").slice(-SEEN_LIMIT), seen = new Set(clean);
+        if (seen.size !== ids.length)
+          try {
+            window.localStorage.setItem(SEEN_KEY, JSON.stringify([...seen]));
+          } catch {
+          }
+        return seen;
+      } catch {
+        return /* @__PURE__ */ new Set();
+      }
+    })();
+    return { SEEN_RESULTS, SEEN_LIMIT, SEEN_KEY };
+  }
+
+  // src/app/overviewPages.tsx
+  var nullable2 = (value, parse) => value == null ? null : parse(value);
+  function parseSelection(value) {
+    const row = object(value);
+    return { source_key: text(row.source_key), catalog_key: text(row.catalog_key) };
+  }
+  function parseHomeRow(value) {
+    const row = object(value), session = object(row.session), event = row.event == null ? null : object(row.event);
+    return {
+      ...parseSelection(row),
+      id: text(row.id),
+      contentGeneration: nullable2(session.content_generation, text),
+      session: {
+        name: text(session.name),
+        kind: session.kind == null ? void 0 : text(session.kind),
+        harness: text(session.harness),
+        model: text(session.model),
+        repo: nullable2(session.repo, text),
+        state: text(session.state),
+        last: number(session.last),
+        start: number(session.start),
+        waiting_for: nullable2(session.waiting_for, text),
+        waiting_since: nullable2(session.waiting_since, number),
+        cost: nullable2(session.cost, number),
+        parent: nullable2(session.parent, text) ?? void 0,
+        branch: nullable2(session.branch, text) ?? void 0,
+        detail: nullable2(session.detail, text) ?? void 0,
+        activity: session.activity == null ? void 0 : [
+          text(session.activity[0]),
+          text(session.activity[1]),
+          number(session.activity[2])
+        ]
+      },
+      event: event ? {
+        id: text(event.id),
+        at: number(event.at),
+        done: nullable2(event.done, number),
+        ask: nullable2(event.ask, text),
+        status: text(event.status),
+        brief: text(event.brief),
+        answer: nullable2(event.answer, (value2) => array(value2, text)),
+        declined: boolean(event.declined),
+        origin: nullable2(event.origin, text) ?? void 0,
+        turn: nullable2(event.turn, text) ?? void 0
+      } : void 0
+    };
+  }
+  function parseHome(value) {
+    const data = object(value), totals = object(data.totals);
+    if (data.api !== 1) throw Error("Unsupported Home response");
+    for (const key2 of ["inbox", "working", "answered", "recent"]) {
+      if (!Array.isArray(data[key2]) || data[key2].length > (key2 === "recent" ? 60 : 100))
+        throw Error("Home response exceeds its bound");
+    }
+    return {
+      version: text(data.version),
+      now: number(data.now),
+      next: {
+        inbox: nullable2(object(data.next).inbox, number),
+        working: nullable2(object(data.next).working, number),
+        answered: nullable2(object(data.next).answered, number)
+      },
+      totals: {
+        waiting: number(totals.waiting),
+        working: number(totals.working),
+        answered: number(totals.answered)
+      },
+      machines: array(data.machines, (value2) => {
+        const row = object(value2);
+        return {
+          key: text(row.key),
+          label: text(row.label),
+          up: boolean(row.up),
+          working: number(row.working),
+          sessions: number(row.sessions),
+          last: nullable2(row.last, number)
+        };
+      }),
+      recent: array(data.recent, parseHomeRow),
+      inbox: array(data.inbox, parseHomeRow),
+      working: array(data.working, parseHomeRow),
+      answered: array(data.answered, parseHomeRow)
+    };
+  }
+  function createOverviewPages(host2) {
+    let disposed = false, epoch = 0, loading = false, queued = false, queuedForce = false, error = null, home = null, analytics = null, machineLabels = {}, selections = {}, range = 7, measure = "hours", allAnswered = false;
+    const filters = { repo: "", machine: "", harness: "", model: "" };
+    const analyticsCache = /* @__PURE__ */ new Map();
+    let analyticsRetryAt = 0;
+    let observationAfter = null;
+    function acceptAnalytics(value) {
+      analytics = value?.data ?? null;
+      if (!value) return;
+      selections = value.selections;
+      machineLabels = value.labels;
+      recentRows = value.recent;
+      recentNow = value.now;
+    }
+    let recentRows = [], recentNow = 0;
+    const recentOpen = /* @__PURE__ */ new Map();
+    const recentAll = /* @__PURE__ */ new Set();
+    try {
+      const preferences = object(JSON.parse(localStorage.getItem("semon.tree") ?? "{}"));
+      for (const [id, value] of Object.entries(preferences).slice(-200)) {
+        if (value && typeof value === "object" && "open" in value && typeof value.open === "boolean")
+          recentOpen.set(id, value.open);
+      }
+    } catch {
+    }
+    function recentSnapshot(source, catalog = [], current, rail = false, selectedMetadata) {
+      const borrowed = source ? recentRows.filter((row) => row.source_key === source) : recentRows;
+      const rows = borrowed.length ? borrowed.map((row) => {
+        const observed = catalog.find((item3) => item3.key === row.catalog_key);
+        return observed ? {
+          ...row,
+          session: {
+            ...row.session,
+            name: observed.name,
+            kind: observed.presentation_kind ?? row.session.kind,
+            last: observed.last ?? row.session.last,
+            parent: observed.parent ?? void 0,
+            model: observed.model,
+            repo: observed.repo
+          }
+        } : row;
+      }).concat(
+        catalog.filter((item3) => !borrowed.some((row) => row.catalog_key === item3.key)).slice(0, 60).map((row) => ({
+          id: JSON.stringify([source, row.key]),
+          source_key: source,
+          catalog_key: row.key,
+          contentGeneration: null,
+          session: {
+            name: row.name,
+            kind: row.presentation_kind ?? void 0,
+            harness: row.harness,
+            model: row.model,
+            repo: row.repo,
+            state: "off",
+            start: row.start ?? 0,
+            last: row.last ?? 0,
+            parent: row.parent ?? void 0,
+            cost: row.cost.usd,
+            waiting_for: null,
+            waiting_since: null
+          }
+        }))
+      ).sort((a, b) => b.session.last - a.session.last).slice(0, 60) : catalog.slice(0, 60).map((row) => ({
+        id: JSON.stringify([source, row.key]),
+        source_key: source,
+        catalog_key: row.key,
+        contentGeneration: null,
+        session: {
+          name: row.name,
+          kind: row.presentation_kind ?? void 0,
+          harness: row.harness,
+          model: row.model,
+          repo: row.repo,
+          state: row.details?.state ?? "off",
+          start: row.start ?? 0,
+          last: row.last ?? 0,
+          parent: row.parent ?? void 0,
+          branch: row.branch ?? void 0,
+          cost: row.cost.usd,
+          waiting_for: null,
+          waiting_since: null
+        }
+      }));
+      if (source && selectedMetadata && selectedMetadata.key === current) {
+        for (const relative of [
+          ...selectedMetadata.details?.family?.ancestors ?? [],
+          ...selectedMetadata.details?.family?.runs ?? [],
+          {
+            key: selectedMetadata.key,
+            name: selectedMetadata.name,
+            harness: selectedMetadata.harness,
+            kind: selectedMetadata.presentation_kind ?? selectedMetadata.kind,
+            parent: selectedMetadata.parent,
+            cost: selectedMetadata.cost
+          }
+        ]) {
+          if (rows.some((row) => row.catalog_key === relative.key)) continue;
+          rows.push({
+            id: JSON.stringify([source, relative.key]),
+            source_key: source,
+            catalog_key: relative.key,
+            contentGeneration: null,
+            session: {
+              name: relative.name,
+              kind: relative.kind,
+              harness: relative.harness,
+              parent: relative.parent ?? void 0,
+              model: "",
+              repo: null,
+              state: "off",
+              start: 0,
+              last: 0,
+              cost: relative.cost.usd,
+              waiting_for: null,
+              waiting_since: null
+            }
+          });
+        }
+      }
+      const byId = new Map(rows.map((row) => [row.id, row]));
+      const canonical = /* @__PURE__ */ new Map();
+      const idOf = (row) => JSON.stringify([row.source_key, row.session.parent]);
+      for (const row of rows)
+        if (row.session.parent && byId.has(idOf(row))) {
+          const parent = idOf(row);
+          canonical.set(parent, [...canonical.get(parent) ?? [], row]);
+        }
+      const path = /* @__PURE__ */ new Set();
+      let selected = rows.find((row) => row.source_key === source && row.catalog_key === current);
+      while (selected && !path.has(selected.id)) {
+        path.add(selected.id);
+        selected = byId.get(idOf(selected));
+      }
+      const children = /* @__PURE__ */ new Map(), roots = [], reachable = /* @__PURE__ */ new Set();
+      function visit(row, parent) {
+        if (reachable.has(row.id)) return;
+        reachable.add(row.id);
+        let nearest = parent;
+        if (host2.reviews() || row.session.kind !== "Approval review" || path.has(row.id)) {
+          if (parent) children.set(parent, [...children.get(parent) ?? [], row]);
+          else roots.push(row);
+          nearest = row.id;
+        }
+        for (const child of canonical.get(row.id) ?? []) visit(child, nearest);
+      }
+      for (const row of rows.filter((row2) => !row2.session.parent || !byId.has(idOf(row2)))) visit(row);
+      for (const row of rows) if (!reachable.has(row.id)) visit(row);
+      const order = host2.orderScope("recent", JSON.stringify([source, host2.reviews(), rail]));
+      const visibleParents = new Set(
+        [...document.querySelectorAll("#lanes .treeitem")].filter((node) => node.querySelector(":scope > .tree-row .srow")?.getClientRects().length).map((node) => node.dataset.id)
+      );
+      const keys = new Set(children.keys());
+      if (order.keep) {
+        for (const [parent, kids] of children)
+          if (!order.prevKids.has(parent) && visibleParents.has(parent) && !path.has(parent)) {
+            order.n += kids.length;
+            children.delete(parent);
+            keys.delete(parent);
+          }
+      }
+      order.kids = keys;
+      function item2(row, depth, visited) {
+        const next = new Set(visited).add(row.id);
+        const rank = (candidate, seen2 = /* @__PURE__ */ new Set()) => {
+          if (seen2.has(candidate.id)) return 2;
+          seen2.add(candidate.id);
+          return Math.min(
+            candidate.session.state === "wait" ? 0 : candidate.session.state === "work" ? 1 : 2,
+            ...(children.get(candidate.id) ?? []).map((child) => rank(child, seen2))
+          );
+        };
+        const candidates = (children.get(row.id) ?? []).filter((child) => !next.has(child.id));
+        const kids = [...candidates].sort(
+          (a, b) => rank(a) - rank(b) || b.session.last - a.session.last
+        );
+        const visible2 = recentAll.has(row.id) ? kids : kids.filter((child, index) => index < 3 || index < 8 && rank(child) < 2);
+        const open2 = recentOpen.get(row.id) ?? (home?.machines.length === 1 ? recentOpen.get(row.catalog_key) : void 0) ?? (path.has(row.id) || kids.some((child) => rank(child) < 2));
+        const shown = orderRows(
+          order,
+          (recentAll.has(row.id) ? "all:" : "kids:") + row.id,
+          visible2,
+          (a, b) => rank(a) - rank(b) || b.session.last - a.session.last,
+          { must: path, quiet: !open2, seed: recentAll.has(row.id) || !visibleParents.has(row.id) }
+        );
+        return {
+          id: row.id,
+          name: row.session.name,
+          label: row.session.name + ", " + (HARNESSES[row.session.harness]?.name ?? row.session.harness),
+          current: current === row.catalog_key ? "page" : void 0,
+          state: row.session.state,
+          stateLabel: row.session.state === "work" ? "Working" : row.session.state === "wait" ? "Waiting on you" : "Recorded history",
+          age: timeText(Math.max(0, recentNow - row.session.last)),
+          model: shortModel(row.session.model),
+          modelTip: row.session.model,
+          harness: mark2(row.session.harness),
+          fields: row.session.repo ? [
+            {
+              className: "repo",
+              text: row.session.repo.split("/").pop() ?? row.session.repo,
+              priority: 1,
+              tip: row.session.repo,
+              icon: I.repo
+            }
+          ] : [],
+          rail,
+          open: open2,
+          depth,
+          stuck: recentAll.has(row.id),
+          flag: (() => {
+            const below = (id, seen2 = /* @__PURE__ */ new Set()) => {
+              if (seen2.has(id)) return [];
+              seen2.add(id);
+              return (children.get(id) ?? []).flatMap((child) => [child, ...below(child.id, seen2)]);
+            };
+            const descendants = below(row.id), waiting = descendants.filter((child) => child.session.state === "wait").length, working = descendants.filter((child) => child.session.state === "work").length;
+            return waiting ? { state: "wait", tip: waiting + " needs you" } : working ? { state: "work", tip: working + " working" } : void 0;
+          })(),
+          childState: kids.some((child) => rank(child) === 0) ? "wait" : kids.some((child) => rank(child) === 1) ? "work" : void 0,
+          children: kids.length ? shown.map((child) => item2(child, depth + 1, next)) : void 0,
+          all: shown.length < kids.length ? kids.length : void 0
+        };
+      }
+      const orderedRoots = orderRows(
+        order,
+        "roots",
+        roots,
+        (a, b) => b.session.last - a.session.last || a.id.localeCompare(b.id),
+        { limit: 8, must: path }
+      );
+      const visibleRoots = orderedRoots.slice(0, 8);
+      for (const row of orderedRoots.filter((row2) => path.has(row2.id))) {
+        if (visibleRoots.includes(row)) continue;
+        let last = visibleRoots.length - 1;
+        while (last >= 0 && path.has(visibleRoots[last].id)) last--;
+        if (last >= 0) visibleRoots.splice(last, 1, row);
+      }
+      return {
+        empty: !rows.length,
+        items: visibleRoots.map((row) => item2(row, 0, /* @__PURE__ */ new Set()))
+      };
+    }
+    let beforeFilters = "";
+    let facetPanel = null;
+    const facetOwner = createFacetChrome({
+      select(label, value, onChange) {
+        return createSelect({ label, value, options: [], onChange });
+      },
+      change(key2, value) {
+        filters[key2] = value;
+      },
+      cleared(key2) {
+        filters[key2] = "";
+        analyticsChanged();
+      },
+      clear() {
+        for (const key2 of Object.keys(filters)) filters[key2] = "";
+        draw();
+      },
+      canOpen() {
+        return host2.route() === "analytics" && !disposed;
+      },
+      opened(dialog) {
+        beforeFilters = JSON.stringify(filters);
+        facetPanel = { destroy: () => dialog.close() };
+        host2.panelOpened(facetPanel);
+      },
+      closed(_dialog, reason) {
+        if (facetPanel) host2.panelClosed(facetPanel);
+        facetPanel = null;
+        if (reason === "dismissed" && beforeFilters !== JSON.stringify(filters)) analyticsChanged();
+      }
+    });
+    const facets = facetOwner.element;
+    const actions = document.createElement("div");
+    actions.className = "analytics-range";
+    actions.setAttribute("role", "group");
+    actions.setAttribute("aria-label", "Analytics range");
+    const dialogs = /* @__PURE__ */ new Set();
+    const seen = createSeenResults({});
+    const money3 = (n) => "$" + n.toFixed(2);
+    const mark2 = (id) => {
+      const harness = HARNESSES[id];
+      return harness ? {
+        id,
+        name: harness.name,
+        light: harness.icon.light,
+        dark: harness.icon.dark,
+        darkTheme: matchMedia("(prefers-color-scheme: dark)").matches
+      } : void 0;
+    };
+    const query = () => {
+      const value = new URLSearchParams({ range: range === 1 ? "24h" : range + "d" });
+      for (const key2 of ["repo", "machine", "harness", "model"])
+        if (filters[key2]) value.set(key2, filters[key2] === "__none__" ? "" : filters[key2]);
+      return value.toString();
+    };
+    function analyticsChanged() {
+      acceptAnalytics(analyticsCache.get(query()));
+      error = null;
+      draw();
+      void refresh(true);
+    }
+    function open(selection, turn) {
+      if (!disposed && selection) host2.session(selection, turn);
+    }
+    function panel(title, className) {
+      const value = createPanelChrome(
+        { title, className },
         {
-          heading,
-          error,
-          ready: !!A,
-          query: analyticsQuery(),
-          metrics,
-          charts,
-          breakdowns,
-          lists,
-          models,
-          measure: host2.analyticsMeasure,
-          allowance,
-          modelHeaders: [
-            "Model",
-            "Work items",
-            ...measures.map((m) => m[0]),
-            "Tokens \xB7 input / output / cache"
-          ]
+          opened() {
+            host2.panelOpened(value);
+          },
+          closed() {
+            host2.panelClosed(value);
+            dialogs.delete(value);
+            render(null, value.body);
+          }
+        }
+      );
+      dialogs.add(value);
+      return value;
+    }
+    function drawHome() {
+      if (!home) return;
+      if (!home.machines.length && host2.homeIntro) {
+        if (host2.homeIntro.parentElement !== host2.root) {
+          render(null, host2.root);
+          host2.root.replaceChildren(host2.homeIntro);
+        }
+        return;
+      }
+      const inbox = home.inbox.filter(
+        (row) => row.event?.ask !== "result" || !(home.machines.length === 1 && seen.SEEN_RESULTS.has(row.event.id)) && !seen.SEEN_RESULTS.has(JSON.stringify([row.source_key, row.event.id]))
+      );
+      const byId = /* @__PURE__ */ new Map();
+      const rowId = (row) => JSON.stringify([row.source_key, row.event?.id ?? row.catalog_key]);
+      const inboxRow = (row, quiet) => {
+        const event = row.event;
+        const id = rowId(row);
+        byId.set(id, row);
+        return {
+          id,
+          quiet,
+          icon: quiet ? I.done : event.ask === "question" ? I.qc : event.ask === "decision" ? I.decide : I.result,
+          parts: [
+            { className: "who", text: row.session.name },
+            {
+              className: "verb",
+              text: event.ask === "question" ? " asked you" : event.ask === "decision" ? " needs your decision" : " sent you a result"
+            }
+          ],
+          age: timeText(Math.max(0, home.now - event.at)) + " ago",
+          preview: event.brief || (loading ? "Loading recorded text\u2026" : "Recorded preview unavailable"),
+          answer: quiet && event.ask !== "result" ? event.answer?.length ? "You answered: " + event.answer.join(" \xB7 ") : event.declined ? "Declined" : "Answered \xB7 reply not in these logs" : void 0,
+          origin: event.origin ? { message: event.origin } : void 0,
+          context: [
+            HARNESSES[row.session.harness]?.name ?? row.session.harness,
+            home.machines.find((machine) => machine.key === row.source_key)?.label ?? row.source_key
+          ].join(" \xB7 "),
+          harness: mark2(row.session.harness),
+          trace: event.turn ? id : void 0
+        };
+      };
+      const sessions = new Map(home.working.map((row) => [row.id, row]));
+      renderHomeScreen(
+        host2.root,
+        {
+          observation: error ?? void 0,
+          waiting: home.totals.waiting - (home.inbox.length - inbox.length),
+          working: home.totals.working,
+          up: home.machines.filter((machine) => machine.up).length,
+          machines: home.machines.length,
+          inbox: inbox.map((row) => inboxRow(row, false)),
+          live: orderRows(
+            host2.orderScope("working"),
+            "working",
+            home.working,
+            (a, b) => b.session.last - a.session.last
+          ).map((row) => ({
+            id: row.id,
+            name: row.session.name,
+            state: "work",
+            stateLabel: "Working",
+            status: HARNESSES[row.session.harness]?.name ?? row.session.harness,
+            detail: [
+              home.machines.length > 1 ? home.machines.find((machine) => machine.key === row.source_key)?.label : null,
+              row.session.detail ? "for you" : null,
+              row.session.detail
+            ].filter(Boolean).join(" \xB7 "),
+            activity: row.session.activity,
+            harness: mark2(row.session.harness)
+          })),
+          answered: (allAnswered ? home.answered : home.answered.slice(0, 3)).map(
+            (row) => inboxRow(row, true)
+          ),
+          totalAnswered: home.totals.answered,
+          allAnswered,
+          moreInbox: home.next.inbox !== null,
+          moreLive: home.next.working !== null,
+          moreAnswered: home.next.answered !== null
         },
         {
-          committed: (...args) => host2.sessionChrome.observeTitle(...args),
-          facets: () => renderFacetFilters(page, () => {
-            host2.documentRendererOwner.render();
-            refreshAnalytics(true);
-          }),
-          session: (...args) => host2.destination.goSession(...args),
-          measure(value) {
-            if (host2.analyticsMeasure === value) return;
-            const top = host2.historyScrollOwner.currentScroll();
-            host2.analyticsMeasure = value;
-            host2.documentRendererOwner.render();
-            host2.historyScrollOwner.restoreScroll(top);
+          committed() {
+          },
+          trace(id) {
+            const row = byId.get(id);
+            if (row?.event?.turn) host2.trace(row, row.event.turn);
+          },
+          session(id) {
+            open(sessions.get(id));
+          },
+          inbox(id) {
+            const row = byId.get(id);
+            if (!row) return;
+            if (row.event?.ask === "result") {
+              seen.SEEN_RESULTS.add(JSON.stringify([row.source_key, row.event.id]));
+              while (seen.SEEN_RESULTS.size > seen.SEEN_LIMIT)
+                seen.SEEN_RESULTS.delete(seen.SEEN_RESULTS.values().next().value);
+              try {
+                localStorage.setItem(seen.SEEN_KEY, JSON.stringify([...seen.SEEN_RESULTS]));
+              } catch {
+              }
+            }
+            open(row, row.event?.turn);
+          },
+          answered() {
+            allAnswered = true;
+            draw();
+          },
+          more(section) {
+            void moreHome(section);
+          }
+        }
+      );
+    }
+    function drawAnalytics() {
+      render(
+        /* @__PURE__ */ jsx(Fragment2, { children: [
+          [1, "24 h"],
+          [7, "7 d"],
+          [30, "30 d"]
+        ].map(([days, label]) => /* @__PURE__ */ jsx(
+          "button",
+          {
+            type: "button",
+            class: range === days ? "on" : "",
+            "aria-pressed": range === days,
+            onClick: () => {
+              range = Number(days);
+              analyticsChanged();
+            },
+            children: label
+          }
+        )) }),
+        actions
+      );
+      const choices = analytics?.facets;
+      facetOwner.update(
+        ["repo", "machine", "harness", "model"].map((key2) => ({
+          key: key2,
+          label: key2 === "repo" ? "Repo" : key2[0].toUpperCase() + key2.slice(1),
+          value: filters[key2],
+          display: key2 === "machine" ? machineLabels[filters[key2]] ?? filters[key2] : key2 === "harness" ? HARNESSES[filters[key2]]?.name ?? filters[key2] : key2 === "model" ? shortModel(filters[key2]) : filters[key2] === "__none__" ? "No repo" : filters[key2],
+          options: [
+            {
+              value: "",
+              label: "All " + (key2 === "repo" ? "repos" : key2 === "harness" ? "harnesses" : key2 + "s")
+            },
+            ...(choices?.[key2] ?? []).map((value) => ({
+              value: value ?? "__none__",
+              label: value == null ? "No repo" : key2 === "machine" ? machineLabels[value] ?? value : key2 === "harness" ? HARNESSES[value]?.name ?? value : key2 === "model" ? shortModel(value) : value
+            }))
+          ]
+        }))
+      );
+      const machines = { ...machineLabels };
+      for (const machine of home?.machines ?? []) machines[machine.key] = machine.label;
+      renderAnalyticsPresentation(
+        host2.root,
+        analytics,
+        error,
+        {
+          range,
+          measure,
+          query: query(),
+          machines,
+          mark: mark2,
+          money: money3,
+          clock: (time) => new Date(time).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }),
+          costTip: "API-equivalent cost; actual plan charges may differ.",
+          width: () => {
+            const style = getComputedStyle(host2.root);
+            return Math.max(
+              280,
+              host2.root.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight)
+            );
+          },
+          sessionHref: (id) => selections[id] ? "/s/native/" + encodeURIComponent(selections[id].catalog_key) + "?machine=" + encodeURIComponent(selections[id].source_key) : void 0
+        },
+        {
+          committed() {
+          },
+          facets: () => facets,
+          session: (id) => open(selections[id]),
+          measure: (value) => {
+            measure = value;
+            draw();
           },
           breakdown(group, key2) {
-            if (group === "repo") host2.sessionFilters.repo = key2;
-            else if (group === "machine") host2.sessionFilters.machine = key2;
-            else {
-              const [harness, model2] = key2.split("\0");
-              host2.sessionFilters.harness = harness ?? "";
-              host2.sessionFilters.model = model2 ?? "";
-            }
-            host2.query = "";
-            host2.groupBy = "recent";
-            host2.destination.go({ v: "sessions" });
+            if (group === "repo") filters.repo = key2;
+            else if (group === "machine") filters.machine = key2;
+            else [filters.harness, filters.model] = key2.split("\0");
+            const machines2 = Object.keys(machineLabels);
+            host2.sessions({
+              ...filters,
+              machine: filters.machine || (machines2.length === 1 ? machines2[0] : "")
+            });
           },
-          slice(key2) {
-            const slice = slices.get(key2);
-            if (!slice || !A) return;
-            const { bin, costMode } = slice;
-            openAnalyticsSlice(A, bin.a, bin.b, bin.sessions, bin.more, costMode);
+          slice(data, bin, costMode) {
+            const value = panel(costMode ? "Sessions with cost" : "Sessions busy", "analytics-slice");
+            renderSliceBody(
+              value.body,
+              bin.sessions.map((item2) => ({
+                id: item2.sid,
+                name: data.sessions[item2.sid]?.name ?? item2.sid,
+                harness: data.sessions[item2.sid]?.harness ?? "",
+                harnessName: data.sessions[item2.sid]?.harness ?? "",
+                mark: mark2(data.sessions[item2.sid]?.harness ?? ""),
+                value: costMode && "usd" in item2 ? item2.usd == null ? "\u2014" : money3(item2.usd) : timeText("ms" in item2 ? item2.ms : 0)
+              })),
+              bin.more,
+              "No sessions in this range.",
+              (id) => {
+                open(selections[id]);
+              }
+            );
+            value.show();
           },
-          model(key2) {
-            const model2 = modelGroups.get(key2);
-            if (model2) openModelItems(model2);
-          }
-        }
-      );
-    }
-    return {
-      fetchAnalytics,
-      scheduleAnalytics,
-      refreshAnalytics,
-      renderAnalytics,
-      matchesSessionFacets,
-      renderFacetFilters
-    };
-  }
-
-  // src/app/applicationRefresh.ts
-  function createApplicationRefresh(host2) {
-    function refresh(dirty = null) {
-      if (host2.disposed) return;
-      if (host2.accountControlsOwner.accountChrome.open && !host2.$(".account-popover")?.isConnected)
-        host2.accountControlsOwner.closeAccountMenu();
-      if (host2.toolViewsOwner.viewerEl || host2.accountControlsOwner.accountChrome.open) {
-        host2.liveModelOwner.LIVE.pending = true;
-        return;
-      }
-      if (host2.sidebarOnly) {
-        host2.liveModelOwner.LIVE.pending = false;
-        host2.documentRendererOwner.render();
-        return;
-      }
-      host2.liveModelOwner.LIVE.pending = false;
-      const r = host2.navigation.route;
-      if (host2.navigation.rendered !== r || r.v === "session" && !host2.modelStore.sessions[r.id] || r.v === "trace" && !host2.modelStore.sessions[r.sid] || r.v === "machine" && !host2.modelStore.machines[r.id])
-        return;
-      const st = host2.viewport.capture();
-      setGeometry(host2.$("#page"), "paddingBottom", null);
-      if (r.v !== "session") {
-        host2.documentRendererOwner.render();
-        host2.viewport.restore(st);
-        return;
-      }
-      const n = host2.viewport.patchSession(dirty);
-      host2.viewport.restore(st, st.bottom);
-      if (!st.bottom && n) host2.liveModelOwner.LIVE.fresh += n;
-      host2.viewport.syncJump();
-    }
-    function controls() {
-      if (host2.disposed) return;
-      if (host2.toolViewsOwner.viewerEl || host2.accountControlsOwner.accountChrome.open) {
-        host2.liveModelOwner.LIVE.pending = true;
-        return;
-      }
-      host2.navigationViewOwner.renderNav();
-      const route = host2.navigation.route;
-      if (host2.sidebarOnly || route.v !== "session" || host2.navigation.rendered !== route) return;
-      const anchor = host2.viewport.capture();
-      updateSessionControl(host2.$("#page"), host2.controlOwner.view(route.id));
-      host2.viewport.restore(anchor, anchor.bottom);
-    }
-    return { refresh, controls };
-  }
-
-  // src/app/bootstrap.ts
-  function createBootstrap(host2) {
-    const routeModel = {
-      session(id) {
-        return host2.modelStore.sessions[id];
-      },
-      machine(id) {
-        return !!host2.modelStore.machines[id];
-      },
-      turn(id) {
-        return host2.modelStore.turn.get(id);
-      },
-      get machinesPath() {
-        return host2.viewerHost?.machinesPath;
-      }
-    };
-    const compatibility = new URLSearchParams(location.search).get("compat") === "1" || host2.sidebarOnly;
-    const urlOf = (r) => {
-      const address = routeUrl(r, routeModel);
-      if (!compatibility) return address;
-      const url = new URL(address, location.href);
-      url.searchParams.set("compat", "1");
-      return url.pathname + url.search + url.hash;
-    }, routeOf = (location2) => parseRoute(location2, routeModel);
-    let retryDelay = 1e3;
-    let retryTimer;
-    let loading = false;
-    function boot() {
-      if (host2.disposed || loading) return;
-      host2.scope.clearTimeout(retryTimer);
-      loading = true;
-      host2.transportOwner.api(
-        "/api/model?delta=1" + (host2.viewerHost?.controlStream || host2.viewerHost?.catalogControlStream ? "&content=1" : "")
-      ).then(async (m) => {
-        if (host2.disposed) return;
-        const adopted = host2.transportOwner.adopt(m);
-        host2.liveModelOwner.LIVE.version = adopted.version;
-        host2.liveModelOwner.remember(adopted);
-        if (host2.sidebarOnly || host2.nativePage) {
-          if (host2.nativePage)
-            host2.navigation.route = host2.navigation.historyRoute(
-              { v: host2.nativePage.nav },
-              { v: "home" }
-            );
-          host2.documentRendererOwner.render();
-          host2.liveModelOwner.schedule(2e3);
-          return;
-        }
-        host2.navigation.route = routeOf(location);
-        if (host2.navigation.route.v === "sessions")
-          host2.query = (new URLSearchParams(location.search).get("q") ?? "").trim();
-        if (host2.navigation.route.v === "machines" && host2.machinesPath && !host2.viewerHost) {
-          location.assign(host2.machinesPath);
-          return;
-        }
-        try {
-          const address = new URL(urlOf(host2.navigation.route), location.href);
-          if (host2.navigation.route.v === "sessions" && host2.query)
-            address.searchParams.set("q", host2.query);
-          if (host2.navigation.route.v === "session") address.hash = location.hash;
-          history.replaceState(
-            { ...host2.navigation.route, scrollTop: 0 },
-            "",
-            address.pathname + address.search + address.hash
-          );
-        } catch {
-        }
-        const done = () => {
-          host2.documentRendererOwner.render();
-          if (host2.navigation.route.v === "session" && ("turn" in host2.navigation.route ? host2.navigation.route.turn : void 0)) {
-            host2.destination.revealTurn(
-              ("turn" in host2.navigation.route ? host2.navigation.route.turn : void 0) ?? "",
-              true
-            );
-            if (location.hash)
-              host2.scope.frame(
-                () => host2.scope.frame(
-                  (...args) => host2.destination.revealEntryHash(...args)
-                )
-              );
-          } else if (host2.navigation.route.v === "session" && location.hash)
-            host2.destination.revealEntryHash();
-          else if (host2.navigation.route.v === "session") {
-            host2.destination.openSessionAtEnd();
-            host2.viewport.syncJump();
-          } else host2.historyScrollOwner.quietTop();
-          host2.liveModelOwner.schedule(2e3);
-          host2.scope.interval(
-            (...args) => host2.tickerOwner.ticker(...args),
-            1e3
-          );
-        };
-        const initialRoute = host2.navigation.route, p = host2.transportOwner.load(initialRoute);
-        if (p) {
-          try {
-            await p;
-          } catch (error) {
-            if (host2.disposed || host2.navigation.route !== initialRoute) return;
-            throw error;
-          }
-        }
-        if (!host2.disposed && host2.navigation.route === initialRoute) done();
-      }).catch((err) => {
-        if (host2.disposed) return;
-        if (host2.viewerHost?.modelFailed?.(err?.status ?? 0)) return;
-        if (err?.status !== 403) {
-          retryTimer = host2.scope.timeout(boot, retryDelay);
-          retryDelay = Math.min(3e4, retryDelay * 2);
-        }
-        if (host2.viewerHost) return;
-        renderPlaceholder(
-          host2.$(host2.sidebarOnly ? "#lanes" : "#page"),
-          "Couldn't load the sessions: " + err.message + (err?.status === 403 ? ". Reload with an authorized URL." : ". Retrying automatically\u2026")
-        );
-      }).finally(() => {
-        loading = false;
-      });
-    }
-    return { routeModel, urlOf, routeOf, boot };
-  }
-
-  // src/app/destination.ts
-  function createDestination(host2) {
-    function openSessionAtEnd() {
-      if (location.hash) return;
-      host2.viewport.startOpeningEndPin();
-    }
-    const SKELETON_MS = 150;
-    let skeletonTimer;
-    let lanesFor = null;
-    function paintPending(r) {
-      const page = host2.$("#page"), hadFocus = host2.$("#sidebar").contains(document.activeElement);
-      host2.navigationViewOwner.renderNav();
-      host2.recentNavigation.renderLanes();
-      host2.sessionChrome.drawSessionBar();
-      lanesFor = { r, version: host2.liveModelOwner.LIVE.version };
-      if (hadFocus)
-        host2.$("#lanes .srow[data-id='" + CSS.escape(r.id) + "']")?.focus({ preventScroll: true });
-      page.setAttribute("aria-busy", "true");
-      page.inert = true;
-      page.classList.add("loading");
-      host2.scope.clearTimeout(skeletonTimer);
-      skeletonTimer = host2.scope.timeout(() => {
-        if (host2.navigation.route !== r || !page.classList.contains("loading")) return;
-        page.classList.remove("loading");
-        page.classList.remove("child-page");
-        setGeometry(page, "paddingBottom", null);
-        renderPlaceholder(page);
-        host2.historyScrollOwner.quietTop();
-        host2.sessionChrome.syncBarLine();
-      }, SKELETON_MS);
-    }
-    function endLoading() {
-      host2.scope.clearTimeout(skeletonTimer);
-      skeletonTimer = void 0;
-      const page = host2.$("#page");
-      page.removeAttribute("aria-busy");
-      page.inert = false;
-      page.classList.remove("loading");
-    }
-    function focusTitle() {
-      const a = document.activeElement;
-      if (a && a !== document.body && !host2.$("#sidebar").contains(a)) return;
-      const h2 = host2.$("#page .ph h1");
-      if (h2) {
-        h2.tabIndex = -1;
-        h2.focus({ preventScroll: true });
-      }
-    }
-    function failLoad(r, err) {
-      if (host2.navigation.route !== r || err instanceof Error && err.name === "AbortError") return;
-      endLoading();
-      const page = host2.$("#page");
-      page.classList.remove("child-page");
-      setGeometry(page, "paddingBottom", null);
-      renderPlaceholder(
-        page,
-        "Couldn't load this session: " + (err instanceof Error ? err.message : "no response"),
-        () => go({ ...r }, true)
-      );
-    }
-    const isDeep = (r) => {
-      const t = r.turn ? host2.modelStore.turn.get(r.turn) : null;
-      return !!t && t.sid === r.id && !t.entries.length;
-    };
-    function go(r, fromHistory = false, prepared = false, nextContent = null) {
-      host2.navigation.cancelNative();
-      if (host2.nativePage) {
-        if (!fromHistory)
-          location.assign(
-            r.v === "machines" ? host2.machinesPath ?? host2.bootstrapOwner.urlOf(r) : host2.bootstrapOwner.urlOf(r)
-          );
-        return;
-      }
-      if (r.v === "machines" && host2.viewerHost && !prepared) {
-        host2.documentEventsOwner.closeDrawer(true);
-        host2.accountControlsOwner.closeAccountMenu(true, true);
-        host2.navigation.loadNative(
-          r,
-          (content2) => go(r, fromHistory, true, content2),
-          () => {
-            if (host2.viewerHost) location.assign(host2.viewerHost.machinesPath);
-          }
-        );
-        return;
-      }
-      if (r.v !== "sessions" || r !== host2.focusSessionsSearchOnRender)
-        host2.focusSessionsSearchOnRender = null;
-      if (host2.sidebarOnly) {
-        if (!fromHistory) {
-          host2.documentEventsOwner.closeDrawer(true);
-          location.assign(
-            r.v === "machines" && host2.machinesPath ? host2.machinesPath : host2.bootstrapOwner.urlOf(r)
-          );
-        }
-        return;
-      }
-      if (host2.navigation.route.v === "session")
-        host2.pagingOwner.clearPaging("id" in host2.navigation.route ? host2.navigation.route.id : "");
-      host2.pagingOwner.resetPagerInput();
-      host2.viewport.stopOpeningEndPin();
-      host2.navigation.cancelRoute();
-      if (r.v === "machines" && host2.machinesPath && !host2.viewerHost) {
-        location.assign(host2.machinesPath);
-        return;
-      }
-      if (!fromHistory) host2.historyScrollOwner.saveHistoryScroll();
-      host2.navigation.replaceContent(r, nextContent);
-      host2.accountControlsOwner.closeAccountMenu(true, true);
-      host2.sessionChrome.dropErrors(true);
-      if (host2.navigation.route.v === "session" && (r.v !== "session" || r.v !== "session" || r.id !== ("id" in host2.navigation.route ? host2.navigation.route.id : "")) && host2.transcripts.entries["id" in host2.navigation.route ? host2.navigation.route.id : ""] && host2.transcripts.meta["id" in host2.navigation.route ? host2.navigation.route.id : ""]) {
-        const sid = "id" in host2.navigation.route ? host2.navigation.route.id : "", entries = host2.transcripts.entries[sid], meta = { ...host2.transcripts.meta[sid], origin: !!host2.domain.originHandoff(sid) };
-        host2.scope.frame(
-          () => host2.scope.frame(() => host2.scope.timeout(() => host2.cacheTx(sid, entries, meta), 0))
-        );
-      }
-      if (r.v !== "session" || r.v !== "session" || r.id !== ("id" in host2.navigation.route ? host2.navigation.route.id : ""))
-        host2.show = { ...host2.allVisibility };
-      if (r.v !== "sessions") host2.orderingControlsOwner.ORD.delete("page");
-      host2.navigation.route = r;
-      host2.find = "";
-      host2.findOpen = false;
-      host2.documentEventsOwner.closeDrawer(true);
-      host2.viewport.clearNewEntries();
-      if (!fromHistory) {
-        const state2 = { ...r };
-        delete state2.scrollTop;
-        try {
-          history.pushState(state2, "", host2.bootstrapOwner.urlOf(r));
-        } catch {
-        }
-      }
-      const done = () => {
-        if (host2.navigation.route !== r) return;
-        endLoading();
-        host2.documentRendererOwner.render();
-        if (r.v === "session" || host2.viewerHost && r.v === "machines") focusTitle();
-        if (fromHistory && Number.isFinite(r.scrollTop)) {
-          const turns = [...host2.$("#page").querySelectorAll(".turn")];
-          for (const turn of turns) revealMeasuredTurn(turn, true);
-          const heights = turns.map((turn) => turn.getBoundingClientRect().height);
-          turns.forEach((turn, i) => {
-            setGeometry(turn, "intrinsicHeight", Math.ceil(heights[i]));
-            revealMeasuredTurn(turn, false);
-          });
-          host2.historyScrollOwner.restoreScroll(r.scrollTop);
-          host2.historyScrollOwner.restoreHostFocus(r.hostFocus);
-        } else if (r.v === "session" && r.turn) {
-          revealTurn(r.turn, !fromHistory);
-          if (location.hash) host2.scope.frame(() => host2.scope.frame(revealEntryHash));
-        } else if (r.v === "session" && location.hash) revealEntryHash();
-        else if (r.v === "session") openSessionAtEnd();
-        else host2.historyScrollOwner.quietTop();
-        host2.viewport.syncJump();
-      };
-      if (r.v === "session" && host2.modelStore.sessions[r.id]) {
-        if (host2.transcripts.staleBriefs.has(r.id)) {
-          delete host2.transcripts.entries[r.id];
-          delete host2.transcripts.meta[r.id];
-          host2.transcripts.cache.delete(r.id);
-        }
-        const kept = !host2.transcripts.entries[r.id];
-        if (kept ? host2.adoptCached(r) : !isDeep(r)) {
-          host2.transcripts.cache.delete(r.id);
-          paintPending(r);
-          host2.scope.frame(
-            () => host2.scope.timeout(() => {
-              if (host2.navigation.route !== r) return;
-              if (kept && !r.turn) host2.transportOwner.spread(r.id);
-              done();
-              host2.transcriptRevalidationOwner.revalidate(r);
-            }, 0)
-          );
-          return;
-        }
-      }
-      if (r.v === "session") paintPending(r);
-      host2.navigation.load(
-        r,
-        (signal) => host2.transportOwner.load(r, signal),
-        done,
-        (error) => failLoad(r, error)
-      );
-    }
-    if (!host2.sidebarOnly)
-      host2.scope.listen(window, "popstate", (e) => {
-        if (host2.toolViewsOwner.skipPop) {
-          host2.toolViewsOwner.skipPop = false;
-          if (host2.afterPop) {
-            const leave = host2.afterPop;
-            host2.afterPop = null;
-            leave();
-            return;
-          }
-          if (host2.pendingSessionOpen) {
-            const id = host2.pendingSessionOpen;
-            host2.pendingSessionOpen = null;
-            goSession(id);
-          }
-          return;
-        }
-        if (host2.accountSheet) {
-          host2.accountSheet = false;
-          host2.accountControlsOwner.closeAccountMenu(true);
-          return;
-        }
-        if (host2.toolViewsOwner.viewerEl) {
-          const d = host2.toolViewsOwner.viewerEl;
-          host2.toolViewsOwner.viewerEl = null;
-          d.close();
-          return;
-        }
-        if (e.state?.v)
-          go(host2.navigation.historyRoute(e.state, host2.bootstrapOwner.routeOf(location)), true);
-      });
-    const goSession = (id, turn = void 0) => go(turn ? { v: "session", id, turn } : { v: "session", id });
-    const goTrace = (turn) => {
-      const found = host2.modelStore.turn.get(turn);
-      if (found) go({ v: "trace", sid: found.sid, turn });
-    };
-    const openSender = (h2) => {
-      if (host2.modelStore.sessions[h2.from]) goSession(h2.from, host2.modelStore.holds.get(h2.id)?.id);
-    };
-    function revealTurn(id, flash) {
-      host2.pagingOwner.resetPagerInput();
-      const b = [...document.querySelectorAll(".turn")].find(
-        (x) => x.dataset.turn === id
-      );
-      if (!b) {
-        host2.historyScrollOwner.quietTop();
-        return;
-      }
-      const place = () => {
-        if (!b.isConnected) return;
-        const gap = host2.$("#topbar").offsetHeight + 8;
-        host2.pagingOwner.scrollProgrammatically(() => {
-          if (host2.phone.matches)
-            window.scrollTo(0, Math.max(0, window.scrollY + b.getBoundingClientRect().top - gap));
-          else {
-            const m = host2.$("#main");
-            m.scrollTop += b.getBoundingClientRect().top - m.getBoundingClientRect().top - gap;
-          }
-        });
-        host2.viewport.syncJump();
-        host2.historyScrollOwner.saveHistoryScroll();
-      };
-      place();
-      host2.scope.frame(() => host2.scope.frame(place));
-      if (flash) {
-        b.classList.add("flash");
-        host2.scope.timeout(() => b.classList.remove("flash"), 1500);
-      }
-    }
-    function revealEntryHash() {
-      host2.pagingOwner.resetPagerInput();
-      if (!location.hash) return;
-      let key2 = "";
-      try {
-        key2 = decodeURIComponent(location.hash.slice(1));
-      } catch {
-        key2 = location.hash.slice(1);
-      }
-      const target = document.getElementById(key2) ?? [...document.querySelectorAll("[data-e]")].find((n) => n.dataset.e === key2) ?? [...document.querySelectorAll(".turn[data-turn]")].find(
-        (n) => n.dataset.turn === key2
-      );
-      if (!target) return;
-      const place = () => {
-        if (!target.isConnected) return;
-        const gap = host2.$("#topbar").offsetHeight + 8;
-        host2.pagingOwner.scrollProgrammatically(() => {
-          if (host2.phone.matches)
-            window.scrollTo(
-              0,
-              Math.max(0, window.scrollY + target.getBoundingClientRect().top - gap)
-            );
-          else {
-            const m = host2.$("#main");
-            m.scrollTop += target.getBoundingClientRect().top - m.getBoundingClientRect().top - gap;
-          }
-        });
-        host2.viewport.syncJump();
-        host2.historyScrollOwner.saveHistoryScroll();
-      };
-      place();
-      host2.scope.frame(() => host2.scope.frame(place));
-    }
-    return {
-      goSession,
-      go,
-      openSender,
-      revealTurn,
-      revealEntryHash,
-      openSessionAtEnd,
-      goTrace,
-      get lanesFor() {
-        return lanesFor;
-      },
-      set lanesFor(value) {
-        lanesFor = value;
-      }
-    };
-  }
-
-  // src/app/documentEvents.ts
-  function createDocumentEvents(host2) {
-    const sidebar = host2.$("#sidebar");
-    function openDrawer() {
-      host2.accountControlsOwner.shellChrome?.openDrawer();
-    }
-    function closeDrawer(quiet = void 0) {
-      host2.accountControlsOwner.shellChrome?.closeDrawer(quiet);
-    }
-    if (host2.sidebarOnly)
-      host2.scope.listen(
-        window,
-        "semon:drawer-open",
-        () => host2.orderingControlsOwner.orderApply("side")
-      );
-    if (!host2.sidebarOnly)
-      host2.scope.listen(document, "keydown", (e) => {
-        if (e.key === "Escape" && host2.accountSheet) host2.accountControlsOwner.accountChrome.escape();
-        else if (e.key === "Escape" && !host2.toolViewsOwner.viewerEl) {
-          closeDrawer();
-          host2.accountControlsOwner.closeAccountMenu();
-          host2.$(".session-menu")?.remove();
-          host2.$("#more-btn")?.setAttribute("aria-expanded", "false");
-        }
-        if (e.key === "/" && !/INPUT|TEXTAREA/.test(document.activeElement?.tagName ?? "") && !(document.activeElement instanceof HTMLElement && document.activeElement.isContentEditable) && !host2.toolViewsOwner.viewerEl) {
-          e.preventDefault();
-          if (host2.navigation.route.v === "session") {
-            host2.findOpen = true;
-            host2.documentRendererOwner.render();
-            host2.$("#find")?.focus();
-          } else if (host2.navigation.route.v === "sessions") {
-            host2.$("#sq")?.focus();
-          } else {
-            const r = { v: "sessions", q: host2.query };
-            host2.focusSessionsSearchOnRender = r;
-            host2.destination.go(r);
-          }
-        }
-      });
-    host2.scope.listen(host2.phone, "change", () => {
-      closeDrawer(true);
-      host2.layoutOwner.syncLayoutPrefs();
-      host2.recentNavigation.expandedAll = null;
-      host2.recentNavigation.renderLanes();
-      if (!host2.phone.matches && host2.toolViewsOwner.viewerEl?.classList.contains("kids-sheet"))
-        host2.toolViewsOwner.viewerEl.close();
-      if (host2.navigation.route.v === "session" || host2.navigation.route.v === "analytics") {
-        const top = host2.historyScrollOwner.currentScroll();
-        host2.documentRendererOwner.render();
-        host2.historyScrollOwner.restoreScroll(top);
-      } else host2.recentNavigation.renderLanes();
-      const l2 = host2.$("#topbar .meta-line");
-      if (l2 && host2.navigation.route.v === "session") measureViewerBar(host2.$("#topbar"));
-      host2.viewport.syncJump();
-    });
-    return { closeDrawer };
-  }
-
-  // src/app/documentRenderer.ts
-  function createDocumentRenderer(host2) {
-    function render2() {
-      if (host2.disposed) return;
-      const focusSearch = host2.focusSessionsSearchOnRender === host2.navigation.route;
-      host2.focusSessionsSearchOnRender = null;
-      if (host2.sidebarOnly) {
-        host2.transportOwner.tick();
-        host2.navigation.rendered = host2.navigation.route;
-        host2.navigationViewOwner.renderNav();
-        host2.recentNavigation.renderLanes();
-        return;
-      }
-      if (host2.nativePage || host2.navigation.route.v === "machines" && host2.viewerHost) {
-        host2.routeControls.retain(host2.navigation.route);
-        host2.transportOwner.tick();
-        host2.navigation.rendered = host2.navigation.route;
-        if (host2.navigation.content && !host2.navigation.content.element.isConnected) {
-          host2.pageRoot.native(host2.$("#page"));
-          host2.$("#page").append(host2.navigation.content.element);
-        }
-        document.title = (host2.nativePage?.title ?? "Machines") + " \xB7 Semon";
-        host2.sessionChrome.renderTopbar(host2.nativePage?.title ?? "Machines");
-        host2.layoutOwner.syncLayoutPrefs();
-        host2.sessionChrome.syncBarLine();
-        host2.navigationViewOwner.renderNav();
-        host2.recentNavigation.renderLanes();
-        host2.accountControlsOwner.renderDrawerAccount();
-        host2.viewport.syncJump();
-        return;
-      }
-      if (host2.viewerHost)
-        document.title = ({
-          home: "Home",
-          sessions: "Sessions",
-          analytics: "Analytics",
-          machines: "Machines",
-          machine: "Machine",
-          session: "Session",
-          trace: "Trace"
-        }[host2.navigation.route.v] ?? "Semon") + " \xB7 Semon";
-      host2.renderTransaction.begin();
-      const page = host2.$("#page"), r = host2.navigation.route;
-      host2.navigation.rendered = r;
-      setGeometry(page, "paddingBottom", null);
-      host2.pageRoot.viewer(page, r.v);
-      host2.routeControls.retain(r);
-      page.classList.remove("child-page");
-      if (r.v === "home") {
-        host2.screenViews.renderHome(page);
-        host2.sessionChrome.renderTopbar("Home");
-      } else if (r.v === "analytics") {
-        host2.analytics.renderAnalytics(page);
-        host2.sessionChrome.renderTopbar("Analytics", null, { analytics: true });
-      } else if (r.v === "sessions") {
-        host2.sessionListOwner.renderSessions(page, focusSearch);
-        host2.sessionChrome.renderTopbar("Sessions");
-      } else if (r.v === "machines") {
-        host2.screenViews.renderMachines(page);
-        host2.sessionChrome.renderTopbar("Machines");
-      } else if (r.v === "machine") {
-        host2.screenViews.renderMachine(page, r.id);
-        host2.sessionChrome.renderTopbar(
-          host2.modelStore.machines[r.id],
-          { label: "Machines", go: () => host2.destination.go({ v: "machines" }) },
-          { line2: host2.sessionChrome.machineLine(r.id) }
-        );
-      } else if (r.v === "trace") {
-        host2.screenViews.renderTrace(page, r.turn);
-        host2.sessionChrome.renderTopbar(
-          "Trace",
-          {
-            label: host2.modelStore.sessions[r.sid].name,
-            go: () => host2.destination.goSession(r.sid, r.turn)
-          },
-          { traceSession: host2.modelStore.sessions[r.sid] }
-        );
-      } else if (r.v === "session") {
-        const s = host2.modelStore.sessions[r.id], lineage = host2.domain.lineageOf(r.id).slice(0, -1);
-        host2.screenViews.renderSession(page, r.id);
-        host2.sessionChrome.renderTopbar(s.name, null, {
-          session: s,
-          lineage,
-          line2: host2.sessionChrome.sessionLine(s)
-        });
-      }
-      if (r.v === "session" && host2.sessionChrome.errOn(r.id)) host2.sessionChrome.markError(false);
-      setGeometry(document.documentElement, "barHeight", host2.$("#topbar").offsetHeight);
-      host2.renderTransaction.complete(r);
-    }
-    return { render: render2 };
-  }
-
-  // src/app/effects.ts
-  var EffectScope = class {
-    cleanups = /* @__PURE__ */ new Set();
-    requests = /* @__PURE__ */ new Map();
-    timers = /* @__PURE__ */ new Map();
-    frames = /* @__PURE__ */ new Map();
-    disposed = false;
-    own(cleanup) {
-      if (this.disposed) cleanup();
-      else this.cleanups.add(cleanup);
-      return cleanup;
-    }
-    listen(target, type, listener, options2) {
-      if (this.disposed) return;
-      const guarded = (event) => {
-        if (!this.disposed) listener(event);
-      };
-      target.addEventListener(type, guarded, options2);
-      this.own(() => target.removeEventListener(type, guarded, options2));
-    }
-    retire(collection, id) {
-      const cleanup = collection.get(id);
-      if (cleanup) this.cleanups.delete(cleanup);
-      collection.delete(id);
-    }
-    timeout(callback, delay = 0) {
-      if (this.disposed) return 0;
-      const id = window.setTimeout(() => {
-        this.retire(this.timers, id);
-        if (!this.disposed) callback();
-      }, delay);
-      this.timers.set(
-        id,
-        this.own(() => {
-          this.retire(this.timers, id);
-          window.clearTimeout(id);
-        })
-      );
-      return id;
-    }
-    clearTimeout(id) {
-      if (id !== void 0) this.timers.get(id)?.();
-    }
-    interval(callback, delay) {
-      if (this.disposed) return 0;
-      const id = window.setInterval(() => {
-        if (!this.disposed) callback();
-      }, delay);
-      this.timers.set(
-        id,
-        this.own(() => {
-          this.retire(this.timers, id);
-          window.clearInterval(id);
-        })
-      );
-      return id;
-    }
-    clearInterval(id) {
-      if (id !== void 0) this.timers.get(id)?.();
-    }
-    frame(callback) {
-      if (this.disposed) return 0;
-      const id = requestAnimationFrame((time) => {
-        this.retire(this.frames, id);
-        if (!this.disposed) callback(time);
-      });
-      this.frames.set(
-        id,
-        this.own(() => {
-          this.retire(this.frames, id);
-          cancelAnimationFrame(id);
-        })
-      );
-      return id;
-    }
-    cancelFrame(id) {
-      if (id !== void 0) this.frames.get(id)?.();
-    }
-    request() {
-      const controller = new AbortController();
-      if (this.disposed) {
-        controller.abort();
-        return controller;
-      }
-      const aborted = () => this.releaseRequest(controller), cleanup = this.own(() => controller.abort());
-      const release = () => {
-        controller.signal.removeEventListener("abort", aborted);
-        this.cleanups.delete(cleanup);
-        this.requests.delete(controller);
-      };
-      this.requests.set(controller, release);
-      controller.signal.addEventListener("abort", aborted, { once: true });
-      return controller;
-    }
-    releaseRequest(controller) {
-      this.requests.get(controller)?.();
-    }
-    destroy() {
-      if (this.disposed) return;
-      this.disposed = true;
-      for (const cleanup of this.cleanups) cleanup();
-      this.cleanups.clear();
-      this.requests.clear();
-    }
-  };
-
-  // src/app/historyScroll.ts
-  function createHistoryScroll(host2) {
-    const currentScroll = () => host2.phone.matches ? window.scrollY : host2.$("#main").scrollTop;
-    const restoreScroll = (top) => host2.pagingOwner.scrollProgrammatically(() => {
-      if (host2.phone.matches) window.scrollTo(0, top);
-      else host2.$("#main").scrollTop = top;
-    });
-    let hostFocus;
-    if (host2.viewerHost)
-      host2.scope.listen(document, "focusin", (event) => {
-        const node = event.target;
-        if (!(node instanceof HTMLElement) || !host2.$("#page").contains(node)) return;
-        hostFocus = node.id ? { id: node.id } : node.dataset.id ? { row: node.dataset.id } : node.getAttribute("aria-label") ? { label: node.getAttribute("aria-label") ?? void 0 } : void 0;
-      });
-    function restoreHostFocus(saved) {
-      if (!host2.viewerHost || !saved) return;
-      const selector = saved.id ? "#" + CSS.escape(saved.id) : saved.row ? '[data-id="' + CSS.escape(saved.row) + '"]' : saved.label ? '[aria-label="' + CSS.escape(saved.label) + '"]' : null;
-      if (selector)
-        host2.$("#page")?.querySelector(selector)?.focus({ preventScroll: true });
-    }
-    const saveHistoryScroll = () => {
-      if (host2.toolViewsOwner.viewerEl) return;
-      try {
-        if (history.state?.v)
-          history.replaceState(
-            {
-              ...history.state,
-              scrollTop: currentScroll(),
-              ...host2.viewerHost ? { hostFocus } : {}
-            },
-            ""
-          );
-      } catch {
-      }
-    };
-    let scrollSaveFrame = false;
-    const queueScrollSave = () => {
-      if (scrollSaveFrame) return;
-      scrollSaveFrame = true;
-      host2.scope.frame(() => {
-        scrollSaveFrame = false;
-        saveHistoryScroll();
-      });
-    };
-    if (!host2.sidebarOnly) {
-      host2.scope.listen(window, "scroll", queueScrollSave, { passive: true });
-      host2.scope.listen(host2.$("#main"), "scroll", queueScrollSave, { passive: true });
-    }
-    const quietTop = () => restoreScroll(0);
-    return { saveHistoryScroll, quietTop, restoreScroll, restoreHostFocus, currentScroll };
-  }
-
-  // src/app/layout.ts
-  function createLayout(host2) {
-    let wideMode = false, railMode = false;
-    let treePrefs = {};
-    try {
-      wideMode = localStorage.getItem("semon.wide") === "1";
-    } catch {
-    }
-    try {
-      railMode = !host2.sidebarOnly && localStorage.getItem("semon.rail") === "1";
-    } catch {
-    }
-    try {
-      const saved = JSON.parse(localStorage.getItem("semon.tree") ?? "{}");
-      if (saved && typeof saved === "object" && !Array.isArray(saved))
-        treePrefs = pruneTreePrefs(saved);
-    } catch {
-    }
-    const app = host2.$(".app");
-    const syncLayoutPrefs = () => {
-      if (host2.sidebarOnly) return;
-      app.classList.toggle("rail", railMode && !host2.phone.matches);
-      host2.$("#page").classList.toggle(
-        "wide-mode",
-        wideMode && !host2.phone.matches && host2.navigation.route.v === "session"
-      );
-    };
-    function setWideMode(on) {
-      wideMode = on;
-      try {
-        localStorage.setItem("semon.wide", on ? "1" : "0");
-      } catch {
-      }
-      syncLayoutPrefs();
-      host2.$(".wide-toggle")?.setAttribute("aria-pressed", String(on));
-      host2.accountControlsOwner.accountChrome.updateWide(on);
-    }
-    function setRailMode(on) {
-      railMode = on;
-      host2.orderingControlsOwner.ORD.delete("side");
-      try {
-        localStorage.setItem("semon.rail", on ? "1" : "0");
-      } catch {
-      }
-      syncLayoutPrefs();
-      host2.recentNavigation.expandedAll = null;
-      host2.recentNavigation.renderLanes();
-      const b = host2.$("#rail-toggle");
-      b?.setAttribute("aria-expanded", String(!on));
-      b?.setAttribute("aria-label", on ? "Expand sidebar" : "Collapse sidebar");
-      b?.setAttribute("data-tip", on ? "Expand sidebar" : "Collapse sidebar");
-    }
-    function pruneTreePrefs(saved) {
-      const kept = {};
-      if (!saved || typeof saved !== "object") return kept;
-      for (const [id, pref] of Object.entries(saved))
-        if (pref && typeof pref === "object" && "open" in pref && typeof pref.open === "boolean")
-          kept[id] = { open: pref.open, at: "at" in pref ? Number(pref.at) || 0 : 0 };
-      return kept;
-    }
-    function saveTreePref(id, open) {
-      treePrefs[id] = { open, at: Date.now() };
-      treePrefs = Object.fromEntries(
-        Object.entries(treePrefs).sort((a, b) => (b[1]?.at ?? 0) - (a[1]?.at ?? 0)).slice(0, 500)
-      );
-      try {
-        localStorage.setItem("semon.tree", JSON.stringify(treePrefs));
-      } catch {
-      }
-    }
-    const railToggle = host2.sidebarOnly ? host2.$("#rail-toggle") ?? document.createElement("button") : document.createElement("button");
-    railToggle.setAttribute("aria-expanded", String(!railMode));
-    railToggle.setAttribute("data-tip", railMode ? "Expand sidebar" : "Collapse sidebar");
-    railToggle.setAttribute("aria-label", railMode ? "Expand sidebar" : "Collapse sidebar");
-    host2.scope.listen(railToggle, "click", () => setRailMode(!railMode));
-    syncLayoutPrefs();
-    return {
-      app,
-      setRailMode,
-      get railMode() {
-        return railMode;
-      },
-      set railMode(value) {
-        railMode = value;
-      },
-      get wideMode() {
-        return wideMode;
-      },
-      set wideMode(value) {
-        wideMode = value;
-      },
-      setWideMode,
-      saveTreePref,
-      get treePrefs() {
-        return treePrefs;
-      },
-      set treePrefs(value) {
-        treePrefs = value;
-      },
-      syncLayoutPrefs
-    };
-  }
-
-  // src/app/liveModel.ts
-  function createLiveModel(host2) {
-    let streamSequence = 0;
-    let activeRead = null;
-    function selection() {
-      if (!host2.viewerHost?.selectedModel) return "";
-      const route = host2.navigation.route;
-      if (route.v !== "session") return "";
-      const session = host2.modelStore.sessions[route.id];
-      return "&selected=" + host2.transportOwner.enc(route.id) + (session ? "&machine=" + host2.transportOwner.enc(session.machine) : "");
-    }
-    function modelPath(path, selected = selection()) {
-      return path + selected + (host2.viewerHost?.controlStream || host2.viewerHost?.catalogControlStream ? "&content=1" : "");
-    }
-    const liveController = createLiveController({
-      async poll() {
-        const recovering = liveController.recovering;
-        const work = delivery.then(async () => {
-          if (destroyed || host2.disposed) return;
-          const sequence = streamSequence;
-          const selected = selection();
-          const request = new AbortController();
-          activeRead = request;
-          const response = await host2.transportOwner.api(
-            modelPath(
-              recovering ? "/api/model?delta=1&since=" : "/api/model?delta=1&since=" + host2.transportOwner.enc(LIVE.late ? "" : LIVE.version ?? ""),
-              selected
-            ),
-            request.signal,
-            !recovering
-          );
-          if (!response || destroyed || host2.disposed || request.signal.aborted || selected !== selection())
-            return;
-          let model2;
-          try {
-            model2 = host2.liveUpdates.applyModelDelta(response);
-          } catch {
-            model2 = await host2.transportOwner.api(
-              modelPath("/api/model?delta=1&since=", selected),
-              request.signal
-            );
-            if (destroyed || host2.disposed || request.signal.aborted || selected !== selection())
-              return;
-          }
-          await host2.liveUpdates.update(model2, recovering);
-          if (stream && selected !== selection()) schedule(0);
-          if (activeRead === request) activeRead = null;
-          if (recovering && !destroyed && !host2.disposed) {
-            if (sequence === streamSequence) {
-              liveController.synchronized();
-              clearStreamNote();
-            } else LIVE.again = true;
-          }
-        });
-        delivery = work.catch(() => {
-        });
-        try {
-          await work;
-        } catch (error) {
-          showStreamNote();
-          liveController.recover();
-          throw error;
-        }
-      },
-      failed,
-      ended
-    });
-    function failed(error) {
-      const handled = !!host2.viewerHost?.modelFailed?.(error instanceof ApiError ? error.status : 0);
-      if (handled) {
-        liveController.stop();
-        destroyed = true;
-        stream?.close();
-        stream = null;
-        clearStreamNote();
-      }
-      return handled;
-    }
-    const LIVE = liveController.state;
-    const remember = (_m) => {
-      LIVE.turns = new Map(
-        Object.values(host2.modelStore.turns).flat().map((x) => [x.id, turnKey(x)])
-      );
-    };
-    const turnKey = (x) => [
-      x.start?.id,
-      x.end?.st,
-      x.end?.why,
-      x.end?.h,
-      x.sent.map((h2) => h2.id).join(","),
-      x.last ? 1 : 0
-    ].join("|");
-    const handKey = (h2) => [
-      h2.status,
-      h2.to,
-      h2.done,
-      h2.result?.length,
-      h2.kind === "toyou" ? h2.answer?.length : void 0,
-      h2.kind === "toyou" ? h2.answers?.length : void 0,
-      h2.declined ? 1 : 0
-    ].join("|");
-    const visible2 = () => document.visibilityState === "visible";
-    let stream = null;
-    let streamSelection = "";
-    let started = false;
-    let destroyed = false;
-    let streamNote = null;
-    function clearStreamNote() {
-      streamNote?.remove();
-      streamNote = null;
-    }
-    function showStreamNote() {
-      if (destroyed || host2.disposed || streamNote) return;
-      streamNote = createStatusNote("Reconnecting\u2026 Your conversation is retained.", "livenote");
-      document.body.append(streamNote);
-    }
-    let delivery = Promise.resolve();
-    const schedule = (ms) => {
-      started = true;
-      const selected = selection();
-      const path = host2.viewerHost?.modelStream;
-      if (!path || typeof EventSource === "undefined") {
-        liveController.schedule(ms);
-        return;
-      }
-      if (destroyed) return;
-      if (stream && streamSelection === selected) return;
-      if (stream) {
-        stream.close();
-        activeRead?.abort();
-        streamSequence++;
-      }
-      streamSelection = selected;
-      if (!path.startsWith("/") || path.startsWith("//") || /[\\\s]/.test(path))
-        throw new Error("Invalid live model stream");
-      const streamQuery = [
-        selected.slice(1),
-        host2.viewerHost?.controlStream || host2.viewerHost?.catalogControlStream ? "content=1&since=" + host2.transportOwner.enc(LIVE.version ?? "") : ""
-      ].filter(Boolean).join("&");
-      const current = new EventSource(
-        path + (streamQuery ? (path.includes("?") ? "&" : "?") + streamQuery : "")
-      );
-      stream = current;
-      liveController.useStream();
-      current.addEventListener("open", () => {
-        if (stream !== current || selection() !== selected || destroyed) return;
-        if (streamNote) liveController.recover();
-      });
-      const recover = () => {
-        if (stream !== current || selection() !== selected || destroyed) return;
-        showStreamNote();
-        liveController.recover();
-      };
-      current.addEventListener("error", recover);
-      current.addEventListener("unavailable", recover);
-      current.addEventListener("model", (event) => {
-        if (!(event instanceof MessageEvent) || destroyed || host2.disposed || stream !== current || selection() !== selected)
-          return;
-        streamSequence++;
-        if (liveController.recovering) return;
-        delivery = delivery.then(async () => {
-          if (destroyed || host2.disposed || liveController.recovering || stream !== current || selection() !== selected)
-            return;
-          await host2.liveUpdates.update(JSON.parse(String(event.data)));
-          if (selected !== selection()) schedule(0);
-          clearStreamNote();
-        }).catch((error) => {
-          if (failed(error)) return;
-          if (error instanceof ApiError && error.status === 403) ended(403);
-          else recover();
-        });
-      });
-      current.addEventListener("ended", () => {
-        if (stream !== current || selection() !== selected || destroyed) return;
-        activeRead?.abort();
-        destroyed = true;
-        liveController.stop();
-        stream?.close();
-        stream = null;
-        clearStreamNote();
-        host2.viewerHost?.modelFailed?.(403);
-      });
-    };
-    const unsubscribeRoute = host2.viewerHost?.selectedModel ? host2.navigation.subscribeRoute(() => {
-      if (!started || destroyed) return;
-      if (stream) schedule(0);
-      else {
-        activeRead?.abort();
-        LIVE.again = true;
-        liveController.schedule(0);
-      }
-    }) : () => {
-    };
-    function ended(status2) {
-      if (host2.disposed) return;
-      activeRead?.abort();
-      liveController.stop();
-      destroyed = true;
-      stream?.close();
-      stream = null;
-      clearStreamNote();
-      if (host2.$(".livenote, .livenote-side")) return;
-      if (!window.dispatchEvent(
-        new CustomEvent("semon:ended", { cancelable: true, detail: { status: status2 } })
-      ))
-        return;
-      const n = createStatusNote(
-        host2.sidebarOnly ? "Sessions stopped updating: reload the page" : "Session ended: reload with the printed URL",
-        host2.sidebarOnly ? "ghead livenote-side" : "livenote"
-      );
-      if (host2.sidebarOnly) host2.$("#lanes").after(n);
-      else document.body.append(n);
-    }
-    const soft = (p) => p;
-    const viewed = () => {
-      const v = /* @__PURE__ */ new Set();
-      if (host2.navigation.route.v === "session")
-        v.add("id" in host2.navigation.route ? host2.navigation.route.id : "");
-      return v;
-    };
-    const cardKeys = () => new Map(
-      host2.modelStore.handoffs.filter((h2) => h2.kind === "spawn" && host2.modelStore.sessions[h2.to]).map((h2) => {
-        const c = host2.modelStore.sessions[h2.to];
-        return [
-          h2.id,
-          [
-            c.name,
-            c.state,
-            c.kind,
-            c.model,
-            host2.domain.countOf(c, "calls"),
-            c.activity?.join("|"),
-            h2.status,
-            h2.result
-          ].join("")
-        ];
-      })
-    );
-    return {
-      destroy() {
-        unsubscribeRoute();
-        activeRead?.abort();
-        activeRead = null;
-        destroyed = true;
-        clearStreamNote();
-        stream?.close();
-        stream = null;
-        liveController.destroy();
-      },
-      liveController,
-      LIVE,
-      remember,
-      schedule,
-      visible: visible2,
-      ended,
-      handKey,
-      cardKeys,
-      viewed,
-      soft
-    };
-  }
-
-  // src/app/liveUpdates.ts
-  function createLiveUpdates(host2) {
-    let generation2 = 0;
-    const applyModelDelta = (value) => host2.modelStore.apply(value);
-    function update(value, resynchronize = false) {
-      if (host2.disposed) return Promise.resolve();
-      const m = applyModelDelta(value);
-      const oldH = new Map(
-        host2.modelStore.handoffs.map((h2) => [h2.id, host2.liveModelOwner.handKey(h2)])
-      ), oldT = host2.liveModelOwner.LIVE.turns, oldCards = host2.liveModelOwner.cardKeys(), names = new Map(Object.values(host2.modelStore.sessions).map((x) => [x.id, x.name]));
-      const hadOrigins = new Set(
-        [...host2.transcripts.cache.keys()].filter((sid) => !!host2.domain.originHandoff(sid))
-      );
-      const hadOrigin = host2.navigation.route.v === "session" && !!host2.modelStore.sessions["id" in host2.navigation.route ? host2.navigation.route.id : ""] && !!host2.domain.originHandoff("id" in host2.navigation.route ? host2.navigation.route.id : "");
-      host2.transportOwner.adopt(m);
-      const revision = ++generation2;
-      host2.liveModelOwner.remember(m);
-      for (const sid of host2.transcripts.staleBriefs)
-        if (!host2.modelStore.sessions[sid]) host2.transcripts.staleBriefs.delete(sid);
-      for (const sid of [...host2.transcripts.cache.keys()])
-        if (!hadOrigins.has(sid) && host2.domain.originHandoff(sid))
-          host2.transcripts.cache.delete(sid);
-      if (host2.liveModelOwner.LIVE.late !== ("id" in host2.navigation.route ? host2.navigation.route.id : "")) {
-        if (host2.liveModelOwner.LIVE.late)
-          host2.transcripts.cache.delete(host2.liveModelOwner.LIVE.late);
-        host2.liveModelOwner.LIVE.late = null;
-      }
-      if (host2.navigation.route.v === "session" && !hadOrigin && !!host2.modelStore.sessions["id" in host2.navigation.route ? host2.navigation.route.id : ""] && !!host2.domain.originHandoff("id" in host2.navigation.route ? host2.navigation.route.id : "")) {
-        host2.liveModelOwner.LIVE.late = "id" in host2.navigation.route ? host2.navigation.route.id : "";
-        host2.liveModelOwner.LIVE.lateTries = 0;
-        host2.transcripts.staleBriefs.add(
-          "id" in host2.navigation.route ? host2.navigation.route.id : ""
-        );
-        host2.transcripts.cache.delete("id" in host2.navigation.route ? host2.navigation.route.id : "");
-      }
-      if (host2.liveModelOwner.LIVE.late && !host2.transcripts.entries[host2.liveModelOwner.LIVE.late])
-        host2.liveModelOwner.LIVE.late = null;
-      const changedH = new Set(
-        host2.modelStore.handoffs.filter((h2) => oldH.get(h2.id) !== host2.liveModelOwner.handKey(h2)).map((h2) => h2.id)
-      );
-      const newCards = host2.liveModelOwner.cardKeys(), changedCards = new Set(
-        [...newCards].filter(([id, k]) => oldCards.has(id) && oldCards.get(id) !== k).map(([id]) => id)
-      );
-      const view = host2.liveModelOwner.viewed(), grown = /* @__PURE__ */ new Set(), cuts = /* @__PURE__ */ new Map(), patched = /* @__PURE__ */ new Map();
-      let full = resynchronize || Object.values(host2.modelStore.sessions).some(
-        (x) => names.has(x.id) && names.get(x.id) !== x.name
-      );
-      for (const sid of Object.keys(host2.transcripts.entries)) {
-        if (view.has(sid) && host2.modelStore.sessions[sid]) host2.transportOwner.spread(sid);
-        else host2.pagingOwner.dropTx(sid);
-      }
-      let chain = Promise.resolve();
-      for (const sid of view)
-        if (host2.transcripts.entries[sid] && host2.liveModelOwner.LIVE.late === sid)
-          chain = chain.then(
-            () => host2.liveModelOwner.soft(
-              reloadLate(sid).then(() => {
-                grown.add(sid);
-                full = true;
-              })
-            )
-          );
-        else if (host2.transcripts.entries[sid] && host2.transcripts.meta[sid].tok != null && host2.transportOwner.TOK[sid] != null && host2.transcriptRevalidationOwner.shrank(
-          host2.transcripts.meta[sid].tok,
-          host2.transportOwner.TOK[sid]
-        ))
-          chain = chain.then(
-            () => host2.liveModelOwner.soft(
-              reload(sid).then(() => {
-                grown.add(sid);
-                full = true;
-              })
-            )
-          );
-        else if (host2.transcripts.entries[sid] && host2.transcripts.meta[sid].to >= host2.transcripts.meta[sid].total && host2.transcripts.meta[sid].tok !== host2.transportOwner.TOK[sid])
-          chain = chain.then(
-            () => host2.liveModelOwner.soft(
-              tail(sid).then((r) => {
-                grown.add(sid);
-                if (r.cut != null) cuts.set(sid, r.cut);
-                if (r.patched?.length) patched.set(sid, r.patched);
-                if (r.reload) full = true;
-              })
-            )
-          );
-      for (const sid of view)
-        if (host2.transcripts.entries[sid] && host2.transcripts.meta[sid].to < host2.transcripts.meta[sid].total && host2.transcripts.meta[sid].watchTok !== host2.transportOwner.TOK[sid])
-          chain = chain.then(
-            () => host2.liveModelOwner.soft(
-              watchLater(sid).then((r) => {
-                if (r?.reload) full = true;
-              })
-            )
-          );
-      return chain.then(() => {
-        if (host2.disposed || revision !== generation2) return;
-        host2.liveModelOwner.LIVE.version = m.version;
-        host2.applicationRefreshOwner.refresh(
-          full ? null : dirtyTurns(cuts, grown, changedH, oldT, changedCards, patched)
-        );
-        if (host2.navigation.route.v === "analytics") host2.analytics.refreshAnalytics();
-        const e = host2.sessionChrome.errorsLive();
-        return e && host2.liveModelOwner.soft(e);
-      });
-    }
-    function dirtyTurns(cuts, grown, changedH, oldT, changedCards, patched) {
-      if (host2.navigation.route.v !== "session" || !host2.transcripts.entries["id" in host2.navigation.route ? host2.navigation.route.id : ""])
-        return null;
-      const sid = "id" in host2.navigation.route ? host2.navigation.route.id : "", dirty = /* @__PURE__ */ new Set(), owner = new Map(
-        (host2.modelStore.turns[sid] ?? []).flatMap((t) => t.entries.map((e) => [e, t.id]))
-      );
-      if (cuts.has(sid))
-        for (const e of host2.transcripts.entries[sid].slice(cuts.get(sid))) {
-          if (host2.isGap(e)) return null;
-          if (owner.has(e)) dirty.add(owner.get(e));
-        }
-      for (const e of patched?.get(sid) ?? []) {
-        if (!owner.has(e)) return null;
-        dirty.add(owner.get(e));
-      }
-      for (const t of host2.modelStore.turns[sid] ?? []) {
-        if (oldT.get(t.id) !== host2.liveModelOwner.LIVE.turns.get(t.id) || [t.start, ...t.sent].some((h2) => h2 && changedH.has(h2.id)) || t.entries.some((e) => e.k === "h" && changedH.has(e.id)))
-          dirty.add(t.id);
-      }
-      for (const h2 of host2.modelStore.handoffs)
-        if (h2.kind === "spawn" && h2.from === sid && changedCards.has(h2.id) && host2.modelStore.holds.get(h2.id))
-          dirty.add(host2.modelStore.holds.get(h2.id).id);
-      return dirty;
-    }
-    function watchLater(sid) {
-      const m = host2.transcripts.meta[sid], tok2 = host2.transportOwner.TOK[sid];
-      return host2.transportOwner.api("/api/tx?sid=" + host2.transportOwner.enc(sid) + "&after=" + m.total).then((value) => {
-        const p = parseTranscriptPage(value);
-        if (host2.transcripts.meta[sid] !== m) return;
-        if (p.total < m.total) return reload(sid);
-        m.newer = (m.newer ?? 0) + Math.max(0, p.total - m.total);
-        Object.assign(m, { total: p.total, calls: p.calls, errors: p.errors, watchTok: tok2 });
-        host2.transcripts.updates.transcript(sid);
-      });
-    }
-    function tail(sid) {
-      const es = host2.transcripts.entries[sid], m = host2.transcripts.meta[sid], tok2 = host2.transportOwner.TOK[sid];
-      let cut2 = es.findIndex((e) => e.live && e.slot != null);
-      if (cut2 < 0) cut2 = es.length;
-      for (let i = es.length - 1; i >= 0; i--) {
-        if (es[i].unfinished && es[i].slot != null) cut2 = Math.min(cut2, i);
-        if (es[i].turn) break;
-      }
-      let got = [], last = null, n = 0;
-      const page = (after) => host2.transportOwner.api("/api/tx?sid=" + host2.transportOwner.enc(sid) + "&after=" + after).then((value) => {
-        const p = parseTranscriptPage(value);
-        got = got.concat(p.entries.map((e) => host2.transportOwner.txEntry({ ...e, sid })));
-        last = p;
-        if (p.to < p.total && p.entries.length && ++n < 5) return page(p.to);
-      });
-      return page(cut2 < es.length ? es[cut2].slot : m.to).then(() => {
-        if (host2.transcripts.entries[sid] !== es) return { cut: null };
-        if (!last) return { cut: null };
-        if (last.total < m.total || last.to < last.total || cut2 < es.length && got[0]?.slot !== es[cut2].slot)
-          return reload(sid);
-        const ends = new Map(
-          got.flatMap((e) => e.k === "bgend" && e.bg ? [[e.call, e.bg]] : [])
-        ), still = new Set(last.bg_running ?? []), patched = [];
-        for (const e of es.slice(0, cut2))
-          if (e.bg) {
-            const next = ends.get(e.tid ?? "") ?? (still.has(e.tid ?? "") ? { ...e.bg, state: "running", secs: e.bg.secs ?? "\u2014" } : e.bg.state === "running" ? { state: "unknown" } : e.bg);
-            if (JSON.stringify(next) !== JSON.stringify(e.bg)) {
-              e.bg = next;
-              patched.push(e);
-            }
-          }
-        host2.transcripts.entries[sid] = es.slice(0, cut2).concat(got);
-        Object.assign(m, {
-          to: last.to,
-          total: last.total,
-          calls: last.calls,
-          errors: last.errors,
-          tok: tok2
-        });
-        host2.transportOwner.spread(sid);
-        host2.transcripts.updates.transcript(sid);
-        return { cut: cut2, patched };
-      });
-    }
-    function reload(sid) {
-      if (sid !== ("id" in host2.navigation.route ? host2.navigation.route.id : "")) {
-        host2.pagingOwner.dropTx(sid);
-        return Promise.resolve({ cut: null, reload: true });
-      }
-      return host2.transportOwner.fetchTx(sid, "").then(() => ({ cut: null, reload: true }));
-    }
-    const LATE_TRIES = 4;
-    function reloadLate(sid) {
-      return reload(sid).then(
-        (r) => {
-          if (host2.liveModelOwner.LIVE.late === sid) host2.liveModelOwner.LIVE.late = null;
-          return r;
-        },
-        (err) => {
-          if (err?.status === 403) throw err;
-          if (host2.liveModelOwner.LIVE.late === sid) {
-            if (++host2.liveModelOwner.LIVE.lateTries >= LATE_TRIES) {
-              host2.liveModelOwner.LIVE.late = null;
-              console.warn(
-                "semon: gave up reloading the transcript of " + sid + " after its origin arrived"
-              );
-              return { cut: null, reload: true };
-            } else host2.liveModelOwner.LIVE.retry = true;
-          }
-          throw err;
-        }
-      );
-    }
-    return { reload, tail, applyModelDelta, update };
-  }
-
-  // src/app/navigationView.ts
-  function createNavigationView(host2) {
-    function renderNav() {
-      const nav = host2.$("#nav");
-      const route = (host2.sidebarOnly ? host2.layoutOwner.app.dataset.viewerNav : host2.nativePage?.nav) ?? host2.navigation.route.v;
-      const destinations = projectShellNavigation(
-        host2.viewerHost?.navigation ?? { leading: host2.viewerHost?.nativeNavigation },
-        route,
-        {
-          home: host2.bootstrapOwner.urlOf({ v: "home" }),
-          sessions: host2.bootstrapOwner.urlOf({ v: "sessions" }),
-          analytics: host2.bootstrapOwner.urlOf({ v: "analytics" }),
-          machines: host2.machinesPath ?? host2.bootstrapOwner.urlOf({ v: "machines" })
-        },
-        host2.nativePage ? {} : {
-          home: host2.domain.inbox().length,
-          machines: Object.keys(host2.modelStore.machines).filter(
-            (m) => !host2.modelStore.machineUp[m]
-          ).length
-        }
-      );
-      if (host2.accountControlsOwner.shellChrome)
-        host2.accountControlsOwner.shellChrome.update(destinations, host2.layoutOwner.railMode);
-      else
-        renderShellNavigation(nav, destinations, (destination) => {
-          if (host2.viewerHost?.nativeNavigation?.some((item2) => item2.key === destination.key))
-            return false;
-          host2.destination.go(host2.navigation.historyRoute({ v: destination.key }, { v: "home" }));
-          return true;
-        });
-    }
-    const sessMatch = (s, q) => !q || [
-      s.name,
-      s.repo,
-      s.branch,
-      host2.modelStore.machines[s.machine],
-      s.movedFrom ? host2.modelStore.machines[s.movedFrom] : "",
-      HARNESS[s.harness],
-      s.role ? "role no repo" : "",
-      ...(host2.modelStore.turns[s.id] ?? []).map((t) => t.start?.brief ?? t.u?.text ?? "")
-    ].join(" ").toLowerCase().includes(q.toLowerCase());
-    const unsubscribe = host2.viewerHost?.subscribeNavigation?.(
-      () => host2.scope.timeout(renderNav, 0)
-    );
-    if (unsubscribe) host2.scope.own(unsubscribe);
-    return { renderNav, sessMatch };
-  }
-
-  // src/app/orderingControls.ts
-  function createOrderingControls(host2) {
-    const ordering = createOrdering(), ORD = ordering.scopes, ordTouch = { down: false }, byLast = (a, b) => b.last - a.last;
-    const pageSig = () => JSON.stringify([host2.query, host2.groupBy, host2.sessionFilters]);
-    host2.scope.listen(
-      document,
-      "pointerdown",
-      () => {
-        ordTouch.down = true;
-      },
-      true
-    );
-    for (const t of ["pointerup", "pointercancel"])
-      host2.scope.listen(
-        document,
-        t,
-        () => {
-          ordTouch.down = false;
-        },
-        true
-      );
-    host2.scope.listen(window, "blur", () => {
-      ordTouch.down = false;
-    });
-    host2.scope.listen(document, "visibilitychange", () => {
-      ordTouch.down = false;
-      if (host2.liveModelOwner.visible()) {
-        orderApply("page");
-        orderApply("side");
-      }
-    });
-    function ordState(name) {
-      const side = name === "side", rows = side ? "#lanes .treeitem" : "#page .nrow", a = document.activeElement;
-      const inView = side ? sideRegion().scrollTop <= 1 : !host2.$(rows) || host2.$(rows).getBoundingClientRect().top >= host2.$("#topbar").getBoundingClientRect().bottom - 1;
-      const touched = ordTouch.down || !!a?.matches?.(":focus-visible") && !!a.closest(side ? "#lanes" : rows) || matchMedia("(hover: hover)").matches && !!host2.$(rows + ":hover");
-      return { inView, touched };
-    }
-    let ordPageState = null;
-    const pageState = () => ordPageState ?? ordState("page");
-    const orderScope = (name, sig, tie, state2) => ordering.begin(name, sig, tie, state2), orderList = orderRows;
-    const sideRegion = () => host2.$("#side-list") ?? host2.$("#sidebar");
-    const ordIdleMs = Reflect.get(window, "__semonOrderIdleMs");
-    const ORD_IDLE_MS = Number.isFinite(ordIdleMs) && ordIdleMs >= 200 && ordIdleMs <= 6e4 ? ordIdleMs : 1e4;
-    const ORD_DRAWER_MS = 320;
-    function orderApply(name) {
-      const sc = ORD.get(name);
-      if (!sc?.n || name === "page" && (sc.tie !== host2.navigation.route || host2.navigation.rendered !== host2.navigation.route || host2.toolViewsOwner.viewerEl || host2.$("#page").hasAttribute("aria-busy")))
-        return;
-      ORD.delete(name);
-      if (name === "side") host2.recentNavigation.renderLanes();
-      else {
-        const st = host2.viewport.capture();
-        host2.documentRendererOwner.render();
-        host2.viewport.restore(st);
-      }
-    }
-    let ordIdle;
-    function ordIdleArm() {
-      host2.scope.clearTimeout(ordIdle);
-      ordIdle = void 0;
-      if (host2.phone.matches || !ORD.get("side")?.n) return;
-      ordIdle = host2.scope.timeout(() => {
-        ordIdle = void 0;
-        const bar = host2.$("#sidebar"), a = document.activeElement;
-        const menu = host2.$(
-          ".session-menu, .account-popover, .runs-popover, .filters.pop:not([hidden])"
-        );
-        if (ordTouch.down || bar.matches(":hover") || a && bar.contains(a) && (a.matches(":focus-visible") || a.matches("input, textarea, select, [contenteditable]")) || menu || host2.toolViewsOwner.viewerEl)
-          ordIdleArm();
-        else orderApply("side");
-      }, ORD_IDLE_MS);
-    }
-    for (const t of [
-      "pointermove",
-      "pointerdown",
-      "pointerleave",
-      "focusin",
-      "focusout",
-      "wheel",
-      "keydown"
-    ])
-      host2.scope.listen(
-        host2.$("#sidebar"),
-        t,
-        () => {
-          if (ordIdle) ordIdleArm();
-        },
-        { passive: true }
-      );
-    return {
-      ORD,
-      orderApply,
-      ORD_DRAWER_MS,
-      byLast,
-      orderList,
-      ordState,
-      orderScope,
-      get ordIdle() {
-        return ordIdle;
-      },
-      set ordIdle(value) {
-        ordIdle = value;
-      },
-      ordIdleArm,
-      pageSig,
-      pageState,
-      get ordPageState() {
-        return ordPageState;
-      },
-      set ordPageState(value) {
-        ordPageState = value;
-      }
-    };
-  }
-
-  // src/app/paging.ts
-  function createPaging(host2) {
-    const pagingStore = host2.transcripts.paging, PAGING = pagingStore.states;
-    let pagerArmed = false, automaticLoads = 0, scrollRevision = 0, programmaticScrollPending = false, programmaticScrollTimer = void 0;
-    const clearPaging = (sid) => host2.transcripts.clearPaging(sid);
-    const dropTx = (sid) => host2.transcripts.drop(sid);
-    function resetPagerInput() {
-      pagerArmed = false;
-      automaticLoads = 0;
-      scrollRevision++;
-      disconnectPagerObservers();
-    }
-    function holdProgrammaticScroll() {
-      programmaticScrollPending = true;
-      host2.scope.clearTimeout(programmaticScrollTimer);
-      programmaticScrollTimer = host2.scope.timeout(() => {
-        programmaticScrollPending = false;
-        programmaticScrollTimer = void 0;
-      }, 120);
-    }
-    function scrollProgrammatically(fn, jump = true) {
-      if (jump) resetPagerInput();
-      holdProgrammaticScroll();
-      fn();
-    }
-    function readerScrollInput() {
-      if (host2.navigation.route.v !== "session" || host2.navigation.rendered !== host2.navigation.route || host2.$("#page").hasAttribute("aria-busy"))
-        return;
-      host2.scope.clearTimeout(programmaticScrollTimer);
-      programmaticScrollTimer = void 0;
-      programmaticScrollPending = false;
-      host2.viewport.stopOpeningEndPin();
-      pagerArmed = true;
-      automaticLoads = 0;
-      scrollRevision++;
-      queuePagerObservers();
-    }
-    const automaticPagingAllowed = () => pagerArmed && automaticLoads < 3 && !host2.viewport.openingEndUntil && !host2.findOpen && !host2.find && host2.show.messages && host2.show.tools && host2.show.thinking;
-    const pagingState = (sid, where) => pagingStore.get(sid, where);
-    function pagerSnapshot(sid, where) {
-      const state2 = pagingState(sid, where), direction = where === "before" ? "earlier" : "later";
-      return {
-        sid,
-        where,
-        disabled: state2.busy,
-        busy: state2.busy,
-        text: state2.busy ? "Loading " + direction + "\u2026" : state2.failed ? "Couldn't load " + direction + " entries \xB7 Retry" : "Load " + direction + (where === "after" && host2.transcripts.meta[sid]?.newer ? " \xB7 " + host2.transcripts.meta[sid].newer + " new" : "")
-      };
-    }
-    function paintPager(b) {
-      updateSessionPager(
-        host2.$("#page"),
-        pagerSnapshot(b.dataset.pagerSid, b.dataset.pagerWhere === "before" ? "before" : "after")
-      );
-    }
-    const pagerController = createPagerController({
-      route(sid) {
-        return host2.navigation.route.v === "session" && ("id" in host2.navigation.route ? host2.navigation.route.id : "") === sid && host2.navigation.rendered === host2.navigation.route ? host2.navigation.route : null;
-      },
-      range(sid) {
-        return host2.transcripts.meta[sid];
-      },
-      state: pagingState,
-      automatic: automaticPagingAllowed,
-      current(sid, where, state2, r) {
-        return PAGING.get(sid)?.[where] === state2;
-      },
-      beginManual: () => host2.viewport.stopOpeningEndPin(),
-      countAutomatic() {
-        automaticLoads++;
-      },
-      paint: paintPager,
-      load(sid, where, boundary, signal, applied) {
-        return host2.transportOwner.fetchTx(sid, where + "=" + boundary, where, signal, applied);
-      },
-      commit(r, where, manual) {
-        const box = host2.viewport.scroller(), top = host2.phone.matches ? 0 : box.getBoundingClientRect().top, st = host2.viewport.capture();
-        const entry2 = [
-          ...host2.$("#page").querySelectorAll(".turns [data-e][data-entry-key]:not(.tgroup)")
-        ].find((n) => {
-          const rect = n.getBoundingClientRect();
-          return rect.height && rect.top >= top;
-        });
-        st.paging = {
-          anchor: entry2 ? { key: entry2.dataset.entryKey, off: entry2.getBoundingClientRect().top - top } : null,
-          height: box.scrollHeight,
-          before: where === "before"
-        };
-        const armed = pagerArmed, used = automaticLoads;
-        host2.documentRendererOwner.render();
-        host2.viewport.restore(st);
-        if (!manual) {
-          pagerArmed = armed;
-          automaticLoads = used;
-        }
-        host2.viewport.syncJump();
-        host2.historyScrollOwner.saveHistoryScroll();
-      },
-      queue: queuePagerObservers
-    });
-    function disconnectPagerObservers() {
-      pagerController.disconnect();
-    }
-    function queuePagerObservers() {
-      if (host2.disposed || host2.sidebarOnly) return;
-      pagerController.queue(
-        host2.$("#page"),
-        host2.phone.matches ? null : host2.$("#main"),
-        () => host2.navigation.route.v === "session" && host2.navigation.rendered === host2.navigation.route && automaticPagingAllowed() && !host2.$("#page").hasAttribute("aria-busy")
-      );
-    }
-    function loadPager(button, manual) {
-      return pagerController.load(button, manual);
-    }
-    return {
-      pagerController,
-      resetPagerInput,
-      scrollProgrammatically,
-      clearPaging,
-      dropTx,
-      loadPager,
-      pagerSnapshot,
-      holdProgrammaticScroll,
-      queuePagerObservers,
-      disconnectPagerObservers,
-      get scrollRevision() {
-        return scrollRevision;
-      },
-      set scrollRevision(value) {
-        scrollRevision = value;
-      },
-      paintPager,
-      readerScrollInput,
-      get programmaticScrollPending() {
-        return programmaticScrollPending;
-      },
-      set programmaticScrollPending(value) {
-        programmaticScrollPending = value;
-      }
-    };
-  }
-
-  // src/app/recentNavigation.ts
-  function createRecentNavigation(host2) {
-    const isApprovalReview = (s) => s.kind === "Approval review";
-    const visibleInNavigation = (s, path = routedPath()) => host2.showApprovalReviews || !isApprovalReview(s) || s.id === path.current || path.ancestors.has(s.id);
-    const navigationTree = (path = routedPath()) => {
-      const canonical = host2.domain.sessionChildren(), roots = [], children = /* @__PURE__ */ new Map(), visited = /* @__PURE__ */ new Set();
-      const visit = (session, parent) => {
-        if (visited.has(session.id)) return;
-        visited.add(session.id);
-        let nearest = parent;
-        if (visibleInNavigation(session, path)) {
-          if (parent) {
-            if (!children.has(parent)) children.set(parent, []);
-            children.get(parent).push(session);
-          } else roots.push(session);
-          nearest = session.id;
-        }
-        for (const child of canonical.get(session.id) ?? []) visit(child, nearest);
-      };
-      for (const root of Object.values(host2.modelStore.sessions).filter(
-        (s) => s.lane && !host2.domain.parentOf(s.id)
-      ))
-        visit(root, null);
-      roots.sort(
-        (...args) => host2.orderingControlsOwner.byLast(...args)
-      );
-      for (const kids of children.values())
-        kids.sort(
-          (...args) => host2.orderingControlsOwner.byLast(...args)
-        );
-      return { roots, children };
-    };
-    const COST_TIP = "What these tokens would cost at API rates. Subscriptions (Claude Max, ChatGPT plans) aren't billed this way.";
-    const TREE_ACTIVE = 8, TREE_ROWS = 3;
-    function routedPath() {
-      const current = host2.navigation.route.v === "session" ? "id" in host2.navigation.route ? host2.navigation.route.id : "" : host2.navigation.route.v === "trace" ? host2.navigation.route.sid : null, ancestors = /* @__PURE__ */ new Set();
-      for (let id = current && host2.modelStore.sessions[current] ? host2.domain.parentOf(current) : null; id && host2.modelStore.sessions[id] && id !== current && !ancestors.has(id); id = host2.domain.parentOf(id))
-        ancestors.add(id);
-      return { current, ancestors };
-    }
-    let forcedOpen = {
-      route: null,
-      ids: /* @__PURE__ */ new Set()
-    };
-    function forcedOpenIds() {
-      if (forcedOpen.route !== host2.navigation.route)
-        forcedOpen = { route: host2.navigation.route, ids: routedPath().ancestors };
-      return forcedOpen.ids;
-    }
-    let expandedAll = null, revealedFor = null;
-    let expandedPath = /* @__PURE__ */ new Set(), expandedUnder = /* @__PURE__ */ new Set();
-    let sideOrder = null;
-    const ancestorsOf = (id) => {
-      const out = /* @__PURE__ */ new Set();
-      for (let p = id && host2.modelStore.sessions[id] ? host2.domain.parentOf(id) : null; p && host2.modelStore.sessions[p] && p !== id && !out.has(p); p = host2.domain.parentOf(p))
-        out.add(p);
-      return out;
-    };
-    function treeGroupSnapshot(parent, kids, children, depth, rail, open) {
-      const { current, ancestors } = routedPath(), rank = new Map(kids.map((c) => [c.id, host2.domain.kidRank(c, children)]));
-      const byRank = (a, b) => rank.get(a.id) - rank.get(b.id) || b.last - a.last, sorted = [...kids].sort(byRank), keep = /* @__PURE__ */ new Set();
-      for (const c of sorted) if (rank.get(c.id) < 2 && keep.size < TREE_ACTIVE) keep.add(c.id);
-      for (const c of sorted)
-        if (c.id === current || ancestors.has(c.id) || expandedPath.has(c.id)) keep.add(c.id);
-      for (const c of sorted) if (keep.size < TREE_ROWS) keep.add(c.id);
-      const listed = sorted.filter((c) => keep.has(c.id)), hidden = kids.length - listed.length;
-      if (!hidden && expandedAll === parent.id) expandedAll = null;
-      const full = hidden > 0 && !rail && (expandedAll === parent.id || expandedUnder.has(parent.id));
-      const key2 = (full ? "a:" : "k:") + parent.id, unseen = !!sideOrder?.keep && open && !full && !sideOrder.reseed && sideOrder.seen.has(parent.id) && !sideOrder.prev.has(key2);
-      const shown = sideOrder ? host2.orderingControlsOwner.orderList(sideOrder, key2, full ? sorted : listed, byRank, {
-        must: /* @__PURE__ */ new Set([...current ? [current] : [], ...ancestors, ...expandedPath]),
-        quiet: !open,
-        seed: full || sideOrder.reseed || !sideOrder.seen.has(parent.id)
-      }) : full ? sorted : listed;
-      const items = shown.map((child) => buildLaneSnapshot(child, depth + 1, children, rail));
-      return {
-        items,
-        all: kids.length === shown.length || full || unseen ? void 0 : host2.domain.descendantsOf(parent.id, children).length,
-        full: full && expandedAll === parent.id
-      };
-    }
-    let recentSnapshot = { items: [], empty: false };
-    const recentRenderer = createRecentRenderer(host2.$("#lanes"), {
-      open: (id) => host2.destination.goSession(id),
-      toggle(id, value) {
-        if (!value) forcedOpenIds().delete(id);
-        host2.layoutOwner.saveTreePref(id, value);
-        if (!value && (expandedAll === id || expandedPath.has(id))) {
-          expandedAll = null;
-          renderLanes();
-          host2.$('#lanes .treeitem[data-id="' + CSS.escape(id) + '"] > .tree-row .tree-toggle')?.focus();
-        } else {
-          const change = (items) => items.map((item2) => ({
-            ...item2,
-            open: item2.id === id ? value : item2.open,
-            children: item2.children ? change(item2.children) : void 0
-          }));
-          recentSnapshot = { ...recentSnapshot, items: change(recentSnapshot.items) };
-          recentRenderer.update(recentSnapshot);
-        }
-      },
-      all(id, trigger) {
-        if (!host2.modelStore.sessions[id]) return;
-        if (host2.phone.matches) {
-          openKidsSheet(host2.modelStore.sessions[id], trigger);
-          return;
-        }
-        expandedAll = id;
-        renderLanes();
-        host2.$('#lanes .treeitem[data-id="' + CSS.escape(id) + '"] > .tree-row .tree-fewer')?.focus();
-      },
-      fewer(id) {
-        expandedAll = null;
-        renderLanes();
-        const row = host2.$('#lanes .srow[data-id="' + CSS.escape(id) + '"]');
-        host2.pagingOwner.scrollProgrammatically(() => row?.scrollIntoView({ block: "nearest" }));
-        row?.focus({ preventScroll: true });
-      }
-    });
-    function openKidsSheet(parent, trigger) {
-      const all = host2.domain.descendantsOf(parent.id, navigationTree().children), bucket = (s) => s.state === "wait" ? 0 : s.state === "work" ? 1 : 2;
-      let picked = null;
-      const rows = [...all].sort((a, b) => b.last - a.last).map((s) => {
-        const above = host2.domain.parentOf(s.id);
-        return {
-          id: s.id,
-          name: s.name,
-          state: s.state,
-          stateLabel: STATE[s.state] ?? s.state,
-          age: host2.ago(s.last),
-          bucket: bucket(s),
-          under: above && above !== parent.id && host2.modelStore.sessions[above] ? host2.modelStore.sessions[above].name : void 0
-        };
-      });
-      const sheet2 = createKidsSheet(parent.name, rows, {
-        matches(id, query) {
-          return host2.navigationViewOwner.sessMatch(host2.modelStore.sessions[id], query);
-        },
-        select(id) {
-          picked = id;
-          host2.pendingSessionOpen = id;
-          sheet2.dialog.close();
-        },
-        opened(d) {
-          host2.toolViewsOwner.viewerEl = d;
-          document.documentElement.classList.add("viewer-open");
-          if (!host2.sidebarOnly)
-            try {
-              history.pushState(
-                {
-                  ...host2.navigation.route,
-                  sheet: 1,
-                  scrollTop: host2.historyScrollOwner.currentScroll()
+          model(group) {
+            const value = panel(shortModel(group.model) + " \xB7 " + group.band);
+            renderModelItems(
+              value.body,
+              group.n + " work items",
+              (group.items ?? []).map((item2) => ({
+                id: item2.sid,
+                name: analytics?.sessions[item2.sid]?.name,
+                description: (item2.models ?? []).map(shortModel).join(" \u2192 ") + " \xB7 " + (item2.cost_usd == null ? "cost unknown" : money3(item2.cost_usd)),
+                url: liveUrl(item2.pr_url ?? "") ?? void 0
+              })),
+              group.items_more ? group.items_more + " more items" : void 0,
+              {
+                session(id) {
+                  open(selections[id]);
                 },
-                ""
-              );
-            } catch {
-            }
-        },
-        closed(d) {
-          host2.dialogs.delete(d);
-          if (host2.disposed) return;
-          document.documentElement.classList.remove("viewer-open");
-          if (host2.toolViewsOwner.viewerEl === d) {
-            host2.toolViewsOwner.viewerEl = null;
-            if (!host2.sidebarOnly && history.state?.sheet) {
-              host2.toolViewsOwner.skipPop = true;
-              history.back();
-            } else if (host2.pendingSessionOpen) {
-              const id = host2.pendingSessionOpen;
-              host2.pendingSessionOpen = null;
-              host2.destination.goSession(id);
-            }
+                trace() {
+                }
+              }
+            );
+            value.show();
           }
-          if (!picked)
-            (host2.$('#lanes .tree-all[data-id="' + CSS.escape(parent.id) + '"]') ?? trigger).focus();
-          if (host2.liveModelOwner.LIVE.pending) host2.applicationRefreshOwner.refresh();
         }
-      });
-      host2.dialogs.set(sheet2.dialog, sheet2);
-      sheet2.show();
-    }
-    function buildLaneSnapshot(s, depth, children, rail) {
-      const kids = children.get(s.id) ?? [], allKids = host2.domain.descendantsOf(s.id, children);
-      const { current, ancestors } = routedPath(), saved = host2.layoutOwner.treePrefs[s.id];
-      const open = forcedOpenIds().has(s.id) || expandedPath.has(s.id) || (typeof saved?.open === "boolean" ? saved.open : host2.domain.defaultTreeOpen(s.id, children) || expandedUnder.has(s.id));
-      const group = kids.length && !rail ? treeGroupSnapshot(s, kids, children, depth, rail, open) : null;
-      const parts = allKids.length ? host2.domain.childParts(allKids) : [], harness = Object.hasOwn(HARNESSES, s.harness) ? HARNESSES[s.harness] : null;
-      const flag = kids.length && !rail ? allKids.some((x) => x.state === "wait") ? "wait" : allKids.some((x) => x.state === "err") ? "err" : null : null;
-      const fields = [
-        {
-          className: "row-duration",
-          text: host2.dur(s.start, s.state === "work" || s.state === "wait" ? null : s.last),
-          priority: 1,
-          tip: "Duration",
-          icon: I.duration
-        }
-      ];
-      if (Object.keys(host2.modelStore.machines).length > 1)
-        fields.push({
-          className: "row-machine host",
-          text: host2.domain.shortHost(s),
-          priority: 2,
-          tip: "Machine: " + host2.domain.hostOf(s),
-          icon: I.machine
-        });
-      if (s.repo)
-        fields.push({
-          className: "repo-short",
-          text: s.repo,
-          priority: 3,
-          tip: "Repo: " + s.repo,
-          icon: I.repo
-        });
-      return {
-        id: s.id,
-        name: s.name,
-        label: [
-          s.name,
-          STATE[s.state] ?? s.state,
-          HARNESS[s.harness] ?? s.harness,
-          host2.domain.shortHost(s),
-          ...parts
-        ].join(", "),
-        state: s.state,
-        stateLabel: STATE[s.state] ?? s.state,
-        age: host2.ago(s.last),
-        model: shortModel(s.model ?? s.modelId),
-        modelTip: "Model: " + host2.sessionChrome.modelIdOf(s),
-        harness: harness ? {
-          id: s.harness,
-          name: harness.name,
-          light: harness.icon.light,
-          dark: harness.icon.dark,
-          darkTheme: host2.darkTheme()
-        } : void 0,
-        fields,
-        current: current === s.id ? "page" : rail && ancestors.has(s.id) ? "true" : void 0,
-        rail,
-        childState: rail && allKids.some((x) => x.state === "work" || x.state === "wait") ? host2.domain.urgentDescendant(s.id, children) ?? "work" : void 0,
-        flag: flag ? {
-          state: flag,
-          tip: allKids.filter((x) => x.state === "wait").length + " needs you \xB7 " + allKids.filter((x) => x.state === "err").length + " failed"
-        } : void 0,
-        open,
-        depth,
-        children: group?.items,
-        all: group?.all,
-        stuck: !!group?.full && open
-      };
-    }
-    function laneFocus() {
-      const a = document.activeElement instanceof HTMLElement ? document.activeElement : null, item2 = a?.closest(".treeitem");
-      if (!a || !host2.$("#lanes").contains(a)) return null;
-      const kind = ["srow", "tree-all", "tree-fewer", "tree-toggle"].find((c) => a.classList.contains(c)) ?? (a === item2 ? "treeitem" : null);
-      const id = kind === "tree-toggle" ? a.dataset.treeToggle : kind === "srow" || kind === "tree-all" ? a.dataset.id : item2?.dataset.id;
-      return kind && id ? { kind, id, visible: a.matches(":focus-visible") } : null;
-    }
-    function restoreLaneFocus(f) {
-      if (!f || document.activeElement !== document.body) return;
-      const q = (sel) => host2.$("#lanes " + sel), id = CSS.escape(f.id);
-      const target = f.kind === "srow" ? q('.srow[data-id="' + id + '"]') : f.kind === "tree-all" ? q('.tree-all[data-id="' + id + '"]') : f.kind === "tree-fewer" ? q('.treeitem[data-id="' + id + '"] > .tree-row .tree-fewer') : f.kind === "tree-toggle" ? q('.tree-toggle[data-tree-toggle="' + id + '"]') : q('.treeitem[data-id="' + id + '"]');
-      (target ?? q('.srow[data-id="' + id + '"]'))?.focus({
-        preventScroll: true,
-        focusVisible: f.visible
-      });
-    }
-    function renderLanes() {
-      const rail = host2.layoutOwner.railMode && !host2.phone.matches, prevSide = host2.orderingControlsOwner.ORD.get("side");
-      if (rail || prevSide?.rail !== rail) host2.orderingControlsOwner.ORD.delete("side");
-      const sideState = host2.orderingControlsOwner.ordState("side"), focus = laneFocus(), path = routedPath(), { current, ancestors } = path, { roots: lanes, children: everyone } = navigationTree(path);
-      sideOrder = Object.assign(host2.orderingControlsOwner.orderScope("side", "", null, sideState), {
-        seen: /* @__PURE__ */ new Set()
-      });
-      sideOrder.rail = rail;
-      const box = host2.$("#lanes"), drawn = [...box.querySelectorAll(".treeitem")];
-      sideOrder.seen = new Set(drawn.map((r) => r.dataset.id));
-      const seeing = new Set(
-        drawn.filter((r) => r.querySelector(":scope > .tree-row .srow")?.getClientRects().length).map((r) => r.dataset.id)
       );
-      let children = everyone;
-      if (sideOrder.keep) {
-        const held = [...everyone.keys()].filter(
-          (p) => !sideOrder.prevKids.has(p) && seeing.has(p) && p !== current && !ancestors.has(p)
+    }
+    function draw() {
+      if (disposed) return;
+      if (host2.nativeContent) {
+        host2.chrome();
+        return;
+      }
+      if (loading) host2.root.setAttribute("aria-busy", "true");
+      else host2.root.removeAttribute("aria-busy");
+      if (host2.route() === "home") {
+        if (home) drawHome();
+        else if (host2.homeIntro) host2.root.replaceChildren(host2.homeIntro);
+        else
+          render(
+            /* @__PURE__ */ jsx("p", { class: "catalog-note", role: "status", children: error ?? "Loading Home\u2026" }),
+            host2.root
+          );
+      } else if (host2.route() === "analytics") drawAnalytics();
+      else if (host2.route() === "machines") {
+        if (home)
+          renderMachinesScreen(
+            host2.root,
+            {
+              up: home.machines.filter((machine) => machine.up).length,
+              working: home.machines.reduce((sum, machine) => sum + machine.working, 0),
+              rows: home.machines.map((machine) => ({
+                id: machine.key,
+                name: machine.label,
+                state: machine.up ? "work" : "off",
+                stateLabel: machine.up ? "Online" : "Offline",
+                status: machine.working ? machine.working + " working" : machine.up ? "Online" : "Offline",
+                detail: machine.sessions + " sessions" + (machine.last == null ? "" : " \xB7 " + timeText(Math.max(0, home.now - machine.last)) + " ago")
+              })),
+              admin: null
+            },
+            {
+              machine(machine) {
+                host2.sessions({ machine, harness: "", repo: "", model: "" });
+              },
+              admin() {
+              },
+              committed() {
+              }
+            }
+          );
+        else
+          render(
+            /* @__PURE__ */ jsx("p", { class: "catalog-note", role: "status", children: error ?? "Loading Machines\u2026" }),
+            host2.root
+          );
+      }
+      host2.chrome();
+    }
+    async function moreHome(section) {
+      const offset = home?.next[section];
+      if (disposed || loading || offset == null || host2.route() !== "home") return;
+      const ticket = epoch;
+      loading = true;
+      host2.root.setAttribute("aria-busy", "true");
+      try {
+        const next = parseHome(
+          await host2.api(
+            "/api/viewer/home?" + new URLSearchParams({ [section + "_offset"]: String(offset) }),
+            { seen: [...seen.SEEN_RESULTS] }
+          )
         );
-        if (held.length) {
-          children = new Map([...everyone].filter(([p]) => !held.includes(p)));
-          sideOrder.n += held.reduce((n, p) => n + everyone.get(p).length, 0);
+        if (disposed || ticket !== epoch || host2.route() !== "home" || !home) return;
+        if (next.version !== home.version) {
+          queued = true;
+          return;
+        }
+        const unique = new Map(
+          home[section].map((row) => [
+            JSON.stringify([row.source_key, row.event?.id ?? row.catalog_key]),
+            row
+          ])
+        );
+        for (const row of next[section])
+          unique.set(JSON.stringify([row.source_key, row.event?.id ?? row.catalog_key]), row);
+        error = null;
+        const previewsIncomplete = await hydrateHome(next, ticket);
+        if (disposed || ticket !== epoch || host2.route() !== "home") return;
+        if (previewsIncomplete) error = "Some recorded previews are unavailable. Retrying\u2026";
+        home = {
+          ...home,
+          [section]: [...unique.values()],
+          next: { ...home.next, [section]: next.next[section] },
+          totals: next.totals
+        };
+      } catch (failure) {
+        if (!disposed && ticket === epoch)
+          error = failure instanceof Error ? failure.message : "Activity unavailable";
+      } finally {
+        if (!disposed && ticket === epoch) {
+          loading = false;
+          draw();
+          if (queued) {
+            queued = false;
+            void refresh();
+          }
         }
       }
-      sideOrder.kids = new Set(children.keys());
-      if (expandedAll && (host2.phone.matches || host2.layoutOwner.railMode || !host2.modelStore.sessions[expandedAll]))
-        expandedAll = null;
-      sideOrder.exp = JSON.stringify([expandedAll, host2.layoutOwner.railMode && !host2.phone.matches]);
-      sideOrder.reseed = sideOrder.keep && sideOrder.prevExp !== sideOrder.exp;
-      expandedPath = expandedAll ? ancestorsOf(expandedAll) : /* @__PURE__ */ new Set();
-      expandedUnder = expandedAll ? new Set(host2.domain.descendantsOf(expandedAll, children).map((x) => x.id)) : /* @__PURE__ */ new Set();
-      recentSnapshot = {
-        items: host2.orderingControlsOwner.orderList(
-          sideOrder,
-          "lanes",
-          lanes,
-          (...args) => host2.orderingControlsOwner.byLast(...args),
-          {
-            limit: 8,
-            must: /* @__PURE__ */ new Set([...current ? [current] : [], ...ancestors])
-          }
-        ).slice(0, 8).map((s) => buildLaneSnapshot(s, 0, children, rail)),
-        empty: !lanes.length
-      };
-      recentRenderer.update(recentSnapshot);
-      if (!sideOrder.n) {
-        host2.scope.clearTimeout(host2.orderingControlsOwner.ordIdle);
-        host2.orderingControlsOwner.ordIdle = void 0;
-      } else if (!host2.orderingControlsOwner.ordIdle) host2.orderingControlsOwner.ordIdleArm();
-      const q = host2.$("#q");
-      if (q && document.activeElement !== q) q.value = host2.query;
-      restoreLaneFocus(focus);
-      const stuck = box.querySelector(".tree-row.stuck"), navigated = revealedFor !== host2.navigation.route;
-      revealedFor = host2.navigation.route;
-      setGeometry(
-        host2.$("#side-list") ?? host2.$("#sidebar"),
-        "scrollPaddingTop",
-        stuck ? stuck.offsetHeight + 8 : null
+    }
+    async function hydrateHome(next, ticket) {
+      const selected = /* @__PURE__ */ new Map();
+      for (const row of [...next.inbox, ...next.working, ...next.answered]) {
+        if (row.previewReady) continue;
+        if (!row.contentGeneration) continue;
+        const key2 = JSON.stringify([row.source_key, row.catalog_key]);
+        selected.set(key2, [...selected.get(key2) ?? [], row]);
+      }
+      let incomplete = false;
+      const work = [...selected.values()].flatMap(
+        (rows) => Array.from(
+          { length: Math.ceil(rows.length / 8) },
+          (_, page) => rows.slice(page * 8, (page + 1) * 8)
+        )
       );
-      if (stuck && navigated)
-        host2.pagingOwner.scrollProgrammatically(
-          () => box.querySelector('.srow[aria-current="page"]')?.scrollIntoView({ block: "nearest" })
+      let cursor = 0;
+      await Promise.all(
+        Array.from({ length: Math.min(4, work.length) }, async () => {
+          while (cursor < work.length && !disposed && ticket === epoch && host2.route() === "home") {
+            const rows = work[cursor++], first = rows[0];
+            const ids = [...new Set(rows.flatMap((row) => row.event ? [row.event.id] : []))];
+            const args = new URLSearchParams({
+              machine: first.source_key,
+              sid: first.catalog_key,
+              scope: "retained_history",
+              generation: first.contentGeneration,
+              events: JSON.stringify(ids)
+            });
+            try {
+              const value = object(await host2.api("/api/session-home?" + args));
+              if (disposed || ticket !== epoch || host2.route() !== "home") return;
+              const identity2 = object(value.identity), session = object(value.session);
+              if (value.api !== 1 || identity2.source_key !== first.source_key || identity2.catalog_key !== first.catalog_key || value.generation !== first.contentGeneration)
+                throw Error("Home preview identity changed");
+              const events = dictionary(value.events, (value2) => {
+                const row = object(value2);
+                return {
+                  brief: text(row.brief),
+                  answer: nullable2(row.answer, (value3) => array(value3, text)),
+                  origin: nullable2(row.origin, text)
+                };
+              });
+              const detail = nullable2(session.detail, text);
+              const activity = session.activity == null ? void 0 : [
+                text(session.activity[0]),
+                text(session.activity[1]),
+                number(session.activity[2])
+              ];
+              const failed = boolean(value.incomplete);
+              if (failed && rows.length > 1) {
+                const half = Math.ceil(rows.length / 2);
+                work.push(rows.slice(0, half), rows.slice(half));
+              } else incomplete ||= failed;
+              for (const row of rows) {
+                row.previewReady = !failed;
+                row.session.detail = detail ?? void 0;
+                row.session.activity = activity;
+                if (row.event && events[row.event.id])
+                  Object.assign(row.event, events[row.event.id], {
+                    origin: events[row.event.id].origin ?? void 0
+                  });
+              }
+              if (home === next && !disposed && ticket === epoch && host2.route() === "home") draw();
+            } catch {
+              if (!disposed && ticket === epoch) incomplete = true;
+            }
+          }
+        })
+      );
+      return incomplete;
+    }
+    async function refresh(force = false) {
+      if (disposed || !["home", "analytics", "machines"].includes(host2.route())) return;
+      if (!force && host2.route() === "analytics" && Date.now() < analyticsRetryAt) return;
+      if (loading) {
+        queued = true;
+        queuedForce ||= force;
+        return;
+      }
+      const route = host2.route(), ticket = ++epoch, requestedQuery = route === "analytics" ? query() : "";
+      const current = () => !disposed && ticket === epoch && host2.route() === route && (route !== "analytics" || query() === requestedQuery);
+      loading = true;
+      host2.root.setAttribute("aria-busy", "true");
+      try {
+        const args = new URLSearchParams(requestedQuery);
+        if (observationAfter)
+          args.set(
+            "observation_after",
+            JSON.stringify([observationAfter.source_key, observationAfter.catalog_key])
+          );
+        const value = await host2.api(
+          "/api/viewer/" + (route === "analytics" ? "analytics" : "home") + (args.size ? "?" + args : ""),
+          route === "analytics" ? void 0 : { seen: [...seen.SEEN_RESULTS] }
         );
+        if (!current()) return;
+        if (route === "analytics" && value === null) {
+          const kept = analyticsCache.get(requestedQuery);
+          if (!kept) throw Error("Unchanged Analytics has no accepted result");
+          acceptAnalytics(kept);
+          error = null;
+          analyticsRetryAt = 0;
+          return;
+        }
+        const observations2 = array(object(value).observations, (value2) => object(value2));
+        const pending = array(object(value).pending_observations ?? [], parseSelection);
+        if (pending.length > 8) throw Error("Pending observations exceed their bound");
+        if (pending.length) observationAfter = pending.at(-1);
+        const observe = async () => {
+          let cursor = 0;
+          await Promise.all(
+            Array.from({ length: Math.min(2, pending.length) }, async () => {
+              while (cursor < pending.length && current()) {
+                const selected = pending[cursor++];
+                try {
+                  await host2.api(
+                    "/api/session-observe?" + new URLSearchParams({
+                      machine: selected.source_key,
+                      sid: selected.catalog_key,
+                      scope: "retained_history"
+                    })
+                  );
+                } catch {
+                }
+              }
+            })
+          );
+        };
+        if (route !== "analytics") {
+          const next = parseHome(value);
+          const pages = Math.max(
+            1,
+            ...["inbox", "working", "answered"].map(
+              (section) => Math.ceil((home?.[section].length ?? 0) / 100)
+            )
+          );
+          for (let page = 1; page < pages; page++) {
+            const args2 = new URLSearchParams();
+            for (const section of ["inbox", "working", "answered"])
+              if ((home?.[section].length ?? 0) > page * 100)
+                args2.set(section + "_offset", String(page * 100));
+            const additional = parseHome(
+              await host2.api("/api/viewer/home?" + args2, { seen: [...seen.SEEN_RESULTS] })
+            );
+            if (disposed || ticket !== epoch || host2.route() !== route) return;
+            if (additional.version !== next.version)
+              throw Error("Activity changed while loading. Retrying\u2026");
+            for (const section of ["inbox", "working", "answered"])
+              if (args2.has(section + "_offset")) {
+                next[section].push(...additional[section]);
+                next.next[section] = additional.next[section];
+              }
+          }
+          if (home?.version === next.version) {
+            const previous = new Map(
+              [...home.inbox, ...home.working, ...home.answered].map((row) => [
+                JSON.stringify([row.source_key, row.catalog_key, row.event?.id]),
+                row
+              ])
+            );
+            for (const row of [...next.inbox, ...next.working, ...next.answered]) {
+              const retained = previous.get(
+                JSON.stringify([row.source_key, row.catalog_key, row.event?.id])
+              );
+              if (!retained || retained.contentGeneration !== row.contentGeneration) continue;
+              row.previewReady = retained.previewReady;
+              row.session.detail = retained.session.detail;
+              if (retained.session.activity) row.session.activity = retained.session.activity;
+              if (row.event && retained.event) {
+                row.event.brief = retained.event.brief;
+                row.event.answer = retained.event.answer;
+                row.event.origin = retained.event.origin;
+              }
+            }
+          }
+          home = next;
+          recentRows = next.recent;
+          recentNow = next.now;
+          error = observations2.length ? "Some machine history is still being observed. Retrying\u2026" : null;
+          draw();
+          if (route !== "home") {
+            await observe();
+            return;
+          }
+          const [previewsIncomplete] = await Promise.all([
+            host2.nativeContent ? Promise.resolve(false) : hydrateHome(next, ticket),
+            observe()
+          ]);
+          if (disposed || ticket !== epoch || host2.route() !== "home") return;
+          if (previewsIncomplete) observations2.push({ state: "previews_unavailable" });
+          home = next;
+          recentRows = next.recent;
+          recentNow = next.now;
+        } else {
+          const data = object(value);
+          const nextAnalytics = parseAnalytics(data), nextSelections = dictionary(data.selections, parseSelection), nextLabels = dictionary(data.machine_labels, text), nextRecent = array(data.recent, parseHomeRow), nextNow = number(data.now);
+          if (nextRecent.length > 60) throw Error("Recent response exceeds its bound");
+          const accepted = {
+            data: nextAnalytics,
+            selections: nextSelections,
+            labels: nextLabels,
+            recent: nextRecent,
+            now: nextNow
+          };
+          analyticsCache.delete(requestedQuery);
+          analyticsCache.set(requestedQuery, accepted);
+          while (analyticsCache.size > 3) analyticsCache.delete(analyticsCache.keys().next().value);
+          acceptAnalytics(accepted);
+          analyticsRetryAt = 0;
+          draw();
+          await observe();
+        }
+        if (!current()) return;
+        error = observations2.length ? "Some machine history is still being observed. Retrying\u2026" : null;
+      } catch (failure) {
+        if (current()) {
+          error = failure instanceof Error ? failure.message : "Overview unavailable. Retrying\u2026";
+          if (route === "analytics") analyticsRetryAt = Date.now() + 1e4;
+        }
+      } finally {
+        if (!disposed && ticket === epoch) {
+          loading = false;
+          draw();
+          if (queued) {
+            const force2 = queuedForce;
+            queued = false;
+            queuedForce = false;
+            void refresh(force2);
+          }
+        }
+      }
     }
     return {
-      recentRenderer,
-      get expandedAll() {
-        return expandedAll;
+      actions,
+      waitingCount: () => home ? Math.max(
+        0,
+        home.totals.waiting - home.inbox.filter(
+          (row) => row.event?.ask === "result" && (home.machines.length === 1 && seen.SEEN_RESULTS.has(row.event.id) || seen.SEEN_RESULTS.has(JSON.stringify([row.source_key, row.event.id])))
+        ).length
+      ) : void 0,
+      recentSnapshot,
+      markResults(source, ids) {
+        let changed = false;
+        for (const id of ids) {
+          const key2 = JSON.stringify([source, id]);
+          if (seen.SEEN_RESULTS.has(key2)) continue;
+          seen.SEEN_RESULTS.add(key2);
+          changed = true;
+        }
+        if (!changed) return;
+        while (seen.SEEN_RESULTS.size > seen.SEEN_LIMIT)
+          seen.SEEN_RESULTS.delete(seen.SEEN_RESULTS.values().next().value);
+        try {
+          localStorage.setItem(seen.SEEN_KEY, JSON.stringify([...seen.SEEN_RESULTS]));
+        } catch {
+        }
+        host2.chrome();
       },
-      set expandedAll(value) {
-        expandedAll = value;
+      openRecent(id) {
+        const row = recentRows.find((row2) => row2.id === id);
+        if (!row) return false;
+        open(row);
+        return true;
       },
-      renderLanes,
-      COST_TIP,
-      isApprovalReview
+      toggleRecent(id, value) {
+        recentOpen.set(id, value);
+        while (recentOpen.size > 200) recentOpen.delete(recentOpen.keys().next().value);
+        try {
+          localStorage.setItem(
+            "semon.tree",
+            JSON.stringify(Object.fromEntries([...recentOpen].map(([key2, open2]) => [key2, { open: open2 }])))
+          );
+        } catch {
+        }
+        host2.chrome();
+      },
+      allRecent(id, value, trigger) {
+        if (value && trigger && matchMedia("(max-width: 760px)").matches) {
+          let collect2 = function(parent) {
+            for (const row of recentRows) {
+              if (visited.has(row.id) || row.source_key !== parent.source_key || row.session.parent !== parent.catalog_key)
+                continue;
+              visited.add(row.id);
+              rows.push(row);
+              collect2(row);
+            }
+          };
+          var collect = collect2;
+          const root = recentRows.find((row) => row.id === id);
+          if (!root) return;
+          const rows = [], visited = /* @__PURE__ */ new Set([root.id]);
+          collect2(root);
+          const sheet2 = createKidsSheet(
+            root.session.name,
+            rows.map((row) => ({
+              id: row.id,
+              name: row.session.name,
+              state: row.session.state,
+              stateLabel: row.session.state === "wait" ? "Waiting on you" : row.session.state === "work" ? "Working" : "Recorded history",
+              age: timeText(Math.max(0, recentNow - row.session.last)),
+              under: row.session.parent === root.catalog_key ? void 0 : recentRows.find(
+                (parent) => parent.source_key === row.source_key && parent.catalog_key === row.session.parent
+              )?.session.name,
+              bucket: row.session.state === "wait" ? 0 : row.session.state === "work" ? 1 : 2
+            })),
+            {
+              opened() {
+                host2.panelOpened(sheet2);
+              },
+              closed() {
+                host2.panelClosed(sheet2);
+                dialogs.delete(sheet2);
+                if (trigger.isConnected) trigger.focus({ preventScroll: true });
+              },
+              matches(key2, query2) {
+                const row = rows.find((row2) => row2.id === key2);
+                return !!row && (!query2 || [row.session.name, row.session.repo, row.session.model, row.session.harness].some(
+                  (field) => field?.toLowerCase().includes(query2.toLowerCase())
+                ));
+              },
+              select(key2) {
+                open(rows.find((row) => row.id === key2));
+              }
+            }
+          );
+          dialogs.add(sheet2);
+          sheet2.show();
+          return;
+        }
+        if (value) recentAll.add(id);
+        else recentAll.delete(id);
+        host2.chrome();
+      },
+      draw,
+      refresh,
+      leave() {
+        ++epoch;
+        queued = false;
+        queuedForce = false;
+        loading = false;
+        host2.root.removeAttribute("aria-busy");
+        facets.querySelector("dialog[open]")?.close();
+        error = null;
+        for (const value of [...dialogs]) value.destroy();
+      },
+      destroy() {
+        disposed = true;
+        ++epoch;
+        for (const value of [...dialogs]) value.destroy();
+        facetOwner.destroy();
+        analyticsCache.clear();
+        render(null, actions);
+      }
     };
   }
 
@@ -12165,6 +8610,7 @@ globalThis.__semonUIShared = __semonUIShared;
   var finite = (value) => typeof value === "number" && Number.isFinite(value);
   function createTraceCalculations(state2, domain, now, RUN_EXPANDED, HARNESS2, STATE2) {
     const { sessions: SESS, turns: TURNS, starts: STARTS } = state2;
+    const workingEnd = (session) => session.state === "work" && session.liveObservation !== false ? now() : session.last;
     const { costForSessions, costForSession, costText, shortMoney, hcls, usageTotal, nameOf } = domain;
     const clock2 = (at) => clock(at, now()), dur2 = (from, to) => dur(from, to, now()), kindText = (s) => s.kind ?? HARNESS2[s.harness];
     const allRunNodes = (model2) => {
@@ -12233,13 +8679,13 @@ globalThis.__semonUIShared = __semonUIShared;
       const model2 = traceAgentTree(root), session = SESS[root.sid];
       const start = root.at ?? root.start?.at ?? session.start;
       const nextTurn = (TURNS[root.sid] ?? []).find((t) => (t.at ?? 0) > start);
-      const upper = root.end?.at ?? nextTurn?.at ?? (session.state === "work" ? now() : session.last) ?? start;
+      const upper = root.end?.at ?? nextTurn?.at ?? workingEnd(session) ?? start;
       const end = Math.max(
         start,
         upper,
         ...model2.handoffs.map((h2) => h2.done).filter(finite),
         ...allRunNodes(model2).filter((n) => n.kind !== "root").map(
-          (n) => SESS[n.sid]?.state === "work" ? now() : n.handoff?.done ?? SESS[n.sid]?.last
+          (n) => SESS[n.sid]?.state === "work" && SESS[n.sid]?.liveObservation !== false ? now() : n.handoff?.done ?? SESS[n.sid]?.last
         ).filter(finite)
       );
       const span = Math.max(1, end - start);
@@ -12292,10 +8738,10 @@ globalThis.__semonUIShared = __semonUIShared;
       const add = (node, depth, parent) => {
         const s = SESS[node.sid];
         if (!s) return;
-        const handoff = node.handoff, from = node.kind === "root" ? start : handoff.at, to = node.kind === "root" ? end : s.state === "work" ? now() : handoff.done ?? s.last ?? from;
+        const handoff = node.handoff, from = node.kind === "root" ? start : handoff.at, to = node.kind === "root" ? end : s.state === "work" && s.liveObservation !== false ? now() : handoff.done ?? s.last ?? from;
         const duration = dur2(from, to), ownCost = costForSession(node.sid), rollup = costForSessions(
           allNodes(node).map((x) => SESS[x.sid]).filter(Boolean)
-        ), status2 = STATE2[s.state] ?? s.state;
+        ), status = (s.liveObservation === false && ["work", "wait"].includes(s.state) ? "Recorded: " : "") + (STATE2[s.state] ?? s.state);
         const segments = [], segment = (a, b, kind) => {
           if (b > a) segments.push({ left: pct(a), width: Math.max(0.2, pct(b) - pct(a)), kind });
         };
@@ -12311,7 +8757,7 @@ globalThis.__semonUIShared = __semonUIShared;
           kind: "agent",
           id: node.sid,
           depth: Math.min(3, depth),
-          label: [s.name, s.kind ?? HARNESS2[s.harness], status2, duration, costText(rollup)].join(
+          label: [s.name, s.kind ?? HARNESS2[s.harness], status, duration, costText(rollup)].join(
             ", "
           ),
           name: s.name,
@@ -12320,7 +8766,7 @@ globalThis.__semonUIShared = __semonUIShared;
           harnessClass: hcls(node.sid),
           model: [kindText(s), shortModel(s.model)].filter(Boolean).join(" \xB7 "),
           state: s.state,
-          stateLabel: status2,
+          stateLabel: status,
           tokens: tok(allNodes(node).reduce((sum, n) => sum + usageTotal(SESS[n.sid]), 0) / 1e6) + " tokens",
           duration,
           cost: rollup.usd == null ? "\u2014" : shortMoney(rollup.usd),
@@ -12336,7 +8782,7 @@ globalThis.__semonUIShared = __semonUIShared;
           edge: parent ? {
             parent,
             started: pct(handoff.at),
-            done: pct(handoff.done ?? (s.state === "work" ? now() : s.last)),
+            done: pct(handoff.done ?? workingEnd(s)),
             returned: Number.isFinite(handoff.done)
           } : void 0
         });
@@ -12344,7 +8790,7 @@ globalThis.__semonUIShared = __semonUIShared;
         for (const child of folded ? node.children.slice(0, 8) : node.children)
           add(child, Math.min(3, depth + 1), node.sid);
         if (folded) {
-          const hidden = node.children.slice(8), ids = new Set(hidden.flatMap((n) => allNodes(n).map((x) => x.sid))), cost2 = costForSessions([...ids].map((id) => SESS[id]).filter(Boolean));
+          const hidden = node.children.slice(8), ids = new Set(hidden.flatMap((n) => allNodes(n).map((x) => x.sid))), cost = costForSessions([...ids].map((id) => SESS[id]).filter(Boolean));
           rows.push({
             kind: "more",
             id: "more:" + node.sid,
@@ -12352,8 +8798,8 @@ globalThis.__semonUIShared = __semonUIShared;
             depth: Math.min(3, depth + 1),
             name: "+" + hidden.length + " more",
             label: "Show " + hidden.length + " more agents under " + s.name,
-            cost: cost2.usd == null ? "\u2014" : shortMoney(cost2.usd),
-            costTip: "Hidden agents' rollup cost: " + costText(cost2)
+            cost: cost.usd == null ? "\u2014" : shortMoney(cost.usd),
+            costTip: "Hidden agents' rollup cost: " + costText(cost)
           });
         }
       };
@@ -12379,3277 +8825,329 @@ globalThis.__semonUIShared = __semonUIShared;
     return { traceAgentTree, agentSnapshot };
   }
 
-  // src/app/screenViews.ts
-  function createScreenViews(host2) {
-    const MENU_KINDS = [
-      ["Input", ["input"]],
-      ["Output", ["output"]],
-      ["Cache write", ["cache_write_5m", "cache_write_1h"]],
-      ["Cache read", ["cache_read"]],
-      ["Web search", ["web_search"]]
-    ];
-    const COST_NOTE = "What these tokens would cost at API rates. Subscriptions aren't billed this way.";
-    function costSnapshot(s, kids) {
-      const own = host2.domain.costForSession(s.id), all = host2.domain.costForSession(s.id, true), missing = host2.domain.costMissing(all), details = [];
-      if (kids.length)
-        details.push(
-          { label: "This session", value: host2.domain.costText(own) },
-          {
-            label: kids.length === 1 ? "Its run" : "Its " + kids.length + " runs",
-            value: host2.domain.costText(host2.domain.costForSessions(kids))
-          }
-        );
-      const reports = s.reported_runs ?? [], reported = reports.filter((r) => Number.isFinite(r.cost_usd));
-      if (reports.length)
-        details.push({
-          label: HARNESS[s.harness] + "'s own figure",
-          value: reported.length ? host2.domain.asMoney(reported.reduce((n, r) => n + (r.cost_usd ?? 0), 0)) + (reported.length === 1 ? ", last run" : ", last " + reported.length + " runs") : "not reported"
-        });
-      const check = [...s.cost_check ?? []].reverse().find(
-        (c) => c.ok === false && Number.isFinite(c.computed_usd) && Number.isFinite(c.reported_usd)
-      );
-      const mismatch = check ? "Semon's estimate for that run is " + (check.reported_usd === 0 ? 100 : Math.round(
-        Math.abs((check.computed_usd ?? 0) - (check.reported_usd ?? 0)) / Math.abs(check.reported_usd ?? 0) * 100
-      )) + "% " + ((check.computed_usd ?? 0) > (check.reported_usd ?? 0) ? "above" : "below") + " " + HARNESS[s.harness] + "'s figure: API rates differ from what a plan is charged." : void 0;
-      const children = host2.domain.sessionChildren(), runs = [], walk = (id, depth) => {
-        for (const c of [...children.get(id) ?? []].sort((a, b) => b.last - a.last)) {
-          const cost2 = host2.domain.costText(host2.domain.costForSession(c.id));
-          runs.push({
-            id: c.id,
-            depth,
-            label: "Open " + c.name + ", " + host2.sessionChrome.kindText(c) + ", " + STATE[c.state] + ", " + cost2,
-            name: c.name,
-            kind: host2.sessionChrome.kindText(c),
-            state: c.state,
-            stateLabel: STATE[c.state],
-            cost: cost2
-          });
-          walk(c.id, depth + 1);
-        }
-      };
-      if (kids.length) walk(s.id, 0);
-      const models = Object.entries(all.by_model ?? {}).map(([id, model2]) => {
-        const priced2 = model2.usd != null && !missing.includes(id), rows = [];
-        for (const [label, keys] of MENU_KINDS) {
-          const tokens2 = keys.reduce((n, k) => n + (Number(model2.tokens?.[k]) || 0), 0), usd = keys.reduce((n, k) => n + (Number(model2.usd_by_kind?.[k]) || 0), 0);
-          if (tokens2 === 0 && (!priced2 || usd < 5e-3)) continue;
-          rows.push({
-            label,
-            count: tokens2 ? compactCount(tokens2) : "",
-            exact: tokens2 ? tokens2.toLocaleString() : void 0,
-            cost: priced2 ? host2.domain.asMoney(usd) : "\u2014"
-          });
-        }
-        return { id, rows };
-      });
-      return {
-        figure: host2.domain.costText(kids.length ? all : own),
-        caption: kids.length ? "this session and its " + kids.length + (kids.length === 1 ? " run" : " runs") : "this session",
-        note: COST_NOTE + ([s, ...kids].some((s2) => s2.claude_usage) ? " Copied usage is excluded. Its original owner and the fresh usage total are unknown." : "") + ([s, ...kids].some((s2) => s2.copilot) ? " Copilot usage is a cumulative saved snapshot. Fresh usage and complete cost are unknown." : "") + (missing.length ? " No price for " + missing.join(", ") + "." : ""),
-        details,
-        mismatch,
-        runs,
-        models,
-        includesRuns: !!kids.length
-      };
-    }
-    const upCount = () => Object.keys(host2.modelStore.machines).filter((m) => host2.modelStore.machineUp[m]).length;
-    let allAnswered = false;
-    function harnessSnapshot(id) {
-      const h2 = Object.hasOwn(HARNESSES, id) ? HARNESSES[id] : null;
-      return h2 ? { id, name: h2.name, light: h2.icon.light, dark: h2.icon.dark, darkTheme: host2.darkTheme() } : void 0;
-    }
-    function liveSnapshot(s, showMachine) {
-      const cur = (host2.modelStore.turns[s.id] ?? []).at(-1), msg = cur?.start?.brief ?? cur?.u?.text;
-      const inb = cur?.start ?? (cur?.u ? { from: "you" } : host2.modelStore.handoffs.find((h2) => h2.to === s.id && h2.kind !== "move"));
-      return {
-        id: s.id,
-        name: s.name,
-        state: s.state,
-        stateLabel: STATE[s.state] ?? s.state,
-        status: s.state === "work" ? HARNESS[s.harness] : host2.ago(s.last),
-        harness: s.state === "work" ? harnessSnapshot(s.harness) : void 0,
-        detail: [
-          showMachine ? host2.modelStore.machines[s.machine] : null,
-          inb ? inb.from === "you" ? "for you" : "for " + host2.domain.nameOf(inb.from) : null,
-          msg ? host2.domain.oneLine(msg) : null
-        ].filter(Boolean).join(" \xB7 "),
-        activity: s.state === "work" && s.activity ? [s.activity[0], s.activity[1], s.activity[2]] : void 0
-      };
-    }
-    function inboxSnapshot(h2, quiet = false) {
-      const sid = h2.kind === "move" ? h2.to : h2.from, t = host2.modelStore.holds.get(h2.id), s = host2.modelStore.sessions[sid];
-      const parts = [], part = (className, text2, tip) => parts.push({ className, text: text2, tip });
-      let path = I.more;
-      if (h2.kind === "ask") {
-        path = I.ask;
-        part("who", host2.domain.nameOf("you"));
-        part("verb", " asked ");
-        part("who", host2.domain.nameOf(h2.to));
-      } else if (h2.kind === "spawn" || h2.kind === "relay") {
-        path = I.out;
-        part("who", host2.domain.nameOf(h2.from));
-        part(
-          "verb",
-          h2.kind === "spawn" ? " handed off to " + (host2.modelStore.sessions[h2.to]?.kind === "Subagent" ? "subagent" : host2.modelStore.sessions[h2.to]?.kind ?? "") + " " : " relayed to "
-        );
-        part("who", host2.domain.nameOf(h2.to));
-      } else if (h2.kind === "move") {
-        path = I.move;
-        const short = machineShorts(
-          [h2.fromMachine, h2.toMachine].map((id) => [id, host2.modelStore.machines[id] ?? id])
-        );
-        part("verb", "Semon moved ");
-        part("who", host2.domain.nameOf(h2.to));
-        part("verb", " from ");
-        part(
-          "verb mach",
-          short.get(h2.fromMachine) ?? h2.fromMachine,
-          "Machine: " + (host2.modelStore.machines[h2.fromMachine] ?? h2.fromMachine)
-        );
-        part("verb", " to ");
-        part(
-          "verb mach",
-          short.get(h2.toMachine) ?? h2.toMachine,
-          "Machine: " + (host2.modelStore.machines[h2.toMachine] ?? h2.toMachine)
-        );
-      } else if (h2.kind === "toyou") {
-        path = h2.status === "done" && (h2.ask === "question" || h2.ask === "decision") ? I.done : h2.ask === "question" ? I.qc : h2.ask === "decision" ? I.decide : I.result;
-        part("who", host2.domain.nameOf(h2.from));
-        part(
-          "verb",
-          { question: " asked you", result: " sent you a result", decision: " needs your decision" }[h2.ask]
-        );
-      }
-      const answer2 = quiet ? host2.domain.answersOf(h2) : null, root = t ? host2.domain.traceRoot(t) : null, msg = root?.start?.from === "you" ? root.start.brief : root?.u?.text;
-      return {
-        id: h2.id,
-        quiet,
-        icon: quiet && h2.kind === "toyou" ? I.done : path,
-        parts,
-        age: host2.ago(h2.at),
-        preview: preview(h2.brief ?? ""),
-        answer: answer2 ? answer2.length ? "You answered: " + answer2.join(" \xB7 ") : "Answered \xB7 reply not in these logs" : void 0,
-        origin: root ? msg ? { message: host2.domain.oneLine(msg) } : { text: "Started by " + host2.domain.nameOf(root.start ? root.start.from : root.sid) } : void 0,
-        context: [HARNESS[s.harness], host2.modelStore.machines[s.machine]].join(" \xB7 "),
-        harness: harnessSnapshot(s.harness),
-        trace: t?.out.length ? t.id : void 0
-      };
-    }
-    const activityHost = {
-      session: (...args) => host2.destination.goSession(...args),
-      committed: (...args) => host2.sessionChrome.observeTitle(...args),
-      trace: (...args) => host2.destination.goTrace(...args),
-      inbox(id) {
-        const h2 = host2.modelStore.handoffs.find((h3) => h3.id === id) ?? host2.domain.inbox().find((h3) => h3.id === id);
-        if (!h2) return;
-        if (host2.domain.isResult(h2)) host2.seenPersistenceOwner.markSeenResults([h2]);
-        host2.destination.goSession(
-          h2.kind === "move" ? h2.to : h2.from,
-          host2.modelStore.holds.get(h2.id)?.id
-        );
-      },
-      answered() {
-        allAnswered = true;
-        host2.documentRendererOwner.render();
-      }
+  // src/domain/relationships.ts
+  function parseRecordedTurn(value) {
+    const row = object(value), end = object(row.end), sent = array(row.sent, text), st = text(end.st);
+    if (sent.length > 1e3 || !["work", "wait", "idle", "done", "err", "off"].includes(st))
+      throw Error("Invalid recorded turn");
+    return {
+      id: text(row.id),
+      start: row.start == null ? void 0 : text(row.start),
+      u: boolean(row.u),
+      at: row.at == null ? void 0 : number(row.at),
+      end: { st, why: text(end.why), at: end.at == null ? void 0 : number(end.at) },
+      sent,
+      last: boolean(row.last)
     };
-    function renderHome(page) {
-      const open = host2.domain.inbox(), running = host2.domain.working(), many = Object.keys(host2.modelStore.machines).length > 1;
-      const rows = host2.orderingControlsOwner.orderList(
-        host2.orderingControlsOwner.orderScope(
-          "page",
-          host2.orderingControlsOwner.pageSig(),
-          host2.navigation.route,
-          host2.orderingControlsOwner.pageState()
-        ),
-        "working",
-        running,
-        (...args) => host2.orderingControlsOwner.byLast(...args)
-      );
-      const done = host2.modelStore.handoffs.filter((h2) => h2.kind === "toyou" && h2.status === "done").sort((a, b) => b.at - a.at);
-      renderHomeScreen(
-        page,
-        {
-          control: host2.controlOwner.view(),
-          waiting: open.length,
-          working: running.length,
-          up: upCount(),
-          machines: Object.keys(host2.modelStore.machines).length,
-          inbox: open.map((h2) => inboxSnapshot(h2, false)),
-          live: rows.map((s) => liveSnapshot(s, many)),
-          answered: (allAnswered ? done : done.slice(0, 3)).map((h2) => inboxSnapshot(h2, true)),
-          totalAnswered: done.length,
-          allAnswered
-        },
-        activityHost
-      );
+  }
+  function parseRecordedRelationship(value) {
+    const row = object(value), kind = text(row.kind), status = text(row.status);
+    if (!["work", "wait", "done", "err", "new"].includes(status))
+      throw Error("Invalid recorded handoff state");
+    const base = {
+      id: text(row.id),
+      from: text(row.from),
+      to: row.to == null ? "" : text(row.to),
+      at: number(row.at),
+      done: row.done == null ? void 0 : number(row.done),
+      status,
+      brief: "",
+      declined: boolean(row.declined)
+    };
+    let edge;
+    if (kind === "toyou") {
+      const ask = text(row.ask);
+      if (!["question", "decision", "result"].includes(ask)) throw Error("Invalid recorded question");
+      edge = { ...base, kind, ask };
+    } else if (kind === "move") edge = { ...base, kind, fromMachine: "", toMachine: "" };
+    else if (kind === "ask" || kind === "spawn" || kind === "relay") edge = { ...base, kind };
+    else throw Error("Invalid recorded handoff");
+    return {
+      edge,
+      briefOwner: row.brief_session == null ? void 0 : text(row.brief_session),
+      resultOwner: row.result_session == null ? void 0 : text(row.result_session),
+      targetTurn: row.target_turn == null ? void 0 : text(row.target_turn)
+    };
+  }
+  function parseNativeRelationships(value, ids) {
+    const data = object(value), allowed = new Set(ids);
+    const rows = Object.entries(object(data.events)).map(([id, value2]) => {
+      const row = object(value2);
+      if (!allowed.has(id)) throw Error("Native relationship exceeds its issued selection");
+      return {
+        id,
+        brief: row.brief == null ? void 0 : text(row.brief),
+        result: row.result == null ? void 0 : text(row.result),
+        answer: row.answer == null ? void 0 : Array.isArray(row.answer) ? array(row.answer, text) : text(row.answer)
+      };
+    });
+    if (rows.length > ids.length || new Set(rows.map((row) => row.id)).size !== rows.length)
+      throw Error("Repeated native relationship");
+    return rows;
+  }
+
+  // src/app/tracePresentation.ts
+  var optionalText = (value) => value == null ? void 0 : text(value);
+  var optionalNumber = (value) => value == null ? void 0 : number(value);
+  function state(value) {
+    if (value === "off") return "idle";
+    if (value !== "work" && value !== "wait" && value !== "idle" && value !== "done" && value !== "err")
+      throw Error("Invalid recorded state");
+    return value;
+  }
+  function parseCost(value) {
+    const cost = object(value);
+    return {
+      usd: cost.usd == null ? null : number(cost.usd),
+      unpriced_models: cost.unpriced_models == null ? [] : array(cost.unpriced_models, text)
+    };
+  }
+  function parseCausalTrace(value, source, key2, root) {
+    const data = object(value);
+    if (data.api !== 1 || data.source_key !== source || data.catalog_key !== key2 || data.root !== root)
+      throw Error("Causal selection changed");
+    const previews = dictionary(data.previews, text);
+    if (Object.keys(previews).length > 128 || Object.values(previews).some((generation2) => !/^[a-f0-9]{64}$/.test(generation2)))
+      throw Error("Invalid causal preview scope");
+    const sessions = dictionary(data.sessions, (value2) => {
+      const row = object(value2);
+      const session = {
+        id: "",
+        name: text(row.name),
+        harness: text(row.harness),
+        state: state(row.state),
+        liveObservation: row.live_observation == null ? false : boolean(row.live_observation),
+        machine: source,
+        model: text(row.model),
+        kind: optionalText(row.kind),
+        start: number(row.start),
+        last: number(row.last),
+        cost: parseCost(row.cost),
+        tokens: array(row.tokens, number),
+        busy: array(row.busy, (value3) => {
+          const span = array(value3, number);
+          if (span.length !== 2) throw Error("Invalid busy interval");
+          return [span[0], span[1]];
+        }),
+        wait_edges: array(row.wait_edges, (value3) => {
+          const edge = object(value3);
+          return {
+            call: text(edge.call),
+            tool: text(edge.tool),
+            targets: array(edge.targets, text),
+            start: number(edge.start),
+            end: optionalNumber(edge.end),
+            turn: optionalText(edge.turn)
+          };
+        }),
+        wait_edges_truncated: boolean(row.wait_edges_truncated)
+      };
+      return session;
+    });
+    for (const [id, session] of Object.entries(sessions)) {
+      session.id = id;
     }
-    function renderMachines(page) {
-      const ms = Object.keys(host2.modelStore.machines).sort(
-        (a, b) => Number(host2.modelStore.machineUp[a]) - Number(host2.modelStore.machineUp[b])
-      );
-      const rows = ms.map((m) => {
-        const here = host2.domain.onMachine(m), w = here.filter((s) => s.state === "work").length, up = host2.modelStore.machineUp[m], state2 = !up ? "err" : w ? "work" : "idle";
-        const mv = host2.domain.movedOff(m).length, mh = host2.domain.movesOf(m).find((h2) => h2.kind === "move" && h2.fromMachine === m);
-        return {
-          id: m,
-          name: host2.modelStore.machines[m],
-          state: state2,
-          stateLabel: STATE[state2] ?? state2,
-          status: !up ? "offline" : w ? "up" : "idle",
-          detail: up ? [w + " working", here.length + (here.length === 1 ? " session" : " sessions")].join(
-            " \xB7 "
-          ) : [
-            "Not responding" + (mh ? " since " + host2.clock(mh.at) : host2.modelStore.machineLast[m] != null ? " since " + host2.clock(host2.modelStore.machineLast[m]) : ""),
-            mv ? mv + (mv === 1 ? " session" : " sessions") + " moved off" : null
-          ].filter(Boolean).join(" \xB7 ")
-        };
+    const handoffs = /* @__PURE__ */ new Map();
+    const previewOwners = /* @__PURE__ */ new Map();
+    for (const value2 of array(data.handoffs, object)) {
+      const relationship = parseRecordedRelationship(value2), edge = relationship.edge;
+      if (edge.kind === "move") {
+        edge.fromMachine = source;
+        edge.toMachine = source;
+      }
+      if (handoffs.has(edge.id)) throw Error("Duplicate causal handoff");
+      handoffs.set(edge.id, edge);
+      previewOwners.set(edge.id, {
+        brief: relationship.briefOwner,
+        result: relationship.resultOwner
       });
-      renderMachinesScreen(
-        page,
-        { rows, up: upCount(), working: host2.domain.working().length, admin: host2.admin },
-        {
-          machine(id) {
-            host2.destination.go({ v: "machine", id });
-          },
-          admin(href) {
-            location.assign(href);
-          },
-          committed: (...args) => host2.sessionChrome.observeTitle(...args)
-        }
-      );
     }
-    function renderMachine(page, m) {
-      const here = host2.domain.onMachine(m), off = host2.domain.movedOff(m), moves2 = host2.domain.movesOf(m);
-      const ordered = host2.orderingControlsOwner.orderList(
-        host2.orderingControlsOwner.orderScope(
-          "page",
-          host2.orderingControlsOwner.pageSig(),
-          host2.navigation.route,
-          host2.orderingControlsOwner.pageState()
-        ),
-        "machine:" + m,
-        here,
-        (...args) => host2.domain.byState(...args)
-      );
-      renderMachineScreen(
-        page,
-        {
-          name: host2.modelStore.machines[m],
-          totalSessions: here.length,
-          sessions: ordered.map((s) => liveSnapshot(s, false)),
-          off: off.map((s) => ({
-            ...liveSnapshot(s, false),
-            detail: "Now on " + host2.modelStore.machines[s.machine]
-          })),
-          moves: moves2.map((h2) => inboxSnapshot(h2, true))
-        },
-        activityHost
-      );
+    const turns = {}, starts = /* @__PURE__ */ new Map(), byId = /* @__PURE__ */ new Map();
+    for (const value2 of array(data.turns, object)) {
+      const end = object(value2.end), sid = text(value2.sid), id = text(value2.id), start = optionalText(value2.start);
+      if (!sessions[sid] || byId.has(id)) throw Error("Invalid causal turn identity");
+      const sent = array(value2.sent, text).map((id2) => {
+        const edge = handoffs.get(id2);
+        if (!edge) throw Error("Missing causal handoff");
+        return edge;
+      });
+      const turn = {
+        id,
+        sid,
+        start: start ? handoffs.get(start) ?? null : null,
+        at: optionalNumber(value2.at),
+        u: boolean(value2.u) ? { k: "u", text: "" } : null,
+        entries: [],
+        out: sent,
+        sent,
+        end: { st: state(end.st), why: text(end.why), at: optionalNumber(end.at) },
+        last: boolean(value2.last)
+      };
+      byId.set(id, turn);
+      (turns[sid] ??= []).push(turn);
+      if (start) starts.set(start, turn);
     }
-    const RUN_EXPANDED = /* @__PURE__ */ new Map();
+    const selected = byId.get(root);
+    if (!selected || selected.sid !== key2 || byId.size > 100 || handoffs.size > 1e3 || Object.keys(sessions).length > 100)
+      throw Error("Causal response exceeds its selection or bound");
+    const frontier = array(data.frontier, (value2) => {
+      const row = object(value2);
+      return { catalog_key: text(row.catalog_key), turn: text(row.turn) };
+    });
+    if (frontier.length > 1e3) throw Error("Causal frontier exceeds its bound");
+    return {
+      source,
+      key: key2,
+      root: selected,
+      sessions,
+      turns,
+      starts,
+      handoffs,
+      generation: text(data.generation),
+      frontier,
+      incomplete: boolean(data.incomplete),
+      previewsIncomplete: boolean(data.previews_incomplete),
+      previews,
+      previewOwners
+    };
+  }
+  function renderCausalTrace(root, data, now, expanded, host2) {
+    const costForSessions = (sessions) => ({
+      usd: sessions.some((session) => session.cost?.usd == null) ? null : sessions.reduce((sum, session) => sum + session.cost.usd, 0),
+      unpriced_models: [
+        ...new Set(sessions.flatMap((session) => session.cost?.unpriced_models ?? []))
+      ]
+    });
+    const costText = (cost) => cost.usd == null ? "Cost unavailable" : "$" + cost.usd.toFixed(2);
     const { agentSnapshot } = createTraceCalculations(
+      data,
       {
-        sessions: host2.modelStore.sessions,
-        turns: host2.modelStore.turns,
-        starts: host2.modelStore.starts
+        costForSessions,
+        costForSession: (id) => data.sessions[id]?.cost ?? { usd: null },
+        costText,
+        shortMoney: (value) => "$" + value.toFixed(2),
+        hcls: (id) => data.sessions[id]?.harness ?? "you",
+        usageTotal: (session) => (session.tokens ?? []).reduce((sum, value) => sum + value, 0) * 1e6,
+        nameOf: (id) => id === "you" ? "You" : data.sessions[id]?.name ?? "Unrecorded session"
       },
-      host2.domain,
-      () => host2.now,
-      RUN_EXPANDED,
+      () => now,
+      expanded,
       HARNESS,
       STATE
     );
-    function renderTrace(page, id) {
-      const root = host2.modelStore.turn.get(id);
-      if (!root) {
-        renderTraceScreen(
-          page,
-          { empty: true, hops: [] },
-          {
-            ...host2.sentencesOwner.sentenceHost,
-            committed: (...args) => host2.sessionChrome.observeTitle(...args),
-            fold() {
-            }
-          }
-        );
-        return;
-      }
-      const visited = /* @__PURE__ */ new Set(), read = (turn) => {
-        if (!turn || visited.has(turn.id)) return;
-        visited.add(turn.id);
-        host2.seenPersistenceOwner.markSeenResults(turn.out);
-        for (const h2 of turn.out)
-          if (h2.kind === "spawn" || h2.kind === "relay") read(host2.modelStore.starts.get(h2.id));
-      };
-      read(root);
-      const seen = /* @__PURE__ */ new Set([root.id]), sessions = /* @__PURE__ */ new Set([root.sid]), scope = /* @__PURE__ */ new Set([root.sid]), reached = /* @__PURE__ */ new Set([root.id]);
-      let n = 0;
-      const reach = (turn) => {
-        for (const h2 of turn.sent) {
-          scope.add(h2.kind === "toyou" ? h2.from : h2.to);
-          const child = h2.kind === "spawn" || h2.kind === "relay" ? host2.modelStore.starts.get(h2.id) : null;
-          if (child && !reached.has(child.id)) {
-            reached.add(child.id);
-            reach(child);
-          }
-        }
-      };
-      reach(root);
-      const meta = (state2, text3, sid, turn, note) => {
-        const s = host2.modelStore.sessions[sid], label = host2.domain.machineLabel(s, scope);
-        return {
-          state: state2,
-          stateLabel: STATE[state2] ?? state2,
-          text: text3,
-          chip: s ? [s.kind ?? HARNESS[s.harness], label].filter(Boolean).join(" \xB7 ") : void 0,
-          chipClass: s ? host2.domain.hcls(sid) : void 0,
-          tip: label ? "Machine: " + host2.domain.hostOf(s) : void 0,
-          harness: s ? harnessSnapshot(s.harness) : void 0,
-          note: note ?? void 0,
-          session: s && !s.stub ? sid : void 0,
-          turn: turn?.id,
-          name: s?.name
-        };
-      };
-      const start = root.start, text2 = start ? start.brief : root.u?.text, initial = start ? host2.sentencesOwner.sentenceSnapshot(start, null) : root.u ? host2.sentencesOwner.sentenceSnapshot(
-        {
-          kind: "ask",
-          id: root.id,
-          from: "you",
-          to: root.sid,
-          at: root.at ?? host2.now,
-          status: "done",
-          brief: ""
-        },
-        null
-      ) : {
-        icon: I.more,
-        parts: [
-          { className: "who", text: host2.modelStore.sessions[root.sid].name },
-          { className: "verb", text: " \xB7 a turn whose start isn't in these logs" }
-        ]
-      };
-      const outcome = host2.domain.turnEnd(root), hops = [
-        {
-          key: "root:" + root.id,
-          className: "k-root",
-          icon: initial.icon,
-          parts: initial.parts,
-          nodeClass: host2.domain.hcls(start ? start.from : root.u ? "you" : root.sid),
-          turn: root.id,
-          handoff: start?.id,
-          time: start ? host2.clock(start.at) : void 0,
-          brief: text2 || void 0,
-          meta: meta(outcome?.st ?? "idle", outcome?.text ?? "Nothing recorded", root.sid, root)
-        }
-      ];
-      const walk = (turn) => {
-        for (const h2 of turn.sent) {
-          const result = h2.kind === "toyou" && h2.ask === "result", child = h2.kind === "spawn" || h2.kind === "relay" ? host2.modelStore.starts.get(h2.id) : null, target = h2.kind === "toyou" ? h2.from : h2.to;
-          const sentence = result ? {
-            icon: I.result,
-            parts: [{ className: "verb", text: host2.domain.statWord(h2) ?? "" }]
-          } : host2.sentencesOwner.sentenceSnapshot(h2, null);
-          const hop = {
-            key: h2.id,
-            className: "child k-" + h2.kind + " s-" + h2.status + (child || h2.kind === "toyou" || h2.kind === "move" ? "" : " stub"),
-            icon: sentence.icon,
-            parts: sentence.parts,
-            nodeClass: host2.domain.hcls(target),
-            handoff: h2.id,
-            turn: child?.id,
-            time: host2.clock(h2.at)
-          };
-          hops.push(hop);
-          if (result) {
-            n++;
-            continue;
-          }
-          hop.brief = h2.brief;
-          hop.answers = host2.domain.answersOf(h2) ?? void 0;
-          hop.result = h2.result || void 0;
-          if (h2.kind === "move") {
-            hop.meta = meta("done", "Moved", h2.to, turn);
-            continue;
-          }
-          n++;
-          if (h2.kind === "toyou") {
-            hop.meta = meta(
-              host2.domain.isResult(h2) ? host2.seenResultsOwner.SEEN_RESULTS.has(h2.id) ? "read" : "new" : h2.status === "done" ? "done" : h2.status,
-              host2.domain.statWord(h2) ?? "",
-              h2.from,
-              turn
-            );
-            continue;
-          }
-          sessions.add(h2.to);
-          const end = child && host2.domain.turnEnd(child);
-          hop.meta = meta(
-            end ? end.st ?? "idle" : h2.status === "done" ? "done" : h2.status,
-            end ? end.text ?? "Nothing recorded" : host2.domain.statWord(h2) ?? "",
-            h2.to,
-            child,
-            child ? void 0 : "Its turn isn't in these logs"
-          );
-          if (child && !seen.has(child.id)) {
-            seen.add(child.id);
-            walk(child);
-          }
-        }
-      };
-      walk(root);
-      renderTraceScreen(
-        page,
-        {
-          empty: false,
-          hops,
-          agents: agentSnapshot(root),
-          summary: [
-            sessions.size + (sessions.size === 1 ? " session" : " sessions"),
-            n + (n === 1 ? " handoff" : " handoffs"),
-            [...host2.domain.machineLabels(scope).values()].join(", ")
-          ].filter(Boolean).join(" \xB7 ")
-        },
-        {
-          ...host2.sentencesOwner.sentenceHost,
-          committed: (...args) => host2.sessionChrome.observeTitle(...args),
-          fold(id2) {
-            RUN_EXPANDED.get(root.id)?.add(id2);
-            renderTrace(page, root.id);
-          }
-        }
-      );
-      return [
-        sessions.size + (sessions.size === 1 ? " session" : " sessions"),
-        n + (n === 1 ? " handoff" : " handoffs"),
-        [...host2.domain.machineLabels(scope).values()].join(", ")
-      ].filter(Boolean).join(" \xB7 ");
-    }
-    function renderSession(page, sid, opts = {}) {
-      host2.seenPersistenceOwner.markSeenResults(
-        host2.modelStore.handoffs.filter((h2) => host2.domain.isResult(h2) && h2.from === sid)
-      );
-      const raw = new Map(
-        host2.transcriptView.transcriptEntries(host2.transcripts.entries[sid] ?? [], sid).map((e) => [e.slot != null ? sid + "#slot:" + e.slot : e.key, e])
-      );
-      renderSessionScreen(
-        page,
-        {
-          ...host2.transcriptView.transcriptSnapshot(sid, opts),
-          control: host2.controlOwner.view(sid)
-        },
-        {
-          ...host2.sentencesOwner.sentenceHost,
-          committed: (...args) => host2.sessionChrome.observeTitle(...args),
-          trace: (...args) => host2.destination.goTrace(...args),
-          toolAll(key2, label) {
-            const e = raw.get(key2);
-            if (e?.k === "tool") {
-              const [ic, v] = host2.transcriptView.verb(e.name);
-              host2.toolViewsOwner.openStepViewer(e, v, ic, label);
-            }
-          },
-          script(key2) {
-            const e = raw.get(key2);
-            if (e?.k === "tool") host2.toolViewsOwner.openScript(e);
-          },
-          image: (...args) => host2.toolViewsOwner.openImage(...args),
-          background(call, trigger) {
-            const target = trigger.closest('section[aria-label="Transcript"]')?.querySelector('.step[data-tid="' + CSS.escape(call) + '"]');
-            if (!target) return;
-            host2.viewport.stopOpeningEndPin();
-            for (let parent = target.parentElement; parent; parent = parent.parentElement) {
-              const toggle = host2.viewport.opener(parent);
-              if (toggle?.getAttribute("aria-expanded") === "false") toggle.click();
-            }
-            host2.sessionChrome.centre(target);
-            target.classList.add("flash");
-            host2.scope.timeout(() => target.classList.remove("flash"), 1500);
-          },
-          pager(button) {
-            host2.pagingOwner.loadPager(button, true);
-          },
-          jump: (...args) => host2.viewport.jumpToLatest(...args)
-        }
-      );
-    }
-    const showsFooter = (s, origin) => origin ? s.state === "work" || s.state === "done" || s.state === "err" || origin.status === "done" || origin.status === "err" : !s.stub && !s.role && s.state in STATE;
-    return {
-      harnessSnapshot,
-      costSnapshot,
-      showsFooter,
-      renderHome,
-      renderMachines,
-      renderMachine,
-      renderTrace,
-      renderSession
-    };
-  }
-
-  // src/app/seenPersistence.ts
-  function createSeenPersistence(host2) {
-    function markSeenResults(handoffs) {
-      let changed = false;
-      for (const h2 of handoffs)
-        if (host2.domain.isResult(h2) && typeof h2.id === "string" && !host2.seenResultsOwner.SEEN_RESULTS.has(h2.id)) {
-          host2.seenResultsOwner.SEEN_RESULTS.add(h2.id);
-          changed = true;
-        }
-      while (host2.seenResultsOwner.SEEN_RESULTS.size > host2.seenResultsOwner.SEEN_LIMIT)
-        host2.seenResultsOwner.SEEN_RESULTS.delete(
-          host2.seenResultsOwner.SEEN_RESULTS.values().next().value
-        );
-      if (changed)
-        try {
-          window.localStorage.setItem(
-            host2.seenResultsOwner.SEEN_KEY,
-            JSON.stringify([...host2.seenResultsOwner.SEEN_RESULTS])
-          );
-        } catch {
-        }
-    }
-    return { markSeenResults };
-  }
-
-  // src/app/seenResults.ts
-  function createSeenResults(host2) {
-    const SEEN_KEY = "semon.seen", SEEN_LIMIT = 2e3;
-    const SEEN_RESULTS = (() => {
-      try {
-        const ids = JSON.parse(window.localStorage.getItem(SEEN_KEY) ?? "[]");
-        if (!Array.isArray(ids)) return /* @__PURE__ */ new Set();
-        const clean2 = ids.filter((id) => typeof id === "string").slice(-SEEN_LIMIT), seen = new Set(clean2);
-        if (seen.size !== ids.length)
-          try {
-            window.localStorage.setItem(SEEN_KEY, JSON.stringify([...seen]));
-          } catch {
-          }
-        return seen;
-      } catch {
-        return /* @__PURE__ */ new Set();
-      }
-    })();
-    return { SEEN_RESULTS, SEEN_LIMIT, SEEN_KEY };
-  }
-
-  // src/app/sentences.ts
-  function createSentences(host2) {
-    function sentenceSnapshot(h2, viewer, links = false) {
-      const parts = [], text2 = (className, text3) => parts.push({ className, text: text3 });
-      const who = (id, action, label) => {
-        const name = host2.domain.nameOf(id), linked = links && action && id !== "you" && id !== viewer && host2.modelStore.sessions[id];
-        parts.push({
-          text: name,
-          className: linked ? "who-link" : "who",
-          action: linked ? action : void 0,
-          label: linked ? label?.(name) : void 0
-        });
-      };
-      const sender = { kind: "sender", id: h2.id }, recipient = {
-        kind: "session",
-        id: h2.to,
-        turn: host2.modelStore.starts.get(h2.id)?.id
-      };
-      const senderLabel = (name) => "Open " + name + " where it sent this", recipientLabel = (name) => "Open " + name + " at the turn this started";
-      let path;
-      if (h2.kind === "ask") {
-        path = I.ask;
-        who("you");
-        text2("verb", " asked ");
-        who(h2.to, recipient, recipientLabel);
-      } else if (h2.kind === "spawn" || h2.kind === "relay") {
-        if (viewer === h2.to) {
-          path = I.in;
-          text2("verb", h2.kind === "spawn" ? "Brief from " : "Relay from ");
-          who(h2.from, sender, senderLabel);
-        } else {
-          path = I.out;
-          who(h2.from, sender, senderLabel);
-          text2(
-            "verb",
-            h2.kind === "spawn" ? " handed off to " + (host2.modelStore.sessions[h2.to]?.kind === "Subagent" ? "subagent" : host2.modelStore.sessions[h2.to]?.kind ?? "") + " " : " relayed to "
-          );
-          who(h2.to, recipient, recipientLabel);
-        }
-      } else if (h2.kind === "move") {
-        path = I.move;
-        const short = machineShorts(
-          [h2.fromMachine, h2.toMachine].map((id) => [id, host2.modelStore.machines[id] ?? id])
-        );
-        const machine2 = (id) => parts.push({
-          className: "verb mach",
-          text: short.get(id) ?? id,
-          tip: "Machine: " + (host2.modelStore.machines[id] ?? id),
-          action: links ? { kind: "machine", id } : void 0,
-          label: links ? "Open machine " + (host2.modelStore.machines[id] ?? id) : void 0
-        });
-        text2("verb", "Semon moved ");
-        who(h2.to, { kind: "session", id: h2.to }, (name) => "Open " + name);
-        text2("verb", " from ");
-        machine2(h2.fromMachine);
-        text2("verb", " to ");
-        machine2(h2.toMachine);
-      } else if (h2.kind === "toyou") {
-        path = h2.status === "done" && (h2.ask === "question" || h2.ask === "decision") ? I.done : h2.ask === "question" ? I.qc : h2.ask === "decision" ? I.decide : I.result;
-        who(h2.from, sender, senderLabel);
-        text2(
-          "verb",
-          { question: " asked you", result: " sent you a result", decision: " needs your decision" }[h2.ask]
-        );
-      }
-      return { icon: path ?? "", parts };
-    }
-    const sentenceHost = {
-      session(id, turn) {
-        host2.destination.goSession(id, turn);
-      },
-      machine(id) {
-        host2.destination.go({ v: "machine", id });
-      },
-      sender(id) {
-        const h2 = host2.modelStore.handoff.get(id);
-        if (h2) host2.destination.openSender(h2);
-      }
-    };
-    return { sentenceHost, sentenceSnapshot };
-  }
-
-  // src/domain/resume.ts
-  function resumeCommand(session) {
-    const id = session.sessionId ?? session.id;
-    if (!id.trim() || id.startsWith("-") || /[\0\r\n]/.test(id)) return null;
-    const argument = /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(id) ? id : "'" + id.replaceAll("'", `'"'"'`) + "'";
-    switch (session.harness) {
-      case "claude":
-        return "claude --resume " + argument;
-      case "codex":
-        return "codex resume " + argument;
-      case "copilot":
-        return "copilot --resume=" + argument;
-      default:
-        return null;
-    }
-  }
-
-  // src/navigation/errors.ts
-  function createErrorNavigation(host2) {
-    const {
-      navigation,
-      TX,
-      TXM,
-      SESS,
-      drawSessionBar,
-      render: render2,
-      keepFocus,
-      countOf,
-      capture,
-      restore,
-      opener,
-      resetPagerInput,
-      stopOpeningEndPin,
-      centre,
-      fetchTx,
-      dropTx,
-      spread,
-      tail
-    } = host2;
-    const scope = new EffectScope();
-    let pending = null, modeRequest = null;
-    const $ = (selector) => host2.page().ownerDocument.querySelector(selector);
-    const enc = encodeURIComponent, SIDEBAR_ONLY = host2.sidebarOnly;
-    const ERR = {
-      mode: "errors",
-      on: false,
-      sid: null,
-      slots: [],
-      listed: false,
-      count: 0,
-      version: null,
-      k: -1,
-      slot: null,
-      saved: null,
-      range: null,
-      tools: true,
-      chain: Promise.resolve(),
-      gen: 0
-    };
-    const ERR_NEAR = 400, ERR_AROUND = 40;
-    const errLive = createLiveRegion();
-    if (!SIDEBAR_ONLY) document.body.append(errLive);
-    const signalCount = (s) => Object.values(s?.signals ?? {}).reduce((n, x) => n + x, 0);
-    const errText = () => ERR.k < 0 ? ERR.count ? "Finding " + ERR.mode + "\u2026" : "No " + ERR.mode : (ERR.mode === "signals" ? "Signal " : "Error ") + (ERR.k + 1) + " of " + ERR.count;
-    const errOn = (sid) => ERR.on && ERR.sid === sid;
-    function errLabel(announce) {
-      ERR.notice = null;
-      if (navigation.route.v === "session" && ERR.on) drawSessionBar();
-      if (announce) errLive.textContent = errText();
-    }
-    function releaseMode() {
-      if (modeRequest) {
-        modeRequest.abort();
-        scope.releaseRequest(modeRequest);
-        modeRequest = null;
-      }
-    }
-    function releasePending() {
-      if (pending) {
-        pending.abort();
-        scope.releaseRequest(pending);
-        pending = null;
-      }
-    }
-    function openErrors(sid, mode = "errors") {
-      if (ERR.on || navigation.route.v !== "session" || navigation.route.id !== sid || !TXM[sid])
-        return;
-      releaseMode();
-      modeRequest = scope.request();
-      resetPagerInput();
-      stopOpeningEndPin();
-      host2.clearFind();
-      Object.assign(ERR, {
-        mode,
-        on: true,
-        sid,
-        slots: [],
-        listed: false,
-        count: mode === "signals" ? signalCount(SESS[sid]) : countOf(SESS[sid], "errors") ?? 0,
-        version: null,
-        k: -1,
-        slot: null,
-        saved: capture(),
-        range: { tx: TX[sid], m: { ...TXM[sid] } },
-        tools: host2.show.tools,
-        gen: ERR.gen + 1
-      });
-      if (!host2.show.tools) {
-        host2.show.tools = true;
-        render2();
-      } else drawSessionBar();
-      document.getElementById("err-next")?.focus({ preventScroll: true });
-      errLabel(true);
-      const gen = ERR.gen;
-      fetchErrors(sid).then(
-        () => {
-          if (ERR.gen !== gen || !ERR.on) return;
-          if (ERR.slots.length) {
-            ERR.k = 0;
-            showError(true);
-          } else errLabel(true);
-        },
-        () => {
-          if (ERR.gen === gen && ERR.on) {
-            errLive.textContent = "Couldn't list " + ERR.mode;
-            ERR.notice = "Couldn't list " + ERR.mode;
-            drawSessionBar();
-          }
-        }
-      );
-    }
-    function fetchErrors(sid) {
-      releasePending();
-      const request = scope.request();
-      pending = request;
-      const gen = ERR.gen, mode = ERR.mode;
-      return requestJson(
-        "/api/tx?sid=" + enc(sid) + "&" + mode + "=1" + (ERR.version ? "&since=" + enc(ERR.version) : ""),
-        request.signal,
-        true
-      ).then((x) => {
-        if (!x || request.signal.aborted || ERR.gen !== gen || !errOn(sid) || typeof x !== "object")
-          return;
-        const slots = "slots" in x && Array.isArray(x.slots) ? x.slots.filter(
-          (value) => typeof value === "number" && Number.isInteger(value) && value >= 0
-        ) : [];
-        const count = mode === "errors" ? "errors" in x ? x.errors : void 0 : "signals" in x ? x.signals : void 0;
-        ERR.listed = true;
-        ERR.slots = slots;
-        ERR.count = typeof count === "number" && Number.isInteger(count) ? Math.max(count, slots.length) : slots.length;
-        ERR.version = "version" in x && typeof x.version === "string" ? x.version : null;
-        if (ERR.slot != null) {
-          const currentSlot = ERR.slot, at = ERR.slots.indexOf(currentSlot), after = ERR.slots.findIndex((slot) => slot > currentSlot);
-          ERR.k = at >= 0 ? at : !ERR.slots.length ? -1 : after >= 0 ? after : ERR.slots.length - 1;
-          if (at < 0) ERR.slot = ERR.k >= 0 ? ERR.slots[ERR.k] : null;
-        }
-      }).catch((error) => {
-        if (!request.signal.aborted && pending === request && ERR.gen === gen && errOn(sid))
-          throw error;
-      }).finally(() => {
-        scope.releaseRequest(request);
-        if (pending === request) pending = null;
-      });
-    }
-    function stepErrors(delta) {
-      if (!ERR.on || !ERR.slots.length) return;
-      const n = ERR.slots.length;
-      ERR.k = ERR.k < 0 ? 0 : ((ERR.k + delta) % n + n) % n;
-      showError(true);
-    }
-    const hasSlot = (sid, slot) => {
-      const m = TXM[sid];
-      return !!m && slot >= m.from && slot < m.to;
-    };
-    function loadSlot(sid, slot) {
-      if (hasSlot(sid, slot)) return Promise.resolve(false);
-      const m = TXM[sid];
-      if (!m || modeRequest?.signal.aborted) return Promise.resolve(false);
-      const up = slot < m.from, near = up ? m.from - slot <= ERR_NEAR : slot - m.to < ERR_NEAR;
-      let tries = 0;
-      const extend = () => modeRequest?.signal.aborted || hasSlot(sid, slot) || tries++ >= 3 ? null : fetchTx(
-        sid,
-        up ? "before=" + TXM[sid].from : "after=" + TXM[sid].to,
-        up ? "before" : "after",
-        modeRequest?.signal
-      ).then(extend);
-      const around = () => modeRequest?.signal.aborted || hasSlot(sid, slot) ? null : fetchTx(
-        sid,
-        "after=" + Math.max(0, slot - ERR_AROUND),
-        void 0,
-        modeRequest?.signal
-      ).then(
-        () => hasSlot(sid, slot) ? null : fetchTx(sid, "after=" + slot, void 0, modeRequest?.signal)
-      );
-      return Promise.resolve(near ? extend() : null).then(around).then(() => true);
-    }
-    function errNode(sid, slot) {
-      const e = (TX[sid] ?? []).find(
-        (x) => x.k === (ERR.mode === "signals" ? "signal" : "tool") && x.slot === slot
-      );
-      if (!e?.key) return null;
-      return [...host2.page().querySelectorAll(".turns [data-e]")].find(
-        (n) => n.dataset.e === e.key
-      ) ?? null;
-    }
-    function markError(ring) {
-      for (const n of host2.page().querySelectorAll("[data-e].err-current"))
-        n.classList.remove("err-current", "err-ring");
-      if (!ERR.on || ERR.slot == null || navigation.route.v !== "session" || navigation.route.id !== ERR.sid)
-        return null;
-      const node = errNode(navigation.route.id, ERR.slot);
-      if (!node) return null;
-      const g = node.closest(".tgroup"), sum = g && opener(g);
-      if (sum?.getAttribute("aria-expanded") === "false") sum.click();
-      node.classList.add("err-current");
-      if (ring) {
-        node.classList.remove("err-ring");
-        void node.offsetWidth;
-        node.classList.add("err-ring");
-        scope.timeout(() => node.classList.remove("err-ring"), 1500);
-      }
-      return node;
-    }
-    function showError(announce) {
-      resetPagerInput();
-      const sid = ERR.sid;
-      if (!sid) return;
-      const slot = ERR.slots[ERR.k], gen = ERR.gen;
-      ERR.slot = slot;
-      errLabel(announce);
-      ERR.chain = ERR.chain.then(() => {
-        if (!ERR.on || ERR.gen !== gen || ERR.slot !== slot) return null;
-        stopOpeningEndPin();
-        return loadSlot(sid, slot).then(
-          (moved) => {
-            if (!ERR.on || ERR.gen !== gen || ERR.slot !== slot || navigation.route.v !== "session" || navigation.route.id !== sid)
-              return;
-            if (moved) keepFocus(render2);
-            const node = markError(true);
-            if (!node) {
-              if (announce) errLive.textContent = errText() + ", not shown in this transcript";
-              return;
-            }
-            centre(node);
-            scope.frame(
-              () => scope.frame(() => {
-                if (ERR.on && ERR.slot === slot && node.isConnected) centre(node);
-              })
-            );
-          },
-          () => {
-            if (ERR.on && ERR.gen === gen) errLive.textContent = "Couldn't load " + errText();
-          }
-        );
-      }).catch((e) => {
-        scope.timeout(() => {
-          throw e;
-        });
-      });
-    }
-    function dropErrors(away = false) {
-      if (!ERR.on) return;
-      const sid = ERR.sid;
-      if (!sid) return;
-      const range = ERR.range, m = TXM[sid];
-      releasePending();
-      releaseMode();
-      ERR.on = false;
-      ERR.gen++;
-      host2.show.tools = ERR.tools;
-      ERR.saved = ERR.range = null;
-      errLive.textContent = "";
-      if (away && range && m && (m.from !== range.m.from || m.to < range.m.to)) dropTx(sid);
-    }
-    function closeErrors() {
-      if (!ERR.on) return;
-      const sid = ERR.sid;
-      if (!sid) return;
-      const saved = ERR.saved, range = ERR.range, m = TXM[sid];
-      dropErrors();
-      const generation2 = ERR.gen;
-      let p = Promise.resolve(void 0);
-      if (range && m && TX[sid] && (m.from !== range.m.from || m.to < range.m.to)) {
-        TX[sid] = range.tx;
-        TXM[sid] = range.m;
-        spread(sid);
-        if (range.m.to >= range.m.total && range.m.tok !== host2.TOK[sid])
-          p = tail(sid).catch(() => null);
-      }
-      p.then(() => {
-        if (navigation.route.v !== "session" || navigation.route.id !== sid || ERR.on || ERR.gen !== generation2)
-          return;
-        render2();
-        if (saved) restore(saved);
-        const b0 = $("#topbar .lab-errs") ?? $('#topbar .chip[data-filter="failures"]'), b = b0 && !b0.getClientRects().length ? $("#more-btn") : b0;
-        if (b && !b.hidden && document.activeElement !== b && (!document.activeElement || document.activeElement === document.body || !document.activeElement.isConnected))
-          b.focus({ preventScroll: true });
-      });
-    }
-    if (!SIDEBAR_ONLY)
-      scope.listen(document, "keydown", (e) => {
-        if (!ERR.on || e.defaultPrevented || e.altKey || e.ctrlKey || e.metaKey || document.querySelector("dialog[open]"))
-          return;
-        if (!(e.target instanceof HTMLElement)) return;
-        if (document.body.classList.contains("drawer-open") || document.querySelector(".menu"))
-          return;
-        if (e.target.closest?.("input, textarea, select, [contenteditable='true']")) return;
-        const inBar = !!e.target.closest?.("#topbar .errnav-bar"), onButton = e.target.tagName === "BUTTON";
-        if (e.key === "Escape") {
-          e.preventDefault();
-          closeErrors();
-          return;
-        }
-        if (e.key === "n" || e.key === "N") {
-          e.preventDefault();
-          stepErrors(1);
-          return;
-        }
-        if (e.key === "p" || e.key === "P") {
-          e.preventDefault();
-          stepErrors(-1);
-          return;
-        }
-        if (e.key === "Enter" && (inBar || e.target === document.body)) {
-          if (e.shiftKey) {
-            e.preventDefault();
-            stepErrors(-1);
-          } else if (!onButton) {
-            e.preventDefault();
-            stepErrors(1);
-          }
-        }
-      });
-    function errorsLive() {
-      if (!ERR.on || navigation.route.v !== "session" || navigation.route.id !== ERR.sid) return null;
-      const sid = ERR.sid;
-      if (!sid) return null;
-      const gen = ERR.gen, was = ERR.count;
-      return fetchErrors(sid).then(() => {
-        if (!ERR.on || ERR.gen !== gen) return;
-        if (ERR.k < 0 && ERR.slots.length) {
-          ERR.k = 0;
-          showError(true);
-          return;
-        }
-        errLabel(ERR.count !== was);
-        markError(false);
-      });
-    }
-    return {
-      state: ERR,
-      text: errText,
-      on: errOn,
-      open: openErrors,
-      step: stepErrors,
-      mark: markError,
-      drop: dropErrors,
-      close: closeErrors,
-      live: errorsLive,
-      destroy() {
-        releasePending();
-        releaseMode();
-        scope.destroy();
-        errLive.remove();
-        ERR.on = false;
-        ERR.gen++;
-      }
-    };
-  }
-
-  // src/app/sessionChrome.ts
-  function createSessionChrome(host2) {
-    const kindText = (s) => s.kind ?? HARNESS[s.harness] ?? s.harness;
-    const modelIdOf = (s) => s.model ?? Object.keys(s.tokens_by_model ?? {})[0];
-    const viewerBar = createViewerBar();
-    function renderTopbar(title, crumb = null, opts = {}) {
-      const s = opts.session ?? opts.traceSession;
-      const account = host2.account ? {
-        account: host2.account,
-        compact: false,
-        wide: host2.layoutOwner.wideMode,
-        onWideChange: () => host2.layoutOwner.setWideMode(!host2.layoutOwner.wideMode)
-      } : null;
-      const mode = s && errOn(s.id) ? "errors" : s && host2.findOpen ? "find" : "normal";
-      const content2 = viewerBar.update(
-        {
-          mode,
-          name: title,
-          session: s?.id,
-          state: s?.state,
-          stateLabel: s ? STATE[s.state] : void 0,
-          stateTip: s ? "Status: " + STATE[s.state] + " \xB7 " + turnsLabel(s) : void 0,
-          showState: !!s && !opts.traceSession && !(host2.phone.matches && opts.lineage?.length),
-          ancestors: !host2.phone.matches ? opts.lineage?.map((a) => ({
-            ...a,
-            harnessName: HARNESS[a.harness] ?? a.harness
-          })) ?? [] : [],
-          crumb: opts.lineage?.length ? void 0 : crumb?.label,
-          labels: opts.line2 ?? [],
-          trace: !!opts.traceSession,
-          analytics: !!opts.analytics,
-          days: host2.analyticsRange,
-          query: host2.find,
-          count: matchText(matchCount()),
-          filter: host2.show.messages && host2.show.tools ? "all" : host2.show.messages ? "messages" : "steps",
-          failed: s ? host2.domain.countOf(s, "errors") ?? 0 : 0,
-          signals: s ? signalCount(s) : 0,
-          errorMode: ERR.mode,
-          errorText: ERR.notice ?? errText(),
-          errorDisabled: ERR.listed && !ERR.slots.length,
-          icons: {
-            search: I.search,
-            back: I.back,
-            x: I.x,
-            up: I.up,
-            more: I.more,
-            dn: I.dn
-          }
-        },
-        {
-          ancestor: (...args) => host2.destination.goSession(...args),
-          crumb() {
-            crumb?.go();
-          },
-          find() {
-            host2.findOpen = true;
-            host2.documentRendererOwner.render();
-            host2.$("#find")?.focus();
-          },
-          closeFind() {
-            host2.findOpen = false;
-            host2.find = "";
-            host2.show = { ...host2.allVisibility };
-            host2.documentRendererOwner.render();
-          },
-          query(value) {
-            host2.find = value.toLowerCase();
-            host2.documentRendererOwner.render();
-          },
-          filter(key2) {
-            if (key2 === "failures" || key2 === "signals") {
-              s && openErrors(s.id, key2 === "signals" ? "signals" : "errors");
-              return;
-            }
-            host2.show = key2 === "messages" ? { messages: true, tools: false, thinking: false } : key2 === "steps" ? { messages: false, tools: true, thinking: false } : { ...host2.allVisibility };
-            host2.documentRendererOwner.render();
-          },
-          menu(trigger, runs) {
-            s && openSessionMenu(
-              host2.modelStore.sessions[s.id] ?? s,
-              trigger,
-              runs ? ".runs" : void 0
-            );
-          },
-          errors() {
-            s && openErrors(s.id);
-          },
-          closeErrors,
-          step: stepErrors,
-          range(days) {
-            if (host2.analyticsRange === days) return;
-            const top = host2.historyScrollOwner.currentScroll();
-            host2.analyticsRange = days;
-            host2.documentRendererOwner.render();
-            host2.historyScrollOwner.restoreScroll(top);
-            host2.analytics.refreshAnalytics(true);
-          }
-        }
-      );
-      const lead = {
-        label: opts.traceSession ? "Back to " + s?.name : "Open navigation",
-        icon: opts.traceSession ? I.chev : I.menu,
-        back: opts.traceSession ? () => s && host2.destination.goSession(
-          s.id,
-          "turn" in host2.navigation.route ? host2.navigation.route.turn : void 0
-        ) : void 0
-      };
-      host2.accountControlsOwner.shellChrome?.topbar(
-        mode === "normal" ? { titleSlot: content2.titleSlot, actions: [content2.actions], session: !!s, lead, account } : { mode: [content2.mode], session: true, account, accountTarget: content2.accountTarget }
-      );
-      if (s && mode === "normal")
-        host2.scope.frame(() => {
-          const line = host2.$("#topbar .meta-line");
-          if (line) measureViewerBar(host2.$("#topbar"));
-        });
-    }
-    const drawSessionBar = () => {
-      const s = host2.modelStore.sessions["id" in host2.navigation.route ? host2.navigation.route.id : ""];
-      if (host2.navigation.route.v !== "session" || !s) return;
-      renderTopbar(s.name, null, {
-        session: s,
-        lineage: host2.domain.lineageOf("id" in host2.navigation.route ? host2.navigation.route.id : "").slice(0, -1),
-        line2: sessionLine(s)
-      });
-      setGeometry(document.documentElement, "barHeight", host2.$("#topbar").offsetHeight);
-      syncBarLine();
-    };
-    const keepFocus = (fn) => {
-      const id = document.activeElement?.id;
-      fn();
-      const n = id && document.getElementById(id);
-      if (n && n !== document.activeElement) n.focus({ preventScroll: true });
-    };
-    function centre(node) {
-      if (!node.isConnected) return;
-      const sc = host2.viewport.scroller(), r = (node.querySelector(":scope > button") ?? node).getBoundingClientRect(), bottom = host2.phone.matches ? window.innerHeight : host2.$("#main").getBoundingClientRect().bottom;
-      const d = (r.top + r.bottom) / 2 - (host2.viewport.edge() + bottom) / 2;
-      host2.pagingOwner.scrollProgrammatically(() => {
-        if (Math.abs(d) >= 1) sc.scrollTop += d;
-      });
-      syncBarLine();
-      host2.viewport.syncJump();
-      host2.historyScrollOwner.saveHistoryScroll();
-    }
-    const errorNavigation = createErrorNavigation({
-      navigation: host2.navigation,
-      TX: host2.transcripts.entries,
-      TXM: host2.transcripts.meta,
-      get TOK() {
-        return host2.transportOwner.TOK;
-      },
-      SESS: host2.modelStore.sessions,
-      get show() {
-        return host2.show;
-      },
-      sidebarOnly: host2.sidebarOnly,
-      page: () => host2.$("#page"),
-      drawSessionBar,
-      render: (...args) => host2.documentRendererOwner.render(...args),
-      keepFocus,
-      countOf: (session, field) => session ? host2.domain.countOf(session, field) ?? void 0 : void 0,
-      capture: () => host2.viewport.capture(),
-      restore: (saved) => host2.viewport.restore(saved),
-      opener: (node) => host2.viewport.opener(node),
-      resetPagerInput: (...args) => host2.pagingOwner.resetPagerInput(...args),
-      stopOpeningEndPin: () => host2.viewport.stopOpeningEndPin(),
-      clearFind() {
-        host2.find = "";
-      },
-      centre,
-      fetchTx: (...args) => host2.transportOwner.fetchTx(...args),
-      dropTx: (...args) => host2.pagingOwner.dropTx(...args),
-      spread: (...args) => host2.transportOwner.spread(...args),
-      tail: (sid) => host2.liveUpdates.tail(sid)
+    const hops = [];
+    const seen = /* @__PURE__ */ new Set();
+    const sessionPart = (id, turn) => ({
+      className: "who",
+      text: id === "you" ? "You" : data.sessions[id]?.name ?? "Unrecorded session",
+      action: data.sessions[id] ? { kind: "session", id, turn } : void 0
     });
-    const {
-      state: ERR,
-      text: errText,
-      on: errOn,
-      open: openErrors,
-      step: stepErrors,
-      mark: markError,
-      drop: dropErrors,
-      close: closeErrors,
-      live: errorsLive
-    } = errorNavigation;
-    const signalCount = (s) => Object.values(s?.signals ?? {}).reduce((n, x) => n + x, 0);
-    const turnsLabel = (s) => {
-      const n = (host2.modelStore.turns[s.id] ?? []).filter(
-        (...args) => host2.domain.hasTurn(...args)
-      ).length;
-      return n + (n === 1 ? " turn" : " turns");
+    const harness = (sid) => {
+      const known = HARNESSES[data.sessions[sid]?.harness];
+      return known ? {
+        name: known.name,
+        light: known.icon.light,
+        dark: known.icon.dark,
+        id: data.sessions[sid].harness,
+        darkTheme: matchMedia("(prefers-color-scheme: dark)").matches
+      } : void 0;
     };
-    const sessionLine = (s) => {
-      const failed = host2.domain.countOf(s, "errors") ?? 0, runs = host2.domain.descendantsOf(s.id, host2.domain.sessionChildren()), cost2 = runs.length ? host2.domain.costForSessions([s, ...runs]) : host2.domain.costForSession(s.id), labels = [];
-      const add = (key2, text2, tip, drop, extra = {}) => labels.push({ key: key2, text: text2, tip: tip ?? void 0, drop, ...extra });
-      add("state", STATE[s.state], void 0, 0, {
-        className: "state " + s.state,
-        state: s.state,
-        stateLabel: STATE[s.state]
-      });
-      add("kind", kindText(s), s.kind ? s.kind + " \xB7 " + HARNESS[s.harness] : void 0, 2);
-      add(
-        "model",
-        shortModel(s.model),
-        "Model: " + modelIdOf(s) + (s.effort ? ". Reasoning effort: " + s.effort : ""),
-        3,
-        { className: "meta-model", effort: s.effort }
-      );
-      if (failed)
-        add(
-          "errors",
-          failed + " failed",
-          failed + (failed === 1 ? " failed step" : " failed steps") + ": step through them",
-          0,
-          { className: "lab-errs", action: "errors" }
-        );
-      if (runs.length)
-        add(
-          "runs",
-          runs.length + (runs.length === 1 ? " run" : " runs"),
-          runs.length + (runs.length === 1 ? " run" : " runs") + " under this session: open the list with their cost",
-          1,
-          { className: "lab-runs", action: "runs" }
-        );
-      add(
-        "machine",
-        host2.modelStore.machines[s.machine],
-        "Machine: " + host2.modelStore.machines[s.machine] + " \xB7 " + host2.domain.hostOf(s),
-        5
-      );
-      if (s.branch) add("branch", s.branch, "Branch: " + s.branch, 6);
-      add(
-        "cost",
-        host2.domain.costText(cost2),
-        "API-equivalent cost" + (runs.length ? ", with " + runs.length + (runs.length === 1 ? " run" : " runs") : "") + ". Details in the session menu.",
-        7
-      );
-      return labels;
-    };
-    const machineLine = (m) => {
-      const here = host2.domain.onMachine(m), w = here.filter((s) => s.state === "work").length, up = host2.modelStore.machineUp[m];
-      const sessions = here.length + (here.length === 1 ? " session" : " sessions");
-      return [
-        {
-          key: "state",
-          text: up ? "Up" : "Not responding",
-          drop: 0,
-          className: "state " + (up ? "done" : "err"),
-          state: up ? w ? "work" : "idle" : "err",
-          stateLabel: STATE[up ? w ? "work" : "idle" : "err"]
-        },
-        {
-          key: "activity",
-          text: up ? w + " working \xB7 " + sessions : host2.domain.movedOff(m).length ? host2.domain.movedOff(m).length + " moved off" : [
-            host2.modelStore.machineLast[m] != null ? "Last seen " + host2.clock(host2.modelStore.machineLast[m]) : null,
-            sessions
-          ].filter(Boolean).join(" \xB7 "),
-          drop: 1
-        }
-      ];
-    };
-    const matchCount = () => host2.find || !host2.show.messages || !host2.show.tools || !host2.show.thinking ? host2.$("#page").querySelectorAll(
-      ".turns .msg, .turns .bubble, .turns .step:not(.bgend), .turns .event, .turns .child-card"
-    ).length : null;
-    const matchText = (n) => n == null ? "" : n ? n + (n === 1 ? " match" : " matches") : "No matches";
-    let titleObs = null;
-    function observeTitle() {
-      syncBarLine();
-    }
-    function syncBarLine() {
-      const y = host2.phone.matches ? window.scrollY : host2.$("#main").scrollTop;
-      host2.$("#topbar").classList.toggle("scrolled", y > 4);
-    }
-    if (!host2.sidebarOnly) {
-      host2.scope.listen(window, "scroll", syncBarLine, { passive: true });
-      host2.scope.listen(host2.$("#main"), "scroll", syncBarLine, { passive: true });
-    }
-    if (!host2.sidebarOnly)
-      host2.scope.listen(
-        window,
-        "resize",
-        () => {
-          const l2 = host2.$("#topbar .meta-line");
-          if (l2 && host2.navigation.route.v === "session") measureViewerBar(host2.$("#topbar"));
-          host2.layoutOwner.syncLayoutPrefs();
-          host2.viewport.syncJump();
-        },
-        { passive: true }
-      );
-    function panel(title, opts = {}) {
-      const chrome = createPanelChrome(
-        { title, className: opts.cls, label: opts.label, sub: opts.sub },
-        {
-          opened() {
-            host2.toolViewsOwner.viewerEl = chrome.dialog;
-            document.documentElement.classList.add("panel-open");
-            try {
-              history.pushState(
-                {
-                  ...host2.navigation.route,
-                  sheet: 1,
-                  scrollTop: host2.historyScrollOwner.currentScroll()
-                },
-                ""
-              );
-            } catch {
-            }
-          },
-          closed() {
-            render(null, chrome.body);
-            host2.dialogs.delete(chrome.dialog);
-            if (host2.disposed) return;
-            const d = chrome.dialog;
-            document.documentElement.classList.remove("panel-open");
-            opts.onClose?.();
-            if (host2.toolViewsOwner.viewerEl === d) {
-              host2.toolViewsOwner.viewerEl = null;
-              if (history.state?.sheet) {
-                host2.toolViewsOwner.skipPop = true;
-                history.back();
-              } else if (host2.pendingSessionOpen) {
-                const id = host2.pendingSessionOpen;
-                host2.pendingSessionOpen = null;
-                host2.destination.goSession(id);
-              }
-            }
-            if (host2.liveModelOwner.LIVE.pending) host2.applicationRefreshOwner.refresh();
-          }
-        }
-      );
-      host2.dialogs.set(chrome.dialog, chrome);
-      return { d: chrome.dialog, body: chrome.body, show: () => chrome.show() };
-    }
-    const RUNS_CAP = 5;
-    const TRADEMARK_NOTICE = "Third-party trademarks are the property of their respective owners. Semon is not affiliated with or endorsed by these companies.";
-    function openSessionMenu(s, anchor = null, scrollTo = void 0) {
-      const kids = host2.domain.descendantsOf(s.id, host2.domain.sessionChildren());
-      const {
-        d,
-        body,
-        show: open
-      } = panel(s.name, {
-        cls: "anchored session-menu",
-        label: "Session menu for " + s.name,
-        sub: [STATE[s.state], kindText(s), shortModel(s.model)].join(" \xB7 "),
-        onClose: () => {
-          anchor?.setAttribute("aria-expanded", "false");
-          anchor?.focus({ focusVisible: false });
-        }
-      });
-      const traceTurn = host2.navigation.route.v === "trace" ? host2.modelStore.turn.get(
-        ("turn" in host2.navigation.route ? host2.navigation.route.turn : void 0) ?? ""
-      ) : (() => {
-        const top = host2.$("#topbar").getBoundingClientRect().bottom;
-        const nodes = [
-          ...document.querySelectorAll("#page .turn[data-turn]")
-        ].filter((n) => !n.closest(".cw-body"));
-        const visible2 = nodes.find((n) => n.getBoundingClientRect().bottom > top);
-        return host2.modelStore.turn.get(visible2?.dataset.turn ?? "") ?? (host2.modelStore.turns[s.id] ?? []).at(-1);
-      })();
-      const actions = [], addAction = (key2, text2, icon, className, note, checked, dot) => actions.push({ key: key2, text: text2, icon, className, note, checked, dot });
-      if (traceTurn?.out.length) addAction("trace", "Trace this turn", I.trace, "menu-trace");
-      const command = resumeCommand(s);
-      if (command !== null) addAction("copy", "Copy resume command", I.copy);
-      if (s.harness === "claude") addAction("external", "Open in claude.ai", I.ext);
-      if (!host2.phone.matches)
-        addAction("wide", "Wide transcript", I.wide, void 0, void 0, host2.layoutOwner.wideMode);
-      const signals = signalCount(s);
-      if (signals)
-        addAction("signals", signals + " signals", void 0, "menu-signals", "Step through");
-      const errorCount = host2.domain.countOf(s, "errors") ?? 0;
-      if (host2.phone.matches) {
-        if (errorCount)
-          addAction(
-            "errors",
-            errorCount + " failed",
-            void 0,
-            "menu-errors",
-            "Step through",
-            void 0,
-            "err"
-          );
-        if (kids.length) addAction("runs", "Runs \xB7 " + kids.length, I.stack, "menu-runs");
-      }
-      const machine2 = host2.modelStore.machines[s.machine] ?? s.machine ?? "Unknown machine", calls = host2.domain.countOf(s, "calls");
-      const detailRows = [
-        ["Status", STATE[s.state] + " \xB7 " + turnsLabel(s)],
-        ...s.kind ? [["Kind", s.kind]] : [],
-        [
-          "Harness",
-          HARNESS[s.harness] ?? s.harness,
-          false,
-          host2.screenViews.harnessSnapshot(s.harness)
-        ],
-        ["Model", modelIdOf(s), true],
-        ...s.effort ? [["Effort", s.effort]] : [],
-        [
-          "Machine",
-          machine2 + (host2.domain.hostOf(s) !== machine2 ? " \xB7 " + host2.domain.hostOf(s) : "") + (s.movedFrom ? " (moved from " + (host2.modelStore.machines[s.movedFrom] ?? s.movedFrom) + ")" : "")
-        ],
-        ["Directory", s.cwd ?? s.dir ?? s.directory, true],
-        [s.worktree ? "Worktree" : "Branch", host2.domain.branchOf(s), true],
-        ["Tool calls", calls == null ? "\u2014" : String(calls)],
-        ...errorCount ? [["Errors", String(errorCount)]] : [],
-        ["Started", host2.clock(s.start)],
-        ["Duration", host2.dur(s.start, s.state === "work" ? null : s.last)],
-        ["Process id", s.pid, true],
-        ["Session id", s.sessionId ?? s.id, true],
-        ...Object.entries(s.signals ?? {}).map(([kind, n]) => [
-          "Signals \xB7 " + kind,
-          String(n)
-        ])
-      ];
-      const details = detailRows.filter(([, value]) => value != null && value !== "").map(([label, value, mono, harness]) => ({ label, value: String(value), mono, harness }));
-      renderSessionMenu(
-        body,
-        {
-          actions,
-          command: command ?? "",
-          path: host2.phone.matches ? host2.domain.lineageOf(s.id).map((a) => ({
-            id: a.id,
-            name: a.name,
-            harness: a.harness,
-            harnessName: HARNESS[a.harness] ?? a.harness
-          })) : [],
-          status: STATE[s.state] + " \xB7 " + turnsLabel(s),
-          state: s.state,
-          stateLabel: STATE[s.state],
-          details,
-          cost: host2.screenViews.costSnapshot(s, kids),
-          notice: TRADEMARK_NOTICE,
-          icons: { chevron: I.chev, copy: I.copy }
-        },
-        {
-          wide: () => host2.layoutOwner.wideMode,
-          session(id) {
-            host2.pendingSessionOpen = id;
-            d.close();
-          },
-          action(key2) {
-            if (key2 === "trace" && traceTurn) {
-              host2.afterPop = () => host2.destination.goTrace(traceTurn.id);
-              d.close();
-            } else if (key2 === "wide") host2.layoutOwner.setWideMode(!host2.layoutOwner.wideMode);
-            else if (key2 === "signals" || key2 === "errors") {
-              d.close();
-              s && openErrors(s.id, key2 === "signals" ? "signals" : "errors");
-            } else if (key2 === "runs")
-              body.querySelector(".runs")?.scrollIntoView({ block: "start" });
-          }
-        }
-      );
-      anchor?.setAttribute("aria-expanded", "true");
-      open();
-      if (scrollTo) body.querySelector(scrollTo)?.scrollIntoView({ block: "nearest" });
-      return d;
-    }
-    return {
-      errorNavigation,
-      viewerBar,
-      drawSessionBar,
-      syncBarLine,
-      dropErrors,
-      modelIdOf,
-      kindText,
-      observeTitle,
-      centre,
-      panel,
-      renderTopbar,
-      machineLine,
-      sessionLine,
-      errOn,
-      markError,
-      errorsLive
-    };
-  }
-
-  // src/app/sessionList.ts
-  function createSessionList(host2) {
-    const laneOf = (sid) => {
-      const seen = /* @__PURE__ */ new Set();
-      while (host2.domain.parentOf(sid) && !seen.has(sid)) {
-        seen.add(sid);
-        sid = host2.domain.parentOf(sid);
-      }
-      return sid;
-    };
-    function childRuns(sid) {
-      const kids = Object.values(host2.modelStore.sessions).filter(
-        (x) => x.id !== sid && laneOf(x.id) === sid && (host2.showApprovalReviews || !host2.recentNavigation.isApprovalReview(x))
-      ), sub = kids.filter((x) => x.kind === "Subagent").length, cdx = kids.filter((x) => x.kind === "Codex run").length, other = kids.length - sub - cdx;
-      return [
-        sub ? sub + (sub === 1 ? " subagent" : " subagents") : null,
-        cdx ? cdx + (cdx === 1 ? " Codex run" : " Codex runs") : null,
-        other ? other + (other === 1 ? " other run" : " other runs") : null
-      ].filter(Boolean).join(" \xB7 ");
-    }
-    function renderSessions(page, focusSearch = false) {
-      const all = Object.values(host2.modelStore.sessions).filter(
-        (s) => (host2.showApprovalReviews || !host2.recentNavigation.isApprovalReview(s)) && host2.analytics.matchesSessionFacets(s)
-      );
-      const lanes = all.filter((s) => host2.navigationViewOwner.sessMatch(s, host2.query)), order = host2.orderingControlsOwner.orderScope(
-        "page",
-        host2.orderingControlsOwner.pageSig(),
-        host2.navigation.route,
-        host2.orderingControlsOwner.pageState()
-      );
-      let groups;
-      if (host2.groupBy === "recent")
-        groups = [
-          [
-            "",
-            host2.orderingControlsOwner.orderList(
-              order,
-              "recent",
-              lanes,
-              (...args) => host2.orderingControlsOwner.byLast(...args)
-            ),
-            lanes.length
-          ]
-        ];
-      else {
-        const keysOf = {
-          machine: (s) => host2.modelStore.machines[s.machine],
-          project: (s) => s.repo ?? "No repo (roles)",
-          harness: (s) => HARNESS[s.harness]
-        };
-        const key2 = keysOf[host2.groupBy] ?? ((s) => s.name);
-        const keys = [...new Set(lanes.map(key2))].sort(
-          (a, b) => Number(a.startsWith("No repo")) - Number(b.startsWith("No repo")) || a.localeCompare(b)
-        );
-        groups = keys.map((k) => {
-          const rows2 = lanes.filter((s) => key2(s) === k);
-          return [
-            k,
-            host2.orderingControlsOwner.orderList(
-              order,
-              "g:" + k,
-              rows2,
-              (...args) => host2.orderingControlsOwner.byLast(...args)
-            ),
-            rows2.length
-          ];
-        });
-      }
-      const rows = groups.filter(([, items, total]) => items.length || !total).map(([title, items, total]) => ({
-        title,
-        total,
-        harness: host2.groupBy === "harness" ? host2.screenViews.harnessSnapshot(
-          Object.keys(HARNESS).find((k) => HARNESS[k] === title) ?? ""
-        ) : void 0,
-        rows: items.map((s) => {
-          const fields = [
+    const meta = (turn) => ({
+      state: turn.end?.st ?? "done",
+      stateLabel: STATE[turn.end?.st ?? "done"] ?? "Recorded",
+      text: turn.end?.why ?? "Recorded turn",
+      session: turn.sid,
+      turn: turn.id,
+      name: data.sessions[turn.sid]?.name,
+      harness: harness(turn.sid),
+      chip: shortModel(data.sessions[turn.sid]?.model)
+    });
+    hops.push({
+      key: "root:" + data.root.id,
+      className: "k-root",
+      nodeClass: "you",
+      icon: I.ask,
+      turn: data.root.id,
+      parts: [
+        sessionPart(data.root.start?.from ?? (data.root.u ? "you" : data.key)),
+        { className: "verb", text: " started a turn in " },
+        sessionPart(data.key, data.root.id)
+      ],
+      time: clock(data.root.at ?? data.sessions[data.key].start, now),
+      brief: data.root.u?.text || data.root.start?.brief || void 0,
+      meta: meta(data.root)
+    });
+    const walk = (turn) => {
+      if (seen.has(turn.id)) return;
+      seen.add(turn.id);
+      for (const edge of turn.sent) {
+        const child = data.starts.get(edge.id);
+        hops.push({
+          key: edge.id,
+          className: "child k-" + edge.kind + " s-" + edge.status,
+          nodeClass: data.sessions[edge.to]?.harness ?? "you",
+          icon: I[edge.kind] ?? I.result,
+          handoff: edge.id,
+          turn: child?.id,
+          parts: [
+            sessionPart(edge.from, turn.id),
             {
-              className: "row-duration",
-              text: host2.dur(s.start, s.state === "work" || s.state === "wait" ? null : s.last),
-              priority: 1,
-              tip: "Duration",
-              icon: I.duration
-            }
-          ];
-          if (Object.keys(host2.modelStore.machines).length > 1)
-            fields.push({
-              className: "row-machine host",
-              text: host2.domain.shortHost(s),
-              priority: 2,
-              tip: "Machine: " + host2.domain.hostOf(s),
-              icon: I.machine
-            });
-          if (s.repo)
-            fields.push({
-              className: "repo-short",
-              text: s.repo,
-              priority: 3,
-              tip: "Repo: " + s.repo,
-              icon: I.repo
-            });
-          const counts = childRuns(s.id);
-          if (counts)
-            fields.push({
-              className: "row-counts",
-              text: counts.replace(/Codex runs/g, "runs"),
-              priority: 4
-            });
-          return {
-            id: s.id,
-            name: s.name,
-            state: s.state,
-            stateLabel: STATE[s.state] ?? s.state,
-            age: host2.ago(s.last),
-            harness: host2.screenViews.harnessSnapshot(s.harness),
-            model: shortModel(s.model ?? s.modelId),
-            modelTip: "Model: " + host2.sessionChrome.modelIdOf(s),
-            delegation: host2.domain.parentOf(s.id) ? I.stack : void 0,
-            fields
-          };
-        })
-      }));
-      renderSessionsScreen(
-        page,
-        {
-          total: all.length,
-          working: all.filter((s) => s.state === "work").length,
-          waiting: all.filter((s) => s.state === "wait").length,
-          query: host2.query,
-          groupBy: host2.groupBy,
-          reviews: host2.showApprovalReviews,
-          showReviews: Object.values(host2.modelStore.sessions).some(
-            (...args) => host2.recentNavigation.isApprovalReview(...args)
-          ) || host2.showApprovalReviews,
-          groups: rows,
-          matches: lanes.length
-        },
-        {
-          session: (...args) => host2.destination.goSession(...args),
-          committed: (...args) => host2.sessionChrome.observeTitle(...args),
-          facets: () => host2.analytics.renderFacetFilters(page, () => host2.documentRendererOwner.render()),
-          search(value) {
-            host2.query = value.trim();
-            const address = new URL(location.href);
-            if (host2.query) address.searchParams.set("q", host2.query);
-            else address.searchParams.delete("q");
-            history.replaceState(history.state, "", address);
-            renderSessions(page);
-            host2.recentNavigation.renderLanes();
-          },
-          group(value) {
-            host2.groupBy = value;
-            renderSessions(page);
-            host2.recentNavigation.renderLanes();
-          },
-          reviews() {
-            host2.showApprovalReviews = !host2.showApprovalReviews;
-            host2.orderingControlsOwner.ORD.delete("page");
-            host2.orderingControlsOwner.ORD.delete("side");
-            host2.documentRendererOwner.render();
-          }
-        },
-        focusSearch
-      );
-      host2.recentNavigation.renderLanes();
-    }
-    return { renderSessions };
-  }
-
-  // src/app/ticker.ts
-  function createTicker(host2) {
-    const running = (ms) => {
-      const x = Math.max(0, Math.floor(ms / 1e3));
-      return x < 60 ? x + "s" : Math.floor(x / 60) + "m " + x % 60 + "s";
-    };
-    function ticker() {
-      if (!host2.liveModelOwner.visible() || Date.now() === host2.transportOwner.fetchedAt) return;
-      host2.transportOwner.tick();
-      if (host2.navigation.route.v === "session" && host2.navigation.rendered === host2.navigation.route)
-        updateSessionClock(
-          host2.$("#page"),
-          host2.now,
-          Object.fromEntries(
-            Object.values(host2.modelStore.sessions).filter((s) => s.activity?.[3] != null).map((s) => [s.id, s.activity[3]])
-          )
-        );
-      else if (host2.navigation.route.v === "home" && host2.navigation.rendered === host2.navigation.route)
-        host2.screenViews.renderHome(host2.$("#page"));
-    }
-    return { ticker, running };
-  }
-
-  // src/app/toolLoader.ts
-  function createToolLoader(host2) {
-    function parseToolDetail(data) {
-      const entry2 = parseEntry({ ...data, k: "tool", name: "", arg: "", ok: true });
-      if (entry2.k !== "tool") throw new Error("Invalid tool details");
-      return entry2;
-    }
-    function fullOf(e) {
-      return Promise.all(
-        (e.more ?? []).map(async (part) => ({
-          part,
-          data: object2(
-            await host2.transportOwner.api(
-              "/api/entry?sid=" + host2.transportOwner.enc(e.sid ?? "") + "&slot=" + e.slot + "&as=" + part
-            )
-          )
-        }))
-      ).then((parts) => {
-        const full = {}, fullCut = [];
-        for (const { part, data } of parts) {
-          if (part === "diff") {
-            full.diff = parseToolDetail(data).diff;
-            full.changes = parseToolDetail(data).changes;
-          } else if (part === "out") {
-            full.out = optional(data.text, text);
-            full.cut = parseToolDetail(data).cut;
-          } else if (part === "in") full.in = optional(data.text, text);
-          else if (part === "arg") full.arg = optional(data.text, text);
-          if (data.truncated === true) fullCut.push(part);
-        }
-        full.fullCut = fullCut;
-        return full;
-      });
-    }
-    return { fullOf };
-  }
-
-  // src/app/toolViews.ts
-  function createToolViews(host2) {
-    let viewerEl = null;
-    let skipPop = false;
-    function openStepViewer(e, v, ic, inLabel = "Input") {
-      if (host2.disposed) return;
-      if (e.more?.length && e.slot != null && !e.full) {
-        const open2 = (f) => openStepViewer({ ...e, ...f, full: true }, v, ic, inLabel);
-        host2.toolLoaderOwner.fullOf(e).then(open2, () => open2({ fullFailed: true }));
-        return;
-      }
-      const status2 = e.live ? "Running \xB7 " + e.secs : e.unfinished ? "No result" : e.ok ? "Done \xB7 " + e.secs : e.ok === null ? "Exit unknown \xB7 " + e.secs : "Failed \xB7 " + e.secs;
-      const { body, show: open } = host2.sessionChrome.panel(v + " " + e.arg, {
-        cls: "full",
-        sub: e.name + " \xB7 " + status2,
-        label: v + " " + e.arg
-      });
-      body.classList.add("viewer-b");
-      renderFullTool(body, e, inLabel, host2.modelStore.sessions[e.sid ?? ""]?.state === "wait");
-      open();
-    }
-    const THUMB_W = 200, THUMB_H = 160;
-    const IMAGE_KIND = {
-      "image/png": "PNG",
-      "image/jpeg": "JPEG",
-      "image/gif": "GIF",
-      "image/webp": "WebP"
-    };
-    const sizeText = (n) => n >= 1048576 ? (n / 1048576).toFixed(1) + " MB" : n >= 1024 ? Math.round(n / 1024) + " KB" : n + " bytes";
-    function attachmentSnapshot(e) {
-      const images = (e.img ?? []).map((a, i) => {
-        const k = a.w != null && a.h != null && a.w > 0 && a.h > 0 ? Math.min(1, THUMB_W / a.w, THUMB_H / a.h) : null;
-        return {
-          unavailable: !!a.na,
-          url: "/api/attachment?sid=" + host2.transportOwner.enc(e.sid ?? "") + "&o=" + host2.transportOwner.enc(a.o) + "&b=" + host2.transportOwner.enc(a.b) + "&v=" + host2.transportOwner.enc(a.v ?? ""),
-          label: "Attached image " + (i + 1) + " (" + (IMAGE_KIND[a.type ?? ""] ?? "image") + ", " + sizeText(a.size ?? 0) + ")",
-          width: k ? Math.max(1, Math.round(a.w * k)) : void 0,
-          height: k ? Math.max(1, Math.round(a.h * k)) : void 0
-        };
-      });
-      return images;
-    }
-    function openImage(url, label, from) {
-      const image2 = createImageViewer(url, label, {
-        opened(d) {
-          viewerEl = d;
-          document.documentElement.classList.add("viewer-open");
-          try {
-            history.pushState({ ...host2.navigation.route, sheet: 1 }, "");
-          } catch {
-          }
-        },
-        closed(d) {
-          host2.dialogs.delete(d);
-          if (host2.disposed) return;
-          document.documentElement.classList.remove("viewer-open");
-          if (viewerEl === d) {
-            viewerEl = null;
-            if (history.state?.sheet) {
-              skipPop = true;
-              history.back();
-            }
-          }
-          if (host2.liveModelOwner.LIVE.pending) host2.applicationRefreshOwner.refresh();
-          (from.isConnected ? from : [...document.querySelectorAll("button.attach")].find(
-            (x) => x.querySelector("img")?.getAttribute("src") === url
-          ))?.focus();
-        }
-      });
-      host2.dialogs.set(image2.dialog, image2);
-      image2.show();
-    }
-    function openScript(e) {
-      const done = (fields) => openStepViewer({ ...e, ...fields, full: true }, "View script", "run", "Script");
-      host2.transportOwner.api(
-        "/api/entry?sid=" + host2.transportOwner.enc(e.sid ?? "") + "&slot=" + e.slot + "&as=script"
-      ).then((value) => {
-        const result = object2(value);
-        done({
-          scriptText: optional(result.text, text),
-          scriptTruncated: result.truncated === true
-        });
-      }).catch(() => done({ scriptFailed: true }));
-    }
-    function childSnapshot(h2, c) {
-      const calls = host2.domain.countOf(c, "calls"), holder = host2.modelStore.holds.get(h2.id);
-      return {
-        kind: "child",
-        handoff: h2.id,
-        id: c.id,
-        turn: host2.modelStore.starts.get(h2.id)?.id,
-        name: c.name,
-        state: c.state,
-        stateLabel: STATE[c.state] ?? c.state,
-        meta: [
-          host2.sessionChrome.kindText(c),
-          shortModel(c.model),
-          host2.dur(c.start, c.state === "work" ? null : c.last),
-          (calls ?? "\u2014") + (calls === 1 ? " step" : " steps"),
-          host2.domain.costText(host2.domain.costForSession(c.id, true))
-        ].join(" \xB7 "),
-        mark: host2.screenViews.harnessSnapshot(c.harness),
-        brief: preview(h2.brief ?? ""),
-        result: h2.result || void 0,
-        failed: h2.status === "err",
-        activity: !h2.result && c.state === "work" && c.activity ? [host2.transcriptView.verbNow(c.activity[0]), c.activity[1]] : void 0,
-        trace: holder?.id,
-        traceLabel: holder ? "Open run view for " + host2.domain.nameOf(h2.from) : void 0,
-        chevron: I.chev
-      };
-    }
-    const callsTip = (s) => {
-      const parts = Object.entries(s.tool_calls ?? {}).sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : 1)).map(([name, n]) => name + " " + n), failed = host2.domain.countOf(s, "errors");
-      if (failed) parts.push(failed + " failed");
-      return parts.join(" \xB7 ");
-    };
-    const timeTip = (s, h2, finished) => "Started " + host2.clock(s.start) + " \xB7 last activity " + host2.clock(s.last) + (finished ? " \xB7 finished " + host2.clock(h2?.done ?? s.last) : "");
-    function costTip(cost2) {
-      const groups = Object.entries(cost2.by_model ?? {}).map(([id, m]) => {
-        const k = m.usd_by_kind ?? {}, kinds2 = [
-          ["Input", k.input],
-          ["Output", k.output],
-          ["Cache read", k.cache_read],
-          ["Cache write", (Number(k.cache_write_5m) || 0) + (Number(k.cache_write_1h) || 0)]
-        ];
-        if (Number(k.web_search) >= 5e-3) kinds2.push(["Web search", k.web_search]);
-        return {
-          id,
-          text: kinds2.map(([label, usd]) => label + " " + host2.domain.asMoney(Number(usd) || 0)).join(" \xB7 ")
-        };
-      });
-      return (groups.length > 1 ? groups.map((g) => g.id + ": " + g.text).join("; ") : groups.map((g) => g.text).join("")) + (groups.length ? ". " : "") + host2.recentNavigation.COST_TIP;
-    }
-    function footerSnapshot(s, h2) {
-      const done = s.state === "done" || s.state === "err", finished = h2 ? done || h2.status === "done" || h2.status === "err" : done;
-      const state2 = h2 ? finished ? s.state === "err" || h2.status === "err" ? "err" : "done" : "work" : s.state;
-      const cost2 = host2.domain.costForSession(s.id), priced2 = cost2.usd != null && !host2.domain.costMissing(cost2).length && cost2.usd >= 5e-3, items = [];
-      if (!h2 || !finished)
-        items.push({
-          kind: "calls",
-          text: host2.domain.callsText(host2.domain.countOf(s, "calls")),
-          tip: callsTip(s)
-        });
-      items.push({
-        kind: "time",
-        text: host2.dur(s.start, state2 === "work" ? null : s.last),
-        tip: timeTip(s, h2, finished)
-      });
-      if (priced2)
-        items.push({ kind: "cost", text: host2.domain.asMoney(cost2.usd ?? 0), tip: costTip(cost2) });
-      return {
-        state: state2,
-        stateLabel: STATE[state2] ?? state2,
-        text: h2 && finished ? "Returned to " + host2.domain.nameOf(h2.from) + " \xB7 " + STATE[state2] : STATE[state2],
-        items,
-        parent: h2 && finished ? {
-          id: h2.from,
-          turn: host2.modelStore.holds.get(h2.id)?.id,
-          name: host2.domain.nameOf(h2.from)
-        } : void 0
-      };
-    }
-    return {
-      get viewerEl() {
-        return viewerEl;
-      },
-      set viewerEl(value) {
-        viewerEl = value;
-      },
-      get skipPop() {
-        return skipPop;
-      },
-      set skipPop(value) {
-        skipPop = value;
-      },
-      openStepViewer,
-      openScript,
-      openImage,
-      attachmentSnapshot,
-      childSnapshot,
-      footerSnapshot
-    };
-  }
-
-  // src/app/transcriptRevalidation.ts
-  function createTranscriptRevalidation(host2) {
-    function shrank(a, b) {
-      const [s0, b0] = String(a).split(".").map(Number), [s1, b1] = String(b).split(".").map(Number);
-      return s1 < s0 || b1 < b0;
-    }
-    function revalidate(r) {
-      const sid = r.id, m = host2.transcripts.meta[sid], moved = m && m.to >= m.total && m.tok != null && host2.transportOwner.TOK[sid] != null && m.tok !== host2.transportOwner.TOK[sid];
-      const job = moved ? shrank(m.tok, host2.transportOwner.TOK[sid]) ? host2.liveUpdates.reload(sid) : host2.liveUpdates.tail(sid) : null, work = job;
-      if (work)
-        work.then(
-          () => {
-            if (host2.navigation.route === r && host2.navigation.rendered === r)
-              host2.applicationRefreshOwner.refresh(null);
-          },
-          () => {
-          }
-        );
-    }
-    return { revalidate, shrank };
-  }
-
-  // src/domain/toolNames.ts
-  var RUN = ["run", "Ran", "ran", "command", "commands"];
-  var FIND = ["find", "Searched for", "searched", "time", "times"];
-  var TOOLS = {
-    Bash: RUN,
-    shell: RUN,
-    exec_command: RUN,
-    local_shell: RUN,
-    write_stdin: ["run", "Sent input to", "sent input to", "time", "times"],
-    Grep: FIND,
-    Glob: FIND,
-    Read: ["read", "Read", "read", "file", "files"],
-    Edit: ["edit", "Edited", "edited", "file", "files"],
-    MultiEdit: ["edit", "Edited", "edited", "file", "files"],
-    Write: ["edit", "Wrote", "wrote", "file", "files"],
-    apply_patch: ["edit", "Patched", "patched", "file", "files"],
-    NotebookEdit: ["edit", "Edited", "edited", "notebook", "notebooks"],
-    AskUserQuestion: ["q", "Asked you", "asked you", "question", "questions"],
-    ToolSearch: ["find", "Loaded", "loaded", "tool", "tools"],
-    SendMessage: ["out", "Sent", "sent", "message", "messages"],
-    SendUserFile: ["out", "Sent you", "sent you", "file", "files"],
-    Agent: ["out", "Started", "started", "agent", "agents"],
-    Task: ["out", "Started", "started", "agent", "agents"],
-    Monitor: ["now", "Watched", "watched", "process", "processes"],
-    ScheduleWakeup: ["now", "Scheduled", "scheduled", "wake-up", "wake-ups"],
-    TaskStop: ["x", "Stopped", "stopped", "task", "tasks"],
-    Artifact: ["ext", "Published", "published", "page", "pages"],
-    WebFetch: ["ext", "Fetched", "fetched", "page", "pages"],
-    WebSearch: ["search", "Searched the web for", "searched the web", "time", "times"],
-    Skill: ["stack", "Used skill", "used", "skill", "skills"]
-  };
-  var providers = {
-    github: "GitHub",
-    figma: "Figma",
-    google_drive: "Google Drive",
-    notion: "Notion",
-    slack: "Slack",
-    gmail: "Gmail",
-    railway: "Railway",
-    linear: "Linear",
-    calendar: "Calendar",
-    search_service: "Search"
-  };
-  function toolInfo(name) {
-    if (TOOLS[name]) return TOOLS[name];
-    let provider, action;
-    const dotted = /^codex_apps\.([^.]+)\.(.+)$/.exec(name);
-    const double = /^mcp__(.+?)__(.+)$/.exec(name);
-    if (dotted) [, provider, action] = dotted;
-    else if (double?.[1] === "codex_apps") {
-      const key2 = Object.keys(providers).sort((a, b) => b.length - a.length).find((key3) => double[2].startsWith(key3 + "_"));
-      if (key2) {
-        provider = key2;
-        action = double[2].slice(key2.length + 1);
-      }
-    } else if (double) {
-      [, provider, action] = double;
-    }
-    const known = provider && providers[provider.toLowerCase().replace(/^claude_ai_/, "")];
-    if (known && action) {
-      const label = known + " \xB7 " + action.replace(/[_.]+/g, " ").trim();
-      return ["ext", label, label, "time", "times"];
-    }
-    return dotted || double ? ["ext", name, name, "time", "times"] : ["run", name, name, "step", "steps"];
-  }
-
-  // src/app/transcriptView.ts
-  function createTranscriptView(host2) {
-    const thoughtText = (e) => String(e.text ?? "").trim();
-    const isPendingThought = (e, entries = [], i = 0, sid = "") => !!(e.pending || e.status === "thinking") || Array.isArray(entries) && e.k === "think" && !thoughtText(e) && i === entries.length - 1 && host2.modelStore.sessions[sid]?.state === "work";
-    const signalLabel = (e) => {
-      const s = e.signal ?? {}, tag = s.tag ?? "", kind = s.kind;
-      if (kind === "compact")
-        return "Context compacted" + (s.value != null ? " \xB7 " + compactCount(s.value) + " tokens before" : "");
-      if (kind === "interrupt") return "Interrupted by you";
-      if (kind === "denial") return (s.tool ?? "Tool call") + " denied";
-      if (kind === "hook")
-        return "Hook " + (tag.includes("block") ? "blocked" : tag || "ran") + (s.tool ? " " + s.tool : "");
-      const name = {
-        model: "Model",
-        effort: "Effort",
-        approval: "Approval policy",
-        sandbox: "Sandbox",
-        permission: "Permission mode"
-      }[kind] ?? "Signal";
-      return name + (s.previous ? " " + s.previous + " \u2192 " : " \u2192 ") + tag;
-    };
-    const isMaskedThought = (e, entries = [], i = 0, sid = "") => e.k === "think" && !isPendingThought(e, entries, i, sid) && !thoughtText(e);
-    function thoughtSeconds(e) {
-      if (typeof e.secs === "number" && Number.isFinite(e.secs) && e.secs >= 0) return e.secs;
-      if (typeof e?.secs === "string") {
-        const m = /^(\d+(?:\.\d+)?)s?$/.exec(e.secs.trim());
-        if (m) return Number(m[1]);
-      }
-      return null;
-    }
-    const thoughtLabel = (secs) => {
-      const n = Number.isFinite(secs) ? Math.round(secs ?? 0) : 0;
-      return n < 1 ? "Thinking" : "Thinking \xB7 " + (n >= 60 ? Math.floor(n / 60) + "m " + n % 60 + "s" : n + "s");
-    };
-    function transcriptEntries(entries, sid) {
-      const out = [], codex = host2.modelStore.sessions[sid]?.harness === "codex";
-      const turns = codex ? host2.modelStore.turns[sid] ?? [] : [], owners2 = codex ? new Map(turns.flatMap((t) => t.entries.map((e) => [e.key, t.id]))) : /* @__PURE__ */ new Map();
-      const turnIds = codex ? new Set(turns.map((t) => t.id)) : /* @__PURE__ */ new Set();
-      let chain = null, sawOwnedEntry = false, unresolvedOwner = false;
-      for (let i = 0; i < entries.length; i++) {
-        const e = entries[i], indexedOwner = codex ? owners2.get(e.key) : null;
-        const turn = codex ? indexedOwner ?? (turnIds.has(e.turn) ? e.turn : null) : null;
-        if (codex && indexedOwner == null && e.turn != null && !turnIds.has(e.turn)) {
-          unresolvedOwner = true;
-          chain = null;
-        } else if (turn !== null) {
-          sawOwnedEntry = true;
-          unresolvedOwner = false;
-        }
-        if (e.k !== "think") {
-          out.push(e);
-          chain = null;
-          continue;
-        }
-        const pending = isPendingThought(e, entries, i, sid);
-        const row = { ...e, ...pending ? { pending: true } : {}, displaySecs: thoughtSeconds(e) };
-        const text2 = thoughtText(row);
-        if (!codex || pending || !text2 || unresolvedOwner || turn === null && sawOwnedEntry) {
-          out.push(row);
-          chain = null;
-          continue;
-        }
-        if (chain && chain.turn === turn && (text2 === chain.text || text2.startsWith(chain.text + "\n") || text2.startsWith(chain.text + "\r\n"))) {
-          const merged = { ...chain.row, text: text2, displaySecs: row.displaySecs };
-          out[chain.index] = merged;
-          chain = { index: chain.index, turn: chain.turn, row: merged, text: text2 };
-        } else {
-          out.push(row);
-          chain = { index: out.length - 1, row, text: text2, turn };
-        }
-      }
-      return out;
-    }
-    const verb = (name) => toolInfo(name).slice(0, 2);
-    const NOW_VERB = {
-      Ran: "Running",
-      Read: "Reading",
-      Edited: "Editing",
-      Patched: "Patching",
-      Wrote: "Writing",
-      "Searched for": "Searching for"
-    };
-    const verbNow = (name) => NOW_VERB[verb(name)[1]] ?? verb(name)[1];
-    const isCmd = (name) => /^(Bash|shell|exec_command|local_shell)$/.test(name);
-    const backgroundText = (bg) => {
-      if (bg.state === "running") return "running " + bg.secs;
-      if (bg.state === "unknown") return "no end recorded";
-      const outcome = bg.state === "failed" ? "failed" : bg.state === "killed" ? "stopped" : bg.exit != null ? "exit " + bg.exit : "done";
-      return outcome + (bg.secs ? " \xB7 " + bg.secs : "");
-    };
-    const elapsedMs = (text2) => {
-      const m = /^(?:(\d+)m )?(\d+(?:\.\d+)?)s$/.exec(text2 ?? "");
-      return m ? (Number(m[1] ?? 0) * 60 + Number(m[2])) * 1e3 : null;
-    };
-    function transcriptSnapshot(sid, opts = {}) {
-      const projection = host2.transcripts.view(sid);
-      const entries = transcriptEntries(projection.entries ?? [], sid), blocks2 = [];
-      let tx = [];
-      const currentTurn = { value: null };
-      let loose = 0;
-      const hit = (text2) => !host2.find || String(text2 ?? "").toLowerCase().includes(host2.find);
-      const filtering = !!host2.find || !host2.show.messages || !host2.show.tools || !host2.show.thinking;
-      const entryKey = (e) => e.slot != null ? sid + "#slot:" + e.slot : e.key;
-      const keyed = (view, e) => ({
-        ...view,
-        key: e.key,
-        entryKey: e.key ? entryKey(e) : void 0
-      });
-      const endedCalls = new Set(entries.flatMap((e) => e.k === "bgend" ? [e.call] : []));
-      let run = [], masked = false;
-      const flush = () => {
-        if (!run.length) return;
-        const summary = [], ends = run.filter((r) => r.end), counts = /* @__PURE__ */ new Map();
-        if (run.length > 1 && !filtering) {
-          for (const r of run.filter((r2) => !r2.end)) {
-            const [, , p, one, many] = toolInfo(r.k ?? ""), c = counts.get(p) ?? { n: 0, one, many };
-            c.n++;
-            counts.set(p, c);
-          }
-          if (ends.length) {
-            const outcomes = [
-              [ends.filter((r) => r.state === "failed").length, "failed"],
-              [ends.filter((r) => r.state === "killed").length, "stopped"]
-            ].filter(([n]) => n).map(([n, word]) => n + " " + word);
-            summary.push(
-              { text: "Finished ", className: "long" },
-              { text: ends.length + " background" },
-              { text: " command" + (ends.length === 1 ? "" : "s"), className: "long" }
-            );
-            if (outcomes.length)
-              summary.push({ text: " (" + outcomes.join(", ") + ")", className: "tt-counts" });
-            for (const [p, c] of counts)
-              summary.push(
-                { text: ", " },
-                { text: p + " ", className: p === "ran" ? "long" : void 0 },
-                { text: c.n + " " + (c.n === 1 ? c.one : c.many) }
-              );
-          } else {
-            const text2 = [...counts].map(([p, c]) => p + " " + c.n + " " + (c.n === 1 ? c.one : c.many)).join(", ");
-            summary.push({ text: text2[0].toUpperCase() + text2.slice(1) });
-          }
-        }
-        const failed = run.filter(
-          (r) => !r.end && r.err && (!r.bg || !endedCalls.has(r.tid ?? ""))
-        ).length;
-        const live = run.some((r) => r.bg) ? run.filter((r) => r.live).sort((a, b) => (elapsedMs(b.secs) ?? 0) - (elapsedMs(a.secs) ?? 0))[0] : run.find((r) => r.live);
-        tx.push({
-          kind: "group",
-          key: run[0].key ? "g:" + run[0].key : void 0,
-          entryKey: run[0].view.entryKey ? "g:" + run[0].view.entryKey : void 0,
-          entries: run.map((r) => r.view),
-          lone: run.length === 1 && !filtering,
-          summary,
-          background: !!ends.length,
-          failed,
-          running: live?.secs,
-          stack: I.stack,
-          chevron: I.chev
-        });
-        run = [];
-      };
-      const firsts = new Map(
-        (host2.modelStore.turns[sid] ?? []).filter((t) => t.entries[0]?.key).map((t) => [t.entries[0].key, t])
-      );
-      const owner = opts.only ? new Map(
-        (host2.modelStore.turns[sid] ?? []).flatMap((t) => t.entries.map((e) => [e.key, t.id]))
-      ) : null;
-      const content2 = (values) => values.some((v) => v.kind !== "label" || v.className === "harness-note");
-      const closeTurn = () => {
-        flush();
-        if (!currentTurn.value) {
-          if (tx.length) blocks2.push({ kind: "loose", key: "loose:" + loose++, entries: tx });
-          tx = [];
-          return;
-        }
-        const { t, view } = currentTurn.value, end = host2.domain.turnEnd(t), returned = t.entries.some((e) => e.k === "end" && /^Returned to /.test(e.text ?? ""));
-        if (!filtering) {
-          if (end?.st === "err" && !returned) view.error = end.text;
-          if (t.out.length) view.trace = t.id;
-        }
-        view.entries = tx;
-        if (!filtering || content2(tx)) blocks2.push({ kind: "turn", turn: view });
-        currentTurn.value = null;
-        tx = [];
-        masked = false;
-      };
-      const openTurn = (t) => {
-        closeTurn();
-        const h2 = t.start, view = {
-          id: t.id,
-          entries: [],
-          traceIcon: I.trace,
-          stateLabel: STATE.err
-        };
-        if (t.u || h2?.kind === "ask")
-          view.label = "Your message" + (h2 ? " at " + host2.clock(h2.at) : "");
-        else if (h2)
-          view.header = {
-            parts: host2.sentencesOwner.sentenceSnapshot(h2, sid, true).parts,
-            mark: host2.modelStore.sessions[h2.from] ? host2.screenViews.harnessSnapshot(host2.modelStore.sessions[h2.from].harness) : void 0,
-            time: host2.clock(h2.at)
-          };
-        currentTurn.value = { t, view };
-      };
-      const toolStep = (e, v, ic, live) => {
-        const bg = e.bg, bgRunning = bg?.state === "running", waiting = live && host2.modelStore.sessions[sid]?.state === "wait";
-        const waitingText = host2.modelStore.sessions[sid]?.waiting_for?.includes("permission") ? "Waiting on permission" : "Waiting for your input";
-        const status2 = bg ? null : waiting ? waitingText : live ? e.secs : e.unfinished ? "no result" : e.exit != null ? "exit " + e.exit + " \xB7 " + e.secs : e.ok ? e.secs : e.ok === null ? "exit unknown \xB7 " + e.secs : "failed \xB7 " + e.secs;
-        const title = e.title ? String(e.title) : null, command = e.in ?? e.arg;
-        const firstLine = typeof command === "string" ? command.split(/\r\n|\n|\r/).find((line) => line.trim()) : null;
-        const bgSecs = bgRunning && bg.since != null ? host2.tickerOwner.running(host2.now - bg.since) : bg?.secs;
-        return {
-          className: "step" + (bg ? (bg.state === "failed" ? " err" : "") + " background" + (bgRunning ? " background-running" : "") : live ? " live" : e.ok || e.ok === null ? "" : " err"),
-          key: e.key,
-          entryKey: e.key ? entryKey(e) : void 0,
-          tid: e.tid,
-          sid: live || bgRunning ? sid : void 0,
-          since: live ? e.since : bgRunning ? bg.since : void 0,
-          running: live || bgRunning,
-          background: !!bg,
-          waiting: host2.modelStore.sessions[sid]?.state === "wait",
-          named: !!title,
-          prefix: title ? waiting ? waitingText + ": " : live ? "Running: " : e.ok === false ? "Failed: " : v + ": " : void 0,
-          verb: waiting ? "Waiting" : live ? verbNow(e.name) : v,
-          label: title ?? e.arg,
-          tip: title && firstLine != null ? firstLine.slice(0, 200) : void 0,
-          status: status2 == null ? null : String(status2),
-          backgroundStatus: bg ? backgroundText({ ...bg, secs: bgSecs }) : void 0,
-          icon: I[ic],
-          chevron: I.chev,
-          data: e
-        };
-      };
-      for (const e of entries) {
-        if (owner && opts.only && !opts.only.has(owner.get(e.key) ?? "")) continue;
-        if (host2.isGap(e)) {
-          closeTurn();
-          if (!filtering)
-            tx.push({
-              kind: "label",
-              className: "divider",
-              text: e.k === "end" ? e.text ?? "" : ""
-            });
-          closeTurn();
-          continue;
-        }
-        const first = firsts.get(e.key);
-        if (first) openTurn(first);
-        if (e.k === "think" && (!host2.show.thinking || host2.find)) continue;
-        if (e.k === "signal") {
-          const label = signalLabel(e);
-          if (hit(label))
-            tx.push(keyed({ kind: "label", className: "signal-marker", text: label }, e));
-          continue;
-        }
-        if (e.k === "think" && isMaskedThought(e)) {
-          if (!masked) {
-            masked = true;
-            tx.push(
-              keyed({ kind: "thought", mode: "masked", label: "Thinking hidden by the harness" }, e)
-            );
-          }
-          continue;
-        }
-        if (e.k === "bgend") {
-          if (!host2.show.tools || !hit(e.label ?? "")) continue;
-          const word = e.state === "failed" ? "failed" : e.state === "killed" ? "stopped" : "completed";
-          const view = keyed(
-            {
-              kind: "background",
-              failed: e.state === "failed",
-              label: "Background command " + word + " \xB7 " + (e.label ?? ""),
-              call: e.call,
-              loaded: entries.some((entry2) => entry2.k === "tool" && entry2.tid === e.call)
+              className: "verb",
+              text: edge.kind === "spawn" ? " spawned " : edge.kind === "relay" ? " relayed to " : edge.kind === "toyou" ? edge.ask === "result" ? " sent a result to " : " asked " : " sent to "
             },
-            e
-          );
-          run.push({ view, end: true, state: e.state, key: e.key });
-          continue;
-        }
-        if (e.k === "tool") {
-          if (!host2.show.tools || !hit(
-            e.name + " " + (e.title ?? "") + " " + e.arg + " " + (e.in ?? "") + " " + (e.out ?? "")
-          ))
-            continue;
-          const [ic, v] = verb(e.name), view = keyed({ kind: "tool", step: toolStep(e, v, ic, !!e.live && !e.bg) }, e);
-          if (e.live && !e.bg) run.push({ view, v, k: e.name, live: true, secs: e.secs, key: e.key });
-          else if (e.bg) {
-            const live = e.bg.state === "running";
-            run.push({
-              view,
-              v,
-              k: e.name,
-              err: e.bg.state === "failed",
-              bg: true,
-              tid: e.tid,
-              live,
-              secs: live && e.bg.since != null ? host2.tickerOwner.running(host2.now - e.bg.since) : e.bg.secs ?? e.secs,
-              key: e.key
-            });
-          } else run.push({ view, v, k: e.name, err: e.ok === false, key: e.key });
-          continue;
-        }
-        flush();
-        if (e.k === "u" || e.k === "a") {
-          if (!host2.show.messages || !hit(e.text)) continue;
-          tx.push(
-            keyed(
-              {
-                kind: "message",
-                flavor: e.k === "u" ? "user" : "assistant",
-                text: e.text,
-                images: e.k === "u" ? host2.toolViewsOwner.attachmentSnapshot(e) : void 0
-              },
-              e
-            )
-          );
-        } else if (e.k === "think")
-          tx.push(
-            keyed(
-              isPendingThought(e) ? { kind: "thought", mode: "pending" } : {
-                kind: "thought",
-                mode: "readable",
-                label: thoughtLabel(e.displaySecs),
-                text: thoughtText(e)
-              },
-              e
-            )
-          );
-        else if (e.k === "harness") {
-          if (!host2.show.messages || host2.find) continue;
-          tx.push(
-            keyed(
-              {
-                kind: "label",
-                className: "harness-note",
-                text: "Harness text added before the prompt (" + e.label + ")"
-              },
-              e
-            )
-          );
-        } else if (e.k === "end") {
-          if (!filtering)
-            tx.push(keyed({ kind: "label", className: "divider", text: e.text ?? "" }, e));
-        } else if (e.k === "h") {
-          const h2 = host2.modelStore.handoff.get(e.id);
-          if (!h2 || !hit(h2.brief + " " + (h2.result ?? ""))) continue;
-          if (h2.kind === "ask") {
-            if (!host2.show.messages) continue;
-            tx.push(
-              keyed(
-                {
-                  kind: "message",
-                  flavor: "user",
-                  text: h2.brief ?? "",
-                  images: host2.toolViewsOwner.attachmentSnapshot(e)
-                },
-                e
-              )
-            );
-            if (currentTurn.value?.t.start === h2)
-              tx.push({ kind: "label", className: "msg-tm", text: host2.clock(h2.at) });
-            continue;
+            sessionPart(edge.to, child?.id)
+          ],
+          time: clock(edge.at, now),
+          brief: edge.kind === "toyou" && edge.ask === "result" ? void 0 : edge.brief || void 0,
+          answers: edge.kind === "toyou" && Array.isArray(edge.answer) ? edge.answer : void 0,
+          result: edge.kind === "toyou" && edge.ask === "result" ? void 0 : edge.result,
+          meta: child ? meta(child) : {
+            state: edge.status,
+            stateLabel: STATE[edge.status] ?? edge.status,
+            text: edge.declined ? "Declined" : edge.status === "done" ? "Completed" : edge.status === "wait" ? "Waiting on you" : "Recorded",
+            note: edge.to !== "you" && !child ? "Its turn is not in this source publication" : void 0
           }
-          if (currentTurn.value && currentTurn.value.t.start === h2) {
-            if (host2.show.messages)
-              tx.push(
-                keyed({ kind: "message", flavor: "incoming", text: h2.brief ?? "", handoff: h2.id }, e)
-              );
-            continue;
-          }
-          if (h2.kind === "spawn" && h2.from === sid && host2.modelStore.sessions[h2.to]) {
-            if (host2.show.tools)
-              tx.push(keyed(host2.toolViewsOwner.childSnapshot(h2, host2.modelStore.sessions[h2.to]), e));
-            continue;
-          }
-          if (host2.find && h2.kind === "move" || !host2.show.messages && h2.kind !== "move")
-            continue;
-          const sentence = host2.sentencesOwner.sentenceSnapshot(h2, sid, true);
-          tx.push(
-            keyed(
-              {
-                kind: "event",
-                handoff: h2.id,
-                className: "event" + (h2.kind === "toyou" && h2.status === "wait" ? " waiting" : "") + (h2.kind === "move" ? " move" : ""),
-                icon: sentence.icon,
-                parts: sentence.parts,
-                time: host2.clock(h2.at),
-                brief: preview(h2.brief ?? ""),
-                result: h2.result || void 0,
-                resultLabel: h2.kind === "relay" ? "Reply: " : "Returned: ",
-                answers: host2.domain.answersOf(h2) ?? void 0,
-                waiting: h2.kind === "toyou" && h2.status === "wait",
-                stateLabel: STATE.wait
-              },
-              e
-            )
-          );
-        }
-      }
-      closeTurn();
-      const range = projection.range, s = host2.modelStore.sessions[sid], origin = host2.domain.originHandoff(sid);
-      return {
-        id: sid,
-        name: s.name,
-        observation: host2.transcripts.staleBriefs.has(sid) ? "This conversation changed at its source. The saved transcript is incomplete; reopen this session to update it." : void 0,
-        blocks: blocks2,
-        order: (host2.modelStore.turns[sid] ?? []).map((t) => t.id),
-        dirty: opts.only,
-        before: range?.from > 0 ? host2.pagingOwner.pagerSnapshot(sid, "before") : void 0,
-        after: range && range.to < range.total ? host2.pagingOwner.pagerSnapshot(sid, "after") : void 0,
-        started: !range?.from && !filtering ? {
-          lead: "Started " + host2.clock(s.start) + " on\xA0",
-          machine: host2.modelStore.machines[s.movedFrom ?? s.machine]
-        } : void 0,
-        empty: !opts.only && !blocks2.some((b) => content2(b.kind === "turn" ? b.turn.entries : b.entries)) ? host2.find ? "Nothing matches \u201C" + host2.find + "\u201D." : "Nothing to show with these filters." : void 0,
-        footer: host2.screenViews.showsFooter(s, origin) ? host2.toolViewsOwner.footerSnapshot(s, origin) : void 0
-      };
-    }
-    return { transcriptEntries, transcriptSnapshot, verb, verbNow };
-  }
-
-  // src/app/transport.ts
-  function createTransport(host2) {
-    let serverNow = 0, fetchedAt = 0;
-    let TOK = {};
-    const enc = encodeURIComponent;
-    const safePath2 = (href) => typeof href === "string" && href.startsWith("/") && !href.startsWith("//") && !href.includes("\\") && !/[\u0000-\u001f\u007f-\u009f]/.test(href) && href.length <= 512;
-    const accountOf = parseAccount;
-    let embedWarned = false;
-    function embeddedAccount() {
-      let source;
-      try {
-        const config = Reflect.get(window, "semonEmbed");
-        source = config && typeof config === "object" && "account" in config ? config.account : void 0;
-      } catch {
-        source = void 0;
-      }
-      const account = accountOf(source);
-      if (source != null && !account && !embedWarned) {
-        embedWarned = true;
-        console.warn("semon: window.semonEmbed.account was rejected (see the account menu rules)");
-      }
-      return account;
-    }
-    async function api(path, signal, unchanged = false) {
-      if (host2.disposed) throw new DOMException("Viewer destroyed", "AbortError");
-      const controller = host2.scope.request(), release = () => host2.scope.releaseRequest(controller);
-      const deadline = host2.scope.timeout(() => controller.abort(), 15e3);
-      try {
-        const response = await requestJson(
-          path,
-          signal ? AbortSignal.any([signal, controller.signal]) : controller.signal,
-          unchanged
-        );
-        if (host2.disposed) throw new DOMException("Viewer destroyed", "AbortError");
-        return response;
-      } finally {
-        host2.scope.clearTimeout(deadline);
-        release();
-      }
-    }
-    function tick() {
-      host2.now = serverNow + (Date.now() - fetchedAt);
-      for (const s of Object.values(host2.modelStore.sessions))
-        if (s.activity && s.activity[3] != null)
-          s.activity[2] = Math.floor((host2.now - s.activity[3]) / 1e3);
-    }
-    function adopt(value) {
-      if (host2.disposed) throw new DOMException("Viewer destroyed", "AbortError");
-      const m = parseModel(value);
-      const control = host2.controlOwner.prepare(m.control);
-      const marks = m.tx == null ? {} : dictionary(m.tx, text);
-      const admin = m.admin == null ? null : object2(m.admin);
-      const nextAdmin = admin && typeof admin.href === "string" && safePath2(admin.href) ? { href: admin.href, label: text(admin.label) } : null;
-      const account = accountOf(m.account) ?? accountOf(host2.viewerHost?.account) ?? embeddedAccount();
-      const nav = m.nav == null ? null : object2(m.nav);
-      const machinesPath = host2.viewerHost?.machinesPath ?? (nav && typeof nav.machines === "string" && safePath2(nav.machines) ? nav.machines : null);
-      host2.modelStore.adopt(m, () => {
-        if (!(host2.viewerHost?.controlStream || host2.viewerHost?.catalogControlStream))
-          host2.controlOwner.adopt(control);
-        serverNow = m.now;
-        fetchedAt = Date.now();
-        TOK = marks;
-        host2.transcripts.marks = marks;
-        host2.admin = nextAdmin;
-        host2.account = account;
-        host2.machinesPath = machinesPath;
-        tick();
-        for (const sid of Object.keys(host2.transcripts.entries)) host2.transcripts.spread(sid);
-      });
-      host2.viewerHost?.modelAccount?.(account);
-      host2.viewerHost?.modelNavigation?.(m);
-      return m;
-    }
-    const spread = (sid) => host2.transcripts.spread(sid);
-    const txEntry = (e) => e.k === "end" && e.ret ? {
-      k: "end",
-      text: "Returned to " + host2.domain.nameOf(e.ret.to) + (e.ret.failed ? " \xB7 failed" : "") + (e.ret.at != null ? " \xB7 " + host2.clock(e.ret.at) : ""),
-      turn: e.turn
-    } : e;
-    const fetchTx = (sid, q = "", where = void 0, signal = void 0, onPage = void 0) => host2.transcripts.fetch(sid, q, where, signal, onPage);
-    function load(r, signal = void 0) {
-      if (r.v === "analytics")
-        return host2.analytics.fetchAnalytics().then(() => {
-          host2.analytics.scheduleAnalytics();
         });
-      if (r.v !== "session" || !host2.modelStore.sessions[r.id]) return null;
-      const t = r.turn ? host2.modelStore.turn.get(r.turn) : null, deep = t && t.sid === r.id && !t.entries.length;
-      if (host2.transcripts.entries[r.id] && !deep) return null;
-      return fetchTx(r.id, deep ? "turn=" + enc(t.id) : "", void 0, signal);
-    }
-    return {
-      api,
-      txEntry,
-      get TOK() {
-        return TOK;
-      },
-      set TOK(value) {
-        TOK = value;
-      },
-      fetchTx,
-      enc,
-      adopt,
-      load,
-      spread,
-      tick,
-      get fetchedAt() {
-        return fetchedAt;
-      },
-      set fetchedAt(value) {
-        fetchedAt = value;
-      },
-      accountOf
-    };
-  }
-
-  // src/navigation/scroll.ts
-  function createScrollTransactions(host2) {
-    let anchor = null, disposed = false;
-    const frames = /* @__PURE__ */ new Set();
-    const frame = (fn) => {
-      const id = requestAnimationFrame(() => {
-        frames.delete(id);
-        if (!disposed) fn();
-      });
-      frames.add(id);
-    };
-    const scroller = () => host2.phone() ? document.scrollingElement ?? document.documentElement : host2.main();
-    const ANCHORS = "[data-e], .turn, .hop, .ib, .nrow, .sec-h, .ph, .divider, .analytics-metric, .analytics-panel, .facet-filters, .groupby, .find, .empty";
-    const HOSTS = "[data-e], [data-h], [data-id], [data-sid], [data-go], [data-turn], [data-g], [data-m]";
-    const FOCUSABLE = "button, input, [tabindex], a[href]";
-    const stateKey = (n) => n.dataset.entryKey ?? n.dataset.e;
-    const identOf = (n) => {
-      const d = n.dataset, keys = [stateKey(n), d.turn, d.h, d.id, d.m, d.sid, d.go, d.g];
-      return [
-        n.classList[0],
-        ...keys,
-        keys.some((x) => x != null) ? "" : n.firstChild?.nodeType === 3 ? n.firstChild.textContent : ""
-      ].map((x) => x ?? "").join("|");
-    };
-    function anchors(fn) {
-      const seen = /* @__PURE__ */ new Map();
-      for (const n of host2.page().querySelectorAll(ANCHORS)) {
-        const id = identOf(n), k = seen.get(id) ?? 0;
-        seen.set(id, k + 1);
-        if (fn(n, id + "#" + k)) return n;
-      }
-      return null;
-    }
-    const opener = (n) => n.classList.contains("step") ? n.querySelector(":scope > button") : n.classList.contains("tgroup") ? n.querySelector(":scope > .tsum") : null;
-    function capture() {
-      const sc = scroller(), line = host2.edge();
-      const st = {
-        top: sc.scrollTop,
-        bottom: sc.scrollHeight - sc.scrollTop - sc.clientHeight <= 80,
-        anchor: null,
-        open: /* @__PURE__ */ new Set(),
-        groups: /* @__PURE__ */ new Set(),
-        groupMembers: /* @__PURE__ */ new Set(),
-        focus: null,
-        drawer: document.body.classList.contains("drawer-open")
-      };
-      const kept = anchor;
-      const still = kept && kept.route === host2.rendered() && Math.abs(sc.scrollTop - kept.top) < 1 ? anchors((n, id) => id === kept.id) : null;
-      if (still && kept && Math.abs(still.getBoundingClientRect().top - line - kept.off) <= 1)
-        st.anchor = { id: kept.id, off: kept.off };
-      else {
-        const turnBounds = /* @__PURE__ */ new Map();
-        anchors((n, id) => {
-          const turn = n.closest(".turn");
-          if (turn) {
-            let bounds = turnBounds.get(turn);
-            if (!bounds) {
-              bounds = turn.getBoundingClientRect();
-              turnBounds.set(turn, bounds);
-            }
-            if (bounds.bottom <= line || bounds.top >= (host2.phone() ? innerHeight : sc.getBoundingClientRect().bottom))
-              return false;
-          }
-          if (n.querySelector(ANCHORS)) return false;
-          const b = n.getBoundingClientRect();
-          if (!b.height || b.bottom <= line) return false;
-          st.anchor = { id, off: b.top - line };
-          return true;
-        });
-      }
-      for (const n of host2.page().querySelectorAll("[data-e]")) {
-        if (n.classList.contains("tgroup")) st.groups.add(stateKey(n));
-        if (opener(n)?.getAttribute("aria-expanded") === "true")
-          for (const step of n.querySelectorAll(".step[data-e]"))
-            st.groupMembers.add(stateKey(step));
-        if (opener(n)?.getAttribute("aria-expanded") === "true" || n.classList.contains("event") && n.querySelector(":scope > .ev-text.open"))
-          st.open.add(stateKey(n));
-      }
-      for (const n of host2.page().querySelectorAll(".hop"))
-        if (n.querySelector(".brief.open")) st.open.add("hop:" + identOf(n));
-      const a = document.activeElement;
-      if (a instanceof HTMLElement && a !== document.body && !a.closest("dialog")) {
-        const owner = a.id ? null : a.closest(HOSTS), sel = owner && owner !== a ? a.tagName.toLowerCase() + [...a.classList].map((c) => "." + CSS.escape(c)).join("") : null;
-        st.focus = {
-          id: a.id || null,
-          host: owner ? identOf(owner) : null,
-          sel,
-          i: sel && owner ? [...owner.querySelectorAll(sel)].indexOf(a) : 0,
-          range: null,
-          label: a.getAttribute("aria-label"),
-          at: [...host2.page().querySelectorAll(FOCUSABLE)].indexOf(a),
-          of: host2.page().querySelectorAll(FOCUSABLE).length,
-          foot: a.closest("#page > .session-foot") ? a.closest("[data-foot]")?.dataset.foot ?? null : null
-        };
-        try {
-          if ((a instanceof HTMLInputElement || a instanceof HTMLTextAreaElement) && typeof a.selectionStart === "number" && a.selectionEnd !== null)
-            st.focus.range = [a.selectionStart, a.selectionEnd];
-        } catch {
-        }
-      }
-      return st;
-    }
-    function restore(st, pin = false) {
-      const all = (sel) => [...host2.page().querySelectorAll(sel)], r0 = host2.rendered(), revision = host2.revision();
-      measureSessionScreen(host2.page());
-      measureTraceScreen(host2.page());
-      for (const n of all(".tgroup[data-e]")) {
-        const want = st.groups.has(stateKey(n)) ? st.open.has(stateKey(n)) : [...n.querySelectorAll(".step[data-e]")].some(
-          (x) => st.open.has(stateKey(x)) || st.groupMembers.has(stateKey(x))
-        );
-        if (want && opener(n).getAttribute("aria-expanded") === "false") opener(n).click();
-      }
-      for (const n of all(".step[data-e]"))
-        if (st.open.has(stateKey(n)) && opener(n)?.getAttribute("aria-expanded") === "false")
-          opener(n).click();
-      for (const n of all(".event[data-e]"))
-        if (st.open.has(stateKey(n)) && !n.querySelector(":scope > .ev-text.open")) {
-          const m = n.querySelector(":scope > .ev-more");
-          m.click();
-        }
-      for (const n of all(".hop"))
-        if (st.open.has("hop:" + identOf(n)) && !n.querySelector(".brief.open")) {
-          const m = n.querySelector(".body > .more");
-          m.click();
-        }
-      if (st.drawer) host2.restoreDrawer();
-      if (st.focus) {
-        let n = st.focus.id ? document.getElementById(st.focus.id) : null;
-        if (!n && st.focus.host) {
-          const owner = [...document.querySelectorAll(HOSTS)].find(
-            (x) => identOf(x) === st.focus.host
-          );
-          n = owner && st.focus.sel ? owner.querySelectorAll(st.focus.sel)[st.focus.i] : owner ?? null;
-        }
-        if (!n && st.focus.label)
-          n = [
-            ...document.querySelectorAll("#page [aria-label], #topbar [aria-label]")
-          ].find((x) => x.getAttribute("aria-label") === st.focus.label) ?? null;
-        if (!n && st.focus.foot) {
-          const f = host2.page().querySelector(":scope > .session-foot");
-          n = f?.querySelector('[data-foot="' + st.focus.foot + '"]') ?? f?.querySelector('[data-foot="time"]') ?? null;
-        }
-        if (!n && !st.focus.host && st.focus.at >= 0 && host2.page().querySelectorAll(FOCUSABLE).length === st.focus.of)
-          n = host2.page().querySelectorAll(FOCUSABLE)[st.focus.at];
-        if (n && n !== document.activeElement) {
-          n.focus({ preventScroll: true });
-          if (st.focus.range)
-            try {
-              if (n instanceof HTMLInputElement || n instanceof HTMLTextAreaElement)
-                n.setSelectionRange(...st.focus.range);
-            } catch {
-            }
-        }
-      }
-      const pagingTurns = st.paging ? all(".turn") : [];
-      if (st.paging) {
-        for (const turn of pagingTurns) revealMeasuredTurn(turn, true);
-        const heights = pagingTurns.map((turn) => turn.getBoundingClientRect().height);
-        pagingTurns.forEach((turn, i) => {
-          setGeometry(turn, "intrinsicHeight", Math.ceil(heights[i]));
-        });
-      }
-      const place = (first) => {
-        const sc = scroller();
-        host2.programmatic(() => {
-          if (pin) sc.scrollTop = sc.scrollHeight;
-          else {
-            const paging = st.paging;
-            let found = null;
-            if (paging?.anchor)
-              found = all(".turns [data-e][data-entry-key]:not(.tgroup)").find(
-                (n) => n.dataset.entryKey === paging.anchor.key
-              );
-            else if (!paging && st.anchor) found = anchors((n, id) => id === st.anchor.id);
-            if (found) {
-              const line = paging ? host2.phone() ? 0 : sc.getBoundingClientRect().top : host2.edge();
-              const d = found.getBoundingClientRect().top - line - (paging ? paging.anchor.off : st.anchor.off), want = sc.scrollTop + d, room = sc.scrollHeight - sc.clientHeight;
-              if (want > room + 0.5) {
-                const page = host2.page();
-                setGeometry(
-                  page,
-                  "paddingBottom",
-                  parseFloat(getComputedStyle(page).paddingBottom) + Math.ceil(want - room)
-                );
-              }
-              if (d) sc.scrollTop = want;
-              anchor = paging || !st.anchor ? null : { ...st.anchor, route: r0, top: sc.scrollTop };
-            } else if (first)
-              sc.scrollTop = st.top + (paging?.before ? sc.scrollHeight - paging.height : 0);
-          }
-        }, false);
-        if (pin) anchor = null;
-        host2.sync();
-      };
-      place(true);
-      const placedTop = scroller().scrollTop;
-      frame(
-        () => frame(() => {
-          for (const turn of pagingTurns) revealMeasuredTurn(turn, false);
-          if (host2.rendered() === r0 && !host2.sheet() && host2.revision() === revision && Math.abs(scroller().scrollTop - placedTop) < 1)
-            place(false);
-        })
-      );
-    }
-    return {
-      capture,
-      restore,
-      opener,
-      stateKey,
-      identOf,
-      get anchor() {
-        return anchor;
-      },
-      set anchor(value) {
-        anchor = value;
-      },
-      destroy() {
-        if (disposed) return;
-        disposed = true;
-        for (const id of frames) cancelAnimationFrame(id);
-        frames.clear();
-        anchor = null;
+        if (child) walk(child);
       }
     };
-  }
-
-  // src/app/viewport.ts
-  function createViewport(host2) {
-    const scroller = () => host2.phone.matches ? document.documentElement : host2.$("#main");
-    const edge = () => host2.$("#topbar").getBoundingClientRect().bottom;
-    let openingEndUntil = 0;
-    let openingEndTimer;
-    let openingEndObserver = null;
-    function stopOpeningEndPin() {
-      const wasPinned = !!openingEndUntil;
-      openingEndUntil = 0;
-      host2.scope.clearTimeout(openingEndTimer);
-      openingEndTimer = void 0;
-      openingEndObserver?.disconnect();
-      openingEndObserver = null;
-      if (wasPinned) host2.pagingOwner.queuePagerObservers();
-    }
-    function pinOpeningEnd() {
-      if (host2.navigation.route.v !== "session" || performance.now() >= openingEndUntil) {
-        stopOpeningEndPin();
-        return;
-      }
-      const sc = scroller();
-      host2.pagingOwner.scrollProgrammatically(() => {
-        sc.scrollTop = sc.scrollHeight;
-      });
-      scrollController.anchor = null;
-      syncJump();
-      host2.historyScrollOwner.saveHistoryScroll();
-    }
-    function startOpeningEndPin() {
-      host2.pagingOwner.resetPagerInput();
-      stopOpeningEndPin();
-      if (host2.navigation.route.v !== "session" || location.hash) return;
-      openingEndUntil = performance.now() + 2e3;
-      host2.pagingOwner.disconnectPagerObservers();
-      const turns = host2.$("#page section[aria-label='Transcript'] .turns");
-      if (turns) {
-        openingEndObserver = new ResizeObserver(pinOpeningEnd);
-        openingEndObserver.observe(turns);
-      }
-      pinOpeningEnd();
-      openingEndTimer = host2.scope.timeout(stopOpeningEndPin, 2e3);
-    }
-    const scrollController = createScrollTransactions({
-      page: () => host2.$("#page"),
-      main: () => host2.$("#main"),
-      phone: () => host2.phone.matches,
-      edge,
-      rendered: () => host2.navigation.rendered,
-      sheet: () => !!host2.toolViewsOwner.viewerEl,
-      revision: () => host2.pagingOwner.scrollRevision,
-      programmatic: (...args) => host2.pagingOwner.scrollProgrammatically(...args),
-      sync: (...args) => host2.sessionChrome.syncBarLine(...args),
-      restoreDrawer: () => host2.accountControlsOwner.shellChrome?.restoreDrawer()
-    });
-    const { capture, restore, opener, stateKey, identOf } = scrollController;
-    function patchSession(dirty) {
-      host2.pagingOwner.resetPagerInput();
-      host2.pagingOwner.holdProgrammaticScroll();
-      host2.transportOwner.tick();
-      const s = host2.modelStore.sessions["id" in host2.navigation.route ? host2.navigation.route.id : ""], box = host2.$("#page .turns");
-      const keys = () => new Set(
-        [
-          ...host2.$("#page").querySelectorAll(
-            ".turns :is(.msg, .bubble, .step, .event, .child-card, .thought, .think-pending)[data-e]"
-          )
-        ].map((n2) => n2.dataset.e)
-      );
-      const before = keys();
-      const whole = !dirty || box.querySelector(":scope > p.empty") || [...box.querySelectorAll(":scope > .turn")].some(
-        (b) => !host2.modelStore.turn.has(b.dataset.turn ?? "")
-      );
-      host2.screenViews.renderSession(
-        host2.$("#page"),
-        "id" in host2.navigation.route ? host2.navigation.route.id : "",
-        whole ? {} : { only: dirty }
-      );
-      host2.sessionChrome.drawSessionBar();
-      for (const pager of box.querySelectorAll("[data-pager-where]"))
-        host2.pagingOwner.paintPager(pager);
-      host2.navigationViewOwner.renderNav();
-      host2.recentNavigation.renderLanes();
-      host2.tickerOwner.ticker();
-      let n = 0;
-      for (const k of keys()) if (!before.has(k)) n++;
-      host2.pagingOwner.queuePagerObservers();
-      return n;
-    }
-    function scrollMetrics() {
-      if (host2.phone.matches)
-        return {
-          top: window.scrollY,
-          height: document.documentElement.scrollHeight,
-          viewport: window.innerHeight,
-          gap: Math.max(
-            0,
-            document.documentElement.scrollHeight - window.innerHeight - window.scrollY
-          )
-        };
-      const m = host2.$("#main");
-      return {
-        top: m.scrollTop,
-        height: m.scrollHeight,
-        viewport: m.clientHeight,
-        gap: Math.max(0, m.scrollHeight - m.clientHeight - m.scrollTop)
-      };
-    }
-    function scrollToEnd(behavior = "smooth") {
-      host2.pagingOwner.scrollProgrammatically(() => {
-        if (host2.phone.matches)
-          window.scrollTo({ top: document.documentElement.scrollHeight, behavior });
-        else {
-          const m = host2.$("#main");
-          m.scrollTo({ top: m.scrollHeight, behavior });
-        }
-      });
-    }
-    let jumpBusy = false;
-    function syncJump() {
-      if (host2.navigation.route.v !== "session") {
-        host2.liveModelOwner.LIVE.fresh = 0;
-        return;
-      }
-      const { gap } = scrollMetrics(), newer = host2.transcripts.meta["id" in host2.navigation.route ? host2.navigation.route.id : ""]?.newer ?? 0;
-      if (gap <= 80) host2.liveModelOwner.LIVE.fresh = 0;
-      updateSessionJump(
-        host2.$("#page"),
-        gap > 80 || !!newer,
-        host2.liveModelOwner.LIVE.fresh + newer,
-        jumpBusy,
-        host2.sessionChrome.viewerBar.jumpTarget
-      );
-    }
-    function clearNewEntries() {
-      host2.liveModelOwner.LIVE.fresh = 0;
-      updateSessionJump(host2.$("#page"), false, 0, jumpBusy);
-    }
-    function jumpToLatest() {
-      const sid = "id" in host2.navigation.route ? host2.navigation.route.id : "", r = host2.navigation.route, m = host2.transcripts.meta[sid];
-      if (m && m.to < m.total) {
-        jumpBusy = true;
-        syncJump();
-        host2.transportOwner.fetchTx(sid, "").then(() => {
-          if (host2.navigation.route === r) host2.destination.goSession(sid);
-        }).catch(() => {
-        }).finally(() => {
-          jumpBusy = false;
-          syncJump();
-        });
-      } else scrollToEnd("smooth");
-    }
-    if (!host2.sidebarOnly) {
-      host2.scope.listen(window, "scroll", syncJump, { passive: true });
-      host2.scope.listen(host2.$("#main"), "scroll", syncJump, { passive: true });
-    }
-    const cancelOpeningEndPin = () => {
-      if (openingEndUntil) stopOpeningEndPin();
-    };
-    if (!host2.sidebarOnly) {
-      host2.scope.listen(window, "wheel", cancelOpeningEndPin, { passive: true });
-      host2.scope.listen(window, "touchmove", cancelOpeningEndPin, { passive: true });
-      host2.scope.listen(window, "pointerdown", cancelOpeningEndPin, { passive: true });
-    }
-    const transcriptInput = (e) => e.target instanceof Element && !e.target.closest?.("#sidebar, dialog, input, textarea, select, [contenteditable='true']") && (host2.phone.matches || host2.$("#main").contains(e.target));
-    if (!host2.sidebarOnly) {
-      const input = (e) => {
-        if (transcriptInput(e)) host2.pagingOwner.readerScrollInput();
-      };
-      host2.scope.listen(window, "wheel", input, { passive: true });
-      host2.scope.listen(window, "touchmove", input, { passive: true });
-      const scroll = () => {
-        if (host2.pagingOwner.programmaticScrollPending) host2.pagingOwner.holdProgrammaticScroll();
-        else if (!openingEndUntil) host2.pagingOwner.readerScrollInput();
-      };
-      host2.scope.listen(
-        window,
-        "scroll",
-        () => {
-          if (host2.phone.matches) scroll();
+    walk(data.root);
+    renderTraceScreen(
+      root,
+      {
+        empty: false,
+        summary: `${Object.keys(data.sessions).length} sessions \xB7 ${data.handoffs.size} handoffs` + (data.incomplete ? " \xB7 some relationship context is unavailable" : ""),
+        hops,
+        agents: agentSnapshot(data.root),
+        observation: data.observation,
+        continuations: data.frontier.map((branch) => ({
+          label: data.sessions[branch.catalog_key]?.name ?? "Recorded branch",
+          href: "/trace/native/" + encodeURIComponent(branch.catalog_key) + "/" + encodeURIComponent(branch.turn) + "?" + new URLSearchParams({ machine: data.source })
+        }))
+      },
+      {
+        ...host2,
+        machine() {
         },
-        { passive: true }
-      );
-      host2.scope.listen(
-        host2.$("#main"),
-        "scroll",
-        () => {
-          if (!host2.phone.matches) scroll();
+        sender() {
         },
-        { passive: true }
-      );
-    }
-    if (!host2.sidebarOnly)
-      host2.scope.listen(document, "keydown", (e) => {
-        if (!e.defaultPrevented && (transcriptInput(e) || e.target === document.body || e.target === document.documentElement) && ["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", " "].includes(e.key))
-          host2.pagingOwner.readerScrollInput();
-      });
-    return {
-      scrollController,
-      stopOpeningEndPin,
-      get openingEndUntil() {
-        return openingEndUntil;
-      },
-      scroller,
-      capture,
-      restore,
-      syncJump,
-      startOpeningEndPin,
-      clearNewEntries,
-      edge,
-      opener,
-      jumpToLatest,
-      patchSession
-    };
-  }
-
-  // src/app/composition.ts
-  var ViewerComposition = class {
-    scope;
-    controlObservationOwner;
-    controlOwner;
-    dialogs;
-    disposed;
-    application;
-    now;
-    updates = new ViewUpdates();
-    catalogSelectionStore = new CatalogSelectionStore();
-    modelStore;
-    admin;
-    account;
-    viewerHost;
-    nativePage;
-    machinesPath;
-    sidebarOnly;
-    transcripts;
-    seenResultsOwner;
-    domain;
-    clock;
-    ago;
-    dur;
-    $;
-    spaced;
-    darkTheme;
-    facetLine;
-    seenPersistenceOwner;
-    sentencesOwner;
-    isGap;
-    transportOwner;
-    cacheTx;
-    adoptCached;
-    transcriptRevalidationOwner;
-    pagingOwner;
-    toolLoaderOwner;
-    bootstrapOwner;
-    phone;
-    navigation;
-    layoutOwner;
-    groupBy;
-    query;
-    focusSessionsSearchOnRender;
-    analyticsRange;
-    analyticsMeasure;
-    showApprovalReviews;
-    sessionFilters;
-    pendingSessionOpen;
-    accountSheet;
-    afterPop;
-    allVisibility;
-    show;
-    find;
-    findOpen;
-    historyScrollOwner;
-    destination;
-    accountControlsOwner;
-    orderingControlsOwner;
-    navigationViewOwner;
-    recentNavigation;
-    sessionChrome;
-    screenViews;
-    transcriptView;
-    toolViewsOwner;
-    pageRoot = createPageRoot();
-    routeControls;
-    renderTransaction;
-    documentRendererOwner;
-    analytics;
-    sessionListOwner;
-    documentEventsOwner;
-    liveModelOwner;
-    liveUpdates;
-    applicationRefreshOwner;
-    viewport;
-    tickerOwner;
-    get catalogSelection() {
-      return this.viewerHost?.catalogControlStream ? this.catalogSelectionStore : void 0;
-    }
-    constructor(host2, onDestroyed) {
-      const context = this;
-      this.scope = new EffectScope();
-      this.dialogs = /* @__PURE__ */ new Map();
-      this.disposed = false;
-      this.application = {
-        destroy() {
-          if (context.disposed) return;
-          context.disposed = true;
-          context.controlObservationOwner.destroy();
-          context.catalogSelectionStore.destroy();
-          context.controlOwner.destroy();
-          context.updates.destroy();
-          context.scope.destroy();
-          context.liveModelOwner.destroy();
-          context.navigation.destroy();
-          context.transcripts.destroy();
-          context.viewport.stopOpeningEndPin();
-          context.pagingOwner.pagerController.disconnect();
-          context.sessionChrome.errorNavigation.destroy();
-          context.viewport.scrollController.destroy();
-          for (const dialog of context.dialogs.values()) dialog.destroy();
-          context.dialogs.clear();
-          context.routeControls.destroy();
-          if (!context.sidebarOnly) context.pageRoot.destroy(context.$("#page"));
-          context.recentNavigation.recentRenderer.destroy();
-          context.sessionChrome.viewerBar.destroy();
-          context.accountControlsOwner.shellChrome?.destroy();
-          context.accountControlsOwner.accountChrome.destroy();
-          releaseGeometry(context.layoutOwner.app);
-          releaseGeometry(document.documentElement, ["barHeight"]);
-          document.querySelectorAll(".livenote, .livenote-side").forEach((node) => node.remove());
-          document.documentElement.classList.remove("viewer-open", "panel-open");
-          onDestroyed(context.application);
+        committed() {
+        },
+        fold(id) {
+          const values = expanded.get(data.root.id) ?? /* @__PURE__ */ new Set();
+          values.add(id);
+          expanded.set(data.root.id, values);
+          host2.fold();
         }
-      };
-      this.now = Date.now();
-      this.modelStore = new ViewerModelStore(this.updates);
-      this.admin = null;
-      this.account = null;
-      this.viewerHost = host2;
-      this.nativePage = context.viewerHost?.nativePage;
-      this.machinesPath = context.viewerHost?.machinesPath ?? null;
-      this.sidebarOnly = document.querySelector(".app")?.dataset.viewer === "sidebar";
-      this.transcripts = new TranscriptStore(
-        {
-          request: (path, signal) => context.transportOwner.api(path, signal),
-          turns: (sid) => context.modelStore.turns[sid] ?? [],
-          turn: (id) => context.modelStore.turn.get(id),
-          entry: (e) => context.transportOwner.txEntry(e),
-          cleared(sid) {
-            if (context.navigation.route.v === "session" && ("id" in context.navigation.route ? context.navigation.route.id : "") === sid)
-              context.pagingOwner.resetPagerInput();
-          }
-        },
-        this.updates
-      );
-      this.seenResultsOwner = createSeenResults({});
-      this.domain = createDomain(
-        {
-          sessions: context.modelStore.sessions,
-          machines: context.modelStore.machines,
-          handoffs: context.modelStore.handoffs,
-          turns: context.modelStore.turns,
-          turn: context.modelStore.turn,
-          starts: context.modelStore.starts,
-          holds: context.modelStore.holds,
-          handoff: context.modelStore.handoff,
-          transcriptMeta: context.transcripts.meta
-        },
-        () => context.now,
-        context.seenResultsOwner.SEEN_RESULTS
-      );
-      this.updates.subscribe(() => this.domain.invalidate());
-      this.clock = (t) => clock(t, context.now);
-      this.ago = (t) => ago(t, context.now);
-      this.dur = (a, b) => dur(a, b ?? void 0, context.now);
-      this.$ = (s, r = document) => r.querySelector(s);
-      this.spaced = (t) => String(t).replace(/ · /g, "\u2009 \xB7 \u2009").replace(/^· /, "\xB7\u2009 ");
-      this.darkTheme = () => {
-        const t = document.documentElement.getAttribute("data-theme");
-        return t === "dark" || t !== "light" && !!window.matchMedia?.("(prefers-color-scheme: dark)").matches;
-      };
-      this.facetLine = (s) => [
-        s.kind ?? HARNESS[s.harness],
-        context.modelStore.machines[s.machine],
-        context.domain.where(s)
-      ].join(" \xB7 ");
-      this.seenPersistenceOwner = createSeenPersistence(context);
-      this.sentencesOwner = createSentences(context);
-      this.isGap = (e) => e.k === "end" && /entries (not included|omitted)|^No activity/.test(e.text ?? "");
-      this.controlOwner = createLocalControl(this.scope, () => {
-        if (context.viewerHost?.controlStream || context.viewerHost?.catalogControlStream)
-          context.applicationRefreshOwner.controls();
-        else context.applicationRefreshOwner.refresh();
-      });
-      this.transportOwner = createTransport(context);
-      this.cacheTx = (sid, entries, meta) => context.transcripts.keep(sid, entries, meta, !!context.domain.originHandoff(sid));
-      this.adoptCached = (r) => context.transcripts.adoptCached(r.id, r.turn);
-      this.transcriptRevalidationOwner = createTranscriptRevalidation(context);
-      this.pagingOwner = createPaging(context);
-      this.toolLoaderOwner = createToolLoader(context);
-      this.bootstrapOwner = createBootstrap(context);
-      this.phone = window.matchMedia("(max-width: 760px)");
-      this.navigation = new NavigationController(
-        {
-          model: context.bootstrapOwner.routeModel,
-          loadMachines: host2 ? (signal) => host2.loadMachines(signal) : void 0
-        },
-        context.viewerHost?.initialMachines ?? null
-      );
-      this.routeControls = createRouteControls(this.navigation);
-      this.layoutOwner = createLayout(context);
-      this.groupBy = "recent";
-      this.query = "";
-      this.focusSessionsSearchOnRender = null;
-      this.analyticsRange = 7;
-      this.analyticsMeasure = "hours";
-      this.showApprovalReviews = false;
-      this.sessionFilters = { repo: "", machine: "", harness: "", model: "" };
-      this.pendingSessionOpen = null;
-      this.accountSheet = false;
-      this.afterPop = null;
-      if (!context.sidebarOnly)
-        try {
-          history.scrollRestoration = "manual";
-        } catch {
-        }
-      this.allVisibility = { messages: true, tools: true, thinking: true };
-      this.show = { ...context.allVisibility };
-      this.find = "";
-      this.findOpen = false;
-      this.historyScrollOwner = createHistoryScroll(context);
-      this.destination = createDestination(context);
-      this.accountControlsOwner = createAccountControls(context);
-      this.orderingControlsOwner = createOrderingControls(context);
-      this.navigationViewOwner = createNavigationView(context);
-      this.recentNavigation = createRecentNavigation(context);
-      this.sessionChrome = createSessionChrome(context);
-      this.screenViews = createScreenViews(context);
-      this.transcriptView = createTranscriptView(context);
-      this.toolViewsOwner = createToolViews(context);
-      this.renderTransaction = createRenderTransaction(context);
-      this.documentRendererOwner = createDocumentRenderer(context);
-      this.analytics = createAnalytics(context);
-      this.sessionListOwner = createSessionList(context);
-      this.documentEventsOwner = createDocumentEvents(context);
-      this.liveModelOwner = createLiveModel(context);
-      this.liveUpdates = createLiveUpdates(context);
-      this.applicationRefreshOwner = createApplicationRefresh(context);
-      this.controlObservationOwner = createControlObservation(context);
-      this.viewport = createViewport(context);
-      this.tickerOwner = createTicker(context);
-      if (context.sidebarOnly) {
-        const nav = context.layoutOwner.app.dataset.viewerNav;
-        context.navigation.route = context.navigation.historyRoute({ v: nav }, { v: "home" });
       }
-      if (context.viewerHost) {
-        this.account = context.transportOwner.accountOf(context.viewerHost.account);
-        if (context.nativePage)
-          context.navigation.route = context.navigation.historyRoute(
-            { v: context.nativePage.nav },
-            { v: "home" }
-          );
-        else if (context.navigation.content) context.navigation.route = { v: "machines" };
-        if (context.nativePage || context.navigation.content) context.documentRendererOwner.render();
-      }
-      context.bootstrapOwner.boot();
-    }
-  };
-
-  // src/state/catalog-source-candidates.ts
-  var nullableText = (v) => v === null ? null : text(v);
-  function key(v) {
-    const value = text(v);
-    if (!value || value.length > 8192) throw new Error("Invalid source candidate identity");
-    return value;
-  }
-  function generation(v) {
-    const value = text(v);
-    if (!/^[a-f0-9]{64}$/.test(value)) throw new Error("Invalid source candidate generation");
-    return value;
-  }
-  function parseCatalogSourceCandidates(v) {
-    const row = object2(v);
-    const items = array(row.items, (value) => {
-      const candidate = object2(value), source = object2(candidate.source), path = text(source.path), root = text(source.root);
-      const observed = candidate.archive_observed_at === null ? null : number(candidate.archive_observed_at);
-      if (!root || !path || path.length > 4096 || path.startsWith("/") || path.includes("\\") || path.includes("\0") || path.split("/").includes("..") || observed !== null && (!Number.isSafeInteger(observed) || observed < 0))
-        throw new Error("Invalid archive source hint");
-      return {
-        candidate_key: key(candidate.candidate_key),
-        source: { root, path },
-        native_name_hint: nullableText(candidate.native_name_hint),
-        generation: generation(candidate.generation),
-        archive_observed_at: observed
-      };
-    });
-    if (row.api !== 1 || items.length > 60 || new Set(items.map((item2) => item2.candidate_key)).size !== items.length)
-      throw new Error("Invalid source candidate page");
-    return {
-      api: 1,
-      source_key: key(row.source_key),
-      items,
-      next_cursor: row.next_cursor === null ? null : key(row.next_cursor)
-    };
-  }
-  function parseCatalogSourceCandidateProgress(v) {
-    const row = object2(v), catalogKey = row.catalog_key === null ? null : key(row.catalog_key);
-    if (row.api !== 1 || !["updating", "ready", "unavailable"].includes(text(row.state)) || row.state === "ready" !== (catalogKey !== null))
-      throw new Error("Invalid source candidate progress");
-    return {
-      api: 1,
-      source_key: key(row.source_key),
-      candidate_key: key(row.candidate_key),
-      generation: generation(row.generation),
-      state: row.state,
-      catalog_key: catalogKey,
-      retryable: boolean(row.retryable),
-      reason: nullableText(row.reason)
-    };
+    );
   }
 
   // src/state/catalog-capabilities.ts
   function parseCatalogCapabilities(value) {
-    const row = object2(value), filters = array(row.filters, text), sourceKey = text(row.source_key), metadataSearch = row.metadata_search === void 0 ? false : boolean(row.metadata_search);
+    const row = object(value), filters = array(row.filters, text), sourceKey = text(row.source_key), metadataSearch = row.metadata_search === void 0 ? false : boolean(row.metadata_search);
     if (row.api !== 1 || row.read_contract !== "catalog-v1" || !sourceKey || row.pagination !== true || row.order !== "last_desc_key_asc" || row.full_text_search !== false || row.global_union !== false || metadataSearch !== filters.includes("q") || filters.some(
-      (filter) => filter !== "harness" && filter !== "repo" && !(metadataSearch && filter === "q")
+      (filter) => !["harness", "repo", "no_repo", "model"].includes(filter) && !(metadataSearch && filter === "q")
     ) || new Set(filters).size !== filters.length)
       throw new Error("Unsupported catalog read contract");
     return {
@@ -15672,6 +9170,521 @@ globalThis.__semonUIShared = __semonUIShared;
     };
   }
 
+  // src/domain/sessionDetails.ts
+  var optionalNumber2 = (value) => value == null ? void 0 : number(value);
+  var nullableText2 = (value) => value == null ? null : text(value);
+  function count(value) {
+    const n = number(value);
+    if (!Number.isSafeInteger(n) || n < 0) throw Error("Invalid recorded session count");
+    return n;
+  }
+  function usage(value) {
+    const row = object(value), result = {};
+    for (const key2 of [
+      "input",
+      "output",
+      "cache_write",
+      "cache_write_5m",
+      "cache_write_1h",
+      "cache_read",
+      "web_search"
+    ]) {
+      if (row[key2] == null) continue;
+      const n = number(row[key2]);
+      if (n < 0) throw Error("Invalid recorded usage");
+      result[key2] = n;
+    }
+    return result;
+  }
+  function parseCost2(value) {
+    const cost = object(value);
+    const models = dictionary(cost.by_model ?? {}, (value2) => {
+      const model2 = object(value2);
+      return {
+        usd: model2.usd == null ? null : number(model2.usd),
+        tokens: usage(model2.tokens ?? {}),
+        usd_by_kind: usage(model2.usd_by_kind ?? {})
+      };
+    });
+    if (Object.keys(models).length > 256) throw Error("Recorded model breakdown exceeds its bound");
+    return {
+      usd: cost.usd == null ? null : number(cost.usd),
+      unpriced_models: array(cost.unpriced_models ?? [], text),
+      by_model: models
+    };
+  }
+  function parseRelative(value) {
+    const row = object(value);
+    return {
+      key: text(row.key),
+      name: text(row.name),
+      harness: text(row.harness),
+      kind: text(row.kind),
+      parent: nullableText2(row.parent),
+      cost: parseCost2(row.cost)
+    };
+  }
+  function parseSessionDetails(value) {
+    const row = object(value), state2 = text(row.state);
+    if (!["work", "wait", "idle", "done", "err", "off"].includes(state2))
+      throw Error("Invalid recorded session state");
+    const family = row.family == null ? null : object(row.family);
+    if (family && (family.state !== "complete" && family.state !== "incomplete" || !Array.isArray(family.ancestors) || family.ancestors.length > 32 || !Array.isArray(family.runs) || family.runs.length > 99))
+      throw Error("Recorded family exceeds its bound");
+    const copilot = row.copilot == null ? null : object(row.copilot);
+    const activity = row.activity == null ? null : object(row.activity);
+    if (activity && text(activity.tool).length > 256) throw Error("Invalid recorded activity tool");
+    const ancestors = family ? array(family.ancestors, parseRelative) : [], runs = family ? array(family.runs, parseRelative) : [], keys = [...ancestors, ...runs].map((row2) => row2.key);
+    if (new Set(keys).size !== keys.length) throw Error("Invalid recorded family identity");
+    return {
+      state: state2,
+      turns: count(row.turns),
+      calls: row.calls == null ? null : count(row.calls),
+      errors: row.errors == null ? null : count(row.errors),
+      tool_calls: dictionary(row.tool_calls, count),
+      signals: dictionary(row.signals, count),
+      cost: parseCost2(row.cost),
+      cwd: nullableText2(row.cwd),
+      family: family ? { state: family.state, ancestors, runs } : void 0,
+      copied_usage: boolean(row.copied_usage),
+      live_observation: row.live_observation == null ? void 0 : boolean(row.live_observation),
+      activity: activity ? { tool: text(activity.tool), since: count(activity.since) } : void 0,
+      copilot: copilot ? {
+        version: text(copilot.version),
+        schema: count(copilot.schema),
+        lifecycle: nullableText2(copilot.lifecycle),
+        logical_parent: nullableText2(copilot.logical_parent),
+        approvals: nullableText2(copilot.approvals)
+      } : null,
+      reported_runs: array(row.reported_runs, (value2) => {
+        const item2 = object(value2);
+        return { start: number(item2.start), cost_usd: optionalNumber2(item2.cost_usd) };
+      }),
+      cost_check: array(row.cost_check, (value2) => {
+        const item2 = object(value2);
+        return {
+          start: number(item2.start),
+          computed_usd: optionalNumber2(item2.computed_usd),
+          reported_usd: optionalNumber2(item2.reported_usd),
+          ok: item2.ok == null ? void 0 : boolean(item2.ok)
+        };
+      })
+    };
+  }
+
+  // src/state/catalog-wire.ts
+  var nullable3 = (value, parse) => value === null ? null : parse(value);
+  var strings2 = (value) => array(value, text);
+  function integer(value) {
+    const parsed = number(value);
+    if (!Number.isSafeInteger(parsed)) throw new Error("Invalid catalog integer");
+    return parsed;
+  }
+  function freshness(value) {
+    if (value === "cached" || value === "stale" || value === "incomplete" || value === "unavailable")
+      return value;
+    throw new Error("Invalid catalog freshness");
+  }
+  function readScope(value) {
+    if (value === void 0 || value === "current") return "current";
+    if (value === "retained_history") return value;
+    throw new Error("Invalid catalog read scope");
+  }
+  function nativeSelection(value) {
+    return value === "retired" ? value : freshness(value);
+  }
+  function observations(row) {
+    return {
+      facts_observation: row.facts_observation === void 0 ? void 0 : { state: freshness(object(row.facts_observation).state) },
+      native_selection: row.native_selection === void 0 ? void 0 : row.native_selection === null ? null : { state: nativeSelection(object(row.native_selection).state) }
+    };
+  }
+  function digest(value) {
+    const bytes = array(value, integer);
+    if (bytes.length !== 32 || bytes.some((byte) => byte < 0 || byte > 255))
+      throw new Error("Invalid catalog source digest");
+    return bytes;
+  }
+  function parseCatalogSource(value) {
+    const source = object(value), offset = integer(source.offset);
+    if (offset < 0) throw new Error("Invalid catalog source offset");
+    return {
+      root: text(source.root),
+      path: text(source.path),
+      native_id: text(source.native_id),
+      offset,
+      prefix_sha256: digest(source.prefix_sha256),
+      tail_sha256: digest(source.tail_sha256)
+    };
+  }
+  function sourceReference(value) {
+    const row = object(value);
+    return { source: parseCatalogSource(row.source), state: freshness(row.state) };
+  }
+  function parseCatalogSession(value) {
+    const row = object(value), cost = object(row.cost), state2 = object(row.freshness), tokens2 = array(row.tokens, number);
+    if (tokens2.length !== 3 || tokens2.some((token) => token < 0))
+      throw new Error("Invalid catalog tokens");
+    return {
+      details: row.details == null ? void 0 : parseSessionDetails(row.details),
+      transcript: row.transcript == null ? void 0 : (() => {
+        const projection = object(row.transcript), generation2 = text(projection.generation), total = integer(projection.total);
+        if (!/^[a-f0-9]{64}$/.test(generation2) || total < 0)
+          throw Error("Invalid selected transcript observation");
+        return { generation: generation2, total };
+      })(),
+      key: text(row.key),
+      name: text(row.name),
+      harness: text(row.harness),
+      kind: text(row.kind),
+      presentation_kind: row.presentation_kind == null ? null : text(row.presentation_kind),
+      native_ids: strings2(row.native_ids),
+      parent: nullable3(row.parent, text),
+      parent_source: nullable3(row.parent_source, text),
+      repo: nullable3(row.repo, text),
+      branch: nullable3(row.branch, text),
+      model: text(row.model),
+      effort: nullable3(row.effort, text),
+      start: nullable3(row.start, integer),
+      last: nullable3(row.last, integer),
+      tokens: tokens2,
+      cost: { usd: nullable3(cost.usd, number), unpriced_models: strings2(cost.unpriced_models) },
+      source_refs: array(row.source_refs, sourceReference),
+      freshness: { state: freshness(state2.state) },
+      ...observations(row)
+    };
+  }
+  function searchObservation(value) {
+    if (value === void 0 || value === null) return null;
+    const row = object(value), fields = strings2(row.fields), candidates = integer(row.candidates);
+    if (row.semantics !== "unicode_lowercase_substring" || fields.length !== 6 || new Set(fields).size !== 6 || fields.some(
+      (field) => !["name", "key", "repo", "branch", "model", "harness"].includes(field)
+    ) || row.candidate_budget !== 512 || row.byte_budget !== 2097152 || candidates < 0 || candidates > 512)
+      throw new Error("Unsupported metadata search observation");
+    return {
+      semantics: "unicode_lowercase_substring",
+      fields,
+      partial: boolean(row.partial),
+      candidates,
+      index_complete: boolean(row.index_complete),
+      candidate_budget: 512,
+      byte_budget: 2097152
+    };
+  }
+  function parseCatalogPage(value) {
+    const page = object(value), machine = text(page.machine), info = object(page.machine_info), capabilities = object(page.capabilities), generation2 = text(page.generation), items = array(page.items, parseCatalogSession), next = nullable3(page.next_cursor, text), completeness = page.completeness === void 0 ? "complete" : object(page.completeness).state, collectionFreshness = page.freshness === "updating" ? "updating" : freshness(page.freshness);
+    if (page.api !== 1 || completeness !== "partial" && completeness !== "complete" || collectionFreshness === "updating" && completeness !== "partial" || info.key !== machine || info.freshness !== "cached" || !/^[0-9a-f]{64}$/i.test(generation2) || items.length > 100 || new Set(items.map((item2) => item2.key)).size !== items.length || next !== null && (!next || next.length > 8192))
+      throw new Error("Invalid catalog page");
+    return {
+      api: 1,
+      machine,
+      read_scope: readScope(page.read_scope),
+      machine_info: { key: machine, label: text(info.label), freshness: "cached" },
+      generation: generation2,
+      observed_at: nullable3(page.observed_at, integer),
+      freshness: collectionFreshness,
+      completeness: { state: completeness },
+      capabilities: {
+        pagination: boolean(capabilities.pagination),
+        filters: strings2(capabilities.filters),
+        order: text(capabilities.order),
+        full_text_search: boolean(capabilities.full_text_search),
+        selected_session_lookup: boolean(capabilities.selected_session_lookup),
+        runtime_status: boolean(capabilities.runtime_status),
+        global_union: boolean(capabilities.global_union)
+      },
+      items,
+      next_cursor: next,
+      search: searchObservation(page.search)
+    };
+  }
+  function parseCatalogIdentity(value) {
+    const row = object(value), refs = array(row.source_refs, sourceReference), nativeIds = strings2(row.native_ids), nativeId = nullable3(row.native_id, text), ids = new Set(refs.map((ref) => ref.source.native_id)), generation2 = text(row.generation), state2 = object(row.freshness), sourceKey = text(row.source_key), catalogKey = text(row.catalog_key), harness = text(row.harness), qualification = row.owner_qualification;
+    if (qualification !== void 0 && qualification !== "qualified" && qualification !== "provisional" || qualification === "provisional" && nativeId !== null || !sourceKey || !catalogKey || !harness || !/^[0-9a-f]{64}$/i.test(generation2) || nativeIds.some((id) => !id) || ids.has("") || new Set(nativeIds).size !== nativeIds.length || ids.size !== nativeIds.length || nativeIds.some((id) => !ids.has(id)) || nativeId !== null && (ids.size !== 1 || !ids.has(nativeId)))
+      throw new Error("Invalid catalog identity");
+    return {
+      source_key: sourceKey,
+      read_scope: readScope(row.read_scope),
+      catalog_key: catalogKey,
+      harness,
+      native_id: nativeId,
+      owner_qualification: qualification,
+      native_ids: nativeIds,
+      source_refs: refs,
+      machine_label: nullable3(row.machine_label, text),
+      generation: generation2,
+      observed_at: nullable3(row.observed_at, integer),
+      freshness: { state: freshness(state2.state) },
+      ...observations(row)
+    };
+  }
+
+  // src/state/catalog-selection.ts
+  var CatalogSelectionStore = class {
+    epoch = 0;
+    disposed = false;
+    pending = null;
+    scope = null;
+    identity = null;
+    listeners = /* @__PURE__ */ new Set();
+    begin(scope) {
+      if (this.disposed) throw new Error("Catalog selection is destroyed");
+      if (typeof scope.source_key !== "string" || !scope.source_key || typeof scope.catalog_key !== "string" || !scope.catalog_key)
+        throw new Error("Invalid catalog selection");
+      const request = Object.freeze({
+        source_key: scope.source_key,
+        catalog_key: scope.catalog_key,
+        epoch: ++this.epoch
+      });
+      this.pending = request;
+      if (this.scope?.source_key !== scope.source_key || this.scope?.catalog_key !== scope.catalog_key)
+        this.scope = Object.freeze({ source_key: scope.source_key, catalog_key: scope.catalog_key });
+      this.identity = null;
+      this.changed();
+      return request;
+    }
+    accept(request, value) {
+      if (request !== this.pending || request.epoch !== this.epoch) return false;
+      const identity2 = parseCatalogIdentity(value);
+      if (identity2.read_scope !== "current" || identity2.native_selection?.state === "retired")
+        throw new Error("Historical identity cannot supply current catalog authority");
+      if (identity2.source_key !== request.source_key || identity2.catalog_key !== request.catalog_key)
+        throw new Error("Catalog selection scope mismatch");
+      for (const ref of identity2.source_refs) {
+        Object.freeze(ref.source.prefix_sha256);
+        Object.freeze(ref.source.tail_sha256);
+        Object.freeze(ref.source);
+        Object.freeze(ref);
+      }
+      Object.freeze(identity2.source_refs);
+      Object.freeze(identity2.native_ids);
+      Object.freeze(identity2.freshness);
+      if (identity2.facts_observation) Object.freeze(identity2.facts_observation);
+      if (identity2.native_selection) Object.freeze(identity2.native_selection);
+      this.identity = Object.freeze(identity2);
+      this.changed();
+      return true;
+    }
+    selectedIdentity() {
+      return this.identity;
+    }
+    /** Read intent survives a failed current identity check; it grants no native authority. */
+    selectedScope() {
+      return this.scope;
+    }
+    subscribe(listener) {
+      if (this.disposed) throw new Error("Catalog selection is destroyed");
+      this.listeners.add(listener);
+      return () => this.listeners.delete(listener);
+    }
+    clear() {
+      ++this.epoch;
+      this.pending = null;
+      this.scope = null;
+      this.identity = null;
+      this.changed();
+    }
+    destroy() {
+      this.disposed = true;
+      this.listeners.clear();
+      this.clear();
+    }
+    changed() {
+      for (const listener of [...this.listeners]) listener();
+    }
+  };
+
+  // src/state/catalog-annotations.ts
+  var integer2 = (value) => {
+    const result = number(value);
+    if (!Number.isSafeInteger(result) || result < 0) throw Error("Invalid annotation address");
+    return result;
+  };
+  function parseCatalogAnnotations(value) {
+    const row = object(value);
+    if (row.api !== 1 || row.scope !== "retained_history" || !["errors", "signals"].includes(String(row.kind)))
+      throw Error("Invalid annotation response");
+    const entries = array(row.entries, (value2) => {
+      const entry2 = object(value2);
+      return { slot: integer2(entry2.slot) };
+    });
+    const first = integer2(row.first), total = integer2(row.total), generation2 = text(row.generation);
+    if (entries.length > 100 || first + entries.length > total || !/^[a-f0-9]{64}$/.test(generation2) || entries.some((entry2, index) => index > 0 && entry2.slot <= entries[index - 1].slot))
+      throw Error("Annotation response exceeds its bound");
+    return {
+      source: text(row.source_key),
+      key: text(row.catalog_key),
+      generation: generation2,
+      kind: row.kind,
+      first,
+      total,
+      entries
+    };
+  }
+
+  // src/state/transcript-wire.ts
+  var strings3 = (value) => array(value, text);
+  function background(value) {
+    const v = object(value), state2 = v.state;
+    if (state2 !== "running" && state2 !== "unknown" && state2 !== "failed" && state2 !== "killed" && state2 !== "done")
+      throw new Error("Invalid background state");
+    return {
+      state: state2,
+      secs: optional(
+        v.secs,
+        (value2) => typeof value2 === "number" ? String(number(value2)) : text(value2)
+      ),
+      since: optional(v.since, number),
+      exit: optional(v.exit, number),
+      summary: optional(v.summary, text)
+    };
+  }
+  function image(value) {
+    const v = object(value), base = {
+      o: number(v.o),
+      b: number(v.b),
+      w: optional(v.w, number),
+      h: optional(v.h, number),
+      type: optional(v.type, text),
+      size: optional(v.size, number)
+    };
+    return v.na === true ? { ...base, na: true, v: optional(v.v, text) } : {
+      ...base,
+      na: optional(v.na, (value2) => {
+        if (value2 !== false) throw new Error("Invalid image availability");
+        return false;
+      }),
+      v: text(v.v)
+    };
+  }
+  var diff = (value) => array(value, (value2) => {
+    if (!Array.isArray(value2) || value2.length !== 2) throw new Error("Invalid diff");
+    return [text(value2[0]), text(value2[1])];
+  });
+  function cut(value) {
+    const v = object(value);
+    return {
+      original_tokens: optional(v.original_tokens, number),
+      parts: optional(
+        v.parts,
+        (v2) => array(v2, (v3) => {
+          const p = object(v3);
+          return {
+            text: optional(p.text, text),
+            gap: optional(p.gap, (v4) => {
+              const g = object(v4);
+              return { unit: text(g.unit), n: number(g.n), of: optional(g.of, number) };
+            })
+          };
+        })
+      )
+    };
+  }
+  function parseEntry(value) {
+    const v = object(value), base = {
+      img: optional(v.img, (v2) => array(v2, image)),
+      turn: optional(v.turn, text),
+      slot: optional(v.slot, number),
+      live: optional(v.live, boolean),
+      unfinished: optional(v.unfinished, boolean),
+      tid: optional(v.tid, text),
+      bg: optional(v.bg, background)
+    };
+    switch (v.k) {
+      case "u":
+      case "a":
+        return { ...base, k: v.k, text: text(v.text), img: optional(v.img, (v2) => array(v2, image)) };
+      case "think":
+        return {
+          ...base,
+          k: "think",
+          text: optional(v.text, text),
+          pending: optional(v.pending, boolean),
+          status: optional(v.status, text),
+          secs: optional(v.secs, (v2) => typeof v2 === "string" ? v2 : number(v2))
+        };
+      case "h":
+        return { ...base, k: "h", id: text(v.id) };
+      case "end":
+        return {
+          ...base,
+          k: "end",
+          text: optional(v.text, text),
+          ret: optional(v.ret, (v2) => {
+            const r = object(v2);
+            return {
+              to: text(r.to),
+              failed: optional(r.failed, boolean),
+              at: optional(r.at, number)
+            };
+          })
+        };
+      case "harness":
+        return { ...base, k: "harness", label: text(v.label) };
+      case "signal":
+        return {
+          ...base,
+          k: "signal",
+          signal: (() => {
+            const s = object(v.signal);
+            return {
+              kind: text(s.kind),
+              tag: optional(s.tag, text),
+              tool: optional(s.tool, text),
+              value: optional(s.value, number),
+              previous: optional(s.previous, text)
+            };
+          })()
+        };
+      case "bgend":
+        return {
+          ...base,
+          k: "bgend",
+          call: text(v.call),
+          state: text(v.state),
+          label: optional(v.label, text)
+        };
+      case "tool":
+        return {
+          ...base,
+          k: "tool",
+          name: text(v.name),
+          arg: text(v.arg),
+          title: optional(v.title, text),
+          secs: optional(
+            v.secs,
+            (value2) => typeof value2 === "number" ? String(number(value2)) : text(value2)
+          ),
+          since: optional(v.since, number),
+          exit: optional(v.exit, number),
+          ok: v.ok == null ? v.ok : boolean(v.ok),
+          in: optional(v.in, text),
+          out: optional(v.out, text),
+          cwd: optional(v.cwd, text),
+          diff: optional(v.diff, diff),
+          changes: optional(
+            v.changes,
+            (v2) => array(v2, (v3) => {
+              const c = object(v3);
+              return {
+                path: text(c.path),
+                move: optional(c.move, text),
+                diff: optional(c.diff, diff)
+              };
+            })
+          ),
+          more: optional(v.more, strings3),
+          script: v.script,
+          scriptText: optional(v.scriptText, text),
+          scriptTruncated: optional(v.scriptTruncated, boolean),
+          cut: optional(v.cut, cut),
+          outputTruncated: optional(v.outputTruncated, boolean)
+        };
+      default:
+        throw new Error("Invalid transcript entry");
+    }
+  }
+
   // src/state/catalog-transcript-wire.ts
   function ordinal(value) {
     const v = number(value);
@@ -15679,14 +9692,14 @@ globalThis.__semonUIShared = __semonUIShared;
     return v;
   }
   function entry(value) {
-    const row = object2(value), entryId = text(row.entry_id), slot = ordinal(row.slot), parsed = parseEntry(row);
-    const provenance = row.provenance === null && parsed.k === "end" ? null : object2(row.provenance);
+    const row = object(value), entryId = text(row.entry_id), slot = ordinal(row.slot), parsed = parseEntry(row);
+    const provenance = row.provenance === null && parsed.k === "end" ? null : object(row.provenance);
     if (!provenance && (row.field !== void 0 || row.clipped === true))
       throw new Error("Unprovenanced boundary cannot expose native text");
     if (!entryId) throw new Error("Invalid catalog entry identity");
     let field;
     if (row.field !== void 0) {
-      const reference = object2(row.field);
+      const reference = object(row.field);
       if (reference.name !== "text" && reference.name !== "out")
         throw new Error("Unsupported native text field");
       const layers = reference.layers ?? 1;
@@ -15695,12 +9708,26 @@ globalThis.__semonUIShared = __semonUIShared;
         layers,
         name: reference.name,
         chunks: ordinal(reference.chunks),
-        complete: boolean(reference.complete)
+        complete: boolean(reference.complete),
+        provenance: reference.provenance === void 0 ? void 0 : (() => {
+          const anchor = object(reference.provenance), source = parseCatalogSource(anchor.source);
+          if (!provenance || JSON.stringify(source) !== JSON.stringify(parseCatalogSource(provenance.source)))
+            throw Error("Native field must belong to its selected source");
+          const offset = ordinal(anchor.offset), block = ordinal(anchor.block);
+          if (offset > source.offset || block > 1024)
+            throw Error("Invalid native field anchor");
+          return {
+            source,
+            offset,
+            block,
+            native_event_id: anchor.native_event_id === null ? null : text(anchor.native_event_id)
+          };
+        })()
       };
     }
     let freshness2;
     if (row.freshness !== void 0) {
-      const state2 = object2(row.freshness).state;
+      const state2 = object(row.freshness).state;
       if (state2 !== "cached" && state2 !== "stale" && state2 !== "incomplete" && state2 !== "unavailable")
         throw new Error("Invalid catalog entry freshness");
       freshness2 = { state: state2 };
@@ -15710,6 +9737,7 @@ globalThis.__semonUIShared = __semonUIShared;
     return {
       entry_id: entryId,
       slot,
+      observed_at: row.observed_at == null ? null : number(row.observed_at),
       entry: parsed,
       clipped: row.clipped === void 0 ? void 0 : boolean(row.clipped),
       field,
@@ -15724,12 +9752,26 @@ globalThis.__semonUIShared = __semonUIShared;
     };
   }
   function parseCatalogTranscriptPage(value) {
-    const row = object2(value);
+    const row = object(value);
     if (!Array.isArray(row.entries) || row.entries.length > 100)
       throw new Error("Invalid catalog transcript page size");
-    const identity2 = parseCatalogIdentity(row.identity), session = parseCatalogSession(row.session), projection = object2(row.projection), range = object2(row.range), context = object2(row.relationship_context), generation2 = text(projection.generation), total = ordinal(projection.total), first = ordinal(range.first), end = ordinal(range.end), next = range.next === null ? null : ordinal(range.next), entries = array(row.entries, entry), state2 = object2(row.freshness).state;
-    if (row.api !== 1 || projection.version !== 5 || !/^[0-9a-f]{64}$/i.test(generation2) || session.key !== identity2.catalog_key || session.harness !== identity2.harness || end < first || end > total || end - first > 100 || entries.length !== end - first || next !== (end < total ? end : null) || entries.some((item2, i) => item2.slot !== first + i) || new Set(entries.map((item2) => item2.entry_id)).size !== entries.length || context.state !== "incomplete" || !Array.isArray(context.handoffs) || context.handoffs.length !== 0 || state2 !== "cached" && state2 !== "stale" && state2 !== "incomplete" && state2 !== "unavailable")
+    const identity2 = parseCatalogIdentity(row.identity), session = parseCatalogSession(row.session), projection = object(row.projection), range = object(row.range), context = object(row.relationship_context), generation2 = text(projection.generation), total = ordinal(projection.total), first = ordinal(range.first), end = ordinal(range.end), next = range.next === null ? null : ordinal(range.next), entries = array(row.entries, entry), state2 = object(row.freshness).state;
+    if (row.api !== 1 || projection.version !== 5 || !/^[0-9a-f]{64}$/i.test(generation2) || session.key !== identity2.catalog_key || session.harness !== identity2.harness || end < first || end > total || end - first > 100 || entries.length !== end - first || next !== (end < total ? end : null) || entries.some((item2, i) => item2.slot !== first + i) || new Set(entries.map((item2) => item2.entry_id)).size !== entries.length || context.state !== "incomplete" && context.state !== "complete" || !Array.isArray(context.handoffs) || context.handoffs.length > 200 || state2 !== "cached" && state2 !== "stale" && state2 !== "incomplete" && state2 !== "unavailable")
       throw new Error("Invalid catalog transcript page");
+    const relationships = array(context.handoffs, parseRecordedRelationship);
+    const turns = array(context.turns ?? [], (value2) => {
+      const row2 = object(value2);
+      if (row2.sid !== identity2.catalog_key) throw Error("Invalid ranged turn owner");
+      return parseRecordedTurn(row2);
+    }), turnIds = new Set(entries.flatMap((item2) => item2.entry.turn ? [item2.entry.turn] : [])), starts = new Set(turns.flatMap((turn) => turn.start ? [turn.start] : []));
+    if (turns.length > 100 || new Set(turns.map((turn) => turn.id)).size !== turns.length || turns.some((turn) => !turnIds.has(turn.id)))
+      throw Error("Invalid ranged turn scope");
+    const named = new Set(relationships.map((row2) => row2.edge.id));
+    const actions = new Set(entries.flatMap((item2) => item2.entry.k === "h" ? [item2.entry.id] : []));
+    if (named.size !== relationships.length || relationships.some(
+      (row2) => !actions.has(row2.edge.id) && !starts.has(row2.edge.id) || row2.edge.from !== identity2.catalog_key && row2.edge.to !== identity2.catalog_key
+    ) || context.state === "complete" && [...actions].some((id) => !named.has(id)) || Object.keys(object(context.sessions ?? {})).length > 201 || Object.keys(object(context.previews ?? {})).length > 128)
+      throw Error("Invalid ranged relationship scope");
     return {
       api: 1,
       identity: identity2,
@@ -15739,9 +9781,30 @@ globalThis.__semonUIShared = __semonUIShared;
       entries,
       freshness: { state: state2 },
       relationship_context: {
-        state: "incomplete",
+        state: context.state,
         turn_ids: array(context.turn_ids, text),
-        handoffs: []
+        turns,
+        handoffs: relationships,
+        sessions: dictionary(context.sessions ?? {}, (value2) => {
+          const row2 = object(value2);
+          return {
+            name: text(row2.name),
+            harness: text(row2.harness),
+            model: text(row2.model),
+            kind: row2.kind == null ? void 0 : text(row2.kind),
+            state: row2.state == null ? void 0 : text(row2.state),
+            start: row2.start == null ? void 0 : number(row2.start),
+            last: row2.last == null ? void 0 : number(row2.last),
+            calls: row2.calls == null ? void 0 : ordinal(row2.calls),
+            usd: row2.usd == null ? void 0 : number(row2.usd),
+            live_observation: row2.live_observation == null ? void 0 : row2.live_observation === 0 ? false : row2.live_observation === 1 ? true : boolean(row2.live_observation)
+          };
+        }),
+        previews: dictionary(context.previews ?? {}, (value2) => {
+          const generation3 = text(value2);
+          if (!/^[a-f0-9]{64}$/.test(generation3)) throw Error("Invalid context generation");
+          return generation3;
+        })
       }
     };
   }
@@ -15766,6 +9829,11 @@ globalThis.__semonUIShared = __semonUIShared;
     disposed = false;
     requests = /* @__PURE__ */ new Set();
     pages = [];
+    access = /* @__PURE__ */ new Map();
+    pageKey(page) {
+      return `${page.range.first}:${page.range.end}`;
+    }
+    clock = 0;
     listeners = /* @__PURE__ */ new Set();
     select(scope, readScope2 = "current") {
       if (this.disposed) throw new Error("Catalog transcript is destroyed");
@@ -15777,6 +9845,7 @@ globalThis.__semonUIShared = __semonUIShared;
       this.readScope = readScope2;
       this.requests.clear();
       this.pages = [];
+      this.access.clear();
       this.changed();
     }
     request(after = null, limit = 60) {
@@ -15801,12 +9870,17 @@ globalThis.__semonUIShared = __semonUIShared;
       const first = request.after === null ? Math.max(0, page.projection.total - request.limit) : Math.min(request.after, page.projection.total);
       if (page.identity.source_key !== request.source_key || page.identity.catalog_key !== request.catalog_key || page.identity.read_scope !== request.read_scope || page.range.first !== first || page.range.end !== Math.min(first + request.limit, page.projection.total) || generation2 !== null && page.projection.generation !== generation2)
         throw new Error("Catalog transcript response does not match the requested range");
+      this.access.set(this.pageKey(page), ++this.clock);
       const sameRange = this.pages.find(
         (old) => old.range.first === page.range.first && old.range.end === page.range.end
       );
       if (sameRange && sameRange.projection.total === page.projection.total && JSON.stringify(sameRange.entries) === JSON.stringify(page.entries)) {
         this.requests.delete(request);
         this.pages[this.pages.indexOf(sameRange)] = page;
+        if (JSON.stringify(sameRange.relationship_context) !== JSON.stringify(page.relationship_context) || sameRange.session.details?.live_observation !== page.session.details?.live_observation) {
+          ++this.contentVersion;
+          this.changed();
+        }
         return true;
       }
       const existing = /* @__PURE__ */ new Map(), ids = /* @__PURE__ */ new Map();
@@ -15832,6 +9906,10 @@ globalThis.__semonUIShared = __semonUIShared;
       if (sameRange && JSON.stringify(sameRange.entries) === JSON.stringify(page.entries)) {
         this.requests.delete(request);
         this.pages[this.pages.indexOf(sameRange)] = page;
+        if (JSON.stringify(sameRange.relationship_context) !== JSON.stringify(page.relationship_context)) {
+          ++this.contentVersion;
+          this.changed();
+        }
         return true;
       }
       const observed = new Map(page.entries.map((item2) => [item2.slot, item2]));
@@ -15843,6 +9921,13 @@ globalThis.__semonUIShared = __semonUIShared;
         })),
         page
       ].sort((a, b) => a.range.first - b.range.first);
+      while (this.pages.length > 5 || this.entries().length > 300) {
+        const oldest = this.pages.reduce(
+          (a, b) => (this.access.get(this.pageKey(a)) ?? 0) < (this.access.get(this.pageKey(b)) ?? 0) ? a : b
+        );
+        this.pages = this.pages.filter((value2) => value2 !== oldest);
+        this.access.delete(this.pageKey(oldest));
+      }
       ++this.contentVersion;
       this.changed();
       return true;
@@ -15850,8 +9935,38 @@ globalThis.__semonUIShared = __semonUIShared;
     reject(request) {
       this.requests.delete(request);
     }
+    retainRanges(ranges) {
+      this.pages = this.pages.filter(
+        (page) => ranges.some((range) => page.range.first >= range.first && page.range.end <= range.end)
+      );
+      const keys = new Set(this.pages.map((page) => this.pageKey(page)));
+      for (const key2 of this.access.keys()) if (!keys.has(key2)) this.access.delete(key2);
+      ++this.contentVersion;
+      this.changed();
+    }
     selectedPage() {
       return this.pages.at(-1) ?? null;
+    }
+    context() {
+      const handoffs = /* @__PURE__ */ new Map();
+      const sessions = {};
+      const previews = {};
+      const turns = /* @__PURE__ */ new Map();
+      for (const page of this.pages) {
+        for (const relationship of page.relationship_context.handoffs)
+          handoffs.set(relationship.edge.id, relationship);
+        Object.assign(sessions, page.relationship_context.sessions);
+        Object.assign(previews, page.relationship_context.previews);
+        for (const turn of page.relationship_context.turns) turns.set(turn.id, turn);
+      }
+      return {
+        state: this.pages.some((page) => page.relationship_context.state === "incomplete") ? "incomplete" : "complete",
+        turn_ids: [...new Set(this.pages.flatMap((page) => page.relationship_context.turn_ids))],
+        turns: [...turns.values()],
+        handoffs: [...handoffs.values()],
+        sessions,
+        previews
+      };
     }
     loadedRanges() {
       const ranges = [];
@@ -15878,6 +9993,7 @@ globalThis.__semonUIShared = __semonUIShared;
       ++this.epoch;
       this.requests.clear();
       this.pages = [];
+      this.access.clear();
       this.scope = null;
       this.listeners.clear();
     }
@@ -15888,13 +10004,14 @@ globalThis.__semonUIShared = __semonUIShared;
 
   // src/lib/catalog.tsx
   function renderCatalogList(root, snapshot, host2) {
-    const filtered = !!(snapshot.query || snapshot.harness || snapshot.repo);
+    const filtered = !!(snapshot.query || snapshot.harness || snapshot.repo || snapshot.model);
     function commit(form) {
       const values = new FormData(form);
       host2.filters({
         q: String(values.get("q") ?? "").trim(),
+        model: String(values.get("model") ?? "").trim(),
         harness: String(values.get("harness") ?? "").trim(),
-        repo: String(values.get("repo") ?? "").trim()
+        repo: values.get("no_repo") === "on" ? "__none__" : String(values.get("repo") ?? "").trim()
       });
     }
     render(
@@ -15923,9 +10040,10 @@ globalThis.__semonUIShared = __semonUIShared;
                   {
                     name: "q",
                     "aria-label": "Search session details",
+                    id: "sq",
                     placeholder: "Session details\u2026",
                     value: snapshot.query ?? "",
-                    onChange: (event) => {
+                    onInput: (event) => {
                       if (event.currentTarget.form) commit(event.currentTarget.form);
                     }
                   }
@@ -15952,13 +10070,41 @@ globalThis.__semonUIShared = __semonUIShared;
                   {
                     name: "repo",
                     "aria-label": "Repository",
-                    value: snapshot.repo,
+                    value: snapshot.repo === "__none__" ? "" : snapshot.repo,
                     onChange: (event) => {
                       if (event.currentTarget.form) commit(event.currentTarget.form);
                     }
                   }
                 )
               ] }, "repo"),
+              /* @__PURE__ */ jsxs("label", { class: "search", children: [
+                /* @__PURE__ */ jsx(
+                  "input",
+                  {
+                    name: "no_repo",
+                    type: "checkbox",
+                    checked: snapshot.repo === "__none__",
+                    onChange: (event) => {
+                      if (event.currentTarget.form) commit(event.currentTarget.form);
+                    }
+                  }
+                ),
+                /* @__PURE__ */ jsx("span", { children: "No repository" })
+              ] }, "no_repo"),
+              /* @__PURE__ */ jsxs("label", { class: "search", children: [
+                /* @__PURE__ */ jsx("span", { children: "Model" }),
+                /* @__PURE__ */ jsx(
+                  "input",
+                  {
+                    name: "model",
+                    "aria-label": "Model",
+                    value: snapshot.model ?? "",
+                    onChange: (event) => {
+                      if (event.currentTarget.form) commit(event.currentTarget.form);
+                    }
+                  }
+                )
+              ] }, "model"),
               /* @__PURE__ */ jsx("button", { class: "link catalog-apply", type: "submit", children: "Apply filters" })
             ]
           }
@@ -16012,6 +10158,17 @@ globalThis.__semonUIShared = __semonUIShared;
             }
           )
         ] }),
+        snapshot.hasReviews && /* @__PURE__ */ jsx(
+          "button",
+          {
+            class: "link",
+            type: "button",
+            "data-show-approval-reviews": "",
+            "aria-pressed": snapshot.reviews ?? false,
+            onClick: () => host2.reviews?.(),
+            children: "Show approval reviews"
+          }
+        ),
         /* @__PURE__ */ jsxs("div", { class: "catalog-result-header", children: [
           /* @__PURE__ */ jsxs("span", { children: [
             snapshot.items.length,
@@ -16025,27 +10182,23 @@ globalThis.__semonUIShared = __semonUIShared;
             /* @__PURE__ */ jsx("p", { class: "catalog-note", children: snapshot.metadataSearch ? "Search includes names, IDs, repositories, branches, models and harnesses. Conversation text and history across sources are unavailable." : "Text search and history across sources are unavailable." })
           ] })
         ] }),
-        /* @__PURE__ */ jsx("div", { class: "session-list", "aria-label": "Recorded sessions", children: snapshot.items.map((item2) => /* @__PURE__ */ jsxs(
-          "button",
+        /* @__PURE__ */ jsx("div", { class: "session-list", "aria-label": "Recorded sessions", children: snapshot.items.map((item2) => /* @__PURE__ */ jsx(
+          SessionRowView,
           {
-            class: "nrow",
-            type: "button",
-            "data-session-row": "list",
-            "data-id": item2.key,
-            onClick: () => host2.session(item2),
-            children: [
-              /* @__PURE__ */ jsxs("span", { class: "session-row-main srow-main", children: [
-                /* @__PURE__ */ jsx("span", { class: "nm", children: screenText(item2.name) }),
-                /* @__PURE__ */ jsx("span", { class: "ag", children: item2.freshness.state })
-              ] }),
-              /* @__PURE__ */ jsx("span", { class: "session-row-meta srow-meta for", children: screenText(
-                [item2.repo, item2.branch, item2.harness, item2.model].filter(Boolean).join(" \xB7 ")
-              ) })
-            ]
+            row: item2.presentation ?? {
+              id: item2.key,
+              name: item2.name,
+              state: "off",
+              stateLabel: "Recorded history",
+              age: item2.freshness.state,
+              model: item2.model,
+              modelTip: item2.model,
+              fields: []
+            },
+            host: { session: () => host2.session(item2) }
           },
           item2.key
         )) }),
-        /* @__PURE__ */ jsx("p", { class: "catalog-note", children: /* @__PURE__ */ jsx("a", { class: "link", href: snapshot.compatibilityHref, children: "Open compatibility view (loads workspace history)" }) }),
         !snapshot.updating && !snapshot.items.length && !snapshot.note && !snapshot.discovering && !snapshot.searchIndexIncomplete && !snapshot.searchPartial && !snapshot.candidates?.length && !snapshot.candidateUpdating && /* @__PURE__ */ jsx("p", { class: "catalog-note", children: filtered ? "No recorded sessions match these filters." : /* @__PURE__ */ jsxs(Fragment2, { children: [
           "No recorded sessions in this source yet.",
           " ",
@@ -16055,6 +10208,444 @@ globalThis.__semonUIShared = __semonUIShared;
       ] }),
       root
     );
+    fitSessionRows(root);
+  }
+
+  // src/domain/resume.ts
+  function resumeCommand(session) {
+    const id = session.sessionId ?? session.id;
+    if (!id.trim() || id.startsWith("-") || /[\0\r\n]/.test(id)) return null;
+    const argument = /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(id) ? id : "'" + id.replaceAll("'", `'"'"'`) + "'";
+    switch (session.harness) {
+      case "claude":
+        return "claude --resume " + argument;
+      case "codex":
+        return "codex resume " + argument;
+      case "copilot":
+        return "copilot --resume=" + argument;
+      default:
+        return null;
+    }
+  }
+
+  // src/app/sessionPresentation.ts
+  var money2 = (value) => value == null ? "\u2014" : "$" + value.toFixed(2);
+  var trademark = "Third-party trademarks are the property of their respective owners. Semon is not affiliated with or endorsed by these companies.";
+  function selectedSessionState(session) {
+    const details = session.details;
+    if (!details) return "off";
+    return (details.state === "work" || details.state === "wait") && !details.live_observation ? "off" : details.state;
+  }
+  function familyCost(session) {
+    const own = session.details?.cost ?? session.cost, family = session.details?.family;
+    if (!family?.runs.length) return own;
+    const costs = [own, ...family.runs.map((run) => run.cost)], models = {};
+    for (const cost of costs)
+      for (const [id, model2] of Object.entries(cost.by_model ?? {})) {
+        const total = models[id] ??= { usd: 0, tokens: {}, usd_by_kind: {} };
+        total.usd = total.usd == null || model2.usd == null ? null : total.usd + model2.usd;
+        for (const field of ["tokens", "usd_by_kind"])
+          for (const [kind, value] of Object.entries(model2[field] ?? {})) {
+            const key2 = kind;
+            total[field][key2] = (total[field][key2] ?? 0) + value;
+          }
+      }
+    return {
+      usd: family.state === "complete" && costs.every((cost) => cost.usd != null) ? costs.reduce((sum, cost) => sum + cost.usd, 0) : null,
+      unpriced_models: [...new Set(costs.flatMap((cost) => cost.unpriced_models ?? []))],
+      by_model: models
+    };
+  }
+  function mark(harness) {
+    const h2 = HARNESSES[harness];
+    return h2 ? {
+      id: harness,
+      name: h2.name,
+      light: h2.icon.light,
+      dark: h2.icon.dark,
+      darkTheme: matchMedia("(prefers-color-scheme: dark)").matches
+    } : void 0;
+  }
+  function catalogSessionRow(session) {
+    return {
+      id: session.key,
+      name: session.name,
+      state: "off",
+      stateLabel: "Recorded history",
+      age: session.last == null ? "" : ago(session.last, Date.now()),
+      harness: mark(session.harness),
+      model: shortModel(session.model),
+      modelTip: session.model,
+      fields: [
+        ...session.repo ? [
+          {
+            className: "repo-short",
+            text: session.repo.split("/").at(-1),
+            tip: session.repo,
+            priority: 1,
+            icon: I.repo
+          }
+        ] : [],
+        ...session.branch ? [
+          {
+            className: "branch",
+            text: session.branch,
+            tip: session.branch,
+            priority: 2,
+            icon: I.branch
+          }
+        ] : []
+      ]
+    };
+  }
+  function selectedSessionLabels(session, machine) {
+    const details = session.details, state2 = selectedSessionState(session), kind = session.presentation_kind ?? {
+      subagent: "Subagent",
+      "codex-run": "Codex run",
+      "copilot-session": "Copilot session"
+    }[session.kind], cost = familyCost(session);
+    const rows = [
+      {
+        key: "state",
+        text: STATE[state2] ?? "Recorded history",
+        tip: "Recorded status \xB7 " + (details?.turns ?? 0) + " turns",
+        drop: 0,
+        className: "state",
+        state: state2,
+        stateLabel: STATE[state2] ?? "Recorded history"
+      },
+      {
+        key: "harness",
+        className: "hname",
+        text: kind ?? HARNESS[session.harness] ?? session.harness,
+        tip: HARNESS[session.harness] ?? session.harness,
+        drop: 2
+      },
+      {
+        key: "model",
+        className: "meta-model",
+        text: shortModel(session.model),
+        tip: "Model: " + session.model,
+        drop: 3,
+        effort: session.effort ?? void 0
+      }
+    ];
+    if (details?.errors)
+      rows.push({
+        key: "errors",
+        text: details.errors + " failed",
+        tip: "Recorded failed steps",
+        drop: 0,
+        className: "errs lab-errs",
+        action: "errors"
+      });
+    if (details?.family?.runs.length)
+      rows.push({
+        key: "runs",
+        text: details.family.runs.length + (details.family.runs.length === 1 ? " run" : " runs") + (details.family.state === "incomplete" ? "+" : ""),
+        tip: "Recorded child sessions",
+        drop: 1,
+        action: "runs"
+      });
+    if (machine) rows.push({ key: "machine", text: machine, tip: "Machine: " + machine, drop: 5 });
+    if (session.branch)
+      rows.push({ key: "branch", text: session.branch, tip: "Branch: " + session.branch, drop: 6 });
+    rows.push({
+      key: "cost",
+      text: money2(cost.usd),
+      tip: "API-equivalent cost" + (details?.family?.runs.length ? " \xB7 this session and its runs" : " \xB7 this session"),
+      drop: 7
+    });
+    return rows;
+  }
+  function selectedSessionMenu(session, machine, wide, trace) {
+    const metadata = session.details, ownCost = metadata?.cost ?? session.cost, cost = familyCost(session), state2 = selectedSessionState(session), now = Date.now(), native = session.native_ids.length === 1 ? session.native_ids[0] : void 0, command = native ? resumeCommand({ harness: session.harness, id: session.key, sessionId: native }) : null, actions = [];
+    if (trace)
+      actions.push({ key: "trace", text: "Trace this turn", icon: I.trace, className: "menu-trace" });
+    if (command) actions.push({ key: "copy", text: "Copy resume command", icon: I.copy });
+    if (metadata?.errors)
+      actions.push({
+        key: "errors",
+        text: metadata.errors + " failed",
+        dot: "err",
+        note: "Step through",
+        className: "menu-errors"
+      });
+    if (metadata && Object.values(metadata.signals).some((count2) => count2 > 0))
+      actions.push({
+        key: "signals",
+        text: "Session signals",
+        icon: I.stack,
+        className: "menu-signals"
+      });
+    actions.push({ key: "source", text: "Choose a machine", icon: I.machine });
+    if (!matchMedia("(max-width: 760px)").matches)
+      actions.push({ key: "wide", text: "Wide transcript", icon: I.wide, checked: wide });
+    else if (metadata?.family?.runs.length)
+      actions.push({
+        key: "runs",
+        text: "Runs \xB7 " + metadata.family.runs.length,
+        icon: I.stack,
+        className: "menu-runs"
+      });
+    const details = [
+      {
+        label: "Status",
+        value: metadata ? (STATE[state2] ?? "Recorded history") + " \xB7 " + metadata.turns + (metadata.turns === 1 ? " turn" : " turns") : "Recorded history"
+      },
+      ...session.presentation_kind ? [{ label: "Kind", value: session.presentation_kind }] : [],
+      {
+        label: "Harness",
+        value: HARNESS[session.harness] ?? session.harness,
+        harness: mark(session.harness)
+      },
+      { label: "Model", value: session.model, mono: true },
+      { label: "Machine", value: machine }
+    ];
+    for (const [label, value] of [
+      ["Effort", session.effort],
+      ["Directory", metadata?.cwd ?? session.repo],
+      ["Branch", session.branch]
+    ])
+      if (value)
+        details.push({
+          label,
+          value,
+          mono: ["Directory", "Branch", "Session id"].includes(label)
+        });
+    if (metadata?.calls != null) details.push({ label: "Tool calls", value: String(metadata.calls) });
+    if (metadata?.errors) details.push({ label: "Errors", value: String(metadata.errors) });
+    if (metadata && Object.values(metadata.signals).some((count2) => count2 > 0))
+      details.push({
+        label: "Signals",
+        value: Object.entries(metadata.signals).map(([kind, count2]) => kind + count2).join(" \xB7 ")
+      });
+    if (session.start != null)
+      details.push(
+        { label: "Started", value: clock(session.start, now) },
+        { label: "Duration", value: dur(session.start, session.last, now) }
+      );
+    if (native) details.push({ label: "Session id", value: native, mono: true });
+    const kinds2 = [
+      ["Input", ["input"]],
+      ["Output", ["output"]],
+      ["Cache write", ["cache_write_5m", "cache_write_1h", "cache_write"]],
+      ["Cache read", ["cache_read"]],
+      ["Web search", ["web_search"]]
+    ], models = Object.entries(cost.by_model ?? {}).map(([id, model2]) => ({
+      id,
+      rows: kinds2.flatMap(([label, keys]) => {
+        const tokens2 = keys.reduce((sum, key2) => sum + (model2.tokens?.[key2] ?? 0), 0), usd = keys.reduce((sum, key2) => sum + (model2.usd_by_kind?.[key2] ?? 0), 0);
+        return tokens2 || usd ? [
+          {
+            label,
+            count: tokens2 ? compactCount(tokens2) : "",
+            exact: tokens2 ? tokens2.toLocaleString() : void 0,
+            cost: model2.usd == null ? "\u2014" : money2(usd)
+          }
+        ] : [];
+      })
+    }));
+    const reports = metadata?.reported_runs ?? [], reported = reports.filter((row) => row.cost_usd != null), costDetails = [];
+    if (metadata?.family?.runs.length)
+      costDetails.push({ label: "This session", value: money2(ownCost.usd) });
+    if (reports.length)
+      costDetails.push({
+        label: (HARNESS[session.harness] ?? session.harness) + "'s own figure",
+        value: reported.length ? money2(reported.reduce((sum, row) => sum + row.cost_usd, 0)) + ", last " + reported.length + (reported.length === 1 ? " run" : " runs") : "not reported"
+      });
+    return {
+      actions,
+      path: metadata?.family?.ancestors.length ? [
+        ...metadata.family.ancestors.map((row) => ({
+          id: row.key,
+          name: row.name,
+          harness: row.harness,
+          harnessName: HARNESS[row.harness] ?? row.harness
+        })),
+        {
+          id: session.key,
+          name: session.name,
+          harness: session.harness,
+          harnessName: HARNESS[session.harness] ?? session.harness
+        }
+      ] : [],
+      status: [
+        STATE[state2] ?? "Recorded history",
+        session.presentation_kind ?? HARNESS[session.harness] ?? session.harness,
+        shortModel(session.model)
+      ].join(" \xB7 "),
+      state: state2,
+      stateLabel: STATE[state2] ?? "Recorded history",
+      details,
+      command: command ?? "",
+      notice: trademark,
+      icons: { chevron: I.chev, copy: I.copy },
+      cost: {
+        figure: money2(cost.usd),
+        caption: "this session" + (metadata?.family?.runs.length ? " and its " + metadata.family.runs.length + (metadata.family.runs.length === 1 ? " run" : " runs") : ""),
+        note: "What these tokens would cost at API rates. Subscriptions aren't billed this way." + (metadata?.copied_usage ? " Copied usage is excluded. Its original owner and the fresh usage total are unknown." : "") + (metadata?.family?.state === "incomplete" ? " The recorded family is incomplete; its total cost is unknown." : "") + (metadata?.copilot ? " Copilot usage is a cumulative saved snapshot. Fresh usage and complete cost are unknown." : "") + (cost.unpriced_models?.length ? " No price for " + cost.unpriced_models.join(", ") + "." : ""),
+        details: costDetails,
+        mismatch: (() => {
+          const check = metadata?.cost_check.slice().reverse().find(
+            (row) => row.ok === false && row.reported_usd != null && row.reported_usd > 0 && row.computed_usd != null
+          );
+          if (!check) return void 0;
+          const difference = (check.computed_usd / check.reported_usd - 1) * 100;
+          return "Semon's estimate for that run is " + Math.round(Math.abs(difference)) + "% " + (difference > 0 ? "above" : "below") + " " + (HARNESS[session.harness] ?? session.harness) + "'s figure.";
+        })(),
+        runs: (metadata?.family?.runs ?? []).map((run) => ({
+          id: run.key,
+          depth: run.parent === session.key ? 0 : 1,
+          label: "Open " + run.name,
+          name: run.name,
+          kind: run.kind,
+          state: "off",
+          stateLabel: "Recorded history",
+          cost: money2(run.cost.usd)
+        })),
+        models,
+        includesRuns: !!metadata?.family?.runs.length
+      }
+    };
+  }
+
+  // src/navigation/routes.ts
+  var NavigationController = class {
+    constructor(observe) {
+      this.observe = observe;
+    }
+    observe;
+    currentRoute = { v: "home" };
+    routeListeners = /* @__PURE__ */ new Set();
+    disposed = false;
+    get route() {
+      return this.currentRoute;
+    }
+    set route(value) {
+      if (this.disposed) return;
+      this.currentRoute = value;
+      this.observe?.(value);
+      for (const listener of this.routeListeners) listener();
+    }
+    subscribeRoute(listener) {
+      if (!this.disposed) this.routeListeners.add(listener);
+      return () => this.routeListeners.delete(listener);
+    }
+    destroy() {
+      this.disposed = true;
+      this.routeListeners.clear();
+    }
+  };
+
+  // src/app/controlObservation.ts
+  function createControlObservation(host2) {
+    if (!host2.viewerHost?.catalogControlStream) return { destroy() {
+    } };
+    let stream = null;
+    let identity2 = "";
+    let timer;
+    let deadline;
+    let delay = 1e3;
+    let disposed = false;
+    function selected() {
+      const route2 = host2.navigation.route;
+      if (host2.catalogSelection) {
+        const selected2 = host2.catalogSelection.selectedIdentity();
+        const accepted = route2.v === "session" && selected2?.catalog_key === route2.id && selected2.owner_qualification !== "provisional" && selected2.read_scope !== "retained_history" ? selected2 : null;
+        return {
+          path: accepted?.native_id ? host2.viewerHost?.catalogControlStream : void 0,
+          params: accepted ? {
+            source_key: accepted.source_key,
+            catalog_key: accepted.catalog_key,
+            native_id: accepted.native_id ?? "",
+            harness: accepted.harness
+          } : {},
+          thread: accepted?.native_id ?? ""
+        };
+      }
+      return { path: void 0, params: {}, thread: "" };
+    }
+    function cancel() {
+      stream?.close();
+      stream = null;
+      host2.scope.clearTimeout(timer);
+      host2.scope.clearTimeout(deadline);
+    }
+    function connect() {
+      if (disposed) return;
+      cancel();
+      const scope = selected();
+      identity2 = JSON.stringify(scope);
+      const path = scope.path;
+      if (!path || typeof EventSource === "undefined") return;
+      if (!path.startsWith("/") || path.startsWith("//") || /[\\\s]/.test(path))
+        throw new Error("Invalid control stream");
+      const current = new EventSource(
+        path + (path.includes("?") ? "&" : "?") + new URLSearchParams(scope.params)
+      );
+      stream = current;
+      let revision = "";
+      const valid = () => !disposed && stream === current && identity2 === JSON.stringify(selected());
+      const recover = () => {
+        if (!valid()) return;
+        cancel();
+        host2.controlOwner.unavailable();
+        timer = host2.scope.timeout(connect, delay);
+        delay = Math.min(15e3, delay * 2);
+      };
+      const heartbeat = () => {
+        if (!valid()) return;
+        host2.scope.clearTimeout(deadline);
+        deadline = host2.scope.timeout(recover, 3e4);
+      };
+      heartbeat();
+      current.addEventListener("heartbeat", heartbeat);
+      current.addEventListener("error", recover);
+      current.addEventListener("unavailable", recover);
+      current.addEventListener("ended", () => {
+        if (!valid()) return;
+        cancel();
+        host2.controlOwner.observe(null);
+      });
+      current.addEventListener("control", (event) => {
+        if (!valid() || !(event instanceof MessageEvent)) return;
+        try {
+          if (String(event.data).length > 3e5) throw new Error("Control snapshot too large");
+          const value = JSON.parse(String(event.data));
+          if (!value || typeof value !== "object" || !("revision" in value) || typeof value.revision !== "string" || value.revision.length < 1 || value.revision.length > 128 || !Object.entries(scope.params).every(
+            ([key2, expected]) => key2 in value && value[key2] === expected
+          ) || !("control" in value))
+            throw new Error("Control identity changed");
+          const control = host2.controlOwner.prepare(value.control);
+          if (control && control.thread !== scope.thread) throw new Error("Control thread changed");
+          heartbeat();
+          delay = 1e3;
+          if (revision === value.revision) return;
+          revision = value.revision;
+          if (control || !scope.thread) host2.controlOwner.observe(control);
+          else host2.controlOwner.unavailable();
+        } catch {
+          recover();
+        }
+      });
+    }
+    function changed() {
+      if (JSON.stringify(selected()) === identity2) return;
+      host2.controlOwner.observe(null);
+      connect();
+    }
+    const route = host2.navigation.subscribeRoute(changed);
+    const catalog = host2.catalogSelection?.subscribe(changed);
+    connect();
+    return {
+      destroy() {
+        disposed = true;
+        route();
+        catalog?.();
+        cancel();
+      }
+    };
   }
 
   // src/lib/runtimeObservation.ts
@@ -16245,16 +10836,490 @@ globalThis.__semonUIShared = __semonUIShared;
     };
   }
 
+  // src/app/localControl.ts
+  function record3(value) {
+    return !!value && typeof value === "object" && !Array.isArray(value);
+  }
+  function createLocalControl(scope, refresh) {
+    const drafts = /* @__PURE__ */ new Map();
+    let current = null;
+    let busy2 = false;
+    let note = "";
+    let uncertain = false;
+    let revision = 0;
+    let selection = 0;
+    async function write(op, extra = {}) {
+      if (!current || busy2 || uncertain && op !== "reconnect") return false;
+      if (op === "send" && (!current.connected || !(current.activeTurn ? current.capabilities.steer : current.capabilities.input)))
+        return false;
+      if (op === "reconnect" && current.runtime?.reconnectable === false) return false;
+      if (op !== "reconnect" && !current.connected) return false;
+      if (op === "interrupt" && !current.capabilities.interrupt) return false;
+      if (op === "answer") {
+        const request = current.requests.find(
+          (request2) => request2.id === extra.request && request2.hash === extra.hash
+        );
+        if (!request || request.state.state !== "open") return false;
+        const supported = request.kind === "question" ? current.capabilities.questions : request.payload.method === "item/fileChange/requestApproval" ? current.capabilities.fileApproval : current.capabilities.commandApproval;
+        if (!supported) return false;
+      }
+      if (op === "send" && (!current.connected || !(current.activeTurn ? current.capabilities.steer : current.capabilities.input)))
+        return false;
+      const target = current;
+      const at = ++revision;
+      busy2 = true;
+      note = "Sending\u2026";
+      refresh();
+      const controller = scope.request();
+      try {
+        const command = {
+          id: crypto.randomUUID().replaceAll("-", ""),
+          op,
+          thread: target.thread,
+          generation: target.generation,
+          activeTurn: target.activeTurn,
+          expires: Date.now() + 25e3,
+          ...extra
+        };
+        const response = await fetch("/api/control", {
+          method: "POST",
+          credentials: "same-origin",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(command),
+          signal: controller.signal
+        });
+        const receipt = await response.json();
+        if (at !== revision) return false;
+        if (op === "reconnect" && response.ok) uncertain = false;
+        if (!response.ok || record3(receipt) && receipt.error) {
+          note = record3(receipt) && typeof receipt.error === "string" ? receipt.error : "Control refused. Inspect the session before sending again.";
+          uncertain = uncertain || note.includes("unknown");
+          return false;
+        } else {
+          if (op === "send") {
+            const snapshot = record3(receipt) && record3(receipt.snapshot) ? receipt.snapshot : null;
+            const action = snapshot && record3(snapshot.actions) ? snapshot.actions[command.id] : null;
+            if (!record3(action) || action.delivery !== "accepted") {
+              uncertain = true;
+              note = "Delivery unconfirmed. Inspect the session before sending again.";
+              return false;
+            }
+          }
+          note = op === "send" ? "" : op === "answer" ? "Response sent. Codex resolution means answered or cleared; the winning client is unknown." : "Native request accepted. Inspect the session for its outcome.";
+          return true;
+        }
+      } catch {
+        if (at === revision) {
+          uncertain = true;
+          note = "Delivery unknown. Inspect Codex and reconnect; this request will not be resent.";
+        }
+        return false;
+      } finally {
+        scope.releaseRequest(controller);
+        if (at === revision) {
+          busy2 = false;
+          refresh();
+        }
+      }
+    }
+    function view(sid, draftKey = sid ?? current?.thread ?? "") {
+      if (!current || sid && sid !== current.thread) return void 0;
+      const target = current;
+      const selected = selection;
+      const send = (op, extra = {}) => selection === selected && current?.thread === target.thread && current.generation === target.generation ? write(op, extra) : Promise.resolve(false);
+      return {
+        get draft() {
+          return drafts.get(draftKey) ?? "";
+        },
+        setDraft(text2) {
+          drafts.set(draftKey, text2);
+        },
+        snapshot: current,
+        busy: busy2,
+        uncertain,
+        note,
+        send: (text2) => send("send", { text: text2 }),
+        interrupt: () => void send("interrupt"),
+        answer: (request, answer) => void send("answer", { request: request.id, hash: request.hash, answer }),
+        reconnect: () => void send("reconnect")
+      };
+    }
+    function apply(value) {
+      if (current?.thread !== value?.thread) {
+        ++selection;
+        ++revision;
+        busy2 = false;
+        uncertain = false;
+        note = "";
+      }
+      if (value?.runtime?.state === "ended" && current?.runtime?.state !== "ended") {
+        ++revision;
+        busy2 = false;
+        note = "";
+      }
+      current = value;
+    }
+    return {
+      readOnly(sid, draftKey = sid) {
+        return {
+          ...unavailableControl(sid),
+          get draft() {
+            return drafts.get(draftKey) ?? "";
+          },
+          setDraft(text2) {
+            drafts.set(draftKey, text2);
+          }
+        };
+      },
+      prepare: parseControl,
+      adopt: apply,
+      unavailable() {
+        if (!current) return;
+        current = {
+          ...current,
+          connected: false,
+          capabilities: {
+            ...current.capabilities,
+            input: false,
+            steer: false,
+            interrupt: false,
+            commandApproval: false,
+            fileApproval: false,
+            questions: false
+          },
+          runtime: current.runtime ? { ...current.runtime, freshness: "stale" } : void 0,
+          reason: current.runtime?.state === "ended" || current.runtime?.state === "failed" ? current.reason : "Current connection status is unavailable. Reconnecting\u2026"
+        };
+        refresh();
+      },
+      observe(value) {
+        apply(value);
+        refresh();
+      },
+      view,
+      destroy() {
+        ++selection;
+        ++revision;
+        current = null;
+      }
+    };
+  }
+
+  // src/app/effects.ts
+  var EffectScope = class {
+    cleanups = /* @__PURE__ */ new Set();
+    requests = /* @__PURE__ */ new Map();
+    timers = /* @__PURE__ */ new Map();
+    frames = /* @__PURE__ */ new Map();
+    disposed = false;
+    own(cleanup) {
+      if (this.disposed) cleanup();
+      else this.cleanups.add(cleanup);
+      return cleanup;
+    }
+    listen(target, type, listener, options2) {
+      if (this.disposed) return;
+      const guarded = (event) => {
+        if (!this.disposed) listener(event);
+      };
+      target.addEventListener(type, guarded, options2);
+      this.own(() => target.removeEventListener(type, guarded, options2));
+    }
+    retire(collection, id) {
+      const cleanup = collection.get(id);
+      if (cleanup) this.cleanups.delete(cleanup);
+      collection.delete(id);
+    }
+    timeout(callback, delay = 0) {
+      if (this.disposed) return 0;
+      const id = window.setTimeout(() => {
+        this.retire(this.timers, id);
+        if (!this.disposed) callback();
+      }, delay);
+      this.timers.set(
+        id,
+        this.own(() => {
+          this.retire(this.timers, id);
+          window.clearTimeout(id);
+        })
+      );
+      return id;
+    }
+    clearTimeout(id) {
+      if (id !== void 0) this.timers.get(id)?.();
+    }
+    interval(callback, delay) {
+      if (this.disposed) return 0;
+      const id = window.setInterval(() => {
+        if (!this.disposed) callback();
+      }, delay);
+      this.timers.set(
+        id,
+        this.own(() => {
+          this.retire(this.timers, id);
+          window.clearInterval(id);
+        })
+      );
+      return id;
+    }
+    clearInterval(id) {
+      if (id !== void 0) this.timers.get(id)?.();
+    }
+    frame(callback) {
+      if (this.disposed) return 0;
+      const id = requestAnimationFrame((time) => {
+        this.retire(this.frames, id);
+        if (!this.disposed) callback(time);
+      });
+      this.frames.set(
+        id,
+        this.own(() => {
+          this.retire(this.frames, id);
+          cancelAnimationFrame(id);
+        })
+      );
+      return id;
+    }
+    cancelFrame(id) {
+      if (id !== void 0) this.frames.get(id)?.();
+    }
+    request() {
+      const controller = new AbortController();
+      if (this.disposed) {
+        controller.abort();
+        return controller;
+      }
+      const aborted = () => this.releaseRequest(controller), cleanup = this.own(() => controller.abort());
+      const release = () => {
+        controller.signal.removeEventListener("abort", aborted);
+        this.cleanups.delete(cleanup);
+        this.requests.delete(controller);
+      };
+      this.requests.set(controller, release);
+      controller.signal.addEventListener("abort", aborted, { once: true });
+      return controller;
+    }
+    releaseRequest(controller) {
+      this.requests.get(controller)?.();
+    }
+    destroy() {
+      if (this.disposed) return;
+      this.disposed = true;
+      for (const cleanup of this.cleanups) cleanup();
+      this.cleanups.clear();
+      this.requests.clear();
+    }
+  };
+
+  // src/domain/toolNames.ts
+  var RUN = ["run", "Ran", "ran", "command", "commands"];
+  var FIND = ["find", "Searched for", "searched", "time", "times"];
+  var TOOLS = {
+    Bash: RUN,
+    shell: RUN,
+    exec_command: RUN,
+    local_shell: RUN,
+    write_stdin: ["run", "Sent input to", "sent input to", "time", "times"],
+    Grep: FIND,
+    Glob: FIND,
+    Read: ["read", "Read", "read", "file", "files"],
+    Edit: ["edit", "Edited", "edited", "file", "files"],
+    MultiEdit: ["edit", "Edited", "edited", "file", "files"],
+    Write: ["edit", "Wrote", "wrote", "file", "files"],
+    apply_patch: ["edit", "Patched", "patched", "file", "files"],
+    NotebookEdit: ["edit", "Edited", "edited", "notebook", "notebooks"],
+    AskUserQuestion: ["q", "Asked you", "asked you", "question", "questions"],
+    ToolSearch: ["find", "Loaded", "loaded", "tool", "tools"],
+    SendMessage: ["out", "Sent", "sent", "message", "messages"],
+    SendUserFile: ["out", "Sent you", "sent you", "file", "files"],
+    Agent: ["out", "Started", "started", "agent", "agents"],
+    Task: ["out", "Started", "started", "agent", "agents"],
+    Monitor: ["now", "Watched", "watched", "process", "processes"],
+    ScheduleWakeup: ["now", "Scheduled", "scheduled", "wake-up", "wake-ups"],
+    TaskStop: ["x", "Stopped", "stopped", "task", "tasks"],
+    Artifact: ["ext", "Published", "published", "page", "pages"],
+    WebFetch: ["ext", "Fetched", "fetched", "page", "pages"],
+    WebSearch: ["search", "Searched the web for", "searched the web", "time", "times"],
+    Skill: ["stack", "Used skill", "used", "skill", "skills"]
+  };
+  var providers = {
+    github: "GitHub",
+    figma: "Figma",
+    google_drive: "Google Drive",
+    notion: "Notion",
+    slack: "Slack",
+    gmail: "Gmail",
+    railway: "Railway",
+    linear: "Linear",
+    calendar: "Calendar",
+    search_service: "Search"
+  };
+  function toolInfo(name) {
+    if (TOOLS[name]) return TOOLS[name];
+    let provider, action;
+    const dotted = /^codex_apps\.([^.]+)\.(.+)$/.exec(name);
+    const double = /^mcp__(.+?)__(.+)$/.exec(name);
+    if (dotted) [, provider, action] = dotted;
+    else if (double?.[1] === "codex_apps") {
+      const key2 = Object.keys(providers).sort((a, b) => b.length - a.length).find((key3) => double[2].startsWith(key3 + "_"));
+      if (key2) {
+        provider = key2;
+        action = double[2].slice(key2.length + 1);
+      }
+    } else if (double) {
+      [, provider, action] = double;
+    }
+    const known = provider && providers[provider.toLowerCase().replace(/^claude_ai_/, "")];
+    if (known && action) {
+      const label = known + " \xB7 " + action.replace(/[_.]+/g, " ").trim();
+      return ["ext", label, label, "time", "times"];
+    }
+    return dotted || double ? ["ext", name, name, "time", "times"] : ["run", name, name, "step", "steps"];
+  }
+
+  // src/domain/thinking.ts
+  function coalesceRecordedThoughts(entries, harness, knownTurns) {
+    if (harness !== "codex") return entries;
+    const out = [];
+    let chain = null;
+    let owner = null, sawOwner = false, unresolved = false;
+    for (const item2 of entries) {
+      const entry2 = item2.entry;
+      if (entry2.turn !== void 0) {
+        owner = knownTurns.has(entry2.turn) ? entry2.turn : null;
+        unresolved = owner === null;
+        if (owner) sawOwner = true;
+      }
+      if (entry2.k !== "think" || entry2.pending || !entry2.text || unresolved || !owner && sawOwner) {
+        out.push(item2);
+        chain = null;
+        continue;
+      }
+      if (chain && chain.owner === owner && (entry2.text === chain.text || entry2.text.startsWith(chain.text + "\n") || entry2.text.startsWith(chain.text + "\r\n"))) {
+        const prior = out[chain.index];
+        if (prior.entry.k !== "think") throw Error("Invalid recorded thought chain");
+        out[chain.index] = {
+          ...prior,
+          entry: { ...prior.entry, text: entry2.text, secs: entry2.secs }
+        };
+        chain.text = entry2.text;
+      } else {
+        out.push(item2);
+        chain = { index: out.length - 1, owner, text: entry2.text };
+      }
+    }
+    return out;
+  }
+  function recordedThoughtLabel(seconds) {
+    const match = /^(\d+(?:\.\d+)?)s?$/.exec(String(seconds ?? ""));
+    const n = match ? Math.round(Number(match[1])) : 0;
+    return n < 1 ? "Thinking" : "Thinking \xB7 " + (n >= 60 ? Math.floor(n / 60) + "m " + n % 60 + "s" : n + "s");
+  }
+
   // src/app/catalogTranscriptView.ts
-  function catalogTranscriptBlocks(entries, fieldView) {
-    return entries.map((item2) => {
+  function recordedSignalLabel(entry2) {
+    const s = entry2.signal, tag = s.tag ?? "";
+    if (s.kind === "compact")
+      return "Context compacted" + (s.value == null ? "" : " \xB7 " + compactCount(s.value) + " tokens before");
+    if (s.kind === "interrupt") return "Interrupted by you";
+    if (s.kind === "denial") return (s.tool ?? "Tool call") + " denied";
+    if (s.kind === "hook")
+      return "Hook " + (tag.includes("block") ? "blocked" : tag || "ran") + (s.tool ? " " + s.tool : "");
+    const name = {
+      model: "Model",
+      effort: "Effort",
+      approval: "Approval policy",
+      sandbox: "Sandbox",
+      permission: "Permission mode"
+    }[s.kind] ?? "Signal";
+    return name + (s.previous ? " " + s.previous + " \u2192 " : " \u2192 ") + tag;
+  }
+  function recordedBackgroundStatus(bg) {
+    if (bg.state === "running") return "running " + (bg.secs ?? "");
+    if (bg.state === "unknown") return "no end recorded";
+    const outcome = bg.state === "failed" ? "failed" : bg.state === "killed" ? "stopped" : bg.exit != null ? "exit " + bg.exit : "done";
+    return outcome + (bg.secs ? " \xB7 " + bg.secs : "");
+  }
+  function gatherTools(entries) {
+    const output = [];
+    let run = [];
+    const flush = () => {
+      if (!run.length) return;
+      const ends = run.filter((row) => row.kind === "background");
+      const counts = /* @__PURE__ */ new Map();
+      for (const row of run) {
+        if (row.kind !== "tool" || ends.some((end) => end.call === row.step.tid)) continue;
+        const [, , verb, one, many] = toolInfo(row.step.data.name), count2 = counts.get(verb) ?? { n: 0, one, many };
+        count2.n++;
+        counts.set(verb, count2);
+      }
+      const text2 = [...counts].map(([verb, count2]) => verb + " " + count2.n + " " + (count2.n === 1 ? count2.one : count2.many)).join(", ");
+      const tools = run.filter((row) => row.kind === "tool");
+      const finished = ends.length ? "Finished " + ends.length + " background command" + (ends.length === 1 ? "" : "s") : "";
+      const failures = ends.filter((row) => row.failed).length, stopped = ends.filter((row) => row.state === "killed").length;
+      const outcome = [failures ? failures + " failed" : "", stopped ? stopped + " stopped" : ""].filter(Boolean).join(", ");
+      output.push({
+        kind: "group",
+        key: "g:" + run[0].key,
+        entries: run,
+        lone: run.length === 1,
+        summary: ends.length ? [
+          { text: finished },
+          ...outcome ? [{ text: " (" + outcome + ")", className: "tt-counts" }] : [],
+          ...text2 ? [{ text: ", " + text2 }] : []
+        ] : run.length > 1 ? [{ text: text2[0].toUpperCase() + text2.slice(1) }] : [],
+        background: ends.length > 0,
+        failed: tools.filter(
+          (row) => row.step.data.ok === false && !ends.some((end) => end.call === row.step.tid)
+        ).length,
+        running: tools.find((row) => row.step.running)?.step.backgroundStatus?.replace(/^running /, "") ?? tools.find((row) => row.step.running)?.step.status ?? void 0,
+        stack: I.stack,
+        chevron: I.chev
+      });
+      run = [];
+    };
+    for (const entry2 of entries) {
+      if (entry2.kind === "tool" || entry2.kind === "background") run.push(entry2);
+      else if (entry2.kind === "label" && ["signal-marker", "vnote"].includes(entry2.className))
+        output.push(entry2);
+      else {
+        flush();
+        output.push(entry2);
+      }
+    }
+    flush();
+    return output;
+  }
+  function catalogTranscriptBlocks(entries, fieldView, relationshipView, liveObservation = false, context, attachments, harness = "", sessionKey = "", activity) {
+    entries = coalesceRecordedThoughts(
+      entries,
+      harness,
+      new Set(context?.turns.map((turn) => turn.id) ?? [])
+    );
+    const closingBodies = /* @__PURE__ */ new Map(), consumed = /* @__PURE__ */ new Set();
+    if (relationshipView)
+      for (const item2 of entries) {
+        if (item2.entry.k !== "h") continue;
+        const recorded = item2.entry;
+        const edge = context?.handoffs.find((row) => row.edge.id === recorded.id)?.edge;
+        if (edge?.kind !== "toyou" || edge.ask !== "result" || edge.from !== sessionKey || !context?.turns.some((turn) => turn.id === item2.entry.turn && turn.sent.includes(edge.id)))
+          continue;
+        const body = [...entries].reverse().find(
+          (row) => row.slot < item2.slot && row.entry.k === "a" && row.entry.turn === item2.entry.turn
+        );
+        if (body?.entry.k !== "a") continue;
+        closingBodies.set(item2.entry_id, body.entry.text);
+        consumed.add(body.entry_id);
+      }
+    entries = entries.filter((item2) => !consumed.has(item2.entry_id));
+    const blocks2 = entries.map((item2) => {
       const { entry_id, native_action_text, clipped, freshness: freshness2 } = item2, field = fieldView?.(item2), entry2 = field?.text === void 0 ? item2.entry : item2.entry.k === "tool" ? { ...item2.entry, out: field.text } : { ...item2.entry, text: field.text };
       const views = [];
       let notice = 0;
-      const label = (text2) => views.push({
+      const label = (text2, className = "vnote") => views.push({
         kind: "label",
         key: entry_id + ":notice:" + notice++,
-        className: "vnote",
+        className,
         text: text2
       });
       if (entry2.k === "u" || entry2.k === "a")
@@ -16263,7 +11328,8 @@ globalThis.__semonUIShared = __semonUIShared;
           key: entry_id,
           entryKey: entry_id,
           flavor: entry2.k === "u" ? "user" : "assistant",
-          text: entry2.text
+          text: entry2.text,
+          images: attachments?.(item2)
         });
       else if (entry2.k === "think")
         views.push({
@@ -16271,51 +11337,102 @@ globalThis.__semonUIShared = __semonUIShared;
           key: entry_id,
           entryKey: entry_id,
           mode: entry2.text ? "readable" : entry2.pending ? "pending" : "masked",
+          label: entry2.text ? recordedThoughtLabel(entry2.secs) : void 0,
           text: entry2.text
         });
       else if (entry2.k === "tool") {
-        const { more, script, scriptText, scriptTruncated, scriptFailed, ...preview2 } = entry2;
+        const { more, ...preview } = entry2;
+        const observedRunning = !!activity && activity.tool === entry2.name && activity.since === item2.observed_at && entry2.ok === null && !entry2.bg && !entry2.unfinished, running = liveObservation && (entry2.live === true || entry2.bg?.state === "running" || observedRunning), since = observedRunning ? activity.since : entry2.bg?.since ?? entry2.since, verb = running ? {
+          Ran: "Running",
+          Read: "Reading",
+          Edited: "Editing",
+          Wrote: "Writing",
+          Patched: "Patching",
+          "Searched for": "Searching for",
+          "Sent input to": "Sending input to"
+        }[toolInfo(entry2.name)[1]] ?? toolInfo(entry2.name)[1] : toolInfo(entry2.name)[1], status = running ? since == null ? entry2.secs : Math.max(0, Math.floor((Date.now() - since) / 1e3)) + "s" : entry2.unfinished ? "Result not recorded" : [
+          entry2.exit != null ? "exit " + entry2.exit : entry2.ok === false ? "failed" : entry2.ok === null ? "exit unknown" : "",
+          entry2.secs
+        ].filter(Boolean).join(" \xB7 ") || null;
         views.push({
           kind: "tool",
           key: entry_id,
           entryKey: entry_id,
           step: {
-            className: "step" + (entry2.ok === false ? " err" : ""),
+            tid: entry2.tid,
+            sid: running ? sessionKey : void 0,
+            since: running ? since : void 0,
+            className: "step" + (entry2.bg ? " background" : "") + (running ? " live" : entry2.ok === false || entry2.bg?.state === "failed" ? " err" : ""),
             key: entry_id,
             entryKey: entry_id,
-            running: false,
-            background: false,
+            running,
+            background: !!entry2.bg,
+            backgroundStatus: entry2.bg ? recordedBackgroundStatus(entry2.bg) : void 0,
             waiting: false,
             label: entry2.title ?? entry2.arg,
             named: !!entry2.title,
-            verb: toolInfo(entry2.name)[1],
-            status: entry2.unfinished ? "Result not recorded" : entry2.exit == null ? null : "exit " + entry2.exit,
+            prefix: entry2.title ? (running ? "Running" : entry2.ok === false ? "Failed" : verb) + ": " : void 0,
+            tip: entry2.title ? (entry2.in ?? entry2.arg).split(/\r\n|\n|\r/).find((line) => line.trim())?.slice(0, 200) : void 0,
+            verb,
+            status: entry2.bg ? null : status ?? null,
             icon: I[toolInfo(entry2.name)[0]],
             chevron: I.chev,
-            data: preview2
+            data: {
+              ...preview,
+              expandable: !!field?.action || !!(entry2.cut && (entry2.out?.split("\n").length ?? 0) > 24)
+            }
           }
         });
-        if (more?.length || script || scriptText || scriptTruncated || scriptFailed)
+        if (more?.length)
           label("Full result unavailable for this source. The recorded preview is shown.");
       } else if (entry2.k === "h") {
-        label("Native action \xB7 related session context is incomplete");
-        if (native_action_text === void 0) label("Original action prompt is unavailable.");
-        else
-          views.push({
-            kind: "message",
-            key: entry_id,
-            entryKey: entry_id,
-            flavor: "incoming",
-            text: native_action_text ?? ""
-          });
-      } else if (entry2.k === "end")
-        label(
-          item2.provenance ? entry2.text ?? "Native session end recorded" : "Session boundary \xB7 native provenance unavailable"
+        const related = relationshipView?.(item2);
+        if (related) {
+          views.push(
+            ...related.map(
+              (view) => view.kind === "message" ? { ...view, images: attachments?.(item2) } : view.kind === "event" && closingBodies.has(item2.entry_id) ? { ...view, brief: closingBodies.get(item2.entry_id) } : view
+            )
+          );
+        } else {
+          label("Native action \xB7 related session context is incomplete");
+          if (native_action_text === void 0) label("Original action prompt is unavailable.");
+          else
+            views.push({
+              kind: "message",
+              key: entry_id,
+              entryKey: entry_id,
+              flavor: "incoming",
+              text: native_action_text ?? ""
+            });
+        }
+      } else if (entry2.k === "end") {
+        const parent = entry2.ret && context?.sessions[entry2.ret.to], returned = entry2.ret && context?.handoffs.some(
+          ({ edge }) => edge.kind === "spawn" && edge.to === sessionKey && edge.from === entry2.ret.to && edge.done === entry2.ret.at
         );
-      else if (entry2.k === "bgend") label(entry2.label ?? entry2.state);
+        label(
+          parent && returned ? "Returned to " + parent.name + (entry2.ret.failed ? " \xB7 failed" : "") + " \xB7 " + clock(entry2.ret.at, Date.now()) : item2.provenance ? entry2.text ?? "Native session end recorded" : "Session boundary \xB7 native provenance unavailable",
+          "divider"
+        );
+      } else if (entry2.k === "bgend")
+        views.push({
+          kind: "background",
+          state: entry2.state,
+          key: entry_id,
+          entryKey: entry_id,
+          failed: entry2.state === "failed",
+          call: entry2.call,
+          label: "Background command " + (entry2.state === "failed" ? "failed" : entry2.state === "killed" ? "stopped" : "completed") + " \xB7 " + (entry2.label ?? ""),
+          loaded: entries.some((item3) => item3.entry.k === "tool" && item3.entry.tid === entry2.call)
+        });
       else if (entry2.k === "harness") label(entry2.label);
       else if (entry2.k === "signal")
-        label("Native " + entry2.signal.kind + (entry2.signal.tag ? " \xB7 " + entry2.signal.tag : ""));
+        views.push({
+          kind: "label",
+          key: entry_id,
+          entryKey: entry_id,
+          className: "signal-marker",
+          text: recordedSignalLabel(entry2)
+        });
       if (field) {
         views.push({
           kind: "label",
@@ -16332,25 +11449,188 @@ globalThis.__semonUIShared = __semonUIShared;
       if (entry2.img?.length) label("Attachments unavailable for this source.");
       return { kind: "loose", key: entry_id, entries: views };
     });
+    const grouped = [];
+    for (let index = 0; index < entries.length; index++) {
+      const item2 = entries[index], block = blocks2[index], turn = item2.entry.turn;
+      if (!turn) {
+        const previous2 = grouped.at(-1);
+        if (previous2?.kind === "loose") previous2.entries.push(...block.entries);
+        else
+          grouped.push({
+            ...block,
+            key: "loose:" + (previous2?.kind === "turn" ? previous2.turn.id : "start")
+          });
+        continue;
+      }
+      const previous = grouped.at(-1);
+      if (previous?.kind === "turn" && previous.turn.id === turn) {
+        previous.turn.entries.push(...block.entries);
+      } else
+        grouped.push({
+          kind: "turn",
+          turn: {
+            id: turn,
+            label: "Recorded turn",
+            entries: block.entries,
+            traceIcon: I.trace,
+            stateLabel: "Recorded"
+          }
+        });
+    }
+    for (const block of grouped) {
+      if (block.kind !== "turn") continue;
+      const descriptor = context?.turns.find((turn) => turn.id === block.turn.id);
+      if (!descriptor) continue;
+      const start = context?.handoffs.find((row) => row.edge.id === descriptor.start)?.edge;
+      block.turn.label = descriptor.u || start?.kind === "ask" ? "Your message" : "Recorded turn";
+      block.turn.trace = descriptor.sent.length ? descriptor.id : void 0;
+      if (descriptor.end.st === "err")
+        block.turn.error = descriptor.end.why === "failed" ? "Failed" : descriptor.end.why;
+      if (start && start.kind !== "ask") {
+        const sender = context?.sessions[start.from], harness2 = sender && HARNESSES[sender.harness];
+        block.turn.header = {
+          mark: harness2 ? {
+            id: sender.harness,
+            name: harness2.name,
+            light: harness2.icon.light,
+            dark: harness2.icon.dark,
+            darkTheme: matchMedia("(prefers-color-scheme: dark)").matches
+          } : void 0,
+          parts: [
+            {
+              className: "soft",
+              text: start.kind === "spawn" ? "Brief from " : "Message from "
+            },
+            {
+              className: "who who-link",
+              text: sender?.name ?? "Recorded session",
+              action: sender ? { kind: "session", id: start.from } : void 0
+            }
+          ],
+          time: clock(start.at, Date.now())
+        };
+      }
+    }
+    return grouped.map(
+      (block) => block.kind === "turn" ? { ...block, turn: { ...block.turn, entries: gatherTools(block.turn.entries) } } : { ...block, entries: gatherTools(block.entries) }
+    );
+  }
+  function recordedRelationshipViews(item2, relationship, selected, participants, native) {
+    const edge = relationship.edge, target = participants[edge.to], source = participants[edge.from];
+    const name = (id) => id === "you" ? "You" : participants[id]?.name ?? "Recorded session";
+    if (edge.kind === "spawn" && edge.from === selected && target) {
+      const mark2 = HARNESSES[target.harness], status = target.state === "work" || target.state === "wait" ? target.live_observation === false ? "off" : target.state : target.state ?? edge.status, kind = target.kind === "subagent" ? "Subagent" : target.kind === "codex-run" ? "Codex run" : target.kind, meta = [
+        kind,
+        shortModel(target.model),
+        target.start == null ? void 0 : dur(
+          target.start,
+          target.live_observation && status === "work" ? void 0 : target.last,
+          Date.now()
+        ),
+        target.calls == null ? void 0 : target.calls + (target.calls === 1 ? " step" : " steps"),
+        target.usd == null ? void 0 : "$" + target.usd.toFixed(2)
+      ].filter(Boolean).join(" \xB7 ");
+      return [
+        {
+          kind: "child",
+          key: item2.entry_id,
+          entryKey: item2.entry_id,
+          handoff: edge.id,
+          id: edge.to,
+          turn: relationship.targetTurn,
+          name: target.name,
+          state: status,
+          stateLabel: STATE[status] ?? "Recorded history",
+          meta,
+          brief: native.brief ?? "",
+          result: native.result,
+          failed: status === "err",
+          mark: mark2 ? {
+            id: target.harness,
+            name: mark2.name,
+            light: mark2.icon.light,
+            dark: mark2.icon.dark,
+            darkTheme: matchMedia("(prefers-color-scheme: dark)").matches
+          } : void 0,
+          chevron: I.chev
+        }
+      ];
+    }
+    if (edge.to === selected && edge.from !== selected)
+      return [
+        {
+          kind: "message",
+          key: item2.entry_id,
+          entryKey: item2.entry_id,
+          handoff: edge.id,
+          flavor: edge.kind === "ask" ? "user" : "incoming",
+          text: native.brief ?? item2.native_action_text ?? ""
+        },
+        ...edge.kind === "ask" && relationship.targetTurn ? [
+          {
+            kind: "label",
+            key: item2.entry_id + ":time",
+            className: "msg-tm",
+            text: clock(edge.at, Date.now())
+          }
+        ] : []
+      ];
+    const parts = [
+      {
+        className: "who who-link",
+        text: name(edge.from),
+        action: source ? { kind: "session", id: edge.from } : void 0
+      },
+      {
+        className: "soft",
+        text: edge.kind === "toyou" ? edge.ask === "result" ? " sent " : " asked " : edge.kind === "relay" ? " relayed to " : " asked "
+      },
+      {
+        className: "who who-link",
+        text: name(edge.to),
+        action: target ? { kind: "session", id: edge.to, turn: relationship.targetTurn } : void 0
+      }
+    ];
+    if (edge.kind === "toyou" && edge.ask === "result")
+      parts.splice(1, 2, { className: "soft", text: " sent you a result" });
+    return [
+      {
+        kind: "event",
+        key: item2.entry_id,
+        entryKey: item2.entry_id,
+        handoff: edge.id,
+        className: "event" + (edge.kind === "move" ? " move" : "") + (edge.kind === "toyou" && edge.status === "wait" ? " waiting" : ""),
+        icon: edge.kind === "toyou" && edge.ask !== "result" && edge.status !== "wait" ? I.done : I[edge.kind === "toyou" ? edge.ask === "result" ? "result" : edge.ask === "decision" ? "decide" : "qc" : edge.kind === "relay" ? "relay" : "ask"],
+        parts,
+        time: clock(edge.at, Date.now()),
+        brief: native.brief ?? item2.native_action_text ?? "",
+        result: native.result,
+        resultLabel: "Result",
+        answers: native.answer == null ? void 0 : Array.isArray(native.answer) ? native.answer : [native.answer],
+        waiting: edge.status === "wait",
+        stateLabel: STATE[edge.status]
+      }
+    ];
   }
 
   // src/state/catalog-field-wire.ts
   function parseCatalogField(value, request) {
     if (!request.entry.provenance) throw new Error("Native text requires source provenance");
-    const row = object2(value), identity2 = parseCatalogIdentity(row.identity), projection = object2(row.projection), field = object2(row.field), provenance = object2(row.provenance), source = parseCatalogSource(provenance.source), chunk = number(field.chunk), next = field.next === null ? null : number(field.next), complete = boolean(field.complete), body = text(row.text), sourceBytes = number(object2(row.observation).source_bytes), layers = field.layers ?? 1;
+    const anchor = request.entry.field?.provenance ?? request.entry.provenance;
+    const row = object(value), identity2 = parseCatalogIdentity(row.identity), projection = object(row.projection), field = object(row.field), provenance = object(row.provenance), source = parseCatalogSource(provenance.source), chunk = number(field.chunk), next = field.next === null ? null : number(field.next), complete = boolean(field.complete), body = text(row.text), sourceBytes = number(object(row.observation).source_bytes), layers = field.layers ?? 1;
     const sourceLimit = layers === 2 ? 65607 : 65547;
-    if (row.api !== 1 || identity2.read_scope !== "retained_history" || identity2.source_key !== request.source_key || identity2.catalog_key !== request.catalog_key || projection.version !== 5 || projection.generation !== request.generation || row.slot !== request.entry.slot || field.name !== request.entry.field?.name || layers !== 1 && layers !== 2 || layers !== (request.entry.field?.layers ?? 1) || chunk !== request.chunk || !Number.isSafeInteger(chunk) || chunk < 0 || next !== (complete ? null : chunk + 1) || !request.entry.field || chunk >= request.entry.field.chunks || complete !== (chunk + 1 === request.entry.field.chunks) || object2(row.freshness).state !== "cached" || !Number.isSafeInteger(sourceBytes) || sourceBytes < 0 || sourceBytes > sourceLimit || new TextEncoder().encode(body).byteLength > 131072 || JSON.stringify(source) !== JSON.stringify(request.entry.provenance.source) || provenance.offset !== request.entry.provenance.offset || provenance.block !== request.entry.provenance.block || provenance.native_event_id !== request.entry.provenance.native_event_id)
+    if (row.api !== 1 || identity2.read_scope !== "retained_history" || identity2.source_key !== request.source_key || identity2.catalog_key !== request.catalog_key || projection.version !== 5 || projection.generation !== request.generation || row.slot !== request.entry.slot || field.name !== request.entry.field?.name || layers !== 1 && layers !== 2 || layers !== (request.entry.field?.layers ?? 1) || chunk !== request.chunk || !Number.isSafeInteger(chunk) || chunk < 0 || next !== (complete ? null : chunk + 1) || !request.entry.field || chunk >= request.entry.field.chunks || complete !== (chunk + 1 === request.entry.field.chunks) || object(row.freshness).state !== "cached" || !Number.isSafeInteger(sourceBytes) || sourceBytes < 0 || sourceBytes > sourceLimit || new TextEncoder().encode(body).byteLength > 131072 || JSON.stringify(source) !== JSON.stringify(anchor.source) || provenance.offset !== anchor.offset || provenance.block !== anchor.block || provenance.native_event_id !== anchor.native_event_id)
       throw new Error("Native field chunk does not match the selected source projection");
     return { text: body, next, complete };
   }
 
   // src/state/catalog-sources.ts
   function parseCatalogSources(value) {
-    const row = object2(value);
+    const row = object(value);
     if (row.api !== 1 || !Array.isArray(row.items) || row.items.length > 100)
       throw new Error("Invalid source inventory");
     const items = array(row.items, (value2) => {
-      const item2 = object2(value2), source_key = text(item2.source_key), label = text(item2.label);
+      const item2 = object(value2), source_key = text(item2.source_key), label = text(item2.label);
       if (!source_key || !label) throw new Error("Invalid source identity");
       return { source_key, label };
     });
@@ -16375,6 +11655,20 @@ globalThis.__semonUIShared = __semonUIShared;
           /* @__PURE__ */ jsx("button", { class: "link", type: "button", onClick: () => host2.retry(), children: "Retry" })
         ] }),
         view.updating && /* @__PURE__ */ jsx("p", { class: "catalog-note", role: "status", children: "Loading machines\u2026" }),
+        !!view.bookmarks?.length && /* @__PURE__ */ jsx("div", { class: "session-list", "aria-label": "Matching session origins", children: view.bookmarks.map((item2) => /* @__PURE__ */ jsxs(
+          "a",
+          {
+            class: "nrow",
+            href: "/s/" + encodeURIComponent(item2.harness) + "/" + encodeURIComponent(item2.catalog_key) + "?" + new URLSearchParams({ machine: item2.source_key }),
+            children: [
+              /* @__PURE__ */ jsx("span", { class: "nm", children: screenText(item2.catalog_key) }),
+              /* @__PURE__ */ jsx("span", { children: screenText(
+                view.items.find((source) => source.source_key === item2.source_key)?.label ?? item2.source_key
+              ) })
+            ]
+          },
+          JSON.stringify([item2.source_key, item2.catalog_key])
+        )) }),
         /* @__PURE__ */ jsx("div", { class: "session-list", children: view.items.map((item2) => /* @__PURE__ */ jsx(
           "button",
           {
@@ -16388,30 +11682,84 @@ globalThis.__semonUIShared = __semonUIShared;
         )) }),
         !view.items.length && !view.updating && !view.note && /* @__PURE__ */ jsx("p", { class: "catalog-note", children: "No authorized recorded sources are available." }),
         view.more && /* @__PURE__ */ jsx("button", { class: "link", type: "button", disabled: view.updating, onClick: () => host2.more(), children: "Load more machines" }),
-        /* @__PURE__ */ jsx("p", { class: "catalog-note", children: "This source list contains names and keys only. History across sources and text search are unavailable." }),
-        /* @__PURE__ */ jsxs("p", { class: "catalog-note", children: [
-          /* @__PURE__ */ jsx("a", { class: "link", href: view.machinesHref, children: "Manage machines" }),
-          " \xB7 ",
-          /* @__PURE__ */ jsx("a", { class: "link", href: "/sessions?compat=1", children: "Open compatibility view (loads workspace history)" })
-        ] })
+        /* @__PURE__ */ jsx("p", { class: "catalog-note", children: /* @__PURE__ */ jsx("a", { class: "link", href: view.machinesHref, children: "Manage machines" }) })
       ] }),
       root
     );
   }
 
   // src/app/catalogViewer.tsx
-  function createCatalogViewer(capabilities, viewerHost) {
-    const scope = new EffectScope(), selection = new CatalogSelectionStore(), navigation = new NavigationController({}), updates = new ViewUpdates();
+  function createCatalogViewer(initialCapabilities, viewerHost) {
+    const capabilities = initialCapabilities ?? {
+      api: 1,
+      read_contract: "catalog-v1",
+      source_key: "",
+      selected_transcript: false,
+      selected_identity: false,
+      selected_entry: false,
+      source_candidates: false,
+      metadata_search: false,
+      attachment: false,
+      relationship_context: false,
+      large_native_records: false,
+      pagination: true,
+      filters: [],
+      order: "last_desc_key_asc",
+      full_text_search: false,
+      global_union: false
+    };
+    const scope = new EffectScope(), selection = new CatalogSelectionStore(), navigation = new NavigationController((route) => {
+      queueMicrotask(() => {
+        if (!disposed && navigation.route === route)
+          history.replaceState({ ...history.state, ...route }, "", location.href);
+      });
+    });
+    const previousScrollRestoration = history.scrollRestoration;
+    if (!viewerHost?.nativePage) history.scrollRestoration = "manual";
     let nameRefreshOffset = 0;
     let listRetry, listRetryDelay = 1e3;
-    let disposed = false, page = null, items = [], cursor = null, listEpoch = 0, updating = false, note = "", harness = new URLSearchParams(location.search).get("harness") ?? "", repo = new URLSearchParams(location.search).get("repo") ?? "", query = new URLSearchParams(location.search).get("q") ?? "", listScroll = 0, listFocus = "", active = null;
+    let disposed = false, page = null, items = [], cursor = null, listEpoch = 0, updating = false, note = "", harness = new URLSearchParams(location.search).get("harness") ?? "", repo = new URLSearchParams(location.search).get("no_repo") === "1" ? "__none__" : new URLSearchParams(location.search).get("repo") ?? "", model2 = new URLSearchParams(location.search).get("model") ?? "", query = new URLSearchParams(location.search).get("q") ?? "", listScroll = 0, listFocus = "", active = null;
     let candidates = [], candidateCursor = null, candidateLoaded = false, candidateUpdating = false, candidateNote = "", candidateEpoch = 0, candidateTimer;
     const selected = /* @__PURE__ */ new Map();
     const sourceViews = /* @__PURE__ */ new Map();
-    let sourcesOpen = false, sourcesEpoch = 0, sourceItems = [], sourceCursor = null, sourcesUpdating = false, sourcesNote = "", sourcesRetryDelay = 1e3;
+    let sourcesOpen = false, sourcesEpoch = 0, sourceItems = [], sourceCursor = null, sourcesUpdating = false, sourcesNote = "", sourcesRetryDelay = 1e3, locating = false;
+    let bookmarkMatches = [];
+    let pinView = null, pinUntil = 0;
     const cacheKey = (key2) => JSON.stringify([capabilities.source_key, key2]);
-    const account = parseAccount(viewerHost?.account);
-    let wide = readShellPreference("wide"), rail = readShellPreference("rail"), chromeTitle = null, chromeSession = false;
+    let showApprovalReviews = false;
+    const ordering = createOrdering();
+    let orderTouch = false, orderIdle;
+    const idleHook = Reflect.get(window, "__semonOrderIdleMs");
+    const orderIdleMs = Number.isFinite(idleHook) && idleHook >= 200 && idleHook <= 6e4 ? idleHook : 1e4;
+    function orderScope(name, signature = "") {
+      const side = name === "recent", region = document.querySelector(side ? "#side-list" : "#main");
+      const rows = side ? "#lanes .treeitem" : "#page .nrow";
+      const first = document.querySelector(rows), focus = document.activeElement;
+      const inView = side ? (region?.scrollTop ?? 0) <= 1 : !first || first.getBoundingClientRect().top >= (document.querySelector("#topbar")?.getBoundingClientRect().bottom ?? 0) - 1;
+      const touched = orderTouch || !!(focus?.matches(":focus-visible") && focus.closest(side ? "#lanes" : rows)) || matchMedia("(hover: hover)").matches && !!document.querySelector(side ? "#lanes .treeitem:hover" : "#page .nrow:hover");
+      if (rail && side) ordering.scopes.delete(name);
+      return ordering.begin(name, signature, side ? null : navigation.route, { inView, touched });
+    }
+    function armOrderIdle() {
+      scope.clearTimeout(orderIdle);
+      orderIdle = void 0;
+      if (matchMedia("(max-width: 760px)").matches || !ordering.scopes.get("recent")?.n) return;
+      orderIdle = scope.timeout(() => {
+        orderIdle = void 0;
+        const sidebar = document.querySelector("#sidebar"), focused = document.activeElement;
+        if (orderTouch || sidebar?.matches(":hover") || sessionPanel || shell.account.open || focused && sidebar?.contains(focused) && focused.matches(":focus-visible, input, textarea, select, [contenteditable]"))
+          armOrderIdle();
+        else {
+          ordering.scopes.delete("recent");
+          chrome();
+        }
+      }, orderIdleMs);
+    }
+    let account = parseAccount(viewerHost?.account);
+    let standaloneNavigation;
+    let restoringOverlayHistory = false, overlayBackPending = false, pendingChrome = false;
+    const machinesHref = () => viewerHost?.machinesPath ?? standaloneNavigation?.paths?.machines ?? "/machines";
+    let wide = readShellPreference("wide"), rail = readShellPreference("rail");
     const shell = createShellChrome({
       account: {
         place(widget, trigger) {
@@ -16420,43 +11768,193 @@ globalThis.__semonUIShared = __semonUIShared;
           setGeometry(widget, "accountWidth", at.width);
           setGeometry(widget, "accountBottom", Math.max(0, innerHeight - at.top + 6));
         },
-        opened() {
+        opened(compact) {
+          if (compact) history.pushState({ ...history.state, sheet: 1 }, "");
         },
-        closed() {
+        closed(options2) {
+          if (pendingChrome && !options2.navigating && !disposed) {
+            pendingChrome = false;
+            scope.frame(chrome);
+          }
+          if (!disposed && !options2.keepEntry && !options2.navigating && !restoringOverlayHistory && history.state?.sheet) {
+            overlayBackPending = true;
+            history.back();
+          }
         },
-        navigate() {
-          return false;
+        navigate(href) {
+          if (!history.state?.sheet) return false;
+          const { sheet: sheet2, ...route } = history.state;
+          history.replaceState(route, "");
+          location.assign(href);
+          return true;
         },
-        submit() {
-          return false;
+        submit(form) {
+          if (!history.state?.sheet) return false;
+          const { sheet: sheet2, ...route } = history.state;
+          history.replaceState(route, "");
+          form.submit();
+          return true;
         }
       },
       navigate(destination) {
+        if (viewerHost?.nativePage) return false;
+        if (destination.key === "home" || destination.key === "analytics") {
+          goOverview(destination.key);
+          return true;
+        }
+        if (destination.key === "machines" && !viewerHost?.catalogSources && machinesHref() === "/machines") {
+          goOverview("machines");
+          return true;
+        }
         if (destination.key !== "sessions") return false;
-        sourcesOpen = false;
-        goList();
+        if (capabilities.source_key) goList();
+        else {
+          history.pushState(null, "", "/sessions");
+          fromLocation();
+        }
         return true;
       },
       drawerOpened() {
+        ordering.scopes.delete("recent");
+        chrome();
+        history.pushState({ ...history.state, drawer: 1 }, "");
       },
       drawerClosed() {
+        ordering.scopes.delete("recent");
+        chrome();
+        if (!disposed && !restoringOverlayHistory && history.state?.drawer && !history.state?.sheet) {
+          overlayBackPending = true;
+          history.back();
+        }
       },
       railChanged() {
+        ordering.scopes.delete("recent");
         rail = !rail;
         writeShellPreference("rail", rail);
         chrome();
       }
     });
     shell.mount(document.querySelector(".app"));
-    const root = shell.slots.content, title = document.createElement("div"), back = document.createElement("button"), jumpActions = document.createElement("div"), jumpSlot = document.createElement("span"), jumpTarget = document.createElement("div");
+    scope.listen(
+      document,
+      "pointerdown",
+      () => {
+        orderTouch = true;
+      },
+      true
+    );
+    for (const type of ["pointerup", "pointercancel"])
+      scope.listen(
+        document,
+        type,
+        () => {
+          orderTouch = false;
+        },
+        true
+      );
+    scope.listen(window, "blur", () => {
+      orderTouch = false;
+    });
+    scope.listen(document, "visibilitychange", () => {
+      orderTouch = false;
+      if (document.visibilityState === "visible") {
+        ordering.scopes.clear();
+        chrome();
+        drawList();
+        overview.draw();
+      }
+    });
+    for (const type of [
+      "pointermove",
+      "pointerdown",
+      "pointerleave",
+      "focusin",
+      "focusout",
+      "wheel",
+      "keydown"
+    ])
+      scope.listen(
+        document.querySelector("#sidebar"),
+        type,
+        () => {
+          if (orderIdle) armOrderIdle();
+        },
+        { passive: true }
+      );
+    const root = shell.slots.content, title = document.createElement("div"), back = document.createElement("button"), jumpActions = document.createElement("div"), jumpSlot = document.createElement("span"), composerTarget = document.createElement("span"), jumpTarget = document.createElement("div");
+    const readerResize = new ResizeObserver(() => {
+      if (active && active === pinView && active.following && !active.errorMode && performance.now() < pinUntil) {
+        active.following = true;
+        scrollEnd();
+      }
+    });
+    readerResize.observe(root);
+    readerResize.observe(document.querySelector("#main"));
+    readerResize.observe(document.querySelector("#topbar"));
+    scope.listen(
+      document,
+      "wheel",
+      () => {
+        pinUntil = 0;
+      },
+      { passive: true, capture: true }
+    );
+    scope.listen(
+      document,
+      "pointerdown",
+      () => {
+        pinUntil = 0;
+      },
+      { passive: true, capture: true }
+    );
+    const sessionBar = createViewerBar();
+    const traceActions = document.createElement("div"), traceMenu = document.createElement("button");
+    traceActions.className = "viewer-bar-actions";
+    traceMenu.type = "button";
+    traceMenu.id = "more-btn";
+    traceMenu.className = "ibtn";
+    traceMenu.setAttribute("aria-label", "Session menu");
+    traceMenu.setAttribute("aria-haspopup", "dialog");
+    traceMenu.setAttribute("aria-expanded", "false");
+    render(/* @__PURE__ */ jsx(Glyph, { path: I.more, className: "" }), traceMenu);
+    traceActions.append(traceMenu);
+    scope.listen(traceMenu, "click", () => openSessionMenu(null, traceMenu));
+    let sessionPanel = null;
+    function panelOpened(panel) {
+      sessionPanel?.destroy();
+      sessionPanel = panel;
+      history.pushState({ ...navigation.route, sheet: 1 }, "");
+    }
+    function panelClosed(panel) {
+      if (sessionPanel === panel) sessionPanel = null;
+      if (!disposed && !restoringOverlayHistory && history.state?.sheet) {
+        overlayBackPending = true;
+        history.back();
+      }
+    }
+    let afterOverlayClose = null;
+    function navigateFromPanel(panel, action) {
+      if (history.state?.sheet) {
+        afterOverlayClose = action;
+        panel.destroy();
+      } else {
+        panel.destroy();
+        action();
+      }
+    }
+    let traceTitle = false;
     title.className = "ttl catalog-title";
     back.type = "button";
-    back.className = "link catalog-back";
-    back.textContent = "\u2190 Back to sessions";
+    back.className = "ibtn catalog-back";
+    back.setAttribute("aria-label", "Back to sessions");
+    back.setAttribute("data-tip", "Back to sessions");
+    render(/* @__PURE__ */ jsx(Glyph, { path: I.back, className: "" }), back);
     const sources = document.createElement("a");
-    sources.className = "link catalog-sources";
+    sources.className = "ibtn catalog-sources";
     sources.href = "/sessions?choose_source=1";
-    sources.textContent = "Choose a machine";
+    sources.setAttribute("aria-label", "Choose a machine");
+    sources.setAttribute("data-tip", "Choose a machine");
+    render(/* @__PURE__ */ jsx(Glyph, { path: I.machine, className: "" }), sources);
     scope.listen(sources, "click", (event) => {
       if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey)
         return;
@@ -16470,16 +11968,26 @@ globalThis.__semonUIShared = __semonUIShared;
     jumpTarget.className = "jump-wrap";
     jumpTarget.hidden = true;
     jumpSlot.append(jumpTarget);
-    jumpActions.append(jumpSlot);
-    const recent = createRecentRenderer(shell.slots.recent, {
+    jumpActions.append(jumpSlot, composerTarget);
+    const recent = createRecentRenderer(shell.slots.recent.querySelector("#lanes"), {
       open(key2) {
-        void goSession(key2);
+        if (overview.openRecent(key2)) return;
+        const item2 = items.find((row) => JSON.stringify([capabilities.source_key, row.key]) === key2);
+        if (item2) void goSession(item2.key, item2);
+        else {
+          const identity2 = JSON.parse(key2);
+          if (Array.isArray(identity2) && identity2.length === 2 && identity2[0] === capabilities.source_key && typeof identity2[1] === "string")
+            void goSession(identity2[1]);
+        }
       },
-      toggle() {
+      toggle(key2, value) {
+        overview.toggleRecent(key2, value);
       },
-      all() {
+      all(key2, trigger) {
+        overview.allRecent(key2, true, trigger);
       },
-      fewer() {
+      fewer(key2) {
+        overview.allRecent(key2, false);
       }
     });
     const control = createLocalControl(scope, () => {
@@ -16488,7 +11996,7 @@ globalThis.__semonUIShared = __semonUIShared;
     });
     function controlFor(view) {
       const identity2 = selection.selectedIdentity();
-      const current = active === view && identity2?.catalog_key === view.key && identity2.owner_qualification !== "provisional" && identity2.native_id ? control.view(identity2.native_id, identity2.source_key + ":" + view.key) : void 0;
+      const current = active === view && identity2?.source_key === view.sourceKey && identity2?.catalog_key === view.key && identity2.owner_qualification !== "provisional" && identity2.native_id ? control.view(identity2.native_id, identity2.source_key + ":" + view.key) : void 0;
       if (current) view.lastControl = current;
       const runtime = runtimeFor(view)?.observation, terminal = runtime && runtime.state !== "active";
       if (current && !terminal || !view.lastControl)
@@ -16496,6 +12004,9 @@ globalThis.__semonUIShared = __semonUIShared;
       const previous = current ?? view.lastControl;
       return {
         ...previous,
+        get draft() {
+          return previous.draft;
+        },
         busy: false,
         uncertain: previous.uncertain,
         canReconnect: false,
@@ -16525,15 +12036,9 @@ globalThis.__semonUIShared = __semonUIShared;
     const observation = createControlObservation({
       scope,
       navigation,
-      updates,
       viewerHost,
       catalogSelection: selection,
-      controlOwner: control,
-      modelStore: {
-        get sessions() {
-          throw new Error("Catalog status cannot access the complete model");
-        }
-      }
+      controlOwner: control
     });
     const runtimeObservation = createRuntimeObservation({
       scope,
@@ -16550,33 +12055,350 @@ globalThis.__semonUIShared = __semonUIShared;
       updateSessionRuntime(active.root, runtimeFor(active));
       updateSessionControl(active.root, controlFor(active));
     });
-    const api = async (path) => {
+    const overviewRequests = /* @__PURE__ */ new Set();
+    let causal = null, causalEpoch = 0, causalLoading = false;
+    const causalExpanded = /* @__PURE__ */ new Map();
+    const api = async (path, body) => {
       const controller = scope.request(), deadline = scope.timeout(() => controller.abort(), 15e3);
+      if (path.startsWith("/api/viewer/home?") || path.startsWith("/api/viewer/analytics?") || path.startsWith("/api/session-home?") || path.startsWith("/api/session-observe?") || path.startsWith("/api/session-trace?"))
+        overviewRequests.add(controller);
       try {
-        return await requestJson(path, controller.signal);
+        return await requestJson(
+          path,
+          controller.signal,
+          path.startsWith("/api/viewer/analytics?"),
+          body
+        );
       } finally {
         scope.clearTimeout(deadline);
         scope.releaseRequest(controller);
+        overviewRequests.delete(controller);
       }
     };
     const currentParams = () => new URLSearchParams({ machine: capabilities.source_key });
     const browsingParams = () => {
       const value = currentParams();
       if (harness) value.set("harness", harness);
-      if (repo) value.set("repo", repo);
+      if (repo === "__none__") value.set("no_repo", "1");
+      else if (repo) value.set("repo", repo);
+      if (model2) value.set("model", model2);
       if (query) value.set("q", query);
       return value;
     };
     const saveFilters = () => history.replaceState(history.state, "", "/sessions?" + browsingParams());
     const params = () => new URLSearchParams({ machine: capabilities.source_key, scope: "retained_history" });
+    const overview = createOverviewPages({
+      orderScope,
+      reviews: () => showApprovalReviews,
+      root,
+      homeIntro: viewerHost?.initialHome?.element,
+      nativeContent: !!viewerHost?.nativePage,
+      api,
+      panelOpened,
+      panelClosed,
+      route: () => viewerHost?.nativePage ? "home" : navigation.route.v,
+      chrome,
+      session(intent, turn) {
+        if (sessionPanel && history.state?.sheet) {
+          navigateFromPanel(sessionPanel, () => overviewSession(intent, turn));
+          return;
+        }
+        overviewSession(intent, turn);
+      },
+      trace(intent, turn) {
+        if (sessionPanel && history.state?.sheet) {
+          navigateFromPanel(sessionPanel, () => overviewTrace(intent, turn));
+          return;
+        }
+        overviewTrace(intent, turn);
+      },
+      sessions(filters) {
+        const open = () => {
+          const value = new URLSearchParams();
+          if (filters.machine) value.set("machine", filters.machine);
+          if (filters.harness) value.set("harness", filters.harness);
+          if (filters.repo === "__none__") value.set("no_repo", "1");
+          else if (filters.repo) value.set("repo", filters.repo);
+          if (filters.model) value.set("model", filters.model);
+          history.pushState(null, "", "/sessions?" + value);
+          fromLocation();
+        };
+        if (sessionPanel && history.state?.sheet) navigateFromPanel(sessionPanel, open);
+        else open();
+      }
+    });
+    function overviewSession(intent, turn) {
+      const url = "/s/native/" + encodeURIComponent(intent.catalog_key) + "?" + new URLSearchParams({ machine: intent.source_key }) + (turn ? "#turn=" + encodeURIComponent(turn) : "");
+      if (viewerHost?.nativePage) {
+        location.assign(url);
+        return;
+      }
+      history.pushState(null, "", url);
+      fromLocation();
+    }
+    function overviewTrace(intent, turn) {
+      const url = "/trace/native/" + encodeURIComponent(intent.catalog_key) + "/" + encodeURIComponent(turn) + "?" + new URLSearchParams({ machine: intent.source_key });
+      if (viewerHost?.nativePage) {
+        location.assign(url);
+        return;
+      }
+      history.pushState(null, "", url);
+      fromLocation();
+    }
+    function leaveScreen() {
+      sessionPanel?.destroy();
+      ++causalEpoch;
+      causal = null;
+      causalLoading = false;
+      causalExpanded.clear();
+      if (active) {
+        preserveScroll();
+        closeSessionComposer(active.root);
+      }
+      overview.leave();
+      for (const request of overviewRequests) request.abort();
+      overviewRequests.clear();
+      ++listEpoch;
+      updating = false;
+      scope.clearTimeout(listRetry);
+      cancelCandidate();
+      active = null;
+      selection.clear();
+      sourcesOpen = false;
+      releaseScreen(root);
+      render(null, root);
+      root.replaceChildren();
+    }
+    function goOverview(route, push = true) {
+      leaveScreen();
+      navigation.route = { v: route };
+      if (push) history.pushState(navigation.route, "", route === "home" ? "/" : "/" + route);
+      shell.closeDrawer(true);
+      overview.draw();
+      void overview.refresh();
+    }
+    function drawCausal() {
+      if (!causal || navigation.route.v !== "trace") return;
+      const accepted = causal;
+      renderCausalTrace(root, accepted, Date.now(), causalExpanded, {
+        session(key2, turn) {
+          const url = "/s/native/" + encodeURIComponent(key2) + "?" + new URLSearchParams({ machine: accepted.source }) + (turn ? "#turn=" + encodeURIComponent(turn) : "");
+          history.pushState(null, "", url);
+          fromLocation();
+        },
+        fold: drawCausal
+      });
+      chrome();
+    }
+    async function loadCausal() {
+      const route = navigation.route;
+      if (disposed || route.v !== "trace" || causalLoading) return;
+      const epoch = causalEpoch, source = capabilities.source_key;
+      causalLoading = true;
+      try {
+        const p = params();
+        p.set("sid", route.sid);
+        p.set("turn", route.turn);
+        const next = parseCausalTrace(
+          await api("/api/session-trace?" + p),
+          source,
+          route.sid,
+          route.turn
+        );
+        const metadataParams = params();
+        metadataParams.set("sid", route.sid);
+        const metadata = parseCatalogPage(await api("/api/sessions?" + metadataParams));
+        if (metadata.machine !== source || metadata.read_scope !== "retained_history")
+          throw Error("Causal metadata selection changed");
+        next.metadata = metadata.items.find((item2) => item2.key === route.sid);
+        if (disposed || epoch !== causalEpoch || navigation.route !== route || source !== capabilities.source_key)
+          return;
+        const previous = causal;
+        next.previewReady = /* @__PURE__ */ new Set();
+        if (previous?.source === source) {
+          for (const sid of previous.previewReady ?? []) {
+            if (previous.previews[sid] !== next.previews[sid]) continue;
+            if ([...next.handoffs.values()].some((edge) => {
+              const owner = next.previewOwners.get(edge.id), old = previous.previewOwners.get(edge.id);
+              return owner?.brief === sid && old?.brief !== sid || owner?.result === sid && old?.result !== sid;
+            }) || (next.turns[sid] ?? []).some(
+              (turn) => !previous.turns[sid]?.some((old) => old.id === turn.id)
+            ))
+              continue;
+            next.previewReady.add(sid);
+            for (const edge of next.handoffs.values()) {
+              const old = previous.handoffs.get(edge.id), owner = next.previewOwners.get(edge.id);
+              if (!old) continue;
+              if (owner?.brief === sid)
+                Object.assign(edge, {
+                  brief: old.brief,
+                  answer: old.kind === "toyou" ? old.answer : void 0
+                });
+              if (owner?.result === sid) edge.result = old.result;
+            }
+            for (const turn of next.turns[sid] ?? []) {
+              const old = previous.turns[sid]?.find((value) => value.id === turn.id);
+              if (turn.u && old?.u) turn.u = old.u;
+            }
+          }
+        }
+        const jobs = [];
+        for (const sid of /* @__PURE__ */ new Set([...Object.keys(next.previews), ...Object.keys(next.sessions)])) {
+          if (next.previewReady.has(sid)) continue;
+          const entries = [...next.handoffs.values()].filter((edge) => {
+            const owner = next.previewOwners.get(edge.id);
+            return owner?.brief === sid || owner?.result === sid;
+          }).map((edge) => ({ event: edge.id })), turns = (next.turns[sid] ?? []).map((turn) => ({ turn: turn.id }));
+          const selected2 = [...entries, ...turns];
+          for (let start = 0; start < selected2.length; start += 8) {
+            const group = selected2.slice(start, start + 8);
+            jobs.push({
+              sid,
+              events: group.flatMap((value) => "event" in value ? [value.event] : []),
+              turns: group.flatMap((value) => "turn" in value ? [value.turn] : [])
+            });
+          }
+        }
+        const remaining = /* @__PURE__ */ new Map();
+        for (const job of jobs) remaining.set(job.sid, (remaining.get(job.sid) ?? 0) + 1);
+        const unavailable = /* @__PURE__ */ new Set();
+        const updateObservation = () => {
+          next.observation = unavailable.size || next.previewsIncomplete ? "Some recorded text is unavailable. Retrying\u2026" : remaining.size ? "Loading recorded text\u2026" : void 0;
+          if (causal === next && !disposed && epoch === causalEpoch && navigation.route === route)
+            drawCausal();
+        };
+        causal = next;
+        updateObservation();
+        let pending = 0;
+        await Promise.all(
+          Array.from({ length: Math.min(4, jobs.length) }, async () => {
+            while (pending < jobs.length && !disposed && epoch === causalEpoch) {
+              const job = jobs[pending++], generation2 = next.previews[job.sid];
+              if (!generation2) {
+                unavailable.add(job.sid);
+                remaining.delete(job.sid);
+                updateObservation();
+                continue;
+              }
+              try {
+                const query2 = params();
+                query2.set("sid", job.sid);
+                query2.set("generation", generation2);
+                query2.set("events", JSON.stringify(job.events));
+                query2.set("turns", JSON.stringify(job.turns));
+                const detail = object(await api("/api/session-home?" + query2));
+                if (disposed || epoch !== causalEpoch || navigation.route !== route || source !== capabilities.source_key)
+                  return;
+                const identity2 = object(detail.identity);
+                if (detail.api !== 1 || detail.generation !== generation2 || identity2.source_key !== source || identity2.catalog_key !== job.sid || typeof detail.incomplete !== "boolean")
+                  throw Error("Causal text selection changed");
+                if (detail.incomplete) {
+                  const values = [
+                    ...job.events.map((event) => ({ event })),
+                    ...job.turns.map((turn) => ({ turn }))
+                  ];
+                  if (values.length > 1) {
+                    const half = Math.ceil(values.length / 2);
+                    for (const part of [values.slice(0, half), values.slice(half)])
+                      jobs.push({
+                        sid: job.sid,
+                        events: part.flatMap((value) => "event" in value ? [value.event] : []),
+                        turns: part.flatMap((value) => "turn" in value ? [value.turn] : [])
+                      });
+                    remaining.set(job.sid, (remaining.get(job.sid) ?? 0) + 2);
+                  } else unavailable.add(job.sid);
+                }
+                const events = object(detail.events), texts = object(detail.turns);
+                const eventUpdates = job.events.flatMap((id) => {
+                  if (!events[id]) return [];
+                  const value = object(events[id]), edge = next.handoffs.get(id);
+                  if (value.brief != null && typeof value.brief !== "string")
+                    throw Error("Invalid causal text");
+                  if (value.result != null && typeof value.result !== "string")
+                    throw Error("Invalid causal result");
+                  if (value.answer != null && (!Array.isArray(value.answer) || !value.answer.every((item2) => typeof item2 === "string")))
+                    throw Error("Invalid recorded answer");
+                  const owner = next.previewOwners.get(id);
+                  return [
+                    {
+                      edge,
+                      ...owner?.brief === job.sid ? {
+                        brief: typeof value.brief === "string" ? value.brief : "",
+                        answer: edge.kind === "toyou" && Array.isArray(value.answer) ? value.answer : void 0
+                      } : {},
+                      ...owner?.result === job.sid ? { result: typeof value.result === "string" ? value.result : void 0 } : {}
+                    }
+                  ];
+                });
+                const turnUpdates = job.turns.map((id) => {
+                  const turn = next.turns[job.sid].find((turn2) => turn2.id === id);
+                  if (texts[id] != null && typeof texts[id] !== "string")
+                    throw Error("Invalid recorded prompt");
+                  return { turn, text: texts[id] };
+                });
+                for (const { edge, ...fields } of eventUpdates) Object.assign(edge, fields);
+                for (const { turn, text: text2 } of turnUpdates)
+                  if (typeof text2 === "string") turn.u = { k: "u", text: text2 };
+              } catch {
+                unavailable.add(job.sid);
+              }
+              const left = remaining.get(job.sid) - 1;
+              if (left > 0) remaining.set(job.sid, left);
+              else {
+                remaining.delete(job.sid);
+                if (!unavailable.has(job.sid)) next.previewReady.add(job.sid);
+              }
+              updateObservation();
+            }
+          })
+        );
+        if (disposed || epoch !== causalEpoch || navigation.route !== route || source !== capabilities.source_key)
+          return;
+        causal = next;
+        drawCausal();
+      } catch (error) {
+        if (disposed || epoch !== causalEpoch || navigation.route !== route) return;
+        if (causal) {
+          causal.observation = readError(error);
+          drawCausal();
+        } else
+          render(
+            /* @__PURE__ */ jsxs("p", { class: "catalog-note", role: "status", children: [
+              readError(error),
+              " ",
+              /* @__PURE__ */ jsx("button", { class: "link", type: "button", onClick: () => void loadCausal(), children: "Retry Trace" })
+            ] }),
+            root
+          );
+      } finally {
+        if (epoch === causalEpoch) causalLoading = false;
+      }
+    }
+    function goCausal(key2, turn) {
+      leaveScreen();
+      navigation.route = { v: "trace", sid: key2, turn };
+      shell.closeDrawer(true);
+      render(
+        /* @__PURE__ */ jsx("p", { class: "catalog-note", role: "status", children: "Loading recorded Trace\u2026" }),
+        root
+      );
+      chrome();
+      void loadCausal();
+    }
     function chrome() {
-      const name = sourcesOpen ? "Choose a machine" : active?.meta?.name ?? (active ? "Session" : "Sessions");
+      if (shell.account.open) {
+        pendingChrome = true;
+        return;
+      }
+      const route = navigation.route.v;
+      const name = viewerHost?.nativePage && !["home", "analytics", "sessions", "session"].includes(route) ? viewerHost.nativePage.title : route === "home" ? "Home" : route === "analytics" ? "Analytics" : route === "machines" ? "Machines" : route === "trace" ? "Trace" : sourcesOpen ? "Choose a machine" : active?.meta?.name ?? (active ? "Session" : "Sessions");
       const recentHeading = document.querySelector(".side-h");
-      if (recentHeading) recentHeading.textContent = "Recent on this machine";
+      if (recentHeading)
+        recentHeading.textContent = viewerHost?.nativePage || ["home", "analytics", "machines"].includes(route) ? "Recent" : "Recent on this machine";
       shell.update(
         projectShellNavigation(
-          viewerHost?.navigation ?? { leading: viewerHost?.nativeNavigation },
-          "sessions",
+          viewerHost?.navigation ?? standaloneNavigation ?? { leading: viewerHost?.nativeNavigation },
+          viewerHost?.nativePage && !["home", "analytics", "sessions", "session"].includes(route) ? viewerHost.nativePage.nav : route === "session" || route === "trace" ? "sessions" : route,
           {
             ...viewerHost?.navigation?.leading?.find((item2) => item2.key === "new-session") ? {
               "new-session": withReturnPath(
@@ -16584,27 +12406,161 @@ globalThis.__semonUIShared = __semonUIShared;
                 location.pathname + location.search
               )
             } : {},
-            home: viewerHost?.navigation?.paths?.home ?? "/?compat=1",
-            analytics: viewerHost?.navigation?.paths?.analytics ?? "/analytics?compat=1",
+            home: viewerHost?.navigation?.paths?.home ?? "/",
+            analytics: viewerHost?.navigation?.paths?.analytics ?? "/analytics",
             sessions: "/sessions?" + browsingParams(),
-            machines: viewerHost?.machinesPath ?? "/machines?compat=1"
-          }
+            machines: machinesHref()
+          },
+          overview.waitingCount() === void 0 ? {} : { home: overview.waitingCount() }
         ),
         rail
       );
-      if (chromeTitle !== name || chromeSession !== !!active) {
-        chromeTitle = name;
-        chromeSession = !!active;
+      {
+        const session = active?.meta;
+        const content2 = active && session ? sessionBar.update(
+          {
+            mode: active.errorMode ? "errors" : active.findOpen ? "find" : "normal",
+            name,
+            session: active.key,
+            state: selectedSessionState(session),
+            stateLabel: STATE[selectedSessionState(session)] ?? "Recorded history",
+            stateTip: "Status: " + (STATE[selectedSessionState(session)] ?? "Recorded history"),
+            showState: true,
+            ancestors: (session.details?.family?.ancestors ?? []).map((row) => ({
+              id: row.key,
+              name: row.name
+            })),
+            crumb: "Sessions",
+            labels: selectedSessionLabels(
+              session,
+              page?.machine_info.label ?? active.sourceKey
+            ),
+            trace: false,
+            analytics: false,
+            days: 7,
+            query: active.find ?? "",
+            count: visibleEntries(active).length + (active.find ? " loaded " + (visibleEntries(active).length === 1 ? "match" : "matches") : " loaded " + (visibleEntries(active).length === 1 ? "record" : "records")),
+            filter: active.filter ?? "all",
+            failed: session.details?.errors ?? 0,
+            signals: Object.values(session.details?.signals ?? {}).reduce(
+              (sum, count2) => sum + count2,
+              0
+            ),
+            errorMode: active.errorMode ?? "",
+            errorText: active.errorMode ? (active.errorMode === "signals" ? "Signal " : "Error ") + (active.annotations?.total ? (active.errorIndex ?? 0) + 1 : 0) + " of " + (active.annotations?.total ?? 0) : "",
+            errorDisabled: (active.annotations?.total ?? 0) < 2,
+            icons: { search: I.search, more: I.more, back: I.back, x: I.x, up: I.up, dn: I.dn }
+          },
+          {
+            ancestor(key2) {
+              void goSession(key2);
+            },
+            crumb() {
+              goList();
+            },
+            find() {
+              if (!active) return;
+              active.errorMode = void 0;
+              for (const node of active.root.querySelectorAll(".err-current"))
+                node.classList.remove("err-current");
+              active.findOpen = true;
+              chrome();
+              document.querySelector("#find")?.focus();
+            },
+            closeFind() {
+              if (!active) return;
+              active.findOpen = false;
+              active.find = "";
+              active.filter = "all";
+              active.renderedRevision = -1;
+              chrome();
+              drawSelected(active);
+            },
+            query(value) {
+              if (!active) return;
+              active.find = value.toLowerCase();
+              active.renderedRevision = -1;
+              chrome();
+              drawSelected(active);
+            },
+            filter(value) {
+              if (!active) return;
+              if (value === "signals" || value === "failures") {
+                openAnnotations(active, value === "signals" ? "signals" : "errors");
+                return;
+              }
+              active.filter = value;
+              active.renderedRevision = -1;
+              chrome();
+              drawSelected(active);
+            },
+            menu(trigger, runs) {
+              if (active) openSessionMenu(active, trigger, runs);
+            },
+            errors() {
+              if (active) openAnnotations(active, "errors");
+            },
+            closeErrors() {
+              if (!active) return;
+              closeAnnotations(active);
+            },
+            step(direction) {
+              if (!active) return;
+              const count2 = active.annotations?.total ?? 0;
+              if (!count2) return;
+              active.errorIndex = ((active.errorIndex ?? 0) + direction + count2) % count2;
+              chrome();
+              void readAnnotations(active);
+            },
+            range() {
+            }
+          }
+        ) : null;
         const label = document.createElement("span");
-        label.className = "catalog-session-name l1";
+        label.className = "t catalog-session-name l1";
         label.textContent = name;
-        title.replaceChildren(label);
-        if (active) title.prepend(back);
+        if (route === "trace") {
+          if (!traceTitle) title.replaceChildren();
+          traceTitle = true;
+          const key2 = navigation.route.v === "trace" ? navigation.route.sid : "", turn = navigation.route.v === "trace" ? navigation.route.turn : void 0, session2 = causal?.sessions[key2];
+          render(
+            /* @__PURE__ */ jsxs("div", { class: "l1", children: [
+              /* @__PURE__ */ jsx(
+                "button",
+                {
+                  type: "button",
+                  class: "crumb",
+                  "aria-label": "Back to " + (session2?.name ?? "session"),
+                  onClick: () => {
+                    void goSession(key2, void 0, true, turn);
+                  },
+                  children: session2?.name ?? "Session"
+                }
+              ),
+              /* @__PURE__ */ jsx("span", { class: "crumb-sep", children: "\u203A" }),
+              /* @__PURE__ */ jsx("span", { class: "t", children: "Trace" })
+            ] }),
+            title
+          );
+        } else {
+          traceTitle = false;
+          render(null, title);
+          title.replaceChildren(label);
+          if (active) title.prepend(back);
+        }
         shell.topbar({
-          titleSlot: title,
-          actions: sourcesOpen ? [] : [sources],
+          titleSlot: content2 && !active?.findOpen && !active?.errorMode ? content2.titleSlot : title,
+          mode: (active?.findOpen || active?.errorMode) && content2 ? [content2.mode] : void 0,
+          actions: route === "analytics" ? [overview.actions] : active ? [composerTarget, ...content2 ? [content2.actions] : [sources]] : route === "sessions" && !sourcesOpen ? [sources] : route === "trace" ? [traceActions] : [],
           session: !!active,
-          lead: { label: "Open menu", icon: I.menu },
+          lead: route === "trace" && navigation.route.v === "trace" ? {
+            label: "Back to " + (causal?.metadata?.name ?? "session"),
+            icon: I.chev,
+            back: () => {
+              if (navigation.route.v === "trace")
+                void goSession(navigation.route.sid, void 0, true, navigation.route.turn);
+            }
+          } : { label: "Open menu", icon: I.menu },
           account: account ? {
             account,
             compact: false,
@@ -16615,33 +12571,395 @@ globalThis.__semonUIShared = __semonUIShared;
               root.classList.toggle("wide-mode", wide);
               shell.account.updateWide(wide);
             }
-          } : null
+          } : null,
+          accountTarget: content2?.accountTarget
         });
         shell.drawerAccount(account ? { account, compact: true, wide, onWideChange() {
         } } : null);
       }
-      recent.update({
-        empty: !items.length,
-        items: items.slice(0, 60).map((item2) => ({
-          id: item2.key,
-          name: item2.name,
-          label: item2.name,
-          state: "",
-          stateLabel: "Cached history",
-          age: item2.freshness.state,
-          model: item2.model,
-          modelTip: item2.model,
-          fields: [],
-          current: active?.key === item2.key ? "page" : void 0,
-          rail: false,
-          open: false,
-          depth: 0,
-          stuck: false
-        }))
+      if (active)
+        scope.frame(() => measureViewerBar(document.querySelector("#topbar")));
+      if (viewerHost?.nativePage || ["home", "analytics", "machines"].includes(route))
+        recent.update(overview.recentSnapshot(void 0, [], void 0, rail));
+      else
+        recent.update(
+          overview.recentSnapshot(capabilities.source_key, items, active?.key, rail, active?.meta)
+        );
+      const pinned = shell.slots.recent.querySelector(".tree-row.stuck");
+      setGeometry(shell.slots.recent, "scrollPaddingTop", pinned ? pinned.offsetHeight + 8 : null);
+      if (ordering.scopes.get("recent")?.n) {
+        if (!orderIdle) armOrderIdle();
+      } else {
+        scope.clearTimeout(orderIdle);
+        orderIdle = void 0;
+      }
+    }
+    function visibleEntries(view) {
+      const query2 = view.find ?? "", filter = view.filter ?? "all";
+      return view.store.entries().filter((item2) => {
+        const entry2 = item2.entry;
+        if (filter === "messages" && !["u", "a", "h"].includes(entry2.k)) return false;
+        if (filter === "steps" && entry2.k !== "tool") return false;
+        if (filter === "failures" && !(entry2.k === "tool" && (entry2.ok === false || entry2.unfinished)))
+          return false;
+        if (filter === "signals" && entry2.k !== "signal") return false;
+        if (!query2) return true;
+        const text2 = entry2.k === "tool" ? [
+          entry2.name,
+          entry2.title,
+          entry2.arg,
+          entry2.in,
+          entry2.out,
+          view.fields.get(item2.entry_id)?.text
+        ].join(" ") : entry2.k === "signal" ? recordedSignalLabel(entry2) : "text" in entry2 ? entry2.text ?? "" : item2.native_action_text ?? "";
+        return text2.toLowerCase().includes(query2);
       });
     }
+    async function readAnnotations(view, force = false) {
+      const current = view.store.selectedPage(), mode = view.errorMode;
+      if (disposed || active !== view || !mode || !current || view.annotationsLoading) return;
+      const index = view.errorIndex ?? 0, first = Math.floor(index / 100) * 100;
+      if (!force && view.annotations?.generation === current.projection.generation && view.annotations.kind === mode && view.annotations.first === first) {
+        highlightAnnotation(view);
+        return;
+      }
+      const epoch = (view.annotationsEpoch ?? 0) + 1;
+      view.annotationsEpoch = epoch;
+      view.annotationsLoading = true;
+      const query2 = params();
+      query2.set("sid", view.key);
+      query2.set("kind", mode);
+      query2.set("after", String(first));
+      query2.set("limit", "100");
+      query2.set("generation", current.projection.generation);
+      chrome();
+      try {
+        const next = parseCatalogAnnotations(await api("/api/session-annotations?" + query2));
+        if (disposed || active !== view || view.errorMode !== mode || epoch !== view.annotationsEpoch || view.store.selectedPage()?.projection.generation !== next.generation)
+          return;
+        if (next.source !== view.sourceKey || next.key !== view.key || next.kind !== mode || next.first !== first)
+          throw Error("Annotation identity changed");
+        view.annotations = next;
+        view.errorIndex = Math.min(index, Math.max(0, next.total - 1));
+        highlightAnnotation(view);
+      } catch (error) {
+        if (!disposed && active === view && epoch === view.annotationsEpoch) {
+          view.note = readError(error);
+          drawSelected(view);
+        }
+      } finally {
+        if (epoch === view.annotationsEpoch) view.annotationsLoading = false;
+        if (!disposed && active === view) {
+          chrome();
+          if (view.annotationsFocus && view.errorMode && view.annotations) {
+            view.annotationsFocus = false;
+            document.querySelector("#err-next")?.focus({ preventScroll: true });
+          }
+        }
+      }
+    }
+    function highlightAnnotation(view) {
+      if (active !== view || !view.errorMode) return;
+      for (const node2 of view.root.querySelectorAll(".err-current"))
+        node2.classList.remove("err-current");
+      const page2 = view.annotations, target = page2?.entries[(view.errorIndex ?? 0) - page2.first];
+      if (!target) return;
+      const identity2 = view.store.entries().find((item2) => item2.slot === target.slot)?.entry_id;
+      const node = [...view.root.querySelectorAll("[data-entry-key]")].find(
+        (node2) => node2.dataset.entryKey === identity2 && (node2.classList.contains("signal-marker") || node2.classList.contains("step"))
+      );
+      if (!node) {
+        if (view.annotationRange !== target.slot) {
+          view.annotationRange = target.slot;
+          void loadSelected(view, Math.max(0, target.slot - 30)).finally(() => {
+            view.annotationRange = void 0;
+          });
+        }
+        return;
+      }
+      view.following = false;
+      node.classList.add("err-current");
+      node.closest(".tgroup")?.querySelector('.tgroup > button[aria-expanded="false"]')?.click();
+      const phone = matchMedia("(max-width: 760px)").matches, main = document.querySelector("#main");
+      const row = (node.querySelector(":scope > button") ?? node).getBoundingClientRect();
+      const top = document.querySelector("#topbar").getBoundingClientRect().bottom;
+      const bottom = phone ? innerHeight : main.getBoundingClientRect().bottom;
+      const delta = (row.top + row.bottom - top - bottom) / 2;
+      if (phone) window.scrollBy(0, delta);
+      else main.scrollTop += delta;
+    }
+    function closeAnnotations(view) {
+      view.errorMode = void 0;
+      view.errorIndex = void 0;
+      view.annotationsEpoch = (view.annotationsEpoch ?? 0) + 1;
+      view.annotationsLoading = false;
+      const restore = view.errorRestore;
+      view.findOpen = restore?.findOpen ?? false;
+      view.find = restore?.find ?? "";
+      view.filter = restore?.filter ?? "all";
+      view.errorRestore = void 0;
+      for (const node of view.root.querySelectorAll(".err-current"))
+        node.classList.remove("err-current");
+      if (restore) view.store.retainRanges(restore.ranges);
+      view.renderedRevision = -1;
+      drawSelected(view);
+      const restoreScreen = () => {
+        if (disposed || active !== view || view.errorMode || !restore) return;
+        for (const button of view.root.querySelectorAll(
+          ".tgroup > button, .step > button"
+        )) {
+          const key2 = button.parentElement?.dataset.entryKey ?? button.parentElement?.dataset.e;
+          if (key2 && button.getAttribute("aria-expanded") === "true" !== restore.expanded.has(key2))
+            button.click();
+        }
+        if (matchMedia("(max-width: 760px)").matches) window.scrollTo(0, restore.scroll);
+        else document.querySelector("#main").scrollTop = restore.scroll;
+        chrome();
+        document.querySelector(restore.focus)?.focus({ preventScroll: true });
+      };
+      if (restore?.key && !view.store.entries().some((item2) => item2.entry_id === restore.key))
+        void loadSelected(view, restore.first).finally(() => scope.frame(restoreScreen));
+      else scope.frame(restoreScreen);
+      chrome();
+    }
+    function openAnnotations(view, mode) {
+      if (!view.errorMode) {
+        const entries = view.store.entries(), first = entries[0];
+        view.errorRestore = {
+          scroll: matchMedia("(max-width: 760px)").matches ? window.scrollY : document.querySelector("#main").scrollTop,
+          first: first?.slot ?? 0,
+          key: first?.entry_id,
+          ranges: view.store.loadedRanges(),
+          findOpen: view.findOpen ?? false,
+          find: view.find,
+          filter: view.filter,
+          focus: view.findOpen ? "#find" : matchMedia("(max-width: 760px)").matches ? "#more-btn" : ".lab-errs",
+          expanded: new Set(
+            [
+              ...view.root.querySelectorAll(
+                '.tgroup > button[aria-expanded="true"], .step > button[aria-expanded="true"]'
+              )
+            ].map((node) => node.parentElement?.dataset.entryKey ?? node.parentElement?.dataset.e).filter((key2) => !!key2)
+          )
+        };
+      }
+      view.find = "";
+      view.filter = "all";
+      view.findOpen = false;
+      view.renderedRevision = -1;
+      view.errorMode = mode;
+      view.errorIndex = 0;
+      view.annotations = void 0;
+      view.annotationsFocus = true;
+      drawSelected(view);
+      chrome();
+      void readAnnotations(view);
+      document.querySelector("#err-close")?.focus();
+    }
+    function openSessionMenu(view, trigger, runs = false) {
+      const metadata = view?.meta ?? causal?.metadata;
+      if (!metadata || (view ? active !== view : navigation.route.v !== "trace")) return;
+      sessionPanel?.destroy();
+      const turn = view ? [...view.root.querySelectorAll("[data-turn]")].find(
+        (node) => node.getBoundingClientRect().bottom > document.querySelector("#topbar").getBoundingClientRect().bottom
+      )?.dataset.turn : void 0;
+      const snapshot = selectedSessionMenu(
+        metadata,
+        page?.machine_info.label ?? capabilities.source_key,
+        wide,
+        !!turn
+      );
+      const panel = createPanelChrome(
+        {
+          title: metadata.name,
+          sub: snapshot.status,
+          label: "Session menu for " + metadata.name,
+          className: "anchored session-menu"
+        },
+        {
+          opened() {
+            history.pushState({ ...navigation.route, sheet: 1 }, "");
+            trigger.setAttribute("aria-expanded", "true");
+          },
+          closed() {
+            render(null, panel.body);
+            if (sessionPanel === panel) sessionPanel = null;
+            trigger.setAttribute("aria-expanded", "false");
+            if (!disposed && !restoringOverlayHistory && history.state?.sheet) {
+              overlayBackPending = true;
+              history.back();
+            }
+            if (trigger.isConnected) trigger.focus({ preventScroll: true });
+          }
+        }
+      );
+      sessionPanel = panel;
+      renderSessionMenu(panel.body, snapshot, {
+        wide: () => wide,
+        session(key2) {
+          navigateFromPanel(panel, () => {
+            void goSession(key2);
+          });
+        },
+        action(key2) {
+          if (key2 === "runs") {
+            panel.body.querySelector(".runs")?.scrollIntoView({ block: "start" });
+          } else if (key2 === "wide") {
+            wide = !wide;
+            writeShellPreference("wide", wide);
+            root.classList.toggle("wide-mode", wide);
+            shell.account.updateWide(wide);
+          } else if (key2 === "source") {
+            navigateFromPanel(panel, () => sources.click());
+          } else if (key2 === "signals" || key2 === "errors") {
+            navigateFromPanel(panel, () => {
+              const kind = key2 === "errors" ? "errors" : "signals";
+              if (view) openAnnotations(view, kind);
+              else
+                void goSession(metadata.key).then(() => {
+                  if (active?.key === metadata.key) openAnnotations(active, kind);
+                });
+            });
+          } else if (key2 === "trace" && turn && view) {
+            navigateFromPanel(panel, () => {
+              history.pushState(
+                null,
+                "",
+                "/trace/native/" + encodeURIComponent(view.key) + "/" + encodeURIComponent(turn) + "?" + browsingParams()
+              );
+              goCausal(view.key, turn);
+            });
+          }
+        }
+      });
+      panel.show();
+      if (runs) panel.body.querySelector(".runs")?.scrollIntoView({ block: "nearest" });
+    }
+    function openRecordedTool(view, key2, inputLabel, script = false) {
+      if (active !== view || disposed || !view.meta) return;
+      const item2 = view.store.entries().find((item3) => item3.entry_id === key2);
+      if (!item2 || item2.entry.k !== "tool") return;
+      const entry2 = item2.entry, trigger = document.activeElement;
+      sessionPanel?.destroy();
+      const panel = createPanelChrome(
+        {
+          title: toolInfo(entry2.name)[1] + " " + entry2.arg,
+          sub: entry2.name + " \xB7 " + (entry2.ok === false ? "Failed" : "Recorded result"),
+          className: "full"
+        },
+        {
+          opened() {
+            history.pushState({ ...navigation.route, sheet: 1 }, "");
+          },
+          closed() {
+            render(null, panel.body);
+            if (sessionPanel === panel) sessionPanel = null;
+            if (!disposed && !restoringOverlayHistory && history.state?.sheet) {
+              overlayBackPending = true;
+              history.back();
+            }
+            if (active === view && trigger instanceof HTMLElement && trigger.isConnected)
+              trigger.focus({ preventScroll: true });
+          }
+        }
+      );
+      panel.body.classList.add("viewer-b");
+      sessionPanel = panel;
+      let scriptResult = {};
+      let outputResult, outputNote = "";
+      const draw = () => {
+        if (disposed || active !== view || sessionPanel !== panel) return;
+        const field = script ? null : fieldView(view, item2), data = {
+          ...entry2,
+          ...script ? scriptResult : { scriptText: void 0 },
+          ...field?.text === void 0 ? {} : { out: field.text },
+          ...field ? { boundedPreview: true } : {},
+          ...outputResult
+        };
+        render(
+          /* @__PURE__ */ jsxs(Fragment2, { children: [
+            script && scriptResult.scriptText === void 0 && !scriptResult.scriptFailed ? /* @__PURE__ */ jsx("p", { role: "status", class: "vnote", children: "Loading recorded script\u2026" }) : /* @__PURE__ */ jsx(
+              FullTool,
+              {
+                data,
+                inputLabel,
+                waiting: selectedSessionState(view.meta) === "wait"
+              }
+            ),
+            field && (field.action || view.fields.get(key2)?.note) && /* @__PURE__ */ jsxs("p", { class: "vnote", children: [
+              field.note,
+              field.action && /* @__PURE__ */ jsx(
+                "button",
+                {
+                  class: "btn sh-quiet",
+                  type: "button",
+                  disabled: field.action.busy,
+                  onClick: () => {
+                    void loadField(view, item2).then(draw);
+                    draw();
+                  },
+                  children: field.action.label
+                }
+              )
+            ] }),
+            outputNote && /* @__PURE__ */ jsx("p", { class: "vnote", role: "status", children: outputNote })
+          ] }),
+          panel.body
+        );
+      };
+      draw();
+      panel.show();
+      if (script) {
+        const generation2 = view.store.selectedPage().projection.generation, p = params();
+        p.set("sid", view.key);
+        p.set("after", String(item2.slot));
+        p.set("limit", "1");
+        p.set("generation", generation2);
+        p.set("part", "script");
+        void api("/api/session-entry?" + p).then((value) => {
+          if (disposed || active !== view || sessionPanel !== panel || view.store.selectedPage()?.projection.generation !== generation2)
+            return;
+          const page2 = parseCatalogTranscriptPage(value), saved = page2.entries[0];
+          if (page2.identity.source_key !== view.sourceKey || page2.identity.catalog_key !== view.key || page2.identity.read_scope !== view.store.selectedPage().identity.read_scope || page2.projection.generation !== generation2 || page2.range.first !== item2.slot || page2.entries.length !== 1 || saved.entry_id !== item2.entry_id || JSON.stringify(saved.provenance) !== JSON.stringify(item2.provenance) || saved.entry.k !== "tool" || typeof saved.entry.scriptText !== "string")
+            throw Error("Invalid recorded script scope");
+          scriptResult = {
+            scriptText: saved.entry.scriptText,
+            scriptTruncated: saved.entry.scriptTruncated
+          };
+          draw();
+        }).catch(() => {
+          scriptResult = { scriptFailed: true };
+          draw();
+        });
+      } else if (fieldView(view, item2)?.action) {
+        void loadField(view, item2).then(draw);
+        draw();
+      } else if (entry2.cut) {
+        const generation2 = view.store.selectedPage().projection.generation, p = params();
+        p.set("sid", view.key);
+        p.set("after", String(item2.slot));
+        p.set("limit", "1");
+        p.set("generation", generation2);
+        p.set("part", "output");
+        outputNote = "Loading recorded output\u2026";
+        draw();
+        void api("/api/session-entry?" + p).then((value) => {
+          if (disposed || active !== view || sessionPanel !== panel || view.store.selectedPage()?.projection.generation !== generation2)
+            return;
+          const page2 = parseCatalogTranscriptPage(value), saved = page2.entries[0];
+          if (page2.identity.source_key !== view.sourceKey || page2.identity.catalog_key !== view.key || page2.identity.read_scope !== view.store.selectedPage().identity.read_scope || page2.projection.generation !== generation2 || page2.range.first !== item2.slot || page2.entries.length !== 1 || saved.entry_id !== item2.entry_id || JSON.stringify(saved.provenance) !== JSON.stringify(item2.provenance) || saved.entry.k !== "tool")
+            throw Error("Invalid recorded output scope");
+          outputResult = { out: saved.entry.out, cut: saved.entry.cut };
+          outputNote = saved.entry.outputTruncated ? "The output preview is bounded; the remaining text is not shown." : "";
+          draw();
+        }).catch(() => {
+          outputNote = "Couldn't load the full text: this is the preview.";
+          draw();
+        });
+      }
+    }
     function drawList() {
-      if (disposed || active || sourcesOpen) return;
+      if (disposed || navigation.route.v !== "sessions" || active || sourcesOpen) return;
       chrome();
       const focused = document.activeElement;
       const draft = focused instanceof HTMLInputElement && root.contains(focused) ? {
@@ -16653,7 +12971,24 @@ globalThis.__semonUIShared = __semonUIShared;
       renderCatalogList(
         root,
         {
-          items,
+          items: orderRows(
+            orderScope(
+              "sessions",
+              JSON.stringify([
+                capabilities.source_key,
+                harness,
+                repo,
+                model2,
+                query,
+                showApprovalReviews
+              ])
+            ),
+            "sessions",
+            items.filter((item2) => showApprovalReviews || item2.presentation_kind !== "Approval review").map((item2) => ({ ...item2, id: item2.key })),
+            (a, b) => (b.last ?? 0) - (a.last ?? 0) || a.key.localeCompare(b.key)
+          ).map((item2) => ({ ...item2, presentation: catalogSessionRow(item2) })),
+          reviews: showApprovalReviews,
+          hasReviews: showApprovalReviews || items.some((item2) => item2.presentation_kind === "Approval review"),
           sourceLabel: page?.machine_info.label ?? (capabilities.source_key || "This source"),
           updating,
           candidates,
@@ -16671,12 +13006,12 @@ globalThis.__semonUIShared = __semonUIShared;
           note,
           harness,
           repo,
+          model: model2,
           query,
           metadataSearch: capabilities.metadata_search,
           searchPartial: page?.search?.partial ?? false,
           searchIndexIncomplete: page?.search ? !page.search.index_complete : false,
-          more: cursor !== null,
-          compatibilityHref: "/sessions?compat=1" + (capabilities.source_key ? "&machine=" + encodeURIComponent(capabilities.source_key) : "")
+          more: cursor !== null
         },
         {
           session(item2) {
@@ -16684,6 +13019,12 @@ globalThis.__semonUIShared = __semonUIShared;
               item2.key,
               items.find((row) => row.key === item2.key)
             );
+          },
+          reviews() {
+            showApprovalReviews = !showApprovalReviews;
+            ordering.scopes.clear();
+            drawList();
+            chrome();
           },
           candidate(item2) {
             void prepareCandidate(item2);
@@ -16695,17 +13036,19 @@ globalThis.__semonUIShared = __semonUIShared;
             void loadCandidates(false);
           },
           filters(values) {
-            if (harness === values.harness && repo === values.repo && query === values.q) return;
+            if (harness === values.harness && repo === values.repo && model2 === values.model && query === values.q)
+              return;
             cancelCandidate();
             harness = values.harness;
             repo = values.repo;
+            model2 = values.model;
             query = values.q;
             saveFilters();
             void loadList(false);
           },
           clearFilters() {
             cancelCandidate();
-            harness = repo = query = "";
+            harness = repo = model2 = query = "";
             saveFilters();
             void loadList(false);
             root.querySelector(".catalog-filters input")?.focus();
@@ -16725,12 +13068,15 @@ globalThis.__semonUIShared = __semonUIShared;
       }
     }
     async function loadList(append) {
-      if (disposed || append && updating) return;
+      if (disposed || !capabilities.source_key || navigation.route.v !== "sessions" && !active || append && updating)
+        return;
       scope.clearTimeout(listRetry);
       const epoch = ++listEpoch, p = params();
       p.set("limit", "60");
       if (harness) p.set("harness", harness);
-      if (repo) p.set("repo", repo);
+      if (repo === "__none__") p.set("no_repo", "1");
+      else if (repo) p.set("repo", repo);
+      if (model2) p.set("model", model2);
       if (query && capabilities.metadata_search) p.set("q", query);
       if (append && cursor !== null) p.set("cursor", cursor);
       updating = true;
@@ -16747,7 +13093,7 @@ globalThis.__semonUIShared = __semonUIShared;
         page = next;
         if (capabilities.source_candidates && !candidateLoaded) void loadCandidates(false);
         cursor = next.next_cursor;
-        items = append ? [...items, ...next.items] : next.items;
+        items = append ? [...items, ...next.items].slice(-300) : next.items;
         updating = false;
         drawList();
         chrome();
@@ -16870,21 +13216,21 @@ globalThis.__semonUIShared = __semonUIShared;
     function readError(error) {
       if (!(error && typeof error === "object" && "status" in error) && !(error instanceof Error && error.name === "AbortError"))
         return "The source returned an invalid history view. Retry after checking this source.";
-      const status2 = error && typeof error === "object" && "status" in error ? error.status : 0;
-      if (status2 === 401 || status2 === 403)
+      const status = error && typeof error === "object" && "status" in error ? error.status : 0;
+      if (status === 401 || status === 403)
         return "Authorization is required to read this source. Reconnect your account and retry.";
-      if (status2 === 400) return "The requested filter or range is unsupported by this source.";
-      if (status2 === 404) return "This recorded session is unavailable from the selected source.";
-      if (status2 === 409) return "Recorded history changed. Resynchronizing\u2026";
-      if (status2 === 503) return "The source is updating or temporarily unavailable. Retrying\u2026";
-      if (status2 === 0) return "Source observation is unavailable. Retrying\u2026";
+      if (status === 400) return "The requested filter or range is unsupported by this source.";
+      if (status === 404) return "This recorded session is unavailable from the selected source.";
+      if (status === 409) return "Recorded history changed. Resynchronizing\u2026";
+      if (status === 503) return "The source is updating or temporarily unavailable. Retrying\u2026";
+      if (status === 0) return "Source observation is unavailable. Retrying\u2026";
       return "History could not be read. Retry after checking your connection.";
     }
     function retryable(error) {
       if (!(error && typeof error === "object" && "status" in error))
         return error instanceof Error && error.name === "AbortError";
-      const status2 = error && typeof error === "object" && "status" in error ? error.status : 0;
-      return status2 === 0 || status2 === 429 || status2 === 500 || status2 === 502 || status2 === 503 || status2 === 504;
+      const status = error && typeof error === "object" && "status" in error ? error.status : 0;
+      return status === 0 || status === 429 || status === 500 || status === 502 || status === 503 || status === 504;
     }
     function preserveScroll() {
       const scroll = window.matchMedia("(max-width: 760px)").matches ? window.scrollY : document.querySelector("#main").scrollTop;
@@ -16892,13 +13238,9 @@ globalThis.__semonUIShared = __semonUIShared;
       else if (!sourcesOpen) listScroll = scroll;
     }
     function goList(push = true) {
-      cancelCandidate();
-      sourcesOpen = false;
-      if (active) preserveScroll();
-      active = null;
-      selection.clear();
+      leaveScreen();
       navigation.route = { v: "sessions" };
-      if (push) history.pushState(null, "", "/sessions?" + browsingParams());
+      if (push) history.pushState(navigation.route, "", "/sessions?" + browsingParams());
       root.replaceChildren();
       drawList();
       const row = [...root.querySelectorAll('[data-session-row="list"]')].find(
@@ -16907,17 +13249,24 @@ globalThis.__semonUIShared = __semonUIShared;
       row?.focus({ preventScroll: true });
       if (window.matchMedia("(max-width: 760px)").matches) window.scrollTo(0, listScroll);
       else document.querySelector("#main").scrollTop = listScroll;
-      if (page?.completeness.state === "partial" && items.length <= 60 && !updating)
+      if ((!page || page.completeness.state === "partial" && items.length <= 60) && !updating)
         void loadList(false);
       shell.closeDrawer(true);
     }
     function drawSelected(view) {
       if (disposed || active !== view) return;
-      const current = view.store.selectedPage(), identity2 = selection.selectedIdentity();
+      const current = view.store.selectedPage(), identity2 = selection.selectedIdentity(), observationNote = [
+        view.anchorNote,
+        view.note,
+        view.meta?.source_refs.some(
+          (reference) => reference.state === "unavailable" || reference.state === "incomplete"
+        ) ? "History is incomplete. Previously loaded text is retained." : void 0
+      ].filter(Boolean).join(" ");
       if (!current) {
         renderSessionScreen(
           view.root,
           {
+            composerTarget,
             id: view.key,
             name: view.meta?.name ?? "Session",
             control: controlFor(view),
@@ -16925,12 +13274,22 @@ globalThis.__semonUIShared = __semonUIShared;
             blocks: [],
             order: [],
             observation: "Recorded history is updating",
-            empty: view.note || (capabilities.selected_transcript ? "Loading recorded session\u2026" : "Recorded transcript is updating. The source refresh will appear automatically.")
+            retry: view.note && !view.loading ? {
+              label: "Retry selected transcript",
+              run() {
+                scope.clearTimeout(view.retry);
+                void loadSelected(view);
+              }
+            } : void 0,
+            empty: observationNote || (capabilities.selected_transcript ? "Loading recorded session\u2026" : "Recorded transcript is updating. The source refresh will appear automatically.")
           },
           {
             committed() {
             },
-            trace() {
+            trace(turn) {
+              const url = "/trace/native/" + encodeURIComponent(view.key) + "/" + encodeURIComponent(turn) + "?" + new URLSearchParams({ machine: view.sourceKey });
+              history.pushState(null, "", url);
+              goCausal(view.key, turn);
             },
             session(key2) {
               void goSession(key2);
@@ -16958,7 +13317,14 @@ globalThis.__semonUIShared = __semonUIShared;
       if (view.lastTotal !== null && !view.following && current.projection.total > view.lastTotal)
         view.newCount += current.projection.total - view.lastTotal;
       view.lastTotal = current.projection.total;
-      if (view.renderedRevision === view.store.revision && view.renderedNote === view.note) {
+      overview.markResults(
+        view.sourceKey,
+        view.store.context().handoffs.filter(
+          (row) => row.edge.kind === "toyou" && row.edge.ask === "result" && row.edge.from === view.key
+        ).map((row) => row.edge.id)
+      );
+      if (view.renderedRevision === view.store.revision && view.renderedNote === observationNote) {
+        measureSessionScreen(view.root);
         updateSessionControl(view.root, controlFor(view));
         updateSessionRuntime(view.root, runtimeFor(view));
         syncJump(view);
@@ -16973,7 +13339,7 @@ globalThis.__semonUIShared = __semonUIShared;
         return;
       }
       view.renderedRevision = view.store.revision;
-      view.renderedNote = view.note;
+      view.renderedNote = observationNote;
       const anchor = [...view.root.querySelectorAll("[data-entry-key]")].find(
         (node) => node.getBoundingClientRect().bottom > (window.matchMedia("(max-width: 760px)").matches ? 0 : document.querySelector("#main").getBoundingClientRect().top)
       );
@@ -16981,18 +13347,64 @@ globalThis.__semonUIShared = __semonUIShared;
       renderSessionScreen(
         view.root,
         {
+          composerTarget,
           id: view.key,
           name: view.meta?.name ?? "Session",
           control: controlFor(view),
           runtime: runtimeFor(view),
-          observation: view.note || {
+          observation: observationNote || {
             cached: "Cached history",
             stale: "Stale history",
             incomplete: "History is incomplete",
             unavailable: "Source history is unavailable"
-          }[current.freshness.state] + " \xB7 related session context is incomplete",
-          blocks: catalogTranscriptBlocks(view.store.entries(), (entry2) => fieldView(view, entry2)),
-          order: view.store.entries().map((item2) => item2.entry_id),
+          }[current.freshness.state] + (view.store.context().state === "incomplete" ? " \xB7 related session context is incomplete" : ""),
+          started: view.store.loadedRanges()[0]?.first === 0 && view.meta?.start != null ? {
+            lead: "Started " + clock(view.meta.start, Date.now()) + " on ",
+            machine: page?.machine_info.label ?? view.sourceKey
+          } : void 0,
+          blocks: catalogTranscriptBlocks(
+            visibleEntries(view),
+            (entry2) => fieldView(view, entry2),
+            (item2) => {
+              if (item2.entry.k !== "h") return null;
+              const context = view.store.context(), relationship = context.handoffs.find(
+                (row) => row.edge.id === item2.entry.id
+              );
+              if (!relationship) return null;
+              const preview = (owner) => owner ? view.contextText?.get(
+                JSON.stringify([owner, context.previews[owner], relationship.edge.id])
+              ) : void 0;
+              return recordedRelationshipViews(item2, relationship, view.key, context.sessions, {
+                brief: preview(relationship.briefOwner)?.brief,
+                result: preview(relationship.resultOwner)?.result,
+                answer: preview(relationship.briefOwner)?.answer
+              });
+            },
+            view.meta?.details?.live_observation === true,
+            view.store.context(),
+            (item2) => (item2.entry.img ?? []).map((image2, index) => {
+              const p = params();
+              p.set("sid", view.key);
+              p.set("after", String(item2.slot));
+              p.set("limit", "1");
+              p.set("generation", current.projection.generation);
+              p.set("part", "attachment");
+              p.set("image", String(index));
+              const scale = image2.w && image2.h ? Math.min(1, 200 / image2.w, 160 / image2.h) : null;
+              const size = image2.size == null ? "?" : image2.size >= 1048576 ? (image2.size / 1048576).toFixed(1) + " MB" : image2.size >= 1024 ? Math.round(image2.size / 1024) + " KB" : image2.size + " bytes";
+              return {
+                unavailable: !!image2.na || !capabilities.attachment,
+                url: "/api/session-entry?" + p,
+                label: "Attached image " + (index + 1) + " (" + (image2.type?.replace("image/", "").toUpperCase() ?? "image") + ", " + size + ")",
+                width: scale && image2.w ? Math.max(1, Math.round(scale * image2.w)) : void 0,
+                height: scale && image2.h ? Math.max(1, Math.round(scale * image2.h)) : void 0
+              };
+            }),
+            view.meta?.harness,
+            view.key,
+            view.meta?.details?.state === "work" ? view.meta.details.activity : void 0
+          ),
+          order: [...new Set(view.store.entries().map((item2) => item2.entry.turn ?? item2.entry_id))],
           before: (view.store.loadedRanges()[0]?.first ?? 0) > 0 ? {
             sid: view.key,
             where: "before",
@@ -17000,29 +13412,65 @@ globalThis.__semonUIShared = __semonUIShared;
             disabled: view.loading,
             busy: view.loading
           } : void 0,
-          empty: "No native records in this range."
+          empty: visibleEntries(view).length ? void 0 : view.store.entries().length ? "No loaded records match your search or filter." : "No native records in this range."
         },
         {
           committed() {
           },
-          trace() {
+          composerOpened(panel) {
+            panelOpened(panel);
           },
-          session(key2) {
-            void goSession(key2);
+          composerClosed(panel) {
+            panelClosed(panel);
+          },
+          trace(turn) {
+            const url = "/trace/native/" + encodeURIComponent(view.key) + "/" + encodeURIComponent(turn) + "?" + new URLSearchParams({ machine: view.sourceKey });
+            history.pushState(null, "", url);
+            goCausal(view.key, turn);
+          },
+          session(key2, turn) {
+            void goSession(key2, void 0, true, turn);
           },
           machine() {
           },
           sender() {
           },
-          toolAll() {
-            view.note = "Full result unavailable for this source. The recorded preview is shown.";
-            drawSelected(view);
+          toolAll(key2, label) {
+            openRecordedTool(view, key2, label);
           },
-          script() {
+          script(key2) {
+            openRecordedTool(view, key2, "Script", true);
           },
-          image() {
+          image(url, label, trigger) {
+            sessionPanel?.destroy();
+            const image2 = createImageViewer(url, label, {
+              opened() {
+                history.pushState({ ...navigation.route, sheet: 1 }, "");
+              },
+              closed() {
+                if (sessionPanel === image2) sessionPanel = null;
+                if (!disposed && !restoringOverlayHistory && history.state?.sheet) {
+                  overlayBackPending = true;
+                  history.back();
+                }
+                if (active === view && trigger.isConnected) trigger.focus({ preventScroll: true });
+              }
+            });
+            sessionPanel = image2;
+            image2.show();
           },
-          background() {
+          background(call) {
+            const saved = view.store.entries().find((item2) => item2.entry.k === "tool" && item2.entry.tid === call);
+            const target = saved && [...view.root.querySelectorAll("[data-entry-key]")].find(
+              (node) => node.dataset.entryKey === saved.entry_id
+            );
+            if (!target) return;
+            const group = target.closest(".tgroup");
+            const summary = group?.querySelector('.tsum[aria-expanded="false"]');
+            summary?.click();
+            target.scrollIntoView({ block: "center" });
+            target.classList.add("flash");
+            scope.timeout(() => target.classList.remove("flash"), 1200);
           },
           jump() {
             jumpLatest(view);
@@ -17032,8 +13480,21 @@ globalThis.__semonUIShared = __semonUIShared;
           }
         }
       );
+      measureSessionScreen(view.root);
       const main = document.querySelector("#main");
       if (view.following) {
+        if (view.opening) {
+          pinView = view;
+          pinUntil = performance.now() + 2e3;
+          scope.frame(() => {
+            if (active === view && pinView === view && performance.now() < pinUntil) {
+              scrollEnd();
+              scope.frame(() => {
+                if (active === view && pinView === view && performance.now() < pinUntil) scrollEnd();
+              });
+            }
+          });
+        }
         view.opening = false;
         scrollEnd();
       } else if (anchor?.isConnected && anchorTop !== void 0) {
@@ -17047,6 +13508,12 @@ globalThis.__semonUIShared = __semonUIShared;
         else main.scrollTop = main.scrollHeight;
       }
       syncJump(view);
+      if (view.errorMode)
+        scope.frame(() => {
+          if (view.annotations?.generation !== view.store.selectedPage()?.projection.generation)
+            void readAnnotations(view);
+          else highlightAnnotation(view);
+        });
     }
     function scrollEnd() {
       if (window.matchMedia("(max-width: 760px)").matches)
@@ -17092,7 +13559,7 @@ globalThis.__semonUIShared = __semonUIShared;
       const generation2 = view.store.selectedPage()?.projection.generation;
       if (!generation2) return;
       let progress = view.fields.get(entry2.entry_id);
-      if (progress?.loading) return;
+      if (progress?.loading) return progress.promise;
       if (!progress || progress.generation !== generation2) {
         progress = { generation: generation2, next: 0, loading: false, note: "" };
         view.fields.set(entry2.entry_id, progress);
@@ -17108,34 +13575,37 @@ globalThis.__semonUIShared = __semonUIShared;
       pending.note = "";
       view.renderedRevision = -1;
       drawSelected(view);
-      try {
-        const value = await api("/api/session-entry?" + p);
-        if (disposed || view.fields.get(entry2.entry_id) !== pending) return;
-        if (view.store.selectedPage()?.projection.generation !== generation2) {
-          pending.note = "Source projection changed. Reload recorded text. ";
-          return;
+      pending.promise = (async () => {
+        try {
+          const value = await api("/api/session-entry?" + p);
+          if (disposed || view.fields.get(entry2.entry_id) !== pending) return;
+          if (view.store.selectedPage()?.projection.generation !== generation2) {
+            pending.note = "Source projection changed. Reload recorded text. ";
+            return;
+          }
+          const field = parseCatalogField(value, {
+            source_key: capabilities.source_key,
+            catalog_key: view.key,
+            generation: generation2,
+            entry: entry2,
+            chunk
+          });
+          pending.text = (chunk === 0 ? "" : pending.text ?? "") + field.text;
+          pending.next = field.next;
+        } catch (error) {
+          if (disposed) return;
+          pending.note = error && typeof error === "object" && "status" in error && error.status === 422 ? "Complete text is unavailable for this native format. " : "Couldn't load the full text. " + readError(error) + " ";
+          if (error && typeof error === "object" && "status" in error && error.status === 409)
+            void loadSelected(view);
+        } finally {
+          pending.loading = false;
+          if (!disposed) {
+            view.renderedRevision = -1;
+            drawSelected(view);
+          }
         }
-        const field = parseCatalogField(value, {
-          source_key: capabilities.source_key,
-          catalog_key: view.key,
-          generation: generation2,
-          entry: entry2,
-          chunk
-        });
-        pending.text = (chunk === 0 ? "" : pending.text ?? "") + field.text;
-        pending.next = field.next;
-      } catch (error) {
-        if (disposed) return;
-        pending.note = error && typeof error === "object" && "status" in error && error.status === 422 ? "Complete text is unavailable for this native format. " : readError(error) + " ";
-        if (error && typeof error === "object" && "status" in error && error.status === 409)
-          void loadSelected(view);
-      } finally {
-        pending.loading = false;
-        if (!disposed) {
-          view.renderedRevision = -1;
-          drawSelected(view);
-        }
-      }
+      })();
+      return pending.promise;
     }
     async function resynchronize(view) {
       const candidate = new CatalogTranscriptStore();
@@ -17202,16 +13672,21 @@ globalThis.__semonUIShared = __semonUIShared;
         const value = await api("/api/session-transcript?" + p);
         if (disposed) return;
         if (view.store.accept(request, value)) {
+          void hydrateContext(view);
           view.retryDelay = 1e3;
           const current = view.store.selectedPage();
-          const previousName = view.meta?.name;
+          const retainedEntries = new Set(view.store.entries().map((item2) => item2.entry_id));
+          for (const key2 of view.fields.keys())
+            if (!retainedEntries.has(key2)) view.fields.delete(key2);
           view.meta = {
             ...current.session,
             ...view.observedName === void 0 ? {} : { name: view.observedName }
           };
           if (active === view) {
+            if (view.errorMode && view.annotations?.generation !== current.projection.generation)
+              void readAnnotations(view, true);
             void loadIdentity(view);
-            if (previousName !== view.meta.name) chrome();
+            chrome();
           }
         }
       } catch (error) {
@@ -17240,6 +13715,107 @@ globalThis.__semonUIShared = __semonUIShared;
         if (!disposed && active === view && queued !== void 0) void loadSelected(view, queued);
       }
     }
+    async function observeSelected(view) {
+      if (disposed || active !== view || view.loading || view.observing) return;
+      const source = view.sourceKey, p = params();
+      p.set("sid", view.key);
+      p.set("limit", "1");
+      view.observing = true;
+      try {
+        const next = parseCatalogPage(await api("/api/sessions?" + p));
+        if (disposed || active !== view || capabilities.source_key !== source) return;
+        const metadata = next.items[0], current = view.store.selectedPage();
+        if (!metadata || metadata.key !== view.key || next.machine !== source)
+          throw Error("Selected observation changed");
+        if (!metadata.transcript || metadata.transcript.generation !== current?.projection.generation || metadata.transcript.total !== current.projection.total)
+          await loadSelected(view);
+        else if (JSON.stringify(metadata) !== JSON.stringify(view.meta)) {
+          view.meta = metadata;
+          view.renderedRevision = -1;
+          drawSelected(view);
+          chrome();
+        }
+        void loadIdentity(view);
+      } catch (error) {
+        if (!disposed && active === view) {
+          view.note = readError(error);
+          drawSelected(view);
+        }
+      } finally {
+        view.observing = false;
+      }
+    }
+    async function hydrateContext(view) {
+      if (disposed || active !== view || view.contextLoading) return;
+      const store = view.store, generation2 = store.selectedPage()?.projection.generation, context = store.context();
+      const cache = view.contextText ??= /* @__PURE__ */ new Map();
+      const owners2 = /* @__PURE__ */ new Map();
+      for (const relationship of context.handoffs)
+        for (const owner of [relationship.briefOwner, relationship.resultOwner]) {
+          if (!owner || !context.previews[owner]) continue;
+          const key2 = JSON.stringify([owner, context.previews[owner], relationship.edge.id]);
+          if (cache.has(key2)) continue;
+          if (!owners2.has(owner)) owners2.set(owner, /* @__PURE__ */ new Set());
+          owners2.get(owner).add(relationship.edge.id);
+        }
+      const jobs = [...owners2].flatMap(([sid, ids]) => {
+        const values = [...ids], result = [];
+        for (let start = 0; start < values.length; start += 8)
+          result.push({ sid, ids: values.slice(start, start + 8) });
+        return result;
+      });
+      if (!jobs.length) return;
+      view.contextLoading = true;
+      const current = () => !disposed && active === view && view.store === store && store.selectedPage()?.projection.generation === generation2;
+      let pending = 0;
+      try {
+        await Promise.all(
+          Array.from({ length: Math.min(4, jobs.length) }, async () => {
+            while (current() && pending < jobs.length) {
+              const job = jobs[pending++];
+              try {
+                const params2 = new URLSearchParams({
+                  machine: view.sourceKey,
+                  scope: "retained_history",
+                  sid: job.sid,
+                  generation: context.previews[job.sid],
+                  events: JSON.stringify(job.ids)
+                });
+                const data = object(await api("/api/session-home?" + params2));
+                if (!current()) return;
+                const identity2 = object(data.identity);
+                if (data.api !== 1 || identity2.catalog_key !== job.sid || identity2.source_key !== view.sourceKey || data.generation !== context.previews[job.sid] || typeof data.incomplete !== "boolean")
+                  throw Error("Native relationship generation changed");
+                const parsed = parseNativeRelationships(data, job.ids);
+                if (data.incomplete === true) {
+                  if (job.ids.length > 1) {
+                    const mid = Math.ceil(job.ids.length / 2);
+                    jobs.push(
+                      { sid: job.sid, ids: job.ids.slice(0, mid) },
+                      { sid: job.sid, ids: job.ids.slice(mid) }
+                    );
+                  }
+                  continue;
+                }
+                for (const row of parsed)
+                  cache.set(JSON.stringify([job.sid, context.previews[job.sid], row.id]), row);
+                const allowed = new Set(
+                  context.handoffs.flatMap(
+                    (row) => [row.briefOwner, row.resultOwner].filter((sid) => !!sid).map((sid) => JSON.stringify([sid, context.previews[sid], row.edge.id]))
+                  )
+                );
+                for (const key2 of cache.keys()) if (!allowed.has(key2)) cache.delete(key2);
+                view.renderedRevision = -1;
+                drawSelected(view);
+              } catch {
+              }
+            }
+          })
+        );
+      } finally {
+        view.contextLoading = false;
+      }
+    }
     async function loadIdentity(view) {
       if (disposed || view.sourceKey !== capabilities.source_key || view.identityLoading || !view.ticket || !capabilities.selected_identity)
         return;
@@ -17248,12 +13824,21 @@ globalThis.__semonUIShared = __semonUIShared;
       view.identityLoading = true;
       let invalidated = false;
       try {
-        const reply = object2(await api("/api/session-identity?" + p));
+        const reply = object(await api("/api/session-identity?" + p));
         if (reply.api !== 1) throw new Error("Unsupported source identity response");
         if (active === view && selection.accept(ticket, reply.identity)) {
           if (selection.selectedIdentity()?.owner_qualification === "provisional")
             view.note = "Session identity is provisional while history is being discovered. Native controls are unavailable.";
           else if (view.note.startsWith("Session identity is provisional")) view.note = "";
+          if (!viewerHost) {
+            const value = object(await api("/api/session-control?" + p));
+            if (!disposed && active === view && view.ticket === ticket) {
+              const identity2 = selection.selectedIdentity();
+              const snapshot = control.prepare(value.control);
+              if (snapshot && snapshot.thread === identity2?.native_id) control.observe(snapshot);
+              else control.unavailable();
+            }
+          }
           drawSelected(view);
         }
       } catch (error) {
@@ -17273,10 +13858,11 @@ globalThis.__semonUIShared = __semonUIShared;
           scope.timeout(() => void loadIdentity(view), 1e3);
       }
     }
-    async function goSession(key2, meta, push = true) {
-      if (disposed) return;
+    async function goSession(key2, meta, push = true, anchor) {
+      if (disposed || !capabilities.source_key) return;
       cancelCandidate();
       preserveScroll();
+      if (active) closeSessionComposer(active.root);
       if (!active && !sourcesOpen) listFocus = key2;
       sourcesOpen = false;
       let view = selected.get(cacheKey(key2));
@@ -17303,40 +13889,121 @@ globalThis.__semonUIShared = __semonUIShared;
           lastTotal: null
         };
         view.root.className = "catalog-session";
+        readerResize.observe(view.root);
         selected.set(cacheKey(key2), view);
       }
+      selected.delete(cacheKey(key2));
+      selected.set(cacheKey(key2), view);
+      while (selected.size > 5) {
+        const oldest = selected.entries().next().value;
+        selected.delete(oldest[0]);
+        scope.clearTimeout(oldest[1].retry);
+        readerResize.unobserve(oldest[1].root);
+        oldest[1].store.destroy();
+        releaseScreen(oldest[1].root);
+        render(null, oldest[1].root);
+      }
+      sessionPanel?.destroy();
       active = view;
+      view.errorMode = void 0;
+      view.annotationsEpoch = (view.annotationsEpoch ?? 0) + 1;
+      view.annotationsLoading = false;
+      view.errorRestore = void 0;
+      view.findOpen = false;
+      view.find = "";
+      view.filter = "all";
+      view.renderedRevision = -1;
+      for (const node of view.root.querySelectorAll(".err-current"))
+        node.classList.remove("err-current");
+      if (push && !anchor) {
+        view.following = true;
+        view.opening = true;
+      }
+      sourcesOpen = false;
       view.ticket = selection.begin({ source_key: capabilities.source_key, catalog_key: key2 });
-      navigation.route = { v: "session", id: key2 };
+      overview.leave();
+      for (const request of overviewRequests) request.abort();
+      overviewRequests.clear();
+      navigation.route = {
+        v: "session",
+        id: key2,
+        turn: anchor ?? (push ? void 0 : new URLSearchParams(location.hash.slice(1)).get("turn") ?? void 0)
+      };
+      releaseScreen(root);
       render(null, root);
       root.replaceChildren(view.root);
+      root.classList.toggle("wide-mode", wide);
       shell.closeDrawer(true);
       if (push)
         history.pushState(
-          null,
+          navigation.route,
           "",
-          "/s/" + encodeURIComponent(view.meta?.harness ?? "native") + "/" + encodeURIComponent(key2) + "?" + browsingParams()
+          "/s/" + encodeURIComponent(view.meta?.harness ?? "native") + "/" + encodeURIComponent(key2) + "?" + browsingParams() + (anchor ? "#turn=" + encodeURIComponent(anchor) : "")
         );
       chrome();
       drawSelected(view);
+      const turn = new URLSearchParams(location.hash.slice(1)).get("turn");
+      view.anchorNote = void 0;
+      if (turn) {
+        view.following = false;
+        view.opening = false;
+        const sourceKey = view.sourceKey;
+        const p = params();
+        p.set("sid", key2);
+        p.set("turn", turn);
+        try {
+          const anchor2 = object(await api("/api/session-anchor?" + p));
+          if (disposed || active !== view || sourceKey !== capabilities.source_key || new URLSearchParams(location.hash.slice(1)).get("turn") !== turn)
+            return;
+          if (anchor2.api !== 1 || anchor2.source_key !== sourceKey || anchor2.catalog_key !== key2 || anchor2.turn !== turn || anchor2.slot !== null && (!Number.isSafeInteger(anchor2.slot) || Number(anchor2.slot) < 0))
+            throw Error("Invalid turn anchor");
+          if (anchor2.slot === null) {
+            view.anchorNote = "This recorded turn is unavailable in the retained history.";
+            drawSelected(view);
+          } else {
+            await loadSelected(view, Number(anchor2.slot));
+            if (active === view && !disposed)
+              scope.timeout(() => {
+                if (disposed || active !== view) return;
+                const target = [...view.root.querySelectorAll("[data-turn]")].find(
+                  (node) => node.dataset.turn === turn
+                );
+                target?.scrollIntoView({ block: "start" });
+                target?.classList.add("flash");
+                scope.timeout(() => target?.classList.remove("flash"), 1400);
+              }, 0);
+            return;
+          }
+        } catch (error) {
+          if (active === view && !disposed) {
+            view.anchorNote = readError(error);
+            drawSelected(view);
+          }
+        }
+      }
       if (view.store.selectedPage()) {
         void loadIdentity(view);
-        if (window.matchMedia("(max-width: 760px)").matches) window.scrollTo(0, view.scroll);
+        view.opening = false;
+        if (push && !turn) scrollEnd();
+        else if (window.matchMedia("(max-width: 760px)").matches) window.scrollTo(0, view.scroll);
         else document.querySelector("#main").scrollTop = view.scroll;
       } else {
         void loadIdentity(view);
         if (capabilities.selected_transcript) await loadSelected(view);
       }
     }
-    async function refreshNames(sourceKey, epoch) {
+    async function refreshMetadata(sourceKey, epoch) {
       const p = params();
       p.set("limit", "60");
       if (harness) p.set("harness", harness);
-      if (repo) p.set("repo", repo);
+      if (repo === "__none__") p.set("no_repo", "1");
+      else if (repo) p.set("repo", repo);
+      if (model2) p.set("model", model2);
       if (query && capabilities.metadata_search) p.set("q", query);
       const value = parseCatalogPage(await api("/api/sessions?" + p));
       if (disposed || epoch !== sourcesEpoch || sourceKey !== capabilities.source_key || value.machine !== sourceKey || value.read_scope !== "retained_history")
         return;
+      const observed = new Map(value.items.map((item2) => [item2.key, item2]));
       const names = new Map(value.items.map((item2) => [item2.key, item2.name]));
       const view = active;
       if (view && !names.has(view.key)) {
@@ -17365,13 +14032,19 @@ globalThis.__semonUIShared = __semonUIShared;
         if (item2) names.set(key2, item2.name);
       }
       if (remaining.length) nameRefreshOffset = (nameRefreshOffset + 8) % remaining.length;
-      let changed = false;
-      items = items.map((item2) => {
-        const name = names.get(item2.key);
-        if (name === void 0 || name === item2.name) return item2;
-        changed = true;
-        return { ...item2, name };
-      });
+      const before = JSON.stringify(items);
+      const previousKeys = new Set(items.map((item2) => item2.key));
+      const refreshed = items.map((item2) => observed.get(item2.key) ?? item2);
+      items = [...value.items.filter((item2) => !previousKeys.has(item2.key)), ...refreshed].slice(
+        0,
+        300
+      );
+      const changedPage = !page || page.generation !== value.generation && items.length <= 60;
+      if (changedPage) {
+        page = value;
+        cursor = value.next_cursor;
+      }
+      let changed = before !== JSON.stringify(items);
       for (const cached of selected.values()) {
         const name = names.get(cached.key);
         if (cached.sourceKey === sourceKey && cached.meta && name !== void 0 && cached.meta.name !== name) {
@@ -17389,6 +14062,15 @@ globalThis.__semonUIShared = __semonUIShared;
     async function recheckCapabilities() {
       const observedSource = capabilities.source_key, observedEpoch = sourcesEpoch;
       try {
+        if (viewerHost?.nativePage || navigation.route.v === "home" || navigation.route.v === "analytics" || navigation.route.v === "machines") {
+          await overview.refresh();
+          return;
+        }
+        if (navigation.route.v === "trace") {
+          await loadCausal();
+          return;
+        }
+        if (!capabilities.source_key) return;
         const next = parseCatalogCapabilities(
           await api("/api/session-capabilities?" + currentParams())
         );
@@ -17402,7 +14084,7 @@ globalThis.__semonUIShared = __semonUIShared;
           void loadCandidates(false);
         if (active) void loadIdentity(active);
         if (ready && active && !active.store.selectedPage()) void loadSelected(active);
-        await refreshNames(observedSource, observedEpoch);
+        await refreshMetadata(observedSource, observedEpoch);
       } catch (error) {
         if (disposed || observedEpoch !== sourcesEpoch || observedSource !== capabilities.source_key)
           return;
@@ -17424,7 +14106,8 @@ globalThis.__semonUIShared = __semonUIShared;
           updating: sourcesUpdating,
           note: sourcesNote,
           more: sourceCursor !== null,
-          machinesHref: viewerHost?.machinesPath ?? "/machines?compat=1"
+          machinesHref: machinesHref(),
+          bookmarks: bookmarkMatches
         },
         {
           select(key2) {
@@ -17472,26 +14155,27 @@ globalThis.__semonUIShared = __semonUIShared;
     }
     function saveSource() {
       preserveScroll();
+      if (!capabilities.source_key) return;
+      sourceViews.delete(capabilities.source_key);
       sourceViews.set(capabilities.source_key, {
         page,
         items,
         cursor,
         harness,
         repo,
+        model: model2,
         query,
         listScroll,
         listFocus,
         selectedKey: active?.key ?? null
       });
+      while (sourceViews.size > 5) sourceViews.delete(sourceViews.keys().next().value);
     }
     async function showSources() {
-      cancelCandidate();
       if (disposed) return;
+      bookmarkMatches = [];
       if (!sourcesOpen) saveSource();
-      ++listEpoch;
-      scope.clearTimeout(listRetry);
-      active = null;
-      selection.clear();
+      leaveScreen();
       navigation.route = { v: "sessions" };
       sourcesOpen = true;
       root.replaceChildren();
@@ -17526,27 +14210,40 @@ globalThis.__semonUIShared = __semonUIShared;
         candidateCursor = null;
         candidateLoaded = false;
         candidateNote = "";
-        harness = retained?.harness ?? "";
-        repo = retained?.repo ?? "";
-        query = retained?.query ?? "";
+        const requested = new URLSearchParams(location.search);
+        harness = requested.get("harness") ?? retained?.harness ?? "";
+        repo = requested.get("no_repo") === "1" ? "__none__" : requested.get("repo") ?? retained?.repo ?? "";
+        model2 = requested.get("model") ?? retained?.model ?? "";
+        query = requested.get("q") ?? retained?.query ?? "";
         listScroll = retained?.listScroll ?? 0;
         listFocus = retained?.listFocus ?? "";
         updating = false;
         note = "";
         sourcesOpen = false;
         active = null;
+        const bookmark = location.pathname.startsWith("/s/") ? location.pathname.split("/")[3] : null;
+        if (push && bookmark) {
+          await goSession(decodeURIComponent(bookmark), void 0, true);
+          chrome();
+          return;
+        }
         if (push && retained?.selectedKey) await goSession(retained.selectedKey, void 0, false);
         else goList(false);
         const url = retained?.selectedKey ? "/s/" + encodeURIComponent(
           selected.get(cacheKey(retained.selectedKey))?.meta?.harness ?? "native"
         ) + "/" + encodeURIComponent(retained.selectedKey) : "/sessions";
-        if (push) history.pushState(null, "", url + "?" + browsingParams());
+        if (push) history.pushState(navigation.route, "", url + "?" + browsingParams());
         else fromLocation();
         chrome();
         void loadList(false);
       } catch (error) {
         if (disposed || epoch !== sourcesEpoch) return;
         sourcesNote = readError(error);
+        if (retryable(error))
+          scope.timeout(() => {
+            if (!disposed && epoch === sourcesEpoch && new URLSearchParams(location.search).get("machine") === key2)
+              void switchSource(key2, false);
+          }, 1e3);
       } finally {
         if (!disposed && epoch === sourcesEpoch) {
           sourcesUpdating = false;
@@ -17554,35 +14251,197 @@ globalThis.__semonUIShared = __semonUIShared;
         }
       }
     }
+    async function locateBookmark(key2, sourceKey) {
+      if (locating) return;
+      locating = true;
+      const path = location.pathname;
+      try {
+        const reply = object(
+          await api(
+            "/api/session-locate?" + new URLSearchParams({ sid: key2, ...sourceKey ? { machine: sourceKey } : {} })
+          )
+        );
+        if (disposed || location.pathname !== path || (sourceKey ? capabilities.source_key !== sourceKey : new URLSearchParams(location.search).has("machine")))
+          return;
+        if (reply.api !== 1 || !Array.isArray(reply.matches))
+          throw Error("Bookmark lookup unavailable");
+        if (reply.matches.length === 1 && reply.unavailable === 0) {
+          const match = object(reply.matches[0]);
+          if (typeof match.source_key !== "string" || typeof match.catalog_key !== "string")
+            throw Error("Invalid bookmark selection");
+          const url = new URL(location.href);
+          url.searchParams.set("machine", match.source_key);
+          if (match.catalog_key !== key2) {
+            url.pathname = "/s/" + encodeURIComponent(typeof match.harness === "string" ? match.harness : "native") + "/" + encodeURIComponent(match.catalog_key);
+            url.hash = "";
+          }
+          history.replaceState(history.state, "", url.pathname + url.search + url.hash);
+          fromLocation();
+        } else {
+          bookmarkMatches = reply.matches.slice(0, 100).map((value) => {
+            const match = object(value);
+            return {
+              source_key: text(match.source_key),
+              catalog_key: text(match.catalog_key),
+              harness: typeof match.harness === "string" ? match.harness : "native"
+            };
+          });
+          leaveScreen();
+          navigation.route = { v: "sessions" };
+          sourcesOpen = true;
+          sourcesNote = reply.matches.length > 1 ? "This bookmark has several recorded origins. Choose a session." : "Choose a machine to resolve this recorded session.";
+          drawSources();
+        }
+      } catch (error) {
+        if (!disposed) {
+          sourcesNote = readError(error);
+          drawSources();
+        }
+      } finally {
+        locating = false;
+      }
+    }
     function fromLocation() {
-      if (new URLSearchParams(location.search).get("choose_source") === "1" || viewerHost?.catalogSources && !new URLSearchParams(location.search).has("machine")) {
-        void showSources();
-        return;
-      }
-      const machine2 = new URLSearchParams(location.search).get("machine");
-      if (machine2 && machine2 !== capabilities.source_key) {
-        void showSources();
-        void switchSource(machine2, false);
-        return;
-      }
       const queryParams = new URLSearchParams(location.search);
+      const machineBookmark = location.pathname.match(/^\/(?:m|machines)\/([^/]+)$/);
+      if (machineBookmark && !viewerHost?.nativePage) {
+        void resolveMachineBookmark(machineBookmark[1]);
+        return;
+      }
+      if (location.pathname === "/machines" && !viewerHost?.nativePage) {
+        if (machinesHref() !== "/machines") {
+          location.assign(machinesHref());
+          return;
+        }
+        goOverview("machines", false);
+        return;
+      }
+      if (location.pathname === "/" || location.pathname === "/analytics" || location.pathname === "/timeline") {
+        goOverview(location.pathname === "/" ? "home" : "analytics", false);
+        return;
+      }
+      if (viewerHost?.nativePage && location.pathname !== "/sessions" && !location.pathname.startsWith("/s/")) {
+        navigation.route = { v: "machines" };
+        chrome();
+        void overview.refresh();
+        return;
+      }
+      const machine = queryParams.get("machine");
+      if (queryParams.get("choose_source") === "1" || viewerHost?.catalogSources && !machine) {
+        void showSources().then(() => {
+          const parts2 = location.pathname.split("/");
+          if ((parts2[1] === "s" || parts2[1] === "trace") && parts2[3])
+            void locateBookmark(decodeURIComponent(parts2[3]));
+        });
+        return;
+      }
+      if (!capabilities.source_key || machine && machine !== capabilities.source_key) {
+        if (machine || viewerHost?.catalogSources) void showSources();
+        else {
+          leaveScreen();
+          navigation.route = { v: "sessions" };
+          sourcesOpen = true;
+          drawSources();
+        }
+        if (machine) void switchSource(machine, false);
+        else
+          void api("/api/session-capabilities").then((value) => {
+            if (disposed) return;
+            Object.assign(capabilities, parseCatalogCapabilities(value));
+            fromLocation();
+          }).catch((error) => {
+            if (disposed) return;
+            sourcesNote = readError(error);
+            drawSources();
+            if (retryable(error))
+              scope.timeout(() => {
+                if (!disposed && !capabilities.source_key && location.pathname !== "/" && location.pathname !== "/analytics")
+                  fromLocation();
+              }, 1e3);
+          });
+        return;
+      }
       harness = queryParams.get("harness") ?? "";
-      repo = queryParams.get("repo") ?? "";
+      repo = queryParams.get("no_repo") === "1" ? "__none__" : queryParams.get("repo") ?? "";
+      model2 = queryParams.get("model") ?? "";
       query = queryParams.get("q") ?? "";
       const parts = location.pathname.split("/").filter(Boolean);
-      if (parts[0] === "s" && parts[2]) {
+      if (parts[0] === "trace" && parts[2] && parts[3]) {
+        goCausal(decodeURIComponent(parts[2]), decodeURIComponent(parts[3]));
+      } else if (parts[0] === "s" && parts[2]) {
         try {
-          void goSession(decodeURIComponent(parts[2]), void 0, false);
+          const key2 = decodeURIComponent(parts[2]);
+          if (key2.startsWith("unsent:")) void locateBookmark(key2, capabilities.source_key);
+          else void goSession(key2, void 0, false);
         } catch {
           goList(false);
         }
       } else goList(false);
     }
-    scope.listen(window, "popstate", fromLocation);
+    scope.listen(window, "popstate", () => {
+      if (overlayBackPending) {
+        overlayBackPending = false;
+        const action = afterOverlayClose;
+        afterOverlayClose = null;
+        if (!disposed) action?.();
+        return;
+      }
+      restoringOverlayHistory = true;
+      try {
+        if (sessionPanel && !history.state?.sheet) {
+          sessionPanel.destroy();
+          if (history.state?.v === navigation.route.v && history.state?.sid === ("sid" in navigation.route ? navigation.route.sid : void 0) && history.state?.id === ("id" in navigation.route ? navigation.route.id : void 0) && history.state?.turn === ("turn" in navigation.route ? navigation.route.turn : void 0) && (!active || new URLSearchParams(location.search).get("machine") === active.sourceKey))
+            return;
+        }
+        if (shell.account.open && !history.state?.sheet) {
+          shell.account.close();
+          return;
+        }
+        if (shell.drawerOpen && !history.state?.drawer) {
+          shell.closeDrawer(true);
+          return;
+        }
+        fromLocation();
+      } finally {
+        restoringOverlayHistory = false;
+      }
+    });
+    async function resolveMachineBookmark(encoded) {
+      const path = location.pathname;
+      await showSources();
+      if (disposed || path !== location.pathname) return;
+      let key2;
+      try {
+        key2 = decodeURIComponent(encoded);
+      } catch {
+        sourcesNote = "This machine bookmark is invalid.";
+        drawSources();
+        return;
+      }
+      const exact = sourceItems.find((source) => source.source_key === key2);
+      const matches = exact ? [exact] : sourceItems.filter((source) => source.label === key2);
+      if (matches.length === 1 && (exact || !sourceCursor)) {
+        const url = new URL(location.href);
+        url.pathname = "/sessions";
+        url.searchParams.set("machine", matches[0].source_key);
+        url.searchParams.delete("choose_source");
+        history.replaceState(history.state, "", url.pathname + url.search + url.hash);
+        fromLocation();
+      } else {
+        sourcesNote = matches.length > 1 ? "Several machines share this name. Choose the source for this bookmark." : "Choose the source for this machine bookmark.";
+        drawSources();
+      }
+    }
     const readingScroll = () => {
-      if (!active) return;
+      if (!active || active.opening || !active.store.selectedPage()) return;
       const main = document.querySelector("#main"), gap = window.matchMedia("(max-width: 760px)").matches ? document.documentElement.scrollHeight - window.scrollY - window.innerHeight : main.scrollHeight - main.scrollTop - main.clientHeight;
+      if (active === pinView && performance.now() < pinUntil && !active.errorMode && gap > 1 && gap <= 80) {
+        active.following = true;
+        scrollEnd();
+        return;
+      }
       active.following = gap <= 80;
+      if (!active.following) pinUntil = 0;
       if (active.following) active.newCount = 0;
       syncJump(active);
     };
@@ -17591,300 +14450,91 @@ globalThis.__semonUIShared = __semonUIShared;
       passive: true
     });
     scope.listen(document, "keydown", (event) => {
+      if (["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", " "].includes(event.key) && !(event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement))
+        pinUntil = 0;
+      if (active?.errorMode && !sessionPanel && !event.altKey && !event.ctrlKey && !event.metaKey && !(event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement) && ["n", "p", "Enter"].includes(event.key)) {
+        event.preventDefault();
+        const direction = event.key === "p" || event.key === "Enter" && event.shiftKey ? -1 : 1;
+        const count2 = active.annotations?.total ?? 0;
+        if (count2) {
+          active.errorIndex = ((active.errorIndex ?? 0) + direction + count2) % count2;
+          void readAnnotations(active);
+          chrome();
+        }
+      }
       if (event.key === "Escape") {
-        if (shell.account.open) shell.account.escape();
+        if (sessionPanel) return;
+        if (active?.errorMode) {
+          closeAnnotations(active);
+        } else if (active?.findOpen) {
+          active.findOpen = false;
+          active.find = "";
+          active.filter = "all";
+          active.renderedRevision = -1;
+          drawSelected(active);
+          chrome();
+          document.querySelector("#find-btn")?.focus();
+        } else if (shell.account.open) shell.account.escape();
         else shell.closeDrawer();
       }
     });
+    scope.interval(() => {
+      if (active?.meta?.details?.live_observation) updateSessionClock(active.root, Date.now(), {});
+    }, 1e3);
     const removeNavigation = viewerHost?.subscribeNavigation?.(chrome);
+    if (!viewerHost)
+      void api("/api/viewer/chrome").then((value) => {
+        if (disposed) return;
+        const data = object(value);
+        if (data.api !== 1) throw Error("Unsupported chrome metadata");
+        account = parseAccount(data.account);
+        standaloneNavigation = parseShellNavigation(data.navigation) ?? void 0;
+        if (location.pathname === "/machines" && machinesHref() !== "/machines") {
+          fromLocation();
+          return;
+        }
+        chrome();
+      }).catch(() => {
+      });
     fromLocation();
-    void loadList(false);
     scope.timeout(() => void recheckCapabilities(), 8e3);
     scope.interval(() => {
       if (active && capabilities.selected_transcript && active.store.selectedPage() && document.visibilityState === "visible")
-        void loadSelected(active);
+        void observeSelected(active);
     }, 3e3);
     return {
       destroy() {
         if (disposed) return;
         disposed = true;
+        afterOverlayClose = null;
+        if (!viewerHost?.nativePage && history.scrollRestoration === "manual")
+          history.scrollRestoration = previousScrollRestoration;
         ++listEpoch;
         observation.destroy();
         removeRuntimeListener();
         runtimeObservation.destroy();
         removeNavigation?.();
         scope.destroy();
+        readerResize.disconnect();
+        sessionPanel?.destroy();
+        sessionBar.destroy();
+        viewerHost?.initialMachines?.destroy();
+        viewerHost?.initialHome?.destroy();
         selection.destroy();
         navigation.destroy();
         control.destroy();
-        updates.destroy();
         for (const view of selected.values()) {
           view.store.destroy();
           releaseScreen(view.root);
           render(null, view.root);
         }
+        overview.destroy();
+        releaseGeometry(shell.slots.recent, ["scrollPaddingTop"]);
         recent.destroy();
+        releaseScreen(root);
         render(null, root);
         shell.destroy();
         selected.clear();
-      }
-    };
-  }
-
-  // src/app/catalogSources.ts
-  function createCatalogSources(host2, select) {
-    const scope = new EffectScope();
-    let disposed = false, epoch = 0, items = [], cursor = null, updating = false, note = "", retry, delay = 1e3;
-    const account = parseAccount(host2?.account);
-    const navigation = () => projectShellNavigation(host2?.navigation ?? { leading: host2?.nativeNavigation }, "sessions", {
-      ...host2?.navigation?.leading?.find((item2) => item2.key === "new-session") ? {
-        "new-session": withReturnPath(
-          host2.navigation.leading.find((item2) => item2.key === "new-session").href,
-          location.pathname + location.search
-        )
-      } : {},
-      home: host2?.navigation?.paths?.home ?? "/?compat=1",
-      analytics: host2?.navigation?.paths?.analytics ?? "/analytics?compat=1",
-      machines: host2?.machinesPath ?? "/machines?compat=1"
-    });
-    let wide = readShellPreference("wide"), rail = readShellPreference("rail");
-    const shell = createShellChrome({
-      account: {
-        place(widget, trigger) {
-          const at = trigger.getBoundingClientRect();
-          setGeometry(widget, "accountLeft", at.left);
-          setGeometry(widget, "accountWidth", at.width);
-          setGeometry(widget, "accountBottom", Math.max(0, innerHeight - at.top + 6));
-        },
-        opened() {
-        },
-        closed() {
-        },
-        navigate() {
-          return false;
-        },
-        submit() {
-          return false;
-        }
-      },
-      navigate() {
-        return false;
-      },
-      drawerOpened() {
-      },
-      drawerClosed() {
-      },
-      railChanged() {
-        rail = !rail;
-        writeShellPreference("rail", rail);
-        shell.update(navigation(), rail);
-      }
-    });
-    shell.mount(document.querySelector(".app"));
-    shell.update(navigation(), rail);
-    const title = document.createElement("div");
-    title.className = "ttl";
-    const line = document.createElement("span");
-    line.className = "l1";
-    line.textContent = "Choose a machine";
-    title.append(line);
-    function wideChange() {
-      wide = !wide;
-      writeShellPreference("wide", wide);
-      document.querySelector("#page")?.classList.toggle("wide-mode", wide);
-      shell.account.updateWide(wide);
-    }
-    shell.topbar({
-      titleSlot: title,
-      lead: { label: "Open menu", icon: I.menu },
-      account: account ? { account, compact: false, wide, onWideChange: wideChange } : null
-    });
-    shell.drawerAccount(account ? { account, compact: true, wide, onWideChange: wideChange } : null);
-    const removeNavigation = host2?.subscribeNavigation?.(() => shell.update(navigation(), rail));
-    const root = shell.slots.content;
-    function draw() {
-      if (disposed) return;
-      renderCatalogSources(
-        root,
-        {
-          items,
-          updating,
-          note,
-          more: cursor !== null,
-          machinesHref: host2?.machinesPath ?? "/machines?compat=1"
-        },
-        {
-          select(key2) {
-            if (!disposed && items.some((item2) => item2.source_key === key2)) select(key2);
-          },
-          more() {
-            void load(true);
-          },
-          retry() {
-            void load(false);
-          }
-        }
-      );
-    }
-    async function load(append) {
-      if (disposed || append && updating) return;
-      scope.clearTimeout(retry);
-      const ticket = ++epoch, request = scope.request(), deadline = scope.timeout(() => request.abort(), 15e3), params = new URLSearchParams({ limit: "60" });
-      if (append && cursor !== null) params.set("cursor", cursor);
-      updating = true;
-      note = "";
-      draw();
-      try {
-        const page = parseCatalogSources(
-          await requestJson("/api/session-sources?" + params, request.signal)
-        );
-        if (disposed || ticket !== epoch) return;
-        if (append && page.items.some((item2) => items.some((old) => old.source_key === item2.source_key)))
-          throw Error("Source inventory repeated a machine");
-        items = append ? [...items, ...page.items] : page.items;
-        cursor = page.next_cursor;
-        delay = 1e3;
-      } catch (error) {
-        if (disposed || ticket !== epoch) return;
-        const status2 = error && typeof error === "object" && "status" in error ? Number(error.status) : 0;
-        const transient = error && typeof error === "object" && "status" in error || error instanceof Error && error.name === "AbortError";
-        note = !transient ? "The source returned an invalid inventory. Check this source and retry." : status2 === 401 || status2 === 403 ? "Authorization is required to browse these machines." : status2 === 404 ? "Bounded source discovery is unavailable. Choose a machine from its management page." : status2 === 400 ? "The source inventory cursor is unavailable. Refresh this list." : "Source inventory is unavailable. Retrying\u2026";
-        if (append && status2 === 400) {
-          void load(false);
-          return;
-        }
-        if (transient && (status2 === 0 || [429, 500, 502, 503, 504].includes(status2))) {
-          retry = scope.timeout(() => void load(append), delay);
-          delay = Math.min(8e3, delay * 2);
-        }
-      } finally {
-        scope.clearTimeout(deadline);
-        scope.releaseRequest(request);
-        if (!disposed && ticket === epoch) {
-          updating = false;
-          draw();
-        }
-      }
-    }
-    scope.listen(document, "keydown", (event) => {
-      if (event.key === "Escape") {
-        if (shell.account.open) shell.account.escape();
-        else shell.closeDrawer();
-      }
-    });
-    scope.listen(window, "focus", () => void load(false));
-    void load(false);
-    return {
-      destroy() {
-        if (disposed) return;
-        disposed = true;
-        ++epoch;
-        removeNavigation?.();
-        scope.destroy();
-        render(null, root);
-        shell.destroy();
-      }
-    };
-  }
-
-  // src/app/nativePageShell.ts
-  function createNativePageShell(host2) {
-    const scope = new EffectScope(), account = parseAccount(host2.account);
-    const app = document.querySelector(".app");
-    const content2 = host2.initialMachines;
-    if (content2) {
-      const page = app.querySelector("#page");
-      if (page && !page.contains(content2.element)) page.replaceChildren(content2.element);
-      scope.own(() => {
-        content2.destroy();
-        content2.element.remove();
-      });
-    }
-    let rail = readShellPreference("rail"), wide = readShellPreference("wide");
-    let destinations = projectShellNavigation(
-      host2.navigation ?? { leading: host2.nativeNavigation },
-      host2.nativePage?.nav ?? "machines",
-      { machines: host2.machinesPath }
-    );
-    const shell = createShellChrome({
-      account: {
-        place(widget, trigger) {
-          const at = trigger.getBoundingClientRect();
-          setGeometry(widget, "accountLeft", at.left);
-          setGeometry(widget, "accountWidth", at.width);
-          setGeometry(widget, "accountBottom", Math.max(0, innerHeight - at.top + 6));
-        },
-        opened() {
-        },
-        closed() {
-        },
-        navigate() {
-          return false;
-        },
-        submit() {
-          return false;
-        }
-      },
-      navigate() {
-        return false;
-      },
-      drawerOpened() {
-      },
-      drawerClosed() {
-      },
-      railChanged() {
-        rail = !rail;
-        writeShellPreference("rail", rail);
-        shell.update(destinations, rail);
-      }
-    });
-    const refresh = () => {
-      destinations = projectShellNavigation(
-        host2.navigation ?? { leading: host2.nativeNavigation },
-        host2.nativePage?.nav ?? "machines",
-        { machines: host2.machinesPath }
-      );
-      shell.update(destinations, rail);
-    };
-    const removeNavigation = host2.subscribeNavigation?.(refresh);
-    const title = app.querySelector("#topbar .ttl") ?? document.createElement("div");
-    title.className = "ttl";
-    if (!title.textContent) title.textContent = host2.nativePage?.title ?? "";
-    if (!title.querySelector(".l1")) {
-      const line = document.createElement("div");
-      line.className = "l1";
-      line.append(...title.childNodes);
-      title.append(line);
-    }
-    shell.mount(app);
-    shell.update(destinations, rail);
-    const accountProps = account ? {
-      account,
-      compact: false,
-      wide,
-      onWideChange() {
-        wide = !wide;
-        writeShellPreference("wide", wide);
-        shell.account.updateWide(wide);
-      }
-    } : null;
-    shell.topbar({
-      titleSlot: title,
-      lead: { label: "Open menu", icon: I.menu },
-      account: accountProps
-    });
-    shell.drawerAccount(accountProps ? { ...accountProps, compact: true } : null);
-    scope.listen(document, "keydown", (event) => {
-      if (event.key === "Escape") {
-        if (shell.account.open) shell.account.escape();
-        else shell.closeDrawer();
-      }
-    });
-    return {
-      destroy() {
-        removeNavigation?.();
-        scope.destroy();
-        shell.destroy();
       }
     };
   }
@@ -17893,100 +14543,25 @@ globalThis.__semonUIShared = __semonUIShared;
   var mounted = null;
   function mountViewerApplication(host2 = getViewerHost()) {
     mounted?.destroy();
-    const scope = new EffectScope();
-    let disposed = false, owner = null, retryDelay = 1e3, choosing = false;
+    const url = new URL(location.href);
+    const before = url.href;
+    if (url.pathname === "/timeline") url.pathname = "/analytics";
+    if (url.pathname.startsWith("/s/") && url.searchParams.has("turn")) {
+      url.hash = "turn=" + encodeURIComponent(url.searchParams.get("turn"));
+      url.searchParams.delete("turn");
+    }
+    if (url.searchParams.has("compat")) url.searchParams.delete("compat");
+    if (url.href !== before) {
+      history.replaceState(history.state, "", url.pathname + url.search + url.hash);
+    }
+    const owner = createCatalogViewer(null, host2);
     const application = {
       destroy() {
-        if (disposed) return;
-        disposed = true;
-        scope.destroy();
-        owner?.destroy();
+        owner.destroy();
         if (mounted === application) mounted = null;
       }
     };
     mounted = application;
-    function legacy() {
-      if (disposed) return;
-      owner = new ViewerComposition(host2, () => {
-      }).application;
-    }
-    function chooseSources() {
-      owner = createCatalogSources(host2, (key2) => {
-        if (disposed) return;
-        owner?.destroy();
-        owner = null;
-        const url = new URL(location.href);
-        url.searchParams.set("machine", key2);
-        url.searchParams.delete("choose_source");
-        history.pushState(null, "", url.pathname + url.search + url.hash);
-        void chooseReader();
-      });
-    }
-    async function chooseReader() {
-      if (disposed || owner || choosing) return;
-      choosing = true;
-      const request = scope.request(), deadline = scope.timeout(() => request.abort(), 15e3);
-      try {
-        const params = new URLSearchParams();
-        const source = new URLSearchParams(location.search).get("machine");
-        if (source !== null) params.set("machine", source);
-        const value = await requestJson(
-          "/api/session-capabilities" + (params.size ? "?" + params : ""),
-          request.signal
-        );
-        const capabilities = parseCatalogCapabilities(value);
-        if (source !== null && capabilities.source_key !== source)
-          throw new Error("Source capability identity does not match this selection");
-        if (!disposed) owner = createCatalogViewer(capabilities, host2);
-      } catch (error) {
-        if (disposed) return;
-        const status2 = error && typeof error === "object" && "status" in error ? error.status : 0;
-        if (status2 === 404) {
-          legacy();
-          return;
-        }
-        if (status2 === 400 && !new URLSearchParams(location.search).has("machine")) {
-          chooseSources();
-          return;
-        }
-        const root = document.querySelector("#page");
-        if (root) {
-          const notice = document.createElement("p");
-          notice.className = "catalog-note";
-          notice.setAttribute("role", "status");
-          notice.textContent = status2 === 401 || status2 === 403 ? "Authorization is required to read this source." : status2 === 400 ? "Choose a machine to browse its recorded history." : "Session history is unavailable. Reconnecting\u2026";
-          const machines = document.createElement("a");
-          machines.className = "link";
-          machines.href = host2?.machinesPath ?? "/machines?compat=1";
-          machines.textContent = "Choose a machine";
-          const compatibility = document.createElement("a");
-          compatibility.className = "link";
-          compatibility.href = "/sessions?compat=1";
-          compatibility.textContent = "Open compatibility view (loads workspace history)";
-          const actions = document.createElement("p");
-          actions.className = "catalog-note";
-          actions.append(machines, document.createTextNode(" \xB7 "), compatibility);
-          root.replaceChildren(notice, actions);
-        }
-        if (status2 !== 400 && status2 !== 401 && status2 !== 403) {
-          scope.timeout(() => void chooseReader(), retryDelay);
-          retryDelay = Math.min(8e3, retryDelay * 2);
-        }
-      } finally {
-        choosing = false;
-        scope.clearTimeout(deadline);
-        scope.releaseRequest(request);
-      }
-    }
-    if (host2?.nativePage) owner = createNativePageShell(host2);
-    else if (new URLSearchParams(location.search).get("compat") === "1" || host2?.loadMachines && host2.machinesPath === location.pathname || document.querySelector(".app")?.dataset.viewer === "sidebar")
-      legacy();
-    else if (host2?.catalogSources && !new URLSearchParams(location.search).has("machine"))
-      chooseSources();
-    else {
-      void chooseReader();
-      scope.listen(window, "focus", () => void chooseReader());
-    }
     return application;
   }
 

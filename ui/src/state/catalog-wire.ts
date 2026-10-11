@@ -1,4 +1,5 @@
 import { array, boolean, number, object, text } from '../domain/validate';
+import { parseSessionDetails, type SessionDetails } from '../domain/sessionDetails';
 
 import type {
   CatalogFreshness,
@@ -17,10 +18,13 @@ export type {
 
 /** Metadata is a partial read view, independent of runtime status and model deltas. */
 export interface CatalogSession {
+  transcript?: { generation: string; total: number };
+  details?: SessionDetails;
   key: string;
   name: string;
   harness: string;
   kind: string;
+  presentation_kind?: string | null;
   native_ids: string[];
   parent: string | null;
   parent_source: string | null;
@@ -133,10 +137,23 @@ export function parseCatalogSession(value: unknown): CatalogSession {
   if (tokens.length !== 3 || tokens.some((token) => token < 0))
     throw new Error('Invalid catalog tokens');
   return {
+    details: row.details == null ? undefined : parseSessionDetails(row.details),
+    transcript:
+      row.transcript == null
+        ? undefined
+        : (() => {
+            const projection = object(row.transcript),
+              generation = text(projection.generation),
+              total = integer(projection.total);
+            if (!/^[a-f0-9]{64}$/.test(generation) || total < 0)
+              throw Error('Invalid selected transcript observation');
+            return { generation, total };
+          })(),
     key: text(row.key),
     name: text(row.name),
     harness: text(row.harness),
     kind: text(row.kind),
+    presentation_kind: row.presentation_kind == null ? null : text(row.presentation_kind),
     native_ids: strings(row.native_ids),
     parent: nullable(row.parent, text),
     parent_source: nullable(row.parent_source, text),

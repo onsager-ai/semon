@@ -652,7 +652,7 @@ export default async function tooltipCheck(browser) {
       if (size === 'phone') {
         // Touch: a static label toggles its tip; elsewhere closes it; a control runs and shows none.
         const stat = page.locator(
-          '#topbar .l1-state[data-tip], #topbar .meta-line > span.lab[data-tip]:not([hidden])',
+          '#topbar .l1-state[data-tip], #topbar .meta-line > span.lab[data-tip^="Model:"]:not([hidden])',
         );
         r.expect(
           (await stat.count()) > 0,
@@ -777,18 +777,20 @@ export default async function tooltipCheck(browser) {
     await guard(r, tag, page, async () => {
       await goto(page, { v: 'session', id: parent.id }, D);
       await page.waitForTimeout(250);
-      // Each changed model commits through the typed owners while unchanged target nodes stay connected.
+      // Changed selected metadata commits while native content and tooltip target nodes stay connected.
       let polls = 0;
-      await page.route('**/api/model**', async (route) => {
-        if (!new URL(route.request().url()).searchParams.has('since')) return route.fallback();
-        const response = await route.fetch({ url: ENV.base + '/api/model' });
+      await page.route('**/api/sessions?**', async (route) => {
+        if (new URL(route.request().url()).searchParams.get('sid') !== parent.id)
+          return route.continue();
+        const response = await route.fetch();
+        if (response.status() !== 200) return route.fulfill({ response });
         const body = await response.json();
-        body.version = 'tip-live-' + ++polls;
+        body.items[0].details.calls += ++polls;
         await route.fulfill({ response, json: body });
       });
       results[tag] = {};
       for (const [name, selector] of [
-        ['a badge in the top bar', '#topbar .meta-line > span.lab[data-tip]'],
+        ['a badge in the top bar', '#topbar .meta-line > span.lab[data-tip^="Model:"]'],
         ["a row's model in the sidebar", '#lanes .session-row-meta .row-model'],
       ]) {
         await away(page);
@@ -807,8 +809,8 @@ export default async function tooltipCheck(browser) {
         const seen = polls;
         await page.waitForResponse(
           (response) =>
-            new URL(response.url()).pathname === '/api/model' &&
-            new URL(response.url()).searchParams.has('since'),
+            new URL(response.url()).pathname === '/api/sessions' &&
+            new URL(response.url()).searchParams.get('sid') === parent.id,
           { timeout: 12000 },
         );
         await page.waitForTimeout(400);
@@ -844,13 +846,14 @@ export default async function tooltipCheck(browser) {
       await page.waitForTimeout(450);
       // The spot is the line's first static tipped label: the Model label, whose tip took the place of main's Tokens badge (this bar has no such badge).
       const spotTip = await page.evaluate(
-        () => document.querySelector('#topbar .meta-line > span.lab[data-tip]').dataset.tip,
+        () =>
+          document.querySelector('#topbar .meta-line > span.lab[data-tip^="Model:"]').dataset.tip,
       );
       r.expect(
         /^Model: \S/.test(spotTip),
         tag + ": the spot's tip is not the Model label's: " + JSON.stringify(spotTip),
       );
-      const spot = await box(page, '#topbar .meta-line > span.lab[data-tip]'),
+      const spot = await box(page, '#topbar .meta-line > span.lab[data-tip^="Model:"]'),
         [px, py] = centre(spot);
       r.expect(
         (await hover(page, spot, 1500)) != null && (await state(page)).text === spotTip,
@@ -861,13 +864,13 @@ export default async function tooltipCheck(browser) {
       r.expect(!(await state(page)).open, tag + ': Esc did not close the tooltip');
       await page.mouse.move(px + 2, py + 1); // a nudge inside the badge
       await page.evaluate(() => {
-        window.__was = document.querySelector('#topbar .meta-line > span.lab[data-tip]');
+        window.__was = document.querySelector('#topbar .meta-line > span.lab[data-tip^="Model:"]');
       });
       const dismissedAt = polls;
       await page.waitForResponse(
         (response) =>
-          new URL(response.url()).pathname === '/api/model' &&
-          new URL(response.url()).searchParams.has('since'),
+          new URL(response.url()).pathname === '/api/sessions' &&
+          new URL(response.url()).searchParams.get('sid') === parent.id,
         { timeout: 12000 },
       );
       await page.waitForTimeout(300);
@@ -919,7 +922,8 @@ export default async function tooltipCheck(browser) {
       const shownAt = await hover(page, 'dialog.session-menu [data-tip]', 1500),
         open = await state(page);
       r.expect(
-        shownAt != null && /^(Working|Needs you|Idle|Done|Failed)$/.test(open.text ?? ''),
+        shownAt != null &&
+          /^(Working|Needs you|Idle|Done|Failed|Recorded history)$/.test(open.text ?? ''),
         tag +
           ": the tooltip did not open on a run's state dot inside the modal dialog with its state word " +
           JSON.stringify(open.text),
@@ -1032,7 +1036,9 @@ export default async function tooltipCheck(browser) {
         await scan(route.v);
       }
       for (const days of [7, 30]) {
-        await page.click('[data-e="analytics-range:' + days + '"]');
+        await page.click(
+          '.analytics-range button' + (days === 7 ? ':nth-child(2)' : ':nth-child(3)'),
+        );
         await page.waitForTimeout(150);
         await scan('analytics-' + days + 'd');
       }

@@ -58,6 +58,7 @@ export interface Session {
   name: string;
   harness: string;
   state: SessionState;
+  liveObservation?: boolean;
   machine: string;
   start: number;
   last: number;
@@ -197,26 +198,4 @@ export interface Turn {
   sent: Handoff[];
   end?: TurnEnd;
   last?: boolean;
-}
-export interface TranscriptMeta {
-  from: number;
-  to: number;
-  total: number;
-  calls?: number;
-  errors?: number;
-  tok?: string;
-  watchTok?: string;
-  newer?: number;
-  origin?: boolean;
-}
-export interface DomainState {
-  sessions: Record<string, Session>;
-  machines: Record<string, string>;
-  handoffs: Handoff[];
-  turns: Record<string, Turn[]>;
-  turn: Map<string, Turn>;
-  starts: Map<string, Turn>;
-  holds: Map<string, Turn>;
-  handoff: Map<string, Handoff>;
-  transcriptMeta: Record<string, TranscriptMeta>;
 }

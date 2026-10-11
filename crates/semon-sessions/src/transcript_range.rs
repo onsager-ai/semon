@@ -85,6 +85,283 @@ pub fn session_transcript_range_with_mode(
     }
 }
 
+/// Locate a recorded turn using only its source-qualified slot projection.
+/// Hosts authorize this metadata query before and after the read.
+pub fn session_turn_anchor(options: &Options, source_key: &str, query: &str) -> ViewerReply {
+    let read = || -> Result<ViewerReply, Box<dyn std::error::Error>> {
+        let Some(key) = query_value(query, "sid")
+            .and_then(decoded)
+            .filter(|v| !v.is_empty() && v.len() <= 4096)
+        else {
+            return Ok(catalog::error(
+                400,
+                "invalid_arguments",
+                "Supply one session key and turn.",
+                false,
+            ));
+        };
+        let Some(turn) = query_value(query, "turn")
+            .and_then(decoded)
+            .filter(|v| !v.is_empty() && v.len() <= 4096)
+        else {
+            return Ok(catalog::error(
+                400,
+                "invalid_arguments",
+                "Supply one session key and turn.",
+                false,
+            ));
+        };
+        if query_value(query, "scope").is_some_and(|value| value != "retained_history") {
+            return Ok(catalog::error(
+                400,
+                "invalid_arguments",
+                "Turn anchors require retained history.",
+                false,
+            ));
+        }
+        for name in ["sid", "turn", "scope", "machine"] {
+            if query
+                .split('&')
+                .filter(|part| part.split('=').next() == Some(name))
+                .count()
+                > 1
+            {
+                return Ok(catalog::error(
+                    400,
+                    "invalid_arguments",
+                    "Duplicate anchor argument.",
+                    false,
+                ));
+            }
+        }
+        let identity = match catalog::session_catalog_history_identity(options, source_key, &key) {
+            Ok(Some(identity)) => identity,
+            Ok(None) => {
+                return Ok(catalog::error(
+                    404,
+                    "session_not_found",
+                    "Recorded session unavailable.",
+                    false,
+                ));
+            }
+            Err(_) => return Ok(unavailable()),
+        };
+        let mut db = Connection::open_with_flags(
+            EventCache::path(&options.cache),
+            OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )?;
+        db.busy_timeout(Duration::from_millis(100))?;
+        let tx = db.transaction()?;
+        let generation: Option<String> = tx
+            .query_row(
+                "SELECT value FROM meta WHERE key='slot_projection_catalog_generation'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if generation.as_deref() != Some(identity.generation.as_str()) {
+            return Ok(stale());
+        }
+        let table = if crate::history_projection::catalog(&tx, &key)?.is_some() {
+            "session_history_slots"
+        } else {
+            "session_slots"
+        };
+        let slot:Option<i64>=tx.query_row(&format!("SELECT slot FROM {table} WHERE session_key=?1 AND json_extract(metadata,'$.turn')=?2 ORDER BY slot LIMIT 1"),rusqlite::params![key,turn],|row|row.get(0)).optional()?;
+        tx.commit()?;
+        Ok(reply(
+            200,
+            json!({"api":1,"source_key":source_key,"catalog_key":key,"turn":turn,"slot":slot}),
+        ))
+    };
+    read().unwrap_or_else(|_| unavailable())
+}
+
+/// Indexed annotation addresses for one immutable selected projection. No native
+/// bodies are opened. Each page holds at most 100 identities, even when failures
+/// are spread throughout a large transcript.
+pub fn session_annotations(options: &Options, source_key: &str, query: &str) -> ViewerReply {
+    let read = || -> Result<ViewerReply, Box<dyn std::error::Error>> {
+        let argument = |name| query_value(query, name).and_then(decoded);
+        let invalid_arguments = || {
+            catalog::error(
+                400,
+                "invalid_arguments",
+                "Use one selected session, retained scope, errors or signals, and limit=1..100.",
+                false,
+            )
+        };
+        for name in [
+            "sid",
+            "machine",
+            "scope",
+            "kind",
+            "after",
+            "limit",
+            "generation",
+        ] {
+            if query
+                .split('&')
+                .filter(|part| part.split('=').next() == Some(name))
+                .count()
+                > 1
+            {
+                return Ok(invalid_arguments());
+            }
+        }
+        let Some(key) = argument("sid").filter(|key| !key.is_empty() && key.len() <= 4096) else {
+            return Ok(invalid_arguments());
+        };
+        if argument("scope").as_deref() != Some("retained_history") {
+            return Ok(invalid_arguments());
+        }
+        let kind = argument("kind").unwrap_or_default();
+        let predicate = match kind.as_str() {
+            "errors" => {
+                "((json_extract(metadata,'$.recipe.recipe') IN ('Tool','Yielded','Sent') AND json_extract(metadata,'$.recipe.outcome')='Err') OR (json_extract(metadata,'$.recipe.recipe')='Operation' AND json_extract(metadata,'$.recipe.ok')=0))"
+            }
+            "signals" => "json_extract(metadata,'$.recipe.recipe')='Signal'",
+            _ => return Ok(invalid_arguments()),
+        };
+        let limit = argument("limit")
+            .map(|value| value.parse::<usize>())
+            .transpose();
+        let after = argument("after")
+            .map(|value| value.parse::<usize>())
+            .transpose();
+        let (Ok(limit), Ok(after)) = (limit, after) else {
+            return Ok(invalid_arguments());
+        };
+        let limit = limit.unwrap_or(100);
+        let after = after.unwrap_or(0);
+        if !(1..=MAX_LIMIT).contains(&limit) || (after > 0 && argument("generation").is_none()) {
+            return Ok(invalid_arguments());
+        }
+        let identity = match catalog::session_catalog_history_identity(options, source_key, &key) {
+            Ok(Some(identity)) => identity,
+            Ok(None) => {
+                return Ok(catalog::error(
+                    404,
+                    "session_not_found",
+                    "Recorded session unavailable.",
+                    false,
+                ));
+            }
+            Err(_) => return Ok(unavailable()),
+        };
+        let mut db = Connection::open_with_flags(
+            EventCache::path(&options.cache),
+            OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )?;
+        db.busy_timeout(Duration::from_millis(100))?;
+        let tx = db.transaction()?;
+        let catalog_generation: Option<String> = tx
+            .query_row(
+                "SELECT value FROM meta WHERE key='slot_projection_catalog_generation'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if catalog_generation.as_deref() != Some(identity.generation.as_str()) {
+            return Ok(stale());
+        }
+        let history = crate::history_projection::catalog(&tx, &key)?.is_some();
+        let header = if history {
+            "session_history_projections"
+        } else {
+            "session_slot_projections"
+        };
+        let slots = if history {
+            "session_history_slots"
+        } else {
+            "session_slots"
+        };
+        let projection: Option<(String, u32)> = tx
+            .query_row(
+                &format!("SELECT generation,version FROM {header} WHERE session_key=?1"),
+                [&key],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        let Some((stored, version)) = projection else {
+            return Ok(unavailable());
+        };
+        if version != VERSION {
+            return Ok(unavailable());
+        }
+        let generation = entry_generation(&stored);
+        if argument("generation").is_some_and(|expected| expected != generation) {
+            return Ok(stale());
+        }
+        let total: i64 = tx.query_row(
+            &format!("SELECT count(*) FROM {slots} WHERE session_key=?1 AND {predicate}"),
+            [&key],
+            |row| row.get(0),
+        )?;
+        let total = usize::try_from(total)?;
+        if after > total {
+            return Ok(invalid_arguments());
+        }
+        let mut statement = tx.prepare(&format!("SELECT slot FROM {slots} WHERE session_key=?1 AND {predicate} ORDER BY slot LIMIT ?2 OFFSET ?3"))?;
+        let entries: Vec<Value> = statement
+            .query_map(
+                rusqlite::params![key, i64::try_from(limit)?, i64::try_from(after)?],
+                |row| Ok(json!({"slot":row.get::<_,i64>(0)?})),
+            )?
+            .collect::<rusqlite::Result<_>>()?;
+        drop(statement);
+        tx.commit()?;
+        let end = after + entries.len();
+        Ok(reply(
+            200,
+            json!({"api":1,"source_key":source_key,"catalog_key":key,"scope":"retained_history","kind":kind,"generation":generation,"total":total,"first":after,"entries":entries,"next_cursor":if end<total {Some(end)}else{None}}),
+        ))
+    };
+    read().unwrap_or_else(|_| unavailable())
+}
+
+fn entry_generation(stored: &str) -> String {
+    use sha2::{Digest, Sha256};
+    format!(
+        "{:x}",
+        Sha256::digest(format!("signal-entry-identity-v2|{stored}").as_bytes())
+    )
+}
+
+/// An exact selected catalog row may carry this body-free observation. It is
+/// coherent with the catalog transaction and grants no provider/control access.
+pub(crate) fn observation(
+    tx: &rusqlite::Transaction<'_>,
+    key: &str,
+    catalog_generation: &str,
+    history: bool,
+) -> rusqlite::Result<Option<Value>> {
+    let published: Option<String> = tx
+        .query_row(
+            "SELECT value FROM meta WHERE key='slot_projection_catalog_generation'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if published.as_deref() != Some(catalog_generation) {
+        return Ok(None);
+    }
+    let history = history && crate::history_projection::catalog(tx, key)?.is_some();
+    let table = if history {
+        "session_history_projections"
+    } else {
+        "session_slot_projections"
+    };
+    let projection: Option<(String, u32, i64)> = tx
+        .query_row(
+            &format!("SELECT generation,version,total FROM {table} WHERE session_key=?1"),
+            [key],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()?;
+    Ok(projection.filter(|(_, version, total)| *version == VERSION && (0..=9_007_199_254_740_991).contains(total)).map(|(generation, _, total)| json!({"generation":entry_generation(&generation),"total":total})))
+}
+
 struct Selection {
     identity: CatalogSessionIdentity,
     session: Value,
@@ -96,6 +373,14 @@ struct Selection {
     slots: Vec<SavedSlot>,
     sources: BTreeMap<PathBuf, CatalogSource>,
     history_incomplete: bool,
+    context: Value,
+}
+
+enum SelectedPart {
+    Transcript,
+    Script,
+    Output,
+    Attachment(usize),
 }
 
 fn read(
@@ -112,6 +397,8 @@ fn read(
         "generation",
         "scope",
         "field_chunk",
+        "part",
+        "image",
     ] {
         if query_value(query, name).is_some_and(|value| decoded(value).is_none()) {
             return Ok(catalog::error(
@@ -273,11 +560,7 @@ fn read(
     }
     // Entry identity distinguishes signals expanded from one native record.
     // Fence pre-fix loaded ranges without rewriting retained source recipes.
-    use sha2::{Digest, Sha256};
-    let generation = format!(
-        "{:x}",
-        Sha256::digest(format!("signal-entry-identity-v2|{stored_generation}").as_bytes())
-    );
+    let generation = entry_generation(&stored_generation);
     if argument("generation").is_some_and(|expected| expected != generation) {
         return Ok(stale());
     }
@@ -322,6 +605,12 @@ fn read(
         )?
     };
     let row: crate::model::summary::CatalogRow = serde_json::from_str(&row_text)?;
+    let context = crate::causal_trace::range_context(
+        &transaction,
+        &key,
+        &slots[first - start..end - start],
+        &row.sources,
+    )?;
     let sources = row
         .sources
         .into_iter()
@@ -339,6 +628,48 @@ fn read(
         slots,
         sources,
         history_incomplete,
+        context,
+    };
+    let attachment = if argument("part").as_deref() == Some("attachment") {
+        match argument("image")
+            .and_then(|value| value.parse::<usize>().ok())
+            .filter(|value| *value < 64)
+        {
+            Some(index) => Some(index),
+            None => {
+                return Ok(catalog::error(
+                    400,
+                    "invalid_arguments",
+                    "A recorded image ordinal is required.",
+                    false,
+                ));
+            }
+        }
+    } else {
+        None
+    };
+    let part = match argument("part").as_deref() {
+        None => SelectedPart::Transcript,
+        Some("script" | "output" | "attachment")
+            if argument("generation").is_some()
+                && argument("after").is_some()
+                && selection.end == selection.first + 1
+                && argument("field_chunk").is_none() =>
+        {
+            match (argument("part").as_deref(), attachment) {
+                (_, Some(index)) => SelectedPart::Attachment(index),
+                (Some("output"), _) => SelectedPart::Output,
+                _ => SelectedPart::Script,
+            }
+        }
+        _ => {
+            return Ok(catalog::error(
+                400,
+                "invalid_arguments",
+                "Selected part reads require generation, after and limit=1.",
+                false,
+            ));
+        }
     };
     if let Some(chunk) = argument("field_chunk") {
         let Ok(chunk) = chunk.parse::<usize>() else {
@@ -359,7 +690,7 @@ fn read(
         }
         return Ok(render_field(options, selection, provider, chunk, mode));
     }
-    Ok(render(options, selection, provider, mode))
+    Ok(render(options, selection, provider, mode, part))
 }
 
 fn stale() -> ViewerReply {
@@ -494,6 +825,63 @@ impl SessionSourceReader for Local<'_> {
         })
     }
 }
+/// Share the selected reader's local-generation validation and explicit provider
+/// fallback with bounded native presentation reads. No model or body cache.
+pub(crate) fn with_source_reader<T>(
+    options: &Options,
+    harness: &str,
+    sources: &[CatalogSource],
+    provider: Option<&dyn SessionSourceReader>,
+    mode: SessionSourceReadMode,
+    read: impl FnOnce(&dyn SessionSourceReader, &BTreeMap<PathBuf, SessionSourceRef>) -> io::Result<T>,
+) -> io::Result<T> {
+    if sources.is_empty() || sources.len() > 64 {
+        return Err(invalid());
+    }
+    let home = match harness {
+        "claude" => &options.claude_home,
+        "codex" => &options.codex_home,
+        "copilot" => &options.copilot_home,
+        _ => return Err(invalid()),
+    };
+    let sources: BTreeMap<_, _> = sources
+        .iter()
+        .map(|source| (source.path.clone(), source.clone()))
+        .collect();
+    let mut references = BTreeMap::new();
+    for (path, source) in &sources {
+        let relative = path
+            .strip_prefix(home)
+            .map_err(|_| invalid())?
+            .to_str()
+            .ok_or_else(invalid)?;
+        if !crate::is_input_path(harness, relative) {
+            return Err(invalid());
+        }
+        references.insert(
+            path.clone(),
+            SessionSourceRef {
+                root: harness.into(),
+                path: relative.into(),
+                native_id: source.native_id.clone(),
+                offset: source.offset,
+                prefix_sha256: source.prefix_sha256,
+                tail_sha256: source.tail_sha256,
+            },
+        );
+    }
+    let local = Local {
+        sources: &sources,
+        references: &references,
+    };
+    let composite = Composite {
+        local: &local,
+        provider,
+        mode,
+    };
+    read(&composite, &references)
+}
+
 fn invalid() -> io::Error {
     io::Error::new(
         io::ErrorKind::InvalidData,
@@ -506,7 +894,12 @@ fn render(
     selection: Selection,
     provider: Option<&dyn SessionSourceReader>,
     mode: SessionSourceReadMode,
+    part: SelectedPart,
 ) -> ViewerReply {
+    let attachment = match part {
+        SelectedPart::Attachment(index) => Some(index),
+        _ => None,
+    };
     let references: BTreeMap<PathBuf, SessionSourceRef> = selection
         .identity
         .source_refs
@@ -532,7 +925,22 @@ fn render(
         mode,
     };
     let reader: &dyn SessionSourceReader = &composite;
-    let mut bytes_left = PAGE_SOURCE_BYTES;
+    let source_budget = if attachment.is_some() {
+        12 * 1024 * 1024
+    } else {
+        PAGE_SOURCE_BYTES
+    };
+    let record_budget = if attachment.is_some() {
+        source_budget
+    } else {
+        RECORD_BYTES
+    };
+    let read_chunk = if attachment.is_some() {
+        64 * 1024
+    } else {
+        READ_CHUNK
+    };
+    let mut bytes_left = source_budget;
     let mut requests_left = PAGE_SOURCE_REQUESTS;
     let mut generations = BTreeMap::<PathBuf, (String, u64, bool)>::new();
     let mut fetched = 0usize;
@@ -610,7 +1018,7 @@ fn render(
                 crate::slot_projection::Recipe::Tool { .. } => "tool",
                 _ => return Err(invalid()),
             };
-            let mut entry = json!({"k":kind,"field":{"name":field.kind.name(),"layers":field.layers,"chunks":field.checkpoints.len().saturating_sub(1),"complete":complete},"clipped":!complete});
+            let mut entry = json!({"k":kind,"field":{"name":field.kind.name(),"layers":field.layers,"chunks":field.checkpoints.len().saturating_sub(1),"complete":complete,"provenance":{"source":reference,"offset":field.record_offset,"block":field.block,"native_event_id":field.native_event_id}},"clipped":!complete});
             entry[field.kind.name()] = json!(text);
             Ok(entry)
         })();
@@ -657,9 +1065,9 @@ fn render(
         let mut bytes = Vec::new();
         let mut at = offset;
         loop {
-            let max = READ_CHUNK
+            let max = read_chunk
                 .min(bytes_left)
-                .min(RECORD_BYTES.saturating_sub(bytes.len()))
+                .min(record_budget.saturating_sub(bytes.len()))
                 .min(usize::try_from(reference.offset - at).unwrap_or(usize::MAX));
             if max == 0 || requests_left == 0 {
                 return Err(io::Error::new(
@@ -743,14 +1151,78 @@ fn render(
             .unwrap_or_else(|| json!({"k":"end"}))
         };
 
+        if matches!(slot.kind, crate::model::SlotKind::Think)
+            && selection.identity.harness == "claude"
+            && let Some(secs) = crate::tx::thought_secs(&slots, index)
+        {
+            entry["secs"] = json!(secs);
+        }
+        if !selection.slots[index].images.is_empty() {
+            entry["img"] = json!(selection.slots[index].images);
+        }
+        if let Some(index) = attachment {
+            let Some(image) = entry["img"].as_array().and_then(|images| images.get(index)) else {
+                return catalog::error(
+                    404,
+                    "attachment_unavailable",
+                    "This recorded image is unavailable.",
+                    false,
+                );
+            };
+            let Some((content_type, body)) = crate::tx::selected_image(&mut lines, slot, image)
+            else {
+                return catalog::error(
+                    404,
+                    "attachment_unavailable",
+                    "This recorded image is unavailable.",
+                    false,
+                );
+            };
+            return ViewerReply {
+                status: 200,
+                content_type,
+                body,
+                etag: None,
+            };
+        }
+        if matches!(part, SelectedPart::Script) {
+            let Some((text, truncated)) = crate::tx::selected_script(&mut lines, slot) else {
+                return catalog::error(
+                    422,
+                    "field_unsupported",
+                    "The recorded script is unavailable for this native entry.",
+                    false,
+                );
+            };
+            entry["scriptText"] = json!(text);
+            entry["scriptTruncated"] = json!(truncated);
+        }
+        if matches!(part, SelectedPart::Output) {
+            let Some(output) = crate::tx::selected_output(&mut lines, slot) else {
+                return catalog::error(
+                    422,
+                    "field_unsupported",
+                    "The recorded tool output is unavailable for this native entry.",
+                    false,
+                );
+            };
+            entry["out"] = output["text"].clone();
+            if let Some(cut) = output.get("cut") {
+                entry["cut"] = cut.clone();
+            }
+            entry["outputTruncated"] = output["truncated"].clone();
+        }
         if let Some(preview) = tool_preview {
             entry["field"] = preview["field"].clone();
-            let clipped =
-                preview["clipped"] == true || entry["out"].as_str() != preview["out"].as_str();
+            let clipped = preview["clipped"] == true
+                || entry["out"]
+                    .as_str()
+                    .is_some_and(|output| Some(output) != preview["out"].as_str());
             entry["field"]["complete"] = json!(!clipped);
             entry["clipped"] = json!(clipped);
         }
         entry["slot"] = json!(absolute);
+        entry["observed_at"] = json!(slot.t);
         let incomplete = field_failed || lines.failures > before;
         if incomplete {
             incomplete_entries += 1;
@@ -837,7 +1309,8 @@ fn render(
         "projection":{"version":VERSION,"generation":selection.generation,"total":selection.total,"history_incomplete":selection.history_incomplete},
         "range":{"first":selection.first,"end":selection.end,"next":(selection.end<selection.total).then_some(selection.end)},
         "entries":entries,"freshness":{"state":state},"content_observation":{"state":content_state,"sources":content_sources},
-        "relationship_context":{"state":"incomplete","turn_ids":turn_ids,"handoffs":[]},
+        "relationship_context": {"state":selection.context["state"],"turn_ids":turn_ids,"turns":selection.context["turns"],
+          "handoffs":selection.context["handoffs"],"sessions":selection.context["sessions"],"previews":selection.context["previews"]},
         "limits":{"source_bytes":PAGE_SOURCE_BYTES,"source_requests":PAGE_SOURCE_REQUESTS,"record_bytes":RECORD_BYTES},
         "observation":{"source_bytes":fetched,"incomplete_entries":incomplete_entries}}),
     )
@@ -869,7 +1342,13 @@ pub fn session_entry_field_with_mode(
     reader: Option<&dyn SessionSourceReader>,
     mode: SessionSourceReadMode,
 ) -> ViewerReply {
-    if query_value(query, "field_chunk").is_none() || query_value(query, "after").is_none() {
+    if (query_value(query, "field_chunk").is_none()
+        && !matches!(
+            query_value(query, "part"),
+            Some("script" | "output" | "attachment")
+        ))
+        || query_value(query, "after").is_none()
+    {
         return catalog::error(
             400,
             "invalid_arguments",

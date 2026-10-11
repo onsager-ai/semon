@@ -454,7 +454,11 @@ export default async function turnsCheck(browser) {
       if (hasHome) {
         await page.click('.ib .q');
         await page.waitForTimeout(250);
-        D1.fromHome = { h: hid, expectTurn: D.holds.get(hid)?.id, ...(await landed()) };
+        D1.fromHome = {
+          h: hid,
+          expectTurn: D.holds.get(JSON.parse(hid)[1])?.id,
+          ...(await landed()),
+        };
         await page.goBack();
         await page.waitForTimeout(200);
         D1.fromHome.backTo = await page.evaluate(

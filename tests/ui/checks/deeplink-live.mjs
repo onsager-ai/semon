@@ -1,92 +1,75 @@
-// A window opened around an early turn keeps its entries and scroll while the unseen tail grows.
-import { served, data, goto, reporter } from '../lib.mjs';
+// Native permalinks preserve qualified anchors and independent reading controls.
+import assert from 'node:assert/strict';
+import { served, data, goto, closePage, overflow } from '../lib.mjs';
+
 export default async function deepLinkLive(browser) {
-  const D = await data(),
-    r = reporter('deeplink-live'),
-    results = {};
-  const sid = 'harbor',
-    turn = D.model.turns.find((t) => t.sid === sid).id;
-  for (const size of ['phone', 'desktop']) {
-    const page = await served(browser, { size });
-    let grown = false;
-    const requests = [];
-    const rows = Array.from({ length: 81 }, (_, slot) => ({
-      k: 'a',
-      text: 'Entry ' + slot,
-      slot,
-      ...(slot === 0 ? { turn } : {}),
-    }));
-    await page.route(/\/api\/tx\?/, async (route) => {
-      const q = new URL(route.request().url()).searchParams;
-      if (q.get('sid') !== sid || q.has('errors')) return route.continue();
-      requests.push(q.toString());
-      const total = grown ? 81 : 80;
-      const from = q.has('after')
-        ? Number(q.get('after'))
-        : q.has('turn')
-          ? 0
-          : Math.max(0, total - 20);
-      const to = q.has('turn') ? 20 : total;
-      return route.fulfill({
-        json: { sid, from, to, total, calls: 0, errors: 0, entries: rows.slice(from, to) },
+  const D = await data({ extras: true });
+  for (const width of [390, 820, 1280])
+    for (const dark of [false, true]) {
+      const page = await served(browser, {
+        extras: true,
+        size: width === 390 ? 'phone' : 'desktop',
+        dark,
+        viewport: { width, height: 860 },
       });
-    });
-    await page.route(/\/api\/model(\?|$)/, async (route) => {
-      const url = new URL(route.request().url());
-      if (grown) url.searchParams.set('since', '');
-      const response = await route.fetch({ url: url.toString() });
-      if (response.status() !== 200) return route.fulfill({ response });
-      const m = await response.json();
-      if (grown) {
-        m.version += '-deep-grow';
-        const [a, b, ...rest] = String(m.tx[sid]).split('.');
-        m.tx[sid] = [Number(a) + 1, Number(b) + 1, ...rest].join('.');
+      const retired = [],
+        reads = [];
+      try {
+        page.on('request', (request) => {
+          const url = new URL(request.url());
+          if (/^\/api\/(model|tx|events)(?:\/|$)/.test(url.pathname)) retired.push(url.pathname);
+          if (url.pathname === '/api/session-transcript' || url.pathname === '/api/session-anchor')
+            reads.push(url);
+        });
+        const turn = D.turns.find((turn) => turn.sid === 'backlog');
+        assert.ok(turn);
+        await goto(page, { v: 'session', id: 'backlog', turn: turn.id }, D);
+        const anchor = page.locator('.turn[data-turn="' + turn.id + '"]');
+        await anchor.waitFor();
+        assert.equal(new URLSearchParams(new URL(page.url()).hash.slice(1)).get('turn'), turn.id);
+        assert.equal(new URL(page.url()).searchParams.has('turn'), false);
+        const source = new URL(page.url()).searchParams.get('machine');
+        assert.ok(source);
+        assert.ok(
+          reads.some(
+            (url) =>
+              url.pathname === '/api/session-anchor' && url.searchParams.get('turn') === turn.id,
+          ),
+        );
+        assert.ok(
+          reads.every(
+            (url) =>
+              url.searchParams.get('machine') === source &&
+              url.searchParams.get('scope') === 'retained_history',
+          ),
+        );
+        const before = await anchor.boundingBox();
+        const bar = await page.locator('#topbar').boundingBox();
+        assert.ok(
+          before.y >= bar.y + bar.height - 1 && before.y < 860 - 40,
+          'the native turn lands below the Topbar',
+        );
+        const url = page.url();
+        await page.getByRole('button', { name: 'Open Composer', exact: true }).click();
+        const composer = page.getByRole('dialog', { name: 'Session Composer', exact: true });
+        await composer.waitFor();
+        await page.goBack();
+        await composer.waitFor({ state: 'detached' });
+        assert.equal(page.url(), url, 'Composer Back preserves the permalink');
+        assert.equal(await page.locator('#page [aria-label="Conversation controls"]').count(), 0);
+        const unavailable = new URL(page.url());
+        unavailable.hash = 'turn=unrecorded-native-turn';
+        await page.goto(unavailable.href);
+        await page
+          .getByText('This recorded turn is unavailable in the retained history.', { exact: true })
+          .waitFor();
+        assert.equal(await overflow(page), 0);
+        assert.deepEqual(retired, []);
+        assert.deepEqual(page.errors, []);
+      } finally {
+        await closePage(page);
       }
-      return route.fulfill({ response, json: m });
-    });
-    await goto(page, { v: 'session', id: sid, turn }, D);
-    await page.waitForFunction(() => document.querySelectorAll('.msg.assistant').length === 20);
-    await page.evaluate(() => {
-      window.__firstDeepRow = document.querySelector('.msg.assistant');
-    });
-    const before = await page.locator('.msg.assistant').allTextContents();
-    grown = true;
-    await page.waitForFunction(
-      () => document.querySelector('#jump-bottom .new-count')?.textContent === '1 new',
-      null,
-      { timeout: 15000 },
-    );
-    r.expect(
-      JSON.stringify(await page.locator('.msg.assistant').allTextContents()) ===
-        JSON.stringify(before),
-      size + ': unseen entries do not replace the deep-link window',
-    );
-    r.expect(
-      await page.evaluate(() => window.__firstDeepRow === document.querySelector('.msg.assistant')),
-      size + ': the existing row node remains in place',
-    );
-    r.expect(
-      requests.some((q) => q.includes('after=80')),
-      size + ': the metadata request starts beyond the original end',
-    );
-    await page.locator('#jump-bottom').click();
-    await page.waitForFunction(
-      () =>
-        document.querySelector('.msg.assistant')?.textContent === 'Entry 61' &&
-        [...document.querySelectorAll('.msg.assistant')].at(-1)?.textContent === 'Entry 80',
-    );
-    r.expect(
-      (await page.locator('.msg.assistant').count()) === 20,
-      size + ': Jump to bottom loads a bounded newest window',
-    );
-    r.expect(page.errors.length === 0, size + ': page errors: ' + page.errors.join(' | '));
-    results[size] = {
-      requests,
-      initial: before.length,
-      latest: await page.locator('.msg.assistant').count(),
-    };
-    await page.context().close();
-  }
-  r.results = results;
-  return r.done();
+    }
+  console.log('Native source-qualified permalinks, anchors and Composer history passed');
+  return true;
 }

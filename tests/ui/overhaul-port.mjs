@@ -211,9 +211,54 @@ export function overhaulPortReference(D, html) {
   out = swapLine(
     out,
     '    const t = transcript(sid); t.append(jumpWrap); page.append(t);',
-    '    const t = transcript(sid), dock = el("div", "session-dock"), jumpSlot = el("div", "session-jump-slot"), controls = el("section", "local-control"), unavailable = btn("composer-unavailable"); jumpSlot.append(jumpWrap); unavailable.append(el("span", null, "Native session controls are unavailable."), el("span", null, "⌄")); controls.append(unavailable); dock.append(jumpSlot, controls); page.append(t, dock);',
+    '    const t = transcript(sid), dock = el("div", "session-dock"), jumpSlot = el("div", "session-jump-slot"); jumpSlot.append(jumpWrap); dock.append(jumpSlot); t.prepend(el("p", "empty", "Cached history")); page.append(t, dock);',
   );
+  // The requested Composer move changes both the reading dock and Topbar.
+  // Keep the independent reference renderer and the existing pixel thresholds.
+  out = swapLine(
+    out,
+    '      bar.append(fb, mb);',
+    '      const composer = btn("btn sh-quiet session-composer-trigger", "Composer", "Open Composer"); composer.setAttribute("aria-haspopup", "dialog"); bar.append(composer, fb, mb);',
+  );
+  out = swapLine(
+    out,
+    '    else if (r.v === "session") { const s = SESS[r.id]; renderSession(page, r.id); if (s) { const lineage = lineageOf(r.id); bar(s.name, null, { session: s, lineage: lineage.length > 1 ? lineage.slice(0, -1) : null, line2: sessionLine(s) }); } else bar("Session", { label: "Sessions", go: () => go({ v: "sessions" }) }); }',
+    '    else if (r.v === "session") { const s = SESS[r.id]; renderSession(page, r.id); if (s) { const lineage = lineageOf(r.id); bar(s.name, { label: "Sessions", go: () => go({ v: "sessions" }) }, { session: s, lineage: lineage.length > 1 ? lineage.slice(0, -1) : null, line2: sessionLine(s) }); } else bar("Session", { label: "Sessions", go: () => go({ v: "sessions" }) }); }',
+  );
+  out = swapLine(
+    out,
+    '    if (opts.lineage?.length) { if (!phone.matches) opts.lineage.forEach((item) => { const c = btn("crumb", item.name, "Open " + item.name); c.addEventListener("click", () => goSession(item.id)); l1.append(c, el("span", "crumb-sep", "›")); }); }',
+    '    if (crumb) { const c = btn("crumb", crumb.label, "Back to " + crumb.label); c.addEventListener("click", crumb.go); l1.append(c, el("span", "crumb-sep", "›")); } if (opts.lineage?.length) opts.lineage.forEach((item) => { const c = btn("crumb", item.name, "Open " + item.name); c.addEventListener("click", () => goSession(item.id)); l1.append(c, el("span", "crumb-sep", "›")); });',
+  );
+  out = swapLine(
+    out,
+    '    else if (crumb) { const c = btn("crumb", crumb.label, "Back to " + crumb.label); c.addEventListener("click", crumb.go); l1.append(c, el("span", "crumb-sep", "›")); }',
+    '',
+  );
+  out = swapLine(
+    out,
+    '    const tt = el("h1", "t", title); tt.style.margin = "0"; tt.style.font = "inherit"; tt.title = title; if (s && !(phone.matches && opts.lineage?.length)) l1.append(stateLead(s)); l1.append(tt); t.append(l1);',
+    '    const tt = el("h1", "t", title); tt.style.margin = "0"; tt.style.font = "inherit"; tt.title = title; if (s) l1.append(stateLead(s)); l1.append(tt); t.append(l1);',
+  );
+  // The canonical menu exposes indexed failures and Source selection. The
+  // mockup's external Claude button has no action or corresponding capability.
+  out = swapLine(
+    out,
+    '    if (s.harness === "claude") { const a = btn("menu-item"); a.setAttribute("role", "menuitem"); a.append(icon(I.ext, "icon"), el("span", null, "Open in claude.ai")); acts.append(a); }',
+    '    const failed = (TX[s.id] ?? []).filter((e) => e.k === "tool" && e.ok === false).length; if (failed) { const e = btn("menu-item menu-errors"); e.setAttribute("role", "menuitem"); e.append(el("span", "dot err"), el("span", null, failed + " failed"), el("span", "menu-note", "Step through")); acts.append(e); } const source = btn("menu-item"); source.setAttribute("role", "menuitem"); source.append(icon(I.machine, "icon"), el("span", null, "Choose a machine")); acts.append(source);',
+  );
+  out = swapLine(
+    out,
+    '      if (failed) { const e = btn("menu-item menu-errors"); e.setAttribute("role", "menuitem"); const mark = el("span", "dot err"); mark.setAttribute("aria-hidden", "true"); e.append(mark, el("span", null, failed + " failed"), el("span", "menu-note", "Step through")); acts.append(e); }',
+    '',
+  );
+  const startedPrefix = '  const startedDivider = ';
+  const startedLine = out.split('\n').find((line) => line.startsWith(startedPrefix));
+  if (!startedLine?.includes(' on\\u00a0')) throw new Error('overhaul started divider moved');
+  out = swapLine(out, startedPrefix, startedLine.replace(' on\\u00a0', ' on'));
   const stagingStyles = `
+.divider .dv-text { gap: var(--s1); }
+.menu-item > .dot { flex: none; }
 .think-disclosure { display: flex; align-items: center; gap: var(--s2); min-height: var(--tap); padding: 0; border: 0; background: transparent; text-align: left; }
 .think-disclosure .chev { flex: none; width: 16px; height: 16px; }
 .think-disclosure .chev.open { transform: rotate(90deg); }
@@ -224,10 +269,12 @@ export function overhaulPortReference(D, html) {
 .page > .transcript { flex: none; }
 .session-dock { position: sticky; bottom: calc(var(--s4) + env(safe-area-inset-bottom, 0px)); margin-top: auto; padding-top: var(--s2); background: var(--ground); }
 .session-jump-slot { display: flex; justify-content: center; }
-.composer-unavailable { display: flex; align-items: center; justify-content: space-between; gap: var(--s2); width: 100%; min-height: var(--tap); padding: var(--s2) var(--s3); border: 0; background: transparent; color: var(--muted); font-size: var(--fs-sm); text-align: left; }
-@media (pointer: coarse) { .composer-unavailable { min-height: 44px; } }
+.btn.sh-quiet { border-color: transparent; background: transparent; color: var(--ink-2); }
+.session-composer-trigger { display: inline-flex; align-items: center; justify-content: center; gap: 8px; min-height: var(--tap); padding: 0 14px; border: 1px solid transparent; border-radius: var(--r2); background: transparent; color: var(--ink-2); font: 500 var(--fs-ui)/1.2 var(--sans); text-align: center; white-space: nowrap; }
 `;
-  out = out.replace('</style>', stagingStyles + '</style>');
+  const stagingStyleEnd = out.lastIndexOf('</style>');
+  if (stagingStyleEnd < 0) throw new Error('overhaul mockup style block moved');
+  out = out.slice(0, stagingStyleEnd) + stagingStyles + out.slice(stagingStyleEnd);
   // The mockup sets inline code in a transcript at .86em of 13px (11.2px), under the 12px floor its own principle P3 sets (and
   // the tokens check enforces); the viewer floors it at the caption size, so the reference does too.
   out = swapLine(

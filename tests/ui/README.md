@@ -43,8 +43,8 @@ parallelism does not weaken their assertions or alter product timers.
   still fail. Turning them into hard limits requires calibrating the budgets.
 
 Workflow dispatch exposes `exhaustive` and `sample_report` for deeper audits.
-The infrastructure tests (`suite-plan`, pixel diff, tap hit-testing, viewer cache,
-and model delta) guard coverage selection and the comparison machinery.
+The infrastructure tests (`suite-plan`, pixel diff, tap hit-testing, catalog cache,
+and catalog wire validation) guard coverage selection and the comparison machinery.
 
 The October 1 baseline ran serially in 27–43 minutes. The largest avoidable costs
 were repeated touch auditing across every session and running independent suites
@@ -55,11 +55,15 @@ that estimate as an achieved CI duration.
 Shared design rules, consumer auditing and deliberate gallery baseline updates are
 documented in [the design contract](../../docs/design/design-contract.md).
 
-The original complete-model suites enter the explicitly supported `compat=1`
-reader. Their references, mismatch limits and functional assertions are unchanged.
-The interaction lane also runs `ui/tests/catalog-served.mjs` against the actual
-compiled producer and embedded default bundle, at phone and desktop sizes in
-both themes. It checks bounded ranges, recorded field bytes, keyboard paging,
-accessible focus, phone paging targets and sideways overflow, and records PNGs
-for design review. These new images do not replace approved compatibility
-references or claim an approved whole-screen comparison for the new layout.
+All served suites enter the canonical reader. Standalone `/api/model` and
+`/api/tx` remain independent fixture oracles where required; browser traffic must
+use bounded Source and selected-session APIs. Compatibility query bookmarks are
+normalized to the same reader. Existing mismatch ratchets and approved baselines
+remain required.
+
+The interaction lane also runs `ui/tests/catalog-served.mjs` and
+`ui/tests/overview-served.mjs` against the compiled producer and embedded bundle
+at 390px, 820px and 1280px in both themes. They check bounded ranges, native bytes,
+keyboard paging, focus, Home/Analytics, causal navigation and the contextual
+Composer, and save actual served screenshots for review. New screenshots do not
+replace approved visual references.

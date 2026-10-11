@@ -164,8 +164,8 @@ const SIDEBAR_RECENT: &str = "<div class=\"side-h\">Recent</div>\n<div class=\"s
 /// `viewer.html` has it (a test holds them together).
 /// `name` is escaped here; `nav` is markup, the page's own rows (see [`NavLink::html`]), shown until the viewer's script
 /// draws its navigation in their place. The page adds anything of its own (an account row) after this, inside the
-/// `<aside class="sidebar" id="sidebar">`, marks its `.app` with [`SIDEBAR_ONLY`], and loads `/viewer.js` after
-/// `/shell.js`.
+/// `<aside class="sidebar" id="sidebar">`. A typed native-page host mounts the
+/// canonical Viewer chrome and native enhancements; see docs/shell.md.
 pub fn session_sidebar(name: &str, nav: &str) -> String {
     format!(
         "{head}\n\
@@ -173,10 +173,6 @@ pub fn session_sidebar(name: &str, nav: &str) -> String {
         head = sidebar_head(name),
     )
 }
-
-/// The attribute on a page's `.app` that has the viewer's script draw only the sidebar ([`session_sidebar`]) and leave
-/// the page and its top bar to the page. Add ` data-viewer-nav="<key>"`, a [`NAV`] key, to mark that row current.
-pub const SIDEBAR_ONLY: &str = "data-viewer=\"sidebar\"";
 
 /// Text for an HTML attribute value or element content.
 fn escape(text: &str) -> String {
@@ -348,13 +344,8 @@ mod tests {
             "tests/ui/shell-sidebar.html does not draw shell::session_sidebar(\"Semon\", NAV rows):\n{}",
             super::session_sidebar("Semon", &nav)
         );
-        assert!(page.contains(&format!(
-            "<div class=\"app\" {} data-viewer-nav=\"machines\">",
-            super::SIDEBAR_ONLY
-        )));
-        assert!(page.contains(
-            "<script src=\"/shell.js\" defer></script>\n<script src=\"/viewer.js\" defer></script>"
-        ));
+        assert!(page.contains("<div class=\"app\">"));
+        assert!(page.contains("<script src=\"/sidebar-host.js\" defer></script>"));
     }
 
     #[test]
@@ -396,13 +387,10 @@ mod tests {
             assert_eq!(link.path, definition["path"]);
             assert_eq!(link.icon, definition["icon"]);
         }
-        for source in [
-            include_str!("../../../ui/src/app/navigationView.ts"),
-            include_str!("../../../ui/src/app/catalogSources.ts"),
-            include_str!("../../../ui/src/app/catalogViewer.tsx"),
-        ] {
-            assert!(source.contains("projectShellNavigation("));
-        }
+        assert!(
+            include_str!("../../../ui/src/app/catalogViewer.tsx")
+                .contains("projectShellNavigation(")
+        );
     }
 
     #[test]

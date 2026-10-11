@@ -1,4 +1,4 @@
-import type { JsonObject } from './model';
+import type { JsonObject } from './api';
 export interface ControlRequest {
   id: string;
   kind: 'permission' | 'question';

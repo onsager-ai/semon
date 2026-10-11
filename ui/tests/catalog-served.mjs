@@ -190,7 +190,7 @@ test(
           }),
         );
       const start = performance.now();
-      await page.goto(url[1] + '/?t=' + url[2]);
+      await page.goto(url[1] + '/sessions?t=' + url[2]);
       await page.locator('#page [data-id]').first().waitFor({ timeout: 60000 });
       const firstList = performance.now() - start;
       const query = page.getByRole('textbox', { name: 'Search session details', exact: true });
@@ -204,7 +204,7 @@ test(
       const key = 'backlog';
       const selectedStart = performance.now();
       await page.locator('#page [data-id="backlog"]').click();
-      await page.locator('#page [data-entry-key]').first().waitFor({ timeout: 60000 });
+      await page.locator('#page [data-entry-key]:visible').first().waitFor({ timeout: 60000 });
       const selected = performance.now() - selectedStart;
       const preview = page.getByRole('button', { name: 'Load recorded text', exact: true });
       await preview.waitFor();
@@ -228,7 +228,7 @@ test(
       await page.locator(`#page [data-id="${key}"]`).waitFor();
       const warmStart = performance.now();
       await page.locator(`#page [data-id="${key}"]`).click();
-      await page.locator('#page [data-entry-key]').first().waitFor();
+      await page.locator('#page [data-entry-key]').first().waitFor({ state: 'attached' });
       const warm = performance.now() - warmStart;
       assert.equal(
         await page.locator('#page [data-entry-key]').first().getAttribute('data-entry-key'),
@@ -240,7 +240,7 @@ test(
         false,
       );
       const visual = [];
-      for (const width of [390, 1280]) {
+      for (const width of [390, 820, 1280]) {
         for (const colorScheme of ['light', 'dark']) {
           const context = await browser.newContext({
             viewport: { width, height: 860 },
@@ -248,10 +248,10 @@ test(
           });
           const check = await context.newPage();
           check.on('pageerror', (e) => errors.push(e.message));
-          await check.goto(url[1] + '/?t=' + url[2]);
+          await check.goto(url[1] + '/sessions?t=' + url[2]);
           await check.locator('#page [data-id="backlog"]').waitFor();
           await check.locator('#page [data-id="backlog"]').click();
-          await check.locator('#page [data-entry-key]').first().waitFor();
+          await check.locator('#page [data-entry-key]:visible').first().waitFor();
           await check.evaluate(() => document.fonts.ready);
           const audit = await auditText(check);
           assert.equal(audit.smallCount, 0, JSON.stringify(audit.small));
@@ -321,15 +321,22 @@ test(
           )
             nativeRanges.push(response.json());
         });
-        await check.goto(url[1] + '/?t=' + url[2]);
+        await check.goto(url[1] + '/sessions?t=' + url[2]);
         const row = check.locator(`#page [data-id="${session}"]`);
         await row.waitFor();
         await row.click();
-        await check.locator('#page [data-entry-key]').first().waitFor();
+        await check.locator('#page [data-entry-key]').first().waitFor({ state: 'attached' });
         assert.equal(await check.getByText('Invalid string', { exact: true }).count(), 0);
         assert.equal(await check.getByText('Invalid object', { exact: true }).count(), 0);
         const failed = check.locator('#page .step.err').first();
         if (await failed.count()) {
+          // Native tools retain the shared collapsed event-group presentation.
+          await failed.evaluate((node) =>
+            node
+              .closest('.tgroup')
+              ?.querySelector(':scope > button[aria-expanded="false"]')
+              ?.click(),
+          );
           await failed.locator(':scope > button').click();
           assert.equal(
             await failed.locator(':scope > button').getAttribute('aria-expanded'),
@@ -341,8 +348,17 @@ test(
           );
         }
         const body = await check.locator('#page').innerText();
-        if (session === 'harbor')
-          assert.ok(body.includes('Original action prompt is unavailable.'));
+        if (session === 'harbor') {
+          assert.equal(body.includes('Original action prompt is unavailable.'), false);
+          assert.ok(
+            await check.locator('#page .child-card').count(),
+            'recorded child sessions are presented',
+          );
+          assert.ok(
+            await check.locator('#page [data-turn]').count(),
+            'recorded turn navigation is retained',
+          );
+        }
         if (session === 'native-tools') {
           const nativeEntries = (await Promise.all(nativeRanges)).flatMap((range) => range.entries);
           const tools = nativeEntries.filter((entry) => entry.k === 'tool');
@@ -379,6 +395,8 @@ test(
       assert.deepEqual(errors, []);
       // Losing the observed native source must remain visible without erasing useful
       // previously loaded history or issuing a complete-model restoration request.
+      await page.bringToFront();
+      await page.waitForFunction(() => document.visibilityState === 'visible');
       const retainedEntry = await page.locator('#page [data-entry-key]').first().elementHandle();
       await rm(join(home, 'claude', backlog));
       await page.waitForFunction(

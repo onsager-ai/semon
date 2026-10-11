@@ -598,17 +598,21 @@ fn put_out(
 /// (`truncated`, or `cut_before`), and for a Codex output that Codex cut,
 /// `cut`. A gap Codex made is never `truncated`.
 fn text_json(text: &str, source: Source, cut_before: bool) -> String {
+    text_value(text, source, cut_before, FULL_MAX).to_string()
+}
+
+fn text_value(text: &str, source: Source, cut_before: bool, limit: usize) -> Value {
     let (plain, cut) = split_cut(text, source);
-    let (shown, truncated) = clip(&plain, FULL_MAX);
+    let (shown, truncated) = clip(&plain, limit);
     let mut fields = json!({"text": shown});
     if let Some(cut) = cut {
         // Each side may take up to the cap itself: whether semon cut the text
         // is `truncated`'s to say, from the text as a whole.
-        let (cut, _) = cut.json(FULL_MAX * 2);
+        let (cut, _) = cut.json(limit * 2);
         fields["cut"] = cut;
     }
     fields["truncated"] = json!(truncated || cut_before);
-    fields.to_string()
+    fields
 }
 
 /// A step's duration: tenths of a second under a minute, then minutes.
@@ -934,6 +938,65 @@ fn item_command(item: &Value) -> Option<String> {
 fn script_at(lines: &mut Lines, path: &Path, offset: u64) -> Option<String> {
     let record = lines.get(path, offset)?;
     model::tool_input(&record, 0).and_then(|input| input.as_str().map(str::to_owned))
+}
+
+pub(crate) fn selected_image(
+    lines: &mut Lines,
+    slot: &Slot,
+    image: &Value,
+) -> Option<(&'static str, Vec<u8>)> {
+    let file = slot.file.as_ref()?;
+    if !matches!(&slot.kind, SlotKind::U | SlotKind::H(_)) {
+        return None;
+    }
+    let offset = image["o"].as_u64()?;
+    let block = usize::try_from(image["b"].as_u64()?).ok()?;
+    let version = u64::from_str_radix(image["v"].as_str()?, 16).ok()?;
+    let record = lines.get(&file.path, offset)?;
+    attachments::image(&record, block, version)
+}
+
+/// Read one recorded script through the caller's qualified, budgeted source reader.
+pub(crate) fn selected_script(lines: &mut Lines, slot: &Slot) -> Option<(String, bool)> {
+    let file = slot.file.as_ref()?;
+    let offset = match slot.kind {
+        SlotKind::Operation {
+            script_offset: Some(offset),
+            ..
+        } => offset,
+        SlotKind::Yielded { .. } | SlotKind::Sent { .. } => slot.offset,
+        _ => return None,
+    };
+    let mut script = script_at(lines, &file.path, offset)?;
+    let truncated = script.len() > 64 * 1024;
+    if truncated {
+        let mut end = 64 * 1024;
+        while !script.is_char_boundary(end) {
+            end -= 1;
+        }
+        script.truncate(end);
+    }
+    Some((script, truncated))
+}
+
+/// Expand one structured tool result through the selected, budgeted reader.
+/// Large plain strings use scalar checkpoints instead of this record path.
+pub(crate) fn selected_output(lines: &mut Lines, slot: &Slot) -> Option<Value> {
+    let file = slot.file.as_ref()?;
+    let (text, source) = match &slot.kind {
+        SlotKind::Tool { reply, item, .. } => {
+            tool_output(lines, &file.path, reply.as_ref(), *item)?
+        }
+        SlotKind::Operation { kind, .. } if kind == "CommandExecution" => {
+            let record = lines.get(&file.path, slot.offset)?;
+            let output = record
+                .pointer("/payload/item/aggregated_output")?
+                .as_str()?;
+            (output.to_owned(), Source::Collected)
+        }
+        _ => return None,
+    };
+    Some(text_value(&text, source, false, 64 * 1024))
 }
 
 /// A yielded command's line: from the item that completed it, else from
@@ -1785,7 +1848,7 @@ fn with_images(
     entry
 }
 
-fn thought_secs(slots: &[Slot], index: usize) -> Option<i64> {
+pub(crate) fn thought_secs(slots: &[Slot], index: usize) -> Option<i64> {
     let before = slots.get(index.checked_sub(1)?)?.t?;
     let at = slots.get(index)?.t?;
     let elapsed = at.checked_sub(before)?;

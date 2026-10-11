@@ -726,6 +726,7 @@ mod tests {
         let source = CatalogSource {
             path: fixture.path.clone(),
             native_id: "lead".into(),
+            native_role: None,
             dev: stat.dev,
             ino: stat.ino,
             size: stat.size,

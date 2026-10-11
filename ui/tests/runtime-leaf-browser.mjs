@@ -21,7 +21,10 @@ for (const width of [390, 1280])
     try {
       const page = await browser.newPage({ viewport: { width, height: 900 } });
       await page.route('http://runtime.test/**', (route) =>
-        route.fulfill({ contentType: 'text/html', body: '<!doctype html><div id="page"></div>' }),
+        route.fulfill({
+          contentType: 'text/html',
+          body: '<!doctype html><header id="topbar"></header><div id="page"></div>',
+        }),
       );
       await page.goto('http://runtime.test/');
       await page.addScriptTag({ content: outputFiles[0].text });
@@ -71,6 +74,7 @@ for (const width of [390, 1280])
         RuntimeLeaf.renderSessionScreen(
           root,
           {
+            composerTarget: document.querySelector('#topbar'),
             id: 'catalog',
             name: 'Session',
             blocks,
@@ -96,6 +100,7 @@ for (const width of [390, 1280])
           throw Error('Runtime update walked transcript blocks');
         };
       });
+      await page.getByRole('button', { name: 'Open Composer' }).click();
       const draft = page.locator('textarea');
       await draft.fill('Retained draft');
       await draft.focus();

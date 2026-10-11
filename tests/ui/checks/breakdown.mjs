@@ -62,7 +62,7 @@ function fakeAnswer(A, D) {
     unpriced_models: [],
     sessions: 9 - i,
   }));
-  const ids = Object.keys(D.SESS);
+  const ids = Object.keys(A.selections);
   for (const spec of Object.values(TOP)) {
     A.top[spec.key] = spec.values.map((v, i) => ({
       sid: ids[i % ids.length],
@@ -70,14 +70,18 @@ function fakeAnswer(A, D) {
       ...(spec.field === 'usd' ? { unpriced_models: [] } : {}),
     }));
   }
-  for (const id of ids) A.sessions[id] ??= { name: D.SESS[id].name, harness: D.SESS[id].harness };
+  for (const id of ids)
+    A.sessions[id] ??= {
+      name: D.SESS[A.selections[id].catalog_key].name,
+      harness: D.SESS[A.selections[id].catalog_key].harness,
+    };
   return A;
 }
 
 // Serves the fake answer for every /api/analytics request of the page, with a tag of its own so the page's kept answer is answered with a 304.
 async function fake(page, D, state = { n: 0 }) {
   await page.route(
-    (u) => u.pathname === '/api/analytics',
+    (u) => u.pathname === '/api/viewer/analytics',
     async (route) => {
       const headers = { ...route.request().headers() };
       delete headers['if-none-match'];
@@ -513,7 +517,7 @@ export default async function breakdownCheck(browser) {
             'px wide, want at least 40',
         );
         r.expect(
-          row.tag === 'A' && /^\/s\/(claude|codex)\/./.test(row.href ?? ''),
+          row.tag === 'A' && /^\/s\/native\/./.test(row.href ?? ''),
           mode +
             ": '" +
             list.title +
@@ -556,7 +560,7 @@ export default async function breakdownCheck(browser) {
       const redrawn = await page
         .waitForResponse(
           (response) =>
-            new URL(response.url()).pathname === '/api/analytics' &&
+            new URL(response.url()).pathname === '/api/viewer/analytics' &&
             response.status() === 200 &&
             response.headers().etag?.endsWith('-fake' + page.fakeState.n),
           { timeout: 20000 },

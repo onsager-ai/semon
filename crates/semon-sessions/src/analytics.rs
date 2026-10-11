@@ -50,10 +50,10 @@ const STALE_AFTER: Duration = Duration::from_secs(30);
 /// active in the last [`KEEP_MS`] whatever the model's own window. Stubs
 /// (the far end of a handoff these logs don't have) are left out: they
 /// stand for a session, they didn't run here.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub(crate) struct Activity {
     pub(crate) name: String,
-    pub(crate) harness: &'static str,
+    pub(crate) harness: String,
     pub(crate) repo: Option<String>,
     pub(crate) model: String,
     /// Working now: its last busy interval runs to the time of the answer.
@@ -79,6 +79,7 @@ pub(crate) struct Activity {
     /// [`KEEP_MS`] ago: when it was asked and when it was answered.
     pub(crate) answered: Vec<(i64, i64)>,
     pub(crate) waits_truncated: bool,
+    #[serde(with = "crate::overview::comparison")]
     pub(crate) comparison: Option<Arc<crate::comparison::Item>>,
 }
 
@@ -146,7 +147,7 @@ pub(crate) fn activity(
             let transcript = tx.get(id);
             let row = Activity {
                 name: session.name.clone(),
-                harness: session.harness,
+                harness: session.harness.into(),
                 repo: session.repo.clone(),
                 model: session.model.clone(),
                 working: session.state == "work",
@@ -753,7 +754,7 @@ pub(crate) fn answer(rows: &[Row], request: &Request, now: i64, version: &str) -
         let activity = row.row.activity;
         repos.insert(activity.repo.as_deref());
         facets[0].insert(row.row.machine);
-        facets[1].insert(activity.harness);
+        facets[1].insert(activity.harness.as_str());
         facets[2].insert(&activity.model);
     }
     let rows: Vec<Live> = all
@@ -797,7 +798,7 @@ pub(crate) fn answer(rows: &[Row], request: &Request, now: i64, version: &str) -
             for row in &rows {
                 let ms = row.busy_in(a, b);
                 if ms > 0 {
-                    match row.activity().harness {
+                    match row.activity().harness.as_str() {
                         "claude" => claude += ms,
                         "codex" => codex += ms,
                         _ => {}
@@ -835,7 +836,7 @@ pub(crate) fn answer(rows: &[Row], request: &Request, now: i64, version: &str) -
                 }
                 unpriced.extend(row.activity().unpriced_models.iter().cloned());
                 let bin = &mut bins[usize::try_from((day - first) / DAY_MS).unwrap_or(0)];
-                match row.activity().harness {
+                match row.activity().harness.as_str() {
                     "claude" => bin.claude += usd,
                     "codex" => bin.codex += usd,
                     _ => {}
@@ -1114,7 +1115,7 @@ mod tests {
     fn session(name: &str, harness: &'static str, repo: Option<&str>) -> Activity {
         Activity {
             name: name.into(),
-            harness,
+            harness: harness.into(),
             repo: repo.map(str::to_owned),
             model: "Opus 5.5".into(),
             working: false,
