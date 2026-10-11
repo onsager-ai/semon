@@ -42,6 +42,7 @@ export interface CatalogListSnapshot {
 export interface CatalogListHost {
   session(item: CatalogListItem): void;
   filters(values: { harness: string; repo: string; model: string; q: string }): void;
+  searchDraft?(query: string): void;
   clearFilters(): void;
   more(): void;
   retry(): void;
@@ -90,6 +91,7 @@ export function renderCatalogList(
               id="sq"
               placeholder="Session details…"
               value={snapshot.query ?? ''}
+              onInput={(event) => host.searchDraft?.(event.currentTarget.value)}
               onChange={(event) => {
                 if (event.currentTarget.form) commit(event.currentTarget.form);
               }}
