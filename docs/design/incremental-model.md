@@ -18,28 +18,6 @@ Each source file generation owns a bounded image metadata cache. An entry stores
 
 The first page reads the source prompt; repeated pages read its text and structure while seeking past the image strings. Image requests seek to the selected string range, decode its JSON escapes and base64, and check the requested content version and raster signature. Rewritten files receive a new cache generation. Prompts too large to fit the metadata budget keep the ordinary uncached image path.
 
-### Model transport deltas
-
-The viewer opts in with `/api/model?delta=1&since=VERSION`. A matching current
-version still returns 304. A known earlier version returns a JSON envelope
-`{delta:1,from,version,set,remove,collections}` when it is smaller than the full
-model. `set` replaces changed top-level values and `remove` deletes fields.
-Collections patch `sessions` and `tx` by key, and `handoffs` and `turns` by `id`;
-each contains `set` and `remove`, plus an explicit `order` when an array's order
-changes. Machine membership, busy intervals and other aggregate fields are
-replaced when they change. The browser reconstructs a complete model before its
-existing update routine preserves scroll, focus, open tools and transcript pages.
-A mismatched browser baseline requests a full model.
-
-Each ViewerCore retains at most eight versions and 32 MiB of serialized models,
-and admits no individual model over 8 MiB. A reconnect, restart, evicted version,
-oversized model or patch bigger than a full response receives the full model.
-Requests without `delta=1` keep the previous full-response contract. Account,
-navigation and admin fields are never stored in shared history; each patch uses
-only the current request's extras. The protocol reduces response bytes; global
-join work and constructing the current model still use the existing build path.
-
-
 ## Persisted descriptions (#320, first slice)
 
 SQLite schema 7 adds `session_descriptions`, one versioned row per session key.

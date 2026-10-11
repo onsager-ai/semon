@@ -314,7 +314,6 @@ pub struct ViewerCore {
     retired: Mutex<Vec<Weak<MachineView>>>,
     /// `/api/analytics`' answers, kept until the model changes.
     analytics: Mutex<analytics::Cache>,
-    model_history: Mutex<crate::model_delta::History>,
     /// One metadata-only ownership projection of immutable machine snapshots.
     ownership: Mutex<Option<Ownership>>,
 }
@@ -975,7 +974,6 @@ impl ViewerCore {
             open: Gate::default(),
             retired: Mutex::default(),
             analytics: Mutex::default(),
-            model_history: Mutex::default(),
             ownership: Mutex::default(),
         };
         if sources.is_retired() {
@@ -1413,7 +1411,6 @@ impl ViewerCore {
             let mut reply = views[0].1.respond(method, path, query, if_none_match);
             if path == "/api/model" && reply.status == 200 {
                 reply.body = extras.apply(&reply.body);
-                reply = self.model_delta(reply, query);
             }
             return reply;
         }
@@ -1429,24 +1426,7 @@ impl ViewerCore {
             "/api/tree" => self.tree(&views),
             _ => Ok(views[0].1.respond(method, path, query, if_none_match)),
         };
-        let reply = answer.unwrap_or_else(|error| failed(&error));
-        if path == "/api/model" {
-            self.model_delta(reply, query)
-        } else {
-            reply
-        }
-    }
-
-    fn model_delta(&self, mut reply: ViewerReply, query: &str) -> ViewerReply {
-        if reply.status == 200 {
-            let since = query_value(query, "since").and_then(decoded);
-            reply.body = lock(&self.model_history).answer(
-                &reply.body,
-                since.as_deref(),
-                query_value(query, "delta") == Some("1"),
-            );
-        }
-        reply
+        answer.unwrap_or_else(|error| failed(&error))
     }
 
     /// Focused lists are scoped by the embedder's stable machine key. A
