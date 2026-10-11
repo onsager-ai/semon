@@ -106,9 +106,13 @@ const local = () =>
 // The machine as a receiver holds it: nothing of the reader's own (an empty home), only DIR/machines/.
 fs.mkdirSync(scratch + '/reader/proc', { recursive: true });
 const pushed = () => {
-  const machines = fs.readdirSync(received + '/machines', { withFileTypes: true })
-    .filter((item) => item.isDirectory()).map((item) => item.name).sort();
-  if (machines.length !== 1) throw new Error('pushed-parity requires the one pushed fixture machine');
+  const machines = fs
+    .readdirSync(received + '/machines', { withFileTypes: true })
+    .filter((item) => item.isDirectory())
+    .map((item) => item.name)
+    .sort();
+  if (machines.length !== 1)
+    throw new Error('pushed-parity requires the one pushed fixture machine');
   return corpus(
     [
       '--machine',
