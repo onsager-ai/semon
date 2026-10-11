@@ -7288,6 +7288,74 @@ fn scan_window_never_replaces_a_complete_catalog_and_unknown_times_remain_unknow
 }
 
 #[test]
+fn isolated_catalog_publication_fences_competing_generations_and_pending_sources() {
+    let home = Home::new();
+    home.top("root", &[human("root", ts(0, 0), "prompt")]);
+    home.top("other", &[human("other", ts(0, 0), "other prompt")]);
+    home.build();
+    let input = |id: &str| crate::inputs::Input {
+        root: crate::inputs::InputRoot::Claude,
+        path: format!("projects/-work-proj/{id}.jsonl"),
+    };
+    home.top(
+        "root",
+        &[
+            human("root", ts(0, 0), "prompt"),
+            assistant("root", ts(0, 1), vec![text("new answer")]),
+        ],
+    );
+    let mut root_cache = EventCache::open_scoped(&home.options.cache).unwrap();
+    let prepared = prepare_sources(&home.options, &mut root_cache, &[input("root")], NOW).unwrap();
+    let before = read_catalog(&home);
+    home.top(
+        "other",
+        &[
+            human("other", ts(0, 0), "other prompt"),
+            assistant("other", ts(0, 2), vec![text("other answer")]),
+        ],
+    );
+    let mut other_cache = EventCache::open_scoped(&home.options.cache).unwrap();
+    let other = prepare_sources(&home.options, &mut other_cache, &[input("other")], NOW).unwrap();
+    assert_eq!(
+        root_cache.publish_isolated_catalog(&prepared).unwrap(),
+        Some(crate::events::Outcome::Conflict),
+        "unacknowledged unrelated evidence cannot qualify a complete publication"
+    );
+    assert_eq!(
+        read_catalog(&home).0,
+        before.0,
+        "failed component publication rolls back all projections"
+    );
+    assert_eq!(
+        other_cache.publish_isolated_catalog(&other).unwrap(),
+        Some(crate::events::Outcome::Conflict),
+        "the other pending source also prevents completeness"
+    );
+    observe_catalog(
+        &home.options,
+        &mut EventCache::open_scoped(&home.options.cache).unwrap(),
+        &mut false,
+        &mut Texts::default(),
+        NOW,
+    )
+    .unwrap();
+    assert_eq!(
+        root_cache.publish_isolated_catalog(&prepared).unwrap(),
+        Some(crate::events::Outcome::Conflict),
+        "a newer complete generation fences an older component"
+    );
+    let (_, rows) = read_catalog(&home);
+    assert_eq!(
+        rows.iter().find(|row| row.key == "other").unwrap().last,
+        Some(at(0, 2))
+    );
+    assert_eq!(
+        rows.iter().find(|row| row.key == "root").unwrap().last,
+        Some(at(0, 1))
+    );
+}
+
+#[test]
 fn interrupted_catalog_publication_retains_one_generation_and_recovers_on_restart() {
     let home = Home::new();
     for id in ["aaa", "zzz"] {

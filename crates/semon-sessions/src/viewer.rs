@@ -1041,6 +1041,50 @@ impl MachineView {
             return Ok(true);
         }
         work.built_at = Some(Instant::now());
+        if work.catalog_snapshot.is_some() {
+            self.evidence.prepare_events(work, now)?;
+            let cache = work.events.as_mut().expect("event cache initialized");
+            // The old snapshot proves discovery/runtime inputs did not change;
+            // stamp before reads so concurrent writes remain retryable.
+            let snapshot = Snapshot::capture_pids(
+                &self.evidence.options,
+                work.catalog_snapshot
+                    .as_ref()
+                    .expect("snapshot exists")
+                    .pids
+                    .keys()
+                    .copied()
+                    .collect(),
+                cache.paths(),
+            );
+            if let Some(inputs) = work
+                .catalog_snapshot
+                .as_ref()
+                .expect("snapshot exists")
+                .changed_catalog_inputs(&snapshot, &self.evidence.options)
+            {
+                let options = Options {
+                    scan_window: false,
+                    ..self.evidence.options.clone()
+                };
+                let prepared = model::prepare_sources(&options, cache, &inputs, now)?;
+                match cache.publish_isolated_catalog(&prepared)? {
+                    Some(crate::events::Outcome::Written) => {
+                        cache.publish_session_descriptions();
+                        cache.end_scan();
+                        work.catalog_snapshot = Some(snapshot);
+                        return Ok(true);
+                    }
+                    Some(_) => {
+                        return Err(io::Error::new(
+                            io::ErrorKind::WouldBlock,
+                            "native Catalog component generation changed",
+                        ));
+                    }
+                    None => {}
+                }
+            }
+        }
         if !self.evidence.prepare_catalog(work, now)? {
             return Ok(false);
         }
@@ -6876,6 +6920,47 @@ mod tests {
             // Explicit legacy reads remain supported until their consumers migrate.
             assert_eq!(view.respond("GET", "/api/model", "", None).status, 200);
             assert!(view.shown_model().is_some());
+            view.close();
+        }
+    }
+
+    #[test]
+    fn a_changed_isolated_catalog_source_does_not_reload_unrelated_event_indexes() {
+        for unrelated in [0, 256] {
+            let fixture = Fixture::new();
+            for n in 0..=unrelated {
+                let id = format!("isolated-{n:04}");
+                fixture.claude(&id, &[json!({"type":"user","sessionId":id,"uuid":id,"origin":{"kind":"human"},"cwd":"/tmp/project","timestamp":"2026-10-01T00:00:00Z","message":{"role":"user","content":"initial prompt"}})]);
+            }
+            let mut cache = EventCache::open_scoped(&fixture.options.cache).unwrap();
+            model::observe_catalog(
+                &fixture.options,
+                &mut cache,
+                &mut false,
+                &mut model::Texts::default(),
+                model::now_ms(),
+            )
+            .unwrap();
+            let snapshot = Snapshot::capture_pids(&fixture.options, BTreeSet::new(), cache.paths());
+            say(&fixture, "isolated-0000", 1, "one changed source");
+            let mut work = Work::default();
+            work.events = Some(EventCache::open_scoped(&fixture.options.cache).unwrap());
+            work.catalog_snapshot = Some(snapshot);
+            let view = fixture.viewer();
+            let before = crate::events::FILE_READS.with(std::cell::Cell::get);
+            assert!(
+                view.refresh_catalog_locked(&mut work, model::now_ms())
+                    .unwrap()
+            );
+            assert_eq!(
+                crate::events::FILE_READS.with(std::cell::Cell::get) - before,
+                1,
+                "unrelated={unrelated}: changed-source publication loads only its own event rows"
+            );
+            let reply = crate::session_catalog_page(&fixture.options, "fixture", "limit=60");
+            let page: Value = serde_json::from_slice(&reply.body).unwrap();
+            assert_eq!(page["completeness"]["state"], "complete");
+            assert!(view.shown_model().is_none());
             view.close();
         }
     }

@@ -30,6 +30,13 @@ pub(crate) struct Projection {
     bookmarks: Vec<(String, String)>,
 }
 impl Projection {
+    pub(crate) fn is_isolated(&self, key: &str) -> bool {
+        self.bookmarks.is_empty()
+            && self.edges.iter().all(|edge| {
+                (edge["kind"] == "toyou" && edge["from"] == key && edge["to"].is_null())
+                    || (edge["kind"] == "ask" && edge["from"] == "you" && edge["to"] == key)
+            })
+    }
     pub(crate) fn relationships_incomplete(&mut self) {
         self.session["relationships_incomplete"] = json!(true);
     }

@@ -450,6 +450,61 @@ fn node_pids(nodes: &[Node], output: &mut BTreeSet<u32>) {
 }
 
 impl Snapshot {
+    /// A bounded rewrite/append set with unchanged discovery and process inputs.
+    /// New or disappeared sources, sidecars and runtime changes need discovery.
+    pub(crate) fn changed_catalog_inputs(
+        &self,
+        observed: &Self,
+        options: &Options,
+    ) -> Option<Vec<crate::inputs::Input>> {
+        if self.watched.keys().ne(observed.watched.keys())
+            || self.lock_ids != observed.lock_ids
+            || self.locks != observed.locks
+            || self.pids != observed.pids
+        {
+            return None;
+        }
+        let mut inputs = Vec::new();
+        for (path, previous) in &self.watched {
+            let current = *observed.watched.get(path)?;
+            if current == *previous {
+                continue;
+            }
+            if !previous.is_some_and(|stamp| stamp.kind.is_file())
+                || !current.is_some_and(|stamp| stamp.kind.is_file())
+                || path
+                    .extension()
+                    .is_none_or(|extension| extension != "jsonl")
+            {
+                return None;
+            }
+            let input = [
+                crate::inputs::InputRoot::Claude,
+                crate::inputs::InputRoot::Codex,
+                crate::inputs::InputRoot::Copilot,
+            ]
+            .into_iter()
+            .find_map(|root| {
+                let relative = path
+                    .strip_prefix(root.home(options))
+                    .ok()?
+                    .to_str()?
+                    .replace(std::path::MAIN_SEPARATOR, "/");
+                crate::inputs::is_input_path(root.as_str(), &relative).then_some(
+                    crate::inputs::Input {
+                        root,
+                        path: relative,
+                    },
+                )
+            })?;
+            inputs.push(input);
+            if inputs.len() > 64 {
+                return None;
+            }
+        }
+        (!inputs.is_empty()).then_some(inputs)
+    }
+
     pub(crate) fn capture(options: &Options, roots: &[Node], index: &EventCache) -> Self {
         let mut ids = BTreeSet::new();
         node_pids(roots, &mut ids);
