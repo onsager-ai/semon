@@ -7326,9 +7326,28 @@ fn interrupted_catalog_publication_retains_one_generation_and_recovers_on_restar
         )
         .unwrap();
     assert_eq!(pending, 2);
+    let native = observe_catalog(
+        &home.options,
+        &mut EventCache::open_scoped(&home.options.cache).unwrap(),
+        &mut false,
+        &mut Texts::default(),
+        NOW,
+    );
+    assert!(
+        native.is_err(),
+        "a rejected publication cannot acknowledge a complete native observation"
+    );
     connection
         .execute_batch("DROP TRIGGER interrupt_catalog")
         .unwrap();
+    observe_catalog(
+        &home.options,
+        &mut EventCache::open_scoped(&home.options.cache).unwrap(),
+        &mut false,
+        &mut Texts::default(),
+        NOW,
+    )
+    .unwrap();
     home.build();
     let recovered = read_catalog(&home);
     assert_ne!(before.0, recovered.0);
@@ -7709,6 +7728,40 @@ fn source_disappearance_stays_pending_until_catalog_retirement_commits() {
         )
         .unwrap();
     assert_eq!(pending, 0);
+}
+
+#[test]
+fn native_catalog_does_not_acknowledge_a_rejected_generation() {
+    let home = Home::new();
+    home.top("root", &[human("root", ts(0, 0), "prompt")]);
+    home.build();
+    let options = home.options.clone();
+    let path = home.root.join("claude/projects/-work-proj/root.jsonl");
+    AFTER_SCAN.with(|hook| {
+        *hook.borrow_mut() = Some(Box::new(move || {
+            let mut file = fs::OpenOptions::new().append(true).open(path).unwrap();
+            writeln!(
+                file,
+                "{}",
+                assistant("root", ts(0, 1), vec![text("new answer")])
+            )
+            .unwrap();
+            model_json_at(&options, NOW).unwrap();
+        }));
+    });
+    assert!(
+        observe_catalog(
+            &home.options,
+            &mut EventCache::open_scoped(&home.options.cache).unwrap(),
+            &mut false,
+            &mut Texts::default(),
+            NOW,
+        )
+        .is_err(),
+        "a newer committed source generation must be retried"
+    );
+    let (_, catalog) = read_catalog(&home);
+    assert_eq!(catalog[0].last, Some(at(0, 1)));
 }
 
 #[test]
