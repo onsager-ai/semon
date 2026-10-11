@@ -38,6 +38,12 @@ pub trait SessionSourceReader: Send + Sync {
 pub(crate) struct BudgetedReader<'a> {
     reader: &'a dyn SessionSourceReader,
     requests: std::sync::atomic::AtomicUsize,
+    generations: std::sync::Mutex<std::collections::BTreeMap<(String, String), SourcePin>>,
+}
+struct SourcePin {
+    source: SessionSourceRef,
+    generation: String,
+    length: u64,
 }
 impl<'a> BudgetedReader<'a> {
     pub(crate) fn remaining(&self) -> usize {
@@ -47,6 +53,7 @@ impl<'a> BudgetedReader<'a> {
         Self {
             reader,
             requests: std::sync::atomic::AtomicUsize::new(requests),
+            generations: std::sync::Mutex::default(),
         }
     }
 }
@@ -77,8 +84,71 @@ impl SessionSourceReader for BudgetedReader<'_> {
                 Err(current) => left = current,
             }
         }
-        self.reader
-            .read_range(source, expected_generation, offset, max_bytes)
+        let changed = || {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "native request source generation changed",
+            )
+        };
+        let key = (source.root.clone(), source.path.clone());
+        let pinned = {
+            let generations = self.generations.lock().map_err(|_| changed())?;
+            match generations.get(&key) {
+                Some(pin) => {
+                    if pin.source != *source
+                        || expected_generation.is_some_and(|value| value != pin.generation)
+                    {
+                        return Err(changed());
+                    }
+                    Some(pin.generation.clone())
+                }
+                None => None,
+            }
+        };
+        // No synchronization guard crosses provider I/O. The request's pin is
+        // rechecked after I/O too, so concurrent fragments cannot rebind it.
+        let part = self.reader.read_range(
+            source,
+            pinned.as_deref().or(expected_generation),
+            offset,
+            max_bytes,
+        )?;
+        if part.offset != offset
+            || part.bytes.len() > max_bytes
+            || part.generation.is_empty()
+            || part.generation.len() > 4096
+            || offset
+                .checked_add(part.bytes.len() as u64)
+                .is_none_or(|end| end > part.length)
+            || expected_generation.is_some_and(|value| value != part.generation)
+        {
+            return Err(changed());
+        }
+        let mut generations = self.generations.lock().map_err(|_| changed())?;
+        if let Some(pin) = generations.get(&key) {
+            if pin.source != *source
+                || pin.generation != part.generation
+                || pin.length != part.length
+            {
+                return Err(changed());
+            }
+        } else {
+            if generations.len() >= 64 {
+                return Err(io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    "Native request source budget exhausted",
+                ));
+            }
+            generations.insert(
+                key,
+                SourcePin {
+                    source: source.clone(),
+                    generation: part.generation.clone(),
+                    length: part.length,
+                },
+            );
+        }
+        Ok(part)
     }
 }
 
@@ -311,6 +381,46 @@ mod tests {
             prefix_sha256: [1; 32],
             tail_sha256: [2; 32],
         }
+    }
+    #[test]
+    fn request_generation_pin_spans_independent_semantic_reads() {
+        let reader = Reader {
+            bytes: Arc::from(b"{}\n{}\n".as_slice()),
+            change_at: Some(1),
+            calls: Mutex::default(),
+        };
+        let bounded = BudgetedReader::new(&reader, 4);
+        let source = source(6);
+        bounded.read_range(&source, None, 0, 3).unwrap();
+        assert_eq!(
+            bounded.read_range(&source, None, 3, 3).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+        let calls = reader.calls.lock().unwrap();
+        assert_eq!(calls[0].0, None);
+        assert_eq!(calls[1].0.as_deref(), Some("verified"));
+    }
+
+    #[test]
+    fn request_generation_pin_rejects_changed_source_references_before_provider_io() {
+        let reader = Reader {
+            bytes: Arc::from(b"{}\n".as_slice()),
+            change_at: None,
+            calls: Mutex::default(),
+        };
+        let bounded = BudgetedReader::new(&reader, 4);
+        let original = source(3);
+        bounded.read_range(&original, None, 0, 1).unwrap();
+        let mut replaced = original.clone();
+        replaced.prefix_sha256[0] ^= 1;
+        assert_eq!(
+            bounded
+                .read_range(&replaced, None, 0, 1)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidData
+        );
+        assert_eq!(reader.calls.lock().unwrap().len(), 1);
     }
     #[test]
     fn request_budget_never_wraps_or_reaches_the_provider_after_exhaustion() {

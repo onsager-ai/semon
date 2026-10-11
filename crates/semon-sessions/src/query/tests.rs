@@ -2650,3 +2650,413 @@ fn assert_contract_reference(
         "{scope}: {scenario}, multiple={multiple}, {tool} {args}"
     );
 }
+
+struct SelectedArchive {
+    source: crate::SessionSourceRef,
+    bytes: Arc<[u8]>,
+    calls: std::sync::atomic::AtomicUsize,
+    read_bytes: AtomicU64,
+    fault: u8,
+}
+impl crate::SessionSourceReader for SelectedArchive {
+    fn read_range(
+        &self,
+        source: &crate::SessionSourceRef,
+        expected: Option<&str>,
+        offset: u64,
+        max: usize,
+    ) -> io::Result<crate::SessionSourceRange> {
+        assert_eq!(source, &self.source, "unrelated source was requested");
+        assert!(max <= crate::SESSION_SOURCE_CHUNK_MAX);
+        let call = self.calls.fetch_add(1, Ordering::Relaxed);
+        if self.fault == 3 && call > 0 {
+            return Err(io::Error::new(io::ErrorKind::PermissionDenied, "revoked"));
+        }
+        let generation = if self.fault == 2 && call > 0 {
+            "replacement"
+        } else {
+            "archive-generation"
+        };
+        if expected.is_some_and(|expected| expected != generation) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "generation changed",
+            ));
+        }
+        let start = usize::try_from(offset).unwrap();
+        let end = self.bytes.len().min(start + max);
+        let mut bytes = self.bytes[start..end].to_vec();
+        if self.fault == 1
+            && let Some(at) = bytes.windows(6).position(|part| part == b"needle")
+        {
+            bytes[at] = b'N';
+        }
+        self.read_bytes
+            .fetch_add(bytes.len() as u64, Ordering::Relaxed);
+        Ok(crate::SessionSourceRange {
+            generation: generation.into(),
+            length: self.bytes.len() as u64,
+            offset,
+            bytes: Arc::from(bytes),
+            cached: call > 0,
+        })
+    }
+}
+
+fn selected_archive(home: &Home, fault: u8) -> SelectedArchive {
+    let db =
+        rusqlite::Connection::open(crate::events::EventCache::path(&home.options.cache)).unwrap();
+    let text: String = db
+        .query_row(
+            "SELECT metadata FROM session_catalog WHERE session_key='lead'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let row: crate::model::summary::CatalogRow = serde_json::from_str(&text).unwrap();
+    assert_eq!(row.sources.len(), 1);
+    let source = &row.sources[0];
+    SelectedArchive {
+        source: crate::SessionSourceRef {
+            root: "claude".into(),
+            path: "projects/-work-proj/lead.jsonl".into(),
+            native_id: source.native_id.clone(),
+            offset: source.offset,
+            prefix_sha256: source.prefix_sha256,
+            tail_sha256: source.tail_sha256,
+        },
+        bytes: Arc::from(fs::read(&source.path).unwrap()),
+        calls: std::sync::atomic::AtomicUsize::new(0),
+        read_bytes: AtomicU64::new(0),
+        fault,
+    }
+}
+
+#[test]
+fn selected_query_uses_original_generations_without_workspace_preparation_or_restoration() {
+    let mut measurements = Vec::new();
+    for unrelated in [0, 256] {
+        let home = Home::new("selected-native-query");
+        home.top(
+            "lead",
+            &[
+                human("lead", ts(1, 0), "selected needle"),
+                assistant("lead", ts(1, 1), vec![text("selected answer")]),
+            ],
+        );
+        for n in 0..unrelated {
+            let id = format!("unrelated-{n}");
+            home.top(&id, &[human(&id, ts(1, 0), &"unrelated".repeat(8192))]);
+        }
+        let mut cache = crate::events::EventCache::open_scoped(&home.options.cache).unwrap();
+        crate::model::observe_catalog(
+            &home.options,
+            &mut cache,
+            &mut false,
+            &mut crate::model::Texts::default(),
+            NOW,
+        )
+        .unwrap();
+        let tools = [
+            ("get_session", json!({"id":"lead"})),
+            ("read_transcript", json!({"id":"lead","limit":10})),
+        ];
+        let expected: Vec<_> = tools
+            .iter()
+            .map(|(tool, args)| home.query().call_at(tool, args, NOW).unwrap())
+            .collect();
+        let archive = selected_archive(&home, 0);
+        fs::remove_file(home.options.claude_home.join(&archive.source.path)).unwrap();
+        let sources = admitted(home.options.clone());
+        let mut query = Query::from_sources(sources.clone());
+        let started = std::time::Instant::now();
+        for ((tool, args), expected) in tools.iter().zip(expected) {
+            assert_eq!(
+                query
+                    .call_selected_at(
+                        "local",
+                        "lead",
+                        tool,
+                        args,
+                        Some(&archive),
+                        crate::SessionSourceReadMode::ProviderOnly,
+                        NOW
+                    )
+                    .unwrap(),
+                expected
+            );
+        }
+        assert!(
+            sources.machines[0].1.work.lock().unwrap().events.is_none(),
+            "selected Query constructed a workspace producer"
+        );
+        assert!(!home.options.claude_home.join(&archive.source.path).exists());
+        let work = (
+            archive.calls.load(Ordering::Relaxed),
+            archive.read_bytes.load(Ordering::Relaxed),
+        );
+        println!(
+            "selected Query get/transcript: unrelated={unrelated}, {}us, calls={}, bytes={}",
+            started.elapsed().as_micros(),
+            work.0,
+            work.1
+        );
+        measurements.push(work);
+    }
+    assert_eq!(
+        measurements[0], measurements[1],
+        "unrelated history changed focused I/O"
+    );
+}
+
+#[test]
+fn selected_query_refuses_changed_bytes_generations_and_revocation() {
+    for fault in [1, 2, 3] {
+        let home = Home::new("selected-query-fences");
+        home.top("lead", &[human("lead", ts(1, 0), "selected needle")]);
+        let mut cache = crate::events::EventCache::open_scoped(&home.options.cache).unwrap();
+        crate::model::observe_catalog(
+            &home.options,
+            &mut cache,
+            &mut false,
+            &mut crate::model::Texts::default(),
+            NOW,
+        )
+        .unwrap();
+        let archive = selected_archive(&home, fault);
+        fs::remove_file(home.options.claude_home.join(&archive.source.path)).unwrap();
+        let generation = catalog_generation(&home);
+        let mut query = Query::from_sources(admitted(home.options.clone()));
+        assert_eq!(
+            query
+                .call_selected_at(
+                    "local",
+                    "lead",
+                    "read_transcript",
+                    &json!({"id":"lead"}),
+                    Some(&archive),
+                    crate::SessionSourceReadMode::ProviderOnly,
+                    NOW
+                )
+                .unwrap_err()
+                .code,
+            "io"
+        );
+        assert_eq!(
+            catalog_generation(&home),
+            generation,
+            "a selected read published metadata"
+        );
+        assert!(!home.options.claude_home.join(&archive.source.path).exists());
+    }
+}
+
+#[test]
+fn selected_query_preserves_the_independent_tool_reference_and_union_labels() {
+    let home = fixture();
+    let peer = Home::new("testbox");
+    peer.top(
+        "other",
+        &[human("other", ts(6, 0), "Review the lexer change")],
+    );
+    for seconds in [86_400, 21_600] {
+        for multiple in [false, true] {
+            let options = |home: &Home| Options {
+                all: false,
+                since: Duration::from_secs(seconds),
+                scan_window: false,
+                ..home.options.clone()
+            };
+            let mut machines = vec![("a".into(), options(&home))];
+            if multiple {
+                machines.push(("b".into(), options(&peer)));
+            }
+            // Publish through the actual native producer. Focused Query must
+            // consume its source identity and recipes without preparing a union.
+            let mut cache = crate::events::EventCache::open_scoped(&home.options.cache).unwrap();
+            crate::model::observe_catalog(
+                &home.options,
+                &mut cache,
+                &mut false,
+                &mut crate::model::Texts::default(),
+                NOW,
+            )
+            .unwrap();
+            let sources = Arc::new(SessionSources::with_machines(machines));
+            let mut query = Query::from_sources(sources.clone());
+            for (tool, args) in [
+                ("get_session", json!({"id":"lead"})),
+                ("get_session", json!({"id":"scan"})),
+                ("get_session", json!({"id":"asker"})),
+                ("get_session", json!({"id":"cx"})),
+                ("read_transcript", json!({"id":"done","limit":1})),
+                ("read_transcript", json!({"id":"scan","after":0,"limit":2})),
+                ("read_transcript", json!({"id":"done","turn":"absent"})),
+            ] {
+                let key = args["id"].as_str().unwrap();
+                let result = query.call_selected_at(
+                    "a",
+                    key,
+                    tool,
+                    &args,
+                    None,
+                    crate::SessionSourceReadMode::LocalThenProvider,
+                    NOW,
+                );
+                assert_contract_reference("output", seconds, multiple, tool, &args, result);
+            }
+            for (_, source) in &sources.machines {
+                assert!(
+                    source.work.lock().unwrap().events.is_none(),
+                    "focused read prepared an unrelated source owner"
+                );
+            }
+        }
+    }
+}
+
+struct PublishingArchive<'a> {
+    archive: SelectedArchive,
+    home: &'a Home,
+    selected_changes: bool,
+    published: std::sync::atomic::AtomicBool,
+}
+impl crate::SessionSourceReader for PublishingArchive<'_> {
+    fn read_range(
+        &self,
+        source: &crate::SessionSourceRef,
+        expected: Option<&str>,
+        offset: u64,
+        max: usize,
+    ) -> io::Result<crate::SessionSourceRange> {
+        let result = self.archive.read_range(source, expected, offset, max)?;
+        if !self.published.swap(true, Ordering::SeqCst) {
+            if self.selected_changes {
+                use std::io::Write;
+                writeln!(
+                    fs::OpenOptions::new()
+                        .append(true)
+                        .open(
+                            self.home
+                                .options
+                                .claude_home
+                                .join(&self.archive.source.path)
+                        )
+                        .unwrap(),
+                    "{}",
+                    assistant("lead", ts(1, 1), vec![text("new selected generation")])
+                )
+                .unwrap();
+            } else {
+                self.home.top(
+                    "unrelated-arrival",
+                    &[human("unrelated-arrival", ts(2, 0), "unrelated")],
+                );
+            }
+            let mut cache =
+                crate::events::EventCache::open_scoped(&self.home.options.cache).unwrap();
+            crate::model::observe_catalog(
+                &self.home.options,
+                &mut cache,
+                &mut false,
+                &mut crate::model::Texts::default(),
+                NOW,
+            )
+            .unwrap();
+        }
+        Ok(result)
+    }
+}
+
+#[test]
+fn selected_query_completion_fences_its_sources_without_coupling_unrelated_publications() {
+    for selected_changes in [false, true] {
+        let home = Home::new("selected-publication-fence");
+        home.top("lead", &[human("lead", ts(1, 0), "selected needle")]);
+        let mut baseline = Query::from_sources(admitted(home.options.clone()));
+        let args = json!({"id":"lead"});
+        let before = baseline.call_at("get_session", &args, NOW).unwrap();
+        let generation = catalog_generation(&home);
+        let archive = PublishingArchive {
+            archive: selected_archive(&home, 0),
+            home: &home,
+            selected_changes,
+            published: std::sync::atomic::AtomicBool::new(false),
+        };
+        let mut query = Query::from_sources(admitted(home.options.clone()));
+        let result = query.call_selected_at(
+            "local",
+            "lead",
+            "get_session",
+            &args,
+            Some(&archive),
+            crate::SessionSourceReadMode::ProviderOnly,
+            NOW,
+        );
+        assert!(archive.published.load(Ordering::SeqCst));
+        assert_ne!(
+            catalog_generation(&home),
+            generation,
+            "actual native publication must run during the read"
+        );
+        if selected_changes {
+            assert_eq!(result.unwrap_err().code, "io");
+        } else {
+            assert_eq!(result.unwrap(), before);
+        }
+    }
+}
+
+#[test]
+fn selected_query_uses_verified_local_bytes_and_never_hides_a_rewrite_with_archive_fallback() {
+    let home = Home::new("selected-live-fallback");
+    home.top("lead", &[human("lead", ts(1, 0), "selected needle")]);
+    let args = json!({"id":"lead"});
+    let expected = Query::from_sources(admitted(home.options.clone()))
+        .call_at("get_session", &args, NOW)
+        .unwrap();
+    let archive = selected_archive(&home, 3);
+    let mut query = Query::from_sources(admitted(home.options.clone()));
+    assert_eq!(
+        query
+            .call_selected_at(
+                "local",
+                "lead",
+                "get_session",
+                &args,
+                Some(&archive),
+                crate::SessionSourceReadMode::LocalThenProvider,
+                NOW
+            )
+            .unwrap(),
+        expected
+    );
+    assert_eq!(
+        archive.calls.load(Ordering::Relaxed),
+        0,
+        "live source required an archive manifest"
+    );
+    let path = home.options.claude_home.join(&archive.source.path);
+    let bytes = fs::read_to_string(&path).unwrap();
+    fs::write(path, bytes.replace("needle", "NEEDLE")).unwrap();
+    assert_eq!(
+        query
+            .call_selected_at(
+                "local",
+                "lead",
+                "get_session",
+                &args,
+                Some(&archive),
+                crate::SessionSourceReadMode::LocalThenProvider,
+                NOW
+            )
+            .unwrap_err()
+            .code,
+        "io"
+    );
+    assert_eq!(
+        archive.calls.load(Ordering::Relaxed),
+        0,
+        "a changed current source fell back to old archive bytes"
+    );
+}

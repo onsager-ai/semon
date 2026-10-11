@@ -407,7 +407,15 @@ enum ReadShape<'a> {
 }
 
 impl View {
-    fn native(read: &QueryRead, now: i64, shape: ReadShape<'_>) -> Result<Self, QueryError> {
+    fn native(
+        read: &QueryRead,
+        now: i64,
+        shape: ReadShape<'_>,
+        provider: Option<(
+            &dyn crate::SessionSourceReader,
+            crate::SessionSourceReadMode,
+        )>,
+    ) -> Result<Self, QueryError> {
         let mut conflicts = read.conflicts();
         let multiple = read.parts.len() > 1;
         let mut sessions = BTreeMap::new();
@@ -417,7 +425,7 @@ impl View {
         let mut handoff_ids = BTreeSet::new();
         let mut turn_ids = BTreeSet::new();
         for part in &read.parts {
-            let records = part.data.sources.reader();
+            let records = part.data.sources.reader_with(provider);
             for (id, session) in &part.data.sessions {
                 if part.dropped.contains(id) {
                     continue;
@@ -809,23 +817,153 @@ impl Query {
         // to the same native evidence cohort.
         self.start = self.window_start(now)?;
         let mut answer = match tool {
-            "list_sessions" => self.list_sessions(args, now),
-            "get_session" => self.get_session(args, now),
-            "read_transcript" => self.read_transcript(args, now),
-            "find" => self.find(args, now),
-            "stalls" => self.stalls(args, now),
+            "list_sessions" => self.list_sessions(args, now, None),
+            "get_session" => self.get_session(args, now, None),
+            "read_transcript" => self.read_transcript(args, now, None),
+            "find" => self.find(args, now, None),
+            "stalls" => self.stalls(args, now, None),
             _ => unreachable!("every tool is handled"),
         }?;
         answer["window_start"] = json!(self.start);
         Ok(answer)
     }
 
-    fn view(&self, now: i64, shape: ReadShape<'_>) -> Result<View, QueryError> {
-        View::native(self.evidence(), now, shape)
+    /// Execute a focused tool over one host-selected native Catalog identity.
+    /// The host admits the source and lends a request-owned reader; Query never
+    /// restores a workspace or retains its credentials. Listings and workspace
+    /// search use their own native selection and cannot call this API.
+    pub fn call_selected(
+        &mut self,
+        source_key: &str,
+        catalog_key: &str,
+        tool: &str,
+        args: &Value,
+        provider: Option<&dyn crate::SessionSourceReader>,
+        mode: crate::SessionSourceReadMode,
+    ) -> Result<Value, QueryError> {
+        self.call_selected_at(
+            source_key,
+            catalog_key,
+            tool,
+            args,
+            provider,
+            mode,
+            now_ms(),
+        )
     }
 
-    fn list_sessions(&mut self, args: &Value, now: i64) -> Result<Value, QueryError> {
-        let view = self.view(now, ReadShape::Summaries)?;
+    #[doc(hidden)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn call_selected_at(
+        &mut self,
+        source_key: &str,
+        catalog_key: &str,
+        tool: &str,
+        args: &Value,
+        provider: Option<&dyn crate::SessionSourceReader>,
+        mode: crate::SessionSourceReadMode,
+        now: i64,
+    ) -> Result<Value, QueryError> {
+        let tools = query_tools();
+        let spec = tools
+            .iter()
+            .find(|spec| spec.name == tool)
+            .ok_or_else(|| QueryError::new("unknown_tool", format!("no tool {tool:?}")))?;
+        validate(&spec.input_schema, args)?;
+        if !matches!(tool, "get_session" | "read_transcript")
+            || args["id"].as_str() != Some(catalog_key)
+        {
+            return Err(QueryError::invalid(
+                "A focused tool requires the selected Catalog id",
+            ));
+        }
+        let evidence = self
+            .sources
+            .machines
+            .iter()
+            .find(|(key, _)| key == source_key || (key.is_empty() && source_key == "local"))
+            .map(|(_, evidence)| evidence.clone())
+            .ok_or_else(|| QueryError::unknown_session(catalog_key))?;
+        if self.sources.is_retired() {
+            return Err(QueryError::new("io", "native query source is closed"));
+        }
+        // One bounded request budget spans semantic derivation, transcript or
+        // search bytes, and the final authorization/generation recheck.
+        let bounded =
+            provider.map(|reader| crate::source_reader::BudgetedReader::new(reader, 1024));
+        let provider = bounded
+            .as_ref()
+            .map(|reader| reader as &dyn crate::SessionSourceReader);
+        let rendering = provider.map(|reader| (reader, mode));
+        let result = crate::overview_repair::with_query(
+            &evidence.options,
+            catalog_key,
+            provider,
+            mode,
+            now,
+            |data| {
+                let data = Arc::new(data);
+                let witness = data.sources.reader_with(rendering);
+                witness
+                    .verify_all()
+                    .map_err(|error| QueryError::io(&error))?;
+                let parts = self
+                    .sources
+                    .machines
+                    .iter()
+                    .map(|(key, source)| {
+                        let part = if Arc::ptr_eq(source, &evidence) {
+                            data.clone()
+                        } else {
+                            Arc::new(crate::model::QueryData::identity(&source.options, now))
+                        };
+                        (key.clone(), part)
+                    })
+                    .collect();
+                let native = QueryRead::new(parts, usize::MAX);
+                self.start = native
+                    .parts
+                    .iter()
+                    .filter_map(|part| part.data.window_start)
+                    .max();
+                self.native = Some(native);
+                let answer = match tool {
+                    "get_session" => self.get_session(args, now, rendering),
+                    "read_transcript" => self.read_transcript(args, now, rendering),
+                    _ => unreachable!("focused tools were checked"),
+                }?;
+                witness.finish().map_err(|error| QueryError::io(&error))?;
+                Ok(answer)
+            },
+        )
+        .map_err(|error| QueryError::io(&error))?;
+        let mut answer: Value = result?;
+        answer["window_start"] = json!(self.start);
+        Ok(answer)
+    }
+
+    fn view(
+        &self,
+        now: i64,
+        shape: ReadShape<'_>,
+        provider: Option<(
+            &dyn crate::SessionSourceReader,
+            crate::SessionSourceReadMode,
+        )>,
+    ) -> Result<View, QueryError> {
+        View::native(self.evidence(), now, shape, provider)
+    }
+
+    fn list_sessions(
+        &mut self,
+        args: &Value,
+        now: i64,
+        provider: Option<(
+            &dyn crate::SessionSourceReader,
+            crate::SessionSourceReadMode,
+        )>,
+    ) -> Result<Value, QueryError> {
+        let view = self.view(now, ReadShape::Summaries, provider)?;
         let since = self.since(args, now)?;
         let state = string(args, "state");
         let repo = string(args, "repo");
@@ -868,9 +1006,17 @@ impl Query {
         }))
     }
 
-    fn get_session(&mut self, args: &Value, now: i64) -> Result<Value, QueryError> {
+    fn get_session(
+        &mut self,
+        args: &Value,
+        now: i64,
+        provider: Option<(
+            &dyn crate::SessionSourceReader,
+            crate::SessionSourceReadMode,
+        )>,
+    ) -> Result<Value, QueryError> {
         let id = string(args, "id").unwrap_or_default();
-        let view = self.view(now, ReadShape::Session(&id))?;
+        let view = self.view(now, ReadShape::Session(&id), provider)?;
         let Some(session) = view.session(&id) else {
             return Err(QueryError::unknown_session(&id));
         };
@@ -893,7 +1039,15 @@ impl Query {
         Ok(json!({"now": view.now, "session": out}))
     }
 
-    fn read_transcript(&mut self, args: &Value, now: i64) -> Result<Value, QueryError> {
+    fn read_transcript(
+        &mut self,
+        args: &Value,
+        now: i64,
+        provider: Option<(
+            &dyn crate::SessionSourceReader,
+            crate::SessionSourceReadMode,
+        )>,
+    ) -> Result<Value, QueryError> {
         let id = string(args, "id").unwrap_or_default();
         let position = |key: &str| integer(args, key).map(|value| value.max(0) as usize);
         let anchor = tx::Anchor::of(position("before"), position("after"), string(args, "turn"))
@@ -915,7 +1069,7 @@ impl Query {
             .tx
             .get(&own)
             .ok_or_else(|| QueryError::unknown_session(&id))?;
-        let records = data.sources.reader();
+        let records = data.sources.reader_with(provider);
         let mut read = |path: &std::path::Path, offset| records.read(path, offset);
         let mut prompts = |file: &crate::model::SlotFile, offset| records.prompt(file, offset);
         let page = tx::page_from_lines(
@@ -942,13 +1096,21 @@ impl Query {
         serde_json::from_str(&page).map_err(|error| QueryError::new("io", error.to_string()))
     }
 
-    fn find(&mut self, args: &Value, now: i64) -> Result<Value, QueryError> {
+    fn find(
+        &mut self,
+        args: &Value,
+        now: i64,
+        provider: Option<(
+            &dyn crate::SessionSourceReader,
+            crate::SessionSourceReadMode,
+        )>,
+    ) -> Result<Value, QueryError> {
         let text = string(args, "text").unwrap_or_default();
         let needle = text.to_ascii_lowercase();
         let since = self.since(args, now)?;
         let limit = integer(args, "limit").unwrap_or(FIND_LIMIT) as usize;
         let max_bytes = integer(args, "max_bytes").unwrap_or(FIND_BYTES) as u64;
-        let view = self.view(now, ReadShape::Search)?;
+        let view = self.view(now, ReadShape::Search, provider)?;
         let handoffs: HashMap<&str, &Value> = view
             .handoffs
             .iter()
@@ -1006,7 +1168,7 @@ impl Query {
             .evidence()
             .parts
             .iter()
-            .map(|part| part.data.sources.reader())
+            .map(|part| part.data.sources.reader_with(provider))
             .collect();
         let source_part = std::cell::Cell::new(0);
         let mut read =
@@ -1131,8 +1293,16 @@ impl Query {
         }))
     }
 
-    fn stalls(&mut self, args: &Value, now: i64) -> Result<Value, QueryError> {
-        let view = self.view(now, ReadShape::Summaries)?;
+    fn stalls(
+        &mut self,
+        args: &Value,
+        now: i64,
+        provider: Option<(
+            &dyn crate::SessionSourceReader,
+            crate::SessionSourceReadMode,
+        )>,
+    ) -> Result<Value, QueryError> {
+        let view = self.view(now, ReadShape::Summaries, provider)?;
         let idle_minutes = integer(args, "idle_minutes").unwrap_or(1);
         let since = self.since(args, now)?;
         let threshold = idle_minutes.saturating_mul(60_000);

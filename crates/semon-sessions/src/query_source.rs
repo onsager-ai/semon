@@ -124,8 +124,20 @@ impl Sources {
     }
 
     pub(crate) fn reader(&self) -> Records<'_> {
+        self.reader_with(None)
+    }
+
+    pub(crate) fn reader_with<'a>(
+        &'a self,
+        provider: Option<(&'a dyn SessionSourceReader, crate::SessionSourceReadMode)>,
+    ) -> Records<'a> {
         Records {
             sources: self,
+            provider: provider.map(|value| value.0),
+            mode: provider.map_or(crate::SessionSourceReadMode::LocalThenProvider, |value| {
+                value.1
+            }),
+            remote: Mutex::default(),
             checked: Mutex::default(),
             checked_chunks: Mutex::default(),
             checked_evidence: Mutex::default(),
@@ -138,6 +150,9 @@ impl Sources {
 /// The verification cache belongs to one read, never the shared query cohort.
 pub(crate) struct Records<'a> {
     sources: &'a Sources,
+    provider: Option<&'a dyn SessionSourceReader>,
+    mode: crate::SessionSourceReadMode,
+    remote: Mutex<BTreeMap<PathBuf, (String, u64)>>,
     checked: Mutex<BTreeMap<PathBuf, Stat>>,
     checked_chunks: Mutex<BTreeMap<PathBuf, BTreeSet<usize>>>,
     checked_evidence: Mutex<BTreeMap<PathBuf, BTreeSet<crate::native_record::Record>>>,
@@ -336,7 +351,19 @@ impl Records<'_> {
     }
 
     fn verify(&self, path: &Path, proof: &Proof) -> io::Result<()> {
-        let mut file = LogFile::open(path)?;
+        if self.provider.is_some()
+            && matches!(self.mode, crate::SessionSourceReadMode::ProviderOnly)
+        {
+            self.provider_block(path, proof, 0)?;
+            return Ok(());
+        }
+        let mut file = match LogFile::open(path) {
+            Err(error) if error.kind() == io::ErrorKind::NotFound && self.provider.is_some() => {
+                self.provider_block(path, proof, 0)?;
+                return Ok(());
+            }
+            result => result?,
+        };
         let before = Stat::from_metadata(&file.metadata()?)?;
         let mut checked = self.checked.lock().map_err(|_| unavailable())?;
         let unchanged = before.changed_ns.is_some()
@@ -407,13 +434,25 @@ impl Records<'_> {
             let proof = self.sources.proofs.get(&path).ok_or_else(unavailable)?;
             self.verify(&path, proof)?;
         }
-        for (path, indices) in self
+        let touched = self
             .checked_chunks
             .lock()
             .map_err(|_| unavailable())?
-            .iter()
-        {
+            .clone();
+        for (path, indices) in &touched {
             let proof = self.sources.proofs.get(path).ok_or_else(unavailable)?;
+            let remote = self
+                .remote
+                .lock()
+                .map_err(|_| unavailable())?
+                .contains_key(path);
+            if remote {
+                // Cache reuse still crosses the host's current authority fence.
+                for index in indices {
+                    self.provider_block(path, proof, *index)?;
+                }
+                continue;
+            }
             let mut file = LogFile::open(path)?;
             let before = Stat::from_metadata(&file.metadata()?)?;
             if before.dev != proof.ledger.stat.dev
@@ -488,7 +527,17 @@ impl Records<'_> {
         {
             return Err(unavailable());
         }
-        let mut file = LogFile::open(path)?;
+        if self.provider.is_some()
+            && matches!(self.mode, crate::SessionSourceReadMode::ProviderOnly)
+        {
+            return self.provider_range(path, proof, offset, max, prepare);
+        }
+        let mut file = match LogFile::open(path) {
+            Err(error) if error.kind() == io::ErrorKind::NotFound && self.provider.is_some() => {
+                return self.provider_range(path, proof, offset, max, prepare);
+            }
+            result => result?,
+        };
         let before = Stat::from_metadata(&file.metadata()?)?;
         if before.dev != proof.ledger.stat.dev
             || before.ino != proof.ledger.stat.ino
@@ -550,6 +599,112 @@ impl Records<'_> {
             generation: proof.generation.clone(),
             // The cohort exposes its complete consumed prefix, even if the
             // native writer has appended more bytes since observation.
+            length: proof.ledger.offset,
+            offset,
+            bytes: Arc::from(bytes),
+            cached: true,
+        })
+    }
+
+    fn provider_block(&self, path: &Path, proof: &Proof, index: usize) -> io::Result<Arc<[u8]>> {
+        let source = proof.source.as_ref().ok_or_else(unavailable)?;
+        let provider = self.provider.ok_or_else(unavailable)?;
+        let start = (index as u64)
+            .checked_mul(crate::source_chunks::SIZE as u64)
+            .filter(|start| *start < proof.ledger.offset)
+            .ok_or_else(unavailable)?;
+        let len = (proof.ledger.offset - start).min(crate::source_chunks::SIZE as u64) as usize;
+        let mut bytes = Vec::with_capacity(len);
+        // A provider's independently verified generation can use another name
+        // than the native prefix digest. Pin that name and length per request,
+        // while every consumed byte still proves the original indexed block.
+        while bytes.len() < len {
+            let expected = self
+                .remote
+                .lock()
+                .map_err(|_| unavailable())?
+                .get(path)
+                .cloned();
+            let offset = start + bytes.len() as u64;
+            let max = len - bytes.len();
+            let part = provider.read_range(
+                source,
+                expected.as_ref().map(|v| v.0.as_str()),
+                offset,
+                max,
+            )?;
+            if part.offset != offset
+                || part.bytes.is_empty()
+                || part.bytes.len() > max
+                || part.length < proof.ledger.offset
+                || part.generation.is_empty()
+                || part.generation.len() > 4096
+                || expected
+                    .as_ref()
+                    .is_some_and(|v| v.0 != part.generation || v.1 != part.length)
+            {
+                return Err(unavailable());
+            }
+            let mut remote = self.remote.lock().map_err(|_| unavailable())?;
+            if let Some(prior) = remote.get(path)
+                && (prior.0 != part.generation || prior.1 != part.length)
+            {
+                return Err(unavailable());
+            }
+            remote.insert(path.to_owned(), (part.generation, part.length));
+            bytes.extend_from_slice(&part.bytes);
+        }
+        proof.chunks.verify(index, &bytes)?;
+        self.checked_chunks
+            .lock()
+            .map_err(|_| unavailable())?
+            .entry(path.to_owned())
+            .or_default()
+            .insert(index);
+        Ok(Arc::from(bytes))
+    }
+
+    fn provider_range(
+        &self,
+        path: &Path,
+        proof: &Proof,
+        offset: u64,
+        max: usize,
+        prepare: bool,
+    ) -> io::Result<SessionSourceRange> {
+        let end = offset + max as u64;
+        let first = (offset / crate::source_chunks::SIZE as u64) as usize;
+        let last = ((end - 1) / crate::source_chunks::SIZE as u64) as usize;
+        let mut bytes = Vec::with_capacity(max);
+        let mut prepared = prepare
+            .then(|| self.prepared.lock().map_err(|_| unavailable()))
+            .transpose()?;
+        for index in first..=last {
+            let part = if let Some(block) = prepared
+                .as_deref()
+                .and_then(Option::as_ref)
+                .filter(|block| block.path == path && block.index == index)
+            {
+                block.bytes.clone()
+            } else {
+                let part = self.provider_block(path, proof, index)?;
+                if let Some(prepared) = prepared.as_deref_mut() {
+                    *prepared = Some(PreparedBlock {
+                        path: path.to_owned(),
+                        index,
+                        bytes: part.clone(),
+                    });
+                }
+                part
+            };
+            let start = index as u64 * crate::source_chunks::SIZE as u64;
+            bytes.extend_from_slice(
+                &part[offset.saturating_sub(start) as usize
+                    ..(end - start).min(part.len() as u64) as usize],
+            );
+        }
+        Ok(SessionSourceRange {
+            generation: proof.generation.clone(),
             length: proof.ledger.offset,
             offset,
             bytes: Arc::from(bytes),

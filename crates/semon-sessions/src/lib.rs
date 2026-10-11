@@ -22,7 +22,7 @@ pub use causal_trace::session_causal_trace;
 pub use overview::{OverviewSource, session_home_details_with_mode, session_overview_reply};
 pub use overview_repair::{
     overview_repair_candidates, overview_repair_sources, repair_session_overview,
-    session_overview_observe,
+    session_overview_observe, session_query_sources,
 };
 mod catalog;
 mod catalog_changes;
