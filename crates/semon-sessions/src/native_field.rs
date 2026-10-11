@@ -48,6 +48,7 @@ impl NativeFieldKind {
 
 /// Allowlisted plain native text. Structured bodies, native formatting wrappers
 /// and arbitrary JSON keys are deliberately excluded from persisted metadata.
+#[cfg(test)]
 pub(crate) fn capture(
     source: &crate::model::summary::CatalogSource,
     offset: u64,
@@ -59,12 +60,24 @@ pub(crate) fn capture(
         read_source_record(source, at, records)
     })
 }
+#[cfg(test)]
 pub(crate) fn capture_with_read(
     offset: u64,
     block: u32,
     recipe: &Recipe,
     read: impl FnOnce(u64) -> Option<Vec<u8>>,
 ) -> Option<NativeField> {
+    capture_with_record(offset, block, recipe, read).0
+}
+
+/// One qualified record supplies both scalar location and native identity/image
+/// evidence. Its body is borrowed only during preparation, never persisted.
+pub(crate) fn capture_with_record(
+    offset: u64,
+    block: u32,
+    recipe: &Recipe,
+    read: impl FnOnce(u64) -> Option<Vec<u8>>,
+) -> (Option<NativeField>, Option<(u64, serde_json::Value)>) {
     let (offset, block, kind) = match recipe {
         Recipe::U | Recipe::A | Recipe::Think => (offset, block, NativeFieldKind::Text),
         Recipe::Tool {
@@ -72,13 +85,29 @@ pub(crate) fn capture_with_read(
             item: None,
             ..
         } => (reply.o, reply.b, NativeFieldKind::ClaudeResult),
-        _ => return None,
+        _ => return (None, None),
     };
     if block > 1024 {
-        return None;
+        return (None, None);
     }
-    let bytes = read(offset)?;
-    let value = crate::tx::parse_native_record(&bytes)?;
+    let Some(bytes) = read(offset) else {
+        return (None, None);
+    };
+    let Some(value) = crate::tx::parse_native_record(&bytes) else {
+        return (None, None);
+    };
+    let field = capture_parsed(&bytes, &value, offset, block, kind, recipe);
+    (field, Some((offset, value)))
+}
+
+fn capture_parsed(
+    bytes: &[u8],
+    value: &serde_json::Value,
+    offset: u64,
+    block: u32,
+    kind: NativeFieldKind,
+    recipe: &Recipe,
+) -> Option<NativeField> {
     let mut kind = kind;
     let mut layers = 1;
     let encoded_output = value
@@ -190,12 +219,12 @@ pub(crate) fn capture_with_read(
         }
         _ => return None,
     };
-    let span = json_string::index_json_string_spans(&bytes)
+    let span = json_string::index_json_string_spans(bytes)
         .ok()?
         .into_iter()
         .find(|span| span.json_pointer == pointer)?;
     let span = if layers == 2 {
-        json_string::index_nested_json_string_spans(&bytes, &span)
+        json_string::index_nested_json_string_spans(bytes, &span)
             .ok()?
             .into_iter()
             .find(|span| span.json_pointer == "/output")?

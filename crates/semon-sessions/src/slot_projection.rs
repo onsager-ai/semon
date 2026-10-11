@@ -326,51 +326,57 @@ impl SavedSlot {
                 first: slot.first,
             };
         }
-        let field = slot.file.as_ref().and_then(|file| {
-            if let Some(history) = history {
-                if history.index(&file.path).is_some() {
-                    return history.field(&file.path, slot.offset, slot.block);
-                }
-                return crate::native_field::capture_with_read(
-                    slot.offset,
-                    slot.block,
-                    &recipe,
-                    |at| history.record_bytes(&file.path, at),
-                );
-            }
-            crate::native_field::capture(
-                sources.get(&file.path)?,
-                slot.offset,
-                slot.block,
-                &recipe,
-                records,
-            )
-        });
         let mut native_record = None;
+        let field = slot.file.as_ref().and_then(|file| {
+            if let Some(history) = history
+                && history.index(&file.path).is_some()
+            {
+                return history.field(&file.path, slot.offset, slot.block);
+            }
+            let (field, record) =
+                crate::native_field::capture_with_record(slot.offset, slot.block, &recipe, |at| {
+                    if let Some(history) = history {
+                        history.record_bytes(&file.path, at)
+                    } else {
+                        crate::native_field::read_source_record(
+                            sources.get(&file.path)?,
+                            at,
+                            records,
+                        )
+                    }
+                });
+            // A tool field can point at its reply. Native entry identity and
+            // attachments belong to the original slot record instead.
+            native_record = record
+                .filter(|(at, _)| *at == slot.offset)
+                .map(|(_, record)| record);
+            field
+        });
         let native_event_id = field
             .as_ref()
             .filter(|field| matches!(field.kind, crate::native_field::NativeFieldKind::Text))
             .and_then(|field| field.native_event_id.clone())
             .or_else(|| {
                 let file = slot.file.as_ref()?;
-                let bytes = if let Some(history) = history {
-                    history.record_bytes(&file.path, slot.offset)?
-                } else {
-                    crate::native_field::read_source_record(
-                        sources.get(&file.path)?,
-                        slot.offset,
-                        records,
-                    )?
-                };
-                let record = crate::tx::parse_native_record(&bytes)?;
-                let id = record
+                if native_record.is_none() {
+                    let bytes = if let Some(history) = history {
+                        history.record_bytes(&file.path, slot.offset)?
+                    } else {
+                        crate::native_field::read_source_record(
+                            sources.get(&file.path)?,
+                            slot.offset,
+                            records,
+                        )?
+                    };
+                    native_record = crate::tx::parse_native_record(&bytes);
+                }
+                let record = native_record.as_ref()?;
+                record
                     .get("uuid")
                     .or_else(|| record.get("id"))
                     .and_then(|value| value.as_str())
                     .filter(|value| !value.is_empty() && value.len() <= 4096)
-                    .map(str::to_owned);
-                native_record = Some(record);
-                id
+                    .map(str::to_owned)
             });
         let mut images = if matches!(&slot.kind, SlotKind::U | SlotKind::H(_)) {
             slot.file
