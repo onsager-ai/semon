@@ -367,9 +367,27 @@ New Codex eviction binds the exact persisted header into a versioned archive
 marker. Earlier markers continue retaining their event rows; they do not qualify
 another Codex eviction until a native header can be repaired. Headers larger
 than 1 MiB stay complete in memory and cannot qualify eviction; fields are not
-truncated. No archived evidence is automatically backfilled or deleted. Claude
-sidecars, private Semon parent markers and a query's relationship closure remain
-to be extracted; hosted MCP restoration remains until those consumers migrate.
+truncated. No archived evidence is automatically backfilled or deleted.
+
+The native producer also consumes Claude subagent call identity, label, model,
+worktree cwd and branch from allowlisted metadata in the same index. It binds an
+independent sidecar observation to the native ledger in the existing commit.
+Known absence and bounded malformed files retain native fallback semantics;
+changes to the sidecar alone repair metadata without replaying unchanged log
+rows. Safe descriptor opens refuse links through any ancestor, and generation
+checks fence indexing and publication races. `Texts::meta` is removed.
+
+New subagent eviction requires a version-three marker binding the persisted
+sidecar encoding and a final check of its independent observation. Prior markers
+still keep existing event rows. Unreadable, linked, oversized or unpersistable
+sidecars defer new eviction without truncating parsed fields or hiding the
+session. Source sidecars are not deleted. Unknown fields, raw JSON, bodies and
+runtime authority are excluded. See the [query contract](../../crates/semon-sessions/src/query/README.md)
+for rollout/downgrade obligations. This is a review branch change, without a new
+database, schema or automatic migration of archived evidence.
+
+Private Semon parent markers and a query's relationship closure remain to be
+extracted; hosted MCP restoration remains until those consumers migrate.
 
 Hub MCP still acquires a workspace core and restores tenant archives; native
 query discovery/joins still cover eligible sources. Implement authorized

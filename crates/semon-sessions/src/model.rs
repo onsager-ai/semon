@@ -564,17 +564,10 @@ pub(crate) struct Texts {
     prompt_caches: HashMap<PathBuf, (u64, Arc<crate::attachments::PromptCache>)>,
     repos: HashMap<String, Option<String>>,
     markers: HashMap<PathBuf, (Stamp, Option<Marker>)>,
-    /// Each Codex file's `session_meta` and each subagent's `.meta.json`, by
-    /// the file's stamp: a rebuild after one file grew re-reads neither for
-    /// the files that didn't change.
-    metas: HashMap<PathBuf, (Stamp, Option<Value>)>,
 }
 
 #[cfg(test)]
 thread_local! {
-    /// Metadata files read by [`Texts::meta`] on this thread: a rebuild reads
-    /// only the changed ones.
-    pub(crate) static META_READS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
     /// Builds on this thread.
     pub(crate) static BUILDS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
     /// Full compatibility model preparation, excluding native catalog observation.
@@ -604,7 +597,6 @@ pub(crate) fn read_line(path: &Path, offset: u64) -> Option<Value> {
 impl Texts {
     fn invalidate(&mut self, path: &Path) {
         if self.generations.remove(path).is_some() {
-            self.metas.remove(path);
             self.markers.remove(path);
         }
     }
@@ -716,35 +708,6 @@ impl Texts {
         self.markers
             .insert(path.to_owned(), (stamp, marker.clone()));
         marker
-    }
-
-    /// A file's metadata, read by `read` only when its stamp changed. A Codex
-    /// file that only grew keeps its first line, so a `session_meta` already
-    /// read is kept (the event cache's rule); one not yet complete is read
-    /// again. A read error isn't kept, so the file is tried again next time.
-    fn meta(
-        &mut self,
-        path: &Path,
-        grows: bool,
-        read: impl FnOnce(&Path) -> io::Result<Option<Value>>,
-    ) -> io::Result<Option<Value>> {
-        let stamp = stamp_of(path);
-        if let Some((seen, meta)) = self.metas.get_mut(path)
-            && (*seen == stamp
-                || (grows
-                    && meta.is_some()
-                    && seen.dev == stamp.dev
-                    && seen.ino == stamp.ino
-                    && stamp.size > seen.size))
-        {
-            *seen = stamp;
-            return Ok(meta.clone());
-        }
-        #[cfg(test)]
-        META_READS.with(|reads| reads.set(reads.get() + 1));
-        let meta = read(path)?;
-        self.metas.insert(path.to_owned(), (stamp, meta.clone()));
-        Ok(meta)
     }
 }
 
@@ -1332,7 +1295,7 @@ fn scan(
             continue;
         };
         let parent = path.parent();
-        let role = if parent.and_then(Path::parent) == Some(projects.as_path()) {
+        let mut role = if parent.and_then(Path::parent) == Some(projects.as_path()) {
             Role::Top {
                 slug: parent
                     .and_then(Path::file_name)
@@ -1344,29 +1307,13 @@ fn scan(
             .is_some_and(|name| name == "subagents")
             && stem.starts_with("agent-")
         {
-            let meta = texts
-                .meta(&path.with_extension("meta.json"), false, |meta| {
-                    Ok(crate::read_regular(meta)
-                        .ok()
-                        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
-                        .filter(Value::is_object))
-                })
-                .ok()
-                .flatten()
-                .unwrap_or(Value::Null);
             Role::Agent(AgentMeta {
                 parent: parent
                     .and_then(Path::parent)
                     .and_then(Path::file_name)
                     .map(|name| name.to_string_lossy().into_owned())
                     .unwrap_or_default(),
-                tool_use_id: field(&meta, "toolUseId").map(str::to_owned),
-                label: field(&meta, "description")
-                    .or_else(|| field(&meta, "agentType"))
-                    .map(str::to_owned),
-                model: field(&meta, "model").map(str::to_owned),
-                cwd: field(&meta, "worktreePath").map(str::to_owned),
-                branch: field(&meta, "worktreeBranch").map(str::to_owned),
+                ..AgentMeta::default()
             })
         } else {
             continue;
@@ -1381,6 +1328,18 @@ fn scan(
         let Ok(summary) = events::scan_file(&path, "claude", cache, dirty) else {
             continue;
         };
+        if let Role::Agent(agent) = &mut role {
+            let metadata = summary
+                .claude_sidecar
+                .as_ref()
+                .map(|sidecar| sidecar.metadata.clone())
+                .unwrap_or_default();
+            agent.tool_use_id = metadata.tool_use_id;
+            agent.label = metadata.label;
+            agent.model = metadata.model;
+            agent.cwd = metadata.cwd;
+            agent.branch = metadata.branch;
+        }
         if cache.replaced(&path) {
             texts.invalidate(&path);
         }
@@ -1495,16 +1454,22 @@ fn scan(
     texts
         .prompt_caches
         .retain(|path, _| seen.contains(path.to_string_lossy().as_ref()));
-    // Metadata of files that are gone is dropped with them.
-    texts.metas.retain(|path, _| {
-        let file = if path.extension().is_some_and(|ext| ext == "json") {
-            path.with_extension("").with_extension("jsonl")
-        } else {
-            path.clone()
-        };
-        seen.contains(file.to_string_lossy().as_ref())
-    });
     Ok((files, skipped, cache.index_clone_duration()))
+}
+
+fn verify_sidecars(files: &[SourceFile]) -> io::Result<()> {
+    if files.iter().any(|file| {
+        file.summary
+            .claude_sidecar
+            .as_ref()
+            .is_some_and(|sidecar| !sidecar.current(&file.path))
+    }) {
+        return Err(io::Error::new(
+            io::ErrorKind::Interrupted,
+            "Claude sidecar changed during native preparation",
+        ));
+    }
+    Ok(())
 }
 
 // ---- Lineages: exact links only (M0, D4, D5) ---------------------------------------------
@@ -6056,6 +6021,9 @@ fn build_sources_inner(
             hook();
         }
     }
+    if target != BuildTarget::Model {
+        verify_sidecars(&files)?;
+    }
     let claims = if target == BuildTarget::Sources {
         cache.catalog_claims(
             &files
@@ -6175,6 +6143,9 @@ fn build_sources_inner(
     let slot_projections = catalog
         .as_ref()
         .map(|rows| crate::slot_projection::capture(&tx, rows));
+    if target != BuildTarget::Model {
+        verify_sidecars(&files)?;
+    }
     if matches!(target, BuildTarget::Catalog | BuildTarget::Sources) {
         source_records
             .as_ref()
@@ -6387,6 +6358,7 @@ fn build_sources_inner(
         if let Some(hook) = AFTER_QUERY_DERIVATION.with(|hook| hook.borrow_mut().take()) {
             hook();
         }
+        verify_sidecars(&files)?;
         source_records
             .as_ref()
             .expect("native query reader captured")

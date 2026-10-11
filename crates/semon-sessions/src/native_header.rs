@@ -155,14 +155,17 @@ mod tests {
         assert_eq!(header["header"]["id"], "run");
         assert!(!home.header_text().contains("PRIVATE-HEADER-CONTROL"));
         assert!(!home.header_text().contains("PRIVATE-BODY-CONTROL"));
-        let direct = crate::model::META_READS.with(std::cell::Cell::get);
+        let direct = crate::events::CLAUDE_SIDECAR_READS.with(std::cell::Cell::get);
         assert_eq!(home.query(), expected);
         assert_eq!(
             reads(),
             before + 2,
             "a cold native query reuses the committed header"
         );
-        assert_eq!(crate::model::META_READS.with(std::cell::Cell::get), direct);
+        assert_eq!(
+            crate::events::CLAUDE_SIDECAR_READS.with(std::cell::Cell::get),
+            direct
+        );
         assert_eq!(fs::read(&home.path).unwrap(), original);
         assert_eq!(
             home.connection()

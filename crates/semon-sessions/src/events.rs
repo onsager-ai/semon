@@ -36,12 +36,19 @@ thread_local! {
     /// Reads of the persisted event cache on this thread.
     pub(crate) static CACHE_READS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
     pub(crate) static CODEX_HEADER_READS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    pub(crate) static CLAUDE_SIDECAR_READS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    static AFTER_CLAUDE_SIDECAR: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
     static AFTER_CODEX_HEADER: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
 }
 
 #[cfg(test)]
 pub(crate) fn set_codex_header_hook(hook: impl FnOnce() + 'static) {
     AFTER_CODEX_HEADER.with(|value| *value.borrow_mut() = Some(Box::new(hook)));
+}
+
+#[cfg(test)]
+pub(crate) fn set_claude_sidecar_hook(hook: impl FnOnce() + 'static) {
+    AFTER_CLAUDE_SIDECAR.with(|value| *value.borrow_mut() = Some(Box::new(hook)));
 }
 
 /// The parser's version: what the fold functions derive from a line. The
@@ -280,6 +287,8 @@ pub(crate) struct FileIndex {
     pub(crate) dirty_rows: Option<DirtyRows>,
     /// Allowlisted first-record metadata observed on the same native generation.
     pub(crate) codex_header: Option<crate::native_header::CodexHeader>,
+    /// A subagent sidecar has its own generation, separate from the native log.
+    pub(crate) claude_sidecar: Option<crate::native_sidecar::ClaudeSidecar>,
     pub(crate) events: Vec<Event>,
     /// Transcript-only items the model's rules never read: thinking blocks,
     /// harness text added before a Codex prompt, and completed Codex operations.
@@ -1649,9 +1658,16 @@ pub(crate) fn scan_file(
     dirty: &mut bool,
 ) -> io::Result<Arc<FileIndex>> {
     let key = path.to_string_lossy().into_owned();
+    let agent = harness == "claude" && crate::native_sidecar::agent_path(path);
     if let Some(entry) = cache.files.get(&key)
         && !cache.unpersisted.contains(&key)
         && (harness != "codex" || entry.index.codex_header.is_some())
+        && (!agent
+            || entry
+                .index
+                .claude_sidecar
+                .as_ref()
+                .is_some_and(|sidecar| sidecar.current(path)))
         && entry.ledger.stat == Stat::of(path)?
     {
         trace("unchanged");
@@ -1676,23 +1692,47 @@ pub(crate) fn scan_file(
                 Base::Moved if !last => continue,
                 Base::Moved | Base::Unreadable => {}
             }
-            // Another process already read it as it is now.
-            if ledger.stat == stat
-                && let Some(index) = &base
-                && (harness != "codex" || index.codex_header.is_some())
-            {
-                trace("unchanged");
-                // The store holds it as it is now: nothing waits to be written.
-                cache.unpersisted.remove(&key);
-                cache.files.insert(
-                    key,
-                    CachedFile {
-                        ledger: ledger.clone(),
-                        index: Arc::clone(index),
-                    },
-                );
-                return Ok(Arc::clone(index));
+        }
+        let sidecar = if agent {
+            match crate::native_sidecar::ClaudeSidecar::observe(
+                path,
+                base.as_ref()
+                    .and_then(|index| index.claude_sidecar.as_ref()),
+            ) {
+                Ok(sidecar) => sidecar,
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => {
+                    if last {
+                        None
+                    } else {
+                        continue;
+                    }
+                }
+                Err(error) => return Err(error),
             }
+        } else {
+            None
+        };
+        // Another process already read it as it is now.
+        if let Some(ledger) = &recorded
+            && ledger.stat == stat
+            && let Some(index) = &base
+            && (harness != "codex" || index.codex_header.is_some())
+            && (!agent
+                || sidecar
+                    .as_ref()
+                    .is_some_and(|observed| index.claude_sidecar.as_ref() == Some(observed)))
+        {
+            trace("unchanged");
+            // The store holds it as it is now: nothing waits to be written.
+            cache.unpersisted.remove(&key);
+            cache.files.insert(
+                key,
+                CachedFile {
+                    ledger: ledger.clone(),
+                    index: Arc::clone(index),
+                },
+            );
+            return Ok(Arc::clone(index));
         }
         let from = match (&recorded, &base) {
             (Some(ledger), Some(_)) => ledger.offset,
@@ -1737,6 +1777,11 @@ pub(crate) fn scan_file(
         } else {
             None
         };
+        writable.claude_sidecar = sidecar;
+        #[cfg(test)]
+        if agent && let Some(hook) = AFTER_CLAUDE_SIDECAR.with(|hook| hook.borrow_mut().take()) {
+            hook();
+        }
         writable.dirty_rows = Some(DirtyRows::begin(writable));
         let offset = parse(&mut file, from, harness, writable)?;
         let changes = writable
@@ -1757,6 +1802,19 @@ pub(crate) fn scan_file(
                         "native Codex header changed while indexing",
                     ));
                 }
+                continue;
+            }
+        }
+        if writable
+            .claude_sidecar
+            .as_ref()
+            .is_some_and(|sidecar| !sidecar.current(path))
+        {
+            if last {
+                // Keep the native session under bounded sidecar churn, using
+                // its existing metadata fallback without an eviction proof.
+                writable.claude_sidecar = None;
+            } else {
                 continue;
             }
         }

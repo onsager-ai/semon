@@ -55,6 +55,7 @@ pub(crate) use read_path::open_input;
 mod model_delta;
 mod native_field;
 mod native_header;
+mod native_sidecar;
 mod read_capabilities;
 mod source_inventory;
 pub use source_inventory::SessionSourceInventory;
@@ -375,20 +376,27 @@ pub(crate) const RECORD_MAX: u64 = 1024 * 1024;
 /// input set has none; see `inputs`). A larger file reads as absent, with
 /// one warning per path.
 pub(crate) fn read_regular(path: &Path) -> io::Result<Vec<u8>> {
-    static WARNED: std::sync::Mutex<BTreeSet<PathBuf>> = std::sync::Mutex::new(BTreeSet::new());
     let read = read_regular_at_most(path, RECORD_MAX);
-    if let Err(error) = &read
-        && error.kind() == io::ErrorKind::FileTooLarge
-        && WARNED
-            .lock()
-            .is_ok_and(|mut warned| warned.insert(path.to_owned()))
+    if read
+        .as_ref()
+        .is_err_and(|error| error.kind() == io::ErrorKind::FileTooLarge)
+    {
+        warn_record_too_large(path);
+    }
+    read
+}
+
+pub(crate) fn warn_record_too_large(path: &Path) {
+    static WARNED: std::sync::Mutex<BTreeSet<PathBuf>> = std::sync::Mutex::new(BTreeSet::new());
+    if WARNED
+        .lock()
+        .is_ok_and(|mut warned| warned.insert(path.to_owned()))
     {
         eprintln!(
             "semon: {} is over {RECORD_MAX} bytes; it is ignored",
             path.display()
         );
     }
-    read
 }
 
 /// A regular file's bytes, at most `max` of them. The path must name a

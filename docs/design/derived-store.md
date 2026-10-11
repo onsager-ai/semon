@@ -13,7 +13,12 @@ from the existing index metadata region. It preserves first-record identity and
 ancestry without storing message bodies or changing the schema. Verified Codex
 eviction binds that persisted header; prior archive markers retain their event
 rows. See the [current query contract](../../crates/semon-sessions/src/query/README.md)
-for repair, size limits and remaining provider/dependency work. The historical
+for repair, size limits and remaining provider/dependency work. Claude subagent
+sidecars also have a generation-bound allowlisted record in this metadata region,
+with an independent sidecar observation. The native producer consumes it and the
+separate metadata cache is removed. New subagent eviction binds that record and
+rechecks its observation; older archive markers continue retaining event rows.
+No sidecar source files are removed. The historical
 Phase B and compatibility-serving proposals below remain historical.
 
 Read at `c4ec3f5`, with #104 (refresh pool) and #105 (server-side analytics) read from their open branches. Claims marked *measured* were measured on 2026-09-29; claims marked *inference* were not.
