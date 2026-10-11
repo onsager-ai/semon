@@ -46,8 +46,10 @@ Selected batches neither restore unrelated FileIndexes nor prune membership.
 An already complete Catalog can republish a closed component of up to 64 sources
 without reloading unrelated event indexes. Before native reads, the producer
 captures a new filesystem/runtime snapshot and compares it with the last
-acknowledged snapshot. Discovery membership, sidecars and runtime inputs must be
-unchanged. Both snapshots are retained as observations; a write arriving after
+acknowledged snapshot. Sidecars and runtime inputs must be unchanged. A new native
+source can explain a changed or newly created containing directory; replacements,
+disappearance and unrelated metadata changes require complete reconciliation.
+Both snapshots are retained as observations; a write arriving after
 capture remains visible to the next refresh.
 
 The producer expands changed paths through indexed current owners, parent/child
@@ -62,11 +64,17 @@ existing partial-publication ledger, generation and revision fences, acknowledge
 only its claims, and rolls back if any unrelated source revision remains pending.
 It preserves complete qualification only after those checks succeed. Identity or
 relationship changes and initial discovery still use complete reconciliation.
+A genuinely new isolated identity can join the complete Catalog after the same
+transactional closure checks. Existing or malformed rows cannot masquerade as
+new identities, and source-path or native aliases owned outside the batch reject
+the focused publication.
 The isolated regression loads one event index with zero or 256 unrelated
 sources; the former complete path loaded 257 in the latter case. A changed-child
 fixture loads its two-source parent/child component with zero or 256 unrelated
 sources, compared with 258 indexes before. This is event-row
 reuse evidence; filesystem snapshot work and cold reconciliation still scale.
+Adding one isolated session loads no unrelated indexes with zero or 256 existing
+sessions; before this extension the larger case loaded all 256 indexes.
 
 ## Qualified workload
 

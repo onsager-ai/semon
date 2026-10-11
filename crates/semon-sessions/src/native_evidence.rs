@@ -516,14 +516,18 @@ impl Snapshot {
             })
             .collect()
     }
-    /// A bounded rewrite/append set with unchanged discovery and process inputs.
-    /// New or disappeared sources, sidecars and runtime changes need discovery.
+    /// A bounded rewrite/append/addition set with unchanged process inputs.
+    /// Directory changes qualify only when an admitted new source explains them;
+    /// disappearance, sidecars and runtime changes still need reconciliation.
     pub(crate) fn changed_catalog_inputs(
         &self,
         observed: &Self,
         options: &Options,
     ) -> Option<Vec<crate::inputs::Input>> {
-        if self.watched.keys().ne(observed.watched.keys())
+        if self
+            .watched
+            .keys()
+            .any(|path| !observed.watched.contains_key(path))
             || self.lock_ids != observed.lock_ids
             || self.locks != observed.locks
             || self.pids != observed.pids
@@ -531,24 +535,43 @@ impl Snapshot {
             return None;
         }
         let mut inputs = Vec::new();
-        for (path, previous) in &self.watched {
-            let current = *observed.watched.get(path)?;
-            if current == *previous {
+        let mut additions = Vec::new();
+        let mut directories = Vec::new();
+        for (path, current) in &observed.watched {
+            let previous = self.watched.get(path).copied().flatten();
+            if *current == previous {
                 continue;
             }
-            if !previous.is_some_and(|stamp| stamp.kind.is_file())
-                || !current.is_some_and(|stamp| stamp.kind.is_file())
-                || path
-                    .extension()
-                    .is_none_or(|extension| extension != "jsonl")
+            let current = current.as_ref()?;
+            if current.kind.is_dir() {
+                if previous.is_some_and(|previous| {
+                    !previous.kind.is_dir()
+                        || (previous.generation.dev, previous.generation.ino)
+                            != (current.generation.dev, current.generation.ino)
+                }) {
+                    return None;
+                }
+                directories.push(path);
+                continue;
+            }
+            if !current.kind.is_file() || previous.is_some_and(|previous| !previous.kind.is_file())
             {
                 return None;
             }
             let input = catalog_input(path, options)?;
+            if previous.is_none() {
+                additions.push(path);
+            }
             inputs.push(input);
             if inputs.len() > 64 {
                 return None;
             }
+        }
+        if directories
+            .iter()
+            .any(|directory| !additions.iter().any(|path| path.starts_with(directory)))
+        {
+            return None;
         }
         (!inputs.is_empty()).then_some(inputs)
     }

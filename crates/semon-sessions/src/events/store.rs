@@ -1352,23 +1352,33 @@ fn closed_catalog(
         {
             return Ok(false);
         }
-        let Some(previous) = current_catalog_row(connection, &row.key)? else {
-            return Ok(false);
-        };
-        if previous.harness != row.harness
-            || previous.kind != row.kind
-            || previous.native_ids != row.native_ids
-            || previous.parent != row.parent
-            || previous.sources.len() != row.sources.len()
-            || previous.sources.iter().any(|previous| {
-                !row.sources.iter().any(|source| {
-                    source.path == previous.path
-                        && source.native_id == previous.native_id
-                        && source.native_role == previous.native_role
+        if let Some(previous) = current_catalog_row(connection, &row.key)? {
+            if previous.harness != row.harness
+                || previous.kind != row.kind
+                || previous.native_ids != row.native_ids
+                || previous.parent != row.parent
+                || previous.sources.len() != row.sources.len()
+                || previous.sources.iter().any(|previous| {
+                    !row.sources.iter().any(|source| {
+                        source.path == previous.path
+                            && source.native_id == previous.native_id
+                            && source.native_role == previous.native_role
+                    })
                 })
-            })
-        {
-            return Ok(false);
+            {
+                return Ok(false);
+            }
+        } else {
+            // A genuinely new identity can join a complete Catalog. Missing or
+            // corrupt metadata for an existing row must never masquerade as one.
+            let exists: bool = connection.query_row(
+                "SELECT EXISTS(SELECT 1 FROM session_catalog WHERE session_key=?1)",
+                [&row.key],
+                |row| row.get(0),
+            )?;
+            if exists {
+                return Ok(false);
+            }
         }
         let related: bool = connection.query_row(
             "SELECT EXISTS(SELECT 1 FROM session_catalog WHERE lifecycle='current' AND parent_key=?1 AND session_key NOT IN (SELECT value FROM json_each(?2))) OR EXISTS(SELECT 1 FROM session_trace_edges WHERE session_key=?1 AND CASE WHEN json_valid(metadata) THEN ((json_extract(metadata,'$.from') IS NULL OR json_extract(metadata,'$.from')='you' OR json_extract(metadata,'$.from') IN (SELECT value FROM json_each(?2))) AND (json_extract(metadata,'$.to') IS NULL OR json_extract(metadata,'$.to')='you' OR json_extract(metadata,'$.to') IN (SELECT value FROM json_each(?2)))) ELSE 0 END IS NOT 1) OR EXISTS(SELECT 1 FROM session_trace_edges WHERE (CASE WHEN json_valid(metadata) THEN json_extract(metadata,'$.from') END=?1 OR CASE WHEN json_valid(metadata) THEN json_extract(metadata,'$.to') END=?1) AND session_key NOT IN (SELECT value FROM json_each(?2))) OR EXISTS(SELECT 1 FROM session_trace_bookmarks WHERE session_key=?1)",
@@ -1376,6 +1386,15 @@ fn closed_catalog(
         )?;
         if related {
             return Ok(false);
+        }
+        for source in &row.sources {
+            let external: bool = connection.query_row(
+                "SELECT EXISTS(SELECT 1 FROM session_catalog_sources WHERE lifecycle='current' AND source_path=?1 AND session_key NOT IN (SELECT value FROM json_each(?2)))",
+                params![source.path.to_string_lossy(), encoded_keys], |row| row.get(0),
+            )?;
+            if external {
+                return Ok(false);
+            }
         }
         for id in &row.native_ids {
             let external: bool = connection.query_row("SELECT EXISTS(SELECT 1 FROM session_catalog_sources WHERE lifecycle='current' AND harness=?1 AND native_id=?2 AND session_key NOT IN (SELECT value FROM json_each(?3)))", params![row.harness,id,encoded_keys], |row| row.get(0))?;

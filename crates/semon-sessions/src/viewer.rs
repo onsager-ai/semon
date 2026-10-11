@@ -7069,6 +7069,64 @@ mod tests {
     }
 
     #[test]
+    fn a_new_isolated_catalog_source_does_not_reload_unrelated_event_indexes() {
+        for unrelated in [0, 256] {
+            let fixture = Fixture::new();
+            for n in 0..unrelated {
+                let id = format!("existing-{n:04}");
+                fixture.claude(&id, &[json!({"type":"user","sessionId":id,"uuid":id,"origin":{"kind":"human"},"cwd":"/tmp/project","timestamp":"2026-10-01T00:00:00Z","message":{"role":"user","content":"existing prompt"}})]);
+            }
+            let mut cache = EventCache::open_scoped(&fixture.options.cache).unwrap();
+            model::observe_catalog(
+                &fixture.options,
+                &mut cache,
+                &mut false,
+                &mut model::Texts::default(),
+                model::now_ms(),
+            )
+            .unwrap();
+            let snapshot = Snapshot::capture_pids(&fixture.options, BTreeSet::new(), cache.paths());
+            fixture.claude("new-isolated", &[json!({"type":"user","sessionId":"new-isolated","uuid":"new-isolated","origin":{"kind":"human"},"cwd":"/tmp/project","timestamp":"2026-10-02T00:00:00Z","message":{"role":"user","content":"new prompt"}})]);
+            let mut work = Work::default();
+            work.events = Some(EventCache::open_scoped(&fixture.options.cache).unwrap());
+            work.catalog_snapshot = Some(snapshot);
+            let view = fixture.viewer();
+            let before = crate::events::FILE_READS.with(std::cell::Cell::get);
+            assert!(
+                view.refresh_catalog_locked(&mut work, model::now_ms())
+                    .unwrap()
+            );
+            let reads = crate::events::FILE_READS.with(std::cell::Cell::get) - before;
+            assert!(
+                reads <= 1,
+                "unrelated={unrelated}: adding one isolated source loaded {reads} event indexes"
+            );
+            let reply = crate::session_catalog_page(&fixture.options, "fixture", "limit=60");
+            let page: Value = serde_json::from_slice(&reply.body).unwrap();
+            assert_eq!(page["completeness"]["state"], "complete");
+            let catalog =
+                rusqlite::Connection::open(EventCache::path(&fixture.options.cache)).unwrap();
+            let count: i64 = catalog
+                .query_row(
+                    "SELECT COUNT(*) FROM session_catalog WHERE lifecycle='current'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(count, i64::from(unrelated) + 1);
+            assert!(
+                page["items"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|row| row["key"] == "new-isolated")
+            );
+            assert!(view.shown_model().is_none());
+            view.close();
+        }
+    }
+
+    #[test]
     fn a_changed_isolated_catalog_source_does_not_reload_unrelated_event_indexes() {
         for unrelated in [0, 256] {
             let fixture = Fixture::new();
