@@ -242,6 +242,10 @@ test(
       const query = page.getByRole('textbox', { name: 'Search session details', exact: true });
       const beforeTyping = requests.length;
       await query.fill('backlog');
+      assert.equal(
+        await page.evaluate(() => new URL(location.href).searchParams.get('q')),
+        'backlog',
+      );
       await page.evaluate(
         () => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))),
       );

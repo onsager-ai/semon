@@ -1839,6 +1839,14 @@ export function createCatalogViewer(
         candidateRetry() {
           void loadCandidates(false);
         },
+        searchDraft(value) {
+          // Preserve bookmarkable input immediately; native observation starts
+          // only when the form commits its filters.
+          const draft = browsingParams();
+          if (value.trim()) draft.set('q', value.trim());
+          else draft.delete('q');
+          history.replaceState(history.state, '', '/sessions?' + draft);
+        },
         filters(values) {
           if (
             harness === values.harness &&

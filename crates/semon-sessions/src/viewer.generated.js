@@ -10051,6 +10051,7 @@ globalThis.__semonUIShared = __semonUIShared;
                     id: "sq",
                     placeholder: "Session details\u2026",
                     value: snapshot.query ?? "",
+                    onInput: (event) => host2.searchDraft?.(event.currentTarget.value),
                     onChange: (event) => {
                       if (event.currentTarget.form) commit(event.currentTarget.form);
                     }
@@ -13042,6 +13043,12 @@ globalThis.__semonUIShared = __semonUIShared;
           },
           candidateRetry() {
             void loadCandidates(false);
+          },
+          searchDraft(value) {
+            const draft2 = browsingParams();
+            if (value.trim()) draft2.set("q", value.trim());
+            else draft2.delete("q");
+            history.replaceState(history.state, "", "/sessions?" + draft2);
           },
           filters(values) {
             if (harness === values.harness && repo === values.repo && model2 === values.model && query === values.q)
