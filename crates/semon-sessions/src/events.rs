@@ -35,6 +35,8 @@ pub(crate) use store::{archive_index_retained, retain_archive_index};
 thread_local! {
     /// Reads of the persisted event cache on this thread.
     pub(crate) static CACHE_READS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// Full per-file event/signal row decodes, including exact-path loads.
+    pub(crate) static FILE_READS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
     pub(crate) static CODEX_HEADER_READS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
     pub(crate) static CLAUDE_SIDECAR_READS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
     static AFTER_CLAUDE_SIDECAR: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
@@ -839,6 +841,21 @@ pub(crate) struct Ledger {
 }
 
 impl Ledger {
+    fn source(&self, path: &Path, native_id: &str) -> crate::model::summary::CatalogSource {
+        crate::model::summary::CatalogSource {
+            path: path.to_owned(),
+            native_id: native_id.to_owned(),
+            dev: self.stat.dev,
+            ino: self.stat.ino,
+            size: self.stat.size,
+            modified_ns: self.stat.modified_ns,
+            changed_ns: self.stat.changed_ns,
+            offset: self.offset,
+            prefix_sha256: self.prefix,
+            tail_sha256: self.tail,
+        }
+    }
+
     /// The file still holds what was read, so reading resumes at the
     /// offset: the same identity, at least as long, and the consumed prefix
     /// unchanged. That covers a file that grew and one only touched; any
@@ -964,6 +981,13 @@ pub(crate) trait IndexStore: Send {
 
     /// `path`'s committed ledger and index, read together.
     fn load_file(&self, path: &str) -> Result<Option<(Ledger, FileIndex)>, StoreError>;
+
+    /// A committed tree summary and its evidence, without event/signal rows.
+    fn load_tree(
+        &self,
+        path: &str,
+        expected: &Stat,
+    ) -> Result<Option<(Ledger, crate::native_tree::Metadata)>, StoreError>;
 
     /// Commits `path`'s new ledger and index if its ledger is still
     /// `expected`. `changes` names rows the append parser touched. Without
@@ -1447,21 +1471,53 @@ impl EventCache {
         native_id: &str,
     ) -> Option<crate::model::summary::CatalogSource> {
         let file = self.files.get(path.to_string_lossy().as_ref())?;
-        let ledger = &file.ledger;
-        Some(crate::model::summary::CatalogSource {
-            path: path.to_owned(),
-            native_id: native_id.to_owned(),
-            dev: ledger.stat.dev,
-            ino: ledger.stat.ino,
-            size: ledger.stat.size,
-            modified_ns: ledger.stat.modified_ns,
-            changed_ns: ledger.stat.changed_ns,
-            offset: ledger.offset,
-            prefix_sha256: ledger.prefix,
-            tail_sha256: ledger.tail,
-        })
+        Some(file.ledger.source(path, native_id))
     }
 
+    /// Warm trees read the existing metadata regions only. Changed sources or
+    /// incomplete metadata use the ordinary parser/ledger CAS; never put a
+    /// partial FileIndex in the producer cache.
+    pub(crate) fn tree(
+        &mut self,
+        path: &Path,
+        harness: &str,
+        native_id: &str,
+        dirty: &mut bool,
+    ) -> io::Result<(
+        crate::model::summary::CatalogSource,
+        crate::native_tree::Metadata,
+    )> {
+        let key = path.to_string_lossy();
+        let stat = Stat::of(path)?;
+        if !self.unpersisted.contains(key.as_ref()) {
+            if let Some(file) = self.files.get(key.as_ref())
+                && file.ledger.stat == stat
+                && let Some(metadata) = crate::native_tree::Metadata::from_index(&file.index)
+            {
+                return Ok((file.ledger.source(path, native_id), metadata));
+            }
+            match self
+                .store
+                .as_ref()
+                .map(|store| store.load_tree(&key, &stat))
+            {
+                Some(Ok(Some((ledger, metadata)))) if ledger.stat == stat => {
+                    return Ok((ledger.source(path, native_id), metadata));
+                }
+                Some(Err(StoreError::Data(_))) | Some(Ok(_)) | None => {}
+                Some(Err(error)) => self.store_failed(&error),
+            }
+        }
+        let index = scan_file(path, harness, self, dirty)?;
+        let metadata = crate::native_tree::Metadata::from_index(&index)
+            .ok_or_else(|| io::Error::other("native tree metadata unavailable"))?;
+        let source = self
+            .source(path, native_id)
+            .ok_or_else(|| io::Error::other("native tree source unavailable"))?;
+        Ok((source, metadata))
+    }
+
+    #[cfg(test)]
     pub(crate) fn file_index(&self, path: &Path) -> Option<&FileIndex> {
         self.files
             .get(path.to_string_lossy().as_ref())

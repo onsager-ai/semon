@@ -413,7 +413,15 @@ Native parent-marker reads now use content-free locations observed by the event
 parser and verified against the selected original record, including valid JSON
 at EOF without a newline. All producer targets, including Model preparation, use
 these indexed reads. CLI and Viewer tree reads now use the same Session Event
-Index, opened with lazy source loads. The separate JSON summary cache, body
+Index. Unchanged Claude/Codex sources read their existing tree summary, byte
+proofs, marker and bounded launch locations with the ledger in one SQLite
+snapshot, without decoding event/signal rows or retaining partial FileIndexes.
+Captured evidence belongs to the request; the producer cache remains the sole
+owner of complete indexes. Changed sources and missing/incompatible metadata
+use the ordinary incremental parser and ledger CAS. Copilot still derives its
+tree from event/signal rows. Paged byte-proof metadata and native tree accounting
+still grow with source evidence; this is not a constant-cost whole tree or a
+bounded discovery/dependency implementation. The separate JSON summary cache, body
 parser and process-global launch scan cache are removed. Raw timestamp strings,
 all model labels, malformed-line diagnostics, message/UUID usage accounting and
 historical tool closure rules remain in content-free native tree metadata,

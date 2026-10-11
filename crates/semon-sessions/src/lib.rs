@@ -999,7 +999,6 @@ fn collect_native_tree(options: &Options, index: &mut events::EventCache) -> io:
                     if let Some(parent_path) = claude_paths.get(&marker.parent_id) {
                         node.via_tool = native_tree::launch(
                             options,
-                            index,
                             parent_path,
                             prompt,
                             node.cwd.as_deref(),
@@ -1105,6 +1104,7 @@ fn collect_native_tree(options: &Options, index: &mut events::EventCache) -> io:
                     .source(&path, id)
                     .ok_or_else(|| io::Error::other("native tree source unavailable"))?,
                 summary.source_chunks.clone(),
+                None,
             )?;
             let mut node = Node::new(id.into(), "copilot", "session");
             node.state = "unknown".into();

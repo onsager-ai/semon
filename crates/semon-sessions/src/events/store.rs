@@ -482,6 +482,7 @@ thread_local! {
     /// Runs once, after the JSON cache is claimed and before the claimed
     /// file is checked and removed.
     pub(super) static AFTER_CLAIM: Hook = const { std::cell::RefCell::new(None) };
+    static AFTER_TREE_LEDGER: Hook = const { std::cell::RefCell::new(None) };
 }
 
 #[cfg(test)]
@@ -1007,6 +1008,14 @@ impl IndexStore for SqliteStore {
 
     fn load_file(&self, path: &str) -> Result<Option<(Ledger, FileIndex)>, StoreError> {
         self.read_one(path).map_err(failure)
+    }
+
+    fn load_tree(
+        &self,
+        path: &str,
+        expected: &Stat,
+    ) -> Result<Option<(Ledger, crate::native_tree::Metadata)>, StoreError> {
+        self.read_tree(path, expected).map_err(failure)
     }
 
     fn commit_file(
@@ -1685,7 +1694,50 @@ impl SqliteStore {
         })
     }
 
-    /// `path`'s committed ledger and index, read in one transaction.
+    /// Tree metadata and its ledger, without reading event/signal rows.
+    fn read_tree(
+        &self,
+        path: &str,
+        expected: &Stat,
+    ) -> rusqlite::Result<Option<(Ledger, crate::native_tree::Metadata)>> {
+        // The ledger and every evidence record belong to one SQLite snapshot.
+        let transaction = self.connection.unchecked_transaction()?;
+        if !current(&transaction)? {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        let Some((_, ledger)) = ledger_row(&transaction, path)? else {
+            return Ok(None);
+        };
+        if ledger.stat != *expected {
+            return Ok(None);
+        }
+        #[cfg(test)]
+        hook(&AFTER_TREE_LEDGER);
+        let mut statement = transaction.prepare(NATIVE_METADATA_VALUE)?;
+        let Some(summary) = read_tree_summary(&mut statement, path, &ledger)? else {
+            return Ok(None);
+        };
+        let Some(chunks) = chunk_proofs::read(&transaction, path, &ledger)? else {
+            return Ok(None);
+        };
+        let Some(marker) = read_parent_marker(&mut statement, path, &ledger)? else {
+            return Ok(None);
+        };
+        let Some(calls) = launch_calls::read(&transaction, path, &ledger)? else {
+            return Ok(None);
+        };
+        Ok(Some((
+            ledger,
+            crate::native_tree::Metadata {
+                summary,
+                chunks,
+                marker,
+                calls: std::sync::Arc::new(calls),
+            },
+        )))
+    }
+
+    /// `path`'s committed ledger and full index, read in one transaction.
     fn read_one(&self, path: &str) -> rusqlite::Result<Option<(Ledger, FileIndex)>> {
         // Dropped in reverse order, so the read transaction ends last.
         let transaction = self.connection.unchecked_transaction()?;
@@ -2858,6 +2910,8 @@ fn read_file(
     readers: &mut Readers<'_>,
     row: &Row<'_>,
 ) -> rusqlite::Result<(String, Ledger, FileIndex)> {
+    #[cfg(test)]
+    super::FILE_READS.with(|reads| reads.set(reads.get() + 1));
     let file_id: i64 = row.get(0)?;
     let path: String = row.get(1)?;
     let ledger = Ledger {
@@ -3660,6 +3714,63 @@ mod tests {
             prefix: [n; 32],
             tail: [n.wrapping_add(1); 32],
         }
+    }
+
+    #[test]
+    fn tree_metadata_and_evidence_share_one_snapshot_during_concurrent_commit() {
+        let root = scratch("tree-snapshot");
+        let path = root.join("index.sqlite3");
+        let (mut store, _) = opened(&path);
+        let index = |model: &str| FileIndex {
+            tree_summary: Some(crate::native_tree::Summary {
+                models: [model.to_owned()].into_iter().collect(),
+                ..Default::default()
+            }),
+            source_chunks: Some(std::sync::Arc::new(crate::source_chunks::Chunks {
+                offset: 3,
+                hashes: vec![[1; 32]],
+            })),
+            marker_index: Some(crate::native_marker::Index::default()),
+            handoff_index: Some(crate::native_handoff::Index::default()),
+            ..Default::default()
+        };
+        let old = ledger(1);
+        let new = ledger(2);
+        assert_eq!(
+            store
+                .write_one("a.jsonl", None, None, &old, &index("old"))
+                .unwrap(),
+            Outcome::Written
+        );
+        let (mut writer, _) = opened(&path);
+        let old_copy = old.clone();
+        let new_copy = new.clone();
+        AFTER_TREE_LEDGER.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                assert_eq!(
+                    writer
+                        .write_one("a.jsonl", Some(&old_copy), None, &new_copy, &index("new"))
+                        .unwrap(),
+                    Outcome::Written
+                );
+            }))
+        });
+        let reads = super::super::FILE_READS.with(std::cell::Cell::get);
+        let (observed, metadata) = store.read_tree("a.jsonl", &old.stat).unwrap().unwrap();
+        assert_eq!(observed, old);
+        assert_eq!(
+            metadata.summary.models,
+            ["old".to_owned()].into_iter().collect()
+        );
+        assert!(store.read_tree("a.jsonl", &old.stat).unwrap().is_none());
+        let (observed, metadata) = store.read_tree("a.jsonl", &new.stat).unwrap().unwrap();
+        assert_eq!(observed, new);
+        assert_eq!(
+            metadata.summary.models,
+            ["new".to_owned()].into_iter().collect()
+        );
+        assert_eq!(super::super::FILE_READS.with(std::cell::Cell::get), reads);
+        fs::remove_dir_all(root).unwrap();
     }
 
     /// A file index with every field set, and every value at an edge where
