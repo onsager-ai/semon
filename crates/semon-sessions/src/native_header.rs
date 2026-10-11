@@ -34,7 +34,7 @@ impl CodexHeader {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Options, Query, ViewerCore};
+    use crate::{Options, Query, SessionSources};
     use rusqlite::Connection;
     use serde_json::json;
     use std::{
@@ -82,11 +82,14 @@ mod tests {
             }
         }
         fn query(&self) -> Value {
-            let core = Arc::new(ViewerCore::new(self.options.clone()));
-            let result = Query::from_native_core(core.clone())
+            let sources = Arc::new(SessionSources::with_machines(vec![(
+                String::new(),
+                self.options.clone(),
+            )]));
+            let result = Query::from_sources(sources.clone())
                 .call_at("list_sessions", &json!({}), NOW)
                 .unwrap();
-            core.close();
+            sources.close();
             result
         }
         fn connection(&self) -> Connection {

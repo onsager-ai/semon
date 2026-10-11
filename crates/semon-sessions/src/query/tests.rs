@@ -11,8 +11,16 @@ use std::{
 use serde_json::{Value, json};
 
 use super::*;
+use crate::ViewerCore;
 
 static NEXT: AtomicU64 = AtomicU64::new(0);
+
+fn admitted(options: Options) -> Arc<SessionSources> {
+    Arc::new(SessionSources::with_machines(vec![(
+        String::new(),
+        options,
+    )]))
+}
 
 fn catalog_generation(home: &Home) -> Option<String> {
     crate::events::EventCache::open_scoped(&home.options.cache)
@@ -69,7 +77,7 @@ fn query_producer_rejects_source_changes_after_indexing_before_publication() {
     for mutation in 0..3 {
         let home = Home::new("producer-race");
         home.top("lead", &[user("lead", ts(1, 0), "old evidence")]);
-        let mut query = Query::from_native_core(Arc::new(ViewerCore::new(home.options.clone())));
+        let mut query = Query::from_sources(admitted(home.options.clone()));
         query.call_at("list_sessions", &json!({}), NOW).unwrap();
         let generation = catalog_generation(&home);
         assert!(generation.is_some());
@@ -128,7 +136,7 @@ fn query_producer_rechecks_cached_and_unread_sources_before_publication() {
         home.top("lead", &[user("lead", ts(1, 0), "old evidence")]);
         // A source with no body derivation still contributes native identity.
         home.top("empty", &[]);
-        let mut query = Query::from_native_core(Arc::new(ViewerCore::new(home.options.clone())));
+        let mut query = Query::from_sources(admitted(home.options.clone()));
         query
             .call_at("get_session", &json!({"id":"lead"}), NOW)
             .unwrap();
@@ -269,10 +277,10 @@ fn query_producer_preserves_large_native_tool_record_derivation() {
 /// A retired native cohort cannot be refreshed after the source mutation.
 /// This also reproduces an active call racing a writer after its index build.
 fn retained_query(home: &Home) -> Query {
-    let core = Arc::new(ViewerCore::new(home.options.clone()));
-    let mut query = Query::from_native_core(core.clone());
+    let sources = admitted(home.options.clone());
+    let mut query = Query::from_sources(sources.clone());
     query.call_at("list_sessions", &json!({}), NOW).unwrap();
-    core.close();
+    sources.close();
     query
 }
 
@@ -488,13 +496,14 @@ fn query_source_paging_preserves_large_prompts_and_cached_image_ranges() {
     let raw = record.to_string().replace('/', "\\/") + "\n";
     assert!(raw.len() as u64 > tx::LINE_MAX);
     home.write("claude/projects/-work-proj/images.jsonl", &raw);
-    let core = Arc::new(ViewerCore::new(home.options.clone()));
+    let sources = admitted(home.options.clone());
+    let core = Arc::new(ViewerCore::from_sources(sources.clone()));
     let legacy = core.respond("GET", "/api/tx", "sid=images", None);
     assert_eq!(legacy.status, 200);
     let mut expected: Value = serde_json::from_slice(&legacy.body).unwrap();
     expected["window_start"] = Value::Null;
     assert_eq!(expected["entries"][0]["img"].as_array().unwrap().len(), 2);
-    let mut query = Query::from_native_core(core.clone());
+    let mut query = Query::from_sources(sources);
     let before = crate::model::COMPAT_BUILDS.with(|count| count.get());
     let actual = query
         .call_at("read_transcript", &json!({"id":"images"}), NOW)
@@ -1924,10 +1933,15 @@ fn native_owner_reuses_one_complete_index_across_query_tree_and_model_reads() {
     let path = home.root.join("claude/projects/-work-proj/lead.jsonl");
     let original = fs::read(&path).unwrap();
     let mut local = Query::new(home.options.clone());
-    let QuerySources::Native(machines) = &local.sources else {
-        panic!("local tools must not construct a Viewer owner");
-    };
-    assert!(machines.machines[0].1.work.lock().unwrap().events.is_none());
+    assert!(
+        local.sources.machines[0]
+            .1
+            .work
+            .lock()
+            .unwrap()
+            .events
+            .is_none()
+    );
     assert!(local.call_at("unknown", &json!({}), NOW).is_err());
     assert!(!home.options.cache.exists());
     assert!(!home.options.cache.with_extension("sqlite3").exists());
@@ -2010,21 +2024,18 @@ fn native_owner_retirement_refuses_a_waiting_cold_read_and_keeps_a_warm_cohort()
 
 #[test]
 fn shared_native_queries_reuse_cached_cohorts_and_expose_the_output_window() {
-    use crate::Refresh;
     let home = Home::new("shared");
     let mut options = home.options.clone();
     options.all = false;
     options.since = Duration::from_secs(86400);
-    let mut viewer = ViewerCore::new(options);
-    viewer.set_refresh(Refresh::OnInvalidate);
-    let core = Arc::new(viewer);
-    let mut first = Query::from_native_core(core.clone());
+    let sources = admitted(options);
+    let mut first = Query::from_sources(sources.clone());
     let answer = first.call_at("list_sessions", &json!({}), NOW).unwrap();
     let start = answer["window_start"]
         .as_i64()
         .expect("output-trimmed native cohorts have a window too");
     assert_eq!(start, NOW - 86_400_000);
-    let second = Query::from_native_core(core.clone())
+    let second = Query::from_sources(sources.clone())
         .call_at("list_sessions", &json!({}), NOW)
         .unwrap();
     assert_eq!(answer, second);
@@ -2039,9 +2050,9 @@ fn shared_native_queries_reuse_cached_cohorts_and_expose_the_output_window() {
             .window_start,
         Some(start)
     );
-    // Closing keeps the last snapshot served: the Query does not instantiate
-    // or synchronously rebuild another core behind the embedding server.
-    core.close();
+    // Closing keeps the last snapshot served without rebuilding sources
+    // behind the embedding server.
+    sources.close();
     assert_eq!(
         first.call_at("list_sessions", &json!({}), NOW).unwrap(),
         answer
@@ -2152,9 +2163,7 @@ fn embedded_native_queries_preserve_output_windows_and_legacy_tool_answers() {
             if multiple {
                 machines.push(("b".into(), options(&peer)));
             }
-            let mut viewer = ViewerCore::with_machines(machines);
-            viewer.set_refresh(crate::Refresh::OnInvalidate);
-            let core = Arc::new(viewer);
+            let sources = Arc::new(SessionSources::with_machines(machines));
             let calls = [
                 ("list_sessions", json!({})),
                 ("list_sessions", json!({"parent":"lead", "limit":1})),
@@ -2174,7 +2183,7 @@ fn embedded_native_queries_preserve_output_windows_and_legacy_tool_answers() {
                 ("find", json!({"text":"cargo", "max_bytes":1})),
                 ("stalls", json!({"idle_minutes":1})),
             ];
-            let mut native = Query::from_native_core(core.clone());
+            let mut native = Query::from_sources(sources.clone());
             let before = crate::model::COMPAT_BUILDS.with(|count| count.get());
             let actual: Vec<_> = calls
                 .iter()
@@ -2186,7 +2195,7 @@ fn embedded_native_queries_preserve_output_windows_and_legacy_tool_answers() {
             );
             let snapshot = native.native.as_ref().unwrap().parts[0].data.clone();
             assert_eq!(snapshot.window_start, Some(NOW - seconds as i64 * 1000));
-            let mut second = Query::from_native_core(core.clone());
+            let mut second = Query::from_sources(sources.clone());
             second.call_at("list_sessions", &json!({}), NOW).unwrap();
             assert!(Arc::ptr_eq(
                 &snapshot,
@@ -2200,8 +2209,8 @@ fn embedded_native_queries_preserve_output_windows_and_legacy_tool_answers() {
             if multiple {
                 configured.push(("b".into(), options(&peer)));
             }
-            let sources = Arc::new(SessionSources::with_machines(configured));
-            let mut admitted = Query::from_sources(sources.clone());
+            let independent_sources = Arc::new(SessionSources::with_machines(configured));
+            let mut admitted = Query::from_sources(independent_sources.clone());
             for (tool, args) in &calls {
                 assert_contract_reference(
                     "output",
@@ -2217,7 +2226,7 @@ fn embedded_native_queries_preserve_output_windows_and_legacy_tool_answers() {
                 before
             );
             sources.close();
-            core.close();
+            independent_sources.close();
         }
     }
 }
@@ -2225,10 +2234,10 @@ fn embedded_native_queries_preserve_output_windows_and_legacy_tool_answers() {
 #[test]
 fn embedded_native_query_retirement_serves_only_retained_snapshots() {
     let home = fixture();
-    let core = Arc::new(ViewerCore::new(home.options.clone()));
-    let mut native = Query::from_native_core(core.clone());
+    let sources = admitted(home.options.clone());
+    let mut native = Query::from_sources(sources.clone());
     let before = native.call_at("list_sessions", &json!({}), NOW).unwrap();
-    core.close();
+    sources.close();
     home.top(
         "after-close",
         &[human("after-close", ts(6, 0), "Closed source")],
@@ -2237,10 +2246,10 @@ fn embedded_native_query_retirement_serves_only_retained_snapshots() {
         native.call_at("list_sessions", &json!({}), NOW).unwrap(),
         before
     );
-    let unopened = Arc::new(ViewerCore::new(home.options.clone()));
+    let unopened = admitted(home.options.clone());
     unopened.close();
     assert_eq!(
-        Query::from_native_core(unopened)
+        Query::from_sources(unopened)
             .call_at("list_sessions", &json!({}), NOW)
             .unwrap_err()
             .code,

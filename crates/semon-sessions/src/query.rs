@@ -1,6 +1,6 @@
 //! The agent read surface (#14): `semon query <tool>` and `semon mcp` answer
 //! the same tools, as JSON, from native session evidence. Hosted callers reuse
-//! their embedding core's native source cache and output window.
+//! their admitted native source cache and configured output window.
 //!
 //! - **Facts, not verdicts.** Every field is something a log line, a process
 //!   or a lock says. A field Semon can't know exactly is `null`, or the state
@@ -25,7 +25,7 @@ use crate::{
     model::{SessionFacts, SlotKind, Transcript, now_ms, one_line},
     native_evidence::SessionSources,
     tx,
-    union::{Owner, QueryRead, ViewerCore},
+    union::{Owner, QueryRead},
 };
 
 /// A session's state: a closed set.
@@ -667,27 +667,12 @@ fn snippet(text: &str, at: usize, length: usize) -> String {
     out
 }
 
-enum QuerySources {
-    Native(Arc<SessionSources>),
-    /// Transitional hosted admission/custody owner, tracked in Hub #226.
-    Hosted(Arc<ViewerCore>),
-}
-
-impl QuerySources {
-    fn read(&self, now: i64) -> io::Result<QueryRead> {
-        match self {
-            Self::Native(sources) => sources.query_at(now),
-            Self::Hosted(core) => core.query_at(now),
-        }
-    }
-}
-
 /// The agent read surface over one machine's homes or several: the tools
 /// `semon query` and `semon mcp` answer. Local calls share the native source
 /// index and snapshots between calls, rebuilding only what changed. Hosted
-/// calls can reuse the embedding core's native source cache and output window.
+/// calls reuse admitted native sources and their configured output windows.
 pub struct Query {
-    sources: QuerySources,
+    sources: Arc<SessionSources>,
     /// Keeps embedding window-error text; source scope comes from the options.
     embedded: bool,
     /// The current call's window start (epoch ms), from its native cohort.
@@ -703,7 +688,7 @@ impl Query {
     }
 
     /// The tools over several machines' native evidence, using the same
-    /// identity and ownership rules as [`ViewerCore::with_machines`].
+    /// identity and ownership rules as [`SessionSources::with_machines`].
     ///
     /// Each machine keeps its own window: its `since`, or every file with
     /// `all`. Only log files modified within it are read
@@ -726,7 +711,7 @@ impl Query {
             })
             .collect();
         Self {
-            sources: QuerySources::Native(Arc::new(SessionSources::with_machines(machines))),
+            sources: Arc::new(SessionSources::with_machines(machines)),
             embedded: false,
             start: None,
             native: None,
@@ -738,21 +723,7 @@ impl Query {
     /// No Viewer or background refresh producer is constructed here.
     pub fn from_sources(sources: Arc<SessionSources>) -> Self {
         Self {
-            sources: QuerySources::Native(sources),
-            embedded: true,
-            start: None,
-            native: None,
-        }
-    }
-
-    /// Reads an embedding core's native evidence without preparing a Viewer
-    /// model. Its existing options preserve the hosted output window, active
-    /// sessions and retained relationships; unlike `with_machines`, this does
-    /// not enable a file-mtime scan window. Each call retains one native cohort
-    /// in the core's existing source cache. The host owns admission and custody.
-    pub fn from_native_core(core: Arc<ViewerCore>) -> Self {
-        Self {
-            sources: QuerySources::Hosted(core),
+            sources,
             embedded: true,
             start: None,
             native: None,
@@ -764,7 +735,7 @@ impl Query {
     fn window_start(&mut self, now: i64) -> Result<Option<i64>, QueryError> {
         let native = self
             .sources
-            .read(now)
+            .query_at(now)
             .map_err(|error| QueryError::io(&error))?;
         let start = native
             .parts

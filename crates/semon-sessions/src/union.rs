@@ -1759,25 +1759,6 @@ impl ViewerCore {
             .map(|(index, _)| (views[*index].0.clone(), plan.machine_ids[*index].clone())))
     }
 
-    /// Native CLI/MCP evidence without building or serializing Viewer models.
-    /// Options retain either a local scan window or an embedding output window.
-    pub(crate) fn query_at(&self, now: i64) -> io::Result<QueryRead> {
-        self.follow();
-        let views = self.views();
-        let data = views
-            .iter()
-            .map(|(_, view)| view.evidence.query_at(now))
-            .collect::<io::Result<Vec<_>>>()?;
-        Ok(QueryRead::new(
-            views
-                .iter()
-                .zip(data)
-                .map(|((key, _), data)| (key.clone(), data))
-                .collect(),
-            self.droppable(),
-        ))
-    }
-
     /// The V1 routes that name a transcript by harness and id: the machine
     /// that has that file.
     fn by_transcript(

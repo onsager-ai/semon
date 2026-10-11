@@ -332,25 +332,27 @@ Catalog demand and a later `ViewerCore::from_sources` attach to the same lazy
 producer and complete index. The host retains its existing tenant gate, capacity,
 blocking-worker lifetime and archive/deletion drain; push observation need not
 construct ViewerCore. Retirement stops native producers and close drains actual
-work. The preceding hosted adapter remains until the paired consumer adoption;
-its removal and tenant-wide archive restoration are tracked in Hub #226.
+work. The paired [Hub #257](https://github.com/onsager-ai/semon-hub/pull/257)
+consumer now admits native sources directly; the preceding hosted constructor
+and its exclusive Viewer query preparation path are removed. Query retains only
+the admitted native owner. Tenant-wide archive restoration remains in Hub #226.
 This extraction does not establish bounded discovery, relationship reconciliation
 or full compatibility retirement.
 
 This slice still discovers and joins every native source eligible for the local
 file-selection window. It does not establish constant-cost selected-session
 dependency closure or replace all query metadata with persisted Catalog rows.
-`Query::from_native_core` lets the host reuse that core's native source cache
-without preparing a Viewer model. It preserves the configured output window,
-active sessions, retained relationships and existing tool/window errors, rather
-than enabling the local CLI's file-mtime scan. Each call retains one native
-evidence cohort; closed sources serve only an already retained query snapshot
-or refuse, without rebuilding behind retirement. This API does not start the
-compatibility refresh loop. The host still owns admission and source custody.
+`Query::from_sources` preserves the configured output window, active sessions,
+retained relationships and existing tool/window errors, rather than enabling the
+local CLI's file-mtime scan. Each call retains one native evidence cohort; closed
+sources serve only an already retained query snapshot or refuse, without
+rebuilding behind retirement. This API does not construct Viewer state or start
+the compatibility refresh loop. The host still owns admission and source custody.
 
 The review migration in [Hub #252](https://github.com/onsager-ai/semon-hub/pull/252)
-uses this native constructor for all five tools and stops requesting compatibility
-push warming. The Source follow-up removes `Query::from_core` and its model,
+originally used the transitional native-core constructor for all five tools and
+stopped requesting compatibility push warming. Hub #257 now uses admitted native
+sources. The Source follow-ups remove `Query::from_core` and its model,
 identity and transcript fallbacks, including their exclusive union helpers.
 There is no compatibility query mode or alias. Existing tool/window behavior
 remains covered by 134 frozen responses captured from the old production engine

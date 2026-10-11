@@ -1147,11 +1147,14 @@ mod tests {
     }
 
     fn native_refresh(fixture: &Fixture) -> Value {
-        let core = std::sync::Arc::new(ViewerCore::new(fixture.options.clone()));
-        let result = crate::Query::from_native_core(core.clone())
+        let sources = std::sync::Arc::new(crate::SessionSources::with_machines(vec![(
+            String::new(),
+            fixture.options.clone(),
+        )]));
+        let result = crate::Query::from_sources(sources.clone())
             .call("list_sessions", &json!({}))
             .unwrap();
-        core.close();
+        sources.close();
         result
     }
 
