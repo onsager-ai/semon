@@ -1045,13 +1045,12 @@ impl MachineView {
             Snapshot::capture_pids(&self.evidence.options, BTreeSet::new(), cache.paths());
         #[cfg(test)]
         self.hooks.building()?;
-        let pids = model::observe_catalog(
-            &self.evidence.options,
-            cache,
-            &mut false,
-            &mut work.texts,
-            now,
-        )?;
+        let catalog_options = Options {
+            scan_window: false,
+            ..self.evidence.options.clone()
+        };
+        let pids =
+            model::observe_catalog(&catalog_options, cache, &mut false, &mut work.texts, now)?;
         if self.evidence.options.facts.is_none() {
             snapshot.pids = pids
                 .iter()
@@ -1250,6 +1249,12 @@ impl MachineView {
         }
     }
 
+    /// Native Catalog demand always uses the shared bounded producer, including
+    /// the default library mode. Legacy synchronous reads keep their own mode.
+    fn native_catalog_only(&self) -> bool {
+        self.evidence.catalog_demand.load(Ordering::Relaxed) && !self.is_shown(Kind::Model)
+    }
+
     /// Demand for the persisted metadata catalog must not synchronously load
     /// all event indices just because this process has no shown model yet.
     pub(crate) fn note_catalog_read(&self) -> io::Result<()> {
@@ -1327,7 +1332,7 @@ impl MachineView {
     /// when `by_worker`: that worker is free again at once, so it never
     /// counts as a busy one the pool must start another thread for.
     fn queue_by(&self, state: &mut LiveState, at: Instant, exact: bool, by_worker: bool) {
-        if state.closed || self.refresh() == Refresh::OnRead {
+        if state.closed || (self.refresh() == Refresh::OnRead && !self.native_catalog_only()) {
             return;
         }
         // Never due before it is queued: after a long build the next check
@@ -1352,7 +1357,7 @@ impl MachineView {
     /// queued is moved up, so its reads never answer from before the change
     /// for long. Refreshed on read, it changes nothing.
     pub(crate) fn invalidate(&self) {
-        if self.refresh() == Refresh::OnRead {
+        if self.refresh() == Refresh::OnRead && !self.native_catalog_only() {
             return;
         }
         let mut state = lock(&self.live.state);
@@ -1378,7 +1383,10 @@ impl MachineView {
             if state.slot != Slot::Queued(key) {
                 return;
             }
-            if state.closed || !state.active() || self.refresh() == Refresh::OnRead {
+            if state.closed
+                || !state.active()
+                || (self.refresh() == Refresh::OnRead && !self.native_catalog_only())
+            {
                 state.slot = Slot::Idle;
                 return;
             }
@@ -1436,10 +1444,7 @@ impl MachineView {
                         && self.evidence.catalog_demand.load(Ordering::Relaxed))
             })
             .map(|kind| {
-                let result = if matches!(kind, Kind::Model)
-                    && !self.is_shown(kind)
-                    && !self.evidence.options.scan_window
-                {
+                let result = if matches!(kind, Kind::Model) && !self.is_shown(kind) {
                     self.refresh_catalog_locked(&mut work, model::now_ms())
                         .map(drop)
                 } else {
@@ -6813,37 +6818,45 @@ mod tests {
 
     #[test]
     fn catalog_demand_refreshes_sources_without_showing_a_compatibility_model() {
-        let fixture = lane_fixture();
-        let pool = RefreshPool::new(1);
-        let view = pooled(&fixture, Refresh::Background, &pool);
-        view.note_catalog_read().unwrap();
-        let generation = || {
-            let reply = crate::session_catalog_page(&fixture.options, "fixture", "limit=60");
-            let body: Value = serde_json::from_slice(&reply.body).ok()?;
-            (reply.status == 200 && body["completeness"]["state"] == "complete")
-                .then(|| body["generation"].clone())
-        };
-        let before = eventually("catalog-only complete observation", generation);
-        assert!(view.shown_model().is_none());
-        say(&fixture, "lane", 1, "catalog-only append");
-        view.invalidate();
-        view.note_catalog_read().unwrap();
-        eventually("catalog-only appended generation", || {
-            generation().filter(|next| next != &before)
-        });
-        let reply = crate::session_transcript_range(
-            &fixture.options,
-            "fixture",
-            "sid=lane&after=0&limit=100",
-            None,
-        );
-        assert_eq!(reply.status, 200);
-        assert!(String::from_utf8_lossy(&reply.body).contains("catalog-only append"));
-        assert!(view.shown_model().is_none());
-        // Explicit legacy reads remain supported until their consumers migrate.
-        assert_eq!(view.respond("GET", "/api/model", "", None).status, 200);
-        assert!(view.shown_model().is_some());
-        view.close();
+        for (mode, scan_window) in [
+            (Refresh::Background, false),
+            (Refresh::OnRead, false),
+            (Refresh::OnInvalidate, true),
+            (Refresh::OnRead, true),
+        ] {
+            let mut fixture = lane_fixture();
+            fixture.options.scan_window = scan_window;
+            let pool = RefreshPool::new(1);
+            let view = pooled(&fixture, mode, &pool);
+            view.note_catalog_read().unwrap();
+            let generation = || {
+                let reply = crate::session_catalog_page(&fixture.options, "fixture", "limit=60");
+                let body: Value = serde_json::from_slice(&reply.body).ok()?;
+                (reply.status == 200 && body["completeness"]["state"] == "complete")
+                    .then(|| body["generation"].clone())
+            };
+            let before = eventually("catalog-only complete observation", generation);
+            assert!(view.shown_model().is_none());
+            say(&fixture, "lane", 1, "catalog-only append");
+            view.invalidate();
+            view.note_catalog_read().unwrap();
+            eventually("catalog-only appended generation", || {
+                generation().filter(|next| next != &before)
+            });
+            let reply = crate::session_transcript_range(
+                &fixture.options,
+                "fixture",
+                "sid=lane&after=0&limit=100",
+                None,
+            );
+            assert_eq!(reply.status, 200);
+            assert!(String::from_utf8_lossy(&reply.body).contains("catalog-only append"));
+            assert!(view.shown_model().is_none());
+            // Explicit legacy reads remain supported until their consumers migrate.
+            assert_eq!(view.respond("GET", "/api/model", "", None).status, 200);
+            assert!(view.shown_model().is_some());
+            view.close();
+        }
     }
 
     #[test]
