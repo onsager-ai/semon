@@ -1211,15 +1211,12 @@ impl ViewerCore {
     /// This uses the published configuration index; it performs no received
     /// directory discovery, model construction or native body reads. Hosts
     /// authorize source custody first and call invalidate() after a push.
-    /// False means absent/ambiguous, closed, or compatibility OnRead mode;
-    /// hosts may then use a source-scoped SessionCatalogObserver instead.
+    /// False means absent/ambiguous or closed. Every refresh mode uses the
+    /// shared native producer; no compatibility warm call is required.
     pub fn demand_catalog_source(&self, source_key: &str) -> io::Result<bool> {
         let Some(_entered) = self.open.enter() else {
             return Ok(false);
         };
-        if self.refresh == Refresh::OnRead {
-            return Ok(false);
-        }
         let views = self.views();
         let inventory = self.source_inventory(&views);
         if !inventory.valid() {
@@ -1503,8 +1500,8 @@ impl ViewerCore {
         };
         let key = if local_alias { "local" } else { key.as_str() };
         // Record demand without waiting for an initial model build. The
-        // configured background coordinator performs coherent observation;
-        // OnRead callers retain their explicit warm()/api/model contract.
+        // shared native coordinator performs coherent observation in every
+        // refresh mode, including default library callers.
         let refresh_error = view.note_catalog_read().err();
         let mut reply = match path {
             "/api/session-locate" => crate::session_bookmark(view.options(), key, query),
@@ -1582,7 +1579,6 @@ impl ViewerCore {
         if let Ok(mut body) = serde_json::from_slice::<Value>(&reply.body) {
             body["refresh"] = match refresh_error {
                 Some(_) => json!({"state":"unavailable","retryable":true}),
-                None if self.refresh == Refresh::OnRead => json!({"state":"manual"}),
                 None => json!({"state":"updating"}),
             };
             reply.body = body.to_string().into_bytes();

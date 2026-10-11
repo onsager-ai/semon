@@ -1212,8 +1212,9 @@ mod tests {
             core.close();
         }
         fn body(&self, query: &str) -> (u16, Value) {
-            let core = ViewerCore::new(self.options.clone());
-            let reply = core.respond("GET", "/api/sessions", query, None);
+            // Projection assertions observe the exact publication under test.
+            // Viewer transport now explicitly schedules its native producer.
+            let reply = session_catalog_page(&self.options, "local", query);
             (reply.status, serde_json::from_slice(&reply.body).unwrap())
         }
     }
@@ -3558,7 +3559,7 @@ mod tests {
         observer.close();
         assert!(EventCache::path(&fixture.options.cache).exists());
         let mut core = ViewerCore::new(fixture.options.clone());
-        assert!(!core.demand_catalog_source("local").unwrap());
+        assert!(core.demand_catalog_source("local").unwrap());
         core.set_refresh(Refresh::OnInvalidate);
         assert!(!core.demand_catalog_source("wrong").unwrap());
         assert!(core.demand_catalog_source("local").unwrap());
@@ -4000,7 +4001,10 @@ mod tests {
         let (status, first) = fixture.body("limit=3");
         assert_eq!(status, 200);
         assert_eq!(first["freshness"], "cached");
-        assert_eq!(first["refresh"]["state"], "manual");
+        assert!(
+            first.get("refresh").is_none(),
+            "projection reads do not own refresh scheduling"
+        );
         let first_items = first["items"].as_array().unwrap();
         assert_eq!(first_items.len(), 3);
         assert_eq!(first_items[0]["key"], "session-00000");
@@ -4146,7 +4150,12 @@ mod tests {
             assert_eq!(body(query).0, 400, "{query}");
         }
         let empty = Fixture::new();
-        assert_eq!(empty.body("").0, 503);
+        // The projection reader itself stays read-only. Viewer transport
+        // explicitly demands its native producer, covered separately.
+        assert_eq!(
+            session_catalog_page(&empty.options, "local", "").status,
+            503
+        );
         assert!(
             !EventCache::path(&empty.options.cache).exists(),
             "a read-only catalog miss must not create an index"

@@ -206,10 +206,7 @@ impl NativeEvidence {
     pub(crate) fn prepare_catalog(&self, work: &mut Work, now: i64) -> io::Result<bool> {
         self.prepare_events(work, now)?;
         let cache = work.events.as_mut().expect("event cache initialized");
-        if self.options.scan_window
-            || !cache.is_scoped()
-            || cache.session_catalog_generation().is_some()
-        {
+        if !cache.is_scoped() || cache.session_catalog_generation().is_some() {
             work.cold_catalog = None;
             return Ok(true);
         }
@@ -237,7 +234,13 @@ impl NativeEvidence {
             .map(|(_, input)| input)
             .collect();
         if !inputs.is_empty() {
-            let prepared = model::prepare_sources(&self.options, cache, &inputs, now)?;
+            // Catalog owns physical membership independently of a Query scan
+            // window; each consumer still applies its configured output window.
+            let options = Options {
+                scan_window: false,
+                ..self.options.clone()
+            };
+            let prepared = model::prepare_sources(&options, cache, &inputs, now)?;
             if cache.publish_partial_catalog(&prepared)? != crate::events::Outcome::Written {
                 return Err(io::Error::other(
                     "Initial native catalog publication changed; retry observation",
