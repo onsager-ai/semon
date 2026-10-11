@@ -2995,7 +2995,8 @@ impl<'a> Builder<'a> {
         (Some(spawner), call, false)
     }
 
-    /// Match through the same incremental parent scan used by the tree.
+    /// Native callers borrow indexed source evidence. Legacy Model/tree consumers
+    /// retain their scan until their remaining transport is migrated.
     fn handoff_tool(
         &self,
         spawner: usize,
@@ -3003,6 +3004,20 @@ impl<'a> Builder<'a> {
         cwd: Option<&str>,
         start: Option<i64>,
     ) -> Option<String> {
+        if let Some(records) = &self.records {
+            let mut matcher = handoff::Matcher::new(prompt, cwd, start);
+            for position in &self.sessions[spawner].files {
+                let file = &self.files[*position];
+                let index = file.summary.handoff_index.as_ref()?;
+                for location in index.calls() {
+                    let call = records.launch(&file.path, location).ok()?;
+                    if let Some(tool) = matcher.consider(&call) {
+                        return Some(tool.id);
+                    }
+                }
+            }
+            return matcher.finish().map(|tool| tool.id);
+        }
         let paths: Vec<PathBuf> = self.sessions[spawner]
             .files
             .iter()
@@ -6104,6 +6119,9 @@ fn build_sources_inner(
     if let Some(records) = &source_records {
         records.verify_all()?;
         for file in &mut files {
+            if file.summary.handoff_index.is_none() {
+                return Err(io::Error::other("native launch calls were not indexed"));
+            }
             if file.harness() != "copilot" {
                 let index = file
                     .summary

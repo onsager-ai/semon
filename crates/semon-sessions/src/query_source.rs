@@ -99,7 +99,7 @@ impl Sources {
             sources: self,
             checked: Mutex::default(),
             checked_chunks: Mutex::default(),
-            checked_markers: Mutex::default(),
+            checked_evidence: Mutex::default(),
             prepared: Mutex::default(),
             failed: Mutex::new(false),
         }
@@ -111,7 +111,7 @@ pub(crate) struct Records<'a> {
     sources: &'a Sources,
     checked: Mutex<BTreeMap<PathBuf, Stat>>,
     checked_chunks: Mutex<BTreeMap<PathBuf, BTreeSet<usize>>>,
-    checked_markers: Mutex<BTreeMap<PathBuf, crate::native_marker::Record>>,
+    checked_evidence: Mutex<BTreeMap<PathBuf, BTreeSet<crate::native_record::Record>>>,
     // Scalar preparation visits adjacent short records. Reuse at most one
     // immutable, verified block; completion still checks every used block.
     prepared: Mutex<Option<PreparedBlock>>,
@@ -141,6 +141,39 @@ impl Records<'_> {
             let Some(record) = index.record() else {
                 return Ok(None);
             };
+            crate::native_marker::decode(&self.evidence(path, record)?)
+        })();
+        if result.is_err() {
+            *self.failed.lock().map_err(|_| unavailable())? = true;
+        }
+        result
+    }
+
+    /// Private indexed evidence can include a valid EOF record; its digest and
+    /// source observation are separate from public complete-line range offsets.
+    pub(crate) fn evidence(
+        &self,
+        path: &Path,
+        record: &crate::native_record::Record,
+    ) -> io::Result<Vec<u8>> {
+        self.with_evidence(path, record, |file| record.read(file))
+    }
+
+    fn with_evidence<T>(
+        &self,
+        path: &Path,
+        record: &crate::native_record::Record,
+        read: impl FnOnce(&mut LogFile) -> io::Result<T>,
+    ) -> io::Result<T> {
+        let result = (|| {
+            let proof = self.sources.proofs.get(path).ok_or_else(unavailable)?;
+            if record
+                .end()
+                .is_none_or(|end| end > proof.ledger.stat.size.max(proof.source.offset))
+            {
+                return Err(unavailable());
+            }
+            self.verify(path, proof)?;
             let mut file = LogFile::open(path)?;
             let before = Stat::from_metadata(&file.metadata()?)?;
             if before.dev != proof.ledger.stat.dev
@@ -149,21 +182,52 @@ impl Records<'_> {
             {
                 return Err(unavailable());
             }
-            let marker = record.read(&mut file)?;
+            let value = read(&mut file)?;
             if Stat::from_metadata(&file.metadata()?)? != before {
                 return Err(unavailable());
             }
-            self.checked_markers
+            self.checked_evidence
                 .lock()
                 .map_err(|_| unavailable())?
-                .insert(path.to_owned(), record.clone());
-            Ok(marker)
+                .entry(path.to_owned())
+                .or_default()
+                .insert(record.clone());
+            Ok(value)
         })();
         if result.is_err() {
             *self.failed.lock().map_err(|_| unavailable())? = true;
         }
         result
     }
+    /// Read a native launch's allowlisted fields and fail the entire observation
+    /// on either an evidence or decoded-location mismatch.
+    pub(crate) fn launch(
+        &self,
+        path: &Path,
+        call: &crate::native_handoff::CallRef,
+    ) -> io::Result<crate::handoff::Call> {
+        let result = (|| {
+            let proof = self.sources.proofs.get(path).ok_or_else(unavailable)?;
+            if !call.valid(&proof.ledger, false) && !call.valid(&proof.ledger, true) {
+                return Err(unavailable());
+            }
+            let checked = self
+                .checked_evidence
+                .lock()
+                .map_err(|_| unavailable())?
+                .get(path)
+                .is_some_and(|records| records.contains(call.record()));
+            if !checked {
+                self.with_evidence(path, call.record(), |file| call.record().verify(file))?;
+            }
+            call.read(path, self)
+        })();
+        if result.is_err() {
+            *self.failed.lock().map_err(|_| unavailable())? = true;
+        }
+        result
+    }
+
     /// Native scalar-recipe preparation keeps its original bounded complete-line
     /// rule while borrowing the same source proof as the other native reads.
     pub(crate) fn record_bytes(
@@ -320,8 +384,8 @@ impl Records<'_> {
                 return Err(unavailable());
             }
         }
-        for (path, record) in self
-            .checked_markers
+        for (path, records) in self
+            .checked_evidence
             .lock()
             .map_err(|_| unavailable())?
             .iter()
@@ -332,7 +396,9 @@ impl Records<'_> {
             if before.dev != proof.ledger.stat.dev || before.ino != proof.ledger.stat.ino {
                 return Err(unavailable());
             }
-            record.verify(&mut file)?;
+            for record in records {
+                record.verify(&mut file)?;
+            }
             if Stat::from_metadata(&file.metadata()?)? != before {
                 return Err(unavailable());
             }
@@ -644,6 +710,155 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.root);
         }
+    }
+
+    #[test]
+    fn native_handoff_checks_record_context_and_completion_with_identical_stats_including_eof() {
+        let _clock = crate::events::fixed_change_time_for_test(0);
+        for eof in [false, true] {
+            for (old, new) in [
+                ("/private/OLD", "/private/NEW"),
+                ("00:00:00Z", "00:00:01Z"),
+                ("tool_use", "tool_xse"),
+            ] {
+                let fixture = Fixture::new("launch-proof");
+                let record = serde_json::json!({"timestamp":"2026-09-24T00:00:00Z","message":{"content":[{"type":"tool_use","id":"launch","name":"Bash","input":{"command":"codex < /private/OLD"}}]}});
+                fs::write(
+                    &fixture.path,
+                    format!("{record}{}", if eof { "" } else { "\n" }),
+                )
+                .unwrap();
+                let mut cache =
+                    crate::events::EventCache::open_scoped(&fixture.root.join("index.json"))
+                        .unwrap();
+                let index =
+                    crate::events::scan_file(&fixture.path, "claude", &mut cache, &mut false)
+                        .unwrap();
+                let consumed = cache.revision(&fixture.path).unwrap().2;
+                let (sources, _, _) = fixture.sources_at(consumed);
+                let reader = sources.reader();
+                let calls = index.handoff_index.as_ref().unwrap().calls();
+                assert_eq!(calls.len(), 1);
+                assert_eq!(
+                    reader.launch(&fixture.path, calls[0]).unwrap().tool.id,
+                    "launch"
+                );
+                reader.finish().unwrap();
+                let replacement = fs::read_to_string(&fixture.path).unwrap().replace(old, new);
+                fixture.rewrite(replacement.as_bytes());
+                assert!(reader.finish().is_err());
+                let fresh = sources.reader();
+                assert!(fresh.launch(&fixture.path, calls[0]).is_err());
+                assert!(fresh.finish().is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn native_handoff_partial_and_valid_eof_are_reconsidered_and_indexed_once_on_newline() {
+        let fixture = Fixture::new("launch-eof-append");
+        let value = serde_json::json!({"message":{"content":[{"type":"tool_use","id":"launch","name":"Bash","input":{"command":"codex exec"}}]}});
+        let bytes = value.to_string();
+        let split = bytes.len() / 2;
+        fs::write(&fixture.path, &bytes[..split]).unwrap();
+        let mut cache =
+            crate::events::EventCache::open_scoped(&fixture.root.join("index.json")).unwrap();
+        let scan = |cache: &mut crate::events::EventCache| {
+            crate::events::scan_file(&fixture.path, "claude", cache, &mut false).unwrap()
+        };
+        assert!(
+            scan(&mut cache)
+                .handoff_index
+                .as_ref()
+                .unwrap()
+                .calls()
+                .is_empty()
+        );
+        use std::io::Write;
+        fs::OpenOptions::new()
+            .append(true)
+            .open(&fixture.path)
+            .unwrap()
+            .write_all(&bytes.as_bytes()[split..])
+            .unwrap();
+        let provisional = scan(&mut cache);
+        assert_eq!(cache.revision(&fixture.path).unwrap().2, 0);
+        assert_eq!(provisional.handoff_index.as_ref().unwrap().calls().len(), 1);
+        let (sources, _, _) = fixture.sources_at(0);
+        let reader = sources.reader();
+        assert_eq!(
+            reader
+                .launch(
+                    &fixture.path,
+                    provisional.handoff_index.as_ref().unwrap().calls()[0]
+                )
+                .unwrap()
+                .tool
+                .id,
+            "launch"
+        );
+        reader.finish().unwrap();
+        let before = crate::events::PARSED.with(std::cell::Cell::get);
+        fs::OpenOptions::new()
+            .append(true)
+            .open(&fixture.path)
+            .unwrap()
+            .write_all(b"\n")
+            .unwrap();
+        let complete = scan(&mut cache).handoff_index.as_ref().unwrap().clone();
+        assert_eq!(complete.complete.len(), 1);
+        assert!(complete.eof.is_empty());
+        assert_eq!(
+            cache.revision(&fixture.path).unwrap().2,
+            bytes.len() as u64 + 1
+        );
+        assert_eq!(crate::events::PARSED.with(std::cell::Cell::get) - before, 1);
+        assert_eq!(scan(&mut cache).handoff_index.as_ref().unwrap(), &complete);
+        assert_eq!(crate::events::PARSED.with(std::cell::Cell::get) - before, 1);
+    }
+
+    #[test]
+    fn native_handoff_metadata_repair_skips_oversized_records_and_keeps_native_offsets() {
+        let fixture = Fixture::new("launch-oversized-repair");
+        let prefix = "codex".repeat(crate::handoff::MAX_INPUT_BYTES / 5 + 100) + "\n";
+        let record = serde_json::json!({"message":{"content":[{"type":"tool_use","id":"launch","name":"Bash","input":{"command":"codex exec"}}]}});
+        let original = format!("{prefix}{record}\n");
+        fs::write(&fixture.path, &original).unwrap();
+        let cache_path = fixture.root.join("index.json");
+        let mut cache = crate::events::EventCache::open_scoped(&cache_path).unwrap();
+        let initial =
+            crate::events::scan_file(&fixture.path, "claude", &mut cache, &mut false).unwrap();
+        assert_eq!(initial.handoff_index.as_ref().unwrap().calls().len(), 1);
+        let before = crate::events::PARSED.with(std::cell::Cell::get);
+        drop(cache);
+        let connection =
+            rusqlite::Connection::open(crate::events::EventCache::path(&cache_path)).unwrap();
+        connection
+            .execute(
+                "DELETE FROM meta WHERE key GLOB 'native_launch_calls:*'",
+                [],
+            )
+            .unwrap();
+        let mut cache = crate::events::EventCache::open_scoped(&cache_path).unwrap();
+        let repaired =
+            crate::events::scan_file(&fixture.path, "claude", &mut cache, &mut false).unwrap();
+        assert_eq!(repaired.handoff_index, initial.handoff_index);
+        assert_eq!(crate::events::PARSED.with(std::cell::Cell::get), before);
+        let (sources, _, _) = fixture.sources_at(original.len() as u64);
+        let reader = sources.reader();
+        assert_eq!(
+            reader
+                .launch(
+                    &fixture.path,
+                    repaired.handoff_index.as_ref().unwrap().calls()[0]
+                )
+                .unwrap()
+                .tool
+                .id,
+            "launch"
+        );
+        reader.finish().unwrap();
+        assert_eq!(fs::read_to_string(&fixture.path).unwrap(), original);
     }
 
     #[test]

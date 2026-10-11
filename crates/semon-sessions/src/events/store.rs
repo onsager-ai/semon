@@ -21,6 +21,7 @@
 //! ```
 
 mod chunk_proofs;
+mod launch_calls;
 
 use std::{
     collections::BTreeMap,
@@ -278,6 +279,7 @@ DELETE FROM meta WHERE key GLOB 'native_codex_header:*';
 DELETE FROM meta WHERE key GLOB 'native_claude_sidecar:*';
 DELETE FROM meta WHERE key GLOB 'native_source_chunks:*';
 DELETE FROM meta WHERE key GLOB 'native_parent_marker:*';
+DELETE FROM meta WHERE key GLOB 'native_launch_calls:*';
 ";
 
 const FILE_COLUMNS: &str = "file_id, path, dev, ino, size, mtime_ns, resume_at, head_sha256, \
@@ -1798,6 +1800,7 @@ impl SqliteStore {
             transaction.execute("DELETE FROM meta WHERE key=?1", [codex_header_key(path)])?;
             transaction.execute("DELETE FROM meta WHERE key=?1", [claude_sidecar_key(path)])?;
             chunk_proofs::clear(&transaction, path)?;
+            launch_calls::clear(&transaction, path)?;
             transaction.execute("DELETE FROM meta WHERE key=?1", [parent_marker_key(path)])?;
             invalidate_catalog_source(&transaction, path, "removed")?;
         }
@@ -2168,6 +2171,8 @@ struct ArchivedIndex {
     source_chunks_sha256: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     parent_marker_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    launch_calls_sha256: Option<String>,
 }
 
 impl ArchivedIndex {
@@ -2184,7 +2189,7 @@ impl ArchivedIndex {
                 && self.native_header_sha256.as_ref().is_some_and(|hash| {
                     hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_hexdigit())
                 }))
-            || (matches!(self.version, 4 | 5)
+            || (matches!(self.version, 4..=6)
                 && self.source_chunks_sha256.as_ref().is_some_and(|hash| {
                     hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_hexdigit())
                 })
@@ -2198,13 +2203,22 @@ impl ArchivedIndex {
                 } else {
                     self.native_header_sha256.is_none()
                 })))
-            && (matches!(self.version, 4 | 5) || self.source_chunks_sha256.is_none())
-            && (if self.version == 5 && matches!(self.source.root.as_str(), "claude" | "codex") {
+            && (matches!(self.version, 4..=6) || self.source_chunks_sha256.is_none())
+            && (if matches!(self.version, 5 | 6)
+                && matches!(self.source.root.as_str(), "claude" | "codex")
+            {
                 self.parent_marker_sha256.as_ref().is_some_and(|hash| {
                     hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_hexdigit())
                 })
             } else {
                 self.parent_marker_sha256.is_none()
+            })
+            && (if self.version == 6 {
+                self.launch_calls_sha256.as_ref().is_some_and(|hash| {
+                    hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_hexdigit())
+                })
+            } else {
+                self.launch_calls_sha256.is_none()
             })
             && self.parser_version == CACHE_VERSION
             && crate::is_input_path(&self.source.root, &self.source.path)
@@ -2295,6 +2309,7 @@ pub(crate) fn retain_archive_index(
     let native_header_sha256;
     let source_chunks_sha256;
     let parent_marker_sha256;
+    let launch_calls_sha256;
     {
         let mut readers = Readers::new(connection)?;
         let mut statement =
@@ -2314,6 +2329,13 @@ pub(crate) fn retain_archive_index(
             return Ok(false);
         };
         source_chunks_sha256 = Some(digest);
+        if index.handoff_index.is_none() {
+            return Ok(false);
+        }
+        let Some(digest) = launch_calls::digest(connection, path)? else {
+            return Ok(false);
+        };
+        launch_calls_sha256 = Some(digest);
         parent_marker_sha256 = if matches!(proof.source.root.as_str(), "claude" | "codex") {
             if index.marker_index.is_none() {
                 return Ok(false);
@@ -2357,7 +2379,7 @@ pub(crate) fn retain_archive_index(
         };
     }
     let record = ArchivedIndex {
-        version: 5,
+        version: 6,
         parser_version: CACHE_VERSION,
         source: proof.source.clone(),
         stat: expected.stat,
@@ -2366,6 +2388,7 @@ pub(crate) fn retain_archive_index(
         native_header_sha256,
         source_chunks_sha256,
         parent_marker_sha256,
+        launch_calls_sha256,
     };
     let encoded = serde_json::to_string(&record)
         .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
@@ -2389,20 +2412,23 @@ pub(crate) fn archive_index_retained(
         return Ok(false);
     };
     let header_matches = if proof.source.root == "codex" {
-        record.version == 5
+        record.version == 6
             && record.native_header_sha256.is_some()
             && record.native_header_sha256 == codex_header_digest(connection, path)?
     } else if proof.source.root == "claude" && crate::native_sidecar::agent_path(Path::new(path)) {
         let mut statement = connection.prepare(NATIVE_METADATA_VALUE)?;
         let sidecar = read_claude_sidecar(&mut statement, path, &ledger)?;
-        record.version == 5
+        record.version == 6
             && record.native_header_sha256.is_some()
             && record.native_header_sha256 == claude_sidecar_digest(connection, path)?
             && sidecar.is_some_and(|sidecar| sidecar.verified(Path::new(path)))
     } else {
-        record.version == 5
+        record.version == 6
     };
     Ok(header_matches
+        && record.launch_calls_sha256.is_some()
+        && record.launch_calls_sha256 == launch_calls::digest(connection, path)?
+        && launch_calls::read(connection, path, &ledger)?.is_some()
         && (if matches!(proof.source.root.as_str(), "claude" | "codex") {
             let mut statement = connection.prepare(NATIVE_METADATA_VALUE)?;
             record.parent_marker_sha256.is_some()
@@ -2845,6 +2871,7 @@ fn read_file(
         dirty_rows: None,
         source_chunks: chunk_proofs::read(readers.connection, &path, &ledger)?,
         marker_index: read_parent_marker(&mut readers.parent_marker, &path, &ledger)?,
+        handoff_index: launch_calls::read(readers.connection, &path, &ledger)?,
         codex_header: read_codex_header(&mut readers.codex_header, &path, &ledger)?,
         claude_sidecar: if crate::native_sidecar::agent_path(Path::new(&path)) {
             read_claude_sidecar(&mut readers.claude_sidecar, &path, &ledger)?
@@ -3069,6 +3096,7 @@ fn write_file(
         dirty_rows: _,
         source_chunks,
         marker_index,
+        handoff_index,
         codex_header,
         claude_sidecar,
         events,
@@ -3113,6 +3141,7 @@ fn write_file(
     write_claude_sidecar(transaction, path, ledger, claude_sidecar.as_ref())?;
     chunk_proofs::write(transaction, path, ledger, source_chunks.as_deref())?;
     write_parent_marker(transaction, path, ledger, marker_index.as_ref())?;
+    launch_calls::write(transaction, path, ledger, handoff_index.as_ref())?;
     let rate_limits = rate_limits.as_ref().map(json).transpose()?;
     let file_id: i64 = transaction.query_row(
         PUT_FILE,
@@ -3580,6 +3609,7 @@ mod tests {
             dirty_rows: None,
             source_chunks: None,
             marker_index: Some(crate::native_marker::Index::default()),
+            handoff_index: Some(crate::native_handoff::Index::default()),
             codex_header: Some(crate::native_header::CodexHeader::default()),
             claude_sidecar: None,
             events: vec![
@@ -4262,6 +4292,7 @@ mod tests {
         let mut index = full();
         index.codex_header = None;
         index.marker_index = None;
+        index.handoff_index = None;
         store
             .write_one("original.jsonl", None, None, &ledger(1), &index)
             .unwrap();

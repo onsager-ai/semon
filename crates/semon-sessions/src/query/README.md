@@ -127,7 +127,7 @@ churn keeps the native session and defers a portable proof until a stable scan. 
 `Texts::meta` cache is removed.
 
 New Claude subagent eviction requires a supported sidecar observation and a
-version-five marker binding its exact persisted encoding and the source byte
+version-six marker binding its exact persisted encoding and the source byte
 proof. The host rechecks the
 sidecar observation and full bounded-file digest before local removal. Earlier markers still retain existing
 event rows, but cannot qualify a new subagent eviction. Unreadable, linked or
@@ -140,11 +140,11 @@ that cannot recognize their version. No deployment or automatic data migration
 is part of this change.
 
 New archive eviction also requires valid paged byte proofs and binds their exact
-header encoding in the version-five marker. Prior version-one through
-version-four markers still retain their existing event rows; they cannot
+header encoding in the version-six marker. Prior version-one through
+version-five markers still retain their existing event rows; they cannot
 qualify another eviction without current proof repair and custody verification.
 Restore verified original archive sources before downgrading to a producer
-that cannot recognize version five. Native logs, sidecars and existing original
+that cannot recognize version six. Native logs, sidecars and existing original
 databases are never removed by this proof migration.
 
 Native Catalog, Query and source preparation now resolve Semon parent markers
@@ -164,8 +164,32 @@ selected record, and completion verifies it with bounded scratch memory.
 File metadata remains an observation of freshness for cached negative results.
 
 New Claude/Codex eviction also requires supported parent-marker metadata and
-binds its exact encoding into the version-five archive marker. Prior markers
+binds its exact encoding into the version-six archive marker. Prior markers
 continue preserving their existing rows; missing or corrupt metadata defers new
-eviction. The legacy Model/tree marker scanner and launch cache remain until
-their consumers migrate. Bounded relationship closure and authorized provider
-reads remain; full-workspace discovery and archive costs are still present.
+eviction.
+
+Native Catalog, Query and source preparation also resolve launch calls from
+locations observed by the same event parser, without using the independent
+full-parent launch scan or retaining command inputs in a resident cache. The
+existing Bash/Skill, raw candidate prefilter, literal prompt priority, unique
+filename and time/worktree ambiguity rules remain shared with legacy consumers.
+Each parent retains the newest 4,096 calls within the existing 2 MiB canonical
+input/id/name budget; native records larger than 2 MiB remain excluded. Only
+locations, record/field digests, timestamps and budget metadata are persisted,
+paged in the existing index metadata region and committed under its ledger CAS.
+Restart and metadata repair preserve event rows. Valid EOF calls are provisional;
+adding a newline indexes them once and leaves public transcript offsets unchanged
+until that newline arrives.
+
+Reads decode only the selected id, name and input fields. The entire containing
+candidate record is independently verified once per read and rechecked on
+completion with bounded scratch memory, binding its timestamp and tool type as
+well as its input. Several calls in the same record share that check. Unrelated
+parent records are not scanned by this lookup. New eviction requires supported
+launch metadata and binds its fingerprint into version-six archive markers;
+versions one through five still preserve already retained index rows but cannot
+qualify another eviction. Restore verified original archives before downgrading.
+
+The legacy Model/tree marker scanner and launch cache remain until their
+consumers migrate. Bounded relationship closure and authorized provider reads
+remain; full-workspace discovery and archive costs are still present.

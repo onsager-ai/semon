@@ -377,7 +377,7 @@ changes to the sidecar alone repair metadata without replaying unchanged log
 rows. Safe descriptor opens refuse links through any ancestor, and generation
 checks fence indexing and publication races. `Texts::meta` is removed.
 
-New subagent eviction requires a version-five marker binding the persisted
+New subagent eviction requires a version-six marker binding the persisted
 sidecar encoding and a final check of its independent observation. Prior markers
 still keep existing event rows. Unreadable, linked, oversized or unpersistable
 sidecars defer new eviction without truncating parsed fields or hiding the
@@ -391,7 +391,7 @@ ledger, including native scalar-recipe preparation. They reject changed bytes
 even if file timestamps collide, and recheck only used blocks on completion.
 Unchanged Unix range reads do not hash unrelated source bytes. Proof metadata contains
 no bodies and is paged in the existing index; repair of unchanged native evidence
-does not replay event rows. New eviction binds the proof header in version-five
+does not replay event rows. New eviction binds the proof header in version-six
 archive markers; prior versions retain existing rows. The [query contract](../../crates/semon-sessions/src/query/README.md)
 owns limits, rollout/downgrade rules and the remaining generation boundaries.
 File-stamp freshness still observes metadata; it does not prove arbitrary
@@ -406,9 +406,13 @@ use the independent full-log marker scan; its legacy Model/tree consumers remain
 Marker text and private handoff prompt paths are not persisted. New archive
 eviction also binds this metadata; prior markers preserve existing rows. The
 [query contract](../../crates/semon-sessions/src/query/README.md) owns exact limits
-and downgrade obligations. The duplicate launch cache and bounded relationship
-closure remain to be extracted; hosted MCP restoration remains until those
-consumers migrate.
+and downgrade obligations. Native launch lookup now uses bounded content-free
+locations from the same event parser and verifies the original candidate record
+before using its allowlisted fields. Shared literal/filename/worktree ambiguity
+rules and valid EOF behavior remain. The legacy Model/tree launch cache still
+serves its unmigrated consumers. New eviction binds launch metadata in version-six
+custody markers; earlier markers retain existing index rows. Bounded relationship
+closure and hosted MCP restoration remain until those consumers migrate.
 
 Hub MCP still acquires a workspace core and restores tenant archives; native
 query discovery/joins still cover eligible sources. Implement authorized

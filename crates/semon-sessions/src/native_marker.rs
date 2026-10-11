@@ -1,29 +1,19 @@
 //! Content-free locations of the first parent marker or preceding agent output.
 //! Prompt paths and marker text remain exclusively in the native source.
+pub(crate) use crate::native_record::Record;
 use crate::{Marker, events::Ledger, sealed::LogFile};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 use std::io::{self, BufRead, BufReader, Read, Seek, SeekFrom};
 
 #[cfg(test)]
-thread_local! {
-    pub(crate) static READ_BYTES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
-}
+pub(crate) use crate::native_record::READ_BYTES;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Index {
     complete: Option<Record>,
     eof: Option<Record>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct Record {
-    offset: u64,
-    length: u64,
-    sha256: [u8; 32],
 }
 
 fn decision(value: &Value) -> Option<Option<Marker>> {
@@ -36,6 +26,16 @@ fn decision(value: &Value) -> Option<Option<Marker>> {
     }
 }
 
+pub(crate) fn decode(bytes: &[u8]) -> io::Result<Option<Marker>> {
+    let value = serde_json::from_slice(bytes)?;
+    decision(&value).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "invalid native parent marker location",
+        )
+    })
+}
+
 impl Index {
     pub(crate) fn begin_append(&mut self) {
         self.eof = None;
@@ -45,11 +45,7 @@ impl Index {
         if self.complete.is_some() || !value.is_object() || decision(value).is_none() {
             return;
         }
-        let record = Record {
-            offset,
-            length: bytes.len() as u64,
-            sha256: Sha256::digest(bytes).into(),
-        };
+        let record = Record::capture(bytes, offset);
         if complete {
             self.complete = Some(record);
         } else {
@@ -104,61 +100,5 @@ impl Index {
             record.verify(file)?;
         }
         Ok(())
-    }
-}
-
-impl Record {
-    pub(crate) fn end(&self) -> Option<u64> {
-        (self.length != 0)
-            .then(|| self.offset.checked_add(self.length))
-            .flatten()
-    }
-
-    pub(crate) fn verify(&self, file: &mut LogFile) -> io::Result<()> {
-        file.seek(SeekFrom::Start(self.offset))?;
-        let mut reader = file.take(self.length);
-        let mut hash = Sha256::new();
-        let mut buffer = [0; 64 * 1024];
-        let mut length = 0;
-        loop {
-            let read = reader.read(&mut buffer)?;
-            if read == 0 {
-                break;
-            }
-            length += read as u64;
-            #[cfg(test)]
-            READ_BYTES.with(|count| count.set(count.get() + read as u64));
-            hash.update(&buffer[..read]);
-        }
-        if length != self.length || <[u8; 32]>::from(hash.finalize()) != self.sha256 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "native parent marker changed",
-            ));
-        }
-        Ok(())
-    }
-
-    pub(crate) fn read(&self, file: &mut LogFile) -> io::Result<Option<Marker>> {
-        file.seek(SeekFrom::Start(self.offset))?;
-        let mut bytes = Vec::new();
-        file.take(self.length).read_to_end(&mut bytes)?;
-        #[cfg(test)]
-        READ_BYTES.with(|count| count.set(count.get() + bytes.len() as u64));
-        if bytes.len() as u64 != self.length
-            || <[u8; 32]>::from(Sha256::digest(&bytes)) != self.sha256
-        {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "native parent marker changed",
-            ));
-        }
-        let value = serde_json::from_slice(&bytes)?;
-        decision(&value).ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                "invalid native parent marker location",
-            )
-        })
     }
 }
