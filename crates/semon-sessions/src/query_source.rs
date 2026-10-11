@@ -167,7 +167,7 @@ impl Records<'_> {
                     records: self,
                     proof,
                     position: offset,
-                    prepared: false,
+                    prepared: true,
                 },
             )
             .take(crate::model::MAX_LINE);
@@ -600,8 +600,9 @@ mod tests {
             records.finish().is_err(),
             "completion must recheck used bytes"
         );
-        let result = records.derive(&fixture.path, 0);
-        let finished = records.finish();
+        let read_request = sources.reader();
+        let result = read_request.derive(&fixture.path, 0);
+        let finished = read_request.finish();
         assert!(
             result.is_err() && finished.is_err(),
             "captured old-generation proof admitted: {result:?}; finish={finished:?}"
@@ -627,6 +628,13 @@ mod tests {
                     .unwrap()
                     .unwrap(),
                 line
+            );
+            assert_eq!(
+                records
+                    .derive(&fixture.path, offset as u64)
+                    .unwrap()
+                    .unwrap()["uuid"],
+                "old"
             );
         }
         assert_eq!(
@@ -664,6 +672,10 @@ mod tests {
                 .unwrap()
                 .unwrap(),
             line
+        );
+        assert_eq!(
+            records.derive(&fixture.path, 0).unwrap().unwrap()["uuid"],
+            "old"
         );
         assert!(records.finish().is_err());
         fs::remove_file(&fixture.path).unwrap();

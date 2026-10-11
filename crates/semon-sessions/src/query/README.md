@@ -81,12 +81,12 @@ preparation use the same reader and publication fence. The legacy Model target
 retains its existing body reader
 while its remaining Viewer consumers are migrated.
 
-Scalar preparation reuses at most one immutable, verified 64 KiB block within
+Native text and scalar preparation reuse at most one immutable, verified 64 KiB block within
 the current preparation request. Adjacent short records do not repeatedly read
 and hash that block. Cache hits retain file-identity/deletion checks and return
 only bytes already verified for the old cohort; completion verifies all used
-blocks before publishing. Public ranges, transcript/search and text derivation
-continue to verify their actual reads independently. No cached source body
+blocks before publishing. Public ranges and transcript/search continue to
+verify their actual reads independently. No cached source body
 survives the request.
 
 The producer still discovers, indexes and joins eligible native sources. Hub MCP
