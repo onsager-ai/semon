@@ -1927,7 +1927,7 @@ fn native_owner_reuses_one_complete_index_across_query_tree_and_model_reads() {
     let QuerySources::Native(machines) = &local.sources else {
         panic!("local tools must not construct a Viewer owner");
     };
-    assert!(machines[0].1.work.lock().unwrap().events.is_none());
+    assert!(machines.machines[0].1.work.lock().unwrap().events.is_none());
     assert!(local.call_at("unknown", &json!({}), NOW).is_err());
     assert!(!home.options.cache.exists());
     assert!(!home.options.cache.with_extension("sqlite3").exists());
@@ -1973,7 +1973,7 @@ fn native_owner_retirement_refuses_a_waiting_cold_read_and_keeps_a_warm_cohort()
     use std::sync::mpsc;
     let home = Home::new("retired-native-owner");
     home.top("lead", &[human("lead", ts(1, 0), "Verified evidence")]);
-    let evidence = NativeEvidence::new(home.options.clone());
+    let evidence = crate::native_evidence::NativeEvidence::new(home.options.clone());
     let work = evidence.work.lock().unwrap();
     let (started, waiting) = mpsc::channel();
     let worker = {
@@ -1993,7 +1993,7 @@ fn native_owner_retirement_refuses_a_waiting_cold_read_and_keeps_a_warm_cohort()
     assert!(!home.options.cache.exists());
     assert!(!home.options.cache.with_extension("sqlite3").exists());
 
-    let warm = NativeEvidence::new(home.options.clone());
+    let warm = crate::native_evidence::NativeEvidence::new(home.options.clone());
     let retained = warm.query_at(NOW).unwrap();
     warm.retire();
     fs::remove_file(home.root.join("claude/projects/-work-proj/lead.jsonl")).unwrap();
@@ -2046,6 +2046,90 @@ fn shared_native_queries_reuse_cached_cohorts_and_expose_the_output_window() {
         first.call_at("list_sessions", &json!({}), NOW).unwrap(),
         answer
     );
+}
+
+#[test]
+fn admitted_sources_share_the_index_with_a_later_viewer_and_drain_on_close() {
+    let home = fixture();
+    let sources = Arc::new(SessionSources::with_machines(vec![(
+        "a".into(),
+        Options {
+            all: false,
+            since: Duration::from_secs(86400),
+            ..home.options.clone()
+        },
+    )]));
+    let mut first = Query::from_sources(sources.clone());
+    assert!(sources.machines[0].1.work.lock().unwrap().events.is_none());
+    assert_eq!(
+        first.call_at("unknown", &json!({}), NOW).unwrap_err().code,
+        "unknown_tool"
+    );
+    assert!(!home.options.cache.with_extension("sqlite3").exists());
+    let builds = crate::model::COMPAT_BUILDS.with(std::cell::Cell::get);
+    let answer = first.call_at("list_sessions", &json!({}), NOW).unwrap();
+    assert_eq!(answer["window_start"], NOW - 86_400_000);
+    assert_eq!(
+        crate::model::COMPAT_BUILDS.with(std::cell::Cell::get),
+        builds
+    );
+    let snapshot = first.native.as_ref().unwrap().parts[0].data.clone();
+    let parsed = crate::events::PARSED.with(std::cell::Cell::get);
+    let core = ViewerCore::from_sources(sources.clone());
+    assert!(Arc::ptr_eq(
+        &core.machine_views()[0].evidence,
+        &sources.machines[0].1
+    ));
+    assert_eq!(core.respond("GET", "/api/model", "", None).status, 200);
+    assert_eq!(crate::events::PARSED.with(std::cell::Cell::get), parsed);
+    let mut second = Query::from_sources(sources.clone());
+    assert_eq!(
+        second.call_at("list_sessions", &json!({}), NOW).unwrap(),
+        answer
+    );
+    assert!(Arc::ptr_eq(
+        &snapshot,
+        &second.native.as_ref().unwrap().parts[0].data
+    ));
+    core.close();
+    sources.close();
+    home.top(
+        "after-close",
+        &[human("after-close", ts(6, 0), "Closed source")],
+    );
+    assert_eq!(
+        first.call_at("list_sessions", &json!({}), NOW).unwrap(),
+        answer
+    );
+}
+
+#[test]
+fn retired_admitted_sources_refuse_cold_reads_and_new_catalog_demand() {
+    let home = fixture();
+    let sources = Arc::new(SessionSources::with_machines(vec![(
+        "a".into(),
+        home.options.clone(),
+    )]));
+    assert!(sources.invalidate("a"));
+    assert!(!sources.invalidate("missing"));
+    assert!(sources.machines[0].1.work.lock().unwrap().events.is_none());
+    sources.close();
+    assert!(!sources.invalidate("a"));
+    assert!(
+        !sources
+            .demand_catalog_source("a", crate::RefreshPool::shared())
+            .unwrap()
+    );
+    assert_eq!(
+        Query::from_sources(sources.clone())
+            .call_at("list_sessions", &json!({}), NOW)
+            .unwrap_err()
+            .code,
+        "io"
+    );
+    let viewer = ViewerCore::from_sources(sources);
+    assert_ne!(viewer.respond("GET", "/api/model", "", None).status, 200);
+    assert!(!home.options.cache.with_extension("sqlite3").exists());
 }
 
 #[test]
@@ -2112,6 +2196,27 @@ fn embedded_native_queries_preserve_output_windows_and_legacy_tool_answers() {
             for ((tool, args), answer) in calls.iter().zip(actual) {
                 assert_contract_reference("output", seconds, multiple, tool, args, answer);
             }
+            let mut configured = vec![("a".into(), options(&home))];
+            if multiple {
+                configured.push(("b".into(), options(&peer)));
+            }
+            let sources = Arc::new(SessionSources::with_machines(configured));
+            let mut admitted = Query::from_sources(sources.clone());
+            for (tool, args) in &calls {
+                assert_contract_reference(
+                    "output",
+                    seconds,
+                    multiple,
+                    tool,
+                    args,
+                    admitted.call_at(tool, args, NOW),
+                );
+            }
+            assert_eq!(
+                crate::model::COMPAT_BUILDS.with(|count| count.get()),
+                before
+            );
+            sources.close();
             core.close();
         }
     }

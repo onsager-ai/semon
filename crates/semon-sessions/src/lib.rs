@@ -78,6 +78,7 @@ pub use transcript_range::{
     session_transcript_range, session_transcript_range_with_mode,
 };
 mod native_evidence;
+pub use native_evidence::SessionSources;
 mod query_source;
 mod source_chunks;
 mod source_reader;

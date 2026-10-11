@@ -859,8 +859,14 @@ impl MachineView {
     /// checked in the background by [`RefreshPool::shared`] until
     /// [`MachineView::set_pool`]. Nothing is read until the first request.
     pub(crate) fn new(options: Options) -> Arc<Self> {
+        Self::from_evidence(NativeEvidence::new(options))
+    }
+
+    /// Attach Viewer production to an existing native owner without a second
+    /// Event Index or query cohort. The host owns its admission and lifetime.
+    pub(crate) fn from_evidence(evidence: Arc<NativeEvidence>) -> Arc<Self> {
         Arc::new_cyclic(|me| Self {
-            evidence: NativeEvidence::new(options),
+            evidence,
             mode: AtomicU8::new(Refresh::OnRead.code()),
             shown: RwLock::default(),
             files: Mutex::default(),
