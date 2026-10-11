@@ -115,8 +115,10 @@ try:
     assert capture.returncode==0 and json.loads(capture.stdout)['running'],'native-home-only capture failed'
     deadline=time.monotonic()+10
     while True:
-        readback=subprocess.check_output([mirror_binary,'sessions','--all','--machines',str(receiver_dir),'--no-local','--model-json'],text=True,timeout=20)
-        if thread in readback and standalone.MARKER in readback: break
+        selected=receiver_dir/'machines'/'native-307'
+        observed=subprocess.run([mirror_binary,'query','read_transcript',thread,'--all','--machine',str(selected),'--json'],text=True,capture_output=True,timeout=20)
+        readback=observed.stdout
+        if observed.returncode==0 and thread in readback and standalone.MARKER in readback: break
         assert time.monotonic()<deadline,'native capture/readback did not converge'
         time.sleep(.05)
     assert thread in readback and standalone.MARKER in readback,'native push/readback lost the selected thread or tool output'

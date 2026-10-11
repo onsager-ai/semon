@@ -140,12 +140,13 @@ jobs:
           npx playwright install --with-deps chromium
 
       - name: Browser-check infrastructure regression tests
-        run: node --test tests/ui/suite-plan.test.mjs tests/ui/pixel-diff.test.mjs tests/ui/tap-hit.test.mjs tests/ui/checks/catalog-cache.test.mjs tests/ui/checks/catalog-wire.test.mjs tests/ui/visual-contract.test.mjs
+        run: |
+          npm --prefix ui ci --no-audit --no-fund
+          node --test tests/ui/suite-plan.test.mjs tests/ui/pixel-diff.test.mjs tests/ui/tap-hit.test.mjs tests/ui/checks/catalog-cache.test.mjs tests/ui/checks/catalog-wire.test.mjs tests/ui/visual-contract.test.mjs
 
       - name: Independent shared-account and application-shell lifecycle
         if: matrix.suite == 'interaction'
         run: |
-          npm --prefix ui ci --no-audit --no-fund
           node --test tests/ui/text-audit.test.mjs
           node tests/ui/gallery.mjs
           node tests/ui/compact-gallery.mjs
