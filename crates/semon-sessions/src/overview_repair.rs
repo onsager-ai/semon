@@ -304,44 +304,52 @@ fn query_selection(db: &Connection, key: &str) -> io::Result<Selection> {
             incomplete,
         }
     };
-    // Query needs the endpoints of the selected session's actual handoffs too.
-    // Reuse the indexed native trace, rather than discovering unrelated files.
-    let mut statement = db.prepare("SELECT endpoint FROM (SELECT json_extract(metadata,'$.from') AS endpoint FROM session_trace_edges WHERE session_key=?1 UNION SELECT json_extract(metadata,'$.to') AS endpoint FROM session_trace_edges WHERE session_key=?1) WHERE endpoint IS NOT NULL ORDER BY endpoint LIMIT 65").map_err(failure)?;
-    let mut endpoints = std::collections::BTreeSet::new();
-    for row in &selected.rows {
-        let next = statement
-            .query_map([&row.key], |row| row.get::<_, String>(0))
+    // Native derivation needs a deterministic closure, including the parents
+    // and endpoints discovered on a newly admitted relative. One pass over the
+    // original rows can omit a grandparent or a second-hop handoff owner and
+    // silently derive a different identity from the same selected source.
+    let mut pending: std::collections::BTreeSet<_> =
+        selected.rows.iter().map(|row| row.key.clone()).collect();
+    let mut visited = std::collections::BTreeSet::new();
+    let mut related = db.prepare("SELECT endpoint FROM (SELECT parent_key AS endpoint FROM session_catalog WHERE session_key=?1 UNION SELECT session_key AS endpoint FROM session_catalog WHERE parent_key=?1 UNION SELECT CASE WHEN json_valid(metadata) THEN json_extract(metadata,'$.from') END AS endpoint FROM session_trace_edges WHERE session_key=?1 UNION SELECT CASE WHEN json_valid(metadata) THEN json_extract(metadata,'$.to') END AS endpoint FROM session_trace_edges WHERE session_key=?1) WHERE endpoint IS NOT NULL ORDER BY endpoint LIMIT 65").map_err(failure)?;
+    while let Some(owner) = pending.pop_first() {
+        if !visited.insert(owner.clone()) {
+            continue;
+        }
+        let endpoints = related
+            .query_map([owner], |row| row.get::<_, String>(0))
             .map_err(failure)?
             .collect::<Result<Vec<_>, _>>()
             .map_err(failure)?;
-        selected.incomplete |= next.len() == 65;
-        endpoints.extend(next);
-        if endpoints.len() > 64 {
-            selected.incomplete = true;
-            break;
+        selected.incomplete |= endpoints.len() == 65;
+        for endpoint in endpoints.into_iter().take(64) {
+            if selected.rows.iter().any(|row| row.key == endpoint) {
+                continue;
+            }
+            // Far-end stubs have no source owner. The native producer derives
+            // them from the admitted owner's recorded handoff evidence.
+            let Some(row) = catalog(db, &endpoint)? else {
+                continue;
+            };
+            let paths: std::collections::BTreeSet<_> = selected
+                .rows
+                .iter()
+                .chain(std::iter::once(&row))
+                .flat_map(|row| &row.sources)
+                .map(|source| &source.path)
+                .collect();
+            if paths.len() > SOURCES_MAX || selected.rows.len() >= 64 {
+                selected.incomplete = true;
+                continue;
+            }
+            pending.insert(row.key.clone());
+            selected.rows.push(row);
         }
     }
-    for endpoint in endpoints {
-        if selected.rows.iter().any(|row| row.key == endpoint) {
-            continue;
-        }
-        // Far-end stubs have no source owner. The shared native producer
-        // derives those from the selected launch/handoff evidence itself.
-        let Some(row) = catalog(db, &endpoint)? else {
-            continue;
-        };
-        let paths: std::collections::BTreeSet<_> = selected
-            .rows
-            .iter()
-            .chain(std::iter::once(&row))
-            .flat_map(|row| row.sources.iter())
-            .map(|source| &source.path)
-            .collect();
-        if paths.len() > SOURCES_MAX || selected.rows.len() >= 64 {
-            selected.incomplete = true;
-            continue;
-        }
-        selected.rows.push(row);
+    // Keep the requested owner first; every context row has stable ordering
+    // independent of SQLite iteration, append timing or producer row order.
+    if selected.rows.len() > 1 {
+        selected.rows[1..].sort_by(|a, b| a.key.cmp(&b.key));
     }
     Ok(selected)
 }

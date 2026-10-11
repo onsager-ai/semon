@@ -3248,3 +3248,86 @@ fn handoff_endpoint_indexes_upgrade_without_losing_native_evidence() {
             .is_empty()
     );
 }
+
+#[test]
+fn selected_native_query_closes_nested_parent_dependencies_without_unrelated_sources() {
+    let home = Home::new("nested-query");
+    for (index, (id, parent)) in [
+        ("root", None),
+        ("middle", Some("root")),
+        ("child", Some("middle")),
+        ("leaf", Some("child")),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let child = ["middle", "child", "leaf"].get(index).copied();
+        let mut records = vec![if parent.is_none() {
+            human(id, ts(1, 0), "Delegate nested work")
+        } else {
+            user(id, ts(1, 0), "Delegate nested work")
+        }];
+        if let Some(child) = child {
+            records.push(assistant(
+                id,
+                ts(1, 1),
+                vec![tool(
+                    &format!("spawn-{child}"),
+                    "Agent",
+                    json!({"description":child,"prompt":"Delegate nested work"}),
+                )],
+            ));
+        } else {
+            records.push(assistant(id, ts(1, 2), vec![text("Nested result")]));
+        }
+        if let Some(parent) = parent {
+            home.agent(parent, id, &format!("spawn-{id}"), &records);
+        } else {
+            home.top(id, &records);
+        }
+    }
+    for n in 0..64 {
+        let id = format!("unrelated-{n}");
+        home.top(&id, &[human(&id, ts(1, 0), "Unrelated history")]);
+    }
+    let mut cache = crate::events::EventCache::open_scoped(&home.options.cache).unwrap();
+    crate::model::observe_catalog(
+        &home.options,
+        &mut cache,
+        &mut false,
+        &mut crate::model::Texts::default(),
+        NOW,
+    )
+    .unwrap();
+    let refs = crate::session_query_sources(&home.options, "leaf").unwrap();
+    assert_eq!(
+        refs.iter()
+            .map(|source| source.native_id.as_str())
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from(["root", "middle", "child", "leaf"])
+    );
+    assert_eq!(
+        refs,
+        crate::session_query_sources(&home.options, "leaf").unwrap(),
+        "closure ordering changed"
+    );
+    let sources = admitted(home.options.clone());
+    let args = json!({"id":"leaf"});
+    let expected = home.query().call_at("get_session", &args, NOW).unwrap();
+    assert_eq!(expected["session"]["parent"], "child");
+    assert_eq!(
+        Query::from_sources(sources.clone())
+            .call_selected_at(
+                "local",
+                "leaf",
+                "get_session",
+                &args,
+                None,
+                crate::SessionSourceReadMode::LocalThenProvider,
+                NOW
+            )
+            .unwrap(),
+        expected
+    );
+    assert!(sources.machines[0].1.work.lock().unwrap().events.is_none());
+}
