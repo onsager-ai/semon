@@ -19,8 +19,9 @@ cohort. Retirement stops producers; close drains them off the async reactor.
 Hosts hold their existing blocking-worker and deletion guards through actual
 completion and close attached Viewer transports before draining sources.
 Tenant-wide hosted archive hydration remains migration work in Hub #226.
-`from_native_core` remains available to the preceding paired host revision until
-adoption; its removal follows consumer migration. Substituting local scan-window
+The paired Hub consumer admits native sources directly; the preceding
+`from_native_core` constructor and its exclusive Viewer preparation path are
+removed. Query owns only native sources. Substituting local scan-window
 construction would change the hosted contract. No full-model query fallback remains.
 
 `contract-reference.json` contains 134 synthetic tool responses from the retired

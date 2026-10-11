@@ -199,7 +199,7 @@ impl ClaudeSidecar {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Options, Query, ViewerCore};
+    use crate::{Options, Query, SessionSources};
     use rusqlite::{Connection, OptionalExtension};
     use serde_json::json;
     use std::{
@@ -260,11 +260,14 @@ mod tests {
             }
         }
         fn query(&self) -> Value {
-            let core = Arc::new(ViewerCore::new(self.options.clone()));
-            let result = Query::from_native_core(core.clone())
+            let sources = Arc::new(SessionSources::with_machines(vec![(
+                String::new(),
+                self.options.clone(),
+            )]));
+            let result = Query::from_sources(sources.clone())
                 .call_at("list_sessions", &json!({}), NOW)
                 .unwrap();
-            core.close();
+            sources.close();
             result
         }
         fn session(query: &Value) -> &Value {
@@ -466,8 +469,11 @@ mod tests {
         assert_eq!(cache.session_catalog_generation(), generation);
         home.refuse_eviction();
         assert_eq!(Home::session(&home.query())["name"], "Checker");
-        let core = Arc::new(ViewerCore::new(home.options.clone()));
-        let mut query = Query::from_native_core(core.clone());
+        let sources = Arc::new(SessionSources::with_machines(vec![(
+            String::new(),
+            home.options.clone(),
+        )]));
+        let mut query = Query::from_sources(sources.clone());
         let path = home.meta.clone();
         crate::model::AFTER_QUERY_DERIVATION.with(|hook| {
             *hook.borrow_mut() = Some(Box::new(move || {
@@ -483,7 +489,7 @@ mod tests {
                 .code,
             "io"
         );
-        core.close();
+        sources.close();
         assert_eq!(Home::session(&home.query())["name"], "After derivation");
     }
 
