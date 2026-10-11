@@ -1521,8 +1521,11 @@ fn variable_handoffs_are_placed_on_their_calls_and_parent_scans_resume() {
         }
     }
     let native = native_marker_query(&home);
+    let mut query = crate::Query::from_sources(Arc::new(crate::SessionSources::with_machines(
+        vec![(String::new(), home.options.clone())],
+    )));
     assert_eq!(
-        serde_json::to_value(&native.handoffs).unwrap(),
+        query.call("get_session", &json!({"id":"lead"})).unwrap()["session"]["handoffs"],
         serde_json::to_value(&built.handoffs).unwrap()
     );
     assert_eq!(

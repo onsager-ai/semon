@@ -6,6 +6,37 @@ use std::{collections::BTreeMap, path::PathBuf, sync::Arc};
 
 pub(crate) const VERSION: u32 = 5;
 
+type SlotKey = (Option<PathBuf>, u64, u32, String);
+
+fn slot_key(file: Option<&File>, offset: u64, block: u32, recipe: &Recipe) -> Option<SlotKey> {
+    Some((
+        file.map(|file| file.path.clone()),
+        offset,
+        block,
+        serde_json::to_string(recipe).ok()?,
+    ))
+}
+
+/// Keep the existing projection digest shared by publication and optional reuse.
+pub(crate) fn generation(
+    metadata: &[String],
+    sources: &[crate::model::summary::CatalogSource],
+) -> serde_json::Result<String> {
+    use sha2::{Digest, Sha256};
+    Ok(format!(
+        "{:x}",
+        Sha256::digest(
+            format!(
+                "{}|{}|{}",
+                VERSION,
+                serde_json::to_string(metadata)?,
+                serde_json::to_string(sources)?
+            )
+            .as_bytes()
+        )
+    ))
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct File {
@@ -186,6 +217,7 @@ impl SavedSlot {
         slot: &Slot,
         sources: &BTreeMap<PathBuf, &crate::model::summary::CatalogSource>,
         records: Option<&crate::query_source::Records<'_>>,
+        previous: &BTreeMap<SlotKey, Self>,
     ) -> Self {
         let recipe = match &slot.kind {
             SlotKind::H(id) => Recipe::H { id: id.clone() },
@@ -274,6 +306,22 @@ impl SavedSlot {
             },
             SlotKind::NoActivity => Recipe::NoActivity,
         };
+        let file = slot.file.as_deref().map(File::capture);
+        if let Some(previous) = slot_key(file.as_ref(), slot.offset, slot.block, &recipe)
+            .and_then(|key| previous.get(&key))
+        {
+            return Self {
+                native_event_id: previous.native_event_id.clone(),
+                field: previous.field.clone(),
+                recipe,
+                file,
+                offset: slot.offset,
+                block: slot.block,
+                t: slot.t,
+                turn: slot.turn.clone(),
+                first: slot.first,
+            };
+        }
         let field = slot.file.as_ref().and_then(|file| {
             crate::native_field::capture(
                 sources.get(&file.path)?,
@@ -414,11 +462,15 @@ impl SavedSlot {
 pub(crate) struct Projection {
     pub(crate) key: String,
     pub(crate) slots: Vec<SavedSlot>,
+    /// A failed optional reuse is rebuilt from evidence, including when a
+    /// damaged stored row left the advertised projection digest unchanged.
+    pub(crate) repair: bool,
 }
 pub(crate) fn capture(
     transcripts: &BTreeMap<String, Arc<Transcript>>,
     rows: &[crate::model::summary::CatalogRow],
     records: Option<&crate::query_source::Records<'_>>,
+    reuse: Option<(&crate::events::EventCache, Option<&str>)>,
 ) -> Vec<Projection> {
     let sources: BTreeMap<_, _> = rows
         .iter()
@@ -427,13 +479,34 @@ pub(crate) fn capture(
         .collect();
     transcripts
         .iter()
-        .map(|(key, transcript)| Projection {
-            key: key.clone(),
-            slots: transcript
-                .slots
-                .iter()
-                .map(|slot| SavedSlot::capture(slot, &sources, records))
-                .collect(),
+        .map(|(key, transcript)| {
+            let previous = reuse.and_then(|(cache, generation)| {
+                cache.session_slots(
+                    rows.iter().find(|row| &row.key == key)?,
+                    generation,
+                    transcript.slots.len(),
+                )
+            });
+            let repair = reuse.is_some() && previous.is_none();
+            let previous = previous
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(|slot| {
+                    Some((
+                        slot_key(slot.file.as_ref(), slot.offset, slot.block, &slot.recipe)?,
+                        slot,
+                    ))
+                })
+                .collect();
+            Projection {
+                key: key.clone(),
+                repair,
+                slots: transcript
+                    .slots
+                    .iter()
+                    .map(|slot| SavedSlot::capture(slot, &sources, records, &previous))
+                    .collect(),
+            }
         })
         .collect()
 }

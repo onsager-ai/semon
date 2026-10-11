@@ -417,6 +417,7 @@ impl View {
         let mut handoff_ids = BTreeSet::new();
         let mut turn_ids = BTreeSet::new();
         for part in &read.parts {
+            let records = part.data.sources.reader();
             for (id, session) in &part.data.sessions {
                 if part.dropped.contains(id) {
                     continue;
@@ -474,6 +475,13 @@ impl View {
                     continue;
                 }
                 let mut handoff = handoff.clone();
+                if matches!(shape, ReadShape::Session(_))
+                    && let Some(brief) = part.data.ask_briefs.get(&handoff.id)
+                {
+                    handoff.brief = brief
+                        .read(&records)
+                        .map_err(|error| QueryError::io(&error))?;
+                }
                 handoff.from = part.served(&handoff.from);
                 handoff.to = handoff.to.map(|to| part.served(&to));
                 handoffs.push(json!(handoff));
@@ -494,6 +502,7 @@ impl View {
                 turn.sid = part.served(&turn.sid);
                 turns.push(json!(turn));
             }
+            records.finish().map_err(|error| QueryError::io(&error))?;
         }
         if !conflicts.is_empty() {
             return Err(QueryError::new(
@@ -1022,9 +1031,20 @@ impl Query {
                 let (kind, texts) = match &slot.kind {
                     SlotKind::H(id) => {
                         let handoff: Option<&Value> = handoffs.get(id.as_str()).copied();
+                        let brief = handoff
+                            .and_then(|_| self.evidence().parts[*index].data.ask_briefs.get(id))
+                            .map(|brief| brief.read(&records[*index]))
+                            .transpose()
+                            .map_err(|error| QueryError::io(&error))?;
                         let mut texts = Vec::new();
                         for part in ["brief", "result"] {
-                            if let Some(text) = handoff.and_then(|handoff| handoff[part].as_str()) {
+                            let text = if part == "brief" {
+                                brief.as_deref()
+                            } else {
+                                None
+                            }
+                            .or_else(|| handoff.and_then(|handoff| handoff[part].as_str()));
+                            if let Some(text) = text {
                                 texts.push((part, text.to_owned()));
                             }
                         }

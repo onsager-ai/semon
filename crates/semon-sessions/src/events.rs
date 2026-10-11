@@ -961,6 +961,15 @@ pub(crate) trait IndexStore: Send {
     /// The committed catalog observed before a model build starts.
     fn session_catalog_generation(&self) -> Result<Option<String>, StoreError>;
 
+    /// Existing scalar recipes at the exact source and catalog generations.
+    /// Optional reuse never grants source access or changes publication CAS.
+    fn session_slots(
+        &self,
+        row: &crate::model::summary::CatalogRow,
+        expected_generation: Option<&str>,
+        max: usize,
+    ) -> Result<Option<Vec<crate::slot_projection::SavedSlot>>, StoreError>;
+
     /// Replaces one complete source-validated metadata catalog atomically.
     fn publish_session_catalog(
         &mut self,
@@ -1326,6 +1335,19 @@ impl EventCache {
         self.store
             .as_ref()?
             .session_catalog_generation()
+            .ok()
+            .flatten()
+    }
+
+    pub(crate) fn session_slots(
+        &self,
+        row: &crate::model::summary::CatalogRow,
+        expected_generation: Option<&str>,
+        max: usize,
+    ) -> Option<Vec<crate::slot_projection::SavedSlot>> {
+        self.store
+            .as_ref()?
+            .session_slots(row, expected_generation, max)
             .ok()
             .flatten()
     }

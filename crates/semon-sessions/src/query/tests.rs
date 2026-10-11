@@ -285,6 +285,223 @@ fn retained_query(home: &Home) -> Query {
 }
 
 #[test]
+fn metadata_and_selected_session_reads_do_not_hydrate_unrelated_prompt_history() {
+    for count in [4, 128] {
+        let home = Home::new("prompt-read-scope");
+        home.top(
+            "selected",
+            &[human("selected", ts(1, 0), "selected evidence")],
+        );
+        let mut history = vec![human("history", ts(1, 0), "history title")];
+        history.extend((0..count).map(|_| human("history", ts(1, 1), &"x".repeat(64 * 1024))));
+        home.top("history", &history);
+        let path = home
+            .options
+            .claude_home
+            .join("projects/-work-proj/history.jsonl");
+        let original = fs::read(&path).unwrap();
+        let mut cache = crate::events::EventCache::open_scoped(&home.options.cache).unwrap();
+        crate::model::observe_catalog(
+            &home.options,
+            &mut cache,
+            &mut false,
+            &mut crate::model::Texts::default(),
+            NOW,
+        )
+        .unwrap();
+        // Indexing native records still reads their evidence. Once indexed,
+        // metadata observation and an unrelated selected session must not read
+        // every old prompt again to populate unused handoff briefs.
+        let before = crate::source_chunks::READ_BYTES.with(std::cell::Cell::get);
+        crate::model::observe_catalog(
+            &home.options,
+            &mut cache,
+            &mut false,
+            &mut crate::model::Texts::default(),
+            NOW,
+        )
+        .unwrap();
+        let mut query = home.query();
+        assert_eq!(
+            query.call_at("list_sessions", &json!({}), NOW).unwrap()["sessions"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+        query
+            .call_at("stalls", &json!({"idle_minutes":10}), NOW)
+            .unwrap();
+        let selected = query
+            .call_at("get_session", &json!({"id":"selected"}), NOW)
+            .unwrap();
+        assert_eq!(
+            selected["session"]["handoffs"][0]["brief"],
+            "selected evidence"
+        );
+        let bytes = crate::source_chunks::READ_BYTES.with(std::cell::Cell::get) - before;
+        println!("{count} unrelated prompts: {bytes} native body/proof bytes");
+        assert!(
+            bytes <= 12 * crate::source_chunks::SIZE as u64,
+            "unrelated history hydrated: {bytes} bytes"
+        );
+        assert_eq!(fs::read(&path).unwrap(), original);
+    }
+}
+
+#[test]
+fn limited_search_reads_prompt_briefs_only_when_their_slots_are_visited() {
+    let home = Home::new("prompt-search-scope");
+    let mut history = vec![human("lead", ts(1, 0), "history title")];
+    history.extend((0..128).map(|_| human("lead", ts(1, 1), &"x".repeat(64 * 1024))));
+    history.push(human("lead", ts(1, 2), "selected needle"));
+    home.top("lead", &history);
+    let mut cache = crate::events::EventCache::open_scoped(&home.options.cache).unwrap();
+    crate::model::observe_catalog(
+        &home.options,
+        &mut cache,
+        &mut false,
+        &mut crate::model::Texts::default(),
+        NOW,
+    )
+    .unwrap();
+    let mut query = home.query();
+    let before = crate::source_chunks::READ_BYTES.with(std::cell::Cell::get);
+    let result = query
+        .call_at("find", &json!({"text":"selected needle", "limit":1}), NOW)
+        .unwrap();
+    assert_eq!(result["matches"].as_array().unwrap().len(), 1);
+    assert_eq!(result["matches"][0]["part"], "brief");
+    assert_eq!(result["matches"][0]["snippet"], "selected needle");
+    assert_eq!(result["truncated_by"], "limit");
+    let bytes = crate::source_chunks::READ_BYTES.with(std::cell::Cell::get) - before;
+    println!("limited search over 128 old prompts: {bytes} native body/proof bytes");
+    assert!(
+        bytes <= 4 * crate::source_chunks::SIZE as u64,
+        "search hydrated unvisited prompts: {bytes} bytes"
+    );
+}
+
+#[test]
+fn source_backed_prompt_briefs_preserve_native_caps_and_completion_fences() {
+    let _time = crate::events::fixed_change_time_for_test(0);
+    let home = Home::new("prompt-brief-integrity");
+    home.top("lead", &[human("lead", ts(1, 0), &"é".repeat(50_000))]);
+    let sources = admitted(home.options.clone());
+    let core = ViewerCore::from_sources(sources.clone());
+    let model: Value =
+        serde_json::from_slice(&core.respond("GET", "/api/model", "", None).body).unwrap();
+    let mut query = Query::from_sources(sources.clone());
+    let selected = query
+        .call_at("get_session", &json!({"id":"lead"}), NOW)
+        .unwrap();
+    assert_eq!(
+        selected["session"]["handoffs"][0]["brief"],
+        model["handoffs"][0]["brief"]
+    );
+    sources.close();
+    let data = &query.evidence().parts[0].data;
+    let records = data.sources.reader();
+    let brief = data.ask_briefs.values().next().unwrap();
+    assert_eq!(brief.read(&records).unwrap(), model["handoffs"][0]["brief"]);
+    let path = home
+        .options
+        .claude_home
+        .join("projects/-work-proj/lead.jsonl");
+    let metadata = fs::metadata(&path).unwrap();
+    let stat = crate::events::Stat::from_metadata(&metadata).unwrap();
+    let raw = fs::read_to_string(&path).unwrap();
+    fs::write(&path, raw.replacen('é', "ê", 1)).unwrap();
+    fs::File::options()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_modified(metadata.modified().unwrap())
+        .unwrap();
+    assert_eq!(
+        crate::events::Stat::from_metadata(&fs::metadata(&path).unwrap()).unwrap(),
+        stat
+    );
+    assert!(
+        records.finish().is_err(),
+        "completion must reject changed cached prompt bytes"
+    );
+    for (name, args) in [
+        ("get_session", json!({"id":"lead"})),
+        ("find", json!({"text":"é"})),
+    ] {
+        assert_eq!(query.call_at(name, &args, NOW).unwrap_err().code, "io");
+    }
+}
+
+#[test]
+fn native_projection_reuse_rebuilds_unqualified_and_corrupt_recipes_from_evidence() {
+    for mutation in [
+        "UPDATE session_slot_projections SET version=version-1",
+        "UPDATE session_slot_projections SET source_generation='wrong'",
+        "UPDATE session_slot_projections SET generation='wrong'",
+        "UPDATE meta SET value='wrong' WHERE key='slot_projection_catalog_generation'",
+        "DELETE FROM session_slots WHERE slot=0",
+        "UPDATE session_slots SET metadata=json_set(metadata,'$.native_event_id','wrong')",
+        "UPDATE session_slots SET metadata='{'",
+    ] {
+        let home = Home::new("projection-repair");
+        home.top(
+            "lead",
+            &[
+                human("lead", ts(1, 0), "native evidence"),
+                human("lead", ts(1, 1), "later evidence"),
+            ],
+        );
+        let mut cache = crate::events::EventCache::open_scoped(&home.options.cache).unwrap();
+        let observe = |cache: &mut crate::events::EventCache| {
+            crate::model::observe_catalog(
+                &home.options,
+                cache,
+                &mut false,
+                &mut crate::model::Texts::default(),
+                NOW,
+            )
+            .unwrap();
+        };
+        observe(&mut cache);
+        let db = rusqlite::Connection::open(crate::events::EventCache::path(&home.options.cache))
+            .unwrap();
+        let slots = || {
+            db.prepare(
+                "SELECT session_key,slot,metadata FROM session_slots ORDER BY session_key,slot",
+            )
+            .unwrap()
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+        };
+        let original = slots();
+        assert!(!original.is_empty());
+        let before = home
+            .query()
+            .call_at("get_session", &json!({"id":"lead"}), NOW)
+            .unwrap();
+        db.execute(mutation, []).unwrap();
+        observe(&mut cache);
+        assert_eq!(slots(), original, "failed to repair {mutation}");
+        assert_eq!(
+            home.query()
+                .call_at("get_session", &json!({"id":"lead"}), NOW)
+                .unwrap(),
+            before
+        );
+    }
+}
+
+#[test]
 fn native_tools_refuse_changed_bytes_even_with_indistinguishable_file_stamps() {
     let _time = crate::events::fixed_change_time_for_test(0);
     let home = Home::new("coarse-native-generation");
