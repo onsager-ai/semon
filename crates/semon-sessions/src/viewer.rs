@@ -6,11 +6,11 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc, Condvar, Mutex, MutexGuard, OnceLock, PoisonError, RwLock, RwLockReadGuard,
-        RwLockWriteGuard, TryLockError, Weak,
-        atomic::{AtomicBool, AtomicU8, Ordering},
+        RwLockWriteGuard, Weak,
+        atomic::{AtomicU8, Ordering},
     },
     thread,
-    time::{Duration, Instant, UNIX_EPOCH},
+    time::{Duration, Instant},
 };
 
 use serde::Serialize;
@@ -21,13 +21,14 @@ use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
 use std::os::unix::fs::MetadataExt;
 
 use crate::{
-    Index, Node, Options, codex_id_from_filename, codex_meta, collect_with_index,
+    Node, Options, codex_id_from_filename, codex_meta, collect_with_index,
     events::EventCache,
     field, file_list, is_agent_output,
-    model::{self, Built, Texts},
-    proc_start, read_index,
+    model::{self, Built},
+    native_evidence::{NativeEvidence, Snapshot, Work},
+    proc_start,
     refresh::{Key, RefreshPool},
-    save_index, tx,
+    tx,
     union::{Refresh, ViewerCore},
     user_text,
 };
@@ -135,15 +136,6 @@ pub(crate) fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// The lock if it is free, poisoned or not.
-fn try_lock<T>(mutex: &Mutex<T>) -> Option<MutexGuard<'_, T>> {
-    match mutex.try_lock() {
-        Ok(guard) => Some(guard),
-        Err(TryLockError::Poisoned(poisoned)) => Some(poisoned.into_inner()),
-        Err(TryLockError::WouldBlock) => None,
-    }
-}
-
 pub(crate) fn read_lock<T>(lock: &RwLock<T>) -> RwLockReadGuard<'_, T> {
     lock.read().unwrap_or_else(PoisonError::into_inner)
 }
@@ -161,8 +153,8 @@ pub(crate) fn write_lock<T>(lock: &RwLock<T>) -> RwLockWriteGuard<'_, T> {
 ///   read takes its lock only to clone the `Arc`, then answers from that
 ///   snapshot alone; a rebuild takes it only to swap a new one in. The
 ///   `ETag` is the snapshot's version.
-/// - `work` holds what a rebuild changes (the index, the event cache, the
-///   texts, when each was saved). A rebuild holds it from its stat pass to
+/// - `evidence` owns the source index, texts and native query cohort. Its
+///   `work` lock serializes producers from their stat pass to
 ///   its swap, so one machine rebuilds once at a time. Outside
 ///   [`Refresh::OnRead`] an API read takes it only when there is nothing
 ///   built to answer from yet: the first model read, or the first V1 tree
@@ -179,16 +171,13 @@ pub(crate) fn write_lock<T>(lock: &RwLock<T>) -> RwLockWriteGuard<'_, T> {
 /// - `live` is the view's refresh state, held for a few field reads, and
 ///   around it the refresh pool's queue lock for an insert or a removal.
 ///
-/// Locks are only ever taken in the order work, files, shown, live, and
-/// the refresh pool's last of all.
+/// Viewer locks are taken in the order evidence.work, files, shown, live,
+/// and the refresh pool's last of all. Native query publication has its own
+/// short snapshot lock and never takes the Viewer locks or starts its workers.
 pub(crate) struct MachineView {
-    options: Options,
+    pub(crate) evidence: Arc<NativeEvidence>,
     /// Its [`Refresh`] mode ([`Refresh::code`]).
     mode: AtomicU8,
-    /// A persisted-catalog reader needs coherent background publication even
-    /// before this process has shown its first compatibility model.
-    catalog_demand: AtomicBool,
-    work: Mutex<Work>,
     shown: RwLock<Shown>,
     files: Mutex<Files>,
     live: Live,
@@ -196,18 +185,6 @@ pub(crate) struct MachineView {
     me: Weak<MachineView>,
     #[cfg(test)]
     hooks: tests::Hooks,
-}
-
-/// What a rebuild changes, and only a rebuild.
-#[derive(Default)]
-struct Work {
-    index: Option<Index>,
-    index_dirty: bool,
-    last_save: Option<Instant>,
-    events: Option<EventCache>,
-    texts: Texts,
-    /// When the last rebuild of either model started.
-    built_at: Option<Instant>,
 }
 
 /// The snapshots reads answer from.
@@ -403,80 +380,6 @@ impl ViewerReply {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-struct Stamp {
-    kind: fs::FileType,
-    size: u64,
-    modified_ns: u128,
-}
-
-fn stamp(path: &Path) -> Option<Stamp> {
-    let metadata = fs::symlink_metadata(path).ok()?;
-    Some(Stamp {
-        kind: metadata.file_type(),
-        size: metadata.len(),
-        modified_ns: metadata
-            .modified()
-            .ok()?
-            .duration_since(UNIX_EPOCH)
-            .ok()?
-            .as_nanos(),
-    })
-}
-
-struct Snapshot {
-    watched: BTreeMap<PathBuf, Option<Stamp>>,
-    /// The Codex writer-lock files' identities, and the `/proc/locks` lines
-    /// that name them. Other locks on the machine (a browser's, SQLite's)
-    /// come and go all the time and change nothing here.
-    lock_ids: BTreeSet<(u64, u64, u64)>,
-    locks: Option<String>,
-    pids: BTreeMap<u32, Option<u64>>,
-}
-
-/// A `/proc/locks` line's `major:minor:inode`, as `lock_pid` reads it.
-fn lock_key(line: &str) -> Option<(u64, u64, u64)> {
-    let words: Vec<_> = line.split_whitespace().collect();
-    let parts: Vec<_> = words.get(5)?.split(':').collect();
-    if parts.len() != 3 {
-        return None;
-    }
-    Some((
-        u64::from_str_radix(parts[0], 16).ok()?,
-        u64::from_str_radix(parts[1], 16).ok()?,
-        parts[2].parse().ok()?,
-    ))
-}
-
-/// The lines of `/proc/locks` on the writer-lock files, and nothing else.
-fn writer_locks(options: &Options, ids: &BTreeSet<(u64, u64, u64)>) -> Option<String> {
-    let locks = fs::read_to_string(options.proc_root.join("locks")).ok()?;
-    Some(
-        locks
-            .lines()
-            .filter(|line| lock_key(line).is_some_and(|key| ids.contains(&key)))
-            .collect::<Vec<_>>()
-            .join("\n"),
-    )
-}
-
-fn lock_ids(options: &Options) -> BTreeSet<(u64, u64, u64)> {
-    let mut ids = BTreeSet::new();
-    #[cfg(unix)]
-    if let Ok(entries) = fs::read_dir(options.codex_home.join("thread-writer-locks")) {
-        for entry in entries.flatten() {
-            if entry.path().extension().is_some_and(|ext| ext == "lock")
-                && let Ok(id) = crate::lock_identity(&entry.path())
-            {
-                ids.insert(id);
-            }
-        }
-    }
-    #[cfg(not(unix))]
-    let _ = options;
-    ids
-}
-
 struct TreeCache {
     roots: Vec<Node>,
     json: String,
@@ -515,149 +418,9 @@ pub(crate) const FONTS: [(&str, &[u8]); 4] = [
     ),
 ];
 
-fn watch_tree(path: &Path, suffixes: &[&str], watched: &mut BTreeMap<PathBuf, Option<Stamp>>) {
-    watched.insert(path.to_owned(), stamp(path));
-    if fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
-        if let Some(parent) = path.parent() {
-            watched
-                .entry(parent.to_owned())
-                .or_insert_with(|| stamp(parent));
-        }
-        return;
-    }
-    let Ok(entries) = fs::read_dir(path) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let Ok(kind) = entry.file_type() else {
-            continue;
-        };
-        // A symbolic link is neither: it is never followed.
-        if kind.is_dir() {
-            watch_tree(&path, suffixes, watched);
-        } else if kind.is_file()
-            && path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .is_some_and(|name| suffixes.iter().any(|suffix| name.ends_with(suffix)))
-        {
-            watched.insert(path.clone(), stamp(&path));
-        }
-    }
-}
-
 /// Whether `path` is a regular file, itself: a link to one isn't.
 fn regular(path: &Path) -> bool {
     fs::symlink_metadata(path).is_ok_and(|metadata| metadata.is_file())
-}
-
-fn node_pids(nodes: &[Node], output: &mut BTreeSet<u32>) {
-    for node in nodes {
-        if let Some(pid) = node.pid {
-            output.insert(pid);
-        }
-        node_pids(&node.children, output);
-    }
-}
-
-impl Snapshot {
-    fn capture(options: &Options, roots: &[Node], index: &Index) -> Self {
-        let mut ids = BTreeSet::new();
-        node_pids(roots, &mut ids);
-        Self::capture_pids(options, ids, index.paths())
-    }
-
-    fn capture_pids<'a>(
-        options: &Options,
-        ids: BTreeSet<u32>,
-        paths: impl Iterator<Item = &'a str>,
-    ) -> Self {
-        let mut watched = BTreeMap::new();
-        watch_tree(
-            &options.claude_home.join("projects"),
-            &[".jsonl", ".meta.json"],
-            &mut watched,
-        );
-        watch_tree(
-            &options.claude_home.join("sessions"),
-            &[".json"],
-            &mut watched,
-        );
-        for root in crate::inputs::codex_rollout_dirs(options) {
-            watch_tree(&root, &[".jsonl"], &mut watched);
-        }
-        watch_tree(
-            &options.codex_home.join("thread-writer-locks"),
-            &[".lock"],
-            &mut watched,
-        );
-        let copilot_root = options.copilot_home.join("session-state");
-        watched.insert(copilot_root.clone(), stamp(&copilot_root));
-        if let Ok(entries) = fs::read_dir(&copilot_root) {
-            for entry in entries
-                .flatten()
-                .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
-            {
-                let dir = entry.path();
-                watched.insert(dir.clone(), stamp(&dir));
-                let file = dir.join("events.jsonl");
-                watched.insert(file.clone(), stamp(&file));
-            }
-        }
-        watched.insert(options.claude_json.clone(), stamp(&options.claude_json));
-        for path in paths {
-            let path = PathBuf::from(path);
-            watched.entry(path.clone()).or_insert_with(|| stamp(&path));
-        }
-        // With a facts file, it is the machine: nothing here reads `/proc`.
-        if let Some(facts) = &options.facts {
-            watched.insert(facts.clone(), stamp(facts));
-            return Self {
-                watched,
-                lock_ids: BTreeSet::new(),
-                locks: None,
-                pids: BTreeMap::new(),
-            };
-        }
-        for name in [
-            "session_index.jsonl",
-            "state_5.sqlite",
-            "state_5.sqlite-wal",
-        ] {
-            let path = options.codex_home.join(name);
-            watched.insert(path.clone(), stamp(&path));
-        }
-        let pids = ids
-            .into_iter()
-            .map(|pid| (pid, proc_start(&options.proc_root, pid)))
-            .collect();
-        let lock_ids = lock_ids(options);
-        Self {
-            watched,
-            locks: writer_locks(options, &lock_ids),
-            lock_ids,
-            pids,
-        }
-    }
-
-    fn changed(&self, options: &Options) -> bool {
-        if self
-            .watched
-            .iter()
-            .any(|(path, original)| stamp(path) != *original)
-        {
-            return true;
-        }
-        if options.facts.is_some() {
-            return false;
-        }
-        writer_locks(options, &self.lock_ids) != self.locks
-            || self
-                .pids
-                .iter()
-                .any(|(pid, original)| proc_start(&options.proc_root, *pid) != *original)
-    }
 }
 
 fn invalid_input(message: &str) -> io::Error {
@@ -1096,11 +859,15 @@ impl MachineView {
     /// checked in the background by [`RefreshPool::shared`] until
     /// [`MachineView::set_pool`]. Nothing is read until the first request.
     pub(crate) fn new(options: Options) -> Arc<Self> {
+        Self::from_evidence(NativeEvidence::new(options))
+    }
+
+    /// Attach Viewer production to an existing native owner without a second
+    /// Event Index or query cohort. The host owns its admission and lifetime.
+    pub(crate) fn from_evidence(evidence: Arc<NativeEvidence>) -> Arc<Self> {
         Arc::new_cyclic(|me| Self {
-            options,
+            evidence,
             mode: AtomicU8::new(Refresh::OnRead.code()),
-            catalog_demand: AtomicBool::new(false),
-            work: Mutex::default(),
             shown: RwLock::default(),
             files: Mutex::default(),
             live: Live {
@@ -1129,7 +896,7 @@ impl MachineView {
 
     /// The homes, cache and facts this view reads.
     pub(crate) fn options(&self) -> &Options {
-        &self.options
+        &self.evidence.options
     }
 
     /// When reads are brought up to date with the logs: see [`Refresh`].
@@ -1159,7 +926,7 @@ impl MachineView {
     fn changed(&self, snapshot: &Snapshot) -> bool {
         #[cfg(test)]
         self.hooks.stats.fetch_add(1, Ordering::SeqCst);
-        snapshot.changed(&self.options)
+        snapshot.changed(&self.evidence.options)
     }
 
     fn shown_model(&self) -> Option<Arc<ModelCache>> {
@@ -1170,13 +937,12 @@ impl MachineView {
         read_lock(&self.shown).tree.clone()
     }
 
-    /// Rebuilds the V1 tree if anything it was built from changed. The
+    /// Rebuilds the native tree if anything it was built from changed. The
     /// caller holds `work`.
     fn refresh_tree_locked(&self, work: &mut Work) -> io::Result<Arc<TreeCache>> {
         if let Some(tree) = self.shown_tree()
             && !self.changed(&tree.snapshot)
         {
-            self.persist_if_due(work)?;
             return Ok(tree);
         }
         work.built_at = Some(Instant::now());
@@ -1184,12 +950,15 @@ impl MachineView {
         if self.hooks.tree_failing.load(Ordering::SeqCst) {
             return Err(io::Error::other("a tree build failed on purpose"));
         }
-        let index = work
-            .index
-            .get_or_insert_with(|| read_index(&self.options.cache));
-        let roots = collect_with_index(&self.options, index, &mut work.index_dirty)?;
+        if work.events.is_none() {
+            work.events = Some(
+                EventCache::open_scoped(&self.evidence.options.cache).map_err(io::Error::other)?,
+            );
+        }
+        let index = work.events.as_mut().expect("native index loaded");
+        let roots = collect_with_index(&self.evidence.options, index)?;
         let json = crate::render_json(&roots);
-        let snapshot = Snapshot::capture(&self.options, &roots, index);
+        let snapshot = Snapshot::capture(&self.evidence.options, &roots, index);
         let paths = snapshot
             .watched
             .iter()
@@ -1202,23 +971,38 @@ impl MachineView {
             snapshot,
         });
         write_lock(&self.shown).tree = Some(tree.clone());
-        self.persist_if_due(work)?;
         Ok(tree)
     }
 
-    fn persist_if_due(&self, work: &mut Work) -> io::Result<()> {
-        if work.index_dirty
-            && work
-                .last_save
-                .is_none_or(|last| last.elapsed() >= Duration::from_secs(30))
+    /// Refresh focused metadata without showing or serializing a legacy model.
+    fn refresh_catalog_locked(&self, work: &mut Work, now: i64) -> io::Result<()> {
+        if let Some(snapshot) = &work.catalog_snapshot
+            && !self.changed(snapshot)
         {
-            save_index(
-                &self.options.cache,
-                work.index.as_ref().expect("index loaded"),
-            )?;
-            work.index_dirty = false;
-            work.last_save = Some(Instant::now());
+            return Ok(());
         }
+        work.built_at = Some(Instant::now());
+        self.evidence.prepare_events(work, now)?;
+        let cache = work.events.as_mut().expect("event cache initialized");
+        // Stamp before native reads so concurrent appends remain observable.
+        let mut snapshot =
+            Snapshot::capture_pids(&self.evidence.options, BTreeSet::new(), cache.paths());
+        #[cfg(test)]
+        self.hooks.building()?;
+        let pids = model::observe_catalog(
+            &self.evidence.options,
+            cache,
+            &mut false,
+            &mut work.texts,
+            now,
+        )?;
+        if self.evidence.options.facts.is_none() {
+            snapshot.pids = pids
+                .iter()
+                .map(|pid| (*pid, proc_start(&self.evidence.options.proc_root, *pid)))
+                .collect();
+        }
+        work.catalog_snapshot = Some(snapshot);
         Ok(())
     }
 
@@ -1231,72 +1015,34 @@ impl MachineView {
             return Ok(model);
         }
         work.built_at = Some(Instant::now());
-        if work.events.is_none() {
-            work.events = Some(match EventCache::open_scoped(&self.options.cache) {
-                Ok(cache) => cache,
-                Err(error) if self.catalog_demand.load(Ordering::Relaxed) => {
-                    return Err(io::Error::other(error));
-                }
-                Err(_) => EventCache::open(&self.options.cache),
-            });
-        }
+        self.evidence.prepare_events(work, now)?;
         let cache = work.events.as_mut().expect("event cache initialized");
-        // Cold catalog demand publishes a small explicit source batch before the
-        // compatibility model reads unrelated native history. Source discovery is
-        // still a filesystem metadata walk; incomplete native lineage cannot grant
-        // control authority until the subsequent complete reconciliation.
-        if self.catalog_demand.load(Ordering::Relaxed)
-            && !self.options.scan_window
-            && cache.is_scoped()
-            && cache.session_catalog_generation().is_none()
-        {
-            let mut inputs = crate::inputs::inputs(&self.options)?;
-            inputs.retain(|input| input.path.ends_with(".jsonl"));
-            inputs.sort_by_cached_key(|input| {
-                std::cmp::Reverse(
-                    fs::metadata(input.full_path(&self.options))
-                        .and_then(|metadata| metadata.modified())
-                        .ok(),
-                )
-            });
-            inputs.truncate(64);
-            if !inputs.is_empty() {
-                let prepared = model::prepare_sources(&self.options, cache, &inputs, now)?;
-                match cache.publish_partial_catalog(&prepared)? {
-                    crate::events::Outcome::Written => {}
-                    _ => {
-                        return Err(io::Error::other(
-                            "initial native catalog publication changed; retry observation",
-                        ));
-                    }
-                }
-                cache.end_scan();
-            }
-        }
-        // The index commits each file's change as it reads it: nothing is
-        // left to save.
         let mut dirty = false;
-        if self.options.facts.is_none() {
-            cache.refresh_reported_runs(&self.options.claude_json, now, &mut dirty);
-        }
         // The files are stamped before the build reads them: a line that
         // lands while it runs is then a change the next check sees, never
         // one that is neither parsed nor noticed. (A file created meanwhile
         // changes its directory's stamp.)
-        let mut snapshot = Snapshot::capture_pids(&self.options, BTreeSet::new(), cache.paths());
+        let mut snapshot =
+            Snapshot::capture_pids(&self.evidence.options, BTreeSet::new(), cache.paths());
         #[cfg(test)]
         self.hooks.building()?;
         let build_started = Instant::now();
-        let built = model::build(&self.options, cache, &mut dirty, &mut work.texts, now)?;
+        let built = model::build(
+            &self.evidence.options,
+            cache,
+            &mut dirty,
+            &mut work.texts,
+            now,
+        )?;
         if build_timing_enabled() {
             let total = u32::try_from(build_started.elapsed().as_millis()).unwrap_or(u32::MAX);
             eprintln!("{}", timing_line(total, &built.timings));
         }
-        if self.options.facts.is_none() {
+        if self.evidence.options.facts.is_none() {
             snapshot.pids = built
                 .pids
                 .iter()
-                .map(|pid| (*pid, proc_start(&self.options.proc_root, *pid)))
+                .map(|pid| (*pid, proc_start(&self.evidence.options.proc_root, *pid)))
                 .collect();
         }
         let model = Arc::new(ModelCache {
@@ -1317,7 +1063,7 @@ impl MachineView {
         {
             return Ok(model);
         }
-        self.refresh_model_locked(&mut lock(&self.work), now)
+        self.refresh_model_locked(&mut lock(&self.evidence.work), now)
     }
 
     /// The V1 tree, rebuilt first if anything changed.
@@ -1325,12 +1071,9 @@ impl MachineView {
         if let Some(tree) = self.shown_tree()
             && !self.changed(&tree.snapshot)
         {
-            if let Some(mut work) = try_lock(&self.work) {
-                self.persist_if_due(&mut work)?;
-            }
             return Ok(tree);
         }
-        self.refresh_tree_locked(&mut lock(&self.work))
+        self.refresh_tree_locked(&mut lock(&self.evidence.work))
     }
 
     /// The model a request answers from. Refreshed on read, it is
@@ -1454,7 +1197,7 @@ impl MachineView {
     /// Demand for the persisted metadata catalog must not synchronously load
     /// all event indices just because this process has no shown model yet.
     pub(crate) fn note_catalog_read(&self) -> io::Result<()> {
-        self.catalog_demand.store(true, Ordering::Relaxed);
+        self.evidence.catalog_demand.store(true, Ordering::Relaxed);
         self.note_read(Kind::Model)
     }
 
@@ -1467,7 +1210,7 @@ impl MachineView {
     fn refresh_first(&self, kind: Kind) -> io::Result<()> {
         #[cfg(test)]
         self.hooks.refreshes_first.fetch_add(1, Ordering::SeqCst);
-        let mut work = lock(&self.work);
+        let mut work = lock(&self.evidence.work);
         // Logs invalidated before this refresh starts, it sees.
         let invalidated = std::mem::take(&mut lock(&self.live.state).invalidated);
         let started = Instant::now();
@@ -1604,7 +1347,7 @@ impl MachineView {
     /// queues the next. The model and the tree are refreshed, and fail,
     /// each on its own.
     fn tick(&self) {
-        let mut work = lock(&self.work);
+        let mut work = lock(&self.evidence.work);
         let started = Instant::now();
         // A stall counts from here, with `work` taken: a warm or a page's
         // fresh check holding it meanwhile isn't this view's build hanging.
@@ -1624,9 +1367,20 @@ impl MachineView {
             .into_iter()
             .filter(|kind| {
                 self.is_shown(*kind)
-                    || (matches!(kind, Kind::Model) && self.catalog_demand.load(Ordering::Relaxed))
+                    || (matches!(kind, Kind::Model)
+                        && self.evidence.catalog_demand.load(Ordering::Relaxed))
             })
-            .map(|kind| (kind, self.refresh_kind(&mut work, kind)))
+            .map(|kind| {
+                let result = if matches!(kind, Kind::Model)
+                    && !self.is_shown(kind)
+                    && !self.evidence.options.scan_window
+                {
+                    self.refresh_catalog_locked(&mut work, model::now_ms())
+                } else {
+                    self.refresh_kind(&mut work, kind)
+                };
+                (kind, result)
+            })
             .collect();
         let built_at = work.built_at;
         drop(work);
@@ -1663,6 +1417,7 @@ impl MachineView {
     /// Stops this view's background checks without waiting: it is no
     /// longer served. [`MachineView::close`] still waits out one running.
     pub(crate) fn retire(&self) {
+        self.evidence.retire();
         Self::stop(&mut lock(&self.live.state));
     }
 
@@ -1671,6 +1426,7 @@ impl MachineView {
     /// read is in progress or starts after, as [`ViewerCore::close`] does:
     /// a read would still build a model it has none of.
     pub(crate) fn close(&self) {
+        self.evidence.retire();
         let mut state = lock(&self.live.state);
         Self::stop(&mut state);
         while state.slot == Slot::Running {
@@ -1682,7 +1438,7 @@ impl MachineView {
         }
         drop(state);
         // A rebuild a read started has finished too.
-        drop(lock(&self.work));
+        drop(lock(&self.evidence.work));
     }
 
     fn tree_json(&self) -> io::Result<String> {
@@ -1975,10 +1731,11 @@ impl MachineView {
         }
         let key = (harness.to_owned(), id.to_owned());
         let known = lock(&self.files).paths.get(&key).cloned();
-        let machine = crate::facts::MachineFacts::of(&self.options);
+        let machine = crate::facts::MachineFacts::of(&self.evidence.options);
         if let Some(path) = known
             && regular(&path)
-            && (harness != "codex" || machine.codex_rollout_is_current(&self.options, &path))
+            && (harness != "codex"
+                || machine.codex_rollout_is_current(&self.evidence.options, &path))
         {
             return Ok(Some(path));
         }
@@ -1997,24 +1754,24 @@ impl MachineView {
         // Listed without the lock: another lookup isn't held up by a walk.
         let mut paths = Vec::new();
         file_list(
-            &self.options.claude_home.join("projects"),
+            &self.evidence.options.claude_home.join("projects"),
             &mut paths,
             "jsonl",
         )?;
         let mut codex_paths = Vec::new();
-        for root in crate::inputs::codex_rollout_dirs(&self.options) {
+        for root in crate::inputs::codex_rollout_dirs(&self.evidence.options) {
             file_list(&root, &mut codex_paths, "jsonl")?;
         }
         paths.extend(
             codex_paths
                 .into_iter()
-                .filter(|path| machine.codex_rollout_is_current(&self.options, path)),
+                .filter(|path| machine.codex_rollout_is_current(&self.evidence.options, path)),
         );
         paths.extend(
-            crate::inputs::inputs(&self.options)?
+            crate::inputs::inputs(&self.evidence.options)?
                 .into_iter()
                 .filter(|input| input.root == crate::inputs::InputRoot::Copilot)
-                .map(|input| input.full_path(&self.options)),
+                .map(|input| input.full_path(&self.evidence.options)),
         );
         self.update_files(paths);
         Ok(lock(&self.files).paths.get(&key).cloned())
@@ -2036,14 +1793,14 @@ impl MachineView {
         &self,
         paths: impl IntoIterator<Item = PathBuf>,
     ) -> (BTreeSet<PathBuf>, BTreeSet<PathBuf>) {
-        let machine = crate::facts::MachineFacts::of(&self.options);
-        let codex_dirs = crate::inputs::codex_rollout_dirs(&self.options);
+        let machine = crate::facts::MachineFacts::of(&self.evidence.options);
+        let codex_dirs = crate::inputs::codex_rollout_dirs(&self.evidence.options);
         let paths: BTreeSet<_> = paths
             .into_iter()
             .filter(|path| path.extension().is_some_and(|ext| ext == "jsonl") && regular(path))
             .filter(|path| {
                 !codex_dirs.iter().any(|root| path.starts_with(root))
-                    || machine.codex_rollout_is_current(&self.options, path)
+                    || machine.codex_rollout_is_current(&self.evidence.options, path)
             })
             .collect();
         let new = paths
@@ -2055,7 +1812,9 @@ impl MachineView {
 
     fn keys_of(&self, new: &BTreeSet<PathBuf>) -> Vec<((String, String), PathBuf)> {
         new.iter()
-            .filter_map(|path| transcript_key(&self.options, path).map(|key| (key, path.clone())))
+            .filter_map(|path| {
+                transcript_key(&self.evidence.options, path).map(|key| (key, path.clone()))
+            })
             .collect()
     }
 
@@ -2244,7 +2003,7 @@ impl MachineView {
         if lock(&self.live.state).closed {
             return Ok(());
         }
-        let mut work = lock(&self.work);
+        let mut work = lock(&self.evidence.work);
         // Logs invalidated before this refresh starts, it sees.
         let invalidated = std::mem::take(&mut lock(&self.live.state).invalidated);
         let model = self.refresh_kind(&mut work, Kind::Model);
@@ -3080,7 +2839,7 @@ mod tests {
             mpsc,
         },
         thread,
-        time::Duration,
+        time::{Duration, UNIX_EPOCH},
     };
 
     use serde_json::json;
@@ -3419,7 +3178,8 @@ mod tests {
                 .to_owned()
         };
         let parsed = || crate::events::PARSED.with(std::cell::Cell::get);
-        let metas = || crate::model::META_READS.with(std::cell::Cell::get);
+        let metas = || crate::events::CLAUDE_SIDECAR_READS.with(std::cell::Cell::get);
+        let headers = || crate::events::CODEX_HEADER_READS.with(std::cell::Cell::get);
         let marks =
             |routed: &Routed| serde_json::from_slice::<Value>(&routed.2).unwrap()["tx"].clone();
         let append = |path: &Path, line: Value| {
@@ -3433,7 +3193,7 @@ mod tests {
         );
         assert_eq!(first.0, 200);
         let v1 = version(&first);
-        let (lines, reads) = (parsed(), metas());
+        let (lines, reads, header_reads) = (parsed(), metas(), headers());
         for _ in 0..3 {
             let poll = viewer.model(&format!("since={v1}"), None).unwrap();
             assert_eq!(poll.0, 304);
@@ -3441,8 +3201,8 @@ mod tests {
             assert_eq!(poll.3, Some(format!("\"{v1}\"")));
         }
         assert_eq!(
-            (parsed(), metas()),
-            (lines, reads),
+            (parsed(), metas(), headers()),
+            (lines, reads, header_reads),
             "idle polls parse nothing"
         );
 
@@ -3463,6 +3223,11 @@ mod tests {
         assert_eq!(changed.3, Some(format!("\"{v2}\"")));
         assert_eq!(parsed(), lines + 1, "only the appended line is parsed");
         assert_eq!(metas(), reads, "no unchanged file's metadata is read again");
+        assert_eq!(
+            headers(),
+            header_reads,
+            "unchanged Codex headers stay indexed"
+        );
         // Only the grown transcript's mark moves: the page tails only it.
         let marks2 = marks(&changed);
         assert_ne!(marks2["lane"], marks1["lane"]);
@@ -3488,8 +3253,8 @@ mod tests {
         assert_eq!(parsed(), lines + 2);
         assert_eq!(viewer.model(&format!("since={v3}"), None).unwrap().0, 304);
 
-        // A Codex file that grows keeps its session_meta: its line is parsed,
-        // its metadata isn't read again.
+        // Codex growth parses only the new event and binds its first-record
+        // header to the new ledger, with a final raw-header recheck.
         append(
             &codex,
             json!({"type":"response_item","timestamp":"2026-09-24T00:06:00Z",
@@ -3501,8 +3266,9 @@ mod tests {
         assert_eq!(
             metas(),
             reads,
-            "a Codex file that grew keeps its session_meta"
+            "a Codex file that grew does not reread unchanged Claude sidecars"
         );
+        assert_eq!(headers(), header_reads + 2);
         // A subagent's .meta.json that changes is read again, and only it.
         fs::write(
             &meta,
@@ -3514,6 +3280,7 @@ mod tests {
             .unwrap();
         assert_eq!(renamed.0, 200);
         assert_eq!(metas(), reads + 1, "only the changed .meta.json is read");
+        assert_eq!(headers(), header_reads + 2);
         assert_eq!(parsed(), lines + 3);
     }
 
@@ -6979,6 +6746,41 @@ mod tests {
     }
 
     #[test]
+    fn catalog_demand_refreshes_sources_without_showing_a_compatibility_model() {
+        let fixture = lane_fixture();
+        let pool = RefreshPool::new(1);
+        let view = pooled(&fixture, Refresh::Background, &pool);
+        view.note_catalog_read().unwrap();
+        let generation = || {
+            let reply = crate::session_catalog_page(&fixture.options, "fixture", "limit=60");
+            let body: Value = serde_json::from_slice(&reply.body).ok()?;
+            (reply.status == 200 && body["completeness"]["state"] == "complete")
+                .then(|| body["generation"].clone())
+        };
+        let before = eventually("catalog-only complete observation", generation);
+        assert!(view.shown_model().is_none());
+        say(&fixture, "lane", 1, "catalog-only append");
+        view.invalidate();
+        view.note_catalog_read().unwrap();
+        eventually("catalog-only appended generation", || {
+            generation().filter(|next| next != &before)
+        });
+        let reply = crate::session_transcript_range(
+            &fixture.options,
+            "fixture",
+            "sid=lane&after=0&limit=100",
+            None,
+        );
+        assert_eq!(reply.status, 200);
+        assert!(String::from_utf8_lossy(&reply.body).contains("catalog-only append"));
+        assert!(view.shown_model().is_none());
+        // Explicit legacy reads remain supported until their consumers migrate.
+        assert_eq!(view.respond("GET", "/api/model", "", None).status, 200);
+        assert!(view.shown_model().is_some());
+        view.close();
+    }
+
+    #[test]
     fn initial_catalog_page_precedes_global_native_observation() {
         for unrelated in [0, 256, 2048] {
             let fixture = Fixture::new();
@@ -6998,7 +6800,7 @@ mod tests {
                     .unwrap();
             }
             let view = MachineView::new(fixture.options.clone());
-            view.catalog_demand.store(true, Ordering::Relaxed);
+            view.evidence.catalog_demand.store(true, Ordering::Relaxed);
             let options = fixture.options.clone();
             let start = Instant::now();
             *lock(&view.hooks.building) = Some(Arc::new(move || {

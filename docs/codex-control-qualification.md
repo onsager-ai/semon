@@ -78,7 +78,7 @@ state must be new and private. Managed native configuration is not qualified.
 npm install --prefix /path/to/native @openai/codex@0.160.0
 python3 -m venv /path/to/probe-venv
 /path/to/probe-venv/bin/pip install -r tests/spikes/requirements-control.txt
-cargo build --locked -p semon-store
+cargo build --locked -p semon-cli
 npm --prefix tests/ui ci
 npm --prefix tests/ui exec -- playwright install chromium
 

@@ -36,7 +36,7 @@ with mismatch thresholds and all other baseline entries preserved. Strict
 transcript/topbar/menu regions are compared separately. No aggregate CI result or
 measured usability gain is inferred from these checks.
 
-Build with `cargo build --locked -p semon-store --bin semon --features
+Build with `cargo build --locked -p semon-cli --bin semon --features
 semon-sessions/test-clock`. Generate a synthetic fixture with
 `node tests/ui/fixture.mjs /tmp/semon-ui-sample`, set `SEMON_TEST_NOW` to its printed
 clock, and serve with the existing fixture paths documented in

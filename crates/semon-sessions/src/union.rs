@@ -23,7 +23,7 @@ use serde_json::{Map, Value, json};
 
 use crate::{
     Options, analytics,
-    model::{self, Built, MODEL_API, fnv},
+    model::{self, Built, MODEL_API, QueryData, Session, Transcript, fnv},
     received::{Listing, ReceivedMachines},
     refresh::RefreshPool,
     viewer::{
@@ -522,28 +522,14 @@ pub(crate) enum Owner {
     Conflict,
 }
 
-/// One machine's part of what a core serves: its model, and the machine id
-/// its machine-local ids are served under (`None` with one machine, where
-/// no id is renamed).
-pub(crate) struct Served {
-    pub(crate) built: Arc<Built>,
-    pub(crate) machine: Option<String>,
-}
-
-impl Served {
-    /// The id the core serves this machine's session `id` under.
-    pub(crate) fn served(&self, id: &str) -> String {
-        match &self.machine {
-            Some(machine) if machine_local(&self.built, id) => format!("{id}@{machine}"),
-            _ => id.to_owned(),
-        }
-    }
-}
-
 /// Whether `id` is a stand-in only its own machine knows: a stub for the
 /// far end of a handoff, or an unsent send's.
 fn machine_local(built: &Built, id: &str) -> bool {
-    id.starts_with("unsent:") || built.sessions.get(id).is_some_and(|session| session.stub)
+    session_local(&built.sessions, id)
+}
+
+fn session_local(sessions: &BTreeMap<String, Session>, id: &str) -> bool {
+    id.starts_with("unsent:") || sessions.get(id).is_some_and(|session| session.stub)
 }
 
 /// A machine's id in the union: its hostname, or, when an earlier machine
@@ -565,18 +551,51 @@ fn machine_id(hostname: &str, key: &str, index: usize, taken: &[String]) -> Stri
 /// The union's plan. Machines from `droppable` on (the received ones) lose
 /// an id an earlier machine has: it is left out of theirs, not refused.
 fn plan(parts: &[(&str, &Built)], droppable: usize) -> Plan {
+    let identities: Vec<_> = parts
+        .iter()
+        .map(|(key, built)| IdentityPart {
+            key,
+            machine: &built.machine_id,
+            sessions: &built.sessions,
+            transcripts: &built.tx,
+        })
+        .collect();
+    let mut plan = identity_plan(&identities, droppable);
+    let joined: String = parts
+        .iter()
+        .zip(&plan.machine_ids)
+        .map(|((_, built), id)| format!("{id}={};", built.version))
+        .collect();
+    plan.version = format!("u{:016x}", fnv(&joined));
+    plan
+}
+
+/// Ownership and presentation identity are native semantics, shared by query
+/// evidence and compatibility transport. A version hash belongs only to the latter.
+struct IdentityPart<'a> {
+    key: &'a str,
+    machine: &'a str,
+    sessions: &'a BTreeMap<String, Session>,
+    transcripts: &'a BTreeMap<String, Arc<Transcript>>,
+}
+
+fn identity_plan(parts: &[IdentityPart<'_>], droppable: usize) -> Plan {
     let mut machine_ids: Vec<String> = Vec::new();
-    for (index, (key, built)) in parts.iter().enumerate() {
-        let id = machine_id(&built.machine_id, key, index, &machine_ids);
+    for (index, part) in parts.iter().enumerate() {
+        let id = machine_id(part.machine, part.key, index, &machine_ids);
         machine_ids.push(id);
     }
     let mut owners: BTreeMap<String, (usize, String)> = BTreeMap::new();
     let mut conflicts = BTreeSet::new();
     let mut dropped = vec![BTreeSet::new(); parts.len()];
-    for (index, (_, built)) in parts.iter().enumerate() {
-        let ids: BTreeSet<&String> = built.sessions.keys().chain(built.tx.keys()).collect();
+    for (index, part) in parts.iter().enumerate() {
+        let ids: BTreeSet<&String> = part
+            .sessions
+            .keys()
+            .chain(part.transcripts.keys())
+            .collect();
         for id in ids {
-            let served = if machine_local(built, id) {
+            let served = if session_local(part.sessions, id) {
                 format!("{id}@{}", machine_ids[index])
             } else {
                 id.clone()
@@ -588,18 +607,83 @@ fn plan(parts: &[(&str, &Built)], droppable: usize) -> Plan {
             }
         }
     }
-    let joined: String = parts
-        .iter()
-        .zip(&machine_ids)
-        .map(|((_, built), id)| format!("{id}={};", built.version))
-        .collect();
     Plan {
         machine_ids,
         owners,
         conflicts,
         dropped,
         droppable,
-        version: format!("u{:016x}", fnv(&joined)),
+        version: String::new(),
+    }
+}
+
+/// One call's native query snapshots. Window, identity, summaries and transcript
+/// offsets all belong to these exact source generations, rather than separate reads.
+pub(crate) struct QueryRead {
+    pub(crate) parts: Vec<QueryPart>,
+    plan: Plan,
+}
+
+pub(crate) struct QueryPart {
+    pub(crate) data: Arc<QueryData>,
+    pub(crate) machine: Option<String>,
+    pub(crate) dropped: BTreeSet<String>,
+    pub(crate) droppable: bool,
+}
+
+impl QueryPart {
+    pub(crate) fn served(&self, id: &str) -> String {
+        match &self.machine {
+            Some(machine) if session_local(&self.data.sessions, id) => format!("{id}@{machine}"),
+            _ => id.to_owned(),
+        }
+    }
+}
+
+impl QueryRead {
+    pub(crate) fn new(machines: Vec<(String, Arc<QueryData>)>, droppable: usize) -> Self {
+        let identities: Vec<_> = machines
+            .iter()
+            .map(|(key, data)| IdentityPart {
+                key,
+                machine: &data.machine_id,
+                sessions: &data.sessions,
+                transcripts: &data.tx,
+            })
+            .collect();
+        let plan = identity_plan(&identities, droppable);
+        let multiple = machines.len() > 1;
+        let parts = machines
+            .into_iter()
+            .enumerate()
+            .map(|(index, (_, data))| QueryPart {
+                data,
+                machine: multiple.then(|| plan.machine_ids[index].clone()),
+                dropped: plan.dropped[index].clone(),
+                droppable: multiple && index >= plan.droppable,
+            })
+            .collect();
+        Self { parts, plan }
+    }
+
+    pub(crate) fn owner(&self, id: &str) -> Owner {
+        match self.parts.len() {
+            0 => Owner::Missing,
+            1 => Owner::At(0, id.to_owned()),
+            _ if self.plan.conflicts.contains(id) => Owner::Conflict,
+            _ => match self.plan.owners.get(id) {
+                Some((index, own)) => Owner::At(*index, own.clone()),
+                None => Owner::Missing,
+            },
+        }
+    }
+
+    pub(crate) fn conflicts(&self) -> BTreeSet<String> {
+        if self.parts.len() > 1 {
+            self.plan.conflicts.clone()
+        } else {
+            BTreeSet::new()
+        }
     }
 }
 
@@ -862,14 +946,16 @@ impl ViewerCore {
     /// order is kept: the first machine is the model's `machine`. With one
     /// machine this is [`ViewerCore::new`], byte for byte.
     pub fn with_machines(machines: Vec<(String, Options)>) -> Self {
-        let views = Arc::new(
-            machines
-                .into_iter()
-                .map(|(key, options)| (key, MachineView::new(options)))
-                .collect::<Views>(),
-        );
-        let inventory = Self::configured_source_inventory(&views);
-        Self {
+        Self::from_sources(Arc::new(crate::SessionSources::with_machines(machines)))
+    }
+
+    /// Attach the remaining Viewer consumers to admitted native sources. Their
+    /// complete source index and query cohort stay with the existing owner.
+    /// The host closes this Viewer before draining sources or removing custody.
+    pub fn from_sources(sources: Arc<crate::SessionSources>) -> Self {
+        let views = Arc::new(sources.machine_views());
+        let inventory = sources.inventory.clone();
+        let core = Self {
             views: RwLock::new(views.clone()),
             source_inventory: Mutex::new(Some((Arc::downgrade(&views), inventory))),
             received: None,
@@ -881,7 +967,11 @@ impl ViewerCore {
             analytics: Mutex::default(),
             model_history: Mutex::default(),
             ownership: Mutex::default(),
+        };
+        if sources.is_retired() {
+            core.close();
         }
+        core
     }
 
     /// A core over `machines` (as [`ViewerCore::with_machines`], possibly
@@ -1644,44 +1734,6 @@ impl ViewerCore {
         }
     }
 
-    /// The machine that answers for session `sid`, under the caller's
-    /// refresh policy.
-    pub(crate) fn owner(&self, sid: &str, read: Reading) -> io::Result<Owner> {
-        self.follow();
-        self.owner_in(&self.views(), sid, read)
-    }
-
-    /// Machine `index`'s model, under the caller's refresh policy.
-    pub(crate) fn built_at(&self, index: usize, read: Reading) -> io::Result<Arc<Built>> {
-        self.follow();
-        self.views()
-            .get(index)
-            .ok_or(io::ErrorKind::NotFound)?
-            .1
-            .built(read)
-    }
-
-    /// The model `/api/model` serves (without an admin link) at `now`, or
-    /// the ids two machines both claim.
-    pub(crate) fn model_at(
-        &self,
-        now: i64,
-        read: Reading,
-    ) -> io::Result<Result<String, Vec<String>>> {
-        self.follow();
-        let views = self.views();
-        match views.len() {
-            0 => Ok(Ok(
-                serde_json::json!({"sessions":{}, "turns":[], "handoffs":[]}).to_string(),
-            )),
-            1 => Ok(Ok(views[0].1.built(read)?.json(now))),
-            _ => {
-                let (models, plan) = self.refresh_at(&views, read)?;
-                Ok(union_json(&parts(&views, &models), &plan, now))
-            }
-        }
-    }
-
     /// The caller-supplied machine key that owns a served session. Hostnames
     /// are presentation labels; embedders use this key to bind native controls.
     /// Missing or ambiguous native IDs never select a writable destination.
@@ -1705,31 +1757,6 @@ impl ViewerCore {
             .owners
             .get(id)
             .map(|(index, _)| (views[*index].0.clone(), plan.machine_ids[*index].clone())))
-    }
-
-    /// Every machine's model, under the caller's refresh policy, with how the core serves
-    /// its session ids.
-    pub(crate) fn served(&self, read: Reading) -> io::Result<Vec<Served>> {
-        self.follow();
-        let views = self.views();
-        let (models, machine_ids) = if views.len() > 1 {
-            let (models, plan) = self.refresh_at(&views, read)?;
-            (models, plan.machine_ids.clone())
-        } else {
-            let models = views
-                .iter()
-                .map(|(_, view)| view.built(read))
-                .collect::<io::Result<Vec<_>>>()?;
-            (models, Vec::new())
-        };
-        Ok(models
-            .into_iter()
-            .enumerate()
-            .map(|(index, built)| Served {
-                built,
-                machine: machine_ids.get(index).cloned(),
-            })
-            .collect())
     }
 
     /// The V1 routes that name a transcript by harness and id: the machine

@@ -53,6 +53,7 @@ pub(crate) fn capture(
     offset: u64,
     block: u32,
     recipe: &Recipe,
+    records: Option<&crate::query_source::Records<'_>>,
 ) -> Option<NativeField> {
     let (offset, block, kind) = match recipe {
         Recipe::U | Recipe::A | Recipe::Think => (offset, block, NativeFieldKind::Text),
@@ -66,7 +67,7 @@ pub(crate) fn capture(
     if block > 1024 {
         return None;
     }
-    let bytes = read_source_record(source, offset)?;
+    let bytes = read_source_record(source, offset, records)?;
     let value = crate::tx::parse_native_record(&bytes)?;
     let mut kind = kind;
     let mut layers = 1;
@@ -185,7 +186,14 @@ pub(crate) fn capture(
 pub(crate) fn read_source_record(
     source: &crate::model::summary::CatalogSource,
     offset: u64,
+    records: Option<&crate::query_source::Records<'_>>,
 ) -> Option<Vec<u8>> {
+    if let Some(records) = records {
+        return records
+            .record_bytes(&source.path, offset, PRODUCER_RECORD_MAX)
+            .ok()
+            .flatten();
+    }
     let remaining = source.offset.checked_sub(offset)?;
     if remaining == 0 {
         return None;

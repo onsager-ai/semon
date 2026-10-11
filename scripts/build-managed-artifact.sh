@@ -6,7 +6,7 @@ mkdir -p "$out"
 out=$(cd "$out" && pwd)
 stage=$(mktemp -d)
 trap 'rm -rf "$stage"' EXIT HUP INT TERM
-cargo build --locked --release -p semon-control --bin semon-guest -p semon-store --bin semon
+cargo build --locked --release -p semon-control --bin semon-guest -p semon-cli --bin semon
 cp scripts/managed-codex/package.json scripts/managed-codex/package-lock.json "$stage/"
 npm --prefix "$stage" ci --ignore-scripts --no-audit --no-fund
 cp -a "$stage/node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl" "$stage/codex"

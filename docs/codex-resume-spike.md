@@ -20,27 +20,7 @@ The created rollout advertises `history_mode: "paginated"`. Nevertheless, rollou
 
 The restored thread has the same ID. Existing SQLite state can make an otherwise valid restored rollout harder to discover when its recorded absolute location is stale. Restore should not copy whole state databases over a target's existing databases or claim that verbatim backups are portable. The tested writer lock is an advisory OS lock held by another process, not merely the existence of a `.lock` file.
 
-This supports designing the rollout-only relay path for the tested CLI version, with an explicit writer-lock check and a discovery plan for an existing target state index. It does not establish sufficiency for arbitrary Codex threads: compaction, long paginated history, attachments, pending tools, subagents, rewritten rollouts, non-Linux lock implementations, and older CLI versions remain untested. In particular, #10 describes version 0.156.1; these results apply to 0.159.0-alpha.3. Replaying earlier turns into a synthetic provider proves the CLI supplied those turns, not that a production model/provider will recover every kind of session. The M5b relay implementation and its rollout/state discovery policy remain a separate checkpoint.
+This informs a future verified rollout recovery artifact for the tested CLI version, with an explicit writer-lock check and a discovery plan for an existing target state index. Independent recovery is tracked in [#255](https://github.com/onsager-ai/semon/issues/255); current product builds remove the Relay protocol. It does not establish sufficiency for arbitrary Codex threads: compaction, long paginated history, attachments, pending tools, subagents, rewritten rollouts, non-Linux lock implementations, and older CLI versions remain untested. In particular, #10 describes version 0.156.1; these results apply to 0.159.0-alpha.3. Replaying earlier turns into a synthetic provider proves the CLI supplied those turns, not that a production model/provider will recover every kind of session. The historical M5b implementation below does not satisfy that independent recovery contract.
 
-## M5b rollout relay
-
-Codex rollouts can now be selected explicitly:
-
-```sh
-semon-relay send --once --codex-sessions /chosen/.codex/sessions
-semon-relay send --follow --projects /chosen/.claude/projects --codex-sessions /chosen/.codex/sessions
-```
-
-`--all` selects the default Claude projects root and, when present, `CODEX_HOME/sessions` (or `~/.codex/sessions`). Sending without any root selector is still rejected. Session filters apply across both roots. Discovery reads only regular rollout JSONL files in valid `YYYY/MM/DD` directories; the first record must be `session_meta` and its ID must match the filename suffix. Symlinks, SQLite databases and other sidecars are excluded. Duplicate stream identities are rejected. A rollout is keyed by its ID and `codex/YYYY/MM/DD/rollout-…jsonl`; the existing generation mechanism handles same-path rewrites.
-
-Restore to a chosen home, preferably a fresh one:
-
-```sh
-semon-relay restore --harness codex --session THREAD_ID --cwd /chosen/worktree --codex-sessions /chosen/recovery-home/sessions
-```
-
-The target must be `CODEX_HOME/sessions`. The report prints a shell-quoted next step with that exact `CODEX_HOME`, recorded working directory/git branch, and unresolved function/custom tool calls. Restore preserves the original date-relative filename and rollout bytes, uses the existing verified-prefix/non-overwrite rule, and applies the same encryption, lease takeover and fencing protocol as Claude restore. Mixed harness streams, multiple rollout paths for one restored session, invalid metadata IDs, unsafe paths and symlink destinations are refused.
-
-Restore acquires the target home's `thread-writer-locks/<thread>.lock` with a nonblocking exclusive OS lock before fetching/installing content and holds it until takeover completes. It refuses an active writer even with `--force`; force concerns the relay lease, not local file ownership. Linux `flock` interoperability is covered by the synthetic Rust round-trip test. SQLite databases in the target are neither copied nor modified. An existing Codex thread index can still point to an older rollout location; this implementation does not repair that index, which is why a fresh target home is recommended.
-
-The compatibility claim remains the M5a measurement above: synthetic minimal rollout-only resume with CLI 0.159.0-alpha.3. The relay tests additionally cover plaintext/encrypted transport, writer exclusion, rewrite generations, metadata reporting, date-path recovery and live SQLite byte preservation; they do not broaden the set of proven resumable Codex histories.
+The experimental M5b Encrypted Relay transport is retired. Independent runtime
+recovery (#255) is future work and does not gate the native session foundation.

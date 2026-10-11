@@ -1,18 +1,18 @@
 # Semon
 
-Local-first, carrier-neutral agent memory, capture, relay and session tooling.
-The former OTLP/Collector/ClickHouse pipeline is intentionally gone.
+Harness-native session collection, synchronization, browsing, queries and runtime
+integration, forming the foundation for Session Intelligence. Encrypted Relay
+and Canonical Trace Store are retired pre-release experiments. Their historical
+migration/export compatibility is outside product scope. Code retirement never
+authorizes deletion of user data or live operational cleanup.
 
 ## Repository invariants
 
-- Transferable trace semantics and raw forensic records are separate regions.
-  Ordinary trace reads cannot expose raw bytes or their carrier labels.
-- Preserve canonical identity and occurrence/provenance semantics. An identity
+- Preserve native session identity, lineage and provenance semantics. An identity
   change must update the relevant fixtures and documented contract together.
-- Preserve documented forensic permissions, exposure and retention. Full raw
-  records may contain credentials. Deletion remains an explicit operator action;
-  do not introduce automatic pruning or maximal deletion defaults.
-- Preserve golden capture/adapter behavior for Claude and Codex inputs.
+- Native logs and archives may contain private data. Preserve source integrity,
+  authorization and custody; deletion remains an explicit operator action.
+- Preserve native session/control parser behavior and sanitized harness fixtures.
 - Vendored tiny_http remains governed by vendor/tiny_http/SEMON-PATCH.md.
 - Viewer UI sources live in ui/src/; generated bundles embedded by Rust are
   produced by ui/build.mjs. Edit sources and regenerate; do not hand-edit bundles.
@@ -28,7 +28,6 @@ cargo clippy --all-targets --locked -- --no-deps -D warnings
 cargo test --locked
 ```
 
-Installer changes also require `sh -n scripts/install-user-timer.sh`.
 Viewer changes require applicable fixture/browser suites and reviewed pixel
 baselines. Do not loosen existing thresholds or remove required checks.
 Use Node 22+ and the foundation lane's locked tooling: `npm --prefix ui ci
@@ -38,9 +37,8 @@ The Rust and UI workflow files supply exact CI setup and aggregate semantics.
 
 ## Conditional reading and workflows
 
-- Storage/identity: docs/design/carrier-neutral-trace-storage.md,
-  docs/design/trace-identity-and-occurrences.md.
-- Forensic access/retention: docs/design/forensic-retention-and-exposure.md.
+- Native storage/identity: docs/design/session-source-reader.md and
+  docs/design/retained-native-projections.md.
 - Harness changes: the affected adapter's fixtures and harness-compatibility skill.
 - Viewer changes: ui/README.md, docs/design/viewer-ownership.md,
   docs/design/design-contract.md,
@@ -50,7 +48,7 @@ The Rust and UI workflow files supply exact CI setup and aggregate semantics.
   User-level Stitch/pen.dev tooling is optional; keep vendor skills and credentials
   outside the checkout and preserve the existing visual/implementation contract.
 - Relay/protocol changes: docs/mirror-protocol.md and
-  docs/encrypted-remote-sessions.md.
+  docs/design/session-foundation-retirement.md.
 
 Pass an exact ref or isolated checkout path when delegating.
 

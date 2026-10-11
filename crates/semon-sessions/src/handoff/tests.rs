@@ -1,9 +1,8 @@
 use super::*;
+use crate::{Options, events, query_source};
 use serde_json::json;
-use std::{
-    io::Write,
-    sync::atomic::{AtomicU64, Ordering},
-};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::{fs, path::PathBuf};
 
 static NEXT: AtomicU64 = AtomicU64::new(0);
 
@@ -23,6 +22,67 @@ impl Home {
         fs::write(&path, text).unwrap();
         path
     }
+    fn options(&self) -> Options {
+        Options {
+            claude_home: self.0.clone(),
+            claude_json: self.0.join("settings.json"),
+            codex_home: self.0.join("codex"),
+            copilot_home: self.0.join("copilot"),
+            proc_root: self.0.join("proc"),
+            cache: self.0.join("index.json"),
+            all: true,
+            ..Options::default()
+        }
+    }
+
+    fn find(
+        &self,
+        paths: &[PathBuf],
+        prompt: &str,
+        cwd: Option<&str>,
+        start: Option<i64>,
+    ) -> Option<ToolCall> {
+        let options = self.options();
+        let mut cache = events::EventCache::open_scoped(&options.cache).unwrap();
+        let mut indexed = Vec::new();
+        for path in paths {
+            let index = events::scan_file(path, "claude", &mut cache, &mut false).unwrap();
+            let source = cache.source(path, "parent").unwrap();
+            indexed.push((path, index, source));
+        }
+        let sources = query_source::Sources::capture_native(
+            &options,
+            indexed
+                .iter()
+                .map(|(_, index, source)| (source.clone(), index.source_chunks.clone())),
+        )
+        .unwrap();
+        let records = sources.reader();
+        records.verify_all().unwrap();
+        let mut matcher = Matcher::new(prompt, cwd, start);
+        let mut selected = None;
+        'parents: for (path, index, _) in &indexed {
+            for location in index.handoff_index.as_ref().unwrap().calls() {
+                if let Some(tool) = matcher.consider(&records.launch(path, location).unwrap()) {
+                    selected = Some(tool);
+                    break 'parents;
+                }
+            }
+        }
+        records.finish().unwrap();
+        selected.or_else(|| matcher.finish())
+    }
+
+    fn count(&self, path: &Path) -> usize {
+        let mut cache = events::EventCache::open_scoped(&self.options().cache).unwrap();
+        events::scan_file(path, "claude", &mut cache, &mut false)
+            .unwrap()
+            .handoff_index
+            .as_ref()
+            .unwrap()
+            .calls()
+            .len()
+    }
 }
 impl Drop for Home {
     fn drop(&mut self) {
@@ -38,117 +98,6 @@ fn call(id: &str, command: &str) -> String {
 }
 
 #[test]
-fn unchanged_and_appended_scans_parse_only_complete_candidate_lines() {
-    let home = Home::new();
-    let first = call("first", "codex exec -C /work/foo");
-    let second = call("second", "codex exec -C /work/bar");
-    let split = second.len() / 2;
-    let initial = format!("not JSON, no launch marker\n{first}{}", &second[..split]);
-    let path = home.file("parent", &initial);
-    let mut cache = ScanCache::default();
-    let bytes = BYTES.with(|count| count.get());
-    let parses = PARSES.with(|count| count.get());
-    let parent = cache.parent(&path).unwrap();
-    assert_eq!(parent.calls.len(), 1);
-    assert_eq!(parent.partial, &second.as_bytes()[..split]);
-    assert_eq!(
-        BYTES.with(|count| count.get()) - bytes,
-        initial.len() as u64
-    );
-    assert_eq!(PARSES.with(|count| count.get()) - parses, 1);
-    cache.parent(&path).unwrap();
-    assert_eq!(
-        BYTES.with(|count| count.get()) - bytes,
-        initial.len() as u64
-    );
-    assert_eq!(PARSES.with(|count| count.get()) - parses, 1);
-    let appended = format!("{}unrelated invalid JSON\n", &second[split..]);
-    fs::OpenOptions::new()
-        .append(true)
-        .open(&path)
-        .unwrap()
-        .write_all(appended.as_bytes())
-        .unwrap();
-    let parent = cache.parent(&path).unwrap();
-    assert_eq!(parent.calls.len(), 2);
-    assert!(parent.partial.is_empty());
-    assert_eq!(parent.offset, (initial.len() + appended.len()) as u64);
-    assert_eq!(BYTES.with(|count| count.get()) - bytes, parent.offset);
-    assert_eq!(PARSES.with(|count| count.get()) - parses, 2);
-}
-
-#[test]
-fn cache_caps_are_invariants_and_evict_lru_parents_and_oldest_calls() {
-    let home = Home::new();
-    let mut cache = ScanCache::default();
-    let paths: Vec<_> = (0..MAX_PARENTS)
-        .map(|index| home.file(&format!("parent-{index}"), ""))
-        .collect();
-    for path in &paths {
-        cache.parent(path).unwrap();
-        assert!(cache.parents.len() <= MAX_PARENTS);
-    }
-    cache.parent(&paths[0]).unwrap();
-    let extra = home.file("extra", "");
-    cache.parent(&extra).unwrap();
-    assert_eq!(cache.parents.len(), MAX_PARENTS);
-    assert!(cache.parents.contains_key(&paths[0]));
-    assert!(!cache.parents.contains_key(&paths[1]));
-    assert!(cache.parents.contains_key(&extra));
-    let records: String = (0..MAX_CALLS + 7)
-        .map(|index| call(&index.to_string(), "codex exec"))
-        .collect();
-    let path = home.file("calls", &records);
-    let parent = cache.parent(&path).unwrap();
-    assert_eq!(parent.calls.len(), MAX_CALLS);
-    assert_eq!(parent.calls.front().unwrap().tool.id, "7");
-    assert_eq!(
-        parent.calls.back().unwrap().tool.id,
-        (MAX_CALLS + 6).to_string()
-    );
-    fs::OpenOptions::new()
-        .append(true)
-        .open(&path)
-        .unwrap()
-        .write_all(call("newest", "codex exec").as_bytes())
-        .unwrap();
-    let parent = cache.parent(&path).unwrap();
-    assert_eq!(parent.calls.len(), MAX_CALLS);
-    assert_eq!(parent.calls.front().unwrap().tool.id, "8");
-    assert_eq!(parent.calls.back().unwrap().tool.id, "newest");
-    assert!(cache.parents.len() <= MAX_PARENTS);
-}
-
-#[test]
-fn changed_same_size_truncated_and_replaced_parents_reset_the_scan() {
-    let home = Home::new();
-    let path = home.file("parent", &call("old", "codex exec"));
-    let mut cache = ScanCache::default();
-    cache.parent(&path).unwrap();
-    let old_stamp = cache.parents[&path].stamp;
-    fs::write(&path, call("new", "codex exec")).unwrap();
-    fs::File::open(&path)
-        .unwrap()
-        .set_times(
-            fs::FileTimes::new()
-                .set_modified(old_stamp.modified.unwrap() + std::time::Duration::from_secs(1)),
-        )
-        .unwrap();
-    assert_eq!(
-        cache.parent(&path).unwrap().calls.front().unwrap().tool.id,
-        "new"
-    );
-    fs::write(&path, "").unwrap();
-    assert!(cache.parent(&path).unwrap().calls.is_empty());
-    let replacement = home.file("replacement", &call("replacement", "codex exec"));
-    fs::rename(replacement, &path).unwrap();
-    assert_eq!(
-        cache.parent(&path).unwrap().calls.front().unwrap().tool.id,
-        "replacement"
-    );
-}
-
-#[test]
 fn literal_priority_clock_skew_and_path_segments() {
     let home = Home::new();
     let path = home.file(
@@ -156,51 +105,46 @@ fn literal_priority_clock_skew_and_path_segments() {
         &(call("literal", "codex exec < /tmp/p.md")
             + &call("cwd", "codex exec -C /work/semon-wt-foo")),
     );
-    let mut cache = ScanCache::default();
     let start = events::parse_ms("2026-09-23T23:59:58Z").unwrap();
     assert_eq!(
-        cache
-            .find(
-                std::slice::from_ref(&path),
-                "/tmp/p.md",
-                Some("/work/semon-wt-foo"),
-                Some(start - 1)
-            )
-            .unwrap()
-            .id,
+        home.find(
+            std::slice::from_ref(&path),
+            "/tmp/p.md",
+            Some("/work/semon-wt-foo"),
+            Some(start - 1)
+        )
+        .unwrap()
+        .id,
         "literal"
     );
     assert_eq!(
-        cache
-            .find(
-                std::slice::from_ref(&path),
-                "/tmp/absent.md",
-                Some("/work/semon-wt-foo"),
-                Some(start)
-            )
-            .unwrap()
-            .id,
+        home.find(
+            std::slice::from_ref(&path),
+            "/tmp/absent.md",
+            Some("/work/semon-wt-foo"),
+            Some(start)
+        )
+        .unwrap()
+        .id,
         "cwd"
     );
     assert!(
-        cache
-            .find(
-                std::slice::from_ref(&path),
-                "/tmp/absent.md",
-                Some("/work/semon-wt-foo"),
-                Some(start - 1)
-            )
-            .is_none()
+        home.find(
+            std::slice::from_ref(&path),
+            "/tmp/absent.md",
+            Some("/work/semon-wt-foo"),
+            Some(start - 1)
+        )
+        .is_none()
     );
     assert!(
-        cache
-            .find(
-                std::slice::from_ref(&path),
-                "/tmp/absent.md",
-                Some("/work/semon-wt-foo"),
-                None
-            )
-            .is_none()
+        home.find(
+            std::slice::from_ref(&path),
+            "/tmp/absent.md",
+            Some("/work/semon-wt-foo"),
+            None
+        )
+        .is_none()
     );
     assert!(matches_cwd(
         "codex exec -C 'semon-wt-foo'",
@@ -228,23 +172,21 @@ fn literal_match_in_another_file_beats_cwd_and_only_launch_tools_are_candidates(
         {"type":"tool_use","id":"ignored","name":"Read","input":{"path":"/tmp/p.md","note":"Semon-Handoff"}},
         {"type":"tool_use","id":"skill","name":"Skill","input":{"args":"Semon-Handoff: /tmp/p.md"}}
     ]}})));
-    let mut cache = ScanCache::default();
     let start = events::parse_ms("2026-09-24T00:00:08Z").unwrap();
     assert_eq!(
-        cache
-            .find(
-                &[cwd, literal.clone()],
-                "/tmp/p.md",
-                Some("/work/foo"),
-                Some(start)
-            )
-            .unwrap(),
+        home.find(
+            &[cwd, literal.clone()],
+            "/tmp/p.md",
+            Some("/work/foo"),
+            Some(start)
+        )
+        .unwrap(),
         ToolCall {
             id: "skill".into(),
             name: "Skill".into()
         }
     );
-    assert_eq!(cache.parent(&literal).unwrap().calls.len(), 1);
+    assert_eq!(home.count(&literal), 1);
 }
 
 #[test]
@@ -260,49 +202,44 @@ fn prompt_names_override_ambiguous_worktrees_and_generic_cwds_do_not_link() {
             "P=$S/codex-two-prompt.md; codex -C /work/repo exec - < $P",
         )),
     );
-    let mut cache = ScanCache::default();
     let start = events::parse_ms("2026-09-24T00:00:01Z").unwrap();
     assert_eq!(
-        cache
-            .find(
-                std::slice::from_ref(&path),
-                "/tmp/codex-one-prompt.md",
-                Some("/work/repo"),
-                Some(start)
-            )
-            .unwrap()
-            .id,
+        home.find(
+            std::slice::from_ref(&path),
+            "/tmp/codex-one-prompt.md",
+            Some("/work/repo"),
+            Some(start)
+        )
+        .unwrap()
+        .id,
         "one"
     );
     assert!(
-        cache
-            .find(
-                std::slice::from_ref(&path),
-                "/tmp/absent.md",
-                Some("/work/repo"),
-                Some(start)
-            )
-            .is_none()
+        home.find(
+            std::slice::from_ref(&path),
+            "/tmp/absent.md",
+            Some("/work/repo"),
+            Some(start)
+        )
+        .is_none()
     );
     assert!(
-        cache
-            .find(
-                std::slice::from_ref(&path),
-                "/tmp/absent.md",
-                Some("/work"),
-                Some(start)
-            )
-            .is_none()
+        home.find(
+            std::slice::from_ref(&path),
+            "/tmp/absent.md",
+            Some("/work"),
+            Some(start)
+        )
+        .is_none()
     );
     assert!(
-        cache
-            .find(
-                &[path],
-                "/tmp/one-prompt.md",
-                Some("/work/repo"),
-                Some(start)
-            )
-            .is_none()
+        home.find(
+            &[path],
+            "/tmp/one-prompt.md",
+            Some("/work/repo"),
+            Some(start)
+        )
+        .is_none()
     );
 }
 
@@ -311,47 +248,8 @@ fn final_complete_record_without_newline_and_literal_codex_wrapper_are_read() {
     let home = Home::new();
     let record = call("wrapper", "codex -C /work/repo -m model exec - < /tmp/p.md");
     let path = home.file("parent", record.trim_end());
-    let mut cache = ScanCache::default();
     assert_eq!(
-        cache.find(&[path], "/tmp/p.md", None, None).unwrap().id,
+        home.find(&[path], "/tmp/p.md", None, None).unwrap().id,
         "wrapper"
     );
-}
-
-#[test]
-fn retained_call_inputs_have_a_byte_budget() {
-    let home = Home::new();
-    let command = format!("codex {}", "x".repeat(MAX_INPUT_BYTES / 2));
-    let path = home.file(
-        "parent",
-        &(call("one", &command) + &call("two", &command) + &call("three", &command)),
-    );
-    let mut cache = ScanCache::default();
-    let parent = cache.parent(&path).unwrap();
-    assert!(parent.input_bytes <= MAX_INPUT_BYTES);
-    assert_eq!(parent.calls.len(), 1);
-    assert_eq!(parent.calls.front().unwrap().tool.id, "three");
-}
-
-#[test]
-fn oversized_unfinished_records_are_bounded_and_skip_to_next_record() {
-    let home = Home::new();
-    let path = home.file("parent", &"codex".repeat(MAX_INPUT_BYTES / 5 + 100));
-    let mut cache = ScanCache::default();
-    let parent = cache.parent(&path).unwrap();
-    assert!(parent.discarding);
-    assert!(parent.partial.len() <= MAX_INPUT_BYTES);
-    assert!(parent.partial.capacity() <= MAX_INPUT_BYTES + 1);
-    assert!(parent.calls.is_empty());
-    fs::OpenOptions::new()
-        .append(true)
-        .open(&path)
-        .unwrap()
-        .write_all(format!("\n{}", call("good", "codex exec -C /work/project")).as_bytes())
-        .unwrap();
-    let parent = cache.parent(&path).unwrap();
-    assert!(!parent.discarding);
-    assert!(parent.partial.is_empty());
-    assert_eq!(parent.calls.len(), 1);
-    assert_eq!(parent.calls[0].tool.id, "good");
 }

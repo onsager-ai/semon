@@ -101,12 +101,14 @@ pub(crate) fn parse_native_record(bytes: &[u8]) -> Option<Value> {
 }
 
 type NativeLineReader<'a> = dyn FnMut(&Path, u64) -> io::Result<(Option<Value>, u64)> + 'a;
+type NativePromptReader<'a> = dyn FnMut(&SlotFile, u64) -> Option<(Value, u64)> + 'a;
 
 /// Source lines read for one page: a line holding several blocks, or a call
 /// and its result, is read once. Only the last few lines are kept.
 #[derive(Default)]
 pub(crate) struct Lines<'a> {
     provider: Option<&'a mut NativeLineReader<'a>>,
+    prompt_provider: Option<&'a mut NativePromptReader<'a>>,
     pub(crate) failures: usize,
     recent: VecDeque<(LineKey, Option<Rc<Value>>)>,
     /// Bytes read from source files so far.
@@ -121,6 +123,16 @@ impl<'a> Lines<'a> {
         Self {
             provider: Some(reader),
             ..Self::default()
+        }
+    }
+
+    pub(crate) fn provider_with_prompts(
+        reader: &'a mut NativeLineReader<'a>,
+        prompts: &'a mut NativePromptReader<'a>,
+    ) -> Self {
+        Self {
+            prompt_provider: Some(prompts),
+            ..Self::provider(reader)
         }
     }
     const KEEP: usize = 16;
@@ -1738,6 +1750,11 @@ pub(crate) fn render(
 /// that long, and its text and images still show.
 fn prompt_record(lines: &mut Lines, file: Option<&SlotFile>, offset: u64) -> Option<Rc<Value>> {
     let file = file?;
+    if let Some(provider) = lines.prompt_provider.as_mut() {
+        let (record, bytes) = provider(file, offset)?;
+        lines.bytes += bytes;
+        return Some(Rc::new(record));
+    }
     if lines.provider.is_some() {
         return lines.get(&file.path, offset);
     }
@@ -1795,11 +1812,7 @@ fn strings(value: &Value, out: &mut String) {
 /// same parts a page shows (`text`, or a call's `in` and `out`), uncapped.
 /// A handoff's text is the model's (its brief, result and answer), so a
 /// handoff slot has none here; neither do markers.
-pub(crate) fn slot_texts(
-    _built: &Built,
-    lines: &mut Lines,
-    slot: &Slot,
-) -> Vec<(&'static str, String)> {
+pub(crate) fn slot_texts(lines: &mut Lines, slot: &Slot) -> Vec<(&'static str, String)> {
     let Some(file) = slot.file.as_deref() else {
         return Vec::new();
     };
@@ -1918,8 +1931,54 @@ pub(crate) fn page_limited(
     now: i64,
     limit: usize,
 ) -> io::Result<String> {
-    let limit = limit.clamp(1, PAGE_ENTRIES);
     let transcript = built.tx.get(sid).ok_or(io::ErrorKind::NotFound)?;
+    page_from(
+        &RenderContext {
+            home: built.home.as_deref(),
+            harness: built.sessions.get(sid).map(|session| session.harness),
+            bounded: false,
+        },
+        transcript,
+        sid,
+        anchor,
+        now,
+        limit,
+    )
+}
+
+/// The shared source-backed pager needs one transcript and its native rendering
+/// context. Query callers do not need a workspace transport model.
+pub(crate) fn page_from(
+    context: &RenderContext<'_>,
+    transcript: &model::Transcript,
+    sid: &str,
+    anchor: &Anchor,
+    now: i64,
+    limit: usize,
+) -> io::Result<String> {
+    page_from_lines(
+        context,
+        transcript,
+        sid,
+        anchor,
+        now,
+        limit,
+        &mut Lines::default(),
+    )
+}
+
+/// The native pager with request-owned source access. Its slots, rendering,
+/// anchors and wire contract are shared with the existing local pager.
+pub(crate) fn page_from_lines(
+    context: &RenderContext<'_>,
+    transcript: &model::Transcript,
+    sid: &str,
+    anchor: &Anchor,
+    now: i64,
+    limit: usize,
+    lines: &mut Lines<'_>,
+) -> io::Result<String> {
+    let limit = limit.clamp(1, PAGE_ENTRIES);
     let slots = &transcript.slots;
     let total = slots.len();
     let first_of = |turn: &str| {
@@ -1933,23 +1992,11 @@ pub(crate) fn page_limited(
         Anchor::After(after) => (true, (*after).min(total)),
         Anchor::Turn(turn) => (true, first_of(turn).ok_or(io::ErrorKind::NotFound)?),
     };
-    let mut lines = Lines::default();
     let mut picked: Vec<(usize, Value)> = Vec::new();
     let mut bytes = 0;
     let (mut low, mut high) = (from, from);
     let mut take = |index: usize, picked: &mut Vec<(usize, Value)>| -> bool {
-        let Some(entry) = render(
-            &RenderContext {
-                home: built.home.as_deref(),
-                harness: built.sessions.get(sid).map(|session| session.harness),
-                bounded: false,
-            },
-            &mut lines,
-            slots,
-            &slots[index],
-            index,
-            now,
-        ) else {
+        let Some(entry) = render(context, lines, slots, &slots[index], index, now) else {
             return true;
         };
         let size = entry.to_string().len() + 1;
