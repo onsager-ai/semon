@@ -4,7 +4,7 @@
 
 `semon receive` is the reference receiver (`semon_push::mirror::Receiver`, see the README's "Receive pushes from your other machines"). It keeps each machine's copy under `DIR/machines/<name>/`, and caps a request body at 6 MiB: one append's 4 MiB of file bytes as base64, plus the JSON around it. Beyond the answers below, it may answer 411 (no `Content-Length`) and 507 (the machine's copy would pass its size cap); a client treats either as a failure.
 
-The generic mirror protocol is independent of the retiring Encrypted Relay.
+The generic mirror protocol is independent of the retired Encrypted Relay.
 Mirrored content is readable by the receiver; sender redaction and HTTPS do not
 provide end-to-end encryption. A source mirror does not contain the complete
 workspace and native harness state required for independent recovery.

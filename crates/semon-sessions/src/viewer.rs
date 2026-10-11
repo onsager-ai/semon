@@ -1029,14 +1029,16 @@ impl MachineView {
     }
 
     /// Refresh focused metadata without showing or serializing a legacy model.
-    fn refresh_catalog_locked(&self, work: &mut Work, now: i64) -> io::Result<()> {
+    fn refresh_catalog_locked(&self, work: &mut Work, now: i64) -> io::Result<bool> {
         if let Some(snapshot) = &work.catalog_snapshot
             && !self.changed(snapshot)
         {
-            return Ok(());
+            return Ok(true);
         }
         work.built_at = Some(Instant::now());
-        self.evidence.prepare_events(work, now)?;
+        if !self.evidence.prepare_catalog(work, now)? {
+            return Ok(false);
+        }
         let cache = work.events.as_mut().expect("event cache initialized");
         // Stamp before native reads so concurrent appends remain observable.
         let mut snapshot =
@@ -1057,7 +1059,7 @@ impl MachineView {
                 .collect();
         }
         work.catalog_snapshot = Some(snapshot);
-        Ok(())
+        Ok(true)
     }
 
     /// Rebuilds the model at `now` if its logs or facts changed. The caller
@@ -1274,6 +1276,9 @@ impl MachineView {
             .is_shown(other)
             .then(|| self.refresh_kind(&mut work, other));
         let built_at = work.built_at;
+        if self.evidence.catalog_pending(&work) {
+            lock(&self.live.state).invalidated = true;
+        }
         drop(work);
         let mut state = lock(&self.live.state);
         state.built_at = built_at;
@@ -1430,6 +1435,7 @@ impl MachineView {
                     && !self.evidence.options.scan_window
                 {
                     self.refresh_catalog_locked(&mut work, model::now_ms())
+                        .map(drop)
                 } else {
                     self.refresh_kind(&mut work, kind)
                 };
@@ -6875,7 +6881,14 @@ mod tests {
                     page.body.len()
                 );
             }));
-            view.warm().unwrap();
+            loop {
+                let ready = view
+                    .refresh_catalog_locked(&mut lock(&view.evidence.work), model::now_ms())
+                    .unwrap();
+                if ready {
+                    break;
+                }
+            }
             let page = crate::session_catalog_page(&fixture.options, "fixture", "limit=60");
             let body: Value = serde_json::from_slice(&page.body).unwrap();
             assert_eq!(body["completeness"]["state"], "complete");

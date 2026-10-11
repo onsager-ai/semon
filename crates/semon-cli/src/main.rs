@@ -155,9 +155,6 @@ fn parse_sessions_args(
                 .ok_or_else(|| format!("{argument} requires a value"))
         };
         match argument.as_str() {
-            "--remote" | "--remote-config" | "--remote-ca" | "--tls-ca" => return Err(
-                "Encrypted Relay viewing is retired. Preserve existing keys/data and use the pinned legacy reader or semon-relay-history; see docs/encrypted-relay-retirement.md. Use --machines for generic mirrored sources.".into()
-            ),
             "--machines" => received = Some(PathBuf::from(value()?)),
             "--no-local" => local = false,
             "--claude-home" => options.claude_home = value()?.into(),
@@ -972,7 +969,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn retired_encrypted_flags_fail_before_default_source_discovery() {
+    fn unsupported_remote_flags_fail_before_source_discovery() {
         for flag in ["--remote", "--remote-config", "--remote-ca", "--tls-ca"] {
             let error = match parse_sessions_args(
                 [flag, "/private/untouched"].map(str::to_owned).into_iter(),
@@ -980,8 +977,7 @@ mod tests {
                 Err(error) => error,
                 Ok(_) => panic!("retired flag accepted: {flag}"),
             };
-            assert!(error.contains("Encrypted Relay viewing is retired"));
-            assert!(error.contains("semon-relay-history"));
+            assert_eq!(error, format!("unknown argument: {flag}"));
             assert!(!usage().contains(flag));
         }
     }
