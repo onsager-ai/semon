@@ -19,6 +19,10 @@ pub const VIEWER_JS: &str = include_str!("viewer.generated.js");
 /// bytes for each page route.
 pub const PAGE_HTML: &str = include_str!("viewer.html");
 
+/// Standalone fallback markup. Native hosts replace this with their own scoped
+/// fallback link while retaining the shared native-content insertion point.
+pub const NATIVE_FALLBACK_HTML: &str = "<noscript><p><a href=\"/sessions?native=1\">Read sessions without JavaScript</a></p></noscript>";
+
 /// Additional components for forms and other server-rendered pages.
 pub const CSS: &str = include_str!("shell.css");
 
