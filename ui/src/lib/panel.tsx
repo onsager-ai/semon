@@ -58,7 +58,13 @@ export function createPanelChrome(options: PanelOptions, host: PanelHost): Panel
   let disposed = false,
     shown = false;
   const close = () => {
-    if (!disposed && dialog.open) dialog.close();
+    if (!disposed && dialog.open) destroy();
+  };
+  const cancel = (event: Event) => {
+    // Native close events are queued. Release the modal and restore its
+    // owner's focus now, before another control can accept keyboard input.
+    event.preventDefault();
+    close();
   };
   render(<PanelHeader heading={options.title} sub={options.sub} close={close} />, header);
   dialog.append(header, body);
@@ -85,6 +91,7 @@ export function createPanelChrome(options: PanelOptions, host: PanelHost): Panel
     if (disposed) return;
     disposed = true;
     dialog.removeEventListener('click', backdrop);
+    dialog.removeEventListener('cancel', cancel);
     dialog.removeEventListener('close', destroy);
     for (const type of ['wheel', 'touchmove'])
       document.removeEventListener(type, hold, { capture: true });
@@ -94,6 +101,7 @@ export function createPanelChrome(options: PanelOptions, host: PanelHost): Panel
     if (shown) host.closed();
   }
   dialog.addEventListener('click', backdrop);
+  dialog.addEventListener('cancel', cancel);
   dialog.addEventListener('close', destroy);
   return {
     dialog,

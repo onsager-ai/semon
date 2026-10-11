@@ -8,7 +8,7 @@ const { outputFiles } = await build({
   absWorkingDir: new URL('../', import.meta.url).pathname,
   stdin: {
     contents:
-      "export {renderSessionScreen,updateSessionControl,updateSessionRuntime,updateSessionJump,updateSessionName} from './src/lib/transcript'; export {createLocalControl} from './src/app/localControl'; export {EffectScope} from './src/app/effects';",
+      "export {renderSessionScreen,updateSessionControl,updateSessionRuntime,updateSessionJump,updateSessionName} from './src/lib/transcript'; export {createLocalControl} from './src/app/localControl'; export {EffectScope} from './src/app/effects'; export {createPanelChrome} from './src/lib/panel';",
     resolveDir: new URL('../', import.meta.url).pathname,
   },
   bundle: true,
@@ -30,6 +30,41 @@ const css = (
 ).join('\n');
 const out = new URL('../../tests/ui/out-staging-viewer/', import.meta.url);
 await mkdir(out, { recursive: true });
+test('panel cancellation releases focus before the next keyboard interaction', async () => {
+  const browser = await chromium.launch();
+  try {
+    const page = await browser.newPage();
+    await page.setContent('<button id="next">Thinking</button>');
+    await page.addScriptTag({ content: outputFiles[0].text });
+    const result = await page.evaluate(() => {
+      let closed = 0;
+      const next = document.querySelector('#next');
+      const panel = ViewerFixes.createPanelChrome(
+        { title: 'Composer' },
+        {
+          opened() {},
+          closed() {
+            closed++;
+            next.focus();
+          },
+        },
+      );
+      panel.show();
+      panel.dialog.dispatchEvent(new Event('cancel', { cancelable: true }));
+      return {
+        connected: panel.dialog.isConnected,
+        closed,
+        focused: document.activeElement === next,
+      };
+    });
+    assert.deepEqual(result, { connected: false, closed: 1, focused: true });
+    await page.locator('#next').press('Enter');
+    await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(resolve)));
+    assert.equal(await page.locator('dialog').count(), 0);
+  } finally {
+    await browser.close();
+  }
+});
 for (const width of [390, 820, 1280])
   for (const colorScheme of ['light', 'dark'])
     test(`approved reading and availability states ${width} ${colorScheme}`, async () => {
