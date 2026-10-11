@@ -1,7 +1,7 @@
 # Query contract reference
 
-Embedding callers replace `Query::from_core(core)` with
-`Query::from_native_core(core)`. The host still owns authorization, admission and
+Embedding callers admit a `SessionSources` owner and use
+`Query::from_sources(sources)`. The host still owns authorization, admission and
 source custody; the native constructor preserves its configured output window.
 CLI/stdio callers keep `Query::new` or `Query::with_machines`; these construct
 native evidence owners directly, without ViewerCore, machine views, compatibility
@@ -12,14 +12,16 @@ tree and Model reads do not create a second producer cache. Source snapshots kee
 the existing file, process, facts and writer-lock observations; request-owned
 readers still verify source bytes and completion independently.
 
-Hosted `from_native_core` remains a transitional admission/custody adapter for
-Hub #226. It borrows each existing machine's native owner and preserves output
-windows, union ownership and closed-source behavior. The host's workspace guard,
-blocking-worker lifetime and archive restoration still need a separate migration;
-substituting local scan-window construction would change the hosted contract.
-Existing hosted
-production pins keep their original API until the paired consumer adopts the
-new Semon revision. No constructor alias or full-model fallback remains.
+`SessionSources` constructs no machine view, refresh pool or worker. Explicit
+Catalog demand attaches the existing source producer to the host's bounded pool;
+a later `ViewerCore::from_sources` borrows that same producer, index and query
+cohort. Retirement stops producers; close drains them off the async reactor.
+Hosts hold their existing blocking-worker and deletion guards through actual
+completion and close attached Viewer transports before draining sources.
+Tenant-wide hosted archive hydration remains migration work in Hub #226.
+`from_native_core` remains available to the preceding paired host revision until
+adoption; its removal follows consumer migration. Substituting local scan-window
+construction would change the hosted contract. No full-model query fallback remains.
 
 `contract-reference.json` contains 134 synthetic tool responses from the retired
 production `Query::from_core` engine at Semon

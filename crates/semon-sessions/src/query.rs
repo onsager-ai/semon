@@ -23,7 +23,7 @@ use serde_json::{Map, Value, json};
 use crate::{
     Options,
     model::{SessionFacts, SlotKind, Transcript, now_ms, one_line},
-    native_evidence::NativeEvidence,
+    native_evidence::SessionSources,
     tx,
     union::{Owner, QueryRead, ViewerCore},
 };
@@ -668,7 +668,7 @@ fn snippet(text: &str, at: usize, length: usize) -> String {
 }
 
 enum QuerySources {
-    Native(Vec<(String, Arc<NativeEvidence>)>),
+    Native(Arc<SessionSources>),
     /// Transitional hosted admission/custody owner, tracked in Hub #226.
     Hosted(Arc<ViewerCore>),
 }
@@ -676,13 +676,7 @@ enum QuerySources {
 impl QuerySources {
     fn read(&self, now: i64) -> io::Result<QueryRead> {
         match self {
-            Self::Native(machines) => {
-                let parts = machines
-                    .iter()
-                    .map(|(key, evidence)| Ok((key.clone(), evidence.query_at(now)?)))
-                    .collect::<io::Result<Vec<_>>>()?;
-                Ok(QueryRead::new(parts, usize::MAX))
-            }
+            Self::Native(sources) => sources.query_at(now),
             Self::Hosted(core) => core.query_at(now),
         }
     }
@@ -732,13 +726,20 @@ impl Query {
             })
             .collect();
         Self {
-            sources: QuerySources::Native(
-                machines
-                    .into_iter()
-                    .map(|(key, options)| (key, NativeEvidence::new(options)))
-                    .collect(),
-            ),
+            sources: QuerySources::Native(Arc::new(SessionSources::with_machines(machines))),
             embedded: false,
+            start: None,
+            native: None,
+        }
+    }
+
+    /// Query admitted native sources with their configured windows unchanged.
+    /// The host holds authorization and custody until the blocking call ends.
+    /// No Viewer or background refresh producer is constructed here.
+    pub fn from_sources(sources: Arc<SessionSources>) -> Self {
+        Self {
+            sources: QuerySources::Native(sources),
+            embedded: true,
             start: None,
             native: None,
         }

@@ -323,13 +323,19 @@ owners directly, with no ViewerCore, compatibility caches or refresh pool.
 Their source-selection/window and union identity rules are unchanged. Retirement
 prevents a waiting cold query from creating an index; a warm retired owner retains
 only its already verified cohort, whose body reads still refuse deleted evidence.
-No persisted schema, API, parser or archive version changes.
+No persisted schema, wire API, parser or archive version changes.
 
-Hosted `from_native_core` still borrows these owners through existing admission
-and source custody. Removing this adapter and tenant-wide archive restoration is
-tracked in Hub #226; it must preserve output windows, capacity, cancellation-safe
-blocking lifetime and deletion fencing. This extraction does not establish
-bounded discovery, relationship reconciliation or full compatibility retirement.
+`SessionSources` now owns an admitted native machine set independently of the
+Viewer. `Query::from_sources` preserves configured hosted output windows and
+union ownership without constructing Viewer state or a refresh pool. Explicit
+Catalog demand and a later `ViewerCore::from_sources` attach to the same lazy
+producer and complete index. The host retains its existing tenant gate, capacity,
+blocking-worker lifetime and archive/deletion drain; push observation need not
+construct ViewerCore. Retirement stops native producers and close drains actual
+work. The preceding hosted adapter remains until the paired consumer adoption;
+its removal and tenant-wide archive restoration are tracked in Hub #226.
+This extraction does not establish bounded discovery, relationship reconciliation
+or full compatibility retirement.
 
 This slice still discovers and joins every native source eligible for the local
 file-selection window. It does not establish constant-cost selected-session

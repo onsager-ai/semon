@@ -11,7 +11,7 @@ use std::{
     fs, io,
     path::{Path, PathBuf},
     sync::{
-        Arc, Mutex, MutexGuard, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard,
+        Arc, Mutex, MutexGuard, OnceLock, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard,
         atomic::{AtomicBool, Ordering},
     },
     time::{Instant, UNIX_EPOCH},
@@ -23,6 +23,140 @@ pub(crate) struct NativeEvidence {
     pub(crate) catalog_demand: AtomicBool,
     query: RwLock<Option<Arc<QueryCache>>>,
     closed: AtomicBool,
+}
+
+/// Native source ownership for an admitted machine set. This constructs no
+/// Viewer state, refresh pool or worker and opens no files. Embedding hosts keep
+/// their authorization, admission and source-custody guards around actual reads.
+/// Options are preserved, including output windows and received machine facts.
+pub struct SessionSources {
+    pub(crate) machines: Vec<(String, Arc<NativeEvidence>)>,
+    views: Vec<OnceLock<Arc<crate::viewer::MachineView>>>,
+    pub(crate) inventory: Arc<crate::SessionSourceInventory>,
+    retired: AtomicBool,
+}
+
+impl SessionSources {
+    pub fn with_machines(machines: Vec<(String, Options)>) -> Self {
+        let local = machines.len() == 1 && machines[0].0.is_empty();
+        let inventory = crate::SessionSourceInventory::new(machines.iter().map(|(key, _)| {
+            let key = if local {
+                "local".to_owned()
+            } else {
+                key.clone()
+            };
+            (key.clone(), key)
+        }));
+        let views = machines.iter().map(|_| OnceLock::new()).collect();
+        Self {
+            machines: machines
+                .into_iter()
+                .map(|(key, options)| (key, NativeEvidence::new(options)))
+                .collect(),
+            views,
+            inventory: Arc::new(inventory),
+            retired: AtomicBool::new(false),
+        }
+    }
+
+    /// Stop native refreshes without blocking. A warm query retains its last
+    /// cohort; its source-backed reads still verify evidence independently.
+    pub fn retire(&self) {
+        self.retired.store(true, Ordering::Release);
+        for (_, evidence) in &self.machines {
+            evidence.retire();
+        }
+        for view in self.views.iter().filter_map(OnceLock::get) {
+            view.retire();
+        }
+    }
+
+    /// Drain native preparation before custody changes. The host first prevents
+    /// new requests and closes attached Viewer transports, if any. This drains
+    /// the shared native/catalog producers too. Async hosts call it off-reactor.
+    pub fn close(&self) {
+        self.retire();
+        for view in self.views.iter().filter_map(OnceLock::get) {
+            view.close();
+        }
+        for (_, evidence) in &self.machines {
+            drop(lock(&evidence.work));
+        }
+    }
+
+    /// Queue the existing source-scoped Catalog producer without a ViewerCore
+    /// or native body reads. The host authorizes custody and supplies its bounded
+    /// refresh pool. Query and any later Viewer borrow this same producer/index.
+    pub fn demand_catalog_source(
+        &self,
+        source_key: &str,
+        pool: Arc<crate::RefreshPool>,
+    ) -> io::Result<bool> {
+        if self.is_retired() || !self.inventory.valid() {
+            return Ok(false);
+        }
+        let Some(index) = self.inventory.index(source_key) else {
+            return Ok(false);
+        };
+        let view = self.view(index);
+        view.set_pool(pool);
+        view.set_refresh(crate::Refresh::OnInvalidate);
+        if self.is_retired() {
+            view.retire();
+            return Ok(false);
+        }
+        view.note_catalog_read()?;
+        Ok(true)
+    }
+
+    pub(crate) fn is_retired(&self) -> bool {
+        self.retired.load(Ordering::Acquire)
+    }
+
+    /// Notify an already demanded source producer after an authorized push.
+    /// This never constructs a producer or starts compatibility warming.
+    /// True means the source is configured and open, even before demand.
+    pub fn invalidate(&self, machine: &str) -> bool {
+        if self.is_retired() {
+            return false;
+        }
+        let Some(index) = self.machines.iter().position(|(key, _)| key == machine) else {
+            return false;
+        };
+        if self.machines[index].1.closed.load(Ordering::Acquire) {
+            return false;
+        }
+        let Some(view) = self.views[index].get() else {
+            return true;
+        };
+        view.invalidate();
+        true
+    }
+
+    fn view(&self, index: usize) -> Arc<crate::viewer::MachineView> {
+        self.views[index]
+            .get_or_init(|| {
+                crate::viewer::MachineView::from_evidence(self.machines[index].1.clone())
+            })
+            .clone()
+    }
+
+    pub(crate) fn machine_views(&self) -> Vec<(String, Arc<crate::viewer::MachineView>)> {
+        self.machines
+            .iter()
+            .enumerate()
+            .map(|(index, (key, _))| (key.clone(), self.view(index)))
+            .collect()
+    }
+
+    pub(crate) fn query_at(&self, now: i64) -> io::Result<crate::union::QueryRead> {
+        let parts = self
+            .machines
+            .iter()
+            .map(|(key, evidence)| Ok((key.clone(), evidence.query_at(now)?)))
+            .collect::<io::Result<Vec<_>>>()?;
+        Ok(crate::union::QueryRead::new(parts, usize::MAX))
+    }
 }
 
 impl NativeEvidence {

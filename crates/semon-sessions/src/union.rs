@@ -946,14 +946,16 @@ impl ViewerCore {
     /// order is kept: the first machine is the model's `machine`. With one
     /// machine this is [`ViewerCore::new`], byte for byte.
     pub fn with_machines(machines: Vec<(String, Options)>) -> Self {
-        let views = Arc::new(
-            machines
-                .into_iter()
-                .map(|(key, options)| (key, MachineView::new(options)))
-                .collect::<Views>(),
-        );
-        let inventory = Self::configured_source_inventory(&views);
-        Self {
+        Self::from_sources(Arc::new(crate::SessionSources::with_machines(machines)))
+    }
+
+    /// Attach the remaining Viewer consumers to admitted native sources. Their
+    /// complete source index and query cohort stay with the existing owner.
+    /// The host closes this Viewer before draining sources or removing custody.
+    pub fn from_sources(sources: Arc<crate::SessionSources>) -> Self {
+        let views = Arc::new(sources.machine_views());
+        let inventory = sources.inventory.clone();
+        let core = Self {
             views: RwLock::new(views.clone()),
             source_inventory: Mutex::new(Some((Arc::downgrade(&views), inventory))),
             received: None,
@@ -965,7 +967,11 @@ impl ViewerCore {
             analytics: Mutex::default(),
             model_history: Mutex::default(),
             ownership: Mutex::default(),
+        };
+        if sources.is_retired() {
+            core.close();
         }
+        core
     }
 
     /// A core over `machines` (as [`ViewerCore::with_machines`], possibly
