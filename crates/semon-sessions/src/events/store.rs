@@ -977,7 +977,7 @@ impl IndexStore for SqliteStore {
         publication: &crate::slot_projection::Publication<'_>,
         expected_generation: Option<&str>,
     ) -> Result<Outcome, StoreError> {
-        self.publish_catalog(publication, expected_generation, None)
+        self.publish_catalog(publication, expected_generation, None, false)
     }
 
     fn session_slots(
@@ -1066,7 +1066,20 @@ impl IndexStore for SqliteStore {
         expected_generation: Option<&str>,
         claims: &[(String, Option<i64>)],
     ) -> Result<Outcome, StoreError> {
-        self.publish_catalog(publication, expected_generation, Some(claims))
+        self.publish_catalog(publication, expected_generation, Some(claims), false)
+    }
+
+    fn publish_isolated_catalog(
+        &mut self,
+        publication: &crate::slot_projection::Publication<'_>,
+        expected_generation: Option<&str>,
+        claims: &[(String, Option<i64>)],
+    ) -> Result<Option<Outcome>, StoreError> {
+        if !isolated_catalog(&self.connection, publication).map_err(failure)? {
+            return Ok(None);
+        }
+        self.publish_catalog(publication, expected_generation, Some(claims), true)
+            .map(Some)
     }
 
     fn catalog_claims(&self, paths: &[String]) -> Result<Vec<(String, Option<i64>)>, StoreError> {
@@ -1211,12 +1224,69 @@ enum Init {
     Newer,
 }
 
+/// A closed, unchanged identity component can advance without revisiting other
+/// event indexes. Repeat this metadata check inside the publication transaction.
+fn isolated_catalog(
+    connection: &Connection,
+    publication: &crate::slot_projection::Publication<'_>,
+) -> rusqlite::Result<bool> {
+    let complete: bool = connection.query_row(
+        "SELECT COALESCE((SELECT value FROM meta WHERE key='catalog_completeness'),'complete')='complete'",
+        [], |row| row.get(0),
+    )?;
+    if !complete || publication.rows.is_empty() || publication.rows.len() > 64 {
+        return Ok(false);
+    }
+    for row in publication.rows {
+        if row.parent.is_some()
+            || row.sources.len() != 1
+            || row.native_ids.len() != 1
+            || !row
+                .trace
+                .as_ref()
+                .is_some_and(|trace| trace.is_isolated(&row.key))
+        {
+            return Ok(false);
+        }
+        let previous: Option<Option<String>> = connection.query_row(
+            "SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata ELSE NULL END FROM session_catalog WHERE session_key=?1 AND lifecycle='current'",
+            [&row.key], |row| row.get(0),
+        ).optional()?;
+        let Some(previous) = previous
+            .flatten()
+            .and_then(|text| serde_json::from_str::<crate::model::summary::CatalogRow>(&text).ok())
+        else {
+            return Ok(false);
+        };
+        if previous.harness != row.harness
+            || previous.kind != row.kind
+            || previous.native_ids != row.native_ids
+            || previous.parent != row.parent
+            || previous.sources.len() != 1
+            || previous.sources[0].path != row.sources[0].path
+            || previous.sources[0].native_id != row.sources[0].native_id
+            || previous.sources[0].native_role != row.sources[0].native_role
+        {
+            return Ok(false);
+        }
+        let related: bool = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM session_catalog WHERE parent_key=?1) OR EXISTS(SELECT 1 FROM session_trace_edges WHERE session_key=?1 AND CASE WHEN json_valid(metadata) THEN ((json_extract(metadata,'$.kind')='toyou' AND json_extract(metadata,'$.from')=?1 AND json_extract(metadata,'$.to') IS NULL) OR (json_extract(metadata,'$.kind')='ask' AND json_extract(metadata,'$.from')='you' AND json_extract(metadata,'$.to')=?1)) ELSE 0 END IS NOT 1) OR EXISTS(SELECT 1 FROM session_trace_bookmarks WHERE session_key=?1) OR (SELECT count(DISTINCT session_key) FROM session_catalog_sources WHERE lifecycle='current' AND harness=?2 AND native_id=?3)!=1",
+            params![row.key, row.harness, row.native_ids[0]], |row| row.get(0),
+        )?;
+        if related {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
 impl SqliteStore {
     fn publish_catalog(
         &mut self,
         publication: &crate::slot_projection::Publication<'_>,
         expected_generation: Option<&str>,
         claims: Option<&[(String, Option<i64>)]>,
+        preserve_complete: bool,
     ) -> Result<Outcome, StoreError> {
         let rows = publication.rows;
         if claims.is_some_and(|claims| claims.len() > 64) || (claims.is_some() && rows.len() > 64) {
@@ -1251,6 +1321,9 @@ impl SqliteStore {
                 .optional()
                 .map_err(failure)?;
             if previous.as_deref() != expected_generation {
+                return Ok(Outcome::Conflict);
+            }
+            if preserve_complete && !isolated_catalog(&transaction, publication).map_err(failure)? {
                 return Ok(Outcome::Conflict);
             }
             // Do not let a slow builder overwrite a newer complete catalog.
@@ -1628,10 +1701,21 @@ impl SqliteStore {
                     .execute("DELETE FROM session_catalog_invalidations", [])
                     .map_err(failure)?;
             }
+            if preserve_complete
+                && transaction
+                    .query_row(
+                        "SELECT EXISTS(SELECT 1 FROM session_catalog_invalidations)",
+                        [],
+                        |row| row.get::<_, bool>(0),
+                    )
+                    .map_err(failure)?
+            {
+                return Ok(Outcome::Conflict);
+            }
             transaction
                 .execute(
                     "INSERT OR REPLACE INTO meta(key,value) VALUES ('catalog_completeness',?1)",
-                    [if claims.is_some() {
+                    [if claims.is_some() && !preserve_complete {
                         "partial"
                     } else {
                         "complete"

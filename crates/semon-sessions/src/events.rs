@@ -984,6 +984,12 @@ pub(crate) trait IndexStore: Send {
         expected_generation: Option<&str>,
         claims: &[(String, Option<i64>)],
     ) -> Result<Outcome, StoreError>;
+    fn publish_isolated_catalog(
+        &mut self,
+        publication: &crate::slot_projection::Publication<'_>,
+        expected_generation: Option<&str>,
+        claims: &[(String, Option<i64>)],
+    ) -> Result<Option<Outcome>, StoreError>;
     fn catalog_claims(&self, paths: &[String]) -> Result<Vec<(String, Option<i64>)>, StoreError>;
 
     /// `path`'s ledger as committed now.
@@ -1257,6 +1263,30 @@ impl EventCache {
             .as_mut()
             .ok_or_else(|| io::Error::other("scoped producer store unavailable"))?
             .publish_partial_catalog(
+                &crate::slot_projection::Publication {
+                    rows: &prepared.rows,
+                    transcripts: Some(&prepared.transcripts),
+                },
+                prepared.base_generation.as_deref(),
+                &prepared.claims,
+            )
+            .map_err(|error| io::Error::other(error.to_string()))
+    }
+
+    pub(crate) fn publish_isolated_catalog(
+        &mut self,
+        prepared: &crate::model::PreparedSources,
+    ) -> io::Result<Option<Outcome>> {
+        if self.busy || !self.unpersisted.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "native producer sources not durably observed",
+            ));
+        }
+        self.store
+            .as_mut()
+            .ok_or_else(|| io::Error::other("scoped producer store unavailable"))?
+            .publish_isolated_catalog(
                 &crate::slot_projection::Publication {
                     rows: &prepared.rows,
                     transcripts: Some(&prepared.transcripts),
