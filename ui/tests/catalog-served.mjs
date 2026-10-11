@@ -240,7 +240,18 @@ test(
       await page.locator('#page [data-id]').first().waitFor({ timeout: 60000 });
       const firstList = performance.now() - start;
       const query = page.getByRole('textbox', { name: 'Search session details', exact: true });
+      const beforeTyping = requests.length;
       await query.fill('backlog');
+      await page.evaluate(
+        () => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))),
+      );
+      assert.ok(
+        requests.slice(beforeTyping).every((path) => {
+          const target = new URL(path, url[1]);
+          return target.pathname !== '/api/sessions' || target.searchParams.get('q') !== 'backlog';
+        }),
+        'typing a draft does not submit native metadata reads',
+      );
       await query.press('Enter');
       await page.waitForFunction(
         () => document.querySelectorAll('#page [data-session-row="list"]').length === 1,

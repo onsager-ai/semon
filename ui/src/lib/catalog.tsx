@@ -90,7 +90,7 @@ export function renderCatalogList(
               id="sq"
               placeholder="Session details…"
               value={snapshot.query ?? ''}
-              onInput={(event) => {
+              onChange={(event) => {
                 if (event.currentTarget.form) commit(event.currentTarget.form);
               }}
             />
