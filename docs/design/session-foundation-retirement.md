@@ -412,9 +412,23 @@ generalized event pipeline is added.
 Native parent-marker reads now use content-free locations observed by the event
 parser and verified against the selected original record, including valid JSON
 at EOF without a newline. All producer targets, including Model preparation, use
-these indexed reads. Normal CLI and Viewer tree consumers retain the separate
-JSON summary cache and its marker scanner until their diagnostic, usage and tool
-semantics migrate.
+these indexed reads. CLI and Viewer tree reads now use the same Session Event
+Index, opened with lazy source loads. The separate JSON summary cache, body
+parser and process-global launch scan cache are removed. Raw timestamp strings,
+all model labels, malformed-line diagnostics, message/UUID usage accounting and
+historical tool closure rules remain in content-free native tree metadata,
+observed by the existing parser. No Model construction is needed for a tree.
+The request rechecks contributing source generations and used marker/launch
+records before publication. Existing tree JSON files are neither read nor
+rewritten/deleted; their configured stem still selects the shared SQLite index.
+Missing or incompatible tree metadata is repaired from verified native bytes
+without replaying event rows. Metadata exceeds the existing 1 MiB limit only
+in memory; cold reads repair it rather than truncating accounting or tool state.
+This optional tree metadata is not new archive eviction proof: earlier custody
+markers and existing retained index rows keep their current behavior. First-line
+Codex identity/labels, Claude sidecar fields and process/control facts retain
+their existing tree-specific reads. Bounded discovery and dependency closure
+remain separate migration work.
 Marker text and private handoff prompt paths are not persisted. New archive
 eviction also binds this metadata; prior markers preserve existing rows. The
 [query contract](../../crates/semon-sessions/src/query/README.md) owns exact limits
@@ -422,8 +436,9 @@ and downgrade obligations. Native launch lookup now uses bounded content-free
 locations from the same event parser and verifies the original candidate record
 before using its allowlisted fields. Shared literal/filename/worktree ambiguity
 rules and valid EOF behavior remain. Model preparation also uses indexed launch
-evidence; the remaining launch scanner serves the unmigrated CLI/tree summary
-path. New eviction binds launch metadata in version-six
+evidence, as does the native CLI/Viewer tree. Shared launch matching remains;
+the duplicate launch scanner and its input cache are gone. New eviction binds
+launch metadata in version-six
 custody markers; earlier markers retain existing index rows. Bounded relationship
 closure and hosted MCP restoration remain until those consumers migrate.
 

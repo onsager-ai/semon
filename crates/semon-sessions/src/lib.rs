@@ -3,7 +3,7 @@ pub use native_prefix::codex_native_id_prefix;
 use std::{
     collections::{BTreeMap, BTreeSet},
     env, fs,
-    io::{self, BufRead, BufReader, Seek, SeekFrom, Write},
+    io::{self, BufRead, BufReader, Write},
     path::{Path, PathBuf},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -59,6 +59,8 @@ mod native_header;
 mod native_marker;
 mod native_record;
 mod native_sidecar;
+mod native_tree;
+use native_tree::Summary;
 mod read_capabilities;
 mod source_inventory;
 pub use source_inventory::SessionSourceInventory;
@@ -279,92 +281,12 @@ impl Node {
     }
 }
 
-#[derive(Default, Serialize, Deserialize)]
-pub(crate) struct Index {
-    version: u32,
-    files: BTreeMap<String, Entry>,
-}
-
-impl Index {
-    pub(crate) fn paths(&self) -> impl Iterator<Item = &str> {
-        self.files.keys().map(String::as_str)
-    }
-}
-
-#[derive(Serialize, Deserialize)]
-struct Entry {
-    dev: u64,
-    ino: u64,
-    offset: u64,
-    #[serde(default)]
-    size: u64,
-    #[serde(default)]
-    modified_ns: u128,
-    summary: Summary,
-}
-
-#[derive(Clone, Default, Serialize, Deserialize)]
-struct Summary {
-    malformed_lines: u64,
-    line_count: u64,
-    first: Option<String>,
-    last: Option<String>,
-    cwd: Option<String>,
-    branch: Option<String>,
-    models: BTreeSet<String>,
-    usage_by_id: BTreeMap<String, Tokens>,
-    #[serde(default)]
-    usage_records: claude_usage::Records,
-    #[serde(default)]
-    usage_models: BTreeMap<String, String>,
-    tools: BTreeMap<String, String>,
-    closed_tools: BTreeSet<String>,
-    codex_tokens: Tokens,
-    #[serde(default)]
-    codex_native_usage: Option<events::CodexNativeUsage>,
-    // Never persisted: a marker can carry a handoff prompt path, and the
-    // on-disk cache must not retain session content (risk:secret).
-    #[serde(skip)]
-    marker: Option<Marker>,
-}
-
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 struct Marker {
     harness: String,
     parent_id: String,
     tool_id: Option<String>,
     handoff: Option<String>,
-}
-
-impl Summary {
-    fn tokens(&self, harness: &str) -> Tokens {
-        if harness == "codex" {
-            return self.codex_native_usage.as_ref().map_or_else(
-                || self.codex_tokens.clone(),
-                events::CodexNativeUsage::tokens,
-            );
-        }
-        let mut total = Tokens::default();
-        for usage in self.usage_by_id.values() {
-            total.input += usage.input;
-            total.cached_input += usage.cached_input;
-            total.output += usage.output;
-            total.reasoning_output += usage.reasoning_output;
-            total.total += usage.total;
-        }
-        total
-    }
-
-    fn open_tools(&self) -> Vec<ToolCall> {
-        self.tools
-            .iter()
-            .filter(|(id, _)| !self.closed_tools.contains(*id))
-            .map(|(id, name)| ToolCall {
-                id: id.clone(),
-                name: name.clone(),
-            })
-            .collect()
-    }
 }
 
 fn field<'a>(value: &'a Value, key: &str) -> Option<&'a str> {
@@ -458,21 +380,6 @@ fn file_list(root: &Path, output: &mut Vec<PathBuf>, suffix: &str) -> io::Result
     Ok(())
 }
 
-pub(crate) fn read_index(path: &Path) -> Index {
-    fs::read(path)
-        .ok()
-        .and_then(|bytes| serde_json::from_slice::<Index>(&bytes).ok())
-        .filter(|index| index.version == 5)
-        .unwrap_or_else(|| Index {
-            version: 5,
-            ..Index::default()
-        })
-}
-
-pub(crate) fn save_index(path: &Path, index: &Index) -> io::Result<()> {
-    save_json(path, index)
-}
-
 /// Writes a cache file buffered, to a private temporary file renamed over the
 /// old one, so a reader never sees a half-written cache.
 pub(crate) fn save_json(path: &Path, value: &impl Serialize) -> io::Result<()> {
@@ -511,183 +418,6 @@ pub(crate) fn save_json_file(path: &Path, value: &impl Serialize) -> io::Result<
     let file = writer.into_inner().map_err(|error| error.into_error())?;
     fs::rename(&temporary, path)?;
     Ok(file)
-}
-
-fn summarize(
-    path: &Path,
-    harness: &str,
-    index: &mut Index,
-    dirty: &mut bool,
-) -> io::Result<Summary> {
-    let metadata = fs::metadata(path)?;
-    let modified_ns = metadata
-        .modified()?
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    #[cfg(unix)]
-    let (dev, ino) = (metadata.dev(), metadata.ino());
-    #[cfg(not(unix))]
-    let (dev, ino) = (0, 0);
-    let key = path.to_string_lossy().into_owned();
-    let prior = index.files.remove(&key);
-    let mut summary = Summary::default();
-    let mut offset = 0;
-    if let Some(entry) = prior {
-        if entry.dev == dev
-            && entry.ino == ino
-            && entry.size == metadata.len()
-            && entry.modified_ns == modified_ns
-        {
-            let mut result = entry.summary.clone();
-            {
-                // The marker is never persisted (it can carry a handoff
-                // prompt path), so it must be recomputed even when the rest
-                // of the file is unchanged. This is a bounded first-turn
-                // scan, not a reread of the whole file.
-                result.marker = read_first_marker(path)?;
-            }
-            index.files.insert(key, entry);
-            return Ok(result);
-        }
-        if entry.dev == dev
-            && entry.ino == ino
-            && entry.offset <= metadata.len()
-            && (metadata.len() > entry.size || entry.modified_ns == modified_ns)
-        {
-            summary = entry.summary;
-            offset = entry.offset;
-        }
-    }
-    *dirty = true;
-    let mut file = sealed::LogFile::open(path)?;
-    file.seek(SeekFrom::Start(offset))?;
-    let mut reader = BufReader::new(file);
-    let mut line = Vec::new();
-    loop {
-        line.clear();
-        let length = reader.read_until(b'\n', &mut line)?;
-        if length == 0 {
-            break;
-        }
-        if !line.ends_with(b"\n") {
-            break;
-        }
-        offset += length as u64;
-        summary.line_count += 1;
-        let Ok(record) = serde_json::from_slice::<Value>(&line) else {
-            summary.malformed_lines += 1;
-            continue;
-        };
-        if !record.is_object() {
-            summary.malformed_lines += 1;
-            continue;
-        }
-        if harness == "claude" {
-            update_claude(&mut summary, &record);
-        } else {
-            update_codex(&mut summary, &record);
-        }
-    }
-    summary.marker = read_first_marker(path)?;
-    index.files.insert(
-        key,
-        Entry {
-            dev,
-            ino,
-            offset,
-            size: metadata.len(),
-            modified_ns,
-            summary: summary.clone(),
-        },
-    );
-    Ok(summary)
-}
-
-fn update_activity(summary: &mut Summary, record: &Value) {
-    if let Some(timestamp) = field(record, "timestamp").or_else(|| {
-        record
-            .get("payload")
-            .and_then(|payload| field(payload, "timestamp"))
-    }) {
-        if summary.first.is_none() {
-            summary.first = Some(timestamp.into());
-        }
-        summary.last = Some(timestamp.into());
-    }
-}
-
-fn update_claude(summary: &mut Summary, record: &Value) {
-    update_activity(summary, record);
-    if let Some(cwd) = field(record, "cwd") {
-        summary.cwd = Some(cwd.into());
-    }
-    if let Some(branch) = field(record, "gitBranch") {
-        summary.branch = Some(branch.into());
-    }
-    let Some(message) = record.get("message") else {
-        return;
-    };
-    if let Some(model) = field(message, "model") {
-        summary.models.insert(model.into());
-    }
-    if let (Some(id), Some(usage)) = (field(message, "id"), message.get("usage")) {
-        if field(record, "type") == Some("assistant")
-            && let Some(uuid) = field(record, "uuid")
-        {
-            summary
-                .usage_records
-                .entry(id.into())
-                .or_default()
-                .insert(uuid.into());
-        }
-        if let Some(model) = field(message, "model") {
-            summary.usage_models.insert(id.into(), model.into());
-        }
-        let input = usage
-            .get("input_tokens")
-            .and_then(Value::as_u64)
-            .unwrap_or(0);
-        let creation = usage
-            .get("cache_creation_input_tokens")
-            .and_then(Value::as_u64)
-            .unwrap_or(0);
-        let read = usage
-            .get("cache_read_input_tokens")
-            .and_then(Value::as_u64)
-            .unwrap_or(0);
-        let output = usage
-            .get("output_tokens")
-            .and_then(Value::as_u64)
-            .unwrap_or(0);
-        summary.usage_by_id.insert(
-            id.into(),
-            Tokens {
-                input: input + creation + read,
-                cached_input: read,
-                output,
-                reasoning_output: 0,
-                total: input + creation + read + output,
-            },
-        );
-    }
-    if let Some(blocks) = message.get("content").and_then(Value::as_array) {
-        for block in blocks {
-            match field(block, "type") {
-                Some("tool_use") => {
-                    if let (Some(id), Some(name)) = (field(block, "id"), field(block, "name")) {
-                        summary.tools.insert(id.into(), name.into());
-                    }
-                }
-                Some("tool_result") => {
-                    if let Some(id) = field(block, "tool_use_id") {
-                        summary.closed_tools.insert(id.into());
-                    }
-                }
-                _ => {}
-            }
-        }
-    }
 }
 
 fn user_text(record: &Value) -> Option<&str> {
@@ -751,76 +481,12 @@ fn parse_marker(message: &str) -> Option<Marker> {
     })
 }
 
-fn update_codex(summary: &mut Summary, record: &Value) {
-    update_activity(summary, record);
-    let payload = &record["payload"];
-    match field(record, "type") {
-        Some("session_meta") => {
-            if field(payload, "forked_from_id").is_some() {
-                summary
-                    .codex_native_usage
-                    .get_or_insert_with(Default::default);
-            }
-            if let Some(cwd) = field(payload, "cwd") {
-                summary.cwd = Some(cwd.into());
-            }
-            if let Some(branch) = payload.get("git").and_then(|git| field(git, "branch")) {
-                summary.branch = Some(branch.into());
-            }
-        }
-        Some("turn_context") => {
-            if let Some(model) = field(payload, "model") {
-                summary.models.insert(model.into());
-            }
-        }
-        Some("token_usage_record") => {
-            // Tree summaries preserve available request counts without asserting
-            // model attribution; their native model labels are tracked separately.
-            events::CodexNativeUsage::observe(
-                &mut summary.codex_native_usage,
-                payload,
-                "unknown".to_owned(),
-                None,
-            );
-        }
-        Some("event_msg") if field(payload, "type") == Some("token_count") => {
-            if let Some(usage) = payload
-                .get("info")
-                .and_then(|info| info.get("total_token_usage"))
-            {
-                summary.codex_tokens = Tokens {
-                    input: usage
-                        .get("input_tokens")
-                        .and_then(Value::as_u64)
-                        .unwrap_or(0),
-                    cached_input: usage
-                        .get("cached_input_tokens")
-                        .and_then(Value::as_u64)
-                        .unwrap_or(0),
-                    output: usage
-                        .get("output_tokens")
-                        .and_then(Value::as_u64)
-                        .unwrap_or(0),
-                    reasoning_output: usage
-                        .get("reasoning_output_tokens")
-                        .and_then(Value::as_u64)
-                        .unwrap_or(0),
-                    total: usage
-                        .get("total_tokens")
-                        .and_then(Value::as_u64)
-                        .unwrap_or(0),
-                };
-            }
-        }
-        _ => {}
-    }
-}
-
 #[cfg(test)]
 thread_local! {
     static FIRST_MARKER_READS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
+#[cfg(test)]
 fn read_first_marker(path: &Path) -> io::Result<Option<Marker>> {
     #[cfg(test)]
     FIRST_MARKER_READS.with(|reads| reads.set(reads.get() + 1));
@@ -1032,20 +698,23 @@ fn has_live_process(node: &Node) -> bool {
 
 /// Collects a read-only, metadata-only session tree and writes the metadata cache.
 pub fn collect(options: &Options) -> io::Result<Vec<Node>> {
-    let mut index = read_index(&options.cache);
-    let mut dirty = false;
-    let result = collect_with_index(options, &mut index, &mut dirty)?;
-    if dirty || !options.cache.exists() {
-        save_index(&options.cache, &index)?;
-    }
-    Ok(result)
+    let mut cache = events::EventCache::open_scoped(&options.cache).map_err(io::Error::other)?;
+    collect_with_index(options, &mut cache)
 }
 
 pub(crate) fn collect_with_index(
     options: &Options,
-    index: &mut Index,
-    dirty: &mut bool,
+    index: &mut events::EventCache,
 ) -> io::Result<Vec<Node>> {
+    let result = collect_native_tree(options, index);
+    index.end_scan();
+    result
+}
+
+fn collect_native_tree(options: &Options, index: &mut events::EventCache) -> io::Result<Vec<Node>> {
+    index.begin_scan();
+    let mut dirty = false;
+    let mut evidence = native_tree::Evidence::default();
     let now = unix_now();
     let cutoff = now.saturating_sub(options.since.as_secs());
     let mut flat = BTreeMap::<String, Node>::new();
@@ -1129,7 +798,16 @@ pub(crate) fn collect_with_index(
             stem
         };
         let key = format!("claude:{id}");
-        let summary = summarize(&path, "claude", index, dirty).ok();
+        let summary = native_tree::read(
+            options,
+            &path,
+            "claude",
+            id,
+            index,
+            &mut dirty,
+            &mut evidence,
+        )
+        .ok();
         let node = flat.entry(key.clone()).or_insert_with(|| {
             Node::new(
                 id.into(),
@@ -1288,7 +966,16 @@ pub(crate) fn collect_with_index(
         let summary = if metadata_unreadable {
             None
         } else {
-            summarize(&path, "codex", index, dirty).ok()
+            native_tree::read(
+                options,
+                &path,
+                "codex",
+                &node.id,
+                index,
+                &mut dirty,
+                &mut evidence,
+            )
+            .ok()
         };
         if let Some(summary) = &summary {
             apply_summary(&mut node, summary, now);
@@ -1310,12 +997,15 @@ pub(crate) fn collect_with_index(
             if flat.contains_key(&parent_key) {
                 if let Some(prompt) = &marker.handoff {
                     if let Some(parent_path) = claude_paths.get(&marker.parent_id) {
-                        node.via_tool = handoff::find(
-                            std::slice::from_ref(parent_path),
+                        node.via_tool = native_tree::launch(
+                            options,
+                            index,
+                            parent_path,
                             prompt,
                             node.cwd.as_deref(),
                             node.first_activity.as_deref().and_then(events::parse_ms),
-                        );
+                            &mut evidence,
+                        )?;
                     }
                 } else if let Some(tool_id) = &marker.tool_id {
                     node.via_tool = summaries
@@ -1399,8 +1089,6 @@ pub(crate) fn collect_with_index(
         .filter(|input| input.root == inputs::InputRoot::Copilot)
         .collect();
     if !copilot_inputs.is_empty() {
-        let mut cache = events::EventCache::open(&options.cache);
-        let mut changed = false;
         for input in copilot_inputs {
             let path = input.full_path(options);
             let id = input
@@ -1411,7 +1099,13 @@ pub(crate) fn collect_with_index(
             if copilot::header(&path, id)?.is_none() {
                 continue;
             }
-            let summary = events::scan_file(&path, "copilot", &mut cache, &mut changed)?;
+            let summary = events::scan_file(&path, "copilot", index, &mut dirty)?;
+            evidence.source(
+                index
+                    .source(&path, id)
+                    .ok_or_else(|| io::Error::other("native tree source unavailable"))?,
+                summary.source_chunks.clone(),
+            )?;
             let mut node = Node::new(id.into(), "copilot", "session");
             node.state = "unknown".into();
             node.cwd = summary.cwd.clone();
@@ -1453,6 +1147,7 @@ pub(crate) fn collect_with_index(
         }
     }
     apply_claude_usage(&mut flat, &summaries);
+    evidence.finish(options)?;
     if let Some(id) = &options.session {
         let key = if id.starts_with("claude:")
             || id.starts_with("codex:")

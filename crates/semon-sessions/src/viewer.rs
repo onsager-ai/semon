@@ -6,7 +6,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc, Condvar, Mutex, MutexGuard, OnceLock, PoisonError, RwLock, RwLockReadGuard,
-        RwLockWriteGuard, TryLockError, Weak,
+        RwLockWriteGuard, Weak,
         atomic::{AtomicBool, AtomicU8, Ordering},
     },
     thread,
@@ -21,13 +21,13 @@ use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
 use std::os::unix::fs::MetadataExt;
 
 use crate::{
-    Index, Node, Options, codex_id_from_filename, codex_meta, collect_with_index,
+    Node, Options, codex_id_from_filename, codex_meta, collect_with_index,
     events::EventCache,
     field, file_list, is_agent_output,
     model::{self, Built, Texts},
-    proc_start, read_index,
+    proc_start,
     refresh::{Key, RefreshPool},
-    save_index, tx,
+    tx,
     union::{Refresh, ViewerCore},
     user_text,
 };
@@ -135,15 +135,6 @@ pub(crate) fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// The lock if it is free, poisoned or not.
-fn try_lock<T>(mutex: &Mutex<T>) -> Option<MutexGuard<'_, T>> {
-    match mutex.try_lock() {
-        Ok(guard) => Some(guard),
-        Err(TryLockError::Poisoned(poisoned)) => Some(poisoned.into_inner()),
-        Err(TryLockError::WouldBlock) => None,
-    }
-}
-
 pub(crate) fn read_lock<T>(lock: &RwLock<T>) -> RwLockReadGuard<'_, T> {
     lock.read().unwrap_or_else(PoisonError::into_inner)
 }
@@ -201,9 +192,6 @@ pub(crate) struct MachineView {
 /// What a rebuild changes, and only a rebuild.
 #[derive(Default)]
 struct Work {
-    index: Option<Index>,
-    index_dirty: bool,
-    last_save: Option<Instant>,
     events: Option<EventCache>,
     texts: Texts,
     catalog_snapshot: Option<Snapshot>,
@@ -569,7 +557,7 @@ fn node_pids(nodes: &[Node], output: &mut BTreeSet<u32>) {
 }
 
 impl Snapshot {
-    fn capture(options: &Options, roots: &[Node], index: &Index) -> Self {
+    fn capture(options: &Options, roots: &[Node], index: &EventCache) -> Self {
         let mut ids = BTreeSet::new();
         node_pids(roots, &mut ids);
         Self::capture_pids(options, ids, index.paths())
@@ -1177,13 +1165,12 @@ impl MachineView {
         read_lock(&self.shown).tree.clone()
     }
 
-    /// Rebuilds the V1 tree if anything it was built from changed. The
+    /// Rebuilds the native tree if anything it was built from changed. The
     /// caller holds `work`.
     fn refresh_tree_locked(&self, work: &mut Work) -> io::Result<Arc<TreeCache>> {
         if let Some(tree) = self.shown_tree()
             && !self.changed(&tree.snapshot)
         {
-            self.persist_if_due(work)?;
             return Ok(tree);
         }
         work.built_at = Some(Instant::now());
@@ -1191,10 +1178,12 @@ impl MachineView {
         if self.hooks.tree_failing.load(Ordering::SeqCst) {
             return Err(io::Error::other("a tree build failed on purpose"));
         }
-        let index = work
-            .index
-            .get_or_insert_with(|| read_index(&self.options.cache));
-        let roots = collect_with_index(&self.options, index, &mut work.index_dirty)?;
+        if work.events.is_none() {
+            work.events =
+                Some(EventCache::open_scoped(&self.options.cache).map_err(io::Error::other)?);
+        }
+        let index = work.events.as_mut().expect("native index loaded");
+        let roots = collect_with_index(&self.options, index)?;
         let json = crate::render_json(&roots);
         let snapshot = Snapshot::capture(&self.options, &roots, index);
         let paths = snapshot
@@ -1209,24 +1198,7 @@ impl MachineView {
             snapshot,
         });
         write_lock(&self.shown).tree = Some(tree.clone());
-        self.persist_if_due(work)?;
         Ok(tree)
-    }
-
-    fn persist_if_due(&self, work: &mut Work) -> io::Result<()> {
-        if work.index_dirty
-            && work
-                .last_save
-                .is_none_or(|last| last.elapsed() >= Duration::from_secs(30))
-        {
-            save_index(
-                &self.options.cache,
-                work.index.as_ref().expect("index loaded"),
-            )?;
-            work.index_dirty = false;
-            work.last_save = Some(Instant::now());
-        }
-        Ok(())
     }
 
     /// Initialize the source index and publish a bounded cold catalog page.
@@ -1365,9 +1337,6 @@ impl MachineView {
         if let Some(tree) = self.shown_tree()
             && !self.changed(&tree.snapshot)
         {
-            if let Some(mut work) = try_lock(&self.work) {
-                self.persist_if_due(&mut work)?;
-            }
             return Ok(tree);
         }
         self.refresh_tree_locked(&mut lock(&self.work))

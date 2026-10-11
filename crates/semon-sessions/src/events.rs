@@ -285,6 +285,7 @@ impl DirtyRows {
 #[derive(Clone, Debug, Default)]
 pub(crate) struct FileIndex {
     pub(crate) dirty_rows: Option<DirtyRows>,
+    pub(crate) tree_summary: Option<crate::native_tree::Summary>,
     pub(crate) source_chunks: Option<Arc<crate::source_chunks::Chunks>>,
     pub(crate) marker_index: Option<crate::native_marker::Index>,
     pub(crate) handoff_index: Option<crate::native_handoff::Index>,
@@ -1114,9 +1115,9 @@ impl EventCache {
         store::read_selected(connection, sources, native_ids).map(Self::from_loaded)
     }
 
-    /// The store beside V1's metadata cache: `sessions-index.json` gives
-    /// `sessions-index.sqlite3`. `semon sessions`, `--watch` and `--json`
-    /// never open it.
+    /// The shared Session Event Index. Preserve the configured cache stem:
+    /// `sessions-index.json` gives `sessions-index.sqlite3`. The retired tree
+    /// JSON file is left untouched; tree and focused reads use this store.
     pub(crate) fn path(v1_cache: &Path) -> PathBuf {
         v1_cache.with_extension("sqlite3")
     }
@@ -1440,6 +1441,33 @@ impl EventCache {
         self.files.keys().map(String::as_str)
     }
 
+    pub(crate) fn source(
+        &self,
+        path: &Path,
+        native_id: &str,
+    ) -> Option<crate::model::summary::CatalogSource> {
+        let file = self.files.get(path.to_string_lossy().as_ref())?;
+        let ledger = &file.ledger;
+        Some(crate::model::summary::CatalogSource {
+            path: path.to_owned(),
+            native_id: native_id.to_owned(),
+            dev: ledger.stat.dev,
+            ino: ledger.stat.ino,
+            size: ledger.stat.size,
+            modified_ns: ledger.stat.modified_ns,
+            changed_ns: ledger.stat.changed_ns,
+            offset: ledger.offset,
+            prefix_sha256: ledger.prefix,
+            tail_sha256: ledger.tail,
+        })
+    }
+
+    pub(crate) fn file_index(&self, path: &Path) -> Option<&FileIndex> {
+        self.files
+            .get(path.to_string_lossy().as_ref())
+            .map(|file| file.index.as_ref())
+    }
+
     pub(crate) fn reported_runs(&self) -> impl Iterator<Item = &crate::facts::ReportedRunSnapshot> {
         self.reported_runs.values().flat_map(|runs| runs.values())
     }
@@ -1693,6 +1721,7 @@ pub(crate) fn scan_file(
     let agent = harness == "claude" && crate::native_sidecar::agent_path(path);
     if let Some(entry) = cache.files.get(&key)
         && !cache.unpersisted.contains(&key)
+        && (harness == "copilot" || entry.index.tree_summary.is_some())
         && entry.index.source_chunks.is_some()
         && (harness == "copilot" || entry.index.marker_index.is_some())
         && entry.index.handoff_index.is_some()
@@ -1753,6 +1782,7 @@ pub(crate) fn scan_file(
         if let Some(ledger) = &recorded
             && ledger.stat == stat
             && let Some(index) = &base
+            && (harness == "copilot" || index.tree_summary.is_some())
             && index.source_chunks.is_some()
             && (harness == "copilot" || index.marker_index.is_some())
             && index.handoff_index.is_some()
@@ -1821,6 +1851,25 @@ pub(crate) fn scan_file(
         #[cfg(test)]
         if agent && let Some(hook) = AFTER_CLAUDE_SIDECAR.with(|hook| hook.borrow_mut().take()) {
             hook();
+        }
+        if harness != "copilot" && writable.tree_summary.is_none() {
+            let (summary, observed) =
+                crate::native_tree::Summary::repair(&mut file, from, harness)?;
+            if append
+                && recorded
+                    .as_ref()
+                    .is_some_and(|ledger| observed != ledger.prefix)
+            {
+                if last {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "native tree metadata generation changed",
+                    ));
+                }
+                force_replace = true;
+                continue;
+            }
+            writable.tree_summary = Some(summary);
         }
         writable.dirty_rows = Some(DirtyRows::begin(writable));
         if harness != "copilot" && writable.marker_index.is_none() {
@@ -1983,7 +2032,11 @@ fn parse(
         parsed.update(&line);
         #[cfg(test)]
         PARSED.with(|parsed| parsed.set(parsed.get() + 1));
-        match serde_json::from_slice::<Value>(&line) {
+        let record = serde_json::from_slice::<Value>(&line);
+        if let Some(summary) = &mut index.tree_summary {
+            summary.observe(record.as_ref().ok(), harness);
+        }
+        match record {
             Ok(record) if record.is_object() => {
                 if let Some(markers) = &mut index.marker_index {
                     markers.observe(&line, line_offset, true, &record);
