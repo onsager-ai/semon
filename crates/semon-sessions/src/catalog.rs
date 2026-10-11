@@ -2291,6 +2291,14 @@ mod tests {
         let db = Connection::open(EventCache::path(&fixture.options.cache)).unwrap();
         let turn: String = db.query_row("SELECT json_extract(metadata,'$.turn') FROM session_slots WHERE session_key='session-00000' AND json_extract(metadata,'$.turn') IS NOT NULL ORDER BY slot LIMIT 1", [], |row| row.get(0)).unwrap();
         let expected: i64 = db.query_row("SELECT slot FROM session_slots WHERE session_key='session-00000' AND json_extract(metadata,'$.turn')=?1 ORDER BY slot LIMIT 1", [&turn], |row| row.get(0)).unwrap();
+        let range = crate::session_transcript_range(
+            &fixture.options,
+            "source",
+            "sid=session-00000&scope=retained_history&after=0&limit=1",
+            None,
+        );
+        assert_eq!(range.status, 200);
+        let range: Value = serde_json::from_slice(&range.body).unwrap();
         fs::remove_file(
             fixture
                 .options
@@ -2307,6 +2315,22 @@ mod tests {
         let value: Value = serde_json::from_slice(&reply.body).unwrap();
         assert_eq!(value["slot"], expected);
         assert_eq!(value["source_key"], "source");
+        assert_eq!(value["generation"], range["projection"]["generation"]);
+        // A turn address is qualified by the same immutable projection as a
+        // range. Concurrent replacement rejects the old address before I/O.
+        db.execute(
+            "UPDATE session_slot_projections SET generation=?1 WHERE session_key='session-00000'",
+            ["e".repeat(64)],
+        )
+        .unwrap();
+        let stale_range = format!(
+            "sid=session-00000&scope=retained_history&after={expected}&limit=1&generation={}",
+            value["generation"].as_str().unwrap()
+        );
+        assert_eq!(
+            crate::session_transcript_range(&fixture.options, "source", &stale_range, None).status,
+            409
+        );
         assert_eq!(
             crate::session_turn_anchor(
                 &fixture.options,

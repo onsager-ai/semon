@@ -86,7 +86,9 @@ pub fn session_transcript_range_with_mode(
 }
 
 /// Locate a recorded turn using only its source-qualified slot projection.
-/// Hosts authorize this metadata query before and after the read.
+/// Hosts authorize this metadata query before and after the read. Consumers
+/// pass the returned projection generation into the subsequent range read so
+/// a rewrite cannot reinterpret the recorded slot address.
 pub fn session_turn_anchor(options: &Options, source_key: &str, query: &str) -> ViewerReply {
     let read = || -> Result<ViewerReply, Box<dyn std::error::Error>> {
         let Some(key) = query_value(query, "sid")
@@ -162,16 +164,28 @@ pub fn session_turn_anchor(options: &Options, source_key: &str, query: &str) -> 
         if generation.as_deref() != Some(identity.generation.as_str()) {
             return Ok(stale());
         }
-        let table = if crate::history_projection::catalog(&tx, &key)?.is_some() {
-            "session_history_slots"
+        let history = crate::history_projection::catalog(&tx, &key)?.is_some();
+        let (table, header) = if history {
+            ("session_history_slots", "session_history_slot_projections")
         } else {
-            "session_slots"
+            ("session_slots", "session_slot_projections")
         };
+        let projection: Option<(String, u32)> = tx
+            .query_row(
+                &format!("SELECT generation,version FROM {header} WHERE session_key=?1"),
+                [&key],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        let Some((projection, VERSION)) = projection else {
+            return Ok(unavailable());
+        };
+        let projection = entry_generation(&projection);
         let slot:Option<i64>=tx.query_row(&format!("SELECT slot FROM {table} WHERE session_key=?1 AND json_extract(metadata,'$.turn')=?2 ORDER BY slot LIMIT 1"),rusqlite::params![key,turn],|row|row.get(0)).optional()?;
         tx.commit()?;
         Ok(reply(
             200,
-            json!({"api":1,"source_key":source_key,"catalog_key":key,"turn":turn,"slot":slot}),
+            json!({"api":1,"source_key":source_key,"catalog_key":key,"turn":turn,"slot":slot,"generation":projection}),
         ))
     };
     read().unwrap_or_else(|_| unavailable())
