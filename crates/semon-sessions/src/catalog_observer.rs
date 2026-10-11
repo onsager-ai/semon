@@ -5,8 +5,9 @@ use crate::{Options, Refresh, RefreshPool, viewer::MachineView};
 
 /// Retain one observer per configured source, independently of browser clients.
 /// Construction and demand do not read native history. The shared pool coalesces
-/// checks. A cold catalog publishes an explicit partial batch before complete
-/// selected-machine reconciliation. Complete refresh still scans the machine;
+/// checks. Cold discovery yields bounded metadata slices and retains at most 64
+/// recent candidates, then publishes that explicit partial source batch before
+/// complete selected-machine reconciliation. Complete refresh still scans the machine;
 /// this is not a bounded incremental background observation contract.
 pub struct SessionCatalogObserver {
     view: Arc<MachineView>,

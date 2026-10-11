@@ -8,12 +8,9 @@ The delivery in #297/#298 was reconciled through main #294 and the landed #297
 on 2026-10-04. The bounded supported contract is documented below; issue
 acceptance and final check evidence are tracked in #235.
 
-Trace capture/occurrence oracles described below are historical: their three
-collector packages are retired, with repair/backfill source and tests preserved
-at the [native session product boundary](design/session-foundation-retirement.md). Native session,
-control, mirror, namespace and transcript/usage contracts and their shared
-fixtures remain current. Historical capture results do not qualify current
-native readers or authorize rebuilding a Store from possibly rotated logs.
+Native session, control, mirror, namespace, transcript and usage contracts remain
+supported. Retired Canonical Trace Store capture and replay are outside this
+contract; see the [first-release product boundary](design/session-foundation-retirement.md).
 
 ## Evidence contract
 
@@ -40,28 +37,22 @@ recovery source.
 
 ## Baseline and oracle
 
-Existing implementations already preserve Claude multiblock records, explicit
-parentUuid ancestry, principal/subagent identity, Codex item-stream dispatch,
-raw-only records and content-addressed trace identity. Existing exact linking
-and mirror functionality are baseline work, not new adapter requirements.
+Native fixtures preserve Claude multiblock records, explicit parentUuid ancestry,
+principal/subagent identity, Codex item-stream dispatch and exact native call/result
+relationships. Existing linking and mirror behavior form the parser baseline.
 
-`tests/fixtures/compatibility/v1/manifest.json` describes the checked-in
-source-shaped fixtures and their hashes. Harness build/version are explicitly
-unknown: these fixtures establish parser behavior, not native-runtime support.
-They contain no real sessions. The Rust `compatibility_*` tests compare cold
-capture, append capture with cursor and SQLite restart at every complete and
-half-frame boundary, and replay of the actual retained raw bytes. They compare
-full occurrence records and verify byte-for-byte retention of malformed and
-unknown complete lines. The fixtures cover reversed results for overlapping
-same-name calls; this structural-store oracle does not establish full viewer
-transcript or usage correctness.
+`tests/fixtures/compatibility/v1/manifest.json` describes the checked-in synthetic
+source fixtures and their hashes. Harness build/version are explicitly unknown;
+these fixtures establish parser behavior and contain no real sessions. Current
+native parser tests consume these inputs directly. Retired Store capture and raw
+carrier replay do not qualify the native session product.
 
-The initial oracle is supplemented by the native/mock and source-shaped corpora
+The native baseline is supplemented by the native/mock and source-shaped corpora
 described below: archived discovery, continuation/fork/copied prefixes,
 compaction, denial/cancellation, concurrent calls and machine namespaces. The
 replacement and source-custody tests verify current-revision replay while retaining
-older raw generations; deletion does not authorize pruning retained evidence.
-The initial structural tests alone do not establish viewer or release acceptance.
+original native generations; deletion does not authorize pruning retained evidence.
+Parser fixtures alone do not establish Viewer or release acceptance.
 The final copied-usage repair in #297 and persisted Copilot delivery in #298 add
 full-model, transcript, restart/rebuild and redacted mirror acceptance coverage.
 
@@ -104,58 +95,6 @@ Neither recording establishes tools, approvals, cancellation, compaction or
 fork semantics. The offline Python validator checks provenance and file hashes;
 CI does not launch either harness or access personal native homes.
 
-## Capture replacement detection
-
-Claude and Codex capture cursors store a constant-size SHA-256 digest of the
-complete consumed prefix. Before resuming, capture verifies that prefix;
-replacement, interior mutation or truncation resets parser context and line
-ordinals, then replays the current source. Older cursors without a digest replay
-once. Batch commits extend the digest only with complete records after their raw
-capture succeeds. No transcript text is added to cursor state and no old raw
-record is deleted.
-
-This deliberately reads the consumed prefix on each capture invocation, including
-idle invocations. It prioritizes verified replacement handling over the former
-size-only shortcut; an idle-read optimization needs equally strong source-change
-evidence. Current source selection from retained evidence is described below. Legacy
-records without explicit custody remain unknown; prefix verification alone
-does not identify an older retained generation.
-
-Capture records local source ownership of projected occurrence rows alongside
-its raw/semantic transaction. When verified source bytes change, it retires that
-source's occurrence projection before replay; another recorded owner keeps its
-shared rows. This reconciles metadata/malformed replacement, fewer Claude blocks,
-truncation tails and changed Codex session identity without deleting canonical
-traces, raw records or raw-to-trace links. Source keys derive from resolved local paths and are excluded from transferable
-identity and ordinary trace/log results. Version 6 introduced this structural
-ownership index; version 7 hashes recorded keys and adds private capture custody.
-
-Pre-upgrade occurrence rows have no reliable file ownership. They remain observed
-memory until independently attributable; the migration never guesses ownership
-from session name, timing or text. A replay claims only rows actually projected
-by that source. Full parity for arbitrary pre-upgrade stale rows and generation
-selection when rebuilding from all retained raw bytes remain unresolved release
-gates, not a native support claim.
-
-When the first complete Codex `item_completed` record arrives after an earlier
-legacy `response_item` message was captured, dispatch now resets that source's
-owned projection and replays with the item stream selected for the whole file.
-An incomplete item frame does not switch dispatch. The source-shaped early-item
-fixture and native paginated alpha fixture both pass full cold/restarted/rebuilt
-occurrence comparisons and exact retention at every half-frame and complete-line
-boundary. This does not retire unowned pre-upgrade observations or establish
-native billing, tools, approval or fork support for the alpha release.
-
-The sessions viewer ledger also verifies the complete consumed prefix when file
-stat changes, replacing its former two-window shortcut. Its versioned, text-free
-cache rebuilds once on upgrade; idle scans with unchanged stat retain their
-existing shortcut. Changed-file scans hash the old prefix before resuming and
-the consumed prefix after parsing. This adds reads on growing or touched files,
-but does not reparse unchanged history. Explicit native tool IDs and byte-offset
-metadata are rebuilt from the source after an interior mutation. A writer that
-preserves the entire file stat while mutating bytes is outside this shortcut's
-change-detection contract.
-
 ## Native home overrides
 
 Capture CLI defaults and session discovery honor nonempty `CODEX_HOME` and
@@ -181,11 +120,10 @@ parent-session field was observed, so they do not establish that lineage.
 The localhost mock supplies five input and three output tokens per request.
 Cost-state model usage accumulates 5/3, 10/6 and 15/9; the fork includes inherited
 context. These are native snapshots of synthetic accounting, not invoices or
-newly attributable child consumption. Canonical message occurrences preserve
-the physical session namespace. Fixture tests compare cold, restarted and
-retained-raw replay for each complete snapshot. Current-source revision
-selection after replacement is described below; unowned legacy custody remains
-unknown.
+newly attributable child consumption. Native records preserve the physical
+session namespace. Current source identity and generation checks govern viewing
+and query interpretation; the snapshots do not establish custody for retired
+Store records.
 
 ### Native Claude tools and model switch
 
@@ -234,23 +172,7 @@ bytes remain read-only.
 
 Compressed native rollouts are outside this supported subset. Current session
 discovery includes plain archived files under the configured Codex home; this
-fixture does not establish native archive lifecycle or logical lineage. Legacy
-collector source selection is documented at the pinned capture revision.
-
-## Retained source revision selection
-
-Complete raw history can contain several byte variants at the same source line.
-Schema v7 therefore retains private collector custody for each observed capture
-revision. Current-source forensic replay selects those recorded ordered bindings
-and validates their complete-prefix checksum. A→B→A tests for both native Claude
-and native paginated Codex compare full current occurrence rows against replay,
-while retaining both raw variants and all canonical/raw links. A lost legacy
-Codex cursor also retires only the explicitly owned projection before replay.
-
-Custody is local source provenance, not a native generation, logical parent or
-transferable trace identity. Explicit raw forgetting leaves replay unavailable;
-idle capture and legacy adoption do not recreate those bytes. Unowned historical
-rows are preserved because their source cannot be established retrospectively.
+fixture does not establish native archive lifecycle or logical lineage. Native source selection is recorded by the shared Event Index and Catalog.
 
 ## Codex native fork boundaries and child usage
 
@@ -267,8 +189,8 @@ After its own turn, `token_usage_record.usage` reports fresh mock usage of 5 inp
 and 3 output tokens, while `thread_token_usage` and the cumulative `token_count`
 report 10/6 including inherited parent context. These are distinct observations,
 not billing evidence. Live mock-provider checks that inherited context was sent
-are recorded separately from persisted facts. Capture tests compare cold,
-restart and retained-raw replay for the parent, empty child and completed child.
+are recorded separately from persisted facts. Native reader fixtures preserve
+the parent, empty child and completed child observations across index restart.
 The corpus supplies the native evidence for the viewer interpretation described
 below; the probe itself does not claim decoder support.
 
@@ -286,19 +208,13 @@ for fresh usage and produces no model-usage row. Legacy non-fork files retain
 existing cumulative-delta behavior. Complete per-response observations take
 precedence over legacy counters; mixed-format histories without complete native
 reports are not claimed as an accepted usage baseline. This remains usage
-telemetry, not an invoice. The rebuildable viewer index moves to schema 2/parser
-20 while preserving separately retained reported-run snapshots; native source
-logs and canonical/raw trace storage are unchanged.
+telemetry, not an invoice. The native Event Index derives this accounting from
+original source evidence and preserves separately retained reported-run snapshots.
 
-The CLI session tree and encrypted relay summaries use the same complete native
-per-response decoder as the viewer. Their private structural summaries deduplicate
-exact request identities and keep cumulative fork context out of fresh request
-counts. Local tree index version 4 and encrypted summary index version 2 rebuild
-older cached accounting from the retained source records/frames; no transcript
-text is added to those caches. This extends the fresh-usage correction to those
-read surfaces without changing canonical/raw storage or adding logical spawn
-edges from physical inherited history.
-
+The CLI session tree uses the same complete native per-response decoder. Private
+structural summaries deduplicate exact request identities and keep cumulative fork
+context out of fresh request counts. Physical inherited history does not create
+logical spawn edges. Native logs remain intact.
 
 ### Colliding native identifiers
 
@@ -315,7 +231,7 @@ accepted. Repeated ambiguous IDs remain unlinked.
 
 The versioned `namespace-*` fixtures are source-shaped synthetic records, with
 unknown native versions. They demonstrate separate sessions with the same native
-ID and call ID, source-local results, and cold/restart/retained-raw capture parity.
+ID and call ID, source-local results, and generation-bound native reads.
 This is no claim about native UUID collision frequency or invented lineage.
 
 ## Copied Claude usage accounting

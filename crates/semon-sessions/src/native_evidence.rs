@@ -189,38 +189,6 @@ impl NativeEvidence {
             });
         }
         let cache = work.events.as_mut().expect("event cache initialized");
-        // Cold catalog demand publishes a small explicit source batch before the
-        // complete native observer reads unrelated history. Source discovery is
-        // still a filesystem metadata walk; incomplete native lineage cannot grant
-        // control authority until the subsequent complete reconciliation.
-        if self.catalog_demand.load(Ordering::Relaxed)
-            && !self.options.scan_window
-            && cache.is_scoped()
-            && cache.session_catalog_generation().is_none()
-        {
-            let mut inputs = crate::inputs::inputs(&self.options)?;
-            inputs.retain(|input| input.path.ends_with(".jsonl"));
-            inputs.sort_by_cached_key(|input| {
-                std::cmp::Reverse(
-                    fs::metadata(input.full_path(&self.options))
-                        .and_then(|metadata| metadata.modified())
-                        .ok(),
-                )
-            });
-            inputs.truncate(64);
-            if !inputs.is_empty() {
-                let prepared = model::prepare_sources(&self.options, cache, &inputs, now)?;
-                match cache.publish_partial_catalog(&prepared)? {
-                    crate::events::Outcome::Written => {}
-                    _ => {
-                        return Err(io::Error::other(
-                            "initial native catalog publication changed; retry observation",
-                        ));
-                    }
-                }
-                cache.end_scan();
-            }
-        }
         // The index commits each file's change as it reads it: nothing is
         // left to save.
         let mut dirty = false;
@@ -230,8 +198,62 @@ impl NativeEvidence {
         Ok(())
     }
 
+    /// Advance cold candidate discovery without reading native bodies. The
+    /// latest page is published after discovery finishes, so a flat directory's
+    /// enumeration order cannot displace recent sessions with old history.
+    /// Workers yield after 512 entries or 64 accepted candidates; only the 64
+    /// newest candidates remain resident between steps.
+    pub(crate) fn prepare_catalog(&self, work: &mut Work, now: i64) -> io::Result<bool> {
+        self.prepare_events(work, now)?;
+        let cache = work.events.as_mut().expect("event cache initialized");
+        if self.options.scan_window
+            || !cache.is_scoped()
+            || cache.session_catalog_generation().is_some()
+        {
+            work.cold_catalog = None;
+            return Ok(true);
+        }
+        let discovery = work.cold_catalog.get_or_insert_with(ColdCatalog::default);
+        let page = discovery.cursor.next(&self.options, 64, 512)?;
+        debug_assert!(page.examined <= 512);
+        for input in page.inputs {
+            let modified = fs::metadata(input.full_path(&self.options))
+                .and_then(|metadata| metadata.modified())
+                .ok();
+            discovery
+                .newest
+                .insert((std::cmp::Reverse(modified), input));
+            if discovery.newest.len() > 64 {
+                discovery.newest.pop_last();
+            }
+        }
+        if !page.complete {
+            return Ok(false);
+        }
+        let discovery = work.cold_catalog.take().expect("discovery initialized");
+        let inputs: Vec<_> = discovery
+            .newest
+            .into_iter()
+            .map(|(_, input)| input)
+            .collect();
+        if !inputs.is_empty() {
+            let prepared = model::prepare_sources(&self.options, cache, &inputs, now)?;
+            if cache.publish_partial_catalog(&prepared)? != crate::events::Outcome::Written {
+                return Err(io::Error::other(
+                    "Initial native catalog publication changed; retry observation",
+                ));
+            }
+            cache.end_scan();
+        }
+        Ok(true)
+    }
+
     /// Native queries refresh this owner's source cache and coherent cohort.
     /// This owner has no compatibility transport or background refresh workers.
+    pub(crate) fn catalog_pending(&self, work: &Work) -> bool {
+        work.cold_catalog.is_some()
+    }
+
     pub(crate) fn query_at(&self, now: i64) -> io::Result<Arc<model::QueryData>> {
         let retained = || {
             self.closed.load(Ordering::Acquire).then(|| {
@@ -302,8 +324,18 @@ pub(crate) struct Work {
     pub(crate) events: Option<EventCache>,
     pub(crate) texts: Texts,
     pub(crate) catalog_snapshot: Option<Snapshot>,
+    cold_catalog: Option<ColdCatalog>,
     /// When the last rebuild of either model started.
     pub(crate) built_at: Option<Instant>,
+}
+
+#[derive(Default)]
+struct ColdCatalog {
+    cursor: crate::inputs::Discovery,
+    newest: BTreeSet<(
+        std::cmp::Reverse<Option<std::time::SystemTime>>,
+        crate::inputs::Input,
+    )>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]

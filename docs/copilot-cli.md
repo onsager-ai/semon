@@ -30,16 +30,6 @@ semon sessions --copilot-home /path/to/copilot --all
 semon sessions --copilot-home /path/to/copilot --serve
 ```
 
-## Historical Trace Store capture
-
-The experimental `semon-copilot` collector is retired from the current workspace.
-Its historical source, watch/cursor behavior, schema-v7 custody tests and capture
-measurements remain at the [native session product boundary](design/session-foundation-retirement.md).
-Native Copilot session parsing, identity, transcripts, mirror synchronization and
-shared fixtures remain supported. Installed collectors, cursors and databases
-are untouched; inventory writers and follow the [native session product boundary](design/session-foundation-retirement.md)
-before changing an installation.
-
 ## Native reader behavior
 
 `semon sessions --model-json`, the query/MCP session tools, modern paged
@@ -97,7 +87,7 @@ length-preserving secret-shape redaction runs on source bytes before transport
 encoding; local originals remain private and unchanged. Unknown secret shapes
 are not guaranteed redacted. Received data is a viewing copy, not a recovery
 source. Native identities are scoped by machine and harness; no cross-machine
-ownership is inferred. Encrypted Relay is retiring separately under its [native session product boundary](design/session-foundation-retirement.md).
+ownership is inferred. Encrypted Relay is retired; native Push/mirror remains supported.
 This native mirror is receiver-readable and is not end-to-end encrypted.
 
 ## Acceptance evidence
@@ -106,8 +96,7 @@ Current `semon-sessions` and mirror tests exercise the native fixtures for both
 supported releases, including exact call/result IDs, protocol versus shell
 outcomes, latest shutdown usage, missing results, unknown lineage/approvals and
 strict source allowlists. Fixture manifests and native probe provenance remain.
-Legacy cold/incremental/retained-raw Store capture oracles are preserved in the
-pinned revision; they are not current native-reader acceptance tests.
+Retired Store capture oracles are outside current native-reader acceptance.
 
 The HTTP mirror regression commits an append and loses its acknowledgement,
 restarts the sender, interrupts a frame, replaces its source and deliberately
