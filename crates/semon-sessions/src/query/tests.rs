@@ -3186,3 +3186,65 @@ fn unsent_query_uses_indexed_bookmark_evidence() {
     );
     assert!(sources.machines[0].1.work.lock().unwrap().events.is_none());
 }
+
+#[test]
+fn handoff_endpoint_indexes_upgrade_without_losing_native_evidence() {
+    let home = fixture();
+    let mut cache = crate::events::EventCache::open_scoped(&home.options.cache).unwrap();
+    crate::model::observe_catalog(
+        &home.options,
+        &mut cache,
+        &mut false,
+        &mut crate::model::Texts::default(),
+        NOW,
+    )
+    .unwrap();
+    drop(cache);
+    let db =
+        rusqlite::Connection::open(crate::events::EventCache::path(&home.options.cache)).unwrap();
+    let snapshot = || {
+        let mut statement = db
+            .prepare("SELECT metadata FROM session_catalog ORDER BY session_key")
+            .unwrap();
+        statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+    };
+    let original = snapshot();
+    let generation: String = db
+        .query_row(
+            "SELECT value FROM meta WHERE key='catalog_generation'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let events: i64 = db
+        .query_row("SELECT count(*) FROM events", [], |row| row.get(0))
+        .unwrap();
+    db.execute_batch(
+        "DROP INDEX session_trace_from; DROP INDEX session_trace_to; PRAGMA user_version=21;",
+    )
+    .unwrap();
+    let reopened = crate::events::EventCache::open_scoped(&home.options.cache).unwrap();
+    assert_eq!(reopened.session_catalog_generation().unwrap(), generation);
+    assert_eq!(snapshot(), original);
+    assert_eq!(
+        db.query_row("SELECT count(*) FROM events", [], |row| row
+            .get::<_, i64>(0))
+            .unwrap(),
+        events
+    );
+    assert_eq!(
+        db.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+            .unwrap(),
+        22
+    );
+    assert_eq!(db.query_row("SELECT count(*) FROM sqlite_schema WHERE name IN ('session_trace_from','session_trace_to')", [], |row|row.get::<_,i64>(0)).unwrap(), 2);
+    assert!(
+        !crate::session_query_sources(&home.options, "scan")
+            .unwrap()
+            .is_empty()
+    );
+}
