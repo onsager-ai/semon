@@ -6918,13 +6918,13 @@ fn build_sources_inner(
             }));
         }
         BuildTarget::Catalog => {
-            cache.publish_session_projection(
+            cache.publish_catalog_projection(
                 &crate::slot_projection::Publication {
                     rows: catalog.as_deref().unwrap_or_default(),
                     transcripts: slot_projections.as_deref(),
                 },
                 catalog_base.as_deref(),
-            );
+            )?;
             cache.publish_session_descriptions();
             return Ok(BuildOutput::Catalog(
                 pids.iter().map(|pid| pid.pid).collect(),

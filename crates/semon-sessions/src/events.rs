@@ -1378,11 +1378,34 @@ impl EventCache {
         publication: &crate::slot_projection::Publication<'_>,
         expected_generation: Option<&str>,
     ) {
-        if !self.busy
-            && self.unpersisted.is_empty()
-            && let Some(store) = self.store.as_mut()
-        {
-            let _ = store.publish_session_catalog(publication, expected_generation);
+        let _ = self.publish_catalog_projection(publication, expected_generation);
+    }
+
+    /// A complete native observation is acknowledged only after its source
+    /// evidence and Catalog publication are durable in the same generation.
+    pub(crate) fn publish_catalog_projection(
+        &mut self,
+        publication: &crate::slot_projection::Publication<'_>,
+        expected_generation: Option<&str>,
+    ) -> io::Result<()> {
+        if self.busy || !self.unpersisted.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "native producer sources not durably observed",
+            ));
+        }
+        let outcome = self
+            .store
+            .as_mut()
+            .ok_or_else(|| io::Error::other("scoped producer store unavailable"))?
+            .publish_session_catalog(publication, expected_generation)
+            .map_err(|error| io::Error::other(error.to_string()))?;
+        match outcome {
+            Outcome::Written => Ok(()),
+            Outcome::Conflict | Outcome::Stale => Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "native Catalog publication generation changed",
+            )),
         }
     }
 
