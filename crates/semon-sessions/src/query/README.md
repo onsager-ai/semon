@@ -27,6 +27,9 @@ construction would change the hosted contract. No full-model query fallback rema
 Focused embedding reads use `Query::call_selected` with a host-selected machine
 and Catalog key. `session_query_sources` returns the original references for its
 parent, children and indexed handoff endpoints; references grant no authority.
+Far-end stubs resolve through indexed native handoff owners, and unsent addresses
+through existing native bookmarks. Machine-local union aliases remain scoped to
+their configured presentation machine; these addresses grant no control rights.
 The native producer reuses qualified current or retained Event Index generations.
 It does not construct a workspace producer, restore files or publish metadata.
 The request lends its reader and shares a 1,024-request budget through derivation,

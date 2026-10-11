@@ -260,16 +260,67 @@ fn selection(db: &Connection, key: &str) -> io::Result<Selection> {
 }
 
 fn query_selection(db: &Connection, key: &str) -> io::Result<Selection> {
-    let mut selected = selection(db, key)?;
+    let mut selected = if catalog(db, key)?.is_some() {
+        selection(db, key)?
+    } else {
+        // Far-end and unsent sessions have no native transcript. Resolve their
+        // owner through indexed handoff endpoints, never a workspace scan.
+        let mut statement = db.prepare("SELECT session_key FROM (SELECT session_key FROM session_trace_edges WHERE CASE WHEN json_valid(metadata) THEN json_extract(metadata,'$.from') END=?1 UNION SELECT session_key FROM session_trace_edges WHERE CASE WHEN json_valid(metadata) THEN json_extract(metadata,'$.to') END=?1 UNION SELECT session_key FROM session_trace_bookmarks WHERE target=?2) ORDER BY session_key LIMIT 65").map_err(failure)?;
+        let owners = statement
+            .query_map(rusqlite::params![key, key.strip_prefix("unsent:")], |row| {
+                row.get::<_, String>(0)
+            })
+            .map_err(failure)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(failure)?;
+        let mut rows = BTreeMap::new();
+        let mut incomplete = owners.len() == 65;
+        for owner in owners.into_iter().take(64) {
+            let context = selection(db, &owner)?;
+            incomplete |= context.incomplete;
+            for row in context.rows {
+                rows.insert(row.key.clone(), row);
+            }
+            let paths: std::collections::BTreeSet<_> = rows
+                .values()
+                .flat_map(|row| &row.sources)
+                .map(|source| &source.path)
+                .collect();
+            if paths.len() > SOURCES_MAX || rows.len() > 64 {
+                return Err(io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    "Selected handoff owner closure exceeds its source bound",
+                ));
+            }
+        }
+        if rows.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                "Selected native query evidence is unavailable",
+            ));
+        }
+        Selection {
+            rows: rows.into_values().collect(),
+            incomplete,
+        }
+    };
     // Query needs the endpoints of the selected session's actual handoffs too.
     // Reuse the indexed native trace, rather than discovering unrelated files.
     let mut statement = db.prepare("SELECT endpoint FROM (SELECT json_extract(metadata,'$.from') AS endpoint FROM session_trace_edges WHERE session_key=?1 UNION SELECT json_extract(metadata,'$.to') AS endpoint FROM session_trace_edges WHERE session_key=?1) WHERE endpoint IS NOT NULL ORDER BY endpoint LIMIT 65").map_err(failure)?;
-    let endpoints = statement
-        .query_map([key], |row| row.get::<_, String>(0))
-        .map_err(failure)?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(failure)?;
-    selected.incomplete |= endpoints.len() == 65;
+    let mut endpoints = std::collections::BTreeSet::new();
+    for row in &selected.rows {
+        let next = statement
+            .query_map([&row.key], |row| row.get::<_, String>(0))
+            .map_err(failure)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(failure)?;
+        selected.incomplete |= next.len() == 65;
+        endpoints.extend(next);
+        if endpoints.len() > 64 {
+            selected.incomplete = true;
+            break;
+        }
+    }
     for endpoint in endpoints {
         if selected.rows.iter().any(|row| row.key == endpoint) {
             continue;

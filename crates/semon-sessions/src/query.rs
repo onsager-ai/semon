@@ -871,7 +871,12 @@ impl Query {
             .ok_or_else(|| QueryError::new("unknown_tool", format!("no tool {tool:?}")))?;
         validate(&spec.input_schema, args)?;
         if !matches!(tool, "get_session" | "read_transcript")
-            || args["id"].as_str() != Some(catalog_key)
+            || !args["id"].as_str().is_some_and(|id| {
+                id == catalog_key
+                    || id
+                        .rsplit_once('@')
+                        .is_some_and(|(own, _)| own == catalog_key)
+            })
         {
             return Err(QueryError::invalid(
                 "A focused tool requires the selected Catalog id",
@@ -940,6 +945,34 @@ impl Query {
         let mut answer: Value = result?;
         answer["window_start"] = json!(self.start);
         Ok(answer)
+    }
+
+    /// Configured presentation labels, including duplicate-hostname aliases.
+    /// This reads machine identity metadata without preparing native sources.
+    pub fn source_labels(&self) -> Vec<(String, String)> {
+        let identities = self
+            .sources
+            .machines
+            .iter()
+            .map(|(key, source)| {
+                (
+                    key.clone(),
+                    Arc::new(crate::model::QueryData::identity(&source.options, now_ms())),
+                )
+            })
+            .collect();
+        let read = QueryRead::new(identities, usize::MAX);
+        self.sources
+            .machines
+            .iter()
+            .zip(read.parts)
+            .map(|((key, _), part)| {
+                (
+                    key.clone(),
+                    part.machine.unwrap_or_else(|| part.data.machine_id.clone()),
+                )
+            })
+            .collect()
     }
 
     fn view(
