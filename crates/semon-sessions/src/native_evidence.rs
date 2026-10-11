@@ -14,7 +14,7 @@ use std::{
         Arc, Mutex, MutexGuard, OnceLock, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard,
         atomic::{AtomicBool, Ordering},
     },
-    time::{Instant, UNIX_EPOCH},
+    time::Instant,
 };
 
 pub(crate) struct NativeEvidence {
@@ -344,21 +344,14 @@ struct ColdCatalog {
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Stamp {
     kind: fs::FileType,
-    size: u64,
-    modified_ns: u128,
+    generation: crate::events::Stat,
 }
 
 fn stamp(path: &Path) -> Option<Stamp> {
     let metadata = fs::symlink_metadata(path).ok()?;
     Some(Stamp {
         kind: metadata.file_type(),
-        size: metadata.len(),
-        modified_ns: metadata
-            .modified()
-            .ok()?
-            .duration_since(UNIX_EPOCH)
-            .ok()?
-            .as_nanos(),
+        generation: crate::events::Stat::from_metadata(&metadata).ok()?,
     })
 }
 
@@ -537,11 +530,36 @@ impl Snapshot {
     }
 
     pub(crate) fn changed(&self, options: &Options) -> bool {
-        if self
-            .watched
-            .iter()
-            .any(|(path, original)| stamp(path) != *original)
-        {
+        self.changed_with(options, true)
+    }
+
+    /// Cached tree metadata remains readable after permission-only changes.
+    /// It cannot qualify current native source bytes or control authority.
+    pub(crate) fn metadata_changed(&self, options: &Options) -> bool {
+        self.changed_with(options, false)
+    }
+
+    fn changed_with(&self, options: &Options, native_generation: bool) -> bool {
+        if self.watched.iter().any(|(path, original)| {
+            let observed = stamp(path);
+            match (observed, original) {
+                (Some(observed), Some(original)) if !native_generation => {
+                    observed.kind != original.kind
+                        || (
+                            observed.generation.dev,
+                            observed.generation.ino,
+                            observed.generation.size,
+                            observed.generation.modified_ns,
+                        ) != (
+                            original.generation.dev,
+                            original.generation.ino,
+                            original.generation.size,
+                            original.generation.modified_ns,
+                        )
+                }
+                _ => observed != *original,
+            }
+        }) {
             return true;
         }
         if options.facts.is_some() {
