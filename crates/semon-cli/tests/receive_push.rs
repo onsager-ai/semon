@@ -150,18 +150,12 @@ impl Fixture {
             .unwrap()
     }
 
-    /// `semon sessions --model-json --all --machines DIR --no-local`, with
+    /// `semon sessions --json --all --machines DIR --no-local`, with
     /// the reader's own homes and cache in the fixture.
-    fn model(&self) -> serde_json::Value {
+    fn tree(&self) -> serde_json::Value {
         let viewer = self.path("viewer");
         let output = semon()
-            .args([
-                "sessions",
-                "--model-json",
-                "--all",
-                "--no-local",
-                "--machines",
-            ])
+            .args(["sessions", "--json", "--all", "--no-local", "--machines"])
             .arg(self.dir())
             .arg("--claude-home")
             .arg(viewer.join("claude"))
@@ -176,7 +170,7 @@ impl Fixture {
             .stdin(Stdio::null())
             .output()
             .unwrap();
-        assert_ok(&output, "the model over DIR");
+        assert_ok(&output, "the native tree over DIR");
         serde_json::from_slice(&output.stdout).unwrap()
     }
 
@@ -285,24 +279,36 @@ fn push_mirrors_a_home_into_semon_receive() {
     let facts = semon_sessions::read_facts(&machine.join("facts.json")).unwrap();
     assert_eq!(facts.hostname, "laptop");
 
-    // The viewer over DIR shows the pushed machine, up, with both its
-    // sessions. With one machine the model is that machine's own: `machine`,
-    // and no `machines` list to pick it from.
-    let model = fixture.model();
-    assert_eq!(model["machine"]["id"], "laptop", "{}", model["machine"]);
-    assert_eq!(model["machine"]["up"], true);
-    assert!(
-        model["machines"]
-            .as_array()
-            .is_none_or(|machines| machines.len() == 1)
-    );
+    // The native Viewer tree names both pushed sessions and their machine.
+    let tree = fixture.tree();
+    assert_eq!(tree["schema_version"], 1);
+    let roots = tree["roots"].as_array().unwrap();
+    assert_eq!(roots.len(), 2);
     for session in ["lane", "cx"] {
-        let found = &model["sessions"][session];
-        assert!(found.is_object(), "{session}: {}", model["sessions"]);
-        if let Some(machine) = found.get("machine") {
-            assert_eq!(machine, "laptop");
-        }
+        let found = roots.iter().find(|root| root["id"] == session).unwrap();
+        assert_eq!(found["machine"], "laptop");
     }
+    // The pushed facts still qualify an up machine independently of history.
+    let options = semon_sessions::Options {
+        cache: fixture.path("viewer/state/index.json"),
+        claude_home: fixture.path("viewer/claude"),
+        codex_home: fixture.path("viewer/codex"),
+        copilot_home: fixture.path("viewer/copilot"),
+        proc_root: fixture.path("home/proc"),
+        all: true,
+        ..Default::default()
+    };
+    let core = semon_sessions::ViewerCore::with_received(
+        Vec::new(),
+        semon_sessions::ReceivedMachines::new(&dir, &options),
+    );
+    let reply = core.respond("GET", "/api/viewer/home", "", None);
+    assert_eq!(reply.status, 200);
+    let overview: serde_json::Value = serde_json::from_slice(&reply.body).unwrap();
+    assert_eq!(overview["machines"].as_array().unwrap().len(), 1);
+    assert_eq!(overview["machines"][0]["label"], "laptop");
+    assert_eq!(overview["machines"][0]["up"], true);
+    core.close();
 
     // Rewritten shorter: sent again whole, with replace.
     fixture.write(&log, claude("rewritten").as_bytes());
