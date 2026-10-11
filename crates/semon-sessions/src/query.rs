@@ -23,6 +23,7 @@ use serde_json::{Map, Value, json};
 use crate::{
     Options,
     model::{SessionFacts, SlotKind, Transcript, now_ms, one_line},
+    native_evidence::NativeEvidence,
     tx,
     union::{Owner, QueryRead, ViewerCore},
 };
@@ -666,12 +667,33 @@ fn snippet(text: &str, at: usize, length: usize) -> String {
     out
 }
 
+enum QuerySources {
+    Native(Vec<(String, Arc<NativeEvidence>)>),
+    /// Transitional hosted admission/custody owner, tracked in Hub #226.
+    Hosted(Arc<ViewerCore>),
+}
+
+impl QuerySources {
+    fn read(&self, now: i64) -> io::Result<QueryRead> {
+        match self {
+            Self::Native(machines) => {
+                let parts = machines
+                    .iter()
+                    .map(|(key, evidence)| Ok((key.clone(), evidence.query_at(now)?)))
+                    .collect::<io::Result<Vec<_>>>()?;
+                Ok(QueryRead::new(parts, usize::MAX))
+            }
+            Self::Hosted(core) => core.query_at(now),
+        }
+    }
+}
+
 /// The agent read surface over one machine's homes or several: the tools
 /// `semon query` and `semon mcp` answer. Local calls share the native source
 /// index and snapshots between calls, rebuilding only what changed. Hosted
 /// calls can reuse the embedding core's native source cache and output window.
 pub struct Query {
-    core: Arc<ViewerCore>,
+    sources: QuerySources,
     /// Keeps embedding window-error text; source scope comes from the options.
     embedded: bool,
     /// The current call's window start (epoch ms), from its native cohort.
@@ -696,7 +718,7 @@ impl Query {
     /// tool's `since` before it would be cut short on some machine, so it is
     /// refused.
     pub fn with_machines(machines: Vec<(String, Options)>) -> Self {
-        let machines = machines
+        let machines: Vec<_> = machines
             .into_iter()
             .map(|(key, options)| {
                 (
@@ -710,7 +732,12 @@ impl Query {
             })
             .collect();
         Self {
-            core: Arc::new(ViewerCore::with_machines(machines)),
+            sources: QuerySources::Native(
+                machines
+                    .into_iter()
+                    .map(|(key, options)| (key, NativeEvidence::new(options)))
+                    .collect(),
+            ),
             embedded: false,
             start: None,
             native: None,
@@ -724,7 +751,7 @@ impl Query {
     /// in the core's existing source cache. The host owns admission and custody.
     pub fn from_native_core(core: Arc<ViewerCore>) -> Self {
         Self {
-            core,
+            sources: QuerySources::Hosted(core),
             embedded: true,
             start: None,
             native: None,
@@ -735,8 +762,8 @@ impl Query {
     /// exact native source snapshots. `None` means every part is unbounded.
     fn window_start(&mut self, now: i64) -> Result<Option<i64>, QueryError> {
         let native = self
-            .core
-            .query_at(now)
+            .sources
+            .read(now)
             .map_err(|error| QueryError::io(&error))?;
         let start = native
             .parts
@@ -797,8 +824,8 @@ impl Query {
         let empty = json!({});
         let args = if args.is_null() { &empty } else { args };
         validate(&spec.input_schema, args)?;
-        // Once per call: the answer's window and the check of `since` are
-        // the models' own.
+        // Once per call: the answer's window and the check of `since` belong
+        // to the same native evidence cohort.
         self.start = self.window_start(now)?;
         let mut answer = match tool {
             "list_sessions" => self.list_sessions(args, now),

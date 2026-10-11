@@ -1915,6 +1915,100 @@ fn an_empty_union_answers_without_creating_a_home() {
 }
 
 #[test]
+fn native_owner_reuses_one_complete_index_across_query_tree_and_model_reads() {
+    use crate::viewer::{MachineView, Reading};
+    use std::io::Write;
+
+    let home = Home::new("shared-native-owner");
+    home.top("lead", &[human("lead", ts(1, 0), "Original evidence")]);
+    let path = home.root.join("claude/projects/-work-proj/lead.jsonl");
+    let original = fs::read(&path).unwrap();
+    let mut local = Query::new(home.options.clone());
+    let QuerySources::Native(machines) = &local.sources else {
+        panic!("local tools must not construct a Viewer owner");
+    };
+    assert!(machines[0].1.work.lock().unwrap().events.is_none());
+    assert!(local.call_at("unknown", &json!({}), NOW).is_err());
+    assert!(!home.options.cache.exists());
+    assert!(!home.options.cache.with_extension("sqlite3").exists());
+
+    let view = MachineView::new(home.options.clone());
+    let parsed = || crate::events::PARSED.with(std::cell::Cell::get);
+    let first = view.evidence.query_at(NOW).unwrap();
+    let count = parsed();
+    assert!(count > 0);
+    assert!(Arc::ptr_eq(&first, &view.evidence.query_at(NOW).unwrap()));
+    let built = view.built(Reading::At(NOW)).unwrap();
+    assert!(built.sessions.contains_key("lead"));
+    assert_eq!(view.respond("GET", "/api/tree", "", None).status, 200);
+    assert_eq!(
+        parsed(),
+        count,
+        "all readers reuse the complete native index"
+    );
+    assert_eq!(fs::read(&path).unwrap(), original);
+
+    let added = assistant("lead", ts(1, 1), vec![text("New evidence")]);
+    writeln!(
+        fs::OpenOptions::new().append(true).open(&path).unwrap(),
+        "{added}"
+    )
+    .unwrap();
+    let next = view.evidence.query_at(NOW).unwrap();
+    assert!(!Arc::ptr_eq(&first, &next));
+    assert_eq!(
+        parsed(),
+        count + 1,
+        "only the appended native record is parsed"
+    );
+    view.built(Reading::At(NOW)).unwrap();
+    assert_eq!(view.respond("GET", "/api/tree", "", None).status, 200);
+    assert_eq!(parsed(), count + 1);
+    assert!(Arc::ptr_eq(&next, &view.evidence.query_at(NOW).unwrap()));
+    view.close();
+}
+
+#[test]
+fn native_owner_retirement_refuses_a_waiting_cold_read_and_keeps_a_warm_cohort() {
+    use std::sync::mpsc;
+    let home = Home::new("retired-native-owner");
+    home.top("lead", &[human("lead", ts(1, 0), "Verified evidence")]);
+    let evidence = NativeEvidence::new(home.options.clone());
+    let work = evidence.work.lock().unwrap();
+    let (started, waiting) = mpsc::channel();
+    let worker = {
+        let evidence = evidence.clone();
+        std::thread::spawn(move || {
+            started.send(()).unwrap();
+            evidence.query_at(NOW)
+        })
+    };
+    waiting.recv_timeout(Duration::from_secs(5)).unwrap();
+    evidence.retire();
+    drop(work);
+    assert_eq!(
+        worker.join().unwrap().err().unwrap().kind(),
+        std::io::ErrorKind::BrokenPipe
+    );
+    assert!(!home.options.cache.exists());
+    assert!(!home.options.cache.with_extension("sqlite3").exists());
+
+    let warm = NativeEvidence::new(home.options.clone());
+    let retained = warm.query_at(NOW).unwrap();
+    warm.retire();
+    fs::remove_file(home.root.join("claude/projects/-work-proj/lead.jsonl")).unwrap();
+    assert!(Arc::ptr_eq(&retained, &warm.query_at(NOW).unwrap()));
+    // Retaining metadata never permits serving removed source evidence.
+    let records = retained.sources.reader();
+    assert!(
+        records
+            .read(&home.root.join("claude/projects/-work-proj/lead.jsonl"), 0)
+            .is_err()
+    );
+    assert!(records.finish().is_err());
+}
+
+#[test]
 fn shared_native_queries_reuse_cached_cohorts_and_expose_the_output_window() {
     use crate::Refresh;
     let home = Home::new("shared");
