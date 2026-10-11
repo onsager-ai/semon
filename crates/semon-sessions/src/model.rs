@@ -4264,7 +4264,7 @@ impl<'a> Builder<'a> {
     fn overview_content(
         &self,
         key: &str,
-        turns: &[Turn],
+        turns: &[&Turn],
         tx: &Transcript,
         saved: Option<&crate::slot_projection::Projection>,
     ) -> Value {
@@ -4418,8 +4418,8 @@ impl<'a> Builder<'a> {
             }
             events.insert(h.out.id.clone(), fields);
         }
-        let current = turns.iter().rev().find(|turn| turn.sid == key);
-        let activity=self.sessions.iter().find(|session|session.key==key).and_then(|session|session.out.activity.as_ref()).and_then(|(name,_,_,at)| {
+        let current = turns.iter().rev().copied().find(|turn| turn.sid == key);
+        let activity=self.by_key.get(key).map(|index| &self.sessions[*index]).and_then(|session|session.out.activity.as_ref()).and_then(|(name,_,_,at)| {
             tx.slots.iter().rev().find(|slot|slot.call_name()==Some(name.as_str()) && slot.t==Some(*at)).and_then(|slot|slot.file.as_ref().and_then(|file|file.path.to_str().map(|path|serde_json::json!({"path":path,"offset":slot.offset,"block":slot.block,"kind":"activity","tool":name,"cwd":file.cwd}))))
         });
         serde_json::json!({"events":events,"detail":current.and_then(origin),"activity":activity})
@@ -6794,6 +6794,29 @@ fn build_sources_inner(
         )
     });
     if let Some(rows) = &mut catalog {
+        // Preserve producer order while looking up only this owner's native
+        // turns and edges. Repeated workspace scans made publication quadratic.
+        let mut turns_by_session: BTreeMap<&str, Vec<&Turn>> = BTreeMap::new();
+        let mut holding_turns = BTreeMap::new();
+        for turn in &turns {
+            turns_by_session.entry(&turn.sid).or_default().push(turn);
+            for edge in &turn.sent {
+                holding_turns.entry(edge.as_str()).or_insert(turn);
+            }
+        }
+        let mut edges_by_session: BTreeMap<&str, Vec<&Handoff>> = BTreeMap::new();
+        for edge in &handoffs {
+            edges_by_session.entry(&edge.from).or_default().push(edge);
+            if let Some(to) = edge.to.as_deref().filter(|to| *to != edge.from) {
+                edges_by_session.entry(to).or_default().push(edge);
+            }
+        }
+        let projections_by_key: BTreeMap<_, _> = slot_projections
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .map(|projection| (projection.key.as_str(), projection))
+            .collect();
         let family_costs =
             crate::causal_trace::family_costs(builder.sessions.iter().map(|session| {
                 (
@@ -6817,6 +6840,14 @@ fn build_sources_inner(
             (h.out.id.clone(),serde_json::json!({"brief_session":owner("brief"),"result_session":owner("result")}))
         }).collect();
         for row in rows {
+            let selected_turns = turns_by_session
+                .get(row.key.as_str())
+                .map(Vec::as_slice)
+                .unwrap_or_default();
+            let selected_edges = edges_by_session
+                .get(row.key.as_str())
+                .map(Vec::as_slice)
+                .unwrap_or_default();
             // The local model remains usable for native paths that cannot be
             // represented by the portable catalog. Never publish a lossy alias.
             if row
@@ -6835,8 +6866,8 @@ fn build_sources_inner(
                     crate::causal_trace::Projection::capture(
                         &row.key,
                         &session.out,
-                        &turns,
-                        &handoffs,
+                        selected_turns,
+                        selected_edges,
                         &preview_owners,
                         builder
                             .by_key
@@ -6852,19 +6883,15 @@ fn build_sources_inner(
                         &row.key,
                         &session.out,
                         activity.get(&row.key),
-                        &handoffs,
-                        &turns,
+                        selected_edges,
+                        &holding_turns,
                         tx.get(&row.key)
                             .map(|tx| {
                                 builder.overview_content(
                                     &row.key,
-                                    &turns,
+                                    selected_turns,
                                     tx,
-                                    slot_projections.as_ref().and_then(|projections| {
-                                        projections
-                                            .iter()
-                                            .find(|projection| projection.key == row.key)
-                                    }),
+                                    projections_by_key.get(row.key.as_str()).copied(),
                                 )
                             })
                             .unwrap_or(Value::Null),

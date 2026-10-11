@@ -1532,37 +1532,25 @@ impl SqliteStore {
                 )
                 .map_err(failure)?;
             if let Some(projections) = publication.transcripts {
-                let membership: std::collections::BTreeSet<_> =
-                    rows.iter().map(|row| row.key.as_str()).collect();
-                for projection in projections
-                    .iter()
-                    .filter(|projection| membership.contains(projection.key.as_str()))
-                {
+                let rows_by_key: BTreeMap<_, _> =
+                    rows.iter().map(|row| (row.key.as_str(), row)).collect();
+                for projection in projections {
+                    let Some(row) = rows_by_key.get(projection.key.as_str()) else {
+                        continue;
+                    };
                     let metadata: Vec<String> = projection
                         .slots
                         .iter()
                         .map(json)
                         .collect::<Result<_, _>>()
                         .map_err(failure)?;
-                    let source_generation = crate::retention::source_generation(
-                        &rows
-                            .iter()
-                            .find(|row| row.key == projection.key)
-                            .expect("catalog membership checked")
-                            .sources,
-                    )
-                    .map_err(|_| {
-                        StoreError::Data("source projection metadata cannot serialize".into())
-                    })?;
-                    let slot_generation = crate::slot_projection::generation(
-                        &metadata,
-                        &rows
-                            .iter()
-                            .find(|row| row.key == projection.key)
-                            .expect("catalog membership checked")
-                            .sources,
-                    )
-                    .map_err(|error| StoreError::Data(error.to_string()))?;
+                    let source_generation = crate::retention::source_generation(&row.sources)
+                        .map_err(|_| {
+                            StoreError::Data("source projection metadata cannot serialize".into())
+                        })?;
+                    let slot_generation =
+                        crate::slot_projection::generation(&metadata, &row.sources)
+                            .map_err(|error| StoreError::Data(error.to_string()))?;
                     let changed = transaction.execute(
                         "INSERT INTO session_slot_projections(session_key,generation,version,total,source_generation) VALUES (?1,?2,?3,?4,?5) ON CONFLICT(session_key) DO UPDATE SET generation=excluded.generation,version=excluded.version,total=excluded.total,source_generation=excluded.source_generation WHERE session_slot_projections.generation != excluded.generation OR session_slot_projections.version != excluded.version OR session_slot_projections.source_generation IS NOT excluded.source_generation",
                         params![projection.key,slot_generation,crate::slot_projection::VERSION,i64::try_from(metadata.len()).map_err(|_| StoreError::Data("slot count exceeds SQL range".into()))?,source_generation]).map_err(failure)?;

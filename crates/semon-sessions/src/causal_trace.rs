@@ -36,8 +36,8 @@ impl Projection {
     pub(crate) fn capture(
         key: &str,
         session: &Session,
-        turns: &[Turn],
-        edges: &[Handoff],
+        turns: &[&Turn],
+        edges: &[&Handoff],
         owners: &BTreeMap<String, Value>,
         cwd: Option<&str>,
         transcript: Option<&crate::model::Transcript>,

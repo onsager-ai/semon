@@ -10,7 +10,7 @@ use crate::{
 use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::{io, sync::Arc};
+use std::{collections::BTreeMap, io, sync::Arc};
 
 pub(crate) const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS session_overview (
@@ -47,8 +47,8 @@ impl Summary {
         key: &str,
         session: &Session,
         activity: Option<&analytics::Activity>,
-        handoffs: &[Handoff],
-        turns: &[Turn],
+        handoffs: &[&Handoff],
+        holding_turns: &BTreeMap<&str, &Turn>,
         content: Value,
         parent: Option<&str>,
     ) -> Self {
@@ -58,7 +58,7 @@ impl Summary {
             .iter()
             .filter(|h| h.kind == "toyou" && h.from == key && (h.at >= crate::model::now_ms().saturating_sub(analytics::KEEP_MS) || h.done.is_some_and(|done|done >= crate::model::now_ms().saturating_sub(analytics::KEEP_MS)) || matches!(h.status,"wait"|"work"|"new")))
             .map(|h| {
-                let holding=turns.iter().find(|turn|turn.sent.contains(&h.id));
+                let holding=holding_turns.get(h.id.as_str());
                 json!({"id":h.id,"at":h.at,"done":h.done,"ask":h.ask,"status":h.status,
                 "brief":"","answer":if h.declined {Some(Vec::<String>::new())} else {None},"declined":h.declined,"turn":holding.map(|turn|&turn.id)})
             })

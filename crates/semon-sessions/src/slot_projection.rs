@@ -512,6 +512,7 @@ pub(crate) fn capture(
     history: Option<&crate::overview_repair::NativeRecords<'_>>,
     reuse: Option<(&crate::events::EventCache, Option<&str>)>,
 ) -> Vec<Projection> {
+    let rows_by_key: BTreeMap<_, _> = rows.iter().map(|row| (row.key.as_str(), row)).collect();
     let sources: BTreeMap<_, _> = rows
         .iter()
         .flat_map(|row| row.sources.iter())
@@ -522,7 +523,7 @@ pub(crate) fn capture(
         .map(|(key, transcript)| {
             let previous = reuse.and_then(|(cache, generation)| {
                 cache.session_slots(
-                    rows.iter().find(|row| &row.key == key)?,
+                    rows_by_key.get(key.as_str()).copied()?,
                     generation,
                     transcript.slots.len(),
                 )
