@@ -771,6 +771,7 @@ pub struct Query {
 
 mod catalog;
 mod search;
+mod transcript;
 
 impl Query {
     /// The tools over the agent homes, `/proc` and cache `options` name.
@@ -1059,6 +1060,24 @@ impl Query {
             .as_ref()
             .map(|reader| reader as &dyn crate::SessionSourceReader);
         let rendering = provider.map(|reader| (reader, mode));
+        if tool == "read_transcript"
+            && let Some(mut answer) =
+                transcript::read(&evidence.options, catalog_key, args, provider, mode, now)?
+        {
+            self.start = self
+                .sources
+                .machines
+                .iter()
+                .filter_map(|(_, source)| {
+                    crate::model::QueryData::identity(&source.options, now).window_start
+                })
+                .max();
+            if self.sources.is_retired() {
+                return Err(QueryError::new("io", "native query source is closed"));
+            }
+            answer["window_start"] = json!(self.start);
+            return Ok(answer);
+        }
         let result = crate::overview_repair::with_query(
             &evidence.options,
             catalog_key,

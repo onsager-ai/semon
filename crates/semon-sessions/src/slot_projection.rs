@@ -6,6 +6,108 @@ use std::{collections::BTreeMap, path::PathBuf, sync::Arc};
 
 pub(crate) const VERSION: u32 = 5;
 
+/// Exact transcript observations share the Catalog's source/runtime fence.
+/// Recipes retain no live authority; a reader may apply these fields only
+/// after qualifying that publication and rechecking it after source reads.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct QueryObservation {
+    pub(crate) calls: usize,
+    pub(crate) errors: usize,
+    live: Vec<usize>,
+    pub(crate) backgrounds: Vec<(usize, String)>,
+}
+
+impl QueryObservation {
+    pub(crate) fn valid(&self, total: usize) -> bool {
+        self.live.iter().all(|index| *index < total)
+            && self.live.windows(2).all(|pair| pair[0] < pair[1])
+            && self
+                .backgrounds
+                .iter()
+                .all(|(index, id)| *index < total && !id.is_empty())
+            && self
+                .backgrounds
+                .windows(2)
+                .all(|pair| pair[0].0 < pair[1].0)
+    }
+
+    pub(crate) fn capture(transcript: &Transcript) -> Self {
+        let mut live = Vec::new();
+        let mut backgrounds = Vec::new();
+        for (index, slot) in transcript.slots.iter().enumerate() {
+            if matches!(
+                slot.kind,
+                SlotKind::Tool {
+                    shown: Shown::Live,
+                    ..
+                } | SlotKind::Yielded {
+                    shown: Shown::Live,
+                    ..
+                } | SlotKind::Sent {
+                    shown: Shown::Live,
+                    ..
+                }
+            ) {
+                live.push(index);
+            }
+            if let SlotKind::Tool {
+                bg: Some(background),
+                ..
+            } = &slot.kind
+                && background.live
+                && background.end.is_none()
+            {
+                backgrounds.push((index, background.tid.clone()));
+            }
+        }
+        Self {
+            calls: transcript.calls,
+            errors: transcript.errors,
+            live,
+            backgrounds,
+        }
+    }
+
+    pub(crate) fn apply(&self, saved: &SavedSlot, slot: &mut Slot, index: usize) {
+        if matches!(
+            saved.recipe,
+            Recipe::Tool {
+                outcome: Outcome::Pending,
+                ..
+            } | Recipe::Yielded {
+                outcome: Outcome::Pending,
+                ..
+            } | Recipe::Sent {
+                outcome: Outcome::Pending,
+                ..
+            }
+        ) {
+            let observed = if self.live.binary_search(&index).is_ok() {
+                Shown::Live
+            } else {
+                Shown::Unfinished
+            };
+            match &mut slot.kind {
+                SlotKind::Tool { shown, .. }
+                | SlotKind::Yielded { shown, .. }
+                | SlotKind::Sent { shown, .. } => *shown = observed,
+                _ => {}
+            }
+        }
+        if let SlotKind::Tool {
+            bg: Some(background),
+            ..
+        } = &mut slot.kind
+        {
+            background.live = self
+                .backgrounds
+                .binary_search_by_key(&index, |(slot, _)| *slot)
+                .is_ok();
+        }
+    }
+}
+
 type SlotKey = (Option<PathBuf>, u64, u32, String);
 
 fn slot_key(file: Option<&File>, offset: u64, block: u32, recipe: &Recipe) -> Option<SlotKey> {

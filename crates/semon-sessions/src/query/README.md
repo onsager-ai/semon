@@ -80,6 +80,24 @@ The same search engine supplies ordering, snippets and line accounting to both
 paths. A selected source still requires full semantic preparation before its first
 search slot; long selected-history range bounds remain an implementation gate.
 
+Qualified `read_transcript` requests read a bounded window of the shared native
+slot projection and original indexed byte proofs, without loading a complete
+Event Index or preparing a semantic cohort. Catalog publishes exact call/error
+counts and pending/background observations under its source/runtime fence;
+recipes themselves grant no live authority. The shared renderer keeps original
+slot addresses and the preceding Thinking timestamp. Turn anchors use the
+existing selected-session turn indexes. Completion rechecks the selected row,
+slot generation, touched sources and runtime, permitting unrelated publication.
+Recipe windows stop at 512 candidates plus one preceding context row; selected
+recipe metadata and content-free proof hashes each have a 4 MiB read budget.
+
+Physical scan-window namespaces, aliases/virtual owners, clipped output-window
+membership, composite retained history and publications without qualified
+observations still use the existing selected native derivation. That remaining
+path is bounded by its source/byte limits but prepares the selected history;
+it is not a completed range-pager migration. Changed or corrupt admitted
+publications and exhausted pager budgets return explicit errors.
+
 
 The opt-in `selected_transcript_tail_scope_measurement` diagnostic grows one
 archived selected session while returning exactly one tail entry. It compares the
@@ -97,7 +115,20 @@ debug medians measured:
 Every request loaded one complete selected Event Index. Remote bytes are not
 proportional to this fixture's prefix, but prepared slots and read latency grow
 while the returned scope stays fixed. These observations establish the remaining
-selected range-pager cost, not a latency threshold or production percentile.
+selected derivation cost, not a latency threshold or production percentile.
+The qualified pager prepares two or three recipes and loads no complete index
+in this same fixture. Five-sample debug medians after the pager change measured:
+
+| Earlier replies | Prepared slots | Range requests / bytes | Read median µs |
+| --- | --- | --- | --- |
+| 0 | 2 | 4 / 2180 | 1749 |
+| 128 | 3 | 3 / 143001 | 4501 |
+| 1024 | 3 | 3 / 151905 | 4760 |
+| 8192 | 3 | 3 / 47457 | 3401 |
+
+Content-free proof hashes still scale with the selected
+prefix, within their read budget; this does not establish constant metadata work
+for arbitrary selected histories or a production latency percentile.
 Reproduce alone:
 
 ```sh
@@ -318,5 +349,6 @@ The separate JSON summary cache and marker/launch scans still serve normal
 `semon sessions` and Viewer tree reads. Their model lists, raw activity timestamps,
 usage deduplication, open-tool state and malformed-line diagnostics require an
 explicit migration before that cache is removed. Bounded relationship closure
-and authorized provider reads remain; full-workspace Model construction, Viewer
-transport, discovery and archive costs are still present.
+and authorized provider reads remain. Product Viewer model transport and complete
+compatibility Model construction are removed; global native reconciliation and
+unqualified selected semantic preparation remain distinct scaling costs.

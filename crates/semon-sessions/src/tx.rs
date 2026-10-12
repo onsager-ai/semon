@@ -1654,6 +1654,20 @@ pub(crate) fn render(
     index: usize,
     now: i64,
 ) -> Option<Value> {
+    render_at(context, lines, slots, slot, index, index, now)
+}
+
+/// A selected window keeps local neighbor indices and original slot addresses
+/// separate. All consumers retain the same native entry rendering rules.
+pub(crate) fn render_at(
+    context: &RenderContext<'_>,
+    lines: &mut Lines,
+    slots: &[Slot],
+    slot: &Slot,
+    index: usize,
+    absolute: usize,
+    now: i64,
+) -> Option<Value> {
     let file = slot.file.as_deref();
     let mut record = || file.and_then(|file| lines.get(&file.path, slot.offset));
     let mut entry = match &slot.kind {
@@ -1702,7 +1716,7 @@ pub(crate) fn render(
         }
         SlotKind::Harness(label) => json!({"k": "harness", "label": label}),
         SlotKind::Signal(signal) => {
-            json!({"k": "signal", "signal": signal, "at": slot.t, "turn":slot.turn,"slot":index})
+            json!({"k": "signal", "signal": signal, "at": slot.t, "turn":slot.turn,"slot":absolute})
         }
         SlotKind::Gap => {
             json!({"k": "end", "text": "Some entries not included: the log has unreadable lines here"})
@@ -1751,7 +1765,7 @@ pub(crate) fn render(
                 lines,
                 file?,
                 slot,
-                index,
+                absolute,
                 *shown,
                 name,
                 reply.as_ref(),
@@ -1769,7 +1783,7 @@ pub(crate) fn render(
             kind,
             ok,
             script_offset,
-        } => operation_entry(lines, file?, slot, index, kind, *ok, *script_offset)?,
+        } => operation_entry(lines, file?, slot, absolute, kind, *ok, *script_offset)?,
         SlotKind::Yielded {
             shown,
             first,
@@ -1780,7 +1794,7 @@ pub(crate) fn render(
             lines,
             file?,
             slot,
-            index,
+            absolute,
             *shown,
             *first,
             polls,
@@ -1797,7 +1811,7 @@ pub(crate) fn render(
             lines,
             file?,
             slot,
-            index,
+            absolute,
             *shown,
             reply.as_ref(),
             *start,
@@ -2079,7 +2093,6 @@ pub(crate) fn page_from_lines(
     limit: usize,
     lines: &mut Lines<'_>,
 ) -> io::Result<String> {
-    let limit = limit.clamp(1, PAGE_ENTRIES);
     let slots = &transcript.slots;
     let total = slots.len();
     let first_of = |turn: &str| {
@@ -2093,34 +2106,111 @@ pub(crate) fn page_from_lines(
         Anchor::After(after) => (true, (*after).min(total)),
         Anchor::Turn(turn) => (true, first_of(turn).ok_or(io::ErrorKind::NotFound)?),
     };
+    // The background calls still running anywhere in the session: a viewer
+    // that loaded one on an earlier page learns it stopped without its
+    // process writing a line (and without fetching that page again).
+    let bg_running: Vec<String> = slots
+        .iter()
+        .filter_map(|slot| match &slot.kind {
+            SlotKind::Tool {
+                bg:
+                    Some(model::Background {
+                        tid,
+                        live: true,
+                        end: None,
+                    }),
+                ..
+            } => Some(tid.clone()),
+            _ => None,
+        })
+        .collect();
+    page_from_window(
+        context,
+        PageWindow {
+            sid,
+            slots,
+            start: 0,
+            total,
+            from,
+            forward,
+            calls: transcript.calls,
+            errors: transcript.errors,
+            bg_running: &bg_running,
+        },
+        now,
+        limit,
+        lines,
+    )
+    .map(|page| page.to_string())
+}
+
+/// Original slot coordinates and exact totals for one request-owned window.
+pub(crate) struct PageWindow<'a> {
+    pub(crate) sid: &'a str,
+    pub(crate) slots: &'a [Slot],
+    pub(crate) start: usize,
+    pub(crate) total: usize,
+    pub(crate) from: usize,
+    pub(crate) forward: bool,
+    pub(crate) calls: usize,
+    pub(crate) errors: usize,
+    pub(crate) bg_running: &'a [String],
+}
+
+pub(crate) fn page_from_window(
+    context: &RenderContext<'_>,
+    window: PageWindow<'_>,
+    now: i64,
+    limit: usize,
+    lines: &mut Lines<'_>,
+) -> io::Result<Value> {
+    let PageWindow {
+        sid,
+        slots,
+        start,
+        total,
+        from,
+        forward,
+        calls,
+        errors,
+        bg_running,
+    } = window;
+    let limit = limit.clamp(1, PAGE_ENTRIES);
     let mut picked: Vec<(usize, Value)> = Vec::new();
     let mut bytes = 0;
     let (mut low, mut high) = (from, from);
-    let mut take = |index: usize, picked: &mut Vec<(usize, Value)>| -> bool {
-        let Some(entry) = render(context, lines, slots, &slots[index], index, now) else {
-            return true;
+    let mut take = |index: usize, picked: &mut Vec<(usize, Value)>| -> io::Result<bool> {
+        let local = index.checked_sub(start).ok_or(io::ErrorKind::WouldBlock)?;
+        let slot = slots.get(local).ok_or(io::ErrorKind::WouldBlock)?;
+        // Thinking duration uses the preceding original slot. If paging reaches
+        // the context row of a partial window, extend it before rendering.
+        if index > 0 && local == 0 && matches!(slot.kind, SlotKind::Think) {
+            return Err(io::ErrorKind::WouldBlock.into());
+        }
+        let Some(entry) = render_at(context, lines, slots, slot, local, index, now) else {
+            return Ok(true);
         };
         let size = entry.to_string().len() + 1;
         if !picked.is_empty() && (picked.len() >= limit || bytes + size > PAGE_BYTES) {
-            return false;
+            return Ok(false);
         }
         bytes += size;
         picked.push((index, entry));
-        true
+        Ok(true)
     };
     if forward {
-        while high < total && take(high, &mut picked) {
+        while high < total && take(high, &mut picked)? {
             high += 1;
         }
     } else {
-        while low > 0 && take(low - 1, &mut picked) {
+        while low > 0 && take(low - 1, &mut picked)? {
             low -= 1;
         }
         picked.reverse();
     }
     let mut entries = Vec::with_capacity(picked.len());
     for (position, (index, mut entry)) in picked.into_iter().enumerate() {
-        let slot = &slots[index];
+        let slot = &slots[index - start];
         if let Some(turn) = &slot.turn
             && (slot.first || position == 0)
         {
@@ -2133,32 +2223,14 @@ pub(crate) fn page_from_lines(
         "from": low,
         "to": high,
         "total": total,
-        "calls": transcript.calls,
-        "errors": transcript.errors,
+        "calls": calls,
+        "errors": errors,
         "entries": entries,
     });
-    // The background calls still running anywhere in the session: a viewer
-    // that loaded one on an earlier page learns it stopped without its
-    // process writing a line (and without fetching that page again).
-    let bg_running: Vec<&str> = slots
-        .iter()
-        .filter_map(|slot| match &slot.kind {
-            SlotKind::Tool {
-                bg:
-                    Some(model::Background {
-                        tid,
-                        live: true,
-                        end: None,
-                    }),
-                ..
-            } => Some(tid.as_str()),
-            _ => None,
-        })
-        .collect();
     if !bg_running.is_empty() {
         page["bg_running"] = json!(bg_running);
     }
-    Ok(page.to_string())
+    Ok(page)
 }
 
 /// `/api/tx?errors=1` lists at most this many failed steps.
