@@ -49,6 +49,14 @@ provenance, never authority. Reading these publications neither admits a
 workspace ViewerCore nor restores a workspace archive. Selected native reads
 reauthorize their exact original generation and remain request-local.
 
+Session-to-machine control binding resolves literal IDs against complete current
+Catalog publications across every configured source, with current role and
+sidecar proofs. Retained history never selects a writable destination. A partial
+publication cannot prove unique ownership; cold/provisional or virtual handoff
+identities use shared native Query derivation, including received-copy policy,
+rather than preparing a compatibility workspace model. This cold fallback still
+prepares a native cohort and remains a scaling boundary to remove.
+
 Sessions retain source-scoped catalog pages, metadata search, native resolution,
 transcript pagination, qualified field expansion and live revalidation. Lists
 have 60-row pages and retain at most 300 metadata rows per Source. Five selected

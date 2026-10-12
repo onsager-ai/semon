@@ -1824,14 +1824,59 @@ impl ViewerCore {
         };
         self.follow();
         let views = self.views();
-        let (_, plan) = self.refresh_at(&views, Reading::Served)?;
-        if plan.conflicts.contains(id) {
+        let labels = native_machine_ids(&views);
+        let now = model::now_ms();
+        let mut selected = None;
+        let mut complete = true;
+        for (index, (key, view)) in views.iter().enumerate() {
+            let source = if key.is_empty() { "local" } else { key };
+            match crate::catalog::qualified_current_identity(view.options(), source, id) {
+                Ok(Some(identity)) => {
+                    if view
+                        .evidence
+                        .local_query_target(&identity.catalog_key, now)?
+                        .is_none()
+                    {
+                        complete = false;
+                        continue;
+                    }
+                    if selected.is_some() {
+                        // Received copies give way to an earlier owner.
+                        if index < self.droppable() {
+                            return Ok(None);
+                        }
+                    } else {
+                        selected = Some((key.clone(), labels[index].clone()));
+                    }
+                }
+                Ok(None) => {}
+                Err(_) => complete = false,
+            }
+        }
+        // Literal native IDs win before interpreting a presentation alias.
+        let alias = id
+            .rsplit_once('@')
+            .is_some_and(|(_, label)| labels.iter().any(|candidate| candidate == label));
+        if complete && (selected.is_some() || (!alias && !id.starts_with("unsent:"))) {
+            return Ok(selected);
+        }
+        // Cold/provisional publications and virtual handoff identities use
+        // the shared native semantic derivation. They never prepare Built or
+        // retain a compatibility workspace model solely to bind controls.
+        let parts = views
+            .iter()
+            .map(|(key, view)| Ok((key.clone(), view.evidence.query_at(now)?)))
+            .collect::<io::Result<Vec<_>>>()?;
+        let native = QueryRead::new(parts, self.droppable());
+        if native.plan.conflicts.contains(id) {
             return Ok(None);
         }
-        Ok(plan
-            .owners
-            .get(id)
-            .map(|(index, _)| (views[*index].0.clone(), plan.machine_ids[*index].clone())))
+        Ok(native.plan.owners.get(id).map(|(index, _)| {
+            (
+                views[*index].0.clone(),
+                native.plan.machine_ids[*index].clone(),
+            )
+        }))
     }
 
     /// The V1 routes that name a transcript by harness and id: the machine
