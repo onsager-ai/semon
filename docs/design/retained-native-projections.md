@@ -129,3 +129,9 @@ JSON. Metadata/edge/turn counts remain 1/1/1; indexed selection VM steps are
 not broad search, long selected history, total memory or production latency.
 Reproduce with `cargo test --locked -p semon-sessions
 catalog_search_selected_work_stays_fixed -- --nocapture`.
+
+A host may transfer existing Catalog observers into `SessionSources` as one
+admitted machine set. The same native evidence, index and refresh coordinator
+survive that transfer; admission does not close a healthy writer or reopen its
+index. The host must transfer lifecycle ownership and retain custody/admission
+fences. Closing the admitted set closes those original observers too.

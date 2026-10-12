@@ -26,6 +26,10 @@ impl SessionCatalogObserver {
         Self { view }
     }
 
+    pub(crate) fn shared_view(&self) -> Arc<MachineView> {
+        self.view.clone()
+    }
+
     /// Queue initial or recovery observation without waiting for a build.
     /// Errors describe a stalled/failing producer; retained reads remain usable.
     pub fn demand(&self) -> io::Result<()> {
