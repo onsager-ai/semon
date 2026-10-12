@@ -133,40 +133,45 @@ async function backgroundCommands(browser, r) {
       page.on('request', (request) => {
         if (/\/api\/(model|tx|events)(?:[?#/]|$)/.test(request.url())) retired.push(request.url());
       });
-      await selectedFixture(page, 'harbor', (data) => {
-        const base = data.entries.find((row) => row.k === 'tool'),
-          owner = base.turn ?? data.entries.find((row) => row.turn)?.turn;
-        data.session.details.live_observation = current;
-        data.session.details.state = current ? 'work' : 'off';
-        data.entries = [
-          { ...base, k: 'u', text: 'Background command coverage', turn: owner },
-          {
-            ...base,
-            k: 'tool',
-            name: 'Bash',
-            arg: 'git fetch origin',
-            tid: 'native-background',
-            live: current,
-            ok: true,
-            secs: '0.5s',
-            turn: owner,
-            out: 'Command running in background',
-            bg:
-              phase === 'running'
-                ? { state: 'running', secs: '8m 18s', since: ENV.now - 498000 }
-                : {
-                    state: 'failed',
-                    exit: 1,
-                    secs: '2m 0s',
-                    summary: '<script>literal</script> failed',
-                  },
-            more: undefined,
-            field: undefined,
-            clipped: false,
-          },
-        ];
-        reads++;
-      });
+      await selectedFixture(
+        page,
+        'harbor',
+        (data) => {
+          const base = data.entries.find((row) => row.k === 'tool'),
+            owner = base.turn ?? data.entries.find((row) => row.turn)?.turn;
+          data.session.details.live_observation = current;
+          data.session.details.state = current ? 'work' : 'off';
+          data.entries = [
+            { ...base, k: 'u', text: 'Background command coverage', turn: owner },
+            {
+              ...base,
+              k: 'tool',
+              name: 'Bash',
+              arg: 'git fetch origin',
+              tid: 'native-background',
+              live: current,
+              ok: true,
+              secs: '0.5s',
+              turn: owner,
+              out: 'Command running in background',
+              bg:
+                phase === 'running'
+                  ? { state: 'running', secs: '8m 18s', since: ENV.now - 498000 }
+                  : {
+                      state: 'failed',
+                      exit: 1,
+                      secs: '2m 0s',
+                      summary: '<script>literal</script> failed',
+                    },
+              more: undefined,
+              field: undefined,
+              clipped: false,
+            },
+          ];
+          reads++;
+        },
+        { publication: () => ({ revision: [phase, current], total: 2 }) },
+      );
       const D = await data();
       await goto(page, { v: 'session', id: 'harbor' }, D);
       await page.waitForSelector('.step[data-tid="native-background"]');

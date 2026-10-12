@@ -17,36 +17,41 @@ export default async function codexThinking(browser) {
         let append = false,
           requests = 0,
           raw;
-        await selectedFixture(page, sid, (data) => {
-          const base = data.entries.find((row) => row.provenance),
-            owner = data.relationship_context.turns[0].id;
-          const values = [
-            { k: 'think', text: '# Plan', secs: '1s' },
-            { k: 'think', text: '# Plan\n# Read the source', secs: '2s' },
-            {
-              k: 'tool',
-              name: 'exec_command',
-              arg: 'echo native',
-              out: 'recorded',
-              ok: true,
-              secs: '1s',
-            },
-            { k: 'think', text: '# After the tool', secs: '0.1s' },
-            { k: 'think', text: '', pending: false },
-            { k: 'think', text: '# Another thought', secs: '12s' },
-          ];
-          if (append)
-            values.push({ k: 'think', text: '# Another thought\n# Live extension', secs: '13s' });
-          data.entries = values.map((entry) => ({
-            entry_id: base.entry_id,
-            provenance: base.provenance,
-            observed_at: base.observed_at,
-            ...entry,
-            turn: owner,
-          }));
-          requests++;
-          raw = JSON.stringify(data.entries);
-        });
+        await selectedFixture(
+          page,
+          sid,
+          (data) => {
+            const base = data.entries.find((row) => row.provenance),
+              owner = data.relationship_context.turns[0].id;
+            const values = [
+              { k: 'think', text: '# Plan', secs: '1s' },
+              { k: 'think', text: '# Plan\n# Read the source', secs: '2s' },
+              {
+                k: 'tool',
+                name: 'exec_command',
+                arg: 'echo native',
+                out: 'recorded',
+                ok: true,
+                secs: '1s',
+              },
+              { k: 'think', text: '# After the tool', secs: '0.1s' },
+              { k: 'think', text: '', pending: false },
+              { k: 'think', text: '# Another thought', secs: '12s' },
+            ];
+            if (append)
+              values.push({ k: 'think', text: '# Another thought\n# Live extension', secs: '13s' });
+            data.entries = values.map((entry) => ({
+              entry_id: base.entry_id,
+              provenance: base.provenance,
+              observed_at: base.observed_at,
+              ...entry,
+              turn: owner,
+            }));
+            requests++;
+            raw = JSON.stringify(data.entries);
+          },
+          { publication: () => ({ revision: append, total: append ? 7 : 6 }) },
+        );
         await goto(page, { v: 'session', id: sid }, D);
         await page.waitForSelector('.thought');
         r.expect(
