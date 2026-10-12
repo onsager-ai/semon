@@ -26,7 +26,11 @@ construction would change the hosted contract. No full-model query fallback rema
 
 Focused embedding reads use `Query::call_selected` with a host-selected machine
 and Catalog key. `session_query_sources` returns the original references for its
-parent, children and indexed handoff endpoints; references grant no authority.
+parent, children, indexed handoff endpoints and native identity collisions;
+references grant no authority. Identity closure includes cross-harness owners
+and literal IDs occupying a qualified spelling, so focused derivation preserves
+the complete producer's canonical keys. Alias lookup uses the existing source
+table's native-ID index and shares the 64-source relationship bound.
 Far-end stubs resolve through indexed native handoff owners, and unsent addresses
 through existing native bookmarks. Machine-local union aliases remain scoped to
 their configured presentation machine; these addresses grant no control rights.

@@ -312,16 +312,54 @@ fn query_selection(db: &Connection, key: &str) -> io::Result<Selection> {
         selected.rows.iter().map(|row| row.key.clone()).collect();
     let mut visited = std::collections::BTreeSet::new();
     let mut related = db.prepare("SELECT endpoint FROM (SELECT parent_key AS endpoint FROM session_catalog WHERE session_key=?1 UNION SELECT session_key AS endpoint FROM session_catalog WHERE parent_key=?1 UNION SELECT CASE WHEN json_valid(metadata) THEN json_extract(metadata,'$.from') END AS endpoint FROM session_trace_edges WHERE session_key=?1 UNION SELECT CASE WHEN json_valid(metadata) THEN json_extract(metadata,'$.to') END AS endpoint FROM session_trace_edges WHERE session_key=?1) WHERE endpoint IS NOT NULL ORDER BY endpoint LIMIT 65").map_err(failure)?;
+    let mut aliases = db.prepare("SELECT DISTINCT session_key FROM session_catalog_sources WHERE native_id=?1 ORDER BY session_key LIMIT 65").map_err(failure)?;
     while let Some(owner) = pending.pop_first() {
         if !visited.insert(owner.clone()) {
             continue;
         }
-        let endpoints = related
-            .query_map([owner], |row| row.get::<_, String>(0))
+        let mut endpoints: std::collections::BTreeSet<_> = related
+            .query_map([&owner], |row| row.get::<_, String>(0))
             .map_err(failure)?
-            .collect::<Result<Vec<_>, _>>()
+            .collect::<Result<_, _>>()
             .map_err(failure)?;
         selected.incomplete |= endpoints.len() == 65;
+        let row = selected
+            .rows
+            .iter()
+            .find(|row| row.key == owner)
+            .expect("selected owner is present");
+        let mut names: std::collections::BTreeSet<_> = row.native_ids.iter().cloned().collect();
+        if !row.native_ids.iter().any(|id| id == &row.key) {
+            // Native keys gain a harness qualifier on collisions, then leading
+            // colons while a literal native ID occupies that spelling. Those
+            // occupants are identity dependencies even without a handoff edge.
+            let mut spelling = row.key.as_str();
+            names.insert(spelling.to_owned());
+            while let Some(next) = spelling.strip_prefix(':') {
+                names.insert(next.to_owned());
+                spelling = next;
+                if names.len() > 128 {
+                    break;
+                }
+            }
+        }
+        if names.len() > 128 {
+            selected.incomplete = true;
+            continue;
+        }
+        for name in names {
+            let matches = aliases
+                .query_map([name], |row| row.get::<_, String>(0))
+                .map_err(failure)?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(failure)?;
+            selected.incomplete |= matches.len() == 65;
+            endpoints.extend(matches.into_iter().take(64));
+            if endpoints.len() > 64 {
+                selected.incomplete = true;
+                break;
+            }
+        }
         for endpoint in endpoints.into_iter().take(64) {
             if selected.rows.iter().any(|row| row.key == endpoint) {
                 continue;

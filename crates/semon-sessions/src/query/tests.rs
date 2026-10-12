@@ -3331,3 +3331,102 @@ fn selected_native_query_closes_nested_parent_dependencies_without_unrelated_sou
     );
     assert!(sources.machines[0].1.work.lock().unwrap().events.is_none());
 }
+
+#[test]
+fn focused_query_keeps_cross_harness_and_literal_native_identity_collision_context() {
+    let home = Home::new("focused-aliases");
+    home.top(
+        "same-id",
+        &[human("same-id", ts(1, 0), "Claude collision owner")],
+    );
+    home.top(
+        "claude:same-id",
+        &[human(
+            "claude:same-id",
+            ts(1, 0),
+            "literal qualified-looking id",
+        )],
+    );
+    home.lines(
+        "codex/sessions/2026/09/24/rollout-same-id.jsonl",
+        &[
+            codex_line(
+                ts(1, 0),
+                "session_meta",
+                json!({"id":"same-id","cwd":"/work/proj"}),
+            ),
+            codex_line(
+                ts(1, 1),
+                "event_msg",
+                json!({"type":"user_message","message":"Codex collision owner"}),
+            ),
+        ],
+    );
+    let mut cache = crate::events::EventCache::open_scoped(&home.options.cache).unwrap();
+    crate::model::observe_catalog(
+        &home.options,
+        &mut cache,
+        &mut false,
+        &mut crate::model::Texts::default(),
+        NOW,
+    )
+    .unwrap();
+    let mut baseline = Query::from_sources(admitted(home.options.clone()));
+    let mut focused = Query::from_sources(admitted(home.options.clone()));
+    for key in [":claude:same-id", "claude:same-id", "codex:same-id"] {
+        for tool in ["get_session", "read_transcript"] {
+            let args = json!({"id":key});
+            let expected = baseline.call_at(tool, &args, NOW).unwrap();
+            let actual = focused
+                .call_selected_at(
+                    "local",
+                    key,
+                    tool,
+                    &args,
+                    None,
+                    crate::SessionSourceReadMode::LocalThenProvider,
+                    NOW,
+                )
+                .unwrap();
+            assert_eq!(
+                actual, expected,
+                "{key} {tool}: focused derivation changed canonical identity"
+            );
+        }
+    }
+}
+
+#[test]
+fn focused_native_identity_collision_context_refuses_an_overbound_closure() {
+    let home = Home::new("focused-alias-bound");
+    home.top("same-id", &[human("same-id", ts(1, 0), "Claude owner")]);
+    for depth in 0..64 {
+        let id = format!("{}claude:same-id", ":".repeat(depth));
+        home.top(&id, &[human(&id, ts(1, 0), "literal identity occupant")]);
+    }
+    home.lines(
+        "codex/sessions/2026/09/24/rollout-same-id.jsonl",
+        &[codex_line(
+            ts(1, 0),
+            "session_meta",
+            json!({"id":"same-id"}),
+        )],
+    );
+    let mut cache = crate::events::EventCache::open_scoped(&home.options.cache).unwrap();
+    crate::model::observe_catalog(
+        &home.options,
+        &mut cache,
+        &mut false,
+        &mut crate::model::Texts::default(),
+        NOW,
+    )
+    .unwrap();
+    let key = format!("{}claude:same-id", ":".repeat(64));
+    let error = crate::session_query_sources(&home.options, &key).unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock);
+    assert!(
+        error
+            .to_string()
+            .contains("closure exceeds its source bound")
+    );
+}
