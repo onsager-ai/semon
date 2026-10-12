@@ -1235,6 +1235,41 @@ fn render(
             entry["field"]["complete"] = json!(!clipped);
             entry["clipped"] = json!(clipped);
         }
+        // A missing native result is distinct from a recorded result whose
+        // exit status is unknown. Runtime observations never enter the recipe.
+        let pending = matches!(
+            selection.slots[index].recipe,
+            crate::slot_projection::Recipe::Tool {
+                outcome: crate::slot_projection::Outcome::Pending,
+                ..
+            } | crate::slot_projection::Recipe::Yielded {
+                outcome: crate::slot_projection::Outcome::Pending,
+                ..
+            } | crate::slot_projection::Recipe::Sent {
+                outcome: crate::slot_projection::Outcome::Pending,
+                ..
+            }
+        );
+        if pending && entry["k"] == "tool" {
+            let details = &selection.session["details"];
+            let working = selection.session["lifecycle"] == "current"
+                && details["live_observation"] == true
+                && matches!(details["state"].as_str(), Some("work" | "wait"));
+            if working
+                && let Some(since) = slot.t
+                && details["activity"]["tool"] == entry["name"]
+                && details["activity"]["since"].as_i64() == Some(since)
+            {
+                entry["live"] = json!(true);
+                entry["since"] = json!(since);
+                entry["secs"] = json!(crate::tx::running(
+                    crate::model::now_ms().saturating_sub(since)
+                ));
+            } else if !working {
+                entry["ok"] = json!(false);
+                entry["unfinished"] = json!(true);
+            }
+        }
         entry["slot"] = json!(absolute);
         entry["observed_at"] = json!(slot.t);
         let incomplete = field_failed || lines.failures > before;

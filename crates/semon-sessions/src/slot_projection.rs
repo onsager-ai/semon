@@ -64,20 +64,23 @@ pub(crate) enum Outcome {
     Ok,
     Err,
     Unknown,
+    /// The native call has no final result. This grants no live authority.
+    Pending,
 }
 impl Outcome {
     fn capture(shown: Shown) -> Self {
         match shown {
             Shown::Ok => Self::Ok,
             Shown::Err => Self::Err,
-            Shown::Unknown | Shown::Live | Shown::Unfinished => Self::Unknown,
+            Shown::Unknown => Self::Unknown,
+            Shown::Live | Shown::Unfinished => Self::Pending,
         }
     }
     fn restore(self) -> Shown {
         match self {
             Self::Ok => Shown::Ok,
             Self::Err => Shown::Err,
-            Self::Unknown => Shown::Unknown,
+            Self::Unknown | Self::Pending => Shown::Unknown,
         }
     }
 }

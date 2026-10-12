@@ -3681,6 +3681,71 @@ mod tests {
     }
 
     #[test]
+    fn native_pending_calls_use_qualified_activity_without_persisting_live_authority() {
+        for live in [false, true] {
+            let fixture = Fixture::new();
+            let path = fixture.source("pending-call");
+            use std::io::Write;
+            writeln!(fs::OpenOptions::new().append(true).open(path).unwrap(), "{}", json!({"type":"assistant","sessionId":"pending-call","uuid":"call","parentUuid":"pending-call","timestamp":"2026-10-01T00:00:01Z","message":{"role":"assistant","content":[{"type":"tool_use","id":"pending-tool","name":"Bash","input":{"command":"cargo test"}}]}})).unwrap();
+            if live {
+                let facts_path = fixture.options.facts.as_ref().unwrap();
+                let mut facts = crate::read_facts(facts_path).unwrap();
+                facts.proc_starts.insert(99, 777);
+                crate::write_facts(facts_path, &facts).unwrap();
+                fs::create_dir_all(fixture.options.claude_home.join("sessions")).unwrap();
+                fs::write(
+                    fixture.options.claude_home.join("sessions/99.json"),
+                    json!({"pid":99,"sessionId":"pending-call","procStart":777,"status":"busy"})
+                        .to_string(),
+                )
+                .unwrap();
+            }
+            fixture.publish(0);
+            let read = || {
+                let reply = crate::session_transcript_range(
+                    &fixture.options,
+                    "local",
+                    "sid=pending-call&scope=retained_history&after=0&limit=100",
+                    None,
+                );
+                assert_eq!(
+                    reply.status,
+                    200,
+                    "{}",
+                    String::from_utf8_lossy(&reply.body)
+                );
+                let page: Value = serde_json::from_slice(&reply.body).unwrap();
+                page["entries"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|entry| entry["k"] == "tool")
+                    .unwrap()
+                    .clone()
+            };
+            let entry = read();
+            if live {
+                assert_eq!(entry["live"], true);
+                assert_eq!(entry["since"], entry["observed_at"]);
+                assert!(entry["unfinished"].is_null());
+                let facts_path = fixture.options.facts.as_ref().unwrap();
+                let mut facts = crate::read_facts(facts_path).unwrap();
+                facts.proc_starts.clear();
+                crate::write_facts(facts_path, &facts).unwrap();
+                fixture.publish(0);
+            }
+            let stopped = read();
+            assert_eq!(stopped["unfinished"], true);
+            assert_eq!(stopped["ok"], false);
+            assert!(stopped["live"].is_null());
+            let db = Connection::open(EventCache::path(&fixture.options.cache)).unwrap();
+            let stored: String = db.query_row("SELECT metadata FROM session_slots WHERE session_key='pending-call' AND json_extract(metadata,'$.recipe.outcome')='Pending'", [], |row|row.get(0)).unwrap();
+            assert!(!stored.contains("\"Live\""));
+            assert!(!stored.contains("\"since\""));
+        }
+    }
+
+    #[test]
     fn native_tool_outputs_use_bounded_string_fields_and_preserve_call_context() {
         for harness in [
             "claude",
@@ -3769,6 +3834,10 @@ mod tests {
             assert!(
                 entry["ok"] == true || entry["ok"].is_null(),
                 "{harness}: {entry}"
+            );
+            assert!(
+                entry["unfinished"].is_null(),
+                "recorded output is not a missing result: {harness}"
             );
             assert!(
                 entry["arg"]
