@@ -8,7 +8,7 @@ native evidence owners directly, without ViewerCore, machine views, compatibilit
 state or refresh workers. Construction and argument rejection do not open the
 source cache. The same native owner supplies the Viewer producer's complete
 Event Index, text preparation and query cohort, so alternating Query, Catalog,
-tree and Model reads do not create a second producer cache. Source snapshots keep
+tree and native Query reads do not create a second producer cache. Source snapshots keep
 the existing file, process, facts and writer-lock observations; request-owned
 readers still verify source bytes and completion independently.
 
@@ -41,7 +41,8 @@ a later `ViewerCore::from_sources` borrows that same producer, index and query
 cohort. Retirement stops producers; close drains them off the async reactor.
 Hosts hold their existing blocking-worker and deletion guards through actual
 completion and close attached Viewer transports before draining sources.
-Tenant-wide hosted archive hydration remains migration work in Hub #226.
+Tenant-wide hosted archive hydration for list/search/stalls remains retirement
+work in Hub #226.
 The paired Hub consumer admits native sources directly; the preceding
 `from_native_core` constructor and its exclusive Viewer preparation path are
 removed. Query owns only native sources. Substituting local scan-window
@@ -75,7 +76,8 @@ session reads resolve their requested briefs through the cohort's verified reade
 search resolves a brief only when its slot is visited, preserving native caps,
 ordering, stopping and response fields. Completion rechecks the used source bytes.
 Catalog observation and scoped preparation retain only the ask relationships.
-The remaining compatibility Model still obtains its supported brief contents.
+The test-only semantic golden Model still obtains its reference brief contents;
+production has no compatibility model owner or read fallback.
 
 Native preparation also reuses existing scalar recipes only when their catalog
 and complete source generations, version, row count and projection digest agree.

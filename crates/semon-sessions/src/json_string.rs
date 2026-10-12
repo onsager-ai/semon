@@ -437,9 +437,27 @@ impl Lexer<'_> {
             if self.bytes.get(self.at) == Some(&b'"') {
                 break;
             }
-            let (_, width) = scalar(self.bytes.get(self.at..).ok_or_else(invalid)?, true)?
-                .ok_or_else(invalid)?;
-            self.at += width;
+            // Plain ASCII cannot split a scalar or escape. Walk that run up to
+            // the next checkpoint without decoding one character at a time.
+            // Quotes, escapes, controls and UTF-8 retain scalar validation.
+            let remaining = self.bytes.get(self.at..).ok_or_else(invalid)?;
+            let limit = if pointer.is_some() {
+                remaining
+                    .len()
+                    .min(self.checkpoint_bytes.saturating_sub(self.at - checkpoint))
+            } else {
+                remaining.len()
+            };
+            let ascii = remaining[..limit]
+                .iter()
+                .position(|byte| *byte < 0x20 || *byte >= 0x80 || matches!(byte, b'"' | b'\\'))
+                .unwrap_or(limit);
+            if ascii > 0 {
+                self.at += ascii;
+            } else {
+                let (_, width) = scalar(remaining, true)?.ok_or_else(invalid)?;
+                self.at += width;
+            }
             if pointer.is_some() && self.at - checkpoint >= self.checkpoint_bytes {
                 checkpoints.push(self.at as u64);
                 checkpoint = self.at;
@@ -970,6 +988,42 @@ mod tests {
             assert_eq!(chunk.text.len(), 4096);
             assert!(chunk.consumed <= 12 * 4096);
             assert!(chunk.text.capacity() <= 4096);
+        }
+    }
+
+    #[test]
+    fn ascii_runs_keep_escape_checkpoints_and_reject_malformed_tails() {
+        let prefix = "x".repeat(JSON_STRING_CHECKPOINT_BYTES as usize - 1);
+        let raw = format!("{prefix}\\uD83D\\uDE80{}é", "y".repeat(70_000));
+        let record = format!("{{\"body\":\"{raw}\"}}");
+        let span = index_json_string_spans(record.as_bytes())
+            .unwrap()
+            .pop()
+            .unwrap();
+        assert_eq!(
+            span.checkpoints[1] - span.start,
+            JSON_STRING_CHECKPOINT_BYTES + 11
+        );
+        let reconstructed: String = span
+            .checkpoints
+            .windows(2)
+            .map(|pair| {
+                decode_all(
+                    &record.as_bytes()[pair[0] as usize..pair[1] as usize],
+                    128 * 1024,
+                )
+            })
+            .collect();
+        let oracle: serde_json::Value = serde_json::from_str(&record).unwrap();
+        assert_eq!(reconstructed, oracle["body"].as_str().unwrap());
+        for tail in [b"\x1f".as_slice(), b"\x80", b"\\q", b"\\uD800", b"\xc3"] {
+            let mut bytes = format!("{{\"body\":\"{prefix}").into_bytes();
+            bytes.extend_from_slice(tail);
+            bytes.extend_from_slice(b"\"}");
+            assert_eq!(
+                index_json_string_spans(&bytes).unwrap_err().kind(),
+                io::ErrorKind::InvalidData
+            );
         }
     }
 

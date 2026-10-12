@@ -598,7 +598,7 @@ pub(crate) struct Work {
     pub(crate) texts: Texts,
     pub(crate) catalog_snapshot: Option<Snapshot>,
     cold_catalog: Option<ColdCatalog>,
-    /// When the last native preparation or legacy model rebuild started.
+    /// When the last native preparation started.
     pub(crate) built_at: Option<Instant>,
 }
 
