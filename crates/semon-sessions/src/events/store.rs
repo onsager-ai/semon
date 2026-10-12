@@ -1287,16 +1287,18 @@ fn invalidate_catalog_source(
 ) -> rusqlite::Result<()> {
     // Keep the counter after acknowledgement. Resetting per-path revisions
     // would let an old claim mistake a later observation for its own (ABA).
-    transaction.execute(
-        "INSERT INTO meta(key,value) VALUES ('catalog_source_revision','1')
+    transaction
+        .prepare_cached(
+            "INSERT INTO meta(key,value) VALUES ('catalog_source_revision','1')
          ON CONFLICT(key) DO UPDATE SET value=CAST(CAST(meta.value AS INTEGER)+1 AS TEXT)",
-        [],
-    )?;
-    transaction.execute(
+        )?
+        .execute([])?;
+    transaction.prepare_cached(
         "INSERT INTO session_catalog_invalidations(source_path,revision,reason,observed_at)
          VALUES (?1,CAST((SELECT value FROM meta WHERE key='catalog_source_revision') AS INTEGER),?2,?3)
          ON CONFLICT(source_path) DO UPDATE SET revision=excluded.revision,
          reason=excluded.reason, observed_at=excluded.observed_at",
+    )?.execute(
         params![path, reason, crate::model::now_ms()],
     )?;
     Ok(())
@@ -2400,6 +2402,10 @@ fn set_aside(path: &Path) -> io::Result<()> {
 /// is taken only to create or migrate it.
 fn init(connection: &mut Connection) -> rusqlite::Result<Init> {
     connection.busy_timeout(BUSY_TIMEOUT)?;
+    // Reuse the small set of per-source ledger/index statements. Cached SQL
+    // clears bound values on return; this retains neither source bodies nor
+    // authority and never skips the transaction's generation checks.
+    connection.set_prepared_statement_cache_capacity(32);
     let mode: String = connection.query_row("PRAGMA journal_mode = WAL", [], |row| row.get(0))?;
     if !mode.eq_ignore_ascii_case("wal") {
         return Ok(Init::NoWal);
@@ -2560,11 +2566,8 @@ fn checkpoint(connection: &Connection) -> rusqlite::Result<()> {
 
 fn parser_version(connection: &Connection) -> rusqlite::Result<Option<u32>> {
     Ok(connection
-        .query_row(
-            "SELECT value FROM meta WHERE key = 'cache_version'",
-            [],
-            |row| row.get::<_, String>(0),
-        )
+        .prepare_cached("SELECT value FROM meta WHERE key = 'cache_version'")?
+        .query_row([], |row| row.get::<_, String>(0))
         .optional()?
         .and_then(|value| value.parse().ok()))
 }
@@ -2572,7 +2575,9 @@ fn parser_version(connection: &Connection) -> rusqlite::Result<Option<u32>> {
 /// The store still has this binary's schema and parser: no other version
 /// rebuilt it since it was opened.
 fn current(connection: &Connection) -> rusqlite::Result<bool> {
-    let schema: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+    let schema: i64 = connection
+        .prepare_cached("PRAGMA user_version")?
+        .query_row([], |row| row.get(0))?;
     Ok(schema == SCHEMA_VERSION && parser_version(connection)? == Some(CACHE_VERSION))
 }
 
@@ -2969,10 +2974,12 @@ fn write_tree_summary(
         })
         .transpose()?;
     if let Some(encoded) = encoded.filter(|text| text.len() <= NATIVE_METADATA_MAX) {
-        transaction.execute("INSERT INTO meta(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value", params![tree_summary_key(path), encoded])?;
+        transaction.prepare_cached("INSERT INTO meta(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value")?.execute(params![tree_summary_key(path), encoded])?;
     } else {
         // Never truncate native model labels, tool state or usage accounting.
-        transaction.execute("DELETE FROM meta WHERE key=?1", [tree_summary_key(path)])?;
+        transaction
+            .prepare_cached("DELETE FROM meta WHERE key=?1")?
+            .execute([tree_summary_key(path)])?;
     }
     Ok(())
 }
@@ -3041,9 +3048,11 @@ fn write_parent_marker(
             ledger: header_ledger(ledger),
             index: index.clone(),
         })?;
-        transaction.execute("INSERT INTO meta(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value", params![parent_marker_key(path), encoded])?;
+        transaction.prepare_cached("INSERT INTO meta(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value")?.execute(params![parent_marker_key(path), encoded])?;
     } else {
-        transaction.execute("DELETE FROM meta WHERE key=?1", [parent_marker_key(path)])?;
+        transaction
+            .prepare_cached("DELETE FROM meta WHERE key=?1")?
+            .execute([parent_marker_key(path)])?;
     }
     Ok(())
 }
@@ -3117,11 +3126,13 @@ fn write_codex_header(
         })
         .transpose()?;
     if let Some(encoded) = encoded.filter(|text| text.len() <= NATIVE_METADATA_MAX) {
-        transaction.execute("INSERT INTO meta(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value", params![codex_header_key(path), encoded])?;
+        transaction.prepare_cached("INSERT INTO meta(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value")?.execute(params![codex_header_key(path), encoded])?;
     } else {
         // Current readers keep their complete in-memory header. An oversized
         // projection cannot authorize eviction; do not truncate native fields.
-        transaction.execute("DELETE FROM meta WHERE key=?1", [codex_header_key(path)])?;
+        transaction
+            .prepare_cached("DELETE FROM meta WHERE key=?1")?
+            .execute([codex_header_key(path)])?;
     }
     Ok(())
 }
@@ -3188,9 +3199,11 @@ fn write_claude_sidecar(
         })
         .transpose()?;
     if let Some(encoded) = encoded.filter(|text| text.len() <= NATIVE_METADATA_MAX) {
-        transaction.execute("INSERT INTO meta(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value", params![claude_sidecar_key(path), encoded])?;
+        transaction.prepare_cached("INSERT INTO meta(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value")?.execute(params![claude_sidecar_key(path), encoded])?;
     } else {
-        transaction.execute("DELETE FROM meta WHERE key=?1", [claude_sidecar_key(path)])?;
+        transaction
+            .prepare_cached("DELETE FROM meta WHERE key=?1")?
+            .execute([claude_sidecar_key(path)])?;
     }
     Ok(())
 }
@@ -3209,9 +3222,11 @@ fn gap(what: &str) -> rusqlite::Error {
 
 fn ledger_row(connection: &Connection, path: &str) -> rusqlite::Result<Option<(i64, Ledger)>> {
     connection
-        .query_row(
+        .prepare_cached(
             "SELECT file_id, dev, ino, size, mtime_ns, resume_at, head_sha256, tail_sha256, ctime_ns \
              FROM files WHERE path = ?1",
+        )?
+        .query_row(
             [path],
             read_ledger,
         )
@@ -3627,8 +3642,7 @@ fn write_file(
     write_parent_marker(transaction, path, ledger, marker_index.as_ref())?;
     launch_calls::write(transaction, path, ledger, handoff_index.as_ref())?;
     let rate_limits = rate_limits.as_ref().map(json).transpose()?;
-    let file_id: i64 = transaction.query_row(
-        PUT_FILE,
+    let file_id: i64 = transaction.prepare_cached(PUT_FILE)?.query_row(
         params![
             path,
             int(*dev),
@@ -3662,9 +3676,9 @@ fn write_file(
         |row| row.get(0),
     )?;
 
-    let mut put = transaction.prepare(PUT_EVENT)?;
+    let mut put = transaction.prepare_cached(PUT_EVENT)?;
     let mut cut = transaction
-        .prepare("DELETE FROM events WHERE file_id = ?1 AND extra = ?2 AND seq >= ?3")?;
+        .prepare_cached("DELETE FROM events WHERE file_id = ?1 AND extra = ?2 AND seq >= ?3")?;
     for (extra, before, touched, new_rows) in [
         (false, changes.before_events, &changes.events, events),
         (true, changes.before_extras, &changes.extras, extras),
@@ -3681,7 +3695,7 @@ fn write_file(
         )?;
     }
 
-    let mut put = transaction.prepare(PUT_SIGNAL)?;
+    let mut put = transaction.prepare_cached(PUT_SIGNAL)?;
     changed(
         changes.before_signals,
         &changes.signals,
@@ -3710,9 +3724,10 @@ fn write_file(
         },
     )?;
 
-    let mut put = transaction.prepare(PUT_USAGE)?;
-    let mut put_identity = transaction
-        .prepare("INSERT INTO usage_identity(file_id,message_id,record_uuid) VALUES (?1,?2,?3)")?;
+    let mut put = transaction.prepare_cached(PUT_USAGE)?;
+    let mut put_identity = transaction.prepare_cached(
+        "INSERT INTO usage_identity(file_id,message_id,record_uuid) VALUES (?1,?2,?3)",
+    )?;
     for id in &changes.usage {
         transaction.execute(
             "DELETE FROM usage_identity WHERE file_id=?1 AND message_id=?2",
@@ -3731,7 +3746,7 @@ fn write_file(
         }
     }
 
-    let mut put = transaction.prepare(PUT_CODEX_USAGE)?;
+    let mut put = transaction.prepare_cached(PUT_CODEX_USAGE)?;
     changed(
         changes.before_codex_usage,
         &changes.codex_usage,
@@ -3970,6 +3985,55 @@ mod tests {
         ));
         fs::create_dir_all(&root).unwrap();
         root
+    }
+
+    #[test]
+    fn cached_statements_recheck_external_schema_and_parser_changes() {
+        for schema in [false, true] {
+            let root = scratch("cached-authority");
+            let path = root.join("index.sqlite3");
+            let (mut store, _) = opened(&path);
+            let original = ledger(1);
+            assert_eq!(
+                store
+                    .write_one("a.jsonl", None, None, &original, &full())
+                    .unwrap(),
+                Outcome::Written
+            );
+            // Warm the actual connection's version/ledger statements before a
+            // separate owner changes authority. SQL reuse must not reuse results.
+            assert!(current(&store.connection).unwrap());
+            assert_eq!(store.ledger("a.jsonl").unwrap(), Some(original.clone()));
+            let external = Connection::open(&path).unwrap();
+            if schema {
+                external
+                    .pragma_update(None, "user_version", SCHEMA_VERSION + 1)
+                    .unwrap();
+            } else {
+                external
+                    .execute(
+                        "UPDATE meta SET value=?1 WHERE key='cache_version'",
+                        [(CACHE_VERSION + 1).to_string()],
+                    )
+                    .unwrap();
+            }
+            assert_eq!(
+                store
+                    .write_one("a.jsonl", Some(&original), None, &ledger(2), &full())
+                    .unwrap(),
+                Outcome::Stale
+            );
+            assert_eq!(
+                store
+                    .remove(&[("a.jsonl".into(), Some(original.clone()))])
+                    .unwrap(),
+                Outcome::Stale
+            );
+            assert_eq!(store.ledger("a.jsonl").unwrap(), Some(original));
+            drop(external);
+            drop(store);
+            fs::remove_dir_all(root).unwrap();
+        }
     }
 
     #[test]

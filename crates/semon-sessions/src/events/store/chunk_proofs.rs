@@ -134,7 +134,7 @@ pub(super) fn write(
         return clear(transaction, path);
     };
     let prefix = prefix(path);
-    let mut put = transaction.prepare("INSERT INTO meta(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value WHERE value!=excluded.value")?;
+    let mut put = transaction.prepare_cached("INSERT INTO meta(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value WHERE value!=excluded.value")?;
     for (index, hashes) in chunks.hashes.chunks(PAGE).enumerate() {
         put.execute(params![
             format!("{prefix}{index:010}"),
