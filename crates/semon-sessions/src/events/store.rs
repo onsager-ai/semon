@@ -497,6 +497,42 @@ pub(super) fn selected_roles_current(
     Ok(true)
 }
 
+pub(super) fn selected_source_proofs(
+    connection: &Connection,
+    sources: &[crate::model::summary::CatalogSource],
+) -> rusqlite::Result<
+    Vec<(
+        crate::model::summary::CatalogSource,
+        Option<std::sync::Arc<crate::source_chunks::Chunks>>,
+    )>,
+> {
+    if sources.len() > 64 || !current(connection)? {
+        return Err(rusqlite::Error::InvalidQuery);
+    }
+    sources
+        .iter()
+        .map(|source| {
+            let ledger = Ledger {
+                stat: Stat {
+                    dev: source.dev,
+                    ino: source.ino,
+                    size: source.size,
+                    modified_ns: source.modified_ns,
+                    changed_ns: source.changed_ns,
+                },
+                offset: source.offset,
+                prefix: source.prefix_sha256,
+                tail: source.tail_sha256,
+            };
+            let path = source.path.to_str().ok_or(rusqlite::Error::InvalidQuery)?;
+            Ok((
+                source.clone(),
+                chunk_proofs::read(connection, path, &ledger)?,
+            ))
+        })
+        .collect()
+}
+
 /// The `meta` key recording when a retired JSON event cache that couldn't
 /// be read was set aside (epoch ms). A readable one needs no marker: it is
 /// imported whenever it is found, and removed.

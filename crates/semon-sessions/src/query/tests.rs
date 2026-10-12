@@ -2976,7 +2976,12 @@ fn selected_transcript_tail_scope_measurement() {
         )
         .unwrap();
         let args = json!({"id":"lead","limit":1});
-        let expected = home.query().call_at("read_transcript", &args, NOW).unwrap();
+        let expected = Query::from_sources(admitted(Options {
+            scan_window: true,
+            ..home.options.clone()
+        }))
+        .call_at("read_transcript", &args, NOW)
+        .unwrap();
         let archive = selected_archive(&home, 0);
         fs::remove_file(home.options.claude_home.join(&archive.source.path)).unwrap();
         drop(cache);
@@ -3004,10 +3009,14 @@ fn selected_transcript_tail_scope_measurement() {
                 archive.calls.load(Ordering::Relaxed) - before_calls,
                 archive.read_bytes.load(Ordering::Relaxed) - before_bytes,
                 crate::events::FILE_READS.with(std::cell::Cell::get) - before_indexes,
-                query.evidence().parts[0].data.tx["lead"].slots.len(),
+                transcript::SLOTS.with(std::cell::Cell::get),
             ));
             assert_eq!(answer, expected);
             assert_eq!(answer["entries"].as_array().unwrap().len(), 1);
+            assert!(
+                query.native.is_none(),
+                "tail read prepared a complete native cohort"
+            );
             assert!(sources.machines[0].1.work.lock().unwrap().events.is_none());
             assert!(!home.options.claude_home.join(&archive.source.path).exists());
         }
@@ -3018,6 +3027,133 @@ fn selected_transcript_tail_scope_measurement() {
             archive.bytes.len()
         );
     }
+}
+
+#[test]
+fn selected_transcript_pages_match_native_anchors_thinking_and_tool_observations() {
+    let home = fixture();
+    home.top(
+        "thought",
+        &[
+            human("thought", ts(1, 0), "Consider the boundary"),
+            assistant(
+                "thought",
+                ts(1, 1),
+                vec![json!({"type":"thinking","thinking":"First thought"})],
+            ),
+            assistant(
+                "thought",
+                ts(1, 2),
+                vec![json!({"type":"thinking","thinking":"Second thought"})],
+            ),
+            assistant(
+                "thought",
+                ts(1, 3),
+                vec![tool("pending", "Bash", json!({"command":"sleep 10"}))],
+            ),
+            assistant("thought", ts(1, 4), vec![text("Tail answer")]),
+        ],
+    );
+    let mut oracle = Query::from_sources(admitted(Options {
+        scan_window: true,
+        ..home.options.clone()
+    }));
+    let mut cases = Vec::new();
+    for id in ["lead", "scan", "asker", "crashed", "done", "cx", "thought"] {
+        let page = oracle
+            .call_at("read_transcript", &json!({"id":id,"after":0}), NOW)
+            .unwrap();
+        let total = page["total"].as_u64().unwrap();
+        for limit in [1, 2, 100] {
+            let mut args = vec![json!({"id":id,"limit":limit})];
+            for position in 0..=total + 1 {
+                args.push(json!({"id":id,"before":position,"limit":limit}));
+                args.push(json!({"id":id,"after":position,"limit":limit}));
+            }
+            for entry in page["entries"].as_array().unwrap() {
+                if let Some(turn) = entry["turn"].as_str() {
+                    args.push(json!({"id":id,"turn":turn,"limit":limit}));
+                }
+            }
+            for args in args {
+                cases.push((
+                    id,
+                    args.clone(),
+                    oracle.call_at("read_transcript", &args, NOW).unwrap(),
+                ));
+            }
+        }
+    }
+    let mut cache = crate::events::EventCache::open_scoped(&home.options.cache).unwrap();
+    crate::model::observe_catalog(
+        &home.options,
+        &mut cache,
+        &mut false,
+        &mut crate::model::Texts::default(),
+        NOW,
+    )
+    .unwrap();
+    let indexes = crate::events::FILE_READS.with(std::cell::Cell::get);
+    for (id, args, expected) in cases {
+        let mut query = Query::from_sources(admitted(home.options.clone()));
+        let actual = query
+            .call_selected_at(
+                "local",
+                id,
+                "read_transcript",
+                &args,
+                None,
+                crate::SessionSourceReadMode::LocalThenProvider,
+                NOW,
+            )
+            .unwrap();
+        assert_eq!(actual, expected, "native paging contract: {args}");
+        assert!(
+            query.native.is_none(),
+            "page prepared a complete native cohort: {args}"
+        );
+    }
+    assert_eq!(
+        crate::events::FILE_READS.with(std::cell::Cell::get),
+        indexes
+    );
+}
+
+#[test]
+fn selected_transcript_refuses_invalid_observation_before_reading_source_bytes() {
+    let home = Home::new("invalid-transcript-observation");
+    home.top("lead", &[human("lead", ts(1, 0), "selected needle")]);
+    let mut cache = crate::events::EventCache::open_scoped(&home.options.cache).unwrap();
+    crate::model::observe_catalog(
+        &home.options,
+        &mut cache,
+        &mut false,
+        &mut crate::model::Texts::default(),
+        NOW,
+    )
+    .unwrap();
+    let archive = selected_archive(&home, 0);
+    let db =
+        rusqlite::Connection::open(crate::events::EventCache::path(&home.options.cache)).unwrap();
+    db.execute("UPDATE session_catalog SET metadata=json_set(metadata,'$.query.transcript_observation.live',json('[1]')) WHERE session_key='lead'", []).unwrap();
+    let mut query = Query::from_sources(admitted(home.options.clone()));
+    assert_eq!(
+        query
+            .call_selected_at(
+                "local",
+                "lead",
+                "read_transcript",
+                &json!({"id":"lead"}),
+                Some(&archive),
+                crate::SessionSourceReadMode::ProviderOnly,
+                NOW
+            )
+            .unwrap_err()
+            .code,
+        "io"
+    );
+    assert_eq!(archive.calls.load(Ordering::Relaxed), 0);
+    assert!(query.native.is_none());
 }
 
 #[test]
@@ -3181,12 +3317,17 @@ impl crate::SessionSourceReader for PublishingArchive<'_> {
 
 #[test]
 fn selected_query_completion_fences_its_sources_without_coupling_unrelated_publications() {
-    for selected_changes in [false, true] {
+    for (tool, selected_changes) in [
+        ("get_session", false),
+        ("get_session", true),
+        ("read_transcript", false),
+        ("read_transcript", true),
+    ] {
         let home = Home::new("selected-publication-fence");
         home.top("lead", &[human("lead", ts(1, 0), "selected needle")]);
         let mut baseline = Query::from_sources(admitted(home.options.clone()));
         let args = json!({"id":"lead"});
-        let before = baseline.call_at("get_session", &args, NOW).unwrap();
+        let before = baseline.call_at(tool, &args, NOW).unwrap();
         let generation = catalog_generation(&home);
         let archive = PublishingArchive {
             archive: selected_archive(&home, 0),
@@ -3198,7 +3339,7 @@ fn selected_query_completion_fences_its_sources_without_coupling_unrelated_publi
         let result = query.call_selected_at(
             "local",
             "lead",
-            "get_session",
+            tool,
             &args,
             Some(&archive),
             crate::SessionSourceReadMode::ProviderOnly,

@@ -1176,6 +1176,17 @@ impl EventCache {
         store::selected_roles_current(connection, sources)
     }
 
+    /// Original indexed byte proofs without complete FileIndex preparation.
+    pub(crate) fn selected_source_proofs(
+        connection: &rusqlite::Connection,
+        options: &crate::Options,
+        sources: &[crate::model::summary::CatalogSource],
+    ) -> std::io::Result<crate::query_source::Sources> {
+        let proofs =
+            store::selected_source_proofs(connection, sources).map_err(std::io::Error::other)?;
+        crate::query_source::Sources::capture_native(options, proofs.into_iter())
+    }
+
     /// The shared Session Event Index. Preserve the configured cache stem:
     /// `sessions-index.json` gives `sessions-index.sqlite3`. The retired tree
     /// JSON file is left untouched; tree and focused reads use this store.

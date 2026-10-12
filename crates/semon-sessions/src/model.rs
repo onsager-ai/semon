@@ -7021,7 +7021,8 @@ fn build_sources_inner(
                     }
                 }
                 row.query = Some(
-                    serde_json::json!({"version":1,"runtime":query_runtime,"source_generation":crate::retention::source_generation(&row.sources)?,"rows":query_rows,"last":summaries[&row.key]["last"],"state":summaries[&row.key]["state"]}),
+                    serde_json::json!({"version":1,"runtime":query_runtime,"source_generation":crate::retention::source_generation(&row.sources)?,"rows":query_rows,"last":summaries[&row.key]["last"],"state":summaries[&row.key]["state"],
+                        "transcript_observation":tx.get(&row.key).map(|transcript|crate::slot_projection::QueryObservation::capture(transcript))}),
                 );
                 row.overview = Some(
                     crate::overview::Summary::capture(
