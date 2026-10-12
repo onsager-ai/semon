@@ -104,6 +104,25 @@ impl SessionSources {
         source_key: &str,
         pool: Arc<crate::RefreshPool>,
     ) -> io::Result<bool> {
+        self.catalog_source(source_key, pool, true)
+    }
+
+    /// Register interest after a host has read qualified persisted evidence.
+    /// Existing admission, source identity and retirement checks still apply.
+    pub fn watch_catalog_source(
+        &self,
+        source_key: &str,
+        pool: Arc<crate::RefreshPool>,
+    ) -> io::Result<bool> {
+        self.catalog_source(source_key, pool, false)
+    }
+
+    fn catalog_source(
+        &self,
+        source_key: &str,
+        pool: Arc<crate::RefreshPool>,
+        prepare: bool,
+    ) -> io::Result<bool> {
         if self.is_retired() || !self.inventory.valid() {
             return Ok(false);
         }
@@ -117,7 +136,11 @@ impl SessionSources {
             view.retire();
             return Ok(false);
         }
-        view.note_catalog_read()?;
+        if prepare {
+            view.note_catalog_read()?;
+        } else {
+            view.note_catalog_interest()?;
+        }
         Ok(true)
     }
 
