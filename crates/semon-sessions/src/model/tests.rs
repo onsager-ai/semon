@@ -7814,7 +7814,14 @@ fn native_catalog_does_not_acknowledge_a_rejected_generation() {
                 assistant("root", ts(0, 1), vec![text("new answer")])
             )
             .unwrap();
-            model_json_at(&options, NOW).unwrap();
+            observe_catalog(
+                &options,
+                &mut EventCache::open_scoped(&options.cache).unwrap(),
+                &mut false,
+                &mut Texts::default(),
+                NOW,
+            )
+            .unwrap();
         }));
     });
     assert!(
@@ -7848,7 +7855,14 @@ fn a_slow_catalog_builder_cannot_overwrite_newer_committed_source_generation() {
                 assistant("root", ts(0, 1), vec![text("new answer")])
             )
             .unwrap();
-            model_json_at(&options, NOW).unwrap();
+            observe_catalog(
+                &options,
+                &mut EventCache::open_scoped(&options.cache).unwrap(),
+                &mut false,
+                &mut Texts::default(),
+                NOW,
+            )
+            .unwrap();
         }));
     });
     let older = home.build();
@@ -7889,7 +7903,14 @@ fn a_slow_catalog_builder_cannot_overwrite_newer_native_metadata_without_log_cha
                 json!({"description":"new native metadata label", "toolUseId":"spawn"}).to_string(),
             )
             .unwrap();
-            model_json_at(&options, NOW).unwrap();
+            observe_catalog(
+                &options,
+                &mut EventCache::open_scoped(&options.cache).unwrap(),
+                &mut false,
+                &mut Texts::default(),
+                NOW,
+            )
+            .unwrap();
         }));
     });
     let older = home.build();

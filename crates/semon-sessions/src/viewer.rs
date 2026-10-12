@@ -3273,7 +3273,7 @@ mod tests {
         let reply = core.respond("GET", "/api/model", "", None);
         assert_eq!(reply.status, 200);
         let body: Value = serde_json::from_slice(&reply.body).unwrap();
-        assert_eq!(body["api"], crate::MODEL_API);
+        assert_eq!(body["api"], crate::model::MODEL_API);
     }
 
     /// Live polling (#40 M3): `?since=` answers 304 while nothing changed,
