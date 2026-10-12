@@ -16,6 +16,13 @@ current native facts and independent durable ownership still bind it. Retired
 native manifests remain outside Current scope. Explicit retained-history reads
 can inspect past identity without gaining current control authority.
 
+Pending slot outcomes record the absence of a final native result, separately
+from a recorded result with unknown exit status. Recipes never store live flags
+or elapsed runtime. A current read may display an active call only when qualified
+activity identifies that exact tool and start time; after that observation ends,
+the same pending recipe reports a result not recorded. Retained history cannot
+gain runtime authority from this display metadata.
+
 Current list indexes are partial B-trees (`WHERE lifecycle='current'`) ordered
 by their filter and keyset keys. Retained rows do not enter those trees; schema
 17 replaces earlier schemas' lifecycle-prefixed list indexes without rebinding rows.
