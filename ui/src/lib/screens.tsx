@@ -38,6 +38,7 @@ export function releaseScreen(root: HTMLElement) {
   cleanups.get(root)?.();
   cleanups.delete(root);
   kinds.delete(root);
+  root.classList.remove('machine-page');
   const state = sessionsState.get(root);
   if (state) {
     cancelAnimationFrame(state.frame);
@@ -500,6 +501,7 @@ export function renderMachineScreen(
   snapshot: MachineSnapshot,
   host: ActivityHost & { moreSessions?(): void },
 ) {
+  root.classList.add('machine-page');
   commitApplicationView(root, <MachineView snapshot={snapshot} host={host} />);
   owned.add(root);
   kinds.set(root, 'machine');

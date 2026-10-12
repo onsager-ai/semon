@@ -33,6 +33,8 @@ before source admission, observation scheduling and preview reads. The canonical
 reader retains machine bookmarks and shell headers; shared Machine rows use the
 accepted sixty-row Recent publication and generation-fenced previews. A scoped
 machine response cannot supply global Home counters or the Machines inventory.
+The shared Machine screen owns its route-specific geometry class and removes it
+when released; section and row styles must not leak into another route.
 Home retains the established Needs You, Working Now, Answered and Recent
 presentation. Native text is absent from persistent metadata: visible previews
 use the qualified selected-session reader with bounded record and byte budgets.
