@@ -8,6 +8,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { sample, BASE } from './fixture.mjs';
+import { data as nativeFixtureData } from './lib.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const J = JSON.stringify;
@@ -22,25 +23,11 @@ const wallMinute = (value) => {
     : value;
 };
 
-// A served transcript in full: every page, back from the last.
+// The fixture oracle uses the same generation-fenced native transcript paging
+// as the browser suites.
 export async function served(base, token) {
-  const get = async (p) => {
-    const r = await fetch(base + p + (p.includes('?') ? '&' : '?') + 't=' + token);
-    if (!r.ok) throw new Error(p + ': ' + r.status);
-    return r.json();
-  };
-  const model = await get('/api/model'),
-    tx = {};
-  for (const sid of Object.keys(model.sessions)) {
-    let page = await get('/api/tx?sid=' + encodeURIComponent(sid)),
-      entries = page.entries;
-    while (page.from > 0) {
-      page = await get('/api/tx?sid=' + encodeURIComponent(sid) + '&before=' + page.from);
-      entries = page.entries.concat(entries);
-    }
-    tx[sid] = entries;
-  }
-  return { model, tx };
+  const fixture = await nativeFixtureData({ base, token });
+  return { model: fixture.model, tx: fixture.TX };
 }
 
 // The longest common subsequence of two lists of strings, as [kept, removed from a, added in b].

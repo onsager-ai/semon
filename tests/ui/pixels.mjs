@@ -10,8 +10,8 @@
 //
 // Two comparisons per screen, both against the screen's mapped mockup rendered in the same browser:
 //
-//   port    The mockup's own code on the served data: the mockup file with its data block replaced by what /api/model and
-//           /api/tx serve, and with the clock formatters and Analytics timestamp adapter changed for served epoch milliseconds.
+//   port    The mockup's own code on the served data: the mockup file with its data block replaced by fixture metadata and
+//           native transcript pages, with the clock formatters and Analytics timestamp adapter changed for served epoch milliseconds.
 //           This isolates the frontend port:
 //           the served page must match it within the anti-aliasing tolerance. Enforced.
 //   sample  The previous sample mockup exactly as committed, with its own data. The differences are the fixture's gaps (gaps.json:

@@ -175,7 +175,7 @@ export default async function attachCheck(browser) {
     );
     r.expect(
       !api.bytesInPage && !api.placeholders,
-      '/api/tx holds no image bytes and no placeholder text',
+      'native transcript holds no image bytes and no placeholder text',
     );
     r.expect(
       api.ok?.status === 200 &&

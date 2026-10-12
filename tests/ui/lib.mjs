@@ -242,6 +242,7 @@ export async function data({ extras = false, base: sourceBase, token: sourceToke
   const sourceKeys = new Set(inventory.items.map((item) => item.source_key));
   const nativeKeys = new Set();
   const catalogByKey = new Map();
+  const sourcesByMachine = new Map(inventory.items.map((item) => [item.label, item.source_key]));
   for (const source of inventory.items) {
     let cursor = null;
     do {
@@ -258,7 +259,7 @@ export async function data({ extras = false, base: sourceBase, token: sourceToke
       const page = await response.json();
       for (const item of page.items) {
         nativeKeys.add(item.key);
-        catalogByKey.set(item.key, { source: source.source_key, metadata: item });
+        catalogByKey.set(JSON.stringify([source.source_key, item.key]), item);
       }
       cursor = page.next_cursor;
     } while (cursor);
@@ -268,37 +269,57 @@ export async function data({ extras = false, base: sourceBase, token: sourceToke
       ? machine
       : inventory.items.length === 1 && !inventory.next_cursor
         ? inventory.items[0].source_key
-        : machine;
+        : sourcesByMachine.get(machine);
   const SESS = model.sessions,
     H = model.handoffs,
     TX = {},
     TXM = {};
   for (const [id, s] of Object.entries(SESS)) s.id = id;
   for (const sid of Object.keys(SESS)) {
-    const catalog = catalogByKey.get(sid);
-    if (catalog) {
+    const machine = sourceFor(SESS[sid].machine);
+    if (!machine) throw Error('Fixture machine has no native source: ' + SESS[sid].machine);
+    const suffix = '@' + SESS[sid].machine;
+    const key = catalogByKey.has(JSON.stringify([machine, sid]))
+      ? sid
+      : sid.endsWith(suffix)
+        ? sid.slice(0, -suffix.length)
+        : sid;
+    if (!catalogByKey.has(JSON.stringify([machine, key])))
+      throw Error('Fixture session has no native catalog identity: ' + sid);
+    const entries = [];
+    let after = 0,
+      generation = null,
+      page;
+    do {
       const query = new URLSearchParams({
-        machine: catalog.source,
+        machine,
         scope: 'retained_history',
-        sid,
-        limit: '1',
+        sid: key,
+        limit: '100',
+        after: String(after),
       });
-      const response = await fetch(base + '/api/sessions?' + query, {
+      if (generation) query.set('generation', generation);
+      const response = await fetch(base + '/api/session-transcript?' + query, {
         headers: cookie ? { cookie } : {},
       });
-      if (!response.ok) throw Error('Selected fixture metadata: ' + response.status);
-      const selected = (await response.json()).items[0];
-      if (selected?.key !== sid) throw Error('Selected fixture metadata identity changed');
-      SESS[sid].cwd = selected.details?.cwd;
-    }
-    let page = await get('/api/tx?sid=' + encodeURIComponent(sid)),
-      entries = page.entries;
-    while (page.from > 0) {
-      page = await get('/api/tx?sid=' + encodeURIComponent(sid) + '&before=' + page.from);
-      entries = page.entries.concat(entries);
-    }
+      if (!response.ok) throw Error('Native fixture transcript: ' + response.status);
+      page = await response.json();
+      generation ??= page.projection.generation;
+      if (
+        page.identity.source_key !== machine ||
+        page.identity.catalog_key !== key ||
+        page.projection.generation !== generation ||
+        page.range.first !== after ||
+        page.range.end !== after + page.entries.length ||
+        (page.range.end <= after && page.projection.total > after)
+      )
+        throw Error('Native fixture transcript identity, generation or range changed: ' + sid);
+      entries.push(...page.entries);
+      after = page.range.end;
+    } while (after < page.projection.total);
+    SESS[sid].cwd = page.session.details?.cwd;
     TX[sid] = entries;
-    TXM[sid] = { calls: page.calls, errors: page.errors };
+    TXM[sid] = { calls: page.session.details?.calls, errors: page.session.details?.errors };
   }
   const machines = model.machines ?? [model.machine];
   return {

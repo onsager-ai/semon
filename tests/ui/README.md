@@ -55,9 +55,10 @@ that estimate as an achieved CI duration.
 Shared design rules, consumer auditing and deliberate gallery baseline updates are
 documented in [the design contract](../../docs/design/design-contract.md).
 
-All served suites enter the canonical reader. Standalone `/api/model` and
-`/api/tx` remain independent fixture oracles where required; browser traffic must
-use bounded Source and selected-session APIs. Compatibility query bookmarks are
+All served suites enter the canonical reader. The shared fixture oracle reads
+transcripts through source-qualified native pages and pins their generation
+across every range. Standalone `/api/model` remains a metadata fixture oracle;
+browser traffic must use bounded Source and selected-session APIs. Compatibility query bookmarks are
 normalized to the same reader. Existing mismatch ratchets and approved baselines
 remain required.
 
