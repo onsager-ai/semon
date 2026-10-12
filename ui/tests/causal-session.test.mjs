@@ -14,11 +14,15 @@ const { causalSessionPart } = await import(
 test('incoming trace sender uses selected family identity without broadening the trace', () => {
   const data = {
     sessions: { selected: { name: 'Selected' } },
-    metadata: { details: { family: { ancestors: [{ key: 'sender', name: 'Updated sender' }], runs: [] } } },
+    metadata: {
+      details: { family: { ancestors: [{ key: 'sender', name: 'Updated sender' }], runs: [] } },
+    },
   };
   const before = JSON.stringify(data);
   assert.deepEqual(causalSessionPart(data, 'sender', 'sender-turn'), {
-    className: 'who', text: 'Updated sender', action: { kind: 'session', id: 'sender', turn: 'sender-turn' },
+    className: 'who',
+    text: 'Updated sender',
+    action: { kind: 'session', id: 'sender', turn: 'sender-turn' },
   });
   assert.deepEqual(Object.keys(data.sessions), ['selected']);
   assert.equal(JSON.stringify(data), before);
@@ -30,7 +34,17 @@ test('incoming trace sender uses selected family identity without broadening the
 test('trace-owned identity wins and ambiguous family identities remain unavailable', () => {
   const data = {
     sessions: { selected: { name: 'Current selection' } },
-    metadata: { details: { family: { ancestors: [{ key: 'selected', name: 'Old selection' }, { key: 'sender', name: 'One' }], runs: [{ key: 'sender', name: 'Two' }] } } },
+    metadata: {
+      details: {
+        family: {
+          ancestors: [
+            { key: 'selected', name: 'Old selection' },
+            { key: 'sender', name: 'One' },
+          ],
+          runs: [{ key: 'sender', name: 'Two' }],
+        },
+      },
+    },
   };
   assert.equal(causalSessionPart(data, 'selected').text, 'Current selection');
   assert.equal(causalSessionPart(data, 'sender').text, 'Unrecorded session');

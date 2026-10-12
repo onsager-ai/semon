@@ -19,6 +19,11 @@ export interface CatalogListItem {
 import { screenText, SessionRowView, fitSessionRows } from './screens';
 export interface CatalogListSnapshot {
   items: readonly CatalogListItem[];
+  groups?: readonly {
+    root: CatalogListItem;
+    children: readonly CatalogListItem[];
+    expanded: boolean;
+  }[];
   sourceLabel: string;
   updating: boolean;
   observation?: string;
@@ -45,6 +50,7 @@ export interface CatalogListHost {
   searchDraft?(query: string): void;
   clearFilters(): void;
   more(): void;
+  children?(key: string, expanded: boolean): void;
   retry(): void;
   reviews?(): void;
   candidate?(candidate: CatalogSourceCandidate): void;
@@ -260,24 +266,53 @@ export function renderCatalogList(
         </details>
       </div>
       <div class="session-list" aria-label="Recorded sessions">
-        {snapshot.items.map((item) => (
-          <SessionRowView
-            key={item.key}
-            row={
-              item.presentation ?? {
-                id: item.key,
-                name: item.name,
-                state: 'off',
-                stateLabel: 'Recorded history',
-                age: item.freshness.state,
-                model: item.model,
-                modelTip: item.model,
-                fields: [],
+        {(
+          snapshot.groups ?? snapshot.items.map((root) => ({ root, children: [], expanded: false }))
+        ).map((group) => {
+          const shown =
+            group.expanded || filtered ? group.children.length : Math.min(5, group.children.length);
+          const row = (item: CatalogListItem, child = false) => (
+            <SessionRowView
+              key={item.key}
+              child={child}
+              row={
+                item.presentation ?? {
+                  id: item.key,
+                  name: item.name,
+                  state: 'off',
+                  stateLabel: 'Recorded history',
+                  age: item.freshness.state,
+                  model: item.model,
+                  modelTip: item.model,
+                  fields: [],
+                }
               }
-            }
-            host={{ session: () => host.session(item) }}
-          />
-        ))}
+              host={{ session: () => host.session(item) }}
+            />
+          );
+          return (
+            <div class={group.children.length ? 'kids-wrap' : ''} key={group.root.key}>
+              {row(group.root)}
+              {!!group.children.length && (
+                <div class="kids">
+                  {group.children.slice(0, shown).map((item) => row(item, true))}
+                  {!filtered && group.children.length > 5 && (
+                    <button
+                      class="tree-more"
+                      type="button"
+                      aria-expanded={group.expanded}
+                      onClick={() => host.children?.(group.root.key, !group.expanded)}
+                    >
+                      {group.expanded
+                        ? 'Show fewer'
+                        : 'Show ' + (group.children.length - shown) + ' more'}
+                    </button>
+                  )}
+                </div>
+              )}
+            </div>
+          );
+        })}
       </div>
       {!snapshot.updating &&
         !snapshot.items.length &&

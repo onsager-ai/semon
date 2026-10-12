@@ -53,6 +53,7 @@ import {
   selectedSessionMenu,
   selectedSessionState,
   catalogSessionRow,
+  catalogSessionGroups,
 } from './sessionPresentation';
 import { NavigationController } from '../navigation/routes';
 import { createControlObservation } from './controlObservation';
@@ -227,6 +228,7 @@ export function createCatalogViewer(
     pinUntil = 0;
   const cacheKey = (key: string) => JSON.stringify([capabilities.source_key, key]);
   let showApprovalReviews = false;
+  const listExpanded = new Set<string>();
   const ordering = createOrdering<object>();
   let orderTouch = false,
     orderIdle: number | undefined;
@@ -1879,27 +1881,27 @@ export function createCatalogViewer(
             end: focused.selectionEnd,
           }
         : null;
+    const ordered = orderRows(
+      orderScope(
+        'sessions',
+        JSON.stringify([capabilities.source_key, harness, repo, model, query, showApprovalReviews]),
+      ),
+      'sessions',
+      items
+        .filter((item) => showApprovalReviews || item.presentation_kind !== 'Approval review')
+        .map((item) => ({ ...item, id: item.key })),
+      (a, b) => (b.last ?? 0) - (a.last ?? 0) || a.key.localeCompare(b.key),
+    ).map((item) => ({ ...item, presentation: catalogSessionRow(item) }));
+    const keys = new Set(ordered.map((item) => cacheKey(item.key)));
+    for (const key of listExpanded) if (!keys.has(key)) listExpanded.delete(key);
     renderCatalogList(
       root,
       {
-        items: orderRows(
-          orderScope(
-            'sessions',
-            JSON.stringify([
-              capabilities.source_key,
-              harness,
-              repo,
-              model,
-              query,
-              showApprovalReviews,
-            ]),
-          ),
-          'sessions',
-          items
-            .filter((item) => showApprovalReviews || item.presentation_kind !== 'Approval review')
-            .map((item) => ({ ...item, id: item.key })),
-          (a, b) => (b.last ?? 0) - (a.last ?? 0) || a.key.localeCompare(b.key),
-        ).map((item) => ({ ...item, presentation: catalogSessionRow(item) })),
+        items: ordered,
+        groups: catalogSessionGroups(ordered).map((group) => ({
+          ...group,
+          expanded: listExpanded.has(cacheKey(group.root.key)),
+        })),
         reviews: showApprovalReviews,
         hasReviews:
           showApprovalReviews || items.some((item) => item.presentation_kind === 'Approval review'),
@@ -1933,6 +1935,11 @@ export function createCatalogViewer(
             item.key,
             items.find((row) => row.key === item.key),
           );
+        },
+        children(key, expanded) {
+          if (expanded) listExpanded.add(cacheKey(key));
+          else listExpanded.delete(cacheKey(key));
+          drawList();
         },
         reviews() {
           showApprovalReviews = !showApprovalReviews;

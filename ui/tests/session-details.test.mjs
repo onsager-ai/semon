@@ -4,7 +4,7 @@ import { build } from 'esbuild';
 const { outputFiles } = await build({
   stdin: {
     contents:
-      "export {parseSessionDetails} from './src/domain/sessionDetails'; export {selectedSessionMenu, selectedSessionState, catalogSessionRow} from './src/app/sessionPresentation';",
+      "export {parseSessionDetails} from './src/domain/sessionDetails'; export {selectedSessionMenu, selectedSessionState, catalogSessionRow, catalogSessionGroups} from './src/app/sessionPresentation';",
     resolveDir: new URL('../', import.meta.url).pathname,
   },
   bundle: true,
@@ -12,10 +12,15 @@ const { outputFiles } = await build({
   format: 'esm',
   platform: 'node',
 });
-const { parseSessionDetails, selectedSessionMenu, selectedSessionState, catalogSessionRow } =
-  await import(
-    'data:text/javascript;base64,' + Buffer.from(outputFiles[0].contents).toString('base64')
-  );
+const {
+  parseSessionDetails,
+  selectedSessionMenu,
+  selectedSessionState,
+  catalogSessionRow,
+  catalogSessionGroups,
+} = await import(
+  'data:text/javascript;base64,' + Buffer.from(outputFiles[0].contents).toString('base64')
+);
 globalThis.matchMedia = () => ({ matches: false });
 const details = () => ({
   state: 'idle',
@@ -155,4 +160,49 @@ test('list status labels preserve recorded observations without enabling control
   assert.equal(catalogSessionRow(session).stateLabel, 'Status unavailable');
   session.status = { state: 'off', observation: 'retained' };
   assert.equal(catalogSessionRow(session).stateLabel, 'Recorded history');
+});
+
+test('Catalog grouping keeps loaded descendants and missing parents selectable without identity guesses', () => {
+  const items = [
+    { key: 'grandchild', parent: 'child' },
+    { key: 'unrelated', parent: null },
+    { key: 'child', parent: 'parent' },
+    { key: 'parent', parent: null },
+    { key: 'orphan', parent: 'unloaded' },
+    { key: 'self', parent: 'self' },
+  ];
+  const before = JSON.stringify(items);
+  const groups = catalogSessionGroups(items);
+  assert.deepEqual(
+    groups.map((group) => group.root.key),
+    ['unrelated', 'parent', 'orphan', 'self'],
+  );
+  assert.deepEqual(
+    groups.find((group) => group.root.key === 'parent').children.map((child) => child.key),
+    ['child', 'grandchild'],
+  );
+  assert.equal(JSON.stringify(items), before);
+  assert.deepEqual(
+    groups
+      .flatMap((group) => [group.root, ...group.children])
+      .map((item) => item.key)
+      .sort(),
+    items.map((item) => item.key).sort(),
+  );
+});
+test('cyclic Catalog parents have a deterministic root and show every loaded row exactly once', () => {
+  const items = [
+    { key: 'b', parent: 'a' },
+    { key: 'a', parent: 'b' },
+    { key: 'c', parent: 'b' },
+  ];
+  for (const ordered of [items, [...items].reverse()]) {
+    const groups = catalogSessionGroups(ordered);
+    assert.equal(groups.length, 1);
+    assert.equal(groups[0].root.key, 'a');
+    assert.deepEqual(
+      groups[0].children.map((item) => item.key),
+      ['b', 'c'],
+    );
+  }
 });
