@@ -68,11 +68,10 @@ and every accepted source record.
 A final empty Thinking entry is pending only under the qualified current-work
 observation used by native tool rendering. Retained custody grants no live state.
 
-A complete, short closing reply may be represented by its recorded result event
-when the same owner and turn explicitly sent that handoff. The accepted native
-reply and its DOM address remain intact, while its text is shown once. Clipped or
-long replies, attachments and incomplete relationship context keep independent
-message rendering; text equality alone never merges unrelated replies.
+A closing reply remains an independently rendered message with its native DOM
+address. A recorded result event may also preview that reply when the same owner
+and turn explicitly sent the handoff. The event never consumes the message;
+clipping, attachments and text equality do not change message visibility.
 
 Lists have 60-row pages and retain at most 300 metadata rows per Source. Five selected
 roots and five Source views are retained. Each selected transcript keeps at most
