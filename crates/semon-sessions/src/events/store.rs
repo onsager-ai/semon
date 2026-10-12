@@ -1475,6 +1475,19 @@ impl SqliteStore {
         preserve_complete: bool,
     ) -> Result<(Outcome, Option<String>), StoreError> {
         let rows = publication.rows;
+        let native_timing = std::env::var("SEMON_BUILD_TIMING").is_ok_and(|value| value == "1");
+        let mut stage_started = std::time::Instant::now();
+        let mut stage = |name: &str| {
+            if native_timing {
+                let now = std::time::Instant::now();
+                eprintln!(
+                    "semon sessions native: publication rows={} stage={name} ms={}",
+                    rows.len(),
+                    now.duration_since(stage_started).as_millis()
+                );
+                stage_started = now;
+            }
+        };
         if claims.is_some_and(|claims| claims.len() > 64) || (claims.is_some() && rows.len() > 64) {
             return Err(StoreError::Data(
                 "scoped catalog source budget exceeded".into(),
@@ -1598,7 +1611,9 @@ impl SqliteStore {
                     return Ok(Outcome::Conflict);
                 }
             }
+            stage("fences");
             crate::history_projection::publish(&transaction, publication).map_err(failure)?;
+            stage("history");
             let search_version: Option<String> = transaction
                 .query_row(
                     "SELECT value FROM meta WHERE key='search_version'",
@@ -1708,6 +1723,7 @@ impl SqliteStore {
                     transaction.execute("UPDATE session_history_catalog SET metadata=json_set(metadata,'$.lifecycle','retained') WHERE session_key=?1 AND session_key NOT IN (SELECT session_key FROM catalog_members)",[key]).map_err(failure)?;
                 }
             }
+            stage("catalog_rows");
             if rebuild_search {
                 transaction.execute_batch("DELETE FROM session_search_postings; DELETE FROM session_search_counts; DELETE FROM session_search_documents; UPDATE session_search_coverage SET incomplete=0;").map_err(failure)?;
                 let mut statement = transaction
@@ -1718,20 +1734,8 @@ impl SqliteStore {
                     let encoded: String = value.get(0).map_err(failure)?;
                     let row: crate::model::summary::CatalogRow = serde_json::from_str(&encoded)
                         .map_err(|_| failure(rusqlite::Error::InvalidQuery))?;
-                    if row.lifecycle == crate::model::summary::CatalogLifecycle::Current {
-                        crate::catalog_search::backfill_row(
-                            &transaction,
-                            crate::CatalogReadScope::Current,
-                            &row,
-                        )
+                    crate::catalog_search::backfill_catalog_row(&transaction, &row)
                         .map_err(failure)?;
-                    }
-                    crate::catalog_search::backfill_row(
-                        &transaction,
-                        crate::CatalogReadScope::RetainedHistory,
-                        &row,
-                    )
-                    .map_err(failure)?;
                 }
             }
             if rebuild_search {
@@ -1745,6 +1749,7 @@ impl SqliteStore {
                     crate::catalog_search::retire_key(&transaction, key).map_err(failure)?;
                 }
             }
+            stage("search");
             let generation = {
                 let mut digest = Sha256::new();
                 digest.update(version.as_bytes());
@@ -1792,6 +1797,7 @@ impl SqliteStore {
                     [crate::model::now_ms().to_string()],
                 )
                 .map_err(failure)?;
+            stage("generation");
             if let Some(projections) = publication.transcripts {
                 let rows_by_key: BTreeMap<_, _> =
                     rows.iter().map(|row| (row.key.as_str(), row)).collect();
@@ -1848,6 +1854,7 @@ impl SqliteStore {
                     )
                     .map_err(failure)?;
             }
+            stage("slots");
             for scope in ["current", "retained_history"] {
                 let incomplete: i64 = transaction
                     .query_row(
@@ -1911,6 +1918,7 @@ impl SqliteStore {
                 )
                 .map_err(failure)?;
             transaction.commit().map_err(failure)?;
+            stage("commit");
             published = Some(generation);
             Ok(Outcome::Written)
         })();

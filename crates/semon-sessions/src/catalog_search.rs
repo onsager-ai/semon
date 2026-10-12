@@ -122,6 +122,22 @@ pub(crate) fn backfill_row(
     insert_row(transaction, scope_key(scope), row, false)
 }
 
+/// Current and retained-history search share the same allowlisted fields.
+/// Normalize and tokenize one current row once before inserting both scopes.
+pub(crate) fn backfill_catalog_row(
+    transaction: &Transaction<'_>,
+    row: &CatalogRow,
+) -> rusqlite::Result<()> {
+    if row.lifecycle != crate::model::summary::CatalogLifecycle::Current {
+        return backfill_row(transaction, crate::CatalogReadScope::RetainedHistory, row);
+    }
+    let (encoded, grams, complete) = prepared_fields(row)?;
+    for scope in ["current", "retained_history"] {
+        insert_fields(transaction, scope, row, &encoded, &grams, complete, false)?;
+    }
+    Ok(())
+}
+
 pub(crate) fn finish_backfill(transaction: &Transaction<'_>) -> rusqlite::Result<()> {
     transaction.execute(
         "INSERT INTO session_search_counts(read_scope,gram,members) SELECT read_scope,gram,COUNT(*) FROM session_search_postings GROUP BY read_scope,gram",
@@ -136,6 +152,19 @@ fn insert_row(
     row: &CatalogRow,
     maintain_counts: bool,
 ) -> rusqlite::Result<()> {
+    let (encoded, grams, complete) = prepared_fields(row)?;
+    insert_fields(
+        transaction,
+        scope,
+        row,
+        &encoded,
+        &grams,
+        complete,
+        maintain_counts,
+    )
+}
+
+fn prepared_fields(row: &CatalogRow) -> rusqlite::Result<(String, BTreeSet<String>, bool)> {
     let fields = fields(row);
     let complete = fields.iter().map(String::len).sum::<usize>() <= MAX_DOCUMENT_BYTES;
     let grams = if complete {
@@ -146,6 +175,18 @@ fn insert_row(
     let complete = complete && grams.len() <= MAX_GRAMS;
     let encoded = serde_json::to_string(if complete { fields.as_slice() } else { &[] })
         .map_err(|_| rusqlite::Error::InvalidQuery)?;
+    Ok((encoded, grams, complete))
+}
+
+fn insert_fields(
+    transaction: &Transaction<'_>,
+    scope: &str,
+    row: &CatalogRow,
+    encoded: &str,
+    grams: &BTreeSet<String>,
+    complete: bool,
+    maintain_counts: bool,
+) -> rusqlite::Result<()> {
     transaction.execute("INSERT INTO session_search_documents(read_scope,session_key,fields,complete) VALUES(?1,?2,?3,?4)",params![scope,row.key,encoded,complete])?;
     if !complete {
         transaction.execute(
@@ -600,11 +641,12 @@ mod sqlite_tests {
             row("large", &"x".repeat(MAX_DOCUMENT_BYTES + 1)),
         ];
         let transaction = connection.transaction().unwrap();
-        for scope in [CatalogReadScope::Current, CatalogReadScope::RetainedHistory] {
-            for row in &rows {
-                backfill_row(&transaction, scope, row).unwrap();
-            }
+        for row in &rows {
+            backfill_catalog_row(&transaction, row).unwrap();
         }
+        let mut retained = row("retained", "shared rare");
+        retained.lifecycle = CatalogLifecycle::Retained;
+        backfill_catalog_row(&transaction, &retained).unwrap();
         finish_backfill(&transaction).unwrap();
         transaction.commit().unwrap();
         let count = |connection: &Connection, scope: &str, gram: &str| -> i64 {
@@ -617,7 +659,18 @@ mod sqlite_tests {
                 .unwrap()
         };
         assert_eq!(count(&connection, "current", "sha"), 3);
-        assert_eq!(count(&connection, "retained_history", "rar"), 1);
+        assert_eq!(count(&connection, "retained_history", "rar"), 2);
+        assert_eq!(count(&connection, "retained_history", "sha"), 4);
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM session_search_documents WHERE session_key='retained' AND read_scope='current'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            0
+        );
         {
             let transaction = connection.transaction().unwrap();
             publish_row(
@@ -637,7 +690,7 @@ mod sqlite_tests {
         .unwrap();
         transaction.commit().unwrap();
         assert_eq!(count(&connection, "current", "sha"), 2);
-        assert_eq!(count(&connection, "retained_history", "sha"), 3);
+        assert_eq!(count(&connection, "retained_history", "sha"), 4);
         assert_eq!(count(&connection, "current", "rar"), 1);
         assert_eq!(
             connection
