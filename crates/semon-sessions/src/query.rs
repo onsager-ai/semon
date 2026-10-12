@@ -831,9 +831,9 @@ impl Query {
         {
             let id = args["id"].as_str().expect("validated focused id");
             let (source_key, evidence) = &self.sources.machines[0];
-            if let Some(catalog_key) =
-                crate::overview_repair::local_query_target(&evidence.options, id, now)
-                    .map_err(|error| QueryError::io(&error))?
+            if let Some(catalog_key) = evidence
+                .local_query_target(id, now)
+                .map_err(|error| QueryError::io(&error))?
             {
                 let source_key = if source_key.is_empty() {
                     "local"

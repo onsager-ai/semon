@@ -52,7 +52,8 @@ Selected batches neither restore unrelated FileIndexes nor prune membership.
 An already complete Catalog can republish a closed component of up to 64 sources
 without reloading unrelated event indexes. Before native reads, the producer
 captures a new filesystem/runtime snapshot and compares it with the last
-acknowledged snapshot. Sidecars and runtime inputs must be unchanged. A new native
+acknowledged snapshot. Changed allowlisted Claude agent sidecars select their
+existing native log and relationship component; runtime inputs must be unchanged. A new native
 source can explain a changed or newly created containing directory; replacements,
 disappearance and unrelated metadata changes require complete reconciliation.
 Both snapshots are retained as observations; a write arriving after
@@ -73,7 +74,10 @@ membership and closure against persisted parent/handoff/bookmark metadata.
 Human asks and questions remain part of the selected session. It uses the
 existing partial-publication ledger, generation and revision fences, acknowledges
 only its claims, and rolls back if any unrelated source revision remains pending.
-It preserves complete qualification only after those checks succeed. Identity changes, unsupported role changes and unresolvable or oversized
+It preserves complete qualification only after those checks succeed. Claude
+sidecar tool-use, label, model, working-directory and branch fields can change
+inside that closure; their independently verified generation and unchanged
+parent identity are required. Identity changes, unsupported role changes and unresolvable or oversized
 relationship closures still use complete reconciliation. A Codex parent rewrite
 can publish its complete old/new component; other native role fields stay stable.
 A genuinely new isolated identity can join the complete Catalog after the same
@@ -93,6 +97,14 @@ Rewriting a Codex child's parent loads at most three event indexes with zero or
 complete qualification, rejection when the old parent is omitted, and refusal to
 overwrite a competing Catalog generation. This does not qualify every relationship
 change or bound filesystem snapshot work.
+
+Ordinary local selected Query refreshes an existing current owner through this
+same component producer, without a filesystem-wide snapshot or discovery. It
+does not create a separate parser/cache, prune unrelated membership or weaken
+the publication transaction. Missing/retained sources and unsupported changes
+keep their existing reconciliation or archive semantics. A parent/child sidecar
+update republishes its new name/model with two index loads at zero or 256
+unrelated sources; changing the role's parent rejects publication.
 
 ## Qualified workload
 

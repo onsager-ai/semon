@@ -3479,6 +3479,79 @@ fn ordinary_focused_query_reuses_qualified_catalog_without_unrelated_index_loads
 }
 
 #[test]
+fn ordinary_focused_query_refreshes_selected_log_without_unrelated_index_loads() {
+    use std::io::Write;
+
+    for unrelated in [0, 256] {
+        let home = Home::new("ordinary-focused-refresh");
+        home.top("lead", &[human("lead", ts(1, 0), "selected prompt")]);
+        for n in 0..unrelated {
+            let id = format!("unrelated-{n}");
+            home.top(&id, &[human(&id, ts(1, 0), "unrelated prompt")]);
+        }
+        let mut cache = crate::events::EventCache::open_scoped(&home.options.cache).unwrap();
+        crate::model::observe_catalog(
+            &home.options,
+            &mut cache,
+            &mut false,
+            &mut crate::model::Texts::default(),
+            NOW,
+        )
+        .unwrap();
+        let mut query = home.query();
+        for phase in ["append", "rewrite"] {
+            if phase == "append" {
+                let mut file = fs::OpenOptions::new()
+                    .append(true)
+                    .open(
+                        home.options
+                            .claude_home
+                            .join("projects/-work-proj/lead.jsonl"),
+                    )
+                    .unwrap();
+                writeln!(file, "{}", human("lead", ts(1, 1), "appended prompt")).unwrap();
+            } else {
+                home.top("lead", &[human("lead", ts(1, 0), "rewritten prompt")]);
+            }
+            // The complete native reference has separate index custody. It
+            // cannot accidentally refresh the Catalog being exercised here.
+            let mut baseline = Query::from_sources(admitted(Options {
+                cache: home.root.join(format!("reference-{phase}")),
+                scan_window: true,
+                ..home.options.clone()
+            }));
+            let tools = [
+                ("get_session", json!({"id":"lead"})),
+                ("read_transcript", json!({"id":"lead","limit":10})),
+            ];
+            let expected: Vec<_> = tools
+                .iter()
+                .map(|(tool, args)| baseline.call_at(tool, args, NOW).unwrap())
+                .collect();
+            let before = crate::events::FILE_READS.with(std::cell::Cell::get);
+            for ((tool, args), expected) in tools.iter().zip(expected) {
+                assert_eq!(query.call_at(tool, args, NOW).unwrap(), expected);
+            }
+            let loads = crate::events::FILE_READS.with(std::cell::Cell::get) - before;
+            eprintln!(
+                "ordinary focused refresh phase={phase} unrelated={unrelated} index_loads={loads}"
+            );
+            assert!(
+                loads <= 5,
+                "focused refresh loaded unrelated indexes: {loads}"
+            );
+            assert_eq!(
+                crate::session_catalog_identity(&home.options, "local", "lead")
+                    .unwrap()
+                    .unwrap()
+                    .owner_qualification,
+                crate::CatalogOwnerQualification::Qualified
+            );
+        }
+    }
+}
+
+#[test]
 fn ordinary_focused_query_reconciles_changed_log_sidecar_and_scan_window_context() {
     let mut home = Home::new("ordinary-focused-freshness");
     home.top("parent", &[human("parent", ts(1, 0), "parent prompt")]);
@@ -3488,6 +3561,10 @@ fn ordinary_focused_query_reconciles_changed_log_sidecar_and_scan_window_context
         "spawn",
         &[human("parent", ts(1, 1), "child prompt")],
     );
+    for n in 0..256 {
+        let id = format!("unrelated-{n}");
+        home.top(&id, &[human(&id, ts(1, 0), "unrelated prompt")]);
+    }
     let mut cache = crate::events::EventCache::open_scoped(&home.options.cache).unwrap();
     crate::model::observe_catalog(
         &home.options,
@@ -3500,16 +3577,23 @@ fn ordinary_focused_query_reconciles_changed_log_sidecar_and_scan_window_context
     let compare = |options: &Options, id: &str| {
         let args = json!({"id":id});
         let expected = Query::from_sources(admitted(Options {
+            cache: home.root.join("reference-freshness"),
             scan_window: true,
             ..options.clone()
         }))
         .call_at("get_session", &args, NOW)
         .unwrap();
+        let before = crate::events::FILE_READS.with(std::cell::Cell::get);
         assert_eq!(
             Query::new(options.clone())
                 .call_at("get_session", &args, NOW)
                 .unwrap(),
             expected
+        );
+        let loads = crate::events::FILE_READS.with(std::cell::Cell::get) - before;
+        assert!(
+            loads <= 8,
+            "selected freshness read loaded unrelated indexes: {loads}"
         );
     };
     compare(&home.options, "child");
