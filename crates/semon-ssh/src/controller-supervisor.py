@@ -27,17 +27,28 @@ def identity(pid):
     except (OSError,ValueError,IndexError): return None
 
 def children():
-    found={os.getpid()}; identities={}
-    # Repeated bounded ancestry expansion handles newly adopted descendants.
-    for _ in range(16):
+    own=os.getpid()
+    found={own:identity(own)}; identities={}
+    # Linux records each task's direct children, including processes that
+    # started a new session. Scan only this subreaper's tree, never all of
+    # /proc. Repeat the walk for descendants adopted during enumeration.
+    while True:
         added=False
-        for proc in pathlib.Path('/proc').glob('[0-9]*'):
-            pid=int(proc.name)
-            item=identity(pid)
-            if item and item[0] in found and pid not in found:
-                found.add(pid);identities[pid]=item;added=True
+        for parent,expected in list(found.items()):
+            if identity(parent)!=expected: continue
+            try:
+                tasks=list(pathlib.Path('/proc',str(parent),'task').iterdir())
+            except (FileNotFoundError,ProcessLookupError): continue
+            for task in tasks:
+                try: pids=(task/'children').read_text().split()
+                except (FileNotFoundError,ProcessLookupError): continue
+                for text in pids:
+                    pid=int(text)
+                    item=identity(pid)
+                    if item and item[0]==parent and pid not in found:
+                        found[pid]=item;identities[pid]=item;added=True
         if not added: break
-    return identities
+    return {pid:item for pid,item in identities.items() if identity(pid)==item}
 
 def reap():
     while True:
