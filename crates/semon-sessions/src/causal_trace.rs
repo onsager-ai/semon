@@ -134,19 +134,15 @@ pub(crate) fn publish(
     );
     let source = crate::retention::source_generation(&row.sources)
         .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
-    let changed=tx.execute("INSERT INTO session_trace_headers VALUES(?1,?2,?3,?4) ON CONFLICT(session_key) DO UPDATE SET generation=excluded.generation,source_generation=excluded.source_generation,metadata=excluded.metadata WHERE session_trace_headers.generation!=excluded.generation OR session_trace_headers.source_generation!=excluded.source_generation",params![row.key,digest,source,session.to_string()])?;
+    let changed=tx.prepare_cached("INSERT INTO session_trace_headers VALUES(?1,?2,?3,?4) ON CONFLICT(session_key) DO UPDATE SET generation=excluded.generation,source_generation=excluded.source_generation,metadata=excluded.metadata WHERE session_trace_headers.generation!=excluded.generation OR session_trace_headers.source_generation!=excluded.source_generation")?.execute(params![row.key,digest,source,session.to_string()])?;
     if changed == 0 {
         return Ok(());
     }
-    tx.execute(
-        "DELETE FROM session_trace_turns WHERE session_key=?1",
-        [&row.key],
-    )?;
-    tx.execute(
-        "DELETE FROM session_trace_edges WHERE session_key=?1",
-        [&row.key],
-    )?;
-    let mut turns = tx.prepare("INSERT INTO session_trace_turns VALUES(?1,?2,?3,?4)")?;
+    tx.prepare_cached("DELETE FROM session_trace_turns WHERE session_key=?1")?
+        .execute([&row.key])?;
+    tx.prepare_cached("DELETE FROM session_trace_edges WHERE session_key=?1")?
+        .execute([&row.key])?;
+    let mut turns = tx.prepare_cached("INSERT INTO session_trace_turns VALUES(?1,?2,?3,?4)")?;
     for turn in &projection.turns {
         turns.execute(params![
             row.key,
@@ -155,15 +151,14 @@ pub(crate) fn publish(
             turn.to_string()
         ])?;
     }
-    let mut edges = tx.prepare("INSERT INTO session_trace_edges VALUES(?1,?2,?3)")?;
+    let mut edges = tx.prepare_cached("INSERT INTO session_trace_edges VALUES(?1,?2,?3)")?;
     for edge in &projection.edges {
         edges.execute(params![row.key, edge["id"].as_str(), edge.to_string()])?;
     }
-    tx.execute(
-        "DELETE FROM session_trace_bookmarks WHERE session_key=?1",
-        [&row.key],
-    )?;
-    let mut bookmarks = tx.prepare("INSERT INTO session_trace_bookmarks VALUES(?1,?2,?3)")?;
+    tx.prepare_cached("DELETE FROM session_trace_bookmarks WHERE session_key=?1")?
+        .execute([&row.key])?;
+    let mut bookmarks =
+        tx.prepare_cached("INSERT INTO session_trace_bookmarks VALUES(?1,?2,?3)")?;
     for (target, edge) in &projection.bookmarks {
         bookmarks.execute(params![target, row.key, edge])?;
     }
