@@ -1,7 +1,7 @@
 // Analytics: range, eight headline figures, stacked column charts, slice drill-in, breakdown filtering, cost measure,
 // phone width and the served Codex allowance. This replaces the retired Timeline check. The figures come from the server
 // (/api/viewer/analytics), which reaches past the model's day: on the extras fixture, a session from five days ago (`archive`,
-// absent from /api/model) counts in 7 d and 30 d and not in 24 h. Every range is shot at 390 and 1280, light and dark, into
+// outside the current observation day) counts in 7 d and 30 d and not in 24 h. Every range is shot at 390 and 1280, light and dark, into
 // out/analytics/. A request that fails (500, 409) keeps the last answer drawn under a message, asks again only every 10 s
 // while it fails, and a 304 or 200 clears it.
 import fs from 'node:fs';
@@ -209,15 +209,25 @@ export default async function analyticsCheck(browser) {
   );
   r.expect(costTwoDays.errors.length === 0, 'cost: page errors: ' + costTwoDays.errors.join(' | '));
 
-  // A session older than the model's day: `archive`, five days before the extras fixture's now, in its own repo. The model
-  // leaves it out; with the Repo filter on archive, Sessions started is 1 in 7 d and 30 d and 0 in 24 h, and its repo is a
+  // A native session older than the current day: `archive`, five days before the extras fixture's now, in its own repo.
+  // With the Repo filter on archive, Sessions started is 1 in 7 d and 30 d and 0 in 24 h, and its repo is a
   // breakdown row in 7 d and 30 d only.
   const older = { ranges: {} };
   const ox = await served(browser, { extras: true, size: 'desktop', path: '/analytics' });
   await drawn(ox, 'range=7d');
-  older.inModel = await ox.evaluate(async () =>
-    Object.keys((await (await fetch('/api/model')).json()).sessions).includes('archive'),
-  );
+  older.inCurrentDay = await ox.evaluate(async () => {
+    const inventory = await (await fetch('/api/session-sources')).json();
+    const query = new URLSearchParams({
+      machine: inventory.items[0].source_key,
+      scope: 'retained_history',
+      sid: 'archive',
+      limit: '1',
+    });
+    const selected = await (await fetch('/api/sessions?' + query)).json();
+    if (selected.items.length !== 1 || selected.items[0].key !== 'archive')
+      throw Error('The older native archive session must remain discoverable');
+    return selected.items[0].last >= Date.now() - 24 * 60 * 60 * 1000;
+  });
   const archiveRow = '.analytics-row[data-breakdown="repo"][data-key="archive"]';
   older.rowWithoutFilter = await ox.locator(archiveRow).count();
   // The Repo filter is a Select (no <select> element) in the filters' sheet: its options are on the component, and choosing is the Filter button, a click on its button and on the option, then Done.
@@ -263,8 +273,8 @@ export default async function analyticsCheck(browser) {
   older.errors = ox.errors;
   await ox.context().close();
   r.expect(
-    older.inModel === false,
-    "the extras fixture's archive session must be older than the model's day: " +
+    older.inCurrentDay === false,
+    "the extras fixture's archive session must remain native and be older than the current day: " +
       JSON.stringify(older),
   );
   r.expect(

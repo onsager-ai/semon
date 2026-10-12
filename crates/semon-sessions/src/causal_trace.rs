@@ -60,7 +60,32 @@ impl Projection {
         cwd: Option<&str>,
         transcript: Option<&crate::model::Transcript>,
     ) -> Self {
-        let details = json!({"state":session.state,"activity":session.activity.as_ref().map(|(tool,_,_,since)|json!({"tool":tool,"since":since})),"cwd":cwd,"turns":turns.iter().filter(|turn|turn.sid==key).count(),"calls":transcript.map(|value|value.calls),"errors":transcript.map(|value|value.errors),"tool_calls":transcript.map(|value|&value.tools).unwrap_or(&session.tool_calls),"signals":session.signals,"cost":session.cost,"copied_usage":session.claude_usage.is_some(),"claude_usage":session.claude_usage,"copilot":session.copilot.as_ref().map(|evidence|json!({"version":evidence.version,"schema":evidence.schema,"usage":evidence.usage,"usage_source":evidence.usage_source,"lifecycle":evidence.lifecycle,"logical_parent":evidence.logical_parent,"approvals":evidence.approvals})),"reported_runs":session.reported_runs,"cost_check":session.cost_check});
+        let details = json!({
+            "state": session.state,
+            "activity": session.activity.as_ref().map(|(tool, _, _, since)| json!({"tool": tool, "since": since})),
+            "cwd": cwd,
+            "turns": turns.iter().filter(|turn| turn.sid == key).count(),
+            "calls": transcript.map(|value| value.calls),
+            "errors": transcript.map(|value| value.errors),
+            "tool_calls": transcript.map(|value| &value.tools).unwrap_or(&session.tool_calls),
+            "signals": session.signals,
+            "cost": session.cost,
+            "copied_usage": session.claude_usage.is_some(),
+            "claude_usage": session.claude_usage,
+            "copilot": session.copilot.as_ref().map(|evidence| json!({
+                "version": evidence.version, "schema": evidence.schema,
+                "usage": evidence.usage, "usage_source": evidence.usage_source,
+                "lifecycle": evidence.lifecycle, "logical_parent": evidence.logical_parent,
+                "approvals": evidence.approvals,
+            })),
+            "reported_runs": session.reported_runs,
+            "cost_check": session.cost_check,
+            "tokens_by_model": session.tokens_by_model,
+            "rate_limits": session.rate_limits,
+            "lane": session.lane,
+            "role": session.role,
+            "waiting_since": session.waiting_since,
+        });
         Self {
             session: json!({"name":session.name,"harness":session.harness,"kind":session.kind,"state":session.state,"model":session.model,"start":session.start,"last":session.last,"tokens":session.tokens,"cost":session.cost,"busy":session.busy,"wait_edges":session.wait_edges,"wait_edges_truncated":session.wait_edges_truncated,"details":details}),
             turns: turns.iter().filter(|turn|turn.sid==key).map(|turn|json!({"id":turn.id,"sid":turn.sid,"start":turn.start,"u":turn.u,"at":turn.at,"end":turn.end,"sent":turn.sent,"last":turn.last})).collect(),
@@ -221,7 +246,7 @@ pub(crate) fn selected_details(
     let expected = crate::retention::source_generation(sources)
         .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
     let encoded: Option<(Option<String>, bool)> = tx.query_row(
-        "SELECT CASE WHEN octet_length(metadata)<=1048576 THEN json_extract(metadata,'$.details') ELSE NULL END,EXISTS(SELECT 1 FROM session_catalog c WHERE c.session_key=?1 AND c.lifecycle='current') FROM session_trace_headers WHERE session_key=?1 AND source_generation=?2",
+        "SELECT CASE WHEN octet_length(metadata)<=1048576 THEN json_set(json_extract(metadata,'$.details'),'$.busy',json_extract(metadata,'$.busy'),'$.content_generation',json_extract(metadata,'$.content_generation')) ELSE NULL END,EXISTS(SELECT 1 FROM session_catalog c WHERE c.session_key=?1 AND c.lifecycle='current') FROM session_trace_headers WHERE session_key=?1 AND source_generation=?2",
         params![key, expected], |row| Ok((row.get(0)?,row.get(1)?)),
     ).optional()?;
     encoded

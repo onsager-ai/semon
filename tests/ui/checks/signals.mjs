@@ -42,14 +42,16 @@ export default async function signalsCheck(browser) {
       // Annotation rows precede a gathered run rather than breaking it in two.
       assert.equal(await page.locator('.tgroup').count(), 1);
       await page.locator('#more-btn').click();
-      assert.match(
-        await page
-          .locator('.session-menu .kv dt')
-          .filter({ hasText: 'Signals' })
-          .locator('+ dd')
-          .textContent(),
-        /compact1.*effort1/,
-      );
+      for (const kind of ['compact', 'effort'])
+        assert.equal(
+          await page
+            .locator('.session-menu .kv dt')
+            .filter({ hasText: new RegExp('^Signals\\s+·\\s+' + kind + '$') })
+            .locator('+ dd')
+            .textContent(),
+          '1',
+        );
+      assert.match(await page.locator('.menu-signals').textContent(), /2 signals.*Step through/);
       await page.locator('.menu-signals').click();
       await page.waitForSelector('.signal-marker.err-current');
       assert.equal(await page.locator('.errnav-count').textContent(), 'Signal 1 of 2');

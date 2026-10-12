@@ -27,6 +27,15 @@ remain unsupported. The list is ordered by last observation descending and
 canonical key ascending. A machine-local catalog includes native sessions and
 subagents, without whole-model union copy deduplication.
 
+An exact `sid` selection also returns generation-bound `details`. Recorded
+per-model tokens, rate windows, lane/role flags and busy intervals come from the
+existing native publication; list pages do not load these breakdowns. The
+selected `content_generation` identifies the original native preview recipes.
+Prompt, answer and running-tool argument text stays source-backed and is read
+through `/api/session-home` with that generation. Recorded details grant no
+current runtime or control authority. Retained details keep their original
+source proof and explicitly disable current live observation.
+
 Each item retains canonical and native identities, parent provenance, stable
 summary fields and `source_refs`. Each reference contains logical `root`, relative
 `path`, native ID, complete consumed offset and prefix/tail SHA-256 identities.

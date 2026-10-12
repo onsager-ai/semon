@@ -1,6 +1,6 @@
 // The harness marks: wherever the viewer names a harness it draws the harness's official mark (an <img> of /harness/*.svg in a sized
 // container, built by harnessIcon in viewer.js), for a Claude, a Codex and an OpenCode session, at 390 and 1280 px, in light and dark.
-// The viewer reads no OpenCode logs, so the fixture's most recent Claude sessions are answered as OpenCode ones by /api/model here.
+// The viewer reads no OpenCode logs, so the fixture's most recent Claude sessions are answered as OpenCode ones by the selected native fixture here.
 //   - the right file is shown for the theme, by prefers-color-scheme and by the explicit data-theme override: Claude's one file in
 //     both, Codex's codex-black.svg on light and codex.svg on dark, OpenCode's light file on light and its dark file on dark;
 //   - the mark is only ever an <img alt=""> in its container, at the container's size, with no filter or transform on the artwork;

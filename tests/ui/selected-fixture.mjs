@@ -3,6 +3,24 @@
 import { createHash } from 'node:crypto';
 export async function selectedFixture(page, sid, change) {
   let observation;
+  await page.route('**/api/sessions?**', async (route) => {
+    const args = new URL(route.request().url()).searchParams;
+    if (args.get('sid') !== sid || !observation || args.get('machine') !== observation.source)
+      return route.continue();
+    const response = await route.fetch();
+    if (response.status() !== 200) return route.fulfill({ response });
+    const data = await response.json();
+    data.items = data.items.map((item) =>
+      item.key === sid
+        ? {
+            ...item,
+            details: observation.session.details,
+            transcript: { generation: observation.generation, total: observation.rows.length },
+          }
+        : item,
+    );
+    await route.fulfill({ response, json: data });
+  });
   await page.route('**/api/session-annotations?**', async (route) => {
     const url = new URL(route.request().url()),
       args = url.searchParams;
@@ -60,6 +78,7 @@ export async function selectedFixture(page, sid, change) {
     data.projection.generation = createHash('sha256').update(JSON.stringify(rows)).digest('hex');
     observation = {
       source: data.identity.source_key,
+      session: data.session,
       rows,
       generation: data.projection.generation,
     };

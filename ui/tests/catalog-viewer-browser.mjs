@@ -202,7 +202,19 @@ for (const width of [390, 1280])
           if (u.pathname === '/api/sessions')
             return route.fulfill({
               json: {
-                ...list([meta('one'), meta('two')]),
+                ...list(
+                  [meta('one'), meta('two')].map((item) =>
+                    u.searchParams.get('sid') === item.key
+                      ? {
+                          ...item,
+                          transcript: {
+                            generation: nativeGeneration.repeat(64),
+                            total: nativeTotal,
+                          },
+                        }
+                      : item,
+                  ),
+                ),
                 machine: u.searchParams.get('machine'),
                 machine_info: {
                   key: u.searchParams.get('machine'),
