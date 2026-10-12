@@ -4477,3 +4477,297 @@ fn catalog_query_rejects_retained_metadata_outside_configured_native_roots() {
     );
     assert_eq!(rejected.unwrap_err().code, "unavailable");
 }
+
+#[test]
+fn published_catalog_search_matches_shared_five_tool_oracles() {
+    for hours in [0, 1, 6, 24] {
+        let home = fixture();
+        let options = Options {
+            all: hours == 0,
+            scan_window: false,
+            since: Duration::from_secs(hours * 3600),
+            ..home.options.clone()
+        };
+        let mut native = Query::from_sources(admitted(options.clone()));
+        for args in [
+            json!({"text":"LEXER"}),
+            json!({"text":"panics"}),
+            json!({"text":"cargo build"}),
+            json!({"text":"task sc"}),
+            json!({"text":"lexer","limit":1}),
+            json!({"text":"lexer","max_bytes":1}),
+            json!({"text":"no such words"}),
+        ] {
+            let expected = native.call_at("find", &args, NOW).unwrap();
+            let mut selected = Query::from_sources(admitted(options.clone()));
+            let actual = selected
+                .call_catalog_at(
+                    "find",
+                    &args,
+                    None,
+                    crate::SessionSourceReadMode::LocalThenProvider,
+                    NOW,
+                )
+                .unwrap();
+            assert_eq!(actual, expected, "{hours}h {args}");
+            assert!(
+                selected.sources.machines[0]
+                    .1
+                    .work
+                    .lock()
+                    .unwrap()
+                    .events
+                    .is_none(),
+                "search prepared a workspace native cohort"
+            );
+        }
+    }
+}
+
+struct SharedSearchArchive(Arc<SelectedArchive>);
+impl crate::SessionSourceReader for SharedSearchArchive {
+    fn read_range(
+        &self,
+        source: &crate::SessionSourceRef,
+        expected: Option<&str>,
+        offset: u64,
+        max: usize,
+    ) -> io::Result<crate::SessionSourceRange> {
+        self.0.read_range(source, expected, offset, max)
+    }
+}
+
+#[test]
+fn catalog_search_admits_only_selected_archives_before_its_stop_boundary() {
+    for fault in [0, 1, 2, 3] {
+        let home = Home::new("catalog-archive-search");
+        home.top(
+            "lead",
+            &[
+                human("lead", ts(23, 58), "find needle"),
+                assistant("lead", ts(23, 59), vec![text("needle answer")]),
+            ],
+        );
+        home.top(
+            "unrelated",
+            &[human("unrelated", ts(1, 0), "unrelated archive history")],
+        );
+        let args = json!({"text":"needle","limit":1});
+        let expected = Query::from_sources(admitted(home.options.clone()))
+            .call_at("find", &args, NOW)
+            .unwrap();
+        let archive = Arc::new(selected_archive(&home, fault));
+        for id in ["lead", "unrelated"] {
+            fs::remove_file(
+                home.options
+                    .claude_home
+                    .join(format!("projects/-work-proj/{id}.jsonl")),
+            )
+            .unwrap();
+        }
+        let mut cache = crate::events::EventCache::open_scoped(&home.options.cache).unwrap();
+        crate::model::observe_catalog(
+            &home.options,
+            &mut cache,
+            &mut false,
+            &mut crate::model::Texts::default(),
+            NOW,
+        )
+        .unwrap();
+        let admissions = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let factory_admissions = admissions.clone();
+        let factory_archive = archive.clone();
+        let factory =
+            move |machine: &str, owner: &str| -> io::Result<Box<dyn crate::SessionSourceReader>> {
+                assert_eq!(
+                    (machine, owner),
+                    ("local", "lead"),
+                    "unrelated archive admitted before stop boundary"
+                );
+                factory_admissions.fetch_add(1, Ordering::Relaxed);
+                Ok(Box::new(SharedSearchArchive(factory_archive.clone())))
+            };
+        let result = Query::from_sources(admitted(home.options.clone())).call_catalog_at(
+            "find",
+            &args,
+            Some(&factory),
+            crate::SessionSourceReadMode::ProviderOnly,
+            NOW,
+        );
+        if fault == 0 {
+            assert_eq!(result.unwrap(), expected);
+            assert_eq!(admissions.load(Ordering::Relaxed), 1);
+            assert!(archive.calls.load(Ordering::Relaxed) > 0);
+        } else {
+            assert!(
+                result.is_err(),
+                "invalid native bytes, replacement or revocation was accepted: {fault}"
+            );
+        }
+    }
+}
+
+#[test]
+fn catalog_search_qualifies_multi_machine_order_and_conflicts() {
+    let first = Home::new("catalog-first");
+    let second = Home::new("catalog-second");
+    first.top(
+        "lead",
+        &[
+            human("lead", ts(1, 0), "needle older"),
+            assistant("lead", ts(1, 1), vec![text("needle answer")]),
+        ],
+    );
+    second.top("peer", &[human("peer", ts(23, 0), "needle newer")]);
+    let machines = vec![
+        ("a".into(), first.options.clone()),
+        ("b".into(), second.options.clone()),
+    ];
+    let sources = Arc::new(SessionSources::with_machines(machines.clone()));
+    let mut native = Query::from_sources(sources);
+    for args in [
+        json!({"text":"needle"}),
+        json!({"text":"needle","limit":1}),
+        json!({"text":"needle","max_bytes":1}),
+    ] {
+        let expected = native.call_at("find", &args, NOW).unwrap();
+        let actual = Query::from_sources(Arc::new(SessionSources::with_machines(machines.clone())))
+            .call_catalog_at(
+                "find",
+                &args,
+                None,
+                crate::SessionSourceReadMode::LocalThenProvider,
+                NOW,
+            )
+            .unwrap();
+        assert_eq!(actual, expected);
+    }
+    second.top(
+        "lead",
+        &[human("lead", ts(1, 0), "duplicate native identity")],
+    );
+    native
+        .call_at("list_sessions", &json!({}), NOW)
+        .unwrap_err();
+    assert_eq!(
+        Query::from_sources(Arc::new(SessionSources::with_machines(machines)))
+            .call_catalog_at(
+                "find",
+                &json!({"text":"needle"}),
+                None,
+                crate::SessionSourceReadMode::LocalThenProvider,
+                NOW
+            )
+            .unwrap_err()
+            .code,
+        "id_conflict"
+    );
+}
+
+#[test]
+fn catalog_search_selected_work_stays_fixed_as_unrelated_history_grows() {
+    let home = Home::new("catalog-search-work");
+    home.top(
+        "lead",
+        &[
+            human("lead", ts(23, 58), "needle prompt"),
+            assistant("lead", ts(23, 59), vec![text("needle answer")]),
+        ],
+    );
+    let options = Options {
+        all: false,
+        since: Duration::from_secs(24 * 3600),
+        ..home.options.clone()
+    };
+    let args = json!({"text":"needle","limit":1});
+    let mut prior = 0;
+    let mut expected = None;
+    let mut selected_work = None;
+    for unrelated in [0, 128, 512] {
+        for n in prior..unrelated {
+            let id = format!("old-{n}");
+            home.top(
+                &id,
+                &[
+                    human(&id, "2026-01-01T00:00:00Z".into(), "old unrelated prompt"),
+                    assistant(
+                        &id,
+                        "2026-01-01T00:00:01Z".into(),
+                        vec![text("old unrelated answer")],
+                    ),
+                ],
+            );
+        }
+        prior = unrelated;
+        // Existing native publication is shared by both read paths.
+        let mut cache = crate::events::EventCache::open_scoped(&home.options.cache).unwrap();
+        crate::model::observe_catalog(
+            &options,
+            &mut cache,
+            &mut false,
+            &mut crate::model::Texts::default(),
+            NOW,
+        )
+        .unwrap();
+        let mut measurements = Vec::new();
+        for native in [true, false] {
+            let mut latency = Vec::new();
+            let mut index_loads = Vec::new();
+            for _ in 0..7 {
+                let mut query = Query::from_sources(admitted(options.clone()));
+                let before = crate::events::FILE_READS.with(std::cell::Cell::get);
+                let started = std::time::Instant::now();
+                let answer = if native {
+                    query.call_at("find", &args, NOW)
+                } else {
+                    query.call_catalog_at(
+                        "find",
+                        &args,
+                        None,
+                        crate::SessionSourceReadMode::LocalThenProvider,
+                        NOW,
+                    )
+                }
+                .unwrap();
+                latency.push(started.elapsed().as_micros());
+                index_loads.push(crate::events::FILE_READS.with(std::cell::Cell::get) - before);
+                if let Some(expected) = &expected {
+                    assert_eq!(&answer, expected);
+                } else {
+                    expected = Some(answer);
+                }
+                if !native {
+                    let work = super::catalog::WORK.with(std::cell::Cell::get);
+                    assert_eq!((work.metadata, work.edges, work.turns), (1, 1, 1));
+                    if unrelated > 0 {
+                        if let Some(prior) = selected_work {
+                            assert_eq!(work, prior);
+                        } else {
+                            selected_work = Some(work);
+                        }
+                    }
+                    assert!(
+                        query.sources.machines[0]
+                            .1
+                            .work
+                            .lock()
+                            .unwrap()
+                            .events
+                            .is_none()
+                    );
+                }
+            }
+            latency.sort_unstable();
+            index_loads.sort_unstable();
+            measurements.push((native, latency[3], index_loads[3]));
+        }
+        eprintln!(
+            "catalog_search unrelated={unrelated} native_cohort_median_us={} native_index_loads={} selected_median_us={} selected_index_loads={} selection_work={:?}",
+            measurements[0].1,
+            measurements[0].2,
+            measurements[1].1,
+            measurements[1].2,
+            super::catalog::WORK.with(std::cell::Cell::get)
+        );
+    }
+}

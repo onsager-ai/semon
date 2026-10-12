@@ -119,6 +119,15 @@ pub(crate) struct Lines<'a> {
     pub(crate) bytes: u64,
 }
 
+/// The same bounded line cache can cross selected native session reads in one
+/// search. It contains no provider or credentials and never escapes the call.
+#[derive(Default)]
+pub(crate) struct LineCache {
+    recent: VecDeque<(LineKey, Option<Rc<Value>>)>,
+    pub(crate) bytes: u64,
+    failures: usize,
+}
+
 /// A source line: its file and byte offset.
 type LineKey = (PathBuf, u64);
 
@@ -127,6 +136,26 @@ impl<'a> Lines<'a> {
         Self {
             provider: Some(reader),
             ..Self::default()
+        }
+    }
+
+    pub(crate) fn provider_with_cache(
+        reader: &'a mut NativeLineReader<'a>,
+        cache: LineCache,
+    ) -> Self {
+        Self {
+            provider: Some(reader),
+            recent: cache.recent,
+            bytes: cache.bytes,
+            failures: cache.failures,
+            ..Self::default()
+        }
+    }
+    pub(crate) fn into_cache(self) -> LineCache {
+        LineCache {
+            recent: self.recent,
+            bytes: self.bytes,
+            failures: self.failures,
         }
     }
 

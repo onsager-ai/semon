@@ -166,7 +166,7 @@ pub fn session_turn_anchor(options: &Options, source_key: &str, query: &str) -> 
         }
         let history = crate::history_projection::catalog(&tx, &key)?.is_some();
         let (table, header) = if history {
-            ("session_history_slots", "session_history_slot_projections")
+            ("session_history_slots", "session_history_projections")
         } else {
             ("session_slots", "session_slot_projections")
         };

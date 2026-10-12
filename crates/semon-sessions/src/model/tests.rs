@@ -7686,6 +7686,45 @@ fn partial_lineage_source_disappearance_preserves_natural_history_context() {
         "{}",
         String::from_utf8_lossy(&causal.body)
     );
+    // Turn navigation must use the same materialized history projection as
+    // transcript ranges, including the prefix whose local source disappeared.
+    let historical_turn = before_body["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["text"] == "original cleared prompt")
+        .unwrap()["turn"]
+        .as_str()
+        .unwrap();
+    let anchor = crate::session_turn_anchor(
+        &home.options,
+        "fixture",
+        &format!(
+            "sid=root&scope=retained_history&turn={}",
+            crate::viewer::percent_encode(historical_turn)
+        ),
+    );
+    assert_eq!(
+        anchor.status,
+        200,
+        "{}",
+        String::from_utf8_lossy(&anchor.body)
+    );
+    let anchor: Value = serde_json::from_slice(&anchor.body).unwrap();
+    assert!(anchor["slot"].is_u64(), "{anchor}");
+    let absent = crate::session_turn_anchor(
+        &home.options,
+        "fixture",
+        "sid=root&scope=retained_history&turn=not-a-recorded-turn",
+    );
+    assert_eq!(absent.status, 200);
+    let absent: Value = serde_json::from_slice(&absent.body).unwrap();
+    assert!(absent["slot"].is_null());
+    assert_eq!(
+        archive.calls.load(Ordering::Relaxed),
+        reads,
+        "turn anchor fetched transcript bytes"
+    );
     let advanced = read();
     let entries = advanced["entries"].as_array().unwrap();
     assert_eq!(

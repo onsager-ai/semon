@@ -111,3 +111,21 @@ return unavailable, rather than reporting a current fragment as complete history
 Metadata Query reads reject current and retained source vectors outside the
 configured, allowlisted native roots. A matching runtime digest or retained
 publication does not grant authority to another source tree.
+
+Catalog-selected Query search shares the five-tool matching, snippets, ordering,
+line cache and stop rules. It visits eligible native session closures in order,
+with a request-owned source reader only for reached sessions. Limit/byte stops
+qualify remaining slot metadata before admitting another archive. It never restores
+unrelated archives or constructs a workspace Query cohort. The reached session's
+semantic derivation still reads its Event Index and bounded relationship context;
+this is not a claim of bounded long-session range preparation.
+
+A seven-sample debug workload holds one matching session fixed while unrelated
+old sessions grow from 0 to 128 to 512. The former cold Query cohort loads 1, 129,
+and 513 source indexes (median 5,618, 278,865 and 1,147,614 microseconds); Catalog
+search loads one each time (5,726, 5,716 and 5,731 microseconds) with identical
+JSON. Metadata/edge/turn counts remain 1/1/1; indexed selection VM steps are
+292, 295 and 295. These measurements qualify this stopped search workload,
+not broad search, long selected history, total memory or production latency.
+Reproduce with `cargo test --locked -p semon-sessions
+catalog_search_selected_work_stays_fixed -- --nocapture`.

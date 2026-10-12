@@ -770,6 +770,7 @@ pub struct Query {
 }
 
 mod catalog;
+mod search;
 
 impl Query {
     /// The tools over the agent homes, `/proc` and cache `options` name.
@@ -1263,40 +1264,21 @@ impl Query {
             crate::SessionSourceReadMode,
         )>,
     ) -> Result<Value, QueryError> {
-        let text = string(args, "text").unwrap_or_default();
-        let needle = text.to_ascii_lowercase();
         let since = self.since(args, now)?;
-        let limit = integer(args, "limit").unwrap_or(FIND_LIMIT) as usize;
-        let max_bytes = integer(args, "max_bytes").unwrap_or(FIND_BYTES) as u64;
         let view = self.view(now, ReadShape::Search, provider)?;
-        let handoffs: HashMap<&str, &Value> = view
-            .handoffs
+        let rows = view
+            .sessions
             .iter()
-            .filter_map(|handoff| handoff["id"].as_str().map(|id| (id, handoff)))
+            .map(|(id, row)| {
+                let mut row = row.clone();
+                row["id"] = json!(id);
+                row["kind"] = json!(view.facts.get(id).map(|facts| &facts.kind));
+                row["last_activity"] = json!(view.last(id));
+                (id.clone(), row)
+            })
             .collect();
-        let recent =
-            |id: &str| since.is_none_or(|since| view.last(id).is_some_and(|last| last >= since));
-        // Sessions whose name, repo or branch holds the text.
-        let mut sessions: Vec<(String, Vec<&str>, usize)> = Vec::new();
-        for (id, session) in &view.sessions {
-            if view.facts.get(id).is_some_and(|facts| facts.kind == "stub") || !recent(id) {
-                continue;
-            }
-            let fields: Vec<&str> = ["name", "repo", "branch"]
-                .into_iter()
-                .filter(|field| {
-                    session[*field]
-                        .as_str()
-                        .is_some_and(|value| find_in(value, &needle).is_some())
-                })
-                .collect();
-            if !fields.is_empty() {
-                sessions.push((id.clone(), fields, 0));
-            }
-        }
-        // Every session's transcript, the most recently active first, each
-        // from its newest entry back. Stubs have no activity of their own.
-        let transcripts: Vec<(usize, String, Arc<Transcript>)> = self
+        let mut search = search::Search::new(args, since, rows);
+        let transcripts: BTreeMap<_, _> = self
             .evidence()
             .parts
             .iter()
@@ -1305,150 +1287,22 @@ impl Query {
                 part.data
                     .tx
                     .iter()
-                    .map(move |(own, tx)| (index, part.served(own), tx.clone()))
+                    .map(move |(own, tx)| (part.served(own), (index, tx)))
             })
             .collect();
-        let mut order = Vec::new();
-        for (index, served, transcript) in transcripts {
-            if view.session(&served).is_none()
-                || view
-                    .facts
-                    .get(&served)
-                    .is_some_and(|facts| facts.kind == "stub")
-                || !recent(&served)
-            {
+        for served in search.order() {
+            let Some((index, transcript)) = transcripts.get(&served) else {
                 continue;
-            }
-            order.push((view.last(&served), served, transcript, index));
-        }
-        order.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
-        let records: Vec<_> = self
-            .evidence()
-            .parts
-            .iter()
-            .map(|part| part.data.sources.reader_with(provider))
-            .collect();
-        let source_part = std::cell::Cell::new(0);
-        let mut read =
-            |path: &std::path::Path, offset| records[source_part.get()].read(path, offset);
-        let mut lines = tx::Lines::provider(&mut read);
-        let mut matches = Vec::new();
-        let mut stopped = None;
-        'sessions: for (_, served, transcript, index) in &order {
-            source_part.set(*index);
-            for (position, slot) in transcript.slots.iter().enumerate().rev() {
-                if since.is_some_and(|since| !slot.t.is_some_and(|t| t >= since)) {
-                    continue;
-                }
-                if matches.len() >= limit {
-                    stopped = Some("limit");
-                    break 'sessions;
-                }
-                if lines.bytes >= max_bytes {
-                    stopped = Some("bytes");
-                    break 'sessions;
-                }
-                let (kind, texts) = match &slot.kind {
-                    SlotKind::H(id) => {
-                        let handoff: Option<&Value> = handoffs.get(id.as_str()).copied();
-                        let brief = handoff
-                            .and_then(|_| self.evidence().parts[*index].data.ask_briefs.get(id))
-                            .map(|brief| brief.read(&records[*index]))
-                            .transpose()
-                            .map_err(|error| QueryError::io(&error))?;
-                        let mut texts = Vec::new();
-                        for part in ["brief", "result"] {
-                            let text = if part == "brief" {
-                                brief.as_deref()
-                            } else {
-                                None
-                            }
-                            .or_else(|| handoff.and_then(|handoff| handoff[part].as_str()));
-                            if let Some(text) = text {
-                                texts.push((part, text.to_owned()));
-                            }
-                        }
-                        if let Some(answers) =
-                            handoff.and_then(|handoff| handoff["answer"].as_array())
-                        {
-                            let answer: Vec<&str> =
-                                answers.iter().filter_map(Value::as_str).collect();
-                            texts.push(("answer", answer.join("\n")));
-                        }
-                        ("h", texts)
-                    }
-                    SlotKind::U => ("u", tx::slot_texts(&mut lines, slot)),
-                    SlotKind::A => ("a", tx::slot_texts(&mut lines, slot)),
-                    SlotKind::Think => ("think", tx::slot_texts(&mut lines, slot)),
-                    SlotKind::Tool { .. }
-                    | SlotKind::Operation { .. }
-                    | SlotKind::Yielded { .. }
-                    | SlotKind::Sent { .. } => ("tool", tx::slot_texts(&mut lines, slot)),
-                    _ => continue,
-                };
-                let Some((part, text, at)) = texts
-                    .iter()
-                    .find_map(|(part, text)| find_in(text, &needle).map(|at| (*part, text, at)))
-                else {
-                    continue;
-                };
-                let mut entry = json!({
-                    "session": served,
-                    "position": position,
-                    "turn": slot.turn,
-                    "kind": kind,
-                    "part": part,
-                    "at": slot.t,
-                    "snippet": snippet(text, at, needle.len()),
-                });
-                match &slot.kind {
-                    SlotKind::H(id) => entry["handoff"] = json!(id),
-                    SlotKind::Tool { name, .. } => entry["name"] = json!(name),
-                    SlotKind::Yielded { .. } => entry["name"] = json!("exec_command"),
-                    SlotKind::Sent { .. } => entry["name"] = json!("write_stdin"),
-                    SlotKind::Operation { kind, .. } => {
-                        entry["name"] = json!(if kind == "CommandExecution" {
-                            "exec_command"
-                        } else {
-                            "apply_patch"
-                        })
-                    }
-                    _ => {}
-                }
-                matches.push(entry);
-                match sessions.iter_mut().find(|(id, _, _)| id == served) {
-                    Some((_, _, count)) => *count += 1,
-                    None => sessions.push((served.clone(), Vec::new(), 1)),
-                }
-            }
-        }
-        for records in &records {
+            };
+            let data = &self.evidence().parts[*index].data;
+            let records = data.sources.reader_with(provider);
+            search.scan(&served, transcript, data, &view.handoffs, &records)?;
             records.finish().map_err(|error| QueryError::io(&error))?;
+            if search.stopped() {
+                break;
+            }
         }
-        let mut sessions: Vec<Value> = sessions
-            .into_iter()
-            .filter_map(|(id, fields, count)| {
-                let session = view.session(&id)?;
-                Some(json!({
-                    "id": id,
-                    "name": session["name"],
-                    "repo": session.get("repo").cloned().unwrap_or(Value::Null),
-                    "last_activity": view.last(&id),
-                    "fields": fields,
-                    "entries": count,
-                }))
-            })
-            .collect();
-        sessions.sort_by(newest_first);
-        Ok(json!({
-            "now": view.now,
-            "text": text,
-            "matches": matches,
-            "sessions": sessions,
-            "scanned_bytes": lines.bytes,
-            "truncated": stopped.is_some(),
-            "truncated_by": stopped,
-        }))
+        Ok(search.finish(now))
     }
 
     fn stalls(
