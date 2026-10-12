@@ -22,7 +22,6 @@ export interface MessageView extends Identity {
   kind: 'message';
   flavor: 'user' | 'assistant' | 'incoming';
   text: string;
-  representedBy?: string;
   images?: readonly Attachment[];
   handoff?: string;
 }
@@ -418,17 +417,6 @@ function Entry({ entry, owner }: { entry: EntryView; owner: SessionOwner }): Com
     };
   switch (entry.kind) {
     case 'message':
-      // A qualified result event owns this reply's visible text. Keep its
-      // native address for range identity without rendering a second copy.
-      if (entry.representedBy)
-        return (
-          <span
-            hidden
-            data-e={entry.key}
-            data-entry-key={entry.entryKey}
-            data-result-entry={entry.representedBy}
-          />
-        );
       return (
         <div
           class={entry.flavor === 'incoming' ? 'bubble in' : 'msg ' + entry.flavor}

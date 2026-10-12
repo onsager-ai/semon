@@ -1147,7 +1147,12 @@ export default async function (browser) {
   {
     const page = await served(browser, { extras: true, path: '/s/claude/result-card' });
     await page.waitForFunction(() => !!document.querySelector('.turns .event'));
-    await page.getByText('Unique result text for the transcript check.', { exact: true }).waitFor();
+    // Wait for the result event itself. Its preview can repeat the independently
+    // rendered closing reply; the assertions below qualify the event's count.
+    await page
+      .locator('.turns .event')
+      .getByText('Unique result text for the transcript check.', { exact: true })
+      .waitFor();
     // The overhaul draws a result as an event like any other message to you: who sent it, the text, and the time.
     const result = await page.locator('.turns').evaluate((turns) => {
       // Read retained content through the existing geometry adapter. An auto
@@ -1163,6 +1168,9 @@ export default async function (browser) {
         );
         return {
           phraseCount: turns.innerText.split(phrase).length - 1,
+          closingReplies: [...turns.querySelectorAll('.msg.assistant')].filter(
+            (message) => message.textContent.trim() === phrase && !message.hidden,
+          ).length,
           events: events.length,
           eventText: events[0]?.innerText ?? '',
           hasVerb: /sent you a result/.test(
@@ -1178,6 +1186,11 @@ export default async function (browser) {
     r.expect(
       result.phraseCount >= 1 && result.events === 1 && result.hasVerb && result.oldMarkers === 0,
       'the result is one event that says it sent a result, with its text: ' +
+        JSON.stringify(result),
+    );
+    r.expect(
+      result.closingReplies === 1,
+      'the recorded closing reply remains one independently visible message: ' +
         JSON.stringify(result),
     );
     const resultId = D.H.find((h) => h.from === 'result-card' && h.ask === 'result')?.id ?? '';

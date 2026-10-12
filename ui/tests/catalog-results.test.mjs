@@ -99,8 +99,8 @@ test('a native result uses its closing reply while preserving every accepted ide
     ['native-0', 'native-1', 'native-2'],
   );
   assert.equal(shown.find((row) => row.kind === 'event').entryKey, 'native-3');
-  assert.equal(shown.find((row) => row.entryKey === 'native-2').representedBy, 'native-3');
-  assert.equal(shown.find((row) => row.entryKey === 'native-1').representedBy, undefined);
+  assert.equal(shown.find((row) => row.entryKey === 'native-2').text, 'Exact result');
+  assert.equal(shown.find((row) => row.entryKey === 'native-1').text, 'Exact result');
   assert.equal(JSON.stringify(accepted), original);
 });
 test('unrelated, filtered, or incomplete result context never consumes a native reply', () => {
@@ -177,7 +177,7 @@ test('unavailable, clipped and long replies remain independently readable', () =
         'owner',
       ),
     );
-    assert.equal(shown.find((row) => row.entryKey === 'native-2').representedBy, undefined);
+    assert.equal(shown.find((row) => row.entryKey === 'native-2').kind, 'message');
     assert.equal(shown.find((row) => row.entryKey === 'native-2').text, rows[2].entry.text);
   }
 });
