@@ -64,9 +64,12 @@ roots and five Source views are retained. Each selected transcript keeps at most
 five recently used ranges and 300 unique entries; revisiting a range updates its
 retention order. Discarding a range also releases its presentation and field state.
 
-The selected-session cadence observes a body-free catalog projection generation
-and entry count. Unchanged observations do not reread native content. A changed
-projection revalidates the accepted ranges through the existing selected reader.
+The selected-session cadence observes body-free Catalog projection and error
+membership generations and the entry count. Unchanged observations do not reread
+native content. A changed projection revalidates accepted ranges through the
+selected reader. Error membership uses the same qualified live/unfinished rule
+as transcript rendering; ending a process or moving a session to retained custody
+invalidates error paging even when no source line changed.
 One application ResizeObserver keeps an opening session at its tail while layout
 settles; user input ends that initial hold. Listener/frame cleanup belongs to the
 application effect lifetime.

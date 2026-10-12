@@ -61,17 +61,32 @@ const page = () => ({
   items: [session()],
   next_cursor: 'opaque cursor',
 });
-test('selected transcript observations validate generation and exact safe totals', () => {
+test('selected transcript observations validate source/runtime generations and exact safe totals', () => {
   const input = page();
-  input.items[0].transcript = { generation: 'a'.repeat(64), total: 3000 };
-  assert.deepEqual(parseCatalogPage(input).items[0].transcript, input.items[0].transcript);
-  for (const projection of [
-    { generation: 'legacy', total: 1 },
-    { generation: 'a'.repeat(64), total: -1 },
-    { generation: 'a'.repeat(64), total: 0.5 },
-    { generation: 'a'.repeat(64), total: Number.MAX_SAFE_INTEGER + 1 },
+  input.items[0].transcript = {
+    generation: 'a'.repeat(64),
+    errors_generation: 'b'.repeat(64),
+    total: 3000,
+  };
+  assert.deepEqual(parseCatalogPage(input).items[0].transcript, {
+    generation: 'a'.repeat(64),
+    errorsGeneration: 'b'.repeat(64),
+    total: 3000,
+  });
+  for (const change of [
+    (projection) => (projection.generation = 'legacy'),
+    (projection) => (projection.errors_generation = 'legacy'),
+    (projection) => delete projection.errors_generation,
+    (projection) => (projection.total = -1),
+    (projection) => (projection.total = 0.5),
+    (projection) => (projection.total = Number.MAX_SAFE_INTEGER + 1),
   ]) {
-    input.items[0].transcript = projection;
+    input.items[0].transcript = {
+      generation: 'a'.repeat(64),
+      errors_generation: 'b'.repeat(64),
+      total: 3000,
+    };
+    change(input.items[0].transcript);
     assert.throws(() => parseCatalogPage(input), /Invalid/);
   }
 });

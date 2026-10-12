@@ -1402,6 +1402,10 @@ export function createCatalogViewer(
       return text.toLowerCase().includes(query);
     });
   }
+  function annotationGeneration(view: SelectedView): string | undefined {
+    const projection = view.store.selectedPage()?.projection;
+    return view.errorMode === 'errors' ? projection?.errorsGeneration : projection?.generation;
+  }
   async function readAnnotations(view: SelectedView, force = false) {
     const current = view.store.selectedPage(),
       mode = view.errorMode;
@@ -1410,7 +1414,8 @@ export function createCatalogViewer(
       first = Math.floor(index / 100) * 100;
     if (
       !force &&
-      view.annotations?.generation === current.projection.generation &&
+      view.annotations &&
+      view.annotations.generation === annotationGeneration(view) &&
       view.annotations.kind === mode &&
       view.annotations.first === first
     ) {
@@ -1425,7 +1430,7 @@ export function createCatalogViewer(
     query.set('kind', mode);
     query.set('after', String(first));
     query.set('limit', '100');
-    query.set('generation', current.projection.generation);
+    query.set('generation', annotationGeneration(view)!);
     chrome();
     try {
       const next = parseCatalogAnnotations(await api('/api/session-annotations?' + query));
@@ -1434,7 +1439,7 @@ export function createCatalogViewer(
         active !== view ||
         view.errorMode !== mode ||
         epoch !== view.annotationsEpoch ||
-        view.store.selectedPage()?.projection.generation !== next.generation
+        annotationGeneration(view) !== next.generation
       )
         return;
       if (
@@ -2537,8 +2542,7 @@ export function createCatalogViewer(
     syncJump(view);
     if (view.errorMode)
       scope.frame(() => {
-        if (view.annotations?.generation !== view.store.selectedPage()?.projection.generation)
-          void readAnnotations(view);
+        if (view.annotations?.generation !== annotationGeneration(view)) void readAnnotations(view);
         else highlightAnnotation(view);
       });
   }
@@ -2674,6 +2678,7 @@ export function createCatalogViewer(
       p.set('limit', String(limit));
       if (after !== null) p.set('after', String(after));
       if (ticket.generation !== null) p.set('generation', ticket.generation);
+      if (ticket.errorsGeneration !== null) p.set('errors_generation', ticket.errorsGeneration);
       candidate.accept(ticket, await api('/api/session-transcript?' + p));
     };
     try {
@@ -2731,6 +2736,7 @@ export function createCatalogViewer(
     p.set('limit', String(request.limit));
     if (after !== null) p.set('after', String(after));
     if (request.generation !== null) p.set('generation', request.generation);
+    if (request.errorsGeneration !== null) p.set('errors_generation', request.errorsGeneration);
     view.loading = true;
     view.root.setAttribute('aria-busy', 'true');
     view.note = '';
@@ -2748,7 +2754,7 @@ export function createCatalogViewer(
           ...(view.observedName === undefined ? {} : { name: view.observedName }),
         };
         if (active === view) {
-          if (view.errorMode && view.annotations?.generation !== current.projection.generation)
+          if (view.errorMode && view.annotations?.generation !== annotationGeneration(view))
             void readAnnotations(view, true);
           void loadIdentity(view);
           chrome();
@@ -2809,7 +2815,8 @@ export function createCatalogViewer(
       if (
         metadata.transcript &&
         (metadata.transcript.generation !== current?.projection.generation ||
-          metadata.transcript.total !== current?.projection.total)
+          metadata.transcript.total !== current?.projection.total ||
+          metadata.transcript.errorsGeneration !== current?.projection.errorsGeneration)
       )
         await loadSelected(view);
       else if (labelChanged || JSON.stringify(metadata) !== JSON.stringify(view.meta)) {

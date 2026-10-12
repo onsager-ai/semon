@@ -22,6 +22,7 @@ export async function selectedFixture(page, sid, change, { publication } = {}) {
             details: observation.session.details,
             transcript: {
               generation: publishedGeneration() ?? observation.generation,
+              errors_generation: publishedGeneration() ?? observation.generation,
               total: publication?.().total ?? observation.rows.length,
             },
           }
@@ -71,6 +72,7 @@ export async function selectedFixture(page, sid, change, { publication } = {}) {
     if (url.searchParams.get('sid') !== sid) return route.continue();
     const original = new URL(url);
     original.searchParams.delete('generation');
+    original.searchParams.delete('errors_generation');
     original.searchParams.delete('after');
     original.searchParams.set('limit', '100');
     const headers = { ...route.request().headers() };
@@ -93,9 +95,12 @@ export async function selectedFixture(page, sid, change, { publication } = {}) {
     };
     data.projection.generation = publishedGeneration() ?? data.projection.generation;
     observation.generation = data.projection.generation;
+    data.projection.errors_generation = data.projection.generation;
     if (
-      url.searchParams.has('generation') &&
-      url.searchParams.get('generation') !== data.projection.generation
+      (url.searchParams.has('generation') &&
+        url.searchParams.get('generation') !== data.projection.generation) ||
+      (url.searchParams.has('errors_generation') &&
+        url.searchParams.get('errors_generation') !== data.projection.errors_generation)
     )
       return route.fulfill({
         status: 409,
@@ -109,7 +114,11 @@ export async function selectedFixture(page, sid, change, { publication } = {}) {
         },
       });
     data.projection.total = rows.length;
-    data.session.transcript = { generation: data.projection.generation, total: rows.length };
+    data.session.transcript = {
+      generation: data.projection.generation,
+      errors_generation: data.projection.errors_generation,
+      total: rows.length,
+    };
     const limit = Number(url.searchParams.get('limit') ?? 60);
     const first = url.searchParams.has('after')
       ? Math.min(Number(url.searchParams.get('after')), rows.length)

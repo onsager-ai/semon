@@ -53,7 +53,12 @@ const page = () => ({
     source_refs: [{ source: source(), state: 'unavailable' }],
     freshness: { state: 'unavailable' },
   },
-  projection: { version: 5, generation: 'b'.repeat(64), total: 3 },
+  projection: {
+    version: 5,
+    generation: 'b'.repeat(64),
+    errors_generation: 'b'.repeat(64),
+    total: 3,
+  },
   range: { first: 0, end: 2, next: 2 },
   entries: [
     {
@@ -105,6 +110,7 @@ test('ranged native content rejects holes, stale scope and fabricated complete c
     (p) => (p.entries[1].entry_id = p.entries[0].entry_id),
     (p) => (p.range.next = null),
     (p) => (p.projection.generation = 'not-sha'),
+    (p) => (p.projection.errors_generation = 'not-sha'),
     (p) => (p.relationship_context.state = 'complete'),
     (p) => (p.relationship_context.handoffs = [{}]),
     (p) => (p.entries[1].text = null),
@@ -313,4 +319,29 @@ test('visiting distant native ranges evicts old windows while preserving accepte
   store.retainRanges([{ first: 800, end: 860 }]);
   assert.deepEqual(store.loadedRanges(), [{ first: 800, end: 860 }]);
   assert.equal(store.request(700).generation, 'b'.repeat(64));
+});
+
+test('runtime observation fences loaded ranges while preserving their source identity', () => {
+  const store = new CatalogTranscriptStore();
+  store.select({ source_key: 'source', catalog_key: 'session' });
+  const first = store.request(0, 2);
+  assert.equal(first.errorsGeneration, null);
+  store.accept(first, page());
+  const pending = store.request(0, 2);
+  assert.equal(pending.errorsGeneration, 'b'.repeat(64));
+  const stopped = page();
+  stopped.projection.errors_generation = 'c'.repeat(64);
+  stopped.entries[0].text = 'New qualified runtime rendering';
+  assert.throws(
+    () => store.accept(pending, stopped),
+    (error) => error.status === 409,
+  );
+  assert.equal(store.selectedPage().projection.errorsGeneration, 'b'.repeat(64));
+  assert.equal(store.entries()[0].entry.text, 'Original native text');
+  const fresh = new CatalogTranscriptStore();
+  fresh.select({ source_key: 'source', catalog_key: 'session' });
+  assert.equal(fresh.accept(fresh.request(0, 2), stopped), true);
+  assert.equal(fresh.selectedPage().projection.generation, 'b'.repeat(64));
+  assert.equal(fresh.selectedPage().projection.errorsGeneration, 'c'.repeat(64));
+  assert.equal(fresh.entries()[0].entry.text, 'New qualified runtime rendering');
 });

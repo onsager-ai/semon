@@ -110,7 +110,12 @@ function transcript(key, p, total = 65, generation = 'b') {
     api: 1,
     identity: { ...identity(key), read_scope: 'retained_history' },
     session: meta(key),
-    projection: { version: 5, generation: generation.repeat(64), total },
+    projection: {
+      version: 5,
+      generation: generation.repeat(64),
+      errors_generation: generation.repeat(64),
+      total,
+    },
     range: { first, end, next: end < total ? end : null },
     entries: Array.from({ length: end - first }, (_, i) => ({
       k: 'a',
@@ -209,6 +214,7 @@ for (const width of [390, 1280])
                           ...item,
                           transcript: {
                             generation: nativeGeneration.repeat(64),
+                            errors_generation: nativeGeneration.repeat(64),
                             total: nativeTotal,
                           },
                         }

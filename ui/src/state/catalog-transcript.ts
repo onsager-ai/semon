@@ -22,6 +22,7 @@ export interface CatalogRangeRequest extends CatalogSelectionScope {
   readonly after: number | null;
   readonly limit: number;
   readonly generation: string | null;
+  readonly errorsGeneration: string | null;
   readonly read_scope: CatalogReadScope;
 }
 export interface CatalogLoadedRange {
@@ -80,6 +81,7 @@ export class CatalogTranscriptStore {
       after,
       limit,
       generation: this.pages[0]?.projection.generation ?? null,
+      errorsGeneration: this.pages[0]?.projection.errorsGeneration ?? null,
       read_scope: this.readScope,
     });
     this.requests.add(request);
@@ -89,6 +91,11 @@ export class CatalogTranscriptStore {
     if (this.disposed || !this.requests.has(request) || request.epoch !== this.epoch) return false;
     const page = parseCatalogTranscriptPage(value);
     const generation = this.pages[0]?.projection.generation ?? request.generation;
+    const errorsGeneration = this.pages[0]?.projection.errorsGeneration ?? request.errorsGeneration;
+    if (errorsGeneration !== null && page.projection.errorsGeneration !== errorsGeneration)
+      throw Object.assign(new Error('Catalog transcript runtime observation changed'), {
+        status: 409,
+      });
     const first =
       request.after === null
         ? Math.max(0, page.projection.total - request.limit)
@@ -116,7 +123,8 @@ export class CatalogTranscriptStore {
       if (
         JSON.stringify(sameRange.relationship_context) !==
           JSON.stringify(page.relationship_context) ||
-        sameRange.session.details?.live_observation !== page.session.details?.live_observation
+        sameRange.session.details?.live_observation !== page.session.details?.live_observation ||
+        sameRange.projection.errorsGeneration !== page.projection.errorsGeneration
       ) {
         ++this.contentVersion;
         this.changed();

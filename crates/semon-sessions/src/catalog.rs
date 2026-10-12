@@ -316,6 +316,25 @@ fn catalog_identity(
     scope: CatalogReadScope,
     require_complete: bool,
 ) -> Result<Option<CatalogSessionIdentity>, CatalogIdentityError> {
+    catalog_selection(
+        options,
+        source_key,
+        canonical_catalog_key,
+        scope,
+        require_complete,
+    )
+    .map(|selected| selected.map(|(identity, _)| identity))
+}
+
+/// The selected row and its identity come from one native Catalog snapshot.
+/// Consumers retain its generation for subsequent indexed or source reads.
+pub(crate) fn catalog_selection(
+    options: &Options,
+    source_key: &str,
+    canonical_catalog_key: &str,
+    scope: CatalogReadScope,
+    require_complete: bool,
+) -> Result<Option<(CatalogSessionIdentity, Value)>, CatalogIdentityError> {
     use CatalogIdentityError::{InvalidArguments, ScopeChanged, Unavailable};
     if source_key.is_empty()
         || source_key.len() > 4096
@@ -383,26 +402,29 @@ fn catalog_identity(
     if observed_at.is_some_and(|time| !(0..=9_007_199_254_740_991).contains(&time)) {
         return Err(Unavailable);
     }
-    Ok(Some(CatalogSessionIdentity {
-        source_key: source_key.to_owned(),
-        read_scope: scope,
-        catalog_key: item.key,
-        harness: item.harness,
-        native_id: (!provisional && native_ids.len() == 1).then(|| native_ids[0].clone()),
-        owner_qualification: if provisional {
-            CatalogOwnerQualification::Provisional
-        } else {
-            CatalogOwnerQualification::Qualified
+    Ok(Some((
+        CatalogSessionIdentity {
+            source_key: source_key.to_owned(),
+            read_scope: scope,
+            catalog_key: item.key,
+            harness: item.harness,
+            native_id: (!provisional && native_ids.len() == 1).then(|| native_ids[0].clone()),
+            owner_qualification: if provisional {
+                CatalogOwnerQualification::Provisional
+            } else {
+                CatalogOwnerQualification::Qualified
+            },
+            native_ids,
+            source_refs: item.source_refs,
+            machine_label: body["machine_info"]["label"].as_str().map(str::to_owned),
+            generation,
+            observed_at,
+            freshness: item.freshness,
+            facts_observation: item.facts_observation,
+            native_selection: item.native_selection,
         },
-        native_ids,
-        source_refs: item.source_refs,
-        machine_label: body["machine_info"]["label"].as_str().map(str::to_owned),
-        generation,
-        observed_at,
-        freshness: item.freshness,
-        facts_observation: item.facts_observation,
-        native_selection: item.native_selection,
-    }))
+        body["items"][0].clone(),
+    )))
 }
 
 /// Read a configured machine's published metadata page without constructing a
@@ -1163,6 +1185,10 @@ fn read_page(
         } else {
             serde_json::Value::Null
         };
+        if let Some(generation) = item["transcript"]["generation"].as_str() {
+            item["transcript"]["errors_generation"] =
+                json!(crate::transcript_range::error_generation(generation, &item,));
+        }
         items.push(item);
     }
     if recorded
@@ -3756,6 +3782,38 @@ mod tests {
                 .unwrap();
             }
             fixture.publish(0);
+            let errors = || {
+                let reply = crate::session_annotations(
+                    &fixture.options,
+                    "local",
+                    "sid=pending-call&scope=retained_history&kind=errors&limit=100",
+                );
+                assert_eq!(reply.status, 200);
+                serde_json::from_slice::<Value>(&reply.body).unwrap()
+            };
+            let before_errors = errors();
+            assert_eq!(before_errors["total"], if live { 0 } else { 1 });
+            let descriptor = crate::session_catalog_page(
+                &fixture.options,
+                "local",
+                "sid=pending-call&scope=retained_history",
+            );
+            assert_eq!(descriptor.status, 200);
+            let descriptor: Value = serde_json::from_slice(&descriptor.body).unwrap();
+            assert_eq!(
+                descriptor["items"][0]["transcript"]["errors_generation"],
+                before_errors["generation"]
+            );
+            if live {
+                // Read-only retained custody cannot inherit a recorded live PID.
+                let db = Connection::open(EventCache::path(&fixture.options.cache)).unwrap();
+                db.execute("UPDATE session_catalog SET lifecycle='retained',metadata=json_set(metadata,'$.lifecycle','retained') WHERE session_key='pending-call'", []).unwrap();
+                let retained = errors();
+                assert_eq!(retained["total"], 1);
+                assert_ne!(retained["generation"], before_errors["generation"]);
+                db.execute("UPDATE session_catalog SET lifecycle='current',metadata=json_set(metadata,'$.lifecycle','current') WHERE session_key='pending-call'", []).unwrap();
+                assert_eq!(errors()["generation"], before_errors["generation"]);
+            }
             let read = || {
                 let reply = crate::session_transcript_range(
                     &fixture.options,
@@ -3794,6 +3852,45 @@ mod tests {
             assert_eq!(stopped["unfinished"], true);
             assert_eq!(stopped["ok"], false);
             assert!(stopped["live"].is_null());
+            let stopped_errors = errors();
+            assert_eq!(stopped_errors["total"], 1);
+            if live {
+                assert_ne!(stopped_errors["generation"], before_errors["generation"]);
+                let stale = crate::session_annotations(
+                    &fixture.options,
+                    "local",
+                    &format!(
+                        "sid=pending-call&scope=retained_history&kind=errors&limit=100&generation={}",
+                        before_errors["generation"].as_str().unwrap()
+                    ),
+                );
+                assert_eq!(stale.status, 409);
+                let stale_range = crate::session_transcript_range(
+                    &fixture.options,
+                    "local",
+                    &format!(
+                        "sid=pending-call&scope=retained_history&after=0&limit=100&errors_generation={}",
+                        before_errors["generation"].as_str().unwrap()
+                    ),
+                    None,
+                );
+                assert_eq!(stale_range.status, 409);
+                let current_range = crate::session_transcript_range(
+                    &fixture.options,
+                    "local",
+                    &format!(
+                        "sid=pending-call&scope=retained_history&after=0&limit=100&errors_generation={}",
+                        stopped_errors["generation"].as_str().unwrap()
+                    ),
+                    None,
+                );
+                assert_eq!(current_range.status, 200);
+                let current_range: Value = serde_json::from_slice(&current_range.body).unwrap();
+                assert_eq!(
+                    current_range["projection"]["errors_generation"],
+                    stopped_errors["generation"]
+                );
+            }
             let db = Connection::open(EventCache::path(&fixture.options.cache)).unwrap();
             let stored: String = db.query_row("SELECT metadata FROM session_slots WHERE session_key='pending-call' AND json_extract(metadata,'$.recipe.outcome')='Pending'", [], |row|row.get(0)).unwrap();
             assert!(!stored.contains("\"Live\""));

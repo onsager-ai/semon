@@ -230,13 +230,9 @@ pub fn session_annotations(options: &Options, source_key: &str, query: &str) -> 
             return Ok(invalid_arguments());
         }
         let kind = argument("kind").unwrap_or_default();
-        let predicate = match kind.as_str() {
-            "errors" => {
-                "((json_extract(metadata,'$.recipe.recipe') IN ('Tool','Yielded','Sent') AND json_extract(metadata,'$.recipe.outcome')='Err') OR (json_extract(metadata,'$.recipe.recipe')='Operation' AND json_extract(metadata,'$.recipe.ok')=0))"
-            }
-            "signals" => "json_extract(metadata,'$.recipe.recipe')='Signal'",
-            _ => return Ok(invalid_arguments()),
-        };
+        if !matches!(kind.as_str(), "errors" | "signals") {
+            return Ok(invalid_arguments());
+        }
         let limit = argument("limit")
             .map(|value| value.parse::<usize>())
             .transpose();
@@ -251,8 +247,14 @@ pub fn session_annotations(options: &Options, source_key: &str, query: &str) -> 
         if !(1..=MAX_LIMIT).contains(&limit) || (after > 0 && argument("generation").is_none()) {
             return Ok(invalid_arguments());
         }
-        let identity = match catalog::session_catalog_history_identity(options, source_key, &key) {
-            Ok(Some(identity)) => identity,
+        let (identity, session) = match catalog::catalog_selection(
+            options,
+            source_key,
+            &key,
+            crate::CatalogReadScope::RetainedHistory,
+            false,
+        ) {
+            Ok(Some(selected)) => selected,
             Ok(None) => {
                 return Ok(catalog::error(
                     404,
@@ -303,7 +305,22 @@ pub fn session_annotations(options: &Options, source_key: &str, query: &str) -> 
         if version != VERSION {
             return Ok(unavailable());
         }
-        let generation = entry_generation(&stored);
+        let working = selected_working(&session);
+        let predicate = if kind == "signals" {
+            "json_extract(metadata,'$.recipe.recipe')='Signal'"
+        } else if working {
+            "((json_extract(metadata,'$.recipe.recipe') IN ('Tool','Yielded','Sent') AND json_extract(metadata,'$.recipe.outcome')='Err') OR (json_extract(metadata,'$.recipe.recipe')='Operation' AND json_extract(metadata,'$.recipe.ok')=0))"
+        } else {
+            "((json_extract(metadata,'$.recipe.recipe') IN ('Tool','Yielded','Sent') AND json_extract(metadata,'$.recipe.outcome') IN ('Err','Pending')) OR (json_extract(metadata,'$.recipe.recipe')='Operation' AND json_extract(metadata,'$.recipe.ok')=0))"
+        };
+        // Error membership includes pending calls only when the same qualified
+        // observation renders them unfinished. Fence paging when that changes,
+        // even if the immutable source/slot generation did not move.
+        let generation = if kind == "errors" {
+            error_generation(&entry_generation(&stored), &session)
+        } else {
+            entry_generation(&stored)
+        };
         if argument("generation").is_some_and(|expected| expected != generation) {
             return Ok(stale());
         }
@@ -332,6 +349,32 @@ pub fn session_annotations(options: &Options, source_key: &str, query: &str) -> 
         ))
     };
     read().unwrap_or_else(|_| unavailable())
+}
+
+/// A persisted pending recipe never grants live authority. Both transcript
+/// presentation and error membership use this qualified selected observation.
+pub(crate) fn selected_working(session: &Value) -> bool {
+    session["lifecycle"] == "current"
+        && session["details"]["live_observation"] == true
+        && matches!(session["details"]["state"].as_str(), Some("work" | "wait"))
+}
+
+/// Source-slot identity and qualified pending membership fence error paging.
+pub(crate) fn error_generation(projection: &str, session: &Value) -> String {
+    use sha2::{Digest, Sha256};
+    let working = selected_working(session);
+    let activity = if working {
+        json!([
+            session["details"]["activity"]["tool"],
+            session["details"]["activity"]["since"]
+        ])
+    } else {
+        Value::Null
+    };
+    format!(
+        "{:x}",
+        Sha256::digest(format!("native-errors-v1|{projection}|{working}|{activity}").as_bytes())
+    )
 }
 
 fn entry_generation(stored: &str) -> String {
@@ -409,6 +452,7 @@ fn read(
         "limit",
         "after",
         "generation",
+        "errors_generation",
         "scope",
         "field_chunk",
         "part",
@@ -467,13 +511,19 @@ fn read(
             false,
         ));
     }
-    let selected_identity = if history {
-        catalog::session_catalog_history_identity(options, source_key, &key)
-    } else {
-        catalog::session_catalog_identity(options, source_key, &key)
-    };
-    let identity = match selected_identity {
-        Ok(Some(identity)) => identity,
+    let selected = catalog::catalog_selection(
+        options,
+        source_key,
+        &key,
+        if history {
+            crate::CatalogReadScope::RetainedHistory
+        } else {
+            crate::CatalogReadScope::Current
+        },
+        false,
+    );
+    let (identity, session) = match selected {
+        Ok(Some(selected)) => selected,
         Ok(None) => {
             return Ok(catalog::error(
                 404,
@@ -500,27 +550,6 @@ fn read(
         }
         Err(CatalogIdentityError::Unavailable) => return Ok(unavailable()),
     };
-    let metadata = catalog::session_catalog_page(
-        options,
-        source_key,
-        &format!(
-            "sid={}&scope={}",
-            crate::viewer::percent_encode(&key),
-            if history {
-                "retained_history"
-            } else {
-                "current"
-            }
-        ),
-    );
-    if metadata.status != 200 {
-        return Ok(metadata);
-    }
-    let metadata: Value = serde_json::from_slice(&metadata.body)?;
-    if metadata["generation"] != identity.generation {
-        return Ok(stale());
-    }
-    let session = metadata["items"][0].clone();
     let mut connection = Connection::open_with_flags(
         EventCache::path(&options.cache),
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
@@ -576,6 +605,11 @@ fn read(
     // Fence pre-fix loaded ranges without rewriting retained source recipes.
     let generation = entry_generation(&stored_generation);
     if argument("generation").is_some_and(|expected| expected != generation) {
+        return Ok(stale());
+    }
+    if argument("errors_generation")
+        .is_some_and(|expected| expected != error_generation(&generation, &session))
+    {
         return Ok(stale());
     }
     let first = after.unwrap_or_else(|| total.saturating_sub(limit));
@@ -1122,9 +1156,7 @@ fn render(
     // Apply qualified observations before rendering, so pending calls reuse the
     // shared live/unfinished presentation without persisting runtime authority.
     let details = &selection.session["details"];
-    let working = selection.session["lifecycle"] == "current"
-        && details["live_observation"] == true
-        && matches!(details["state"].as_str(), Some("work" | "wait"));
+    let working = selected_working(&selection.session);
     for (saved, slot) in selection.slots.iter().zip(&mut slots) {
         use crate::{
             model::{Shown, SlotKind},
@@ -1371,7 +1403,7 @@ fn render(
     reply(
         200,
         json!({"api":1,"identity":selection.identity,"session":selection.session,
-        "projection":{"version":VERSION,"generation":selection.generation,"total":selection.total,"history_incomplete":selection.history_incomplete},
+        "projection":{"version":VERSION,"generation":selection.generation,"errors_generation":error_generation(&selection.generation, &selection.session),"total":selection.total,"history_incomplete":selection.history_incomplete},
         "range":{"first":selection.first,"end":selection.end,"next":(selection.end<selection.total).then_some(selection.end)},
         "entries":entries,"freshness":{"state":state},"content_observation":{"state":content_state,"sources":content_sources},
         "relationship_context": {"state":selection.context["state"],"turn_ids":turn_ids,"turns":selection.context["turns"],
