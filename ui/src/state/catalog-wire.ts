@@ -16,10 +16,14 @@ export type {
   CatalogNativeSelection,
 } from '../domain/catalog';
 
-/** Metadata is a partial read view, independent of runtime status and model deltas. */
+/** Metadata and fenced recorded status are partial observations, never control authority. */
 export interface CatalogSession {
   transcript?: { generation: string; errorsGeneration: string; total: number };
   details?: SessionDetails;
+  status?: {
+    state: 'work' | 'wait' | 'idle' | 'done' | 'err' | 'new' | 'read' | 'off' | null;
+    observation: 'current' | 'retained' | 'unavailable';
+  };
   key: string;
   name: string;
   harness: string;
@@ -106,6 +110,23 @@ function observations(row: Record<string, unknown>) {
           : { state: nativeSelection(object(row.native_selection).state) },
   };
 }
+function recordedStatus(value: unknown): CatalogSession['status'] {
+  if (value === undefined) return undefined;
+  const row = object(value),
+    state = row.state,
+    observation = row.observation;
+  if (
+    !(
+      state === null ||
+      ['work', 'wait', 'idle', 'done', 'err', 'new', 'read', 'off'].includes(text(state))
+    ) ||
+    !(observation === 'current' || observation === 'retained' || observation === 'unavailable') ||
+    (observation === 'unavailable') !== (state === null) ||
+    (observation === 'retained' && (state === 'work' || state === 'wait'))
+  )
+    throw new Error('Invalid catalog status observation');
+  return { state: state as NonNullable<CatalogSession['status']>['state'], observation };
+}
 function digest(value: unknown) {
   const bytes = array(value, integer);
   if (bytes.length !== 32 || bytes.some((byte) => byte < 0 || byte > 255))
@@ -138,6 +159,7 @@ export function parseCatalogSession(value: unknown): CatalogSession {
     throw new Error('Invalid catalog tokens');
   return {
     details: row.details == null ? undefined : parseSessionDetails(row.details),
+    status: recordedStatus(row.status),
     transcript:
       row.transcript == null
         ? undefined

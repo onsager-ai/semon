@@ -1,5 +1,6 @@
 //! Focused reads of the published metadata catalog. This path never opens the
-//! EventCache, walks input homes, loads transcript bodies or constructs a model.
+//! EventCache, discovers native log files, loads transcript bodies or constructs
+//! a model. Runtime labels reuse the shared native observation fence.
 use crate::{
     Options,
     events::EventCache,
@@ -849,6 +850,7 @@ fn read_page(
     )?;
     connection.busy_timeout(Duration::from_millis(100))?;
     let transaction = connection.transaction()?;
+    let runtime = crate::native_evidence::query_runtime_generation(options).ok();
     let meta = |key: &str| {
         transaction
             .query_row("SELECT value FROM meta WHERE key=?1", [key], |row| {
@@ -1158,7 +1160,37 @@ fn read_page(
         }
         let is_codex = row.harness == "codex";
         let partial_summary = partial_history.contains(&row.key);
+        let current = row.lifecycle == crate::model::summary::CatalogLifecycle::Current;
+        let observation = if let Some(saved) = &row.query {
+            if crate::model::summary::query_observation_matches(
+                saved,
+                &row.sources,
+                current,
+                runtime.as_deref(),
+            )? && state == "cached"
+                && (!current || (facts_known && !retired_native))
+            {
+                let observed = saved["state"].as_str();
+                let status = match observed {
+                    Some("work" | "wait") if !current => Some("off"),
+                    Some("work" | "wait" | "idle" | "done" | "err" | "new" | "read" | "off") => {
+                        observed
+                    }
+                    _ => None,
+                };
+                if let Some(status) = status {
+                    json!({"state":status,"observation":if current {"current"} else {"retained"}})
+                } else {
+                    json!({"state":null,"observation":"unavailable"})
+                }
+            } else {
+                json!({"state":null,"observation":"unavailable"})
+            }
+        } else {
+            json!({"state":null,"observation":"unavailable"})
+        };
         let mut item = serde_json::to_value(row)?;
+        item["status"] = observation;
         // Exact Query facts and runtime fences are internal publication data.
         // The Catalog transport retains its stable description allowlist.
         item.as_object_mut()
@@ -1200,6 +1232,18 @@ fn read_page(
         }
         items.push(item);
     }
+    if runtime.as_ref().is_some_and(|before| {
+        crate::native_evidence::query_runtime_generation(options)
+            .ok()
+            .as_ref()
+            != Some(before)
+    }) {
+        for item in &mut items {
+            if item["status"]["observation"] == "current" {
+                item["status"] = json!({"state":null,"observation":"unavailable"});
+            }
+        }
+    }
     if recorded
         .as_ref()
         .is_some_and(|source| source.validate().is_err())
@@ -1223,7 +1267,7 @@ fn read_page(
         json!({"api":1,"machine":machine,"read_scope":request.scope,"generation":generation,"observed_at":observed_at,
         "machine_info":{"key":machine,"label":machine_label,"freshness":if facts_known { "cached" } else { "unavailable" }},
         "capabilities":{"pagination":true,"metadata_search":true,"filters":["harness","repo","no_repo","model","q"],"order":"last_desc_key_asc",
-            "full_text_search":false,"selected_session_lookup":true,"runtime_status":false,"global_union":false},
+            "full_text_search":false,"selected_session_lookup":true,"runtime_status":true,"global_union":false},
         "completeness":{"state":completeness},"freshness":if completeness == "partial" { "updating" } else { page_state },"items":items,"next_cursor":next,"search":search_report.map(|report|json!({"semantics":"unicode_lowercase_substring","fields":["name","key","repo","branch","model","harness"],"partial":report.partial,"candidates":report.candidates,"index_complete":report.index_complete,"candidate_budget":crate::catalog_search::MAX_CANDIDATES,"byte_budget":crate::catalog_search::MAX_SCAN_BYTES}))}),
     ))
 }
@@ -4296,6 +4340,99 @@ mod tests {
             fresh["projection"]["generation"],
             old["projection"]["generation"]
         );
+    }
+
+    #[test]
+    fn list_status_reuses_native_facts_and_rejects_runtime_or_source_changes() {
+        let fixture = Fixture::new();
+        fixture.publish(1);
+        native_refresh(&fixture);
+        let connection = Connection::open(EventCache::path(&fixture.options.cache)).unwrap();
+        let metadata: String = connection
+            .query_row(
+                "SELECT metadata FROM session_catalog WHERE session_key='session-00000'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let original: Value = serde_json::from_str(&metadata).unwrap();
+        assert!(original["query"].is_object());
+        let save = |row: &Value| {
+            connection.execute(
+                "UPDATE session_catalog SET lifecycle=?1,metadata=?2 WHERE session_key='session-00000'",
+                rusqlite::params![row["lifecycle"].as_str().unwrap(), row.to_string()],
+            ).unwrap();
+        };
+        let status = |scope: &str| {
+            let before = crate::events::CACHE_READS.with(|reads| reads.get());
+            let (code, body) = fixture.body(scope);
+            assert_eq!(code, 200);
+            assert_eq!(body["capabilities"]["runtime_status"], true);
+            let row = &body["items"][0];
+            assert!(row.get("query").is_none());
+            assert!(row.get("details").is_none());
+            assert!(row.get("transcript").is_none());
+            assert!(!body.to_string().contains("synthetic prompt"));
+            assert_eq!(crate::events::CACHE_READS.with(|reads| reads.get()), before);
+            row["status"].clone()
+        };
+        crate::events::CACHE_READS.with(|reads| reads.set(0));
+        for state in ["work", "wait", "idle", "done", "err", "new", "read", "off"] {
+            let mut row = original.clone();
+            row["query"]["state"] = json!(state);
+            save(&row);
+            assert_eq!(status(""), json!({"state":state,"observation":"current"}));
+            row["lifecycle"] = json!("retained");
+            save(&row);
+            let expected = if matches!(state, "work" | "wait") {
+                "off"
+            } else {
+                state
+            };
+            assert_eq!(
+                status("scope=retained_history"),
+                json!({"state":expected,"observation":"retained"})
+            );
+        }
+        for (field, value) in [
+            ("runtime", json!("old-runtime")),
+            ("source_generation", json!("old-source")),
+            ("version", json!(0)),
+        ] {
+            let mut row = original.clone();
+            row["query"][field] = value;
+            save(&row);
+            assert_eq!(
+                status(""),
+                json!({"state":null,"observation":"unavailable"})
+            );
+        }
+        save(&original);
+        let facts = fixture.options.facts.as_ref().unwrap();
+        let mut changed: Value = serde_json::from_slice(&fs::read(facts).unwrap()).unwrap();
+        changed["hostname"] = json!("changed-runtime-input");
+        fs::write(facts, changed.to_string()).unwrap();
+        assert_eq!(
+            status(""),
+            json!({"state":null,"observation":"unavailable"})
+        );
+        fixture.publish_existing();
+        assert_ne!(status("")["state"], Value::Null);
+        let source = fixture
+            .options
+            .claude_home
+            .join("projects/project/session-00000.jsonl");
+        use std::io::Write;
+        writeln!(
+            fs::OpenOptions::new().append(true).open(source).unwrap(),
+            "{{}}"
+        )
+        .unwrap();
+        assert_eq!(
+            status(""),
+            json!({"state":null,"observation":"unavailable"})
+        );
+        // Each status read above checks that it loads no Event Index rows.
     }
 
     #[test]

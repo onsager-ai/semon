@@ -182,3 +182,34 @@ test('metadata search exposes bounded partial scan and independent index coverag
     parseCatalogPage({ ...page(), search: { ...observation, byte_budget: Infinity } }),
   );
 });
+
+test('catalog status distinguishes current, retained and unavailable observations', () => {
+  for (const observation of ['current', 'retained']) {
+    const input = page();
+    input.capabilities.runtime_status = true;
+    input.items[0].status = { state: 'done', observation };
+    assert.deepEqual(parseCatalogPage(input).items[0].status, input.items[0].status);
+  }
+  for (const status of [
+    { state: null, observation: 'unavailable' },
+    { state: 'work', observation: 'current' },
+    { state: 'wait', observation: 'current' },
+    { state: 'off', observation: 'retained' },
+  ]) {
+    const input = page();
+    input.items[0].status = status;
+    assert.deepEqual(parseCatalogPage(input).items[0].status, status);
+  }
+  for (const status of [
+    { state: 'work', observation: 'retained' },
+    { state: 'wait', observation: 'retained' },
+    { state: 'done', observation: 'unavailable' },
+    { state: null, observation: 'current' },
+    { state: 'invented', observation: 'current' },
+    { state: 'done', observation: 'live-authority' },
+  ]) {
+    const input = page();
+    input.items[0].status = status;
+    assert.throws(() => parseCatalogPage(input), /Invalid/);
+  }
+});

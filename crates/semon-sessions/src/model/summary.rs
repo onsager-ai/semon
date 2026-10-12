@@ -152,6 +152,19 @@ pub(crate) struct CatalogRow {
     pub(crate) sources: Vec<CatalogSource>,
 }
 
+/// Shared qualification for exact native Query publication fields. These are
+/// recorded observations, never a grant of process or credential authority.
+pub(crate) fn query_observation_matches(
+    saved: &Value,
+    sources: &[CatalogSource],
+    current: bool,
+    runtime: Option<&str>,
+) -> Result<bool, serde_json::Error> {
+    Ok(saved["version"] == 1
+        && saved["source_generation"] == crate::retention::source_generation(sources)?
+        && (!current || (runtime.is_some() && saved["runtime"].as_str() == runtime)))
+}
+
 /// Native source identity and last observed generation. `prefix_sha256` hashes
 /// every consumed byte in `[0, offset)`; `tail_sha256` hashes at most the last
 /// 4 KiB of that prefix. Neither binds unread trailing bytes or a whole archive

@@ -216,6 +216,14 @@ Escape/focus return and remount; Hub provides the real server/form adoption chec
 
 ## Selected observation
 
+Catalog list rows carry a compact recorded status observation. They reuse the
+producer's exact native Query fields only when the source generation, source
+stats, facts custody and shared runtime fence still match; a changed fence
+returns an unavailable status. Current and retained observations remain distinct,
+and retained Working/Needs you states become recorded history. This metadata
+read loads no transcript rows and grants no control authority. Selected control
+and runtime observers retain their independent authorization checks.
+
 Navigation publishes route changes through `subscribeRoute`. Catalog status
 borrows the accepted selection owner's narrow identity accessor and subscription.
 A missing, superseded, ambiguous or multi-native selection opens no native status
