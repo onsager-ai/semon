@@ -3430,3 +3430,120 @@ fn focused_native_identity_collision_context_refuses_an_overbound_closure() {
             .contains("closure exceeds its source bound")
     );
 }
+
+#[test]
+fn ordinary_focused_query_reuses_qualified_catalog_without_unrelated_index_loads() {
+    for all in [false, true] {
+        for unrelated in [0, 256] {
+            let mut home = Home::new("ordinary-focused");
+            home.options.all = all;
+            home.top("lead", &[human("lead", ts(1, 0), "selected prompt")]);
+            for n in 0..unrelated {
+                let id = format!("unrelated-{n}");
+                home.top(&id, &[human(&id, ts(1, 0), "unrelated prompt")]);
+            }
+            let mut cache = crate::events::EventCache::open_scoped(&home.options.cache).unwrap();
+            crate::model::observe_catalog(
+                &home.options,
+                &mut cache,
+                &mut false,
+                &mut crate::model::Texts::default(),
+                NOW,
+            )
+            .unwrap();
+            let mut baseline = Query::from_sources(admitted(Options {
+                scan_window: true,
+                ..home.options.clone()
+            }));
+            let tools = [
+                ("get_session", json!({"id":"lead"})),
+                ("read_transcript", json!({"id":"lead","limit":10})),
+            ];
+            let expected: Vec<_> = tools
+                .iter()
+                .map(|(tool, args)| baseline.call_at(tool, args, NOW).unwrap())
+                .collect();
+            let mut query = home.query();
+            let before = crate::events::FILE_READS.with(std::cell::Cell::get);
+            for ((tool, args), expected) in tools.iter().zip(expected) {
+                assert_eq!(query.call_at(tool, args, NOW).unwrap(), expected);
+            }
+            let loads = crate::events::FILE_READS.with(std::cell::Cell::get) - before;
+            eprintln!("ordinary focused Query all={all} unrelated={unrelated} index_loads={loads}");
+            assert!(
+                loads <= 4,
+                "ordinary focused Query loaded unrelated indexes: {loads}"
+            );
+        }
+    }
+}
+
+#[test]
+fn ordinary_focused_query_reconciles_changed_log_sidecar_and_scan_window_context() {
+    let mut home = Home::new("ordinary-focused-freshness");
+    home.top("parent", &[human("parent", ts(1, 0), "parent prompt")]);
+    home.agent(
+        "parent",
+        "child",
+        "spawn",
+        &[human("parent", ts(1, 1), "child prompt")],
+    );
+    let mut cache = crate::events::EventCache::open_scoped(&home.options.cache).unwrap();
+    crate::model::observe_catalog(
+        &home.options,
+        &mut cache,
+        &mut false,
+        &mut crate::model::Texts::default(),
+        NOW,
+    )
+    .unwrap();
+    let compare = |options: &Options, id: &str| {
+        let args = json!({"id":id});
+        let expected = Query::from_sources(admitted(Options {
+            scan_window: true,
+            ..options.clone()
+        }))
+        .call_at("get_session", &args, NOW)
+        .unwrap();
+        assert_eq!(
+            Query::new(options.clone())
+                .call_at("get_session", &args, NOW)
+                .unwrap(),
+            expected
+        );
+    };
+    compare(&home.options, "child");
+    home.write(
+        "claude/projects/-work-proj/parent/subagents/agent-child.meta.json",
+        &json!({"description":"updated native role","toolUseId":"spawn","model":"updated-model"})
+            .to_string(),
+    );
+    compare(&home.options, "child");
+    home.top(
+        "parent",
+        &[human("parent", ts(1, 0), "rewritten parent prompt")],
+    );
+    compare(&home.options, "parent");
+    crate::model::observe_catalog(
+        &home.options,
+        &mut cache,
+        &mut false,
+        &mut crate::model::Texts::default(),
+        NOW,
+    )
+    .unwrap();
+    home.options.all = false;
+    home.options.since = Duration::from_secs(6 * 3600);
+    fs::File::open(
+        home.options
+            .claude_home
+            .join("projects/-work-proj/parent.jsonl"),
+    )
+    .unwrap()
+    .set_times(
+        fs::FileTimes::new()
+            .set_modified(std::time::UNIX_EPOCH + Duration::from_millis((NOW - 86400000) as u64)),
+    )
+    .unwrap();
+    compare(&home.options, "child");
+}

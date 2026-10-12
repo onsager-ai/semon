@@ -707,7 +707,7 @@ fn source_relative(options: &Options, harness: &str, source: &CatalogSource) -> 
     .then(|| relative.to_owned())
 }
 
-fn source_state(source: &CatalogSource) -> &'static str {
+pub(crate) fn source_state(source: &CatalogSource) -> &'static str {
     let Ok(file) = crate::sealed::LogFile::open(&source.path) else {
         return "unavailable";
     };
