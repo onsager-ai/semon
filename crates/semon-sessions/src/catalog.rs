@@ -262,6 +262,7 @@ pub fn session_catalog_identity(
         source_key,
         canonical_catalog_key,
         CatalogReadScope::Current,
+        false,
     )
 }
 
@@ -278,6 +279,23 @@ pub fn session_catalog_history_identity(
         source_key,
         canonical_catalog_key,
         CatalogReadScope::RetainedHistory,
+        false,
+    )
+}
+
+/// Local multi-source Query must not infer absence or unique ownership from a
+/// provisional discovery. The completeness gate shares the lookup's snapshot.
+pub(crate) fn qualified_history_identity(
+    options: &Options,
+    source_key: &str,
+    key: &str,
+) -> Result<Option<CatalogSessionIdentity>, CatalogIdentityError> {
+    catalog_identity(
+        options,
+        source_key,
+        key,
+        CatalogReadScope::RetainedHistory,
+        true,
     )
 }
 
@@ -286,6 +304,7 @@ fn catalog_identity(
     source_key: &str,
     canonical_catalog_key: &str,
     scope: CatalogReadScope,
+    require_complete: bool,
 ) -> Result<Option<CatalogSessionIdentity>, CatalogIdentityError> {
     use CatalogIdentityError::{InvalidArguments, ScopeChanged, Unavailable};
     if source_key.is_empty()
@@ -296,6 +315,7 @@ fn catalog_identity(
         return Err(InvalidArguments);
     }
     let request = Request {
+        require_complete,
         scope,
         limit: 1,
         sid: Some(canonical_catalog_key.to_owned()),
@@ -409,6 +429,7 @@ struct Cursor {
 }
 
 pub(crate) struct Request {
+    require_complete: bool,
     scope: CatalogReadScope,
     limit: usize,
     sid: Option<String>,
@@ -546,6 +567,7 @@ impl Request {
             return Err(invalid());
         }
         Ok(Self {
+            require_complete: false,
             scope,
             limit,
             sid,
@@ -794,6 +816,16 @@ fn read_page(
     };
     if version.as_deref() != Some(CATALOG_VERSION.to_string().as_str()) {
         return Err(io::Error::other("catalog version").into());
+    }
+    if request.require_complete {
+        match meta("catalog_completeness")?.as_deref() {
+            None | Some("complete") => {}
+            _ => {
+                return Err(
+                    io::Error::other("catalog ownership is unavailable or provisional").into(),
+                );
+            }
+        }
     }
     if request
         .cursor
@@ -4571,6 +4603,7 @@ mod tests {
         assert_eq!(small_steps, large_steps);
         // A late cursor in a huge equal-time group must seek its key directly.
         let request = Request {
+            require_complete: false,
             scope: CatalogReadScope::Current,
             limit: 3,
             sid: None,
