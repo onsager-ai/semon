@@ -1082,12 +1082,29 @@ impl IndexStore for SqliteStore {
             .map(Some)
     }
 
-    fn catalog_component_paths(&self, paths: &[String]) -> Result<Option<Vec<String>>, StoreError> {
-        if paths.is_empty() || paths.len() > 64 {
+    fn catalog_component_paths(
+        &self,
+        paths: &[String],
+        keys: &[String],
+        native_parents: &[(String, String)],
+    ) -> Result<Option<Vec<String>>, StoreError> {
+        if paths.is_empty() || paths.len() > 64 || keys.len() > 64 || native_parents.len() > 64 {
             return Ok(None);
         }
         let tx = self.connection.unchecked_transaction().map_err(failure)?;
-        let mut pending = std::collections::BTreeSet::new();
+        let mut pending: std::collections::BTreeSet<_> = keys.iter().cloned().collect();
+        for (harness, id) in native_parents {
+            let mut statement = tx.prepare("SELECT DISTINCT session_key FROM session_catalog_sources WHERE lifecycle='current' AND harness=?1 AND native_id=?2 LIMIT 65").map_err(failure)?;
+            let owners = statement
+                .query_map(params![harness, id], |row| row.get::<_, String>(0))
+                .map_err(failure)?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(failure)?;
+            if owners.is_empty() || owners.len() > 64 {
+                return Ok(None);
+            }
+            pending.extend(owners);
+        }
         for path in paths {
             let mut statement = tx.prepare("SELECT DISTINCT session_key FROM session_catalog_sources WHERE source_path=?1 AND lifecycle='current' LIMIT 65").map_err(failure)?;
             let owners = statement
@@ -1095,7 +1112,7 @@ impl IndexStore for SqliteStore {
                 .map_err(failure)?
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(failure)?;
-            if owners.is_empty() || owners.len() > 64 {
+            if owners.len() > 64 {
                 return Ok(None);
             }
             pending.extend(owners);
@@ -1318,6 +1335,26 @@ fn current_catalog_row(
         .and_then(|text| serde_json::from_str(&text).ok()))
 }
 
+fn stable_native_role(previous: Option<&Value>, current: Option<&Value>) -> bool {
+    if previous == current {
+        return true;
+    }
+    let (Some(previous), Some(current)) = (previous, current) else {
+        return false;
+    };
+    let mut previous = previous.clone();
+    // A Codex parent rewrite is qualified by both old/current closure and its
+    // newly resolved native parent. Other role changes require reconciliation.
+    if let (Some(old), Some(new)) = (
+        previous.get_mut("Codex").and_then(Value::as_object_mut),
+        current.get("Codex").and_then(Value::as_object),
+    ) && let Some(parent) = new.get("parent_thread")
+    {
+        old.insert("parent_thread".to_owned(), parent.clone());
+    }
+    previous == *current
+}
+
 fn closed_catalog(
     connection: &Connection,
     publication: &crate::slot_projection::Publication<'_>,
@@ -1356,13 +1393,19 @@ fn closed_catalog(
             if previous.harness != row.harness
                 || previous.kind != row.kind
                 || previous.native_ids != row.native_ids
-                || previous.parent != row.parent
+                || previous
+                    .parent
+                    .as_deref()
+                    .is_some_and(|parent| !keys.contains(parent))
                 || previous.sources.len() != row.sources.len()
                 || previous.sources.iter().any(|previous| {
                     !row.sources.iter().any(|source| {
                         source.path == previous.path
                             && source.native_id == previous.native_id
-                            && source.native_role == previous.native_role
+                            && stable_native_role(
+                                previous.native_role.as_ref(),
+                                source.native_role.as_ref(),
+                            )
                     })
                 })
             {

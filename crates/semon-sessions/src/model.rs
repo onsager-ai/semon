@@ -6361,6 +6361,27 @@ pub(crate) struct PreparedSources {
     pub(crate) pids: BTreeSet<u32>,
 }
 
+impl PreparedSources {
+    /// Header/path parent references exist before a selected cohort can resolve
+    /// them. Keep them as native identities rather than dropping an absent end.
+    pub(crate) fn native_parents(&self) -> Vec<(String, String)> {
+        self.rows
+            .iter()
+            .flat_map(|row| &row.sources)
+            .filter_map(|source| {
+                let role: Role = serde_json::from_value(source.native_role.clone()?).ok()?;
+                match role {
+                    Role::Agent(meta) => Some(("claude".to_owned(), meta.parent)),
+                    Role::Codex(meta) if !meta.guardian_review => {
+                        meta.parent_thread.map(|id| ("codex".to_owned(), id))
+                    }
+                    _ => None,
+                }
+            })
+            .collect()
+    }
+}
+
 pub(crate) fn prepare_sources(
     options: &Options,
     cache: &mut EventCache,

@@ -991,7 +991,12 @@ pub(crate) trait IndexStore: Send {
         claims: &[(String, Option<i64>)],
     ) -> Result<Option<Outcome>, StoreError>;
     fn catalog_claims(&self, paths: &[String]) -> Result<Vec<(String, Option<i64>)>, StoreError>;
-    fn catalog_component_paths(&self, paths: &[String]) -> Result<Option<Vec<String>>, StoreError>;
+    fn catalog_component_paths(
+        &self,
+        paths: &[String],
+        keys: &[String],
+        native_parents: &[(String, String)],
+    ) -> Result<Option<Vec<String>>, StoreError>;
 
     /// `path`'s ledger as committed now.
     fn ledger(&self, path: &str) -> Result<Option<Ledger>, StoreError>;
@@ -1254,6 +1259,8 @@ impl EventCache {
     pub(crate) fn catalog_component_paths(
         &self,
         inputs: &[crate::inputs::Input],
+        keys: &[String],
+        native_parents: &[(String, String)],
         options: &crate::Options,
     ) -> io::Result<Option<Vec<crate::inputs::Input>>> {
         let paths = inputs
@@ -1264,7 +1271,7 @@ impl EventCache {
             .store
             .as_ref()
             .ok_or_else(|| io::Error::other("scoped producer store unavailable"))?
-            .catalog_component_paths(&paths)
+            .catalog_component_paths(&paths, keys, native_parents)
             .map_err(|error| io::Error::other(error.to_string()))?;
         paths
             .map(|paths| {
