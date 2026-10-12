@@ -6691,6 +6691,7 @@ fn build_sources_inner(
     selection: BuildSelection<'_>,
     target: BuildTarget,
 ) -> io::Result<BuildOutput> {
+    let query_runtime = crate::native_evidence::query_runtime_generation(options)?;
     let catalog_base = cache.session_catalog_generation();
     let mut timings = Vec::with_capacity(18);
     macro_rules! timed {
@@ -6878,6 +6879,38 @@ fn build_sources_inner(
     let mut catalog = ((!options.scan_window && selected.is_none())
         || matches!(target, BuildTarget::Catalog | BuildTarget::Sources))
     .then(|| summary::catalog(&builder, &handoffs));
+    let derive_query_facts = || {
+        builder.session_facts(
+            &skipped,
+            |id| match lock_pids.as_ref() {
+                Some(locks) => match locks.get(id) {
+                    Some(pid) => (Some(*pid), Some(true)),
+                    None => (
+                        None,
+                        facts
+                            .codex_lock_file(options, id)
+                            .filter(|exists| *exists)
+                            .map(|_| false),
+                    ),
+                },
+                None => (None, None),
+            },
+            |pid, start| facts.run(options, pid, start),
+        )
+    };
+    let mut published_facts = catalog.as_ref().map(|_| derive_query_facts());
+    let query_summaries = published_facts.as_ref().map(|facts| {
+        crate::query::catalog_summaries(
+            builder
+                .sessions
+                .iter()
+                .map(|session| (session.key.as_str(), &session.out)),
+            &handoffs,
+            facts,
+            &tx,
+            now,
+        )
+    });
     let slot_projections = catalog.as_ref().map(|rows| {
         crate::slot_projection::capture(
             &tx,
@@ -6973,6 +7006,22 @@ fn build_sources_inner(
                     )
                     .with_family_cost(family_costs[&row.key.as_str()]),
                 );
+                let summaries = query_summaries.as_ref().expect("Catalog summaries");
+                let mut query_rows =
+                    BTreeMap::from([(row.key.clone(), summaries[&row.key].clone())]);
+                for endpoint in selected_edges
+                    .iter()
+                    .flat_map(|edge| std::iter::once(&edge.from).chain(edge.to.iter()))
+                {
+                    if let Some(summary) = summaries.get(endpoint)
+                        && summary["summary"]["kind"] == "stub"
+                    {
+                        query_rows.insert(endpoint.clone(), summary.clone());
+                    }
+                }
+                row.query = Some(
+                    serde_json::json!({"version":1,"runtime":query_runtime,"source_generation":crate::retention::source_generation(&row.sources)?,"rows":query_rows,"last":summaries[&row.key]["last"],"state":summaries[&row.key]["state"]}),
+                );
                 row.overview = Some(
                     crate::overview::Summary::capture(
                         &row.key,
@@ -6996,6 +7045,13 @@ fn build_sources_inner(
                 );
             }
         }
+    }
+    if catalog.is_some()
+        && crate::native_evidence::query_runtime_generation(options)? != query_runtime
+    {
+        return Err(io::Error::other(
+            "Native Query runtime observations changed",
+        ));
     }
     if !target.reference_model() && history_records.is_none() {
         verify_sidecars(&files)?;
@@ -7052,29 +7108,10 @@ fn build_sources_inner(
     }
     #[cfg(test)]
     let texts = builder.texts_by_turn();
-    let run_of = |pid, start| facts.run(options, pid, start);
     let session_facts = if target == BuildTarget::Query || cfg!(test) {
         timed!(
             "session_facts",
-            builder.session_facts(
-                &skipped,
-                |id| match lock_pids.as_ref() {
-                    Some(locks) => match locks.get(id) {
-                        Some(pid) => (Some(*pid), Some(true)),
-                        // A lock file no process holds: its writer is gone. Without a
-                        // lock file there is no process record.
-                        None => (
-                            None,
-                            facts
-                                .codex_lock_file(options, id)
-                                .filter(|exists| *exists)
-                                .map(|_| false),
-                        ),
-                    },
-                    None => (None, None),
-                },
-                run_of,
-            )
+            published_facts.take().unwrap_or_else(derive_query_facts)
         )
     } else {
         BTreeMap::new()

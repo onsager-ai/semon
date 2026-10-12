@@ -92,3 +92,18 @@ returned metadata is identical and the partial harness/repo order
 has the same SQLite VM-step count in both cases. This qualifies SQLite
 execution work for the current index shape, not complete journey latency, browser work, memory or the background
 producer. The reader scope/filter integration is a separate dependent change.
+
+Exact five-tool summaries are published in the existing native Catalog metadata,
+using the shared Query facts and state derivation. They retain integer token counts,
+lineage, process observations and question identity, rather than inferring facts from
+rounded presentation totals. A runtime observation digest fences process fields;
+retained rows cannot inherit live process or pending-question authority. Question
+text stays source-backed and request-local through the existing preview recipes.
+
+Schema 23 adds indexes for the Query output window and recorded relationship/turn
+closure. Published listing and stall reads do not decode transcript event rows.
+Composite current/history recipes initially have no exact Query aggregate: the
+existing authorized selected producer publishes those facts after qualifying their
+whole source closure. Readers check source-vector agreement and recheck the selected
+metadata witnesses after preview I/O. Incomplete, changed or over-budget observations
+return unavailable, rather than reporting a current fragment as complete history.

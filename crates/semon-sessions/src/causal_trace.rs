@@ -18,6 +18,11 @@ CREATE INDEX IF NOT EXISTS session_trace_starts ON session_trace_turns(session_k
 CREATE TABLE IF NOT EXISTS session_trace_edges(session_key TEXT NOT NULL,edge_id TEXT NOT NULL,metadata TEXT NOT NULL,PRIMARY KEY(session_key,edge_id)) STRICT, WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS session_trace_from ON session_trace_edges(CASE WHEN json_valid(metadata) THEN json_extract(metadata,'$.from') END,session_key);
 CREATE INDEX IF NOT EXISTS session_trace_to ON session_trace_edges(CASE WHEN json_valid(metadata) THEN json_extract(metadata,'$.to') END,session_key);
+CREATE INDEX IF NOT EXISTS session_trace_query_at ON session_trace_edges(json_extract(metadata,'$.at'),session_key,edge_id);
+CREATE INDEX IF NOT EXISTS session_trace_query_done ON session_trace_edges(json_extract(metadata,'$.done'),session_key,edge_id);
+CREATE INDEX IF NOT EXISTS session_trace_query_status ON session_trace_edges(json_extract(metadata,'$.status'),session_key,edge_id);
+CREATE INDEX IF NOT EXISTS session_trace_turn_query_at ON session_trace_turns(session_key,json_extract(metadata,'$.at'),turn_id);
+CREATE INDEX IF NOT EXISTS session_trace_turn_query_last ON session_trace_turns(session_key,turn_id) WHERE json_extract(metadata,'$.last')=1;
 CREATE TABLE IF NOT EXISTS session_trace_bookmarks(target TEXT NOT NULL,session_key TEXT NOT NULL,edge_id TEXT NOT NULL,PRIMARY KEY(target,session_key,edge_id)) STRICT, WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS session_trace_bookmark_owner ON session_trace_bookmarks(session_key);
 ";

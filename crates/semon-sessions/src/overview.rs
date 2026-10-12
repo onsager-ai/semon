@@ -287,6 +287,17 @@ pub fn session_home_details_with_mode(
     provider: Option<&dyn crate::SessionSourceReader>,
     mode: crate::SessionSourceReadMode,
 ) -> ViewerReply {
+    session_home_details_inner(options, source_key, query, provider, mode, true)
+}
+
+pub(crate) fn session_home_details_inner(
+    options: &Options,
+    source_key: &str,
+    query: &str,
+    provider: Option<&dyn crate::SessionSourceReader>,
+    mode: crate::SessionSourceReadMode,
+    include_session: bool,
+) -> ViewerReply {
     let read = || -> io::Result<Value> {
         let args: Vec<_> = query
             .split('&')
@@ -528,7 +539,10 @@ pub fn session_home_details_with_mode(
                         _ => result["incomplete"] = json!(true),
                     }
                 }
-                for field in ["detail", "activity"] {
+                for field in ["detail", "activity"]
+                    .into_iter()
+                    .filter(|_| include_session)
+                {
                     let recipe = &content[field];
                     if recipe.is_null() {
                         continue;

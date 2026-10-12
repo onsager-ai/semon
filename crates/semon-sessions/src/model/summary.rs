@@ -119,7 +119,8 @@ impl CatalogLifecycle {
     }
 }
 
-/// Stable metadata used by focused cold list queries. No clock or process facts.
+/// Stable source descriptions and exact Query observations for focused lists.
+/// Query process fields carry their own runtime fence; they grant no control authority.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct CatalogRow {
@@ -127,6 +128,8 @@ pub(crate) struct CatalogRow {
     pub(crate) overview: Option<crate::overview::Summary>,
     #[serde(skip)]
     pub(crate) trace: Option<crate::causal_trace::Projection>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) query: Option<Value>,
     #[serde(default)]
     pub(crate) lifecycle: CatalogLifecycle,
     pub(crate) key: String,
@@ -215,6 +218,7 @@ pub(super) fn catalog(builder: &Builder<'_>, handoffs: &[Handoff]) -> Vec<Catalo
         rows.push(CatalogRow {
             overview: None,
             trace: None,
+            query: None,
             lifecycle: CatalogLifecycle::Current,
             key: session.key.clone(),
             name: out.name.clone(),

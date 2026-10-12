@@ -7595,6 +7595,22 @@ fn partial_lineage_source_disappearance_preserves_natural_history_context() {
             .unwrap()
             .contains(&"root".into())
     );
+    let mut metadata_query = crate::Query::from_sources(std::sync::Arc::new(
+        crate::SessionSources::with_machines(vec![("fixture".into(), home.options.clone())]),
+    ));
+    assert_eq!(
+        metadata_query
+            .call_catalog(
+                "list_sessions",
+                &json!({}),
+                None,
+                crate::SessionSourceReadMode::LocalThenProvider
+            )
+            .unwrap_err()
+            .code,
+        "unavailable",
+        "a current fragment cannot claim complete history facts"
+    );
     assert!(
         crate::repair_session_overview(
             &home.options,
@@ -7622,6 +7638,24 @@ fn partial_lineage_source_disappearance_preserves_natural_history_context() {
         .unwrap()
     );
     assert_eq!(archive.calls.load(Ordering::Relaxed), reads);
+    let metadata = metadata_query
+        .call_catalog(
+            "list_sessions",
+            &json!({}),
+            None,
+            crate::SessionSourceReadMode::LocalThenProvider,
+        )
+        .unwrap();
+    assert_eq!(metadata["sessions"][0]["id"], "root");
+    assert_eq!(
+        metadata["sessions"][0]["last_activity"],
+        events::parse_ms(&ts(0, 2)).unwrap()
+    );
+    assert_eq!(
+        archive.calls.load(Ordering::Relaxed),
+        reads,
+        "qualified history summaries must not fetch transcript bodies"
+    );
     home.build();
     assert!(
         !crate::overview_repair_candidates(&home.options, 8)
