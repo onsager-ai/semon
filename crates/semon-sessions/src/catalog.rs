@@ -4367,6 +4367,9 @@ mod tests {
             body.get("items").is_none(),
             "metadata from a prior configuration is not source authority"
         );
+        // The refused read still schedules native observation. Drain its
+        // actual worker before the fixture removes its private source roots.
+        core.close();
     }
 
     #[test]
