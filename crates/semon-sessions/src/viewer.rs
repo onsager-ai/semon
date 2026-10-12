@@ -1033,162 +1033,19 @@ impl MachineView {
         Ok(tree)
     }
 
-    /// Refresh focused metadata without showing or serializing a legacy model.
+    /// Schedule native Catalog work through its evidence owner. Viewer retains
+    /// only refresh policy and test instrumentation, never Catalog derivation.
     fn refresh_catalog_locked(&self, work: &mut Work, now: i64) -> io::Result<bool> {
-        if let Some(snapshot) = &work.catalog_snapshot
-            && !self.changed(snapshot)
-        {
-            return Ok(true);
-        }
-        work.built_at = Some(Instant::now());
-        if work.catalog_snapshot.is_some() {
-            self.evidence.prepare_events(work, now)?;
-            let cache = work.events.as_mut().expect("event cache initialized");
-            // The old snapshot proves discovery/runtime inputs did not change;
-            // stamp before reads so concurrent writes remain retryable.
-            let snapshot = Snapshot::capture_pids(
-                &self.evidence.options,
-                work.catalog_snapshot
-                    .as_ref()
-                    .expect("snapshot exists")
-                    .pids
-                    .keys()
-                    .copied()
-                    .collect(),
-                cache.paths(),
-            );
-            if let Some(inputs) = work
-                .catalog_snapshot
-                .as_ref()
-                .expect("snapshot exists")
-                .changed_catalog_inputs(&snapshot, &self.evidence.options)
-            {
-                let mut inputs: BTreeSet<_> = inputs.into_iter().collect();
-                let options = Options {
-                    scan_window: false,
-                    ..self.evidence.options.clone()
-                };
-                // Expand through both persisted relationships and newly derived
-                // endpoints. Reprepare only when another current source joins;
-                // the event cache retains the already loaded component indexes.
-                let mut keys = Vec::new();
-                let mut native_parents = Vec::new();
-                let prepared = loop {
-                    let selected: Vec<_> = inputs.iter().cloned().collect();
-                    let Some(component) = cache.catalog_component_paths(
-                        &selected,
-                        &keys,
-                        &native_parents,
-                        &self.evidence.options,
-                    )?
-                    else {
-                        break None;
-                    };
-                    inputs.extend(component);
-                    if inputs.len() > 64 {
-                        break None;
-                    }
-                    let selected: Vec<_> = inputs.iter().cloned().collect();
-                    let prepared = model::prepare_sources(&options, cache, &selected, now)?;
-                    let dependencies: BTreeSet<_> = prepared
-                        .rows
-                        .iter()
-                        .flat_map(|row| {
-                            std::iter::once(row.key.as_str())
-                                .chain(row.parent.as_deref())
-                                .chain(row.trace.iter().flat_map(|trace| trace.endpoints()))
-                        })
-                        .map(str::to_owned)
-                        .collect();
-                    if dependencies.len() > 64 {
-                        break None;
-                    }
-                    keys = dependencies.into_iter().collect();
-                    native_parents = prepared.native_parents();
-                    let Some(component) = cache.catalog_component_paths(
-                        &selected,
-                        &keys,
-                        &native_parents,
-                        &self.evidence.options,
-                    )?
-                    else {
-                        break None;
-                    };
-                    if component.iter().all(|input| inputs.contains(input)) {
-                        break Some(prepared);
-                    }
-                    inputs.extend(component);
-                    if inputs.len() > 64 {
-                        break None;
-                    }
-                };
-                if let Some(prepared) = prepared {
-                    match cache.publish_closed_catalog(&prepared)? {
-                        Some(crate::events::Outcome::Written) => {
-                            cache.publish_session_descriptions();
-                            cache.end_scan();
-                            work.catalog_snapshot = Some(snapshot);
-                            return Ok(true);
-                        }
-                        Some(_) => {
-                            return Err(io::Error::new(
-                                io::ErrorKind::WouldBlock,
-                                "native Catalog component generation changed",
-                            ));
-                        }
-                        None => {}
-                    }
-                }
-            }
-        }
-        match self.evidence.prepare_catalog(work, now)? {
-            crate::native_evidence::CatalogPreparation::Pending => return Ok(false),
-            crate::native_evidence::CatalogPreparation::Complete(complete) => {
-                #[cfg(test)]
-                self.hooks.building()?;
-                let cache = work.events.as_mut().expect("event cache initialized");
-                cache.publish_catalog_projection(
-                    &crate::slot_projection::Publication {
-                        rows: &complete.prepared.rows,
-                        transcripts: Some(&complete.prepared.transcripts),
-                    },
-                    Some(&complete.generation),
-                )?;
-                cache.publish_session_descriptions();
-                let mut snapshot = complete.snapshot;
-                if self.evidence.options.facts.is_none() {
-                    snapshot.pids = complete
-                        .prepared
-                        .pids
-                        .iter()
-                        .map(|pid| (*pid, proc_start(&self.evidence.options.proc_root, *pid)))
-                        .collect();
-                }
-                work.catalog_snapshot = Some(snapshot);
-                return Ok(true);
-            }
-            crate::native_evidence::CatalogPreparation::Reconcile => {}
-        }
-        let cache = work.events.as_mut().expect("event cache initialized");
-        // Stamp before native reads so concurrent appends remain observable.
-        let mut snapshot =
-            Snapshot::capture_pids(&self.evidence.options, BTreeSet::new(), cache.paths());
         #[cfg(test)]
-        self.hooks.building()?;
-        let catalog_options = Options {
-            scan_window: false,
-            ..self.evidence.options.clone()
-        };
-        let pids =
-            model::observe_catalog(&catalog_options, cache, &mut false, &mut work.texts, now)?;
-        if self.evidence.options.facts.is_none() {
-            snapshot.pids = pids
-                .iter()
-                .map(|pid| (*pid, proc_start(&self.evidence.options.proc_root, *pid)))
-                .collect();
+        {
+            if work.catalog_snapshot.is_some() {
+                self.hooks.stats.fetch_add(1, Ordering::SeqCst);
+            }
+            self.evidence
+                .refresh_catalog_with(work, now, || self.hooks.building())
         }
-        work.catalog_snapshot = Some(snapshot);
-        Ok(true)
+        #[cfg(not(test))]
+        self.evidence.refresh_catalog(work, now)
     }
 
     /// Rebuilds the model at `now` if its logs or facts changed. The caller

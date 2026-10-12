@@ -1,5 +1,11 @@
 # Initial scoped native publication
 
+NativeEvidence owns Catalog discovery, component expansion, derivation and fenced
+publication directly. Viewer owns only refresh scheduling and presentation.
+Query and other admitted readers can reuse this producer without a ViewerCore,
+shown model or native Query cohort. The standalone-owner fixture verifies those
+owners remain absent even with Query-style scan-window options.
+
 The focused catalog producer opens the durable event store without restoring every
 FileIndex or reported run. An exact source batch uses the existing native model
 builder, captures its allowlisted catalog and untrimmed slot recipes, and publishes

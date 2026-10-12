@@ -281,6 +281,171 @@ impl NativeEvidence {
         Ok(CatalogPreparation::Reconcile)
     }
 
+    /// Prepare/publish Catalog evidence directly, independent of Viewer state.
+    /// The caller holds native work; false yields a bounded discovery slice.
+    pub(crate) fn refresh_catalog(&self, work: &mut Work, now: i64) -> io::Result<bool> {
+        self.refresh_catalog_with(work, now, || Ok(()))
+    }
+
+    pub(crate) fn refresh_catalog_with(
+        &self,
+        work: &mut Work,
+        now: i64,
+        mut before_build: impl FnMut() -> io::Result<()>,
+    ) -> io::Result<bool> {
+        if let Some(snapshot) = &work.catalog_snapshot
+            && !snapshot.changed(&self.options)
+        {
+            return Ok(true);
+        }
+        work.built_at = Some(Instant::now());
+        if work.catalog_snapshot.is_some() {
+            self.prepare_events(work, now)?;
+            let cache = work.events.as_mut().expect("event cache initialized");
+            // The old snapshot proves discovery/runtime inputs did not change;
+            // stamp before reads so concurrent writes remain retryable.
+            let snapshot = Snapshot::capture_pids(
+                &self.options,
+                work.catalog_snapshot
+                    .as_ref()
+                    .expect("snapshot exists")
+                    .pids
+                    .keys()
+                    .copied()
+                    .collect(),
+                cache.paths(),
+            );
+            if let Some(inputs) = work
+                .catalog_snapshot
+                .as_ref()
+                .expect("snapshot exists")
+                .changed_catalog_inputs(&snapshot, &self.options)
+            {
+                let mut inputs: BTreeSet<_> = inputs.into_iter().collect();
+                let options = Options {
+                    scan_window: false,
+                    ..self.options.clone()
+                };
+                // Expand through both persisted relationships and newly derived
+                // endpoints. Reprepare only when another current source joins;
+                // the event cache retains the already loaded component indexes.
+                let mut keys = Vec::new();
+                let mut native_parents = Vec::new();
+                let prepared = loop {
+                    let selected: Vec<_> = inputs.iter().cloned().collect();
+                    let Some(component) = cache.catalog_component_paths(
+                        &selected,
+                        &keys,
+                        &native_parents,
+                        &self.options,
+                    )?
+                    else {
+                        break None;
+                    };
+                    inputs.extend(component);
+                    if inputs.len() > 64 {
+                        break None;
+                    }
+                    let selected: Vec<_> = inputs.iter().cloned().collect();
+                    let prepared = model::prepare_sources(&options, cache, &selected, now)?;
+                    let dependencies: BTreeSet<_> = prepared
+                        .rows
+                        .iter()
+                        .flat_map(|row| {
+                            std::iter::once(row.key.as_str())
+                                .chain(row.parent.as_deref())
+                                .chain(row.trace.iter().flat_map(|trace| trace.endpoints()))
+                        })
+                        .map(str::to_owned)
+                        .collect();
+                    if dependencies.len() > 64 {
+                        break None;
+                    }
+                    keys = dependencies.into_iter().collect();
+                    native_parents = prepared.native_parents();
+                    let Some(component) = cache.catalog_component_paths(
+                        &selected,
+                        &keys,
+                        &native_parents,
+                        &self.options,
+                    )?
+                    else {
+                        break None;
+                    };
+                    if component.iter().all(|input| inputs.contains(input)) {
+                        break Some(prepared);
+                    }
+                    inputs.extend(component);
+                    if inputs.len() > 64 {
+                        break None;
+                    }
+                };
+                if let Some(prepared) = prepared {
+                    match cache.publish_closed_catalog(&prepared)? {
+                        Some(crate::events::Outcome::Written) => {
+                            cache.publish_session_descriptions();
+                            cache.end_scan();
+                            work.catalog_snapshot = Some(snapshot);
+                            return Ok(true);
+                        }
+                        Some(_) => {
+                            return Err(io::Error::new(
+                                io::ErrorKind::WouldBlock,
+                                "native Catalog component generation changed",
+                            ));
+                        }
+                        None => {}
+                    }
+                }
+            }
+        }
+        match self.prepare_catalog(work, now)? {
+            CatalogPreparation::Pending => return Ok(false),
+            CatalogPreparation::Complete(complete) => {
+                before_build()?;
+                let cache = work.events.as_mut().expect("event cache initialized");
+                cache.publish_catalog_projection(
+                    &crate::slot_projection::Publication {
+                        rows: &complete.prepared.rows,
+                        transcripts: Some(&complete.prepared.transcripts),
+                    },
+                    Some(&complete.generation),
+                )?;
+                cache.publish_session_descriptions();
+                let mut snapshot = complete.snapshot;
+                if self.options.facts.is_none() {
+                    snapshot.pids = complete
+                        .prepared
+                        .pids
+                        .iter()
+                        .map(|pid| (*pid, proc_start(&self.options.proc_root, *pid)))
+                        .collect();
+                }
+                work.catalog_snapshot = Some(snapshot);
+                return Ok(true);
+            }
+            CatalogPreparation::Reconcile => {}
+        }
+        let cache = work.events.as_mut().expect("event cache initialized");
+        // Stamp before native reads so concurrent appends remain observable.
+        let mut snapshot = Snapshot::capture_pids(&self.options, BTreeSet::new(), cache.paths());
+        before_build()?;
+        let catalog_options = Options {
+            scan_window: false,
+            ..self.options.clone()
+        };
+        let pids =
+            model::observe_catalog(&catalog_options, cache, &mut false, &mut work.texts, now)?;
+        if self.options.facts.is_none() {
+            snapshot.pids = pids
+                .iter()
+                .map(|pid| (*pid, proc_start(&self.options.proc_root, *pid)))
+                .collect();
+        }
+        work.catalog_snapshot = Some(snapshot);
+        Ok(true)
+    }
+
     /// Native queries refresh this owner's source cache and coherent cohort.
     /// This owner has no compatibility transport or background refresh workers.
     pub(crate) fn catalog_pending(&self, work: &Work) -> bool {
@@ -358,7 +523,7 @@ pub(crate) struct Work {
     pub(crate) texts: Texts,
     pub(crate) catalog_snapshot: Option<Snapshot>,
     cold_catalog: Option<ColdCatalog>,
-    /// When the last rebuild of either model started.
+    /// When the last native preparation or legacy model rebuild started.
     pub(crate) built_at: Option<Instant>,
 }
 
@@ -696,5 +861,66 @@ impl Snapshot {
                 .pids
                 .iter()
                 .any(|(pid, original)| proc_start(&options.proc_root, *pid) != *original)
+    }
+}
+
+#[cfg(test)]
+mod catalog_owner_tests {
+    use super::*;
+
+    #[test]
+    fn native_catalog_production_has_no_viewer_or_query_cohort_owner() {
+        let root = std::env::temp_dir().join(format!(
+            "semon-native-catalog-owner-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let options = Options {
+            claude_home: root.join("claude"),
+            claude_json: root.join("claude.json"),
+            codex_home: root.join("codex"),
+            copilot_home: root.join("copilot"),
+            proc_root: root.join("proc"),
+            cache: root.join("index.json"),
+            scan_window: true,
+            ..Options::default()
+        };
+        let log = options
+            .codex_home
+            .join("sessions/2026/10/01/rollout-owner.jsonl");
+        fs::create_dir_all(log.parent().unwrap()).unwrap();
+        fs::write(log, "{\"type\":\"session_meta\",\"timestamp\":\"2026-10-01T00:00:00Z\",\"payload\":{\"id\":\"owner\"}}\n").unwrap();
+        let sources = SessionSources::with_machines(vec![(String::new(), options.clone())]);
+        let evidence = &sources.machines[0].1;
+        let before = crate::model::COMPAT_BUILDS.with(std::cell::Cell::get);
+        let mut work = lock(&evidence.work);
+        let mut complete = false;
+        for _ in 0..16 {
+            if evidence
+                .refresh_catalog(&mut work, crate::model::now_ms())
+                .unwrap()
+            {
+                complete = true;
+                break;
+            }
+        }
+        assert!(complete, "single-source discovery did not complete");
+        let reply = crate::session_catalog_page(&options, "local", "limit=60");
+        assert_eq!(reply.status, 200);
+        let body: serde_json::Value = serde_json::from_slice(&reply.body).unwrap();
+        assert_eq!(body["completeness"]["state"], "complete");
+        assert_eq!(body["items"][0]["key"], "owner");
+        assert!(sources.views.iter().all(|view| view.get().is_none()));
+        assert!(read_lock(&evidence.query).is_none());
+        assert_eq!(
+            crate::model::COMPAT_BUILDS.with(std::cell::Cell::get),
+            before
+        );
+        drop(work);
+        drop(sources);
+        fs::remove_dir_all(root).unwrap();
     }
 }
