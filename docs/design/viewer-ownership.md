@@ -65,6 +65,8 @@ local source does not add a machine chooser to the Sessions topbar. Capability
 reads perform no native evidence preparation. Hidden Thinking keeps one quiet
 placeholder per qualified native turn while preserving readable/pending thoughts
 and every accepted source record.
+A final empty Thinking entry is pending only under the qualified current-work
+observation used by native tool rendering. Retained custody grants no live state.
 
 Lists have 60-row pages and retain at most 300 metadata rows per Source. Five selected
 roots and five Source views are retained. Each selected transcript keeps at most
