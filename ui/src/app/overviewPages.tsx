@@ -22,6 +22,7 @@ import { createSeenResults } from './seenResults';
 import { HARNESSES, I } from './registry';
 import { runningToolLabel } from '../domain/toolNames';
 import { ago, timeText, shortModel, liveUrl, previewLine } from '../domain/format';
+import type { EffectScope } from './effects';
 
 interface Selection {
   source_key: string;
@@ -179,6 +180,7 @@ function parseHome(value: unknown): HomeData {
 }
 interface OverviewHost {
   root: HTMLElement;
+  effects: EffectScope;
   orderScope(name: string, signature?: string): OrderScope<object>;
   reviews(): boolean;
   homeIntro?: HTMLElement;
@@ -197,6 +199,12 @@ interface OverviewHost {
 /** Home/Analytics own only their accepted compact response, filters and panels.
  * The canonical reader owns navigation, transport, refresh and shell lifetime. */
 export function createOverviewPages(host: OverviewHost) {
+  let retryTimer: number | undefined,
+    retryDelay = 500;
+  const cancelRetry = () => {
+    host.effects.clearTimeout(retryTimer);
+    retryTimer = undefined;
+  };
   let disposed = false,
     epoch = 0,
     loading = false,
@@ -1168,6 +1176,7 @@ export function createOverviewPages(host: OverviewHost) {
       queuedForce ||= force;
       return;
     }
+    cancelRetry();
     const route = host.route(),
       ticket = ++epoch,
       requestedQuery =
@@ -1350,6 +1359,14 @@ export function createOverviewPages(host: OverviewHost) {
           queued = false;
           queuedForce = false;
           void refresh(force);
+        } else if (current() && error && (route === 'home' || route === 'machine')) {
+          retryTimer = host.effects.timeout(() => {
+            retryTimer = undefined;
+            if (current()) void refresh();
+          }, retryDelay);
+          retryDelay = Math.min(8000, retryDelay * 2);
+        } else if (current() && !error) {
+          retryDelay = 500;
         }
       }
     }
@@ -1482,6 +1499,8 @@ export function createOverviewPages(host: OverviewHost) {
     draw,
     refresh,
     leave() {
+      cancelRetry();
+      retryDelay = 500;
       ++epoch;
       queued = false;
       queuedForce = false;
@@ -1492,6 +1511,7 @@ export function createOverviewPages(host: OverviewHost) {
       for (const value of [...dialogs]) value.destroy();
     },
     destroy() {
+      cancelRetry();
       disposed = true;
       ++epoch;
       for (const value of [...dialogs]) value.destroy();

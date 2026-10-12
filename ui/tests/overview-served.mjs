@@ -73,12 +73,24 @@ test(
       }
       assert.deepEqual(home.observations, [], 'Home source publication completes');
       assert.ok(home.inbox.length, 'fixture has needs-you activity');
-      // Standalone model remains a legitimate local oracle. Browser requests
-      // below must use only the canonical transport.
-      const model = await (await fetch(address[1] + '/api/model', { headers })).json();
-      const question = model.handoffs.find(
-        (event) => event.ask === 'question' && event.status === 'wait',
+      const waiting = home.inbox.find(
+        (row) => row.event?.ask === 'question' && row.event.status === 'wait',
       );
+      assert.ok(waiting, 'fixture has a source-qualified waiting question');
+      const query = new URLSearchParams({
+        machine: waiting.source_key,
+        sid: waiting.catalog_key,
+        scope: 'retained_history',
+        generation: waiting.session.content_generation,
+        events: JSON.stringify([waiting.event.id]),
+      });
+      const previewResponse = await fetch(address[1] + '/api/session-home?' + query, { headers });
+      assert.equal(previewResponse.status, 200);
+      const preview = await previewResponse.json();
+      assert.equal(preview.identity.source_key, waiting.source_key);
+      assert.equal(preview.identity.catalog_key, waiting.catalog_key);
+      assert.equal(preview.generation, waiting.session.content_generation);
+      const question = preview.events[waiting.event.id];
       assert.ok(question?.brief);
       if (captures) await mkdir(captures, { recursive: true });
       for (const width of [390, 820, 1280])

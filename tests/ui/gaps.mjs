@@ -216,6 +216,14 @@ export function gaps({ model, tx }) {
   const norm = (e) => {
     const k = e.k === 'reasoning' ? 'think' : e.k;
     const x = { k };
+    // Native focused headers carry their prompt directly. The reference draws
+    // it from its turn; require the same text before comparing their header IDs.
+    if (e.k === 'h' && e.text !== undefined) {
+      const prompt =
+        model.handoffs.find((event) => event.id === e.id)?.brief ??
+        model.turns.find((turn) => turn.start === e.id)?.text;
+      if (prompt !== e.text) say('native header ' + e.id + ': prompt differs from its turn');
+    }
     for (const f of [
       'text',
       'label',
@@ -230,6 +238,7 @@ export function gaps({ model, tx }) {
       'unfinished',
     ]) {
       if (f === 'secs' && k === 'think') continue;
+      if (f === 'text' && k === 'h') continue;
       if (e[f] !== undefined) x[f] = e[f];
     }
     if (e.k === 'signal') x.signal = e.signal;

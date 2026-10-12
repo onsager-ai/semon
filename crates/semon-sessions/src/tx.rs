@@ -626,7 +626,7 @@ fn secs(ms: i64) -> String {
 }
 
 /// How long a running step has run.
-pub(crate) fn running(ms: i64) -> String {
+fn running(ms: i64) -> String {
     let seconds = ms.max(0) / 1000;
     if seconds < 60 {
         format!("{seconds}s")
