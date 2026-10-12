@@ -137,19 +137,21 @@ export async function goto(page, route, D) {
   const sid = route.id ?? route.sid,
     session = D.SESS[sid],
     machine = session ? (D.SOURCES?.[session.machine] ?? session.machine) : undefined,
+    key = D.KEYS?.[sid] ?? sid,
+    machineKey = D.SOURCES?.[route.id] ?? route.id,
     paths = { home: '/', analytics: '/analytics', sessions: '/sessions', machines: '/machines' },
     destination =
       route.v === 'session'
-        ? '/s/' + (session?.harness ?? 'native') + '/' + encodeURIComponent(sid)
+        ? '/s/' + (session?.harness ?? 'native') + '/' + encodeURIComponent(key)
         : route.v === 'trace'
           ? '/trace/' +
             (session?.harness ?? 'native') +
             '/' +
-            encodeURIComponent(sid) +
+            encodeURIComponent(key) +
             '/' +
             encodeURIComponent(route.turn)
           : route.v === 'machine'
-            ? '/machines/' + encodeURIComponent(route.id)
+            ? '/machines/' + encodeURIComponent(machineKey)
             : paths[route.v];
   const url = new URL(destination, page.url());
   if (machine && ['session', 'trace'].includes(route.v)) url.searchParams.set('machine', machine);
@@ -159,7 +161,15 @@ export async function goto(page, route, D) {
       history.pushState(r, '', url);
       dispatchEvent(new PopStateEvent('popstate', { state: r }));
     },
-    { r: route, url: url.pathname + url.search + url.hash },
+    {
+      r:
+        route.v === 'machine'
+          ? { ...route, id: machineKey }
+          : ['session', 'trace'].includes(route.v)
+            ? { ...route, ...(route.id ? { id: key } : { sid: key }) }
+            : route,
+      url: url.pathname + url.search + url.hash,
+    },
   );
   const title = titleOf(route, D);
   // A session's title is in the bar as soon as it is opened; its page is ready once it is no longer aria-busy.
@@ -255,6 +265,17 @@ export async function data({ extras = false, base: sourceBase, token: sourceToke
     inventory.push(...page.items);
     cursor = page.next_cursor;
   } while (cursor);
+  const labelCounts = new Map();
+  for (const source of inventory)
+    labelCounts.set(source.label, (labelCounts.get(source.label) ?? 0) + 1);
+  // Reference machine IDs are presentation labels. Keep source authority in
+  // SOURCES rather than using internal directory keys in filenames/routes.
+  const machineIds = new Map(
+    inventory.map((source, index) => [
+      source.source_key,
+      labelCounts.get(source.label) === 1 ? source.label : source.label + '@' + (index + 1),
+    ]),
+  );
   const records = [],
     nativeKeys = new Set();
   for (const source of inventory) {
@@ -276,12 +297,17 @@ export async function data({ extras = false, base: sourceBase, token: sourceToke
     } while (cursor);
   }
   const overview = await get('/api/viewer/home');
+  records.sort(
+    (a, b) =>
+      a.item.key.localeCompare(b.item.key) ||
+      a.source.source_key.localeCompare(b.source.source_key),
+  );
   const counts = new Map();
   for (const { item } of records) counts.set(item.key, (counts.get(item.key) ?? 0) + 1);
   const ids = new Map(
     records.map(({ source, item }) => [
       JSON.stringify([source.source_key, item.key]),
-      counts.get(item.key) === 1 ? item.key : item.key + '@' + source.label,
+      counts.get(item.key) === 1 ? item.key : item.key + '@' + machineIds.get(source.source_key),
     ]),
   );
   const qualify = (source, key) =>
@@ -354,7 +380,7 @@ export async function data({ extras = false, base: sourceBase, token: sourceToke
       ...copyPresent(header ?? {}),
       ...copyPresent(details),
       id: sid,
-      machine: source.source_key,
+      machine: machineIds.get(source.source_key),
       parent: item.parent == null ? undefined : qualify(source.source_key, item.parent),
       kind: item.presentation_kind ?? undefined,
     };
@@ -439,7 +465,7 @@ export async function data({ extras = false, base: sourceBase, token: sourceToke
     }
   }
   const machines = overview.machines.map((source) => ({
-    id: source.key,
+    id: machineIds.get(source.key),
     name: source.label,
     up: source.up,
     last: source.last,
@@ -475,7 +501,12 @@ export async function data({ extras = false, base: sourceBase, token: sourceToke
     nativeKeys,
     turns: nativeTurns,
     NOW: overview.now,
-    SOURCES: Object.fromEntries(inventory.map((source) => [source.source_key, source.source_key])),
+    SOURCES: Object.fromEntries(
+      inventory.map((source) => [machineIds.get(source.source_key), source.source_key]),
+    ),
+    KEYS: Object.fromEntries(
+      records.map(({ source, item }) => [qualify(source.source_key, item.key), item.key]),
+    ),
     MACHINE: Object.fromEntries(machines.map((machine) => [machine.id, machine.name])),
     MACHINE_UP: Object.fromEntries(machines.map((machine) => [machine.id, machine.up])),
     MACHINE_LAST: Object.fromEntries(

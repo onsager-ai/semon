@@ -1,8 +1,13 @@
 // Synthetic presentation changes retain the real, qualified native source proof.
 // Tests replace only the selected range, never the retired workspace model.
 import { createHash } from 'node:crypto';
-export async function selectedFixture(page, sid, change) {
+export async function selectedFixture(page, sid, change, { publication } = {}) {
   let observation;
+  const publishedGeneration = () =>
+    publication &&
+    createHash('sha256')
+      .update(JSON.stringify([observation.source, sid, publication().revision]))
+      .digest('hex');
   await page.route('**/api/sessions?**', async (route) => {
     const args = new URL(route.request().url()).searchParams;
     if (args.get('sid') !== sid || !observation || args.get('machine') !== observation.source)
@@ -15,7 +20,10 @@ export async function selectedFixture(page, sid, change) {
         ? {
             ...item,
             details: observation.session.details,
-            transcript: { generation: observation.generation, total: observation.rows.length },
+            transcript: {
+              generation: publishedGeneration() ?? observation.generation,
+              total: publication?.().total ?? observation.rows.length,
+            },
           }
         : item,
     );
@@ -27,6 +35,7 @@ export async function selectedFixture(page, sid, change) {
     if (args.get('sid') !== sid) return route.continue();
     if (
       !observation ||
+      (publication && publishedGeneration() !== observation.generation) ||
       (args.has('generation') && args.get('generation') !== observation.generation)
     )
       return route.fulfill({
@@ -82,6 +91,8 @@ export async function selectedFixture(page, sid, change) {
       rows,
       generation: data.projection.generation,
     };
+    data.projection.generation = publishedGeneration() ?? data.projection.generation;
+    observation.generation = data.projection.generation;
     if (
       url.searchParams.has('generation') &&
       url.searchParams.get('generation') !== data.projection.generation
@@ -98,6 +109,7 @@ export async function selectedFixture(page, sid, change) {
         },
       });
     data.projection.total = rows.length;
+    data.session.transcript = { generation: data.projection.generation, total: rows.length };
     const limit = Number(url.searchParams.get('limit') ?? 60);
     const first = url.searchParams.has('after')
       ? Math.min(Number(url.searchParams.get('after')), rows.length)
