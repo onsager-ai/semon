@@ -59,8 +59,14 @@ rather than preparing a compatibility workspace model. This cold fallback still
 prepares a native cohort and remains a scaling boundary to remove.
 
 Sessions retain source-scoped catalog pages, metadata search, native resolution,
-transcript pagination, qualified field expansion and live revalidation. Lists
-have 60-row pages and retain at most 300 metadata rows per Source. Five selected
+transcript pagination, qualified field expansion and live revalidation. Hosts
+advertise machine selection through native capabilities; a single
+local source does not add a machine chooser to the Sessions topbar. Capability
+reads perform no native evidence preparation. Hidden Thinking keeps one quiet
+placeholder per qualified native turn while preserving readable/pending thoughts
+and every accepted source record.
+
+Lists have 60-row pages and retain at most 300 metadata rows per Source. Five selected
 roots and five Source views are retained. Each selected transcript keeps at most
 five recently used ranges and 300 unique entries; revisiting a range updates its
 retention order. Discarding a range also releases its presentation and field state.

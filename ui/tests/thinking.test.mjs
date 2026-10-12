@@ -8,7 +8,7 @@ const { outputFiles } = await build({
   format: 'esm',
   platform: 'node',
 });
-const { coalesceRecordedThoughts, recordedThoughtLabel } = await import(
+const { coalesceRecordedThoughts, recordedThoughtLabel, visibleMaskedThoughts } = await import(
   'data:text/javascript;base64,' + Buffer.from(outputFiles[0].contents).toString('base64')
 );
 const rows = (values) =>
@@ -82,4 +82,35 @@ test('adjacent hidden Codex thinking collapses within its known turn without cha
   );
   assert.equal(JSON.stringify(input), original);
   assert.equal(coalesceRecordedThoughts(input, 'claude', new Set(['a', 'b'])), input);
+});
+
+test('masked thinking keeps one placeholder per known turn across tool boundaries without changing evidence', () => {
+  const input = rows([
+    { k: 'think', turn: 'a' },
+    { k: 'tool', turn: 'a', name: 'native' },
+    { k: 'think', turn: 'a', text: '' },
+    { k: 'think', turn: 'a', text: 'Recorded reasoning' },
+    { k: 'think', turn: 'a', pending: true },
+    { k: 'think', turn: 'b' },
+    { k: 'think', turn: 'unknown' },
+    { k: 'think' },
+    { k: 'end' },
+    { k: 'think' },
+  ]);
+  const original = JSON.stringify(input);
+  assert.deepEqual(
+    visibleMaskedThoughts(input, new Set(['a', 'b'])).map((item) => item.entry_id),
+    [
+      'native-0',
+      'native-1',
+      'native-3',
+      'native-4',
+      'native-5',
+      'native-6',
+      'native-7',
+      'native-8',
+      'native-9',
+    ],
+  );
+  assert.equal(JSON.stringify(input), original);
 });

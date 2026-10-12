@@ -1151,7 +1151,8 @@ impl ViewerCore {
         // Record demand without waiting for an initial model build. The
         // shared native coordinator performs coherent observation in every
         // refresh mode, including default library callers.
-        let refresh_error = view.note_catalog_read().err();
+        let refresh_error =
+            (path != "/api/session-capabilities").then(|| view.note_catalog_read().err());
         let mut reply = match path {
             "/api/session-locate" => crate::session_bookmark(view.options(), key, query),
             "/api/session-observe" => crate::session_overview_observe(view.options(), key, query),
@@ -1226,10 +1227,15 @@ impl ViewerCore {
             ),
         };
         if let Ok(mut body) = serde_json::from_slice::<Value>(&reply.body) {
-            body["refresh"] = match refresh_error {
-                Some(_) => json!({"state":"unavailable","retryable":true}),
-                None => json!({"state":"updating"}),
-            };
+            if path == "/api/session-capabilities" {
+                body["source_candidates"] = json!(views.len() > 1);
+            }
+            if let Some(refresh_error) = refresh_error {
+                body["refresh"] = match refresh_error {
+                    Some(_) => json!({"state":"unavailable","retryable":true}),
+                    None => json!({"state":"updating"}),
+                };
+            }
             reply.body = body.to_string().into_bytes();
         }
         reply
