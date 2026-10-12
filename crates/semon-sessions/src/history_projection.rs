@@ -13,6 +13,7 @@ pub(crate) const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS session_history_catalog (
  session_key TEXT PRIMARY KEY, metadata TEXT NOT NULL
 ) STRICT;
+CREATE INDEX IF NOT EXISTS session_history_query_last ON session_history_catalog(json_extract(metadata,'$.query.last'),session_key);
 CREATE TABLE IF NOT EXISTS session_history_projections (
  session_key TEXT PRIMARY KEY, generation TEXT NOT NULL, source_generation TEXT NOT NULL,
  version INTEGER NOT NULL, total INTEGER NOT NULL, incomplete INTEGER NOT NULL
@@ -92,6 +93,9 @@ pub(crate) fn publish(tx: &Transaction<'_>, publication: &Publication<'_>) -> ru
             )?;
             continue;
         }
+        // A composite recipe is custody, not an exact aggregate of its native
+        // records. The existing selected producer must qualify full Query facts.
+        history.query = None;
         history.sources.extend(missing.values().cloned());
         history.native_ids = history
             .sources

@@ -432,22 +432,7 @@ impl View {
                 }
                 // The tools expose only these session fields. Pricing tables,
                 // workspace transport and per-transcript growth marks stay out.
-                let mut row = json!({
-                    "name": session.name, "harness": session.harness,
-                    "model": session.model, "repo": session.repo,
-                    "branch": session.branch, "state": session.state,
-                    "machine": part.machine.as_ref().unwrap_or(&session.machine),
-                    "busy": session.busy,
-                });
-                if let Some(evidence) = &session.copilot {
-                    row["copilot"] = json!(evidence);
-                }
-                if let Some(evidence) = &session.claude_usage {
-                    row["claude_usage"] = json!(evidence);
-                }
-                if !session.signals.is_empty() {
-                    row["signals"] = json!(session.signals);
-                }
+                let row = session_fields(session, part.machine.as_deref());
                 sessions.insert(part.served(id), row);
             }
             for (id, own) in &part.data.facts {
@@ -649,6 +634,68 @@ impl View {
     }
 }
 
+fn session_fields(session: &crate::model::Session, machine: Option<&str>) -> Value {
+    let mut row = json!({"name":session.name,"harness":session.harness,
+        "model":session.model,"repo":session.repo,"branch":session.branch,
+        "state":session.state,"last":session.last,"machine":machine.unwrap_or(&session.machine),"busy":session.busy});
+    if let Some(evidence) = &session.copilot {
+        row["copilot"] = json!(evidence);
+    }
+    if let Some(evidence) = &session.claude_usage {
+        row["claude_usage"] = json!(evidence);
+    }
+    if !session.signals.is_empty() {
+        row["signals"] = json!(session.signals);
+    }
+    row
+}
+
+/// The native producer records exact five-tool facts alongside its existing
+/// relationship header. Readers do not reconstruct those facts from rounded UI
+/// totals or decode transcript event rows to list sessions.
+pub(crate) fn catalog_summaries<'a>(
+    sessions: impl Iterator<Item = (&'a str, &'a crate::model::Session)>,
+    handoffs: &[crate::model::Handoff],
+    facts: &BTreeMap<String, SessionFacts>,
+    transcripts: &BTreeMap<String, Arc<Transcript>>,
+    now: i64,
+) -> BTreeMap<String, Value> {
+    let sessions: Vec<_> = sessions
+        .map(|(id, session)| {
+            let mut fields = session_fields(session, None);
+            if let Some(tx) = transcripts.get(id)
+                && !tx.signals.is_empty()
+            {
+                fields["signals"] = json!(tx.signals);
+            }
+            (id.to_owned(), fields)
+        })
+        .collect();
+    let view = View::from_evidence(
+        now,
+        sessions,
+        handoffs.iter().map(|h| json!(h)).collect(),
+        Vec::new(),
+        facts.clone(),
+    );
+    view.sessions
+        .iter()
+        .map(|(id, session)| {
+            let mut summary = view.summary(id, session);
+            if !summary["open_question"].is_null() {
+                summary["open_question"]["text"] = Value::Null;
+            }
+            (
+                id.clone(),
+                json!({"summary":summary,
+                    "recorded_status":facts.get(id).and_then(|f| f.recorded_status.as_deref()),
+                    "state":session["state"], "last":session["last"],
+                }),
+            )
+        })
+        .collect()
+}
+
 /// Orders summaries by their last log line, newest first, then by id.
 fn newest_first(a: &Value, b: &Value) -> std::cmp::Ordering {
     b["last_activity"]
@@ -703,6 +750,11 @@ pub fn validate_query_call(tool: &str, args: &Value) -> Result<(), QueryError> {
     Ok(())
 }
 
+/// Request-scoped native reader admission for a selected Catalog owner.
+/// The embedding host retains authorization and cancellation policy.
+pub type CatalogReaderFactory =
+    dyn Fn(&str, &str) -> io::Result<Box<dyn crate::SessionSourceReader>>;
+
 /// The agent read surface over one machine's homes or several: the tools
 /// `semon query` and `semon mcp` answer. Local calls share the native source
 /// index and snapshots between calls, rebuilding only what changed. Hosted
@@ -716,6 +768,8 @@ pub struct Query {
     /// One native evidence cohort supplies the entire call.
     native: Option<QueryRead>,
 }
+
+mod catalog;
 
 impl Query {
     /// The tools over the agent homes, `/proc` and cache `options` name.
@@ -1102,45 +1156,12 @@ impl Query {
     ) -> Result<Value, QueryError> {
         let view = self.view(now, ReadShape::Summaries, provider)?;
         let since = self.since(args, now)?;
-        let state = string(args, "state");
-        let repo = string(args, "repo");
-        let parent = string(args, "parent");
-        let harness = string(args, "harness");
-        let limit = integer(args, "limit").unwrap_or(LIST_LIMIT) as usize;
-        if let Some(parent) = &parent
-            && view.session(parent).is_none()
-        {
-            return Err(QueryError::unknown_session(parent));
-        }
-        let mut rows: Vec<Value> = view
+        let rows = view
             .sessions
             .iter()
             .map(|(id, session)| view.summary(id, session))
-            .filter(|row| {
-                state.as_deref().is_none_or(|state| row["state"] == state)
-                    && repo.as_deref().is_none_or(|repo| row["repo"] == repo)
-                    && parent
-                        .as_deref()
-                        .is_none_or(|parent| row["parent"] == parent)
-                    && harness
-                        .as_deref()
-                        .is_none_or(|harness| row["harness"] == harness)
-                    && since.is_none_or(|since| {
-                        row["last_activity"]
-                            .as_i64()
-                            .is_some_and(|last| last >= since)
-                    })
-            })
             .collect();
-        rows.sort_by(newest_first);
-        let total = rows.len();
-        rows.truncate(limit);
-        Ok(json!({
-            "now": view.now,
-            "total": total,
-            "truncated": total > rows.len(),
-            "sessions": rows,
-        }))
+        catalog::list_response(rows, args, since, view.now)
     }
 
     fn get_session(
@@ -1440,49 +1461,16 @@ impl Query {
         )>,
     ) -> Result<Value, QueryError> {
         let view = self.view(now, ReadShape::Summaries, provider)?;
-        let idle_minutes = integer(args, "idle_minutes").unwrap_or(1);
         let since = self.since(args, now)?;
-        let threshold = idle_minutes.saturating_mul(60_000);
-        let mut rows = Vec::new();
-        for (id, session) in &view.sessions {
-            let Some(facts) = view.facts.get(id) else {
-                continue;
-            };
-            // Without a log line, how long it has been quiet isn't known.
-            let Some(last) = facts.last else {
-                continue;
-            };
-            if since.is_some_and(|since| last < since) || now.saturating_sub(last) < threshold {
-                continue;
-            }
-            let reason =
-                if facts.alive == Some(false) && facts.recorded_status.as_deref() == Some("busy") {
-                    StallReason::ProcessGone
-                } else {
-                    match view.state(id, session) {
-                        State::WaitingQuestion => StallReason::WaitingQuestion,
-                        State::Working => StallReason::NoOutput,
-                        _ => continue,
-                    }
-                };
-            let mut row = view.summary(id, session);
-            row["stall_reason"] = json!(reason.name());
-            row["idle_ms"] = json!(now.saturating_sub(last));
-            rows.push(row);
-        }
-        // The longest quiet first.
-        rows.sort_by(|a, b| {
-            a["last_activity"]
-                .as_i64()
-                .cmp(&b["last_activity"].as_i64())
-                .then_with(|| a["id"].as_str().cmp(&b["id"].as_str()))
-        });
-        Ok(json!({
-            "now": view.now,
-            "idle_minutes": idle_minutes,
-            "rule": STALL_RULE,
-            "stalls": rows,
-        }))
+        let rows = view
+            .sessions
+            .iter()
+            .filter_map(|(id, session)| {
+                let facts = view.facts.get(id)?;
+                Some((view.summary(id, session), facts.recorded_status.clone()))
+            })
+            .collect();
+        Ok(catalog::stall_response(rows, args, since, view.now))
     }
 }
 

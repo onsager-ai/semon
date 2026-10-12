@@ -554,6 +554,7 @@ mod sqlite_tests {
         CatalogRow {
             overview: None,
             trace: None,
+            query: None,
             lifecycle: CatalogLifecycle::Current,
             key: key.into(),
             name: name.into(),

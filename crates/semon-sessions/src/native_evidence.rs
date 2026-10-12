@@ -626,6 +626,75 @@ fn stamp(path: &Path) -> Option<Stamp> {
     })
 }
 
+/// Runtime observations fence published Query summaries independently of native
+/// history. This visits process records and naming inputs, never transcript trees.
+pub(crate) fn query_runtime_generation(options: &Options) -> io::Result<String> {
+    use sha2::{Digest, Sha256};
+    let mut watched = BTreeMap::new();
+    watch_tree(
+        &options.claude_home.join("sessions"),
+        &[".json"],
+        &mut watched,
+    );
+    for path in [&options.claude_json]
+        .into_iter()
+        .chain(options.facts.iter())
+    {
+        watched.insert(path.clone(), stamp(path));
+    }
+    let mut processes = BTreeMap::new();
+    let mut locks = None;
+    if options.facts.is_none() {
+        let path = options.proc_root.join("sys/kernel/hostname");
+        watched.insert(path.clone(), stamp(&path));
+        for name in [
+            "session_index.jsonl",
+            "state_5.sqlite",
+            "state_5.sqlite-wal",
+        ] {
+            let path = options.codex_home.join(name);
+            watched.insert(path.clone(), stamp(&path));
+        }
+        watch_tree(
+            &options.codex_home.join("thread-writer-locks"),
+            &[".lock"],
+            &mut watched,
+        );
+        let ids = lock_ids(options);
+        locks = writer_locks(options, &ids);
+        let machine = crate::facts::MachineFacts::Local;
+        let pids = model::pid_files(options, &machine)
+            .into_iter()
+            .map(|pid| pid.pid)
+            .chain(
+                machine
+                    .codex_lock_pids(options)
+                    .into_iter()
+                    .flat_map(|pids| pids.into_values()),
+            );
+        for pid in pids {
+            processes.insert(
+                pid,
+                (
+                    proc_start(&options.proc_root, pid),
+                    machine.run(options, pid, None),
+                ),
+            );
+        }
+    }
+    let paths: Vec<_> = watched
+        .into_iter()
+        .map(|(path, observed)| {
+            let path = path
+                .to_str()
+                .ok_or_else(|| io::Error::other("Nonportable runtime observation"))?;
+            Ok((path.to_owned(), observed.map(|stamp| stamp.generation)))
+        })
+        .collect::<io::Result<_>>()?;
+    let bytes = serde_json::to_vec(&(paths, locks, processes)).map_err(io::Error::other)?;
+    Ok(format!("{:x}", Sha256::digest(bytes)))
+}
+
 pub(crate) struct Snapshot {
     pub(crate) watched: BTreeMap<PathBuf, Option<Stamp>>,
     /// The Codex writer-lock files' identities, and the `/proc/locks` lines
@@ -884,6 +953,8 @@ impl Snapshot {
                 pids: BTreeMap::new(),
             };
         }
+        let hostname = options.proc_root.join("sys/kernel/hostname");
+        watched.insert(hostname.clone(), stamp(&hostname));
         for name in [
             "session_index.jsonl",
             "state_5.sqlite",

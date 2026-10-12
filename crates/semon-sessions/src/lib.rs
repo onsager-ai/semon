@@ -107,7 +107,10 @@ pub use facts::{
 pub use harness::{HARNESS_ICONS, HARNESSES, HarnessDefinition, harness};
 pub use inputs::{Input, InputRoot, inputs, is_input_path};
 pub use mcp::serve_mcp;
-pub use query::{DEFAULT_WINDOW, Query, QueryError, QueryTool, query_tools, validate_query_call};
+pub use query::{
+    CatalogReaderFactory, DEFAULT_WINDOW, Query, QueryError, QueryTool, query_tools,
+    validate_query_call,
+};
 pub use received::{ReceivedMachines, is_machine_name};
 pub use refresh::RefreshPool;
 pub use union::{

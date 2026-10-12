@@ -1155,6 +1155,11 @@ fn read_page(
         let is_codex = row.harness == "codex";
         let partial_summary = partial_history.contains(&row.key);
         let mut item = serde_json::to_value(row)?;
+        // Exact Query facts and runtime fences are internal publication data.
+        // The Catalog transport retains its stable description allowlist.
+        item.as_object_mut()
+            .expect("catalog row object")
+            .remove("query");
         if let Some(transcript) = &transcript {
             item["transcript"] = transcript.clone();
         }

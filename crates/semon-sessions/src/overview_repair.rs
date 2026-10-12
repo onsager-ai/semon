@@ -192,6 +192,13 @@ fn ready(db: &Connection, row: &CatalogRow) -> io::Result<bool> {
         return Ok(false);
     }
     let source = crate::retention::source_generation(&row.sources).map_err(failure)?;
+    if row
+        .query
+        .as_ref()
+        .is_none_or(|query| query["version"] != 1 || query["source_generation"] != source)
+    {
+        return Ok(false);
+    }
     db.query_row("SELECT EXISTS(SELECT 1 FROM session_overview o JOIN session_trace_headers t USING(session_key) WHERE o.session_key=?1 AND json_extract(o.summary,'$.source_generation')=?2 AND t.source_generation=?2)",rusqlite::params![row.key,source],|row|row.get(0)).map_err(failure)
 }
 
@@ -708,6 +715,13 @@ pub fn repair_session_overview(
             ));
         }
         row.sources = sources.clone();
+        if let Some(query) = row.query.as_mut() {
+            query["source_generation"] =
+                serde_json::json!(crate::retention::source_generation(sources).map_err(failure)?);
+        }
+        if selection.incomplete {
+            row.query = None;
+        }
         if selection.incomplete
             && let Some(trace) = row.trace.as_mut()
         {
@@ -759,6 +773,17 @@ pub fn repair_session_overview(
         }
         if let Some(trace) = &row.trace {
             crate::causal_trace::publish(&tx, row, trace).map_err(failure)?;
+        }
+        if let Some(query) = &row.query {
+            let table = if crate::history_projection::catalog(&tx, &row.key)
+                .map_err(failure)?
+                .is_some()
+            {
+                "session_history_catalog"
+            } else {
+                "session_catalog"
+            };
+            tx.execute(&format!("UPDATE {table} SET metadata=json_set(metadata,'$.query',json(?2)) WHERE session_key=?1"),rusqlite::params![row.key,query.to_string()]).map_err(failure)?;
         }
         tx.execute(
             "DELETE FROM meta WHERE key=?1",

@@ -4176,3 +4176,260 @@ fn ordinary_focused_query_keeps_omitted_resume_file_turns_truncated() {
         );
     }
 }
+
+#[test]
+fn published_catalog_tools_match_native_facts_without_decoding_history() {
+    let home = fixture();
+    let sources = admitted(home.options.clone());
+    let mut source_query = Query::from_sources(sources.clone());
+    let list = source_query
+        .call_at("list_sessions", &json!({}), NOW)
+        .unwrap();
+    let stalls = source_query
+        .call_at("stalls", &json!({"idle_minutes":60}), NOW)
+        .unwrap();
+    let mut published = Query::from_sources(sources);
+    assert_eq!(
+        published
+            .call_catalog_at(
+                "list_sessions",
+                &json!({}),
+                None,
+                crate::SessionSourceReadMode::LocalThenProvider,
+                NOW
+            )
+            .unwrap(),
+        list
+    );
+    assert_eq!(
+        published
+            .call_catalog_at(
+                "stalls",
+                &json!({"idle_minutes":60}),
+                None,
+                crate::SessionSourceReadMode::LocalThenProvider,
+                NOW
+            )
+            .unwrap(),
+        stalls
+    );
+    let page = crate::session_catalog_page(&home.options, "local", "limit=100");
+    assert_eq!(page.status, 200);
+    let page: Value = serde_json::from_slice(&page.body).unwrap();
+    assert!(
+        page["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|row| row.get("query").is_none()),
+        "internal Query observations must not enter Catalog transport"
+    );
+    let db =
+        rusqlite::Connection::open(crate::events::EventCache::path(&home.options.cache)).unwrap();
+    // No question body is persisted in the exact summary publication.
+    let question_text:Option<String> = db.query_row("SELECT json_extract(metadata,'$.query.rows.asker.summary.open_question.text') FROM session_catalog WHERE session_key='asker'",[],|row|row.get(0)).unwrap();
+    assert_eq!(question_text, None);
+    // Corrupt an unrelated transcript recipe. Metadata tools do not visit it.
+    db.execute(
+        "UPDATE session_slots SET metadata='invalid' WHERE session_key='done'",
+        [],
+    )
+    .unwrap();
+    assert_eq!(
+        published
+            .call_catalog_at(
+                "list_sessions",
+                &json!({}),
+                None,
+                crate::SessionSourceReadMode::LocalThenProvider,
+                NOW
+            )
+            .unwrap(),
+        list
+    );
+    home.process(30, 999); // A different process cannot inherit the published live facts.
+    assert_eq!(
+        published
+            .call_catalog_at(
+                "stalls",
+                &json!({"idle_minutes":60}),
+                None,
+                crate::SessionSourceReadMode::LocalThenProvider,
+                NOW
+            )
+            .unwrap_err()
+            .code,
+        "unavailable"
+    );
+}
+
+#[test]
+fn published_catalog_tools_preserve_output_window_and_relationship_closure() {
+    for hours in [1, 6, 24] {
+        let home = fixture();
+        let options = Options {
+            all: false,
+            scan_window: false,
+            since: Duration::from_secs(hours * 3600),
+            ..home.options.clone()
+        };
+        let sources = admitted(options);
+        let mut native = Query::from_sources(sources.clone());
+        for (tool, args) in [
+            ("list_sessions", json!({})),
+            ("list_sessions", json!({"limit":2})),
+            ("stalls", json!({"idle_minutes":60})),
+        ] {
+            let expected = native.call_at(tool, &args, NOW).unwrap();
+            let mut metadata = Query::from_sources(sources.clone());
+            let actual = metadata
+                .call_catalog_at(
+                    tool,
+                    &args,
+                    None,
+                    crate::SessionSourceReadMode::LocalThenProvider,
+                    NOW,
+                )
+                .unwrap();
+            assert_eq!(actual, expected, "{hours}h {tool} {args}");
+        }
+    }
+}
+
+#[test]
+fn catalog_query_work_stays_fixed_with_unrelated_old_sessions_and_turns() {
+    let home = Home::new("catalog-query-scaling");
+    home.top(
+        "selected",
+        &[user("selected", ts(23, 59), "selected prompt")],
+    );
+    let options = Options {
+        all: false,
+        scan_window: false,
+        since: Duration::from_secs(24 * 3600),
+        ..home.options.clone()
+    };
+    let sources = admitted(options);
+    Query::from_sources(sources.clone())
+        .call_at("list_sessions", &json!({}), NOW)
+        .unwrap();
+    let mut query = Query::from_sources(sources);
+    let mut expected = None;
+    let mut baseline = None;
+    let mut prior_unrelated = 0;
+    for unrelated in [0, 1, 2048] {
+        if unrelated > 0 {
+            let mut db =
+                rusqlite::Connection::open(crate::events::EventCache::path(&home.options.cache))
+                    .unwrap();
+            let original: String = db
+                .query_row(
+                    "SELECT metadata FROM session_catalog WHERE session_key='selected'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            let tx = db.transaction().unwrap();
+            for n in prior_unrelated..unrelated {
+                let id = format!("old-{n:05}");
+                let old = NOW - 90 * 86_400_000;
+                let mut metadata: Value = serde_json::from_str(&original).unwrap();
+                metadata["key"] = json!(id);
+                metadata["last"] = json!(old);
+                metadata["query"]["last"] = json!(old);
+                metadata["query"]["state"] = json!("done");
+                tx.execute("INSERT INTO session_catalog(session_key,harness,repo,last_ms,parent_key,lifecycle,metadata) SELECT ?1,harness,repo,?2,parent_key,lifecycle,?3 FROM session_catalog WHERE session_key='selected'",rusqlite::params![id,old,metadata.to_string()]).unwrap();
+                for turn in 0..16 {
+                    let turn_id = format!("old-turn-{n}-{turn}");
+                    let turn = json!({"at":old,"last":false,"start":null,"sent":[]});
+                    tx.execute(
+                        "INSERT INTO session_trace_turns VALUES(?1,?2,NULL,?3)",
+                        rusqlite::params![id, turn_id, turn.to_string()],
+                    )
+                    .unwrap();
+                }
+                let edge = json!({"from":id,"to":"you","at":old,"done":old,"status":"done"});
+                tx.execute(
+                    "INSERT INTO session_trace_edges VALUES(?1,?2,?3)",
+                    rusqlite::params![id, format!("old-edge-{n}"), edge.to_string()],
+                )
+                .unwrap();
+            }
+            tx.commit().unwrap();
+        }
+        prior_unrelated = unrelated;
+        let mut latencies = Vec::new();
+        for _ in 0..31 {
+            let started = std::time::Instant::now();
+            let answer = query
+                .call_catalog_at(
+                    "list_sessions",
+                    &json!({}),
+                    None,
+                    crate::SessionSourceReadMode::LocalThenProvider,
+                    NOW,
+                )
+                .unwrap();
+            latencies.push(started.elapsed().as_micros());
+            if let Some(expected) = &expected {
+                assert_eq!(&answer, expected);
+            } else {
+                expected = Some(answer);
+            }
+            let work = super::catalog::WORK.with(std::cell::Cell::get);
+            assert_eq!((work.metadata, work.edges, work.turns), (1, 0, 1));
+            if unrelated > 0 {
+                if let Some(baseline) = baseline {
+                    assert_eq!(work, baseline);
+                } else {
+                    baseline = Some(work);
+                }
+            }
+        }
+        latencies.sort_unstable();
+        eprintln!(
+            "catalog_query unrelated={unrelated} old_turns={} work={:?} warm_median_us={}",
+            unrelated * 16,
+            super::catalog::WORK.with(std::cell::Cell::get),
+            latencies[15]
+        );
+    }
+}
+
+#[test]
+fn catalog_query_requalifies_changed_machine_presentation_identity() {
+    let home = Home::new("original-host");
+    home.top("selected", &[user("selected", ts(1, 0), "hello")]);
+    let sources = admitted(home.options.clone());
+    let mut producer = Query::from_sources(sources.clone());
+    producer.call_at("list_sessions", &json!({}), NOW).unwrap();
+    let mut metadata = Query::from_sources(sources);
+    home.write("proc/sys/kernel/hostname", "renamed-host\n");
+    assert_eq!(
+        metadata
+            .call_catalog_at(
+                "list_sessions",
+                &json!({}),
+                None,
+                crate::SessionSourceReadMode::LocalThenProvider,
+                NOW
+            )
+            .unwrap_err()
+            .code,
+        "unavailable"
+    );
+    let expected = producer.call_at("list_sessions", &json!({}), NOW).unwrap();
+    assert_eq!(expected["sessions"][0]["machine"], "renamed-host");
+    assert_eq!(
+        metadata
+            .call_catalog_at(
+                "list_sessions",
+                &json!({}),
+                None,
+                crate::SessionSourceReadMode::LocalThenProvider,
+                NOW
+            )
+            .unwrap(),
+        expected
+    );
+}
