@@ -3095,6 +3095,13 @@ fn selected_transcript_pages_match_native_anchors_thinking_and_tool_observations
     .unwrap();
     let indexes = crate::events::FILE_READS.with(std::cell::Cell::get);
     for (id, args, expected) in cases {
+        let mut local = Query::new(home.options.clone());
+        let local_page = local.call_at("read_transcript", &args, NOW).unwrap();
+        assert_eq!(local_page, expected, "local --all paging contract: {args}");
+        assert!(
+            local.native.is_none(),
+            "local --all page prepared a complete native cohort: {args}"
+        );
         let mut query = Query::from_sources(admitted(home.options.clone()));
         let actual = query
             .call_selected_at(

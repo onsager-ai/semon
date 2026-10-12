@@ -69,10 +69,11 @@ pub(super) fn read(
 ) -> Result<Option<Value>, QueryError> {
     #[cfg(test)]
     SLOTS.with(|slots| slots.set(0));
-    // A physical scan-window namespace can omit parent/resume files and their
+    // A finite physical scan-window namespace can omit parent/resume files and their
     // contextual slots. The ordinary Catalog projection belongs to the complete
     // native source selection, so it cannot qualify that distinct namespace.
-    if args["id"] != key || options.scan_window {
+    // With --all no physical cutoff applies, including for local CLI/MCP.
+    if args["id"] != key || (options.scan_window && !options.all) {
         return Ok(None);
     }
     let mut db = Connection::open_with_flags(

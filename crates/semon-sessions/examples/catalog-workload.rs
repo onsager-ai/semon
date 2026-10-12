@@ -1,12 +1,13 @@
 //! Seed deterministic history, then measure focused native first-list
 //! reads in fresh child processes so seed allocations cannot conceal cold RSS.
 //! cargo run --release --locked -p semon-sessions --example catalog-workload -- 1000 4
-use semon_sessions::{Options, ViewerCore};
+use semon_sessions::{Options, SessionCatalogObserver, ViewerCore};
 use serde_json::json;
 use std::{
     fs, io,
     path::{Path, PathBuf},
     process::Command,
+    thread,
     time::{Duration, Instant},
 };
 
@@ -122,6 +123,20 @@ fn main() -> io::Result<()> {
             let records:String=(0..2).map(|turn|json!({"type":"user","sessionId":id,"uuid":format!("{id}-{turn}"),"parentUuid":null,"cwd":"/synthetic/project","timestamp":"2026-10-01T00:00:00Z","message":{"role":"user","content":format!("synthetic prompt {turn}")}}).to_string()+"\n").collect();
             fs::write(projects.join(format!("{id}.jsonl")), records)?;
         }
+        let observer = SessionCatalogObserver::new(options.clone());
+        observer.demand()?;
+        loop {
+            let reply =
+                semon_sessions::session_catalog_page(&options, &machine.to_string(), "limit=60");
+            let body: serde_json::Value = serde_json::from_slice(&reply.body)?;
+            if reply.status == 200 && body["completeness"]["state"] == "complete" {
+                break;
+            }
+            assert!(reply.status == 200 || reply.status == 503, "{body}");
+            observer.demand()?;
+            thread::sleep(Duration::from_millis(20));
+        }
+        observer.close();
     }
     let status = Command::new(std::env::current_exe()?)
         .arg("--read")

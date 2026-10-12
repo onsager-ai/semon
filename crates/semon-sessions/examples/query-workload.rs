@@ -1,10 +1,14 @@
-//! Deterministic fixed-scope, multi-machine Viewer read workload (#29/#53/#319).
+//! Deterministic fixed-scope, multi-machine native Query read workload.
 //! Run each size in a fresh process: cargo run --release --locked -p
 //! semon-sessions --example query-workload -- 1000 4
-use semon_sessions::{Options, Refresh, ViewerCore};
+use semon_sessions::{
+    Options, Query, SessionCatalogObserver, SessionSourceReadMode, SessionSources,
+};
 use serde_json::json;
 use std::{
     fs, io,
+    sync::Arc,
+    thread,
     time::{Duration, Instant},
 };
 
@@ -83,26 +87,62 @@ fn main() -> io::Result<()> {
             },
         ));
     }
-    let mut core = ViewerCore::with_machines(inputs);
-    core.set_refresh(Refresh::OnInvalidate);
     let started = Instant::now();
-    let cold = core.respond("GET", "/api/model", "", None);
-    assert_eq!(cold.status, 200);
+    let observers: Vec<_> = inputs
+        .iter()
+        .map(|(_, options)| SessionCatalogObserver::new(options.clone()))
+        .collect();
+    for observer in &observers {
+        observer.demand()?;
+    }
+    let mut catalog_bytes = 0;
+    for ((machine, options), observer) in inputs.iter().zip(&observers) {
+        loop {
+            let reply = semon_sessions::session_catalog_page(options, machine, "limit=60");
+            let body: serde_json::Value = serde_json::from_slice(&reply.body)?;
+            if reply.status == 200 && body["completeness"]["state"] == "complete" {
+                catalog_bytes += reply.body.len();
+                break;
+            }
+            assert!(reply.status == 200 || reply.status == 503, "{body}");
+            observer.demand()?;
+            thread::sleep(Duration::from_millis(20));
+        }
+    }
     let cold_ms = started.elapsed().as_secs_f64() * 1000.;
     let cold_rss = rss_kib();
+    let sources = Arc::new(SessionSources::from_catalog_observers(
+        inputs
+            .iter()
+            .zip(&observers)
+            .map(|((key, _), observer)| (key.clone(), observer))
+            .collect(),
+    ));
+    let mut query = Query::from_sources(sources.clone());
     let mut samples = Vec::new();
     let mut bytes = 0;
     let reads_before = read_counters();
     eprintln!("WARM_BEGIN");
     for _ in 0..101 {
         let started = Instant::now();
-        let reply = core.respond("GET", "/api/tx", "sid=selected&before=120", None);
-        assert_eq!(reply.status, 200);
+        let reply = query
+            .call_selected(
+                "0",
+                "selected",
+                "read_transcript",
+                &json!({"id":"selected", "before":120, "limit":60}),
+                None,
+                SessionSourceReadMode::LocalThenProvider,
+            )
+            .map_err(io::Error::other)?;
+        assert_eq!(reply["entries"].as_array().unwrap().len(), 60);
+        assert_eq!((&reply["from"], &reply["to"]), (&json!(60), &json!(120)));
+        let encoded = serde_json::to_vec(&reply)?;
         samples.push(started.elapsed().as_secs_f64() * 1000.);
         if bytes != 0 {
-            assert_eq!(bytes, reply.body.len());
+            assert_eq!(bytes, encoded.len());
         }
-        bytes = reply.body.len();
+        bytes = encoded.len();
     }
     eprintln!("WARM_END");
     let reads = reads_before
@@ -114,13 +154,15 @@ fn main() -> io::Result<()> {
     println!(
         "{}",
         json!({"history_per_machine":history,"machines":machines,
-        "cold_model_ms":cold_ms,"cold_model_bytes":cold.body.len(),"cold_rss_kib":cold_rss,
+        "cold_catalog_complete_ms":cold_ms,"catalog_page_bytes":catalog_bytes,"cold_rss_kib":cold_rss,
         "first_tx_ms":first_tx_ms,"warm_tx_p50_ms":samples[50],"warm_tx_p95_ms":samples[95],
         "tx_bytes":bytes,"warm_rss_kib":rss_kib(),"selected_records":120,"warm_samples":100,
         "warm_read_counters":reads})
     );
-    core.close();
-    drop(core);
+    sources.close();
+    drop(query);
+    drop(sources);
+    drop(observers);
     fs::remove_dir_all(root)?;
     Ok(())
 }
