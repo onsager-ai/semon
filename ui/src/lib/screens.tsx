@@ -125,6 +125,7 @@ export interface HarnessMark {
   darkTheme: boolean;
 }
 export interface LiveRow extends MachineRow {
+  age?: string;
   harness?: HarnessMark;
   activity?: readonly [string, string, number];
 }
@@ -169,6 +170,8 @@ export interface HomeHost extends ActivityHost {
 }
 export interface MachineSnapshot {
   name: string;
+  observation?: string;
+  more?: boolean;
   sessions: readonly LiveRow[];
   totalSessions: number;
   off: readonly LiveRow[];
@@ -238,7 +241,15 @@ function Section({ heading, count }: { heading: string; count: number }) {
     </div>
   );
 }
-function Live({ row, host }: { row: LiveRow; host: ActivityHost }) {
+function Live({
+  row,
+  host,
+  machine = false,
+}: {
+  row: LiveRow;
+  host: ActivityHost;
+  machine?: boolean;
+}) {
   return (
     <button
       class="nrow"
@@ -256,10 +267,16 @@ function Live({ row, host }: { row: LiveRow; host: ActivityHost }) {
       />
       <span class="nm">{screenText(row.name)}</span>
       <span class="ag">
-        {row.harness && <Harness mark={row.harness} />}
-        {screenText(row.status)}
+        {machine ? (
+          screenText(row.age ?? '')
+        ) : (
+          <>
+            {row.harness && <Harness mark={row.harness} />}
+            {screenText(row.status)}
+          </>
+        )}
       </span>
-      <span class="for">{screenText(row.detail)}</span>
+      {(!machine || !row.activity) && <span class="for">{screenText(row.detail)}</span>}
       {row.activity && (
         <span class="act">
           <span class="spin" />
@@ -423,28 +440,41 @@ export function renderHomeScreen(root: HTMLElement, snapshot: HomeSnapshot, host
   kinds.set(root, 'home');
   host.committed();
 }
-export function MachineView({ snapshot, host }: { snapshot: MachineSnapshot; host: ActivityHost }) {
+export function MachineView({
+  snapshot,
+  host,
+}: {
+  snapshot: MachineSnapshot;
+  host: ActivityHost & { moreSessions?(): void };
+}) {
   return (
     <>
-      <div class="ph sr">
-        <h1>{screenText(snapshot.name)}</h1>
-      </div>
+      {snapshot.observation && (
+        <p class="catalog-note" role="status">
+          {snapshot.observation}
+        </p>
+      )}
       {snapshot.totalSessions > 0 && (
         <>
           <Section heading="Sessions" count={snapshot.totalSessions} />
           <div class="list">
             {snapshot.sessions.map((row) => (
-              <Live key={row.id} row={row} host={host} />
+              <Live key={row.id} row={row} host={host} machine />
             ))}
           </div>
         </>
+      )}
+      {snapshot.more && host.moreSessions && (
+        <button class="more" type="button" onClick={() => host.moreSessions?.()}>
+          Show all {snapshot.totalSessions} sessions
+        </button>
       )}
       {snapshot.off.length > 0 && (
         <>
           <Section heading="Moved off" count={snapshot.off.length} />
           <div class="list">
             {snapshot.off.map((row) => (
-              <Live key={row.id} row={row} host={host} />
+              <Live key={row.id} row={row} host={host} machine />
             ))}
           </div>
         </>
@@ -468,7 +498,7 @@ export function MachineView({ snapshot, host }: { snapshot: MachineSnapshot; hos
 export function renderMachineScreen(
   root: HTMLElement,
   snapshot: MachineSnapshot,
-  host: ActivityHost,
+  host: ActivityHost & { moreSessions?(): void },
 ) {
   commitApplicationView(root, <MachineView snapshot={snapshot} host={host} />);
   owned.add(root);

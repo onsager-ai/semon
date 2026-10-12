@@ -30,7 +30,7 @@ import {
   updateSessionRuntime,
   updateSessionJump,
 } from '../lib/transcript';
-import { releaseScreen, Glyph } from '../lib/screens';
+import { releaseScreen, Glyph, screenText } from '../lib/screens';
 import { requestJson } from '../lib/api';
 import { parseAccount } from '../lib/account';
 import {
@@ -488,7 +488,8 @@ export function createCatalogViewer(
       action();
     }
   }
-  let traceTitle = false;
+  let traceTitle = false,
+    machineTitle = false;
   title.className = 'ttl catalog-title';
   back.type = 'button';
   back.className = 'ibtn catalog-back';
@@ -668,6 +669,15 @@ export function createCatalogViewer(
     panelOpened,
     panelClosed,
     route: () => (viewerHost?.nativePage ? 'home' : navigation.route.v),
+    selectedMachine: () => (navigation.route.v === 'machine' ? navigation.route.id : null),
+    machine(key) {
+      history.pushState(
+        null,
+        '',
+        '/machines/' + encodeURIComponent(key) + '?' + new URLSearchParams({ machine: key }),
+      );
+      fromLocation();
+    },
     chrome,
     session(intent, turn) {
       if (sessionPanel && history.state?.sheet) {
@@ -1035,6 +1045,7 @@ export function createCatalogViewer(
       return;
     }
     const route = navigation.route.v;
+    title.classList.toggle('catalog-title', route !== 'machine' && route !== 'trace');
     const name =
       viewerHost?.nativePage && !['home', 'analytics', 'sessions', 'session'].includes(route)
         ? viewerHost.nativePage.title
@@ -1042,17 +1053,19 @@ export function createCatalogViewer(
           ? 'Home'
           : route === 'analytics'
             ? 'Analytics'
-            : route === 'machines'
-              ? 'Machines'
-              : route === 'trace'
-                ? 'Trace'
-                : sourcesOpen
-                  ? 'Choose a machine'
-                  : (active?.meta?.name ?? (active ? 'Session' : 'Sessions'));
+            : route === 'machine'
+              ? (overview.machine()?.label ?? 'Machine')
+              : route === 'machines'
+                ? 'Machines'
+                : route === 'trace'
+                  ? 'Trace'
+                  : sourcesOpen
+                    ? 'Choose a machine'
+                    : (active?.meta?.name ?? (active ? 'Session' : 'Sessions'));
     const recentHeading = document.querySelector('.side-h');
     if (recentHeading)
       recentHeading.textContent =
-        viewerHost?.nativePage || ['home', 'analytics', 'machines'].includes(route)
+        viewerHost?.nativePage || ['home', 'analytics', 'machines', 'machine'].includes(route)
           ? 'Recent'
           : 'Recent on this machine';
     shell.update(
@@ -1060,9 +1073,11 @@ export function createCatalogViewer(
         viewerHost?.navigation ?? standaloneNavigation ?? { leading: viewerHost?.nativeNavigation },
         viewerHost?.nativePage && !['home', 'analytics', 'sessions', 'session'].includes(route)
           ? viewerHost.nativePage.nav
-          : route === 'session' || route === 'trace'
-            ? 'sessions'
-            : route,
+          : route === 'machine'
+            ? 'machines'
+            : route === 'session' || route === 'trace'
+              ? 'sessions'
+              : route,
         {
           ...(viewerHost?.navigation?.leading?.find((item) => item.key === 'new-session')
             ? {
@@ -1197,8 +1212,12 @@ export function createCatalogViewer(
       label.className = 't catalog-session-name l1';
       label.textContent = name;
       if (route === 'trace') {
-        if (!traceTitle) title.replaceChildren();
+        if (!traceTitle) {
+          render(null, title);
+          title.replaceChildren();
+        }
         traceTitle = true;
+        machineTitle = false;
         const key = navigation.route.v === 'trace' ? navigation.route.sid : '',
           turn = navigation.route.v === 'trace' ? navigation.route.turn : undefined,
           session = causal?.sessions[key];
@@ -1219,8 +1238,56 @@ export function createCatalogViewer(
           </div>,
           title,
         );
+      } else if (route === 'machine') {
+        if (!machineTitle) {
+          render(null, title);
+          title.replaceChildren();
+        }
+        machineTitle = true;
+        traceTitle = false;
+        const machine = overview.machine();
+        render(
+          <>
+            <div class="l1">
+              <button
+                type="button"
+                class="crumb"
+                aria-label="Back to Machines"
+                onClick={() => goOverview('machines')}
+              >
+                Machines
+              </button>
+              <span class="crumb-sep">›</span>
+              <span class="t">{name}</span>
+            </div>
+            {machine && (
+              <div class="meta-line">
+                <span class={'lab state ' + (machine.up ? 'done' : 'err')}>
+                  <span
+                    class={'dot ' + (machine.up ? (machine.working ? 'work' : 'idle') : 'err')}
+                    role="img"
+                    aria-label={machine.up ? 'Up' : 'Not responding'}
+                  />
+                  <span>{machine.up ? 'Up' : 'Not responding'}</span>
+                </span>
+                <span class="lab" data-drop="1">
+                  <span>
+                    {screenText(
+                      machine.working +
+                        ' working · ' +
+                        machine.sessions +
+                        (machine.sessions === 1 ? ' session' : ' sessions'),
+                    )}
+                  </span>
+                </span>
+              </div>
+            )}
+          </>,
+          title,
+        );
       } else {
         traceTitle = false;
+        machineTitle = false;
         render(null, title);
         title.replaceChildren(label);
         if (active) title.prepend(back);
@@ -1267,9 +1334,9 @@ export function createCatalogViewer(
       });
       shell.drawerAccount(account ? { account, compact: true, wide, onWideChange() {} } : null);
     }
-    if (active)
+    if (active || route === 'machine')
       scope.frame(() => measureViewerBar(document.querySelector<HTMLElement>('#topbar')!));
-    if (viewerHost?.nativePage || ['home', 'analytics', 'machines'].includes(route))
+    if (viewerHost?.nativePage || ['home', 'analytics', 'machines', 'machine'].includes(route))
       recent.update(overview.recentSnapshot(undefined, [], undefined, rail));
     else
       recent.update(
@@ -3124,7 +3191,8 @@ export function createCatalogViewer(
         viewerHost?.nativePage ||
         navigation.route.v === 'home' ||
         navigation.route.v === 'analytics' ||
-        navigation.route.v === 'machines'
+        navigation.route.v === 'machines' ||
+        navigation.route.v === 'machine'
       ) {
         await overview.refresh();
         return;
@@ -3411,8 +3479,17 @@ export function createCatalogViewer(
     const queryParams = new URLSearchParams(location.search);
     const machineBookmark = location.pathname.match(/^\/(?:m|machines)\/([^/]+)$/);
     if (machineBookmark && !viewerHost?.nativePage) {
-      void resolveMachineBookmark(machineBookmark[1]);
-      return;
+      let key: string;
+      try {
+        key = decodeURIComponent(machineBookmark[1]);
+      } catch {
+        void resolveMachineBookmark(machineBookmark[1]);
+        return;
+      }
+      if (queryParams.get('machine') !== key) {
+        void resolveMachineBookmark(machineBookmark[1]);
+        return;
+      }
     }
     if (location.pathname === '/machines' && !viewerHost?.nativePage) {
       if (machinesHref() !== '/machines') {
@@ -3497,6 +3574,12 @@ export function createCatalogViewer(
       } catch {
         goList(false);
       }
+    } else if (machineBookmark) {
+      leaveScreen();
+      navigation.route = { v: 'machine', id: capabilities.source_key };
+      shell.closeDrawer(true);
+      overview.draw();
+      void overview.refresh(true);
     } else goList(false);
   }
   scope.listen(window, 'popstate', () => {
@@ -3550,7 +3633,7 @@ export function createCatalogViewer(
     const matches = exact ? [exact] : sourceItems.filter((source) => source.label === key);
     if (matches.length === 1 && (exact || !sourceCursor)) {
       const url = new URL(location.href);
-      url.pathname = '/sessions';
+      url.pathname = '/machines/' + encodeURIComponent(matches[0].source_key);
       url.searchParams.set('machine', matches[0].source_key);
       url.searchParams.delete('choose_source');
       history.replaceState(history.state, '', url.pathname + url.search + url.hash);

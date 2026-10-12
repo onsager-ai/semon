@@ -586,6 +586,28 @@ fn reply(value: Value) -> ViewerReply {
     }
 }
 
+/// Optional exact source boundary for focused machine activity. Hosts use the
+/// same validated key before admitting options or scheduling source observation.
+pub fn overview_source_key(query: &str) -> io::Result<Option<String>> {
+    let mut selected = None;
+    for pair in query.split('&').filter(|pair| !pair.is_empty()) {
+        if pair == "source" || pair.starts_with("source=") {
+            let value = pair
+                .strip_prefix("source=")
+                .and_then(crate::viewer::decoded)
+                .filter(|value| !value.is_empty() && value.len() <= 4096);
+            if selected.is_some() || value.is_none() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "Invalid overview source",
+                ));
+            }
+            selected = value;
+        }
+    }
+    Ok(selected)
+}
+
 /// Aggregate compact sixty-day activity, preserving source-qualified selection
 /// and existing cost, waits, concurrency, allowance and comparison semantics.
 pub fn session_overview_reply(
@@ -594,11 +616,29 @@ pub fn session_overview_reply(
     query: &str,
     now: i64,
 ) -> io::Result<ViewerReply> {
+    let selected_source = overview_source_key(query)?;
+    let sources: Vec<_> = sources
+        .iter()
+        .filter(|source| {
+            selected_source
+                .as_ref()
+                .is_none_or(|key| source.key == *key)
+        })
+        .collect();
+    if selected_source.is_some() && sources.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            "Overview source unavailable",
+        ));
+    }
     // Page the existing metadata migration queue by its authorized source and
     // session keys. A failed item cannot indefinitely hide later publications.
     let mut after: Option<[String; 2]> = None;
     let mut retained_query = Vec::new();
     for pair in query.split('&').filter(|pair| !pair.is_empty()) {
+        if pair.starts_with("source=") {
+            continue;
+        }
         if let Some(value) = pair.strip_prefix("observation_after=") {
             if after.is_some() || value.len() > 32768 {
                 return Err(io::Error::new(
@@ -716,7 +756,7 @@ pub fn session_overview_reply(
             }
         }
     }
-    for source in sources {
+    for source in &sources {
         match read(
             source,
             now.saturating_sub(analytics::KEEP_MS),
@@ -744,6 +784,9 @@ pub fn session_overview_reply(
         .take(60)
         .map(|row| {
             let mut session = row.summary.home.clone();
+            if !row.content_generation.is_empty() {
+                session["content_generation"] = json!(row.content_generation);
+            }
             session.as_object_mut().unwrap().remove("events");
             session.as_object_mut().unwrap().remove("content");
             json!({"id":row.id,"source_key":row.source,"catalog_key":row.key,"session":session})
@@ -958,6 +1001,51 @@ mod tests {
         )
         .unwrap()
     }
+    #[test]
+    fn focused_machine_activity_never_opens_an_unrelated_source_index() {
+        let selected = Fixture::new("selected/machine");
+        let unrelated = Fixture::new("unrelated");
+        selected.put("selected-session", "work", "current");
+        std::fs::write(
+            EventCache::path(&unrelated.source.options.cache),
+            "unavailable unrelated index",
+        )
+        .unwrap();
+        let sources = [
+            selected.source.clone_for_test(),
+            unrelated.source.clone_for_test(),
+        ];
+        let focused = home(&sources, "source=selected%2Fmachine");
+        assert_eq!(focused["observations"], json!([]));
+        assert_eq!(focused["machines"].as_array().unwrap().len(), 1);
+        assert_eq!(focused["machines"][0]["key"], "selected/machine");
+        assert_eq!(focused["machines"][0]["working"], 1);
+        assert_eq!(focused["recent"][0]["catalog_key"], "selected-session");
+        let broad = home(&sources, "");
+        assert_eq!(
+            broad["observations"],
+            json!([{ "source_key":"unrelated", "state":"unavailable" }])
+        );
+        assert_eq!(
+            session_overview_reply(&sources, "home", "source=missing", 2000)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::NotFound
+        );
+        for query in [
+            "source",
+            "source=",
+            "source=%ZZ",
+            "source=selected%2Fmachine&source=unrelated",
+        ] {
+            assert_eq!(
+                overview_source_key(query).unwrap_err().kind(),
+                io::ErrorKind::InvalidInput,
+                "{query}"
+            );
+        }
+    }
+
     #[test]
     fn cross_source_collisions_remain_qualified_and_retired_sessions_are_not_live() {
         let first = Fixture::new("first");

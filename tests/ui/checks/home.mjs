@@ -301,20 +301,26 @@ export default async function homeCheck(browser) {
     for (const m of ms) {
       await nav('machines');
       await page.click('.nrow[data-m="' + m + '"]');
-      await afterTitle(page, 'Sessions');
-      await page.locator('[data-session-row="list"]').first().waitFor();
+      const machineId = Object.keys(D.MACHINE).find((id) => (D.SOURCES?.[id] ?? id) === m);
+      const machineName = D.MACHINE[machineId ?? m];
+      r.expect(!!machineName, 'the selected source has an independently observed machine name');
+      await afterTitle(page, machineName);
+      await page.locator('#page .nrow[data-id]').first().waitFor();
       const info = await page.evaluate(() => ({
-        h1: document.querySelector('.page h1')?.textContent,
+        h1: document.querySelector('#topbar .t')?.textContent,
+        rows: document.querySelectorAll('#page .nrow[data-id]').length,
         source: new URLSearchParams(location.search).get('machine'),
         up: document.querySelector('.uplink')?.textContent,
         crumb: document.querySelector('.topbar .crumb')?.textContent,
         cur: document.querySelector('.nav-item[aria-current="page"]')?.textContent,
         secs: [...document.querySelectorAll('.page .sec-h')].map((s) => s.textContent),
-        sub: document.querySelector('.topbar .l2')?.textContent,
+        sub: document.querySelector('.topbar .meta-line')?.textContent,
         moves: [...document.querySelectorAll('.page .ib')].map(
           (x) => x.querySelector('.org')?.textContent.slice(0, 60) ?? null,
         ),
       }));
+      info.expectedName = machineName;
+      info.expectedSource = m;
       info.over = await over();
       out.machinePages.push(info);
       await page.screenshot({
@@ -544,7 +550,14 @@ export default async function homeCheck(browser) {
     'metadata filtering and clearing must preserve the selected catalog',
   );
   for (const mp of out.machinePages)
-    r.expect(mp.h1 === 'Sessions' && !!mp.source, 'a machine opens its qualified session catalog');
+    r.expect(
+      mp.h1 === mp.expectedName &&
+        mp.source === mp.expectedSource &&
+        mp.crumb === 'Machines' &&
+        mp.rows > 0 &&
+        mp.rows <= 60,
+      'a machine opens bounded native activity under its exact source and name',
+    );
   r.expect(
     !!out.liveRowOpens && out.liveRowOpens.title !== 'Home' && out.liveRowOpens.gap <= 1,
     'a Home live row did not open at the end: ' + JSON.stringify(out.liveRowOpens),

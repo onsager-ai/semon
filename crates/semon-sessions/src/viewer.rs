@@ -3026,6 +3026,25 @@ mod tests {
         assert_eq!(listing.status, 200);
         let listing = String::from_utf8(listing.body).unwrap();
         assert!(listing.contains("/s/claude/native-html?machine=local&amp;native=1"));
+        assert_eq!(
+            core.respond("GET", "/machines/local", "machine=local", None)
+                .status,
+            200
+        );
+        let machine = core.respond("GET", "/machines/local", "native=1&machine=local", None);
+        assert_eq!(machine.status, 200);
+        let machine = String::from_utf8(machine.body).unwrap();
+        assert!(machine.contains("native-html") && machine.contains("All sessions"));
+        assert_eq!(
+            core.respond("GET", "/machines/local", "native=1&machine=foreign", None)
+                .status,
+            400
+        );
+        assert_eq!(
+            core.respond("GET", "/machines/foreign", "native=1", None)
+                .status,
+            404
+        );
         let selected = core.respond(
             "GET",
             "/s/claude/native-html",

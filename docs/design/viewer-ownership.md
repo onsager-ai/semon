@@ -28,6 +28,11 @@ Navigation's observable route is shared with scoped status observers; it has no
 native-page loader or independent destination request lifecycle.
 
 Home and Analytics read compact producer publications across authorized sources.
+Machine details borrow that same producer with an exact source key, validated
+before source admission, observation scheduling and preview reads. The canonical
+reader retains machine bookmarks and shell headers; shared Machine rows use the
+accepted sixty-row Recent publication and generation-fenced previews. A scoped
+machine response cannot supply global Home counters or the Machines inventory.
 Home retains the established Needs You, Working Now, Answered and Recent
 presentation. Native text is absent from persistent metadata: visible previews
 use the qualified selected-session reader with bounded record and byte budgets.

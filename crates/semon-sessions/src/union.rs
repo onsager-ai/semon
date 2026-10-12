@@ -1335,8 +1335,24 @@ impl ViewerCore {
             return self.source_inventory(&views).page(query);
         }
         if matches!(path, "/api/viewer/home" | "/api/viewer/analytics") {
+            let selected_source = match crate::overview_source_key(query) {
+                Ok(source) => source,
+                Err(error) => return failed(&error),
+            };
+            if selected_source.as_ref().is_some_and(|selected| {
+                !views
+                    .iter()
+                    .any(|(key, _)| (if key.is_empty() { "local" } else { key }) == selected)
+            }) {
+                return text(404, "Not found");
+            }
             let sources: Vec<_> = views
                 .iter()
+                .filter(|(key, _)| {
+                    selected_source.as_ref().is_none_or(|selected| {
+                        (if key.is_empty() { "local" } else { key }) == selected
+                    })
+                })
                 .map(|(key, view)| {
                     let _ = view.note_catalog_read();
                     let key = if key.is_empty() { "local" } else { key };
@@ -1898,11 +1914,17 @@ impl ViewerCore {
         let labels = native_machine_ids(views);
         let (harness, id, turn) = match parts.as_slice() {
             ["machines", id] => {
-                return Some(if labels.iter().any(|label| label == id) {
-                    shell()
-                } else {
-                    text(404, "Not found")
-                });
+                return Some(
+                    if labels.iter().any(|label| label == id)
+                        || views
+                            .iter()
+                            .any(|(key, _)| key == id || (key.is_empty() && *id == "local"))
+                    {
+                        shell()
+                    } else {
+                        text(404, "Not found")
+                    },
+                );
             }
             ["s", harness, id] => (*harness, *id, None),
             ["trace", harness, id, turn] => (*harness, *id, Some(*turn)),

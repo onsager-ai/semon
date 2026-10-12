@@ -55,7 +55,22 @@ pub(crate) fn reply(
     };
     let mut body = String::new();
     let mut status = 200;
-    if matches!(path, "/" | "/analytics" | "/timeline") {
+    if let Some(encoded) = path.strip_prefix("/machines/") {
+        let Some(key) = crate::viewer::decoded(encoded) else {
+            return response(400, "<p>Invalid machine address.</p>");
+        };
+        if get("machine").is_some_and(|machine| machine != key) {
+            return response(400, "<p>Machine address and source differ.</p>");
+        }
+        let (code, value) = decoded(read("/api/viewer/home", &query(&[("source", &key)])));
+        status = code;
+        if code == 200 && !crate::native_html::machine_overview(&mut body, &value, &key) {
+            return response(
+                409,
+                "<p>Machine observation changed. Reload to refresh.</p>",
+            );
+        }
+    } else if matches!(path, "/" | "/analytics" | "/timeline") {
         let home = path == "/";
         let names: &[&str] = if home {
             &["inbox_offset", "working_offset", "answered_offset"]

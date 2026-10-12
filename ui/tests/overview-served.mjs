@@ -191,6 +191,36 @@ test(
             await page.locator('#page h1').filter({ hasText: 'Analytics' }).waitFor();
             await page.locator('.analytics-metrics').waitFor();
             await screenshot('analytics');
+            await navigate('machines');
+            await page.locator('#page [data-m]').first().click();
+            await page.getByRole('button', { name: 'Back to Machines', exact: true }).waitFor();
+            await page.locator('#page .nrow[data-id]').first().waitFor();
+            assert.match(new URL(page.url()).pathname, /^\/machines\//);
+            await page.reload();
+            await page.getByRole('button', { name: 'Back to Machines', exact: true }).waitFor();
+            assert.match(
+              await page.locator('#topbar .meta-line').textContent(),
+              /Up.*working.*sessions?/,
+            );
+            assert.equal(
+              await page.locator('#topbar .ttl > .l1').count(),
+              1,
+              'machine header has one owner',
+            );
+            await page.waitForFunction(
+              () => document.querySelector('#page')?.getAttribute('aria-busy') !== 'true',
+            );
+            assert.match(
+              await page.locator('#page .nrow').filter({ hasText: 'Principal' }).textContent(),
+              /Morning sweep/,
+              'machine prompt preview uses selected native evidence',
+            );
+            const nativeMachine = await page.request.get(page.url() + '&native=1');
+            assert.equal(nativeMachine.status(), 200, 'native machine bookmark reloads');
+            assert.match(await nativeMachine.text(), /Principal.*All sessions/s);
+            await screenshot('machine');
+            await page.getByRole('button', { name: 'Back to Machines', exact: true }).click();
+            await page.locator('#page h1').filter({ hasText: 'Machines' }).waitFor();
             await navigate('sessions');
             await page.locator('#page [data-session-row="list"][data-id="harbor"]').click();
             await page.locator('[aria-label="Transcript"]').waitFor();

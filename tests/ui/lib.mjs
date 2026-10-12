@@ -161,7 +161,7 @@ export async function goto(page, route, D) {
     },
     { r: route, url: url.pathname + url.search + url.hash },
   );
-  const title = route.v === 'machine' ? 'Sessions' : titleOf(route, D);
+  const title = titleOf(route, D);
   // A session's title is in the bar as soon as it is opened; its page is ready once it is no longer aria-busy.
   if (title) {
     try {
