@@ -776,20 +776,6 @@ impl Viewer {
                             .is_some_and(|id| snapshot["thread"].as_str() == Some(id))
                 });
             control_reply(200, serde_json::json!({"control":status}))
-        } else if let Some(control) = self.control.as_ref().filter(|_| path == "/api/model") {
-            // Full model while control is opted in. The existing poller owns both revisions.
-            let mut reply = self.core.respond("GET", path, "", None);
-            if reply.status == 200
-                && let Ok(mut model) = serde_json::from_slice::<Value>(&reply.body)
-            {
-                model["control"] = control
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .snapshot();
-                reply.body = serde_json::to_vec(&model).unwrap_or_default();
-                reply.etag = None;
-            }
-            reply
         } else {
             self.core
                 .respond("GET", path, query, if_none_match.as_deref())
@@ -3193,29 +3179,63 @@ mod tests {
     }
 
     #[test]
-    fn late_native_name_refreshes_model_without_moving_transcript_marks() {
+    fn late_native_name_refreshes_catalog_without_moving_transcript_projection() {
         let fixture = Fixture::new();
         let id = "00000000-0000-0000-0000-000000000077";
         fixture.codex(id, &[]);
-        let viewer = fixture.viewer();
-        let first = viewer.model("", None).unwrap();
-        let before: Value = serde_json::from_slice(&first.2).unwrap();
+        let sources =
+            crate::SessionSources::with_machines(vec![(String::new(), fixture.options.clone())]);
+        let evidence = &sources.machines[0].1;
+        let builds = crate::model::COMPAT_BUILDS.with(std::cell::Cell::get);
+        let prepare = || {
+            let mut work = lock(&evidence.work);
+            for _ in 0..16 {
+                if evidence
+                    .refresh_catalog(&mut work, model::now_ms())
+                    .unwrap()
+                {
+                    return;
+                }
+            }
+            panic!("single-source native Catalog publication did not complete");
+        };
+        let row = || {
+            let reply = crate::session_catalog_page(&fixture.options, "fixture", "limit=100");
+            assert_eq!(reply.status, 200);
+            let page: Value = serde_json::from_slice(&reply.body).unwrap();
+            assert_eq!(page["completeness"]["state"], "complete");
+            assert_eq!(page["items"].as_array().unwrap().len(), 1);
+            page["items"][0].clone()
+        };
+        let turns = || {
+            let db = rusqlite::Connection::open(EventCache::path(&fixture.options.cache)).unwrap();
+            let mut selected = db.prepare("SELECT metadata FROM session_trace_turns WHERE session_key=?1 ORDER BY turn_id").unwrap();
+            selected
+                .query_map([id], |row| row.get::<_, String>(0))
+                .unwrap()
+                .map(Result::unwrap)
+                .collect::<Vec<_>>()
+        };
+        prepare();
+        let before = row();
+        let before_turns = turns();
         fixture.write("codex/session_index.jsonl", &(json!({"id":id,"thread_name":"Meaningful late name","updated_at":"2026-10-10T00:00:00Z"}).to_string() + "\n"));
-        let changed = viewer
-            .model(
-                &format!("since={}", before["version"].as_str().unwrap()),
-                None,
-            )
-            .unwrap();
-        assert_eq!(changed.0, 200);
-        let after: Value = serde_json::from_slice(&changed.2).unwrap();
-        assert_eq!(after["sessions"][id]["name"], "Meaningful late name");
-        assert_eq!(before["tx"], after["tx"]);
-        assert_eq!(before["turns"], after["turns"]);
+        prepare();
+        let after = row();
+        assert_eq!(after["name"], "Meaningful late name");
+        assert_ne!(before["name"], after["name"]);
+        assert_eq!(before["transcript"], after["transcript"]);
+        assert_eq!(before["sources"], after["sources"]);
+        assert_eq!(before_turns, turns());
+        assert_eq!(
+            crate::model::COMPAT_BUILDS.with(std::cell::Cell::get),
+            builds
+        );
+        sources.close();
     }
 
     #[test]
-    fn model_is_json_with_headers_etag_and_304() {
+    fn native_transcript_json_preserves_security_headers_and_generation_fencing() {
         let fixture = Fixture::new();
         fixture.write("proc/sys/kernel/hostname", "testbox\n");
         fixture.claude(
@@ -3223,12 +3243,20 @@ mod tests {
             &[json!({"type":"user","timestamp":"2026-09-24T00:00:00Z","sessionId":"xss","origin":{"kind":"human"},
                 "message":{"role":"user","content":"<script>alert(1)</script>"}})],
         );
+        model::observe_catalog(
+            &fixture.options,
+            &mut EventCache::open_scoped(&fixture.options.cache).unwrap(),
+            &mut false,
+            &mut model::Texts::default(),
+            model::now_ms(),
+        )
+        .unwrap();
         let token = "0123456789abcdef0123456789abcdef";
         let get = |extra: &str, query: &str| {
             http(
                 &fixture,
                 &format!(
-                    "GET /api/model?t={token}{query} HTTP/1.1\r\nHost: 127.0.0.1:PORT\r\n{extra}\r\n"
+                    "GET /api/session-transcript?machine=local&sid=xss&after=0&limit=1&t={token}{query} HTTP/1.1\r\nHost: 127.0.0.1:PORT\r\n{extra}\r\n"
                 ),
             )
         };
@@ -3244,36 +3272,52 @@ mod tests {
             assert!(wire.contains(header), "missing {header}");
         }
         let body = wire.split_once("\r\n\r\n").unwrap().1;
-        let model: Value = serde_json::from_str(body).unwrap();
+        let selected: Value = serde_json::from_str(body).unwrap();
         for key in [
-            "version", "now", "machine", "sessions", "handoffs", "turns", "busy",
+            "api",
+            "identity",
+            "session",
+            "projection",
+            "range",
+            "entries",
+            "content_observation",
         ] {
-            assert!(model.get(key).is_some(), "missing {key}");
+            assert!(selected.get(key).is_some(), "missing {key}");
         }
-        assert_eq!(model["handoffs"][0]["brief"], "<script>alert(1)</script>");
-        let version = model["version"].as_str().unwrap();
-        let etag = format!("\"{version}\"");
-        assert!(wire.contains(&format!("ETag: {etag}")));
-        let cached = get(&format!("If-None-Match: {etag}\r\n"), "");
-        assert!(cached.starts_with("HTTP/1.1 304"));
-        assert!(cached.split_once("\r\n\r\n").unwrap().1.is_empty());
-        assert!(get("", &format!("&since={version}")).starts_with("HTTP/1.1 304"));
-        assert!(get("", "&since=stale").starts_with("HTTP/1.1 200"));
+        assert_eq!(selected["identity"]["source_key"], "local");
+        assert_eq!(selected["identity"]["catalog_key"], "xss");
+        assert_eq!(selected["entries"][0]["text"], "<script>alert(1)</script>");
+        assert_eq!(selected["entries"][0]["freshness"]["state"], "cached");
+        let generation = selected["projection"]["generation"].as_str().unwrap();
+        assert_eq!(generation.len(), 64);
+        assert!(get("", &format!("&generation={generation}")).starts_with("HTTP/1.1 200"));
+        let stale = get("", &format!("&generation={}", "0".repeat(64)));
+        assert!(stale.starts_with("HTTP/1.1 409"));
+        assert!(
+            !stale.contains("<script>"),
+            "stale observations expose no content"
+        );
         let refused = http(
             &fixture,
-            "GET /api/model HTTP/1.1\r\nHost: 127.0.0.1:PORT\r\n\r\n",
+            "GET /api/session-transcript?machine=local&sid=xss&after=0&limit=1 HTTP/1.1\r\nHost: 127.0.0.1:PORT\r\n\r\n",
         );
         assert!(refused.starts_with("HTTP/1.1 403"));
     }
 
     #[test]
-    fn model_api_version_is_served() {
+    fn native_source_api_version_is_served_without_model_preparation() {
         let fixture = Fixture::new();
+        let builds = crate::model::COMPAT_BUILDS.with(std::cell::Cell::get);
         let core = ViewerCore::new(fixture.options.clone());
-        let reply = core.respond("GET", "/api/model", "", None);
+        let reply = core.respond("GET", "/api/session-sources", "", None);
         assert_eq!(reply.status, 200);
         let body: Value = serde_json::from_slice(&reply.body).unwrap();
-        assert_eq!(body["api"], crate::model::MODEL_API);
+        assert_eq!(body["api"], 1);
+        assert_eq!(
+            crate::model::COMPAT_BUILDS.with(std::cell::Cell::get),
+            builds
+        );
+        core.close();
     }
 
     /// Live polling (#40 M3): `?since=` answers 304 while nothing changed,
