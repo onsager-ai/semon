@@ -1816,7 +1816,7 @@ impl SqliteStore {
             }
             stage("catalog_rows");
             if rebuild_search {
-                transaction.execute_batch("DELETE FROM session_search_postings; DELETE FROM session_search_counts; DELETE FROM session_search_documents; UPDATE session_search_coverage SET incomplete=0;").map_err(failure)?;
+                crate::catalog_search::begin_backfill(&transaction).map_err(failure)?;
                 let mut statement = transaction
                     .prepare("SELECT metadata FROM session_catalog ORDER BY session_key")
                     .map_err(failure)?;

@@ -138,7 +138,15 @@ pub(crate) fn backfill_catalog_row(
     Ok(())
 }
 
+/// Rebuild the ordering index once after bulk insertion. This runs inside the
+/// Catalog publication transaction: readers retain the previous complete index,
+/// and rollback restores both its contents and schema.
+pub(crate) fn begin_backfill(transaction: &Transaction<'_>) -> rusqlite::Result<()> {
+    transaction.execute_batch("DELETE FROM session_search_postings; DELETE FROM session_search_counts; DELETE FROM session_search_documents; UPDATE session_search_coverage SET incomplete=0; DROP INDEX IF EXISTS session_search_order;")
+}
+
 pub(crate) fn finish_backfill(transaction: &Transaction<'_>) -> rusqlite::Result<()> {
+    transaction.execute_batch("CREATE INDEX IF NOT EXISTS session_search_order ON session_search_postings(read_scope,gram,last_ms DESC,session_key ASC);")?;
     transaction.execute(
         "INSERT INTO session_search_counts(read_scope,gram,members) SELECT read_scope,gram,COUNT(*) FROM session_search_postings GROUP BY read_scope,gram",
         [],
@@ -643,6 +651,7 @@ mod sqlite_tests {
             row("large", &"x".repeat(MAX_DOCUMENT_BYTES + 1)),
         ];
         let transaction = connection.transaction().unwrap();
+        begin_backfill(&transaction).unwrap();
         for row in &rows {
             backfill_catalog_row(&transaction, row).unwrap();
         }
@@ -663,6 +672,34 @@ mod sqlite_tests {
         assert_eq!(count(&connection, "current", "sha"), 3);
         assert_eq!(count(&connection, "retained_history", "rar"), 2);
         assert_eq!(count(&connection, "retained_history", "sha"), 4);
+        let postings = |connection: &Connection| {
+            connection
+                .prepare("SELECT session_key FROM session_search_postings WHERE read_scope='current' AND gram='sha' ORDER BY last_ms DESC,session_key ASC")
+                .unwrap()
+                .query_map([], |row| row.get::<_, String>(0))
+                .unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap()
+        };
+        let original = postings(&connection);
+        assert_eq!(original, ["one", "three", "two"]);
+        {
+            let transaction = connection.transaction().unwrap();
+            begin_backfill(&transaction).unwrap();
+            backfill_catalog_row(&transaction, &row("replacement", "other")).unwrap();
+            // An interrupted publication must restore the old search and its
+            // ordering index, including the exact aggregate member counts.
+        }
+        assert_eq!(postings(&connection), original);
+        assert_eq!(count(&connection, "current", "sha"), 3);
+        let ordering_index: String = connection
+            .query_row(
+                "SELECT name FROM sqlite_schema WHERE type='index' AND name='session_search_order'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(ordering_index, "session_search_order");
         assert_eq!(
             connection
                 .query_row(

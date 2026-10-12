@@ -3120,40 +3120,60 @@ fn selected_transcript_pages_match_native_anchors_thinking_and_tool_observations
 }
 
 #[test]
-fn selected_transcript_refuses_invalid_observation_before_reading_source_bytes() {
-    let home = Home::new("invalid-transcript-observation");
-    home.top("lead", &[human("lead", ts(1, 0), "selected needle")]);
-    let mut cache = crate::events::EventCache::open_scoped(&home.options.cache).unwrap();
-    crate::model::observe_catalog(
-        &home.options,
-        &mut cache,
-        &mut false,
-        &mut crate::model::Texts::default(),
-        NOW,
-    )
-    .unwrap();
-    let archive = selected_archive(&home, 0);
-    let db =
-        rusqlite::Connection::open(crate::events::EventCache::path(&home.options.cache)).unwrap();
-    db.execute("UPDATE session_catalog SET metadata=json_set(metadata,'$.query.transcript_observation.live',json('[1]')) WHERE session_key='lead'", []).unwrap();
-    let mut query = Query::from_sources(admitted(home.options.clone()));
-    assert_eq!(
-        query
-            .call_selected_at(
-                "local",
-                "lead",
-                "read_transcript",
-                &json!({"id":"lead"}),
-                Some(&archive),
-                crate::SessionSourceReadMode::ProviderOnly,
-                NOW
-            )
-            .unwrap_err()
-            .code,
-        "io"
-    );
-    assert_eq!(archive.calls.load(Ordering::Relaxed), 0);
-    assert!(query.native.is_none());
+fn selected_transcript_refuses_invalid_observation_and_missing_proofs_before_source_reads() {
+    for damaged in ["observation", "proofs"] {
+        let home = Home::new("invalid-transcript-observation");
+        home.top("lead", &[human("lead", ts(1, 0), "selected needle")]);
+        let mut cache = crate::events::EventCache::open_scoped(&home.options.cache).unwrap();
+        crate::model::observe_catalog(
+            &home.options,
+            &mut cache,
+            &mut false,
+            &mut crate::model::Texts::default(),
+            NOW,
+        )
+        .unwrap();
+        let archive = selected_archive(&home, 0);
+        let db = rusqlite::Connection::open(crate::events::EventCache::path(&home.options.cache))
+            .unwrap();
+        let generation = catalog_generation(&home);
+        let indexes = crate::events::FILE_READS.with(std::cell::Cell::get);
+        if damaged == "observation" {
+            db.execute("UPDATE session_catalog SET metadata=json_set(metadata,'$.query.transcript_observation.live',json('[1]')) WHERE session_key='lead'", []).unwrap();
+        } else {
+            assert!(
+                db.execute(
+                    "DELETE FROM meta WHERE key GLOB 'native_source_chunks:*'",
+                    []
+                )
+                .unwrap()
+                    > 0
+            );
+        }
+        let mut query = Query::from_sources(admitted(home.options.clone()));
+        assert_eq!(
+            query
+                .call_selected_at(
+                    "local",
+                    "lead",
+                    "read_transcript",
+                    &json!({"id":"lead"}),
+                    Some(&archive),
+                    crate::SessionSourceReadMode::ProviderOnly,
+                    NOW
+                )
+                .unwrap_err()
+                .code,
+            "io"
+        );
+        assert_eq!(archive.calls.load(Ordering::Relaxed), 0);
+        assert!(query.native.is_none());
+        assert_eq!(
+            crate::events::FILE_READS.with(std::cell::Cell::get),
+            indexes
+        );
+        assert_eq!(catalog_generation(&home), generation);
+    }
 }
 
 #[test]

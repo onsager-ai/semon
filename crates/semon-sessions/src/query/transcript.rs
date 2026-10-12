@@ -202,10 +202,8 @@ pub(super) fn read(
             "Native transcript proofs exceed their read budget",
         ));
     }
-    let sources = match EventCache::selected_source_proofs(&tx, options, &row.sources) {
-        Ok(sources) => sources,
-        Err(_) => return Ok(None),
-    };
+    let sources = EventCache::selected_source_proofs(&tx, options, &row.sources)
+        .map_err(|_| unavailable("Original native transcript proofs are unavailable"))?;
     let incomplete: bool = if history.is_some() {
         tx.query_row(
             "SELECT incomplete FROM session_history_projections WHERE session_key=?1",
