@@ -338,7 +338,7 @@ export function renderCausalTrace(
           sessionPart(edge.to, child?.id),
         ],
         time: clock(edge.at, now),
-        brief: edge.brief || undefined,
+        brief: edge.kind === 'toyou' && edge.ask === 'result' ? undefined : edge.brief || undefined,
         answers: edge.kind === 'toyou' && Array.isArray(edge.answer) ? edge.answer : undefined,
         result: edge.kind === 'toyou' && edge.ask === 'result' ? undefined : edge.result,
         meta: child

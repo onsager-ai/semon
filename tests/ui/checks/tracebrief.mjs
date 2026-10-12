@@ -70,17 +70,15 @@ export default async function tracebrief(browser) {
         await more.click();
         assert.equal((await style()).open, false);
         await goto(page, { v: 'trace', sid: resultTurn.sid, turn: resultTurn.id }, D);
-        const closing = page.locator(`.hop[data-h="${result.id}"] > .body > .brief`);
+        const closing = page.locator(`.hop[data-h="${result.id}"]`);
         await closing.waitFor();
         assert.match(
           await page.locator('.hop.k-root .meta').textContent(),
           /Sent you a result/,
           'Trace exposed an internal turn-end code instead of its recorded outcome',
         );
-        assert.ok(
-          (await closing.textContent()).includes(result.brief),
-          'Trace omitted the qualified native closing reply',
-        );
+        assert.equal(await closing.locator('.brief, .more').count(), 0);
+        assert.ok(!(await closing.textContent()).includes(result.brief));
         assert.ok(
           previews.length &&
             previews.every(
