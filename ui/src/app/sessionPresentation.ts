@@ -190,13 +190,6 @@ export function selectedSessionMenu(
       note: 'Step through',
       className: 'menu-errors',
     });
-  if (metadata && Object.values(metadata.signals).some((count) => count > 0))
-    actions.push({
-      key: 'signals',
-      text: 'Session signals',
-      icon: I.stack,
-      className: 'menu-signals',
-    });
   actions.push({ key: 'source', text: 'Choose a machine', icon: I.machine });
   if (!matchMedia('(max-width: 760px)').matches)
     actions.push({ key: 'wide', text: 'Wide transcript', icon: I.wide, checked: wide });
@@ -206,6 +199,14 @@ export function selectedSessionMenu(
       text: 'Runs · ' + metadata.family.runs.length,
       icon: I.stack,
       className: 'menu-runs',
+    });
+  const signals = Object.values(metadata?.signals ?? {}).reduce((sum, count) => sum + count, 0);
+  if (signals)
+    actions.push({
+      key: 'signals',
+      text: signals + ' signals',
+      note: 'Step through',
+      className: 'menu-signals',
     });
   const details: MenuDetail[] = [
     {
@@ -239,19 +240,14 @@ export function selectedSessionMenu(
       });
   if (metadata?.calls != null) details.push({ label: 'Tool calls', value: String(metadata.calls) });
   if (metadata?.errors) details.push({ label: 'Errors', value: String(metadata.errors) });
-  if (metadata && Object.values(metadata.signals).some((count) => count > 0))
-    details.push({
-      label: 'Signals',
-      value: Object.entries(metadata.signals)
-        .map(([kind, count]) => kind + count)
-        .join(' · '),
-    });
   if (session.start != null)
     details.push(
       { label: 'Started', value: clock(session.start, now) },
       { label: 'Duration', value: dur(session.start, session.last, now) },
     );
   if (native) details.push({ label: 'Session id', value: native, mono: true });
+  for (const [kind, count] of Object.entries(metadata?.signals ?? {}))
+    details.push({ label: 'Signals · ' + kind, value: String(count) });
   const kinds: [string, TokenKind[]][] = [
       ['Input', ['input']],
       ['Output', ['output']],

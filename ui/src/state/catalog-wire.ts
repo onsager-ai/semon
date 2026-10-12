@@ -45,7 +45,7 @@ export interface CatalogPage {
   api: 1;
   machine: string;
   read_scope: CatalogReadScope;
-  machine_info: { key: string; label: string; freshness: 'cached' };
+  machine_info: { key: string; label: string | null; freshness: 'cached' | 'unavailable' };
   generation: string;
   observed_at: number | null;
   freshness: CatalogFreshness | 'updating';
@@ -213,7 +213,7 @@ export function parseCatalogPage(value: unknown): CatalogPage {
     (completeness !== 'partial' && completeness !== 'complete') ||
     (collectionFreshness === 'updating' && completeness !== 'partial') ||
     info.key !== machine ||
-    info.freshness !== 'cached' ||
+    (info.freshness !== 'cached' && info.freshness !== 'unavailable') ||
     !/^[0-9a-f]{64}$/i.test(generation) ||
     items.length > 100 ||
     new Set(items.map((item) => item.key)).size !== items.length ||
@@ -224,7 +224,7 @@ export function parseCatalogPage(value: unknown): CatalogPage {
     api: 1,
     machine,
     read_scope: readScope(page.read_scope),
-    machine_info: { key: machine, label: text(info.label), freshness: 'cached' },
+    machine_info: { key: machine, label: nullable(info.label, text), freshness: info.freshness },
     generation,
     observed_at: nullable(page.observed_at, integer),
     freshness: collectionFreshness,

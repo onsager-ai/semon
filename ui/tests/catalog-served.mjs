@@ -186,6 +186,13 @@ test(
       );
       assert.ok(bookmarkReads >= 3, 'incomplete native lookups retry before selection');
       assert.equal(new URL(bookmark.url()).searchParams.get('machine'), 'local');
+      const sourceLabel = (await readFile(join(home, 'proc/sys/kernel/hostname'), 'utf8')).trim();
+      await bookmark.waitForFunction(
+        (label) =>
+          document.querySelector('#page .divider.started .dv-machine')?.textContent === label,
+        sourceLabel,
+        { timeout: 5000 },
+      );
       assert.ok(
         bookmarkRequests.every((path) => !/^\/api\/(model|tx|events)(?:\/|$)/.test(path)),
         'bookmark resolution does not warm a workspace model',
