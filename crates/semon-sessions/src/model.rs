@@ -305,10 +305,8 @@ pub(crate) struct Machine {
     pub(crate) last: Option<i64>,
 }
 
-/// What the agent read surface (`semon query`, `semon mcp`) says about a
-/// session beyond `/api/model`'s shape: facts the builder already holds but
-/// the viewer doesn't serve. Metadata only, never served by `/api/model`, so
-/// the model's JSON and version don't change with it.
+/// Native Query facts beyond the Viewer session metadata, derived from
+/// qualified native evidence and current process observations.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct SessionFacts {
     /// `session`, `subagent`, `codex-run` or `stub`.
