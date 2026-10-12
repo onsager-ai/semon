@@ -1063,28 +1063,81 @@ impl MachineView {
                 .expect("snapshot exists")
                 .changed_catalog_inputs(&snapshot, &self.evidence.options)
             {
-                let inputs = cache
-                    .catalog_component_paths(&inputs, &self.evidence.options)?
-                    .unwrap_or(inputs);
+                let mut inputs: BTreeSet<_> = inputs.into_iter().collect();
                 let options = Options {
                     scan_window: false,
                     ..self.evidence.options.clone()
                 };
-                let prepared = model::prepare_sources(&options, cache, &inputs, now)?;
-                match cache.publish_closed_catalog(&prepared)? {
-                    Some(crate::events::Outcome::Written) => {
-                        cache.publish_session_descriptions();
-                        cache.end_scan();
-                        work.catalog_snapshot = Some(snapshot);
-                        return Ok(true);
+                // Expand through both persisted relationships and newly derived
+                // endpoints. Reprepare only when another current source joins;
+                // the event cache retains the already loaded component indexes.
+                let mut keys = Vec::new();
+                let mut native_parents = Vec::new();
+                let prepared = loop {
+                    let selected: Vec<_> = inputs.iter().cloned().collect();
+                    let Some(component) = cache.catalog_component_paths(
+                        &selected,
+                        &keys,
+                        &native_parents,
+                        &self.evidence.options,
+                    )?
+                    else {
+                        break None;
+                    };
+                    inputs.extend(component);
+                    if inputs.len() > 64 {
+                        break None;
                     }
-                    Some(_) => {
-                        return Err(io::Error::new(
-                            io::ErrorKind::WouldBlock,
-                            "native Catalog component generation changed",
-                        ));
+                    let selected: Vec<_> = inputs.iter().cloned().collect();
+                    let prepared = model::prepare_sources(&options, cache, &selected, now)?;
+                    let dependencies: BTreeSet<_> = prepared
+                        .rows
+                        .iter()
+                        .flat_map(|row| {
+                            std::iter::once(row.key.as_str())
+                                .chain(row.parent.as_deref())
+                                .chain(row.trace.iter().flat_map(|trace| trace.endpoints()))
+                        })
+                        .map(str::to_owned)
+                        .collect();
+                    if dependencies.len() > 64 {
+                        break None;
                     }
-                    None => {}
+                    keys = dependencies.into_iter().collect();
+                    native_parents = prepared.native_parents();
+                    let Some(component) = cache.catalog_component_paths(
+                        &selected,
+                        &keys,
+                        &native_parents,
+                        &self.evidence.options,
+                    )?
+                    else {
+                        break None;
+                    };
+                    if component.iter().all(|input| inputs.contains(input)) {
+                        break Some(prepared);
+                    }
+                    inputs.extend(component);
+                    if inputs.len() > 64 {
+                        break None;
+                    }
+                };
+                if let Some(prepared) = prepared {
+                    match cache.publish_closed_catalog(&prepared)? {
+                        Some(crate::events::Outcome::Written) => {
+                            cache.publish_session_descriptions();
+                            cache.end_scan();
+                            work.catalog_snapshot = Some(snapshot);
+                            return Ok(true);
+                        }
+                        Some(_) => {
+                            return Err(io::Error::new(
+                                io::ErrorKind::WouldBlock,
+                                "native Catalog component generation changed",
+                            ));
+                        }
+                        None => {}
+                    }
                 }
             }
         }
@@ -7138,6 +7191,107 @@ mod tests {
             Some(published.as_str())
         );
         view.close();
+    }
+
+    #[test]
+    fn a_changed_catalog_parent_reloads_only_old_and_new_relationship_components() {
+        for unrelated in [0, 256] {
+            let fixture = Fixture::new();
+            let record = |id: &str, parent: Option<&str>| {
+                json!({"type":"session_meta","timestamp":"2026-10-01T00:00:00Z","payload":{"id":id,"parent_thread_id":parent,"thread_source":if parent.is_some() {"subagent"} else {"cli"},"cwd":"/tmp/project"}}).to_string() + "\n"
+            };
+            for id in ["old-parent", "new-parent"] {
+                fixture.write(
+                    &format!("codex/sessions/2026/10/01/rollout-{id}.jsonl"),
+                    &record(id, None),
+                );
+            }
+            let child = fixture.write(
+                "codex/sessions/2026/10/01/rollout-child.jsonl",
+                &record("child", Some("old-parent")),
+            );
+            for n in 0..unrelated {
+                let id = format!("unrelated-{n:04}");
+                fixture.claude(&id, &[json!({"type":"user","sessionId":id,"uuid":id,"origin":{"kind":"human"},"cwd":"/tmp/project","timestamp":"2026-10-01T00:00:00Z","message":{"role":"user","content":"unrelated"}})]);
+            }
+            let mut cache = EventCache::open_scoped(&fixture.options.cache).unwrap();
+            model::observe_catalog(
+                &fixture.options,
+                &mut cache,
+                &mut false,
+                &mut model::Texts::default(),
+                model::now_ms(),
+            )
+            .unwrap();
+            let snapshot = Snapshot::capture_pids(&fixture.options, BTreeSet::new(), cache.paths());
+            fs::write(&child, record("child", Some("new-parent"))).unwrap();
+            let mut work = Work::default();
+            work.events = Some(EventCache::open_scoped(&fixture.options.cache).unwrap());
+            work.catalog_snapshot = Some(snapshot);
+            let view = fixture.viewer();
+            let before = crate::events::FILE_READS.with(std::cell::Cell::get);
+            assert!(
+                view.refresh_catalog_locked(&mut work, model::now_ms())
+                    .unwrap()
+            );
+            let reads = crate::events::FILE_READS.with(std::cell::Cell::get) - before;
+            assert!(
+                reads <= 3,
+                "unrelated={unrelated}: parent rewrite loaded {reads} indexes"
+            );
+            let catalog =
+                rusqlite::Connection::open(EventCache::path(&fixture.options.cache)).unwrap();
+            let parent: String = catalog.query_row("SELECT parent_key FROM session_catalog WHERE session_key='child' AND lifecycle='current'", [], |row| row.get(0)).unwrap();
+            assert_eq!(parent, "new-parent");
+            let page = crate::session_catalog_page(&fixture.options, "fixture", "limit=60");
+            assert_eq!(
+                serde_json::from_slice::<Value>(&page.body).unwrap()["completeness"]["state"],
+                "complete"
+            );
+            assert!(view.shown_model().is_none());
+            // The previous parent is required even when the new parent and
+            // child alone can derive a valid-looking replacement relationship.
+            fs::write(&child, record("child", Some("old-parent"))).unwrap();
+            let input = |id: &str| crate::inputs::Input {
+                root: crate::inputs::InputRoot::Codex,
+                path: format!("sessions/2026/10/01/rollout-{id}.jsonl"),
+            };
+            let cache = work.events.as_mut().unwrap();
+            let omitted = model::prepare_sources(
+                &fixture.options,
+                cache,
+                &[input("child"), input("old-parent")],
+                model::now_ms(),
+            )
+            .unwrap();
+            assert_eq!(
+                cache.publish_closed_catalog(&omitted).unwrap(),
+                None,
+                "an omitted old parent qualified a closed publication"
+            );
+            let prepared = model::prepare_sources(
+                &fixture.options,
+                cache,
+                &[input("child"), input("old-parent"), input("new-parent")],
+                model::now_ms(),
+            )
+            .unwrap();
+            let mut competing = EventCache::open_scoped(&fixture.options.cache).unwrap();
+            model::observe_catalog(
+                &fixture.options,
+                &mut competing,
+                &mut false,
+                &mut model::Texts::default(),
+                model::now_ms(),
+            )
+            .unwrap();
+            assert_eq!(
+                cache.publish_closed_catalog(&prepared).unwrap(),
+                Some(crate::events::Outcome::Conflict),
+                "a competing generation was overwritten"
+            );
+            view.close();
+        }
     }
 
     #[test]

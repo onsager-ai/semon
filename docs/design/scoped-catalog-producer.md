@@ -54,7 +54,12 @@ capture remains visible to the next refresh.
 
 The producer expands changed paths through indexed current owners, parent/child
 relationships, handoff endpoints and native aliases in a deterministic read
-transaction. It loads event rows only for that component. Retained rows cannot
+transaction. Newly derived endpoints and allowlisted native header/path parents expand that
+same bounded component before publication. An unresolved native parent cannot
+silently disappear just because its source was outside the first batch. Expansion
+reprepares only when an additional current source joins; the event cache retains
+already loaded indexes. Both old and new parents must be in the final closure.
+It loads event rows only for that component. Retained rows cannot
 stand in for current producer evidence.
 
 The write transaction rechecks completeness, canonical/native identity, source
@@ -62,8 +67,9 @@ membership and closure against persisted parent/handoff/bookmark metadata.
 Human asks and questions remain part of the selected session. It uses the
 existing partial-publication ledger, generation and revision fences, acknowledges
 only its claims, and rolls back if any unrelated source revision remains pending.
-It preserves complete qualification only after those checks succeed. Identity or
-relationship changes and initial discovery still use complete reconciliation.
+It preserves complete qualification only after those checks succeed. Identity changes, unsupported role changes and unresolvable or oversized
+relationship closures still use complete reconciliation. A Codex parent rewrite
+can publish its complete old/new component; other native role fields stay stable.
 A genuinely new isolated identity can join the complete Catalog after the same
 transactional closure checks. Existing or malformed rows cannot masquerade as
 new identities, and source-path or native aliases owned outside the batch reject
@@ -75,6 +81,12 @@ sources, compared with 258 indexes before. This is event-row
 reuse evidence; filesystem snapshot work and cold reconciliation still scale.
 Adding one isolated session loads no unrelated indexes with zero or 256 existing
 sessions; before this extension the larger case loaded all 256 indexes.
+
+Rewriting a Codex child's parent loads at most three event indexes with zero or
+256 unrelated sessions, versus 258 before. The fixture checks the new parent,
+complete qualification, rejection when the old parent is omitted, and refusal to
+overwrite a competing Catalog generation. This does not qualify every relationship
+change or bound filesystem snapshot work.
 
 ## Qualified workload
 

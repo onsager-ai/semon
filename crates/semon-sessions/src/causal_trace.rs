@@ -30,6 +30,13 @@ pub(crate) struct Projection {
     bookmarks: Vec<(String, String)>,
 }
 impl Projection {
+    pub(crate) fn endpoints(&self) -> impl Iterator<Item = &str> {
+        self.edges.iter().flat_map(|edge| {
+            ["from", "to"]
+                .into_iter()
+                .filter_map(move |field| edge[field].as_str().filter(|key| *key != "you"))
+        })
+    }
     pub(crate) fn closed_over(&self, keys: &BTreeSet<&str>) -> bool {
         self.bookmarks.is_empty()
             && self.edges.iter().all(|edge| {
