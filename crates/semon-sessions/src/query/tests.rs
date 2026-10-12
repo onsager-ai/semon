@@ -2942,6 +2942,84 @@ fn selected_query_uses_original_generations_without_workspace_preparation_or_res
     );
 }
 
+/// Measure the same one-entry archived tail as its selected prefix grows.
+/// This is diagnostic evidence for the range-pager gate, not a latency threshold.
+#[test]
+#[ignore = "opt-in selected-history scope measurement"]
+fn selected_transcript_tail_scope_measurement() {
+    for prefix in [0, 128, 1024, 8192] {
+        let home = Home::new("selected-tail-scope");
+        let mut records = vec![human("lead", ts(1, 0), "selected opening prompt")];
+        for n in 0..prefix {
+            records.push(assistant(
+                "lead",
+                ts(1, 1),
+                vec![text(&format!(
+                    "old selected reply {n}: {}",
+                    "history ".repeat(64)
+                ))],
+            ));
+        }
+        records.push(assistant(
+            "lead",
+            ts(23, 59),
+            vec![text("fixed selected tail")],
+        ));
+        home.top("lead", &records);
+        let mut cache = crate::events::EventCache::open_scoped(&home.options.cache).unwrap();
+        crate::model::observe_catalog(
+            &home.options,
+            &mut cache,
+            &mut false,
+            &mut crate::model::Texts::default(),
+            NOW,
+        )
+        .unwrap();
+        let args = json!({"id":"lead","limit":1});
+        let expected = home.query().call_at("read_transcript", &args, NOW).unwrap();
+        let archive = selected_archive(&home, 0);
+        fs::remove_file(home.options.claude_home.join(&archive.source.path)).unwrap();
+        drop(cache);
+        let mut samples = Vec::new();
+        for _ in 0..5 {
+            let before_calls = archive.calls.load(Ordering::Relaxed);
+            let before_bytes = archive.read_bytes.load(Ordering::Relaxed);
+            let before_indexes = crate::events::FILE_READS.with(std::cell::Cell::get);
+            let sources = admitted(home.options.clone());
+            let mut query = Query::from_sources(sources.clone());
+            let start = std::time::Instant::now();
+            let answer = query
+                .call_selected_at(
+                    "local",
+                    "lead",
+                    "read_transcript",
+                    &args,
+                    Some(&archive),
+                    crate::SessionSourceReadMode::ProviderOnly,
+                    NOW,
+                )
+                .unwrap();
+            samples.push((
+                start.elapsed().as_micros(),
+                archive.calls.load(Ordering::Relaxed) - before_calls,
+                archive.read_bytes.load(Ordering::Relaxed) - before_bytes,
+                crate::events::FILE_READS.with(std::cell::Cell::get) - before_indexes,
+                query.evidence().parts[0].data.tx["lead"].slots.len(),
+            ));
+            assert_eq!(answer, expected);
+            assert_eq!(answer["entries"].as_array().unwrap().len(), 1);
+            assert!(sources.machines[0].1.work.lock().unwrap().events.is_none());
+            assert!(!home.options.claude_home.join(&archive.source.path).exists());
+        }
+        samples.sort_unstable();
+        let (latency, calls, bytes, indexes, slots) = samples[2];
+        eprintln!(
+            "selected_tail prefix={prefix} source_bytes={} median_us={latency} range_requests={calls} range_bytes={bytes} full_index_loads={indexes} prepared_slots={slots} entries=1",
+            archive.bytes.len()
+        );
+    }
+}
+
 #[test]
 fn selected_query_refuses_changed_bytes_generations_and_revocation() {
     for fault in [1, 2, 3] {

@@ -35,14 +35,18 @@ one versus 257); a rewrite loads four in both cases. Unsupported identity/role
 changes, missing sources, cold Catalogs and multi-machine automatic selection
 still require native reconciliation.
 
-`SessionSources` constructs no machine view, refresh pool or worker. Explicit
-Catalog demand attaches the existing source producer to the host's bounded pool;
+Ordinary `SessionSources::with_machines` constructs no machine view, refresh pool
+or worker. Hosts with admitted Catalog observers transfer their existing evidence
+owners and refresh coordinators with `SessionSources::from_catalog_observers`,
+without closing producers or reopening indexes. Explicit Catalog demand attaches
+the existing source producer to the host's bounded pool;
 a later `ViewerCore::from_sources` borrows that same producer, index and query
 cohort. Retirement stops producers; close drains them off the async reactor.
 Hosts hold their existing blocking-worker and deletion guards through actual
 completion and close attached Viewer transports before draining sources.
-Tenant-wide hosted archive hydration for list/search/stalls remains retirement
-work in Hub #226.
+Hosted list/search/stalls use shared native Catalog reads; no hosted tool restores
+tenant archives. Healthy observer transfer preserves custody fences and the
+admitted source set owns subsequent retirement.
 The paired Hub consumer admits native sources directly; the preceding
 `from_native_core` constructor and its exclusive Viewer preparation path are
 removed. Query owns only native sources. Substituting local scan-window
@@ -68,7 +72,38 @@ transcript bytes additionally verify the existing native block proofs. Completio
 rechecks the selected source/relationship footprint, so an unrelated Catalog
 publication does not invalidate a focused answer. Union machine labels and
 configured windows remain metadata inputs; unrelated native bodies are not read.
-Workspace listing, search and stalls still use the complete native query cohort.
+Ordinary local listing, search and stalls preserve the native cohort contract.
+Embedding hosts instead use `Query::call_catalog` for these three tools: list and
+stalls reuse generation-fenced published facts, and search admits eligible source
+closures only until the shared matcher reaches its result or byte stop boundary.
+The same search engine supplies ordering, snippets and line accounting to both
+paths. A selected source still requires full semantic preparation before its first
+search slot; long selected-history range bounds remain an implementation gate.
+
+
+The opt-in `selected_transcript_tail_scope_measurement` diagnostic grows one
+archived selected session while returning exactly one tail entry. It compares the
+complete response with the existing local oracle and verifies no native-file
+restoration or workspace producer. At the production code in b73834b, five-sample
+debug medians measured:
+
+| Earlier replies | Source bytes | Prepared slots | Range requests / bytes | Read median µs |
+| --- | --- | --- | --- | --- |
+| 0 | 545 | 2 | 6 / 3270 | 3406 |
+| 128 | 113203 | 130 | 5 / 274073 | 11193 |
+| 1024 | 902603 | 1026 | 5 / 282977 | 28668 |
+| 8192 | 7224779 | 8194 | 5 / 178529 | 106498 |
+
+Every request loaded one complete selected Event Index. Remote bytes are not
+proportional to this fixture's prefix, but prepared slots and read latency grow
+while the returned scope stays fixed. These observations establish the remaining
+selected range-pager cost, not a latency threshold or production percentile.
+Reproduce alone:
+
+```sh
+cargo test --locked -p semon-sessions --lib selected_transcript_tail_scope_measurement \
+  -- --ignored --nocapture --test-threads=1
+```
 
 Recorded human-ask briefs remain content-free source offsets in the Query cohort.
 Metadata and transcript paging do not materialize every ask's prompt. Selected
@@ -178,9 +213,8 @@ blocks before publishing. Public ranges and transcript/search continue to
 verify their actual reads independently. No cached source body
 survives the request.
 
-The producer still discovers, indexes and joins eligible native sources. Broad
-Hub MCP tools still restore archives before admission; focused get/transcript
-calls admit selected sources directly. This local reader does not supply
+The producer still discovers, indexes and joins eligible native sources. All
+Hub MCP tools admit selected native sources or bounded Catalog facts directly. This local reader does not supply
 missing archived index metadata or grant provider authority. Removing those
 costs requires scoped dependency selection and independently authorized provider
 access for the producer. Verified archive eviction now explicitly retains an
