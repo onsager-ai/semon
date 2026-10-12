@@ -299,6 +299,16 @@ pub(crate) fn qualified_history_identity(
     )
 }
 
+/// Control ownership must prove absence and uniqueness against a complete
+/// current publication, rather than admitting retained history as writable.
+pub(crate) fn qualified_current_identity(
+    options: &Options,
+    source_key: &str,
+    key: &str,
+) -> Result<Option<CatalogSessionIdentity>, CatalogIdentityError> {
+    catalog_identity(options, source_key, key, CatalogReadScope::Current, true)
+}
+
 fn catalog_identity(
     options: &Options,
     source_key: &str,
@@ -332,6 +342,12 @@ fn catalog_identity(
         200 => {}
         _ if body["error"]["code"] == "catalog_scope_changed" => return Err(ScopeChanged),
         _ => return Err(Unavailable),
+    }
+    if require_complete
+        && scope == CatalogReadScope::Current
+        && body["items"][0]["lifecycle"] != "current"
+    {
+        return Ok(None);
     }
     #[derive(Deserialize)]
     struct Item {
@@ -588,7 +604,11 @@ fn rows(connection: &Connection, request: &Request) -> rusqlite::Result<Vec<Cata
         return read_range(
             connection,
             "sqlite_autoindex_session_catalog_1",
-            "",
+            if request.require_complete && request.scope == CatalogReadScope::Current {
+                "lifecycle='current' AND "
+            } else {
+                ""
+            },
             "session_key = ?",
             vec![SqlValue::Text(sid.clone())],
             1,
@@ -1238,10 +1258,17 @@ mod tests {
             for id in 0..count {
                 self.source(&format!("session-{id:05}"));
             }
-            let mut core = ViewerCore::new(self.options.clone());
-            core.set_refresh(Refresh::OnInvalidate);
-            core.warm().unwrap();
-            core.close();
+            self.publish_existing();
+        }
+        fn publish_existing(&self) {
+            let evidence = crate::native_evidence::NativeEvidence::new(self.options.clone());
+            let mut work = crate::viewer::lock(&evidence.work);
+            while !evidence
+                .refresh_catalog(&mut work, crate::model::now_ms())
+                .unwrap()
+            {}
+            drop(work);
+            evidence.retire();
         }
         fn body(&self, query: &str) -> (u16, Value) {
             // Projection assertions observe the exact publication under test.
@@ -2264,9 +2291,7 @@ mod tests {
             lines.push_str(&format!("{}\n{}\n", json!({"type":"assistant","sessionId":"faults","uuid":format!("call-{index}"),"timestamp":"2026-10-01T00:00:01Z","message":{"role":"assistant","content":[{"type":"tool_use","id":format!("tool-{index}"),"name":"Bash","input":{"command":"synthetic failed call"}}]}}), json!({"type":"user","sessionId":"faults","uuid":format!("reply-{index}"),"timestamp":"2026-10-01T00:00:02Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":format!("tool-{index}"),"is_error":true,"content":"failed synthetic output"}]}})));
         }
         fs::write(&path, lines).unwrap();
-        let core = ViewerCore::new(fixture.options.clone());
-        core.warm().unwrap();
-        core.close();
+        fixture.publish_existing();
         fs::remove_file(path).unwrap();
         let query = "sid=faults&scope=retained_history&kind=errors&limit=100";
         let response = crate::session_annotations(&fixture.options, "source", query);
@@ -2503,9 +2528,7 @@ mod tests {
         let mut bytes = complete.clone();
         bytes.extend_from_slice(b"{\"type\":\"user\"");
         fs::write(&native, &bytes).unwrap();
-        let core = ViewerCore::new(fixture.options.clone());
-        core.warm().unwrap();
-        core.close();
+        fixture.publish_existing();
         let proof =
             session_source_proof(&fixture.options, "claude", "projects/project/partial.jsonl")
                 .unwrap()
@@ -2674,9 +2697,7 @@ mod tests {
         connection
             .execute("UPDATE meta SET value='0' WHERE key='cache_version'", [])
             .unwrap();
-        let core = ViewerCore::new(fixture.options.clone());
-        core.warm().unwrap();
-        core.close();
+        fixture.publish_existing();
         let retained = crate::source_projection_ready(&fixture.options, "claude", relative)
             .unwrap()
             .unwrap();
@@ -2684,9 +2705,7 @@ mod tests {
         assert_eq!(before.source, retained.source);
         assert_eq!(before.projection_generation, retained.projection_generation);
         fixture.source("session-00000");
-        let core = ViewerCore::new(fixture.options.clone());
-        core.warm().unwrap();
-        core.close();
+        fixture.publish_existing();
         let current = crate::source_projection_ready(&fixture.options, "claude", relative)
             .unwrap()
             .unwrap();
@@ -3379,11 +3398,9 @@ mod tests {
         assert!(crate::native_field::read_source_record(original, 0, None).is_none());
         fs::remove_file(&path).unwrap();
         drop(connection);
-        // A closed/reopened background model retires the native index. History
+        // A reopened native producer retires the missing source index. History
         // metadata and immutable native recipe generation must survive it.
-        let reopened = ViewerCore::new(fixture.options.clone());
-        reopened.warm().unwrap();
-        reopened.close();
+        fixture.publish_existing();
         let retained = crate::source_projection_ready(
             &fixture.options,
             "claude",
@@ -4106,9 +4123,7 @@ mod tests {
         let range: Value = serde_json::from_slice(&range.body).unwrap();
         assert_eq!(range["freshness"]["state"], "incomplete");
         assert!(!range.to_string().contains("rewritten prompt"));
-        let core = ViewerCore::new(fixture.options.clone());
-        core.warm().unwrap();
-        core.close();
+        fixture.publish_existing();
         let fresh = crate::session_transcript_range(
             &fixture.options,
             "source",
@@ -4205,9 +4220,7 @@ mod tests {
         // An append/republication moves the generation; the old page cannot
         // silently select a changed logical or source snapshot.
         fixture.source("new-session");
-        let core = ViewerCore::new(fixture.options.clone());
-        core.warm().unwrap();
-        core.close();
+        fixture.publish_existing();
         let (status, stale) = fixture.body(&cursor_query(&first["next_cursor"]));
         assert_eq!(status, 409);
         assert_eq!(stale["error"]["code"], "stale_cursor");

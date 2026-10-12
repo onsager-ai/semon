@@ -5137,6 +5137,11 @@ mod tests {
             Some("second-key")
         );
         assert_eq!(core.session_machine_key("missing").unwrap(), None);
+        assert!(
+            core.machine_views()
+                .iter()
+                .all(|view| view.shown_built().is_none())
+        );
         let identity = core
             .session_view_identity("first-session")
             .unwrap()
@@ -5159,8 +5164,121 @@ mod tests {
             ambiguous.session_machine_key("first-session").unwrap(),
             None
         );
+        assert!(
+            ambiguous
+                .machine_views()
+                .iter()
+                .all(|view| view.shown_built().is_none())
+        );
         core.close();
         assert_eq!(core.session_machine_key("first-session").unwrap(), None);
+    }
+
+    #[test]
+    fn published_control_ownership_reads_only_selected_indexes_and_no_models() {
+        for unrelated in [0, 256] {
+            let first = machine("same-host", "selected");
+            let second = machine("same-host", "peer");
+            for n in 0..unrelated {
+                let id = format!("unrelated-{n}");
+                second.claude(
+                    &id,
+                    &[serde_json::json!({
+                        "type":"user", "sessionId":id, "uuid":id,
+                        "timestamp":"2026-10-01T00:00:00Z",
+                        "message":{"role":"user","content":"unrelated evidence"}
+                    })],
+                );
+            }
+            let core = ViewerCore::with_machines(vec![
+                ("first-key".into(), first.options.clone()),
+                ("second-key".into(), second.options.clone()),
+            ]);
+            for view in core.machine_views() {
+                let mut work = lock(&view.evidence.work);
+                while !view
+                    .evidence
+                    .refresh_catalog(&mut work, model::now_ms())
+                    .unwrap()
+                {}
+            }
+            let before = crate::events::FILE_READS.with(std::cell::Cell::get);
+            let builds = crate::model::BUILDS.with(std::cell::Cell::get);
+            assert_eq!(
+                core.session_machine_key("selected").unwrap().as_deref(),
+                Some("first-key")
+            );
+            assert_eq!(
+                core.session_machine_key("peer").unwrap().as_deref(),
+                Some("second-key")
+            );
+            assert_eq!(core.session_machine_key("missing").unwrap(), None);
+            let loads = crate::events::FILE_READS.with(std::cell::Cell::get) - before;
+            eprintln!("published control ownership unrelated={unrelated} index_loads={loads}");
+            // One index per selected session proves its role/sidecar remains
+            // current. The peer's unrelated indexes never join that proof.
+            assert_eq!(loads, 2);
+            assert_eq!(crate::model::BUILDS.with(std::cell::Cell::get), builds);
+            assert!(
+                core.machine_views()
+                    .iter()
+                    .all(|view| view.shown_built().is_none())
+            );
+
+            let connection =
+                rusqlite::Connection::open(EventCache::path(&first.options.cache)).unwrap();
+            connection
+                .execute(
+                    "UPDATE session_catalog SET lifecycle='retained',metadata=json_set(metadata,'$.lifecycle','retained') WHERE session_key='selected'",
+                    [],
+                )
+                .unwrap();
+            assert_eq!(
+                core.session_machine_key("selected").unwrap(),
+                None,
+                "retained history cannot select a writable current source"
+            );
+        }
+    }
+
+    #[test]
+    fn partial_control_ownership_cannot_hide_a_duplicate_native_session() {
+        let first = machine("same-host", "selected");
+        let second = machine("same-host", "peer");
+        let core = ViewerCore::with_machines(vec![
+            ("first-key".into(), first.options.clone()),
+            ("second-key".into(), second.options.clone()),
+        ]);
+        for view in core.machine_views() {
+            let mut work = lock(&view.evidence.work);
+            while !view
+                .evidence
+                .refresh_catalog(&mut work, model::now_ms())
+                .unwrap()
+            {}
+        }
+        second.claude(
+            "selected",
+            &[serde_json::json!({
+                "type":"user", "sessionId":"selected", "uuid":"duplicate",
+                "timestamp":"2026-10-01T00:00:00Z",
+                "message":{"role":"user","content":"a newly discovered duplicate"}
+            })],
+        );
+        let connection =
+            rusqlite::Connection::open(EventCache::path(&second.options.cache)).unwrap();
+        connection
+            .execute(
+                "UPDATE meta SET value='partial' WHERE key='catalog_completeness'",
+                [],
+            )
+            .unwrap();
+        assert_eq!(core.session_machine_key("selected").unwrap(), None);
+        assert!(
+            core.machine_views()
+                .iter()
+                .all(|view| view.shown_built().is_none())
+        );
     }
 
     #[test]
