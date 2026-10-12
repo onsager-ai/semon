@@ -535,26 +535,9 @@ pub(crate) fn local_query_target(
     if sources.is_empty() {
         return Ok(Some(key));
     }
-    let ids = selected
-        .rows
-        .iter()
-        .flat_map(|row| row.native_ids.iter().cloned())
-        .collect();
-    let cache = match EventCache::from_selected(&tx, &sources, &ids) {
-        Ok(cache) => cache,
-        Err(_) => return Ok(None),
-    };
     // Sidecars are independently generation-bound native evidence. A changed
     // sidecar must not lend an old role/name merely because its log is stable.
-    let ready = sources.iter().all(|source| {
-        cache.selected_index(&source.path).is_some_and(|index| {
-            crate::model::current_query_role(source, &index)
-                && index
-                    .claude_sidecar
-                    .as_ref()
-                    .is_none_or(|sidecar| sidecar.current(&source.path))
-        })
-    });
+    let ready = EventCache::selected_roles_current(&tx, &sources).unwrap_or(false);
     Ok(ready.then_some(key))
 }
 

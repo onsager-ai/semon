@@ -459,6 +459,44 @@ pub(super) fn read_selected(
     Ok(loaded)
 }
 
+/// Read only the generation-bound role proof needed for current ownership.
+/// The caller holds the same read transaction as the selected Catalog rows.
+pub(super) fn selected_roles_current(
+    connection: &Connection,
+    sources: &[crate::model::summary::CatalogSource],
+) -> rusqlite::Result<bool> {
+    if !current(connection)? {
+        return Ok(false);
+    }
+    let mut metadata = connection.prepare(NATIVE_METADATA_VALUE)?;
+    for source in sources {
+        let path = source.path.to_str().ok_or(rusqlite::Error::InvalidQuery)?;
+        let Some((_, ledger)) = ledger_row(connection, path)? else {
+            return Ok(false);
+        };
+        let mut expected = ledger.source(&source.path, &source.native_id);
+        expected.native_role = source.native_role.clone();
+        if expected != *source {
+            return Ok(false);
+        }
+        let sidecar = if crate::native_sidecar::agent_path(&source.path) {
+            let Some(sidecar) = read_claude_sidecar(&mut metadata, path, &ledger)? else {
+                return Ok(false);
+            };
+            if !sidecar.current(&source.path) {
+                return Ok(false);
+            }
+            Some(sidecar)
+        } else {
+            None
+        };
+        if !crate::model::current_query_role(source, sidecar.as_ref()) {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
 /// The `meta` key recording when a retired JSON event cache that couldn't
 /// be read was set aside (epoch ms). A readable one needs no marker: it is
 /// imported whenever it is found, and removed.
@@ -4034,6 +4072,100 @@ mod tests {
             drop(store);
             fs::remove_dir_all(root).unwrap();
         }
+    }
+
+    #[test]
+    fn selected_role_proofs_fence_ledger_sidecar_and_parser_without_event_loads() {
+        let root = scratch("selected-role-proof");
+        let (mut store, _) = opened(&root.join("index.sqlite3"));
+        let path = root.join("subagents/agent-proof.jsonl");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, "").unwrap();
+        let sidecar_path = path.with_extension("meta.json");
+        fs::write(
+            &sidecar_path,
+            r#"{"description":"original","toolUseId":"launch"}"#,
+        )
+        .unwrap();
+        let sidecar = crate::native_sidecar::ClaudeSidecar::observe(&path, None)
+            .unwrap()
+            .unwrap();
+        let original = ledger(1);
+        let path_text = path.to_str().unwrap();
+        store
+            .write_one(
+                path_text,
+                None,
+                None,
+                &original,
+                &FileIndex {
+                    claude_sidecar: Some(sidecar),
+                    ..FileIndex::default()
+                },
+            )
+            .unwrap();
+        let mut source = original.source(&path, "proof");
+        source.native_role = Some(serde_json::json!({"Agent":{
+            "parent":"parent", "tool_use_id":"launch", "label":"original",
+            "model":null, "cwd":null, "branch":null
+        }}));
+        let reads = crate::events::FILE_READS.with(std::cell::Cell::get);
+        let qualified = |source: &crate::model::summary::CatalogSource| {
+            selected_roles_current(&store.connection, std::slice::from_ref(source)).unwrap()
+        };
+        assert!(qualified(&source));
+        for field in 0..8 {
+            let mut changed = source.clone();
+            match field {
+                0 => changed.dev ^= 1,
+                1 => changed.ino ^= 1,
+                2 => changed.size += 1,
+                3 => changed.modified_ns ^= 1,
+                4 => changed.changed_ns = None,
+                5 => changed.offset += 1,
+                6 => changed.prefix_sha256[0] ^= 1,
+                _ => changed.tail_sha256[0] ^= 1,
+            }
+            assert!(
+                !qualified(&changed),
+                "ledger field {field} must remain bound"
+            );
+        }
+        let mut changed = source.clone();
+        changed.native_role.as_mut().unwrap()["Agent"]["label"] = serde_json::json!("different");
+        assert!(!qualified(&changed));
+        changed.native_role = None;
+        assert!(!qualified(&changed));
+        fs::write(&sidecar_path, r#"{"description":"changed independently"}"#).unwrap();
+        assert!(!qualified(&source));
+        fs::remove_file(&sidecar_path).unwrap();
+        assert!(
+            !qualified(&source),
+            "present sidecar cannot become absent silently"
+        );
+        let mut top = original.source(&path.with_file_name("top.jsonl"), "top");
+        store
+            .write_one(
+                top.path.to_str().unwrap(),
+                None,
+                None,
+                &original,
+                &FileIndex::default(),
+            )
+            .unwrap();
+        top.native_role = Some(serde_json::json!({"Top":{"slug":"project"}}));
+        assert!(selected_roles_current(&store.connection, &[top.clone()]).unwrap());
+        store
+            .connection
+            .execute(
+                "UPDATE meta SET value=?1 WHERE key='cache_version'",
+                [(CACHE_VERSION + 1).to_string()],
+            )
+            .unwrap();
+        assert!(!selected_roles_current(&store.connection, &[top]).unwrap());
+        assert_eq!(crate::events::FILE_READS.with(std::cell::Cell::get), reads);
+        drop(store);
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

@@ -1503,7 +1503,10 @@ fn verify_sidecars(files: &[SourceFile]) -> io::Result<()> {
 /// A catalog's recorded native role must still match independently indexed
 /// sidecar evidence. Another producer may refresh that evidence before it
 /// republishes the catalog, leaving the log's own generation unchanged.
-pub(crate) fn current_query_role(source: &summary::CatalogSource, index: &FileIndex) -> bool {
+pub(crate) fn current_query_role(
+    source: &summary::CatalogSource,
+    sidecar: Option<&crate::native_sidecar::ClaudeSidecar>,
+) -> bool {
     let Some(role) = source
         .native_role
         .as_ref()
@@ -1514,9 +1517,7 @@ pub(crate) fn current_query_role(source: &summary::CatalogSource, index: &FileIn
     let Role::Agent(agent) = role else {
         return true;
     };
-    let metadata = index
-        .claude_sidecar
-        .as_ref()
+    let metadata = sidecar
         .map(|sidecar| sidecar.metadata.clone())
         .unwrap_or_default();
     agent.tool_use_id == metadata.tool_use_id
