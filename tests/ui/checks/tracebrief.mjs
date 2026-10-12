@@ -4,8 +4,13 @@ import { served, data, goto, closePage, overflow } from '../lib.mjs';
 
 export default async function tracebrief(browser) {
   const D = await data(),
-    turn = D.turns.find((turn) => turn.sid === 'harbor' && turn.sent.length);
+    turn = D.turns.find((turn) => turn.sid === 'harbor' && turn.sent.length),
+    result = D.H.find(
+      (edge) => edge.from === 'principal' && edge.kind === 'toyou' && edge.ask === 'result',
+    ),
+    resultTurn = D.turns.find((turn) => turn.sid === 'principal' && turn.sent.includes(result?.id));
   assert.ok(turn);
+  assert.ok(result?.brief && resultTurn, 'recorded closing-result fixture');
   for (const width of [390, 820, 1280])
     for (const dark of [false, true]) {
       const page = await served(browser, {
@@ -64,6 +69,18 @@ export default async function tracebrief(browser) {
         assert.notEqual(after.brief.color, after.accent);
         await more.click();
         assert.equal((await style()).open, false);
+        await goto(page, { v: 'trace', sid: resultTurn.sid, turn: resultTurn.id }, D);
+        const closing = page.locator(`.hop[data-h="${result.id}"] > .body > .brief`);
+        await closing.waitFor();
+        assert.match(
+          await page.locator('.hop.k-root .meta').textContent(),
+          /Sent you a result/,
+          'Trace exposed an internal turn-end code instead of its recorded outcome',
+        );
+        assert.ok(
+          (await closing.textContent()).includes(result.brief),
+          'Trace omitted the qualified native closing reply',
+        );
         assert.ok(
           previews.length &&
             previews.every(

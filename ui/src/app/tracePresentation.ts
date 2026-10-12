@@ -250,10 +250,33 @@ export function renderCausalTrace(
         }
       : undefined;
   };
+  const endLabel = (turn: Turn) => {
+    if (turn.end?.why === 'toyou') {
+      const edge = [...turn.sent].reverse().find((edge) => edge.kind === 'toyou');
+      if (edge?.kind !== 'toyou') return 'Recorded turn';
+      if (edge.ask === 'result') return 'Sent you a result';
+      if (edge.status === 'wait') return 'Waiting on you';
+      if (edge.declined) return 'You declined';
+      return edge.answer?.length ? 'You answered' : 'Asked you';
+    }
+    const labels: Record<string, string> = {
+      permission: 'Waiting for permission',
+      input: 'Waiting for your input',
+      working: 'Working',
+      failed: 'Failed',
+      failed_step: 'A step failed',
+      unfinished_step: 'Step result not recorded',
+      handoff_failed: 'Handoff failed',
+      returned: 'Returned',
+      replied: 'Replied',
+      no_reply: 'No reply recorded',
+    };
+    return labels[turn.end?.why ?? ''] ?? 'Recorded turn';
+  };
   const meta = (turn: Turn) => ({
     state: turn.end?.st ?? 'done',
     stateLabel: STATE[turn.end?.st ?? 'done'] ?? 'Recorded',
-    text: turn.end?.why ?? 'Recorded turn',
+    text: endLabel(turn),
     session: turn.sid,
     turn: turn.id,
     name: data.sessions[turn.sid]?.name,
@@ -315,7 +338,7 @@ export function renderCausalTrace(
           sessionPart(edge.to, child?.id),
         ],
         time: clock(edge.at, now),
-        brief: edge.kind === 'toyou' && edge.ask === 'result' ? undefined : edge.brief || undefined,
+        brief: edge.brief || undefined,
         answers: edge.kind === 'toyou' && Array.isArray(edge.answer) ? edge.answer : undefined,
         result: edge.kind === 'toyou' && edge.ask === 'result' ? undefined : edge.result,
         meta: child
