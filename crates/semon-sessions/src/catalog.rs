@@ -755,7 +755,11 @@ fn read_range(
     Ok(found)
 }
 
-fn source_relative(options: &Options, harness: &str, source: &CatalogSource) -> Option<String> {
+pub(crate) fn source_relative(
+    options: &Options,
+    harness: &str,
+    source: &CatalogSource,
+) -> Option<String> {
     let home = match harness {
         "claude" => &options.claude_home,
         "codex" => &options.codex_home,

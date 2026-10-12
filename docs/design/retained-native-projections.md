@@ -107,3 +107,7 @@ existing authorized selected producer publishes those facts after qualifying the
 whole source closure. Readers check source-vector agreement and recheck the selected
 metadata witnesses after preview I/O. Incomplete, changed or over-budget observations
 return unavailable, rather than reporting a current fragment as complete history.
+
+Metadata Query reads reject current and retained source vectors outside the
+configured, allowlisted native roots. A matching runtime digest or retained
+publication does not grant authority to another source tree.

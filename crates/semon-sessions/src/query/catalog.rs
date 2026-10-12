@@ -279,6 +279,16 @@ fn read(options: &Options, now: i64, bytes_left: &mut usize) -> Result<Part, Que
         if row.key != key {
             return Err(unavailable("Catalog metadata identity changed"));
         }
+        if row.sources.is_empty()
+            || row.sources.len() > 64
+            || row.sources.iter().any(|source| {
+                crate::catalog::source_relative(options, &row.harness, source).is_none()
+            })
+        {
+            return Err(unavailable(
+                "Catalog sources are outside configured native authority",
+            ));
+        }
         let saved = row
             .query
             .ok_or_else(|| unavailable("Exact Catalog query facts are unavailable"))?;
