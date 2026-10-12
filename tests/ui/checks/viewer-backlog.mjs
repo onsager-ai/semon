@@ -39,7 +39,7 @@ export default async function viewerBacklog(browser) {
       await ready(page, 'sessions');
       assert.equal(await page.locator('#sq').inputValue(), '');
       await page.waitForTimeout(100);
-      const rows = await page.locator('[data-session-row="list"]').evaluateAll((rows) =>
+      const rows = await page.locator('[data-session-row="list"]:not(.child)').evaluateAll((rows) =>
         rows.map((row) => {
           const meta = row.querySelector('.session-row-meta');
           return {
@@ -56,6 +56,31 @@ export default async function viewerBacklog(browser) {
         rows.length > 0 &&
           rows.every((x) => x.main && x.model && x.fits && x.items.every((v) => !v.cut)),
         size + ': metadata must drop complete values',
+      );
+      const children = await page.locator('[data-session-row="list"].child').evaluateAll((rows) =>
+        rows.map((row) => ({
+          main: !!row.querySelector('.session-row-main'),
+          name: row.querySelector('.nm')?.textContent,
+          status: row.querySelector('.dot')?.getAttribute('aria-label'),
+          identity: row.getAttribute('data-id'),
+          parent: !!row.closest('.kids-wrap')?.querySelector(':scope > .nrow:not(.child)'),
+          metadata: !!row.querySelector('.session-row-meta'),
+          fits: row.scrollWidth <= row.clientWidth + 1,
+        })),
+      );
+      assert(
+        children.length > 0 &&
+          children.every(
+            (row) =>
+              row.main &&
+              row.name &&
+              row.status &&
+              row.identity &&
+              row.parent &&
+              !row.metadata &&
+              row.fits,
+          ),
+        size + ': compact native children retain names, status and canonical navigation',
       );
       assert(
         (await page.locator('#lanes [data-session-row="compact"] .session-row-main').count()) > 0,
@@ -202,9 +227,12 @@ export default async function viewerBacklog(browser) {
       if (response.status() !== 200) return route.fulfill({ response });
       const catalog = await response.json();
       if (!new URL(route.request().url()).searchParams.has('sid')) {
-        versions.splice(0, versions.length, ...catalog.items.slice(0, 2).map((item) => item.key));
-        catalog.items[0].model = 'gpt-6-sol';
-        catalog.items[1].model = 'gpt-6.1-sol';
+        const keys = new Set(catalog.items.map((item) => item.key));
+        const roots = catalog.items.filter((item) => !item.parent || !keys.has(item.parent));
+        assert(roots.length >= 2, 'fixture needs two root model labels');
+        versions.splice(0, versions.length, ...roots.slice(0, 2).map((item) => item.key));
+        roots[0].model = 'gpt-6-sol';
+        roots[1].model = 'gpt-6.1-sol';
       }
       await route.fulfill({ response, json: catalog });
     });

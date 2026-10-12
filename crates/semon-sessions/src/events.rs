@@ -1166,6 +1166,16 @@ impl EventCache {
             .map(|file| Arc::clone(&file.index))
     }
 
+    /// Current ownership needs ledger and independent role evidence only.
+    /// Keep this inside the caller's Catalog snapshot without loading events,
+    /// transcript slots, byte-proof pages or unrelated source metadata.
+    pub(crate) fn selected_roles_current(
+        connection: &rusqlite::Connection,
+        sources: &[crate::model::summary::CatalogSource],
+    ) -> rusqlite::Result<bool> {
+        store::selected_roles_current(connection, sources)
+    }
+
     /// The shared Session Event Index. Preserve the configured cache stem:
     /// `sessions-index.json` gives `sessions-index.sqlite3`. The retired tree
     /// JSON file is left untouched; tree and focused reads use this store.

@@ -4049,7 +4049,7 @@ mod tests {
     }
 
     #[test]
-    fn published_control_ownership_reads_only_selected_indexes_and_no_models() {
+    fn published_control_ownership_reads_only_selected_role_metadata_and_no_models() {
         for unrelated in [0, 256] {
             let first = machine("same-host", "selected");
             let second = machine("same-host", "peer");
@@ -4089,9 +4089,9 @@ mod tests {
             assert_eq!(core.session_machine_key("missing").unwrap(), None);
             let loads = crate::events::FILE_READS.with(std::cell::Cell::get) - before;
             eprintln!("published control ownership unrelated={unrelated} index_loads={loads}");
-            // One index per selected session proves its role/sidecar remains
-            // current. The peer's unrelated indexes never join that proof.
-            assert_eq!(loads, 2);
+            // Generation-bound ledgers and sidecar metadata qualify ownership
+            // without any full event-index loads, including the selected one.
+            assert_eq!(loads, 0);
             assert_eq!(crate::model::BUILDS.with(std::cell::Cell::get), builds);
 
             let connection =
