@@ -89,9 +89,9 @@ pub(crate) fn publish(
 ) -> rusqlite::Result<()> {
     let text = serde_json::to_string(summary)
         .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
-    let changed = tx.execute("INSERT INTO session_overview VALUES(?1,?2,?3,?4) ON CONFLICT(session_key) DO UPDATE SET last_ms=excluded.last_ms,state=excluded.state,summary=excluded.summary WHERE session_overview.summary IS NOT excluded.summary",params![key,last,summary.home["state"].as_str().unwrap_or("off"),text])?;
+    let changed = tx.prepare_cached("INSERT INTO session_overview VALUES(?1,?2,?3,?4) ON CONFLICT(session_key) DO UPDATE SET last_ms=excluded.last_ms,state=excluded.state,summary=excluded.summary WHERE session_overview.summary IS NOT excluded.summary")?.execute(params![key,last,summary.home["state"].as_str().unwrap_or("off"),text])?;
     if changed > 0 {
-        tx.execute("INSERT INTO meta(key,value) VALUES('overview_generation','1') ON CONFLICT(key) DO UPDATE SET value=CAST(CAST(value AS INTEGER)+1 AS TEXT)", [])?;
+        tx.prepare_cached("INSERT INTO meta(key,value) VALUES('overview_generation','1') ON CONFLICT(key) DO UPDATE SET value=CAST(CAST(value AS INTEGER)+1 AS TEXT)")?.execute([])?;
     }
     Ok(())
 }
@@ -136,15 +136,11 @@ pub(crate) fn publish_current(
                     content_generation(&prior),
                 )?;
             }
-            tx.execute(
-                "DELETE FROM meta WHERE key=?1",
-                [format!("overview_needed:{}", row.key)],
-            )?;
+            tx.prepare_cached("DELETE FROM meta WHERE key=?1")?
+                .execute([format!("overview_needed:{}", row.key)])?;
         } else {
-            tx.execute(
-                "INSERT OR REPLACE INTO meta(key,value) VALUES(?1,'1')",
-                [format!("overview_needed:{}", row.key)],
-            )?;
+            tx.prepare_cached("INSERT OR REPLACE INTO meta(key,value) VALUES(?1,'1')")?
+                .execute([format!("overview_needed:{}", row.key)])?;
         }
         return Ok(());
     }
@@ -154,10 +150,8 @@ pub(crate) fn publish_current(
     if let Some(summary) = &row.overview {
         publish(tx, &row.key, row.last.unwrap_or(0), summary)?;
     }
-    tx.execute(
-        "DELETE FROM meta WHERE key=?1",
-        [format!("overview_needed:{}", row.key)],
-    )?;
+    tx.prepare_cached("DELETE FROM meta WHERE key=?1")?
+        .execute([format!("overview_needed:{}", row.key)])?;
     Ok(())
 }
 

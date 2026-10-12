@@ -187,16 +187,17 @@ fn insert_fields(
     complete: bool,
     maintain_counts: bool,
 ) -> rusqlite::Result<()> {
-    transaction.execute("INSERT INTO session_search_documents(read_scope,session_key,fields,complete) VALUES(?1,?2,?3,?4)",params![scope,row.key,encoded,complete])?;
+    transaction.prepare_cached("INSERT INTO session_search_documents(read_scope,session_key,fields,complete) VALUES(?1,?2,?3,?4)")?.execute(params![scope,row.key,encoded,complete])?;
     if !complete {
-        transaction.execute(
-            "UPDATE session_search_coverage SET incomplete=incomplete+1 WHERE read_scope=?1",
-            [scope],
-        )?;
+        transaction
+            .prepare_cached(
+                "UPDATE session_search_coverage SET incomplete=incomplete+1 WHERE read_scope=?1",
+            )?
+            .execute([scope])?;
     }
     if complete {
-        let mut posting = transaction.prepare("INSERT INTO session_search_postings(read_scope,session_key,gram,last_ms) VALUES(?1,?2,?3,?4)")?;
-        let mut count = maintain_counts.then(|| transaction.prepare("INSERT INTO session_search_counts(read_scope,gram,members) VALUES(?1,?2,1) ON CONFLICT(read_scope,gram) DO UPDATE SET members=members+1")).transpose()?;
+        let mut posting = transaction.prepare_cached("INSERT INTO session_search_postings(read_scope,session_key,gram,last_ms) VALUES(?1,?2,?3,?4)")?;
+        let mut count = maintain_counts.then(|| transaction.prepare_cached("INSERT INTO session_search_counts(read_scope,gram,members) VALUES(?1,?2,1) ON CONFLICT(read_scope,gram) DO UPDATE SET members=members+1")).transpose()?;
         for gram in grams {
             posting.execute(params![scope, row.key, gram, row.last.unwrap_or(0)])?;
             if let Some(count) = &mut count {
