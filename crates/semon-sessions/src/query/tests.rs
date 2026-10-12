@@ -714,19 +714,19 @@ fn query_source_paging_preserves_large_prompts_and_cached_image_ranges() {
     assert!(raw.len() as u64 > tx::LINE_MAX);
     home.write("claude/projects/-work-proj/images.jsonl", &raw);
     let sources = admitted(home.options.clone());
-    let core = Arc::new(ViewerCore::from_sources(sources.clone()));
-    let legacy = core.respond("GET", "/api/tx", "sid=images", None);
-    assert_eq!(legacy.status, 200);
-    let mut expected: Value = serde_json::from_slice(&legacy.body).unwrap();
-    expected["window_start"] = Value::Null;
+    // Independently captured from the retired served pager at 3b2e549.
+    // Pin both range versions and the full five-tool transcript response.
+    let expected = json!({"sid":"images","from":0,"to":1,"total":1,"calls":0,"errors":0,
+        "entries":[{"k":"u","text":"Inspect both images","img":[
+            {"b":1,"type":"image/png","size":4194304,"v":"dadd81fa9dd82382","o":0},
+            {"b":2,"type":"image/png","size":4194304,"v":"dadd81fa9dd82382","o":0}
+        ],"turn":"images:images:0"}],"window_start":null});
     assert_eq!(expected["entries"][0]["img"].as_array().unwrap().len(), 2);
     let mut query = Query::from_sources(sources);
     let before = crate::model::COMPAT_BUILDS.with(|count| count.get());
     let actual = query
         .call_at("read_transcript", &json!({"id":"images"}), NOW)
         .unwrap();
-    // The served pager uses wall time only for an unfinished background tool;
-    // this fixed prompt fixture has no such entries.
     assert_eq!(actual, expected);
     assert_eq!(
         crate::model::COMPAT_BUILDS.with(|count| count.get()),
@@ -882,12 +882,6 @@ impl Home {
     fn query(&self) -> Query {
         Query::new(self.options.clone())
     }
-
-    /// `--model-json` of this home at NOW: the reference the tools must
-    /// agree with.
-    fn model(&self) -> Value {
-        serde_json::from_str(&crate::model_json_at(&self.options, NOW).unwrap()).unwrap()
-    }
 }
 
 impl Drop for Home {
@@ -1029,7 +1023,7 @@ fn fixture() -> Home {
 }
 
 /// The open question's handoff id and each session's first turn id, from
-/// the model: they are hashes of source ids.
+/// independent captured evidence: they are hashes of source ids.
 fn question_id(model: &Value) -> String {
     model["handoffs"]
         .as_array()
@@ -1112,7 +1106,7 @@ fn failure(query: &mut Query, tool: &str, args: Value) -> &'static str {
 #[test]
 fn list_sessions_summarizes_every_session_newest_first() {
     let home = fixture();
-    let question = question_id(&home.model());
+    let question = question_id(&fixture_relation_reference());
     let mut query = home.query();
     let all = call(&mut query, "list_sessions", json!({}));
     let order = ["cx", "done", "crashed", "asker", "scan", "lead"];
@@ -1166,9 +1160,9 @@ fn list_sessions_summarizes_every_session_newest_first() {
 }
 
 #[test]
-fn get_session_adds_busy_turns_and_handoffs_from_the_model() {
+fn get_session_adds_busy_turns_and_handoffs_from_native_evidence() {
     let home = fixture();
-    let model = home.model();
+    let model = fixture_relation_reference();
     let question = question_id(&model);
     let mut query = home.query();
     let got = call(&mut query, "get_session", json!({"id": "asker"}));
@@ -1195,7 +1189,7 @@ fn get_session_adds_busy_turns_and_handoffs_from_the_model() {
         got,
         json!({"now": NOW, "window_start": null, "session": expected})
     );
-    // The model's own turn and handoffs: your message, then the question.
+    // The independently captured turn and handoffs: your message, then the question.
     assert_eq!(turns.as_array().unwrap().len(), 1);
     assert_eq!(turns[0]["end"]["why"], "toyou");
     let kinds: Vec<&str> = handoffs
@@ -1228,7 +1222,7 @@ fn get_session_adds_busy_turns_and_handoffs_from_the_model() {
 #[test]
 fn read_transcript_pages_as_the_viewer_does() {
     let home = fixture();
-    let model = home.model();
+    let model = fixture_relation_reference();
     let ask = turn_id(&model, "done");
     let mut query = home.query();
     let page = call(&mut query, "read_transcript", json!({"id": "done"}));
@@ -1239,27 +1233,85 @@ fn read_transcript_pages_as_the_viewer_does() {
             {"k": "a", "text": "The design keeps the frontend and replaces the data."},
         ], "window_start": null})
     );
-    // The same page the viewer serves at /api/tx.
-    let core = ViewerCore::new(home.options.clone());
-    for (args, url) in [
-        (json!({"id": "done"}), "sid=done".to_owned()),
-        (json!({"id": "scan"}), "sid=scan".to_owned()),
-        (
-            json!({"id": "done", "after": 1}),
-            "sid=done&after=1".to_owned(),
-        ),
-        (
-            json!({"id": "done", "turn": ask}),
-            format!("sid=done&turn={ask}"),
-        ),
+    let sources = admitted(home.options.clone());
+    let evidence = &sources.machines[0].1;
+    let mut complete = false;
+    {
+        let mut work = evidence.work.lock().unwrap();
+        for _ in 0..16 {
+            if evidence.refresh_catalog(&mut work, NOW).unwrap() {
+                complete = true;
+                break;
+            }
+        }
+    }
+    assert!(
+        complete,
+        "native fixture Catalog publication did not complete"
+    );
+    // Selected Viewer reads expose the same entries and paging positions,
+    // together with generation-bound native provenance.
+    for args in [
+        json!({"id": "done"}),
+        json!({"id": "scan"}),
+        json!({"id": "done", "after": 1}),
+        json!({"id": "done", "turn": ask}),
     ] {
-        let served = core.respond("GET", "/api/tx", &url, None);
+        let ours = call(&mut query, "read_transcript", args.clone());
+        let sid = args["id"].as_str().unwrap();
+        let mut url = format!("sid={sid}&after={}&limit=100", ours["from"]);
+        if let Some(turn) = args["turn"].as_str() {
+            let anchor = crate::session_turn_anchor(
+                &home.options,
+                "fixture",
+                &format!("sid={sid}&turn={turn}"),
+            );
+            assert_eq!(anchor.status, 200);
+            let anchor: Value = serde_json::from_slice(&anchor.body).unwrap();
+            assert_eq!(anchor["slot"], ours["from"]);
+            url.push_str(&format!(
+                "&generation={}",
+                anchor["generation"].as_str().unwrap()
+            ));
+        }
+        let served = crate::session_transcript_range(&home.options, "fixture", &url, None);
         assert_eq!(served.status, 200, "{url}");
         let served: Value = serde_json::from_slice(&served.body).unwrap();
-        let mut ours = call(&mut query, "read_transcript", args);
-        let window = ours.as_object_mut().unwrap().remove("window_start");
-        assert_eq!(window, Some(Value::Null));
-        assert_eq!(ours, served, "{url}");
+        assert_eq!(served["api"], 1);
+        assert_eq!(served["range"]["first"], ours["from"]);
+        assert_eq!(served["range"]["end"], ours["to"]);
+        assert_eq!(served["projection"]["total"], ours["total"]);
+        assert_eq!(served["freshness"]["state"], "cached");
+        let mut entries = served["entries"].clone();
+        for (offset, entry) in entries.as_array_mut().unwrap().iter_mut().enumerate() {
+            assert_eq!(
+                entry["slot"].as_u64().unwrap(),
+                ours["from"].as_u64().unwrap() + offset as u64
+            );
+            assert_eq!(entry["entry_id"].as_str().unwrap().len(), 64);
+            assert!(entry["provenance"].is_object());
+            assert_eq!(entry["freshness"]["state"], "cached");
+            if entry.get("field").is_some() {
+                assert_eq!(entry["field"]["name"], "text");
+                assert_eq!(entry["field"]["complete"], true);
+                assert_eq!(entry["clipped"], false);
+                entry.as_object_mut().unwrap().remove("field");
+                entry.as_object_mut().unwrap().remove("clipped");
+            }
+            let expected = &ours["entries"][offset];
+            if expected.get("turn").is_none() {
+                assert_eq!(entry["turn"], turn_id(&model, sid));
+                entry.as_object_mut().unwrap().remove("turn");
+            }
+            if entry["k"] == "h" && sid == "done" {
+                assert_eq!(entry["text"], "Summarize the design doc");
+                entry.as_object_mut().unwrap().remove("text");
+            }
+            for field in ["slot", "observed_at", "freshness", "entry_id", "provenance"] {
+                entry.as_object_mut().unwrap().remove(field);
+            }
+        }
+        assert_eq!(entries, ours["entries"], "{url}");
     }
     let last = call(
         &mut query,
@@ -1308,7 +1360,7 @@ fn read_transcript_pages_as_the_viewer_does() {
 #[test]
 fn find_searches_entries_newest_first_within_its_bounds() {
     let home = fixture();
-    let model = home.model();
+    let model = fixture_relation_reference();
     let (cx, scan) = (turn_id(&model, "cx"), turn_id(&model, "scan"));
     let mut query = home.query();
     let mut found = call(&mut query, "find", json!({"text": "LEXER"}));
@@ -1421,7 +1473,7 @@ fn walk(dir: &std::path::Path) -> Vec<PathBuf> {
 #[test]
 fn stalls_give_one_closed_reason_per_session() {
     let home = fixture();
-    let question = question_id(&home.model());
+    let question = question_id(&fixture_relation_reference());
     let mut query = home.query();
     let stalls = call(&mut query, "stalls", json!({"idle_minutes": 60}));
     let row = |id: &str, reason: &str, last: i64| {
@@ -2601,18 +2653,43 @@ fn local_query_conflicts_and_source_removal_use_native_snapshots() {
     );
 }
 
-/// Frozen responses from the retired production engine, captured before its
-/// removal. These preserve an independent oracle without retaining that engine.
-fn assert_contract_reference(
-    scope: &str,
-    scenario: u64,
-    multiple: bool,
-    tool: &str,
-    args: &Value,
-    actual: Result<Value, QueryError>,
-) {
+/// The fixture's independently captured turns and handoffs, without invoking
+/// full-workspace compatibility preparation to construct expected values.
+fn fixture_relation_reference() -> Value {
+    let rows = contract_reference()["responses"].as_array().unwrap();
+    let captured = |tool: &str, args: Value| -> &Value {
+        let matches: Vec<_> = rows
+            .iter()
+            .filter(|row| {
+                row["scope"] == "scan"
+                    && row["scenario"] == 0
+                    && row["multiple"] == false
+                    && row["tool"] == tool
+                    && row["args"] == args
+            })
+            .collect();
+        assert_eq!(matches.len(), 1, "unique fixture reference: {tool} {args}");
+        &matches[0]["response"]["ok"]
+    };
+    let asker = &captured("get_session", json!({"id": "asker"}))["session"];
+    let mut turns = asker["turns"].as_array().unwrap().clone();
+    for sid in ["cx", "scan"] {
+        turns.extend(
+            captured("get_session", json!({"id": sid}))["session"]["turns"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .cloned(),
+        );
+    }
+    let done = captured("read_transcript", json!({"id": "done", "limit": 1}));
+    turns.push(json!({"sid": "done", "id": done["entries"][0]["turn"]}));
+    json!({"turns": turns, "handoffs": asker["handoffs"]})
+}
+
+fn contract_reference() -> &'static Value {
     static REFERENCE: std::sync::OnceLock<Value> = std::sync::OnceLock::new();
-    let reference = REFERENCE.get_or_init(|| {
+    REFERENCE.get_or_init(|| {
         let reference: Value =
             serde_json::from_str(include_str!("contract-reference.json")).unwrap();
         assert_eq!(reference["format"], "semon.query-contract-reference.v1");
@@ -2623,7 +2700,20 @@ fn assert_contract_reference(
         assert_eq!(reference["clock"], NOW);
         assert_eq!(reference["responses"].as_array().unwrap().len(), 134);
         reference
-    });
+    })
+}
+
+/// Frozen responses from the retired production engine, captured before its
+/// removal. These preserve an independent oracle without retaining that engine.
+fn assert_contract_reference(
+    scope: &str,
+    scenario: u64,
+    multiple: bool,
+    tool: &str,
+    args: &Value,
+    actual: Result<Value, QueryError>,
+) {
+    let reference = contract_reference();
     let rows: Vec<_> = reference["responses"]
         .as_array()
         .unwrap()
