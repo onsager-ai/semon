@@ -138,7 +138,8 @@ export function catalogTranscriptBlocks(
     new Set(context?.turns.map((turn) => turn.id) ?? []),
   );
   const closingBodies = new Map<string, string>(),
-    consumed = new Set<string>();
+    consumed = new Set<string>(),
+    returnedFailures = new Set<string>();
   if (relationshipView)
     for (const item of entries) {
       if (item.entry.k !== 'h') continue;
@@ -308,6 +309,7 @@ export function catalogTranscriptBlocks(
               edge.from === entry.ret!.to &&
               edge.done === entry.ret!.at,
           );
+      if (parent && returned && entry.ret!.failed && entry.turn) returnedFailures.add(entry.turn);
       label(
         parent && returned
           ? 'Returned to ' +
@@ -402,7 +404,10 @@ export function catalogTranscriptBlocks(
     const start = context?.handoffs.find((row) => row.edge.id === descriptor.start)?.edge;
     block.turn.label = descriptor.u || start?.kind === 'ask' ? 'Your message' : 'Recorded turn';
     block.turn.trace = descriptor.sent.length ? descriptor.id : undefined;
-    if (descriptor.end.st === 'err')
+    if (
+      descriptor.end.st === 'err' &&
+      !(descriptor.end.why === 'failed' && returnedFailures.has(block.turn.id))
+    )
       block.turn.error = descriptor.end.why === 'failed' ? 'Failed' : descriptor.end.why;
     if (start && start.kind !== 'ask') {
       const sender = context?.sessions[start.from],

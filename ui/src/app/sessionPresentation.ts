@@ -109,7 +109,7 @@ export function selectedSessionLabels(session: CatalogSession, machine?: string)
       text: STATE[state] ?? 'Recorded history',
       tip: 'Recorded status · ' + (details?.turns ?? 0) + ' turns',
       drop: 0,
-      className: 'state',
+      className: 'state ' + state,
       state,
       stateLabel: STATE[state] ?? 'Recorded history',
     },
