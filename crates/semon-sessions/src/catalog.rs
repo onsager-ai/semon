@@ -1728,6 +1728,12 @@ mod tests {
         let details = &selected["items"][0]["details"];
         assert_eq!(details["turns"], 1);
         assert_eq!(details["copied_usage"], false);
+        assert_eq!(details["tokens_by_model"], json!({}));
+        assert_eq!(details["rate_limits"], Value::Null);
+        assert_eq!(details["lane"], true);
+        assert_eq!(details["role"], false);
+        assert!(details["busy"].is_array());
+        assert_eq!(details["content_generation"].as_str().unwrap().len(), 64);
         assert!(!details.to_string().contains("synthetic prompt"));
         let transcript = crate::session_transcript_range(
             &fixture.options,

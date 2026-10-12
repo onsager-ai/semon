@@ -1150,17 +1150,29 @@ export default async function (browser) {
     await page.getByText('Unique result text for the transcript check.', { exact: true }).waitFor();
     // The overhaul draws a result as an event like any other message to you: who sent it, the text, and the time.
     const result = await page.locator('.turns').evaluate((turns) => {
-      const phrase = 'Unique result text for the transcript check.';
-      const events = [...turns.querySelectorAll('.event')].filter((x) =>
-        x.querySelector('.ev-text')?.textContent.includes(phrase),
+      // Read retained content through the existing geometry adapter. An auto
+      // content-visibility subtree can skip innerText until its next paint.
+      const measured = [...turns.querySelectorAll('.turn')].filter(
+        (turn) => !turn.classList.contains('semon-measuring-turn'),
       );
-      return {
-        phraseCount: turns.innerText.split(phrase).length - 1,
-        events: events.length,
-        eventText: events[0]?.innerText ?? '',
-        hasVerb: /sent you a result/.test(events[0]?.querySelector('.ev-head')?.textContent ?? ''),
-        oldMarkers: turns.querySelectorAll('.result-marker').length,
-      };
+      measured.forEach((turn) => turn.classList.add('semon-measuring-turn'));
+      try {
+        const phrase = 'Unique result text for the transcript check.';
+        const events = [...turns.querySelectorAll('.event')].filter((x) =>
+          x.querySelector('.ev-text')?.textContent.includes(phrase),
+        );
+        return {
+          phraseCount: turns.innerText.split(phrase).length - 1,
+          events: events.length,
+          eventText: events[0]?.innerText ?? '',
+          hasVerb: /sent you a result/.test(
+            events[0]?.querySelector('.ev-head')?.textContent ?? '',
+          ),
+          oldMarkers: turns.querySelectorAll('.result-marker').length,
+        };
+      } finally {
+        measured.forEach((turn) => turn.classList.remove('semon-measuring-turn'));
+      }
     });
     R.resultMarker = result;
     r.expect(

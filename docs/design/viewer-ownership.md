@@ -93,9 +93,11 @@ read-only behavior, native controls and pending approvals keep their existing
 owners. Jump to Bottom belongs to the reading dock and is independent of that
 panel. The New Session native creation composer is a separate product flow.
 
-Standalone Semon retains legitimate ViewerCore consumers: local model/query/MCP
-APIs and native source production. Hub retains explicitly admitted MCP cores and
-their bounded warming/custody lifecycle. Hosted browser content does not consume
+Local CLI and stdio MCP share native Session Query. Hosted focused MCP admits
+authorized native selections with bounded worker/custody lifetime; broad hosted
+queries still require archive-cohort retirement. ViewerCore retains standalone
+native production, the supported CLI tree and compatibility APIs awaiting code
+retirement. Hosted browser content does not consume
 `/api/model`, model deltas or the retired Hub compatibility/control endpoints.
 The former composition, complete-model store, model poller, parallel transcript
 owner and compatibility bootstrap are removed. Pure shared presentation,

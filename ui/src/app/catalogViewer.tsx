@@ -445,6 +445,16 @@ export function createCatalogViewer(
     },
     { passive: true, capture: true },
   );
+  // Keyboard activation and native control clicks also end the opening hold.
+  // Their expansion/navigation owns the resulting reading position.
+  scope.listen(
+    document,
+    'click',
+    () => {
+      pinUntil = 0;
+    },
+    { capture: true },
+  );
   scope.listen(
     document,
     'pointerdown',
@@ -2771,7 +2781,12 @@ export function createCatalogViewer(
       const queued = view.queuedAfter;
       view.queuedAfter = undefined;
       if (!disposed && active === view && queued !== undefined) void loadSelected(view, queued);
-      else if (!disposed && active === view && view.sourceLabel === undefined)
+      else if (
+        !disposed &&
+        active === view &&
+        view.store.selectedPage() &&
+        view.sourceLabel === undefined
+      )
         void observeSelected(view);
     }
   }
@@ -2792,9 +2807,9 @@ export function createCatalogViewer(
       const labelChanged = view.sourceLabel !== next.machine_info.label;
       view.sourceLabel = next.machine_info.label;
       if (
-        !metadata.transcript ||
-        metadata.transcript.generation !== current?.projection.generation ||
-        metadata.transcript.total !== current.projection.total
+        metadata.transcript &&
+        (metadata.transcript.generation !== current?.projection.generation ||
+          metadata.transcript.total !== current?.projection.total)
       )
         await loadSelected(view);
       else if (labelChanged || JSON.stringify(metadata) !== JSON.stringify(view.meta)) {
