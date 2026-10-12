@@ -99,6 +99,8 @@ test('a native result uses its closing reply while preserving every accepted ide
     ['native-0', 'native-1', 'native-2'],
   );
   assert.equal(shown.find((row) => row.kind === 'event').entryKey, 'native-3');
+  assert.equal(shown.find((row) => row.entryKey === 'native-2').representedBy, 'native-3');
+  assert.equal(shown.find((row) => row.entryKey === 'native-1').representedBy, undefined);
   assert.equal(JSON.stringify(accepted), original);
 });
 test('unrelated, filtered, or incomplete result context never consumes a native reply', () => {
@@ -143,6 +145,41 @@ test('unrelated, filtered, or incomplete result context never consumes a native 
     ).filter((row) => row.kind === 'message').length,
     3,
   );
+});
+
+test('unavailable, clipped and long replies remain independently readable', () => {
+  for (const change of [
+    (rows, metadata) => {
+      metadata.state = 'partial';
+    },
+    (rows) => {
+      rows[2].clipped = true;
+    },
+    (rows) => {
+      rows[2].entry.text = 'Long result '.repeat(1000);
+    },
+    (rows) => {
+      rows[2].entry.img = [{ url: '/image' }];
+    },
+  ]) {
+    const rows = entries(),
+      metadata = context();
+    change(rows, metadata);
+    const shown = values(
+      catalogTranscriptBlocks(
+        rows,
+        undefined,
+        event,
+        false,
+        metadata,
+        undefined,
+        'claude',
+        'owner',
+      ),
+    );
+    assert.equal(shown.find((row) => row.entryKey === 'native-2').representedBy, undefined);
+    assert.equal(shown.find((row) => row.entryKey === 'native-2').text, rows[2].entry.text);
+  }
 });
 
 test('only a matching current observation presents an unfinished native call as running', () => {
