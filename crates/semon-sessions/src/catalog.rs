@@ -3763,6 +3763,51 @@ mod tests {
     }
 
     #[test]
+    fn final_masked_thinking_is_pending_only_for_qualified_current_work() {
+        use std::io::Write;
+        for live in [false, true] {
+            let fixture = Fixture::new();
+            let path = fixture.source("thinking-session");
+            writeln!(fs::OpenOptions::new().append(true).open(path).unwrap(), "{}", json!({"type":"assistant","sessionId":"thinking-session","uuid":"thinking","parentUuid":"thinking-session","timestamp":"2026-10-01T00:00:01Z","message":{"role":"assistant","content":[{"type":"thinking","thinking":""}]}})).unwrap();
+            if live {
+                let facts_path = fixture.options.facts.as_ref().unwrap();
+                let mut facts = crate::read_facts(facts_path).unwrap();
+                facts.proc_starts.insert(99, 777);
+                crate::write_facts(facts_path, &facts).unwrap();
+                fs::create_dir_all(fixture.options.claude_home.join("sessions")).unwrap();
+                fs::write(
+                    fixture.options.claude_home.join("sessions/99.json"),
+                    json!({"pid":99,"sessionId":"thinking-session","procStart":777,"status":"busy"}).to_string(),
+                ).unwrap();
+            }
+            fixture.publish(0);
+            let read = |query| {
+                let reply = crate::session_transcript_range(&fixture.options, "local", query, None);
+                assert_eq!(reply.status, 200);
+                serde_json::from_slice::<Value>(&reply.body).unwrap()
+            };
+            let page = read("sid=thinking-session&scope=retained_history&after=0&limit=100");
+            let entry = page["entries"].as_array().unwrap().last().unwrap();
+            assert_eq!(entry["k"], "think");
+            assert_eq!(entry["pending"].as_bool(), live.then_some(true));
+            let earlier = read("sid=thinking-session&scope=retained_history&after=0&limit=1");
+            assert!(earlier["entries"][0].get("pending").is_none());
+            let db = Connection::open(EventCache::path(&fixture.options.cache)).unwrap();
+            db.execute("UPDATE session_catalog SET lifecycle='retained',metadata=json_set(metadata,'$.lifecycle','retained') WHERE session_key='thinking-session'", []).unwrap();
+            let retired = read("sid=thinking-session&scope=retained_history&after=0&limit=100");
+            assert!(
+                retired["entries"]
+                    .as_array()
+                    .unwrap()
+                    .last()
+                    .unwrap()
+                    .get("pending")
+                    .is_none()
+            );
+        }
+    }
+
+    #[test]
     fn native_pending_calls_use_qualified_activity_without_persisting_live_authority() {
         for live in [false, true] {
             let fixture = Fixture::new();

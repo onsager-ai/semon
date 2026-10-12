@@ -1266,6 +1266,15 @@ fn render(
                 .expect("native entry object")
                 .remove("text");
         }
+        if working
+            && absolute + 1 == selection.total
+            && matches!(slot.kind, crate::model::SlotKind::Think)
+            && entry["text"].as_str().is_none_or(str::is_empty)
+            && !field_failed
+            && lines.failures == before
+        {
+            entry["pending"] = json!(true);
+        }
         if matches!(slot.kind, crate::model::SlotKind::Think)
             && selection.identity.harness == "claude"
             && let Some(secs) = crate::tx::thought_secs(&slots, index)
