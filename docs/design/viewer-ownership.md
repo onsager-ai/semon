@@ -51,9 +51,10 @@ reauthorize their exact original generation and remain request-local.
 
 Session-to-machine control binding resolves literal IDs against complete current
 Catalog publications across every configured source, with current role and
-sidecar proofs. Retained history never selects a writable destination. A partial
-publication cannot prove unique ownership; cold/provisional or virtual handoff
-identities use shared native Query derivation, including received-copy policy,
+sidecar proofs. An invalidated source or running observation cannot prove
+absence or uniqueness from an older complete publication. Retained history never
+selects a writable destination. A partial publication cannot prove unique
+ownership; cold/provisional or virtual handoff identities use shared native Query derivation, including received-copy policy,
 rather than preparing a compatibility workspace model. This cold fallback still
 prepares a native cohort and remains a scaling boundary to remove.
 
@@ -70,6 +71,12 @@ native content. A changed projection revalidates accepted ranges through the
 selected reader. Error membership uses the same qualified live/unfinished rule
 as transcript rendering; ending a process or moving a session to retained custody
 invalidates error paging even when no source line changed.
+A reader rejection of a native source generation returns a stale response before
+accepting transcript or expansion content. It cannot replace existing entries
+with blank text under their previous projection proof. Malformed records,
+request budgets and unavailable archive bytes retain explicit incomplete states.
+Home and Analytics versions bind their qualified source publications, including
+stable machine keys; presentation hostnames never supply read authority.
 One application ResizeObserver keeps an opening session at its tail while layout
 settles; user input ends that initial hold. Listener/frame cleanup belongs to the
 application effect lifetime.
@@ -106,10 +113,12 @@ panel. The New Session native creation composer is a separate product flow.
 
 Local CLI and stdio MCP share native Session Query. Hosted focused MCP admits
 authorized native selections with bounded worker/custody lifetime; broad hosted
-queries still require archive-cohort retirement. ViewerCore retains standalone
-native production, the supported CLI tree and compatibility APIs awaiting code
-retirement. Hosted browser content does not consume
-`/api/model`, model deltas or the retired Hub compatibility/control endpoints.
+queries still require archive-cohort retirement. ViewerCore owns standalone
+native routing and refresh coordination, the supported CLI tree, and request
+chrome. It owns no full workspace model, model preparation, transcript body
+cache, raw file lookup cache or compatibility read fallback. `/api/model` and
+the former raw transcript/expansion routes are removed. Hosted browser content
+does not consume model deltas or the retired Hub compatibility/control endpoints.
 The former composition, complete-model store, model poller, parallel transcript
 owner and compatibility bootstrap are removed. Pure shared presentation,
 formatting and causal calculations remain where the canonical reader needs them.

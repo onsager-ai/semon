@@ -1,4 +1,4 @@
-//! Seed deterministic history, then measure full-model and focused first-list
+//! Seed deterministic history, then measure focused native first-list
 //! reads in fresh child processes so seed allocations cannot conceal cold RSS.
 //! cargo run --release --locked -p semon-sessions --example catalog-workload -- 1000 4
 use semon_sessions::{Options, ViewerCore};
@@ -50,7 +50,7 @@ fn read_counters() -> Option<(u64, u64)> {
     Some((field("rchar:")?, field("syscr:")?))
 }
 
-fn first_read(root: &Path, machines: usize, mode: &str) {
+fn first_read(root: &Path, machines: usize) {
     let before = read_counters();
     let started = Instant::now();
     let core = ViewerCore::with_machines(
@@ -58,11 +58,7 @@ fn first_read(root: &Path, machines: usize, mode: &str) {
             .map(|machine| (machine.to_string(), options(root, machine)))
             .collect(),
     );
-    let (path, query) = if mode == "catalog" {
-        ("/api/sessions", "machine=0&limit=60")
-    } else {
-        ("/api/model", "")
-    };
+    let (path, query) = ("/api/sessions", "machine=0&limit=60");
     let reply = core.respond("GET", path, query, None);
     let cold_ms = started.elapsed().as_secs_f64() * 1000.;
     assert_eq!(
@@ -76,13 +72,13 @@ fn first_read(root: &Path, machines: usize, mode: &str) {
         .map(|(before, after)| json!({"rchar":after.0-before.0,"syscr":after.1-before.1}));
     let cold_rss = rss_kib();
     let body: serde_json::Value = serde_json::from_slice(&reply.body).unwrap();
-    if mode == "catalog" {
+    {
         assert_eq!(body["items"].as_array().unwrap().len(), 60);
         assert_eq!(body["items"][0]["key"], "history-0-000000");
         assert_eq!(body["items"][59]["key"], "history-0-000059");
     }
     let mut samples = Vec::new();
-    let warm_samples = if mode == "catalog" { 20 } else { 1 };
+    let warm_samples = 20;
     for _ in 0..warm_samples {
         let started = Instant::now();
         let warm = core.respond("GET", path, query, None);
@@ -92,7 +88,7 @@ fn first_read(root: &Path, machines: usize, mode: &str) {
     samples.sort_by(f64::total_cmp);
     println!(
         "{}",
-        json!({"mode":mode,"machines":machines,"cold_ms":cold_ms,"response_bytes":reply.body.len(),"cold_rss_kib":cold_rss,"cold_read_counters":reads,"warm_p50_ms":samples[warm_samples/2],"warm_p95_ms":samples[warm_samples-1],"warm_rss_kib":rss_kib(),"warm_samples":warm_samples,"scope":"first 60 rows on machine 0"})
+        json!({"mode":"native-catalog","machines":machines,"cold_ms":cold_ms,"response_bytes":reply.body.len(),"cold_rss_kib":cold_rss,"cold_read_counters":reads,"warm_p50_ms":samples[warm_samples/2],"warm_p95_ms":samples[warm_samples-1],"warm_rss_kib":rss_kib(),"warm_samples":warm_samples,"scope":"first 60 rows on machine 0"})
     );
     core.close();
 }
@@ -100,11 +96,7 @@ fn first_read(root: &Path, machines: usize, mode: &str) {
 fn main() -> io::Result<()> {
     let args: Vec<_> = std::env::args().collect();
     if args.get(1).is_some_and(|value| value == "--read") {
-        first_read(
-            Path::new(&args[2]),
-            args[3].parse().expect("machine count"),
-            &args[4],
-        );
+        first_read(Path::new(&args[2]), args[3].parse().expect("machine count"));
         return Ok(());
     }
     let history: usize = args
@@ -131,23 +123,12 @@ fn main() -> io::Result<()> {
             fs::write(projects.join(format!("{id}.jsonl")), records)?;
         }
     }
-    let core = ViewerCore::with_machines(
-        (0..machines)
-            .map(|machine| (machine.to_string(), options(&root, machine)))
-            .collect(),
-    );
-    core.warm()?;
-    core.close();
-    drop(core);
-    for mode in ["model", "catalog"] {
-        let status = Command::new(std::env::current_exe()?)
-            .arg("--read")
-            .arg(&root)
-            .arg(machines.to_string())
-            .arg(mode)
-            .status()?;
-        assert!(status.success(), "{mode} child failed");
-    }
+    let status = Command::new(std::env::current_exe()?)
+        .arg("--read")
+        .arg(&root)
+        .arg(machines.to_string())
+        .status()?;
+    assert!(status.success(), "native Catalog child failed");
     fs::remove_dir_all(root)?;
     Ok(())
 }

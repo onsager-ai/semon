@@ -403,6 +403,7 @@ impl MachineFacts {
     }
 
     /// When the machine was last seen, if its facts say it's offline.
+    #[cfg(test)]
     pub(crate) fn offline_since(&self) -> Option<i64> {
         match self {
             Self::Local => None,

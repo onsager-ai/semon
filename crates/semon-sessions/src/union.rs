@@ -1,17 +1,11 @@
 //! [`ViewerCore`]: the session viewer over one machine's homes or several.
 //!
-//! With one machine it is exactly the single-machine viewer. With several it
-//! serves one model, the union of each machine's own:
-//! - every session keeps the machine it ran on;
-//! - handoffs are never linked across machines (a link is never guessed);
-//!   a stub or an unsent send's stand-in belongs to its machine and is
-//!   keyed `<id>@<machine>`;
-//! - transcripts and entries are answered by the machine that owns the
-//!   session. Session ids are UUIDs, so they don't collide; if two machines
-//!   ever share one, the viewer refuses (409) rather than pick one.
-//!
-//! The same core serves any view across machines: an embedding server's, or
-//! semon's own cross-machine view.
+//! Configured machine keys define source authority. Focused Catalog, Transcript,
+//! Entry, identity and relationship reads use the shared native Event Index.
+//! Cross-machine handoffs stay scoped to their source; duplicate native session
+//! IDs are refused for writable control ownership instead of choosing a machine.
+//! The core owns configuration and refresh scheduling, never a full workspace
+//! model. Native Query reads reuse the same evidence owner.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -19,16 +13,16 @@ use std::{
     sync::{Arc, Condvar, Mutex, PoisonError, RwLock, Weak},
 };
 
-use serde_json::{Map, Value, json};
+use serde_json::{Value, json};
 
 use crate::{
-    Options, analytics,
-    model::{self, Built, MODEL_API, QueryData, Session, Transcript, fnv},
+    Options,
+    model::{self, QueryData, Session, Transcript},
     received::{Listing, ReceivedMachines},
     refresh::RefreshPool,
     viewer::{
-        MachineView, Reading, ViewerReply, decoded, is_named_page, lock, page_parts,
-        percent_encode, query_value, read_lock, write_lock,
+        MachineView, ViewerReply, decoded, is_named_page, lock, page_parts, percent_encode,
+        query_value, read_lock, write_lock,
     },
 };
 
@@ -184,69 +178,37 @@ impl AccountMenu {
     }
 }
 
-/// When a [`ViewerCore`] brings each machine's model up to date with its
-/// logs.
+/// Refresh scheduling for a [`ViewerCore`]'s native evidence and tree reads.
 ///
-/// Outside [`Refresh::OnRead`], a read answers from the last model built,
-/// at once, and machines are checked (and rebuilt when their logs changed)
-/// off the request path by a [`RefreshPool`]'s few threads, shared by every
-/// machine and core that uses the pool: the queue holds each machine once
-/// at most. A machine is rebuilt at most once a second, so the changes of
-/// one second are one rebuild, and it is checked only while it is read: 30 s
-/// after its last read it goes idle, and its next read queues a check at
-/// once. Once a machine's model is built, every read of it answers at once,
-/// never waiting for a rebuild in progress, a late check or failing
-/// rebuilds. A read waits for a build only when there is nothing built to
-/// answer it from: the first model read of a machine, the first V1 tree
-/// read (`/api/tree`, `/api/transcript`), which may wait behind a model
-/// rebuild, and a page URL the built models lack, which is checked against
-/// models brought up to date first. While the pool
-/// keeps up, an answer is at most about 1 s plus one build behind the logs,
-/// and the first read after an idle spell answers from the model before it
-/// (a poll sees the change once the check it queued has rebuilt). When the
-/// pool falls behind (every worker busy), a machine's check waits its turn,
-/// and its answers are as far behind the logs as the pool's queue is.
+/// Catalog demand always runs through the shared bounded producer, including
+/// [`Refresh::OnRead`]. Catalog and selected reads use published generations;
+/// they do not wait for an unrelated workspace preparation. Refresh failures
+/// are reported as retryable refresh metadata while qualified data remains
+/// available. Missing or invalid selected evidence has its own explicit error.
 ///
-/// A background rebuild that fails leaves the last model served, with the
-/// error printed once, and each check tries again; 3 s after rebuilds were
-/// first seen failing, each read answers the error (500) instead, at once,
-/// without waiting for a build, until a build works again. A machine whose
-/// builds hang is not shown as a model that silently stopped either: once
-/// its check is a minute late, or its build has run a minute, each read
-/// answers an error (500) at once. A backlog of ordinary builds never grows
-/// the pool; only when every worker's check has run 5 s may it start
-/// threads past its size, up to twice it, each stopping once nothing is due. The model and the V1 tree fail on their own: a tree
-/// that won't build never turns `/api/model` into an error.
+/// Background work shares a [`RefreshPool`](crate::RefreshPool), with at most
+/// one queued check per machine. Changed observations are spaced by one second;
+/// cold discovery continuations yield behind other due work. Reads keep checks
+/// active for 30 seconds. A normal backlog cannot grow the pool; overflow is
+/// bounded to twice its configured size when every worker has been stuck for
+/// five seconds. Closing a core drops queued checks and waits for running work.
 ///
-/// [`RefreshPool`]: crate::RefreshPool
+/// Explicit `/api/tree` reads retain an independent native tree snapshot. Their
+/// first read may wait for collection; subsequent background reads serve the
+/// last tree, then report sustained failures or stalls under the existing
+/// refresh policy. Tree preparation is never required by focused session reads.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Refresh {
-    /// Before each read: every answer reflects the logs as they are. A read
-    /// that finds a log changed rebuilds before it answers (185–303 ms for
-    /// 519 files); reads that find nothing changed answer at once, side by
-    /// side. No thread is used. For one-shot and tool callers. The default.
+    /// Refresh explicit tree reads synchronously. Native Catalog demand still
+    /// uses the bounded asynchronous producer. The default for library callers.
     #[default]
     OnRead,
-    /// In the background, by watching the files: while a machine is read,
-    /// the pool checks it every 250 ms (a stat pass over its logs) and
-    /// rebuilds when they changed. For a server whose logs change on disk
-    /// with no one to say so; `semon sessions --serve` uses it. The first
-    /// read after the machine went idle answers from its last model and
-    /// queues a check at once, since its logs may have changed unseen.
+    /// Check demanded native sources every 250 ms while reads keep them active.
+    /// Used by the local server when files can change without an invalidation.
     Background,
-    /// In the background, when the embedding server says a machine's logs
-    /// changed ([`ViewerCore::invalidate`]): no stat pass every 250 ms, only
-    /// a rebuild once invalidated, as soon as the one-second spacing
-    /// allows. However many invalidations come in that second, they are one
-    /// rebuild, and one that comes while a rebuild runs is one more after
-    /// it. As a safety net for a writer that doesn't invalidate, a machine
-    /// that is read is still checked every 30 s. The first read after the
-    /// machine went idle answers at once from its last model, invalidated
-    /// meanwhile or not, and the machine is checked at its next safety
-    /// check (at once if none is queued), so a writer that doesn't
-    /// invalidate is seen within 30 s. For servers that receive the logs
-    /// themselves.
+    /// Refresh after [`ViewerCore::invalidate`], with a 30-second safety check
+    /// for active sources when a writer did not announce its change.
     OnInvalidate,
 }
 
@@ -270,8 +232,8 @@ impl Refresh {
 }
 
 /// The session viewer without a transport: the pages, assets and API routes
-/// `semon sessions --serve` answers, with the in-memory model, caches and
-/// live refresh behind them, and no listener, token or Host check of its own.
+/// `semon sessions --serve` answers, with shared native evidence and refresh
+/// coordination, and no listener, token or Host check of its own.
 /// It lets another server embed the viewer: that server owns the socket and
 /// decides who may ask, then hands each request to [`ViewerCore::respond`]
 /// and sends back the [`ViewerReply`] with its headers
@@ -279,30 +241,21 @@ impl Refresh {
 /// or an attachment's image's own).
 ///
 /// A core reads one machine's homes ([`ViewerCore::new`]) or several
-/// ([`ViewerCore::with_machines`]). A call does blocking file I/O, and the
-/// first one builds the model, so an async server should call it off its
-/// runtime (for example on a blocking thread).
+/// ([`ViewerCore::with_machines`]). Calls can perform blocking selected-source
+/// I/O, so async hosts invoke them off their runtime. Configure the core before
+/// sharing it; `respond` takes `&self` and supports concurrent requests.
 ///
-/// [`ViewerCore::respond`] takes `&self`: share one core (in an `Arc`)
-/// and call it from as many threads at once as there are requests. Each
-/// answer comes from one snapshot of each machine's model, cloned (an
-/// `Arc`) under a lock held for nothing else, and its `ETag` is that
-/// snapshot's version. With [`Refresh::Background`] or
-/// [`Refresh::OnInvalidate`] ([`ViewerCore::set_refresh`]) no read waits
-/// for a rebuild while the refresh pool keeps up; see [`Refresh`] for how
-/// far behind the logs an answer can be. An embedding server that receives
-/// logs uses [`Refresh::OnInvalidate`] and calls [`ViewerCore::invalidate`]
-/// once a machine's new logs are written. The setters
-/// take `&mut self`: configure the core before sharing it. What differs per
-/// request (an account menu, say) is passed with the call, as [`Extras`] to
-/// [`ViewerCore::respond_with`], so the shared core holds no per-request
-/// state and needs no lock.
-/// [`ViewerCore::close`] stops it before the files it reads are removed.
+/// Catalog demand schedules native observation. Pages use indexed identity and
+/// focused reads use source and projection generations. An embedding server
+/// calls [`ViewerCore::invalidate`] after writing a machine's new source data.
+/// Per-request account, navigation and management values are passed as [`Extras`]
+/// to [`ViewerCore::respond_with`], independently of native evidence.
+/// [`ViewerCore::close`] drains work before the host removes readable source data.
 pub struct ViewerCore {
     views: RwLock<Arc<Views>>,
     source_inventory: Mutex<Option<(Weak<Views>, Arc<crate::SessionSourceInventory>)>>,
     received: Option<Received>,
-    /// What [`ViewerCore::respond`] serves in the model when a call
+    /// Chrome metadata [`ViewerCore::respond`] serves when a call
     /// doesn't pass its own ([`ViewerCore::respond_with`]).
     extras: Extras,
     refresh: Refresh,
@@ -312,19 +265,13 @@ pub struct ViewerCore {
     /// Views [`ViewerCore::follow`] stopped serving, which
     /// [`ViewerCore::close`] still waits out: a rebuild of one may run on.
     retired: Mutex<Vec<Weak<MachineView>>>,
-    /// `/api/analytics`' answers, kept until the model changes.
-    analytics: Mutex<analytics::Cache>,
-    /// One metadata-only ownership projection of immutable machine snapshots.
-    ownership: Mutex<Option<Ownership>>,
 }
 
-/// The embedding server's own values in `/api/model`, which can differ per
-/// request: the Machines page's management link (`admin`), the account menu
-/// (`account`) and the Machines navigation destination (`nav`). None of them
-/// changes the model version or its `ETag`. Pass them with each call to
-/// [`ViewerCore::respond_with`], so a core shared between requests holds no
-/// per-request state; [`ViewerCore::set_admin_link`] and its siblings set
-/// the ones [`ViewerCore::respond`] uses.
+/// Per-request embedding metadata served by `/api/viewer/chrome`: the Machines
+/// management link, account menu and Machines navigation destination. Reading
+/// or changing it never observes session sources or alters their generations.
+/// Pass it to [`ViewerCore::respond_with`] on a shared core. Setters configure
+/// the defaults used by [`ViewerCore::respond`].
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Extras {
     admin: Option<AdminLink>,
@@ -355,16 +302,6 @@ impl Extras {
         self.nav_machines = Some(href.to_owned());
         true
     }
-
-    /// `body`, a model's JSON object, with these values at its front.
-    fn apply(&self, body: &[u8]) -> Vec<u8> {
-        with_model_extras(
-            body,
-            self.admin.as_ref(),
-            self.account.as_ref(),
-            self.nav_machines.as_deref(),
-        )
-    }
 }
 
 /// The machines a core serves, each with its key, in order.
@@ -387,9 +324,6 @@ struct Following {
     seen: Option<Listing>,
     /// Entries of `DIR/machines/` already warned about.
     warned: BTreeSet<String>,
-    /// How many sessions each received machine last had left out, as
-    /// another machine's: warned about when it changes.
-    dropped: BTreeMap<String, usize>,
 }
 
 /// Counts the calls in progress, so [`ViewerCore::close`] can wait them
@@ -460,56 +394,6 @@ struct Plan {
     /// The first machine whose ids an earlier machine's win over: the first
     /// received machine. `usize::MAX` without received machines.
     droppable: usize,
-    version: String,
-}
-
-/// A cache key is the exact snapshot, machine key/order and copy policy, not
-/// just the transport version: a replacement may leave its displayed JSON
-/// unchanged while changing source ownership. Weak refs cannot keep an old
-/// model, transcript index or source generation alive.
-struct Ownership {
-    snapshots: Vec<(String, Weak<Built>)>,
-    plan: Arc<Plan>,
-}
-
-impl Ownership {
-    fn matches(&self, views: &Views, models: &[Arc<Built>], droppable: usize) -> bool {
-        self.plan.droppable == droppable
-            && self.snapshots.len() == views.len()
-            && models.len() == views.len()
-            && self.snapshots.iter().zip(views).zip(models).all(
-                |(((key, snapshot), (current_key, _)), model)| {
-                    key == current_key && snapshot.ptr_eq(&Arc::downgrade(model))
-                },
-            )
-    }
-
-    /// Bound both structural entries and retained string bytes. Oversized
-    /// workspaces keep the existing uncached behavior; admission is never an
-    /// excuse to evict sessions or change ambiguity handling.
-    fn admissible(views: &Views, plan: &Plan) -> bool {
-        let entries = plan.owners.len()
-            + plan.conflicts.len()
-            + plan.dropped.iter().map(BTreeSet::len).sum::<usize>();
-        if views.len() > 4096 || entries > 100_000 {
-            return false;
-        }
-        let bytes = views.iter().map(|(key, _)| key.len()).sum::<usize>()
-            + plan.machine_ids.iter().map(String::len).sum::<usize>()
-            + plan
-                .owners
-                .iter()
-                .map(|(id, (_, own))| id.len() + own.len())
-                .sum::<usize>()
-            + plan.conflicts.iter().map(String::len).sum::<usize>()
-            + plan
-                .dropped
-                .iter()
-                .flat_map(|ids| ids.iter())
-                .map(String::len)
-                .sum::<usize>();
-        bytes <= 8 * 1024 * 1024
-    }
 }
 
 /// Which machine answers for a session id.
@@ -520,13 +404,6 @@ pub(crate) enum Owner {
     /// Two machines both claim it: refused, never picked.
     Conflict,
 }
-
-/// Whether `id` is a stand-in only its own machine knows: a stub for the
-/// far end of a handoff, or an unsent send's.
-fn machine_local(built: &Built, id: &str) -> bool {
-    session_local(&built.sessions, id)
-}
-
 fn session_local(sessions: &BTreeMap<String, Session>, id: &str) -> bool {
     id.starts_with("unsent:") || sessions.get(id).is_some_and(|session| session.stub)
 }
@@ -556,29 +433,6 @@ fn native_machine_ids(views: &Views) -> Vec<String> {
     }
     labels
 }
-
-/// The union's plan. Machines from `droppable` on (the received ones) lose
-/// an id an earlier machine has: it is left out of theirs, not refused.
-fn plan(parts: &[(&str, &Built)], droppable: usize) -> Plan {
-    let identities: Vec<_> = parts
-        .iter()
-        .map(|(key, built)| IdentityPart {
-            key,
-            machine: &built.machine_id,
-            sessions: &built.sessions,
-            transcripts: &built.tx,
-        })
-        .collect();
-    let mut plan = identity_plan(&identities, droppable);
-    let joined: String = parts
-        .iter()
-        .zip(&plan.machine_ids)
-        .map(|((_, built), id)| format!("{id}={};", built.version))
-        .collect();
-    plan.version = format!("u{:016x}", fnv(&joined));
-    plan
-}
-
 /// Ownership and presentation identity are native semantics, shared by query
 /// evidence and compatibility transport. A version hash belongs only to the latter.
 struct IdentityPart<'a> {
@@ -622,7 +476,6 @@ fn identity_plan(parts: &[IdentityPart<'_>], droppable: usize) -> Plan {
         conflicts,
         dropped,
         droppable,
-        version: String::new(),
     }
 }
 
@@ -695,134 +548,6 @@ impl QueryRead {
         }
     }
 }
-
-/// The union model's JSON, or the ids two machines both claim.
-fn union_json(parts: &[(&str, &Built)], plan: &Plan, now: i64) -> Result<String, Vec<String>> {
-    let mut conflicts: BTreeSet<String> = plan.conflicts.clone();
-    let mut machines = Vec::new();
-    let mut sessions = Map::new();
-    let mut handoffs = Vec::new();
-    let mut handoff_ids = BTreeSet::new();
-    let mut turns = Vec::new();
-    let mut turn_ids = BTreeSet::new();
-    let mut busy = Map::new();
-    let mut tx = Map::new();
-    let mut served_now = Value::from(now);
-    for (index, (_, built)) in parts.iter().enumerate() {
-        let machine_id = &plan.machine_ids[index];
-        // A received machine's part an earlier machine already serves is
-        // left out, never refused.
-        let droppable = index >= plan.droppable;
-        let dropped = |id: &str| plan.dropped[index].contains(id);
-        let rename = |id: &str| -> String {
-            if machine_local(built, id) {
-                format!("{id}@{machine_id}")
-            } else {
-                id.to_owned()
-            }
-        };
-        let Ok(Value::Object(mut model)) = serde_json::from_str::<Value>(&built.json(now)) else {
-            continue;
-        };
-        if let Some(value) = model.remove("now") {
-            served_now = value;
-        }
-        if let Some(Value::Object(mut machine)) = model.remove("machine") {
-            machine.insert("id".into(), Value::from(machine_id.as_str()));
-            machines.push(Value::Object(machine));
-        }
-        if let Some(Value::Object(own)) = model.remove("sessions") {
-            for (id, mut session) in own {
-                if dropped(id.as_str()) {
-                    continue;
-                }
-                if let Some(fields) = session.as_object_mut() {
-                    fields.insert("machine".into(), Value::from(machine_id.as_str()));
-                }
-                let served = rename(&id);
-                if droppable && sessions.contains_key(&served) {
-                    continue;
-                }
-                if sessions.insert(served.clone(), session).is_some() {
-                    conflicts.insert(served);
-                }
-            }
-        }
-        if let Some(Value::Array(own)) = model.remove("handoffs") {
-            for mut handoff in own {
-                let ends_dropped = ["from", "to"].into_iter().any(|end| {
-                    handoff
-                        .get(end)
-                        .and_then(Value::as_str)
-                        .is_some_and(dropped)
-                });
-                let id = handoff.get("id").and_then(Value::as_str);
-                if ends_dropped || (droppable && id.is_some_and(|id| handoff_ids.contains(id))) {
-                    continue;
-                }
-                for end in ["from", "to"] {
-                    if let Some(served) = handoff.get(end).and_then(Value::as_str).map(rename) {
-                        handoff[end] = Value::from(served);
-                    }
-                }
-                if let Some(id) = handoff.get("id").and_then(Value::as_str)
-                    && !handoff_ids.insert(id.to_owned())
-                {
-                    conflicts.insert(id.to_owned());
-                }
-                handoffs.push(handoff);
-            }
-        }
-        if let Some(Value::Array(own)) = model.remove("turns") {
-            for mut turn in own {
-                let sid_dropped = turn.get("sid").and_then(Value::as_str).is_some_and(dropped);
-                let id = turn.get("id").and_then(Value::as_str);
-                if sid_dropped || (droppable && id.is_some_and(|id| turn_ids.contains(id))) {
-                    continue;
-                }
-                if let Some(served) = turn.get("sid").and_then(Value::as_str).map(rename) {
-                    turn["sid"] = Value::from(served);
-                }
-                if let Some(id) = turn.get("id").and_then(Value::as_str)
-                    && !turn_ids.insert(id.to_owned())
-                {
-                    conflicts.insert(id.to_owned());
-                }
-                turns.push(turn);
-            }
-        }
-        if let Some(Value::Object(own)) = model.remove("busy") {
-            for (_, intervals) in own {
-                busy.insert(machine_id.clone(), intervals);
-            }
-        }
-        if let Some(Value::Object(own)) = model.remove("tx") {
-            for (id, mark) in own {
-                if !dropped(id.as_str()) {
-                    tx.insert(rename(&id), mark);
-                }
-            }
-        }
-    }
-    if !conflicts.is_empty() {
-        return Err(conflicts.into_iter().collect());
-    }
-    let first = machines.first().cloned().unwrap_or(Value::Null);
-    let union = json!({
-        "api": MODEL_API,
-        "version": plan.version,
-        "now": served_now,
-        "machine": first,
-        "machines": machines,
-        "sessions": sessions,
-        "handoffs": handoffs,
-        "turns": turns,
-        "busy": busy,
-        "tx": tx,
-    });
-    Ok(union.to_string())
-}
-
 /// Sets `machine` on a V1 tree node and every node under it.
 fn tag(node: &mut Value, machine: &str) {
     if let Some(fields) = node.as_object_mut() {
@@ -855,42 +580,6 @@ fn account_json(account: &AccountMenu) -> Value {
         })).collect::<Vec<_>>(),
     })
 }
-
-/// Adds per-request embedding values at the front of a model's JSON object.
-fn with_model_extras(
-    body: &[u8],
-    admin: Option<&AdminLink>,
-    account: Option<&AccountMenu>,
-    nav_machines: Option<&str>,
-) -> Vec<u8> {
-    if admin.is_none() && account.is_none() && nav_machines.is_none() {
-        return body.to_vec();
-    }
-    let mut out = b"{".to_vec();
-    let mut first = true;
-    let mut add = |name: &str, value: Value| {
-        if !first {
-            out.push(b',');
-        }
-        first = false;
-        out.extend_from_slice(format!("\"{name}\":{}", value).as_bytes());
-    };
-    if let Some(admin) = admin {
-        add("admin", json!({ "label": admin.label, "href": admin.href }));
-    }
-    if let Some(account) = account {
-        add("account", account_json(account));
-    }
-    if let Some(href) = nav_machines {
-        add("nav", json!({ "machines": href }));
-    }
-    if body.get(1).is_some_and(|byte| *byte != b'}') {
-        out.push(b',');
-    }
-    out.extend_from_slice(body.get(1..).unwrap_or_default());
-    out
-}
-
 fn text(status: u16, body: &str) -> ViewerReply {
     ViewerReply {
         status,
@@ -910,39 +599,6 @@ fn failed(error: &io::Error) -> ViewerReply {
         }
     }
 }
-
-fn conflict(ids: &[String]) -> ViewerReply {
-    ViewerReply {
-        status: 409,
-        content_type: "application/json; charset=utf-8",
-        body: json!({ "error": "id_conflict", "ids": ids })
-            .to_string()
-            .into_bytes(),
-        etag: None,
-    }
-}
-
-/// `query` with its `key` parameter set to `value`.
-fn with_param(query: &str, key: &str, value: &str) -> String {
-    query
-        .split('&')
-        .map(|part| match part.split_once('=') {
-            Some((name, _)) if name == key => format!("{key}={}", percent_encode(value)),
-            _ => part.to_owned(),
-        })
-        .collect::<Vec<_>>()
-        .join("&")
-}
-
-/// Each machine's key and model, in the order they are served.
-fn parts<'a>(views: &'a Views, models: &'a [Arc<Built>]) -> Vec<(&'a str, &'a Built)> {
-    views
-        .iter()
-        .zip(models)
-        .map(|((key, _), built)| (key.as_str(), &**built))
-        .collect()
-}
-
 impl ViewerCore {
     /// A core over one machine's agent homes, `/proc` and cache that
     /// `options` name. Nothing is read until the first request.
@@ -973,8 +629,6 @@ impl ViewerCore {
             pool: RefreshPool::shared(),
             open: Gate::default(),
             retired: Mutex::default(),
-            analytics: Mutex::default(),
-            ownership: Mutex::default(),
         };
         if sources.is_retired() {
             core.close();
@@ -1000,9 +654,17 @@ impl ViewerCore {
                 hosts: None,
                 seen: None,
                 warned: BTreeSet::new(),
-                dropped: BTreeMap::new(),
             }),
         });
+        core
+    }
+
+    /// Route tests through the production native adapter while retaining the
+    /// exact instrumented refresh worker and evidence owner under test.
+    #[cfg(test)]
+    pub(crate) fn with_test_view(view: Arc<MachineView>) -> Self {
+        let core = Self::with_machines(Vec::new());
+        *write_lock(&core.views) = Arc::new(vec![(String::new(), view)]);
         core
     }
 
@@ -1028,11 +690,10 @@ impl ViewerCore {
     }
 
     fn configured_source_inventory(views: &Views) -> Arc<crate::SessionSourceInventory> {
-        let local = views.len() == 1 && views[0].0.is_empty();
         let labels = native_machine_ids(views);
         Arc::new(crate::SessionSourceInventory::new(
             views.iter().enumerate().map(|(index, (key, _))| {
-                let key = if local {
+                let key = if key.is_empty() {
                     "local".to_owned()
                 } else {
                     key.clone()
@@ -1167,7 +828,7 @@ impl ViewerCore {
         self.views().len()
     }
 
-    /// Sets when the core brings its models up to date with the logs: see
+    /// Sets when the core refreshes its native sources and tree: see
     /// [`Refresh`]. [`Refresh::OnRead`] unless set.
     pub fn set_refresh(&mut self, refresh: Refresh) {
         self.refresh = refresh;
@@ -1258,14 +919,14 @@ impl ViewerCore {
     }
 
     /// Sets, or clears, the link the Machines page shows to the embedding
-    /// server's machine-management page, served in the model as `admin` by
+    /// server's machine-management page, served in native chrome as `admin` by
     /// [`ViewerCore::respond`]. A value that differs per request goes in
     /// the [`Extras`] passed to [`ViewerCore::respond_with`] instead.
     pub fn set_admin_link(&mut self, link: Option<AdminLink>) {
         self.extras.set_admin_link(link);
     }
 
-    /// Sets, or clears, the account menu served in `/api/model` as `account`
+    /// Sets, or clears, the account menu served in `/api/viewer/chrome` as `account`
     /// by [`ViewerCore::respond`]. It is not included in the model version
     /// or its `ETag`. A menu that differs per request goes in the
     /// [`Extras`] passed to [`ViewerCore::respond_with`] instead.
@@ -1288,11 +949,9 @@ impl ViewerCore {
     /// percent-encoded, and the request's `If-None-Match`. Only GET is
     /// answered (405 otherwise); every URL the viewer uses is a GET. The
     /// caller authenticates first: the core serves whoever it is handed.
-    /// Any number of threads may call it at once. The model carries the
-    /// [`Extras`] the core's setters set. Outside [`Refresh::OnRead`] only
-    /// the API routes refresh a model: a page, including one that names a
-    /// machine, session or trace, is answered from the models already built
-    /// and never waits for a build.
+    /// Any number of threads may call it at once. Embedding metadata uses the
+    /// defaults configured by the setters; native session APIs authorize and
+    /// fence their selected source and generation independently.
     pub fn respond(
         &self,
         method: &str,
@@ -1304,7 +963,7 @@ impl ViewerCore {
     }
 
     /// [`ViewerCore::respond`], with this request's own [`Extras`] in the
-    /// model instead of the core's.
+    /// native chrome instead of the core's.
     pub fn respond_with(
         &self,
         extras: &Extras,
@@ -1322,7 +981,17 @@ impl ViewerCore {
         if path == "/api/viewer/chrome" {
             // Standalone embedding metadata is independent of source/model
             // observation. Hosted consumers provide their authenticated host.
-            return ViewerReply { status:200,content_type:"application/json; charset=utf-8",body:json!({"api":1,"account":extras.account.as_ref().map(account_json),"navigation":{"paths":{"machines":extras.nav_machines.as_deref().unwrap_or("/machines")}}}).to_string().into_bytes(),etag:None };
+            return ViewerReply {
+                status: 200,
+                content_type: "application/json; charset=utf-8",
+                body: json!({
+                    "api": 1,
+                    "account": extras.account.as_ref().map(account_json),
+                    "admin": extras.admin.as_ref().map(|link| json!({"label": link.label, "href": link.href})),
+                    "navigation": {"paths": {"machines": extras.nav_machines.as_deref().unwrap_or("/machines")}}
+                }).to_string().into_bytes(),
+                etag: None,
+            };
         }
         if crate::shell::is_page_path(path) && query_value(query, "native") == Some("1") {
             return crate::native_page::reply(path, query, |endpoint, args| {
@@ -1346,14 +1015,16 @@ impl ViewerCore {
             }) {
                 return text(404, "Not found");
             }
+            let labels = native_machine_ids(&views);
             let sources: Vec<_> = views
                 .iter()
-                .filter(|(key, _)| {
+                .enumerate()
+                .filter(|(_, (key, _))| {
                     selected_source.as_ref().is_none_or(|selected| {
                         (if key.is_empty() { "local" } else { key }) == selected
                     })
                 })
-                .map(|(key, view)| {
+                .map(|(index, (key, view))| {
                     let _ = view.note_catalog_read();
                     let key = if key.is_empty() { "local" } else { key };
                     {
@@ -1364,16 +1035,7 @@ impl ViewerCore {
                             .and_then(|path| crate::read_facts(path).ok());
                         crate::OverviewSource {
                             key: key.into(),
-                            label: facts
-                                .as_ref()
-                                .map(|facts| facts.hostname.clone())
-                                .unwrap_or_else(|| {
-                                    if view.options().facts.is_none() {
-                                        crate::facts::MachineFacts::Local.hostname(view.options())
-                                    } else {
-                                        key.into()
-                                    }
-                                }),
+                            label: labels[index].clone(),
                             options: view.options().clone(),
                             up: facts
                                 .as_ref()
@@ -1414,37 +1076,13 @@ impl ViewerCore {
         if views.is_empty() {
             return text(404, "Not found");
         }
-        // One machine or several, Analytics is the core's own answer.
-        if path == "/api/analytics" {
-            return self
-                .analytics(&views, query, if_none_match)
-                .unwrap_or_else(|error| failed(&error));
-        }
-        // A page never waits for a build: only the API routes refresh.
         if let Some(reply) = self.page_at_once(&views, path) {
             return reply;
         }
-        // With received machines the tree always names each node's machine.
-        if views.len() == 1 && !(self.received.is_some() && path == "/api/tree") {
-            let mut reply = views[0].1.respond(method, path, query, if_none_match);
-            if path == "/api/model" && reply.status == 200 {
-                reply.body = extras.apply(&reply.body);
-            }
-            return reply;
+        if path == "/api/tree" {
+            return self.tree(&views).unwrap_or_else(|error| failed(&error));
         }
-        let answer = match path {
-            "/api/model" => self.model(&views, extras, query, if_none_match),
-            "/api/tx" => self.by_session(&views, path, query, if_none_match),
-            "/api/entry" if query_value(query, "as").is_some() => {
-                self.by_session(&views, path, query, if_none_match)
-            }
-            "/api/entry" | "/api/transcript" => {
-                self.by_transcript(&views, path, query, if_none_match)
-            }
-            "/api/tree" => self.tree(&views),
-            _ => Ok(views[0].1.respond(method, path, query, if_none_match)),
-        };
-        answer.unwrap_or_else(|error| failed(&error))
+        views[0].1.respond(method, path, query, if_none_match)
     }
 
     /// Focused lists are scoped by the embedder's stable machine key. A
@@ -1505,7 +1143,11 @@ impl ViewerCore {
                 false,
             );
         };
-        let key = if local_alias { "local" } else { key.as_str() };
+        let key = if key.is_empty() {
+            "local"
+        } else {
+            key.as_str()
+        };
         // Record demand without waiting for an initial model build. The
         // shared native coordinator performs coherent observation in every
         // refresh mode, including default library callers.
@@ -1592,61 +1234,6 @@ impl ViewerCore {
         }
         reply
     }
-
-    /// Every machine's model, read as `read` says, and the union's plan.
-    /// Each model is read once, so an answer comes from one snapshot of
-    /// each.
-    fn refresh_at(&self, views: &Views, read: Reading) -> io::Result<(Vec<Arc<Built>>, Arc<Plan>)> {
-        let models = views
-            .iter()
-            .map(|(_, view)| view.built(read))
-            .collect::<io::Result<Vec<_>>>()?;
-        let plan = self.ownership_plan(views, &models);
-        if let Some(received) = &self.received {
-            let mut following = lock(&received.following);
-            for ((name, _), dropped) in views.iter().zip(&plan.dropped).skip(received.fixed) {
-                let count = dropped.len();
-                if following.dropped.insert(name.clone(), count).unwrap_or(0) != count && count > 0
-                {
-                    eprintln!(
-                        "semon: received machine {name}: {count} session(s) an earlier machine \
-                         already has are left out of it (if it is this machine's own push, use \
-                         --no-local)"
-                    );
-                }
-            }
-        }
-        Ok((models, plan))
-    }
-
-    fn ownership_plan(&self, views: &Views, models: &[Arc<Built>]) -> Arc<Plan> {
-        let droppable = self.droppable();
-        {
-            let cached = lock(&self.ownership);
-            if let Some(cached) = cached
-                .as_ref()
-                .filter(|cache| cache.matches(views, models, droppable))
-            {
-                return cached.plan.clone();
-            }
-        }
-        // Do not block readers of a cached generation while a new generation
-        // is planned. Concurrent misses can duplicate work, but each returned
-        // plan belongs to that caller's exact snapshots. A late older admission
-        // only causes a miss on the next read, never an incorrect match.
-        let plan = Arc::new(plan(&parts(views, models), droppable));
-        let admission = Ownership::admissible(views, &plan).then(|| Ownership {
-            snapshots: views
-                .iter()
-                .zip(models)
-                .map(|((key, _), model)| (key.clone(), Arc::downgrade(model)))
-                .collect(),
-            plan: plan.clone(),
-        });
-        *lock(&self.ownership) = admission;
-        plan
-    }
-
     /// The first view whose ids an earlier view's win over: the first
     /// received machine's.
     fn droppable(&self) -> usize {
@@ -1654,161 +1241,6 @@ impl ViewerCore {
             .as_ref()
             .map_or(usize::MAX, |received| received.fixed)
     }
-
-    fn model(
-        &self,
-        views: &Views,
-        extras: &Extras,
-        query: &str,
-        if_none_match: Option<&str>,
-    ) -> io::Result<ViewerReply> {
-        let json = "application/json; charset=utf-8";
-        let (models, plan) = self.refresh_at(views, Reading::Served)?;
-        let etag = format!("\"{}\"", plan.version);
-        let since = query_value(query, "since").and_then(decoded);
-        if if_none_match == Some(etag.as_str()) || since.as_deref() == Some(plan.version.as_str()) {
-            return Ok(ViewerReply {
-                status: 304,
-                content_type: json,
-                body: Vec::new(),
-                etag: Some(etag),
-            });
-        }
-        let now = crate::model::now_ms();
-        match union_json(&parts(views, &models), &plan, now) {
-            Ok(body) => {
-                let body = body.into_bytes();
-                Ok(ViewerReply {
-                    status: 200,
-                    content_type: json,
-                    body: extras.apply(&body),
-                    etag: Some(etag),
-                })
-            }
-            Err(ids) => Ok(conflict(&ids)),
-        }
-    }
-
-    /// `/api/analytics?range=24h|7d|30d` (and the page's filters, see
-    /// [`analytics::Request`]): the figures, charts and lists Analytics draws
-    /// for the range, over every machine served, from the rows each build
-    /// keeps ([`analytics::Activity`]); nothing is built for it. The answer
-    /// is kept per range and filters until the model changes (and at least
-    /// a second), or for 30 s while nothing does, as time moves the range.
-    /// Its `ETag` hashes the answer but for the time it was computed at: a
-    /// poll whose `If-None-Match` still matches is a 304. A filter value no
-    /// session has is answered (empty) but not kept. `version` in the body
-    /// is the model version it was computed from, as `/api/model` names it.
-    fn analytics(
-        &self,
-        views: &Views,
-        query: &str,
-        if_none_match: Option<&str>,
-    ) -> io::Result<ViewerReply> {
-        let json = "application/json; charset=utf-8";
-        let Some(request) = analytics::Request::parse(query) else {
-            return Ok(text(400, "Invalid request"));
-        };
-        let (models, plan) = self.refresh_at(views, Reading::Served)?;
-        if !plan.conflicts.is_empty() {
-            return Ok(conflict(
-                &plan.conflicts.iter().cloned().collect::<Vec<_>>(),
-            ));
-        }
-        let version = match models.as_slice() {
-            [one] => one.version.clone(),
-            _ => plan.version.clone(),
-        };
-        let key = request.key();
-        // The lock is held to look up or to keep an answer, never to
-        // compute one: two reads that miss at once may both compute it.
-        let kept = lock(&self.analytics).kept(&key, &version);
-        let kept = match kept {
-            Some(kept) => kept,
-            None => {
-                let rows = analytics::rows(
-                    plan.machine_ids
-                        .iter()
-                        .zip(&models)
-                        .map(|(machine, built)| (machine.as_str(), &built.activity)),
-                );
-                let answer = analytics::answer(&rows, &request, crate::model::now_ms(), &version);
-                let kept = analytics::Kept {
-                    etag: analytics::etag(&answer),
-                    body: Arc::new(serde_json::to_vec(&answer).map_err(io::Error::other)?),
-                };
-                // A filter value no session has gets its (empty) answer,
-                // not a place among the kept ones.
-                if request.known(&rows) {
-                    lock(&self.analytics).keep(&key, &version, kept.clone());
-                }
-                kept
-            }
-        };
-        let etag = Some(kept.etag.clone());
-        if if_none_match == Some(kept.etag.as_str()) {
-            return Ok(ViewerReply {
-                status: 304,
-                content_type: json,
-                body: Vec::new(),
-                etag,
-            });
-        }
-        Ok(ViewerReply {
-            status: 200,
-            content_type: json,
-            body: kept.body.to_vec(),
-            etag,
-        })
-    }
-
-    /// `/api/tx` and `/api/entry?sid=…`: the machine that
-    /// owns the session.
-    fn by_session(
-        &self,
-        views: &Views,
-        path: &str,
-        query: &str,
-        if_none_match: Option<&str>,
-    ) -> io::Result<ViewerReply> {
-        let Some(sid) = query_value(query, "sid").and_then(decoded) else {
-            return Ok(text(400, "Invalid request"));
-        };
-        Ok(match self.owner_in(views, &sid, Reading::Served)? {
-            Owner::Conflict => conflict(&[sid]),
-            Owner::Missing => text(404, "Not found"),
-            Owner::At(index, own) => {
-                let query = if own == sid {
-                    query.to_owned()
-                } else {
-                    with_param(query, "sid", &own)
-                };
-                views[index].1.respond("GET", path, &query, if_none_match)
-            }
-        })
-    }
-
-    /// The machine among `views` that answers for session `sid`, and the
-    /// session's id there. With one machine that is always the one
-    /// machine, under `sid` itself: whether it has the session is its own
-    /// answer.
-    fn owner_in(&self, views: &Views, sid: &str, read: Reading) -> io::Result<Owner> {
-        match views.len() {
-            0 => Ok(Owner::Missing),
-            1 => Ok(Owner::At(0, sid.to_owned())),
-            _ => {
-                let (_, plan) = self.refresh_at(views, read)?;
-                if plan.conflicts.contains(sid) {
-                    return Ok(Owner::Conflict);
-                }
-                Ok(match plan.owners.get(sid) {
-                    Some((index, own)) => Owner::At(*index, own.clone()),
-                    None => Owner::Missing,
-                })
-            }
-        }
-    }
-
     /// The caller-supplied machine key that owns a served session. Hostnames
     /// are presentation labels; embedders use this key to bind native controls.
     /// Missing or ambiguous native IDs never select a writable destination.
@@ -1829,6 +1261,7 @@ impl ViewerCore {
         let mut selected = None;
         let mut complete = true;
         for (index, (key, view)) in views.iter().enumerate() {
+            complete &= !view.catalog_observation_pending();
             let source = if key.is_empty() { "local" } else { key };
             match crate::catalog::qualified_current_identity(view.options(), source, id) {
                 Ok(Some(identity)) => {
@@ -1878,40 +1311,6 @@ impl ViewerCore {
             )
         }))
     }
-
-    /// The V1 routes that name a transcript by harness and id: the machine
-    /// that has that file.
-    fn by_transcript(
-        &self,
-        views: &Views,
-        path: &str,
-        query: &str,
-        if_none_match: Option<&str>,
-    ) -> io::Result<ViewerReply> {
-        let (Some(harness), Some(id)) = (
-            query_value(query, "harness").and_then(decoded),
-            query_value(query, "id").and_then(decoded),
-        ) else {
-            return Ok(text(400, "Invalid request"));
-        };
-        let mut found = Vec::new();
-        for (index, (_, view)) in views.iter().enumerate() {
-            if view.has_transcript(&harness, &id)? {
-                found.push(index);
-            }
-        }
-        let droppable = self.droppable();
-        Ok(match found.as_slice() {
-            [index] => views[*index].1.respond("GET", path, query, if_none_match),
-            [] => text(404, "Not found"),
-            // Received machines' copies give way to the first.
-            [index, rest @ ..] if rest.iter().all(|later| *later >= droppable) => {
-                views[*index].1.respond("GET", path, query, if_none_match)
-            }
-            _ => conflict(&[id]),
-        })
-    }
-
     /// The V1 tree: every machine's roots, each node with its machine's
     /// id as `machine`.
     fn tree(&self, views: &Views) -> io::Result<ViewerReply> {
@@ -2067,60 +1466,6 @@ impl ViewerCore {
         }
         Some(text(404, "Not found"))
     }
-
-    /// Brings every machine's model up to date now, on the calling thread,
-    /// so that the reads that come later find it built: a machine with no
-    /// model yet is built, and one whose logs changed (invalidated or not;
-    /// a stat pass tells) is rebuilt. It is for an embedding server that
-    /// wants models warm before anyone reads them, for example once at
-    /// start and again, spaced out, after it writes a machine's logs.
-    ///
-    /// It is not a read: in [`Refresh::Background`] or
-    /// [`Refresh::OnInvalidate`] it starts no background checks, and it
-    /// clears the invalidations it covers, so the first read after an idle
-    /// spell answers at once from what it built. It blocks for as long as
-    /// the builds take (a machine's first build reads all its logs): call
-    /// it off an async runtime, and bound how many run at once. A read of a
-    /// machine that has a model never waits for it; the first read of one
-    /// with none waits for the machine it is building, then finds it built,
-    /// and so does a page URL the built models lack. Every machine is
-    /// tried; the first error is returned. Once the core is closed it does
-    /// nothing.
-    pub fn warm(&self) -> io::Result<()> {
-        let Some(_entered) = self.open.enter() else {
-            return Ok(());
-        };
-        self.follow();
-        let mut first = Ok(());
-        for (_, view) in self.views().iter() {
-            if let Err(error) = view.warm()
-                && first.is_ok()
-            {
-                first = Err(error);
-            }
-        }
-        first
-    }
-
-    /// [`ViewerCore::warm`] for the one machine served under `machine`, as
-    /// [`ViewerCore::invalidate`] names it: the key given to
-    /// [`ViewerCore::with_machines`], a received machine's directory name,
-    /// or `""` for [`ViewerCore::new`]'s one. No other machine is looked
-    /// at, so an embedding server that warms the machine it just wrote
-    /// rebuilds nothing else. Returns whether a machine is served under
-    /// that key: false once the core is closed, and for a received machine
-    /// that is new since the last request.
-    pub fn warm_machine(&self, machine: &str) -> io::Result<bool> {
-        let Some(_entered) = self.open.enter() else {
-            return Ok(false);
-        };
-        let views = self.views();
-        let Some((_, view)) = views.iter().find(|(key, _)| key == machine) else {
-            return Ok(false);
-        };
-        view.warm()?;
-        Ok(true)
-    }
 }
 
 #[cfg(test)]
@@ -2128,7 +1473,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn ownership_projection_tracks_exact_snapshots_and_union_policy() {
+    fn native_ownership_tracks_configuration_rewrites_and_removal() {
         let root = std::env::temp_dir().join(format!(
             "semon-ownership-{}-{}",
             std::process::id(),
@@ -2178,7 +1523,6 @@ mod tests {
             ("second".into(), second.clone()),
         ]);
         core.set_refresh(Refresh::OnInvalidate);
-        let views = core.views();
         let builds = model::COMPAT_BUILDS.with(std::cell::Cell::get);
         let native_tree = core.respond("GET", "/api/tree", "", None);
         assert_eq!(native_tree.status, 200);
@@ -2187,126 +1531,36 @@ mod tests {
         assert_eq!(roots.len(), 2);
         assert!(roots.iter().all(|root| root["id"] == "shared"));
         assert_ne!(roots[0]["machine"], roots[1]["machine"]);
-        assert_eq!(model::COMPAT_BUILDS.with(std::cell::Cell::get), builds);
-        assert!(views.iter().all(|(_, view)| view.shown_built().is_none()));
-        let (models, original) = core.refresh_at(&views, Reading::Served).unwrap();
-        assert_eq!(*original, plan(&parts(&views, &models), core.droppable()));
-        assert!(original.conflicts.contains("shared"));
-        assert!(Arc::ptr_eq(
-            &original,
-            &core.ownership_plan(&views, &models)
-        ));
-        assert!(matches!(
-            core.owner_in(&views, "shared", Reading::Served).unwrap(),
-            Owner::Conflict
-        ));
-
-        // Key changes, reordering, and removal must not use an old mapping,
-        // even while every underlying source snapshot is still unchanged.
-        let mut renamed = (*views).clone();
-        renamed[1].0 = "renamed".into();
-        let renamed_plan = core.ownership_plan(&renamed, &models);
-        assert!(!Arc::ptr_eq(&original, &renamed_plan));
-        assert_eq!(
-            *renamed_plan,
-            plan(&parts(&renamed, &models), core.droppable())
-        );
-        let mut reordered = renamed.clone();
-        reordered.reverse();
-        let mut reversed_models = models.clone();
-        reversed_models.reverse();
-        let reversed = core.ownership_plan(&reordered, &reversed_models);
-        assert_eq!(
-            *reversed,
-            plan(&parts(&reordered, &reversed_models), core.droppable())
-        );
-        assert_eq!(
-            *core.ownership_plan(&reordered[..1].to_vec(), &reversed_models[..1]),
-            plan(
-                &parts(&reordered[..1].to_vec(), &reversed_models[..1]),
-                core.droppable()
-            )
-        );
-
-        // A received copy gives way to the fixed machine; it never inherits
-        // the conflict policy of the same snapshots served as fixed machines.
-        let copies = Ownership {
-            snapshots: views
-                .iter()
-                .zip(&models)
-                .map(|((key, _), model)| (key.clone(), Arc::downgrade(model)))
-                .collect(),
-            plan: Arc::new(plan(&parts(&views, &models), 1)),
-        };
-        assert!(copies.plan.conflicts.is_empty());
-        assert!(copies.plan.dropped[1].contains("shared"));
-        assert!(copies.matches(&views, &models, 1));
-        assert!(!copies.matches(&views, &models, core.droppable()));
-
-        // Replacing identical bytes invalidates the exact snapshot even if
-        // its transport version stays identical; the source generation moved.
+        assert_eq!(core.session_machine_key("shared").unwrap(), None);
+        // Reordering or renaming configured sources never chooses a duplicate.
+        let mut configured: Vec<_> = core
+            .views()
+            .iter()
+            .map(|(key, view)| (key.clone(), view.options().clone()))
+            .collect();
+        configured[1].0 = "renamed".into();
+        configured.reverse();
+        let renamed = ViewerCore::with_machines(configured);
+        assert_eq!(renamed.session_machine_key("shared").unwrap(), None);
         write(&second, "shared");
-        assert!(core.warm_machine("second").unwrap());
-        let (rewritten_models, rewritten) = core.refresh_at(&views, Reading::Served).unwrap();
-        assert!(!Arc::ptr_eq(&original, &rewritten));
-        assert_eq!(
-            *rewritten,
-            plan(&parts(&views, &rewritten_models), core.droppable())
-        );
-        assert_eq!(original.version, rewritten.version);
-        drop(rewritten_models);
-
-        // Removal and a newly observed native session change authority.
+        assert!(core.invalidate("second"));
+        assert_eq!(core.session_machine_key("shared").unwrap(), None);
         std::fs::remove_file(second.claude_home.join("projects/project/shared.jsonl")).unwrap();
         write(&second, "replacement");
-        assert!(core.warm_machine("second").unwrap());
-        let (new_models, updated) = core.refresh_at(&views, Reading::Served).unwrap();
-        assert!(!Arc::ptr_eq(&original, &updated));
-        assert_eq!(
-            *updated,
-            plan(&parts(&views, &new_models), core.droppable())
-        );
-        assert!(updated.conflicts.is_empty());
+        assert!(core.invalidate("second"));
         assert_eq!(
             core.session_machine_key("replacement").unwrap().as_deref(),
             Some("second")
         );
-        assert!(Arc::ptr_eq(
-            &updated,
-            &core.ownership_plan(&views, &new_models)
-        ));
-
-        // Only metadata survives in the cache. It cannot pin either source
-        // generation or transcript indices after the views are discarded.
-        let cached = lock(&core.ownership).take().unwrap();
-        drop(models);
-        drop(new_models);
-        drop(reversed_models);
-        drop(renamed);
-        drop(reordered);
-        drop(views);
-        core.close();
-        drop(core);
-        assert!(
-            cached
-                .snapshots
-                .iter()
-                .all(|(_, model)| model.upgrade().is_none())
+        assert_eq!(
+            core.session_machine_key("shared").unwrap().as_deref(),
+            Some("first")
         );
+        assert_eq!(model::COMPAT_BUILDS.with(std::cell::Cell::get), builds);
+        renamed.close();
+        core.close();
+        assert_eq!(core.session_machine_key("replacement").unwrap(), None);
         std::fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn ownership_projection_refuses_oversized_cache_admission() {
-        let mut projection = plan(&[], usize::MAX);
-        assert!(Ownership::admissible(&vec![], &projection));
-        projection.conflicts.insert("x".repeat(8 * 1024 * 1024 + 1));
-        assert!(!Ownership::admissible(&vec![], &projection));
-        projection.conflicts.clear();
-        projection
-            .conflicts
-            .extend((0..100_001).map(|index| index.to_string()));
-        assert!(!Ownership::admissible(&vec![], &projection));
     }
 
     #[test]
@@ -2324,18 +1578,12 @@ mod tests {
             assert!(AdminLink::new(label, href).is_none(), "{label:?} {href:?}");
         }
         let link = AdminLink::new("Manage machines", "/admin/machines").unwrap();
-        assert_eq!(
-            with_model_extras(b"{\"api\":1,\"version\":\"v\"}", Some(&link), None, None),
-            b"{\"admin\":{\"label\":\"Manage machines\",\"href\":\"/admin/machines\"},\"api\":1,\"version\":\"v\"}"
-        );
-        assert_eq!(
-            with_param("sid=a%40b&before=3", "sid", "a"),
-            "sid=a&before=3"
-        );
+        assert_eq!(link.label, "Manage machines");
+        assert_eq!(link.href, "/admin/machines");
     }
 
     #[test]
-    fn two_machine_model_advertises_the_api_version() {
+    fn two_machine_native_inventory_advertises_the_api_version() {
         let root = std::env::temp_dir().join(format!(
             "semon-union-api-{}-{}",
             std::process::id(),
@@ -2369,11 +1617,11 @@ mod tests {
             ("first".into(), options("first")),
             ("second".into(), options("second")),
         ]);
-        let reply = core.respond("GET", "/api/model", "", None);
+        let reply = core.respond("GET", "/api/session-sources", "", None);
         assert_eq!(reply.status, 200);
         let body: Value = serde_json::from_slice(&reply.body).unwrap();
-        assert_eq!(body["api"], MODEL_API);
-        assert_eq!(body["machines"].as_array().unwrap().len(), 2);
+        assert_eq!(body["api"], 1);
+        assert_eq!(body["items"].as_array().unwrap().len(), 2);
         drop(core);
         std::fs::remove_dir_all(root).unwrap();
     }

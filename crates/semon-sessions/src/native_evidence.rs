@@ -428,6 +428,9 @@ impl NativeEvidence {
                 .expect("snapshot exists")
                 .changed_catalog_inputs(&snapshot, &self.options)
             {
+                // Incremental semantic work shares the same lifecycle boundary
+                // as reconciliation, including worker failure instrumentation.
+                before_build()?;
                 let prepared = self.prepare_catalog_component(cache, inputs, now)?;
                 if let Some(prepared) = prepared {
                     match cache.publish_closed_catalog(&prepared)? {
