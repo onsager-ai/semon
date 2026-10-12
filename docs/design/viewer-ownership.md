@@ -214,6 +214,12 @@ navigation root; shared safe-path validation and native links apply. It creates
 no additional router, model store or poller. The compact gallery covers geometry,
 Escape/focus return and remount; Hub provides the real server/form adoption checks.
 
+The native relationship view resolves incoming sender names from its selected
+session's bounded family metadata when the exact related identity is present.
+This does not add ancestors to the causal cohort or timeline totals. An incoming
+root retains its handoff identity and kind; absent or ambiguous related metadata
+stays explicitly unavailable.
+
 ## Selected observation
 
 Catalog list rows carry a compact recorded status observation. They reuse the

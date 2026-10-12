@@ -269,7 +269,13 @@ export default async function turnsCheck(browser) {
         title: document.querySelector('.topbar .t')?.textContent,
         root: (() => {
           const r = document.querySelector('.hop.k-root');
-          return r && { turn: r.dataset.turn, h: r.dataset.h ?? null };
+          return (
+            r && {
+              turn: r.dataset.turn,
+              h: r.dataset.h ?? null,
+              sender: r.querySelector('.who')?.textContent,
+            }
+          );
         })(),
         nodes: [...document.querySelectorAll('.hop.child')].map((x) => ({
           h: x.dataset.h,
@@ -286,6 +292,12 @@ export default async function turnsCheck(browser) {
         t.crumb !== D.SESS[sid].name
       )
         TR.bad = (TR.bad ?? 0) + 1;
+      const incoming = D.turns[sid].find((turn) => turn.id === tid)?.start;
+      if (incoming) {
+        const expectedSender = incoming.from === 'you' ? 'You' : D.SESS[incoming.from]?.name;
+        if (t.root?.h !== incoming.id || (expectedSender && t.root.sender !== expectedSender))
+          TR.badSender = (TR.badSender ?? 0) + 1;
+      }
       TR.traces++;
       TR.roots++;
       TR.nodes += 1 + t.nodes.length;
@@ -687,6 +699,7 @@ export default async function turnsCheck(browser) {
     'buttonWithoutOnward=' + light.turns.buttonWithoutOnward,
   );
   r.expect(!light.traces.bad, 'bad traces=' + light.traces.bad);
+  r.expect(!light.traces.badSender, 'incorrect incoming trace sender=' + light.traces.badSender);
   r.expect(
     light.deepLinks.hadPick === true,
     'no trace child node with its own turn was found for the fromTrace/crumb deep-link test',
