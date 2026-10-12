@@ -82,6 +82,7 @@ interface SelectedView {
   store: CatalogTranscriptStore;
   meta: CatalogSession | null;
   observedName?: string;
+  sourceLabel?: string | null;
   scroll: number;
   loading: boolean;
   observing?: boolean;
@@ -646,6 +647,16 @@ export function createCatalogViewer(
     }
   };
   const currentParams = () => new URLSearchParams({ machine: capabilities.source_key });
+  const sourceLabel = (key: string) => {
+    const identity = selection.selectedIdentity();
+    return (
+      (active?.sourceKey === key ? active.sourceLabel : null) ??
+      (identity?.source_key === key ? identity.machine_label : null) ??
+      sourceItems.find((source) => source.source_key === key)?.label ??
+      (page?.machine === key ? page.machine_info.label : null) ??
+      key
+    );
+  };
   const browsingParams = () => {
     const value = currentParams();
     if (harness) value.set('harness', harness);
@@ -1115,10 +1126,7 @@ export function createCatalogViewer(
                   name: row.name,
                 })),
                 crumb: 'Sessions',
-                labels: selectedSessionLabels(
-                  session,
-                  page?.machine_info.label ?? active!.sourceKey,
-                ),
+                labels: selectedSessionLabels(session, sourceLabel(active!.sourceKey)),
                 trace: false,
                 analytics: false,
                 days: 7,
@@ -1572,9 +1580,20 @@ export function createCatalogViewer(
       : undefined;
     const snapshot = selectedSessionMenu(
       metadata,
-      page?.machine_info.label ?? capabilities.source_key,
+      sourceLabel(view?.sourceKey ?? capabilities.source_key),
       wide,
-      !!turn,
+      !!view &&
+        view.store
+          .context()
+          .turns.some(
+            (row) =>
+              row.id === turn &&
+              row.sent.some((id) =>
+                view.store
+                  .context()
+                  .handoffs.some(({ edge }) => edge.id === id && edge.kind !== 'move'),
+              ),
+          ),
     );
     const panel = createPanelChrome(
       {
@@ -2324,7 +2343,7 @@ export function createCatalogViewer(
           view.store.loadedRanges()[0]?.first === 0 && view.meta?.start != null
             ? {
                 lead: 'Started ' + clock(view.meta.start, Date.now()) + ' on ',
-                machine: page?.machine_info.label ?? view.sourceKey,
+                machine: sourceLabel(view.sourceKey),
               }
             : undefined,
         blocks: catalogTranscriptBlocks(
@@ -2752,6 +2771,8 @@ export function createCatalogViewer(
       const queued = view.queuedAfter;
       view.queuedAfter = undefined;
       if (!disposed && active === view && queued !== undefined) void loadSelected(view, queued);
+      else if (!disposed && active === view && view.sourceLabel === undefined)
+        void observeSelected(view);
     }
   }
   async function observeSelected(view: SelectedView) {
@@ -2768,13 +2789,15 @@ export function createCatalogViewer(
         current = view.store.selectedPage();
       if (!metadata || metadata.key !== view.key || next.machine !== source)
         throw Error('Selected observation changed');
+      const labelChanged = view.sourceLabel !== next.machine_info.label;
+      view.sourceLabel = next.machine_info.label;
       if (
         !metadata.transcript ||
         metadata.transcript.generation !== current?.projection.generation ||
         metadata.transcript.total !== current.projection.total
       )
         await loadSelected(view);
-      else if (JSON.stringify(metadata) !== JSON.stringify(view.meta)) {
+      else if (labelChanged || JSON.stringify(metadata) !== JSON.stringify(view.meta)) {
         view.meta = metadata;
         view.renderedRevision = -1;
         drawSelected(view);
@@ -2894,6 +2917,7 @@ export function createCatalogViewer(
     try {
       const reply = object(await api('/api/session-identity?' + p));
       if (reply.api !== 1) throw new Error('Unsupported source identity response');
+      const previousLabel = sourceLabel(view.sourceKey);
       if (active === view && selection.accept(ticket, reply.identity)) {
         if (selection.selectedIdentity()?.owner_qualification === 'provisional')
           view.note =
@@ -2907,6 +2931,10 @@ export function createCatalogViewer(
             if (snapshot && snapshot.thread === identity?.native_id) control.observe(snapshot);
             else control.unavailable();
           }
+        }
+        if (previousLabel !== sourceLabel(view.sourceKey)) {
+          view.renderedRevision = -1;
+          chrome();
         }
         drawSelected(view);
       }

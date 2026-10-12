@@ -96,6 +96,7 @@ test('catalog retains unknown timestamps, source disappearance and independent c
 test('catalog rejects wrong machine identity, duplicate rows and malformed source generations', () => {
   for (const change of [
     (p) => (p.machine_info.key = 'another-machine'),
+    (p) => (p.machine_info.freshness = 'healthy'),
     (p) => p.items.push(session()),
     (p) => (p.items[0].source_refs[0].source.offset = Number.MAX_SAFE_INTEGER + 1),
     (p) => (p.items[0].source_refs[0].source.prefix_sha256 = [1]),
@@ -109,6 +110,22 @@ test('catalog rejects wrong machine identity, duplicate rows and malformed sourc
     change(input);
     assert.throws(() => parseCatalogPage(input));
   }
+});
+
+test('retained catalog metadata preserves unavailable current facts without discarding source evidence', () => {
+  const input = page();
+  input.read_scope = 'retained_history';
+  input.machine_info = { key: input.machine, label: null, freshness: 'unavailable' };
+  input.items[0].freshness = { state: 'cached' };
+  input.items[0].facts_observation = { state: 'unavailable' };
+  input.items[0].native_selection = { state: 'unavailable' };
+  const parsed = parseCatalogPage(input);
+  assert.deepEqual(parsed.machine_info, input.machine_info);
+  assert.equal(parsed.read_scope, 'retained_history');
+  assert.equal(parsed.items[0].freshness.state, 'cached');
+  assert.equal(parsed.items[0].facts_observation.state, 'unavailable');
+  assert.equal(parsed.items[0].native_selection.state, 'unavailable');
+  assert.deepEqual(parsed.items[0].source_refs, parseCatalogPage(page()).items[0].source_refs);
 });
 
 test('catalog discovery completeness stays distinct from row freshness and native authority', () => {

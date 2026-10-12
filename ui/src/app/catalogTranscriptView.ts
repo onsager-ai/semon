@@ -341,7 +341,8 @@ export function catalogTranscriptBlocks(
           (entry.label ?? ''),
         loaded: entries.some((item) => item.entry.k === 'tool' && item.entry.tid === entry.call),
       });
-    else if (entry.k === 'harness') label(entry.label);
+    else if (entry.k === 'harness')
+      label('Harness text added before the prompt (' + entry.label + ')', 'harness-note');
     else if (entry.k === 'signal')
       views.push({
         kind: 'label',
