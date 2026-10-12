@@ -13,13 +13,16 @@ the existing file, process, facts and writer-lock observations; request-owned
 readers still verify source bytes and completion independently.
 
 Ordinary single-machine CLI/stdio `get_session` and `read_transcript` reuse
-focused Query when an existing Catalog closure is current and every contributing
-file belongs to the configured scan window. Qualification checks native file
+focused Query when an existing Catalog closure is current. Qualification checks native file
 generations and the Catalog role against independently current sidecar evidence;
 it neither discovers unrelated sources nor initializes a workspace Query cohort.
 The two-tool fixture loads four selected indexes with zero or 256 unrelated
 sessions in both default-window and `--all` modes (previously one versus 257).
-Cold/stale Catalogs, cross-window dependencies and multi-machine automatic
+Selected derivation preserves whole-file mtime scan windows and omitted Claude
+parent identities. Excluded sources are filtered before index/body adaptation,
+including missing-ledger fallback; they cannot trigger archive reads. A wholly
+excluded owner returns the ordinary unknown-session error without body I/O.
+Cold/stale Catalogs and multi-machine automatic
 selection still use native reconciliation and remain bounded-selection work.
 
 `SessionSources` constructs no machine view, refresh pool or worker. Explicit

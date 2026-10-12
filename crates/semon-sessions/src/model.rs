@@ -1264,6 +1264,14 @@ pub(crate) fn scan_cutoff(options: &Options, now: i64) -> Option<i64> {
         .then(|| now.saturating_sub(i64::try_from(options.since.as_millis()).unwrap_or(i64::MAX)))
 }
 
+pub(crate) fn catalog_source_in_window(
+    source: &summary::CatalogSource,
+    cutoff: Option<i64>,
+) -> bool {
+    cutoff
+        .is_none_or(|cutoff| source.modified_ns / 1_000_000 >= u128::try_from(cutoff).unwrap_or(0))
+}
+
 /// A file's modification time (epoch ms).
 fn modified_ms(path: &Path) -> Option<i64> {
     let time = fs::metadata(path).ok()?.modified().ok()?;
@@ -6447,6 +6455,7 @@ enum BuildSelection<'a> {
     Current(Option<&'a [crate::inputs::Input]>),
     History {
         files: Vec<SourceFile>,
+        skipped: BTreeSet<String>,
         records: &'a crate::overview_repair::NativeRecords<'a>,
     },
 }
@@ -6492,9 +6501,24 @@ fn prepare_history_inner(
 ) -> io::Result<BuildOutput> {
     let mut files = Vec::new();
     let mut seen = BTreeSet::new();
+    let mut skipped = BTreeSet::new();
+    let cutoff = scan_cutoff(options, now);
+    let projects = options.claude_home.join("projects");
     for row in rows {
         for source in &row.sources {
             if !seen.insert(source.path.clone()) {
+                continue;
+            }
+            if !catalog_source_in_window(source, cutoff) {
+                // Match current scanning: exclude the whole file, while
+                // retaining omitted Claude top-level identities for lineage
+                // and turns_truncated derivation. Never read excluded bodies.
+                if row.harness == "claude"
+                    && source.path.parent().and_then(Path::parent) == Some(projects.as_path())
+                    && let Some(stem) = source.path.file_stem().and_then(|stem| stem.to_str())
+                {
+                    skipped.insert(stem.to_owned());
+                }
                 continue;
             }
             let mut header = Value::Null;
@@ -6638,7 +6662,11 @@ fn prepare_history_inner(
         &mut false,
         &mut Texts::default(),
         now,
-        BuildSelection::History { files, records },
+        BuildSelection::History {
+            files,
+            skipped,
+            records,
+        },
         target,
     )
 }
@@ -6676,11 +6704,15 @@ fn build_sources_inner(
             );
             (selected, None, files, skipped, duration)
         }
-        BuildSelection::History { files, records } => (
+        BuildSelection::History {
+            files,
+            skipped,
+            records,
+        } => (
             Some([].as_slice()),
             Some(records),
             files,
-            BTreeSet::new(),
+            skipped,
             std::time::Duration::ZERO,
         ),
     };

@@ -3547,3 +3547,144 @@ fn ordinary_focused_query_reconciles_changed_log_sidecar_and_scan_window_context
     .unwrap();
     compare(&home.options, "child");
 }
+
+#[test]
+fn focused_query_preserves_whole_file_scan_window_and_skipped_parent_context() {
+    let mut home = Home::new("focused-cross-window");
+    home.options.all = false;
+    home.options.since = Duration::from_secs(6 * 3600);
+    home.top(
+        "parent",
+        &[human("parent", ts(1, 0), "outside-window parent")],
+    );
+    home.top(
+        "outside",
+        &[human("outside", ts(1, 0), "excluded isolated source")],
+    );
+    home.agent(
+        "parent",
+        "child",
+        "spawn",
+        &[human("parent", ts(1, 1), "inside-window child")],
+    );
+    for (path, age) in [
+        ("projects/-work-proj/parent.jsonl", 86400000),
+        ("projects/-work-proj/outside.jsonl", 86400000),
+        (
+            "projects/-work-proj/parent/subagents/agent-child.jsonl",
+            3600000,
+        ),
+    ] {
+        fs::File::open(home.options.claude_home.join(path))
+            .unwrap()
+            .set_times(
+                fs::FileTimes::new().set_modified(
+                    std::time::UNIX_EPOCH + Duration::from_millis((NOW - age) as u64),
+                ),
+            )
+            .unwrap();
+    }
+    let mut cache = crate::events::EventCache::open_scoped(&home.options.cache).unwrap();
+    crate::model::observe_catalog(
+        &home.options,
+        &mut cache,
+        &mut false,
+        &mut crate::model::Texts::default(),
+        NOW,
+    )
+    .unwrap();
+    let options = Options {
+        scan_window: true,
+        ..home.options.clone()
+    };
+    for id in ["child", "parent", "outside"] {
+        for tool in ["get_session", "read_transcript"] {
+            let args = json!({"id":id});
+            let expected = Query::from_sources(admitted(options.clone())).call_at(tool, &args, NOW);
+            let focused = Query::from_sources(admitted(options.clone())).call_selected_at(
+                "local",
+                id,
+                tool,
+                &args,
+                None,
+                crate::SessionSourceReadMode::LocalThenProvider,
+                NOW,
+            );
+            assert_eq!(
+                focused, expected,
+                "{id} {tool}: selected scan changed whole-file semantics"
+            );
+            let mut ordinary = Query::new(home.options.clone());
+            assert_eq!(ordinary.call_at(tool, &args, NOW), expected);
+            assert!(
+                ordinary.sources.machines[0]
+                    .1
+                    .work
+                    .lock()
+                    .unwrap()
+                    .events
+                    .is_none()
+            );
+        }
+    }
+    let reference = crate::session_query_sources(&home.options, "child")
+        .unwrap()
+        .into_iter()
+        .find(|source| source.native_id == "child")
+        .unwrap();
+    let archive = SelectedArchive {
+        bytes: Arc::from(fs::read(home.options.claude_home.join(&reference.path)).unwrap()),
+        source: reference,
+        calls: std::sync::atomic::AtomicUsize::new(0),
+        read_bytes: AtomicU64::new(0),
+        fault: 0,
+    };
+    // Missing excluded ledgers cannot force archive-body fallback. This reader
+    // accepts only the child and panics if any excluded source is requested.
+    let db =
+        rusqlite::Connection::open(crate::events::EventCache::path(&home.options.cache)).unwrap();
+    db.execute(
+        "DELETE FROM files WHERE path=?1",
+        [home
+            .options
+            .claude_home
+            .join("projects/-work-proj/parent.jsonl")
+            .to_str()
+            .unwrap()],
+    )
+    .unwrap();
+    for tool in ["get_session", "read_transcript"] {
+        let args = json!({"id":"child"});
+        let expected = Query::from_sources(admitted(options.clone())).call_at(tool, &args, NOW);
+        assert_eq!(
+            Query::from_sources(admitted(options.clone())).call_selected_at(
+                "local",
+                "child",
+                tool,
+                &args,
+                Some(&archive),
+                crate::SessionSourceReadMode::ProviderOnly,
+                NOW
+            ),
+            expected
+        );
+    }
+    let before = archive.calls.load(Ordering::Relaxed);
+    let error = Query::from_sources(admitted(options))
+        .call_selected_at(
+            "local",
+            "outside",
+            "get_session",
+            &json!({"id":"outside"}),
+            Some(&archive),
+            crate::SessionSourceReadMode::ProviderOnly,
+            NOW,
+        )
+        .unwrap_err();
+    assert_eq!(error.code, "unknown_session");
+    assert_eq!(
+        archive.calls.load(Ordering::Relaxed),
+        before,
+        "excluded source caused archive I/O"
+    );
+}
