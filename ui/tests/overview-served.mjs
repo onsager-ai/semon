@@ -195,6 +195,7 @@ test(
             await page.locator('#page [data-m]').first().click();
             await page.getByRole('button', { name: 'Back to Machines', exact: true }).waitFor();
             await page.locator('#page .nrow[data-id]').first().waitFor();
+            assert.equal(await page.locator('#page.machine-page').count(), 1);
             assert.match(new URL(page.url()).pathname, /^\/machines\//);
             await page.reload();
             await page.getByRole('button', { name: 'Back to Machines', exact: true }).waitFor();
@@ -221,6 +222,11 @@ test(
             await screenshot('machine');
             await page.getByRole('button', { name: 'Back to Machines', exact: true }).click();
             await page.locator('#page h1').filter({ hasText: 'Machines' }).waitFor();
+            assert.equal(
+              await page.locator('#page.machine-page').count(),
+              0,
+              'leaving machine detail releases its screen geometry',
+            );
             await navigate('sessions');
             await page.locator('#page [data-session-row="list"][data-id="harbor"]').click();
             await page.locator('[aria-label="Transcript"]').waitFor();

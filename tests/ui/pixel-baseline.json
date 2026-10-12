@@ -77,7 +77,7 @@
     "phone-dark|analytics": {"ratio": 0.06439, "size": ["780×7476", "780×5980"]},
     "phone-dark|drawer": {"ratio": 0.03179, "size": ["780×1688", "780×1688"]},
     "phone-dark|home": {"ratio": 0.46033, "size": ["780×3052", "780×1688"]},
-    "phone-dark|machine-laptop": {"ratio": 0.06392, "size": ["780×3798", "780×3384"]},
+    "phone-dark|machine-laptop": {"ratio": 0, "size": ["780×3384", "780×3384"]},
     "phone-dark|machines": {"ratio": 0.00381, "size": ["780×1688", "780×1688"]},
     "phone-dark|session-a-docs": {"ratio": 0.018, "size": ["780\u00d71688", "780\u00d71688"]},
     "phone-dark|session-a-index": {"ratio": 0.02722, "size": ["780\u00d71688", "780\u00d71688"]},
@@ -115,7 +115,7 @@
     "phone-light|analytics": {"ratio": 0.06393, "size": ["780×7476", "780×5980"]},
     "phone-light|drawer": {"ratio": 0.05439, "size": ["780×1688", "780×1688"]},
     "phone-light|home": {"ratio": 0.06524, "size": ["780×3052", "780×1688"]},
-    "phone-light|machine-laptop": {"ratio": 0.06327, "size": ["780×3798", "780×3384"]},
+    "phone-light|machine-laptop": {"ratio": 0, "size": ["780×3384", "780×3384"]},
     "phone-light|machines": {"ratio": 0.00375, "size": ["780×1688", "780×1688"]},
     "phone-light|session-a-docs": {"ratio": 0.01749, "size": ["780\u00d71688", "780\u00d71688"]},
     "phone-light|session-a-index": {"ratio": 0.02633, "size": ["780\u00d71688", "780\u00d71688"]},
@@ -159,10 +159,10 @@
     "desktop-light|machine-laptop": {"ratio": 0.05381, "size": ["1280×860", "1280×860"]},
     "desktop-light|machines": {"ratio": 0.01727, "size": ["1280×860", "1280×860"]},
     "phone-dark|machine-desktop": {"ratio": 0.01195, "size": ["780×1688", "780×1688"]},
-    "phone-dark|machine-laptop": {"ratio": 0.06392, "size": ["780×3798", "780×3384"]},
+    "phone-dark|machine-laptop": {"ratio": 0, "size": ["780×3384", "780×3384"]},
     "phone-dark|machines": {"ratio": 0.0064, "size": ["780×1688", "780×1688"]},
     "phone-light|machine-desktop": {"ratio": 0.01173, "size": ["780×1688", "780×1688"]},
-    "phone-light|machine-laptop": {"ratio": 0.06327, "size": ["780×3798", "780×3384"]},
+    "phone-light|machine-laptop": {"ratio": 0, "size": ["780×3384", "780×3384"]},
     "phone-light|machines": {"ratio": 0.00633, "size": ["780×1688", "780×1688"]}
   }
 }

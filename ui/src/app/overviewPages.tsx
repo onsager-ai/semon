@@ -21,7 +21,7 @@ import { renderAnalyticsPresentation } from './analyticsPresentation';
 import { createSeenResults } from './seenResults';
 import { HARNESSES, I } from './registry';
 import { runningToolLabel } from '../domain/toolNames';
-import { ago, timeText, shortModel, liveUrl } from '../domain/format';
+import { ago, timeText, shortModel, liveUrl, previewLine } from '../domain/format';
 
 interface Selection {
   source_key: string;
@@ -943,7 +943,7 @@ export function createOverviewPages(host: OverviewHost) {
                 detail: [
                   row.session.kind ?? HARNESSES[row.session.harness]?.name ?? row.session.harness,
                   machine.label,
-                  row.session.detail,
+                  row.session.detail ? previewLine(row.session.detail) : null,
                 ]
                   .filter(Boolean)
                   .join(' · '),

@@ -107,3 +107,5 @@ export function timeText(ms: number) {
 }
 export const countText = (n: number) => Math.round(n).toLocaleString(),
   hLabel = (n: number) => (n ? +n.toFixed(2) + ' h' : '0');
+/** Plain, single-line activity previews use the established machine screen format. */
+export const previewLine = (text: string) => text.replace(/[`*]/g, '').replace(/\s+/g, ' ').trim();
