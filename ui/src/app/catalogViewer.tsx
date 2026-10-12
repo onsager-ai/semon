@@ -767,6 +767,7 @@ export function createCatalogViewer(
     ++causalEpoch;
     causal = null;
     causalLoading = false;
+    root.removeAttribute('aria-busy');
     causalExpanded.clear();
     if (active) {
       preserveScroll();
@@ -820,6 +821,7 @@ export function createCatalogViewer(
     const epoch = causalEpoch,
       source = capabilities.source_key;
     causalLoading = true;
+    if (!causal) root.setAttribute('aria-busy', 'true');
     try {
       const p = params();
       p.set('sid', route.sid);
@@ -1048,7 +1050,10 @@ export function createCatalogViewer(
           root,
         );
     } finally {
-      if (epoch === causalEpoch) causalLoading = false;
+      if (epoch === causalEpoch) {
+        causalLoading = false;
+        if (!disposed && navigation.route === route) root.removeAttribute('aria-busy');
+      }
     }
   }
   function goCausal(key: string, turn: string) {
