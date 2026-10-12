@@ -143,7 +143,7 @@ pub(super) fn write(
         return clear(transaction, path);
     };
     let prefix = prefix(path);
-    let mut put = transaction.prepare("INSERT INTO meta(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value WHERE value!=excluded.value")?;
+    let mut put = transaction.prepare_cached("INSERT INTO meta(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value WHERE value!=excluded.value")?;
     let calls: Vec<_> = index.complete.iter().chain(&index.eof).cloned().collect();
     for (page, calls) in calls.chunks(PAGE).enumerate() {
         let encoded = json(&Page {

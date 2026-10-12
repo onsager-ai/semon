@@ -135,3 +135,18 @@ admitted machine set. The same native evidence, index and refresh coordinator
 survive that transfer; admission does not close a healthy writer or reopen its
 index. The host must transfer lifecycle ownership and retain custody/admission
 fences. Closing the admitted set closes those original observers too.
+
+The native Event Index connection reuses at most 32 compiled SQL statements for
+per-source ledger checks and row writes. Bound values clear when a statement
+returns to the connection cache; generation checks still execute within each
+existing transaction. A separate-connection regression changes schema/parser
+versions after the statements are warm and verifies the old owner refuses both
+write and removal without changing the original ledger.
+
+Three isolated cold-Catalog diagnostic runs before/after this change measured
+2108-source indexing times of 1905/1975/1533 ms and 1200/1795/1099 ms respectively;
+complete-test times were 7.99/7.81/6.15 s and 5.87/7.20/5.89 s. Runs without
+compilation reported 174616–174984 KiB peak process RSS across both variants.
+The first page still indexed only 64 sources with unrelated history present.
+These local samples qualify reduced compilation overhead; they neither prove the
+CI contention gate passes nor establish a production latency or memory bound.
