@@ -1418,7 +1418,7 @@ impl ViewerCore {
         }
         let answer = match path {
             "/api/model" => self.model(&views, extras, query, if_none_match),
-            "/api/tx" | "/api/attachment" => self.by_session(&views, path, query, if_none_match),
+            "/api/tx" => self.by_session(&views, path, query, if_none_match),
             "/api/entry" if query_value(query, "as").is_some() => {
                 self.by_session(&views, path, query, if_none_match)
             }
@@ -1746,7 +1746,7 @@ impl ViewerCore {
         })
     }
 
-    /// `/api/tx`, `/api/attachment` and `/api/entry?sid=…`: the machine that
+    /// `/api/tx` and `/api/entry?sid=…`: the machine that
     /// owns the session.
     fn by_session(
         &self,

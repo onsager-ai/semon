@@ -372,10 +372,8 @@ pub(crate) struct PromptCache {
 
 #[derive(Clone)]
 struct ImageRange {
-    block: usize,
     start: u64,
     end: u64,
-    prefix: usize,
 }
 
 #[derive(Clone)]
@@ -413,8 +411,10 @@ impl PromptMetadata {
         let mut ranges = Vec::new();
         if let Some(parts) = parts(record).filter(|parts| has_image(parts)) {
             let raw_parts = raw_parts(text)?;
-            for (block, (part, raw_part)) in parts.iter().zip(raw_parts).enumerate() {
-                let Some(found) = inline(part) else { continue };
+            for (part, raw_part) in parts.iter().zip(raw_parts) {
+                if inline(part).is_none() {
+                    continue;
+                }
                 let data = match field(part, "type")? {
                     "image" => raw_field(raw_field(raw_part.get(), "source")?.get(), "data")?,
                     "input_image" => {
@@ -427,18 +427,14 @@ impl PromptMetadata {
                     }
                     _ => continue,
                 };
-                let decoded: String = serde_json::from_str(data.get()).ok()?;
-                let prefix = decoded.len().checked_sub(found.data.len())?;
                 let start = (data.get().as_ptr() as usize).checked_sub(raw.as_ptr() as usize)?;
                 let end = start.checked_add(data.get().len())?;
                 if end > raw.len() || !data.get().starts_with('"') || !data.get().ends_with('"') {
                     return None;
                 }
                 ranges.push(ImageRange {
-                    block,
                     start: (start + 1) as u64,
                     end: (end - 1) as u64,
-                    prefix,
                 });
             }
         }
@@ -538,55 +534,6 @@ impl PromptCache {
     pub(crate) fn refs(&self, offset: u64) -> Option<Vec<Value>> {
         self.metadata(offset).map(|metadata| metadata.refs)
     }
-
-    /// Reads and decodes only the selected image string, checking its current
-    /// version and signature before serving it. Cached refs contain no bytes.
-    pub(crate) fn image(
-        &self,
-        path: &std::path::Path,
-        offset: u64,
-        block: usize,
-        want: u64,
-    ) -> Option<(&'static str, Vec<u8>)> {
-        use std::io::{Read, Seek, SeekFrom};
-        let metadata = match self.metadata(offset) {
-            Some(metadata) => metadata,
-            None => {
-                let (record, _) = self.record(path, offset)?;
-                match self.metadata(offset) {
-                    Some(metadata) => metadata,
-                    None => return image(&record, block, want),
-                }
-            }
-        };
-        let reference = metadata
-            .refs
-            .iter()
-            .find(|reference| reference["b"].as_u64() == Some(block as u64))?;
-        let media = allowed(reference["type"].as_str()?)?;
-        let range = metadata.ranges.iter().find(|range| range.block == block)?;
-        let length = range.end.checked_sub(range.start)?;
-        if length > PROMPT_LINE_MAX {
-            return None;
-        }
-        let mut file = crate::sealed::LogFile::open(path).ok()?;
-        file.seek(SeekFrom::Start(offset.checked_add(range.start)?))
-            .ok()?;
-        let mut encoded = Vec::with_capacity(length as usize + 2);
-        encoded.push(b'"');
-        file.take(length).read_to_end(&mut encoded).ok()?;
-        if encoded.len() != length as usize + 1 {
-            return None;
-        }
-        encoded.push(b'"');
-        let data: String = serde_json::from_slice(&encoded).ok()?;
-        let data = data.get(range.prefix..)?;
-        if version(data.as_bytes()) != want {
-            return None;
-        }
-        let bytes = decode(data.as_bytes(), IMAGE_MAX)?;
-        signature(media, &bytes).then_some((media, bytes))
-    }
 }
 
 #[cfg(test)]
@@ -656,26 +603,32 @@ pub(crate) mod tests {
         );
         for block in [1, 2] {
             assert_eq!(
-                cache
-                    .image(&path, 0, block, version(encoded.as_bytes()))
-                    .unwrap()
-                    .1,
+                image(
+                    &serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap(),
+                    block,
+                    version(encoded.as_bytes())
+                )
+                .unwrap()
+                .1,
                 png
             );
         }
         // A stale range cannot serve bytes under an old content URL.
-        let changed = raw.replace("/", "A");
+        let changed = raw.replace("\\/", "A");
         std::fs::write(&path, changed).unwrap();
         assert!(
-            cache
-                .image(&path, 0, 1, version(encoded.as_bytes()))
-                .is_none()
+            image(
+                &serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap(),
+                1,
+                version(encoded.as_bytes())
+            )
+            .is_none()
         );
         std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
-    fn codex_data_url_cache_reads_the_base64_range_only() {
+    fn codex_data_url_cache_elides_image_bytes_and_preserves_image_references() {
         let root =
             std::env::temp_dir().join(format!("semon-codex-prompt-cache-{}", std::process::id()));
         std::fs::create_dir_all(&root).unwrap();
@@ -692,10 +645,13 @@ pub(crate) mod tests {
         let (skinny, _) = cache.record(&path, 0).unwrap();
         assert_eq!(skinny["payload"]["content"][1]["image_url"]["url"], "");
         assert_eq!(
-            cache
-                .image(&path, 0, 1, version(encoded.as_bytes()))
-                .unwrap()
-                .1,
+            image(
+                &serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap(),
+                1,
+                version(encoded.as_bytes())
+            )
+            .unwrap()
+            .1,
             png
         );
         std::fs::remove_dir_all(root).unwrap();

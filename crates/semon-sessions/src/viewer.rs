@@ -1635,70 +1635,6 @@ impl MachineView {
         ))
     }
 
-    /// `/api/attachment?sid=&o=&b=&v=`: one image a prompt of session `sid`
-    /// attaches, as `/api/tx` names it (its line's offset `o`, its block
-    /// `b`, the version of its content `v`), decoded, sent as its exact
-    /// type. Its URL names its content, so it may be cached (for a day); a line
-    /// rewritten under the same offset no longer matches `v`, and is a 404
-    /// until the page reads its new URL. The offset must be one of the
-    /// session's own prompts in the model (a message of yours, or a prompt
-    /// shown as one); the line is read back from that prompt's file, and the
-    /// block must be an image [`crate::attachments::image`] serves: one of
-    /// the four raster types (never SVG), whose bytes start with that type's
-    /// signature, inline as valid base64, at most
-    /// [`crate::attachments::IMAGE_MAX`] decoded. Anything else is 404, a
-    /// malformed request 400.
-    fn attachment(&self, query: &str) -> io::Result<(u16, &'static str, Vec<u8>)> {
-        let sid = query_value(query, "sid")
-            .and_then(decoded)
-            .ok_or_else(|| invalid_input("sid"))?;
-        let number = |key: &str| {
-            query_value(query, key)
-                .filter(|value| {
-                    (1..=20).contains(&value.len())
-                        && value.bytes().all(|byte| byte.is_ascii_digit())
-                })
-                .and_then(|value| value.parse::<u64>().ok())
-                .ok_or_else(|| invalid_input(key))
-        };
-        let offset = number("o")?;
-        let block = usize::try_from(number("b")?).map_err(|_| invalid_input("b"))?;
-        let version = query_value(query, "v")
-            .filter(|value| {
-                value.len() == 16
-                    && value
-                        .bytes()
-                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-            })
-            .and_then(|value| u64::from_str_radix(value, 16).ok())
-            .ok_or_else(|| invalid_input("v"))?;
-        let cache = self.served_model()?;
-        let built = &cache.built;
-        let transcript = built.tx.get(&sid).ok_or(io::ErrorKind::NotFound)?;
-        let mut files: Vec<&model::SlotFile> = Vec::new();
-        for slot in &transcript.slots {
-            let prompt = match &slot.kind {
-                model::SlotKind::U => true,
-                model::SlotKind::H(id) => model::is_ask(id),
-                _ => false,
-            };
-            if !prompt || slot.offset != offset {
-                continue;
-            }
-            if let Some(file) = slot.file.as_deref()
-                && !files.iter().any(|seen| seen.path == file.path)
-            {
-                files.push(file);
-            }
-        }
-        for file in files {
-            if let Some((media, bytes)) = file.prompts.image(&file.path, offset, block, version) {
-                return Ok((200, media, bytes));
-            }
-        }
-        Err(io::ErrorKind::NotFound.into())
-    }
-
     /// Whether a page URL names something in the model: `/machines/<id>`,
     /// `/s/<harness>/<id>` and `/trace/<harness>/<id>/<turn>`. Checked
     /// against the model brought up to date first (a stat pass, and a
@@ -1753,7 +1689,6 @@ impl MachineView {
             "/api/transcript" => Ok((200, json, serde_json::to_vec(&self.transcript(query)?)?)),
             "/api/tx" => Ok((200, json, self.tx(query)?.into_bytes())),
             "/api/entry" => Ok((200, json, self.expand(query)?.into_bytes())),
-            "/api/attachment" => self.attachment(query),
             _ if path.starts_with("/fonts/") => {
                 let name = path["/fonts/".len()..]
                     .strip_suffix(".woff2")
@@ -3059,7 +2994,10 @@ mod tests {
             port,
         };
         let request = request.replace("PORT", &port.to_string());
-        let worker = thread::spawn(move || viewer.handle(server.recv().unwrap()));
+        let worker = thread::spawn(move || {
+            viewer.handle(server.recv().unwrap());
+            viewer.core.close();
+        });
         let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
         stream.write_all(request.as_bytes()).unwrap();
         stream.shutdown(std::net::Shutdown::Write).unwrap();
@@ -4047,15 +3985,31 @@ mod tests {
         (fixture, lines)
     }
 
-    fn tx_entries(core: &MachineView, sid: &str) -> (String, Vec<Value>) {
-        let reply = core.respond("GET", "/api/tx", &format!("sid={sid}"), None);
+    fn native_image_entries(core: &MachineView, sid: &str) -> (String, Vec<Value>) {
+        model::observe_catalog(
+            core.options(),
+            &mut EventCache::open_scoped(&core.options().cache).unwrap(),
+            &mut false,
+            &mut model::Texts::default(),
+            model::now_ms(),
+        )
+        .unwrap();
+        let builds = model::COMPAT_BUILDS.with(std::cell::Cell::get);
+        let reply = crate::session_transcript_range(
+            core.options(),
+            "fixture",
+            &format!("sid={sid}&after=0&limit=100"),
+            None,
+        );
         assert_eq!(reply.status, 200);
+        assert_eq!(model::COMPAT_BUILDS.with(std::cell::Cell::get), builds);
         let body = String::from_utf8(reply.body).unwrap();
         let page: Value = serde_json::from_str(&body).unwrap();
+        assert!(!page["range"]["has_more"].as_bool().unwrap_or(false));
         (body, page["entries"].as_array().unwrap().clone())
     }
 
-    /// A servable image's reference, as `/api/tx` names it.
+    /// A servable image's native transcript reference.
     fn served_ref(o: u64, b: usize, media: &str, bytes: &[u8], size: (u32, u32)) -> Value {
         json!({"b":b,"type":media,"size":bytes.len(),"v":v(&b64(bytes)),"w":size.0,"h":size.1,"o":o})
     }
@@ -4064,7 +4018,7 @@ mod tests {
     fn a_prompts_images_are_named_by_reference_never_inlined() {
         let (fixture, at) = images_fixture();
         let core = fixture.viewer();
-        let (body, entries) = tx_entries(&core, "pics");
+        let (body, entries) = native_image_entries(&core, "pics");
         // No bytes, no placeholder, no "[image]" text in the page.
         for bytes in [PNG, JPEG, GIF, WEBP] {
             assert!(!body.contains(&b64(bytes)[..12]), "{body}");
@@ -4095,9 +4049,10 @@ mod tests {
             ],
             "{entries:?}"
         );
-        // Every entry with images is your message; its text is the model's, without the placeholder.
-        let model = body_of(&core.respond("GET", "/api/model", "", None));
-        let briefs: Vec<&str> = model["handoffs"]
+        // Image prompts retain their shared native handoff text.
+        let mut query = crate::Query::new(fixture.options.clone());
+        let session = query.call("get_session", &json!({"id":"pics"})).unwrap();
+        let briefs: Vec<&str> = session["session"]["handoffs"]
             .as_array()
             .unwrap()
             .iter()
@@ -4119,22 +4074,43 @@ mod tests {
         }
     }
 
+    fn native_image_query(core: &MachineView, sid: &str, offset: u64, block: usize) -> String {
+        let (body, entries) = native_image_entries(core, sid);
+        let page: Value = serde_json::from_str(&body).unwrap();
+        let (entry, ordinal) = entries
+            .iter()
+            .find_map(|entry| {
+                entry["img"]
+                    .as_array()?
+                    .iter()
+                    .enumerate()
+                    .find_map(|(ordinal, image)| {
+                        (image["o"] == offset && image["b"] == block).then_some((entry, ordinal))
+                    })
+            })
+            .expect("the selected native image reference");
+        format!(
+            "machine=local&sid={sid}&after={}&limit=1&generation={}&part=attachment&image={ordinal}",
+            entry["slot"],
+            page["projection"]["generation"].as_str().unwrap()
+        )
+    }
+
     #[test]
-    fn an_attachment_is_served_only_as_an_indexed_prompts_image() {
+    fn an_attachment_is_served_only_as_a_generation_fenced_native_image() {
         let (fixture, at) = images_fixture();
         let core = fixture.viewer();
-        let fetch = |query: &str| core.respond("GET", "/api/attachment", query, None);
-        let url = |sid: &str, o: u64, b: usize, data: &str| {
-            format!("sid={sid}&o={o}&b={b}&v={}", v(data))
-        };
-        for (o, b, media, bytes) in [
+        let fetch =
+            |query: &str| crate::session_entry_field(&fixture.options, "local", query, None);
+        for (offset, block, media, bytes) in [
             (at[0], 0, "image/png", PNG),
             (at[2], 0, "image/jpeg", JPEG),
             (at[3], 0, "image/png", PNG),
             (at[7], 0, "image/gif", GIF),
             (at[7], 1, "image/webp", WEBP),
         ] {
-            let reply = fetch(&url("pics", o, b, &b64(bytes)));
+            let query = native_image_query(&core, "pics", offset, block);
+            let reply = fetch(&query);
             assert_eq!(
                 (reply.status, reply.content_type, reply.body.as_slice()),
                 (200, media, bytes),
@@ -4142,67 +4118,54 @@ mod tests {
             );
             assert_eq!(reply.headers(), ATTACHMENT_HEADERS.as_slice());
         }
-        let png = b64(PNG);
-        let refused = [
-            // Another session, or none: the offset must be one of this session's prompts.
-            url("other", at[0], 0, &png),
-            url("nobody", at[0], 0, &png),
-            // A line that is no prompt (the reply, the tool result beside its image), or no line.
-            url("pics", at[1], 0, &png),
-            url("pics", at[6], 1, &png),
-            url("pics", at[0] + 1, 0, &png),
-            // A block that is text, or past the end.
-            url("pics", at[0], 1, &png),
-            url("pics", at[0], 99, &png),
-            // Content other than the URL names: another image's version.
-            url("pics", at[0], 0, &b64(JPEG)),
-            // SVG, an SVG declared as PNG, a type that isn't an image, malformed base64, a URL.
-            url("pics", at[4], 0, &b64(SVG)),
-            url("pics", at[4], 1, &b64(SVG)),
-            url("pics", at[4], 2, &png),
-            url("pics", at[4], 3, &format!("{}*AAA", &png[..8])),
-            url("pics", at[4], 4, ""),
-        ];
-        for query in &refused {
-            let reply = fetch(query);
+        // SVG, SVG declared as PNG, non-image types, malformed base64 and remote URLs remain unavailable.
+        for block in 0..5 {
+            let query = native_image_query(&core, "pics", at[4], block);
+            let reply = fetch(&query);
             assert_eq!(reply.status, 404, "{query}");
-            assert_eq!(reply.content_type, "text/plain; charset=utf-8", "{query}");
-            assert_eq!(reply.headers(), SECURITY_HEADERS.as_slice(), "{query}");
+            assert_eq!(reply.headers(), SECURITY_HEADERS.as_slice());
         }
-        let good = v(&png);
+        let good = native_image_query(&core, "pics", at[0], 0);
+        assert_ne!(fetch(&good.replace("sid=pics", "sid=other")).status, 200);
+        assert_eq!(fetch(&good.replace("sid=pics", "sid=nobody")).status, 404);
+        assert_eq!(fetch(&good.replace("image=0", "image=1")).status, 404);
+        // Non-prompt entries, including a tool result beside an image, cannot expose image bytes.
+        let (body, entries) = native_image_entries(&core, "pics");
+        let page: Value = serde_json::from_str(&body).unwrap();
+        let generation = page["projection"]["generation"].as_str().unwrap();
+        for entry in entries.iter().filter(|entry| entry.get("img").is_none()) {
+            let query = format!(
+                "sid=pics&after={}&limit=1&generation={generation}&part=attachment&image=0",
+                entry["slot"]
+            );
+            assert_eq!(fetch(&query).status, 404, "{entry}");
+        }
         for query in [
-            format!("o=0&b=0&v={good}"),
-            format!("sid=pics&b=0&v={good}"),
-            format!("sid=pics&o={}&v={good}", at[0]),
-            format!("sid=pics&o={}&b=0", at[0]),
-            format!("sid=pics&o=x&b=0&v={good}"),
-            format!("sid=pics&o=-1&b=0&v={good}"),
-            format!("sid=pics&o=+0&b=0&v={good}"),
-            format!("sid=pics&o=0&b=1e2&v={good}"),
-            format!("sid=pics&o=0&b=&v={good}"),
-            format!("sid=pics&o=99999999999999999999999&b=0&v={good}"),
-            format!("sid=pics&o=0&b=0&v={}", good.to_uppercase()),
-            format!("sid=pics&o=0&b=0&v={}", &good[..15]),
-            format!("sid=pics&o=0&b=0&v={good}0"),
-            "sid=pics&o=0&b=0&v=zzzzzzzzzzzzzzzz".into(),
+            good.replace("sid=pics&", ""),
+            good.replace("after=0&", ""),
+            good.replace("limit=1", "limit=2"),
+            good.replace(&format!("generation={generation}&"), ""),
+            good.replace("after=0", "after=x"),
+            good.replace("after=0", "after=-1"),
+            good.replace("after=0", "after=99999999999999999999999"),
+            good.replace("image=0", "image=64"),
+            good.replace("image=0", "image=x"),
         ] {
             assert_eq!(fetch(&query).status, 400, "{query}");
         }
         assert_eq!(
-            core.respond(
-                "POST",
-                "/api/attachment",
-                &url("pics", at[0], 0, &png),
-                None
-            )
-            .status,
+            fetch(&good.replace(generation, &"0".repeat(64))).status,
+            409
+        );
+        let viewer = ViewerCore::new(fixture.options.clone());
+        assert_eq!(
+            viewer
+                .respond("POST", "/api/session-entry", &good, None)
+                .status,
             405
         );
-        // On the wire: the exact type, nosniff, cached privately for a day, a CSP of its own; nothing else is cached.
-        let wire = get(
-            &fixture,
-            &format!("/api/attachment?{}", url("pics", at[0], 0, &png)),
-        );
+        viewer.close();
+        let wire = get(&fixture, &format!("/api/session-entry?{good}"));
         assert!(wire.starts_with("HTTP/1.1 200"), "{wire}");
         for header in [
             "Content-Type: image/png",
@@ -4215,22 +4178,16 @@ mod tests {
             assert!(wire.contains(header), "missing {header}");
         }
         assert!(!wire.contains("no-store"));
-        let missing = get(
-            &fixture,
-            &format!("/api/attachment?{}", url("pics", at[4], 0, &b64(SVG))),
-        );
+        let missing_query = native_image_query(&core, "pics", at[4], 0);
+        let missing = get(&fixture, &format!("/api/session-entry?{missing_query}"));
         assert!(missing.starts_with("HTTP/1.1 404"));
         for header in HEADERS {
             assert!(missing.contains(header), "missing {header}");
         }
-        // The token guards it as it guards the rest.
         assert!(
             http(
                 &fixture,
-                &format!(
-                    "GET /api/attachment?{} HTTP/1.1\r\nHost: 127.0.0.1:PORT\r\n\r\n",
-                    url("pics", at[0], 0, &png)
-                )
+                &format!("GET /api/session-entry?{good} HTTP/1.1\r\nHost: 127.0.0.1:PORT\r\n\r\n")
             )
             .starts_with("HTTP/1.1 403")
         );
@@ -4249,24 +4206,24 @@ mod tests {
         let other: &[u8] = b"GIF89a\x07\0\x03\0\0\0\0";
         fixture.claude("swap", &[line(GIF)]);
         let core = fixture.viewer();
-        let old = format!("sid=swap&o=0&b=0&v={}", v(&b64(GIF)));
+        let old = native_image_query(&core, "swap", 0, 0);
         assert_eq!(
-            core.respond("GET", "/api/attachment", &old, None).status,
+            crate::session_entry_field(&fixture.options, "local", &old, None).status,
             200
         );
         let path = fixture.claude("swap", &[line(other)]);
         assert_eq!(offsets(&path), [0]);
-        let (_, entries) = tx_entries(&core, "swap");
+        let (_, entries) = native_image_entries(&core, "swap");
         let image = &entries.iter().find_map(|entry| entry.get("img")).unwrap()[0];
         assert_eq!(image["v"], v(&b64(other)));
         assert_eq!(image["w"], 7);
         assert_eq!(
-            core.respond("GET", "/api/attachment", &old, None).status,
-            404
+            crate::session_entry_field(&fixture.options, "local", &old, None).status,
+            409
         );
-        let new = format!("sid=swap&o=0&b=0&v={}", v(&b64(other)));
+        let new = native_image_query(&core, "swap", 0, 0);
         assert_eq!(
-            core.respond("GET", "/api/attachment", &new, None).body,
+            crate::session_entry_field(&fixture.options, "local", &new, None).body,
             other
         );
     }
@@ -4291,7 +4248,7 @@ mod tests {
         let at = offsets(&path);
         assert!(at[1] > tx::LINE_MAX);
         let core = fixture.viewer();
-        let (_, entries) = tx_entries(&core, "big");
+        let (_, entries) = native_image_entries(&core, "big");
         let images: Vec<&Value> = entries
             .iter()
             .filter_map(|entry| entry.get("img"))
@@ -4303,17 +4260,12 @@ mod tests {
                 &json!([{"b":0,"na":true,"o":at[1]}]),
             ]
         );
-        let served = core.respond(
-            "GET",
-            "/api/attachment",
-            &format!("sid=big&o=0&b=0&v={}", v(&exact)),
-            None,
-        );
+        let query = native_image_query(&core, "big", 0, 0);
+        let served = crate::session_entry_field(&fixture.options, "local", &query, None);
         assert_eq!((served.status, served.body.len()), (200, cap));
-        let refused = format!("sid=big&o={}&b=0&v={}", at[1], v(&over));
+        let refused = native_image_query(&core, "big", at[1], 0);
         assert_eq!(
-            core.respond("GET", "/api/attachment", &refused, None)
-                .status,
+            crate::session_entry_field(&fixture.options, "local", &refused, None).status,
             404
         );
     }
@@ -4334,7 +4286,7 @@ mod tests {
         );
         let at = offsets(&path);
         let core = fixture.viewer();
-        let (body, entries) = tx_entries(&core, "cdx");
+        let (body, entries) = native_image_entries(&core, "cdx");
         assert!(
             !body.contains("<image") && !body.contains("[Image #"),
             "{body}"
@@ -4345,15 +4297,15 @@ mod tests {
             prompt["img"],
             json!([served_ref(at[1], 1, "image/png", PNG, (1, 1)), {"b":3,"na":true,"o":at[1]}])
         );
-        let query = format!("sid=cdx&o={}&b=1&v={}", at[1], v(&b64(PNG)));
-        let reply = core.respond("GET", "/api/attachment", &query, None);
+        let query = native_image_query(&core, "cdx", at[1], 1);
+        let reply = crate::session_entry_field(&fixture.options, "local", &query, None);
         assert_eq!(
             (reply.status, reply.content_type, reply.body.as_slice()),
             (200, "image/png", PNG)
         );
-        let local = format!("sid=cdx&o={}&b=3&v={}", at[1], v("/home/me/shot.png"));
+        let local = native_image_query(&core, "cdx", at[1], 3);
         assert_eq!(
-            core.respond("GET", "/api/attachment", &local, None).status,
+            crate::session_entry_field(&fixture.options, "local", &local, None).status,
             404
         );
     }
@@ -6596,6 +6548,13 @@ mod tests {
             .unwrap()
             .to_owned();
         assert_eq!(view.respond("GET", "/api/tree", "", None).status, 200);
+        let (native_body, native_entries) = native_image_entries(&view, "lane");
+        let native_page: Value = serde_json::from_str(&native_body).unwrap();
+        let attachment_query = format!(
+            "sid=lane&after={}&limit=1&generation={}&part=attachment&image=0",
+            native_entries[0]["slot"],
+            native_page["projection"]["generation"].as_str().unwrap()
+        );
         let reads = view.hooks.refreshes_first.load(Ordering::SeqCst);
         let (starts, release) = view.hooks.hold();
         say(&fixture, "lane", 1, "written while the rebuild waits");
@@ -6620,12 +6579,10 @@ mod tests {
                 "{query}"
             );
         }
-        let attachment = ask(
-            "/api/attachment",
-            &view,
-            "/api/attachment",
-            "sid=lane&o=0&b=0&v=0000000000000000",
-        );
+        let native_options = view.options().clone();
+        let attachment = at_once("native attachment", move || {
+            crate::session_entry_field(&native_options, "local", &attachment_query, None)
+        });
         assert_eq!(attachment.status, 404, "no image there, but an answer");
         let tree = ask("/api/tree", &view, "/api/tree", "");
         assert_eq!(tree.status, 200);
