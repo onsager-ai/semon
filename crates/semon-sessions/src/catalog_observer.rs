@@ -32,6 +32,13 @@ impl SessionCatalogObserver {
         self.view.note_catalog_read()
     }
 
+    /// Register a qualified persisted read's interest in future changes. This
+    /// starts no cold preparation; invalidation still queues the shared worker,
+    /// and existing producer failure or stall health remains observable.
+    pub fn watch(&self) -> io::Result<()> {
+        self.view.note_catalog_interest()
+    }
+
     /// Call after an authorized source push, including when no Viewer is open.
     /// Refreshes are coalesced using the existing spacing and revision rules.
     pub fn changed(&self) -> io::Result<()> {

@@ -949,6 +949,10 @@ impl MachineView {
     /// long, a read answers "rebuilds stalled" (500) at once. A closed view
     /// answers from what it has.
     fn note_read(&self, kind: Kind) -> io::Result<()> {
+        self.note_read_with(kind, true)
+    }
+
+    fn note_read_with(&self, kind: Kind, prepare: bool) -> io::Result<()> {
         let mut state = lock(&self.live.state);
         let now = Instant::now();
         state.read_at = Some(now);
@@ -969,8 +973,10 @@ impl MachineView {
                 late >= stalled_after
             }
             Slot::Idle => {
-                state.unconfirmed = [true; 2];
-                self.queue(&mut state, now, false);
+                if prepare || state.invalidated {
+                    state.unconfirmed = [true; 2];
+                    self.queue(&mut state, now, false);
+                }
                 false
             }
         };
@@ -1000,6 +1006,13 @@ impl MachineView {
     pub(crate) fn note_catalog_read(&self) -> io::Result<()> {
         self.evidence.catalog_demand.store(true, Ordering::Relaxed);
         self.note_read(Kind::Catalog)
+    }
+
+    /// An already qualified persisted read needs updates after invalidation,
+    /// without starting a cold producer merely because this owner is new.
+    pub(crate) fn note_catalog_interest(&self) -> io::Result<()> {
+        self.evidence.catalog_demand.store(true, Ordering::Relaxed);
+        self.note_read_with(Kind::Catalog, false)
     }
 
     /// A read's own refresh of the kind it wants, when none is built yet
@@ -6026,6 +6039,39 @@ mod tests {
             1,
             "never more threads than its size"
         );
+        view.close();
+    }
+
+    #[test]
+    fn qualified_catalog_interest_avoids_cold_work_and_observes_invalidation() {
+        let fixture = lane_fixture();
+        let publisher = MachineView::new(fixture.options.clone());
+        publish_native(&publisher);
+        publisher.close();
+        let generation = || {
+            let page = crate::session_catalog_page(&fixture.options, "fixture", "limit=60");
+            assert_eq!(page.status, 200);
+            let body: Value = serde_json::from_slice(&page.body).unwrap();
+            body["generation"].clone()
+        };
+        let before = generation();
+        let pool = RefreshPool::new(1);
+        let view = pooled(&fixture, Refresh::OnInvalidate, &pool);
+        for _ in 0..8 {
+            view.note_catalog_interest().unwrap();
+            assert_eq!(generation(), before);
+        }
+        assert_eq!(view.hooks.builds(), 0);
+        assert_eq!(pool.entries_for(&view), 0);
+        assert!(lock(&view.evidence.work).events.is_none());
+        say(&fixture, "lane", 1, "after qualified interest");
+        view.invalidate();
+        eventually("a watched source changes after invalidation", || {
+            (generation() != before).then_some(())
+        });
+        assert!(view.hooks.builds() > 0);
+        assert!(pool.threads() <= 1);
+        assert!(pool.entries_for(&view) <= 1);
         view.close();
     }
 
