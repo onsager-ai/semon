@@ -36,6 +36,39 @@ fn paragraphs(text: &str) -> String {
     format!("<p class=\"hub-name\">{}</p>", crate::shell::escape(text))
 }
 
+/// A selected source overview; authentication and source admission stay with
+/// the host. The bounded recent rows link to the same native history reader.
+pub fn machine_overview(body: &mut String, value: &Value, key: &str) -> bool {
+    let Some(machines) = value["machines"].as_array() else {
+        return false;
+    };
+    let [machine] = machines.as_slice() else {
+        return false;
+    };
+    if machine["key"] != key {
+        return false;
+    }
+    let label = machine["label"].as_str().unwrap_or(key);
+    body.push_str(&format!(
+        "<h1>{}</h1><p>{} · {} working · {} sessions</p>",
+        crate::shell::escape(label),
+        if machine["up"] == true {
+            "Up"
+        } else {
+            "Not responding"
+        },
+        machine["working"].as_u64().unwrap_or(0),
+        machine["sessions"].as_u64().unwrap_or(0)
+    ));
+    overview_sessions(body, &value["recent"]);
+    body.push_str(&link(
+        "/sessions",
+        &[("machine", key), ("native", "1")],
+        "All sessions",
+    ));
+    true
+}
+
 pub fn overview_sessions(body: &mut String, rows: &Value) {
     body.push_str("<ul>");
     for row in rows.as_array().into_iter().flatten() {

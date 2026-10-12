@@ -1,6 +1,6 @@
 import type { CatalogTranscriptEntry } from '../state/catalog-transcript-wire';
 import type { TranscriptBlock, EntryView, ToolView, BackgroundView } from '../lib/transcript';
-import { toolInfo } from '../domain/toolNames';
+import { toolInfo, runningToolLabel } from '../domain/toolNames';
 import { I } from './registry';
 import { STATE, HARNESSES } from './registry';
 import { clock, compactCount, shortModel, dur } from '../domain/format';
@@ -212,19 +212,7 @@ export function catalogTranscriptBlocks(
           liveObservation &&
           (entry.live === true || entry.bg?.state === 'running' || observedRunning),
         since = observedRunning ? activity!.since : (entry.bg?.since ?? entry.since),
-        verb = running
-          ? ((
-              {
-                Ran: 'Running',
-                Read: 'Reading',
-                Edited: 'Editing',
-                Wrote: 'Writing',
-                Patched: 'Patching',
-                'Searched for': 'Searching for',
-                'Sent input to': 'Sending input to',
-              } as Record<string, string>
-            )[toolInfo(entry.name)[1]] ?? toolInfo(entry.name)[1])
-          : toolInfo(entry.name)[1],
+        verb = running ? runningToolLabel(entry.name) : toolInfo(entry.name)[1],
         status = running
           ? since == null
             ? entry.secs

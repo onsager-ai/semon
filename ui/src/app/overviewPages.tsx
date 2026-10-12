@@ -6,6 +6,7 @@ import { array, object, text, number, boolean, dictionary } from '../domain/vali
 import {
   renderHomeScreen,
   renderMachinesScreen,
+  renderMachineScreen,
   type InboxRow,
   type HarnessMark,
   renderSliceBody,
@@ -19,7 +20,8 @@ import { parseAnalytics, type AnalyticsData } from '../state/analytics-wire';
 import { renderAnalyticsPresentation } from './analyticsPresentation';
 import { createSeenResults } from './seenResults';
 import { HARNESSES, I } from './registry';
-import { timeText, shortModel, liveUrl } from '../domain/format';
+import { runningToolLabel } from '../domain/toolNames';
+import { ago, timeText, shortModel, liveUrl } from '../domain/format';
 
 interface Selection {
   source_key: string;
@@ -83,7 +85,17 @@ function parseSelection(value: unknown): Selection {
   const row = object(value);
   return { source_key: text(row.source_key), catalog_key: text(row.catalog_key) };
 }
-function parseHomeRow(value: unknown): HomeRow {
+function parseActivity(value: unknown, now: number): readonly [string, string, number] | undefined {
+  if (value == null) return undefined;
+  const parts = value as unknown[];
+  const age = number(parts[2]);
+  return [
+    text(parts[0]),
+    text(parts[1]),
+    parts[3] == null ? age : Math.max(0, Math.floor((now - number(parts[3])) / 1000)),
+  ];
+}
+function parseHomeRow(value: unknown, now: number): HomeRow {
   const row = object(value),
     session = object(row.session),
     event = row.event == null ? null : object(row.event);
@@ -106,14 +118,7 @@ function parseHomeRow(value: unknown): HomeRow {
       parent: nullable(session.parent, text) ?? undefined,
       branch: nullable(session.branch, text) ?? undefined,
       detail: nullable(session.detail, text) ?? undefined,
-      activity:
-        session.activity == null
-          ? undefined
-          : [
-              text((session.activity as unknown[])[0]),
-              text((session.activity as unknown[])[1]),
-              number((session.activity as unknown[])[2]),
-            ],
+      activity: parseActivity(session.activity, now),
     },
     event: event
       ? {
@@ -166,10 +171,10 @@ function parseHome(value: unknown): HomeData {
         last: nullable(row.last, number),
       };
     }),
-    recent: array(data.recent, parseHomeRow),
-    inbox: array(data.inbox, parseHomeRow),
-    working: array(data.working, parseHomeRow),
-    answered: array(data.answered, parseHomeRow),
+    recent: array(data.recent, (row) => parseHomeRow(row, number(data.now))),
+    inbox: array(data.inbox, (row) => parseHomeRow(row, number(data.now))),
+    working: array(data.working, (row) => parseHomeRow(row, number(data.now))),
+    answered: array(data.answered, (row) => parseHomeRow(row, number(data.now))),
   };
 }
 interface OverviewHost {
@@ -180,6 +185,8 @@ interface OverviewHost {
   nativeContent?: boolean;
   api(path: string, body?: unknown): Promise<unknown>;
   route(): string;
+  selectedMachine(): string | null;
+  machine(key: string): void;
   chrome(): void;
   panelOpened(panel: { destroy(): void }): void;
   panelClosed(panel: { destroy(): void }): void;
@@ -197,6 +204,7 @@ export function createOverviewPages(host: OverviewHost) {
     queuedForce = false,
     error: string | null = null,
     home: HomeData | null = null,
+    homeSource: string | null = null,
     analytics: AnalyticsData | null = null,
     machineLabels: Record<string, string> = {},
     selections: Record<string, Selection> = {},
@@ -669,7 +677,13 @@ export function createOverviewPages(host: OverviewHost) {
           ]
             .filter(Boolean)
             .join(' · '),
-          activity: row.session.activity,
+          activity: row.session.activity
+            ? ([
+                runningToolLabel(row.session.activity[0]),
+                row.session.activity[1],
+                row.session.activity[2],
+              ] as const)
+            : undefined,
           harness: mark(row.session.harness),
         })),
         answered: (allAnswered ? home.answered : home.answered.slice(0, 3)).map((row) =>
@@ -884,7 +898,7 @@ export function createOverviewPages(host: OverviewHost) {
     if (loading) host.root.setAttribute('aria-busy', 'true');
     else host.root.removeAttribute('aria-busy');
     if (host.route() === 'home') {
-      if (home) drawHome();
+      if (home && homeSource === null) drawHome();
       else if (host.homeIntro) host.root.replaceChildren(host.homeIntro);
       else
         render(
@@ -893,9 +907,81 @@ export function createOverviewPages(host: OverviewHost) {
           </p>,
           host.root,
         );
+    } else if (host.route() === 'machine') {
+      const key = host.selectedMachine();
+      const machine = home?.machines.find((row) => row.key === key);
+      if (machine && home)
+        renderMachineScreen(
+          host.root,
+          {
+            name: machine.label,
+            observation: error ?? undefined,
+            totalSessions: machine.sessions,
+            more: machine.sessions > home.recent.filter((row) => row.source_key === key).length,
+            sessions: home.recent
+              .filter((row) => row.source_key === key)
+              .sort((a, b) => {
+                const rank = (state: string) =>
+                  state === 'wait' ? 0 : state === 'work' ? 1 : state === 'err' ? 2 : 3;
+                return (
+                  rank(a.session.state) - rank(b.session.state) || b.session.last - a.session.last
+                );
+              })
+              .map((row) => ({
+                id: row.id,
+                name: row.session.name,
+                state: row.session.state,
+                stateLabel:
+                  row.session.state === 'work'
+                    ? 'Working'
+                    : row.session.state === 'wait'
+                      ? 'Waiting on you'
+                      : 'Recorded history',
+                status:
+                  row.session.kind ?? HARNESSES[row.session.harness]?.name ?? row.session.harness,
+                age: ago(row.session.last, home!.now),
+                detail: [
+                  row.session.kind ?? HARNESSES[row.session.harness]?.name ?? row.session.harness,
+                  machine.label,
+                  row.session.detail,
+                ]
+                  .filter(Boolean)
+                  .join(' · '),
+                activity:
+                  row.session.state === 'work' && row.session.activity
+                    ? ([
+                        runningToolLabel(row.session.activity[0]),
+                        row.session.activity[1],
+                        row.session.activity[2],
+                      ] as const)
+                    : undefined,
+                harness: mark(row.session.harness),
+              })),
+            off: [],
+            moves: [],
+          },
+          {
+            session(id) {
+              open(home?.recent.find((row) => row.id === id));
+            },
+            moreSessions() {
+              host.sessions({ machine: key!, harness: '', repo: '', model: '' });
+            },
+            inbox() {},
+            trace() {},
+            committed() {},
+          },
+        );
+      else
+        render(
+          <p class="catalog-note" role="status">
+            {error ?? 'Loading machine…'}
+          </p>,
+          host.root,
+        );
     } else if (host.route() === 'analytics') drawAnalytics();
     else if (host.route() === 'machines') {
-      if (home)
+      if (home && homeSource === null)
         renderMachinesScreen(
           host.root,
           {
@@ -922,7 +1008,7 @@ export function createOverviewPages(host: OverviewHost) {
           },
           {
             machine(machine) {
-              host.sessions({ machine, harness: '', repo: '', model: '' });
+              host.machine(machine);
             },
             admin() {},
             committed() {},
@@ -990,7 +1076,9 @@ export function createOverviewPages(host: OverviewHost) {
   }
   async function hydrateHome(next: HomeData, ticket: number) {
     const selected = new Map<string, HomeRow[]>();
-    for (const row of [...next.inbox, ...next.working, ...next.answered]) {
+    for (const row of host.route() === 'machine'
+      ? next.recent
+      : [...next.inbox, ...next.working, ...next.answered]) {
       if (row.previewReady) continue;
       if (!row.contentGeneration) continue;
       const key = JSON.stringify([row.source_key, row.catalog_key]);
@@ -1005,7 +1093,12 @@ export function createOverviewPages(host: OverviewHost) {
     let cursor = 0;
     await Promise.all(
       Array.from({ length: Math.min(4, work.length) }, async () => {
-        while (cursor < work.length && !disposed && ticket === epoch && host.route() === 'home') {
+        while (
+          cursor < work.length &&
+          !disposed &&
+          ticket === epoch &&
+          ['home', 'machine'].includes(host.route())
+        ) {
           const rows = work[cursor++],
             first = rows[0];
           const ids = [...new Set(rows.flatMap((row) => (row.event ? [row.event.id] : [])))];
@@ -1018,7 +1111,7 @@ export function createOverviewPages(host: OverviewHost) {
           });
           try {
             const value = object(await host.api('/api/session-home?' + args));
-            if (disposed || ticket !== epoch || host.route() !== 'home') return;
+            if (disposed || ticket !== epoch || !['home', 'machine'].includes(host.route())) return;
             const identity = object(value.identity),
               session = object(value.session);
             if (
@@ -1037,14 +1130,7 @@ export function createOverviewPages(host: OverviewHost) {
               };
             });
             const detail = nullable(session.detail, text);
-            const activity =
-              session.activity == null
-                ? undefined
-                : ([
-                    text((session.activity as unknown[])[0]),
-                    text((session.activity as unknown[])[1]),
-                    number((session.activity as unknown[])[2]),
-                  ] as const);
+            const activity = parseActivity(session.activity, next.now);
             const failed = boolean(value.incomplete);
             if (failed && rows.length > 1) {
               const half = Math.ceil(rows.length / 2);
@@ -1059,7 +1145,13 @@ export function createOverviewPages(host: OverviewHost) {
                   origin: events[row.event.id].origin ?? undefined,
                 });
             }
-            if (home === next && !disposed && ticket === epoch && host.route() === 'home') draw();
+            if (
+              home === next &&
+              !disposed &&
+              ticket === epoch &&
+              ['home', 'machine'].includes(host.route())
+            )
+              draw();
           } catch {
             if (!disposed && ticket === epoch) incomplete = true;
           }
@@ -1069,7 +1161,7 @@ export function createOverviewPages(host: OverviewHost) {
     return incomplete;
   }
   async function refresh(force = false) {
-    if (disposed || !['home', 'analytics', 'machines'].includes(host.route())) return;
+    if (disposed || !['home', 'analytics', 'machines', 'machine'].includes(host.route())) return;
     if (!force && host.route() === 'analytics' && Date.now() < analyticsRetryAt) return;
     if (loading) {
       queued = true;
@@ -1078,12 +1170,19 @@ export function createOverviewPages(host: OverviewHost) {
     }
     const route = host.route(),
       ticket = ++epoch,
-      requestedQuery = route === 'analytics' ? query() : '';
+      requestedQuery =
+        route === 'analytics'
+          ? query()
+          : route === 'machine'
+            ? new URLSearchParams({ source: host.selectedMachine()! }).toString()
+            : '';
     const current = () =>
       !disposed &&
       ticket === epoch &&
       host.route() === route &&
-      (route !== 'analytics' || query() === requestedQuery);
+      (route !== 'analytics' || query() === requestedQuery) &&
+      (route !== 'machine' ||
+        new URLSearchParams({ source: host.selectedMachine()! }).toString() === requestedQuery);
     loading = true;
     host.root.setAttribute('aria-busy', 'true');
     try {
@@ -1136,6 +1235,11 @@ export function createOverviewPages(host: OverviewHost) {
       };
       if (route !== 'analytics') {
         const next = parseHome(value);
+        if (
+          route === 'machine' &&
+          (next.machines.length !== 1 || next.machines[0].key !== host.selectedMachine())
+        )
+          throw Error('Machine activity source changed');
         const pages = Math.max(
           1,
           ...(['inbox', 'working', 'answered'] as const).map((section) =>
@@ -1161,12 +1265,14 @@ export function createOverviewPages(host: OverviewHost) {
         }
         if (home?.version === next.version) {
           const previous = new Map(
-            [...home.inbox, ...home.working, ...home.answered].map((row) => [
-              JSON.stringify([row.source_key, row.catalog_key, row.event?.id]),
-              row,
-            ]),
+            (route === 'machine'
+              ? home.recent
+              : [...home.inbox, ...home.working, ...home.answered]
+            ).map((row) => [JSON.stringify([row.source_key, row.catalog_key, row.event?.id]), row]),
           );
-          for (const row of [...next.inbox, ...next.working, ...next.answered]) {
+          for (const row of route === 'machine'
+            ? next.recent
+            : [...next.inbox, ...next.working, ...next.answered]) {
             const retained = previous.get(
               JSON.stringify([row.source_key, row.catalog_key, row.event?.id]),
             );
@@ -1182,13 +1288,14 @@ export function createOverviewPages(host: OverviewHost) {
           }
         }
         home = next;
+        homeSource = route === 'machine' ? host.selectedMachine() : null;
         recentRows = next.recent;
         recentNow = next.now;
         error = observations.length
           ? 'Some machine history is still being observed. Retrying…'
           : null;
         draw();
-        if (route !== 'home') {
+        if (route !== 'home' && route !== 'machine') {
           await observe();
           return;
         }
@@ -1196,9 +1303,10 @@ export function createOverviewPages(host: OverviewHost) {
           host.nativeContent ? Promise.resolve(false) : hydrateHome(next, ticket),
           observe(),
         ]);
-        if (disposed || ticket !== epoch || host.route() !== 'home') return;
+        if (!current()) return;
         if (previewsIncomplete) observations.push({ state: 'previews_unavailable' });
         home = next;
+        homeSource = route === 'machine' ? host.selectedMachine() : null;
         recentRows = next.recent;
         recentNow = next.now;
       } else {
@@ -1206,7 +1314,7 @@ export function createOverviewPages(host: OverviewHost) {
         const nextAnalytics = parseAnalytics(data),
           nextSelections = dictionary(data.selections, parseSelection),
           nextLabels = dictionary(data.machine_labels, text),
-          nextRecent = array(data.recent, parseHomeRow),
+          nextRecent = array(data.recent, (row) => parseHomeRow(row, number(data.now))),
           nextNow = number(data.now);
         if (nextRecent.length > 60) throw Error('Recent response exceeds its bound');
         const accepted = {
@@ -1247,9 +1355,10 @@ export function createOverviewPages(host: OverviewHost) {
     }
   }
   return {
+    machine: () => home?.machines.find((row) => row.key === host.selectedMachine()),
     actions,
     waitingCount: () =>
-      home
+      home && homeSource === null
         ? Math.max(
             0,
             home.totals.waiting -
