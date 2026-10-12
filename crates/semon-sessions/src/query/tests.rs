@@ -3688,3 +3688,142 @@ fn focused_query_preserves_whole_file_scan_window_and_skipped_parent_context() {
         "excluded source caused archive I/O"
     );
 }
+
+#[test]
+fn ordinary_focused_query_resolves_native_ids_after_scan_window_namespace_changes() {
+    let mut home = Home::new("ordinary-native-alias");
+    home.options.all = false;
+    home.options.since = Duration::from_secs(6 * 3600);
+    home.top("same-id", &[human("same-id", ts(1, 0), "old Claude owner")]);
+    home.top(
+        "claude:same-id",
+        &[human("claude:same-id", ts(1, 0), "old literal qualifier")],
+    );
+    for id in ["same-id", "claude:same-id"] {
+        fs::File::open(
+            home.options
+                .claude_home
+                .join(format!("projects/-work-proj/{id}.jsonl")),
+        )
+        .unwrap()
+        .set_times(
+            fs::FileTimes::new().set_modified(
+                std::time::UNIX_EPOCH + Duration::from_millis((NOW - 86400000) as u64),
+            ),
+        )
+        .unwrap();
+    }
+    home.lines(
+        "codex/sessions/2026/09/24/rollout-same-id.jsonl",
+        &[
+            codex_line(ts(1, 0), "session_meta", json!({"id":"same-id"})),
+            codex_line(
+                ts(1, 1),
+                "event_msg",
+                json!({"type":"user_message","message":"current Codex owner"}),
+            ),
+        ],
+    );
+    let mut cache = crate::events::EventCache::open_scoped(&home.options.cache).unwrap();
+    crate::model::observe_catalog(
+        &home.options,
+        &mut cache,
+        &mut false,
+        &mut crate::model::Texts::default(),
+        NOW,
+    )
+    .unwrap();
+    for tool in ["get_session", "read_transcript"] {
+        let args = json!({"id":"same-id"});
+        let expected = Query::from_sources(admitted(Options {
+            scan_window: true,
+            ..home.options.clone()
+        }))
+        .call_at(tool, &args, NOW)
+        .unwrap();
+        let mut ordinary = home.query();
+        assert_eq!(ordinary.call_at(tool, &args, NOW).unwrap(), expected);
+        assert!(
+            ordinary.sources.machines[0]
+                .1
+                .work
+                .lock()
+                .unwrap()
+                .events
+                .is_none(),
+            "raw native ID caused workspace Query preparation despite a qualified Catalog"
+        );
+    }
+    let error = Query::from_sources(admitted(home.options.clone()))
+        .call_selected_at(
+            "local",
+            "codex:same-id",
+            "get_session",
+            &json!({"id":"same-id"}),
+            None,
+            crate::SessionSourceReadMode::LocalThenProvider,
+            NOW,
+        )
+        .unwrap_err();
+    assert_eq!(
+        error.code, "invalid_arguments",
+        "host-selected Catalog ID validation was weakened"
+    );
+}
+
+#[test]
+fn ordinary_focused_query_keeps_omitted_resume_file_turns_truncated() {
+    let mut home = Home::new("ordinary-resume-window");
+    home.options.all = false;
+    home.options.since = DEFAULT_WINDOW;
+    let old = NOW - 60 * DAY_MS;
+    home.top("first", &[human("first", iso(old), "Plan the release")]);
+    fs::File::open(
+        home.options
+            .claude_home
+            .join("projects/-work-proj/first.jsonl"),
+    )
+    .unwrap()
+    .set_times(
+        fs::FileTimes::new()
+            .set_modified(std::time::UNIX_EPOCH + Duration::from_millis(old as u64)),
+    )
+    .unwrap();
+    let mut resumed = human("second", ts(1, 0), "Ship the release");
+    resumed["session_id"] = json!("first");
+    let mut shipped = assistant("second", ts(1, 1), vec![text("Shipped.")]);
+    shipped["session_id"] = json!("first");
+    home.top("second", &[resumed, shipped]);
+    let mut cache = crate::events::EventCache::open_scoped(&home.options.cache).unwrap();
+    crate::model::observe_catalog(
+        &home.options,
+        &mut cache,
+        &mut false,
+        &mut crate::model::Texts::default(),
+        NOW,
+    )
+    .unwrap();
+    for tool in ["get_session", "read_transcript"] {
+        let args = json!({"id":"second"});
+        let expected = Query::from_sources(admitted(Options {
+            scan_window: true,
+            ..home.options.clone()
+        }))
+        .call_at(tool, &args, NOW)
+        .unwrap();
+        if tool == "get_session" {
+            assert_eq!(expected["session"]["turns_truncated"], true);
+        }
+        let mut ordinary = home.query();
+        assert_eq!(ordinary.call_at(tool, &args, NOW).unwrap(), expected);
+        assert!(
+            ordinary.sources.machines[0]
+                .1
+                .work
+                .lock()
+                .unwrap()
+                .events
+                .is_none()
+        );
+    }
+}

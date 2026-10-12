@@ -22,6 +22,11 @@ Selected derivation preserves whole-file mtime scan windows and omitted Claude
 parent identities. Excluded sources are filtered before index/body adaptation,
 including missing-ledger fallback; they cannot trigger archive reads. A wholly
 excluded owner returns the ordinary unknown-session error without body I/O.
+Local native IDs resolve through the indexed Catalog source owners when scan
+exclusion changes a qualified spelling. The shared producer then derives the
+requested identity from the bounded collision closure. Resumed sessions retain
+omitted-file turns_truncated semantics. This local resolution grants no source
+authority and does not relax public hosted selected-Catalog-ID validation.
 Cold/stale Catalogs and multi-machine automatic
 selection still use native reconciliation and remain bounded-selection work.
 
