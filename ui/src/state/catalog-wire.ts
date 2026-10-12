@@ -18,7 +18,7 @@ export type {
 
 /** Metadata is a partial read view, independent of runtime status and model deltas. */
 export interface CatalogSession {
-  transcript?: { generation: string; total: number };
+  transcript?: { generation: string; errorsGeneration: string; total: number };
   details?: SessionDetails;
   key: string;
   name: string;
@@ -144,10 +144,15 @@ export function parseCatalogSession(value: unknown): CatalogSession {
         : (() => {
             const projection = object(row.transcript),
               generation = text(projection.generation),
+              errorsGeneration = text(projection.errors_generation),
               total = integer(projection.total);
-            if (!/^[a-f0-9]{64}$/.test(generation) || total < 0)
+            if (
+              !/^[a-f0-9]{64}$/.test(generation) ||
+              !/^[a-f0-9]{64}$/.test(errorsGeneration) ||
+              total < 0
+            )
               throw Error('Invalid selected transcript observation');
-            return { generation, total };
+            return { generation, errorsGeneration, total };
           })(),
     key: text(row.key),
     name: text(row.name),

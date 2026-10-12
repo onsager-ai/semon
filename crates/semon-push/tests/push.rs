@@ -125,6 +125,22 @@ fn native_reply_content(reply: &semon_sessions::ViewerReply) -> serde_json::Valu
         if let Some(transcript) = body["session"].get("transcript") {
             assert_eq!(transcript["generation"], generation);
         }
+        let errors_generation = body["projection"]["errors_generation"].as_str().unwrap();
+        assert_eq!(errors_generation.len(), 64);
+        assert!(
+            errors_generation
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit())
+        );
+        if let Some(transcript) = body["session"].get("transcript") {
+            assert_eq!(transcript["errors_generation"], errors_generation);
+        }
+        // Runtime paging proofs bind each copy's source generation; independent
+        // redacted copies keep exact content, not equal physical custody proofs.
+        body["projection"]
+            .as_object_mut()
+            .unwrap()
+            .remove("errors_generation");
         body["projection"]
             .as_object_mut()
             .unwrap()
