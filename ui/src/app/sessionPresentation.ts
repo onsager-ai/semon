@@ -53,12 +53,65 @@ function mark(harness: string): HarnessMark | undefined {
       }
     : undefined;
 }
+/** Group only loaded canonical parents; absent parents remain selectable roots. */
+export function catalogSessionGroups<T extends { key: string; parent: string | null }>(
+  items: readonly T[],
+): { root: T; children: T[] }[] {
+  const byKey = new Map(items.map((item) => [item.key, item])),
+    parents = new Map(
+      items.map((item) => [
+        item.key,
+        item.parent && item.parent !== item.key && byKey.has(item.parent) ? item.parent : null,
+      ]),
+    ),
+    resolved = new Set<string>();
+  for (const item of items) {
+    const chain: string[] = [],
+      positions = new Map<string, number>();
+    let key: string | null = item.key;
+    while (key && !resolved.has(key)) {
+      const repeat = positions.get(key);
+      if (repeat !== undefined) {
+        // A malformed relationship cycle has one deterministic visible root.
+        parents.set(chain.slice(repeat).sort()[0], null);
+        break;
+      }
+      positions.set(key, chain.length);
+      chain.push(key);
+      key = parents.get(key) ?? null;
+    }
+    for (const key of chain) resolved.add(key);
+  }
+  const children = new Map<string, T[]>();
+  for (const item of items) {
+    const parent = parents.get(item.key);
+    if (parent) {
+      const values = children.get(parent) ?? [];
+      values.push(item);
+      children.set(parent, values);
+    }
+  }
+  return items
+    .filter((item) => !parents.get(item.key))
+    .map((root) => {
+      const descendants: T[] = [],
+        pending = [...(children.get(root.key) ?? [])].reverse();
+      while (pending.length) {
+        const child = pending.pop()!;
+        descendants.push(child);
+        pending.push(...[...(children.get(child.key) ?? [])].reverse());
+      }
+      return { root, children: descendants };
+    });
+}
+
 /** Fenced list observations describe status without granting live control. */
 export function catalogSessionRow(session: CatalogSession): SessionRow {
   const state = session.status?.state ?? 'off';
   return {
     id: session.key,
     name: session.name,
+    kind: session.presentation_kind ?? session.kind,
     state,
     stateLabel:
       STATE[state] ??

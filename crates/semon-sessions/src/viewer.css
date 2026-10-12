@@ -1117,6 +1117,14 @@ html.viewer-open, html.viewer-open body { overflow: hidden; }
 .machine-page .nrow .ag { font-variant-numeric: tabular-nums; }
 .machine-page .nrow .act { gap: 8px; }
 .machine-page .nrow .act .el { font-family: inherit; font-variant-numeric: tabular-nums; padding-left: 0; }
+/* Loaded Catalog children share the established compact navigation pitch. */
+.session-list .kids-wrap { display: grid; border-bottom: 1px solid var(--line); padding-bottom: var(--s1); }
+.session-list .kids-wrap > .nrow { border-bottom-color: transparent; }
+.session-list .kids { display: grid; margin-left: 11px; padding-left: 13px; border-left: 1px solid var(--line); }
+.session-list .kids .nrow.child { padding-block: 0; min-height: var(--tap); justify-content: center; }
+.session-list .nrow.child .nm { font-weight: 400; color: var(--ink-2); }
+.session-list .nrow.child .kind { color: var(--muted); font-weight: 400; }
+.session-list .tree-more { border: 0; background: none; min-height: var(--tap); color: var(--accent); text-align: left; }
 .session-row-main .ag { flex: none; }
 .session-row-meta { width: 100%; overflow: hidden; white-space: nowrap; gap: 7px; }
 .session-row-meta > * { flex: none; }

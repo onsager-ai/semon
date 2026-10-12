@@ -510,6 +510,7 @@ export function renderMachineScreen(
 
 export interface SessionRow {
   id: string;
+  kind?: string;
   name: string;
   state: string;
   stateLabel: string;
@@ -564,13 +565,15 @@ export function fitSessionRows(root: ParentNode) {
 export function SessionRowView({
   row,
   host,
+  child = false,
 }: {
   row: SessionRow;
   host: Pick<SessionsHost, 'session'>;
+  child?: boolean;
 }) {
   return (
     <button
-      class="nrow"
+      class={'nrow' + (child ? ' child' : '')}
       type="button"
       data-id={row.id}
       data-session-row="list"
@@ -587,78 +590,81 @@ export function SessionRowView({
         />
         <span class="nm" data-tip={row.name} data-tip-clipped="">
           {screenText(row.name)}
+          {child && row.kind && <span class="kind"> · {screenText(row.kind)}</span>}
         </span>
         <span class="ag">{row.age}</span>
       </span>
-      <span class="session-row-meta srow-meta for">
-        {row.harness && (
-          <span
-            class="hicon hi-screen"
-            data-harness={row.harness.id}
-            role="img"
-            aria-label={row.harness.name}
-            data-tip={row.harness.name}
-          >
-            {row.harness.light === row.harness.dark ? (
-              <img src={row.harness.light} alt="" draggable={false} decoding="async" />
-            ) : (
-              <>
-                <img
-                  class="hi-light"
-                  loading={row.harness.darkTheme ? 'lazy' : undefined}
-                  src={row.harness.light}
-                  alt=""
-                  draggable={false}
-                  decoding="async"
-                />
-                <img
-                  class="hi-dark"
-                  loading={row.harness.darkTheme ? undefined : 'lazy'}
-                  src={row.harness.dark}
-                  alt=""
-                  draggable={false}
-                  decoding="async"
-                />
-              </>
-            )}
+      {!child && (
+        <span class="session-row-meta srow-meta for">
+          {row.harness && (
+            <span
+              class="hicon hi-screen"
+              data-harness={row.harness.id}
+              role="img"
+              aria-label={row.harness.name}
+              data-tip={row.harness.name}
+            >
+              {row.harness.light === row.harness.dark ? (
+                <img src={row.harness.light} alt="" draggable={false} decoding="async" />
+              ) : (
+                <>
+                  <img
+                    class="hi-light"
+                    loading={row.harness.darkTheme ? 'lazy' : undefined}
+                    src={row.harness.light}
+                    alt=""
+                    draggable={false}
+                    decoding="async"
+                  />
+                  <img
+                    class="hi-dark"
+                    loading={row.harness.darkTheme ? undefined : 'lazy'}
+                    src={row.harness.dark}
+                    alt=""
+                    draggable={false}
+                    decoding="async"
+                  />
+                </>
+              )}
+            </span>
+          )}
+          <span class="row-model" data-tip={row.modelTip}>
+            {screenText(row.model)}
           </span>
-        )}
-        <span class="row-model" data-tip={row.modelTip}>
-          {screenText(row.model)}
+          {row.delegation && (
+            <svg
+              class="icon row-delegation"
+              data-tip="Delegated session"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.8"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              aria-hidden="true"
+            >
+              <path d={row.delegation} />
+            </svg>
+          )}
+          {row.fields.map((field) => (
+            <span
+              key={field.priority}
+              class={field.className + (field.icon ? ' row-field' : '')}
+              data-drop={field.priority}
+              data-tip={field.tip}
+            >
+              {field.icon ? (
+                <>
+                  <Glyph path={field.icon} />
+                  <span class="field-value">{screenText(field.text)}</span>
+                </>
+              ) : (
+                screenText(field.text)
+              )}
+            </span>
+          ))}
         </span>
-        {row.delegation && (
-          <svg
-            class="icon row-delegation"
-            data-tip="Delegated session"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            stroke-width="1.8"
-            stroke-linecap="round"
-            stroke-linejoin="round"
-            aria-hidden="true"
-          >
-            <path d={row.delegation} />
-          </svg>
-        )}
-        {row.fields.map((field) => (
-          <span
-            key={field.priority}
-            class={field.className + (field.icon ? ' row-field' : '')}
-            data-drop={field.priority}
-            data-tip={field.tip}
-          >
-            {field.icon ? (
-              <>
-                <Glyph path={field.icon} />
-                <span class="field-value">{screenText(field.text)}</span>
-              </>
-            ) : (
-              screenText(field.text)
-            )}
-          </span>
-        ))}
-      </span>
+      )}
     </button>
   );
 }

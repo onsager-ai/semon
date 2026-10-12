@@ -220,6 +220,13 @@ This does not add ancestors to the causal cohort or timeline totals. An incoming
 root retains its handoff identity and kind; absent or ambiguous related metadata
 stays explicitly unavailable.
 
+Session list grouping uses only loaded Catalog rows and exact canonical parent
+keys. Missing parents remain visible roots; malformed cycles receive a
+deterministic root, so each loaded identity stays selectable exactly once.
+Children reuse the shared compact row component, with five descendants initially
+shown and a document-owned expansion bounded by the loaded row set. Grouping and
+expansion perform no additional source or transcript reads.
+
 ## Selected observation
 
 Catalog list rows carry a compact recorded status observation. They reuse the

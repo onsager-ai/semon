@@ -1197,3 +1197,88 @@ for (const width of [390, 1280])
       await browser.close();
     }
   });
+
+for (const width of [390, 1280])
+  for (const colorScheme of ['light', 'dark'])
+    test(`loaded Catalog parent navigation and expansion stay focused at ${width}px ${colorScheme}`, async () => {
+      const browser = await chromium.launch();
+      try {
+        const page = await browser.newPage({ viewport: { width, height: 900 }, colorScheme });
+        const requests = [],
+          children = Array.from({ length: 7 }, (_, i) => ({
+            ...meta('child-' + i),
+            parent: 'parent',
+            presentation_kind: 'Subagent',
+          })),
+          items = [meta('parent'), ...children, { ...meta('orphan'), parent: 'unloaded-parent' }];
+        await page.route('http://catalog.test/**', (route) => {
+          const u = new URL(route.request().url());
+          requests.push(u.pathname + u.search);
+          if (u.pathname === '/api/session-capabilities')
+            return route.fulfill({ json: capabilities(false) });
+          if (u.pathname === '/api/sessions') return route.fulfill({ json: list(items) });
+          if (u.pathname === '/api/session-identity')
+            return route.fulfill({
+              json: { ...identity(u.searchParams.get('sid')), read_scope: 'retained_history' },
+            });
+          return route.fulfill({
+            contentType: u.pathname === '/viewer.css' ? 'text/css' : 'text/html',
+            body: u.pathname === '/viewer.css' ? css : html,
+          });
+        });
+        await page.goto('http://catalog.test/sessions');
+        await page.addScriptTag({ content: outputFiles[0].text });
+        await page.evaluate(() => {
+          window.app = CatalogViewer.mountViewerApplication();
+          Object.defineProperty(document, 'visibilityState', {
+            configurable: true,
+            get: () => 'hidden',
+          });
+        });
+        const parent = page.locator('.kids-wrap > [data-id="parent"]');
+        await parent.waitFor();
+        assert.equal(await page.locator('.kids .nrow.child').count(), 5);
+        assert.equal(await page.locator('[data-id="orphan"][data-session-row="list"]').count(), 1);
+        await parent.evaluate((node) => {
+          window.parentRow = node;
+        });
+        const more = page.getByRole('button', { name: 'Show 2 more', exact: true });
+        const before = requests.length;
+        await more.focus();
+        await more.press('Enter');
+        assert.equal(await page.locator('.kids .nrow.child').count(), 7);
+        const fewer = page.getByRole('button', { name: 'Show fewer', exact: true });
+        assert.equal(await fewer.getAttribute('aria-expanded'), 'true');
+        assert.equal(await fewer.evaluate((node) => node === document.activeElement), true);
+        await fewer.press('Enter');
+        assert.equal(await page.locator('.kids .nrow.child').count(), 5);
+        assert.equal(
+          await page.evaluate(
+            () => parentRow === document.querySelector('.kids-wrap > [data-id="parent"]'),
+          ),
+          true,
+        );
+        assert.equal(requests.length, before, 'local expansion requested source preparation');
+        const child = page.locator('.kids .nrow.child[data-id="child-0"]');
+        assert.match(await child.innerText(), /Subagent/);
+        assert.ok(
+          await child.evaluate(
+            (node, minimum) => node.getBoundingClientRect().height >= minimum,
+            width < 761 ? 44 : 36,
+          ),
+        );
+        await child.press('Enter');
+        await page.waitForFunction(
+          () => history.state?.v === 'session' && history.state.id === 'child-0',
+        );
+        assert.equal(
+          requests.some(
+            (path) => path.startsWith('/api/model') || path.startsWith('/api/session-transcript'),
+          ),
+          false,
+        );
+        await page.evaluate(() => app.destroy());
+      } finally {
+        await browser.close();
+      }
+    });
