@@ -91,7 +91,9 @@ slot generation, touched sources and runtime, permitting unrelated publication.
 Recipe windows stop at 512 candidates plus one preceding context row; selected
 recipe metadata and content-free proof hashes each have a 4 MiB read budget.
 
-Physical scan-window namespaces, aliases/virtual owners, clipped output-window
+Local CLI/MCP `--all` reads share this pager: their physical scan flag has no
+cutoff, so their namespace matches the complete Catalog. Finite physical
+scan-window namespaces, aliases/virtual owners, clipped output-window
 membership, composite retained history and publications without qualified
 observations still use the existing selected native derivation. That remaining
 path is bounded by its source/byte limits but prepares the selected history;

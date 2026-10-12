@@ -777,7 +777,10 @@ pub(crate) fn source_relative(
 }
 
 pub(crate) fn source_state(source: &CatalogSource) -> &'static str {
-    let Ok(file) = crate::sealed::LogFile::open(&source.path) else {
+    // Catalog state compares the native file's identity and observation stamp.
+    // It needs the secure input handle, without opening archive manifests or
+    // preparing a logical transcript reader for this metadata-only fence.
+    let Ok(file) = crate::open_input(&source.path) else {
         return "unavailable";
     };
     let Ok(metadata) = file.metadata() else {

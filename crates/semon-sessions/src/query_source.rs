@@ -156,8 +156,9 @@ pub(crate) struct Records<'a> {
     checked: Mutex<BTreeMap<PathBuf, Stat>>,
     checked_chunks: Mutex<BTreeMap<PathBuf, BTreeSet<usize>>>,
     checked_evidence: Mutex<BTreeMap<PathBuf, BTreeSet<crate::native_record::Record>>>,
-    // Scalar preparation visits adjacent short records. Reuse at most one
-    // immutable, verified block; completion still checks every used block.
+    // Native reads share at most one handle and verified block per request.
+    // Only scalar preparation reuses bytes; ordinary ranges verify the current
+    // block on every read. Completion reopens and checks every used source.
     prepared: Mutex<Option<PreparedBlock>>,
     failed: Mutex<bool>,
 }
@@ -166,6 +167,10 @@ struct PreparedBlock {
     path: PathBuf,
     index: usize,
     bytes: Arc<[u8]>,
+    // One request-owned native handle avoids walking the secure directory chain
+    // for every scalar in this block. Completion reopens the named path and
+    // verifies every consumed block before any projection can be published.
+    file: Option<LogFile>,
 }
 
 impl Records<'_> {
@@ -532,13 +537,35 @@ impl Records<'_> {
         {
             return self.provider_range(path, proof, offset, max, prepare);
         }
-        let mut file = match LogFile::open(path) {
+        let mut prepared = Some(self.prepared.lock().map_err(|_| unavailable())?);
+        let cached_file = prepared
+            .as_deref_mut()
+            .and_then(Option::as_mut)
+            .filter(|block| block.path == path)
+            .and_then(|block| block.file.take());
+        let reused = cached_file.is_some();
+        let mut file = match cached_file.map(Ok).unwrap_or_else(|| LogFile::open(path)) {
             Err(error) if error.kind() == io::ErrorKind::NotFound && self.provider.is_some() => {
+                drop(prepared);
                 return self.provider_range(path, proof, offset, max, prepare);
             }
             result => result?,
         };
         let before = Stat::from_metadata(&file.metadata()?)?;
+        if reused {
+            let named = match std::fs::symlink_metadata(path) {
+                Err(error)
+                    if error.kind() == io::ErrorKind::NotFound && self.provider.is_some() =>
+                {
+                    drop(prepared);
+                    return self.provider_range(path, proof, offset, max, prepare);
+                }
+                result => result?,
+            };
+            if !named.is_file() || Stat::from_metadata(&named)? != before {
+                return Err(unavailable());
+            }
+        }
         if before.dev != proof.ledger.stat.dev
             || before.ino != proof.ledger.stat.ino
             || before.size < proof.ledger.offset
@@ -557,14 +584,11 @@ impl Records<'_> {
         let last = usize::try_from((end - 1) / crate::source_chunks::SIZE as u64)
             .map_err(|_| unavailable())?;
         let mut bytes = Vec::with_capacity(max);
-        let mut prepared = prepare
-            .then(|| self.prepared.lock().map_err(|_| unavailable()))
-            .transpose()?;
         for index in first..=last {
             let part = if let Some(block) = prepared
                 .as_deref()
                 .and_then(Option::as_ref)
-                .filter(|block| block.path == path && block.index == index)
+                .filter(|block| prepare && block.path == path && block.index == index)
             {
                 block.bytes.clone()
             } else {
@@ -574,6 +598,7 @@ impl Records<'_> {
                         path: path.to_owned(),
                         index,
                         bytes: part.clone(),
+                        file: None,
                     });
                 }
                 part
@@ -589,6 +614,9 @@ impl Records<'_> {
             return Err(unavailable());
         }
         checked.insert(path.to_owned(), before);
+        if let Some(block) = prepared.as_deref_mut().and_then(Option::as_mut) {
+            block.file = Some(file);
+        }
         self.checked_chunks
             .lock()
             .map_err(|_| unavailable())?
@@ -693,6 +721,7 @@ impl Records<'_> {
                         path: path.to_owned(),
                         index,
                         bytes: part.clone(),
+                        file: None,
                     });
                 }
                 part
@@ -1190,6 +1219,129 @@ mod tests {
             result.is_err() && finished.is_err(),
             "captured old-generation proof admitted: {result:?}; finish={finished:?}"
         );
+    }
+
+    #[test]
+    fn prepared_local_handle_can_fall_back_to_an_authorized_provider() {
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        struct Provider {
+            source: SessionSourceRef,
+            bytes: Arc<[u8]>,
+            calls: AtomicUsize,
+            revoked: AtomicBool,
+        }
+        impl SessionSourceReader for Provider {
+            fn read_range(
+                &self,
+                source: &SessionSourceRef,
+                expected_generation: Option<&str>,
+                offset: u64,
+                max: usize,
+            ) -> io::Result<SessionSourceRange> {
+                self.calls.fetch_add(1, Ordering::Relaxed);
+                if self.revoked.load(Ordering::Relaxed) {
+                    return Err(io::ErrorKind::PermissionDenied.into());
+                }
+                assert_eq!(source, &self.source);
+                assert!(expected_generation.is_none_or(|generation| generation == "archive"));
+                let start = offset as usize;
+                Ok(SessionSourceRange {
+                    generation: "archive".into(),
+                    length: self.bytes.len() as u64,
+                    offset,
+                    bytes: Arc::from(&self.bytes[start..(start + max).min(self.bytes.len())]),
+                    cached: true,
+                })
+            }
+        }
+        let fixture = Fixture::new("prepared-provider-fallback");
+        let line = b"{\"uuid\":\"old\"}\n";
+        fs::write(&fixture.path, line).unwrap();
+        let (sources, source, _) = fixture.sources();
+        let provider = Provider {
+            source,
+            bytes: Arc::from(line.as_slice()),
+            calls: AtomicUsize::new(0),
+            revoked: AtomicBool::new(false),
+        };
+        let records = sources.reader_with(Some((
+            &provider,
+            crate::SessionSourceReadMode::LocalThenProvider,
+        )));
+        assert_eq!(
+            records.derive(&fixture.path, 0).unwrap().unwrap()["uuid"],
+            "old"
+        );
+        assert_eq!(provider.calls.load(Ordering::Relaxed), 0);
+        fs::remove_file(&fixture.path).unwrap();
+        assert_eq!(
+            records.derive(&fixture.path, 0).unwrap().unwrap()["uuid"],
+            "old"
+        );
+        records.finish().unwrap();
+        assert!(provider.calls.load(Ordering::Relaxed) > 0);
+        provider.revoked.store(true, Ordering::Relaxed);
+        assert!(records.finish().is_err());
+    }
+
+    #[test]
+    fn prepared_native_handle_refuses_replacement_and_rechecks_parent_custody() {
+        for (scalar, replacement) in [
+            (true, "file"),
+            (true, "parent"),
+            (false, "file"),
+            (false, "parent"),
+        ] {
+            let fixture = Fixture::new(&format!("prepared-custody-{scalar}-{replacement}"));
+            let line = b"{\"uuid\":\"old\"}\n";
+            fs::write(&fixture.path, line).unwrap();
+            let (sources, _, _) = fixture.sources();
+            let records = sources.reader();
+            let read = || {
+                if scalar {
+                    records.derive(&fixture.path, 0)
+                } else {
+                    records.read(&fixture.path, 0).map(|(value, _)| value)
+                }
+            };
+            assert_eq!(read().unwrap().unwrap()["uuid"], "old");
+            assert!(
+                records
+                    .prepared
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .unwrap()
+                    .file
+                    .is_some()
+            );
+            match replacement {
+                "file" => {
+                    let next = fixture.root.join("replacement.jsonl");
+                    fs::write(&next, line).unwrap();
+                    fs::rename(next, &fixture.path).unwrap();
+                    assert!(read().is_err());
+                    assert!(records.finish().is_err());
+                }
+                "parent" => {
+                    let moved = fixture.root.with_extension("moved");
+                    fs::rename(&fixture.root, &moved).unwrap();
+                    #[cfg(unix)]
+                    std::os::unix::fs::symlink(&moved, &fixture.root).unwrap();
+                    #[cfg(not(unix))]
+                    fs::create_dir(&fixture.root).unwrap();
+                    // Even the same inode behind a replaced parent cannot be
+                    // published using the previously admitted handle.
+                    assert!(records.finish().is_err());
+                    #[cfg(unix)]
+                    fs::remove_file(&fixture.root).unwrap();
+                    #[cfg(not(unix))]
+                    fs::remove_dir(&fixture.root).unwrap();
+                    fs::rename(moved, &fixture.root).unwrap();
+                }
+                _ => unreachable!(),
+            }
+        }
     }
 
     #[test]

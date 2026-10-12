@@ -1,29 +1,32 @@
 # Fixed-scope Viewer query workload
 
-This reproducible synthetic workload supports the remaining measurements in
-#29, #53 and the first independently reviewable serving slice in #319. It is
-not production, browser, provider, archive or connection-to-session evidence.
-Those acceptance criteria remain open.
-
+The checked-in `query-workload` now measures native focused Query reads; it
+constructs no ViewerCore and calls no retired full-model or transaction endpoint.
 Run `cargo build --release --locked -p semon-sessions --example query-workload`,
 then run `target/release/examples/query-workload HISTORY_PER_MACHINE MACHINES`
-in a fresh process for each size. The example creates made-up Claude JSONL
-sources and removes them after closing its ViewerCore. It holds one 120-record
-session and the same 60-entry transcript page constant while increasing other
-two-record sessions. There are four fixed machines; they deliberately share a
-hostname, with independent caller keys and unique native session ids. No
-personal source records or private hosted metadata are used.
+in a fresh process for each size. It holds one 120-record session and the same
+60-entry transcript page constant while increasing unrelated two-record sessions
+on independently named machines. All logs are synthetic.
 
-The first `/api/model` includes cold index/model creation and full serialization.
-The subsequent 101 `/api/tx?sid=selected&before=120` requests use OnInvalidate
-refresh, without source appends or a background stat worker. The first request
-is reported separately; the following 100 give p50/p95 latency. Latencies are
-in-process server response construction; response bytes exclude HTTP headers
-and compression. Linux VmRSS and `/proc/self/io` counters are process-wide;
-read counters include the tiny measurement reads themselves. Browser layout,
-paint, frames, filtering, live updates and tool expansion are not measured here.
+The preparation phase uses existing native Catalog observers, waits for complete
+publication on each machine, and reports `cold_catalog_complete_ms` separately.
+This phase reconciles all seeded machine history; it is not a bounded cold
+foreground read claim. Query adopts those same evidence owners. The next 101
+`read_transcript` requests use the selected source and Catalog identity, with no
+provider or source changes. The first page is reported separately, followed by
+100 warm p50/p95 samples. Every response must contain exactly entries 60–119.
 
-## Observed 2026-10-07
+Latencies include in-process native rendering and JSON encoding, not HTTP,
+compression or browser rendering. Linux VmRSS and `/proc/self/io` counters are
+process-wide and include their own small measurement reads. Retained archives,
+authorization, concurrency, cancellation and deletion require their separate
+repository fixtures; this workload does not qualify them.
+
+## Historical compatibility baseline, 2026-10-07
+
+The measurements below used the retired full-model implementation and the old
+workload endpoints. They are preserved as baseline evidence, not a description
+of current product architecture or exact final integration qualification.
 
 Baseline library: main `83e23259ba5b71d14d6262f951c58cc01186bf64`.
 Baseline workload binary SHA256:
@@ -64,27 +67,12 @@ once. Unchanged warm snapshots reuse it, examining four snapshot identities
 and looking up the selected id in the map. Tests check reuse by Arc identity
 and compare every plan field with the uncached ownership oracle.
 
-## Serving and limits
+## Current serving boundary
 
-The cache holds at most one ownership plan per ViewerCore. Admission allows
-at most 4,096 machine keys, 100,000 combined owner/conflict/dropped entries and
-8 MiB of retained string contents. These bound structural counts and string
-contents rather than claiming an exact allocator heap limit. Oversized plans
-use the existing uncached path. Snapshot keys are Weak references, so the
-cache retains no old model, source generation, transcript index or body.
-
-Any changed model object, caller key, machine order/count or received-copy
-policy invalidates the cache. An identical transport version is insufficient
-to reuse it. Concurrent misses may compute twice, but a caller always receives
-the plan for its own snapshots. Session id conflicts, machine-local stub
-namespaces, received-copy precedence, source access and model API semantics
-remain those of the full ownership oracle.
-
-Cold full-model initialization, global lineage/joins, full-model serialization,
-and per-machine snapshot collection remain. At 20,004 sessions the compatibility
-model still returns 17.6 MB and this workload retains about 652 MiB RSS. A warm
-routing cache cannot satisfy bounded first content or filtered list acceptance.
-The next #319/#320 slice needs a persisted metadata catalog with bounded page
-reads and generation-bound cursors, while preserving `/api/model` compatibility.
-Received-directory follow/stat/facts refresh, unknown transcript lookup and
-real multi-machine workload acceptance in #53 also still need direct evidence.
+Native Catalog and slot projections own focused selection and byte recipes.
+Queries fence the selected source generations and recheck consumed evidence
+before publishing. Complete native background reconciliation and selected-source
+proof metadata remain measurable costs; the retired ownership-plan cache and
+full-model fallback described by the historical baseline are no longer product
+paths. Run the current native workload on the exact integration commit before
+reporting current timings or memory use.
