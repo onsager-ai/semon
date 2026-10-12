@@ -852,6 +852,56 @@ impl Query {
                 );
             }
         }
+        if !self.embedded
+            && self.sources.machines.len() > 1
+            && !self.sources.is_retired()
+            && matches!(tool, "get_session" | "read_transcript")
+        {
+            let id = args["id"].as_str().expect("validated focused id");
+            let mut selected = None;
+            let mut ready = true;
+            for (source_key, evidence) in &self.sources.machines {
+                let key = if source_key.is_empty() {
+                    "local"
+                } else {
+                    source_key
+                };
+                // Resolve ownership from every admitted source's published
+                // Catalog. Do not decode another machine's event rows merely
+                // to rule out a duplicate global session ID.
+                match crate::catalog::qualified_history_identity(&evidence.options, key, id) {
+                    Ok(Some(identity)) => {
+                        let target = evidence
+                            .local_query_target(&identity.catalog_key, now)
+                            .map_err(|error| QueryError::io(&error))?;
+                        if target.is_none() {
+                            ready = false;
+                            continue;
+                        }
+                        if selected.is_some() {
+                            return Err(QueryError::new(
+                                "id_conflict",
+                                format!("two machines both have {id}"),
+                            ));
+                        }
+                        selected = Some((key.to_owned(), identity.catalog_key));
+                    }
+                    Ok(None) => {}
+                    Err(_) => ready = false,
+                }
+            }
+            if ready && let Some((source_key, catalog_key)) = selected {
+                return self.execute_selected_at(
+                    &source_key,
+                    &catalog_key,
+                    tool,
+                    args,
+                    None,
+                    crate::SessionSourceReadMode::LocalThenProvider,
+                    now,
+                );
+            }
+        }
         // Once per call: the answer's window and the check of `since` belong
         // to the same native evidence cohort.
         self.start = self.window_start(now)?;
@@ -923,8 +973,8 @@ impl Query {
 
     // Public selected reads validate the exact host-selected Catalog ID above.
     // Ordinary local reads may resolve a raw native ID whose spelling changes
-    // under the file window; only their already owned single-machine source can
-    // enter here without that host selection. Derivation still resolves args.id.
+    // under the file window; their admitted native Catalogs resolve ownership
+    // before entering here. Derivation still resolves args.id.
     #[allow(clippy::too_many_arguments)]
     fn execute_selected_at(
         &mut self,

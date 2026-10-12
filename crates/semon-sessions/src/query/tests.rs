@@ -3569,6 +3569,138 @@ fn ordinary_focused_query_reuses_qualified_catalog_without_unrelated_index_loads
 }
 
 #[test]
+fn ordinary_multi_machine_focused_query_reuses_published_ownership() {
+    for all in [false, true] {
+        for unrelated in [0, 256] {
+            let mut selected = Home::new("focused-owner");
+            let mut peer = Home::new("focused-peer");
+            selected.options.all = all;
+            peer.options.all = all;
+            peer.options.since = Duration::from_secs(6 * 3600);
+            selected.top("lead", &[human("lead", ts(12, 0), "selected prompt")]);
+            peer.top("peer", &[human("peer", ts(12, 0), "peer prompt")]);
+            for n in 0..unrelated {
+                let id = format!("unrelated-{n}");
+                peer.top(&id, &[human(&id, ts(12, 0), "unrelated peer history")]);
+            }
+            for home in [&selected, &peer] {
+                let mut cache =
+                    crate::events::EventCache::open_scoped(&home.options.cache).unwrap();
+                crate::model::observe_catalog(
+                    &home.options,
+                    &mut cache,
+                    &mut false,
+                    &mut crate::model::Texts::default(),
+                    NOW,
+                )
+                .unwrap();
+            }
+            let machines = vec![
+                ("a".into(), selected.options.clone()),
+                ("b".into(), peer.options.clone()),
+            ];
+            let mut baseline =
+                Query::from_sources(Arc::new(SessionSources::with_machines(machines.clone())));
+            let calls = [
+                ("get_session", json!({"id":"lead"})),
+                ("read_transcript", json!({"id":"lead","limit":10})),
+            ];
+            let expected: Vec<_> = calls
+                .iter()
+                .map(|(tool, args)| baseline.call_at(tool, args, NOW).unwrap())
+                .collect();
+            let mut query = Query::with_machines(machines);
+            let before = crate::events::FILE_READS.with(std::cell::Cell::get);
+            for ((tool, args), expected) in calls.iter().zip(expected) {
+                assert_eq!(query.call_at(tool, args, NOW).unwrap(), expected);
+            }
+            let loads = crate::events::FILE_READS.with(std::cell::Cell::get) - before;
+            eprintln!(
+                "ordinary multi-machine focused Query all={all} unrelated={unrelated} index_loads={loads}"
+            );
+            assert!(
+                loads <= 4,
+                "focused Query loaded unrelated machine indexes: {loads}"
+            );
+            assert!(query.evidence().parts[1].data.sessions.is_empty());
+        }
+    }
+}
+
+#[test]
+fn ordinary_multi_machine_focus_does_not_infer_absence_from_partial_discovery() {
+    let first = Home::new("first-owner");
+    let second = Home::new("second-owner");
+    first.top("lead", &[human("lead", ts(12, 0), "selected evidence")]);
+    second.top("peer", &[human("peer", ts(12, 0), "other evidence")]);
+    for home in [&first, &second] {
+        let mut cache = crate::events::EventCache::open_scoped(&home.options.cache).unwrap();
+        crate::model::observe_catalog(
+            &home.options,
+            &mut cache,
+            &mut false,
+            &mut crate::model::Texts::default(),
+            NOW,
+        )
+        .unwrap();
+    }
+    let db =
+        rusqlite::Connection::open(crate::events::EventCache::path(&second.options.cache)).unwrap();
+    db.execute(
+        "INSERT OR REPLACE INTO meta(key,value) VALUES('catalog_completeness','partial')",
+        [],
+    )
+    .unwrap();
+    // This newly discovered duplicate is outside the peer's partial projection.
+    second.top("lead", &[human("lead", ts(12, 0), "unpublished duplicate")]);
+    let mut query = Query::with_machines(vec![
+        ("a".into(), first.options.clone()),
+        ("b".into(), second.options.clone()),
+    ]);
+    assert_eq!(
+        query
+            .call_at("get_session", &json!({"id":"lead"}), NOW)
+            .unwrap_err()
+            .code,
+        "id_conflict"
+    );
+}
+
+#[test]
+fn ordinary_multi_machine_focused_query_refuses_qualified_duplicate_owners() {
+    let first = Home::new("first-owner");
+    let second = Home::new("second-owner");
+    for home in [&first, &second] {
+        home.top(
+            "duplicate",
+            &[human("duplicate", ts(12, 0), "native evidence")],
+        );
+        let mut cache = crate::events::EventCache::open_scoped(&home.options.cache).unwrap();
+        crate::model::observe_catalog(
+            &home.options,
+            &mut cache,
+            &mut false,
+            &mut crate::model::Texts::default(),
+            NOW,
+        )
+        .unwrap();
+    }
+    let mut query = Query::with_machines(vec![
+        ("a".into(), first.options.clone()),
+        ("b".into(), second.options.clone()),
+    ]);
+    for tool in ["get_session", "read_transcript"] {
+        assert_eq!(
+            query
+                .call_at(tool, &json!({"id":"duplicate"}), NOW)
+                .unwrap_err()
+                .code,
+            "id_conflict"
+        );
+    }
+}
+
+#[test]
 fn ordinary_focused_query_refreshes_selected_log_without_unrelated_index_loads() {
     use std::io::Write;
 

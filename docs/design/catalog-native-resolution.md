@@ -25,6 +25,19 @@ It verifies parsed native membership and the configured logical input root.
 Current uses current bindings; explicit history also considers retained bindings.
 No native identifier is assumed to equal a canonical key or inferred from a path.
 
+Ordinary local multi-machine `get_session` and `read_transcript` resolve ownership
+from every configured source's complete published Catalog before reading the
+selected component. Completeness and the exact-key lookup share one SQLite
+snapshot, including an absent key. Provisional or unavailable discovery cannot
+prove absence or unique ownership and retains native producer reconciliation.
+Two qualified owners retain the existing `id_conflict` error. Other machines
+contribute identity/window facts without decoding their unrelated event rows;
+the selected source still verifies its byte proofs, current role and generation.
+The regression compares both tools against the full native Query cohort with
+zero and 256 unrelated peer sessions, for both window configurations. Both sizes
+perform four index loads. Cold discovery and filesystem reconciliation remain
+separate costs; these measurements qualify published ownership reuse only.
+
 Verification: `native_alias_is_exact_bounded_and_preserves_ambiguity_and_provisional_reads`
 passes, including absent local bytes/facts, provisional discovery, exact harness
 scope, ambiguity, retained bindings and a covering query plan. The copied exact
