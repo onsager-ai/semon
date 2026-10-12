@@ -24,6 +24,131 @@ use tiny_http::{Header, Response, Server};
 static NEXT: AtomicU64 = AtomicU64::new(0);
 const TOKEN: &str = "test-token-0123456789";
 
+/// Compare supported native reads after transport redaction and source
+/// selection, including every transcript page and Catalog usage/cost metadata.
+fn native_query_corpus(options: &Options, now: i64) -> serde_json::Value {
+    let sources = Arc::new(semon_sessions::SessionSources::with_machines(vec![(
+        String::new(),
+        options.clone(),
+    )]));
+    let mut query = semon_sessions::Query::from_sources(sources);
+    let listing = query
+        .call_at("list_sessions", &json!({"limit":1000}), now)
+        .unwrap();
+    assert_eq!(
+        listing["truncated"], false,
+        "fixture must cover all sessions"
+    );
+    let mut sessions = serde_json::Map::new();
+    let mut transcripts = serde_json::Map::new();
+    for row in listing["sessions"].as_array().unwrap() {
+        let id = row["id"].as_str().unwrap();
+        sessions.insert(
+            id.into(),
+            query
+                .call_at("get_session", &json!({"id":id}), now)
+                .unwrap()["session"]
+                .clone(),
+        );
+        let mut pages = Vec::new();
+        let mut after = 0;
+        loop {
+            match query.call_at("read_transcript", &json!({"id":id,"after":after}), now) {
+                Ok(page) => {
+                    let to = page["to"].as_u64().unwrap();
+                    let total = page["total"].as_u64().unwrap();
+                    assert!(to > after || to == total, "paging must advance");
+                    pages.push(page);
+                    if to == total {
+                        break;
+                    }
+                    after = to;
+                }
+                Err(error) => {
+                    assert_eq!(row["kind"], "stub");
+                    assert_eq!(error.code, "unknown_session");
+                    pages.push(json!({"error":error.code,"message":error.message}));
+                    break;
+                }
+            }
+        }
+        transcripts.insert(id.into(), json!(pages));
+    }
+    let catalog = semon_sessions::session_catalog_page(options, "local", "limit=100");
+    assert_eq!(catalog.status, 200);
+    let catalog: serde_json::Value = serde_json::from_slice(&catalog.body).unwrap();
+    assert!(
+        catalog["next_cursor"].is_null(),
+        "fixture must cover all Catalog rows"
+    );
+    let metrics: Vec<_> = catalog["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| {
+            let mut metrics = row.as_object().unwrap().clone();
+            if let Some(context) = metrics.remove("summary_context") {
+                assert_eq!(context["state"], "incomplete");
+                assert_eq!(context["scope"], "current_observation");
+            }
+            // Physical custody observations legitimately differ across copies.
+            // The native summary, identity, lineage, tokens and cost stay exact.
+            for field in [
+                "freshness",
+                "facts_observation",
+                "native_selection",
+                "transcript",
+                "details",
+            ] {
+                metrics.remove(field);
+            }
+            metrics
+        })
+        .collect();
+    json!({"listing":listing,"sessions":sessions,"transcripts":transcripts,"catalog":metrics,
+        "stalls":query.call_at("stalls", &json!({"idle_minutes":1}), now).unwrap(),
+        "find":query.call_at("find", &json!({"text":"session"}), now).unwrap()})
+}
+
+fn native_reply_content(reply: &semon_sessions::ViewerReply) -> serde_json::Value {
+    assert_eq!(reply.status, 200);
+    let mut body: serde_json::Value = serde_json::from_slice(&reply.body).unwrap();
+    assert_eq!(body["api"], 1);
+    let generation = body["identity"]["generation"].as_str().unwrap();
+    assert_eq!(generation.len(), 64);
+    assert!(generation.bytes().all(|byte| byte.is_ascii_hexdigit()));
+    assert!(body["identity"]["observed_at"].as_i64().unwrap() > 0);
+    if body.get("projection").is_some() {
+        let generation = body["projection"]["generation"].as_str().unwrap();
+        assert_eq!(generation.len(), 64);
+        assert!(generation.bytes().all(|byte| byte.is_ascii_hexdigit()));
+        if let Some(transcript) = body["session"].get("transcript") {
+            assert_eq!(transcript["generation"], generation);
+        }
+        body["projection"]
+            .as_object_mut()
+            .unwrap()
+            .remove("generation");
+        // Optional summary headers describe this copy's retained history
+        // readiness. The requested current projection/body is checked above;
+        // summary readiness can differ when only one copy has earlier custody.
+        let session = body["session"].as_object_mut().unwrap();
+        session.remove("transcript");
+        session.remove("details");
+        if let Some(context) = session.remove("summary_context") {
+            assert_eq!(context["state"], "incomplete");
+            assert_eq!(context["scope"], "current_observation");
+        }
+    }
+    // Independent native copies have separate physical source/publication
+    // generations and observation times. Compare all content and provenance
+    // after checking each reply's own generation bindings above.
+    let identity = body["identity"].as_object_mut().unwrap();
+    identity.remove("generation");
+    identity.remove("observed_at");
+    body
+}
+
 #[derive(Default)]
 struct Received {
     files: BTreeMap<String, Vec<u8>>,
@@ -595,21 +720,26 @@ fn archive_and_unarchive_pushes_select_current_sources_without_deleting_old_copi
         )
         .unwrap();
         let now = 1_790_208_000_000;
-        assert_eq!(
-            semon_sessions::model_json_at(&mirrored_options, now).unwrap(),
-            semon_sessions::model_json_at(&expected_options, now).unwrap(),
-            "pass {pass}"
-        );
+        let actual_corpus = native_query_corpus(&mirrored_options, now);
+        let expected_corpus = native_query_corpus(&expected_options, now);
+        assert_eq!(actual_corpus, expected_corpus, "pass {pass}");
         let core = semon_sessions::ViewerCore::new(mirrored_options.clone());
         let expected_core = semon_sessions::ViewerCore::new(expected_options);
         for (path, query) in [
-            ("/api/tx", "sid=archive-root"),
-            ("/api/transcript", "harness=codex&id=archive-root"),
+            (
+                "/api/session-transcript",
+                "machine=local&sid=archive-root&limit=100",
+            ),
+            ("/api/session-identity", "machine=local&sid=archive-root"),
         ] {
             let actual = core.respond("GET", path, query, None);
             let wanted = expected_core.respond("GET", path, query, None);
             assert_eq!(actual.status, 200, "{path} pass {pass}");
-            assert_eq!(actual.body, wanted.body, "{path} pass {pass}");
+            assert_eq!(
+                native_reply_content(&actual),
+                native_reply_content(&wanted),
+                "{path} pass {pass}"
+            );
         }
         assert_eq!(
             fs::read(home.root.join(current)).unwrap(),
@@ -1113,11 +1243,10 @@ fn copied_claude_usage_has_redacted_http_mirror_and_restart_parity() {
         let remote = configure(&mirrored);
         let now = 1_791_072_000_000;
         assert_eq!(
-            semon_sessions::model_json_at(&local, now).unwrap(),
-            semon_sessions::model_json_at(&remote, now).unwrap()
+            native_query_corpus(&local, now),
+            native_query_corpus(&remote, now)
         );
-        let json: serde_json::Value =
-            serde_json::from_str(&semon_sessions::model_json_at(&remote, now).unwrap()).unwrap();
+        let json = native_query_corpus(&remote, now);
         assert_eq!(
             json["sessions"]["native-claude-child"]["claude_usage"]["exclusive"]["input"],
             5
@@ -1127,13 +1256,16 @@ fn copied_claude_usage_has_redacted_http_mirror_and_restart_parity() {
         let expected_core = semon_sessions::ViewerCore::new(local);
         for id in ["native-claude-parent", "native-claude-child"] {
             for (path, query) in [
-                ("/api/tx", format!("sid={id}")),
-                ("/api/transcript", format!("harness=claude&id={id}")),
+                (
+                    "/api/session-transcript",
+                    format!("machine=local&sid={id}&limit=100"),
+                ),
+                ("/api/session-identity", format!("machine=local&sid={id}")),
             ] {
                 let actual = core.respond("GET", path, &query, None);
                 let wanted = expected_core.respond("GET", path, &query, None);
                 assert_eq!(actual.status, 200);
-                assert_eq!(actual.body, wanted.body);
+                assert_eq!(native_reply_content(&actual), native_reply_content(&wanted));
             }
         }
     }
@@ -1227,19 +1359,22 @@ fn copilot_redacted_mirror_survives_lost_ack_restart_partial_and_replacement() {
             let remote = configure(&mirrored);
             let now = 1_791_072_000_000;
             assert_eq!(
-                semon_sessions::model_json_at(&local, now).unwrap(),
-                semon_sessions::model_json_at(&remote, now).unwrap()
+                native_query_corpus(&local, now),
+                native_query_corpus(&remote, now)
             );
             let local = semon_sessions::ViewerCore::new(local);
             let remote = semon_sessions::ViewerCore::new(remote);
             for (route, query) in [
-                ("/api/tx", format!("sid={id}")),
-                ("/api/transcript", format!("harness=copilot&id={id}")),
+                (
+                    "/api/session-transcript",
+                    format!("machine=local&sid={id}&limit=100"),
+                ),
+                ("/api/session-identity", format!("machine=local&sid={id}")),
             ] {
                 let actual = remote.respond("GET", route, &query, None);
                 let wanted = local.respond("GET", route, &query, None);
                 assert_eq!(actual.status, 200);
-                assert_eq!(actual.body, wanted.body);
+                assert_eq!(native_reply_content(&actual), native_reply_content(&wanted));
             }
         }
         let retained = copy(&receiver, &path);
