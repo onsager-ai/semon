@@ -123,6 +123,9 @@ The former composition, complete-model store, model poller, parallel transcript
 owner and compatibility bootstrap are removed. Pure shared presentation,
 formatting and causal calculations remain where the canonical reader needs them.
 
+Qualified persisted reads can register update interest without cold preparation;
+missing evidence and invalidation still queue the same bounded native producer.
+
 ## Refactoring contract
 
 This document is the canonical viewer refactoring contract. AGENTS.md and the
