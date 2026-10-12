@@ -6936,51 +6936,97 @@ mod tests {
 
     #[test]
     fn a_changed_catalog_child_reuses_only_its_relationship_component() {
-        for unrelated in [0, 256] {
-            let fixture = Fixture::new();
-            fixture.claude("parent", &[
-                json!({"type":"user","sessionId":"parent","uuid":"parent-u","origin":{"kind":"human"},"cwd":"/tmp/project","timestamp":"2026-10-01T00:00:00Z","message":{"role":"user","content":"parent request"}}),
-                json!({"type":"assistant","sessionId":"parent","uuid":"parent-task","timestamp":"2026-10-01T00:01:00Z","message":{"role":"assistant","content":[{"type":"tool_use","id":"task-child","name":"Task","input":{"prompt":"inspect child"}}]}}),
-            ]);
-            let child = fixture.write("claude/projects/project/parent/subagents/agent-child.jsonl", &(json!({"type":"user","sessionId":"parent","agentId":"child","isSidechain":true,"uuid":"child-u","cwd":"/tmp/project","timestamp":"2026-10-01T00:02:00Z","message":{"role":"user","content":"inspect child"}}).to_string()+"\n"));
-            fixture.write(
-                "claude/projects/project/parent/subagents/agent-child.meta.json",
-                r#"{"toolUseId":"task-child","description":"Child inspection"}"#,
-            );
-            for n in 0..unrelated {
-                let id = format!("unrelated-{n:04}");
-                fixture.claude(&id, &[json!({"type":"user","sessionId":id,"uuid":id,"origin":{"kind":"human"},"cwd":"/tmp/project","timestamp":"2026-10-01T00:00:00Z","message":{"role":"user","content":"unrelated prompt"}})]);
+        for change in ["append", "sidecar"] {
+            for unrelated in [0, 256] {
+                let fixture = Fixture::new();
+                fixture.claude("parent", &[
+                    json!({"type":"user","sessionId":"parent","uuid":"parent-u","origin":{"kind":"human"},"cwd":"/tmp/project","timestamp":"2026-10-01T00:00:00Z","message":{"role":"user","content":"parent request"}}),
+                    json!({"type":"assistant","sessionId":"parent","uuid":"parent-task","timestamp":"2026-10-01T00:01:00Z","message":{"role":"assistant","content":[{"type":"tool_use","id":"task-child","name":"Task","input":{"prompt":"inspect child"}}]}}),
+                ]);
+                let child = fixture.write("claude/projects/project/parent/subagents/agent-child.jsonl", &(json!({"type":"user","sessionId":"parent","agentId":"child","isSidechain":true,"uuid":"child-u","cwd":"/tmp/project","timestamp":"2026-10-01T00:02:00Z","message":{"role":"user","content":"inspect child"}}).to_string()+"\n"));
+                fixture.write(
+                    "claude/projects/project/parent/subagents/agent-child.meta.json",
+                    r#"{"toolUseId":"task-child","description":"Child inspection"}"#,
+                );
+                for n in 0..unrelated {
+                    let id = format!("unrelated-{n:04}");
+                    fixture.claude(&id, &[json!({"type":"user","sessionId":id,"uuid":id,"origin":{"kind":"human"},"cwd":"/tmp/project","timestamp":"2026-10-01T00:00:00Z","message":{"role":"user","content":"unrelated prompt"}})]);
+                }
+                let mut cache = EventCache::open_scoped(&fixture.options.cache).unwrap();
+                model::observe_catalog(
+                    &fixture.options,
+                    &mut cache,
+                    &mut false,
+                    &mut model::Texts::default(),
+                    model::now_ms(),
+                )
+                .unwrap();
+                let snapshot =
+                    Snapshot::capture_pids(&fixture.options, BTreeSet::new(), cache.paths());
+                if change == "append" {
+                    writeln!(fs::OpenOptions::new().append(true).open(&child).unwrap(), "{}", json!({"type":"assistant","sessionId":"parent","agentId":"child","isSidechain":true,"uuid":"child-a","timestamp":"2026-10-01T00:03:00Z","message":{"role":"assistant","content":[{"type":"text","text":"bounded child update"}]}})).unwrap();
+                } else {
+                    fixture.write(
+                        "claude/projects/project/parent/subagents/agent-child.meta.json",
+                        r#"{"toolUseId":"task-child","description":"Updated child inspection","model":"updated-model"}"#,
+                    );
+                }
+                let mut work = Work::default();
+                work.events = Some(EventCache::open_scoped(&fixture.options.cache).unwrap());
+                work.catalog_snapshot = Some(snapshot);
+                let view = fixture.viewer();
+                let before = crate::events::FILE_READS.with(std::cell::Cell::get);
+                assert!(
+                    view.refresh_catalog_locked(&mut work, model::now_ms())
+                        .unwrap()
+                );
+                assert_eq!(
+                    crate::events::FILE_READS.with(std::cell::Cell::get) - before,
+                    2,
+                    "unrelated={unrelated}"
+                );
+                let reply = crate::session_catalog_page(&fixture.options, "fixture", "limit=60");
+                let page: Value = serde_json::from_slice(&reply.body).unwrap();
+                assert_eq!(page["completeness"]["state"], "complete");
+                if change == "sidecar" {
+                    let child = page["items"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .find(|row| row["key"] == "child")
+                        .unwrap();
+                    assert_eq!(child["name"], "Updated child inspection");
+                    assert_eq!(child["model"], "updated-model");
+                }
+                if change == "sidecar" {
+                    let cache = work.events.as_mut().unwrap();
+                    let inputs = [
+                        crate::native_evidence::catalog_input(
+                            &fixture.root.join("claude/projects/project/parent.jsonl"),
+                            &fixture.options,
+                        )
+                        .unwrap(),
+                        crate::native_evidence::catalog_input(&child, &fixture.options).unwrap(),
+                    ];
+                    let mut prepared =
+                        model::prepare_sources(&fixture.options, cache, &inputs, model::now_ms())
+                            .unwrap();
+                    let generation = cache.session_catalog_generation();
+                    prepared
+                        .rows
+                        .iter_mut()
+                        .find(|row| row.key == "child")
+                        .unwrap()
+                        .sources[0]
+                        .native_role
+                        .as_mut()
+                        .unwrap()["Agent"]["parent"] = json!("different-parent");
+                    assert_eq!(cache.publish_closed_catalog(&prepared).unwrap(), None);
+                    assert_eq!(cache.session_catalog_generation(), generation);
+                }
+                assert!(view.shown_model().is_none());
+                view.close();
             }
-            let mut cache = EventCache::open_scoped(&fixture.options.cache).unwrap();
-            model::observe_catalog(
-                &fixture.options,
-                &mut cache,
-                &mut false,
-                &mut model::Texts::default(),
-                model::now_ms(),
-            )
-            .unwrap();
-            let snapshot = Snapshot::capture_pids(&fixture.options, BTreeSet::new(), cache.paths());
-            writeln!(fs::OpenOptions::new().append(true).open(child).unwrap(), "{}", json!({"type":"assistant","sessionId":"parent","agentId":"child","isSidechain":true,"uuid":"child-a","timestamp":"2026-10-01T00:03:00Z","message":{"role":"assistant","content":[{"type":"text","text":"bounded child update"}]}})).unwrap();
-            let mut work = Work::default();
-            work.events = Some(EventCache::open_scoped(&fixture.options.cache).unwrap());
-            work.catalog_snapshot = Some(snapshot);
-            let view = fixture.viewer();
-            let before = crate::events::FILE_READS.with(std::cell::Cell::get);
-            assert!(
-                view.refresh_catalog_locked(&mut work, model::now_ms())
-                    .unwrap()
-            );
-            assert_eq!(
-                crate::events::FILE_READS.with(std::cell::Cell::get) - before,
-                2,
-                "unrelated={unrelated}"
-            );
-            let reply = crate::session_catalog_page(&fixture.options, "fixture", "limit=60");
-            let page: Value = serde_json::from_slice(&reply.body).unwrap();
-            assert_eq!(page["completeness"]["state"], "complete");
-            assert!(view.shown_model().is_none());
-            view.close();
         }
     }
 

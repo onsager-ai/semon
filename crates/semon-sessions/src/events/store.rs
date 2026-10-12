@@ -1344,6 +1344,19 @@ fn stable_native_role(previous: Option<&Value>, current: Option<&Value>) -> bool
         return false;
     };
     let mut previous = previous.clone();
+    // Claude's independently observed sidecar owns these content-free fields.
+    // Parent identity and the complete old/new relationship closure stay fenced.
+    if let (Some(old), Some(new)) = (
+        previous.get_mut("Agent").and_then(Value::as_object_mut),
+        current.get("Agent").and_then(Value::as_object),
+    ) {
+        for field in ["tool_use_id", "label", "model", "cwd", "branch"] {
+            let Some(value) = new.get(field) else {
+                return false;
+            };
+            old.insert(field.to_owned(), value.clone());
+        }
+    }
     // A Codex parent rewrite is qualified by both old/current closure and its
     // newly resolved native parent. Other role changes require reconciliation.
     if let (Some(old), Some(new)) = (

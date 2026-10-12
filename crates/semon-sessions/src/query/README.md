@@ -27,8 +27,13 @@ exclusion changes a qualified spelling. The shared producer then derives the
 requested identity from the bounded collision closure. Resumed sessions retain
 omitted-file turns_truncated semantics. This local resolution grants no source
 authority and does not relax public hosted selected-Catalog-ID validation.
-Cold/stale Catalogs and multi-machine automatic
-selection still use native reconciliation and remain bounded-selection work.
+An existing current owner's changed log or allowlisted Claude sidecar refreshes
+through the same bounded Catalog component producer. Old and new relationships,
+source revisions and publication generation remain fenced. Two tools after an
+isolated append load five indexes with zero or 256 unrelated sessions (formerly
+one versus 257); a rewrite loads four in both cases. Unsupported identity/role
+changes, missing sources, cold Catalogs and multi-machine automatic selection
+still require native reconciliation.
 
 `SessionSources` constructs no machine view, refresh pool or worker. Explicit
 Catalog demand attaches the existing source producer to the host's bounded pool;

@@ -425,26 +425,14 @@ pub fn session_query_sources(
     source_refs(options, &selected.rows)
 }
 
-/// Qualify an ordinary local focused read against existing native evidence.
-/// Cold/stale publications still require their native producer. This never
-/// discovers unrelated sources or changes source/catalog ownership.
-pub(crate) fn local_query_target(
-    options: &Options,
-    key: &str,
-    now: i64,
-) -> io::Result<Option<String>> {
-    if !EventCache::path(&options.cache).is_file() {
-        return Ok(None);
-    }
-    let mut db = connection(options)?;
-    let tx = db.transaction().map_err(failure)?;
-    let (key, selected) = match query_selection(&tx, key) {
+fn local_query_selection(db: &Connection, key: &str) -> io::Result<Option<(String, Selection)>> {
+    let (key, selected) = match query_selection(db, key) {
         Ok(selected) => (key.to_owned(), selected),
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
             // A complete Catalog's namespace can differ from the CLI's file
             // window. Resolve original native IDs through the existing index;
             // query_selection then includes every identity collision owner.
-            let mut aliases = tx.prepare("SELECT DISTINCT session_key FROM session_catalog_sources WHERE native_id=?1 ORDER BY session_key LIMIT 65").map_err(failure)?;
+            let mut aliases = db.prepare("SELECT DISTINCT session_key FROM session_catalog_sources WHERE native_id=?1 ORDER BY session_key LIMIT 65").map_err(failure)?;
             let owners = aliases
                 .query_map([key], |row| row.get::<_, String>(0))
                 .map_err(failure)?
@@ -459,7 +447,7 @@ pub(crate) fn local_query_target(
             let Some(owner) = owners.into_iter().next() else {
                 return Ok(None);
             };
-            let selected = query_selection(&tx, &owner)?;
+            let selected = query_selection(db, &owner)?;
             (owner, selected)
         }
         Err(error) => return Err(error),
@@ -470,6 +458,57 @@ pub(crate) fn local_query_target(
             "Selected query relationship closure exceeds its source bound",
         ));
     }
+    Ok(Some((key, selected)))
+}
+
+/// Existing current paths for a bounded selected-source producer refresh.
+/// Retained/missing sources keep their archive or disappearance semantics.
+pub(crate) fn local_query_inputs(
+    options: &Options,
+    key: &str,
+) -> io::Result<Option<Vec<crate::inputs::Input>>> {
+    if !EventCache::path(&options.cache).is_file() {
+        return Ok(None);
+    }
+    let mut db = connection(options)?;
+    let tx = db.transaction().map_err(failure)?;
+    let Some((_, selected)) = local_query_selection(&tx, key)? else {
+        return Ok(None);
+    };
+    let mut inputs = std::collections::BTreeSet::new();
+    for row in selected.rows {
+        if row.lifecycle != crate::model::summary::CatalogLifecycle::Current {
+            return Ok(None);
+        }
+        for source in row.sources {
+            if !std::fs::symlink_metadata(&source.path).is_ok_and(|metadata| metadata.is_file()) {
+                return Ok(None);
+            }
+            let Some(input) = crate::native_evidence::catalog_input(&source.path, options) else {
+                return Ok(None);
+            };
+            inputs.insert(input);
+        }
+    }
+    Ok((!inputs.is_empty()).then(|| inputs.into_iter().collect()))
+}
+
+/// Qualify an ordinary local focused read against existing native evidence.
+/// Cold/stale publications still require their native producer. This never
+/// discovers unrelated sources or changes source/catalog ownership.
+pub(crate) fn local_query_target(
+    options: &Options,
+    key: &str,
+    now: i64,
+) -> io::Result<Option<String>> {
+    if !EventCache::path(&options.cache).is_file() {
+        return Ok(None);
+    }
+    let mut db = connection(options)?;
+    let tx = db.transaction().map_err(failure)?;
+    let Some((key, selected)) = local_query_selection(&tx, key)? else {
+        return Ok(None);
+    };
     let cutoff = crate::model::scan_cutoff(options, now);
     let mut sources = BTreeMap::new();
     for source in selected.rows.iter().flat_map(|row| &row.sources) {

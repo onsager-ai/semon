@@ -281,6 +281,113 @@ impl NativeEvidence {
         Ok(CatalogPreparation::Reconcile)
     }
 
+    /// Expand and derive the same bounded component for Catalog refresh and
+    /// ordinary selected local reads. Publication retains its existing fences.
+    fn prepare_catalog_component(
+        &self,
+        cache: &mut EventCache,
+        inputs: Vec<crate::inputs::Input>,
+        now: i64,
+    ) -> io::Result<Option<model::PreparedSources>> {
+        let mut inputs: BTreeSet<_> = inputs.into_iter().collect();
+        let options = Options {
+            scan_window: false,
+            ..self.options.clone()
+        };
+        // Expand through both persisted relationships and newly derived
+        // endpoints. Reprepare only when another current source joins;
+        // the event cache retains the already loaded component indexes.
+        let mut keys = Vec::new();
+        let mut native_parents = Vec::new();
+        let prepared = loop {
+            let selected: Vec<_> = inputs.iter().cloned().collect();
+            let Some(component) =
+                cache.catalog_component_paths(&selected, &keys, &native_parents, &self.options)?
+            else {
+                break None;
+            };
+            inputs.extend(component);
+            if inputs.len() > 64 {
+                break None;
+            }
+            let selected: Vec<_> = inputs.iter().cloned().collect();
+            let prepared = model::prepare_sources(&options, cache, &selected, now)?;
+            let dependencies: BTreeSet<_> = prepared
+                .rows
+                .iter()
+                .flat_map(|row| {
+                    std::iter::once(row.key.as_str())
+                        .chain(row.parent.as_deref())
+                        .chain(row.trace.iter().flat_map(|trace| trace.endpoints()))
+                })
+                .map(str::to_owned)
+                .collect();
+            if dependencies.len() > 64 {
+                break None;
+            }
+            keys = dependencies.into_iter().collect();
+            native_parents = prepared.native_parents();
+            let Some(component) =
+                cache.catalog_component_paths(&selected, &keys, &native_parents, &self.options)?
+            else {
+                break None;
+            };
+            if component.iter().all(|input| inputs.contains(input)) {
+                break Some(prepared);
+            }
+            inputs.extend(component);
+            if inputs.len() > 64 {
+                break None;
+            }
+        };
+        Ok(prepared)
+    }
+
+    /// Refresh an existing current owner through the shared Catalog producer.
+    /// Cold discovery and unsupported role/identity changes still reconcile.
+    pub(crate) fn local_query_target(&self, key: &str, now: i64) -> io::Result<Option<String>> {
+        if let Some(target) = crate::overview_repair::local_query_target(&self.options, key, now)? {
+            return Ok(Some(target));
+        }
+        let Some(inputs) = crate::overview_repair::local_query_inputs(&self.options, key)? else {
+            return Ok(None);
+        };
+        let mut work = lock(&self.work);
+        if self.closed.load(Ordering::Acquire) {
+            return Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "native query source is closed",
+            ));
+        }
+        self.prepare_events(&mut work, now)?;
+        let cache = work.events.as_mut().expect("event cache initialized");
+        let Some(prepared) = self.prepare_catalog_component(cache, inputs, now)? else {
+            return Ok(None);
+        };
+        match cache.publish_closed_catalog(&prepared)? {
+            Some(crate::events::Outcome::Written) => {
+                cache.publish_session_descriptions();
+                cache.end_scan();
+                *write_lock(&self.query) = None;
+            }
+            Some(_) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    "native Catalog component generation changed",
+                ));
+            }
+            None => return Ok(None),
+        }
+        crate::overview_repair::local_query_target(&self.options, key, now)?
+            .map(Some)
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    "Selected native source changed during refresh",
+                )
+            })
+    }
+
     /// Prepare/publish Catalog evidence directly, independent of Viewer state.
     /// The caller holds native work; false yields a bounded discovery slice.
     pub(crate) fn refresh_catalog(&self, work: &mut Work, now: i64) -> io::Result<bool> {
@@ -321,65 +428,7 @@ impl NativeEvidence {
                 .expect("snapshot exists")
                 .changed_catalog_inputs(&snapshot, &self.options)
             {
-                let mut inputs: BTreeSet<_> = inputs.into_iter().collect();
-                let options = Options {
-                    scan_window: false,
-                    ..self.options.clone()
-                };
-                // Expand through both persisted relationships and newly derived
-                // endpoints. Reprepare only when another current source joins;
-                // the event cache retains the already loaded component indexes.
-                let mut keys = Vec::new();
-                let mut native_parents = Vec::new();
-                let prepared = loop {
-                    let selected: Vec<_> = inputs.iter().cloned().collect();
-                    let Some(component) = cache.catalog_component_paths(
-                        &selected,
-                        &keys,
-                        &native_parents,
-                        &self.options,
-                    )?
-                    else {
-                        break None;
-                    };
-                    inputs.extend(component);
-                    if inputs.len() > 64 {
-                        break None;
-                    }
-                    let selected: Vec<_> = inputs.iter().cloned().collect();
-                    let prepared = model::prepare_sources(&options, cache, &selected, now)?;
-                    let dependencies: BTreeSet<_> = prepared
-                        .rows
-                        .iter()
-                        .flat_map(|row| {
-                            std::iter::once(row.key.as_str())
-                                .chain(row.parent.as_deref())
-                                .chain(row.trace.iter().flat_map(|trace| trace.endpoints()))
-                        })
-                        .map(str::to_owned)
-                        .collect();
-                    if dependencies.len() > 64 {
-                        break None;
-                    }
-                    keys = dependencies.into_iter().collect();
-                    native_parents = prepared.native_parents();
-                    let Some(component) = cache.catalog_component_paths(
-                        &selected,
-                        &keys,
-                        &native_parents,
-                        &self.options,
-                    )?
-                    else {
-                        break None;
-                    };
-                    if component.iter().all(|input| inputs.contains(input)) {
-                        break Some(prepared);
-                    }
-                    inputs.extend(component);
-                    if inputs.len() > 64 {
-                        break None;
-                    }
-                };
+                let prepared = self.prepare_catalog_component(cache, inputs, now)?;
                 if let Some(prepared) = prepared {
                     match cache.publish_closed_catalog(&prepared)? {
                         Some(crate::events::Outcome::Written) => {
@@ -723,7 +772,17 @@ impl Snapshot {
             {
                 return None;
             }
-            let input = catalog_input(path, options)?;
+            let input = catalog_input(path, options).or_else(|| {
+                let stem = path.file_name()?.to_str()?.strip_suffix(".meta.json")?;
+                let log = path.with_file_name(format!("{stem}.jsonl"));
+                if !crate::native_sidecar::agent_path(&log)
+                    || !fs::symlink_metadata(&log).is_ok_and(|metadata| metadata.is_file())
+                {
+                    return None;
+                }
+                let input = catalog_input(&log, options)?;
+                (input.root == crate::inputs::InputRoot::Claude).then_some(input)
+            })?;
             if previous.is_none() {
                 additions.push(path);
             }
