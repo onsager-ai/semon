@@ -50,6 +50,36 @@ pub struct SessionSources {
 
 impl SessionSources {
     pub fn with_machines(machines: Vec<(String, Options)>) -> Self {
+        Self::from_evidence(
+            machines
+                .into_iter()
+                .map(|(key, options)| (key, NativeEvidence::new(options)))
+                .collect(),
+        )
+    }
+
+    /// Adopt existing Catalog evidence owners without closing their producers,
+    /// reopening indexes or creating a second writer. The host transfers their
+    /// lifecycle ownership into this machine set: retiring or closing this set
+    /// also retires the original observers. This grants no source authority.
+    pub fn from_catalog_observers(machines: Vec<(String, &crate::SessionCatalogObserver)>) -> Self {
+        let views: Vec<_> = machines
+            .into_iter()
+            .map(|(key, observer)| (key, observer.shared_view()))
+            .collect();
+        let sources = Self::from_evidence(
+            views
+                .iter()
+                .map(|(key, view)| (key.clone(), view.evidence.clone()))
+                .collect(),
+        );
+        for (slot, (_, view)) in sources.views.iter().zip(views) {
+            let _ = slot.set(view);
+        }
+        sources
+    }
+
+    fn from_evidence(machines: Vec<(String, Arc<NativeEvidence>)>) -> Self {
         let local = machines.len() == 1 && machines[0].0.is_empty();
         let inventory = crate::SessionSourceInventory::new(machines.iter().map(|(key, _)| {
             let key = if local {
@@ -61,10 +91,7 @@ impl SessionSources {
         }));
         let views = machines.iter().map(|_| OnceLock::new()).collect();
         Self {
-            machines: machines
-                .into_iter()
-                .map(|(key, options)| (key, NativeEvidence::new(options)))
-                .collect(),
+            machines,
             views,
             inventory: Arc::new(inventory),
             retired: AtomicBool::new(false),
