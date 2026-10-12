@@ -219,3 +219,51 @@ test('derived return labels require a matching source-qualified spawn and record
     globalThis.matchMedia = previous;
   }
 });
+
+test('a qualified failed return reports the outcome once and incomplete provenance keeps its failure', () => {
+  const previous = globalThis.matchMedia;
+  globalThis.matchMedia = () => ({ matches: false });
+  try {
+    const returned = entry(0, 'turn', {
+      k: 'end',
+      ret: { to: 'parent', at: 1000, failed: true },
+    });
+    const metadata = {
+      ...context(),
+      turns: [
+        { id: 'turn', start: 'spawn', u: false, sent: [], end: { st: 'err', why: 'failed' } },
+      ],
+      sessions: { parent: { name: 'Parent task', harness: 'claude' } },
+      handoffs: [
+        { edge: { id: 'spawn', kind: 'spawn', from: 'parent', to: 'selected', at: 0, done: 1000 } },
+      ],
+    };
+    const present = (value) =>
+      catalogTranscriptBlocks(
+        [returned],
+        undefined,
+        undefined,
+        false,
+        value,
+        undefined,
+        'claude',
+        'selected',
+      )[0].turn;
+    const qualified = present(metadata);
+    assert.match(qualified.entries[0].text, /^Returned to Parent task · failed · /);
+    assert.equal(qualified.error, undefined);
+    for (const value of [
+      { ...metadata, sessions: {} },
+      { ...metadata, handoffs: [] },
+      { ...metadata, handoffs: [{ edge: { ...metadata.handoffs[0].edge, done: 999 } }] },
+    ]) {
+      assert.equal(present(value).error, 'Failed');
+      assert.equal(
+        present(value).entries[0].text,
+        'Session boundary · native provenance unavailable',
+      );
+    }
+  } finally {
+    globalThis.matchMedia = previous;
+  }
+});
