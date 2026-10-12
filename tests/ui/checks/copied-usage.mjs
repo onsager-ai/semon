@@ -61,6 +61,64 @@ export function start(root) {
     );
   });
 }
+// These read-only fixture journeys select one native owner. They never prepare
+// a workspace model to inspect usage or persisted harness facts.
+export async function nativeRead(server, sid, { transcript = false } = {}) {
+  const landing = await fetch(server.base + '/?t=' + server.token);
+  const cookie = landing.headers
+    .getSetCookie()
+    .map((value) => value.split(';')[0])
+    .join('; ');
+  const get = async (route) => {
+    const deadline = Date.now() + 5000;
+    for (;;) {
+      const response = await fetch(server.base + route, { headers: { cookie } });
+      const page = await response.json();
+      if (response.status === 503 && page.error?.code === 'catalog_unavailable') {
+        assert.ok(Date.now() < deadline, 'native fixture publication did not arrive');
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        continue;
+      }
+      assert.equal(response.status, 200, route.split('?')[0]);
+      return page;
+    }
+  };
+  const inventory = await get('/api/session-sources');
+  assert.equal(inventory.items.length, 1);
+  assert.equal(inventory.next_cursor, null);
+  const machine = inventory.items[0].source_key;
+  const query = new URLSearchParams({
+    machine,
+    scope: 'retained_history',
+    limit: '100',
+    after: '0',
+  });
+  if (sid != null) query.set('sid', sid);
+  const page = await get((transcript ? '/api/session-transcript?' : '/api/sessions?') + query);
+  if (sid == null) {
+    assert.equal(page.next_cursor, null, 'small harness fixture fits one native catalog page');
+    return page;
+  }
+  const session = transcript ? page.session : page.items[0];
+  assert.equal(session.key, sid);
+  if (transcript) {
+    assert.equal(page.identity.source_key, machine);
+    assert.equal(page.identity.catalog_key, sid);
+    assert.equal(page.range.first, 0);
+    assert.equal(
+      page.range.end,
+      page.projection.total,
+      'small harness fixture fits one native page',
+    );
+    assert.equal(page.entries.length, page.projection.total);
+  }
+  return page;
+}
+export async function nativeSession(server, sid, options) {
+  const page = await nativeRead(server, sid, options);
+  const session = page.session ?? page.items[0];
+  return { ...session, ...session.details, entries: page.entries };
+}
 export default async function copiedUsageCheck(browser) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'semon-copied-usage-'));
   const project = path.join(root, 'claude/projects/fixture');
@@ -84,9 +142,8 @@ export default async function copiedUsageCheck(browser) {
   const report = reporter('copied-usage');
   try {
     server = await start(root);
-    const model = await (await fetch(server.base + '/api/model?t=' + server.token)).json();
-    const parent = model.sessions['native-claude-parent'],
-      child = model.sessions['native-claude-child'];
+    const parent = await nativeSession(server, 'native-claude-parent'),
+      child = await nativeSession(server, 'native-claude-child');
     assert.equal(parent.claude_usage.observed.input + child.claude_usage.observed.input, 25);
     assert.equal(child.claude_usage.exclusive.input, 5);
     assert.equal(child.claude_usage.fresh, null);

@@ -215,6 +215,7 @@ for (const width of [390, 1280])
             pendingResolve,
             pendingSignal,
             requests = 0,
+            pendingObservation = false,
             hold = false;
           const requestPaths = [];
           window.fetch = (path, options) => {
@@ -233,9 +234,21 @@ for (const width of [390, 1280])
                 });
               }
               return Promise.resolve(
-                new Response(JSON.stringify(model), {
-                  headers: { 'Content-Type': 'application/json' },
-                }),
+                new Response(
+                  JSON.stringify(
+                    pendingObservation
+                      ? {
+                          ...model,
+                          observations: [
+                            { source_key: model.machines[0].key, state: 'catalog_unavailable' },
+                          ],
+                        }
+                      : model,
+                  ),
+                  {
+                    headers: { 'Content-Type': 'application/json' },
+                  },
+                ),
               );
             }
             if (String(path).startsWith('/api/session-transcript'))
@@ -379,6 +392,21 @@ for (const width of [390, 1280])
               await settle();
               assert(requests === before, 'disposed refresh listener polled');
             }
+            history.replaceState(null, '', '/');
+            pendingObservation = true;
+            const retrying = Application.mountViewerApplication(host());
+            await ready();
+            assert(
+              document.body.textContent.includes('Retrying'),
+              'pending observation was not shown',
+            );
+            retrying.destroy();
+            await settle();
+            assert(count() === 0 && effects() === 0, 'pending overview retry survived teardown');
+            const retiredRequests = requests;
+            await new Promise((resolve) => originalTimers.setTimeout.call(window, resolve, 600));
+            assert(requests === retiredRequests, 'retired overview retry made another request');
+            pendingObservation = false;
             history.replaceState(null, '', '/');
             hold = true;
             const old = Application.mountViewerApplication(host());

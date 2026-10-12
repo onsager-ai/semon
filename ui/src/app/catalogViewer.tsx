@@ -660,6 +660,7 @@ export function createCatalogViewer(
   const params = () =>
     new URLSearchParams({ machine: capabilities.source_key, scope: 'retained_history' });
   const overview = createOverviewPages({
+    effects: scope,
     orderScope,
     reviews: () => showApprovalReviews,
     root,

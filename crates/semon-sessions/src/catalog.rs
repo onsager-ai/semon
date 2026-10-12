@@ -3726,6 +3726,7 @@ mod tests {
             let entry = read();
             if live {
                 assert_eq!(entry["live"], true);
+                assert!(entry.get("ok").is_none());
                 assert_eq!(entry["since"], entry["observed_at"]);
                 assert!(entry["unfinished"].is_null());
                 let facts_path = fixture.options.facts.as_ref().unwrap();

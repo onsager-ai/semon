@@ -1118,7 +1118,52 @@ fn render(
             at += part.bytes.len() as u64;
         }
     };
-    let slots: Vec<_> = selection.slots.iter().map(SavedSlot::restore).collect();
+    let mut slots: Vec<_> = selection.slots.iter().map(SavedSlot::restore).collect();
+    // Apply qualified observations before rendering, so pending calls reuse the
+    // shared live/unfinished presentation without persisting runtime authority.
+    let details = &selection.session["details"];
+    let working = selection.session["lifecycle"] == "current"
+        && details["live_observation"] == true
+        && matches!(details["state"].as_str(), Some("work" | "wait"));
+    for (saved, slot) in selection.slots.iter().zip(&mut slots) {
+        use crate::{
+            model::{Shown, SlotKind},
+            slot_projection::{Outcome, Recipe},
+        };
+        let pending = matches!(
+            saved.recipe,
+            Recipe::Tool {
+                outcome: Outcome::Pending,
+                ..
+            } | Recipe::Yielded {
+                outcome: Outcome::Pending,
+                ..
+            } | Recipe::Sent {
+                outcome: Outcome::Pending,
+                ..
+            }
+        );
+        if !pending {
+            continue;
+        }
+        let observed = working
+            && slot.t.is_some()
+            && slot.call_name() == details["activity"]["tool"].as_str()
+            && slot.t == details["activity"]["since"].as_i64();
+        let state = if observed {
+            Shown::Live
+        } else if !working {
+            Shown::Unfinished
+        } else {
+            Shown::Unknown
+        };
+        match &mut slot.kind {
+            SlotKind::Tool { shown, .. }
+            | SlotKind::Yielded { shown, .. }
+            | SlotKind::Sent { shown, .. } => *shown = state,
+            _ => {}
+        }
+    }
     let mut lines = crate::tx::Lines::provider(&mut read);
     let mut entries = Vec::new();
     let mut incomplete_entries = 0;
@@ -1165,6 +1210,12 @@ fn render(
             .unwrap_or_else(|| json!({"k":"end"}))
         };
 
+        if matches!(slot.kind, crate::model::SlotKind::Think) && entry["text"] == "" {
+            entry
+                .as_object_mut()
+                .expect("native entry object")
+                .remove("text");
+        }
         if matches!(slot.kind, crate::model::SlotKind::Think)
             && selection.identity.harness == "claude"
             && let Some(secs) = crate::tx::thought_secs(&slots, index)
@@ -1234,41 +1285,6 @@ fn render(
                     .is_some_and(|output| Some(output) != preview["out"].as_str());
             entry["field"]["complete"] = json!(!clipped);
             entry["clipped"] = json!(clipped);
-        }
-        // A missing native result is distinct from a recorded result whose
-        // exit status is unknown. Runtime observations never enter the recipe.
-        let pending = matches!(
-            selection.slots[index].recipe,
-            crate::slot_projection::Recipe::Tool {
-                outcome: crate::slot_projection::Outcome::Pending,
-                ..
-            } | crate::slot_projection::Recipe::Yielded {
-                outcome: crate::slot_projection::Outcome::Pending,
-                ..
-            } | crate::slot_projection::Recipe::Sent {
-                outcome: crate::slot_projection::Outcome::Pending,
-                ..
-            }
-        );
-        if pending && entry["k"] == "tool" {
-            let details = &selection.session["details"];
-            let working = selection.session["lifecycle"] == "current"
-                && details["live_observation"] == true
-                && matches!(details["state"].as_str(), Some("work" | "wait"));
-            if working
-                && let Some(since) = slot.t
-                && details["activity"]["tool"] == entry["name"]
-                && details["activity"]["since"].as_i64() == Some(since)
-            {
-                entry["live"] = json!(true);
-                entry["since"] = json!(since);
-                entry["secs"] = json!(crate::tx::running(
-                    crate::model::now_ms().saturating_sub(since)
-                ));
-            } else if !working {
-                entry["ok"] = json!(false);
-                entry["unfinished"] = json!(true);
-            }
         }
         entry["slot"] = json!(absolute);
         entry["observed_at"] = json!(slot.t);
