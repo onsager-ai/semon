@@ -824,6 +824,33 @@ impl Query {
         let empty = json!({});
         let args = if args.is_null() { &empty } else { args };
         validate_query_call(tool, args)?;
+        if !self.embedded
+            && self.sources.machines.len() == 1
+            && !self.sources.is_retired()
+            && matches!(tool, "get_session" | "read_transcript")
+        {
+            let id = args["id"].as_str().expect("validated focused id");
+            let (source_key, evidence) = &self.sources.machines[0];
+            if crate::overview_repair::local_query_ready(&evidence.options, id, now)
+                .map_err(|error| QueryError::io(&error))?
+            {
+                let source_key = if source_key.is_empty() {
+                    "local"
+                } else {
+                    source_key
+                }
+                .to_owned();
+                return self.call_selected_at(
+                    &source_key,
+                    id,
+                    tool,
+                    args,
+                    None,
+                    crate::SessionSourceReadMode::LocalThenProvider,
+                    now,
+                );
+            }
+        }
         // Once per call: the answer's window and the check of `since` belong
         // to the same native evidence cohort.
         self.start = self.window_start(now)?;

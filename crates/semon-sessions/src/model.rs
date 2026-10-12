@@ -1507,6 +1507,32 @@ fn verify_sidecars(files: &[SourceFile]) -> io::Result<()> {
     Ok(())
 }
 
+/// A catalog's recorded native role must still match independently indexed
+/// sidecar evidence. Another producer may refresh that evidence before it
+/// republishes the catalog, leaving the log's own generation unchanged.
+pub(crate) fn current_query_role(source: &summary::CatalogSource, index: &FileIndex) -> bool {
+    let Some(role) = source
+        .native_role
+        .as_ref()
+        .and_then(|value| serde_json::from_value::<Role>(value.clone()).ok())
+    else {
+        return false;
+    };
+    let Role::Agent(agent) = role else {
+        return true;
+    };
+    let metadata = index
+        .claude_sidecar
+        .as_ref()
+        .map(|sidecar| sidecar.metadata.clone())
+        .unwrap_or_default();
+    agent.tool_use_id == metadata.tool_use_id
+        && agent.label == metadata.label
+        && agent.model == metadata.model
+        && agent.cwd == metadata.cwd
+        && agent.branch == metadata.branch
+}
+
 // ---- Lineages: exact links only (M0, D4, D5) ---------------------------------------------
 
 #[derive(Default)]

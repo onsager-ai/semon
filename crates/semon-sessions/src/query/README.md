@@ -12,6 +12,16 @@ tree and Model reads do not create a second producer cache. Source snapshots kee
 the existing file, process, facts and writer-lock observations; request-owned
 readers still verify source bytes and completion independently.
 
+Ordinary single-machine CLI/stdio `get_session` and `read_transcript` reuse
+focused Query when an existing Catalog closure is current and every contributing
+file belongs to the configured scan window. Qualification checks native file
+generations and the Catalog role against independently current sidecar evidence;
+it neither discovers unrelated sources nor initializes a workspace Query cohort.
+The two-tool fixture loads four selected indexes with zero or 256 unrelated
+sessions in both default-window and `--all` modes (previously one versus 257).
+Cold/stale Catalogs, cross-window dependencies and multi-machine automatic
+selection still use native reconciliation and remain bounded-selection work.
+
 `SessionSources` constructs no machine view, refresh pool or worker. Explicit
 Catalog demand attaches the existing source producer to the host's bounded pool;
 a later `ViewerCore::from_sources` borrows that same producer, index and query
@@ -153,8 +163,9 @@ blocks before publishing. Public ranges and transcript/search continue to
 verify their actual reads independently. No cached source body
 survives the request.
 
-The producer still discovers, indexes and joins eligible native sources. Hub MCP
-still restores archives before admission; this local reader does not supply
+The producer still discovers, indexes and joins eligible native sources. Broad
+Hub MCP tools still restore archives before admission; focused get/transcript
+calls admit selected sources directly. This local reader does not supply
 missing archived index metadata or grant provider authority. Removing those
 costs requires scoped dependency selection and independently authorized provider
 access for the producer. Verified archive eviction now explicitly retains an
