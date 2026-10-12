@@ -30,7 +30,8 @@ HTML sinks or inline styles. The public entry installs a native-VNode prop guard
 parse unknown account JSON before rendering.
 
 `createAccountChrome(host)` returns `mount(AccountMenuProps)`, `close(options)`,
-`updateWide(boolean)`, `unmount(root)`, `escape()`, `destroy()` and readonly `open`.
+`update(root, AccountMenuProps)`, `updateWide(boolean)`, `unmount(root)`,
+`escape()`, `destroy()` and readonly `open`.
 One controller arbitrates phone and desktop roots in one shell. The host supplies:
 
 - `place(widget, trigger)` for measured CSSOM placement.
@@ -40,7 +41,9 @@ One controller arbitrates phone and desktop roots in one shell. The host supplie
 
 Forward Escape from the host's overlay arbitration so closing the account sheet
 leaves its drawer open. Explicit renders commit before focus and measurements;
-wide updates retain keyed trigger, workspace and Display nodes. `destroy()`
+account and wide updates retain keyed trigger, workspace and Display nodes.
+Shell publication updates reuse mounted phone and desktop account roots, preserving
+focus returned by overlay dismissal. `destroy()`
 unmounts roots and removes listeners; `unmount()` precedes host container removal.
 Detached triggers cannot reopen old roots. `src/lib-contract.tsx` has a type-checked
 independent consumer; `node --test ui/tests/browser-lifecycle.mjs` tests it with the

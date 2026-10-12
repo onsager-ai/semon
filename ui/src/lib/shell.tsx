@@ -260,15 +260,16 @@ export function createShellChrome(host: ShellHost): ShellChrome {
   }
   function drawerAccount(props: AccountMenuProps | null) {
     ready();
-    if (phoneAccount) {
-      account.unmount(phoneAccount);
-      phoneAccount.remove();
-      phoneAccount = null;
-    }
-    if (props) {
+    if (props && phoneAccount) {
+      account.update(phoneAccount, props);
+    } else if (props) {
       phoneAccount = account.mount(props);
       phoneAccount.id = 'account-drawer';
       sidebar.append(phoneAccount);
+    } else if (phoneAccount) {
+      account.unmount(phoneAccount);
+      phoneAccount.remove();
+      phoneAccount = null;
     }
   }
   function unmount() {
@@ -388,7 +389,7 @@ export function createShellChrome(host: ShellHost): ShellChrome {
       ready();
       const leadFocused = lead !== null && document.activeElement === lead;
       account.close();
-      dropDesktop();
+      if (!props.account) dropDesktop();
       lead = null;
       const nodes: HTMLElement[] = [];
       if (!props.mode && props.lead) {
@@ -418,8 +419,10 @@ export function createShellChrome(host: ShellHost): ShellChrome {
         if (props.actions) nodes.push(...props.actions);
       }
       if (props.account) {
-        desktopAccount = account.mount(props.account);
-        if (props.accountTarget) props.accountTarget.append(desktopAccount);
+        if (desktopAccount) account.update(desktopAccount, props.account);
+        else desktopAccount = account.mount(props.account);
+        if (props.accountTarget && desktopAccount.parentElement !== props.accountTarget)
+          props.accountTarget.append(desktopAccount);
         else nodes.push(desktopAccount);
       }
       bar.classList.remove('scrolled');
