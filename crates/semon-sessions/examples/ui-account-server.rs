@@ -1,6 +1,6 @@
 //! A loopback fixture that exercises the embedding API in the browser suite.
 
-use std::{env, net::SocketAddr, path::PathBuf, time::Duration};
+use std::{env, io::Read, net::SocketAddr, path::PathBuf, time::Duration};
 
 use semon_sessions::{
     AccountLink, AccountMenu, AccountWorkspace, LinkMethod, Options, SECURITY_HEADERS, ViewerCore,
@@ -86,7 +86,7 @@ fn redirect_to_root(request: Request) {
     let _ = request.respond(response);
 }
 
-fn handle(core: &mut ViewerCore, request: Request, address: SocketAddr) {
+fn handle(core: &mut ViewerCore, mut request: Request, address: SocketAddr) {
     let url = request.url().to_owned();
     let (path, query) = url.split_once('?').unwrap_or((&url, ""));
     let expected_host = address.to_string();
@@ -107,7 +107,7 @@ fn handle(core: &mut ViewerCore, request: Request, address: SocketAddr) {
     let is_post = request.method() == &Method::Post;
     let post_action = matches!(
         path,
-        "/workspaces/research" | "/workspaces/writing" | "/account/sign-out"
+        "/workspaces/research" | "/workspaces/writing" | "/account/sign-out" | "/api/viewer/home"
     );
     let expected_origin = format!("http://{expected_host}");
     let valid_origin = same_origin_request(&request, &expected_origin);
@@ -147,10 +147,48 @@ fn handle(core: &mut ViewerCore, request: Request, address: SocketAddr) {
         );
         return;
     }
-    if is_post {
+    if is_post && path != "/api/viewer/home" {
         redirect_to_root(request);
         return;
     }
+    let home_query;
+    let query = if is_post {
+        let mut bytes = Vec::new();
+        let read = request
+            .as_reader()
+            .take(512 * 1024 + 1)
+            .read_to_end(&mut bytes);
+        let value = serde_json::from_slice::<serde_json::Value>(&bytes);
+        if read.is_err()
+            || bytes.len() > 512 * 1024
+            || value
+                .as_ref()
+                .ok()
+                .and_then(|value| value["seen"].as_array())
+                .is_none()
+        {
+            answer(
+                request,
+                400,
+                "text/plain; charset=utf-8",
+                b"Invalid Home read arguments".to_vec(),
+                None,
+                &SECURITY_HEADERS,
+                false,
+            );
+            return;
+        }
+        let seen = value.unwrap()["seen"].to_string();
+        home_query = format!(
+            "{}{}{}",
+            query,
+            if query.is_empty() { "" } else { "&" },
+            semon_sessions::native_html::query(&[("seen", &seen)])
+        );
+        home_query.as_str()
+    } else {
+        query
+    };
     let if_none_match = request_header(&request, "If-None-Match").map(str::to_owned);
     let reply = core.respond("GET", path, query, if_none_match.as_deref());
     let headers = reply.headers();
