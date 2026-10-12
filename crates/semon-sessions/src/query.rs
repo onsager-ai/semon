@@ -831,8 +831,9 @@ impl Query {
         {
             let id = args["id"].as_str().expect("validated focused id");
             let (source_key, evidence) = &self.sources.machines[0];
-            if crate::overview_repair::local_query_ready(&evidence.options, id, now)
-                .map_err(|error| QueryError::io(&error))?
+            if let Some(catalog_key) =
+                crate::overview_repair::local_query_target(&evidence.options, id, now)
+                    .map_err(|error| QueryError::io(&error))?
             {
                 let source_key = if source_key.is_empty() {
                     "local"
@@ -840,9 +841,9 @@ impl Query {
                     source_key
                 }
                 .to_owned();
-                return self.call_selected_at(
+                return self.execute_selected_at(
                     &source_key,
-                    id,
+                    &catalog_key,
                     tool,
                     args,
                     None,
@@ -917,6 +918,24 @@ impl Query {
                 "A focused tool requires the selected Catalog id",
             ));
         }
+        self.execute_selected_at(source_key, catalog_key, tool, args, provider, mode, now)
+    }
+
+    // Public selected reads validate the exact host-selected Catalog ID above.
+    // Ordinary local reads may resolve a raw native ID whose spelling changes
+    // under the file window; only their already owned single-machine source can
+    // enter here without that host selection. Derivation still resolves args.id.
+    #[allow(clippy::too_many_arguments)]
+    fn execute_selected_at(
+        &mut self,
+        source_key: &str,
+        catalog_key: &str,
+        tool: &str,
+        args: &Value,
+        provider: Option<&dyn crate::SessionSourceReader>,
+        mode: crate::SessionSourceReadMode,
+        now: i64,
+    ) -> Result<Value, QueryError> {
         let evidence = self
             .sources
             .machines

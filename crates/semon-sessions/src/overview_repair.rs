@@ -428,15 +428,40 @@ pub fn session_query_sources(
 /// Qualify an ordinary local focused read against existing native evidence.
 /// Cold/stale publications still require their native producer. This never
 /// discovers unrelated sources or changes source/catalog ownership.
-pub(crate) fn local_query_ready(options: &Options, key: &str, now: i64) -> io::Result<bool> {
+pub(crate) fn local_query_target(
+    options: &Options,
+    key: &str,
+    now: i64,
+) -> io::Result<Option<String>> {
     if !EventCache::path(&options.cache).is_file() {
-        return Ok(false);
+        return Ok(None);
     }
     let mut db = connection(options)?;
     let tx = db.transaction().map_err(failure)?;
-    let selected = match query_selection(&tx, key) {
-        Ok(selected) => selected,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+    let (key, selected) = match query_selection(&tx, key) {
+        Ok(selected) => (key.to_owned(), selected),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            // A complete Catalog's namespace can differ from the CLI's file
+            // window. Resolve original native IDs through the existing index;
+            // query_selection then includes every identity collision owner.
+            let mut aliases = tx.prepare("SELECT DISTINCT session_key FROM session_catalog_sources WHERE native_id=?1 ORDER BY session_key LIMIT 65").map_err(failure)?;
+            let owners = aliases
+                .query_map([key], |row| row.get::<_, String>(0))
+                .map_err(failure)?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(failure)?;
+            if owners.len() > 64 {
+                return Err(io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    "Native query identity closure exceeds its source bound",
+                ));
+            }
+            let Some(owner) = owners.into_iter().next() else {
+                return Ok(None);
+            };
+            let selected = query_selection(&tx, &owner)?;
+            (owner, selected)
+        }
         Err(error) => return Err(error),
     };
     if selected.incomplete {
@@ -449,7 +474,7 @@ pub(crate) fn local_query_ready(options: &Options, key: &str, now: i64) -> io::R
     let mut sources = BTreeMap::new();
     for source in selected.rows.iter().flat_map(|row| &row.sources) {
         if crate::catalog::source_state(source) != "cached" {
-            return Ok(false);
+            return Ok(None);
         }
         if !crate::model::catalog_source_in_window(source, cutoff) {
             continue;
@@ -462,7 +487,7 @@ pub(crate) fn local_query_ready(options: &Options, key: &str, now: i64) -> io::R
     }
     let sources: Vec<_> = sources.into_values().collect();
     if sources.is_empty() {
-        return Ok(true);
+        return Ok(Some(key));
     }
     let ids = selected
         .rows
@@ -471,11 +496,11 @@ pub(crate) fn local_query_ready(options: &Options, key: &str, now: i64) -> io::R
         .collect();
     let cache = match EventCache::from_selected(&tx, &sources, &ids) {
         Ok(cache) => cache,
-        Err(_) => return Ok(false),
+        Err(_) => return Ok(None),
     };
     // Sidecars are independently generation-bound native evidence. A changed
     // sidecar must not lend an old role/name merely because its log is stable.
-    Ok(sources.iter().all(|source| {
+    let ready = sources.iter().all(|source| {
         cache.selected_index(&source.path).is_some_and(|index| {
             crate::model::current_query_role(source, &index)
                 && index
@@ -483,7 +508,8 @@ pub(crate) fn local_query_ready(options: &Options, key: &str, now: i64) -> io::R
                     .as_ref()
                     .is_none_or(|sidecar| sidecar.current(&source.path))
         })
-    }))
+    });
+    Ok(ready.then_some(key))
 }
 
 fn source_refs(options: &Options, rows: &[CatalogRow]) -> io::Result<Vec<crate::SessionSourceRef>> {
