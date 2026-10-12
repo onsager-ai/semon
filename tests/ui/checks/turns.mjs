@@ -256,8 +256,11 @@ export default async function turnsCheck(browser) {
       await goto(page, { v: 'session', id: sid }, D0);
       await page.click('.turn[data-turn="' + tid + '"] > .turn-end .link');
       await page.waitForFunction(
-        (t) => document.querySelector('#topbar .t')?.textContent === t,
-        'Trace',
+        (turn) =>
+          document.querySelector('#topbar .t')?.textContent === 'Trace' &&
+          document.querySelector('.hop.k-root')?.dataset.turn === turn &&
+          !document.querySelector('#page')?.hasAttribute('aria-busy'),
+        tid,
       );
       await page.waitForTimeout(120);
       const t = await page.evaluate(() => ({

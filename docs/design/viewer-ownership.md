@@ -26,6 +26,12 @@ abort superseded overview/causal work. Destroying the application invalidates
 callbacks before destroying stores, controls, native content and screen roots.
 Navigation's observable route is shared with scoped status observers; it has no
 native-page loader or independent destination request lifecycle.
+An initial causal read marks its root busy until its selected metadata and
+preview work settles. Navigation clears that state, and a superseded read cannot
+clear a new route's readiness. Browser consumers wait for the requested native
+root rather than assuming that a changed toolbar title means content is ready.
+The native reader wrapper preserves the established 24px transcript-to-dock gap
+and 8px top inset across viewport sizes.
 
 Home and Analytics read compact producer publications across authorized sources.
 Machine details borrow that same producer with an exact source key, validated
