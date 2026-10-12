@@ -448,15 +448,11 @@ pub(crate) fn local_query_ready(options: &Options, key: &str, now: i64) -> io::R
     let cutoff = crate::model::scan_cutoff(options, now);
     let mut sources = BTreeMap::new();
     for source in selected.rows.iter().flat_map(|row| &row.sources) {
-        // A scan excludes whole files by mtime. Until selected derivation owns
-        // skipped-parent context, a closure crossing that cutoff needs native
-        // reconciliation rather than silently changing its identity or links.
-        if crate::catalog::source_state(source) != "cached"
-            || cutoff.is_some_and(|cutoff| {
-                source.modified_ns / 1_000_000 < u128::try_from(cutoff).unwrap_or(0)
-            })
-        {
+        if crate::catalog::source_state(source) != "cached" {
             return Ok(false);
+        }
+        if !crate::model::catalog_source_in_window(source, cutoff) {
+            continue;
         }
         if let Some(prior) = sources.insert(source.path.clone(), source.clone())
             && prior != *source
@@ -465,6 +461,9 @@ pub(crate) fn local_query_ready(options: &Options, key: &str, now: i64) -> io::R
         }
     }
     let sources: Vec<_> = sources.into_values().collect();
+    if sources.is_empty() {
+        return Ok(true);
+    }
     let ids = selected
         .rows
         .iter()
@@ -723,11 +722,22 @@ fn with_records<T>(
         }
     }
     let sources: Vec<_> = unique.into_values().collect();
-    if sources.is_empty() || sources.len() > SOURCES_MAX {
+    if sources.len() > SOURCES_MAX {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "Selected native migration exceeds its source bound",
         ));
+    }
+    if sources.is_empty() {
+        tx.commit().map_err(failure)?;
+        return derive(&NativeRecords {
+            full: BTreeMap::new(),
+            selected: None,
+            read: None,
+            evidence: None,
+            error: std::cell::RefCell::new(None),
+            fields: BTreeMap::new(),
+        });
     }
     // Prefer the exact original event ledgers. Large native bodies need not be
     // copied merely to derive Home/Trace metadata from an existing native index.
@@ -942,7 +952,24 @@ pub(crate) fn with_query<T>(
         ));
     }
     let rows = selection.rows;
-    let data = with_records(options, &rows, provider, mode, tx, |native| {
+    // Filter before index/body adaptation, including its missing-ledger path.
+    // Original rows remain the generation footprint and skipped-parent input.
+    let native_rows = if let Some(cutoff) = crate::model::scan_cutoff(options, now) {
+        std::borrow::Cow::Owned(
+            rows.iter()
+                .filter_map(|row| {
+                    let mut row = row.clone();
+                    row.sources.retain(|source| {
+                        crate::model::catalog_source_in_window(source, Some(cutoff))
+                    });
+                    (!row.sources.is_empty()).then_some(row)
+                })
+                .collect::<Vec<_>>(),
+        )
+    } else {
+        std::borrow::Cow::Borrowed(rows.as_slice())
+    };
+    let data = with_records(options, &native_rows, provider, mode, tx, |native| {
         crate::model::query_history(options, &rows, native, now)
     })?;
     let result = read(data);
