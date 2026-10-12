@@ -581,12 +581,14 @@ export default async function (browser) {
       waitUntil: 'load',
     });
     await desktop.waitForURL(
-      (url) => url.pathname === '/sessions' && url.searchParams.has('machine'),
+      (url) => url.pathname === '/machines/local' && url.searchParams.get('machine') === 'local',
     );
-    await desktop.locator('[data-session-row="list"]').first().waitFor();
+    await desktop.locator('#page .nrow[data-id]').first().waitFor();
     r.expect(
-      new URL(desktop.url()).searchParams.get('machine') === 'local',
-      'the machine bookmark normalizes to its bounded source catalog',
+      (await desktop.locator('#topbar .t').textContent()) === 'laptop' &&
+        (await desktop.getByRole('button', { name: 'Back to Machines', exact: true }).count()) ===
+          1,
+      'the machine bookmark normalizes to its source-qualified native detail page',
     );
     r.expect(
       desktop.errors.length === 0,
@@ -1145,6 +1147,7 @@ export default async function (browser) {
   {
     const page = await served(browser, { extras: true, path: '/s/claude/result-card' });
     await page.waitForFunction(() => !!document.querySelector('.turns .event'));
+    await page.getByText('Unique result text for the transcript check.', { exact: true }).waitFor();
     // The overhaul draws a result as an event like any other message to you: who sent it, the text, and the time.
     const result = await page.locator('.turns').evaluate((turns) => {
       const phrase = 'Unique result text for the transcript check.';
