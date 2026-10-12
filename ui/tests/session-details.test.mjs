@@ -4,7 +4,7 @@ import { build } from 'esbuild';
 const { outputFiles } = await build({
   stdin: {
     contents:
-      "export {parseSessionDetails} from './src/domain/sessionDetails'; export {selectedSessionMenu, selectedSessionState} from './src/app/sessionPresentation';",
+      "export {parseSessionDetails} from './src/domain/sessionDetails'; export {selectedSessionMenu, selectedSessionState, catalogSessionRow} from './src/app/sessionPresentation';",
     resolveDir: new URL('../', import.meta.url).pathname,
   },
   bundle: true,
@@ -12,9 +12,10 @@ const { outputFiles } = await build({
   format: 'esm',
   platform: 'node',
 });
-const { parseSessionDetails, selectedSessionMenu, selectedSessionState } = await import(
-  'data:text/javascript;base64,' + Buffer.from(outputFiles[0].contents).toString('base64')
-);
+const { parseSessionDetails, selectedSessionMenu, selectedSessionState, catalogSessionRow } =
+  await import(
+    'data:text/javascript;base64,' + Buffer.from(outputFiles[0].contents).toString('base64')
+  );
 globalThis.matchMedia = () => ({ matches: false });
 const details = () => ({
   state: 'idle',
@@ -134,4 +135,24 @@ test('selected family costs, ancestry and mismatches remain bounded and unknown 
   assert.equal(selectedSessionMenu(session, 'machine', false, false).cost.figure, '—');
   raw.family.runs.push(raw.family.runs[0]);
   assert.throws(() => parseSessionDetails(raw), /identity/);
+});
+
+test('list status labels preserve recorded observations without enabling controls', () => {
+  const session = { key: 'selected', name: 'Selected', harness: 'claude', model: 'm', last: null };
+  for (const [state, label] of [
+    ['work', 'Working'],
+    ['wait', 'Needs you'],
+    ['done', 'Done'],
+    ['err', 'Failed'],
+  ]) {
+    session.status = { state, observation: 'current' };
+    const row = catalogSessionRow(session);
+    assert.equal(row.state, state);
+    assert.equal(row.stateLabel, label);
+    assert.equal(selectedSessionState(session), 'off');
+  }
+  session.status = { state: null, observation: 'unavailable' };
+  assert.equal(catalogSessionRow(session).stateLabel, 'Status unavailable');
+  session.status = { state: 'off', observation: 'retained' };
+  assert.equal(catalogSessionRow(session).stateLabel, 'Recorded history');
 });

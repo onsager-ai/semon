@@ -51,7 +51,7 @@ export interface CatalogListHost {
   candidateMore?(): void;
   candidateRetry?(): void;
 }
-/** Cached metadata reports its own scope/freshness and carries no runtime totals or state. */
+/** Cached metadata reports its scope, freshness and recorded status without live control. */
 export function renderCatalogList(
   root: HTMLElement,
   snapshot: CatalogListSnapshot,

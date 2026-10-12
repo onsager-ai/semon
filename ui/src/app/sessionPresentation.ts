@@ -53,13 +53,16 @@ function mark(harness: string): HarnessMark | undefined {
       }
     : undefined;
 }
-/** List observations describe recorded history; they cannot imply live control. */
+/** Fenced list observations describe status without granting live control. */
 export function catalogSessionRow(session: CatalogSession): SessionRow {
+  const state = session.status?.state ?? 'off';
   return {
     id: session.key,
     name: session.name,
-    state: 'off',
-    stateLabel: 'Recorded history',
+    state,
+    stateLabel:
+      STATE[state] ??
+      (session.status?.observation === 'retained' ? 'Recorded history' : 'Status unavailable'),
     age: session.last == null ? '' : ago(session.last, Date.now()),
     harness: mark(session.harness),
     model: shortModel(session.model),

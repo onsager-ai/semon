@@ -292,10 +292,13 @@ fn read(options: &Options, now: i64, bytes_left: &mut usize) -> Result<Part, Que
         let saved = row
             .query
             .ok_or_else(|| unavailable("Exact Catalog query facts are unavailable"))?;
-        if saved["version"] != 1
-            || saved["source_generation"]
-                != crate::retention::source_generation(&row.sources).map_err(unavailable)?
-            || (lifecycle == "current" && saved["runtime"] != runtime)
+        if !crate::model::summary::query_observation_matches(
+            &saved,
+            &row.sources,
+            lifecycle == "current",
+            Some(&runtime),
+        )
+        .map_err(unavailable)?
         {
             return Err(unavailable(
                 "Native Query observations changed; retry after publication",
