@@ -4433,3 +4433,47 @@ fn catalog_query_requalifies_changed_machine_presentation_identity() {
         expected
     );
 }
+
+#[test]
+fn catalog_query_rejects_retained_metadata_outside_configured_native_roots() {
+    let home = Home::new("catalog-root-fence");
+    home.top(
+        "selected",
+        &[user("selected", ts(1, 0), "private native prompt")],
+    );
+    let mut producer = Query::from_sources(admitted(home.options.clone()));
+    producer.call_at("list_sessions", &json!({}), NOW).unwrap();
+    fs::remove_file(
+        home.options
+            .claude_home
+            .join("projects/-work-proj/selected.jsonl"),
+    )
+    .unwrap();
+    producer.call_at("list_sessions", &json!({}), NOW).unwrap();
+    let mut retained = Query::from_sources(admitted(home.options.clone()));
+    let valid = retained
+        .call_catalog_at(
+            "list_sessions",
+            &json!({}),
+            None,
+            crate::SessionSourceReadMode::LocalThenProvider,
+            NOW,
+        )
+        .unwrap();
+    assert_eq!(valid["sessions"][0]["id"], "selected");
+    let mut changed = home.options.clone();
+    changed.claude_home = home.root.join("other-authorized-root");
+    let mut query = Query::from_sources(admitted(changed));
+    let rejected = query.call_catalog_at(
+        "list_sessions",
+        &json!({}),
+        None,
+        crate::SessionSourceReadMode::LocalThenProvider,
+        NOW,
+    );
+    assert!(
+        rejected.is_err(),
+        "Retained facts cannot escape configured native source authority"
+    );
+    assert_eq!(rejected.unwrap_err().code, "unavailable");
+}
