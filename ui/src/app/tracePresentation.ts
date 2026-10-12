@@ -181,6 +181,25 @@ export function parseCausalTrace(
   };
 }
 
+/** Related names come from the selected, bounded family observation, never a workspace lookup. */
+export function causalSessionPart(
+  data: CausalTrace,
+  id: string,
+  turn?: string,
+): Hop['parts'][number] {
+  const own = data.sessions[id],
+    family = data.metadata?.details?.family,
+    relatives = [...(family?.ancestors ?? []), ...(family?.runs ?? [])].filter(
+      (relative) => relative.key === id,
+    ),
+    related = relatives.length === 1 ? relatives[0] : undefined;
+  return {
+    className: 'who',
+    text: id === 'you' ? 'You' : (own?.name ?? related?.name ?? 'Unrecorded session'),
+    action: id !== 'you' && (own || related) ? { kind: 'session', id, turn } : undefined,
+  };
+}
+
 /** Existing rail/chart presentation, fed by one bounded source query. */
 export function renderCausalTrace(
   root: HTMLElement,
@@ -209,7 +228,7 @@ export function renderCausalTrace(
       hcls: (id) => data.sessions[id]?.harness ?? 'you',
       usageTotal: (session) =>
         (session.tokens ?? []).reduce((sum, value) => sum + value, 0) * 1000000,
-      nameOf: (id) => (id === 'you' ? 'You' : (data.sessions[id]?.name ?? 'Unrecorded session')),
+      nameOf: (id) => causalSessionPart(data, id).text,
     },
     () => now,
     expanded,
@@ -218,11 +237,7 @@ export function renderCausalTrace(
   );
   const hops: Hop[] = [];
   const seen = new Set<string>();
-  const sessionPart = (id: string, turn?: string) => ({
-    className: 'who',
-    text: id === 'you' ? 'You' : (data.sessions[id]?.name ?? 'Unrecorded session'),
-    action: data.sessions[id] ? { kind: 'session' as const, id, turn } : undefined,
-  });
+  const sessionPart = (id: string, turn?: string) => causalSessionPart(data, id, turn);
   const harness = (sid: string) => {
     const known = HARNESSES[data.sessions[sid]?.harness];
     return known
@@ -248,12 +263,22 @@ export function renderCausalTrace(
   hops.push({
     key: 'root:' + data.root.id,
     className: 'k-root',
-    nodeClass: 'you',
-    icon: I.ask,
+    nodeClass: data.root.start ? (data.sessions[data.key]?.harness ?? 'you') : 'you',
+    icon: data.root.start ? (I[data.root.start.kind] ?? I.ask) : I.ask,
+    handoff: data.root.start?.id,
     turn: data.root.id,
     parts: [
       sessionPart(data.root.start?.from ?? (data.root.u ? 'you' : data.key)),
-      { className: 'verb', text: ' started a turn in ' },
+      {
+        className: 'verb',
+        text: data.root.start
+          ? data.root.start.kind === 'spawn'
+            ? ' spawned '
+            : data.root.start.kind === 'relay'
+              ? ' relayed to '
+              : ' started a turn in '
+          : ' started a turn in ',
+      },
       sessionPart(data.key, data.root.id),
     ],
     time: clock(data.root.at ?? data.sessions[data.key].start, now),
