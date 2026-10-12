@@ -3,9 +3,13 @@ import type { TranscriptBlock, EntryView, ToolView, BackgroundView } from '../li
 import { toolInfo, runningToolLabel } from '../domain/toolNames';
 import { I } from './registry';
 import { STATE, HARNESSES } from './registry';
-import { clock, compactCount, shortModel, dur } from '../domain/format';
+import { clock, compactCount, shortModel, dur, preview } from '../domain/format';
 import type { Entry } from '../domain/types';
-import { coalesceRecordedThoughts, recordedThoughtLabel } from '../domain/thinking';
+import {
+  coalesceRecordedThoughts,
+  recordedThoughtLabel,
+  visibleMaskedThoughts,
+} from '../domain/thinking';
 import type { RecordedRelationship } from '../domain/relationships';
 import type {
   CatalogTranscriptPage,
@@ -132,13 +136,12 @@ export function catalogTranscriptBlocks(
   sessionKey = '',
   activity?: { tool: string; since: number },
 ): TranscriptBlock[] {
-  entries = coalesceRecordedThoughts(
-    entries,
-    harness,
-    new Set(context?.turns.map((turn) => turn.id) ?? []),
+  const knownTurns = new Set(context?.turns.map((turn) => turn.id) ?? []);
+  entries = visibleMaskedThoughts(
+    coalesceRecordedThoughts(entries, harness, knownTurns),
+    knownTurns,
   );
   const closingBodies = new Map<string, string>(),
-    consumed = new Set<string>(),
     returnedFailures = new Set<string>();
   if (relationshipView)
     for (const item of entries) {
@@ -160,9 +163,7 @@ export function catalogTranscriptBlocks(
         );
       if (body?.entry.k !== 'a') continue;
       closingBodies.set(item.entry_id, body.entry.text);
-      consumed.add(body.entry_id);
     }
-  entries = entries.filter((item) => !consumed.has(item.entry_id));
   const blocks = entries.map((item) => {
     const { entry_id, native_action_text, clipped, freshness } = item,
       field = fieldView?.(item),
@@ -282,7 +283,7 @@ export function catalogTranscriptBlocks(
             view.kind === 'message'
               ? { ...view, images: attachments?.(item) }
               : view.kind === 'event' && closingBodies.has(item.entry_id)
-                ? { ...view, brief: closingBodies.get(item.entry_id)! }
+                ? { ...view, brief: preview(closingBodies.get(item.entry_id)!) }
                 : view,
           ),
         );
@@ -498,7 +499,7 @@ export function recordedRelationshipViews(
         state: status,
         stateLabel: STATE[status] ?? 'Recorded history',
         meta,
-        brief: native.brief ?? '',
+        brief: preview(native.brief ?? ''),
         result: native.result,
         failed: status === 'err',
         mark: mark
@@ -539,7 +540,8 @@ export function recordedRelationshipViews(
     {
       className: 'who who-link',
       text: name(edge.from),
-      action: source ? { kind: 'session' as const, id: edge.from } : undefined,
+      action:
+        source && edge.from !== selected ? { kind: 'session' as const, id: edge.from } : undefined,
     },
     {
       className: 'soft',
@@ -560,8 +562,11 @@ export function recordedRelationshipViews(
         : undefined,
     },
   ];
-  if (edge.kind === 'toyou' && edge.ask === 'result')
-    parts.splice(1, 2, { className: 'soft', text: ' sent you a result' });
+  if (edge.kind === 'toyou')
+    parts.splice(1, 2, {
+      className: 'soft',
+      text: edge.ask === 'result' ? ' sent you a result' : ' asked you',
+    });
   return [
     {
       kind: 'event',
@@ -583,12 +588,12 @@ export function recordedRelationshipViews(
                     ? 'decide'
                     : 'qc'
                 : edge.kind === 'relay'
-                  ? 'relay'
+                  ? 'out'
                   : 'ask'
             ],
       parts,
       time: clock(edge.at, Date.now()),
-      brief: native.brief ?? item.native_action_text ?? '',
+      brief: preview(native.brief ?? item.native_action_text ?? ''),
       result: native.result,
       resultLabel: 'Result',
       answers:

@@ -53,6 +53,22 @@ export function coalesceRecordedThoughts(
   }
   return out;
 }
+/** Masked reasoning has one quiet placeholder per qualified native turn. */
+export function visibleMaskedThoughts(
+  entries: readonly CatalogTranscriptEntry[],
+  knownTurns: ReadonlySet<string>,
+): readonly CatalogTranscriptEntry[] {
+  const seen = new Set<string>();
+  let owner: string | undefined;
+  return entries.filter(({ entry }) => {
+    if (entry.turn !== undefined) owner = knownTurns.has(entry.turn) ? entry.turn : undefined;
+    if (entry.k === 'end') owner = undefined;
+    if (entry.k !== 'think' || entry.text || entry.pending || owner === undefined) return true;
+    if (seen.has(owner)) return false;
+    seen.add(owner);
+    return true;
+  });
+}
 export function recordedThoughtLabel(seconds: string | number | undefined): string {
   const match = /^(\d+(?:\.\d+)?)s?$/.exec(String(seconds ?? ''));
   const n = match ? Math.round(Number(match[1])) : 0;

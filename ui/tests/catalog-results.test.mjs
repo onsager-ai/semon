@@ -78,10 +78,12 @@ const event = (item) => [
 ];
 const values = (blocks) =>
   blocks.filter((block) => block.kind === 'turn').flatMap((block) => block.turn.entries);
-test('a native result folds only its closing reply, preserving other accepted identities', () => {
+test('a native result uses its closing reply while preserving every accepted identity', () => {
+  const accepted = entries();
+  const original = JSON.stringify(accepted);
   const shown = values(
     catalogTranscriptBlocks(
-      entries(),
+      accepted,
       undefined,
       event,
       false,
@@ -94,9 +96,10 @@ test('a native result folds only its closing reply, preserving other accepted id
   assert.equal(shown.find((row) => row.kind === 'event').brief, 'Exact result');
   assert.deepEqual(
     shown.filter((row) => row.kind === 'message').map((row) => row.entryKey),
-    ['native-0', 'native-1'],
+    ['native-0', 'native-1', 'native-2'],
   );
   assert.equal(shown.find((row) => row.kind === 'event').entryKey, 'native-3');
+  assert.equal(JSON.stringify(accepted), original);
 });
 test('unrelated, filtered, or incomplete result context never consumes a native reply', () => {
   for (const change of [
@@ -266,4 +269,38 @@ test('a qualified failed return reports the outcome once and incomplete provenan
   } finally {
     globalThis.matchMedia = previous;
   }
+});
+
+test('outgoing human questions and peer relays retain the established heading and direction', () => {
+  const question = recordedRelationshipViews(
+    entry(1, 'turn', { k: 'h', id: 'ask' }),
+    {
+      edge: {
+        id: 'ask',
+        kind: 'toyou',
+        ask: 'question',
+        from: 'owner',
+        to: 'you',
+        status: 'wait',
+        at: 0,
+      },
+    },
+    'owner',
+    { owner: { name: 'Native owner' } },
+    { brief: 'Recorded question' },
+  )[0];
+  assert.equal(question.parts.map((part) => part.text).join(''), 'Native owner asked you');
+  assert.equal(question.brief, 'Recorded question');
+  assert.equal(question.parts[0].action, undefined);
+  const relay = recordedRelationshipViews(
+    entry(2, 'turn', { k: 'h', id: 'relay' }),
+    { edge: { id: 'relay', kind: 'relay', from: 'owner', to: 'peer', status: 'done', at: 0 } },
+    'owner',
+    { owner: { name: 'Native owner' }, peer: { name: 'Peer' } },
+    { brief: 'Recorded handoff' },
+  )[0];
+  assert.equal(relay.parts.map((part) => part.text).join(''), 'Native owner relayed to Peer');
+  assert.equal(relay.icon, 'M7 17L17 7M9 7h8v8');
+  assert.equal(relay.parts[2].action.id, 'peer');
+  assert.equal(relay.parts[0].action, undefined);
 });

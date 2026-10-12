@@ -3386,6 +3386,27 @@ mod tests {
     /// `ETag` the loopback server sends, GET only, and the headers it sends
     /// are the ones a server embedding the core is given.
     #[test]
+    fn native_capabilities_advertise_source_selection_without_preparing_evidence() {
+        let fixture = lane_fixture();
+        for count in [1, 2] {
+            let core = ViewerCore::with_machines(
+                (0..count)
+                    .map(|index| (format!("source-{index}"), fixture.options.clone()))
+                    .collect(),
+            );
+            let reply = core.respond("GET", "/api/session-capabilities", "machine=source-0", None);
+            assert_eq!(reply.status, 200);
+            assert_eq!(body_of(&reply)["source_candidates"], count > 1);
+            for view in core.machine_views() {
+                assert_eq!(view.hooks.builds(), 0);
+                assert!(lock(&view.evidence.work).events.is_none());
+                assert!(!view.evidence.catalog_demand.load(Ordering::Relaxed));
+            }
+            core.close();
+        }
+    }
+
+    #[test]
     fn the_core_answers_without_a_transport() {
         let fixture = lane_fixture();
         let core = ViewerCore::new(fixture.options.clone());

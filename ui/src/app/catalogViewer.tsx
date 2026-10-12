@@ -1322,7 +1322,7 @@ export function createCatalogViewer(
             ? [overview.actions]
             : active
               ? [composerTarget, ...(content ? [content.actions] : [sources])]
-              : route === 'sessions' && !sourcesOpen
+              : route === 'sessions' && !sourcesOpen && capabilities.source_candidates
                 ? [sources]
                 : route === 'trace'
                   ? [traceActions]
