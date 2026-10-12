@@ -3253,7 +3253,7 @@ mod tests {
             &format!("GET /?t={token} HTTP/1.1\r\nHost: 127.0.0.1:PORT\r\n\r\n"),
         );
         assert!(good.starts_with("HTTP/1.1 200"));
-        assert!(good.contains("Read sessions without JavaScript"));
+        assert!(good.contains("Open native session history"));
         for header in [
             "Cache-Control: no-store",
             "Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self'",
