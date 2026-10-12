@@ -52,3 +52,34 @@ test('native thinking durations omit unmeasured time and preserve readable round
   assert.equal(recordedThoughtLabel('12s'), 'Thinking · 12s');
   assert.equal(recordedThoughtLabel('62s'), 'Thinking · 1m 2s');
 });
+
+test('adjacent hidden Codex thinking collapses within its known turn without changing evidence', () => {
+  const input = rows([
+    { k: 'think', turn: 'a' },
+    { k: 'think', turn: 'a' },
+    { k: 'think', turn: 'b' },
+    { k: 'tool', turn: 'b', name: 'native' },
+    { k: 'think', turn: 'b' },
+    { k: 'think', turn: 'unknown' },
+    { k: 'think' },
+    { k: 'think', turn: 'a', pending: true },
+    { k: 'think', turn: 'a' },
+  ]);
+  const original = JSON.stringify(input);
+  const display = coalesceRecordedThoughts(input, 'codex', new Set(['a', 'b']));
+  assert.deepEqual(
+    display.map((item) => item.entry_id),
+    [
+      'native-0',
+      'native-2',
+      'native-3',
+      'native-4',
+      'native-5',
+      'native-6',
+      'native-7',
+      'native-8',
+    ],
+  );
+  assert.equal(JSON.stringify(input), original);
+  assert.equal(coalesceRecordedThoughts(input, 'claude', new Set(['a', 'b'])), input);
+});

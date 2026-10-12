@@ -7,7 +7,7 @@ export function coalesceRecordedThoughts(
 ): readonly CatalogTranscriptEntry[] {
   if (harness !== 'codex') return entries;
   const out: CatalogTranscriptEntry[] = [];
-  let chain: { index: number; owner: string | null; text: string } | null = null;
+  let chain: { index: number; owner: string | null; text: string | null } | null = null;
   let owner: string | null = null,
     sawOwner = false,
     unresolved = false;
@@ -18,7 +18,13 @@ export function coalesceRecordedThoughts(
       unresolved = owner === null;
       if (owner) sawOwner = true;
     }
-    if (entry.k !== 'think' || entry.pending || !entry.text || unresolved || (!owner && sawOwner)) {
+    if (
+      entry.k !== 'think' ||
+      entry.pending ||
+      entry.text === '' ||
+      unresolved ||
+      (!owner && sawOwner)
+    ) {
       out.push(item);
       chain = null;
       continue;
@@ -26,9 +32,12 @@ export function coalesceRecordedThoughts(
     if (
       chain &&
       chain.owner === owner &&
-      (entry.text === chain.text ||
-        entry.text.startsWith(chain.text + '\n') ||
-        entry.text.startsWith(chain.text + '\r\n'))
+      ((entry.text === undefined && chain.text === null) ||
+        (typeof entry.text === 'string' &&
+          typeof chain.text === 'string' &&
+          (entry.text === chain.text ||
+            entry.text.startsWith(chain.text + '\n') ||
+            entry.text.startsWith(chain.text + '\r\n'))))
     ) {
       const prior = out[chain.index];
       if (prior.entry.k !== 'think') throw Error('Invalid recorded thought chain');
@@ -36,10 +45,10 @@ export function coalesceRecordedThoughts(
         ...prior,
         entry: { ...prior.entry, text: entry.text, secs: entry.secs },
       };
-      chain.text = entry.text;
+      chain.text = entry.text ?? null;
     } else {
       out.push(item);
-      chain = { index: out.length - 1, owner, text: entry.text };
+      chain = { index: out.length - 1, owner, text: entry.text ?? null };
     }
   }
   return out;

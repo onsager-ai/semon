@@ -426,7 +426,7 @@ export function catalogTranscriptBlocks(
         parts: [
           {
             className: 'soft',
-            text: start.kind === 'spawn' ? 'Brief from ' : 'Message from ',
+            text: start.kind === 'spawn' ? 'Brief from ' : 'Relay from ',
           },
           {
             className: 'who who-link',
