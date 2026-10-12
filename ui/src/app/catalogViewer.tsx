@@ -45,6 +45,7 @@ import {
   createImageViewer,
   measureSessionScreen,
   parseShellNavigation,
+  safePath,
   type ShellNavigation,
 } from '../lib';
 import {
@@ -277,6 +278,7 @@ export function createCatalogViewer(
   }
   let account = parseAccount(viewerHost?.account);
   let standaloneNavigation: ShellNavigation | undefined;
+  let standaloneAdmin: { label: string; href: string } | null = null;
   let restoringOverlayHistory = false,
     overlayBackPending = false,
     pendingChrome = false;
@@ -692,6 +694,7 @@ export function createCatalogViewer(
     panelClosed,
     route: () => (viewerHost?.nativePage ? 'home' : navigation.route.v),
     selectedMachine: () => (navigation.route.v === 'machine' ? navigation.route.id : null),
+    admin: () => standaloneAdmin,
     machine(key) {
       history.pushState(
         null,
@@ -3778,11 +3781,25 @@ export function createCatalogViewer(
         if (data.api !== 1) throw Error('Unsupported chrome metadata');
         account = parseAccount(data.account);
         standaloneNavigation = parseShellNavigation(data.navigation) ?? undefined;
+        if (data.admin != null) {
+          const link = object(data.admin),
+            label = text(link.label),
+            href = text(link.href);
+          if (
+            !label.trim() ||
+            label.length > 80 ||
+            /[\x00-\x1f\x7f]/.test(label) ||
+            !safePath(href)
+          )
+            throw Error('Invalid machine management link');
+          standaloneAdmin = { label, href };
+        }
         if (location.pathname === '/machines' && machinesHref() !== '/machines') {
           fromLocation();
           return;
         }
         chrome();
+        if (navigation.route.v === 'machines') overview.draw();
       })
       .catch(() => {});
   fromLocation();

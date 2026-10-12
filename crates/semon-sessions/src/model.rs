@@ -1,6 +1,7 @@
-//! The session model behind `/api/model` and `--model-json` (#40 M1): the
-//! mockup's `SESS` and `H` globals, the turn index and busy intervals, built
-//! from the per-file event index.
+//! Shared native session semantic derivation over the generation-bound Event Index.
+//! Catalog publications and focused Query reads share identity, relationships,
+//! transcript slots and runtime facts. The complete serialization oracle is
+//! compiled only for semantic equivalence tests, never the product Viewer.
 //!
 //! Semon never guesses a link. Every join below is on a logged id: a
 //! `toolUseId`, a `msg_id`, a `session_id`, a `continued-in` or
@@ -40,12 +41,14 @@ use crate::{
 
 /// Version of the `/api/model` JSON shape. Embedders and clients compare it;
 /// bump it only for a breaking change to that shape.
+#[cfg(test)]
 pub const MODEL_API: u32 = 1;
 
 /// Briefs and results are capped as in the mockup data.
 pub(crate) const MSG_MAX: usize = 4096;
 const TRUNCATED: &str = "\n…(truncated)";
 /// A tool call without a result counts as running for this long.
+#[cfg(test)]
 const LIVE_MS: i64 = 30 * 60 * 1000;
 /// A single source line read back for text is bounded by this.
 pub(crate) const MAX_LINE: u64 = 64 * 1024 * 1024;
@@ -292,6 +295,7 @@ pub(crate) struct Turn {
 }
 
 #[derive(Clone, Debug, Serialize)]
+#[cfg(test)]
 pub(crate) struct Machine {
     pub(crate) id: String,
     pub(crate) name: String,
@@ -337,6 +341,7 @@ pub(crate) struct SessionFacts {
 }
 
 #[derive(Serialize)]
+#[cfg(test)]
 struct Rest<'a> {
     pricing: &'a crate::pricing::Pricing,
     handoffs: &'a [Handoff],
@@ -352,6 +357,7 @@ struct Rest<'a> {
 /// A built model. Everything but the sessions' running-tool age is
 /// serialized once; `version` hashes the build and every source file's
 /// length, so it changes when, and only when, the logs do.
+#[cfg(test)]
 pub(crate) struct Built {
     pub(crate) version: String,
     /// Milliseconds spent in each model build phase, in order.
@@ -361,7 +367,6 @@ pub(crate) struct Built {
     pub(crate) sessions: BTreeMap<String, Session>,
     /// `"handoffs":…,"turns":…,"busy":…,"tx":…}`
     rest: String,
-    pub(crate) pids: Vec<u32>,
     /// `$HOME` of the machine the logs come from, for shortening paths.
     pub(crate) home: Option<String>,
     /// This machine's id, as sessions name it.
@@ -445,6 +450,7 @@ impl PromptBrief {
     }
 }
 
+#[cfg(test)]
 impl Built {
     /// The model as served at `now`: a running tool's `activity[2]` is its
     /// age in seconds, and a tool without a result for [`LIVE_MS`] is no
@@ -3788,7 +3794,7 @@ impl<'a> Builder<'a> {
                 // The Catalog and slot recipes contain only the relationship.
                 // Query reads its brief from the same captured generation when
                 // a selected session or searched slot actually requests it.
-                let text = (target == BuildTarget::Model)
+                let text = (target.reference_model())
                     .then(|| self.text(at, "user", |record, _| prompt_text(record)))
                     .flatten();
                 let file = &self.files[at.0];
@@ -6261,6 +6267,15 @@ pub(crate) fn arg_summary(
 /// both ends, so every file is indexed whatever the window, and the window
 /// only trims what is returned. With [`Options::scan_window`], files last
 /// modified before the window aren't read at all.
+/// Semantic fixture oracle only; never a Viewer owner, cache or read fallback.
+#[cfg(test)]
+pub(crate) fn reference_json(options: &Options, now: i64) -> serde_json::Value {
+    let mut cache = EventCache::open_scoped(&options.cache).unwrap();
+    let built = build(options, &mut cache, &mut false, &mut Texts::default(), now).unwrap();
+    serde_json::from_str(&built.json(now)).unwrap()
+}
+
+#[cfg(test)]
 pub(crate) fn build(
     options: &Options,
     cache: &mut EventCache,
@@ -6274,6 +6289,7 @@ pub(crate) fn build(
 /// Native projection over an explicit, authorized source closure. Request-local
 /// caches have no writable store. Discovery and publication remain separate;
 /// callers must not claim missing relationship context as a complete graph.
+#[cfg(test)]
 pub(crate) fn build_sources(
     options: &Options,
     cache: &mut EventCache,
@@ -6298,13 +6314,29 @@ pub(crate) fn build_sources(
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum BuildTarget {
+    #[cfg(test)]
     Model,
     Query,
     Catalog,
     Sources,
 }
 
+impl BuildTarget {
+    fn reference_model(self) -> bool {
+        #[cfg(test)]
+        {
+            matches!(self, Self::Model)
+        }
+        #[cfg(not(test))]
+        {
+            let _ = self;
+            false
+        }
+    }
+}
+
 enum BuildOutput {
+    #[cfg(test)]
     Model(Box<Built>),
     Query(Box<QueryData>),
     Catalog(BTreeSet<u32>),
@@ -6709,7 +6741,7 @@ fn build_sources_inner(
             hook();
         }
     }
-    if target != BuildTarget::Model && history_records.is_none() {
+    if !target.reference_model() && history_records.is_none() {
         verify_sidecars(&files)?;
     }
     let claims = if target == BuildTarget::Sources && history_records.is_none() {
@@ -6727,6 +6759,7 @@ fn build_sources_inner(
     let held;
     let machine;
     let home;
+    #[cfg(test)]
     let offline_since;
     let groups;
     timed!("facts", {
@@ -6738,7 +6771,10 @@ fn build_sources_inner(
             .collect::<BTreeSet<String>>();
         machine = facts.hostname(options);
         home = facts.home();
-        offline_since = facts.offline_since();
+        #[cfg(test)]
+        {
+            offline_since = facts.offline_since();
+        }
         groups = lineages(&files);
     });
     if cache.is_scoped() && matches!(&facts, MachineFacts::Local) {
@@ -6758,7 +6794,7 @@ fn build_sources_inner(
     let sources = files
         .iter()
         .map(|file| (summary::source(file), file.summary.source_chunks.clone()));
-    let source_proofs = if target == BuildTarget::Model {
+    let source_proofs = if target.reference_model() {
         crate::query_source::Sources::capture_native(options, sources)?
     } else {
         crate::query_source::Sources::capture(options, sources)?
@@ -6850,7 +6886,7 @@ fn build_sources_inner(
             rows,
             Some(&source_records),
             history_records,
-            (target != BuildTarget::Model && history_records.is_none())
+            (!target.reference_model() && history_records.is_none())
                 .then_some((&*builder.cache, catalog_base.as_deref())),
         )
     });
@@ -6963,7 +6999,7 @@ fn build_sources_inner(
             }
         }
     }
-    if target != BuildTarget::Model && history_records.is_none() {
+    if !target.reference_model() && history_records.is_none() {
         verify_sidecars(&files)?;
     }
     if matches!(target, BuildTarget::Catalog | BuildTarget::Sources) && history_records.is_none() {
@@ -7008,10 +7044,12 @@ fn build_sources_inner(
                 pids.iter().map(|pid| pid.pid).collect(),
             ));
         }
-        BuildTarget::Model | BuildTarget::Query => {}
+        BuildTarget::Query => {}
+        #[cfg(test)]
+        BuildTarget::Model => {}
     }
     #[cfg(test)]
-    if target == BuildTarget::Model {
+    if target.reference_model() {
         COMPAT_BUILDS.with(|builds| builds.set(builds.get() + 1));
     }
     #[cfg(test)]
@@ -7055,7 +7093,8 @@ fn build_sources_inner(
         .collect();
     // Analytics reads a month and the month before it, whatever the model's
     // window: taken from every session before the window trims them.
-    let activity = (target == BuildTarget::Model)
+    #[cfg(test)]
+    let activity = (target.reference_model())
         .then(|| crate::analytics::activity(&sessions, &tx, &turns, &handoffs, now));
     // A scan window already chose the files; what it read is returned
     // whole, so an answer is never trimmed inside a session.
@@ -7228,140 +7267,143 @@ fn build_sources_inner(
             }),
         })));
     }
-    let all_busy = events::busy_merge(
-        sessions
-            .values()
-            .flat_map(|session| session.busy.iter().copied())
-            .collect(),
-    );
-    let busy = BTreeMap::from([(machine.clone(), all_busy)]);
-    let file_sizes: HashMap<&Path, u64> = files
-        .iter()
-        .map(|file| (file.path.as_path(), file.stamp.size))
-        .collect();
-    let marks: BTreeMap<&str, String> = tx
-        .iter()
-        .map(|(sid, transcript)| {
-            let sources: BTreeSet<&Path> = transcript
-                .slots
-                .iter()
-                .filter_map(|slot| slot.file.as_ref().map(|file| file.path.as_path()))
-                .collect();
-            let bytes: u64 = sources
-                .iter()
-                .filter_map(|path| file_sizes.get(path).copied())
-                .sum();
-            // A call stops running when its process dies, which writes no
-            // line: the running count moves the mark all the same.
-            let running = transcript
-                .slots
-                .iter()
-                .filter(|slot| {
-                    matches!(
-                        &slot.kind,
-                        SlotKind::Tool {
-                            bg: Some(Background {
-                                live: true,
-                                end: None,
-                                ..
-                            }),
-                            ..
-                        } | SlotKind::Tool {
-                            shown: Shown::Live,
-                            ..
-                        } | SlotKind::Yielded {
-                            shown: Shown::Live,
-                            ..
-                        } | SlotKind::Sent {
-                            shown: Shown::Live,
-                            ..
-                        }
-                    )
-                })
-                .count();
-            (
-                sid.as_str(),
-                format!("{}.{bytes}.{running}", transcript.slots.len()),
-            )
-        })
-        .collect();
-    let machine_id = machine.clone();
-    let machine = Machine {
-        id: machine.clone(),
-        name: machine,
-        up: offline_since.is_none(),
-        last: offline_since,
-    };
-    let machine = serde_json::to_string(&machine)?;
-    let pricing = crate::pricing::table();
-    let rest = serde_json::to_string(&Rest {
-        pricing: &pricing,
-        handoffs: &handoffs,
-        turns: &turns,
-        busy: &busy,
-        tx: &marks,
-    })?;
-    // The version also covers every source file's length, so any appended
-    // line gives a new version, even one whose entry changes nothing else in
-    // the model (the same timestamp as the line before it). Lengths, not
-    // paths or times, keep it the same for the same content.
-    let lengths: Vec<String> = files
-        .iter()
-        .map(|file| file.stamp.size.to_string())
-        .collect();
-    let version = format!(
-        "{:016x}",
-        fnv(&format!(
-            "{machine}{}{rest}|{}",
-            serde_json::to_string(&sessions)?,
-            lengths.join(",")
-        ))
-    );
-    let pids = pids.iter().map(|pid| pid.pid).collect();
-    let mut built = Built {
-        version,
-        machine,
-        sessions,
-        rest: rest[1..].to_owned(),
-        pids,
-        home,
-        machine_id,
-        tx,
-        #[cfg(test)]
-        facts: session_facts,
-        activity: activity.expect("model analytics prepared"),
-        #[cfg(test)]
-        handoffs,
-        #[cfg(test)]
-        turns,
-        #[cfg(test)]
-        texts,
-        timings,
-    };
-    built.timings.push((
-        "post",
-        u32::try_from(post_started.elapsed().as_millis()).unwrap_or(u32::MAX),
-    ));
+    #[cfg(not(test))]
+    unreachable!("native build targets return their evidence above");
     #[cfg(test)]
-    if let Some(hook) = AFTER_MODEL_DERIVATION.with(|hook| hook.borrow_mut().take()) {
-        hook();
-    }
-    if history_records.is_none() {
-        source_records.finish()?;
-    }
-    if let Some(catalog) = catalog {
-        cache.publish_session_projection(
-            &crate::slot_projection::Publication {
-                rows: &catalog,
-                transcripts: slot_projections.as_deref(),
-            },
-            catalog_base.as_deref(),
+    {
+        let all_busy = events::busy_merge(
+            sessions
+                .values()
+                .flat_map(|session| session.busy.iter().copied())
+                .collect(),
         );
+        let busy = BTreeMap::from([(machine.clone(), all_busy)]);
+        let file_sizes: HashMap<&Path, u64> = files
+            .iter()
+            .map(|file| (file.path.as_path(), file.stamp.size))
+            .collect();
+        let marks: BTreeMap<&str, String> = tx
+            .iter()
+            .map(|(sid, transcript)| {
+                let sources: BTreeSet<&Path> = transcript
+                    .slots
+                    .iter()
+                    .filter_map(|slot| slot.file.as_ref().map(|file| file.path.as_path()))
+                    .collect();
+                let bytes: u64 = sources
+                    .iter()
+                    .filter_map(|path| file_sizes.get(path).copied())
+                    .sum();
+                // A call stops running when its process dies, which writes no
+                // line: the running count moves the mark all the same.
+                let running = transcript
+                    .slots
+                    .iter()
+                    .filter(|slot| {
+                        matches!(
+                            &slot.kind,
+                            SlotKind::Tool {
+                                bg: Some(Background {
+                                    live: true,
+                                    end: None,
+                                    ..
+                                }),
+                                ..
+                            } | SlotKind::Tool {
+                                shown: Shown::Live,
+                                ..
+                            } | SlotKind::Yielded {
+                                shown: Shown::Live,
+                                ..
+                            } | SlotKind::Sent {
+                                shown: Shown::Live,
+                                ..
+                            }
+                        )
+                    })
+                    .count();
+                (
+                    sid.as_str(),
+                    format!("{}.{bytes}.{running}", transcript.slots.len()),
+                )
+            })
+            .collect();
+        let machine_id = machine.clone();
+        let machine = Machine {
+            id: machine.clone(),
+            name: machine,
+            up: offline_since.is_none(),
+            last: offline_since,
+        };
+        let machine = serde_json::to_string(&machine)?;
+        let pricing = crate::pricing::table();
+        let rest = serde_json::to_string(&Rest {
+            pricing: &pricing,
+            handoffs: &handoffs,
+            turns: &turns,
+            busy: &busy,
+            tx: &marks,
+        })?;
+        // The version also covers every source file's length, so any appended
+        // line gives a new version, even one whose entry changes nothing else in
+        // the model (the same timestamp as the line before it). Lengths, not
+        // paths or times, keep it the same for the same content.
+        let lengths: Vec<String> = files
+            .iter()
+            .map(|file| file.stamp.size.to_string())
+            .collect();
+        let version = format!(
+            "{:016x}",
+            fnv(&format!(
+                "{machine}{}{rest}|{}",
+                serde_json::to_string(&sessions)?,
+                lengths.join(",")
+            ))
+        );
+        let mut built = Built {
+            version,
+            machine,
+            sessions,
+            rest: rest[1..].to_owned(),
+            home,
+            machine_id,
+            tx,
+            #[cfg(test)]
+            facts: session_facts,
+            activity: activity.expect("model analytics prepared"),
+            #[cfg(test)]
+            handoffs,
+            #[cfg(test)]
+            turns,
+            #[cfg(test)]
+            texts,
+            timings,
+        };
+        built.timings.push((
+            "post",
+            u32::try_from(post_started.elapsed().as_millis()).unwrap_or(u32::MAX),
+        ));
+        #[cfg(test)]
+        if let Some(hook) = AFTER_MODEL_DERIVATION.with(|hook| hook.borrow_mut().take()) {
+            hook();
+        }
+        if history_records.is_none() {
+            source_records.finish()?;
+        }
+        if let Some(catalog) = catalog {
+            cache.publish_session_projection(
+                &crate::slot_projection::Publication {
+                    rows: &catalog,
+                    transcripts: slot_projections.as_deref(),
+                },
+                catalog_base.as_deref(),
+            );
+        }
+        if selected.is_none() {
+            cache.publish_session_descriptions();
+        }
+        Ok(BuildOutput::Model(Box::new(built)))
     }
-    if selected.is_none() {
-        cache.publish_session_descriptions();
-    }
-    Ok(BuildOutput::Model(Box::new(built)))
 }
 
 #[cfg(test)]

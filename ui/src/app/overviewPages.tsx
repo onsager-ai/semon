@@ -188,6 +188,7 @@ interface OverviewHost {
   api(path: string, body?: unknown): Promise<unknown>;
   route(): string;
   selectedMachine(): string | null;
+  admin(): { label: string; href: string } | null;
   machine(key: string): void;
   chrome(): void;
   panelOpened(panel: { destroy(): void }): void;
@@ -1012,13 +1013,16 @@ export function createOverviewPages(host: OverviewHost) {
                   ? ''
                   : ' · ' + timeText(Math.max(0, home!.now - machine.last)) + ' ago'),
             })),
-            admin: null,
+            admin: host.admin(),
           },
           {
             machine(machine) {
               host.machine(machine);
             },
-            admin() {},
+            admin() {
+              const link = host.admin();
+              if (link) location.assign(link.href);
+            },
             committed() {},
           },
         );

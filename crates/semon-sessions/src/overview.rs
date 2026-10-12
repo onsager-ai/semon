@@ -616,6 +616,12 @@ pub fn session_overview_reply(
     query: &str,
     now: i64,
 ) -> io::Result<ViewerReply> {
+    if !query.is_empty() && query.split('&').any(str::is_empty) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Invalid overview arguments",
+        ));
+    }
     let selected_source = overview_source_key(query)?;
     let sources: Vec<_> = sources
         .iter()
@@ -809,7 +815,7 @@ pub fn session_overview_reply(
                 })
             })
             .collect();
-        let mut data = analytics::answer(&rows, &request, now, "catalog-overview");
+        let mut data = analytics::answer(&rows, &request, now, &version);
         fn selected_ids(value: &Value, ids: &mut std::collections::BTreeSet<String>) {
             match value {
                 Value::Object(row) => {
@@ -937,7 +943,8 @@ pub fn session_overview_reply(
             json!({"key":s.key,"label":s.label,"up":s.up,
                 "sessions":observed.len(),
                 "working":observed.iter().filter(|row|row.summary.home["state"]=="work").count(),
-                "last":observed.iter().filter_map(|row|row.summary.home["last"].as_i64()).max()})
+                "last":(!s.up).then(|| s.options.facts.as_ref().and_then(|path| crate::read_facts(path).ok()).and_then(|facts| facts.offline_since)).flatten()
+                    .or_else(|| observed.iter().filter_map(|row|row.summary.home["last"].as_i64()).max())})
         }).collect::<Vec<_>>()}),
     ))
 }

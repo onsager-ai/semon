@@ -1,25 +1,17 @@
-//! `/api/analytics`: what the Analytics page draws for the last 24 hours,
-//! 7 days or 30 days, computed on the server.
-//!
-//! `/api/model` keeps only its own window (24 h by default), so a week or a
-//! month can't be computed from it in the browser. A build reads every log
-//! anyway and trims to the window at its end: before it trims, it keeps what
-//! Analytics reads of each session active in the last [`KEEP_MS`]
-//! ([`Activity`]: names, facets, times and totals, no text). A request
-//! computes its range from those rows alone and builds nothing; [`Cache`]
-//! keeps each answer until the model changes.
+//! Native Analytics aggregation from compact Event Index publications.
+//! Activity, timing, waits and costs are captured before output-window trimming;
+//! readers compute requested periods without a workspace model or source bodies.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
     sync::Arc,
-    time::{Duration, Instant},
 };
 
 use serde_json::{Value, json};
 
 use crate::{
     events::RateLimits,
-    model::{Handoff, Session, Transcript, Turn, fnv},
+    model::{Handoff, Session, Transcript, Turn},
     viewer::decoded,
 };
 
@@ -37,15 +29,6 @@ const TOP: usize = 5;
 /// Invariant: each activity retains at most this many open or answered wait spans.
 /// Overflow is explicitly reported; wait figures then describe retained spans.
 const MAX_WAIT_SPANS: usize = 4096;
-/// Answers kept, one per range and filters.
-const CACHE_MAX: usize = 16;
-/// A kept answer is computed again once the model changed, but never sooner
-/// than this after it was computed.
-const SPACING: Duration = Duration::from_secs(1);
-/// With nothing changed, time still moves the range and the waits: a kept
-/// answer is computed again once it is this old.
-const STALE_AFTER: Duration = Duration::from_secs(30);
-
 /// What Analytics reads of one session, kept by each build for the sessions
 /// active in the last [`KEEP_MS`] whatever the model's own window. Stubs
 /// (the far end of a handoff these logs don't have) are left out: they
@@ -294,6 +277,7 @@ pub(crate) struct Row<'a> {
 
 /// Every machine's rows, in the order the machines are served. A session id
 /// an earlier machine has is left out of a later one: it counts once.
+#[cfg(test)]
 pub(crate) fn rows<'a>(
     machines: impl IntoIterator<Item = (&'a str, &'a BTreeMap<String, Activity>)>,
 ) -> Vec<Row<'a>> {
@@ -405,42 +389,6 @@ impl Request {
         request.range = range?;
         Some(request)
     }
-
-    /// The cache's key: the range and the filters, unambiguously (no repo
-    /// filter is `null`, the filter for no repo `[null]`).
-    pub(crate) fn key(&self) -> String {
-        serde_json::to_string(&json!([
-            self.range.name(),
-            self.repo.as_ref().map(|repo| [repo]),
-            self.machine,
-            self.harness,
-            self.model
-        ]))
-        .expect("serializable key")
-    }
-
-    /// Whether each filter names a value some row has (over every row
-    /// kept, not only the range's). A request that doesn't is answered, but
-    /// its answer isn't kept: any value would otherwise be a new key.
-    pub(crate) fn known(&self, rows: &[Row]) -> bool {
-        let has = |test: &dyn Fn(&Row) -> bool| rows.iter().any(test);
-        self.repo
-            .as_ref()
-            .is_none_or(|repo| has(&|row| row.activity.repo.as_ref() == repo.as_ref()))
-            && self
-                .machine
-                .as_deref()
-                .is_none_or(|machine| has(&|row| row.machine == machine))
-            && self
-                .harness
-                .as_deref()
-                .is_none_or(|harness| has(&|row| row.activity.harness == harness))
-            && self
-                .model
-                .as_deref()
-                .is_none_or(|model| has(&|row| row.activity.model == model))
-    }
-
     fn matches(&self, row: &Row) -> bool {
         let activity = row.activity;
         self.repo
@@ -1025,86 +973,6 @@ pub(crate) fn answer(rows: &[Row], request: &Request, now: i64, version: &str) -
     Value::Object(out)
 }
 
-/// An answer's `ETag`: a hash of it without the time it was computed at
-/// (`now`, and the range's and each agent column's ends, which follow it),
-/// so an answer that didn't change keeps its tag. `version` is in it.
-pub(crate) fn etag(answer: &Value) -> String {
-    let mut stable = answer.clone();
-    if let Some(fields) = stable.as_object_mut() {
-        for key in ["now", "from", "to"] {
-            fields.remove(key);
-        }
-    }
-    if let Some(columns) = stable["agents"]["columns"].as_array_mut() {
-        for column in columns.iter_mut().filter_map(Value::as_object_mut) {
-            column.remove("from");
-            column.remove("to");
-        }
-    }
-    format!("\"a{:016x}\"", fnv(&stable.to_string()))
-}
-
-/// A kept answer: its `ETag` and its body.
-#[derive(Clone)]
-pub(crate) struct Kept {
-    pub(crate) etag: String,
-    pub(crate) body: Arc<Vec<u8>>,
-}
-
-struct Entry {
-    key: String,
-    version: String,
-    at: Instant,
-    kept: Kept,
-}
-
-/// The answers a core keeps, at most [`CACHE_MAX`], one per range and
-/// filters. A kept answer serves until the model it came from changed (and
-/// [`SPACING`] has passed), or until it is [`STALE_AFTER`] old. The caller
-/// computes a new one without holding the cache.
-#[derive(Default)]
-pub(crate) struct Cache {
-    entries: Vec<Entry>,
-}
-
-impl Cache {
-    /// The kept answer for `key` that may still answer for the model at
-    /// `version`.
-    pub(crate) fn kept(&self, key: &str, version: &str) -> Option<Kept> {
-        self.entries
-            .iter()
-            .find(|entry| {
-                entry.key == key
-                    && (entry.at.elapsed() < SPACING
-                        || (entry.version == version && entry.at.elapsed() < STALE_AFTER))
-            })
-            .map(|entry| entry.kept.clone())
-    }
-
-    /// Keeps `kept` for `key`, in place of any older answer for it; the
-    /// oldest answer goes when the cache is full.
-    pub(crate) fn keep(&mut self, key: &str, version: &str, kept: Kept) {
-        self.entries.retain(|entry| entry.key != key);
-        if self.entries.len() >= CACHE_MAX
-            && let Some(oldest) =
-                (0..self.entries.len()).min_by_key(|index| self.entries[*index].at)
-        {
-            self.entries.remove(oldest);
-        }
-        self.entries.push(Entry {
-            key: key.to_owned(),
-            version: version.to_owned(),
-            at: Instant::now(),
-            kept,
-        });
-    }
-
-    #[cfg(test)]
-    pub(crate) fn len(&self) -> usize {
-        self.entries.len()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1179,12 +1047,12 @@ mod tests {
         ] {
             assert_eq!(Request::parse(query), None, "{query:?}");
         }
-        // One key for one request, whatever the order.
+        // Identical filters have identical semantics, whatever their order.
         assert_eq!(
-            get("range=7d&repo=a&model=m").key(),
-            get("model=m&repo=a&range=7d").key()
+            get("range=7d&repo=a&model=m"),
+            get("model=m&repo=a&range=7d")
         );
-        assert_ne!(get("range=7d&repo=").key(), get("range=7d").key());
+        assert_ne!(get("range=7d&repo="), get("range=7d"));
     }
 
     #[test]
@@ -1501,75 +1369,6 @@ mod tests {
         assert_eq!(column["more"], 7);
         assert_eq!(day["top"]["busy"].as_array().unwrap().len(), TOP);
     }
-
-    #[test]
-    fn the_cache_keeps_an_answer_per_key_until_its_version_changes() {
-        let mut cache = Cache::default();
-        let answer = |n: i64| Kept {
-            etag: format!("\"{n}\""),
-            body: Arc::new(n.to_string().into_bytes()),
-        };
-        assert!(cache.kept("a", "v1").is_none());
-        cache.keep("a", "v1", answer(1));
-        assert_eq!(cache.kept("a", "v1").unwrap().etag, "\"1\"");
-        // Within SPACING a new version is answered from the kept one.
-        assert_eq!(cache.kept("a", "v2").unwrap().etag, "\"1\"");
-        assert!(cache.kept("b", "v1").is_none());
-        cache.keep("a", "v2", answer(2));
-        assert_eq!(cache.kept("a", "v2").unwrap().etag, "\"2\"");
-        assert_eq!(cache.len(), 1);
-        for key in 0..CACHE_MAX + 3 {
-            cache.keep(&key.to_string(), "v1", answer(3));
-        }
-        assert_eq!(cache.len(), CACHE_MAX);
-    }
-
-    #[test]
-    fn the_etag_ignores_when_the_answer_was_computed() {
-        let activity = fixture();
-        let first = at("range=7d", &activity);
-        // The same figures computed a little later: only the times differ.
-        let mut later = first.clone();
-        later["now"] = json!(NOW + 30_000);
-        later["from"] = json!(NOW + 30_000 - 7 * DAY_MS);
-        later["to"] = json!(NOW + 30_000);
-        for column in later["agents"]["columns"].as_array_mut().unwrap() {
-            column["from"] = json!(column["from"].as_i64().unwrap() + 30_000);
-            column["to"] = json!(column["to"].as_i64().unwrap() + 30_000);
-        }
-        assert_ne!(first, later);
-        assert_eq!(etag(&first), etag(&later));
-        // A figure, or the model it came from, changes it.
-        let mut busier = later.clone();
-        busier["current"]["agent_ms"] = json!(1);
-        assert_ne!(etag(&first), etag(&busier));
-        let mut moved = later;
-        moved["version"] = json!("v2");
-        assert_ne!(etag(&first), etag(&moved));
-    }
-
-    #[test]
-    fn a_filter_no_row_has_is_not_known() {
-        let activity = fixture();
-        let rows = rows([("laptop", &activity)]);
-        for query in [
-            "range=7d",
-            "range=7d&repo=harbor",
-            "range=7d&repo=",
-            "range=7d&machine=laptop&harness=codex&model=Opus%205.5",
-        ] {
-            assert!(get(query).known(&rows), "{query}");
-        }
-        for query in [
-            "range=7d&repo=nowhere",
-            "range=7d&machine=desktop",
-            "range=7d&harness=other",
-            "range=7d&model=Other",
-        ] {
-            assert!(!get(query).known(&rows), "{query}");
-        }
-    }
-
     #[test]
     fn rows_outside_the_range_and_the_one_before_are_not_walked() {
         let mut activity = fixture();

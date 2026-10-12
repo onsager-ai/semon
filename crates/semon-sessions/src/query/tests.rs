@@ -264,11 +264,23 @@ fn query_producer_preserves_large_native_tool_record_derivation() {
     assert!(answer.to_string().contains("Find parser panics"));
     assert_eq!(answer, expected);
     crate::model::DIRECT_SOURCE_READS.with(|reads| assert_eq!(reads.get(), 0));
-    // Full Model preparation now shares the verified native body reader too.
+    // The indexed native producer uses the verified body reader for this
+    // oversized source too; the retired model endpoint is absent.
+    let core = ViewerCore::new(home.options.clone());
+    assert_eq!(core.respond("GET", "/api/model", "", None).status, 404);
+    let views = core.machine_views();
+    let view = &views[0];
+    let mut work = crate::viewer::lock(&view.evidence.work);
+    loop {
+        view.evidence
+            .refresh_catalog(&mut work, crate::model::now_ms())
+            .unwrap();
+        if !view.evidence.catalog_pending(&work) {
+            break;
+        }
+    }
     assert_eq!(
-        ViewerCore::new(home.options.clone())
-            .respond("GET", "/api/model", "", None)
-            .status,
+        crate::session_catalog_page(&home.options, "local", "sid=lead").status,
         200
     );
     crate::model::DIRECT_SOURCE_READS.with(|reads| assert_eq!(reads.get(), 0));
@@ -388,9 +400,7 @@ fn source_backed_prompt_briefs_preserve_native_caps_and_completion_fences() {
     let home = Home::new("prompt-brief-integrity");
     home.top("lead", &[human("lead", ts(1, 0), &"é".repeat(50_000))]);
     let sources = admitted(home.options.clone());
-    let core = ViewerCore::from_sources(sources.clone());
-    let model: Value =
-        serde_json::from_slice(&core.respond("GET", "/api/model", "", None).body).unwrap();
+    let model = crate::model::reference_json(&home.options, crate::model::now_ms());
     let mut query = Query::from_sources(sources.clone());
     let selected = query
         .call_at("get_session", &json!({"id":"lead"}), NOW)
@@ -2193,8 +2203,8 @@ fn an_empty_union_answers_without_creating_a_home() {
 }
 
 #[test]
-fn native_owner_reuses_one_complete_index_across_query_tree_and_model_reads() {
-    use crate::viewer::{MachineView, Reading};
+fn native_owner_reuses_one_complete_index_across_query_tree_and_catalog_reads() {
+    use crate::viewer::MachineView;
     use std::io::Write;
 
     let home = Home::new("shared-native-owner");
@@ -2221,8 +2231,22 @@ fn native_owner_reuses_one_complete_index_across_query_tree_and_model_reads() {
     let count = parsed();
     assert!(count > 0);
     assert!(Arc::ptr_eq(&first, &view.evidence.query_at(NOW).unwrap()));
-    let built = view.built(Reading::At(NOW)).unwrap();
-    assert!(built.sessions.contains_key("lead"));
+    let publish = || {
+        let mut work = view.evidence.work.lock().unwrap();
+        while !view.evidence.refresh_catalog(&mut work, NOW).unwrap() {}
+        drop(work);
+        let page = crate::session_catalog_page(&home.options, "fixture", "limit=60");
+        assert_eq!(page.status, 200);
+        let page: Value = serde_json::from_slice(&page.body).unwrap();
+        assert!(
+            page["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|row| row["key"] == "lead")
+        );
+    };
+    publish();
     assert_eq!(view.respond("GET", "/api/tree", "", None).status, 200);
     assert_eq!(
         parsed(),
@@ -2244,7 +2268,7 @@ fn native_owner_reuses_one_complete_index_across_query_tree_and_model_reads() {
         count + 1,
         "only the appended native record is parsed"
     );
-    view.built(Reading::At(NOW)).unwrap();
+    publish();
     assert_eq!(view.respond("GET", "/api/tree", "", None).status, 200);
     assert_eq!(parsed(), count + 1);
     assert!(Arc::ptr_eq(&next, &view.evidence.query_at(NOW).unwrap()));
@@ -2360,7 +2384,26 @@ fn admitted_sources_share_the_index_with_a_later_viewer_and_drain_on_close() {
         &core.machine_views()[0].evidence,
         &sources.machines[0].1
     ));
-    assert_eq!(core.respond("GET", "/api/model", "", None).status, 200);
+    assert_eq!(core.respond("GET", "/api/model", "", None).status, 404);
+    assert_eq!(
+        core.respond("GET", "/api/session-sources", "", None).status,
+        200
+    );
+    {
+        let view = core.machine_views()[0].clone();
+        let mut work = crate::viewer::lock(&view.evidence.work);
+        loop {
+            view.evidence.refresh_catalog(&mut work, NOW).unwrap();
+            if !view.evidence.catalog_pending(&work) {
+                break;
+            }
+        }
+    }
+    assert_eq!(
+        core.respond("GET", "/api/sessions", "machine=a&limit=60", None)
+            .status,
+        200
+    );
     assert_eq!(crate::events::PARSED.with(std::cell::Cell::get), parsed);
     let mut second = Query::from_sources(sources.clone());
     assert_eq!(

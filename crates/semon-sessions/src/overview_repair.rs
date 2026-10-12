@@ -203,7 +203,7 @@ fn selection(db: &Connection, key: &str) -> io::Result<Selection> {
     let target = catalog(db, key)?.ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::NotFound,
-            "Selected migration source unavailable",
+            "Selected native query source unavailable",
         )
     })?;
     let mut paths: std::collections::BTreeSet<_> = target

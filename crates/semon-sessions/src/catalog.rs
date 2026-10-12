@@ -1858,10 +1858,7 @@ mod tests {
         writeln!(file,"{}",json!({"type":"user","sessionId":"home","uuid":"answer","parentUuid":"question","timestamp":"2026-10-01T00:00:02Z","toolUseResult":{"answers":{"NATIVE_PRIVATE_QUESTION":"NATIVE_PRIVATE_ANSWER"}},"message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"ask-native","content":"User has answered your questions"}]}})).unwrap();
         drop(file);
         fixture.publish(1);
-        let core = ViewerCore::new(fixture.options.clone());
-        let model: Value =
-            serde_json::from_slice(&core.respond("GET", "/api/model", "", None).body).unwrap();
-        core.close();
+        let model = crate::model::reference_json(&fixture.options, crate::model::now_ms());
         let question = model["handoffs"]
             .as_array()
             .unwrap()
@@ -3555,9 +3552,13 @@ mod tests {
             Some(&changed),
         );
         let body: Value = serde_json::from_slice(&reply.body).unwrap();
-        assert_eq!(reply.status, 200);
-        assert_eq!(body["freshness"]["state"], "incomplete");
-        assert_eq!(body["entries"][1]["freshness"]["state"], "incomplete");
+        assert_eq!(reply.status, 409);
+        assert_eq!(body["error"]["code"], "stale_projection");
+        assert_eq!(body["resynchronize"], true);
+        assert!(
+            body.get("entries").is_none(),
+            "changed provider generations publish no partial page"
+        );
         crate::events::CACHE_READS.with(|reads| assert_eq!(reads.get(), 0));
         assert!(!path.exists());
     }
@@ -4090,9 +4091,10 @@ mod tests {
         fs::write(&path, "{}\n").unwrap();
         let changed = get();
         let body: Value = serde_json::from_slice(&changed.body).unwrap();
-        assert_eq!(body["entries"][0]["freshness"]["state"], "incomplete");
-        assert_eq!(body["entries"][0]["entry_id"], identity);
-        assert_eq!(body["entries"][0]["provenance"], provenance);
+        assert_eq!(changed.status, 409);
+        assert_eq!(body["error"]["code"], "stale_projection");
+        assert_eq!(body["resynchronize"], true);
+        assert!(body.get("entries").is_none());
         assert_eq!(
             provider.0.load(Ordering::Relaxed),
             0,
@@ -4101,6 +4103,9 @@ mod tests {
         fs::remove_file(&path).unwrap();
         let missing = get();
         let body: Value = serde_json::from_slice(&missing.body).unwrap();
+        assert_eq!(missing.status, 200);
+        assert_eq!(body["entries"][0]["entry_id"], identity);
+        assert_eq!(body["entries"][0]["provenance"], provenance);
         assert_eq!(body["entries"][0]["freshness"]["state"], "incomplete");
         assert_eq!(
             provider.0.load(Ordering::Relaxed),
@@ -4217,8 +4222,10 @@ mod tests {
             "sid=session-00000&after=0&limit=1",
             None,
         );
+        assert_eq!(range.status, 409);
         let range: Value = serde_json::from_slice(&range.body).unwrap();
-        assert_eq!(range["freshness"]["state"], "incomplete");
+        assert_eq!(range["error"]["code"], "stale_projection");
+        assert_eq!(range["resynchronize"], true);
         assert!(!range.to_string().contains("rewritten prompt"));
         fixture.publish_existing();
         let fresh = crate::session_transcript_range(

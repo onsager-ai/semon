@@ -219,6 +219,7 @@ pub fn session_annotations(options: &Options, source_key: &str, query: &str) -> 
                 .filter(|part| part.split('=').next() == Some(name))
                 .count()
                 > 1
+                || query_value(query, name).is_some_and(|value| decoded(value).is_none())
             {
                 return Ok(invalid_arguments());
             }
@@ -973,6 +974,20 @@ fn render(
         mode,
     };
     let reader: &dyn SessionSourceReader = &composite;
+    // Presentation deliberately tolerates malformed records and unavailable
+    // archive bytes. A rejected source generation is different: never replace
+    // accepted content with empty entries under the same projection proof.
+    let source_changed = std::cell::Cell::new(false);
+    let source_read = |reference: &SessionSourceRef, expected: Option<&str>, offset, max| {
+        let result = reader.read_range(reference, expected, offset, max);
+        if result
+            .as_ref()
+            .is_err_and(|error| error.kind() == io::ErrorKind::InvalidData)
+        {
+            source_changed.set(true);
+        }
+        result
+    };
     let source_budget = if attachment.is_some() {
         12 * 1024 * 1024
     } else {
@@ -1031,8 +1046,7 @@ fn render(
             if max > 0 {
                 requests_left -= 1;
                 let known = generations.get(&file.path);
-                let part =
-                    reader.read_range(reference, known.map(|known| known.0.as_str()), at, max)?;
+                let part = source_read(reference, known.map(|known| known.0.as_str()), at, max)?;
                 if part.offset != at
                     || part.bytes.is_empty()
                     || part.bytes.len() > max
@@ -1042,6 +1056,7 @@ fn render(
                     || known
                         .is_some_and(|known| known.0 != part.generation || known.1 != part.length)
                 {
+                    source_changed.set(true);
                     return Err(invalid());
                 }
                 bytes_left -= part.bytes.len();
@@ -1125,8 +1140,7 @@ fn render(
             }
             requests_left -= 1;
             let known = generations.get(path);
-            let part =
-                reader.read_range(reference, known.map(|known| known.0.as_str()), at, max)?;
+            let part = source_read(reference, known.map(|known| known.0.as_str()), at, max)?;
             if part.offset != at
                 || part.bytes.is_empty()
                 || part.bytes.len() > max
@@ -1135,6 +1149,7 @@ fn render(
                 || part.generation.len() > 4096
                 || known.is_some_and(|known| known.0 != part.generation || known.1 != part.length)
             {
+                source_changed.set(true);
                 return Err(invalid());
             }
             generations
@@ -1242,6 +1257,9 @@ fn render(
             .unwrap_or_else(|| json!({"k":"end"}))
         };
 
+        if source_changed.get() {
+            return stale();
+        }
         if matches!(slot.kind, crate::model::SlotKind::Think) && entry["text"] == "" {
             entry
                 .as_object_mut()
@@ -1268,6 +1286,9 @@ fn render(
             };
             let Some((content_type, body)) = crate::tx::selected_image(&mut lines, slot, image)
             else {
+                if source_changed.get() {
+                    return stale();
+                }
                 return catalog::error(
                     404,
                     "attachment_unavailable",
@@ -1284,6 +1305,9 @@ fn render(
         }
         if matches!(part, SelectedPart::Script) {
             let Some((text, truncated)) = crate::tx::selected_script(&mut lines, slot) else {
+                if source_changed.get() {
+                    return stale();
+                }
                 return catalog::error(
                     422,
                     "field_unsupported",
@@ -1296,6 +1320,9 @@ fn render(
         }
         if matches!(part, SelectedPart::Output) {
             let Some(output) = crate::tx::selected_output(&mut lines, slot) else {
+                if source_changed.get() {
+                    return stale();
+                }
                 return catalog::error(
                     422,
                     "field_unsupported",
@@ -1385,6 +1412,9 @@ fn render(
     }
     let failures = lines.failures;
     drop(lines);
+    if source_changed.get() {
+        return stale();
+    }
     let state = if failures > 0 || incomplete_entries > 0 || selection.history_incomplete {
         "incomplete"
     } else {

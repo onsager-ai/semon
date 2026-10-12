@@ -14,13 +14,16 @@ use std::{
 
 use serde_json::{Map, Value, json};
 
+#[cfg(test)]
+use crate::model::Built;
+
 use crate::{
     attachments,
     events::{self, Reply, ScriptArg},
     field,
     model::{
-        self, Built, MSG_MAX, Shown, Slot, SlotFile, SlotKind, arg_summary, cap, content_text,
-        one_line, patch_text, prompt_text, tool_input, tool_result_text,
+        self, MSG_MAX, Shown, Slot, SlotFile, SlotKind, arg_summary, cap, content_text, one_line,
+        patch_text, prompt_text, tool_input, tool_result_text,
     },
 };
 
@@ -73,6 +76,7 @@ impl Anchor {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn read_record(path: &Path, offset: u64) -> Option<Value> {
     read_sized(path, offset).0
 }
@@ -597,6 +601,7 @@ fn put_out(
 /// One part's whole text for "View all": `text`, whether semon cut it here
 /// (`truncated`, or `cut_before`), and for a Codex output that Codex cut,
 /// `cut`. A gap Codex made is never `truncated`.
+#[cfg(test)]
 fn text_json(text: &str, source: Source, cut_before: bool) -> String {
     text_value(text, source, cut_before, FULL_MAX).to_string()
 }
@@ -635,6 +640,7 @@ fn running(ms: i64) -> String {
     }
 }
 
+#[cfg(test)]
 fn tool_name(record: &Value, block: usize) -> Option<String> {
     if field(record, "type") == Some("assistant.message") {
         return record
@@ -1981,12 +1987,14 @@ pub(crate) fn slot_texts(lines: &mut Lines, slot: &Slot) -> Vec<(&'static str, S
 
 /// A page of `sid`'s transcript as JSON. Each entry that starts a turn, and
 /// the page's first entry, carries its turn's id as `turn`.
+#[cfg(test)]
 pub(crate) fn page(built: &Built, sid: &str, anchor: &Anchor, now: i64) -> io::Result<String> {
     page_limited(built, sid, anchor, now, PAGE_ENTRIES)
 }
 
 /// [`page`] with at most `limit` entries (1 to [`PAGE_ENTRIES`]); the byte
 /// bound is the same.
+#[cfg(test)]
 pub(crate) fn page_limited(
     built: &Built,
     sid: &str,
@@ -2011,6 +2019,7 @@ pub(crate) fn page_limited(
 
 /// The shared source-backed pager needs one transcript and its native rendering
 /// context. Query callers do not need a workspace transport model.
+#[cfg(test)]
 pub(crate) fn page_from(
     context: &RenderContext<'_>,
     transcript: &model::Transcript,
@@ -2124,6 +2133,7 @@ pub(crate) fn page_from_lines(
 }
 
 /// `/api/tx?errors=1` lists at most this many failed steps.
+#[cfg(test)]
 pub(crate) const ERRORS_MAX: usize = 10_000;
 
 /// Where `sid`'s failed steps are, so the viewer can step through them
@@ -2132,6 +2142,7 @@ pub(crate) const ERRORS_MAX: usize = 10_000;
 /// holding slot `s` is `after=s` (it starts there) or `before=s+1` (it ends
 /// there). `errors` is the whole count; `truncated` says the list stops
 /// short of it, at [`ERRORS_MAX`]. `version` is the model's, for `since=`.
+#[cfg(test)]
 pub(crate) fn signals(built: &Built, sid: &str) -> io::Result<String> {
     let transcript = built.tx.get(sid).ok_or(io::ErrorKind::NotFound)?;
     let count: usize = transcript.signals.values().sum();
@@ -2150,11 +2161,13 @@ pub(crate) fn signals(built: &Built, sid: &str) -> io::Result<String> {
     )
 }
 
+#[cfg(test)]
 pub(crate) fn errors(built: &Built, sid: &str) -> io::Result<String> {
     errors_limited(built, sid, ERRORS_MAX)
 }
 
 /// [`errors`] listing at most `limit` slots.
+#[cfg(test)]
 pub(crate) fn errors_limited(built: &Built, sid: &str, limit: usize) -> io::Result<String> {
     let transcript = built.tx.get(sid).ok_or(io::ErrorKind::NotFound)?;
     let slots: Vec<usize> = transcript
@@ -2177,6 +2190,7 @@ pub(crate) fn errors_limited(built: &Built, sid: &str, limit: usize) -> io::Resu
 
 /// The whole of one part of a session's tool call, by its slot, for "View
 /// all": what it was asked (`in`), what came back (`out`) or its diff.
+#[cfg(test)]
 pub(crate) fn full_slot(built: &Built, sid: &str, index: usize, part: &str) -> io::Result<String> {
     let slot = built
         .tx
@@ -2276,6 +2290,7 @@ pub(crate) fn full_slot(built: &Built, sid: &str, index: usize, part: &str) -> i
 
 /// The whole of one part of a yielded command's step or a poll's: its
 /// script, its command line or input (`in`), or its output (`out`).
+#[cfg(test)]
 fn full_yielded(file: &SlotFile, slot: &Slot, part: &str) -> io::Result<String> {
     let invalid = || io::Error::new(io::ErrorKind::InvalidInput, "entry is not expandable");
     let mut lines = Lines::default();
@@ -2332,6 +2347,7 @@ fn full_yielded(file: &SlotFile, slot: &Slot, part: &str) -> io::Result<String> 
 
 /// The whole of one part of a tool call at a line: what it was asked (`in`),
 /// what came back (`out`, the result's line), or its diff.
+#[cfg(test)]
 fn full(path: &Path, offset: u64, block: usize, part: &str) -> io::Result<String> {
     let record = read_record(path, offset)
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "entry"))?;
