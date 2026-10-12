@@ -233,7 +233,19 @@ export async function goto(page, route, D) {
 // Test expectations in the reference fixture's shapes, assembled exclusively
 // from source-qualified native publications and generation-fenced body reads.
 // Exhaustive fixture census is test work; production readers remain selected.
-export async function data({ extras = false, base: sourceBase, token: sourceToken } = {}) {
+export async function data(options = {}) {
+  // A fixture census spans several source-qualified publications. If refresh
+  // moves a preview generation, discard the entire census and reacquire it;
+  // never combine its old relationships with bytes from the new observation.
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await nativeFixtureData(options);
+    } catch (error) {
+      if (attempt >= 2 || error.cause?.nativeObservationChanged !== true) throw error;
+    }
+  }
+}
+async function nativeFixtureData({ extras = false, base: sourceBase, token: sourceToken } = {}) {
   const base = sourceBase ?? (extras ? ENV.extraBase : ENV.base),
     token = sourceToken ?? (extras ? ENV.extraToken : ENV.token);
   const landing = await fetch(base + '/?t=' + token);
@@ -249,8 +261,18 @@ export async function data({ extras = false, base: sourceBase, token: sourceToke
         const result = await response.json();
         if (!path.startsWith('/api/sessions?') || result.completeness.state === 'complete')
           return result;
-      } else if (response.status !== 503 || !path.startsWith('/api/sessions?'))
-        throw Error('Native fixture ' + path + ': ' + response.status);
+      } else if (response.status !== 503 || !path.startsWith('/api/sessions?')) {
+        const body = await response.json().catch(() => null);
+        throw Error('Native fixture ' + path + ': ' + response.status, {
+          cause: {
+            nativeObservationChanged:
+              response.status === 409 &&
+              path.startsWith('/api/session-home?') &&
+              body?.error?.code === 'home_details_unavailable' &&
+              body.error.retryable === true,
+          },
+        });
+      }
       if (Date.now() >= deadline)
         throw Error('Native fixture Catalog publication deadline: ' + path);
       await new Promise((resolve) => setTimeout(resolve, 50));
@@ -482,7 +504,9 @@ export async function data({ extras = false, base: sourceBase, token: sourceToke
         to: 'you',
       });
   }
-  const H = [...handoffs.values()],
+  const H = [...handoffs.values()].sort(
+      (a, b) => a.at - b.at || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0),
+    ),
     nativeTurns = [...turns.values()];
   const model = {
     sessions: SESS,
