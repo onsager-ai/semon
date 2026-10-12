@@ -142,6 +142,7 @@ export function catalogTranscriptBlocks(
     knownTurns,
   );
   const closingBodies = new Map<string, string>(),
+    representedReplies = new Map<string, string>(),
     returnedFailures = new Set<string>();
   if (relationshipView)
     for (const item of entries) {
@@ -163,6 +164,18 @@ export function catalogTranscriptBlocks(
         );
       if (body?.entry.k !== 'a') continue;
       closingBodies.set(item.entry_id, body.entry.text);
+      // Only a complete short reply can move into its qualified result event.
+      // Clipped text, attachments and unavailable context retain their own UI.
+      if (
+        context?.state === 'complete' &&
+        !body.clipped &&
+        !body.entry.img?.length &&
+        !attachments?.(body)?.length &&
+        fieldView?.(body)?.text === undefined &&
+        preview(body.entry.text) === body.entry.text &&
+        relationshipView(item)?.some((view) => view.kind === 'event')
+      )
+        representedReplies.set(body.entry_id, item.entry_id);
     }
   const blocks = entries.map((item) => {
     const { entry_id, native_action_text, clipped, freshness } = item,
@@ -189,6 +202,7 @@ export function catalogTranscriptBlocks(
         entryKey: entry_id,
         flavor: entry.k === 'u' ? 'user' : 'assistant',
         text: entry.text,
+        representedBy: representedReplies.get(entry_id),
         images: attachments?.(item),
       });
     else if (entry.k === 'think')
