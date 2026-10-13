@@ -12,6 +12,7 @@ const { parseCatalogPage } = await import(
   'data:text/javascript;base64,' + Buffer.from(outputFiles[0].contents).toString('base64')
 );
 const session = () => ({
+  lifecycle: 'current',
   key: 'stable-session',
   name: '<img src=x> A session',
   harness: 'codex',
@@ -60,6 +61,17 @@ const page = () => ({
   },
   items: [session()],
   next_cursor: 'opaque cursor',
+});
+test('catalog validates current and retained membership independently of status authority', () => {
+  const input = page();
+  for (const lifecycle of ['current', 'retained']) {
+    input.items[0].lifecycle = lifecycle;
+    assert.equal(parseCatalogPage(input).items[0].lifecycle, lifecycle);
+  }
+  for (const lifecycle of [undefined, null, 'archived', 'current-authority']) {
+    input.items[0].lifecycle = lifecycle;
+    assert.throws(() => parseCatalogPage(input), /Invalid catalog lifecycle/);
+  }
 });
 test('selected transcript observations validate source/runtime generations and exact safe totals', () => {
   const input = page();

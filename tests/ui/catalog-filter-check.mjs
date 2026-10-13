@@ -36,6 +36,38 @@ export async function catalogFilterCheck(browser, name) {
         const all = await response.json(),
           row = all.items.find((row) => row.harness && row.repo);
         assert.ok(row, 'fixture includes a recorded repository');
+        const observed = all.items.find((item) => item.status?.observation === 'current');
+        assert.ok(observed, 'fixture includes qualified current status');
+        let pendingInjected = false,
+          refreshed = false;
+        const pendingFacts = async (route) => {
+          const response = await route.fetch(),
+            body = await response.json();
+          if (!pendingInjected && body.completeness.state === 'complete') {
+            const item = body.items.find((item) => item.key === observed.key);
+            assert.ok(item, 'qualified status remains in the same bounded page');
+            item.status = { state: null, observation: 'unavailable' };
+            item.facts_observation = { state: dark ? 'unavailable' : 'stale' };
+            body.freshness = dark ? 'cached' : 'stale';
+            pendingInjected = true;
+            await route.fulfill({ response, json: body });
+          } else {
+            refreshed ||= pendingInjected;
+            await route.fulfill({ response });
+          }
+        };
+        await page.route('**/api/sessions?*', pendingFacts);
+        try {
+          await page.reload();
+          await page.waitForFunction(
+            ({ key, state }) =>
+              document.querySelector(`.nrow[data-id="${key}"] .dot`)?.classList.contains(state),
+            { key: observed.key, state: observed.status.state },
+          );
+          assert.ok(pendingInjected && refreshed, 'complete pages retry pending runtime facts');
+        } finally {
+          await page.unroute('**/api/sessions?*', pendingFacts);
+        }
         await page.getByLabel('Harness', { exact: true }).fill(row.harness);
         await page.getByLabel('Repository', { exact: true }).fill(row.repo);
         await page.getByRole('button', { name: 'Apply filters', exact: true }).press('Enter');
@@ -66,6 +98,33 @@ export async function catalogFilterCheck(browser, name) {
         await page.getByRole('button', { name: 'Apply filters', exact: true }).click();
         await page.waitForFunction(() => !new URLSearchParams(location.search).has('repo'));
         assert.equal(new URL(page.url()).searchParams.get('harness'), row.harness);
+        const noRepository = page.getByRole('checkbox', { name: 'No repository', exact: true });
+        const geometry = await noRepository.evaluate((checkbox) => {
+          const box = checkbox.getBoundingClientRect(),
+            label = checkbox.parentElement.querySelector('span').getBoundingClientRect();
+          return { width: box.width, gap: label.left - box.right };
+        });
+        assert.ok(geometry.width < 32, 'checkbox retains its native width');
+        assert.equal(geometry.gap, 8, 'checkbox stays beside its associated label');
+        await noRepository.check();
+        await page.waitForFunction(
+          () => new URLSearchParams(location.search).get('no_repo') === '1',
+        );
+        assert.equal(new URL(page.url()).searchParams.get('harness'), row.harness);
+        assert.equal(new URL(page.url()).searchParams.has('repo'), false);
+        const withoutRepository = all.items
+          .filter((item) => item.harness === row.harness && !item.repo)
+          .map((item) => item.key)
+          .sort();
+        await page.waitForFunction(
+          (ids) =>
+            JSON.stringify(
+              [...document.querySelectorAll('#page .nrow')].map((row) => row.dataset.id).sort(),
+            ) === JSON.stringify(ids),
+          withoutRepository,
+        );
+        await noRepository.uncheck();
+        await page.waitForFunction(() => !new URLSearchParams(location.search).has('no_repo'));
         assert.ok(requests.some((url) => url.searchParams.get('harness') === row.harness));
         assert.ok(
           requests.every(

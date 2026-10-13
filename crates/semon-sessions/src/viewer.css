@@ -129,7 +129,8 @@ code { overflow-wrap: anywhere; }
 .chip svg { width: 14px; height: 14px; }
 .search { display: flex; align-items: center; gap: 8px; min-width: 0; height: var(--tap); padding: 0 10px; border-radius: var(--r2); background: var(--sunken); color: var(--muted); overflow: hidden; }
 .search svg { width: 18px; height: 18px; flex: none; }
-.search input { flex: 1 1 auto; min-width: 0; border: 0; outline: none; background: transparent; padding: 0; color: var(--ink); }
+.search input:not([type="checkbox"]) { flex: 1 1 auto; min-width: 0; border: 0; outline: none; background: transparent; padding: 0; color: var(--ink); }
+.search input[type="checkbox"] { flex: none; margin: 0; accent-color: var(--accent); }
 .search input::placeholder { color: var(--muted); }
 .state { display: inline-flex; align-items: center; gap: 6px; flex: none; white-space: nowrap; color: var(--ink-2); }
 .state.wait { color: var(--wait); } .state.err { color: var(--err); }
@@ -243,7 +244,7 @@ dialog.panel::backdrop { background: color-mix(in srgb, #000 40%, transparent); 
   .topbar .lead { display: inline-grid; }
   .topbar .ttl { padding: 0 4px; }
   .crumb { padding: 11px 0; margin: -11px 0; }
-  .search input { font-size: 16px; transform: scale(.9375); transform-origin: left center; width: calc(100% / .9375); }
+  .search input:not([type="checkbox"]) { font-size: 16px; transform: scale(.9375); transform-origin: left center; width: calc(100% / .9375); }
   .find-chips { padding: 6px 4px 6px; }
   .chip { min-height: 36px; }
   .chip::before { content: ""; position: absolute; inset: -4px 0; }

@@ -18,6 +18,7 @@ export type {
 
 /** Metadata and fenced recorded status are partial observations, never control authority. */
 export interface CatalogSession {
+  lifecycle: 'current' | 'retained';
   transcript?: { generation: string; errorsGeneration: string; total: number };
   details?: SessionDetails;
   status?: {
@@ -157,7 +158,10 @@ export function parseCatalogSession(value: unknown): CatalogSession {
     tokens = array(row.tokens, number);
   if (tokens.length !== 3 || tokens.some((token) => token < 0))
     throw new Error('Invalid catalog tokens');
+  if (row.lifecycle !== 'current' && row.lifecycle !== 'retained')
+    throw new Error('Invalid catalog lifecycle');
   return {
+    lifecycle: row.lifecycle,
     details: row.details == null ? undefined : parseSessionDetails(row.details),
     status: recordedStatus(row.status),
     transcript:

@@ -1164,6 +1164,27 @@ fn read_page(
         let is_codex = row.harness == "codex";
         let partial_summary = partial_history.contains(&row.key);
         let current = row.lifecycle == crate::model::summary::CatalogLifecycle::Current;
+        // A complete membership publication can precede a new runtime facts
+        // snapshot. Keep status unavailable, but expose the stale derivation so
+        // readers retry instead of retaining unknown dots until navigation.
+        let runtime_pending = current
+            && facts_known
+            && !retired_native
+            && state == "cached"
+            && runtime.is_some()
+            && row.query.as_ref().is_some_and(|saved| {
+                saved["runtime"].as_str() != runtime.as_deref()
+                    && crate::model::summary::query_observation_matches(
+                        saved,
+                        &row.sources,
+                        false,
+                        None,
+                    )
+                    .unwrap_or(false)
+            });
+        if runtime_pending && page_state == "cached" {
+            page_state = "stale";
+        }
         let observation = if let Some(saved) = &row.query {
             if crate::model::summary::query_observation_matches(
                 saved,
@@ -1222,8 +1243,7 @@ fn read_page(
             .remove("sources");
         item["source_refs"] = json!(refs);
         item["freshness"] = json!({"state":state});
-        item["facts_observation"] =
-            json!({"state":if facts_known { "cached" } else { "unavailable" }});
+        item["facts_observation"] = json!({"state":if runtime_pending {"stale"} else if facts_known { "cached" } else { "unavailable" }});
         item["native_selection"] = if is_codex {
             json!({"state":if !facts_known { "unavailable" } else if retired_native { "retired" } else if codex_selection_known { "cached" } else { "incomplete" }})
         } else {
@@ -1244,6 +1264,10 @@ fn read_page(
         for item in &mut items {
             if item["status"]["observation"] == "current" {
                 item["status"] = json!({"state":null,"observation":"unavailable"});
+                item["facts_observation"] = json!({"state":"stale"});
+                if page_state == "cached" {
+                    page_state = "stale";
+                }
             }
         }
     }
@@ -4409,6 +4433,15 @@ mod tests {
                 status(""),
                 json!({"state":null,"observation":"unavailable"})
             );
+            let (_, body) = fixture.body("");
+            assert_eq!(
+                body["items"][0]["facts_observation"]["state"],
+                if field == "runtime" {
+                    "stale"
+                } else {
+                    "cached"
+                }
+            );
         }
         save(&original);
         let facts = fixture.options.facts.as_ref().unwrap();
@@ -4419,8 +4452,30 @@ mod tests {
             status(""),
             json!({"state":null,"observation":"unavailable"})
         );
+        let (_, unavailable) = fixture.body("");
+        assert_eq!(
+            unavailable["items"][0]["facts_observation"]["state"],
+            "unavailable"
+        );
+        // A valid atomic facts publication restores source authority while its
+        // existing complete Catalog still carries the prior runtime fence.
+        crate::write_facts(
+            facts,
+            &serde_json::from_value::<crate::Facts>(changed).unwrap(),
+        )
+        .unwrap();
+        let (_, pending) = fixture.body("");
+        assert_eq!(pending["completeness"]["state"], "complete");
+        assert_eq!(pending["freshness"], "stale");
+        assert_eq!(pending["items"][0]["facts_observation"]["state"], "stale");
         fixture.publish_existing();
         assert_ne!(status("")["state"], Value::Null);
+        let (_, refreshed) = fixture.body("");
+        assert_eq!(refreshed["freshness"], "cached");
+        assert_eq!(
+            refreshed["items"][0]["facts_observation"]["state"],
+            "cached"
+        );
         let source = fixture
             .options
             .claude_home

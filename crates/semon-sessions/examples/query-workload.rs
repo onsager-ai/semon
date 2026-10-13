@@ -25,6 +25,25 @@ fn rss_kib() -> Option<u64> {
         })
 }
 
+// RSS retains allocator pages after native preparation. Distinguish those pages
+// from live allocations on the GNU libc workload host; this is not a product
+// cache-size estimate and is unavailable on other allocators.
+fn heap_bytes() -> Option<serde_json::Value> {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    {
+        // SAFETY: mallinfo2 takes no pointers and reads the allocator's counters.
+        let heap = unsafe { libc::mallinfo2() };
+        Some(json!({
+            "allocated":heap.uordblks.saturating_add(heap.hblkhd),
+            "reserved":heap.arena.saturating_add(heap.hblkhd)
+        }))
+    }
+    #[cfg(not(all(target_os = "linux", target_env = "gnu")))]
+    {
+        None
+    }
+}
+
 fn read_counters() -> Option<(u64, u64)> {
     let value = fs::read_to_string("/proc/self/io").ok()?;
     let field = |key: &str| {
@@ -111,6 +130,7 @@ fn main() -> io::Result<()> {
     }
     let cold_ms = started.elapsed().as_secs_f64() * 1000.;
     let cold_rss = rss_kib();
+    let cold_heap = heap_bytes();
     let sources = Arc::new(SessionSources::from_catalog_observers(
         inputs
             .iter()
@@ -154,9 +174,9 @@ fn main() -> io::Result<()> {
     println!(
         "{}",
         json!({"history_per_machine":history,"machines":machines,
-        "cold_catalog_complete_ms":cold_ms,"catalog_page_bytes":catalog_bytes,"cold_rss_kib":cold_rss,
+        "cold_catalog_complete_ms":cold_ms,"catalog_page_bytes":catalog_bytes,"cold_rss_kib":cold_rss,"cold_heap_bytes":cold_heap,
         "first_tx_ms":first_tx_ms,"warm_tx_p50_ms":samples[50],"warm_tx_p95_ms":samples[95],
-        "tx_bytes":bytes,"warm_rss_kib":rss_kib(),"selected_records":120,"warm_samples":100,
+        "tx_bytes":bytes,"warm_rss_kib":rss_kib(),"warm_heap_bytes":heap_bytes(),"selected_records":120,"warm_samples":100,
         "warm_read_counters":reads})
     );
     sources.close();

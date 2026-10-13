@@ -204,6 +204,33 @@ fn insert_fields(
             .execute([scope])?;
     }
     if complete {
+        if !maintain_counts {
+            // Bulk publication computes exact counts once at finish_backfill.
+            // Reuse a bounded VALUES statement instead of executing SQLite's
+            // insert program separately for every gram in both read scopes.
+            const BATCH: usize = 64;
+            let last = row.last.unwrap_or(0);
+            let mut grams = grams.iter().peekable();
+            while grams.peek().is_some() {
+                let batch: Vec<_> = grams.by_ref().take(BATCH).collect();
+                let values = (0..batch.len())
+                    .map(|index| format!("(?1,?2,?{},?3)", index + 4))
+                    .collect::<Vec<_>>()
+                    .join(",");
+                let sql = format!(
+                    "INSERT INTO session_search_postings(read_scope,session_key,gram,last_ms) VALUES {values}"
+                );
+                let mut posting = transaction.prepare_cached(&sql)?;
+                posting.raw_bind_parameter(1, scope)?;
+                posting.raw_bind_parameter(2, &row.key)?;
+                posting.raw_bind_parameter(3, last)?;
+                for (index, gram) in batch.iter().enumerate() {
+                    posting.raw_bind_parameter(index + 4, gram.as_str())?;
+                }
+                posting.raw_execute()?;
+            }
+            return Ok(());
+        }
         let mut posting = transaction.prepare_cached("INSERT INTO session_search_postings(read_scope,session_key,gram,last_ms) VALUES(?1,?2,?3,?4)")?;
         let mut count = maintain_counts.then(|| transaction.prepare_cached("INSERT INTO session_search_counts(read_scope,gram,members) VALUES(?1,?2,1) ON CONFLICT(read_scope,gram) DO UPDATE SET members=members+1")).transpose()?;
         for gram in grams {
@@ -648,6 +675,12 @@ mod sqlite_tests {
             row("one", "shared rare"),
             row("two", "shared common"),
             row("three", "shared common"),
+            row(
+                "unicode",
+                &(0x400..0x480)
+                    .filter_map(char::from_u32)
+                    .collect::<String>(),
+            ),
             row("large", &"x".repeat(MAX_DOCUMENT_BYTES + 1)),
         ];
         let transaction = connection.transaction().unwrap();
@@ -660,6 +693,34 @@ mod sqlite_tests {
         backfill_catalog_row(&transaction, &retained).unwrap();
         finish_backfill(&transaction).unwrap();
         transaction.commit().unwrap();
+        // The bulk insert's full batches and final partial batch must preserve
+        // every Unicode gram and both scopes, including incomplete coverage.
+        let mut incremental = database();
+        let transaction = incremental.transaction().unwrap();
+        for row in &rows {
+            for scope in [CatalogReadScope::Current, CatalogReadScope::RetainedHistory] {
+                publish_row(&transaction, scope, row).unwrap();
+            }
+        }
+        publish_row(&transaction, CatalogReadScope::RetainedHistory, &retained).unwrap();
+        transaction.commit().unwrap();
+        for sql in [
+            "SELECT json_array(read_scope,session_key,gram,last_ms) FROM session_search_postings ORDER BY read_scope,session_key,gram",
+            "SELECT json_array(read_scope,gram,members) FROM session_search_counts ORDER BY read_scope,gram",
+            "SELECT json_array(read_scope,session_key,fields,complete) FROM session_search_documents ORDER BY read_scope,session_key",
+            "SELECT json_array(read_scope,incomplete) FROM session_search_coverage ORDER BY read_scope",
+        ] {
+            let read = |connection: &Connection| {
+                connection
+                    .prepare(sql)
+                    .unwrap()
+                    .query_map([], |row| row.get::<_, String>(0))
+                    .unwrap()
+                    .collect::<rusqlite::Result<Vec<_>>>()
+                    .unwrap()
+            };
+            assert_eq!(read(&connection), read(&incremental), "{sql}");
+        }
         let count = |connection: &Connection, scope: &str, gram: &str| -> i64 {
             connection
                 .query_row(

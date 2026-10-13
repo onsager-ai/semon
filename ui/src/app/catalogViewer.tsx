@@ -2034,7 +2034,13 @@ export function createCatalogViewer(
         throw new Error('History changed; refresh this list before loading another page.');
       if (append && next.items.some((item) => items.some((old) => old.key === item.key)))
         throw new Error('History page repeated a session. Refresh this list.');
-      listRetryDelay = 1000;
+      const pendingFacts = next.items.some(
+        (item) =>
+          item.lifecycle === 'current' &&
+          (item.facts_observation?.state === 'stale' ||
+            item.facts_observation?.state === 'unavailable'),
+      );
+      if (!pendingFacts) listRetryDelay = 1000;
       page = next;
       if (capabilities.source_candidates && !candidateLoaded) void loadCandidates(false);
       cursor = next.next_cursor;
@@ -2043,7 +2049,9 @@ export function createCatalogViewer(
       drawList();
       chrome();
       if (
-        (next.completeness.state === 'partial' || next.search?.index_complete === false) &&
+        (next.completeness.state === 'partial' ||
+          next.search?.index_complete === false ||
+          pendingFacts) &&
         items.length <= 60
       ) {
         const refresh = () => {
@@ -2052,7 +2060,8 @@ export function createCatalogViewer(
           // provisional discovery advances; focus must not stall publication.
           void loadList(false);
         };
-        listRetry = scope.timeout(refresh, 1000);
+        listRetry = scope.timeout(refresh, pendingFacts ? listRetryDelay : 1000);
+        if (pendingFacts) listRetryDelay = Math.min(8000, listRetryDelay * 2);
       }
     } catch (error) {
       if (disposed || epoch !== listEpoch) return;
