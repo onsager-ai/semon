@@ -9,6 +9,8 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, bail, ensure};
 use codex_protocol::items::TurnItem;
+use codex_protocol::models::ResponseItem;
+use codex_protocol::protocol::{ExecCommandBeginEvent, ExecCommandEndEvent};
 use codex_rollout_trace::{
     ConversationItemKind, RawPayloadKind, RawTraceEventContext, RawTraceEventPayload, ToolCallKind,
     ToolCallRequester, ToolCallSummary, TraceWriter, replay_bundle,
@@ -18,6 +20,10 @@ use serde_json::{Value, json};
 const UPSTREAM_COMMIT: &str = "a9b0815167c27ab13719dd12d13b63e02b70d221";
 const MAX_FIXTURE_BYTES: u64 = 10 * 1024 * 1024;
 const DIRECT_CALL_ID: &str = "start-26789";
+// core/src/tools/context.rs response_text, not code_mode_result JSON.
+const DIRECT_OUTPUT: &str =
+    "Chunk ID: old\nWall time: 0.1000 seconds\nProcess running with session ID 26789\nOutput:\nold";
+const CELL_HEADER: &str = "Script completed\nWall time 0.1 seconds\nOutput:\n";
 const OUTER_CALL_ID: &str = "multi-output";
 const OUTER_SOURCE: &str = r#"text(await tools.exec_command({cmd:"printf new"})); text(await tools.write_stdin({session_id:26789,chars:""}));"#;
 
@@ -191,15 +197,9 @@ fn validate_fixture_pairing(
     );
 
     let direct_output = response_item(legacy_rows, "function_call_output", DIRECT_CALL_ID)?;
-    let direct_result: Value = serde_json::from_str(
-        direct_output["output"]
-            .as_str()
-            .context("direct function_call_output is not text")?,
-    )
-    .context("parse direct start result")?;
     ensure!(
-        direct_result["session_id"].as_u64() == Some(26789),
-        "direct start output must name its own session 26789"
+        direct_output["output"].as_str() == Some(DIRECT_OUTPUT),
+        "direct model result must retain the pinned formatter text, never Code Mode JSON"
     );
 
     let outer_call = response_item(legacy_rows, "custom_tool_call", OUTER_CALL_ID)?;
@@ -210,7 +210,7 @@ fn validate_fixture_pairing(
     let outer_output = response_item(legacy_rows, "custom_tool_call_output", OUTER_CALL_ID)?;
     let outer_parts = text_parts(&outer_output["output"])?;
     ensure!(
-        outer_parts.len() == 3 && outer_parts[0].trim_start().starts_with("Script completed"),
+        outer_parts.len() == 3 && outer_parts[0] == CELL_HEADER,
         "mixed outer-cell output must be one success header and two JSON results"
     );
     let new_result: Value =
@@ -254,8 +254,6 @@ fn validate_fixture_pairing(
                 == json!("unified_exec_startup")
             && scenario["synthetic_shell_environment"]["nested_process_source"]
                 == json!("unified_exec_startup")
-            && scenario["synthetic_shell_environment"]["poll_process_source"]
-                == json!("unified_exec_interaction")
             && scenario["synthetic_shell_environment"]["direct_process_command"]
                 == json!(["/bin/sh", "-c", "printf old"])
             && scenario["synthetic_shell_environment"]["nested_process_command"]
@@ -298,17 +296,32 @@ fn validate_fixture_pairing(
                 == direct_call["arguments"].as_str(),
         "direct trace invocation differs from the default function_call"
     );
+    let direct_dispatch_end = trace_event(
+        trace_events,
+        "tool_call_ended",
+        "tool_call_id",
+        DIRECT_CALL_ID,
+    )?;
+    let direct_dispatch_result = payload_data_value(direct_dispatch_end, "result_payload")?;
+    ensure!(
+        direct_dispatch_result["type"] == "direct_response"
+            && direct_dispatch_result["response_item"] == *direct_output,
+        "direct dispatch result must preserve its model-facing formatter output"
+    );
     let direct_end = trace_event(
         trace_events,
         "tool_call_runtime_ended",
         "tool_call_id",
-        "tool-direct",
+        DIRECT_CALL_ID,
     )?;
     let direct_runtime = payload_data_value(direct_end, "runtime_payload")?;
     ensure!(
         direct_runtime["process_id"].as_str() == Some("26789")
+            && direct_runtime["call_id"].as_str() == Some(DIRECT_CALL_ID)
             && direct_runtime["source"].as_str() == Some("unified_exec_startup")
+            && direct_runtime["cwd"].as_str() == Some("/fixture/project")
             && direct_runtime["command"] == json!(["/bin/sh", "-c", "printf old"])
+            && direct_runtime["aggregated_output"].as_str() == Some("old")
             && direct_runtime["exit_code"].as_i64() == Some(0),
         "direct trace operation must start process 26789 with the paired command"
     );
@@ -349,9 +362,27 @@ fn validate_fixture_pairing(
         "tool-new",
     )?;
     let new_runtime = payload_data_value(new_end, "runtime_payload")?;
+    let new_invocation = payload_data_value(nested_starts[0], "invocation_payload")?;
+    let new_arguments: Value = serde_json::from_str(
+        new_invocation["payload"]["arguments"]
+            .as_str()
+            .context("new invocation arguments missing")?,
+    )?;
+    let new_dispatch_end =
+        trace_event(trace_events, "tool_call_ended", "tool_call_id", "tool-new")?;
+    let new_dispatch_result = payload_data_value(new_dispatch_end, "result_payload")?;
+    ensure!(
+        new_invocation["tool_name"] == "exec_command"
+            && new_invocation["payload"]["type"] == "function"
+            && new_arguments == json!({"cmd":"printf new"})
+            && new_dispatch_result["type"] == "code_mode_response"
+            && new_dispatch_result["value"] == new_result,
+        "new command dispatch must match the outer source and printed Code Mode result"
+    );
     ensure!(
         new_runtime["process_id"].as_str() == Some("95583")
             && new_runtime["source"].as_str() == Some("unified_exec_startup")
+            && new_runtime["cwd"].as_str() == Some("/fixture/project")
             && new_runtime["command"] == json!(["/bin/sh", "-c", "printf new"])
             && new_runtime["aggregated_output"].as_str() == Some("new")
             && new_runtime["exit_code"].as_i64() == Some(0),
@@ -376,20 +407,33 @@ fn validate_fixture_pairing(
                 == paginated_command.aggregated_output.as_deref(),
         "Paginated CommandExecution process, command, and output must match the paired runtime and printed result"
     );
-    let poll_end = trace_event(
-        trace_events,
-        "tool_call_runtime_ended",
-        "tool_call_id",
-        "tool-poll",
+    let poll_invocation = payload_data_value(nested_starts[1], "invocation_payload")?;
+    let poll_arguments: Value = serde_json::from_str(
+        poll_invocation["payload"]["arguments"]
+            .as_str()
+            .context("poll invocation arguments missing")?,
     )?;
-    let poll_runtime = payload_data_value(poll_end, "runtime_payload")?;
     ensure!(
-        poll_runtime["process_id"].as_str() == Some("26789")
-            && poll_runtime["source"].as_str() == Some("unified_exec_interaction")
-            && poll_runtime["command"] == json!(["/bin/sh", "-c", "printf old"])
-            && poll_runtime["interaction_input"].as_str() == Some("")
-            && poll_runtime.get("exit_code").and_then(Value::as_i64) == Some(0),
-        "the outer-cell poll must complete old process 26789"
+        poll_invocation["tool_name"] == "write_stdin"
+            && poll_invocation["payload"]["type"] == "function"
+            && poll_arguments == json!({"session_id":26789,"chars":""}),
+        "canonical poll invocation must name old process 26789"
+    );
+    let poll_end = trace_event(trace_events, "tool_call_ended", "tool_call_id", "tool-poll")?;
+    let poll_dispatch_result = payload_data_value(poll_end, "result_payload")?;
+    ensure!(
+        poll_dispatch_result["type"] == "code_mode_response"
+            && poll_dispatch_result["value"] == poll_result,
+        "canonical poll result must match its printed Code Mode result"
+    );
+    ensure!(
+        !trace_events.iter().any(|event| {
+            matches!(
+                event["payload"]["type"].as_str(),
+                Some("tool_call_runtime_started" | "tool_call_runtime_ended")
+            ) && event["payload"]["tool_call_id"] == "tool-poll"
+        }),
+        "empty write_stdin polls do not emit hypothetical exec runtime begin/end"
     );
     ensure!(
         !trace_events.iter().any(|event| {
@@ -605,6 +649,45 @@ fn payload_data_value<'a>(event: &'a Value, field: &str) -> anyhow::Result<&'a V
 
 fn append_trace_events(records: &[Value], writer: &TraceWriter) -> anyhow::Result<()> {
     for (index, record) in records.iter().enumerate() {
+        if matches!(
+            record["payload"]["type"].as_str(),
+            Some("tool_call_runtime_started" | "tool_call_runtime_ended")
+        ) {
+            let mut value = payload_data_value(record, "runtime_payload")?.clone();
+            ensure!(
+                value["call_id"] == record["payload"]["tool_call_id"],
+                "native runtime envelope and payload must use the same emitted call_id"
+            );
+            ensure!(
+                value["cwd"] == "/fixture/project",
+                "trace cwd must be a native path"
+            );
+            // protocol_event.rs serializes PathUri as an inferred native path.
+            // Normalize only this fixture's known cwd for public live-event decoding.
+            value["cwd"] = json!("file:///fixture/project");
+            if record["payload"]["type"] == "tool_call_runtime_started" {
+                let _: ExecCommandBeginEvent = serde_json::from_value(value)
+                    .context("decode required public exec begin fields")?;
+            } else {
+                let _: ExecCommandEndEvent = serde_json::from_value(value)
+                    .context("decode required public exec end fields")?;
+            }
+        }
+        // Check the real public model-item shape before the reducer sees it.
+        let inference = match record["payload"]["type"].as_str() {
+            Some("inference_started") => Some(("request_payload", "input")),
+            Some("inference_completed") => Some(("response_payload", "output_items")),
+            _ => None,
+        };
+        if let Some((field, items)) = inference {
+            for item in payload_data_value(record, field)?[items]
+                .as_array()
+                .context("inference payload has no model-item array")?
+            {
+                let _: ResponseItem = serde_json::from_value(item.clone())
+                    .context("deserialize inference model item through pinned protocol")?;
+            }
+        }
         let context_value = record.get("context").cloned().unwrap_or(Value::Null);
         let context = RawTraceEventContext {
             thread_id: optional_string(&context_value, "thread_id")?,

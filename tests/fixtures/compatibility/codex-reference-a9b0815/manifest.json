@@ -11,7 +11,9 @@
     "legacy_completed_command_execution_retained": false,
     "paginated_completed_command_execution_retained": true,
     "paginated_command_output_max_bytes": 65536,
-    "paginated_command_execution_fixture_process_ids": ["95583"]
+    "paginated_command_execution_fixture_process_ids": [
+      "95583"
+    ]
   },
   "paired_default_and_trace_scenario": {
     "direct_start_call_id": "start-26789",
@@ -23,12 +25,28 @@
       "login": false,
       "direct_process_source": "unified_exec_startup",
       "nested_process_source": "unified_exec_startup",
-      "poll_process_source": "unified_exec_interaction",
-      "direct_process_command": ["/bin/sh", "-c", "printf old"],
-      "nested_process_command": ["/bin/sh", "-c", "printf new"]
+      "direct_process_command": [
+        "/bin/sh",
+        "-c",
+        "printf old"
+      ],
+      "nested_process_command": [
+        "/bin/sh",
+        "-c",
+        "printf new"
+      ]
     },
-    "outer_output_entries": ["success_header", "new_95583_json", "completed_poll_json_without_session_id"],
-    "runtime_nested_tool_ids": ["tool-new", "tool-poll"]
+    "outer_output_entries": [
+      "success_header",
+      "new_95583_json",
+      "completed_poll_json_without_session_id"
+    ],
+    "runtime_nested_tool_ids": [
+      "tool-new",
+      "tool-poll"
+    ],
+    "trace_runtime_qualification": "source-shaped synthetic; write_stdin terminal relation comes from canonical dispatch invocation/result, not fictitious runtime begin/end",
+    "direct_runtime_call_id": "start-26789"
   },
   "trace_bundle": {
     "trace_id": "synthetic-trace",
@@ -36,7 +54,10 @@
     "root_thread_id": "thread-root"
   },
   "expected_upstream_reducer": {
-    "nested_tool_call_ids": ["tool-new", "tool-poll"],
+    "nested_tool_call_ids": [
+      "tool-new",
+      "tool-poll"
+    ],
     "nested_tool_edges": [
       {
         "tool_call_id": "tool-new",
@@ -52,11 +73,16 @@
     "terminal_sessions": [
       {
         "terminal_id": "26789",
-        "operation_ids": ["terminal_operation:1", "terminal_operation:3"]
+        "operation_ids": [
+          "terminal_operation:1",
+          "terminal_operation:3"
+        ]
       },
       {
         "terminal_id": "95583",
-        "operation_ids": ["terminal_operation:2"]
+        "operation_ids": [
+          "terminal_operation:2"
+        ]
       }
     ]
   },
@@ -64,19 +90,31 @@
     "recoverable": [
       {
         "edge": "direct start-26789 function_call to its function_call_output",
-        "basis": "exact model-visible call_id start-26789"
+        "basis": "exact model-visible call_id start-26789",
+        "kind": "model_pair",
+        "call_id": "start-26789",
+        "semon_supported": true
       },
       {
         "edge": "direct start-26789 result to terminal session 26789",
-        "basis": "the paired result JSON explicitly carries session_id 26789"
+        "basis": "exact session ID in pinned direct formatter text; a recoverable source contract that the current Semon adapter does not decode",
+        "semon_supported": false,
+        "kind": "formatted_terminal",
+        "process_id": "26789"
       },
       {
         "edge": "outer multi-output custom_tool_call to its custom_tool_call_output",
-        "basis": "exact model-visible call_id multi-output"
+        "basis": "exact model-visible call_id multi-output",
+        "kind": "model_pair",
+        "call_id": "multi-output",
+        "semon_supported": true
       },
       {
         "edge": "paginated CommandExecution to terminal 95583",
-        "basis": "exact process_id in the separate Paginated completed-item carrier"
+        "basis": "exact process_id in separate Paginated completed-item carrier; current Semon adapter has no standalone unowned command projection",
+        "semon_supported": false,
+        "kind": "standalone_completed_command",
+        "process_id": "95583"
       }
     ],
     "ambiguous": [
@@ -110,8 +148,24 @@
       },
       {
         "edge": "runtime tool calls to terminal operations and process IDs",
-        "basis": "synthetic ToolCallRuntimeStarted/Ended events reduced by the pinned upstream trace reducer"
+        "basis": "synthetic exec runtime begin/end and write_stdin canonical invocation/result reduced by pinned upstream trace reducer"
       }
+    ]
+  },
+  "semon_adapter_contract": {
+    "model_call_ids": [
+      "start-26789",
+      "multi-output"
+    ],
+    "unsupported_relations": [
+      "direct formatted terminal ID",
+      "standalone Paginated command projection"
+    ],
+    "native_capture": null,
+    "cli_version": null,
+    "excluded_runtime_tool_ids": [
+      "tool-new",
+      "tool-poll"
     ]
   }
 }
