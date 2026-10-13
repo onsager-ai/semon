@@ -42,6 +42,115 @@ pub(crate) fn catalog(connection: &Connection, key: &str) -> rusqlite::Result<Op
     }
 }
 
+/// An explicit older harness observation must carry its own complete recipe
+/// header and consumed-source cohort, independently of the Current owner.
+pub(crate) fn qualified(connection: &Connection, row: &CatalogRow) -> rusqlite::Result<bool> {
+    if row.sources.is_empty() || row.sources.len() > 64 {
+        return Ok(false);
+    }
+    let header: Option<(u32, String, bool)> = connection
+        .query_row(
+            "SELECT version,source_generation,incomplete FROM session_history_projections WHERE session_key=?1",
+            [&row.key],
+            |record| Ok((record.get(0)?, record.get(1)?, record.get(2)?)),
+        )
+        .optional()?;
+    let sources = crate::retention::source_generation(&row.sources).map_err(data)?;
+    Ok(header.is_some_and(|(version, recorded, incomplete)| {
+        version == VERSION && recorded == sources && !incomplete
+    }))
+}
+
+fn preserve_original_harness(tx: &Transaction<'_>, old: &CatalogRow) -> rusqlite::Result<()> {
+    // Existing History is original custody, including unsupported versions or
+    // incomplete recipes. A Current replacement cannot overwrite that state.
+    if catalog(tx, &old.key)?.is_some() {
+        return Ok(());
+    }
+    let mut history = old.clone();
+    history.lifecycle = crate::model::summary::CatalogLifecycle::Retained;
+    let header: Option<(String, u32, Option<String>, i64)> = tx.query_row(
+        "SELECT generation,version,source_generation,total FROM session_slot_projections WHERE session_key=?1",
+        [&old.key],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+    ).optional()?;
+    let metadata = encode(&history)?;
+    let original_header = encode(&header)?;
+    let mut bytes = metadata.len().saturating_add(original_header.len());
+    // Reuse the semantic metadata page's 64-row/1MiB budget for this
+    // selected-owner custody transfer. Refuse oversized original state before
+    // any Current overwrite; never truncate it or certify a partial copy.
+    if bytes > 1048576 {
+        return Err(rusqlite::Error::InvalidQuery);
+    }
+    let mut saved = Vec::new();
+    let mut recipes = tx.prepare("SELECT slot,CASE WHEN octet_length(metadata)<=1048576 THEN metadata END FROM session_slots WHERE session_key=?1 ORDER BY slot LIMIT 65")?;
+    for recipe in recipes.query_map([&old.key], |row| {
+        Ok((row.get::<_, i64>(0)?, row.get::<_, Option<String>>(1)?))
+    })? {
+        let (slot, recipe) = recipe?;
+        let recipe = recipe.ok_or(rusqlite::Error::InvalidQuery)?;
+        bytes = bytes.saturating_add(recipe.len());
+        if saved.len() == 64 || bytes > 1048576 {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        saved.push((slot, recipe));
+    }
+    drop(recipes);
+    let mut complete = header.as_ref().is_some_and(|(_, version, recorded, _)| {
+        *version == VERSION
+            && !old.sources.is_empty()
+            && old.sources.len() <= 64
+            && recorded.is_some()
+            && crate::retention::source_generation(&old.sources)
+                .ok()
+                .as_ref()
+                == recorded.as_ref()
+    });
+    complete &= header.as_ref().is_some_and(|(_, _, _, total)| {
+        *total >= 0 && usize::try_from(*total).ok() == Some(saved.len())
+    });
+    if complete {
+        let paths: BTreeSet<_> = old.sources.iter().map(|source| &source.path).collect();
+        for (_, recipe) in &saved {
+            let qualified = decode::<SavedSlot>(recipe)
+                .ok()
+                .is_some_and(|slot| slot.source_paths().iter().all(|path| paths.contains(*path)));
+            if !qualified {
+                complete = false;
+                break;
+            }
+        }
+    }
+    tx.execute(
+        "INSERT INTO session_history_catalog(session_key,metadata) VALUES(?1,?2)",
+        params![old.key, metadata],
+    )?;
+    tx.execute(
+        "INSERT OR REPLACE INTO meta(key,value) VALUES(?1,?2)",
+        params![
+            format!("history_original_header:{}", old.key),
+            original_header
+        ],
+    )?;
+    if let Some((generation, version, sources, total)) = header {
+        // History's hash column is non-nullable. Preserve the exact original
+        // nullable header separately; an absent hash remains explicitly
+        // incomplete and can never qualify as a fresh V5 observation.
+        tx.execute("INSERT INTO session_history_projections(session_key,generation,source_generation,version,total,incomplete) VALUES(?1,?2,?3,?4,?5,?6)",params![old.key,generation,sources.unwrap_or_default(),version,total,!complete])?;
+    }
+    let mut put = tx
+        .prepare("INSERT INTO session_history_slots(session_key,slot,metadata) VALUES(?1,?2,?3)")?;
+    for (slot, recipe) in saved {
+        put.execute(params![old.key, slot, recipe])?;
+    }
+    tx.execute(
+        "INSERT OR REPLACE INTO meta(key,value) VALUES(?1,'1')",
+        [format!("overview_needed:{}", old.key)],
+    )?;
+    Ok(())
+}
+
 /// Must run inside the same source/membership/revision-CAS transaction, before
 /// current rows or recipes are overwritten. No source body is copied or read.
 pub(crate) fn publish(tx: &Transaction<'_>, publication: &Publication<'_>) -> rusqlite::Result<()> {
@@ -67,6 +176,19 @@ pub(crate) fn publish(tx: &Transaction<'_>, publication: &Publication<'_>) -> ru
         let old = old_text
             .as_deref()
             .and_then(|text| serde_json::from_str::<CatalogRow>(text).ok());
+        let separate_harness = old
+            .as_ref()
+            .is_some_and(|old| old.harness != current.harness);
+        if separate_harness {
+            let old = old.as_ref().unwrap();
+            for source in &old.sources {
+                tx.execute("INSERT INTO session_catalog_sources(session_key,lifecycle,harness,native_id,source_path) VALUES(?1,'retained',?2,?3,?4) ON CONFLICT(session_key,source_path) DO UPDATE SET lifecycle='retained'",params![old.key,old.harness,source.native_id,source.path.to_string_lossy()])?;
+            }
+            preserve_original_harness(tx, old)?;
+            continue;
+        }
+        // A reused viewer key does not join two native harness identities.
+        // Retain the original owner and recipes independently of Current.
         let mut history = current.clone();
         let paths: BTreeSet<_> = current.sources.iter().map(|source| &source.path).collect();
         let mut missing = BTreeMap::new();
@@ -106,7 +228,7 @@ pub(crate) fn publish(tx: &Transaction<'_>, publication: &Publication<'_>) -> ru
             .into_iter()
             .collect();
         for source in missing.values() {
-            tx.execute("INSERT INTO session_catalog_sources(session_key,lifecycle,harness,native_id,source_path) VALUES(?1,'retained',?2,?3,?4) ON CONFLICT(session_key,source_path) DO UPDATE SET lifecycle='retained'",params![current.key,current.harness,source.native_id,source.path.to_string_lossy()])?;
+            tx.execute("INSERT INTO session_catalog_sources(session_key,lifecycle,harness,native_id,source_path) VALUES(?1,'retained',?2,?3,?4) ON CONFLICT(session_key,source_path) DO UPDATE SET lifecycle='retained'",params![current.key,old.as_ref().unwrap().harness,source.native_id,source.path.to_string_lossy()])?;
         }
 
         let mut slots = projection.slots.clone();

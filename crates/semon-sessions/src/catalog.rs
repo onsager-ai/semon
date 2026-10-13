@@ -959,6 +959,25 @@ fn read_page(
             if let Some(metadata) = crate::history_projection::catalog(&transaction, &current.key)?
             {
                 let history: CatalogRow = serde_json::from_str(&metadata)?;
+                if history.harness != current.harness {
+                    // Only explicit History identity reads can select the
+                    // original harness behind a reused Current viewer key.
+                    // Lists retain Current's indexed filters and ordering.
+                    if request.sid.as_deref() == Some(current.key.as_str())
+                        && history.key == current.key
+                    {
+                        if !crate::history_projection::qualified(&transaction, &history)? {
+                            return Ok(error(
+                                503,
+                                "catalog_unavailable",
+                                "The original retained history projection is incomplete.",
+                                true,
+                            ));
+                        }
+                        *current = history;
+                    }
+                    continue;
+                }
                 // History extends source context only; current indexed fields
                 // remain the list ordering/filter and native selection oracle.
                 if history.key != current.key
@@ -2805,7 +2824,7 @@ mod tests {
                 connection
                     .query_row("PRAGMA user_version", [], |row| row.get::<_, u32>(0))
                     .unwrap(),
-                24
+                25
             );
         }
     }
