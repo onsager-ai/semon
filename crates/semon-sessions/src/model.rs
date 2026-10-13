@@ -7139,7 +7139,7 @@ fn build_sources_inner(
         && crate::native_timing::enabled();
     if native_timing {
         let id = crate::native_timing::id(&EventCache::path(&options.cache));
-        let (parse, index_write) = cache.scan_durations();
+        let (parse, index_write) = builder.cache.scan_durations();
         eprintln!(
             "semon sessions native: producer={id} sources={} preparation={timings:?} projections={} parse_us={} index_write_us={}",
             files.len(),
