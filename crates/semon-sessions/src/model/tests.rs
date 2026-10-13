@@ -7253,7 +7253,7 @@ fn parser_cache_reset_rederives_direct_formatter_catalog_outcome() {
     );
     drop(connection);
 
-    let mut stale_cache = EventCache::open_scoped(&home.options.cache).unwrap();
+    let stale_cache = EventCache::open_scoped(&home.options.cache).unwrap();
     assert_eq!(
         stale_cache.session_catalog_generation().as_deref(),
         Some(old_catalog_generation.as_str())
