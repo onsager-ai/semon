@@ -1835,6 +1835,67 @@ fn relays_join_on_msg_id() {
 }
 
 #[test]
+fn causal_peer_names_do_not_invent_branch_turns_or_reuse_stale_evidence() {
+    let home = relay_home();
+    let built = home.build();
+    let root = turns_of(&built, "beta")[0];
+    let query = format!(
+        "sid=beta&turn={}&scope=retained_history",
+        crate::viewer::percent_encode(&root.id)
+    );
+    let read = || {
+        let reply = crate::session_causal_trace(&home.options, "fixture", &query);
+        assert_eq!(
+            reply.status,
+            200,
+            "{}",
+            String::from_utf8_lossy(&reply.body)
+        );
+        serde_json::from_slice::<Value>(&reply.body).unwrap()
+    };
+    let before = read();
+    assert_eq!(before["participants"]["alpha"], "Alpha");
+    assert_eq!(before["participants"].as_object().unwrap().len(), 1);
+    assert!(before["sessions"].get("alpha").is_none());
+    assert!(
+        before["turns"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|turn| turn["sid"] == "beta")
+    );
+    assert!(before["participants"].get("twin-1").is_none());
+    // A title update is a native source publication, not an independent name
+    // cache. The branch generation includes its qualified participant version.
+    let path = home
+        .options
+        .claude_home
+        .join("projects/-work-proj/alpha.jsonl");
+    writeln!(
+        fs::OpenOptions::new().append(true).open(path).unwrap(),
+        "{}",
+        json!({"type":"custom-title","customTitle":"Updated Alpha","sessionId":"alpha"})
+    )
+    .unwrap();
+    home.build();
+    let renamed = read();
+    assert_eq!(renamed["participants"]["alpha"], "Updated Alpha");
+    assert_ne!(renamed["generation"], before["generation"]);
+    assert_eq!(renamed["turns"], before["turns"]);
+    let db = rusqlite::Connection::open(EventCache::path(&home.options.cache)).unwrap();
+    db.execute(
+        "UPDATE session_trace_headers SET source_generation='stale' WHERE session_key='alpha'",
+        [],
+    )
+    .unwrap();
+    let stale = read();
+    assert!(stale["participants"].get("alpha").is_none());
+    assert_eq!(stale["incomplete"], true);
+    assert_eq!(stale["turns"], before["turns"]);
+    assert_eq!(stale["sessions"], before["sessions"]);
+}
+
+#[test]
 fn failed_and_denied_sends_are_failed_relays_with_no_receiver() {
     let home = relay_home();
     let built = home.build();
@@ -7471,6 +7532,19 @@ fn partial_lineage_source_disappearance_preserves_natural_history_context() {
         .find(|entry| entry["text"] == "original cleared prompt")
         .unwrap()
         .clone();
+    let original_mcp = crate::Query::from_sources(std::sync::Arc::new(
+        crate::SessionSources::with_machines(vec![("fixture".into(), home.options.clone())]),
+    ))
+    .call_selected_at(
+        "fixture",
+        "root",
+        "read_transcript",
+        &json!({"id":"root","after":0,"limit":100}),
+        None,
+        crate::SessionSourceReadMode::LocalThenProvider,
+        crate::model::now_ms(),
+    )
+    .unwrap();
     fs::remove_file(&removed.path).unwrap();
     let current = home.build();
     assert!(current.sessions.contains_key("root"));
@@ -7739,6 +7813,43 @@ fn partial_lineage_source_disappearance_preserves_natural_history_context() {
             .iter()
             .any(|entry| entry["text"] == "new current answer")
     );
+    // A cold MCP consumer must page the same composite custody: neither a
+    // current-only fragment nor a stale whole-session summary is sufficient.
+    let mut query = crate::Query::from_sources(std::sync::Arc::new(
+        crate::SessionSources::with_machines(vec![("fixture".into(), home.options.clone())]),
+    ));
+    let mut position = 0;
+    let mut paged = Vec::new();
+    loop {
+        let page = query
+            .call_selected_at(
+                "fixture",
+                "root",
+                "read_transcript",
+                &json!({"id":"root","after":position,"limit":1}),
+                Some(&archive),
+                crate::SessionSourceReadMode::LocalThenProvider,
+                crate::model::now_ms(),
+            )
+            .unwrap();
+        let items = page["entries"].as_array().unwrap();
+        if items.is_empty() {
+            break;
+        }
+        assert_eq!(items.len(), 1);
+        paged.push(items[0].clone());
+        let next = page["to"].as_u64().unwrap();
+        assert!(next > position, "composite paging did not advance: {page}");
+        position = next;
+        assert!(paged.len() <= 3, "composite paging repeated entries");
+    }
+    assert_eq!(
+        &paged[..2],
+        original_mcp["entries"].as_array().unwrap().as_slice(),
+        "composite paging changed the original native entry identities"
+    );
+    assert_eq!(paged.len(), 3);
+    assert_eq!(paged[2]["text"], "new current answer");
     assert!(!removed.path.exists());
     let connection = rusqlite::Connection::open(EventCache::path(&home.options.cache)).unwrap();
     let body_leaks:i64=connection.query_row("SELECT count(*) FROM session_history_slots WHERE instr(metadata,'original cleared prompt')>0 OR instr(metadata,'new current answer')>0",[],|row|row.get(0)).unwrap();

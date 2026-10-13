@@ -217,11 +217,13 @@ navigation root; shared safe-path validation and native links apply. It creates
 no additional router, model store or poller. The compact gallery covers geometry,
 Escape/focus return and remount; Hub provides the real server/form adoption checks.
 
-The native relationship view resolves incoming sender names from its selected
-session's bounded family metadata when the exact related identity is present.
-This does not add ancestors to the causal cohort or timeline totals. An incoming
-root retains its handoff identity and kind; absent or ambiguous related metadata
-stays explicitly unavailable.
+The native relationship view resolves peer names from at most 128 exact recorded
+handoff participants, qualified against the same Catalog/source generation as
+the selected branch. Participant versions enter its response generation. The
+selected session's bounded family metadata also supplies exact ancestor names.
+These names never add sessions or turns to the causal cohort or timeline totals.
+An incoming root retains its handoff identity and kind; absent, ambiguous or
+stale related metadata stays explicitly unavailable.
 
 Session list grouping uses only loaded Catalog rows and exact canonical parent
 keys. Missing parents remain visible roots; malformed cycles receive a

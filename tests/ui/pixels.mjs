@@ -498,11 +498,19 @@ async function ready(page) {
   );
   await page.waitForTimeout(120);
 }
-async function shot(page, size) {
+async function shot(page, size, catalog = false) {
   await ready(page);
-  return PNG.sync.read(
-    await page.screenshot({ fullPage: size === 'phone', animations: 'disabled', caret: 'hide' }),
-  );
+  const deadline = Date.now() + 5000;
+  do {
+    if (catalog) await settledCatalog(page, Math.max(1, deadline - Date.now()));
+    const capture = await page.screenshot({
+      fullPage: size === 'phone',
+      animations: 'disabled',
+      caret: 'hide',
+    });
+    if (!catalog || (await page.evaluate(catalogQualified))) return PNG.sync.read(capture);
+  } while (Date.now() < deadline);
+  throw Error('Catalog observation changed throughout its bounded capture');
 }
 
 const compare = (a, b) => comparePixels(a, b, THRESHOLD);
@@ -580,15 +588,17 @@ async function nav(page, route, D, mockup) {
   await page.waitForTimeout(80);
 }
 
-async function settledCatalog(page) {
+function catalogQualified() {
+  return (
+    document.querySelector('#page .ph .sub')?.textContent.endsWith(' · Cached history') &&
+    !document.querySelector('[data-session-row="list"] [aria-label="Status unavailable"]')
+  );
+}
+async function settledCatalog(page, timeout) {
   // Push publishes native bytes before their paired runtime facts. Compare
   // settled observations rather than an intermediate unavailable status. A
   // reader that never recovers still fails the normal bounded browser deadline.
-  await page.waitForFunction(
-    () =>
-      document.querySelector('#page .ph .sub')?.textContent.endsWith(' · Cached history') &&
-      !document.querySelector('[data-session-row="list"] [aria-label="Status unavailable"]'),
-  );
+  await page.waitForFunction(catalogQualified, undefined, { timeout });
 }
 
 // Masked in every comparison: the jump-to-latest button, a transient control that floats at a scroll position (its place shifts a pixel or two
@@ -776,12 +786,10 @@ function saveMismatch(row, name, scheme, p) {
         ref = other ? 'served' : enforced ? mapped : 'overhaul';
       const port = other ?? (await portFor(ref));
       await nav(page, s.served, D, false);
-      if (other && s.served.v === 'sessions') await settledCatalog(page);
-      const a = await shot(page, size);
+      const a = await shot(page, size, !!other && s.served.v === 'sessions');
       if (other) await nav(port, s.served, referenceData, false);
       else await nav(port, s.port, D, true);
-      if (other && s.served.v === 'sessions') await settledCatalog(port);
-      const b = await shot(port, size);
+      const b = await shot(port, size, !!other && s.served.v === 'sessions');
       const p = compare(a, b);
       const row = {
         scheme,
