@@ -7147,6 +7147,7 @@ fn build_sources_inner(
             parse.as_micros(),
             index_write.as_micros()
         );
+        builder.cache.emit_scan_measurements(&id);
     }
     match target {
         BuildTarget::Sources => {
