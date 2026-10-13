@@ -46,12 +46,15 @@ use lock::Hold;
 pub use lock::StateLock;
 pub use stop::Stop;
 
-use wire::{Append, CHUNK_BYTES, HEAD_BYTES, Length, base64_encode, head_sha256, sha256_hex};
+use wire::{Append, HEAD_BYTES, Length, base64_encode, head_sha256, sha256_hex};
 
 /// A line longer than this is redacted and sent in pieces of this size.
 const LINE_CAP: usize = 64 * 1024 * 1024;
 /// Whole-file inputs (`*.json`) larger than this are skipped.
 const WHOLE_CAP: u64 = 4 * 1024 * 1024;
+/// Keep upload requests short on slow links. This is the sender's default,
+/// independent of the protocol's larger [`wire::CHUNK_BYTES`] maximum.
+const UPLOAD_CHUNK_BYTES: usize = 256 * 1024;
 /// How often `--watch` looks for new lines, and sends facts.
 const PASS_EVERY: Duration = Duration::from_secs(2);
 const FACTS_EVERY: Duration = Duration::from_secs(10);
@@ -378,7 +381,7 @@ impl Client {
             lock: None,
             state_path: options.state.clone(),
             state,
-            chunk: CHUNK_BYTES,
+            chunk: UPLOAD_CHUNK_BYTES,
             heads: BTreeMap::new(),
             generation_support: AtomicU8::new(GenerationSupport::Unknown as u8),
             progress: Arc::new(Mutex::new(status::Progress::new(wire::new_generation()?))),

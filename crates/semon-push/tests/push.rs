@@ -49,6 +49,7 @@ struct Received {
     hang_facts: bool,
     prepared_facts: Option<Facts>,
     appends: u64,
+    largest_append: usize,
     replaces: u64,
     conflicts: u64,
     /// Answer 500 after this many successful appends.
@@ -206,6 +207,7 @@ fn handle_append(received: &mut Received, body: &str) -> Response<std::io::Curso
     let Some(bytes) = base64_decode(&append.bytes) else {
         return json_response(400, json!({"error":"bytes"}));
     };
+    received.largest_append = received.largest_append.max(bytes.len());
     if received
         .fail_after
         .is_some_and(|limit| received.appends >= limit)
@@ -1251,6 +1253,74 @@ fn copilot_redacted_mirror_survives_lost_ack_restart_partial_and_replacement() {
             "source deletion does not erase previously received viewing evidence"
         );
     }
+}
+
+#[test]
+fn default_uploads_bound_long_lines_without_changing_redaction_or_one_shot_completion() {
+    let home = Home::new();
+    let receiver = receiver();
+    let secret = "sk-ant-api03-SECRETSECRETSECRETSECRET";
+    // Put a secret across a sender chunk boundary; it must be redacted
+    // before the complete line is split into separate HTTP requests.
+    let prefix = line("").find("\"content\":\"").unwrap() + "\"content\":\"".len();
+    let text = line(&format!(
+        "{}{secret}{}",
+        "a".repeat(256 * 1024 - prefix - 10),
+        "b".repeat(512 * 1024)
+    ));
+    home.write(LOG, &text);
+    let mut client = home.client(&receiver);
+    let report = client.pass(&home.options).unwrap();
+    assert_eq!(report.bytes, text.len() as u64);
+    assert_eq!(copy(&receiver, LOG), redacted(&text));
+    {
+        let received = receiver.state.lock().unwrap();
+        assert!(received.appends >= 3);
+        assert!(received.largest_append <= 256 * 1024);
+    }
+    // The saved checkpoint is usable by a new default client.
+    assert_eq!(home.client(&receiver).pass(&home.options).unwrap().bytes, 0);
+}
+
+#[test]
+fn default_watch_syncs_live_logs_before_archived_backfill_and_resumes_both() {
+    let home = Home::new();
+    let receiver = receiver();
+    let archive = "codex/archived_sessions/old.jsonl";
+    let active = "codex/sessions/current.jsonl";
+    let history = line(&"old".repeat(4096)).repeat(100);
+    let archived = home.write(archive, &history);
+    fs::File::open(archived)
+        .unwrap()
+        .set_times(fs::FileTimes::new().set_modified(std::time::UNIX_EPOCH))
+        .unwrap();
+    let live = line("current turn");
+    home.write(active, &live);
+    let options = home.push_options(&receiver.url);
+    let stop = Stop::new();
+    // Stop after the live log and one history batch are acknowledged.
+    receiver.state.lock().unwrap().stop_after = Some((2, stop.clone()));
+    let push = watch_in_background(&options, &stop);
+    wait_for("two accepted upload batches", || {
+        receiver.state.lock().unwrap().appends >= 2
+    });
+    stop_and_join(&stop, push).unwrap();
+    let saved = assert_stopped_cleanly(&options);
+    assert_eq!(copy(&receiver, active), redacted(&live));
+    let archived_bytes = copy(&receiver, archive);
+    assert!(!archived_bytes.is_empty());
+    assert!(archived_bytes.len() < history.len());
+    assert_eq!(archived_bytes, redacted(&history)[..archived_bytes.len()]);
+    assert_eq!(
+        saved["files"][archive]["sent"].as_u64().unwrap(),
+        archived_bytes.len() as u64
+    );
+    {
+        let received = receiver.state.lock().unwrap();
+        assert_eq!(received.data_batch_order[0], active);
+        assert!(received.largest_append <= 256 * 1024);
+    }
+    assert_resumes(&home, &receiver, &[(archive, history), (active, live)]);
 }
 
 #[test]
