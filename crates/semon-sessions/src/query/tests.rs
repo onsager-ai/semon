@@ -3127,6 +3127,51 @@ fn selected_transcript_pages_match_native_anchors_thinking_and_tool_observations
 }
 
 #[test]
+fn ordinary_windowed_paging_reuses_a_complete_in_window_native_context() {
+    let home = fixture();
+    let mut cache = crate::events::EventCache::open_scoped(&home.options.cache).unwrap();
+    crate::model::observe_catalog(
+        &home.options,
+        &mut cache,
+        &mut false,
+        &mut crate::model::Texts::default(),
+        NOW,
+    )
+    .unwrap();
+    let options = Options {
+        all: false,
+        scan_window: true,
+        ..home.options.clone()
+    };
+    let mut oracle = Query::from_sources(admitted(options.clone()));
+    for id in ["done", "lead", "scan"] {
+        for args in [
+            json!({"id":id,"limit":1}),
+            json!({"id":id,"after":0,"limit":2}),
+            json!({"id":id,"before":1,"limit":1}),
+            json!({"id":id,"after":100,"limit":1}),
+        ] {
+            let expected = oracle.call_at("read_transcript", &args, NOW).unwrap();
+            let mut query = Query::new(options.clone());
+            let loaded = crate::events::CACHE_READS.with(std::cell::Cell::get);
+            assert_eq!(
+                query.call_at("read_transcript", &args, NOW).unwrap(),
+                expected,
+                "physical-window paging changed native semantics: {args}"
+            );
+            assert!(
+                query.native.is_none(),
+                "in-window paging derived a complete selected cohort: {args}"
+            );
+            assert_eq!(
+                crate::events::CACHE_READS.with(std::cell::Cell::get),
+                loaded
+            );
+        }
+    }
+}
+
+#[test]
 fn focused_recorded_id_suffixes_preserve_native_global_identity() {
     let home = fixture();
     let peer = Home::new("testbox");
@@ -4048,6 +4093,57 @@ fn ordinary_multi_machine_focused_query_reuses_published_ownership() {
             );
             assert!(query.evidence().parts[1].data.sessions.is_empty());
         }
+    }
+}
+
+#[test]
+fn ordinary_single_machine_focus_does_not_qualify_a_provisional_native_identity() {
+    let home = Home::new("provisional-owner");
+    home.top("lead", &[human("lead", ts(12, 0), "observed Claude owner")]);
+    let mut cache = crate::events::EventCache::open_scoped(&home.options.cache).unwrap();
+    crate::model::observe_catalog(
+        &home.options,
+        &mut cache,
+        &mut false,
+        &mut crate::model::Texts::default(),
+        NOW,
+    )
+    .unwrap();
+    let db =
+        rusqlite::Connection::open(crate::events::EventCache::path(&home.options.cache)).unwrap();
+    db.execute(
+        "UPDATE meta SET value='partial' WHERE key='catalog_completeness'",
+        [],
+    )
+    .unwrap();
+    home.lines(
+        "codex/sessions/2026/09/24/rollout-lead.jsonl",
+        &[
+            codex_line(
+                ts(12, 0),
+                "session_meta",
+                json!({"id":"lead","cwd":"/work/proj"}),
+            ),
+            codex_line(
+                ts(12, 1),
+                "event_msg",
+                json!({"type":"user_message","message":"unpublished Codex collision"}),
+            ),
+        ],
+    );
+    let args = json!({"id":"lead"});
+    let mut oracle = Query::from_sources(admitted(Options {
+        scan_window: true,
+        ..home.options.clone()
+    }));
+    for tool in ["get_session", "read_transcript"] {
+        let expected = oracle.call_at(tool, &args, NOW);
+        assert_eq!(expected.as_ref().unwrap_err().code, "unknown_session");
+        assert_eq!(
+            home.query().call_at(tool, &args, NOW),
+            expected,
+            "provisional discovery lent a stale unqualified native identity"
+        );
     }
 }
 
