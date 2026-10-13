@@ -133,10 +133,37 @@ pub(crate) fn publish_current_rows(
         for scope in ["current", "retained_history"] {
             remove_members(transaction, scope)?;
         }
-        for row in rows {
-            let (encoded, grams, complete) = prepared_fields(row)?;
+        let prepared = rows
+            .iter()
+            .map(|row| prepared_fields(row))
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        for (row, (encoded, _, complete)) in rows.iter().zip(&prepared) {
             for scope in ["current", "retained_history"] {
-                insert_fields(transaction, scope, row, &encoded, &grams, complete, false)?;
+                insert_document(transaction, scope, row, encoded, *complete)?;
+            }
+        }
+        // The ordering index groups grams, while its primary key groups source
+        // keys. At most 64 source ranges are resident here. Gram-major writes
+        // revisit their bounded primary-key pages while keeping the ordering
+        // index's current leaf hot, instead of cycling through all gram leaves
+        // for each source and repeatedly spilling dirty pages into the WAL.
+        let mut postings = rows
+            .iter()
+            .zip(&prepared)
+            .flat_map(|(row, (_, grams, complete))| {
+                grams
+                    .iter()
+                    .filter(move |_| *complete)
+                    .map(move |gram| (gram, *row))
+            })
+            .collect::<Vec<_>>();
+        postings.sort_unstable_by(|(left, a), (right, b)| {
+            left.cmp(right).then_with(|| a.key.cmp(&b.key))
+        });
+        let mut posting = transaction.prepare_cached("INSERT INTO session_search_postings(read_scope,session_key,gram,last_ms) VALUES(?1,?2,?3,?4)")?;
+        for scope in ["current", "retained_history"] {
+            for (gram, row) in &postings {
+                posting.execute(params![scope, row.key, gram, row.last.unwrap_or(0)])?;
             }
         }
         for scope in ["current", "retained_history"] {
@@ -245,42 +272,11 @@ fn insert_fields(
     complete: bool,
     maintain_counts: bool,
 ) -> rusqlite::Result<()> {
-    transaction.prepare_cached("INSERT INTO session_search_documents(read_scope,session_key,fields,complete) VALUES(?1,?2,?3,?4)")?.execute(params![scope,row.key,encoded,complete])?;
-    if !complete {
-        transaction
-            .prepare_cached(
-                "UPDATE session_search_coverage SET incomplete=incomplete+1 WHERE read_scope=?1",
-            )?
-            .execute([scope])?;
-    }
+    insert_document(transaction, scope, row, encoded, complete)?;
     if complete {
-        if !maintain_counts {
-            // Bulk publication computes exact counts once at finish_backfill.
-            // Reuse a bounded VALUES statement instead of executing SQLite's
-            // insert program separately for every gram in both read scopes.
-            const BATCH: usize = 64;
-            let last = row.last.unwrap_or(0);
-            let mut grams = grams.iter().peekable();
-            while grams.peek().is_some() {
-                let batch: Vec<_> = grams.by_ref().take(BATCH).collect();
-                let values = (0..batch.len())
-                    .map(|index| format!("(?1,?2,?{},?3)", index + 4))
-                    .collect::<Vec<_>>()
-                    .join(",");
-                let sql = format!(
-                    "INSERT INTO session_search_postings(read_scope,session_key,gram,last_ms) VALUES {values}"
-                );
-                let mut posting = transaction.prepare_cached(&sql)?;
-                posting.raw_bind_parameter(1, scope)?;
-                posting.raw_bind_parameter(2, &row.key)?;
-                posting.raw_bind_parameter(3, last)?;
-                for (index, gram) in batch.iter().enumerate() {
-                    posting.raw_bind_parameter(index + 4, gram.as_str())?;
-                }
-                posting.raw_execute()?;
-            }
-            return Ok(());
-        }
+        // Single posting statements avoid multi-row rollback work over many
+        // nonadjacent ordering-index pages. Exact counts still advance once
+        // per producer cohort inside this same publication transaction.
         let mut posting = transaction.prepare_cached("INSERT INTO session_search_postings(read_scope,session_key,gram,last_ms) VALUES(?1,?2,?3,?4)")?;
         let mut count = maintain_counts.then(|| transaction.prepare_cached("INSERT INTO session_search_counts(read_scope,gram,members) VALUES(?1,?2,1) ON CONFLICT(read_scope,gram) DO UPDATE SET members=members+1")).transpose()?;
         for gram in grams {
@@ -289,6 +285,24 @@ fn insert_fields(
                 count.execute(params![scope, gram])?;
             }
         }
+    }
+    Ok(())
+}
+
+fn insert_document(
+    transaction: &Transaction<'_>,
+    scope: &str,
+    row: &CatalogRow,
+    encoded: &str,
+    complete: bool,
+) -> rusqlite::Result<()> {
+    transaction.prepare_cached("INSERT INTO session_search_documents(read_scope,session_key,fields,complete) VALUES(?1,?2,?3,?4)")?.execute(params![scope,row.key,encoded,complete])?;
+    if !complete {
+        transaction
+            .prepare_cached(
+                "UPDATE session_search_coverage SET incomplete=incomplete+1 WHERE read_scope=?1",
+            )?
+            .execute([scope])?;
     }
     Ok(())
 }

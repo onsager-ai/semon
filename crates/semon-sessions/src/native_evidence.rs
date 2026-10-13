@@ -520,11 +520,11 @@ impl NativeEvidence {
                 break None;
             }
             keys = dependencies.into_iter().collect();
-            native_parents = if recovering {
-                Vec::new()
-            } else {
-                prepared.native_parents()
-            };
+            // Backfill must resolve parents that were published by an earlier
+            // source batch too. The lookup uses indexed current owners only;
+            // an undiscovered parent remains provisional until its own batch.
+            // Omitting this context can incorrectly qualify orphaned children.
+            native_parents = prepared.native_parents();
             native_parents.extend(
                 prepared
                     .lineage_dependencies

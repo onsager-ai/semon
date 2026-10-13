@@ -3072,6 +3072,7 @@ impl SqliteStore {
                     transaction.execute("UPDATE session_history_catalog SET metadata=json_set(metadata,'$.lifecycle','retained') WHERE session_key=?1 AND session_key NOT IN (SELECT session_key FROM catalog_members)",[key]).map_err(failure)?;
                 }
             }
+            stage("catalog_metadata");
             crate::catalog_search::publish_current_rows(&transaction, &search_rows)
                 .map_err(failure)?;
             stage("catalog_rows");

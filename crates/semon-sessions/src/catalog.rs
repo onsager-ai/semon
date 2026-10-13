@@ -1362,6 +1362,27 @@ mod tests {
             fs::write(&path,format!("{}\n",json!({"type":"user","sessionId":id,"uuid":id,"parentUuid":null,"cwd":"/synthetic/project","timestamp":"2026-10-01T00:00:00Z","message":{"role":"user","content":"synthetic prompt"}}))).unwrap();
             path
         }
+        fn codex_source(&self, id: &str, parent: Option<&str>, modified: u64) -> String {
+            let relative = format!("sessions/2026/10/01/rollout-{id}.jsonl");
+            let path = self.options.codex_home.join(&relative);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(
+                &path,
+                format!(
+                    "{}\n",
+                    json!({"type":"session_meta","timestamp":"2026-10-01T00:00:00Z","payload":{"id":id,"parent_thread_id":parent,"thread_source":if parent.is_some() {"subagent"} else {"cli"},"cwd":"/synthetic/project"}})
+                ),
+            )
+            .unwrap();
+            fs::File::open(&path)
+                .unwrap()
+                .set_times(
+                    fs::FileTimes::new()
+                        .set_modified(std::time::UNIX_EPOCH + Duration::from_secs(modified)),
+                )
+                .unwrap();
+            relative
+        }
         fn publish(&self, count: usize) {
             for id in 0..count {
                 self.source(&format!("session-{id:05}"));
@@ -5669,6 +5690,77 @@ mod tests {
             assert_eq!(counts(), start, "metadata audit rebuilt session history");
             assert_eq!(rows, db.query_row("SELECT group_concat(metadata) FROM (SELECT metadata FROM session_catalog ORDER BY session_key)", [], |row| row.get::<_,String>(0)).unwrap());
             assert!(!evidence.catalog_pending(&work));
+        }
+    }
+
+    #[test]
+    fn cold_codex_parent_context_survives_separate_unrelated_batches() {
+        let fixture = Fixture::new();
+        let child = fixture.codex_source("family-child", Some("family-parent"), 1);
+        let parent = fixture.codex_source("family-parent", None, 3);
+        for n in 0..128 {
+            let path = fixture.source(&format!("unrelated-{n:03}"));
+            fs::File::open(path)
+                .unwrap()
+                .set_times(
+                    fs::FileTimes::new()
+                        .set_modified(std::time::UNIX_EPOCH + Duration::from_secs(2)),
+                )
+                .unwrap();
+        }
+        let mut facts = crate::read_facts(fixture.options.facts.as_ref().unwrap()).unwrap();
+        facts.codex_rollouts = Some(std::collections::BTreeSet::from([child, parent]));
+        crate::write_facts(fixture.options.facts.as_ref().unwrap(), &facts).unwrap();
+        fixture.publish_existing();
+        let db = Connection::open(EventCache::path(&fixture.options.cache)).unwrap();
+        assert_eq!(db.query_row("SELECT parent_key FROM session_catalog WHERE session_key='family-child' AND lifecycle='current'", [], |row| row.get::<_, Option<String>>(0)).unwrap().as_deref(), Some("family-parent"));
+    }
+
+    #[test]
+    fn cold_codex_family_crossing_batches_preserves_every_native_parent() {
+        let fixture = Fixture::new();
+        let mut paths = std::collections::BTreeSet::new();
+        for n in 0..80 {
+            paths.insert(fixture.codex_source(
+                &format!("family-child-{n:03}"),
+                Some("family-parent"),
+                1,
+            ));
+        }
+        // The newest cohort includes the parent and only part of its children.
+        // The remaining children's own headers must resolve that already indexed
+        // parent when subsequent source batches are published.
+        paths.insert(fixture.codex_source("family-parent", None, 2));
+        let mut facts = crate::read_facts(fixture.options.facts.as_ref().unwrap()).unwrap();
+        facts.codex_rollouts = Some(paths);
+        crate::write_facts(fixture.options.facts.as_ref().unwrap(), &facts).unwrap();
+        let evidence = crate::native_evidence::NativeEvidence::new(fixture.options.clone());
+        let mut work = crate::viewer::lock(&evidence.work);
+        let mut complete = false;
+        for _ in 0..16 {
+            if evidence
+                .refresh_catalog(&mut work, crate::model::now_ms())
+                .unwrap()
+            {
+                complete = true;
+                break;
+            }
+        }
+        drop(work);
+        evidence.retire();
+        assert!(
+            complete,
+            "connected cold family did not finish bounded steps"
+        );
+        let db = Connection::open(EventCache::path(&fixture.options.cache)).unwrap();
+        let parents = db.prepare("SELECT session_key,parent_key FROM session_catalog WHERE lifecycle='current' AND session_key LIKE 'family-child-%' ORDER BY session_key").unwrap().query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))).unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
+        assert_eq!(parents.len(), 80);
+        for (child, parent) in parents {
+            assert_eq!(
+                parent.as_deref(),
+                Some("family-parent"),
+                "{child} lost its native parent across source batches"
+            );
         }
     }
 
