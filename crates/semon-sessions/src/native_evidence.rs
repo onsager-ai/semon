@@ -452,10 +452,29 @@ impl NativeEvidence {
                         break prepared;
                     }
                     if seeds.len() <= 1 {
-                        return Err(io::Error::new(
-                            io::ErrorKind::WouldBlock,
-                            "backfill dependency budget exceeded",
-                        ));
+                        let paths = seeds
+                            .iter()
+                            .map(|input| {
+                                input
+                                    .full_path(&self.options)
+                                    .to_string_lossy()
+                                    .into_owned()
+                            })
+                            .collect::<Vec<_>>();
+                        if cache.begin_semantic_stage(
+                            &paths,
+                            &query_runtime_generation(&self.options)?,
+                        )? != crate::events::Outcome::Written
+                        {
+                            return Err(io::Error::new(
+                                io::ErrorKind::WouldBlock,
+                                "semantic stage changed",
+                            ));
+                        }
+                        cache.end_scan();
+                        cache.release_published_indexes();
+                        work.texts.release_published_derivations();
+                        return Ok(CatalogPreparation::Pending);
                     }
                     seeds.truncate(seeds.len() / 2);
                 }
@@ -487,6 +506,119 @@ impl NativeEvidence {
                 .session_catalog_generation()
                 .ok_or_else(|| io::Error::other("backfill generation missing"))?,
         ))
+    }
+
+    /// Resume semantic work before the ordinary journal drain. Source claims
+    /// remain pending until the epoch's relationships and owner projections are
+    /// qualified; losing this Work does not lose any progress or grant readiness.
+    fn advance_semantic_stage(
+        &self,
+        work: &mut Work,
+        now: i64,
+        before_build: &mut impl FnMut() -> io::Result<()>,
+    ) -> io::Result<bool> {
+        use model::relation_stage::Phase;
+        let cache = work.events.as_mut().expect("event cache initialized");
+        if !cache.is_scoped() {
+            return Ok(false);
+        }
+        let runtime = query_runtime_generation(&self.options)?;
+        match cache.begin_semantic_stage(&[], &runtime)? {
+            crate::events::Outcome::Conflict => return Ok(false),
+            crate::events::Outcome::Written => {}
+            _ => {
+                return Err(io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    "semantic index changed",
+                ));
+            }
+        }
+        let Some(batch) = cache.semantic_batch(64)? else {
+            return Ok(false);
+        };
+        work.pending_sources = true;
+        // Runtime/facts qualification also covers scalar reductions and the
+        // durable final acknowledgement, which may have no selected sources.
+        before_build()?;
+        work.built_at = Some(Instant::now());
+        if batch.paths.is_empty() {
+            if batch.phase == Phase::Publication
+                && cache.finish_semantic_stage(batch.epoch)? != crate::events::Outcome::Written
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    "semantic completion changed",
+                ));
+            }
+            return Ok(true);
+        }
+        let mut paths: BTreeSet<_> = batch.paths.iter().cloned().collect();
+        if batch.phase == Phase::Relations {
+            paths.extend(batch.context.parent_paths(&batch.paths));
+            paths.extend(batch.context.companions.iter().cloned());
+        }
+        if paths.len() > 64 {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "semantic matching source budget exceeded",
+            ));
+        }
+        let inputs = paths
+            .iter()
+            .map(|path| {
+                catalog_input(Path::new(path), &self.options)
+                    .ok_or_else(|| io::Error::other("semantic source outside native allowlist"))
+            })
+            .collect::<io::Result<Vec<_>>>()?;
+        cache.scan_byte_budget =
+            matches!(batch.phase, Phase::Indexing | Phase::Identity).then_some(4 * 1024 * 1024);
+        let catalog_options = Options {
+            scan_window: false,
+            ..self.options.clone()
+        };
+        let prepared = if batch.phase == Phase::Indexing {
+            model::prepare_semantic_index_sources(&catalog_options, cache, &inputs, now)
+        } else if batch.phase == Phase::Identity {
+            model::prepare_semantic_identity_sources(
+                &catalog_options,
+                cache,
+                &inputs,
+                &batch.context,
+                now,
+            )
+        } else {
+            model::prepare_staged_sources(
+                &catalog_options,
+                cache,
+                &inputs,
+                &batch.context,
+                batch.phase == Phase::Relations,
+                now,
+            )
+        };
+        cache.scan_byte_budget = None;
+        let mut prepared = prepared?;
+        prepared.relationships.restrict_relations(&batch.paths);
+        let (outcome, generation) = if batch.phase == Phase::Publication {
+            cache.publish_semantic_catalog(&batch, &prepared)?
+        } else {
+            (cache.record_semantic_batch(&batch, &prepared)?, None)
+        };
+        if outcome != crate::events::Outcome::Written {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "semantic publication changed",
+            ));
+        }
+        if batch.phase == Phase::Publication {
+            work.observed_catalog_generation = generation;
+            crate::events::store::requeue_concurrent_sources(&self.options, &prepared)?;
+            cache.publish_session_descriptions();
+        }
+        cache.end_scan();
+        cache.release_published_indexes();
+        work.texts.release_published_derivations();
+        Ok(true)
     }
 
     /// Expand and derive the same bounded component for Catalog refresh and
@@ -691,6 +823,9 @@ impl NativeEvidence {
         // Hosted Raw writers journal exact intents durably. The persisted
         // qualification is independent of this process's in-memory snapshot.
         self.prepare_events(work, now)?;
+        if self.advance_semantic_stage(work, now, &mut before_build)? {
+            return Ok(false);
+        }
         let requested = self.audit_request.load(Ordering::Acquire);
         if requested != work.audit_revision
             && work.audit.is_none()
@@ -795,6 +930,15 @@ impl NativeEvidence {
                     audit.started = true;
                 }
             }
+            let staged_paths = inputs
+                .iter()
+                .map(|input| {
+                    input
+                        .full_path(&self.options)
+                        .to_string_lossy()
+                        .into_owned()
+                })
+                .collect::<Vec<_>>();
             if let Some(prepared) = self.prepare_catalog_component(cache, inputs, now)? {
                 match cache.publish_closed_catalog_fenced(&prepared)? {
                     Some((crate::events::Outcome::Written, generation)) => {
@@ -833,11 +977,18 @@ impl NativeEvidence {
                     None => {}
                 }
             }
-            eprintln!("semon sessions native: recovery reason=incomplete-source-closure");
-            crate::events::store::begin_catalog_recovery(
-                &self.options,
-                "incomplete-source-closure",
-            )?;
+            if cache
+                .begin_semantic_stage(&staged_paths, &query_runtime_generation(&self.options)?)?
+                != crate::events::Outcome::Written
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    "semantic stage changed",
+                ));
+            }
+            cache.end_scan();
+            cache.release_published_indexes();
+            work.texts.release_published_derivations();
             work.catalog_snapshot = None;
             work.pending_sources = true;
             return Ok(false);
@@ -876,6 +1027,15 @@ impl NativeEvidence {
                 // as reconciliation, including worker failure instrumentation.
                 before_build()?;
                 started = true;
+                let staged_paths = inputs
+                    .iter()
+                    .map(|input| {
+                        input
+                            .full_path(&self.options)
+                            .to_string_lossy()
+                            .into_owned()
+                    })
+                    .collect::<Vec<_>>();
                 let prepared = self.prepare_catalog_component(cache, inputs, now)?;
                 if let Some(prepared) = prepared {
                     match cache.publish_closed_catalog_fenced(&prepared)? {
@@ -902,6 +1062,21 @@ impl NativeEvidence {
                         None => {}
                     }
                 }
+                if cache.begin_semantic_stage(
+                    &staged_paths,
+                    &query_runtime_generation(&self.options)?,
+                )? != crate::events::Outcome::Written
+                {
+                    return Err(io::Error::new(
+                        io::ErrorKind::WouldBlock,
+                        "semantic stage changed",
+                    ));
+                }
+                cache.end_scan();
+                cache.release_published_indexes();
+                work.texts.release_published_derivations();
+                work.pending_sources = true;
+                return Ok(false);
             }
         }
         // Untrusted runtime or inventory changes use the bounded metadata audit;
@@ -1958,6 +2133,144 @@ mod catalog_owner_tests {
         assert_eq!(builds.get(), 2, "intervening peer commit notified twice");
         drop(first);
         drop(second);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn staged_commit_acknowledges_own_generation_before_intervening_peer_metadata() {
+        let (root, options, input) = audit_fixture();
+        let first = NativeEvidence::new(options.clone());
+        let peer = NativeEvidence::new(options.clone());
+        let builds = std::cell::Cell::new(0);
+        drain_catalog(&first, &builds);
+        drain_catalog(&peer, &std::cell::Cell::new(0));
+        append_audit_record(&options, &input);
+        {
+            let mut work = lock(&first.work);
+            assert_eq!(
+                work.events
+                    .as_mut()
+                    .unwrap()
+                    .begin_semantic_stage(
+                        &[input.full_path(&options).to_string_lossy().into_owned()],
+                        &query_runtime_generation(&options).unwrap()
+                    )
+                    .unwrap(),
+                crate::events::Outcome::Written
+            );
+        }
+        let committed = std::rc::Rc::new(std::cell::RefCell::new(None));
+        let foreign = std::rc::Rc::new(std::cell::RefCell::new(None));
+        let committed_in_hook = std::rc::Rc::clone(&committed);
+        let foreign_in_hook = std::rc::Rc::clone(&foreign);
+        let peer_in_hook = Arc::clone(&peer);
+        let peer_options = options.clone();
+        crate::events::AFTER_CATALOG_PUBLICATION.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                let db = rusqlite::Connection::open(EventCache::path(&peer_options.cache)).unwrap();
+                *committed_in_hook.borrow_mut() = Some(
+                    db.query_row(
+                        "SELECT value FROM meta WHERE key='catalog_generation'",
+                        [],
+                        |row| row.get::<_, String>(0),
+                    )
+                    .unwrap(),
+                );
+                drop(db);
+                // An actual peer observes a legitimate runtime change. Its
+                // stage replay can commit before the first caller acknowledges
+                // the generation already returned by its own transaction.
+                fs::write(
+                    peer_options.proc_root.join("sys/kernel/hostname"),
+                    "peer-host\n",
+                )
+                .unwrap();
+                peer_in_hook.request_metadata_audit();
+                let mut complete = false;
+                for _ in 0..128 {
+                    if peer_in_hook
+                        .refresh_catalog(&mut lock(&peer_in_hook.work), model::now_ms())
+                        .unwrap()
+                    {
+                        complete = true;
+                        break;
+                    }
+                }
+                assert!(complete, "peer metadata replay did not complete");
+                *foreign_in_hook.borrow_mut() =
+                    lock(&peer_in_hook.work).observed_catalog_generation.clone();
+                assert_ne!(
+                    *committed_in_hook.borrow(),
+                    *foreign_in_hook.borrow(),
+                    "peer metadata did not advance the shared generation"
+                );
+            }));
+        });
+        for _ in 0..128 {
+            first
+                .refresh_catalog_with(&mut lock(&first.work), model::now_ms(), || {
+                    builds.set(builds.get() + 1);
+                    Ok(())
+                })
+                .unwrap();
+            if foreign.borrow().is_some() {
+                break;
+            }
+        }
+        assert!(
+            foreign.borrow().is_some(),
+            "staged publication did not invoke commit-gap hook"
+        );
+        {
+            let work = lock(&first.work);
+            assert_eq!(
+                &work.observed_catalog_generation,
+                &*committed.borrow(),
+                "staged own acknowledgement did not preserve its transaction result"
+            );
+            assert_ne!(
+                &work.observed_catalog_generation,
+                &*foreign.borrow(),
+                "staged own acknowledgement sampled the intervening peer generation"
+            );
+            assert_eq!(
+                work.events.as_ref().unwrap().session_catalog_generation(),
+                *foreign.borrow()
+            );
+        }
+        let parsed = crate::events::PARSED.with(std::cell::Cell::get);
+        let published = crate::events::CATALOG_PUBLISHED_ROWS.with(std::cell::Cell::get);
+        let notified = builds.get();
+        first.request_metadata_audit();
+        drain_catalog(&first, &builds);
+        assert!(
+            builds.get() > notified,
+            "intervening staged peer generation lost its notification"
+        );
+        assert_eq!(
+            crate::events::PARSED.with(std::cell::Cell::get),
+            parsed,
+            "peer notice reparsed source history"
+        );
+        assert_eq!(
+            crate::events::CATALOG_PUBLISHED_ROWS.with(std::cell::Cell::get),
+            published,
+            "peer notice republished source history"
+        );
+        assert_eq!(
+            lock(&first.work).observed_catalog_generation,
+            *foreign.borrow()
+        );
+        let notified = builds.get();
+        first.request_metadata_audit();
+        drain_catalog(&first, &builds);
+        assert_eq!(
+            builds.get(),
+            notified,
+            "staged peer generation notified twice"
+        );
+        drop(first);
+        drop(peer);
         fs::remove_dir_all(root).unwrap();
     }
 

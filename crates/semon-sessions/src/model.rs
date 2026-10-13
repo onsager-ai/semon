@@ -24,6 +24,7 @@ use std::os::unix::fs::MetadataExt;
 
 use serde::{Deserialize, Serialize};
 
+pub(crate) mod relation_stage;
 pub(crate) mod summary;
 use serde_json::Value;
 
@@ -1022,11 +1023,19 @@ fn pretty_model(model: &str) -> Option<String> {
 const PARENT_ADDRESS: &str = "main";
 
 /// A relay recipient or sender name without the harness's ` [..]` suffix.
-fn plain_name(name: &str) -> String {
+pub(crate) fn plain_name(name: &str) -> String {
     name.split_once(" [")
         .map_or(name, |(head, _)| head)
         .trim()
         .to_owned()
+}
+
+/// Shared copy-resume identity; bridge peers deliberately do not deduplicate.
+pub(crate) fn native_copy_identity(event: &Event) -> Option<String> {
+    event.u.clone().or_else(|| match event.k {
+        Kind::Tool | Kind::Xsm => event.id.clone(),
+        _ => None,
+    })
 }
 
 /// This machine's hostname, as `/proc` (or `/etc/hostname`) gives it.
@@ -1686,6 +1695,7 @@ struct H {
     from: Option<usize>,
     to: Option<usize>,
     previews: Option<BTreeMap<&'static str, PreviewRef>>,
+    preview_owners: BTreeMap<String, String>,
 }
 
 struct PreviewRef {
@@ -1773,6 +1783,7 @@ struct Builder<'a> {
     by_key: HashMap<String, usize>,
     by_native: HashMap<(&'static str, String), usize>,
     native_harnesses: HashMap<String, BTreeSet<&'static str>>,
+    staged_keys: BTreeMap<(String, String), String>,
     handoffs: Vec<H>,
     ask_briefs: BTreeMap<String, PromptBrief>,
     placed: HashMap<Ref, Vec<(usize, Place)>>,
@@ -1792,6 +1803,9 @@ struct Builder<'a> {
     shared_usage: BTreeMap<String, crate::claude_usage::Shared>,
     /// A subagent's send to `main`, and its receipt in the parent.
     progress: HashMap<Ref, Ref>,
+    staged_endpoints: BTreeMap<String, relation_stage::Endpoint>,
+    staged_epoch: Option<i64>,
+    matching_refs: Option<BTreeSet<Ref>>,
 }
 
 fn event(files: &[SourceFile], at: Ref) -> &Event {
@@ -1856,6 +1870,7 @@ impl<'a> Builder<'a> {
                     .insert(file.harness());
                 ids
             }),
+            staged_keys: BTreeMap::new(),
             handoffs: Vec::new(),
             ask_briefs: BTreeMap::new(),
             placed: HashMap::new(),
@@ -1869,6 +1884,9 @@ impl<'a> Builder<'a> {
             copied: BTreeSet::new(),
             shared_usage: BTreeMap::new(),
             progress: HashMap::new(),
+            staged_endpoints: BTreeMap::new(),
+            staged_epoch: None,
+            matching_refs: None,
         }
     }
 
@@ -1925,7 +1943,11 @@ impl<'a> Builder<'a> {
         // Native IDs belong to a harness. Keep the established viewer key when
         // unambiguous, and qualify only collisions without changing source IDs.
         let harness = out.harness;
-        if self
+        if self.staged_endpoints.contains_key(&key) {
+            // Durable graph descriptors already carry their canonical key.
+        } else if let Some(qualified) = self.staged_keys.get(&(harness.to_owned(), key.clone())) {
+            key.clone_from(qualified);
+        } else if self
             .native_harnesses
             .get(&key)
             .is_some_and(|harnesses| harnesses.iter().any(|other| *other != harness))
@@ -2071,12 +2093,7 @@ impl<'a> Builder<'a> {
             }
         }
         // From the index alone: each event carries its record's uuid.
-        let key = |event: &Event| {
-            event.u.clone().or_else(|| match event.k {
-                Kind::Tool | Kind::Xsm => event.id.clone(),
-                _ => None,
-            })
-        };
+        let key = native_copy_identity;
         let mut copied = BTreeSet::new();
         for (source, target) in pairs {
             let seen: BTreeSet<String> = self.files[source]
@@ -2109,6 +2126,7 @@ impl<'a> Builder<'a> {
             from,
             to,
             previews: None,
+            preview_owners: BTreeMap::new(),
         });
         self.handoffs.len() - 1
     }
@@ -2118,6 +2136,11 @@ impl<'a> Builder<'a> {
     }
 
     fn root(&self, mut session: usize) -> usize {
+        if let Some(root) = self.staged_endpoints.get(&self.sessions[session].key)
+            && let Some(&root) = self.by_key.get(&root.root)
+        {
+            return root;
+        }
         let mut seen = BTreeSet::new();
         while let Some(parent) = self.sessions[session].parent {
             if !seen.insert(session) {
@@ -2126,6 +2149,28 @@ impl<'a> Builder<'a> {
             session = parent;
         }
         session
+    }
+
+    fn graph_root_key(&self, session: usize) -> String {
+        self.staged_endpoints
+            .get(&self.sessions[session].key)
+            .map(|endpoint| endpoint.root.clone())
+            .unwrap_or_else(|| self.sessions[self.root(session)].key.clone())
+    }
+
+    fn graph_root_alive(&self, session: usize) -> bool {
+        self.staged_endpoints
+            .get(&self.sessions[session].key)
+            .map_or_else(
+                || self.sessions[self.root(session)].alive,
+                |endpoint| endpoint.root_alive,
+            )
+    }
+
+    fn match_selected(&self, at: Ref) -> bool {
+        self.matching_refs
+            .as_ref()
+            .is_none_or(|refs| refs.contains(&at))
     }
 
     /// Every session's facts for the agent read surface. `codex_process`
@@ -2141,6 +2186,11 @@ impl<'a> Builder<'a> {
         self.sessions
             .iter()
             .map(|session| {
+                if let Some(endpoint) = self.staged_endpoints.get(&session.key)
+                    && session.files.is_empty()
+                {
+                    return (session.key.clone(), endpoint.facts());
+                }
                 let (kind, pid, alive, recorded_status, run) = match session.kind {
                     SessKind::Lineage => {
                         let live = session.pid_files.iter().find(|(_, alive, _, _)| *alive);
@@ -2831,7 +2881,7 @@ impl<'a> Builder<'a> {
 
     // -- spawns --
 
-    fn claude_spawns(&mut self) {
+    fn claude_spawns(&mut self) -> io::Result<()> {
         let mut notifications = HashMap::<String, Ref>::new();
         // Every `<agent-message>` a subagent's parent received from it: its
         // sends to `main`, and its hand-backs.
@@ -2870,21 +2920,41 @@ impl<'a> Builder<'a> {
                 continue;
             };
             let child = self.of_file[position];
-            let call = meta.tool_use_id.as_deref().and_then(|id| {
-                if let Some(&parent) = self.by_native.get(&("claude", meta.parent.clone()))
-                    && let Some(call) = self.find_in(parent, id)
-                {
-                    return Some(call);
-                }
-                // Nested subagents can share their root's storage directory.
-                // If that ancestor has no matching call, use only a unique
-                // exact Claude call ID. Repeated IDs remain ambiguous.
-                let mut matches = self.tools.iter().filter_map(|((session, call), at)| {
-                    (call == id && self.sessions[*session].out.harness == "claude").then_some(*at)
-                });
-                let first = matches.next()?;
-                matches.next().is_none().then_some(first)
+            let exact_parent = meta.tool_use_id.as_deref().and_then(|id| {
+                self.by_native
+                    .get(&("claude", meta.parent.clone()))
+                    .and_then(|parent| self.find_in(*parent, id))
             });
+            let call = if exact_parent.is_some() {
+                exact_parent
+            } else if let (Some(epoch), Some(id)) = (self.staged_epoch, meta.tool_use_id.as_ref()) {
+                let selected = self.cache.semantic_select(
+                    epoch,
+                    &relation_stage::Selector::ClaudeCall { id: id.clone() },
+                )?;
+                if selected.count == 1 {
+                    let location = selected
+                        .location
+                        .ok_or_else(|| io::Error::other("staged Claude call location missing"))?;
+                    Some(location.local(self)?.ok_or_else(|| {
+                        io::Error::other("staged Claude call source not selected")
+                    })?)
+                } else {
+                    None
+                }
+            } else {
+                meta.tool_use_id.as_deref().and_then(|id| {
+                    // Nested subagents can share their root's storage directory.
+                    // If that ancestor has no matching call, use only a unique
+                    // exact Claude call ID. Repeated IDs remain ambiguous.
+                    let mut matches = self.tools.iter().filter_map(|((session, call), at)| {
+                        (call == id && self.sessions[*session].out.harness == "claude")
+                            .then_some(*at)
+                    });
+                    let first = matches.next()?;
+                    matches.next().is_none().then_some(first)
+                })
+            };
             let spawner = call.map(|at| self.of_file[at.0]).or_else(|| {
                 self.files
                     .iter()
@@ -2996,8 +3066,7 @@ impl<'a> Builder<'a> {
                 result = Some((text, event(self.files, at).t, false));
                 previews.insert("result", PreviewRef::new(at, "handback"));
             }
-            let root = self.root(spawner);
-            let running = self.sessions[root].alive;
+            let running = self.graph_root_alive(spawner);
             let (status, state) = match &result {
                 Some((_, _, true)) => ("err", "err"),
                 Some(_) => ("done", "done"),
@@ -3031,18 +3100,19 @@ impl<'a> Builder<'a> {
                 }
             }
         }
+        Ok(())
     }
 
     /// A Codex run's spawner, the call that launched it when that is
     /// exact, and whether the call is ambiguous.
-    fn codex_spawner(&mut self, position: usize) -> (Option<usize>, Option<Ref>, bool) {
+    fn codex_spawner(&mut self, position: usize) -> io::Result<(Option<usize>, Option<Ref>, bool)> {
         let file = &self.files[position];
         let Role::Codex(meta) = &file.role else {
-            return (None, None, false);
+            return Ok((None, None, false));
         };
         if let Some(parent) = &meta.parent_thread {
             let Some(&spawner) = self.by_native.get(&("codex", parent.clone())) else {
-                return (None, None, false);
+                return Ok((None, None, false));
             };
             let names: Vec<String> = meta
                 .path
@@ -3090,14 +3160,29 @@ impl<'a> Builder<'a> {
                     })
                     .count()
             };
-            return match matching.as_slice() {
+            let global_siblings =
+                if let (Some(epoch), [(.., task)]) = (self.staged_epoch, matching.as_slice()) {
+                    Some(self.cache.semantic_select(
+                        epoch,
+                        &relation_stage::Selector::CodexSibling {
+                            parent: parent.clone(),
+                            task: task.clone(),
+                        },
+                    )?)
+                } else {
+                    None
+                };
+            let count = global_siblings.map(|selection| selection.count);
+            return Ok(match matching.as_slice() {
                 [] => (Some(spawner), None, false),
-                [(at, task)] if siblings(task) == 1 => (Some(spawner), Some(*at), false),
+                [(at, task)] if count.unwrap_or_else(|| siblings(task)) == 1 => {
+                    (Some(spawner), Some(*at), false)
+                }
                 _ => (Some(spawner), None, true),
-            };
+            });
         }
         let Some(marker) = file.marker.clone() else {
-            return (None, None, false);
+            return Ok((None, None, false));
         };
         let mut seen = BTreeSet::from([format!("{}:{}", file.harness(), file.id)]);
         let mut next = Some(format!("{}:{}", marker.harness, marker.parent_id));
@@ -3106,7 +3191,7 @@ impl<'a> Builder<'a> {
                 break;
             };
             if !seen.insert(parent.clone()) {
-                return (None, None, false);
+                return Ok((None, None, false));
             }
             next = self
                 .files
@@ -3116,14 +3201,14 @@ impl<'a> Builder<'a> {
                 .map(|marker| format!("{}:{}", marker.harness, marker.parent_id));
         }
         if next.is_some() {
-            return (None, None, false);
+            return Ok((None, None, false));
         }
         let Some(parent_file) = self
             .files
             .iter()
             .position(|file| file.harness() == marker.harness && file.id == marker.parent_id)
         else {
-            return (None, None, false);
+            return Ok((None, None, false));
         };
         let spawner = self.of_file[parent_file];
         let tool = match (&marker.tool_id, &marker.handoff) {
@@ -3134,7 +3219,7 @@ impl<'a> Builder<'a> {
             _ => None,
         };
         let call = tool.and_then(|id| self.find_in(spawner, &id));
-        (Some(spawner), call, false)
+        Ok((Some(spawner), call, false))
     }
 
     /// All producer targets borrow the same indexed source evidence.
@@ -3165,14 +3250,14 @@ impl<'a> Builder<'a> {
         matcher.finish().map(|tool| tool.id)
     }
 
-    fn codex_spawns(&mut self) {
+    fn codex_spawns(&mut self) -> io::Result<()> {
         let mut spawns = Vec::new();
         let mut runs: Vec<usize> = (0..self.files.len())
             .filter(|position| matches!(self.files[*position].role, Role::Codex(_)))
             .collect();
         runs.sort_by_key(|position| (self.files[*position].first, *position));
         for position in runs {
-            let (spawner, call, ambiguous) = self.codex_spawner(position);
+            let (spawner, call, ambiguous) = self.codex_spawner(position)?;
             spawns.push((self.of_file[position], spawner, call, ambiguous));
         }
         for (child, spawner, _, _) in &spawns {
@@ -3267,11 +3352,12 @@ impl<'a> Builder<'a> {
                 }
             }
         }
+        Ok(())
     }
 
     // -- relays --
 
-    fn relays(&mut self) {
+    fn relays(&mut self) -> io::Result<()> {
         let mut received = HashMap::<String, Vec<Ref>>::new();
         let mut unkeyed = Vec::new();
         for (position, file) in self.files.iter().enumerate() {
@@ -3282,7 +3368,7 @@ impl<'a> Builder<'a> {
                 if self.copied.contains(&(position, at)) {
                     continue;
                 }
-                if event.k != Kind::Xsm {
+                if event.k != Kind::Xsm || !self.match_selected((position, at)) {
                     continue;
                 }
                 match &event.id {
@@ -3302,6 +3388,7 @@ impl<'a> Builder<'a> {
                 }
                 if event.k == Kind::Tool
                     && event.n.as_deref() == Some("SendMessage")
+                    && self.match_selected((position, at))
                     && let Some(reply) = &event.r
                     && reply.f & PIN == 0
                 {
@@ -3366,10 +3453,23 @@ impl<'a> Builder<'a> {
                 (Some(self.stub(&format!("name:{name}"), &name)), None)
             } else {
                 let name = plain_name(&self.send_target(at));
-                let unique = names
-                    .get(&name)
-                    .filter(|found| found.len() == 1)
-                    .and_then(|found| found.first().copied());
+                let unique = if let Some(epoch) = self.staged_epoch {
+                    let selected = self.cache.semantic_select(
+                        epoch,
+                        &relation_stage::Selector::ClaudeName { name: name.clone() },
+                    )?;
+                    if let (1, Some(endpoint)) = (selected.count, selected.endpoint) {
+                        relation_stage::Context::install_endpoint(&endpoint, self)?;
+                        Some(self.by_key[&endpoint.row.key])
+                    } else {
+                        None
+                    }
+                } else {
+                    names
+                        .get(&name)
+                        .filter(|found| found.len() == 1)
+                        .and_then(|found| found.first().copied())
+                };
                 if unique.is_none() {
                     unmatched = true;
                 }
@@ -3427,7 +3527,13 @@ impl<'a> Builder<'a> {
                 .sock
                 .as_deref()
                 .and_then(|from| self.by_native.get(&("claude", from.to_owned())).copied())
-                .filter(|from| self.sessions[*from].kind == SessKind::Agent);
+                .filter(|from| {
+                    self.sessions[*from].kind == SessKind::Agent
+                        || self
+                            .staged_endpoints
+                            .get(&self.sessions[*from].key)
+                            .is_some_and(|endpoint| endpoint.facts_kind == "subagent")
+                });
             let from = from.unwrap_or_else(|| {
                 let identity = match (peer.pid, &peer.start, &peer.sock) {
                     (Some(pid), start, _) => {
@@ -3442,7 +3548,8 @@ impl<'a> Builder<'a> {
                 received_body(record, "cross-session-message", None, 0)
             });
             let handoff = Handoff {
-                unmatched: self.sessions[from].kind == SessKind::Stub,
+                unmatched: self.sessions[from].kind == SessKind::Stub
+                    && !self.staged_endpoints.contains_key(&self.sessions[from].key),
                 ..Handoff::new(
                     stable_id("r", &source),
                     "relay",
@@ -3462,6 +3569,7 @@ impl<'a> Builder<'a> {
                 PreviewRef::new(at, "received_cross"),
             )]));
         }
+        Ok(())
     }
 
     /// A subagent's send addressed to [`PARENT_ADDRESS`] goes to the
@@ -3628,7 +3736,7 @@ impl<'a> Builder<'a> {
         .unwrap_or_default()
     }
 
-    fn codex_relays(&mut self) {
+    fn codex_relays(&mut self) -> io::Result<()> {
         let mut sends = Vec::new();
         for (position, file) in self.files.iter().enumerate() {
             if file.harness() != "codex" {
@@ -3664,18 +3772,34 @@ impl<'a> Builder<'a> {
             let message = self.text(at, "message", |record, block| {
                 input_string(record, block, &["message"])
             });
-            let matches: Vec<usize> = (0..self.sessions.len())
+            let matches: Vec<usize> = if let Some(epoch) = self.staged_epoch {
+                let selected = self.cache.semantic_select(
+                    epoch,
+                    &relation_stage::Selector::CodexRelay {
+                        root: self.graph_root_key(from),
+                        target: target.clone(),
+                    },
+                )?;
+                if let (1, Some(endpoint)) = (selected.count, selected.endpoint) {
+                    relation_stage::Context::install_endpoint(&endpoint, self)?;
+                    vec![self.by_key[&endpoint.row.key]]
+                } else {
+                    Vec::new()
+                }
+            } else {
+                (0..self.sessions.len())
                 .filter(|index| {
                     let session = &self.sessions[*index];
-                    session.kind == SessKind::Codex
+                    (session.kind == SessKind::Codex || self.staged_endpoints.get(&session.key).is_some_and(|endpoint| endpoint.facts_kind == "codex-run"))
                         && self.root(*index) == tree
-                        && matches!(
-                            &self.files[session.files[0]].role,
+                        && (self.staged_endpoints.get(&session.key).is_some_and(|endpoint| endpoint.paths.iter().any(|path| path == &target) || endpoint.nickname.as_deref() == Some(target.as_str())) || session.files.first().is_some_and(|file| matches!(
+                            &self.files[*file].role,
                             Role::Codex(meta) if meta.path.as_deref() == Some(target.as_str())
                                 || meta.nickname.as_deref() == Some(target.as_str())
-                        )
+                        )))
                 })
-                .collect();
+                .collect()
+            };
             let reply = event(self.files, at).r.clone();
             let failed = reply.as_ref().is_some_and(|reply| reply.e);
             let (to, unmatched) = match matches.as_slice() {
@@ -3702,6 +3826,7 @@ impl<'a> Builder<'a> {
             let handoff = self.add_handoff(handoff, Some(from), Some(to));
             self.place(at, handoff, Place::Out);
         }
+        Ok(())
     }
 
     fn observed_parents(
@@ -3977,8 +4102,7 @@ impl<'a> Builder<'a> {
                         }
                     }
                     None => {
-                        let root = self.root(index);
-                        if self.sessions[root].alive {
+                        if self.graph_root_alive(index) {
                             handoff.status = "wait";
                         }
                     }
@@ -4213,7 +4337,7 @@ impl<'a> Builder<'a> {
         self.sessions[index].out.activity = Some((name, arg, 0, time));
     }
 
-    fn wait_edges(&mut self, transcripts: &BTreeMap<String, Arc<Transcript>>) {
+    fn wait_edges(&mut self, transcripts: &BTreeMap<String, Arc<Transcript>>) -> io::Result<()> {
         const MAX_WAITS: usize = 4096;
         for index in 0..self.sessions.len() {
             if self.sessions[index].kind == SessKind::Stub {
@@ -4266,6 +4390,20 @@ impl<'a> Builder<'a> {
                     .unwrap_or_default();
                 let mut targets = BTreeSet::new();
                 for target in input {
+                    if let Some(epoch) = self.staged_epoch {
+                        let selected = self.cache.semantic_select(
+                            epoch,
+                            &relation_stage::Selector::CodexWait {
+                                root: self.graph_root_key(index),
+                                target,
+                                exclude: self.sessions[index].key.clone(),
+                            },
+                        )?;
+                        if let (1, Some(endpoint)) = (selected.count, selected.endpoint) {
+                            targets.insert(endpoint.row.key);
+                        }
+                        continue;
+                    }
                     let candidates: Vec<usize> = (0..self.sessions.len())
                         .filter(|candidate| {
                             if *candidate == index || self.root(*candidate) != self.root(index) {
@@ -4273,6 +4411,12 @@ impl<'a> Builder<'a> {
                             }
                             let session = &self.sessions[*candidate];
                             session.key == target
+                                || self
+                                    .staged_endpoints
+                                    .get(&session.key)
+                                    .is_some_and(|endpoint| {
+                                        endpoint.paths.iter().any(|path| path == &target)
+                                    })
                                 || session.files.iter().any(|file| {
                                     matches!(&self.files[*file].role,
                             Role::Codex(meta) if meta.path.as_deref()==Some(target.as_str()))
@@ -4315,6 +4459,7 @@ impl<'a> Builder<'a> {
             waits.shrink_to_fit();
             self.sessions[index].out.wait_edges = waits;
         }
+        Ok(())
     }
 
     // -- turns --
@@ -4577,7 +4722,7 @@ impl<'a> Builder<'a> {
             background_liveness,
             baseline: serde_json::to_string(&session.out).expect("session serializes"),
             links,
-            root_alive: self.sessions[self.root(index)].alive,
+            root_alive: self.graph_root_alive(index),
             liveness: (session.alive, session.busy, session.waiting),
             clock: session.first.is_none().then_some(self.now),
         }
@@ -6458,27 +6603,218 @@ pub(crate) struct PreparedSources {
     pub(crate) transcripts: Vec<crate::slot_projection::Projection>,
     pub(crate) pids: BTreeSet<u32>,
     pub(crate) lineage_dependencies: Vec<(String, String)>,
+    pub(crate) relationships: relation_stage::Context,
+    pub(crate) indexed_sources: Vec<(String, summary::CatalogSource)>,
+    pub(crate) indexed_native_parents: Vec<(String, String, String)>,
+    pub(crate) withdrawals: Vec<relation_stage::Withdrawal>,
 }
 
 impl PreparedSources {
     /// Header/path parent references exist before a selected cohort can resolve
     /// them. Keep them as native identities rather than dropping an absent end.
     pub(crate) fn native_parents(&self) -> Vec<(String, String)> {
-        self.rows
-            .iter()
-            .flat_map(|row| &row.sources)
-            .filter_map(|source| {
-                let role: Role = serde_json::from_value(source.native_role.clone()?).ok()?;
-                match role {
-                    Role::Agent(meta) => Some(("claude".to_owned(), meta.parent)),
-                    Role::Codex(meta) if !meta.guardian_review => {
-                        meta.parent_thread.map(|id| ("codex".to_owned(), id))
-                    }
-                    _ => None,
-                }
-            })
+        self.relationships
+            .endpoints
+            .values()
+            .flat_map(|endpoint| endpoint.native_parents.iter().cloned())
+            .chain(
+                self.indexed_native_parents
+                    .iter()
+                    .map(|(_, harness, native)| (harness.clone(), native.clone())),
+            )
+            .chain(
+                self.rows
+                    .iter()
+                    .flat_map(|row| &row.sources)
+                    .filter_map(|source| {
+                        let role: Role =
+                            serde_json::from_value(source.native_role.clone()?).ok()?;
+                        match role {
+                            Role::Agent(meta) => Some(("claude".to_owned(), meta.parent)),
+                            Role::Codex(meta) if !meta.guardian_review => {
+                                meta.parent_thread.map(|id| ("codex".to_owned(), id))
+                            }
+                            _ => None,
+                        }
+                    }),
+            )
+            .collect::<BTreeSet<_>>()
+            .into_iter()
             .collect()
     }
+}
+
+/// Primitive source observations precede owner identity closure. No partial
+/// lineage, relation history or query projection is accepted in this phase.
+pub(crate) fn prepare_semantic_index_sources(
+    options: &Options,
+    cache: &mut EventCache,
+    inputs: &[crate::Input],
+    now: i64,
+) -> io::Result<PreparedSources> {
+    if inputs.len() > 64
+        || inputs
+            .iter()
+            .map(|input| input.full_path(options))
+            .collect::<BTreeSet<_>>()
+            .len()
+            != inputs.len()
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "native producer source batch must contain at most 64 distinct sources",
+        ));
+    }
+    let _facts_lock = options
+        .facts
+        .as_ref()
+        .map(|_| crate::source_change::SourceLock::acquire(options, "facts", false))
+        .transpose()?;
+    let paths = inputs
+        .iter()
+        .map(|input| input.full_path(options).to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+    let _source_locks = paths
+        .iter()
+        .map(|path| crate::source_change::SourceLock::acquire(options, path, false))
+        .collect::<io::Result<Vec<_>>>()?;
+    let base_generation = cache.session_catalog_generation();
+    let facts = MachineFacts::of(options);
+    let runtime = crate::native_evidence::query_runtime_generation(options)?;
+    let mut withdrawals = Vec::new();
+    if let Some(facts_path) = &options.facts
+        && inputs.iter().any(|input| {
+            input.root == crate::InputRoot::Codex
+                && !facts.codex_rollout_is_current(options, &input.full_path(options))
+        })
+    {
+        let authority = crate::facts::source_authority::CurrentSources::open(facts_path)?;
+        let facts_identity =
+            crate::facts::source_authority::Identity::of(&fs::symlink_metadata(facts_path)?)?;
+        authority.validate()?;
+        for input in inputs
+            .iter()
+            .filter(|input| input.root == crate::InputRoot::Codex)
+        {
+            if authority.codex_current(&input.path)? != Some(false) {
+                continue;
+            }
+            let path = input.full_path(options);
+            let stat = match crate::events::Stat::of(&path) {
+                Ok(stat) => stat,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(error),
+            };
+            withdrawals.push(relation_stage::Withdrawal {
+                path: path.to_string_lossy().into_owned(),
+                relative: input.path.clone(),
+                stat,
+                facts_path: facts_path.clone(),
+                facts_identity: facts_identity.clone(),
+                runtime: runtime.clone(),
+            });
+        }
+        authority.validate()?;
+    }
+    let (mut files, _, _) = scan(
+        options,
+        cache,
+        &mut false,
+        &mut Texts::default(),
+        scan_cutoff(options, now),
+        &facts,
+        Some(inputs),
+    )?;
+    verify_sidecars(&files)?;
+    let claims = cache.catalog_claims(&paths)?;
+    let proofs = crate::query_source::Sources::capture(
+        options,
+        files
+            .iter()
+            .map(|file| (summary::source(file), file.summary.source_chunks.clone())),
+    )?;
+    let records = proofs.reader();
+    records.verify_all()?;
+    for file in &mut files {
+        if file.summary.handoff_index.is_none() {
+            return Err(io::Error::other("native launch calls were not indexed"));
+        }
+        if file.harness() != "copilot" {
+            let marker = file
+                .summary
+                .marker_index
+                .as_ref()
+                .ok_or_else(|| io::Error::other("native parent marker was not indexed"))?;
+            file.marker = records.marker(&file.path, marker)?;
+        }
+    }
+    let indexed_sources = files
+        .iter()
+        .map(|file| (file.harness().to_owned(), summary::source(file)))
+        .collect();
+    let indexed_native_parents = files
+        .iter()
+        .filter_map(|file| {
+            (match &file.role {
+                Role::Agent(meta) => Some(("claude".to_owned(), meta.parent.clone())),
+                Role::Codex(meta) if !meta.guardian_review => meta
+                    .parent_thread
+                    .as_ref()
+                    .map(|parent| ("codex".to_owned(), parent.clone()))
+                    .or_else(|| {
+                        file.marker
+                            .as_ref()
+                            .map(|marker| (marker.harness.clone(), marker.parent_id.clone()))
+                    }),
+                _ => None,
+            })
+            .map(|(harness, native)| (file.path.to_string_lossy().into_owned(), harness, native))
+        })
+        .collect();
+    let lineage_dependencies = files
+        .iter()
+        .flat_map(|file| {
+            file.summary
+                .links
+                .session_ids
+                .iter()
+                .chain(&file.summary.links.continued_in)
+                .map(|id| (file.harness().to_owned(), id.clone()))
+                .chain(
+                    file.summary
+                        .links
+                        .bridges
+                        .iter()
+                        .map(|id| (format!("bridge:{}", file.harness()), id.clone())),
+                )
+        })
+        .collect();
+    records.finish()?;
+    verify_sidecars(&files)?;
+    for withdrawal in &withdrawals {
+        if !withdrawal.current()? {
+            return Err(io::Error::other(
+                "native source admission withdrawal changed",
+            ));
+        }
+    }
+    if !withdrawals.is_empty()
+        && crate::native_evidence::query_runtime_generation(options)? != runtime
+    {
+        return Err(io::Error::other("native source admission runtime changed"));
+    }
+    Ok(PreparedSources {
+        base_generation,
+        claims,
+        indexed_sources,
+        indexed_native_parents,
+        withdrawals,
+        lineage_dependencies,
+        rows: Vec::new(),
+        transcripts: Vec::new(),
+        pids: BTreeSet::new(),
+        relationships: relation_stage::Context::default(),
+    })
 }
 
 pub(crate) fn prepare_sources(
@@ -6486,6 +6822,63 @@ pub(crate) fn prepare_sources(
     cache: &mut EventCache,
     inputs: &[crate::inputs::Input],
     now: i64,
+) -> io::Result<PreparedSources> {
+    prepare_sources_selected(
+        options,
+        cache,
+        inputs,
+        now,
+        BuildSelection::Current(Some(inputs)),
+    )
+}
+
+pub(crate) fn prepare_semantic_identity_sources(
+    options: &Options,
+    cache: &mut EventCache,
+    inputs: &[crate::inputs::Input],
+    relationships: &relation_stage::Context,
+    now: i64,
+) -> io::Result<PreparedSources> {
+    prepare_sources_selected(
+        options,
+        cache,
+        inputs,
+        now,
+        BuildSelection::Identity {
+            inputs,
+            relationships,
+        },
+    )
+}
+
+pub(crate) fn prepare_staged_sources(
+    options: &Options,
+    cache: &mut EventCache,
+    inputs: &[crate::inputs::Input],
+    relationships: &relation_stage::Context,
+    matching: bool,
+    now: i64,
+) -> io::Result<PreparedSources> {
+    let selection = if matching {
+        BuildSelection::Matching {
+            inputs,
+            relationships,
+        }
+    } else {
+        BuildSelection::Staged {
+            inputs,
+            relationships,
+        }
+    };
+    prepare_sources_selected(options, cache, inputs, now, selection)
+}
+
+fn prepare_sources_selected(
+    options: &Options,
+    cache: &mut EventCache,
+    inputs: &[crate::inputs::Input],
+    now: i64,
+    selection: BuildSelection<'_>,
 ) -> io::Result<PreparedSources> {
     if inputs.len() > 64
         || inputs
@@ -6509,7 +6902,7 @@ pub(crate) fn prepare_sources(
         &mut false,
         &mut Texts::default(),
         now,
-        BuildSelection::Current(Some(inputs)),
+        selection,
         BuildTarget::Sources,
     )? {
         BuildOutput::Sources(prepared) => Ok(prepared),
@@ -6520,7 +6913,19 @@ pub(crate) fn prepare_sources(
 }
 
 enum BuildSelection<'a> {
+    Identity {
+        inputs: &'a [crate::inputs::Input],
+        relationships: &'a relation_stage::Context,
+    },
     Current(Option<&'a [crate::inputs::Input]>),
+    Staged {
+        inputs: &'a [crate::inputs::Input],
+        relationships: &'a relation_stage::Context,
+    },
+    Matching {
+        inputs: &'a [crate::inputs::Input],
+        relationships: &'a relation_stage::Context,
+    },
     History {
         files: Vec<SourceFile>,
         skipped: BTreeSet<String>,
@@ -6769,7 +7174,10 @@ fn build_sources_inner(
     measurements.record("facts_lock", started, 1);
     let started = measurements.start();
     let _source_locks = match &selection {
-        BuildSelection::Current(Some(inputs)) => inputs
+        BuildSelection::Current(Some(inputs))
+        | BuildSelection::Identity { inputs, .. }
+        | BuildSelection::Staged { inputs, .. }
+        | BuildSelection::Matching { inputs, .. } => inputs
             .iter()
             .map(|input| {
                 crate::source_change::SourceLock::acquire(
@@ -6809,6 +7217,18 @@ fn build_sources_inner(
 
     let facts = measured!("machine_facts", 1, MachineFacts::of(options));
     let window_start = scan_cutoff(options, now);
+    let staged_relationships = match &selection {
+        BuildSelection::Staged { relationships, .. } => Some(*relationships),
+        _ => None,
+    };
+    let matching_relationships = match &selection {
+        BuildSelection::Matching { relationships, .. } => Some(*relationships),
+        _ => None,
+    };
+    let identity_epoch = match &selection {
+        BuildSelection::Identity { relationships, .. } => relationships.epoch,
+        _ => None,
+    };
     let (selected, history_records, mut files, skipped, index_clone) = match selection {
         BuildSelection::Current(selected) => {
             let (files, skipped, duration) = timed!(
@@ -6816,6 +7236,23 @@ fn build_sources_inner(
                 scan(options, cache, dirty, texts, window_start, &facts, selected)?
             );
             (selected, None, files, skipped, duration)
+        }
+        BuildSelection::Identity { inputs, .. }
+        | BuildSelection::Staged { inputs, .. }
+        | BuildSelection::Matching { inputs, .. } => {
+            let (files, skipped, duration) = timed!(
+                "scan",
+                scan(
+                    options,
+                    cache,
+                    dirty,
+                    texts,
+                    window_start,
+                    &facts,
+                    Some(inputs)
+                )?
+            );
+            (Some(inputs), None, files, skipped, duration)
         }
         BuildSelection::History {
             files,
@@ -6951,6 +7388,28 @@ fn build_sources_inner(
     );
     measurements.record("builder_setup", started, files.len());
     builder.history_records = history_records;
+    if let Some(epoch) = identity_epoch.or_else(|| {
+        staged_relationships
+            .or(matching_relationships)
+            .and_then(|context| context.epoch)
+    }) {
+        for file in &files {
+            let native = (file.harness().to_owned(), file.id.clone());
+            if !builder.staged_keys.contains_key(&native) {
+                let selected = builder.cache.semantic_select(
+                    epoch,
+                    &relation_stage::Selector::NativeKey {
+                        harness: native.0.clone(),
+                        native: native.1.clone(),
+                    },
+                )?;
+                let key = selected
+                    .key
+                    .ok_or_else(|| io::Error::other("staged native identity not qualified"))?;
+                builder.staged_keys.insert(native, key);
+            }
+        }
+    }
     timed!("sessions", builder.sessions(groups, &pids, &held));
     let started = measurements.start();
     for name in facts.native_names(options) {
@@ -6965,26 +7424,47 @@ fn build_sources_inner(
     measurements.record("native_names", started, 1);
     timed!("index_tools", builder.index_tools());
     timed!("background_commands", builder.background_commands());
-    timed!("claude_spawns", builder.claude_spawns());
-    timed!("codex_spawns", builder.codex_spawns());
-    timed!(
-        "observed_parents",
-        builder.observed_parents(options, &pids, &lock_pids.clone().unwrap_or_default())
-    );
-    timed!("relays", builder.relays());
-    timed!("codex_relays", builder.codex_relays());
+    builder.staged_epoch = staged_relationships
+        .or(matching_relationships)
+        .and_then(|relationships| relationships.epoch);
+    if let Some(relationships) = matching_relationships {
+        relationships.install_endpoints(&mut builder)?;
+        if let Some(locations) = &relationships.matching_locations {
+            let mut selected = BTreeSet::new();
+            for location in locations {
+                if let Some(at) = location.local(&builder)? {
+                    selected.insert(at);
+                }
+            }
+            builder.matching_refs = Some(selected);
+        }
+    }
+    if let Some(relationships) = staged_relationships {
+        timed!("staged_relationships", relationships.install(&mut builder)?);
+    } else {
+        timed!("claude_spawns", builder.claude_spawns()?);
+        timed!("codex_spawns", builder.codex_spawns()?);
+        timed!(
+            "observed_parents",
+            builder.observed_parents(options, &pids, &lock_pids.clone().unwrap_or_default())
+        );
+        timed!("relays", builder.relays()?);
+        timed!("codex_relays", builder.codex_relays()?);
+    }
     timed!("asks", builder.asks(target));
     timed!("questions", builder.questions());
     timed!("lineage_states", builder.lineage_states());
     let (mut turns, mut tx) = timed!("turns", builder.turns());
-    timed!("wait_edges", builder.wait_edges(&tx));
+    timed!("wait_edges", builder.wait_edges(&tx)?);
 
     // Stubs span the handoffs that name them.
     timed!("stubs", {
         for handoff in &builder.handoffs {
             for end in [handoff.from, handoff.to].into_iter().flatten() {
                 let session = &mut builder.sessions[end];
-                if session.kind == SessKind::Stub {
+                if session.kind == SessKind::Stub
+                    && !builder.staged_endpoints.contains_key(&session.key)
+                {
                     let at = handoff.out.at;
                     session.out.start = if session.out.start == 0 {
                         at
@@ -7038,7 +7518,7 @@ fn build_sources_inner(
         catalog.as_ref().map(|_| derive_query_facts())
     );
     let started = measurements.start();
-    let query_summaries = published_facts.as_ref().map(|facts| {
+    let mut query_summaries = published_facts.as_ref().map(|facts| {
         crate::query::catalog_summaries(
             builder
                 .sessions
@@ -7050,6 +7530,14 @@ fn build_sources_inner(
             now,
         )
     });
+    if let (Some(relationships), Some(summaries)) = (staged_relationships, query_summaries.as_mut())
+    {
+        for (key, children) in &relationships.children {
+            if let Some(summary) = summaries.get_mut(key) {
+                summary["summary"]["children"] = serde_json::json!(children);
+            }
+        }
+    }
     measurements.record("projection_query_summaries", started, 1);
     let started = measurements.start();
     let slot_projections = catalog.as_ref().map(|rows| {
@@ -7092,7 +7580,7 @@ fn build_sources_inner(
             .iter()
             .map(|projection| (projection.key.as_str(), projection))
             .collect();
-        let family_costs =
+        let mut family_costs =
             crate::causal_trace::family_costs(builder.sessions.iter().map(|session| {
                 (
                     session.key.as_str(),
@@ -7100,6 +7588,13 @@ fn build_sources_inner(
                     session.out.cost.usd,
                 )
             }));
+        if let Some(relationships) = staged_relationships {
+            for (key, cost) in &relationships.family_costs {
+                if let Some(stored) = family_costs.get_mut(key.as_str()) {
+                    *stored = *cost;
+                }
+            }
+        }
         let publication_sessions = builder
             .sessions
             .iter()
@@ -7109,8 +7604,8 @@ fn build_sources_inner(
             crate::analytics::activity(&publication_sessions, &tx, &turns, &handoffs, now);
         let preview_owners: BTreeMap<_,_>=builder.handoffs.iter().map(|h| {
             let owner=|field:&str| match &h.previews {
-                Some(previews)=>previews.get(field).map(|preview|builder.sessions[builder.of_file[preview.at.0]].key.as_str()),
-                None=>(field=="brief" || h.out.result.is_some()).then_some(h.out.from.as_str()),
+                Some(previews)=>previews.get(field).map(|preview|builder.sessions[builder.of_file[preview.at.0]].key.as_str()).or_else(||h.preview_owners.get(field).map(String::as_str)),
+                None=>h.preview_owners.get(field).map(String::as_str).or_else(||(field=="brief" || h.out.result.is_some()).then_some(h.out.from.as_str())),
             };
             (h.out.id.clone(),serde_json::json!({"brief_session":owner("brief"),"result_session":owner("result")}))
         }).collect();
@@ -7246,6 +7741,8 @@ fn build_sources_inner(
     }
     match target {
         BuildTarget::Sources => {
+            let relationships =
+                relation_stage::Context::capture(&builder, published_facts.as_ref());
             return Ok(BuildOutput::Sources(PreparedSources {
                 base_generation: catalog_base,
                 claims,
@@ -7270,6 +7767,10 @@ fn build_sources_inner(
                             )
                     })
                     .collect(),
+                relationships,
+                indexed_sources: Vec::new(),
+                indexed_native_parents: Vec::new(),
+                withdrawals: Vec::new(),
             }));
         }
         BuildTarget::Catalog => {

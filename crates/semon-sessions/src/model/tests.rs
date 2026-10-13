@@ -7,6 +7,7 @@ use std::{
     time::Duration,
 };
 
+use rusqlite::OptionalExtension;
 use serde_json::{Value, json};
 
 use super::*;
@@ -3400,6 +3401,730 @@ fn codex_native_spawn_calls_place_their_exact_task() {
     assert_eq!(
         turns_of(&built, "root")[0].sent,
         std::slice::from_ref(&spawn.id)
+    );
+}
+
+/// Replay must enter the shared turn/slot builder before it replaces native
+/// entries with placements. Compare the public persisted artifacts, including
+/// native preview recipes, rather than just checking parent headers.
+fn assert_staged_owner_parity(home: &Home, inputs: &[crate::Input]) {
+    let mut cache = EventCache::open(&home.options.cache);
+    let full = prepare_sources(&home.options, &mut cache, inputs, NOW).unwrap();
+    let serialized = serde_json::to_vec(&full.relationships).unwrap();
+    let mut staged: relation_stage::Context = serde_json::from_slice(&serialized).unwrap();
+    for row in &full.rows {
+        staged.children.insert(
+            row.key.clone(),
+            serde_json::from_value(
+                row.query.as_ref().unwrap()["rows"][&row.key]["summary"]["children"].clone(),
+            )
+            .unwrap(),
+        );
+    }
+    for input in inputs {
+        let replay = prepare_staged_sources(
+            &home.options,
+            &mut cache,
+            std::slice::from_ref(input),
+            &staged,
+            false,
+            NOW,
+        )
+        .unwrap();
+        for row in &replay.rows {
+            let expected = full
+                .rows
+                .iter()
+                .find(|candidate| candidate.key == row.key)
+                .unwrap();
+            assert_eq!(
+                serde_json::to_value(row).unwrap(),
+                serde_json::to_value(expected).unwrap(),
+                "{} catalog/Query",
+                row.key
+            );
+            assert_eq!(
+                format!("{:?}", row.trace),
+                format!("{:?}", expected.trace),
+                "{} trace",
+                row.key
+            );
+            assert_eq!(
+                serde_json::to_value(&row.overview).unwrap(),
+                serde_json::to_value(&expected.overview).unwrap(),
+                "{} native preview recipes",
+                row.key
+            );
+            let actual_slots = &replay
+                .transcripts
+                .iter()
+                .find(|projection| projection.key == row.key)
+                .unwrap()
+                .slots;
+            let expected_slots = &full
+                .transcripts
+                .iter()
+                .find(|projection| projection.key == row.key)
+                .unwrap()
+                .slots;
+            assert_eq!(
+                serde_json::to_value(actual_slots).unwrap(),
+                serde_json::to_value(expected_slots).unwrap(),
+                "{} source-qualified slots",
+                row.key
+            );
+        }
+    }
+}
+
+#[test]
+fn staged_codex_native_spawn_and_relay_replay_matches_shared_builder() {
+    let home = Home::new();
+    home.codex("root", json!({}), &[
+        codex_user(ts(4,0), "Coordinate"),
+        codex_line(ts(4,1), "response_item", json!({"type":"function_call","namespace":"collaboration","name":"spawn_agent","call_id":"spawn-worker","arguments":"{\"task_name\":\"worker\",\"message\":\"Inspect\"}"})),
+        codex_line(ts(4,1), "response_item", json!({"type":"function_call_output","call_id":"spawn-worker","output":"{\"task_name\":\"worker\"}"})),
+        codex_line(ts(4,3), "response_item", json!({"type":"function_call","namespace":"collaboration","name":"send_message","call_id":"send-worker","arguments":"{\"target\":\"root/worker\",\"message\":\"Follow up\"}"})),
+        codex_line(ts(4,3), "response_item", json!({"type":"function_call_output","call_id":"send-worker","output":"sent"})),
+    ]);
+    home.codex("worker", json!({"parent_thread_id":"root","thread_source":"subagent","agent_path":"root/worker","agent_nickname":"Socrates"}), &[
+        codex_user(ts(4,2), "Inspect"),
+        codex_reply(ts(4,4), "Complete"),
+    ]);
+    assert_staged_owner_parity(
+        &home,
+        &[
+            crate::Input {
+                root: crate::InputRoot::Codex,
+                path: "sessions/2026/09/24/rollout-root.jsonl".into(),
+            },
+            crate::Input {
+                root: crate::InputRoot::Codex,
+                path: "sessions/2026/09/24/rollout-worker.jsonl".into(),
+            },
+        ],
+    );
+}
+
+#[test]
+fn staged_claude_unmatched_send_and_orphan_receipt_keep_stubs_and_native_recipes() {
+    let home = Home::new();
+    home.top(
+        "sender",
+        &[
+            human("sender", ts(5, 0), "Coordinate"),
+            assistant(
+                "sender",
+                ts(5, 1),
+                vec![tool(
+                    "send-absent",
+                    "SendMessage",
+                    json!({"to":"missing","message":"Native outgoing brief"}),
+                )],
+            ),
+            result(
+                "sender",
+                ts(5, 1),
+                "send-absent",
+                "sent",
+                false,
+                json!({"success":true,"message":"sent"}),
+            ),
+        ],
+    );
+    home.top("receiver", &[
+        human("receiver", ts(5,0), "Receive"),
+        json!({"type":"user","timestamp":ts(5,2),"sessionId":"receiver","origin":{"kind":"peer","from":"unknown","name":"missing-worker","body":"Native receipt"},"message":{"role":"user","content":"<cross-session-message from=\"unknown\" from-name=\"missing-worker\">Native receipt</cross-session-message>"}}),
+    ]);
+    assert_staged_owner_parity(
+        &home,
+        &[
+            crate::Input {
+                root: crate::InputRoot::Claude,
+                path: "projects/-work-proj/sender.jsonl".into(),
+            },
+            crate::Input {
+                root: crate::InputRoot::Claude,
+                path: "projects/-work-proj/receiver.jsonl".into(),
+            },
+        ],
+    );
+}
+
+#[test]
+fn resumable_rich_codex_family_survives_owner_loss_and_late_native_append() {
+    let home = Home::new();
+    let mut records = vec![codex_user(ts(6, 0), "Coordinate a large native family")];
+    for n in 0..80 {
+        let task = format!("part{n:03}");
+        records.push(codex_line(ts(6,1), "response_item", json!({"type":"function_call","namespace":"collaboration","name":"spawn_agent","call_id":format!("spawn-{n}"),"arguments":json!({"task_name":task,"message":"Inspect"}).to_string()})));
+        home.codex(&format!("child-{n:03}"), json!({"parent_thread_id":"root","thread_source":"subagent","agent_path":format!("root/{task}"),"agent_nickname":format!("worker-{n}")}), &[
+            codex_user(ts(6,2), "Inspect"), codex_reply(ts(6,4), "Complete"),
+        ]);
+    }
+    records.push(codex_line(ts(6,3), "response_item", json!({"type":"function_call","namespace":"collaboration","name":"send_message","call_id":"far-relay","arguments":"{\"target\":\"root/part079\",\"message\":\"Follow up\"}"})));
+    home.codex("root", json!({}), &records);
+    home.codex("grandchild", json!({"parent_thread_id":"child-079","thread_source":"subagent","agent_path":"root/part079/deep","agent_nickname":"deep"}), &[
+        codex_user(ts(6,3), "Deep work"),
+        codex_line(ts(6,4), "response_item", json!({"type":"function_call","namespace":"collaboration","name":"send_message","call_id":"deep-relay","arguments":"{\"target\":\"root/part000\",\"message\":\"Across the true root\"}"})),
+    ]);
+    let mut evidence = crate::native_evidence::NativeEvidence::new(home.options.clone());
+    let mut restarted = false;
+    let mut appended = false;
+    let mut complete = false;
+    for _ in 0..128 {
+        let done = evidence
+            .refresh_catalog(&mut crate::viewer::lock(&evidence.work), NOW)
+            .unwrap();
+        let db = rusqlite::Connection::open(EventCache::path(&home.options.cache)).unwrap();
+        let phase: Option<String> = db
+            .query_row("SELECT phase FROM catalog_semantic_stage", [], |row| {
+                row.get(0)
+            })
+            .optional()
+            .unwrap();
+        if !done {
+            assert!(
+                crate::source_projection_ready(
+                    &home.options,
+                    "codex",
+                    "sessions/2026/09/24/rollout-root.jsonl"
+                )
+                .unwrap()
+                .is_none(),
+                "partial epoch became archive-ready"
+            );
+        }
+        if phase.as_deref() == Some("relations") && !restarted {
+            evidence.retire();
+            evidence = crate::native_evidence::NativeEvidence::new(home.options.clone());
+            restarted = true;
+        }
+        if phase.as_deref() == Some("publication") && !appended {
+            let mut file = fs::OpenOptions::new()
+                .append(true)
+                .open(
+                    home.options
+                        .codex_home
+                        .join("sessions/2026/09/24/rollout-root.jsonl"),
+                )
+                .unwrap();
+            writeln!(file, "{}", codex_reply(ts(6, 5), "Late native completion")).unwrap();
+            appended = true;
+        } else if done {
+            complete = true;
+            break;
+        }
+    }
+    evidence.retire();
+    assert!(
+        complete && restarted && appended,
+        "durable rich family did not qualify after owner loss and append"
+    );
+    let mut oracle_options = home.options.clone();
+    oracle_options.cache = home.root.join("oracle-index.json");
+    let oracle = home.build_at(&oracle_options, NOW);
+    let db = rusqlite::Connection::open(EventCache::path(&home.options.cache)).unwrap();
+    for handoff in oracle
+        .handoffs
+        .iter()
+        .filter(|edge| matches!(edge.kind, "spawn" | "relay"))
+    {
+        for owner in [Some(&handoff.from), handoff.to.as_ref()]
+            .into_iter()
+            .flatten()
+        {
+            let metadata: String = db
+                .query_row(
+                    "SELECT metadata FROM session_trace_edges WHERE session_key=?1 AND edge_id=?2",
+                    rusqlite::params![owner, handoff.id],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            let value: Value = serde_json::from_str(&metadata).unwrap();
+            assert_eq!(value["from"], json!(handoff.from));
+            assert_eq!(value["to"], json!(handoff.to));
+            assert_eq!(value["status"], json!(handoff.status));
+            assert_eq!(value["ambiguous"], json!(handoff.ambiguous));
+            assert_eq!(value["unmatched"], json!(handoff.unmatched));
+        }
+    }
+    for turn in &oracle.turns {
+        let metadata: String = db
+            .query_row(
+                "SELECT metadata FROM session_trace_turns WHERE session_key=?1 AND turn_id=?2",
+                rusqlite::params![turn.sid, turn.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let value: Value = serde_json::from_str(&metadata).unwrap();
+        assert_eq!(value["start"], json!(turn.start));
+        assert_eq!(value["sent"], json!(turn.sent));
+        assert_eq!(value["end"], json!(turn.end));
+    }
+    let metadata: String = db
+        .query_row(
+            "SELECT metadata FROM session_catalog WHERE session_key='root' AND lifecycle='current'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let row: Value = serde_json::from_str(&metadata).unwrap();
+    assert_eq!(
+        row["query"]["rows"]["root"]["summary"]["children"]
+            .as_array()
+            .unwrap()
+            .len(),
+        80
+    );
+    assert!(
+        crate::source_projection_ready(
+            &home.options,
+            "codex",
+            "sessions/2026/09/24/rollout-root.jsonl"
+        )
+        .unwrap()
+        .is_some()
+    );
+}
+
+#[test]
+fn resumable_claude_peer_component_preserves_exact_messages_and_learned_name() {
+    let home = Home::new();
+    let mut sender = vec![human("coordinator", ts(7, 0), "Coordinate peers")];
+    for n in 0..80 {
+        let call = format!("send-{n:03}");
+        let message = format!("message-{n:03}");
+        let receiver = format!("peer-{n:03}");
+        sender.push(assistant(
+            "coordinator",
+            ts(7, 1),
+            vec![tool(
+                &call,
+                "SendMessage",
+                json!({"to":receiver,"message":format!("native brief {n}")}),
+            )],
+        ));
+        sender.push(result(
+            "coordinator",
+            ts(7, 1),
+            &call,
+            "sent",
+            false,
+            json!({"success":true,"msg_id":message}),
+        ));
+        let mut records = vec![peer(
+            &receiver,
+            ts(7, 2),
+            &message,
+            "Coordinator",
+            100,
+            &format!("native brief {n}"),
+        )];
+        if n == 79 {
+            records.push(assistant(
+                &receiver,
+                ts(7, 3),
+                vec![tool(
+                    "legacy-return",
+                    "SendMessage",
+                    json!({"to":"Coordinator","message":"Return by learned unique name"}),
+                )],
+            ));
+            records.push(result(
+                &receiver,
+                ts(7, 3),
+                "legacy-return",
+                "sent",
+                false,
+                json!({"success":true,"message":"sent"}),
+            ));
+        }
+        home.top(&receiver, &records);
+    }
+    home.top("coordinator", &sender);
+    let mut oracle_options = home.options.clone();
+    oracle_options.cache = home.root.join("oracle-index.json");
+    let oracle = home.build_at(&oracle_options, NOW);
+    let evidence = crate::native_evidence::NativeEvidence::new(home.options.clone());
+    let mut complete = false;
+    for _ in 0..128 {
+        if evidence
+            .refresh_catalog(&mut crate::viewer::lock(&evidence.work), NOW)
+            .unwrap()
+        {
+            complete = true;
+            break;
+        }
+    }
+    evidence.retire();
+    assert!(
+        complete,
+        "cross-batch native Claude peer component remained pending"
+    );
+    let db = rusqlite::Connection::open(EventCache::path(&home.options.cache)).unwrap();
+    let expected = oracle
+        .handoffs
+        .iter()
+        .filter(|edge| edge.kind == "relay")
+        .collect::<Vec<_>>();
+    assert_eq!(expected.len(), 81);
+    assert!(expected.iter().all(|edge| !edge.unmatched));
+    assert_eq!(db.query_row("SELECT count(DISTINCT edge_id) FROM session_trace_edges WHERE json_extract(metadata,'$.kind')='relay'",[],|row|row.get::<_,usize>(0)).unwrap(),81,"a receipt became an extra orphan edge");
+    for edge in expected {
+        for owner in [Some(&edge.from), edge.to.as_ref()].into_iter().flatten() {
+            let metadata: String = db
+                .query_row(
+                    "SELECT metadata FROM session_trace_edges WHERE session_key=?1 AND edge_id=?2",
+                    rusqlite::params![owner, edge.id],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            let value: Value = serde_json::from_str(&metadata).unwrap();
+            assert_eq!(value["from"], json!(edge.from));
+            assert_eq!(value["to"], json!(edge.to));
+            assert_eq!(value["unmatched"], json!(edge.unmatched));
+        }
+    }
+}
+
+fn assert_queued_identity_matches_oracle(home: &Home, options: &Options) -> Built {
+    let mut oracle_options = options.clone();
+    oracle_options.cache = options.cache.with_extension("oracle.json");
+    let oracle = home.build_at(&oracle_options, NOW);
+    let mut inputs = crate::inputs(options).unwrap();
+    inputs.retain(|input| input.path.ends_with(".jsonl"));
+    let paths = inputs
+        .iter()
+        .map(|input| input.full_path(options).to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+    let runtime = crate::native_evidence::query_runtime_generation(options).unwrap();
+    let mut cache = EventCache::open_scoped(&options.cache).unwrap();
+    for page in paths.chunks(64) {
+        assert_eq!(
+            cache.begin_semantic_stage(page, &runtime).unwrap(),
+            crate::events::Outcome::Written
+        );
+    }
+    drop(cache);
+    let evidence = crate::native_evidence::NativeEvidence::new(options.clone());
+    let mut complete = false;
+    for _ in 0..128 {
+        if evidence
+            .refresh_catalog(&mut crate::viewer::lock(&evidence.work), NOW)
+            .unwrap()
+        {
+            complete = true;
+            break;
+        }
+    }
+    evidence.retire();
+    assert!(
+        complete,
+        "queued identity closure did not finish bounded steps"
+    );
+    let db = rusqlite::Connection::open(EventCache::path(&options.cache)).unwrap();
+    for (key, session) in &oracle.sessions {
+        if session.stub {
+            continue;
+        }
+        let metadata: String = db
+            .query_row(
+                "SELECT metadata FROM session_catalog WHERE session_key=?1 AND lifecycle='current'",
+                [key],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let row: Value = serde_json::from_str(&metadata).unwrap();
+        assert_eq!(row["parent"], json!(session.parent), "{key} parent");
+        assert_eq!(row["tokens"], json!(session.tokens), "{key} owner usage");
+        assert_eq!(row["cost"], json!(session.cost), "{key} owner cost");
+        let metadata: String = db
+            .query_row(
+                "SELECT metadata FROM session_trace_headers WHERE session_key=?1",
+                [key],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let header: Value = serde_json::from_str(&metadata).unwrap();
+        assert_eq!(header["state"], json!(session.state), "{key} native state");
+    }
+    for edge in oracle
+        .handoffs
+        .iter()
+        .filter(|edge| matches!(edge.kind, "spawn" | "relay"))
+    {
+        for owner in [Some(&edge.from), edge.to.as_ref()].into_iter().flatten() {
+            if oracle.sessions[owner].stub {
+                continue;
+            }
+            let metadata: String = db
+                .query_row(
+                    "SELECT metadata FROM session_trace_edges WHERE session_key=?1 AND edge_id=?2",
+                    rusqlite::params![owner, edge.id],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            let value: Value = serde_json::from_str(&metadata).unwrap();
+            assert_eq!(value["from"], json!(edge.from));
+            assert_eq!(value["to"], json!(edge.to));
+            assert_eq!(value["status"], json!(edge.status));
+            assert_eq!(value["unmatched"], json!(edge.unmatched));
+            assert_eq!(value["ambiguous"], json!(edge.ambiguous));
+        }
+    }
+    for turn in &oracle.turns {
+        if oracle.sessions[&turn.sid].stub {
+            continue;
+        }
+        let metadata: String = db
+            .query_row(
+                "SELECT metadata FROM session_trace_turns WHERE session_key=?1 AND turn_id=?2",
+                rusqlite::params![turn.sid, turn.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let value: Value = serde_json::from_str(&metadata).unwrap();
+        assert_eq!(value["start"], json!(turn.start));
+        assert_eq!(value["sent"], json!(turn.sent));
+        assert_eq!(value["end"], json!(turn.end));
+    }
+    oracle
+}
+
+#[test]
+fn staged_identity_reprepares_copy_resume_split_across_source_pages() {
+    let home = Home::new();
+    let original = vec![
+        uuid(
+            human("000-original", ts(8, 0), "Before resume"),
+            "copied-user",
+        ),
+        uuid(
+            assistant(
+                "000-original",
+                ts(8, 1),
+                vec![tool(
+                    "copy-send",
+                    "SendMessage",
+                    json!({"to":"absent","message":"Only one native send"}),
+                )],
+            ),
+            "copied-send",
+        ),
+        uuid(
+            result(
+                "000-original",
+                ts(8, 1),
+                "copy-send",
+                "sent",
+                false,
+                json!({"success":true}),
+            ),
+            "copied-result",
+        ),
+    ];
+    let mut old = original.clone();
+    old.push(json!({"type":"continued-in","continuedInSessionId":"zzz-resumed","sessionId":"000-original","timestamp":ts(8,2)}));
+    home.top("000-original", &old);
+    let mut copied = original;
+    copied.push(uuid(
+        human("zzz-resumed", ts(8, 3), "After resume"),
+        "resumed-user",
+    ));
+    home.top("zzz-resumed", &copied);
+    for n in 0..70 {
+        home.top(
+            &format!("middle-{n:03}"),
+            &[human(&format!("middle-{n:03}"), ts(8, 0), "Independent")],
+        );
+    }
+    let oracle = assert_queued_identity_matches_oracle(&home, &home.options);
+    assert!(oracle.sessions.contains_key("000-original"));
+    assert!(!oracle.sessions.contains_key("zzz-resumed"));
+    let db = rusqlite::Connection::open(EventCache::path(&home.options.cache)).unwrap();
+    let metadata: String = db
+        .query_row(
+            "SELECT metadata FROM session_catalog WHERE session_key='000-original'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let row: Value = serde_json::from_str(&metadata).unwrap();
+    assert_eq!(row["sources"].as_array().unwrap().len(), 2);
+    assert_eq!(row["native_ids"], json!(["000-original", "zzz-resumed"]));
+    assert_eq!(db.query_row("SELECT count(DISTINCT edge_id) FROM session_trace_edges WHERE json_extract(metadata,'$.kind')='relay'",[],|row|row.get::<_,usize>(0)).unwrap(),1,"received/copied policy emitted duplicate send");
+}
+
+#[test]
+fn staged_native_key_collisions_match_global_harness_and_reserved_id_contract() {
+    let home = Home::new();
+    home.top("same", &[human("same", ts(9, 0), "Claude identity")]);
+    home.top(
+        "codex:same",
+        &[human("codex:same", ts(9, 0), "Reserved native identity")],
+    );
+    for n in 0..70 {
+        home.top(
+            &format!("middle-{n:03}"),
+            &[human(&format!("middle-{n:03}"), ts(9, 0), "Independent")],
+        );
+    }
+    home.codex("same", json!({}), &[codex_user(ts(9, 1), "Codex identity")]);
+    let oracle = assert_queued_identity_matches_oracle(&home, &home.options);
+    assert!(oracle.sessions.contains_key("claude:same"));
+    assert!(oracle.sessions.contains_key(":codex:same"));
+    assert!(oracle.sessions.contains_key("codex:same"));
+    let db = rusqlite::Connection::open(EventCache::path(&home.options.cache)).unwrap();
+    for (key, harness, native) in [
+        ("claude:same", "claude", "same"),
+        (":codex:same", "codex", "same"),
+        ("codex:same", "claude", "codex:same"),
+    ] {
+        let metadata: String = db
+            .query_row(
+                "SELECT metadata FROM session_catalog WHERE session_key=?1 AND lifecycle='current'",
+                [key],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let row: Value = serde_json::from_str(&metadata).unwrap();
+        assert_eq!(row["harness"], json!(harness));
+        assert_eq!(row["native_ids"], json!([native]));
+    }
+}
+
+#[test]
+fn staged_deep_claude_spawn_uses_received_true_root_liveness() {
+    let home = Home::new();
+    home.top(
+        "root",
+        &[
+            human("root", ts(10, 0), "Start nested work"),
+            assistant(
+                "root",
+                ts(10, 1),
+                vec![tool("outer-call", "Agent", json!({"prompt":"Outer work"}))],
+            ),
+            result(
+                "root",
+                ts(10, 1),
+                "outer-call",
+                "launched",
+                false,
+                json!({"status":"async_launched"}),
+            ),
+        ],
+    );
+    home.agent(
+        "root",
+        "outer",
+        "outer-call",
+        &[
+            user("root", ts(10, 2), "Outer work"),
+            assistant(
+                "root",
+                ts(10, 3),
+                vec![tool("inner-call", "Agent", json!({"prompt":"Inner work"}))],
+            ),
+            result(
+                "root",
+                ts(10, 3),
+                "inner-call",
+                "launched",
+                false,
+                json!({"status":"async_launched"}),
+            ),
+        ],
+    );
+    home.agent(
+        "outer",
+        "inner",
+        "inner-call",
+        &[user("outer", ts(10, 4), "Inner work")],
+    );
+    home.live(77, "root", "busy", json!({}));
+    for n in 0..70 {
+        home.top(
+            &format!("middle-{n:03}"),
+            &[human(&format!("middle-{n:03}"), ts(10, 0), "Independent")],
+        );
+    }
+    let (_copy, options) = copy_with_facts(&home);
+    let oracle = assert_queued_identity_matches_oracle(&home, &options);
+    assert_eq!(oracle.sessions["inner"].state, "work");
+    assert_eq!(only(&oracle, "spawn", "outer", "inner").status, "work");
+}
+
+#[test]
+fn staged_claude_ambiguity_and_received_copy_policy_match_shared_builder() {
+    let home = relay_home();
+    let beta = home
+        .options
+        .claude_home
+        .join("projects/-work-proj/beta.jsonl");
+    let mut resumed = fs::read_to_string(&beta)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .collect::<Vec<_>>();
+    resumed.push(uuid(
+        human("zzz-beta", ts(6, 1), "After received copy"),
+        "after-copy",
+    ));
+    home.top("zzz-beta", &resumed);
+    let mut original = fs::OpenOptions::new().append(true).open(&beta).unwrap();
+    writeln!(original,"{}",json!({"type":"continued-in","continuedInSessionId":"zzz-beta","sessionId":"beta","timestamp":ts(6,1)})).unwrap();
+    home.top(
+        "logged-root",
+        &[human("logged-root", ts(5, 0), "Unresolved exact call")],
+    );
+    for owner in ["call-a", "call-b"] {
+        home.top(
+            owner,
+            &[
+                human(owner, ts(5, 0), "Duplicate native call"),
+                assistant(
+                    owner,
+                    ts(5, 1),
+                    vec![tool(
+                        "duplicate-native-call",
+                        "Agent",
+                        json!({"prompt":"Ambiguous native ID"}),
+                    )],
+                ),
+            ],
+        );
+    }
+    home.agent(
+        "logged-root",
+        "ambiguous-child",
+        "duplicate-native-call",
+        &[user("logged-root", ts(5, 2), "Unresolved child")],
+    );
+    for n in 0..70 {
+        home.top(
+            &format!("middle-{n:03}"),
+            &[human(&format!("middle-{n:03}"), ts(5, 0), "Independent")],
+        );
+    }
+    let oracle = assert_queued_identity_matches_oracle(&home, &home.options);
+    assert!(by_brief(&oracle, "to a twin").unmatched);
+    assert_eq!(
+        by_brief(&oracle, "by unique name").to.as_deref(),
+        Some("beta")
+    );
+    assert_eq!(
+        oracle
+            .handoffs
+            .iter()
+            .filter(|edge| edge.kind == "relay" && edge.brief == "hello beta")
+            .count(),
+        1
+    );
+    assert_eq!(
+        only(&oracle, "spawn", "logged-root", "ambiguous-child").from,
+        "logged-root"
     );
 }
 
@@ -8334,4 +9059,753 @@ fn failed_send_bookmarks_resolve_indexed_real_owners_without_source_bytes() {
     }
     let value: Value = serde_json::from_slice(&resolve("sid=unsent%3Amissing").body).unwrap();
     assert_eq!(value["matches"], json!([]));
+}
+
+fn acknowledged_semantic_family() -> Home {
+    let home = Home::new();
+    home.codex(
+        "ack-root",
+        json!({}),
+        &[codex_user(ts(14, 0), "Coordinate")],
+    );
+    for n in 0..80 {
+        home.codex(&format!("ack-child-{n:03}"),json!({"parent_thread_id":"ack-root","thread_source":"subagent","agent_path":format!("root/part{n:03}")}),&[codex_user(ts(14,1),"Work")]);
+    }
+    home
+}
+
+fn first_acknowledged_owner(
+    home: &Home,
+) -> (
+    crate::native_evidence::NativeEvidence,
+    i64,
+    summary::CatalogSource,
+) {
+    let evidence = crate::native_evidence::NativeEvidence::new(home.options.clone());
+    for _ in 0..128 {
+        assert!(
+            !evidence
+                .refresh_catalog(&mut crate::viewer::lock(&evidence.work), NOW)
+                .unwrap(),
+            "family completed before exposing its first acknowledged owner page"
+        );
+        let db = rusqlite::Connection::open(EventCache::path(&home.options.cache)).unwrap();
+        let acknowledged:Option<(i64,String)>=db.query_row("SELECT epoch,source_path FROM catalog_semantic_stage CROSS JOIN catalog_semantic_sources WHERE resetting=0 AND ack_done=1 AND EXISTS(SELECT 1 FROM catalog_semantic_sources WHERE publication_done=0) ORDER BY source_path LIMIT 1",[],|row|Ok((row.get(0)?,row.get(1)?))).optional().unwrap();
+        if let Some((epoch, path)) = acknowledged {
+            let metadata:String=db.query_row("SELECT c.metadata FROM session_catalog_sources s JOIN session_catalog c USING(session_key) WHERE s.source_path=?1 AND s.lifecycle='current'",[&path],|row|row.get(0)).unwrap();
+            let row: summary::CatalogRow = serde_json::from_str(&metadata).unwrap();
+            let source = row
+                .sources
+                .into_iter()
+                .find(|source| source.path.to_string_lossy() == path)
+                .unwrap();
+            let relative = source
+                .path
+                .strip_prefix(&home.options.codex_home)
+                .unwrap()
+                .to_str()
+                .unwrap();
+            assert!(
+                crate::source_projection_ready(&home.options, "codex", relative)
+                    .unwrap()
+                    .is_none(),
+                "acknowledged owner made the partial collection archive-ready"
+            );
+            return (evidence, epoch, source);
+        }
+    }
+    panic!("no active stage with an acknowledged real owner publication page");
+}
+
+#[test]
+fn semantic_announced_mutation_of_acknowledged_page_invalidates_old_epoch() {
+    let home = acknowledged_semantic_family();
+    let (evidence, old_epoch, old_source) = first_acknowledged_owner(&home);
+    let relative = old_source
+        .path
+        .strip_prefix(&home.options.codex_home)
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_owned();
+    let input = crate::Input {
+        root: crate::InputRoot::Codex,
+        path: relative.clone(),
+    };
+    let from = fs::metadata(&old_source.path).unwrap().len();
+    let intent = crate::SessionSourceWrite::begin(&home.options, &input, None, from).unwrap();
+    let line = format!(
+        "{}\n",
+        codex_reply(
+            ts(14, 2),
+            "Announced completion after acknowledged owner page"
+        )
+    );
+    let mut file = fs::OpenOptions::new()
+        .append(true)
+        .open(&old_source.path)
+        .unwrap();
+    file.write_all(line.as_bytes()).unwrap();
+    file.sync_all().unwrap();
+    intent.complete(from + line.len() as u64).unwrap();
+    let mut cache = EventCache::open_scoped(&home.options.cache).unwrap();
+    assert_ne!(
+        cache.finish_semantic_stage(old_epoch).unwrap(),
+        crate::events::Outcome::Written,
+        "old epoch accepted a newly announced revision of an acknowledged source"
+    );
+    drop(cache);
+    let mut reset = false;
+    let mut complete = false;
+    for _ in 0..256 {
+        let done = evidence
+            .refresh_catalog(&mut crate::viewer::lock(&evidence.work), NOW)
+            .unwrap();
+        let db = rusqlite::Connection::open(EventCache::path(&home.options.cache)).unwrap();
+        let active: Option<i64> = db
+            .query_row("SELECT epoch FROM catalog_semantic_stage", [], |row| {
+                row.get(0)
+            })
+            .optional()
+            .unwrap();
+        if active.is_some_and(|epoch| epoch != old_epoch) {
+            reset = true;
+        }
+        if active == Some(old_epoch) {
+            assert!(!done, "stale acknowledged epoch completed");
+            assert!(
+                crate::source_projection_ready(&home.options, "codex", &relative)
+                    .unwrap()
+                    .is_none()
+            );
+        }
+        if done {
+            complete = true;
+            break;
+        }
+    }
+    evidence.retire();
+    assert!(
+        reset && complete,
+        "announced acknowledged-page mutation did not reset and qualify a new epoch"
+    );
+    let ready = crate::source_projection_ready(&home.options, "codex", &relative)
+        .unwrap()
+        .unwrap();
+    assert_eq!(ready.source.offset, from + line.len() as u64);
+    assert_ne!(ready.source.prefix_sha256, old_source.prefix_sha256);
+    let mut oracle_options = home.options.clone();
+    oracle_options.cache = home.root.join("ack-oracle-index.json");
+    let oracle = home.build_at(&oracle_options, NOW);
+    let key = &old_source.native_id;
+    let db = rusqlite::Connection::open(EventCache::path(&home.options.cache)).unwrap();
+    let metadata: String = db
+        .query_row(
+            "SELECT metadata FROM session_catalog WHERE session_key=?1 AND lifecycle='current'",
+            [key],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let row: summary::CatalogRow = serde_json::from_str(&metadata).unwrap();
+    assert_eq!(row.parent, oracle.sessions[key].parent);
+    assert_eq!(row.last, oracle.facts[key].last);
+    for turn in oracle.turns.iter().filter(|turn| &turn.sid == key) {
+        let metadata: String = db
+            .query_row(
+                "SELECT metadata FROM session_trace_turns WHERE session_key=?1 AND turn_id=?2",
+                rusqlite::params![key, turn.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let value: Value = serde_json::from_str(&metadata).unwrap();
+        assert_eq!(value["end"], json!(turn.end));
+        assert_eq!(value["sent"], json!(turn.sent));
+    }
+}
+
+#[test]
+fn semantic_unannounced_mutation_after_ack_rejects_original_native_generation() {
+    let home = acknowledged_semantic_family();
+    let (evidence, _, old_source) = first_acknowledged_owner(&home);
+    let relative = old_source
+        .path
+        .strip_prefix(&home.options.codex_home)
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_owned();
+    let db = rusqlite::Connection::open(EventCache::path(&home.options.cache)).unwrap();
+    let original =
+        EventCache::selected_source_proofs(&db, &home.options, std::slice::from_ref(&old_source))
+            .unwrap();
+    original.reader().verify_all().unwrap();
+    assert!(
+        crate::session_source_proof(&home.options, "codex", &relative)
+            .unwrap()
+            .is_some()
+    );
+    let source_path = old_source.path.to_string_lossy();
+    let revision: Option<i64> = db
+        .query_row(
+            "SELECT revision FROM session_catalog_invalidations WHERE source_path=?1",
+            [source_path.as_ref()],
+            |row| row.get(0),
+        )
+        .optional()
+        .unwrap();
+    let bytes = fs::read_to_string(&old_source.path).unwrap();
+    assert!(bytes.contains("Work"));
+    // Change bytes inside the consumed prefix without invoking a journal or
+    // producer. Readiness is a consumed-generation certificate, not an atomic
+    // filesystem snapshot or permission to archive the changed current file.
+    fs::write(
+        &old_source.path,
+        bytes.replacen("Work", "Changed original bytes", 1),
+    )
+    .unwrap();
+    assert_eq!(
+        revision,
+        db.query_row(
+            "SELECT revision FROM session_catalog_invalidations WHERE source_path=?1",
+            [source_path.as_ref()],
+            |row| row.get::<_, i64>(0)
+        )
+        .optional()
+        .unwrap()
+    );
+    assert!(
+        crate::source_projection_ready(&home.options, "codex", &relative)
+            .unwrap()
+            .is_none(),
+        "partial stage lost strict global archive barrier"
+    );
+    assert_eq!(crate::catalog::source_state(&old_source), "changed");
+    assert!(
+        matches!(
+            crate::session_source_proof(&home.options, "codex", &relative),
+            Err(crate::CatalogIdentityError::Unavailable) | Ok(None)
+        ),
+        "native control/archive source proof accepted changed original generation"
+    );
+    assert!(
+        original.reader().verify_all().is_err(),
+        "original consumed-byte archive proof accepted altered prefix bytes"
+    );
+    evidence.retire();
+}
+
+#[test]
+fn cold_semantic_family_discovers_older_disconnected_native_key_collisions() {
+    let home = Home::new();
+    for id in ["same", "codex:same"] {
+        let path = home.top(
+            id,
+            &[human(id, ts(15, 0), "Older disconnected Claude identity")],
+        );
+        fs::File::open(path)
+            .unwrap()
+            .set_times(
+                fs::FileTimes::new().set_modified(std::time::UNIX_EPOCH + Duration::from_secs(1)),
+            )
+            .unwrap();
+    }
+    for n in 0..80 {
+        let id = format!("native-child-{n:03}");
+        home.codex(&id,json!({"parent_thread_id":"same","thread_source":"subagent","agent_path":format!("root/part{n:03}")}),&[codex_user(ts(15,1),"Related native work")]);
+        fs::File::open(
+            home.options
+                .codex_home
+                .join(format!("sessions/2026/09/24/rollout-{id}.jsonl")),
+        )
+        .unwrap()
+        .set_times(
+            fs::FileTimes::new().set_modified(std::time::UNIX_EPOCH + Duration::from_secs(2)),
+        )
+        .unwrap();
+    }
+    home.codex(
+        "same",
+        json!({}),
+        &[codex_user(ts(15, 0), "Native Codex family")],
+    );
+    fs::File::open(
+        home.options
+            .codex_home
+            .join("sessions/2026/09/24/rollout-same.jsonl"),
+    )
+    .unwrap()
+    .set_times(fs::FileTimes::new().set_modified(std::time::UNIX_EPOCH + Duration::from_secs(3)))
+    .unwrap();
+    let mut oracle_options = home.options.clone();
+    oracle_options.cache = home.root.join("cold-key-oracle.json");
+    let oracle = home.build_at(&oracle_options, NOW);
+    assert!(
+        oracle.sessions.contains_key("claude:same")
+            && oracle.sessions.contains_key(":codex:same")
+            && oracle.sessions.contains_key("codex:same")
+    );
+    // Enter through ordinary cold discovery. Prequeueing every source would
+    // mask missing collision hints in the oldest disconnected source cohort.
+    let evidence = crate::native_evidence::NativeEvidence::new(home.options.clone());
+    let mut complete = false;
+    for _ in 0..128 {
+        if evidence
+            .refresh_catalog(&mut crate::viewer::lock(&evidence.work), NOW)
+            .unwrap()
+        {
+            complete = true;
+            break;
+        }
+    }
+    evidence.retire();
+    assert!(
+        complete,
+        "cold family with older disconnected native collisions remained pending"
+    );
+    let db = rusqlite::Connection::open(EventCache::path(&home.options.cache)).unwrap();
+    let actual=db.prepare("SELECT session_key FROM session_catalog WHERE lifecycle='current' ORDER BY session_key").unwrap().query_map([],|row|row.get::<_,String>(0)).unwrap().collect::<rusqlite::Result<BTreeSet<_>>>().unwrap();
+    assert_eq!(
+        actual,
+        oracle
+            .sessions
+            .iter()
+            .filter(|(_, session)| !session.stub)
+            .map(|(key, _)| key.clone())
+            .collect::<BTreeSet<_>>()
+    );
+    for (key, session) in &oracle.sessions {
+        let metadata: String = db
+            .query_row(
+                "SELECT metadata FROM session_catalog WHERE session_key=?1 AND lifecycle='current'",
+                [key],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let row: summary::CatalogRow = serde_json::from_str(&metadata).unwrap();
+        assert_eq!(row.harness, session.harness);
+        assert_eq!(row.parent, session.parent, "{key} qualified native parent");
+        assert_eq!(
+            row.query.as_ref().unwrap()["rows"][key]["summary"]["parent"],
+            json!(oracle.facts[key].parent),
+            "{key} Query parent binding"
+        );
+    }
+    let metadata: String = db
+        .query_row(
+            "SELECT metadata FROM session_catalog WHERE session_key=':codex:same'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let row: summary::CatalogRow = serde_json::from_str(&metadata).unwrap();
+    assert_eq!(
+        row.query.as_ref().unwrap()["rows"][":codex:same"]["summary"]["children"]
+            .as_array()
+            .unwrap()
+            .len(),
+        80
+    );
+}
+
+#[test]
+fn staged_claude_learned_names_ignore_pinned_sends_and_later_duplicate_receipts() {
+    let home = Home::new();
+    home.top("alpha",&[
+        human("alpha",ts(16,0),"Send native messages"),
+        assistant("alpha",ts(16,1),vec![tool("pin-call","SendMessage",json!({"to":"pin-owner","message":"Pinned native send"})),tool("ordinary-call","SendMessage",json!({"to":"aaa-first","message":"Ordinary native send"}))]),
+        result("alpha",ts(16,1),"pin-call","sent",false,json!({"success":true,"msg_id":"pin-message","pin":{"id":"pin-owner","name":"pin"}})),
+        result("alpha",ts(16,1),"ordinary-call","sent",false,json!({"success":true,"msg_id":"duplicate-message"})),
+    ]);
+    home.top(
+        "aaa-first",
+        &[peer(
+            "aaa-first",
+            ts(16, 2),
+            "duplicate-message",
+            "FirstLearned",
+            100,
+            "Ordinary native send",
+        )],
+    );
+    home.top(
+        "zzz-second",
+        &[peer(
+            "zzz-second",
+            ts(16, 2),
+            "duplicate-message",
+            "ForbiddenSecond",
+            100,
+            "Ordinary native send",
+        )],
+    );
+    home.top(
+        "pin-owner",
+        &[peer(
+            "pin-owner",
+            ts(16, 2),
+            "pin-message",
+            "ForbiddenPinned",
+            100,
+            "Pinned native send",
+        )],
+    );
+    let mut legacy = vec![human("legacy", ts(16, 0), "Use learned names")];
+    for (call, name, body) in [
+        ("first-legacy", "FirstLearned", "Eligible first receipt"),
+        (
+            "second-legacy",
+            "ForbiddenSecond",
+            "Ineligible duplicate receipt",
+        ),
+        ("pin-legacy", "ForbiddenPinned", "Ineligible pinned send"),
+    ] {
+        legacy.push(assistant(
+            "legacy",
+            ts(16, 3),
+            vec![tool(call, "SendMessage", json!({"to":name,"message":body}))],
+        ));
+        legacy.push(result(
+            "legacy",
+            ts(16, 3),
+            call,
+            "sent",
+            false,
+            json!({"success":true}),
+        ));
+    }
+    home.top("legacy", &legacy);
+    for n in 0..70 {
+        let id = format!("middle-{n:03}");
+        home.top(&id, &[human(&id, ts(16, 0), "Independent")]);
+    }
+    // The oracle assertions make the exact native-first and PIN eligibility
+    // premises explicit before testing the staged reducer against them.
+    let mut oracle_options = home.options.clone();
+    oracle_options.cache = home.root.join("learned-name-premise-oracle.json");
+    let oracle = home.build_at(&oracle_options, NOW);
+    assert_eq!(
+        by_brief(&oracle, "Eligible first receipt").to.as_deref(),
+        Some("alpha")
+    );
+    assert!(by_brief(&oracle, "Ineligible duplicate receipt").unmatched);
+    assert!(by_brief(&oracle, "Ineligible pinned send").unmatched);
+    assert_queued_identity_matches_oracle(&home, &home.options);
+}
+
+#[test]
+fn cold_codex_family_qualifies_pending_copilot_native_collision() {
+    let home = Home::new();
+    let native = "01234567-89ab-4cde-8123-456789abcdef";
+    let copilot = home.lines(
+        &format!("copilot/session-state/{native}/events.jsonl"),
+        &[json!({"type":"session.start","id":"copilot-start","timestamp":ts(0,0),"data":{"version":1,"copilotVersion":"1.0.91","sessionId":native}})],
+    );
+    fs::File::options()
+        .write(true)
+        .open(&copilot)
+        .unwrap()
+        .set_times(
+            fs::FileTimes::new()
+                .set_modified(std::time::UNIX_EPOCH + Duration::from_secs((BASE / 1000) as u64)),
+        )
+        .unwrap();
+    for n in 0..80 {
+        let child = format!("copilot-collision-child-{n:03}");
+        home.codex(&child, json!({"parent_thread_id":native,"thread_source":"subagent","agent_path":format!("{native}/part{n:03}")}), &[codex_user(ts(1,0), "Child")]);
+    }
+    home.codex(native, json!({}), &[codex_user(ts(1, 0), "Codex root")]);
+    let mut oracle_options = home.options.clone();
+    oracle_options.cache = home.root.join("copilot-collision-oracle.json");
+    let oracle = home.build_at(&oracle_options, NOW);
+    let codex_key = format!("codex:{native}");
+    let copilot_key = format!("copilot:{native}");
+    assert_eq!(oracle.sessions[&codex_key].harness, "codex");
+    assert_eq!(oracle.sessions[&copilot_key].harness, "copilot");
+    let evidence = crate::native_evidence::NativeEvidence::new(home.options.clone());
+    let mut complete = false;
+    let mut staged = false;
+    for _ in 0..128 {
+        let done = evidence
+            .refresh_catalog(&mut crate::viewer::lock(&evidence.work), NOW)
+            .unwrap();
+        let db = rusqlite::Connection::open(EventCache::path(&home.options.cache)).unwrap();
+        staged |= db
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM catalog_semantic_stage)",
+                [],
+                |row| row.get::<_, bool>(0),
+            )
+            .unwrap();
+        if done {
+            complete = true;
+            break;
+        }
+    }
+    evidence.retire();
+    assert!(
+        complete && staged,
+        "normal cold family did not use and finish durable staging"
+    );
+    let db = rusqlite::Connection::open(EventCache::path(&home.options.cache)).unwrap();
+    let keys = db.prepare("SELECT session_key FROM session_catalog WHERE lifecycle='current' ORDER BY session_key").unwrap().query_map([],|row|row.get::<_,String>(0)).unwrap().collect::<Result<BTreeSet<_>,_>>().unwrap();
+    assert_eq!(
+        keys,
+        oracle
+            .sessions
+            .iter()
+            .filter(|(_, session)| !session.stub)
+            .map(|(key, _)| key.clone())
+            .collect()
+    );
+    for n in 0..80 {
+        let child = format!("copilot-collision-child-{n:03}");
+        let parent:Option<String>=db.query_row("SELECT parent_key FROM session_catalog WHERE session_key=?1 AND lifecycle='current'",[&child],|row|row.get(0)).unwrap();
+        assert_eq!(parent.as_deref(), Some(codex_key.as_str()), "{child}");
+    }
+    for (harness, key) in [("codex", &codex_key), ("copilot", &copilot_key)] {
+        let binding:String=db.query_row("SELECT session_key FROM session_catalog_sources WHERE harness=?1 AND native_id=?2 AND lifecycle='current'",rusqlite::params![harness,native],|row|row.get(0)).unwrap();
+        assert_eq!(&binding, key);
+        let reply = crate::session_transcript_range(
+            &home.options,
+            "fixture",
+            &format!("sid={key}&limit=10"),
+            None,
+        );
+        assert_eq!(
+            reply.status, 200,
+            "{harness} source-qualified Query binding"
+        );
+    }
+}
+
+#[test]
+fn staged_current_native_key_ignores_deselected_or_rewritten_cached_codex_header() {
+    for (rewritten, retain) in [(false, true), (false, false), (true, false)] {
+        let home = Home::new();
+        let native = "stale-native";
+        home.codex(
+            native,
+            json!({}),
+            &[codex_user(ts(0, 0), "Old native identity")],
+        );
+        let old_relative = format!("sessions/2026/09/24/rollout-{native}.jsonl");
+        let old_evidence = crate::native_evidence::NativeEvidence::new(home.options.clone());
+        let mut old_complete = false;
+        for _ in 0..16 {
+            if old_evidence
+                .refresh_catalog(&mut crate::viewer::lock(&old_evidence.work), NOW)
+                .unwrap()
+            {
+                old_complete = true;
+                break;
+            }
+        }
+        old_evidence.retire();
+        assert!(
+            old_complete,
+            "old Current native publication did not qualify"
+        );
+        let old_db = rusqlite::Connection::open(EventCache::path(&home.options.cache)).unwrap();
+        let old_binding:String=old_db.query_row("SELECT session_key FROM session_catalog_sources WHERE harness='codex' AND native_id=?1 AND lifecycle='current'",[native],|row|row.get(0)).unwrap();
+        assert_eq!(
+            old_binding, native,
+            "fixture requires an old Current identity membership"
+        );
+        drop(old_db);
+        let retained = if retain {
+            let proof = crate::session_source_proof(&home.options, "codex", &old_relative)
+                .unwrap()
+                .unwrap();
+            let ready = crate::source_projection_ready(&home.options, "codex", &old_relative)
+                .unwrap()
+                .unwrap();
+            crate::retain_source_event_index(&home.options, &proof, &ready).unwrap();
+            assert!(crate::source_event_index_retained(&home.options, &proof, &ready).unwrap());
+            let db = rusqlite::Connection::open(EventCache::path(&home.options.cache)).unwrap();
+            let archive_key = format!(
+                "archive_event_index:{}",
+                home.options.codex_home.join(&old_relative).display()
+            );
+            let marker: String = db
+                .query_row(
+                    "SELECT value FROM meta WHERE key=?1",
+                    [&archive_key],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            Some((proof, archive_key, marker))
+        } else {
+            None
+        };
+        if rewritten {
+            home.lines(&format!("codex/{old_relative}"),&[
+                json!({"type":"session_meta","timestamp":ts(0,1),"payload":{"id":"rewritten-native","cwd":"/work/proj","originator":"codex_exec","thread_source":"user"}}),
+                codex_user(ts(0,1),"Replacement native identity"),
+            ]);
+        }
+        home.top(
+            native,
+            &[human(native, ts(1, 0), "Current Claude identity")],
+        );
+        let mut current = BTreeSet::new();
+        if rewritten {
+            current.insert(old_relative.clone());
+        }
+        for n in 0..80 {
+            let child = format!("cached-header-child-{n:03}");
+            home.codex(&child,json!({"parent_thread_id":"cached-header-family","thread_source":"subagent","agent_path":format!("cached-header-family/part{n:03}")}),&[codex_user(ts(1,0),"Child")]);
+            current.insert(format!("sessions/2026/09/24/rollout-{child}.jsonl"));
+        }
+        home.codex(
+            "cached-header-family",
+            json!({}),
+            &[codex_user(ts(1, 0), "Current family")],
+        );
+        current.insert("sessions/2026/09/24/rollout-cached-header-family.jsonl".to_owned());
+        let mut facts = crate::local_runtime_facts(&home.options).unwrap();
+        facts.codex_rollouts = Some(current);
+        let facts_path = home.root.join("selected-facts.json");
+        crate::write_facts(&facts_path, &facts).unwrap();
+        let mut options = home.options.clone();
+        options.facts = Some(facts_path);
+        let mut oracle_options = options.clone();
+        oracle_options.cache = home.root.join("selected-native-oracle.json");
+        let oracle = home.build_at(&oracle_options, NOW);
+        assert_eq!(oracle.sessions[native].harness, "claude");
+        assert!(!oracle.sessions.contains_key(&format!("claude:{native}")));
+        let evidence = crate::native_evidence::NativeEvidence::new(options.clone());
+        let mut complete = false;
+        for _ in 0..128 {
+            if evidence
+                .refresh_catalog(&mut crate::viewer::lock(&evidence.work), NOW)
+                .unwrap()
+            {
+                complete = true;
+                break;
+            }
+        }
+        evidence.retire();
+        assert!(
+            complete,
+            "cached native identity did not requalify (rewritten={rewritten}, retain={retain})"
+        );
+        let db = rusqlite::Connection::open(EventCache::path(&options.cache)).unwrap();
+        let keys = db.prepare("SELECT session_key FROM session_catalog WHERE lifecycle='current' ORDER BY session_key").unwrap().query_map([],|row|row.get::<_,String>(0)).unwrap().collect::<Result<BTreeSet<_>,_>>().unwrap();
+        assert_eq!(
+            keys,
+            oracle
+                .sessions
+                .iter()
+                .filter(|(_, session)| !session.stub)
+                .map(|(key, _)| key.clone())
+                .collect(),
+            "rewritten={rewritten}, retain={retain}"
+        );
+        let old_header: Option<String> = db
+            .query_row(
+                "SELECT value FROM meta WHERE key=?1",
+                [format!(
+                    "native_codex_header:{}",
+                    home.options.codex_home.join(&old_relative).display()
+                )],
+                |row| row.get(0),
+            )
+            .optional()
+            .unwrap();
+        if rewritten || retain {
+            let header: Value = serde_json::from_str(&old_header.unwrap()).unwrap();
+            assert_eq!(
+                header["header"]["id"],
+                if rewritten {
+                    "rewritten-native"
+                } else {
+                    native
+                }
+            );
+        } else {
+            assert!(
+                old_header.is_none(),
+                "unretained excluded header remains authoritative"
+            );
+            let old_path = home.options.codex_home.join(&old_relative);
+            assert!(
+                old_path.is_file(),
+                "withdrawal must preserve the native file"
+            );
+            let ledger: bool = db
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM files WHERE path=?1)",
+                    [old_path.to_string_lossy().as_ref()],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert!(
+                !ledger,
+                "unretained excluded source kept its EventIndex ledger"
+            );
+            let old_current:bool=db.query_row("SELECT EXISTS(SELECT 1 FROM session_catalog_sources WHERE harness='codex' AND native_id=?1 AND lifecycle='current')",[native],|row|row.get(0)).unwrap();
+            assert!(!old_current, "withdrawn native membership stayed Current");
+        }
+        if let Some((proof, archive_key, marker)) = retained {
+            let preserved: String = db
+                .query_row(
+                    "SELECT value FROM meta WHERE key=?1",
+                    [archive_key],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(
+                preserved, marker,
+                "retained consumed-generation EventIndex proof changed"
+            );
+            let history = crate::session_catalog_history_identity(&options, "fixture", native)
+                .unwrap()
+                .unwrap();
+            assert!(
+                history
+                    .source_refs
+                    .iter()
+                    .any(|source| source.source == proof.source),
+                "historical recipes lost the retained native source proof"
+            );
+            let recipes: i64 = db
+                .query_row(
+                    "SELECT count(*) FROM session_history_slots WHERE session_key=?1",
+                    [native],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert!(recipes > 0, "retained native recipes were removed");
+        }
+        let binding:String=db.query_row("SELECT session_key FROM session_catalog_sources WHERE harness='claude' AND native_id=?1 AND lifecycle='current'",[native],|row|row.get(0)).unwrap();
+        assert_eq!(binding, native);
+    }
+}
+
+#[test]
+fn staged_native_key_long_reserved_prefix_chain_matches_shared_identity_oracle() {
+    let home = Home::new();
+    home.top("same", &[human("same", ts(0, 0), "Claude collision")]);
+    home.codex(
+        "same",
+        json!({}),
+        &[codex_user(ts(0, 0), "Codex collision")],
+    );
+    for n in 0..80 {
+        home.codex(
+            &format!("{}codex:same", ":".repeat(n)),
+            json!({}),
+            &[codex_user(ts(0, 0), "Reserved native identity")],
+        );
+    }
+    let oracle = assert_queued_identity_matches_oracle(&home, &home.options);
+    assert_eq!(
+        oracle.sessions[&format!("{}codex:same", ":".repeat(80))].harness,
+        "codex"
+    );
+    assert_eq!(oracle.sessions["claude:same"].harness, "claude");
+    for n in 0..80 {
+        let key = format!("{}codex:same", ":".repeat(n));
+        assert_eq!(oracle.sessions[&key].harness, "codex");
+    }
 }

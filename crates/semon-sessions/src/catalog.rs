@@ -6096,4 +6096,82 @@ mod tests {
             "focused catalog SQL VM steps: 100 rows={small_steps}, 20000 rows={large_steps}, late cursor={late_steps}"
         );
     }
+
+    #[test]
+    fn resumable_catalog_keeps_current_old_family_outside_viewer_scan_window() {
+        let mut fixture = Fixture::new();
+        let mut paths = std::collections::BTreeSet::new();
+        for n in 0..80 {
+            paths.insert(fixture.codex_source(&format!("old-child-{n:03}"), Some("old-parent"), 1));
+        }
+        let parent = fixture.codex_source("old-parent", None, 2);
+        paths.insert(parent.clone());
+        let mut facts = crate::read_facts(fixture.options.facts.as_ref().unwrap()).unwrap();
+        facts.codex_rollouts = Some(paths.clone());
+        crate::write_facts(fixture.options.facts.as_ref().unwrap(), &facts).unwrap();
+        fixture.options.all = false;
+        fixture.options.scan_window = true;
+        fixture.options.since = Duration::from_secs(1);
+        let now = crate::model::now_ms();
+        assert!(crate::model::scan_cutoff(&fixture.options, now).unwrap() > 2000);
+        let evidence = crate::native_evidence::NativeEvidence::new(fixture.options.clone());
+        let mut complete = false;
+        for _ in 0..128 {
+            if evidence
+                .refresh_catalog(&mut crate::viewer::lock(&evidence.work), now)
+                .unwrap()
+            {
+                complete = true;
+                break;
+            }
+            assert!(
+                crate::source_projection_ready(&fixture.options, "codex", &parent)
+                    .unwrap()
+                    .is_none(),
+                "partial old family became archive-ready"
+            );
+        }
+        evidence.retire();
+        assert!(
+            complete,
+            "Catalog staging inherited the viewer window and lost old current sources"
+        );
+        let db = Connection::open(EventCache::path(&fixture.options.cache)).unwrap();
+        let metadata=db.prepare("SELECT metadata FROM session_catalog WHERE lifecycle='current' AND harness='codex' ORDER BY session_key").unwrap().query_map([],|row|row.get::<_,String>(0)).unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
+        assert_eq!(
+            metadata.len(),
+            81,
+            "old current owners were omitted or retired"
+        );
+        for text in metadata {
+            let row: CatalogRow = serde_json::from_str(&text).unwrap();
+            assert_eq!(row.sources.len(), 1);
+            let source = &row.sources[0];
+            assert_eq!(source.offset, fs::metadata(&source.path).unwrap().len());
+            assert_eq!(crate::catalog::source_state(source), "cached");
+            if row.key != "old-parent" {
+                assert_eq!(row.parent.as_deref(), Some("old-parent"));
+                assert_eq!(
+                    row.query.as_ref().unwrap()["rows"][&row.key]["summary"]["parent"],
+                    json!("old-parent")
+                );
+            } else {
+                assert_eq!(
+                    row.query.as_ref().unwrap()["rows"][&row.key]["summary"]["children"]
+                        .as_array()
+                        .unwrap()
+                        .len(),
+                    80
+                );
+            }
+        }
+        for path in paths {
+            assert!(
+                crate::source_projection_ready(&fixture.options, "codex", &path)
+                    .unwrap()
+                    .is_some(),
+                "qualified current source {path} lost its original projection"
+            );
+        }
+    }
 }
