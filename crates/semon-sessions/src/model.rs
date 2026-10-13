@@ -594,6 +594,17 @@ pub(crate) struct Texts {
     repos: HashMap<String, Option<String>>,
 }
 
+impl Texts {
+    /// Native Catalog persists descriptions and slot recipes. Completed
+    /// publication needs no resident derivation or attachment payload for every
+    /// discovered session; unchanged inputs bypass derivation via the snapshot.
+    pub(crate) fn release_published_derivations(&mut self) {
+        self.derived_sessions = HashMap::new();
+        self.descriptions = HashMap::new();
+        self.prompt_caches = HashMap::new();
+    }
+}
+
 #[cfg(test)]
 thread_local! {
     /// Builds on this thread.

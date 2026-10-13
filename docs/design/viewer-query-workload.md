@@ -10,6 +10,9 @@ on independently named machines. All logs are synthetic.
 
 The preparation phase uses existing native Catalog observers, waits for complete
 publication on each machine, and reports `cold_catalog_complete_ms` separately.
+The observers share two workers. `cold_worker_drain_ms` measures the remaining
+publication/cleanup lifetime before allocator snapshots; `active_workers` and
+`queued_checks` retain the actual pool state at the end of the reads.
 This phase reconciles all seeded machine history; it is not a bounded cold
 foreground read claim. Query adopts those same evidence owners. The next 101
 `read_transcript` requests use the selected source and Catalog identity, with no
