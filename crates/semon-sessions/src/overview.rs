@@ -87,11 +87,33 @@ pub(crate) fn publish(
     last: i64,
     summary: &Summary,
 ) -> rusqlite::Result<()> {
+    publish_measured(
+        tx,
+        key,
+        last,
+        summary,
+        &mut crate::native_timing::Measurements::default(),
+    )
+}
+
+fn publish_measured(
+    tx: &Transaction<'_>,
+    key: &str,
+    last: i64,
+    summary: &Summary,
+    measurements: &mut crate::native_timing::Measurements,
+) -> rusqlite::Result<()> {
+    let started = measurements.start();
     let text = serde_json::to_string(summary)
         .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+    measurements.record("summary_serialization", started, 1);
+    let started = measurements.start();
     let changed = tx.prepare_cached("INSERT INTO session_overview VALUES(?1,?2,?3,?4) ON CONFLICT(session_key) DO UPDATE SET last_ms=excluded.last_ms,state=excluded.state,summary=excluded.summary WHERE session_overview.summary IS NOT excluded.summary")?.execute(params![key,last,summary.home["state"].as_str().unwrap_or("off"),text])?;
+    measurements.record("summary_upsert", started, 1);
     if changed > 0 {
+        let started = measurements.start();
         tx.prepare_cached("INSERT INTO meta(key,value) VALUES('overview_generation','1') ON CONFLICT(key) DO UPDATE SET value=CAST(CAST(value AS INTEGER)+1 AS TEXT)")?.execute([])?;
+        measurements.record("generation", started, 1);
     }
     Ok(())
 }
@@ -103,16 +125,28 @@ pub(crate) fn publish_current(
     tx: &Transaction<'_>,
     row: &crate::model::summary::CatalogRow,
 ) -> rusqlite::Result<()> {
+    publish_current_measured(tx, row, &mut crate::native_timing::Measurements::default())
+}
+
+pub(crate) fn publish_current_measured(
+    tx: &Transaction<'_>,
+    row: &crate::model::summary::CatalogRow,
+    measurements: &mut crate::native_timing::Measurements,
+) -> rusqlite::Result<()> {
+    let started = measurements.start();
     let history = crate::history_projection::catalog(tx, &row.key)?
         .map(|text| serde_json::from_str::<crate::model::summary::CatalogRow>(&text))
         .transpose()
         .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+    measurements.record("history_lookup", started, 1);
     if let Some(history) = history
         && history.sources != row.sources
     {
+        let started = measurements.start();
         let expected = crate::retention::source_generation(&history.sources)
             .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
         let prior=tx.query_row("SELECT CASE WHEN octet_length(summary)<=4194304 THEN summary ELSE NULL END FROM session_overview WHERE session_key=?1",[&row.key],|row|row.get::<_,String>(0)).optional()?.map(|text|serde_json::from_str::<Summary>(&text)).transpose().map_err(|error|rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+        measurements.record("history_prior", started, 1);
         if let Some(mut prior) = prior
             && prior.source_generation == expected
         {
@@ -126,32 +160,48 @@ pub(crate) fn publish_current(
                         .as_ref()
                         .is_some_and(|activity| activity.working);
                 }
-                publish(tx, &row.key, history.last.unwrap_or(0), &prior)?;
+                publish_measured(
+                    tx,
+                    &row.key,
+                    history.last.unwrap_or(0),
+                    &prior,
+                    measurements,
+                )?;
             }
             if let Some(current) = &row.trace {
+                let started = measurements.start();
                 crate::causal_trace::update_current_observation(
                     tx,
                     &row.key,
                     current,
                     content_generation(&prior),
                 )?;
+                measurements.record("trace_update", started, 1);
             }
+            let started = measurements.start();
             tx.prepare_cached("DELETE FROM meta WHERE key=?1")?
                 .execute([format!("overview_needed:{}", row.key)])?;
+            measurements.record("cleanup", started, 1);
         } else {
+            let started = measurements.start();
             tx.prepare_cached("INSERT OR REPLACE INTO meta(key,value) VALUES(?1,'1')")?
                 .execute([format!("overview_needed:{}", row.key)])?;
+            measurements.record("repair_request", started, 1);
         }
         return Ok(());
     }
     if let Some(trace) = &row.trace {
+        let started = measurements.start();
         crate::causal_trace::publish(tx, row, trace)?;
+        measurements.record("trace_publish", started, 1);
     }
     if let Some(summary) = &row.overview {
-        publish(tx, &row.key, row.last.unwrap_or(0), summary)?;
+        publish_measured(tx, &row.key, row.last.unwrap_or(0), summary, measurements)?;
     }
+    let started = measurements.start();
     tx.prepare_cached("DELETE FROM meta WHERE key=?1")?
         .execute([format!("overview_needed:{}", row.key)])?;
+    measurements.record("cleanup", started, 1);
     Ok(())
 }
 

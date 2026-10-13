@@ -2448,10 +2448,15 @@ impl IndexStore for SqliteStore {
                 "initial index batch exceeds source budget".into(),
             ));
         }
+        let timing = crate::native_timing::enabled();
+        let mut measurements = crate::native_timing::Measurements::new(timing);
+        let started = measurements.start();
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(failure)?;
+        measurements.record("transaction", started, 1);
+        let started = measurements.start();
         if !current(&transaction).map_err(failure)? {
             return Ok(Outcome::Stale);
         }
@@ -2463,10 +2468,21 @@ impl IndexStore for SqliteStore {
                 return Ok(Outcome::Conflict);
             }
         }
+        measurements.record("fences", started, files.len());
+        let started = measurements.start();
         for (path, ledger, index) in files {
             write_index_changes(&transaction, path, ledger, index, None, None).map_err(failure)?;
         }
+        measurements.record("write_index_changes", started, files.len());
+        let started = measurements.start();
         transaction.commit().map_err(failure)?;
+        measurements.record("commit", started, 1);
+        if timing {
+            measurements.emit(
+                &crate::native_timing::id(&self.path),
+                "index_initial_publication",
+            );
+        }
         Ok(Outcome::Written)
     }
 
@@ -2929,6 +2945,8 @@ impl SqliteStore {
             stage("history");
             let mut metadata_measurements =
                 crate::native_timing::Measurements::new(producer.is_some());
+            let mut overview_measurements =
+                crate::native_timing::Measurements::new(producer.is_some());
             let setup_started = metadata_measurements.start();
             let search_version: Option<String> = transaction
                 .query_row(
@@ -2981,7 +2999,16 @@ impl SqliteStore {
                     metadata_measurements.record("statements", statements_started, 1);
                     for (row, metadata) in rows.iter().zip(&metadata) {
                         let started = metadata_measurements.start();
-                        crate::overview::publish_current(&transaction, row).map_err(failure)?;
+                        if producer.is_some() {
+                            crate::overview::publish_current_measured(
+                                &transaction,
+                                row,
+                                &mut overview_measurements,
+                            )
+                            .map_err(failure)?;
+                        } else {
+                            crate::overview::publish_current(&transaction, row).map_err(failure)?;
+                        }
                         metadata_measurements.record("overview", started, 1);
                         let started = metadata_measurements.start();
                         member.execute([&row.key]).map_err(failure)?;
@@ -3079,6 +3106,7 @@ impl SqliteStore {
             metadata_measurements.record("history_retirement", started, 1);
             if let Some(producer) = &producer {
                 metadata_measurements.emit(producer, "catalog_metadata");
+                overview_measurements.emit(producer, "overview_publish");
             }
             stage("catalog_metadata");
             crate::catalog_search::publish_current_rows(&transaction, &search_rows)
