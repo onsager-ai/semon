@@ -7109,6 +7109,155 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
+    #[test]
+    fn codex_reference_conformance_preserves_carrier_relations() {
+        const LEGACY: &str = include_str!(
+            "../../../tests/fixtures/compatibility/codex-reference-a9b0815/rollout-legacy.jsonl"
+        );
+        const PAGINATED: &str = include_str!(
+            "../../../tests/fixtures/compatibility/codex-reference-a9b0815/rollout-paginated.jsonl"
+        );
+        let manifest: Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/compatibility/codex-reference-a9b0815/manifest.json"
+        ))
+        .unwrap();
+        let classes = &manifest["edge_classification"];
+        assert_eq!(manifest["qualified_cli_versions"], serde_json::json!([]));
+        assert!(manifest["semon_adapter_contract"]["native_capture"].is_null());
+        assert!(manifest["semon_adapter_contract"]["cli_version"].is_null());
+        let root = scratch("codex-reference");
+        let log = root.join("legacy.jsonl");
+        let cache_path = root.join("index.json");
+        fs::write(&log, LEGACY).unwrap();
+        let mut cache = EventCache::open(&cache_path);
+        assert!(
+            cache.store.is_some(),
+            "paired evidence uses the SQLite event cache"
+        );
+        let index = scan_file(&log, "codex", &mut cache, &mut false).unwrap();
+        let calls = manifest["semon_adapter_contract"]["model_call_ids"]
+            .as_array()
+            .unwrap();
+        assert_eq!(index.events.len(), calls.len());
+        for (event, expected) in index.events.iter().zip(calls) {
+            assert_eq!(event.id.as_deref(), expected.as_str());
+            assert_eq!(event.k, Kind::Tool);
+            let reply = event.r.as_ref().expect("exact call_id resolves output");
+            let call = crate::tx::read_record(&log, event.o).unwrap();
+            let output = crate::tx::read_record(&log, reply.o).unwrap();
+            assert_eq!(call["payload"]["call_id"], *expected);
+            assert_eq!(output["payload"]["call_id"], *expected);
+            assert!(event.o < reply.o && reply.o < LEGACY.len() as u64);
+            assert!(
+                event.y.is_none(),
+                "no terminal identity from formatted or mixed output"
+            );
+            assert!(event.poll.is_none());
+            assert!(event.parent.is_none());
+            assert!(event.item.is_none());
+        }
+        let direct = &index.events[0];
+        assert!(!direct.code_mode);
+        assert_ne!(direct.r.as_ref().unwrap().f & UNKNOWN, 0);
+        let outer = &index.events[1];
+        assert!(outer.code_mode);
+        assert_ne!(outer.script & AMBIGUOUS_COMMANDS, 0);
+        assert!(!outer.result_source);
+        // Ambiguous printed bodies and trace-only requester/operation IDs cannot
+        // become model calls, poll ownership, or a completed direct command.
+        for class in ["ambiguous", "absent", "trace_only"] {
+            assert!(!classes[class].as_array().unwrap().is_empty());
+            for excluded in manifest["semon_adapter_contract"]["excluded_runtime_tool_ids"]
+                .as_array()
+                .unwrap()
+            {
+                assert!(
+                    !index
+                        .events
+                        .iter()
+                        .any(|event| event.id.as_deref() == excluded.as_str()),
+                    "{class} evidence must not manufacture runtime identities"
+                );
+            }
+        }
+        for edge in classes["recoverable"].as_array().unwrap() {
+            match edge["kind"].as_str().unwrap() {
+                "model_pair" => {
+                    assert_eq!(edge["semon_supported"], true);
+                    assert!(
+                        index
+                            .events
+                            .iter()
+                            .any(|event| event.id.as_deref() == edge["call_id"].as_str()
+                                && event.r.is_some())
+                    );
+                }
+                "formatted_terminal" => {
+                    assert_eq!(edge["semon_supported"], false);
+                    let output =
+                        crate::tx::read_record(&log, direct.r.as_ref().unwrap().o).unwrap();
+                    assert!(
+                        output["payload"]["output"]
+                            .as_str()
+                            .unwrap()
+                            .contains(&format!(
+                                "Process running with session ID {}",
+                                edge["process_id"].as_str().unwrap()
+                            ))
+                    );
+                    assert!(direct.y.is_none());
+                }
+                "standalone_completed_command" => assert_eq!(edge["semon_supported"], false),
+                "completed_runtime_identity" => assert_eq!(edge["semon_supported"], false),
+                other => panic!("unhandled recoverable edge {other}"),
+            }
+        }
+        assert!(index.yields.is_empty());
+        let cold = scan_file(&log, "codex", &mut EventCache::default(), &mut false).unwrap();
+        assert_eq!(format!("{index:?}"), format!("{cold:?}"));
+        drop(cache);
+        let replay = scan_file(
+            &log,
+            "codex",
+            &mut EventCache::open(&cache_path),
+            &mut false,
+        )
+        .unwrap();
+        assert_eq!(format!("{index:?}"), format!("{replay:?}"));
+
+        // The native Paginated carrier survives independently in source bytes;
+        // current Semon does not expose an unowned completed command as an event.
+        let paginated = root.join("paginated.jsonl");
+        fs::write(&paginated, PAGINATED).unwrap();
+        let offset = PAGINATED.find('\n').unwrap() as u64 + 1;
+        let record = crate::tx::read_record(&paginated, offset).unwrap();
+        assert_eq!(record["payload"]["item"]["process_id"], "95583");
+        assert_eq!(record["payload"]["item"]["type"], "CommandExecution");
+        let runtime_identity = classes["recoverable"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|edge| edge["kind"] == "completed_runtime_identity")
+            .unwrap();
+        assert_eq!(record["payload"]["item"]["id"], runtime_identity["item_id"]);
+        assert_eq!(
+            record["payload"]["item"]["id"],
+            runtime_identity["runtime_tool_call_id"]
+        );
+        assert_eq!(record["payload"]["item"]["id"], "tool-new");
+        assert!(record["payload"]["item"].get("call_id").is_none());
+        assert!(
+            record["payload"]["item"]
+                .get("model_visible_call_id")
+                .is_none()
+        );
+        assert!(record["payload"]["item"].get("requester").is_none());
+        let separate =
+            scan_file(&paginated, "codex", &mut EventCache::default(), &mut false).unwrap();
+        assert!(separate.events.is_empty());
+        fs::remove_dir_all(root).unwrap();
+    }
+
     // ---- The persisted index ------------------------------------------------------------
 
     /// A new directory under the system temp dir.
