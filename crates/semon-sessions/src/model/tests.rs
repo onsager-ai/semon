@@ -7060,7 +7060,7 @@ fn schema_four_upgrade_preserves_event_indices_and_observed_runs() {
     let version: i64 = connection
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 23);
+    assert_eq!(version, 24);
 }
 
 #[test]
@@ -7379,18 +7379,30 @@ fn isolated_catalog_publication_fences_competing_generations_and_pending_sources
     let other = prepare_sources(&home.options, &mut other_cache, &[input("other")], NOW).unwrap();
     assert_eq!(
         root_cache.publish_closed_catalog(&prepared).unwrap(),
-        Some(crate::events::Outcome::Conflict),
-        "unacknowledged unrelated evidence cannot qualify a complete publication"
+        Some(crate::events::Outcome::Written),
+        "a closed component must commit while unrelated evidence stays pending"
     );
-    assert_eq!(
+    assert_ne!(
         read_catalog(&home).0,
         before.0,
-        "failed component publication rolls back all projections"
+        "closed publication advances its fenced generation"
     );
+    let connection = rusqlite::Connection::open(EventCache::path(&home.options.cache)).unwrap();
+    let pending: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM session_catalog_invalidations WHERE source_path=?1",
+            [input("other")
+                .full_path(&home.options)
+                .to_string_lossy()
+                .as_ref()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(pending, 1, "unrelated source remains durable pending work");
     assert_eq!(
         other_cache.publish_closed_catalog(&other).unwrap(),
         Some(crate::events::Outcome::Conflict),
-        "the other pending source also prevents completeness"
+        "a prepared component must retry after a competing publication advances the generation"
     );
     observe_catalog(
         &home.options,

@@ -42,7 +42,7 @@ pub use catalog::{
     session_catalog_history_identity, session_catalog_identity, session_catalog_page,
     session_source_proof, validate_session_catalog_query,
 };
-pub use catalog_observer::SessionCatalogObserver;
+pub use catalog_observer::{SessionCatalogObserver, invalidate_session_sources};
 pub use native_resolution::{
     CatalogNativeResolution, CatalogNativeResolutionState, session_catalog_resolve_native,
 };
@@ -76,6 +76,11 @@ mod native_sidecar;
 mod native_tree;
 use native_tree::Summary;
 mod read_capabilities;
+mod source_change;
+pub use source_change::{
+    SessionFactsWrite, SessionSourceRelocation, SessionSourceWrite, indexed_codex_sources,
+    invalidate_session_input, verify_codex_relocation,
+};
 mod source_inventory;
 pub use source_inventory::SessionSourceInventory;
 mod history_projection;

@@ -1012,7 +1012,8 @@ impl MachineView {
     /// without starting a cold producer merely because this owner is new.
     pub(crate) fn note_catalog_interest(&self) -> io::Result<()> {
         self.evidence.catalog_demand.store(true, Ordering::Relaxed);
-        self.note_read_with(Kind::Catalog, false)
+        let pending = crate::events::store::catalog_work_pending(&self.evidence.options)?;
+        self.note_read_with(Kind::Catalog, pending)
     }
 
     /// A read's own refresh of the kind it wants, when none is built yet
@@ -1110,6 +1111,11 @@ impl MachineView {
     /// queued is moved up, so its reads never answer from before the change
     /// for long. Refreshed on read, it changes nothing.
     pub(crate) fn invalidate(&self) {
+        self.evidence.request_metadata_audit();
+        self.invalidate_journaled();
+    }
+
+    pub(crate) fn invalidate_journaled(&self) {
         if self.refresh() == Refresh::OnRead && !self.native_catalog_only() {
             return;
         }
@@ -1174,7 +1180,7 @@ impl MachineView {
         lock(&self.live.state).running_since = Some(started);
         // Cold discovery steps are continuations of one bounded observation,
         // not repeated rebuilds. Requeue each step behind already due work.
-        let discovery_only = self.evidence.catalog_pending(&work)
+        let discovery_only = self.evidence.catalog_continuation(&work)
             && !self.is_shown(Kind::Catalog)
             && !self.is_shown(Kind::Tree);
         if !discovery_only
@@ -6612,11 +6618,11 @@ mod tests {
             assert_eq!(body_of(&page)["completeness"]["state"], "partial");
             assert_eq!(pool.running(), 1);
             drop(release);
-            // Full observation deliberately scales with discovered history;
-            // it is not the foreground response deadline. Final publication is
-            // atomic, so its intermediate work is not durable progress visible
-            // to this reader. Require completion and actual worker cleanup
-            // before the existing production stalled-worker boundary instead.
+            // Historical ingestion scales with inventory size. Its bounded
+            // steps commit Index offsets and partial Catalog publications while
+            // foreground reads remain responsive. Require complete collection
+            // qualification and worker cleanup before the existing production
+            // stalled-worker boundary; the foreground deadline stays separate.
             let background = Instant::now();
             let connection =
                 rusqlite::Connection::open(EventCache::path(&fixture.options.cache)).unwrap();

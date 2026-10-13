@@ -9,6 +9,8 @@
 //! - `claude/sessions/<pid>.json`: a running Claude process's record;
 //! - `codex/sessions/**/*.jsonl` and `codex/archived_sessions/**/*.jsonl`: Codex rollouts.
 
+#[cfg(test)]
+thread_local! { pub(crate) static DISCOVERY_ENTRIES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) }; }
 use std::{fs, io, path::PathBuf};
 
 use crate::Options;
@@ -240,6 +242,8 @@ impl Discovery {
         }
         page.inputs.sort();
         page.complete = self.complete;
+        #[cfg(test)]
+        DISCOVERY_ENTRIES.with(|count| count.set(count.get() + page.examined as u64));
         Ok(page)
     }
 }

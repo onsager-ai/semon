@@ -102,6 +102,7 @@ pub(crate) fn row_present(transaction: &Transaction<'_>, key: &str) -> rusqlite:
 
 /// Called inside the existing source/generation-CAS publication transaction.
 /// Native body strings, paths, tool arguments and runtime state are excluded.
+#[cfg(test)]
 pub(crate) fn publish_row(
     transaction: &Transaction<'_>,
     scope: crate::CatalogReadScope,
@@ -109,7 +110,38 @@ pub(crate) fn publish_row(
 ) -> rusqlite::Result<()> {
     let scope = scope_key(scope);
     remove_row(transaction, scope, &row.key)?;
-    insert_row(transaction, scope, row, true)
+    // Reuse the existing bounded posting inserts, then advance counts with one
+    // source-key range scan. Per-gram SQL programs dominated cold batches.
+    insert_row(transaction, scope, row, false)?;
+    transaction.prepare_cached("INSERT INTO session_search_counts(read_scope,gram,members) SELECT read_scope,gram,1 FROM session_search_postings WHERE read_scope=?1 AND session_key=?2 ON CONFLICT(read_scope,gram) DO UPDATE SET members=members+excluded.members")?.execute(params![scope,row.key])?;
+    Ok(())
+}
+
+/// Update a bounded producer cohort's current/history postings together. The
+/// temporary key set never becomes another read model or survives the transaction.
+pub(crate) fn publish_current_rows(
+    transaction: &Transaction<'_>,
+    rows: &[&CatalogRow],
+) -> rusqlite::Result<()> {
+    for rows in rows.chunks(64) {
+        transaction.execute_batch("CREATE TEMP TABLE IF NOT EXISTS catalog_search_members(session_key TEXT PRIMARY KEY) WITHOUT ROWID; DELETE FROM catalog_search_members;")?;
+        for row in rows {
+            transaction
+                .prepare_cached("INSERT INTO catalog_search_members VALUES(?1)")?
+                .execute([&row.key])?;
+            let (encoded, grams, complete) = prepared_fields(row)?;
+            for scope in ["current", "retained_history"] {
+                remove_row(transaction, scope, &row.key)?;
+                insert_fields(transaction, scope, row, &encoded, &grams, complete, false)?;
+            }
+        }
+        for scope in ["current", "retained_history"] {
+            // CROSS JOIN keeps at most 64 members as the outer loop; each inner
+            // lookup uses the existing (scope,source key,gram) primary key.
+            transaction.prepare_cached("INSERT INTO session_search_counts(read_scope,gram,members) SELECT ?1,p.gram,COUNT(*) FROM catalog_search_members m CROSS JOIN session_search_postings p WHERE p.read_scope=?1 AND p.session_key=m.session_key GROUP BY p.gram ON CONFLICT(read_scope,gram) DO UPDATE SET members=members+excluded.members")?.execute([scope])?;
+        }
+    }
+    Ok(())
 }
 
 /// A complete rebuild starts with empty postings and documents. Aggregate
@@ -704,6 +736,11 @@ mod sqlite_tests {
         }
         publish_row(&transaction, CatalogReadScope::RetainedHistory, &retained).unwrap();
         transaction.commit().unwrap();
+        let mut batched = database();
+        let transaction = batched.transaction().unwrap();
+        publish_current_rows(&transaction, &rows.iter().collect::<Vec<_>>()).unwrap();
+        publish_row(&transaction, CatalogReadScope::RetainedHistory, &retained).unwrap();
+        transaction.commit().unwrap();
         for sql in [
             "SELECT json_array(read_scope,session_key,gram,last_ms) FROM session_search_postings ORDER BY read_scope,session_key,gram",
             "SELECT json_array(read_scope,gram,members) FROM session_search_counts ORDER BY read_scope,gram",
@@ -720,6 +757,7 @@ mod sqlite_tests {
                     .unwrap()
             };
             assert_eq!(read(&connection), read(&incremental), "{sql}");
+            assert_eq!(read(&connection), read(&batched), "bounded cohort: {sql}");
         }
         let count = |connection: &Connection, scope: &str, gram: &str| -> i64 {
             connection

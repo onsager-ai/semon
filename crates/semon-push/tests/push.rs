@@ -183,6 +183,8 @@ struct Received {
     status_redirect: Option<String>,
     status_refuse: bool,
     omit_generations: bool,
+    relocation_supported: bool,
+    relocation_requests: Vec<(Append, usize)>,
     grow_source: Option<PathBuf>,
     discover_source: Option<(PathBuf, String)>,
     move_source: Option<(String, PathBuf, PathBuf)>,
@@ -190,6 +192,7 @@ struct Received {
     hang_facts: bool,
     prepared_facts: Option<Facts>,
     appends: u64,
+    largest_append: usize,
     replaces: u64,
     conflicts: u64,
     /// Answer 500 after this many successful appends.
@@ -347,6 +350,7 @@ fn handle_append(received: &mut Received, body: &str) -> Response<std::io::Curso
     let Some(bytes) = base64_decode(&append.bytes) else {
         return json_response(400, json!({"error":"bytes"}));
     };
+    received.largest_append = received.largest_append.max(bytes.len());
     if received
         .fail_after
         .is_some_and(|limit| received.appends >= limit)
@@ -354,7 +358,27 @@ fn handle_append(received: &mut Received, body: &str) -> Response<std::io::Curso
         return json_response(500, json!({"error":"down"}));
     }
     let key = format!("{}/{}", append.root, append.path);
-    let current = received.files.get(&key).cloned().unwrap_or_default();
+    let mut current = received.files.get(&key).cloned().unwrap_or_default();
+    if let Some(relocation) = &append.relocation {
+        received
+            .relocation_requests
+            .push((append.clone(), bytes.len()));
+        if received.relocation_supported && current.is_empty() && !append.replace {
+            let old_key = format!("codex/{}", relocation.from_path);
+            if let Some(old) = received.files.get(&old_key)
+                && received.generations.get(&old_key) == append.generation.as_ref()
+                && append.offset == old.len() as u64
+                && semon_push::wire::sha256_hex(old) == relocation.prefix_sha256
+                && serde_json::from_slice::<serde_json::Value>(
+                    old.split(|byte| *byte == b'\n').next().unwrap(),
+                )
+                .ok()
+                .is_some_and(|header| header["payload"]["id"] == relocation.native_id)
+            {
+                current = old.clone();
+            }
+        }
+    }
     let conflict = |received: &mut Received, current: &[u8]| {
         received.conflicts += 1;
         json_response(
@@ -675,6 +699,77 @@ fn a_long_line_is_redacted_whole_before_it_is_cut_into_chunks() {
 }
 
 #[test]
+fn native_relocation_sender_reuses_redacted_prefix_and_replays_lost_ack() {
+    for supported in [false, true] {
+        let home = Home::new();
+        let receiver = receiver();
+        receiver.state.lock().unwrap().relocation_supported = supported;
+        let active = "codex/sessions/2026/10/01/rollout-native.jsonl";
+        let archived = "codex/archived_sessions/rollout-native.jsonl";
+        let initial = format!(
+            "{}\n{}\n",
+            json!({"type":"session_meta","payload":{"id":"native","cwd":"/synthetic/project"}}),
+            json!({"type":"event_msg","payload":{"type":"user_message","message":"synthetic sk-ant-api03-SECRETSECRETSECRETSECRET"}})
+        );
+        home.write(active, &initial);
+        semon_push::push(&home.push_options(&receiver.url), false).unwrap();
+        fs::create_dir_all(home.root.join("codex/archived_sessions")).unwrap();
+        fs::rename(home.root.join(active), home.root.join(archived)).unwrap();
+        let append = format!(
+            "{}\n",
+            json!({"type":"event_msg","payload":{"type":"user_message","message":"synthetic append"}})
+        );
+        home.append(archived, &append);
+        if supported {
+            receiver.state.lock().unwrap().drop_ack_once = true;
+            assert!(semon_push::push(&home.push_options(&receiver.url), false).is_err());
+        }
+        let report = home.client(&receiver).pass(&home.options).unwrap();
+        let state = receiver.state.lock().unwrap();
+        assert!(
+            !state.relocation_requests.is_empty(),
+            "sender missed native move"
+        );
+        let (request, bytes) = &state.relocation_requests[0];
+        assert_eq!(request.offset, redacted(&initial).len() as u64);
+        assert_eq!(
+            *bytes,
+            redacted(&append).len(),
+            "native move retransferred history"
+        );
+        assert_eq!(
+            request.relocation.as_ref().unwrap().prefix_sha256,
+            semon_push::wire::sha256_hex(&redacted(&initial))
+        );
+        assert_eq!(
+            state.files[archived],
+            redacted(&(initial.clone() + &append))
+        );
+        assert_eq!(
+            state.files[active],
+            redacted(&initial),
+            "stale mirror was deleted or overwritten"
+        );
+        if supported {
+            assert_eq!(
+                report.bytes, 0,
+                "lost ACK replay retransferred accepted history"
+            );
+        } else {
+            assert!(
+                state.conflicts > 0,
+                "legacy receiver did not use conservative fallback"
+            );
+        }
+        drop(state);
+        fs::rename(home.root.join(archived), home.root.join(active)).unwrap();
+        let report = home.client(&receiver).pass(&home.options).unwrap();
+        assert!(report.bytes <= append.len() as u64);
+        assert_eq!(copy(&receiver, active), redacted(&(initial + &append)));
+    }
+}
+
+#[test]
 fn archive_and_unarchive_pushes_select_current_sources_without_deleting_old_copies() {
     let mut home = Home::new();
     home.options.all = true;
@@ -750,7 +845,12 @@ fn archive_and_unarchive_pushes_select_current_sources_without_deleting_old_copi
         ] {
             let actual = core.respond("GET", path, query, None);
             let wanted = expected_core.respond("GET", path, query, None);
-            assert_eq!(actual.status, 200, "{path} pass {pass}");
+            assert_eq!(
+                actual.status,
+                200,
+                "{path} pass {pass}: {}",
+                String::from_utf8_lossy(&actual.body)
+            );
             assert_eq!(
                 native_reply_content(&actual),
                 native_reply_content(&wanted),
@@ -1402,6 +1502,116 @@ fn copilot_redacted_mirror_survives_lost_ack_restart_partial_and_replacement() {
             "source deletion does not erase previously received viewing evidence"
         );
     }
+}
+
+#[test]
+fn default_uploads_bound_long_lines_without_changing_redaction_or_one_shot_completion() {
+    let home = Home::new();
+    let receiver = receiver();
+    let secret = "sk-ant-api03-SECRETSECRETSECRETSECRET";
+    // Put a secret across a sender chunk boundary; it must be redacted
+    // before the complete line is split into separate HTTP requests.
+    let prefix = line("").find("\"content\":\"").unwrap() + "\"content\":\"".len();
+    let text = line(&format!(
+        "{}{secret}{}",
+        "a".repeat(256 * 1024 - prefix - 10),
+        "b".repeat(512 * 1024)
+    ));
+    home.write(LOG, &text);
+    let mut client = home.client(&receiver);
+    let report = client.pass(&home.options).unwrap();
+    assert_eq!(report.bytes, text.len() as u64);
+    assert_eq!(copy(&receiver, LOG), redacted(&text));
+    {
+        let received = receiver.state.lock().unwrap();
+        assert!(received.appends >= 3);
+        assert!(received.largest_append <= 256 * 1024);
+    }
+    // The saved checkpoint is usable by a new default client.
+    assert_eq!(home.client(&receiver).pass(&home.options).unwrap().bytes, 0);
+}
+
+#[test]
+fn default_watch_syncs_live_logs_before_archived_backfill_and_resumes_both() {
+    let home = Home::new();
+    let receiver = receiver();
+    let archive = "codex/archived_sessions/old.jsonl";
+    let active = "codex/sessions/current.jsonl";
+    let history = line(&"old".repeat(4096)).repeat(100);
+    let archived = home.write(archive, &history);
+    fs::File::open(archived)
+        .unwrap()
+        .set_times(fs::FileTimes::new().set_modified(std::time::UNIX_EPOCH))
+        .unwrap();
+    let live = line("current turn");
+    home.write(active, &live);
+    let options = home.push_options(&receiver.url);
+    let stop = Stop::new();
+    // Stop after the live log and one history batch are acknowledged.
+    receiver.state.lock().unwrap().stop_after = Some((2, stop.clone()));
+    let push = watch_in_background(&options, &stop);
+    wait_for("two accepted upload batches", || {
+        receiver.state.lock().unwrap().appends >= 2
+    });
+    stop_and_join(&stop, push).unwrap();
+    let saved = assert_stopped_cleanly(&options);
+    assert_eq!(copy(&receiver, active), redacted(&live));
+    let archived_bytes = copy(&receiver, archive);
+    assert!(!archived_bytes.is_empty());
+    assert!(archived_bytes.len() < history.len());
+    assert_eq!(archived_bytes, redacted(&history)[..archived_bytes.len()]);
+    assert!(saved["files"][archive]["sent"].as_u64().unwrap_or(0) <= archived_bytes.len() as u64);
+    {
+        let received = receiver.state.lock().unwrap();
+        assert_eq!(received.data_batch_order[0], active);
+        assert!(received.largest_append <= 256 * 1024);
+    }
+    assert_resumes(&home, &receiver, &[(archive, history), (active, live)]);
+}
+
+#[test]
+fn watch_revisits_growing_logs_before_archives_finish_without_committing_partial_inventory() {
+    let home = Home::new();
+    let receiver = receiver();
+    let archive = "codex/archived_sessions/old.jsonl";
+    let active = "codex/sessions/current.jsonl";
+    let history = line(&"old".repeat(4096)).repeat(400);
+    let archived = home.write(archive, &history);
+    fs::File::open(archived)
+        .unwrap()
+        .set_times(fs::FileTimes::new().set_modified(std::time::UNIX_EPOCH))
+        .unwrap();
+    let live = line("current turn");
+    let source = home.write(active, &live);
+    let options = home.push_options(&receiver.url);
+    let stop = Stop::new();
+    {
+        let mut received = receiver.state.lock().unwrap();
+        // Grow the live file after every accepted request while history
+        // remains far larger than a bounded watch sweep.
+        received.grow_source = Some(source.clone());
+        received.stop_after = Some((5, stop.clone()));
+    }
+    let push = watch_in_background(&options, &stop);
+    wait_for("a second live upload during backfill", || {
+        receiver.state.lock().unwrap().appends >= 5
+    });
+    stop_and_join(&stop, push).unwrap();
+    assert_stopped_cleanly(&options);
+    assert!(copy(&receiver, active).len() > live.len());
+    assert!(copy(&receiver, archive).len() < history.len());
+    {
+        let mut received = receiver.state.lock().unwrap();
+        assert_eq!(received.data_batch_order[0], active);
+        assert_eq!(received.data_batch_order[4], active);
+        assert!(
+            received.facts.is_none(),
+            "partial inventory is not committed"
+        );
+        received.grow_source = None;
+    }
+    let latest = fs::read_to_string(source).unwrap();
+    assert_resumes(&home, &receiver, &[(archive, history), (active, latest)]);
 }
 
 #[test]

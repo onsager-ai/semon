@@ -149,10 +149,16 @@ pub(super) fn read(
         return Ok(None);
     }
     let runtime = crate::native_evidence::query_runtime_generation(options).map_err(unavailable)?;
+    let row_runtime = crate::native_evidence::RuntimeObservations::new(options).expected(&row);
     // Retention preserves byte custody, not a live process observation. Its
     // pending tools and backgrounds need the same runtime qualification.
-    if !crate::model::summary::query_observation_matches(saved, &row.sources, true, Some(&runtime))
-        .map_err(unavailable)?
+    if !crate::model::summary::query_observation_matches(
+        saved,
+        &row.sources,
+        true,
+        row_runtime.as_deref(),
+    )
+    .map_err(unavailable)?
     {
         return Ok(None);
     }

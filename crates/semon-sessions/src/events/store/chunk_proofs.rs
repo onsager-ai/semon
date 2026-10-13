@@ -13,6 +13,8 @@ struct Header {
     ledger: String,
     count: usize,
     fingerprint: [u8; 32],
+    #[serde(default)]
+    resume: Option<crate::source_chunks::PrefixState>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -108,6 +110,7 @@ pub(super) fn read(
     let chunks = Chunks {
         offset: ledger.offset,
         hashes,
+        resume: header.resume,
     };
     if !chunks.valid(ledger.offset) || chunks.fingerprint() != header.fingerprint {
         return Ok(None);
@@ -157,7 +160,8 @@ pub(super) fn write(
             parser_version: CACHE_VERSION,
             ledger: header_ledger(ledger),
             count: chunks.hashes.len(),
-            fingerprint: chunks.fingerprint()
+            fingerprint: chunks.fingerprint(),
+            resume: chunks.resume.clone()
         })?
     ])?;
     Ok(())
@@ -177,6 +181,7 @@ mod tests {
         let chunks = Chunks {
             offset: crate::source_chunks::SIZE as u64 * 1024 + 19,
             hashes: vec![[42; 32]; 1025],
+            resume: None,
         };
         let ledger = Ledger {
             stat: Stat {
@@ -248,6 +253,7 @@ mod tests {
         let chunks = Chunks {
             offset: crate::source_chunks::SIZE as u64 * 1025,
             hashes: vec![[1; 32]; 1025],
+            resume: None,
         };
         let mut ledger = Ledger {
             stat: Stat {
@@ -284,6 +290,7 @@ mod tests {
         let short = Chunks {
             offset: 19,
             hashes: vec![[2; 32]],
+            resume: None,
         };
         ledger.offset = short.offset;
         ledger.stat.size = short.offset;

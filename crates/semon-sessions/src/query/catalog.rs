@@ -134,6 +134,7 @@ fn read(options: &Options, now: i64, bytes_left: &mut usize) -> Result<Part, Que
     }
     let runtime = crate::native_evidence::query_runtime_generation(options)
         .map_err(|error| QueryError::io(&error))?;
+    let runtime_observations = crate::native_evidence::RuntimeObservations::new(options);
     let cutoff = (!options.all)
         .then(|| now.saturating_sub(i64::try_from(options.since.as_millis()).unwrap_or(i64::MAX)));
     let base_sql = if cutoff.is_some() {
@@ -289,6 +290,7 @@ fn read(options: &Options, now: i64, bytes_left: &mut usize) -> Result<Part, Que
                 "Catalog sources are outside configured native authority",
             ));
         }
+        let row_runtime = runtime_observations.expected(&row);
         let saved = row
             .query
             .ok_or_else(|| unavailable("Exact Catalog query facts are unavailable"))?;
@@ -296,7 +298,7 @@ fn read(options: &Options, now: i64, bytes_left: &mut usize) -> Result<Part, Que
             &saved,
             &row.sources,
             lifecycle == "current",
-            Some(&runtime),
+            row_runtime.as_deref(),
         )
         .map_err(unavailable)?
         {

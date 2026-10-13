@@ -69,13 +69,14 @@ pub(crate) fn publish(tx: &Transaction<'_>, publication: &Publication<'_>) -> ru
             .and_then(|text| serde_json::from_str::<CatalogRow>(text).ok());
         let mut history = current.clone();
         let paths: BTreeSet<_> = current.sources.iter().map(|source| &source.path).collect();
-        let missing: BTreeMap<_, _> = old
-            .as_ref()
-            .into_iter()
-            .flat_map(|row| &row.sources)
-            .filter(|source| !paths.contains(&source.path))
-            .map(|source| (source.path.clone(), source.clone()))
-            .collect();
+        let mut missing = BTreeMap::new();
+        for source in old.as_ref().into_iter().flat_map(|row| &row.sources) {
+            if !paths.contains(&source.path)
+                && !crate::events::store::relocated_catalog_source(tx, source, &current.sources)?
+            {
+                missing.insert(source.path.clone(), source.clone());
+            }
+        }
         if missing.is_empty() {
             // The normal case reuses the existing current projection rather
             // than duplicating every transcript in a second persistent table.

@@ -1,141 +1,177 @@
-# Initial scoped native publication
+# Incremental native Catalog publication
 
-NativeEvidence owns Catalog discovery, component expansion, derivation and fenced
-publication directly. Viewer owns only refresh scheduling and presentation.
-Query and other admitted readers can reuse this producer without a ViewerCore,
-shown model or native Query cohort. The standalone-owner fixture verifies those
-owners remain absent even with Query-style scan-window options.
+NativeEvidence owns discovery, dependency expansion, native derivation and
+publication. Viewer schedules that producer; CLI, MCP and selected Query reads
+reuse it. The producer opens the existing SQLite Event Index without restoring
+historical FileIndexes. Raw remains authoritative for native content and facts
+retain their independent source-selection and runtime authority.
 
-The focused catalog producer opens the durable event store without restoring every
-FileIndex or reported run. An exact source batch uses the existing native model
-builder, captures its allowlisted catalog and untrimmed slot recipes, and publishes
-those together. Historical reported-run snapshots are selected by indexed native
-identity; a write does not read back unrelated snapshots.
+## Durable source revisions
 
-A partial publication verifies the collection generation, exact source ledgers
-including ctime, source journal claims, and existing source/native ownership in one
-transaction. Every affected existing current owner must have its entire current
-source closure in the batch. Missing closure, newer claims, and competing publications
-reject the write. Only the claimed revisions are acknowledged. Unrelated owners
-and pending work are preserved. The collection epoch advances without hashing all
-catalog metadata or counting all file ledgers. History extension and source/slot
-CAS use the same transaction as full publication.
+Receiver writes use `SessionSourceWrite` before changing Raw and complete it after
+fsync under the receiver publication fence. The existing
+`session_catalog_invalidations` journal records exact paths and monotonically
+increasing revisions. `session_source_mutations` stores only generation-bound
+append/relocation proofs or content-free runtime fingerprints. Begin withdraws
+prior append trust durably. A crash leaves pending work and conservative
+verification, never an acknowledged unindexed change. No second parser, broker
+or metadata database participates.
 
-A first focused catalog demand discovers allowed paths, orders their filesystem
-metadata by modification time, and prepares at most 64 native sources. It publishes
-before the complete compatibility/background model observes unrelated native
-history. Collection `completeness.state` is `partial`, `freshness` is `updating`, and
-cursors bind the opaque 64-hex-character publication epoch. Existing databases
-without the additive completeness marker are treated as complete. A successful
-full reconciliation publishes `complete` and changes the cursor generation.
+A verified append binds the old and new descriptor identities, both clocks,
+lengths and receiver generation. The parser resumes at its committed complete
+record offset. Persisted 64 KiB chunk proofs include a SHA-256 continuation at the
+last complete chunk boundary. The continuation reconstructs and checks the old
+full-prefix digest before computing the new prefix. Only the old boundary chunk
+and appended bytes are read and hashed. Missing, corrupt or ambiguous evidence,
+replacement and untrusted local changes retain full-prefix verification or repair.
+An interrupted Index commit is retried through its ledger CAS.
 
-When bounded discovery has found the entire cohort (at most 64 inputs), the
-producer checks that membership against the filesystem snapshot captured before
-native reads. It reuses that batch's prepared projections for complete publication;
-it does not derive the same native sources again. The partial transaction returns
-its committed generation directly, so a competing producer cannot be mistaken for
-the batch's own publication between the two writes. Complete publication still
-checks every current ledger and rejects newer source or Catalog generations.
+Whole Claude process JSON and agent sidecars journal their native dependencies.
+Sidecar intents fence the underlying log before Raw mutation. Whole JSON inputs
+retain their pre-write revision until dependency replay, so dependent logs are
+not published twice around that replay. Facts writes journal actual served
+changes, including native names, lock holders, process starts, runs, ancestors,
+repositories and source inventory. Heartbeat sequence and naming observation
+timestamps alone do not stale runtime summaries.
 
-A partial collection returns `owner_qualification: "provisional"` and null
-`native_id` in identity responses, preserving the declared `native_ids` and source
-references as read context. It cannot qualify native control selection or an eviction
-readiness proof. Explicit History identities remain readable. This conservative gate prevents an undiscovered lineage or harness
-collision from granting native control authority under a provisional canonical key.
-It does not replace a host's independent durable runtime ownership.
+Runtime recipes use per-row fingerprints of those dependencies. Local observations
+use the same native process/lock/name inputs and existing allowlisted reported-run
+parser. Hosted upgrade witnesses preserve qualified legacy recipes across verified
+facts and PID writes without rewriting unrelated metadata. PID witnesses are
+persisted before Raw changes and replayed idempotently; changes outside the
+witnessed input invalidate their qualification. These fingerprints never grant
+runtime or control authority.
 
-The complete background scan captures only durable ledger metadata before source
-discovery for disappearance reconciliation. It removes a disappeared file only if
-that observed ledger still matches, preserving newly committed concurrent sources.
-Selected batches neither restore unrelated FileIndexes nor prune membership.
+## Qualified publication and restart
 
-An already complete Catalog can republish a closed component of up to 64 sources
-without reloading unrelated event indexes. Before native reads, the producer
-captures a new filesystem/runtime snapshot and compares it with the last
-acknowledged snapshot. Changed allowlisted Claude agent sidecars select their
-existing native log and relationship component; runtime inputs must be unchanged. A new native
-source can explain a changed or newly created containing directory; replacements,
-disappearance and unrelated metadata changes require complete reconciliation.
-Both snapshots are retained as observations; a write arriving after
-capture remains visible to the next refresh.
+An existing qualified collection resumes persisted dirty revisions even when its
+owner has no in-memory snapshot. Push-driven sources require no historical path
+discovery. Untrusted local observations use bounded metadata audits: filesystem
+pages examine at most 512 entries and accept at most 64 candidates; current-source
+keyset pages inspect at most 64 rows. Audits open no Event Index payload for an
+unchanged source. Agent sidecars are checked alongside their discovered log.
 
-The producer expands changed paths through indexed current owners, parent/child
-relationships, handoff endpoints and native aliases in a deterministic read
-transaction. Newly derived endpoints and allowlisted native header/path parents expand that
-same bounded component before publication. An unresolved native parent cannot
-silently disappear just because its source was outside the first batch. Expansion
-reprepares only when an additional current source joins; the event cache retains
-already loaded indexes. Both old and new parents must be in the final closure.
-It loads event rows only for that component. Retained rows cannot
-stand in for current producer evidence.
+The host distinguishes exact journaled notifications from unknown writes.
+`changed_journaled` drains durable revisions; `changed` requests a bounded metadata
+audit. Explicit recovery demand coalesces an audit; ordinary qualified reads use
+`watch`. Read interest checks only persisted pending revisions and backfill state,
+so a replacement owner resumes an interrupted publication even when its rows
+already answer metadata reads. No pending work means no cold preparation. An audit advances `catalog_observed_at` only after discovery, current-row
+checks and claimed revisions complete. Component generations advance independently,
+so a partial drain cannot claim a newly observed whole cohort. SQLite journal
+mutations reserve the writer before reading evidence, avoiding read-to-write
+upgrade races while WAL readers remain available.
 
-The write transaction rechecks completeness, canonical/native identity, source
-membership and closure against persisted parent/handoff/bookmark metadata.
-Human asks and questions remain part of the selected session. It uses the
-existing partial-publication ledger, generation and revision fences, acknowledges
-only its claims, and rolls back if any unrelated source revision remains pending.
-It preserves complete qualification only after those checks succeed. Claude
-sidecar tool-use, label, model, working-directory and branch fields can change
-inside that closure; their independently verified generation and unchanged
-parent identity are required. Identity changes, unsupported role changes and unresolvable or oversized
-relationship closures still use complete reconciliation. A Codex parent rewrite
-can publish its complete old/new component; other native role fields stay stable.
-A genuinely new isolated identity can join the complete Catalog after the same
-transactional closure checks. Existing or malformed rows cannot masquerade as
-new identities, and source-path or native aliases owned outside the batch reject
-the focused publication.
-The isolated regression loads one event index with zero or 256 unrelated
-sources; the former complete path loaded 257 in the latter case. A changed-child
-fixture loads its two-source parent/child component with zero or 256 unrelated
-sources, compared with 258 indexes before. This is event-row
-reuse evidence; filesystem snapshot work and cold reconciliation still scale.
-Adding one isolated session loads no unrelated indexes with zero or 256 existing
-sessions; before this extension the larger case loaded all 256 indexes.
+Dirty sources expand through indexed current owners, parents/children, handoffs,
+aliases, relocation candidates and native identity dependencies. Newly derived
+endpoints expand the same component. Claude `session_id`, `continued-in` and
+shared bridge identities join their indexed current owners, including newly parsed
+links; reverse links share the existing dependency table. Source removal qualifies
+retired native IDs through the disappearance journal. The existing native model
+derives only that component. Retained rows cannot replace current producer evidence.
 
-Rewriting a Codex child's parent loads at most three event indexes with zero or
-256 unrelated sessions, versus 258 before. The fixture checks the new parent,
-complete qualification, rejection when the old parent is omitted, and refusal to
-overwrite a competing Catalog generation. This does not qualify every relationship
-change or bound filesystem snapshot work.
+Publication atomically checks the collection generation, exact source ledgers,
+claims, native ownership, source membership, role invariants and relationship
+closure. The receiver facts read fence spans preparation and publication; facts
+writes cannot miss an about-to-be-published new owner. Only claimed revisions are acknowledged. Unrelated pending revisions
+remain pending and do not block a closed component. Slot recipes, history
+extensions and Catalog metadata share that transaction. Search publication reuses
+bounded posting inserts and updates gram counts through a selected source-key range;
+it does not execute a separate insertion program for every gram. A concurrent Raw change
+or competing publication cannot satisfy a stale claim. An untrusted append that
+lands after scanning requeues only its affected paths.
 
-Ordinary local selected Query refreshes an existing current owner through this
-same component producer, without a filesystem-wide snapshot or discovery. It
-does not create a separate parser/cache, prune unrelated membership or weaken
-the publication transaction. Missing/retained sources and unsupported changes
-keep their existing reconciliation or archive semantics. A parent/child sidecar
-update republishes its new name/model with two index loads at zero or 256
-unrelated sources; changing the role's parent rejects publication.
+Published Event Index payloads and native description derivations are released.
+The worker retains scoped metadata and the existing queue/lifetime behavior;
+this change adds no workers. Selected reads reuse the same producer and existing
+source authorization, generation and read-cohort fences.
 
-## Qualified workload
+## Progressive initial ingestion and recovery
 
-The production MachineView fixture holds a recent 60-session page constant and
-adds 0, 256, and 2,048 older single-record Claude sources. Older source mtimes are
-explicitly preserved. Before the full background observation starts, the real
-producer and catalog reader returned that same page in 101, 103, and 133 ms.
-Only 60, 64, and 64 native file ledgers existed then. Response sizes were 53,736,
-53,960, and 53,960 bytes; the additional 224 bytes are a continuation cursor.
-These single-run server fixture numbers include metadata discovery, native batch
-preparation, publication and response generation. They exclude browser, provider,
-long-transcript, and large-result costs and are not complete journey budgets.
+A new machine discovers source metadata in bounded pages. Discovered paths and
+backfill state are persisted in SQLite, and committed source offsets survive
+restart. Filesystem enumeration itself restarts after process loss; discovered
+paths are deduplicated and indexed history is not reparsed. The first publication
+favors the newest 64 discovered candidates. Subsequent publications drain the
+journal in bounded source batches instead of constructing a global model.
 
-An explicit 60-source preparation fixture returned identical 54,090-byte pages
-with 0 and 2,048 unrelated files; neither unrelated file set was indexed. A separate
-20,000-run fixture verifies exact historical snapshot restoration and bounded write
-readback. Tests also reject newer journal claims without acknowledging unrelated
-work and verify full reconciliation restores Current identity qualification.
+Cold parsing checkpoints after approximately 4 MiB per source, at a complete
+record boundary. One native record can cross that budget. New, fully consumed sources share one Index transaction for at most 64 sources;
+parsing occurs before the writer reservation, and every ledger and physical
+generation is rechecked before any row commits. Partial-source checkpoints
+retain their individual transaction. Each commit atomically publishes its Event
+rows, native dependencies and consumed offsets; a separately fenced
+continuation proof allows the next slice to reuse the prefix. A crash between
+those writes safely verifies the affected prefix. Partial Catalog publications
+are visible between slices, and cache payloads are released after publication.
+Completion checks the publication generation and an empty pending journal.
 
-## Remaining work
+Partial collections retain provisional owner qualification and cannot grant
+native control selection or payload-eviction readiness. Native archived paths do
+not change this distinction. Existing collections without a backfill marker are
+qualified rather than automatically cold-started.
 
-Filesystem discovery and complete background reconciliation still grow with total
-history. A source batch parses its selected native history; it does not bound initial
-source parsing by requested list metadata. Progressive per-source parsing, a durable
-bounded dirty dependency worker, separately qualified native owners, canonical alias
-resynchronization, and authorized immutable-provider History backfill remain open.
-The current partial seam must not be advertised as a complete incremental producer
-or as qualified archived backfill. Metadata modification time is a discovery hint,
-not native transcript chronology; partial lists are not exhaustive. An import that
-writes old history with new filesystem mtimes can put unrelated old sources in the
-first batch while the requested recent page still waits for full reconciliation.
-The adversarial connection-to-session workload must retain that behavior and pass
-its fixed 60-row page, 473-slot transcript and large-field assertions before any
-complete journey improvement is claimed.
+Broad discovery is reserved for initial ingestion or failed closure/repair.
+Recovery records its reason and resumes bounded discovery and prior-current-path
+keyset pages, including disappeared sources that disk enumeration cannot find.
+Supported disappearance, replacement, inventory and runtime changes ordinarily
+use source revisions. The compatibility producer remains available when a scoped
+store is unavailable, with its original conservative semantics.
+
+## Native Codex relocation
+
+Active and archived rollout paths retain the same explicitly verified native
+identity. A validated relocation rebinds the existing file ID, Event rows,
+chunk proofs and native metadata to the selected destination. Custody proofs can
+avoid historical Raw verification; local moves conservatively verify the selected
+prefix. Intervening appended complete records are parsed from the old offset.
+The Index transaction also records a content-free Catalog relocation witness.
+Publication checks the old Catalog generation against the verified prefix and
+the destination against its current Index ledger, including any intervening
+verified append. The witness survives failed publication and restart, and is
+removed only after the relevant source revisions are acknowledged. History
+projection uses this witness to avoid retaining the former path as a second copy
+of the same transcript. Replacement or mismatched evidence withdraws that trust.
+Facts still select the authoritative current path. Stale mirrored copies may
+remain and cannot create duplicate current sources or grant control authority.
+Native archived state is distinct from retained-history and Hub object-storage
+lifecycle. The wire contract is in [the mirror protocol](../mirror-protocol.md).
+
+## Instrumented evidence and limits
+
+Synthetic tests hold one selected append constant with 0, 256 and 2,048 unrelated
+single-record sessions. Baseline f8b49cf loaded 1, 257 and 2,049 Event Indexes on
+append and again on fresh-owner restart. Append publication took 6.725, 337.024
+and 2,717.895 ms; restart took 5.024, 332.998 and 2,709.485 ms.
+
+The source-journal implementation loaded one Index and parsed one 194-byte record
+in all three cases. It discovered zero paths, derived one source and published
+one row. Logical source reads were 2,512 bytes and source SHA work 2,702 bytes in
+all cases. Publication took 11.599, 9.440 and 15.579 ms. Fresh-owner restart loaded
+zero Indexes; zero indexed payloads remained resident after publication. These
+are individual debug-build fixture measurements, not production latency budgets.
+
+Five trusted appends to 4 MiB and 16 MiB sources parsed five records and performed
+no full-prefix rehash. Logical reads were 133,754 and 128,312 bytes; source SHA
+work was 263,412 and 252,528 bytes. Corrupt continuation state and interrupted Raw
+intents exercised conservative full-prefix verification. SHA counters distinguish
+full-prefix verification from total source hashing; neither counts metadata
+fingerprint hashing or physical block I/O.
+
+A 16,816,826-byte cold source progressed across fresh owners in four steps of
+approximately 4.2 MiB, parsing each of its 513 records once without rehashing a
+committed prefix. Steps took approximately 330–394 ms and released indexed
+payloads. Archive/Unarchive tests preserve the indexed file ID and load only the
+selected Index at all three unrelated-history sizes, parsing zero records on a
+move and one on move-plus-append. Local metadata audit work still scales with
+inventory size; local runtime tests changed one Index at each history size.
+
+The existing semantic component limit remains 64 sources. Oversized connected
+components are not yet qualified for resumable semantic publication; they can
+exhaust the bounded recovery path. Initial source discovery requires total
+inventory metadata work. One selected Index load can grow with that session's
+history, and one complete native record may exceed the cold byte budget.
+Resident payload counts are not a process RSS guarantee. Worker lifetime, actual
+RSS and cross-machine contention need separate production-scale qualification;
+endpoint timings do not establish browser journey performance. No deadline,
+security assertion or worker count is relaxed by these measurements.

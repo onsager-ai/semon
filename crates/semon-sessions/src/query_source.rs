@@ -34,6 +34,20 @@ fn unavailable() -> io::Error {
     )
 }
 
+// Cold checkpoints describe a complete prefix of a larger, unchanged physical
+// generation. Size is the only synthetic field; both descriptor clocks and
+// inode identity still fence the observation. Unknown clocks retain hashing.
+fn same_physical_generation(ledger: &Ledger, physical: &Stat) -> bool {
+    physical.changed_ns.is_some()
+        && (physical == &ledger.stat
+            || (ledger.stat.size == ledger.offset
+                && physical.size >= ledger.stat.size
+                && Stat {
+                    size: ledger.stat.size,
+                    ..*physical
+                } == ledger.stat))
+}
+
 impl Sources {
     pub(crate) fn capture(
         options: &Options,
@@ -372,7 +386,8 @@ impl Records<'_> {
         let before = Stat::from_metadata(&file.metadata()?)?;
         let mut checked = self.checked.lock().map_err(|_| unavailable())?;
         let unchanged = before.changed_ns.is_some()
-            && (before == proof.ledger.stat || checked.get(path) == Some(&before));
+            && (same_physical_generation(&proof.ledger, &before)
+                || checked.get(path) == Some(&before));
         if (!unchanged && !proof.ledger.resumes(&before, &mut file))
             || Stat::from_metadata(&file.metadata()?)? != before
         {
@@ -574,7 +589,8 @@ impl Records<'_> {
         }
         let mut checked = self.checked.lock().map_err(|_| unavailable())?;
         let unchanged = before.changed_ns.is_some()
-            && (before == proof.ledger.stat || checked.get(path) == Some(&before));
+            && (same_physical_generation(&proof.ledger, &before)
+                || checked.get(path) == Some(&before));
         if !unchanged && !proof.ledger.resumes(&before, &mut file) {
             return Err(unavailable());
         }
