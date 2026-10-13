@@ -143,12 +143,30 @@ pub(crate) fn publish(
     row: &crate::model::summary::CatalogRow,
     projection: &Projection,
 ) -> rusqlite::Result<()> {
+    publish_measured(
+        tx,
+        row,
+        projection,
+        &mut crate::native_timing::Measurements::default(),
+    )
+}
+
+pub(crate) fn publish_measured(
+    tx: &Transaction<'_>,
+    row: &crate::model::summary::CatalogRow,
+    projection: &Projection,
+    measurements: &mut crate::native_timing::Measurements,
+) -> rusqlite::Result<()> {
+    let total_started = measurements.start();
+    let started = measurements.start();
     let mut session = projection.session.clone();
     session["content_generation"] = json!(
         row.overview
             .as_ref()
             .map(crate::overview::content_generation)
     );
+    measurements.record("trace_session", started, 1);
+    let started = measurements.start();
     let digest = format!(
         "{:x}",
         Sha256::digest(
@@ -162,36 +180,74 @@ pub(crate) fn publish(
             .as_bytes()
         )
     );
+    measurements.record("trace_digest", started, 1);
+    let started = measurements.start();
     let source = crate::retention::source_generation(&row.sources)
         .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
-    let changed=tx.prepare_cached("INSERT INTO session_trace_headers VALUES(?1,?2,?3,?4) ON CONFLICT(session_key) DO UPDATE SET generation=excluded.generation,source_generation=excluded.source_generation,metadata=excluded.metadata WHERE session_trace_headers.generation!=excluded.generation OR session_trace_headers.source_generation!=excluded.source_generation")?.execute(params![row.key,digest,source,session.to_string()])?;
+    measurements.record("trace_source_generation", started, 1);
+    let changed = {
+        let started = measurements.start();
+        let mut statement=tx.prepare_cached("INSERT INTO session_trace_headers VALUES(?1,?2,?3,?4) ON CONFLICT(session_key) DO UPDATE SET generation=excluded.generation,source_generation=excluded.source_generation,metadata=excluded.metadata WHERE session_trace_headers.generation!=excluded.generation OR session_trace_headers.source_generation!=excluded.source_generation")?;
+        measurements.record("trace_header_prepare", started, 1);
+        let started = measurements.start();
+        let parameters = params![row.key, digest, source, session.to_string()];
+        measurements.record("trace_header_serialization", started, 1);
+        let started = measurements.start();
+        let changed = statement.execute(parameters)?;
+        measurements.record("trace_header_sql", started, 1);
+        changed
+    };
     if changed == 0 {
+        measurements.record("trace_total_inclusive", total_started, 1);
         return Ok(());
     }
+    let started = measurements.start();
     tx.prepare_cached("DELETE FROM session_trace_turns WHERE session_key=?1")?
         .execute([&row.key])?;
     tx.prepare_cached("DELETE FROM session_trace_edges WHERE session_key=?1")?
         .execute([&row.key])?;
+    measurements.record("trace_turn_edge_removal", started, 2);
+    let started = measurements.start();
     let mut turns = tx.prepare_cached("INSERT INTO session_trace_turns VALUES(?1,?2,?3,?4)")?;
+    measurements.record("trace_turn_prepare", started, 1);
     for turn in &projection.turns {
-        turns.execute(params![
+        let started = measurements.start();
+        let parameters = params![
             row.key,
             turn["id"].as_str(),
             turn["start"].as_str(),
             turn.to_string()
-        ])?;
+        ];
+        measurements.record("trace_turn_serialization", started, 1);
+        let started = measurements.start();
+        turns.execute(parameters)?;
+        measurements.record("trace_turn_sql", started, 1);
     }
+    let started = measurements.start();
     let mut edges = tx.prepare_cached("INSERT INTO session_trace_edges VALUES(?1,?2,?3)")?;
+    measurements.record("trace_edge_prepare", started, 1);
     for edge in &projection.edges {
-        edges.execute(params![row.key, edge["id"].as_str(), edge.to_string()])?;
+        let started = measurements.start();
+        let parameters = params![row.key, edge["id"].as_str(), edge.to_string()];
+        measurements.record("trace_edge_serialization", started, 1);
+        let started = measurements.start();
+        edges.execute(parameters)?;
+        measurements.record("trace_edge_sql", started, 1);
     }
+    let started = measurements.start();
     tx.prepare_cached("DELETE FROM session_trace_bookmarks WHERE session_key=?1")?
         .execute([&row.key])?;
+    measurements.record("trace_bookmark_removal", started, 1);
+    let started = measurements.start();
     let mut bookmarks =
         tx.prepare_cached("INSERT INTO session_trace_bookmarks VALUES(?1,?2,?3)")?;
+    measurements.record("trace_bookmark_prepare", started, 1);
+    let started = measurements.start();
     for (target, edge) in &projection.bookmarks {
         bookmarks.execute(params![target, row.key, edge])?;
     }
+    measurements.record("trace_bookmark_sql", started, projection.bookmarks.len());
+    measurements.record("trace_total_inclusive", total_started, 1);
     Ok(())
 }
 

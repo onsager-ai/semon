@@ -2532,6 +2532,7 @@ impl IndexStore for SqliteStore {
         }
         let timing = crate::native_timing::enabled();
         let mut measurements = crate::native_timing::Measurements::new(timing);
+        let mut row_measurements = crate::native_timing::Measurements::new(timing);
         let started = measurements.start();
         let transaction = self
             .connection
@@ -2553,7 +2554,16 @@ impl IndexStore for SqliteStore {
         measurements.record("fences", started, files.len());
         let started = measurements.start();
         for (path, ledger, index) in files {
-            write_index_changes(&transaction, path, ledger, index, None, None).map_err(failure)?;
+            write_index_changes_measured(
+                &transaction,
+                path,
+                ledger,
+                index,
+                None,
+                None,
+                &mut row_measurements,
+            )
+            .map_err(failure)?;
         }
         measurements.record("write_index_changes", started, files.len());
         let started = measurements.start();
@@ -2564,6 +2574,7 @@ impl IndexStore for SqliteStore {
                 &crate::native_timing::id(&self.path),
                 "index_initial_publication",
             );
+            row_measurements.emit(&crate::native_timing::id(&self.path), "index_rows");
         }
         Ok(Outcome::Written)
     }
@@ -5051,12 +5062,44 @@ fn write_index_changes(
     changes: Option<&super::DirtyRows>,
     expected: Option<&Ledger>,
 ) -> rusqlite::Result<()> {
+    write_index_changes_measured(
+        transaction,
+        path,
+        ledger,
+        index,
+        changes,
+        expected,
+        &mut crate::native_timing::Measurements::default(),
+    )
+}
+
+fn write_index_changes_measured(
+    transaction: &Transaction<'_>,
+    path: &str,
+    ledger: &Ledger,
+    index: &FileIndex,
+    changes: Option<&super::DirtyRows>,
+    expected: Option<&Ledger>,
+    measurements: &mut crate::native_timing::Measurements,
+) -> rusqlite::Result<()> {
+    let started = measurements.start();
     relocation::advance(transaction, path, expected, ledger, changes.is_some())?;
+    measurements.record("relocation", started, 1);
+    let started = measurements.start();
     let full = super::DirtyRows {
         usage: index.usage_by_id.keys().cloned().collect(),
         ..super::DirtyRows::default()
     };
-    write_file(transaction, path, ledger, changes.unwrap_or(&full), index)?;
+    measurements.record("dirty_rows", started, 1);
+    write_file(
+        transaction,
+        path,
+        ledger,
+        changes.unwrap_or(&full),
+        index,
+        measurements,
+    )?;
+    let started = measurements.start();
     transaction.execute("DELETE FROM catalog_native_dependencies WHERE source_path=?1 AND (harness LIKE 'lineage:%' OR harness LIKE 'bridge:%')", [path])?;
     for id in index
         .links
@@ -5075,7 +5118,9 @@ fn write_index_changes(
             params![path, id],
         )?;
     }
+    measurements.record("dependencies", started, 1);
 
+    let started = measurements.start();
     transaction.execute("DELETE FROM catalog_native_dependencies WHERE source_path=?1 AND harness IN ('semantic-native:codex','semantic-parent:codex')", [path])?;
     if let Some(header) = &index.codex_header {
         if let Some(id) = header.native_id(Path::new(path)) {
@@ -5089,12 +5134,19 @@ fn write_index_changes(
             }
         }
     }
+    measurements.record("semantic_dependencies", started, 1);
+    let started = measurements.start();
     transaction.execute("DELETE FROM meta WHERE key=?1", [archive_index_key(path)])?;
+    measurements.record("archive_metadata", started, 1);
+    let started = measurements.start();
     invalidate_catalog_source(transaction, path, "changed")?;
+    measurements.record("invalidation", started, 1);
+    let started = measurements.start();
     transaction.execute(
         "DELETE FROM session_source_mutations WHERE source_path=?1",
         [path],
     )?;
+    measurements.record("mutation_retirement", started, 1);
     Ok(())
 }
 
@@ -5106,6 +5158,7 @@ fn write_file(
     ledger: &Ledger,
     changes: &super::DirtyRows,
     index: &FileIndex,
+    measurements: &mut crate::native_timing::Measurements,
 ) -> rusqlite::Result<()> {
     let FileIndex {
         dirty_rows: _,
@@ -5153,15 +5206,33 @@ fn write_file(
         prefix,
         tail,
     } = ledger;
+    let started = measurements.start();
     write_codex_header(transaction, path, ledger, codex_header.as_ref())?;
+    measurements.record("proof_header", started, 1);
+    let started = measurements.start();
     write_tree_summary(transaction, path, ledger, tree_summary.as_ref())?;
+    measurements.record("proof_tree", started, 1);
+    let started = measurements.start();
     write_claude_sidecar(transaction, path, ledger, claude_sidecar.as_ref())?;
+    measurements.record("proof_sidecar", started, 1);
+    let started = measurements.start();
     chunk_proofs::write(transaction, path, ledger, source_chunks.as_deref())?;
+    measurements.record("proof_chunks", started, 1);
+    let started = measurements.start();
     write_parent_marker(transaction, path, ledger, marker_index.as_ref())?;
+    measurements.record("proof_parent", started, 1);
+    let started = measurements.start();
     launch_calls::write(transaction, path, ledger, handoff_index.as_ref())?;
+    measurements.record("proof_launch", started, 1);
+    let started = measurements.start();
     let rate_limits = rate_limits.as_ref().map(json).transpose()?;
-    let file_id: i64 = transaction.prepare_cached(PUT_FILE)?.query_row(
-        params![
+    measurements.record("rate_limit_serialization", started, 1);
+    let file_id: i64 = {
+        let started = measurements.start();
+        let mut statement = transaction.prepare_cached(PUT_FILE)?;
+        measurements.record("file_prepare", started, 1);
+        let started = measurements.start();
+        let parameters = params![
             path,
             int(*dev),
             int(*ino),
@@ -5190,10 +5261,15 @@ fn write_file(
             codex_native_usage.as_ref().map(json).transpose()?,
             copilot.as_ref().map(json).transpose()?,
             changed_ns.map(i128::to_be_bytes),
-        ],
-        |row| row.get(0),
-    )?;
+        ];
+        measurements.record("file_parameters", started, 1);
+        let started = measurements.start();
+        let file_id = statement.query_row(parameters, |row| row.get(0))?;
+        measurements.record("file_upsert", started, 1);
+        file_id
+    };
 
+    let started = measurements.start();
     let mut put = transaction.prepare_cached(PUT_EVENT)?;
     let mut cut = transaction
         .prepare_cached("DELETE FROM events WHERE file_id = ?1 AND extra = ?2 AND seq >= ?3")?;
@@ -5212,7 +5288,10 @@ fn write_file(
             },
         )?;
     }
+    measurements.record("events", started, 1);
+    measurements.count("event_records", events.len().saturating_add(extras.len()));
 
+    let started = measurements.start();
     let mut put = transaction.prepare_cached(PUT_SIGNAL)?;
     changed(
         changes.before_signals,
@@ -5241,7 +5320,10 @@ fn write_file(
                 .map(drop)
         },
     )?;
+    measurements.record("signals", started, 1);
+    measurements.count("signal_records", signals.len());
 
+    let started = measurements.start();
     let mut put = transaction.prepare_cached(PUT_USAGE)?;
     let mut put_identity = transaction.prepare_cached(
         "INSERT INTO usage_identity(file_id,message_id,record_uuid) VALUES (?1,?2,?3)",
@@ -5263,7 +5345,9 @@ fn write_file(
             )?;
         }
     }
+    measurements.record("usage", started, changes.usage.len());
 
+    let started = measurements.start();
     let mut put = transaction.prepare_cached(PUT_CODEX_USAGE)?;
     changed(
         changes.before_codex_usage,
@@ -5302,6 +5386,8 @@ fn write_file(
                 .map(drop)
         },
     )?;
+    measurements.record("codex_usage", started, 1);
+    measurements.count("codex_usage_records", codex_usage_events.len());
     Ok(())
 }
 
