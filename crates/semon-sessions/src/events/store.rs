@@ -6978,6 +6978,7 @@ mod tests {
                 .unwrap()
         });
         evidence.retire();
+        drop(evidence);
         assert!(complete);
         let (old_rows, _) = catalog_fixture_projection(&options);
         let old = old_rows
