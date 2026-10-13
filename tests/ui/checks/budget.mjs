@@ -112,7 +112,7 @@ function serve(dir, now) {
       if (!match || done) return;
       done = true;
       clearTimeout(timer);
-      resolve({ proc, base: `http://127.0.0.1:${match[1]}`, token: match[2] });
+      resolve({ proc, base: `http://127.0.0.1:${match[1]}`, token: match[2], log: () => log });
     };
     proc.stdout.on('data', read);
     proc.stderr.on('data', read);
@@ -687,8 +687,13 @@ async function runSize(browser, vp, warnings) {
         .map((value) => value.split(';')[0])
         .join('; '),
     };
+    // This prepares the warm fixture; none of this time enters screen budgets.
+    // Atomic native publication can exceed ten seconds on a loaded CI runner.
+    // Use the existing production stalled-worker boundary (viewer.rs), while
+    // retaining every measured foreground request/byte/main-thread threshold.
+    const preparing = Date.now(), publicationDeadline = preparing + 60_000;
     let complete = false;
-    for (let attempt = 0; attempt < 200; attempt++) {
+    while (Date.now() < publicationDeadline) {
       const warm = await fetch(server.base + '/api/viewer/home', { headers });
       if (warm.ok) {
         const value = await warm.json();
@@ -699,7 +704,8 @@ async function runSize(browser, vp, warnings) {
       }
       await sleep(50);
     }
-    if (!complete) throw Error('Native publication did not settle');
+    if (!complete) throw Error(`Native publication did not settle: ${server.log().slice(-12000)}`);
+    console.log(`Native warm fixture ${vp.width}: publication settled in ${Date.now() - preparing} ms`);
     for (const [name, run] of Object.entries(scenarios)) {
       try {
         for (const [label, result] of Object.entries(await run(server, vp, browser, fixture, warn)))
