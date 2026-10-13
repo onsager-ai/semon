@@ -1669,6 +1669,8 @@ impl EventCache {
             .map_err(|error| io::Error::other(error.to_string()))?;
         #[cfg(test)]
         if result.0 == Outcome::Written {
+            CATALOG_PUBLISHED_ROWS
+                .with(|count| count.set(count.get() + prepared.rows.len() as u64));
             if let Some(hook) = AFTER_CATALOG_PUBLICATION.with(|hook| hook.borrow_mut().take()) {
                 hook();
             }
