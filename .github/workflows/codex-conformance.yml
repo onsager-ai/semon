@@ -46,6 +46,12 @@ jobs:
       - name: Run parser transaction and selected-output tests on the exact head
         run: cargo test --locked -p semon-sessions 'tx::tests::'
 
+      - name: Run paired reference conformance hooks on the exact head
+        run: cargo test --locked -p semon-sessions codex_reference_conformance
+
+      - name: Run source-generation selected-output expansion on the exact head
+        run: cargo test --locked -p semon-sessions catalog::tests::selected_output_expansion_keeps_native_blocks_under_source_generation
+
   upstream-reference:
     name: Pinned Codex reducer reference
     runs-on: ubuntu-latest
@@ -97,4 +103,5 @@ jobs:
         run: |
           cargo run --locked -p codex-rollout-trace --example semon_native_oracle -- \
             "$GITHUB_WORKSPACE/semon/tests/fixtures/compatibility/codex-reference-a9b0815" \
-            "$RUNNER_TEMP/codex-native-reference-bundle"
+            "$RUNNER_TEMP/codex-native-reference-bundle" \
+            "$GITHUB_WORKSPACE/semon/tests/fixtures/compatibility/codex-native-a9b0815/parser-cases.jsonl"
