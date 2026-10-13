@@ -7293,6 +7293,8 @@ mod tests {
         eventually("the announced change", || {
             tx_has(&core, "local", "lane", "announced while idle").then_some(())
         });
+        // A readable commit can precede the worker releasing its work lock.
+        until_idle(&view);
         assert_eq!(view.hooks.builds(), before.0 + 1);
         assert_eq!(
             view.hooks.refreshes_first.load(Ordering::SeqCst),
