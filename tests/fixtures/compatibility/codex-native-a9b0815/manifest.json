@@ -131,5 +131,19 @@
   "replay_extension": {
     "kind": "synthetic exact-target poll appended by the Rust fixture oracle",
     "expected": "incremental append and reopened cache index equal a cold index of the same final bytes"
+  },
+  "delayed_startup": {
+    "fixture": "delayed-startup.jsonl",
+    "origin": "source-shaped synthetic Paginated records at the same upstream pin; not a runtime capture",
+    "source_contract": "process_manager.rs store_process spawns an exit watcher; async_watcher.rs:174 captures the original call_id and :327-376 emits UnifiedExecStartup with its original process_id; an open single-exec wrapper does not establish reuse",
+    "source_reference": "https://github.com/openai/codex/blob/a9b0815167c27ab13719dd12d13b63e02b70d221/codex-rs/core/src/unified_exec/async_watcher.rs#L174",
+    "start_id": "start-26789",
+    "start_offset": 0,
+    "result_offset": 197,
+    "terminal_offset": 690,
+    "later_id": "start-95583",
+    "later_offset": 491,
+    "later_result_offset": 1009,
+    "expected": "old26789 completes with its exact failure outcome; later95583 remains yielded and does not own the old terminal item; cold, append and reopened caches agree"
   }
 }

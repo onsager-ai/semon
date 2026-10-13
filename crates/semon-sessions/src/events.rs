@@ -3708,7 +3708,11 @@ fn directly_prints_call(tokens: &[String], operation: &str, stringify: bool) -> 
     if tokens.len() < prefix.len() + 2 {
         return false;
     }
-    if tokens[..prefix.len()].iter().map(String::as_str).ne(prefix) {
+    if tokens[..prefix.len()]
+        .iter()
+        .map(String::as_str)
+        .ne(prefix.iter().copied())
+    {
         return false;
     }
     let operation_at = prefix.len();
@@ -4646,23 +4650,13 @@ pub(crate) fn codex(summary: &mut FileIndex, record: &Value, offset: u64) {
                 || field(item, "status") == Some("failed")
                 || field(item, "type") == Some("FileChange");
             // A yielded command's end: its `process_id` is the session id
-            // the starting script answered with. An open wrapper only proves
-            // reuse when the terminal source is a startup and the wrapper has
-            // exactly one exec source; unrelated wrappers do not erase this
-            // exact process-id join.
+            // the starting script answered with. A startup source and an open
+            // exec wrapper do not identify a new native invocation: the old
+            // startup's exit watcher can finish during a different wrapper.
+            // Preserve the exact process-id join without guessing reuse.
             let yielded = if field(item, "type") == Some("CommandExecution") && !legacy_tool {
-                exec_session(item.get("process_id")).and_then(|session| {
-                    let start = summary.yields.remove(&session)?;
-                    let current_startup = field(item, "source") == Some("unified_exec_startup")
-                        && open.is_some_and(|open| {
-                            summary.events.get(open).is_some_and(|event| {
-                                event.code_mode
-                                    && event.code_mode_open
-                                    && event.script == EXEC_COMMAND
-                            })
-                        });
-                    (!current_startup).then_some(start)
-                })
+                exec_session(item.get("process_id"))
+                    .and_then(|session| summary.yields.remove(&session))
             } else {
                 None
             };
@@ -6645,6 +6639,81 @@ mod tests {
         assert!(summary.extras.iter().all(|extra| {
             extra.parent != Some(1) || extra.id.as_deref() != Some("terminal-26789")
         }));
+    }
+
+    #[test]
+    fn delayed_startup_completion_during_different_exec_preserves_exact_join_and_cache_parity() {
+        use std::io::Write;
+        // Source-shaped synthetic Paginated records, qualified by the adjacent
+        // manifest's a9b0815 pin. The startup exit watcher retains the old
+        // native invocation while the later single-exec wrapper is open.
+        const FIXTURE: &str = include_str!(
+            "../../../tests/fixtures/compatibility/codex-native-a9b0815/delayed-startup.jsonl"
+        );
+        let root = scratch("delayed-startup");
+        let log = root.join("delayed-startup.jsonl");
+        let cache_path = root.join("index.json");
+        let boundary = FIXTURE
+            .split_inclusive('\n')
+            .take(2)
+            .map(str::len)
+            .sum::<usize>();
+        fs::write(&log, &FIXTURE[..boundary]).unwrap();
+        let mut cache = EventCache::open(&cache_path);
+        let initial = scan_file(&log, "codex", &mut cache, &mut false).unwrap();
+        assert_eq!(initial.yields.get("26789"), Some(&0));
+        assert!(initial.events[0].y.as_ref().unwrap().done.is_none());
+        fs::OpenOptions::new()
+            .append(true)
+            .open(&log)
+            .unwrap()
+            .write_all(FIXTURE[boundary..].as_bytes())
+            .unwrap();
+        let appended = scan_file(&log, "codex", &mut cache, &mut false).unwrap();
+        let cold = scan_file(&log, "codex", &mut EventCache::default(), &mut false).unwrap();
+        assert_eq!(format!("{appended:?}"), format!("{cold:?}"));
+        let old = &appended.events[0];
+        assert_eq!(old.id.as_deref(), Some("start-26789"));
+        assert_eq!(old.o, 0);
+        assert_eq!(old.r.as_ref().unwrap().o, 197);
+        let done = old.y.as_ref().unwrap().done.as_ref().unwrap();
+        let terminal_offset = FIXTURE
+            .split_inclusive('\n')
+            .take(3)
+            .map(str::len)
+            .sum::<usize>() as u64;
+        assert_eq!(done.o, terminal_offset);
+        assert_eq!(done.o, 690);
+        assert!(done.e);
+        assert_eq!(done.f, 0);
+        assert!(!appended.yields.contains_key("26789"));
+        assert_eq!(appended.yields.get("95583"), Some(&1));
+        let later = &appended.events[1];
+        assert_eq!(later.id.as_deref(), Some("start-95583"));
+        assert_eq!(later.o, boundary as u64);
+        assert!(later.result_source);
+        assert_eq!(later.script, EXEC_COMMAND);
+        assert!(later.poll.is_none());
+        assert!(later.y.as_ref().unwrap().done.is_none());
+        assert_eq!(later.r.as_ref().unwrap().o, 1009);
+        assert!(old.parent.is_none());
+        assert!(later.parent.is_none());
+        assert!(
+            appended
+                .extras
+                .iter()
+                .all(|extra| extra.id.as_deref() != Some("terminal-26789"))
+        );
+        drop(cache);
+        let reopened = scan_file(
+            &log,
+            "codex",
+            &mut EventCache::open(&cache_path),
+            &mut false,
+        )
+        .unwrap();
+        assert_eq!(format!("{reopened:?}"), format!("{cold:?}"));
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

@@ -4443,6 +4443,8 @@ mod tests {
                     code_mode_open: true,
                     parent: Some(7),
                     script: STDIN | SENDS,
+                    poll_target: Some("26789".to_owned()),
+                    result_source: true,
                     y: Some(Box::new(Yield {
                         polls: vec![1, 2, u64::MAX],
                         cut: true,
