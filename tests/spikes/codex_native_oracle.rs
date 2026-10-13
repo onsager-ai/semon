@@ -410,6 +410,10 @@ fn validate_fixture_pairing(
         .to_string();
     ensure!(
         new_result["output"].as_str() == Some("new")
+            && Some(paginated_command.id.as_str()) == new_runtime["call_id"].as_str()
+            && Some(paginated_command.id.as_str()) == new_end["payload"]["tool_call_id"].as_str()
+            && Some(paginated_command.id.as_str())
+                == nested_starts[0]["payload"]["tool_call_id"].as_str()
             && paginated_command.process_id.as_deref() == Some(new_process_id.as_str())
             && paginated_command.command
                 == vec![
@@ -421,7 +425,7 @@ fn validate_fixture_pairing(
             && new_runtime["command"] == json!(paginated_command.command)
             && new_runtime["aggregated_output"].as_str()
                 == paginated_command.aggregated_output.as_deref(),
-        "Paginated CommandExecution process, command, and output must match the paired runtime and printed result"
+        "Paginated CommandExecution native item ID, process, command, and output must match the paired runtime and printed result"
     );
     let poll_invocation = payload_data_value(nested_starts[1], "invocation_payload")?;
     let poll_arguments: Value = serde_json::from_str(
