@@ -16,11 +16,48 @@ pub(crate) struct RuntimeObservations {
     legacy: Option<String>,
     preserved: Option<(String, String)>,
 }
+/// Scope-only publication observations cannot enter reader compatibility lookup.
+pub(crate) struct ScopedRuntimeObservations(RuntimeObservations);
+impl ScopedRuntimeObservations {
+    pub(crate) fn scope(&self, row: &crate::model::summary::CatalogRow) -> io::Result<String> {
+        self.0.scope(row)
+    }
+}
 impl RuntimeObservations {
     pub(crate) fn new(options: &Options) -> Self {
         Self::new_measured(options, &mut crate::native_timing::Measurements::default())
     }
     pub(crate) fn new_measured(
+        options: &Options,
+        measurements: &mut crate::native_timing::Measurements,
+    ) -> Self {
+        let mut observations = Self::fresh_measured(options, measurements);
+        let started = measurements.start();
+        observations.preserved = observations.connection.as_ref().and_then(|db| db.query_row("SELECT (SELECT value FROM meta WHERE key='catalog_legacy_runtime_anchor'),(SELECT value FROM meta WHERE key='catalog_legacy_runtime_semantics')",[],|row|Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?))).ok());
+        measurements.record("runtime_ctor_preserved", started, 1);
+        let started = measurements.start();
+        observations.fallback = query_runtime_generation(options).ok();
+        measurements.record("runtime_ctor_fallback", started, 1);
+        let started = measurements.start();
+        observations.legacy = legacy_runtime_generation(options).ok();
+        measurements.record("runtime_ctor_legacy", started, 1);
+        observations
+    }
+    /// Only for a publication that captured this initial runtime successfully
+    /// and independently rechecks it after deriving all scoped Query rows.
+    pub(crate) fn for_publication_measured(
+        options: &Options,
+        initial_runtime: &str,
+        measurements: &mut crate::native_timing::Measurements,
+    ) -> ScopedRuntimeObservations {
+        let mut observations = Self::fresh_measured(options, measurements);
+        observations.fallback = Some(initial_runtime.to_owned());
+        observations.into_scoped()
+    }
+    pub(crate) fn into_scoped(self) -> ScopedRuntimeObservations {
+        ScopedRuntimeObservations(self)
+    }
+    fn fresh_measured(
         options: &Options,
         measurements: &mut crate::native_timing::Measurements,
     ) -> Self {
@@ -75,15 +112,6 @@ impl RuntimeObservations {
         )
         .ok();
         measurements.record("runtime_ctor_connection", started, 1);
-        let started = measurements.start();
-        let preserved = connection.as_ref().and_then(|db| db.query_row("SELECT (SELECT value FROM meta WHERE key='catalog_legacy_runtime_anchor'),(SELECT value FROM meta WHERE key='catalog_legacy_runtime_semantics')",[],|row|Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?))).ok());
-        measurements.record("runtime_ctor_preserved", started, 1);
-        let started = measurements.start();
-        let fallback = query_runtime_generation(options).ok();
-        measurements.record("runtime_ctor_fallback", started, 1);
-        let started = measurements.start();
-        let legacy = legacy_runtime_generation(options).ok();
-        measurements.record("runtime_ctor_legacy", started, 1);
         Self {
             facts,
             local,
@@ -91,9 +119,9 @@ impl RuntimeObservations {
             names,
             runs,
             connection,
-            fallback,
-            legacy,
-            preserved,
+            fallback: None,
+            legacy: None,
+            preserved: None,
         }
     }
     pub(crate) fn expected(&self, row: &crate::model::summary::CatalogRow) -> Option<String> {
