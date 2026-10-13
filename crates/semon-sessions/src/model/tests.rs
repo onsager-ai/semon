@@ -7191,7 +7191,9 @@ fn parser_cache_reset_rederives_direct_formatter_catalog_outcome() {
     let mut stale_slot: Value = serde_json::from_str(&slots[tool_at].1).unwrap();
     assert_eq!(stale_slot["outcome"], "Ok");
     stale_slot["outcome"] = json!("Unknown");
-    let stale_reply_flags = stale_slot["reply"]["f"].as_u64().unwrap() as u8 | UNKNOWN;
+    let reply: crate::events::Reply = serde_json::from_value(stale_slot["reply"].clone()).unwrap();
+    assert_eq!(reply.f & UNKNOWN, 0);
+    let stale_reply_flags = reply.f | UNKNOWN;
     stale_slot["reply"]["f"] = json!(stale_reply_flags);
     slots[tool_at].1 = stale_slot.to_string();
     let stale_slot_generation = crate::slot_projection::generation(
