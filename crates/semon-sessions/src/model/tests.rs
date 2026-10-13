@@ -3770,7 +3770,7 @@ fn resumable_claude_peer_component_preserves_exact_messages_and_learned_name() {
         .collect::<Vec<_>>();
     assert_eq!(expected.len(), 81);
     assert!(expected.iter().all(|edge| !edge.unmatched));
-    assert_eq!(db.query_row("SELECT count(DISTINCT edge_id) FROM session_trace_edges WHERE json_extract(metadata,'$.kind')='relay'",[],|row|row.get::<_,usize>(0)).unwrap(),81,"a receipt became an extra orphan edge");
+    assert_eq!(db.query_row("SELECT count(DISTINCT edge_id) FROM session_trace_edges WHERE json_extract(metadata,'$.kind')='relay'",[],|row|row.get::<_,i64>(0)).unwrap(),81,"a receipt became an extra orphan edge");
     for edge in expected {
         for owner in [Some(&edge.from), edge.to.as_ref()].into_iter().flatten() {
             let metadata: String = db
@@ -3953,7 +3953,7 @@ fn staged_identity_reprepares_copy_resume_split_across_source_pages() {
     let row: Value = serde_json::from_str(&metadata).unwrap();
     assert_eq!(row["sources"].as_array().unwrap().len(), 2);
     assert_eq!(row["native_ids"], json!(["000-original", "zzz-resumed"]));
-    assert_eq!(db.query_row("SELECT count(DISTINCT edge_id) FROM session_trace_edges WHERE json_extract(metadata,'$.kind')='relay'",[],|row|row.get::<_,usize>(0)).unwrap(),1,"received/copied policy emitted duplicate send");
+    assert_eq!(db.query_row("SELECT count(DISTINCT edge_id) FROM session_trace_edges WHERE json_extract(metadata,'$.kind')='relay'",[],|row|row.get::<_,i64>(0)).unwrap(),1,"received/copied policy emitted duplicate send");
 }
 
 #[test]
@@ -9077,7 +9077,7 @@ fn acknowledged_semantic_family() -> Home {
 fn first_acknowledged_owner(
     home: &Home,
 ) -> (
-    crate::native_evidence::NativeEvidence,
+    std::sync::Arc<crate::native_evidence::NativeEvidence>,
     i64,
     summary::CatalogSource,
 ) {
