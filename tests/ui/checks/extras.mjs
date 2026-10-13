@@ -297,16 +297,15 @@ export default async function (browser) {
         shotTitle,
       );
       await childRequestsSettled();
+      await settled(shot);
       await shot.evaluate(() =>
         document
           .querySelectorAll('.tsum[aria-expanded="false"]')
           .forEach((button) => button.click()),
       );
       const titleLabel = shot.locator('.step .sa.st');
-      await titleLabel.scrollIntoViewIfNeeded();
       if (expanded) {
         await titleLabel.evaluate((title) => title.click());
-        await titleLabel.scrollIntoViewIfNeeded();
         await shot.waitForFunction(
           () =>
             document
@@ -316,6 +315,31 @@ export default async function (browser) {
               ?.getAttribute('aria-expanded') === 'true',
         );
       }
+      // Genuine input ends the opening scroll hold without activating a control.
+      const wheelPoint = await shot.evaluate(() => {
+        const bar = document.querySelector('#topbar'),
+          rect = bar.getBoundingClientRect(),
+          x = Math.min(rect.right - 1, innerWidth - 1),
+          y = Math.max(rect.top + 1, 1),
+          target = document.elementFromPoint(x, y);
+        if (
+          !bar.contains(target) ||
+          target.closest('button, a, input, select, textarea, [role="button"], [contenteditable]')
+        )
+          throw new Error('Step-title capture needs inert topbar padding for wheel input');
+        return { x, y };
+      });
+      await shot.mouse.move(wheelPoint.x, wheelPoint.y);
+      await shot.mouse.wheel(0, 1);
+      const layoutFrames = () =>
+        shot.evaluate(
+          () => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done))),
+        );
+      await layoutFrames();
+      await titleLabel.evaluate((title) =>
+        title.closest('.step').querySelector(':scope > button').scrollIntoView({ block: 'center' }),
+      );
+      await layoutFrames();
       const visibleRows = await shot.evaluate((value) => {
         const label = [...document.querySelectorAll('.step .sa.st')].find(
             (node) => node.textContent === value,
