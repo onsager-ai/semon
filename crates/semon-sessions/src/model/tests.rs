@@ -3788,6 +3788,90 @@ fn resumable_claude_peer_component_preserves_exact_messages_and_learned_name() {
     }
 }
 
+#[test]
+fn late_native_claude_receipt_requalifies_previously_unmatched_sender() {
+    let home = Home::new();
+    home.top(
+        "sender",
+        &[
+            human("sender", ts(7, 0), "Send before the receipt exists"),
+            assistant(
+                "sender",
+                ts(7, 1),
+                vec![tool(
+                    "send-late",
+                    "SendMessage",
+                    json!({"to":"receiver","message":"Native late receipt"}),
+                )],
+            ),
+            result(
+                "sender",
+                ts(7, 1),
+                "send-late",
+                "sent",
+                false,
+                json!({"success":true,"msg_id":"late-message"}),
+            ),
+        ],
+    );
+    let evidence = crate::native_evidence::NativeEvidence::new(home.options.clone());
+    let drain = || {
+        for _ in 0..128 {
+            if evidence
+                .refresh_catalog(&mut crate::viewer::lock(&evidence.work), NOW)
+                .unwrap()
+            {
+                return;
+            }
+        }
+        panic!("late native receipt publication did not finish");
+    };
+    drain();
+    let db = rusqlite::Connection::open(EventCache::path(&home.options.cache)).unwrap();
+    let before: String = db.query_row("SELECT metadata FROM session_trace_edges WHERE session_key='sender' AND json_extract(metadata,'$.kind')='relay'", [], |row| row.get(0)).unwrap();
+    assert_eq!(
+        serde_json::from_str::<Value>(&before).unwrap()["unmatched"],
+        json!(true)
+    );
+    home.top(
+        "receiver",
+        &[peer(
+            "receiver",
+            ts(7, 2),
+            "late-message",
+            "Sender",
+            100,
+            "Native late receipt",
+        )],
+    );
+    evidence.request_metadata_audit();
+    drain();
+    let mut oracle_options = home.options.clone();
+    oracle_options.cache = home.root.join("late-receipt-oracle.json");
+    let oracle = home.build_at(&oracle_options, NOW);
+    let edge = oracle
+        .handoffs
+        .iter()
+        .find(|edge| edge.kind == "relay")
+        .unwrap();
+    assert!(!edge.unmatched);
+    assert_eq!(edge.to.as_deref(), Some("receiver"));
+    for owner in [&edge.from, edge.to.as_ref().unwrap()] {
+        let metadata: String = db
+            .query_row(
+                "SELECT metadata FROM session_trace_edges WHERE session_key=?1 AND edge_id=?2",
+                rusqlite::params![owner, edge.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let actual: Value = serde_json::from_str(&metadata).unwrap();
+        assert_eq!(actual["from"], json!(edge.from));
+        assert_eq!(actual["to"], json!(edge.to));
+        assert_eq!(actual["unmatched"], json!(false));
+    }
+    evidence.retire();
+}
+
 fn assert_queued_identity_matches_oracle(home: &Home, options: &Options) -> Built {
     let mut oracle_options = options.clone();
     oracle_options.cache = options.cache.with_extension("oracle.json");
@@ -7785,7 +7869,7 @@ fn schema_four_upgrade_preserves_event_indices_and_observed_runs() {
     let version: i64 = connection
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 24);
+    assert_eq!(version, 25);
 }
 
 #[test]
@@ -8933,7 +9017,7 @@ fn schema_six_catalog_migration_populates_relationship_indexes_on_next_complete_
     home.build();
     let connection =
         rusqlite::Connection::open(home.options.cache.with_extension("sqlite3")).unwrap();
-    connection.execute_batch("DROP TABLE session_catalog_sources; DROP INDEX session_catalog_parent; DROP INDEX session_catalog_current_parent; ALTER TABLE session_catalog DROP COLUMN parent_key; UPDATE meta SET value='1' WHERE key='catalog_version'; PRAGMA user_version=6;").unwrap();
+    connection.execute_batch("DROP TABLE session_catalog_sources; DROP INDEX session_catalog_parent; DROP INDEX session_catalog_current_parent; DROP INDEX IF EXISTS semantic_catalog_parent_key; ALTER TABLE session_catalog DROP COLUMN parent_key; UPDATE meta SET value='1' WHERE key='catalog_version'; PRAGMA user_version=6;").unwrap();
     use sha2::{Digest, Sha256};
     let metadata: Vec<String> = read_catalog(&home)
         .1

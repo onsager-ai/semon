@@ -6603,6 +6603,8 @@ pub(crate) struct PreparedSources {
     pub(crate) transcripts: Vec<crate::slot_projection::Projection>,
     pub(crate) pids: BTreeSet<u32>,
     pub(crate) lineage_dependencies: Vec<(String, String)>,
+    /// Exact native message discovery hints; overflow requires durable staging.
+    pub(crate) message_dependencies: Option<Vec<String>>,
     pub(crate) relationships: relation_stage::Context,
     pub(crate) indexed_sources: Vec<(String, summary::CatalogSource)>,
     pub(crate) indexed_native_parents: Vec<(String, String, String)>,
@@ -6810,6 +6812,7 @@ pub(crate) fn prepare_semantic_index_sources(
         indexed_native_parents,
         withdrawals,
         lineage_dependencies,
+        message_dependencies: Some(Vec::new()),
         rows: Vec::new(),
         transcripts: Vec::new(),
         pids: BTreeSet::new(),
@@ -7743,6 +7746,47 @@ fn build_sources_inner(
         BuildTarget::Sources => {
             let relationships =
                 relation_stage::Context::capture(&builder, published_facts.as_ref());
+            let mut message_ids = BTreeSet::new();
+            let mut message_bytes = 0usize;
+            let mut message_dependencies = Some(Vec::new());
+            'messages: for (file, source) in files.iter().enumerate() {
+                if source.harness() != "claude" {
+                    continue;
+                }
+                for (at, event) in source.summary.events.iter().enumerate() {
+                    if builder.copied.contains(&(file, at)) {
+                        continue;
+                    }
+                    let id = match event.k {
+                        Kind::Xsm => event.id.as_ref(),
+                        Kind::Tool if event.n.as_deref() == Some("SendMessage") => event
+                            .r
+                            .as_ref()
+                            .filter(|reply| reply.f & PIN == 0)
+                            .and_then(|reply| reply.m.as_ref()),
+                        _ => None,
+                    };
+                    let Some(id) = id else {
+                        continue;
+                    };
+                    if message_ids.contains(id) {
+                        continue;
+                    }
+                    // Six bytes per UTF-8 byte bounds JSON escaping without
+                    // allocating an oversized encoded selector first.
+                    let bytes = id.len().saturating_mul(6).saturating_add(3);
+                    if message_ids.len() == 64 || message_bytes.saturating_add(bytes) > 1024 * 1024
+                    {
+                        message_dependencies = None;
+                        break 'messages;
+                    }
+                    message_bytes += bytes;
+                    message_ids.insert(id.clone());
+                }
+            }
+            if let Some(dependencies) = &mut message_dependencies {
+                dependencies.extend(message_ids);
+            }
             return Ok(BuildOutput::Sources(Box::new(PreparedSources {
                 base_generation: catalog_base,
                 claims,
@@ -7768,6 +7812,7 @@ fn build_sources_inner(
                     })
                     .collect(),
                 relationships,
+                message_dependencies,
                 indexed_sources: Vec::new(),
                 indexed_native_parents: Vec::new(),
                 withdrawals: Vec::new(),

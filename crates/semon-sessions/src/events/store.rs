@@ -618,6 +618,34 @@ pub(crate) fn audit_catalog_sources(
     Ok(last)
 }
 
+#[derive(Debug)]
+struct CatalogDependencyBudgetExceeded;
+impl fmt::Display for CatalogDependencyBudgetExceeded {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("native dependent budget exceeded")
+    }
+}
+impl std::error::Error for CatalogDependencyBudgetExceeded {}
+
+/// Explicit component overflow is distinct from unavailable or invalid native
+/// evidence. Callers can enter resumable publication without masking errors.
+pub(crate) fn catalog_dependents_bounded(
+    options: &crate::Options,
+    selectors: &[(String, String)],
+) -> io::Result<Option<Vec<crate::Input>>> {
+    match catalog_dependents(options, selectors) {
+        Ok(inputs) => Ok(Some(inputs)),
+        Err(error)
+            if error
+                .get_ref()
+                .is_some_and(|inner| inner.is::<CatalogDependencyBudgetExceeded>()) =>
+        {
+            Ok(None)
+        }
+        Err(error) => Err(error),
+    }
+}
+
 pub(crate) fn catalog_dependents(
     options: &crate::Options,
     selectors: &[(String, String)],
@@ -634,6 +662,38 @@ pub(crate) fn catalog_dependents(
         ]
     });
     for (harness, id) in expanded {
+        if harness == "message:claude" {
+            // These indexed coordinates are discovery hints. Selected shared
+            // native preparation still qualifies source ownership and copies.
+            for sql in [
+                "SELECT DISTINCT f.path FROM events e JOIN files f USING(file_id) WHERE e.extra=0 AND e.k='xsm' AND e.id=?1 AND EXISTS(SELECT 1 FROM session_catalog_sources s WHERE s.source_path=f.path AND s.harness='claude' AND s.lifecycle='current') LIMIT 65",
+                "SELECT DISTINCT f.path FROM events e JOIN files f USING(file_id) WHERE e.extra=0 AND e.k='tool' AND e.n='SendMessage' AND e.reply=1 AND e.reply_m=?1 AND (e.reply_f & ?2)=0 AND EXISTS(SELECT 1 FROM session_catalog_sources s WHERE s.source_path=f.path AND s.harness='claude' AND s.lifecycle='current') LIMIT 65",
+            ] {
+                let mut messages = store
+                    .connection
+                    .prepare_cached(sql)
+                    .map_err(io::Error::other)?;
+                messages
+                    .raw_bind_parameter(1, &id)
+                    .map_err(io::Error::other)?;
+                if messages.parameter_count() == 2 {
+                    messages
+                        .raw_bind_parameter(2, crate::events::PIN)
+                        .map_err(io::Error::other)?;
+                }
+                let mut rows = messages.raw_query();
+                while let Some(row) = rows.next().map_err(io::Error::other)? {
+                    found.insert(row.get::<_, String>(0).map_err(io::Error::other)?);
+                    if found.len() > 64 {
+                        return Err(io::Error::new(
+                            io::ErrorKind::WouldBlock,
+                            CatalogDependencyBudgetExceeded,
+                        ));
+                    }
+                }
+            }
+            continue;
+        }
         found.extend(
             statement
                 .query_map(params![harness, id], |row| row.get::<_, String>(0))
@@ -644,7 +704,7 @@ pub(crate) fn catalog_dependents(
         if found.len() > 64 {
             return Err(io::Error::new(
                 io::ErrorKind::WouldBlock,
-                "native dependent budget exceeded",
+                CatalogDependencyBudgetExceeded,
             ));
         }
     }
@@ -3660,7 +3720,14 @@ impl SqliteStore {
                         // Explicit archive retention does not make this source
                         // current. Complete catalog observation still retires
                         // its membership; only the existing event rows survive.
-                        invalidate_catalog_source(&transaction, path, "removed")?;
+                        // Re-observing this exact retained generation after its
+                        // withdrawal must not advance the stage's own claim.
+                        // A fresh announced revision or changed reason remains
+                        // visible; neither the claim nor its proof is replaced.
+                        let already_removed:bool=transaction.query_row("SELECT EXISTS(SELECT 1 FROM session_catalog_invalidations WHERE source_path=?1 AND reason='removed')",[path],|row|row.get(0))?;
+                        if !already_removed {
+                            invalidate_catalog_source(&transaction, path, "removed")?;
+                        }
                         continue;
                     }
                 }
