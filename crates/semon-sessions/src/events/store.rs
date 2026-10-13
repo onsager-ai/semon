@@ -2791,13 +2791,14 @@ impl SqliteStore {
         preserve_complete: bool,
     ) -> Result<(Outcome, Option<String>), StoreError> {
         let rows = publication.rows;
-        let native_timing = std::env::var("SEMON_BUILD_TIMING").is_ok_and(|value| value == "1");
+        let producer =
+            crate::native_timing::enabled().then(|| crate::native_timing::id(&self.path));
         let mut stage_started = std::time::Instant::now();
         let mut stage = |name: &str| {
-            if native_timing {
+            if let Some(producer) = &producer {
                 let now = std::time::Instant::now();
                 eprintln!(
-                    "semon sessions native: publication rows={} stage={name} ms={}",
+                    "semon sessions native: producer={producer} publication rows={} stage={name} ms={}",
                     rows.len(),
                     now.duration_since(stage_started).as_millis()
                 );

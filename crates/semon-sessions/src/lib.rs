@@ -97,6 +97,7 @@ pub use transcript_range::{
     session_transcript_range, session_transcript_range_with_mode, session_turn_anchor,
 };
 mod native_evidence;
+mod native_timing;
 pub use native_evidence::SessionSources;
 mod query_source;
 mod source_chunks;
