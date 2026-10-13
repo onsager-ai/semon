@@ -4227,12 +4227,64 @@ fn finish_companion_fixture_against_oracle(home: &Home, oracle: &Built) {
             "qualified native companion bytes for {owner}"
         );
         if owner == "zzz-sender" {
-            let body = String::from_utf8_lossy(&reply.body);
-            if oracle.sessions.contains_key("aaa-canonical") {
-                assert!(body.contains("Canonical outgoing message"));
+            // Resolved SendMessage slots render as handoff references. Their
+            // native message bytes belong to the generation-qualified preview.
+            let transcript: Value = serde_json::from_slice(&reply.body).unwrap();
+            let outgoing = oracle
+                .handoffs
+                .iter()
+                .filter(|edge| edge.kind == "relay" && edge.from == owner)
+                .collect::<Vec<_>>();
+            let briefs: BTreeSet<_> = outgoing.iter().map(|edge| edge.brief.as_str()).collect();
+            let expected = if oracle.sessions.contains_key("aaa-canonical") {
+                BTreeSet::from(["Canonical outgoing message"])
             } else {
-                assert!(body.contains("First outgoing message"));
-                assert!(body.contains("Second outgoing message"));
+                BTreeSet::from(["First outgoing message", "Second outgoing message"])
+            };
+            assert_eq!(briefs, expected, "independent native message oracle");
+            for edge in &outgoing {
+                assert!(
+                    transcript["entries"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|entry| entry["k"] == "h" && entry["id"] == edge.id),
+                    "missing native send placement {}: {transcript}",
+                    edge.id
+                );
+            }
+            let generation = transcript["relationship_context"]["previews"][owner]
+                .as_str()
+                .unwrap_or_else(|| {
+                    panic!("missing native sender preview generation: {transcript}")
+                });
+            let ids = outgoing.iter().map(|edge| &edge.id).collect::<Vec<_>>();
+            let query = format!(
+                "sid={owner}&generation={generation}&scope=retained_history&events={}",
+                crate::viewer::percent_encode(&json!(ids).to_string())
+            );
+            let details = crate::session_home_details_with_mode(
+                &home.options,
+                "fixture",
+                &query,
+                None,
+                crate::SessionSourceReadMode::LocalThenProvider,
+            );
+            assert_eq!(
+                details.status,
+                200,
+                "{}",
+                String::from_utf8_lossy(&details.body)
+            );
+            let details: Value = serde_json::from_slice(&details.body).unwrap();
+            assert_eq!(details["incomplete"], false, "{details}");
+            for edge in outgoing {
+                assert_eq!(
+                    details["events"][&edge.id]["brief"],
+                    json!(edge.brief),
+                    "{} native message bytes: {details}",
+                    edge.id
+                );
             }
         }
     }
