@@ -5128,10 +5128,10 @@ fn write_index_changes_measured(
         }
         let metadata =
             serde_json::to_value(&header.metadata).map_err(|_| rusqlite::Error::InvalidQuery)?;
-        if metadata.get("guardian_review").and_then(Value::as_bool) != Some(true) {
-            if let Some(parent) = metadata.get("parent_thread").and_then(Value::as_str) {
-                transaction.execute("INSERT OR IGNORE INTO catalog_native_dependencies VALUES(?1,'semantic-parent:codex',?2)", params![path,parent])?;
-            }
+        if metadata.get("guardian_review").and_then(Value::as_bool) != Some(true)
+            && let Some(parent) = metadata.get("parent_thread").and_then(Value::as_str)
+        {
+            transaction.execute("INSERT OR IGNORE INTO catalog_native_dependencies VALUES(?1,'semantic-parent:codex',?2)", params![path,parent])?;
         }
     }
     measurements.record("semantic_dependencies", started, 1);
