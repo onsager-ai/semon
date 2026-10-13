@@ -6377,7 +6377,7 @@ enum BuildOutput {
     #[cfg(test)]
     Model(Box<Built>),
     Query(Box<QueryData>),
-    Catalog(BTreeSet<u32>),
+    Catalog(BTreeSet<u32>, Option<String>),
     Sources(PreparedSources),
 }
 
@@ -6409,6 +6409,7 @@ pub(crate) fn build_query(
 
 /// Reconcile native metadata and transcript slots without preparing legacy
 /// model analytics or transport. Complete observation still discovers all sources.
+#[cfg(test)]
 pub(crate) fn observe_catalog(
     options: &Options,
     cache: &mut EventCache,
@@ -6416,6 +6417,18 @@ pub(crate) fn observe_catalog(
     texts: &mut Texts,
     now: i64,
 ) -> io::Result<BTreeSet<u32>> {
+    observe_catalog_fenced(options, cache, dirty, texts, now).map(|(pids, _)| pids)
+}
+
+/// The generation belongs to this observation's transaction, even if a peer
+/// advances the shared Catalog before the caller acknowledges its own work.
+pub(crate) fn observe_catalog_fenced(
+    options: &Options,
+    cache: &mut EventCache,
+    dirty: &mut bool,
+    texts: &mut Texts,
+    now: i64,
+) -> io::Result<(BTreeSet<u32>, Option<String>)> {
     if options.scan_window {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -6431,7 +6444,7 @@ pub(crate) fn observe_catalog(
         BuildSelection::Current(None),
         BuildTarget::Catalog,
     )? {
-        BuildOutput::Catalog(pids) => Ok(pids),
+        BuildOutput::Catalog(pids, generation) => Ok((pids, generation)),
         _ => Err(io::Error::other("native producer did not observe catalog")),
     }
 }
@@ -7179,7 +7192,7 @@ fn build_sources_inner(
         }
         BuildTarget::Catalog => {
             let publication_started = std::time::Instant::now();
-            cache.publish_catalog_projection(
+            let generation = cache.publish_catalog_projection_fenced(
                 &crate::slot_projection::Publication {
                     rows: catalog.as_deref().unwrap_or_default(),
                     transcripts: slot_projections.as_deref(),
@@ -7196,6 +7209,7 @@ fn build_sources_inner(
             cache.publish_session_descriptions();
             return Ok(BuildOutput::Catalog(
                 pids.iter().map(|pid| pid.pid).collect(),
+                generation,
             ));
         }
         BuildTarget::Query => {}
