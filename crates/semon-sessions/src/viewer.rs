@@ -5833,11 +5833,14 @@ mod tests {
         let core = Arc::new(core);
         publish_core_native(&core);
         let writing = Arc::new(AtomicBool::new(true));
-        let readers:Vec<_>=(0..8).map(|_| {
-            let(core,writing)=(core.clone(),writing.clone());
+        let reader_success: Arc<[AtomicBool; 8]> =
+            Arc::new(std::array::from_fn(|_| AtomicBool::new(false)));
+        let readers:Vec<_>=(0..8).map(|reader| {
+            let(core,writing,reader_success)=(core.clone(),writing.clone(),reader_success.clone());
             thread::spawn(move|| {
                 let mut seen=[0_u64;2];
                 let mut reads=0;
+                let mut reported=false;
                 while writing.load(Ordering::SeqCst)||reads<10 {
                     for (at,(source,sid)) in [("a","lane-a"),("b","lane-b")].into_iter().enumerate() {
                         let catalog=core.respond("GET","/api/sessions",&format!("machine={source}&sid={sid}"),None);
@@ -5865,6 +5868,10 @@ mod tests {
                         assert_eq!(page["entries"].as_array().unwrap().len() as u64,total);
                         seen[at]=total;
                     }
+                    if !reported && seen.iter().all(|total| *total>0) {
+                        reader_success[reader].store(true,Ordering::SeqCst);
+                        reported=true;
+                    }
                     reads+=1;
                 }
                 seen
@@ -5876,8 +5883,12 @@ mod tests {
             thread::sleep(Duration::from_millis(25));
         }
         eventually("last lines in both qualified sources", || {
-            (tx_has(&core, "a", "lane-a", "line 39") && tx_has(&core, "b", "lane-b", "line 39"))
-                .then_some(())
+            (tx_has(&core, "a", "lane-a", "line 39")
+                && tx_has(&core, "b", "lane-b", "line 39")
+                && reader_success
+                    .iter()
+                    .all(|success| success.load(Ordering::SeqCst)))
+            .then_some(())
         });
         writing.store(false, Ordering::SeqCst);
         for reader in readers {
