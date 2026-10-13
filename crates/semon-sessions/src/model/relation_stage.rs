@@ -262,6 +262,23 @@ fn preview_kind(value: &str) -> io::Result<&'static str> {
     }
 }
 
+#[derive(Debug)]
+struct SourceGenerationChanged;
+
+impl std::fmt::Display for SourceGenerationChanged {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("staged native source generation changed")
+    }
+}
+
+impl std::error::Error for SourceGenerationChanged {}
+
+pub(crate) fn source_generation_changed(error: &io::Error) -> bool {
+    error
+        .get_ref()
+        .is_some_and(|cause| cause.is::<SourceGenerationChanged>())
+}
+
 impl Location {
     fn capture(builder: &Builder<'_>, at: Ref) -> Self {
         let found = event(builder.files, at);
@@ -288,7 +305,7 @@ impl Location {
             return Ok(None);
         };
         if summary::source(&builder.files[file]) != self.source {
-            return Err(io::Error::other("staged native source generation changed"));
+            return Err(io::Error::other(SourceGenerationChanged));
         }
         let mut matches = builder.files[file]
             .summary

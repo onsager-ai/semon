@@ -439,44 +439,38 @@ impl NativeEvidence {
                 .snapshot
                 .get_or_insert_with(|| Snapshot::sources(&self.options, &[]));
             snapshot.extend_sources(&self.options, &inputs);
-            let mut seeds = inputs;
+            let seeds = inputs;
             let prepared = {
                 let _timing =
                     crate::native_timing::Phase::new(&self.options.cache, "cold_component");
-                loop {
-                    cache.scan_byte_budget = Some(4 * 1024 * 1024);
-                    let prepared =
-                        self.prepare_catalog_component_mode(cache, seeds.clone(), true, now);
-                    cache.scan_byte_budget = None;
-                    if let Some(prepared) = prepared? {
-                        break prepared;
+                cache.scan_byte_budget = Some(4 * 1024 * 1024);
+                let prepared = self.prepare_catalog_component_mode(cache, seeds.clone(), true, now);
+                cache.scan_byte_budget = None;
+                if let Some(prepared) = prepared? {
+                    prepared
+                } else {
+                    let paths = seeds
+                        .iter()
+                        .map(|input| {
+                            input
+                                .full_path(&self.options)
+                                .to_string_lossy()
+                                .into_owned()
+                        })
+                        .collect::<Vec<_>>();
+                    if cache
+                        .begin_semantic_stage(&paths, &query_runtime_generation(&self.options)?)?
+                        != crate::events::Outcome::Written
+                    {
+                        return Err(io::Error::new(
+                            io::ErrorKind::WouldBlock,
+                            "semantic stage changed",
+                        ));
                     }
-                    if seeds.len() <= 1 {
-                        let paths = seeds
-                            .iter()
-                            .map(|input| {
-                                input
-                                    .full_path(&self.options)
-                                    .to_string_lossy()
-                                    .into_owned()
-                            })
-                            .collect::<Vec<_>>();
-                        if cache.begin_semantic_stage(
-                            &paths,
-                            &query_runtime_generation(&self.options)?,
-                        )? != crate::events::Outcome::Written
-                        {
-                            return Err(io::Error::new(
-                                io::ErrorKind::WouldBlock,
-                                "semantic stage changed",
-                            ));
-                        }
-                        cache.end_scan();
-                        cache.release_published_indexes();
-                        work.texts.release_published_derivations();
-                        return Ok(CatalogPreparation::Pending);
-                    }
-                    seeds.truncate(seeds.len() / 2);
+                    cache.end_scan();
+                    cache.release_published_indexes();
+                    work.texts.release_published_derivations();
+                    return Ok(CatalogPreparation::Pending);
                 }
             };
             discovery.pids.extend(prepared.pids.iter().copied());
@@ -576,6 +570,12 @@ impl NativeEvidence {
             scan_window: false,
             ..self.options.clone()
         };
+        if let Some(discovery) = &mut work.cold_catalog {
+            discovery
+                .snapshot
+                .get_or_insert_with(|| Snapshot::sources(&self.options, &[]))
+                .extend_sources(&self.options, &inputs);
+        }
         let prepared = if batch.phase == Phase::Indexing {
             model::prepare_semantic_index_sources(&catalog_options, cache, &inputs, now)
         } else if batch.phase == Phase::Identity {
@@ -597,7 +597,21 @@ impl NativeEvidence {
             )
         };
         cache.scan_byte_budget = None;
-        let mut prepared = prepared?;
+        let mut prepared = match prepared {
+            Ok(prepared) => prepared,
+            Err(error) if model::relation_stage::source_generation_changed(&error) => {
+                // Scanning committed the newer Ledger and exact dirty claim.
+                // The next bounded batch resets the old epoch before replay.
+                cache.end_scan();
+                cache.release_published_indexes();
+                work.texts.release_published_derivations();
+                return Ok(true);
+            }
+            Err(error) => return Err(error),
+        };
+        if let Some(discovery) = &mut work.cold_catalog {
+            discovery.pids.extend(prepared.pids.iter().copied());
+        }
         prepared.relationships.restrict_relations(&batch.paths);
         let (outcome, generation) = if batch.phase == Phase::Publication {
             cache.publish_semantic_catalog(&batch, &prepared)?
@@ -694,6 +708,9 @@ impl NativeEvidence {
             if dependencies.len() > 64 {
                 break None;
             }
+            let Some(messages) = &prepared.message_dependencies else {
+                break None;
+            };
             let selectors = prepared
                 .rows
                 .iter()
@@ -703,13 +720,20 @@ impl NativeEvidence {
                         .map(|id| (row.harness.clone(), id.clone()))
                 })
                 .chain(prepared.lineage_dependencies.iter().cloned())
+                .chain(
+                    messages
+                        .iter()
+                        .map(|id| ("message:claude".to_owned(), id.clone())),
+                )
                 .collect::<Vec<_>>();
             let started = measurements.start();
-            inputs.extend(crate::events::store::catalog_dependents(
-                &self.options,
-                &selectors,
-            )?);
+            let dependents =
+                crate::events::store::catalog_dependents_bounded(&self.options, &selectors)?;
             measurements.record("dependents", started, selectors.len());
+            let Some(dependents) = dependents else {
+                break None;
+            };
+            inputs.extend(dependents);
             if inputs.len() > 64 {
                 break None;
             }
@@ -824,6 +848,36 @@ impl NativeEvidence {
         // qualification is independent of this process's in-memory snapshot.
         self.prepare_events(work, now)?;
         if self.advance_semantic_stage(work, now, &mut before_build)? {
+            let cache = work.events.as_ref().expect("event cache initialized");
+            if cache.qualified_catalog()? && cache.pending_catalog_sources(1)?.is_empty() {
+                if let Some(discovery) = work.cold_catalog.take() {
+                    work.audit_revision = discovery.revision;
+                    self.audit_completed
+                        .store(discovery.revision, Ordering::Release);
+                    let mut snapshot = discovery
+                        .snapshot
+                        .unwrap_or_else(|| Snapshot::sources(&self.options, &[]));
+                    if self.options.facts.is_none() {
+                        snapshot.pids.extend(
+                            discovery
+                                .pids
+                                .into_iter()
+                                .map(|pid| (pid, proc_start(&self.options.proc_root, pid))),
+                        );
+                    }
+                    work.catalog_snapshot = Some(snapshot);
+                }
+                work.pending_sources = if let Some(audit) = &work.audit {
+                    if audit.discovered && audit.checked {
+                        self.finish_audit(work, now, &mut before_build)?
+                    } else {
+                        true
+                    }
+                } else {
+                    self.audit_request.load(Ordering::Acquire) != work.audit_revision
+                };
+                return Ok(!work.pending_sources);
+            }
             return Ok(false);
         }
         let requested = self.audit_request.load(Ordering::Acquire);

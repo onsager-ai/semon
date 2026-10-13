@@ -2129,8 +2129,23 @@ mod tests {
 
     #[test]
     fn reserved_native_key_cursor_bounds_probes_and_selectors_reuse_qualified_result() {
-        let mut connection = Connection::open_in_memory().unwrap();
-        super::super::init(&mut connection).unwrap();
+        // This exercises the production WAL initialization contract. An
+        // in-memory connection returns NoWal before any schema is installed.
+        let root = std::env::temp_dir().join(format!(
+            "semon-semantic-key-cursor-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("index.sqlite3");
+        let mut connection = Connection::open(&path).unwrap();
+        assert!(matches!(
+            super::super::init(&mut connection).unwrap(),
+            Init::Ready
+        ));
         connection.execute("INSERT INTO catalog_semantic_stage(singleton,epoch,phase,runtime,revision) VALUES(1,7,'indexing','runtime',0)",[]).unwrap();
         for harness in ["claude", "codex"] {
             connection
@@ -2170,7 +2185,7 @@ mod tests {
         assert_eq!(NATIVE_OCCUPANCY_PROBES.with(|count| count.get()), 18);
         let mut store = SqliteStore {
             connection,
-            path: PathBuf::new(),
+            path,
             selected_runs: None,
         };
         NATIVE_OCCUPANCY_PROBES.with(|count| count.set(0));
@@ -2217,5 +2232,7 @@ mod tests {
             native_key(&store.connection, "same", "codex").unwrap(),
             format!("{}codex:same", ":".repeat(80))
         );
+        drop(store);
+        fs::remove_dir_all(root).unwrap();
     }
 }
