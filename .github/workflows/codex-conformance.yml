@@ -1,0 +1,107 @@
+name: Pinned Codex reducer conformance
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - ".github/workflows/codex-conformance.yml"
+      - "crates/semon-sessions/**"
+      - "tests/fixtures/compatibility/codex-native-a9b0815/**"
+      - "tests/fixtures/compatibility/codex-reference-a9b0815/**"
+      - "tests/spikes/codex_native_oracle.rs"
+      - "docs/design/codex-native-conformance.md"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: codex-conformance-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  semon-targeted-tests:
+    name: Semon parser and selected-output tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out exact Semon pull request head
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+
+      - name: Install upstream-pinned Rust toolchain
+        id: rust-toolchain
+        uses: dtolnay/rust-toolchain@1.95.0
+        with:
+          components: clippy, rustfmt, rust-src
+
+      - name: Cache Rust dependencies and build outputs
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-codex-conformance-semon-${{ steps.rust-toolchain.outputs.cachekey }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-codex-conformance-semon-${{ steps.rust-toolchain.outputs.cachekey }}-
+
+      - name: Run parser event fixture tests on the exact head
+        run: cargo test --locked -p semon-sessions events::tests::
+
+      - name: Run parser transaction and selected-output tests on the exact head
+        run: cargo test --locked -p semon-sessions tx::tests::
+
+  upstream-reference:
+    name: Pinned Codex reducer reference
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out exact Semon pull request head
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          path: semon
+          persist-credentials: false
+
+      - name: Check out pinned Codex source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: openai/codex
+          ref: a9b0815167c27ab13719dd12d13b63e02b70d221
+          path: codex
+          persist-credentials: false
+
+      - name: Install upstream-pinned Rust toolchain
+        id: rust-toolchain
+        uses: dtolnay/rust-toolchain@1.95.0
+        with:
+          components: clippy, rustfmt, rust-src
+
+      - name: Cache upstream Rust dependencies and build outputs
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            codex/codex-rs/target
+          key: ${{ runner.os }}-codex-conformance-upstream-${{ steps.rust-toolchain.outputs.cachekey }}-${{ hashFiles('codex/codex-rs/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-codex-conformance-upstream-${{ steps.rust-toolchain.outputs.cachekey }}-
+
+      - name: Copy the original Semon runner into the disposable Codex checkout
+        run: |
+          mkdir -p codex/codex-rs/rollout-trace/examples
+          cp semon/tests/spikes/codex_native_oracle.rs codex/codex-rs/rollout-trace/examples/semon_native_oracle.rs
+
+      - name: Check the copied upstream example format
+        working-directory: codex/codex-rs
+        run: rustfmt --check --edition 2024 rollout-trace/examples/semon_native_oracle.rs
+
+      - name: Replay synthetic fixtures through the pinned public reducer
+        working-directory: codex/codex-rs
+        run: |
+          cargo run --locked -p codex-rollout-trace --example semon_native_oracle -- \
+            "$GITHUB_WORKSPACE/semon/tests/fixtures/compatibility/codex-reference-a9b0815" \
+            "$RUNNER_TEMP/codex-native-reference-bundle"
