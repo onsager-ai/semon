@@ -1098,6 +1098,148 @@ fn load_context(
     Ok(out)
 }
 
+/// Only a complete shared matching observation can consume a companion owner.
+/// Keep the qualification, incident-edge scope and cursor mutation in one CAS.
+struct RelationScope {
+    owners: BTreeSet<String>,
+    companions: std::collections::BTreeMap<String, String>,
+}
+fn relation_scope(
+    c: &Connection,
+    batch: &Batch,
+    prepared: &crate::model::PreparedSources,
+) -> rusqlite::Result<RelationScope> {
+    let mut scope = RelationScope {
+        owners: BTreeSet::new(),
+        companions: std::collections::BTreeMap::new(),
+    };
+    for path in &batch.paths {
+        let mut owners=c.prepare("SELECT session_key FROM catalog_semantic_owner_sources WHERE source_path=?1 ORDER BY session_key LIMIT 65")?;
+        for owner in owners.query_map([path], |row| row.get::<_, String>(0))? {
+            scope.owners.insert(owner?);
+        }
+    }
+    let Some(locations) = batch.context.matching_locations.as_ref() else {
+        return Ok(scope);
+    };
+    let mut roster: std::collections::BTreeMap<String, BTreeSet<String>> =
+        std::collections::BTreeMap::new();
+    let mut candidates = BTreeSet::new();
+    for location in locations {
+        let path = location.source.path.to_string_lossy().into_owned();
+        roster
+            .entry(path.clone())
+            .or_default()
+            .insert(location_key(location)?);
+        if !batch.paths.contains(&path) {
+            let mut owners=c.prepare("SELECT session_key FROM catalog_semantic_owner_sources WHERE source_path=?1 ORDER BY session_key LIMIT 65")?;
+            for owner in owners.query_map([&path], |row| row.get::<_, String>(0))? {
+                candidates.insert(owner?);
+            }
+        }
+    }
+    if roster.len() > 64 {
+        return Err(rusqlite::Error::InvalidQuery);
+    }
+    let mut budget = 64usize;
+    for owner in candidates {
+        if budget == 0 {
+            break;
+        }
+        if scope.owners.contains(&owner) {
+            continue;
+        }
+        let Some(endpoint) = prepared.relationships.endpoints.get(&owner) else {
+            continue;
+        };
+        if endpoint.row.harness != "claude" {
+            continue;
+        }
+        let paths=c.prepare("SELECT source_path FROM catalog_semantic_owner_sources WHERE session_key=?1 ORDER BY source_path LIMIT 65")?.query_map([&owner],|row|row.get::<_,String>(0))?.collect::<Result<Vec<_>,_>>()?;
+        if paths.len() > 64 || paths.len() != endpoint.row.sources.len() {
+            continue;
+        }
+        let mut covered = std::collections::BTreeMap::new();
+        let mut complete = true;
+        let mut pending = false;
+        for path in paths {
+            let Some((_, observed)) = prepared
+                .claims
+                .iter()
+                .find(|(selected, _)| selected == &path)
+            else {
+                complete = false;
+                break;
+            };
+            let Some(source) = endpoint
+                .row
+                .sources
+                .iter()
+                .find(|source| source.path == Path::new(&path))
+            else {
+                complete = false;
+                break;
+            };
+            let qualified:bool=c.query_row("SELECT index_done=1 AND events_done=1 AND identity_done=1 AND claim IS ?2 FROM catalog_semantic_sources WHERE source_path=?1",params![path,observed],|row|row.get(0))?;
+            if !qualified
+                || !selected_roles_current(c, std::slice::from_ref(source))?
+                || locations.iter().any(|location| {
+                    location.source.path == source.path && location.source != *source
+                })
+            {
+                complete = false;
+                break;
+            }
+            let done: bool = c.query_row(
+                "SELECT relation_done=1 FROM catalog_semantic_sources WHERE source_path=?1",
+                [&path],
+                |row| row.get(0),
+            )?;
+            pending |= !done;
+            // Require the entire owner's candidate roster, including previously
+            // processed sources: a partial later slice cannot refine its state.
+            // Metadata inspection is shared across companions under one page.
+            if budget == 0 {
+                complete = false;
+                break;
+            }
+            let mut events=c.prepare("SELECT event_key FROM catalog_semantic_events WHERE source_path=?1 AND copied=0 AND qualified=1 ORDER BY event_key LIMIT ?2")?;
+            let mut rows = events.query(params![path, budget as i64])?;
+            let mut end = String::new();
+            while let Some(row) = rows.next()? {
+                let key: String = row.get(0)?;
+                budget -= 1;
+                if !roster
+                    .get(&path)
+                    .is_some_and(|selected| selected.contains(&key))
+                {
+                    complete = false;
+                    break;
+                }
+                end = key;
+            }
+            drop(rows);
+            drop(events);
+            if !complete {
+                break;
+            }
+            let more:bool=c.query_row("SELECT EXISTS(SELECT 1 FROM catalog_semantic_events WHERE source_path=?1 AND copied=0 AND qualified=1 AND event_key>?2)",params![path,end],|row|row.get(0))?;
+            if more {
+                complete = false;
+                break;
+            }
+            if !done {
+                covered.insert(path, end);
+            }
+        }
+        if complete && pending {
+            scope.owners.insert(owner);
+            scope.companions.extend(covered);
+        }
+    }
+    Ok(scope)
+}
+
 impl SqliteStore {
     pub(super) fn semantic_begin(
         &mut self,
@@ -1483,6 +1625,11 @@ impl SqliteStore {
                 return Ok(Outcome::Conflict);
             }
         }
+        let matched_scope = if b.phase == Phase::Relations {
+            Some(relation_scope(&tx, b, prepared).map_err(failure)?)
+        } else {
+            None
+        };
         if b.phase == Phase::Indexing {
             if prepared.withdrawals.len() > 64 {
                 return Err(StoreError::Data(
@@ -1669,11 +1816,10 @@ impl SqliteStore {
             }
         } else {
             for endpoint in prepared.relationships.endpoints.values() {
-                if !endpoint.row.sources.iter().any(|source| {
-                    b.paths
-                        .iter()
-                        .any(|path| source.path.to_str() == Some(path))
-                }) {
+                if !matched_scope
+                    .as_ref()
+                    .is_some_and(|scope| scope.owners.contains(&endpoint.row.key))
+                {
                     continue;
                 }
                 let encoded = json(endpoint).map_err(failure)?;
@@ -1689,6 +1835,15 @@ impl SqliteStore {
                 .map_err(failure)?;
             }
             for relation in prepared.relationships.relations.values() {
+                if !matched_scope.as_ref().is_some_and(|scope| {
+                    scope.owners.contains(&relation.from)
+                        || relation
+                            .to
+                            .as_ref()
+                            .is_some_and(|to| scope.owners.contains(to))
+                }) {
+                    continue;
+                }
                 let encoded = json(relation).map_err(failure)?;
                 if encoded.len() > MAX_CONTEXT {
                     return Err(StoreError::Data(
@@ -1765,6 +1920,16 @@ impl SqliteStore {
         if let Some(cursor) = &cursor {
             let pending:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM catalog_semantic_events WHERE source_path=?1 AND event_key>?2 AND copied=0 AND qualified=1)",params![cursor.path,cursor.end],|r|r.get(0)).map_err(failure)?;
             tx.execute("UPDATE catalog_semantic_sources SET relation_after=?2,relation_done=?3 WHERE source_path=?1",params![cursor.path,cursor.end,!pending]).map_err(failure)?;
+        }
+        if let Some(scope) = &matched_scope {
+            for (path, end) in &scope.companions {
+                let (_, observed) = prepared
+                    .claims
+                    .iter()
+                    .find(|(selected, _)| selected == path)
+                    .ok_or_else(|| StoreError::Data("unclaimed semantic companion".into()))?;
+                tx.execute("UPDATE catalog_semantic_sources SET relation_after=?2,relation_done=1,claim=?3,ledger=?4 WHERE source_path=?1",params![path,end,observed,ledger(&tx,path).map_err(failure)?]).map_err(failure)?;
+            }
         }
         for path in &b.paths {
             tx.execute("UPDATE catalog_semantic_sources SET (dev,ino,size,mtime_ns,ctime_ns,resume_at,head_sha256,tail_sha256)=(SELECT dev,ino,size,mtime_ns,ctime_ns,resume_at,head_sha256,tail_sha256 FROM files WHERE path=?1) WHERE source_path=?1",[path]).map_err(failure)?;

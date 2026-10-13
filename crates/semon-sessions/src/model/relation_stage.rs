@@ -798,25 +798,4 @@ impl Context {
             .into_iter()
             .collect()
     }
-
-    /// A parent loaded for native call matching supplies evidence; only the
-    /// selected task owners' incident relationships enter this batch's spool.
-    pub(crate) fn restrict_relations(&mut self, paths: &[String]) {
-        let owners: BTreeSet<_> = self
-            .endpoints
-            .values()
-            .filter(|endpoint| {
-                endpoint
-                    .row
-                    .sources
-                    .iter()
-                    .any(|source| paths.iter().any(|path| source.path.to_str() == Some(path)))
-            })
-            .map(|endpoint| endpoint.row.key.clone())
-            .collect();
-        self.relations.retain(|_, relation| {
-            owners.contains(&relation.from)
-                || relation.to.as_ref().is_some_and(|to| owners.contains(to))
-        });
-    }
 }

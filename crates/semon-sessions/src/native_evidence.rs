@@ -597,7 +597,7 @@ impl NativeEvidence {
             )
         };
         cache.scan_byte_budget = None;
-        let mut prepared = match prepared {
+        let prepared = match prepared {
             Ok(prepared) => prepared,
             Err(error) if model::relation_stage::source_generation_changed(&error) => {
                 // Scanning committed the newer Ledger and exact dirty claim.
@@ -612,7 +612,6 @@ impl NativeEvidence {
         if let Some(discovery) = &mut work.cold_catalog {
             discovery.pids.extend(prepared.pids.iter().copied());
         }
-        prepared.relationships.restrict_relations(&batch.paths);
         let (outcome, generation) = if batch.phase == Phase::Publication {
             cache.publish_semantic_catalog(&batch, &prepared)?
         } else {
