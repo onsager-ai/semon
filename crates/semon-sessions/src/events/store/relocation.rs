@@ -2,6 +2,77 @@
 //! consumed-prefix verification. It never infers identity from a filename.
 use super::*;
 
+// Keep the production statement unchanged until pinned-CI planner and VM-step
+// measurements establish which operation grows with unrelated catalog width.
+const CANDIDATE_SQL: &str = "SELECT DISTINCT source_path FROM session_catalog_sources WHERE lifecycle='current' AND harness='codex' AND native_id=?1 AND source_path<>?2 LIMIT 2";
+const SELECTIVE_CANDIDATE_SQL: &str = "SELECT DISTINCT source_path FROM session_catalog_sources INDEXED BY session_catalog_current_native WHERE lifecycle='current' AND harness='codex' AND native_id=?1 AND source_path<>?2 LIMIT 2";
+
+fn candidate_paths(
+    connection: &Connection,
+    sql: &str,
+    native_id: &str,
+    path: &str,
+    measure_vm: bool,
+) -> rusqlite::Result<(Vec<String>, Option<i32>)> {
+    let mut statement = connection.prepare(sql)?;
+    let paths = statement
+        .query_map(params![native_id, path], |row| row.get::<_, String>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    let steps = measure_vm.then(|| statement.get_status(rusqlite::StatementStatus::VmStep));
+    Ok((paths, steps))
+}
+
+fn candidate_plan(
+    connection: &Connection,
+    sql: &str,
+    native_id: &str,
+    path: &str,
+) -> rusqlite::Result<Vec<String>> {
+    connection
+        .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))?
+        .query_map(params![native_id, path], |row| row.get::<_, String>(3))?
+        .collect()
+}
+
+/// Once per process, opt-in diagnostics expose only static planner details and
+/// operation counts. No candidate paths, native IDs or source contents are logged.
+fn report_candidate_plan(
+    store: &SqliteStore,
+    native_id: &str,
+    path: &str,
+    original_steps: i32,
+) -> bool {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static REPORTED: AtomicBool = AtomicBool::new(false);
+    if REPORTED.swap(true, Ordering::Relaxed) {
+        return false;
+    }
+    let result = (|| {
+        let original = candidate_plan(&store.connection, CANDIDATE_SQL, native_id, path)?;
+        let selective =
+            candidate_plan(&store.connection, SELECTIVE_CANDIDATE_SQL, native_id, path)?;
+        let (_, selective_steps) = candidate_paths(
+            &store.connection,
+            SELECTIVE_CANDIDATE_SQL,
+            native_id,
+            path,
+            true,
+        )?;
+        Ok::<_, rusqlite::Error>((original, selective, selective_steps))
+    })();
+    let producer = crate::native_timing::id(&store.path);
+    match result {
+        Ok((original, selective, selective_steps)) => eprintln!(
+            "semon sessions native: producer={producer} relocation_planner sqlite={} original={original:?} selective={selective:?} original_vm_steps={original_steps} selective_vm_steps={selective_steps:?}",
+            rusqlite::version()
+        ),
+        Err(_) => eprintln!(
+            "semon sessions native: producer={producer} relocation_planner status=unavailable"
+        ),
+    }
+    true
+}
+
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CatalogRelocation {
@@ -108,15 +179,25 @@ pub(super) fn reuse(
     stat: &Stat,
     native_id: &str,
     file: &mut crate::sealed::LogFile,
+    measurements: &mut crate::native_timing::Measurements,
 ) -> Result<Option<String>, StoreError> {
-    let candidates = {
-        let mut statement = store.connection.prepare("SELECT DISTINCT source_path FROM session_catalog_sources WHERE lifecycle='current' AND harness='codex' AND native_id=?1 AND source_path<>?2 LIMIT 2").map_err(failure)?;
-        statement
-            .query_map(params![native_id, path], |row| row.get::<_, String>(0))
-            .map_err(failure)?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(failure)?
-    };
+    let started = measurements.start();
+    let (candidates, steps) = candidate_paths(
+        &store.connection,
+        CANDIDATE_SQL,
+        native_id,
+        path,
+        started.is_some(),
+    )
+    .map_err(failure)?;
+    measurements.record("relocation_candidate", started, 1);
+    if let Some(steps) = steps {
+        measurements.count("relocation_candidate_vm_steps", steps.max(0) as usize);
+        let started = measurements.start();
+        if report_candidate_plan(store, native_id, path, steps) {
+            measurements.record("relocation_plan_diagnostics", started, 1);
+        }
+    }
     let [old] = candidates.as_slice() else {
         return Ok(None);
     };
@@ -288,4 +369,192 @@ pub(super) fn reuse(
     invalidate_catalog_source(&tx, path, "changed").map_err(failure)?;
     tx.commit().map_err(failure)?;
     Ok(Some(old.clone()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn add_source(
+        connection: &Connection,
+        key: &str,
+        lifecycle: &str,
+        harness: &str,
+        id: &str,
+        path: &str,
+    ) {
+        connection.execute(
+            "INSERT INTO session_catalog_sources(session_key,lifecycle,harness,native_id,source_path) VALUES(?1,?2,?3,?4,?5)",
+            params![key, lifecycle, harness, id, path],
+        ).unwrap();
+    }
+
+    fn compare_candidates(connection: &Connection) -> (Vec<String>, Vec<String>, i32, i32) {
+        let (original, original_steps) = candidate_paths(
+            connection,
+            CANDIDATE_SQL,
+            "target",
+            "/fixture/sessions/self.jsonl",
+            true,
+        )
+        .unwrap();
+        let (selective, selective_steps) = candidate_paths(
+            connection,
+            SELECTIVE_CANDIDATE_SQL,
+            "target",
+            "/fixture/sessions/self.jsonl",
+            true,
+        )
+        .unwrap();
+        assert_eq!(
+            original.len(),
+            selective.len(),
+            "candidate ambiguity changed"
+        );
+        if original.len() < 2 {
+            assert_eq!(original, selective, "unique candidate identity changed");
+        }
+        (
+            original,
+            selective,
+            original_steps.unwrap(),
+            selective_steps.unwrap(),
+        )
+    }
+
+    #[test]
+    fn relocation_candidate_plans_and_native_index_work() {
+        let mut baseline = None;
+        for unrelated in [0, 256, 2048] {
+            let mut connection = Connection::open_in_memory().unwrap();
+            connection.execute_batch(SCHEMA).unwrap();
+            {
+                let transaction = connection.transaction().unwrap();
+                for index in 0..unrelated {
+                    add_source(
+                        &transaction,
+                        &format!("unrelated-{index}"),
+                        "current",
+                        "codex",
+                        &format!("unrelated-{index}"),
+                        &format!("/fixture/sessions/unrelated-{index}.jsonl"),
+                    );
+                }
+                transaction.commit().unwrap();
+            }
+            let original_plan = candidate_plan(
+                &connection,
+                CANDIDATE_SQL,
+                "target",
+                "/fixture/sessions/self.jsonl",
+            )
+            .unwrap();
+            let selective_plan = candidate_plan(
+                &connection,
+                SELECTIVE_CANDIDATE_SQL,
+                "target",
+                "/fixture/sessions/self.jsonl",
+            )
+            .unwrap();
+            assert!(
+                selective_plan
+                    .iter()
+                    .any(|detail| detail.contains("session_catalog_current_native")
+                        && detail.contains("native_id=?")),
+                "selective plan did not constrain native identity: {selective_plan:?}"
+            );
+
+            let (original, selective, absent_original, absent_selective) =
+                compare_candidates(&connection);
+            assert!(original.is_empty() && selective.is_empty());
+            add_source(
+                &connection,
+                "original",
+                "current",
+                "codex",
+                "target",
+                "/fixture/sessions/old.jsonl",
+            );
+            // Two semantic aliases of one physical path still qualify uniquely.
+            add_source(
+                &connection,
+                "alias",
+                "current",
+                "codex",
+                "target",
+                "/fixture/sessions/old.jsonl",
+            );
+            add_source(
+                &connection,
+                "self",
+                "current",
+                "codex",
+                "target",
+                "/fixture/sessions/self.jsonl",
+            );
+            add_source(
+                &connection,
+                "retained",
+                "retained",
+                "codex",
+                "target",
+                "/fixture/sessions/retained.jsonl",
+            );
+            add_source(
+                &connection,
+                "other-harness",
+                "current",
+                "claude",
+                "target",
+                "/fixture/sessions/claude.jsonl",
+            );
+            let (original, _, unique_original, unique_selective) = compare_candidates(&connection);
+            assert_eq!(original, ["/fixture/sessions/old.jsonl"]);
+
+            add_source(
+                &connection,
+                "copy",
+                "current",
+                "codex",
+                "target",
+                "/fixture/sessions/copy.jsonl",
+            );
+            add_source(
+                &connection,
+                "third-copy",
+                "current",
+                "codex",
+                "target",
+                "/fixture/sessions/third.jsonl",
+            );
+            let (original, selective, ambiguous_original, ambiguous_selective) =
+                compare_candidates(&connection);
+            assert_eq!(
+                original.len(),
+                2,
+                "original did not saturate ambiguity at two"
+            );
+            assert_eq!(
+                selective.len(),
+                2,
+                "selective did not saturate ambiguity at two"
+            );
+            let steps = [absent_selective, unique_selective, ambiguous_selective];
+            if let Some(baseline) = baseline {
+                for (actual, empty) in steps.into_iter().zip(baseline) {
+                    assert!(
+                        actual <= empty + 16,
+                        "selective VM work grew with {unrelated} unrelated sources: {actual} vs {empty}"
+                    );
+                }
+            } else {
+                baseline = Some(steps);
+            }
+            eprintln!(
+                "semon relocation comparison: sqlite={} unrelated={unrelated} original_vm_steps={:?} selective_vm_steps={steps:?} original={original_plan:?} selective={selective_plan:?}",
+                rusqlite::version(),
+                [absent_original, unique_original, ambiguous_original]
+            );
+        }
+    }
 }

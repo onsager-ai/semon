@@ -1019,6 +1019,7 @@ pub(crate) trait IndexStore: Send {
         stat: &Stat,
         id: &str,
         file: &mut LogFile,
+        measurements: &mut crate::native_timing::Measurements,
     ) -> Result<Option<String>, StoreError>;
     fn append_evidence(
         &self,
@@ -2333,15 +2334,27 @@ pub(crate) fn scan_file(
         let stat = Stat::from_metadata(&file.metadata()?)?;
         cache.scan_measurements.record("open_stat", started, 1);
         let started = cache.scan_measurements.start();
-        if harness == "codex"
-            && cache.recorded(&key).is_none()
-            && let Some(id) = crate::codex_native_id_prefix(path, stat.size)?
-            && let Some(store) = cache.store.as_mut()
-            && let Some(old) = store
-                .relocate_codex(&key, &stat, &id, &mut file)
-                .map_err(|error| io::Error::other(error.to_string()))?
-        {
-            cache.files.remove(&old);
+        if harness == "codex" {
+            let recorded_started = cache.scan_measurements.start();
+            let absent = cache.recorded(&key).is_none();
+            cache
+                .scan_measurements
+                .record("relocation_recorded", recorded_started, 1);
+            if absent {
+                let prefix_started = cache.scan_measurements.start();
+                let id = crate::codex_native_id_prefix(path, stat.size)?;
+                cache
+                    .scan_measurements
+                    .record("relocation_prefix", prefix_started, 1);
+                if let Some(id) = id
+                    && let Some(store) = cache.store.as_mut()
+                    && let Some(old) = store
+                        .relocate_codex(&key, &stat, &id, &mut file, &mut cache.scan_measurements)
+                        .map_err(|error| io::Error::other(error.to_string()))?
+                {
+                    cache.files.remove(&old);
+                }
+            }
         }
         cache
             .scan_measurements

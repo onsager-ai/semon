@@ -40,6 +40,13 @@ impl Measurements {
         }
     }
 
+    pub(crate) fn count(&mut self, name: &'static str, units: usize) {
+        if self.enabled {
+            let entry = self.values.entry(name).or_default();
+            entry.1 = entry.1.saturating_add(units);
+        }
+    }
+
     pub(crate) fn emit(&self, producer: &str, group: &'static str) {
         if self.enabled {
             eprintln!(
