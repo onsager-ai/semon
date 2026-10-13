@@ -1,0 +1,112 @@
+{
+  "kind": "source-qualified-codex-state-research",
+  "origin": "synthetic",
+  "not_a_native_capture": true,
+  "not_a_test_claim": true,
+  "source": {
+    "repository": "openai/codex",
+    "revision": "a9b0815167c27ab13719dd12d13b63e02b70d221"
+  },
+  "schema_modes": [
+    {
+      "id": "before_migration_0041",
+      "qualifier": "state schema before migration 0041; not an application version",
+      "thread": {
+        "id": "synthetic-thread",
+        "title": "synthetic title",
+        "preview": "synthetic preview"
+      },
+      "name": {
+        "availability": "unavailable"
+      }
+    },
+    {
+      "id": "after_migration_0041",
+      "qualifier": "state schema after migration 0041; not an application version",
+      "thread": {
+        "id": "synthetic-thread",
+        "title": "synthetic title",
+        "preview": "synthetic preview",
+        "name": null
+      },
+      "name": {
+        "availability": "available_nullable"
+      }
+    },
+    {
+      "id": "renamed_after_migration_0041",
+      "qualifier": "mutable name differs from title and preview",
+      "thread": {
+        "id": "synthetic-thread",
+        "title": "synthetic title",
+        "preview": "synthetic preview",
+        "name": "synthetic renamed thread"
+      },
+      "name": {
+        "availability": "available_value"
+      }
+    }
+  ],
+  "identity_cases": [
+    {
+      "id": "conflicting_exact_spawn_edge",
+      "rollout_parent_thread_id": "synthetic-parent-a",
+      "sqlite_edge": {
+        "parent_thread_id": "synthetic-parent-b",
+        "child_thread_id": "synthetic-child",
+        "status": "synthetic-status"
+      },
+      "result": "conflict",
+      "do_not_infer": ["process_liveness", "preferred_parent"]
+    },
+    {
+      "id": "same_thread_id_in_two_homes",
+      "sources": [
+        {
+          "root": "<synthetic-home-a>",
+          "thread_id": "synthetic-thread"
+        },
+        {
+          "root": "<synthetic-home-b>",
+          "thread_id": "synthetic-thread"
+        }
+      ],
+      "result": "distinct_source_identities"
+    }
+  ],
+  "worktree_owner_cases": [
+    {
+      "id": "version_one_owner",
+      "record": {
+        "version": 1,
+        "ownerThreadId": "synthetic-thread"
+      },
+      "proves": ["worktree_owner_thread_id"],
+      "does_not_prove": ["native_session_id", "rollout_cwd", "historical_commit"]
+    },
+    {
+      "id": "missing_owner",
+      "record": null,
+      "result": "unavailable"
+    },
+    {
+      "id": "unsupported_owner_version",
+      "record": {
+        "version": 2,
+        "ownerThreadId": "synthetic-thread"
+      },
+      "result": "unavailable"
+    }
+  ],
+  "privacy": {
+    "contains_sensitive_content": false,
+    "contains_real_paths_or_ids": false,
+    "omitted": [
+      "goal_objectives",
+      "rollout_bodies",
+      "memory_content",
+      "queued_user_messages",
+      "database_rows"
+    ]
+  }
+}
