@@ -460,16 +460,14 @@ impl Context {
                     heads: builder
                         .head
                         .iter()
-                        .filter_map(|(owner, handoff)| {
-                            (*handoff == index).then(|| builder.sessions[*owner].key.clone())
-                        })
+                        .filter(|&(_, handoff)| *handoff == index)
+                        .map(|(owner, _)| builder.sessions[*owner].key.clone())
                         .collect(),
                     after: builder
                         .after
                         .iter()
-                        .filter_map(|(at, handoff)| {
-                            (*handoff == index).then(|| Location::capture(builder, *at))
-                        })
+                        .filter(|&(_, handoff)| *handoff == index)
+                        .map(|(at, _)| Location::capture(builder, *at))
                         .collect(),
                     previews,
                     explicit_previews: h.previews.is_some(),
@@ -737,10 +735,9 @@ impl Context {
             for owner in &relation.heads {
                 if let Some(&at) = builder.by_key.get(owner)
                     && !builder.sessions[at].files.is_empty()
+                    && builder.head.insert(at, index).is_some()
                 {
-                    if builder.head.insert(at, index).is_some() {
-                        return Err(io::Error::other("duplicate staged native head"));
-                    }
+                    return Err(io::Error::other("duplicate staged native head"));
                 }
             }
             for location in &relation.after {

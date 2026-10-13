@@ -6523,7 +6523,7 @@ enum BuildOutput {
     Model(Box<Built>),
     Query(Box<QueryData>),
     Catalog(BTreeSet<u32>, Option<String>),
-    Sources(PreparedSources),
+    Sources(Box<PreparedSources>),
 }
 
 /// Build native query evidence using the existing incremental source index.
@@ -6905,7 +6905,7 @@ fn prepare_sources_selected(
         selection,
         BuildTarget::Sources,
     )? {
-        BuildOutput::Sources(prepared) => Ok(prepared),
+        BuildOutput::Sources(prepared) => Ok(*prepared),
         _ => Err(io::Error::other(
             "native producer did not capture projection",
         )),
@@ -6942,7 +6942,7 @@ pub(crate) fn prepare_history(
     now: i64,
 ) -> io::Result<PreparedSources> {
     match prepare_history_inner(options, rows, records, now, BuildTarget::Sources)? {
-        BuildOutput::Sources(prepared) => Ok(prepared),
+        BuildOutput::Sources(prepared) => Ok(*prepared),
         _ => Err(io::Error::other(
             "Qualified producer did not capture metadata",
         )),
@@ -7743,7 +7743,7 @@ fn build_sources_inner(
         BuildTarget::Sources => {
             let relationships =
                 relation_stage::Context::capture(&builder, published_facts.as_ref());
-            return Ok(BuildOutput::Sources(PreparedSources {
+            return Ok(BuildOutput::Sources(Box::new(PreparedSources {
                 base_generation: catalog_base,
                 claims,
                 rows: catalog.unwrap_or_default(),
@@ -7771,7 +7771,7 @@ fn build_sources_inner(
                 indexed_sources: Vec::new(),
                 indexed_native_parents: Vec::new(),
                 withdrawals: Vec::new(),
-            }));
+            })));
         }
         BuildTarget::Catalog => {
             let publication_started = std::time::Instant::now();

@@ -1040,8 +1040,10 @@ fn load_context(
         }
     }
     let mut selected = owners.clone();
-    let mut out = Context::default();
-    out.epoch = Some(epoch);
+    let mut out = Context {
+        epoch: Some(epoch),
+        ..Context::default()
+    };
     let mut used = 0;
     for owner in &owners {
         if p == Phase::Publication {
@@ -1591,7 +1593,7 @@ impl SqliteStore {
             // Every authoritative owner must have its complete physical lineage
             // in this batch. A newly learned continuation restarts discovery.
             for endpoint in prepared.relationships.endpoints.values() {
-                for source in endpoint.row.sources.first() {
+                if let Some(source) = endpoint.row.sources.first() {
                     let closed = owner_closure(&tx, source.path.to_string_lossy().as_ref())
                         .map_err(failure)?;
                     if closed.iter().any(|path| !b.paths.contains(path)) {

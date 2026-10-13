@@ -1000,7 +1000,7 @@ impl NativeEvidence {
             return Ok(true);
         }
         work.built_at = Some(Instant::now());
-        let mut started = false;
+        let started = false;
         if work.cold_catalog.is_none() && work.catalog_snapshot.is_some() {
             self.prepare_events(work, now)?;
             let cache = work.events.as_mut().expect("event cache initialized");
@@ -1026,7 +1026,6 @@ impl NativeEvidence {
                 // Incremental semantic work shares the same lifecycle boundary
                 // as reconciliation, including worker failure instrumentation.
                 before_build()?;
-                started = true;
                 let staged_paths = inputs
                     .iter()
                     .map(|input| {
