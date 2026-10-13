@@ -180,11 +180,20 @@ pub(super) fn write_measured(
         measurements.record("chunks_page_sql", started, 1);
     }
     let started = measurements.start();
-    let pages = chunks.hashes.len().div_ceil(PAGE);
-    transaction.execute(
+    if measurements.is_enabled() {
+        measurements.cleanup(
+            transaction,
+            &prefix,
+            || chunks.hashes.len().div_ceil(PAGE),
+            &crate::native_timing::CHUNKS_CLEANUP,
+        )?;
+    } else {
+        let pages = chunks.hashes.len().div_ceil(PAGE);
+        transaction.execute(
         "DELETE FROM meta WHERE key>=?1 AND key<?2 AND key!=?3 AND (key>=?4 OR length(key)!=?5 OR substr(key,?6) GLOB '*[^0-9]*')",
         params![&prefix, format!("{prefix}~"), format!("{prefix}header"), format!("{prefix}{pages:010}"), (prefix.len()+10) as i64, (prefix.len()+1) as i64],
     )?;
+    }
     measurements.record("chunks_cleanup_sql", started, 1);
     let key = format!("{prefix}header");
     let header = Header {
@@ -218,6 +227,199 @@ pub(super) fn write_measured(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn cleanup_root() -> PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "semon-chunks-cleanup-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    fn cleanup_store(root: &Path, name: &str) -> SqliteStore {
+        match SqliteStore::attempt(&root.join(name), None) {
+            Ok((store, _)) => store,
+            Err(error) => panic!("real Index schema: {error}"),
+        }
+    }
+
+    fn cleanup_proof(count: usize, byte: u8) -> (Ledger, FileIndex) {
+        let offset = count as u64 * crate::source_chunks::SIZE as u64;
+        let ledger = Ledger {
+            stat: Stat {
+                dev: 1,
+                ino: 2,
+                size: offset,
+                modified_ns: 3,
+                changed_ns: Some(4),
+            },
+            offset,
+            prefix: [5; 32],
+            tail: [6; 32],
+        };
+        let index = FileIndex {
+            source_chunks: Some(Arc::new(Chunks {
+                offset,
+                hashes: vec![[byte; 32]; count],
+                resume: None,
+            })),
+            ..FileIndex::default()
+        };
+        (ledger, index)
+    }
+
+    fn cleanup_publish(
+        store: &mut SqliteStore,
+        path: &str,
+        ledger: &Ledger,
+        index: &FileIndex,
+        enabled: bool,
+    ) -> rusqlite::Result<crate::native_timing::Measurements> {
+        crate::native_timing::cleanup_tests::publish(
+            &mut store.connection,
+            enabled,
+            |tx, measurements| {
+                write_file(
+                    tx,
+                    path,
+                    ledger,
+                    &super::super::super::DirtyRows::default(),
+                    index,
+                    measurements,
+                )
+            },
+        )
+    }
+
+    #[test]
+    fn cleanup_diagnostics_preserve_parent_writer_proofs_and_exact_state() {
+        use crate::native_timing::{CHUNKS_CLEANUP, cleanup_tests as timing};
+        let _recording = timing::recording();
+        let root = cleanup_root();
+        // Clone one closed real initializer so the random stream epoch and all
+        // authority metadata begin byte-identical rather than being normalized.
+        drop(cleanup_store(&root, "seed.sqlite3"));
+        for name in ["ordinary.sqlite3", "measured.sqlite3"] {
+            fs::copy(root.join("seed.sqlite3"), root.join(name)).unwrap();
+        }
+        let mut ordinary = cleanup_store(&root, "ordinary.sqlite3");
+        let mut measured = cleanup_store(&root, "measured.sqlite3");
+        let path = "/fixture/parent[1]*.jsonl";
+        let other = "/fixture/other-prefix.jsonl";
+        let (ledger, index) = cleanup_proof(PAGE + 1, 1);
+        for store in [&mut ordinary, &mut measured] {
+            for path in [path, other] {
+                cleanup_publish(store, path, &ledger, &index, false).unwrap();
+            }
+            store.connection.execute_batch(&format!(
+                "CREATE TEMP TABLE audit(value TEXT); CREATE TEMP TRIGGER preserve_header BEFORE DELETE ON meta WHEN OLD.key='{}header' BEGIN SELECT RAISE(ABORT,'chunk-header-exemption'); END;",
+                prefix(path)
+            )).unwrap();
+        }
+        assert_eq!(
+            timing::snapshot(&ordinary.connection),
+            timing::snapshot(&measured.connection)
+        );
+        for (count, changed) in [(PAGE + 1, 5), (PAGE, 6), (1, 5), (0, 6)] {
+            for store in [&ordinary, &measured] {
+                for suffix in [
+                    "-1",
+                    "00000000x0",
+                    "0000000000bad",
+                    "0000000002",
+                    "header:extra",
+                ] {
+                    store
+                        .connection
+                        .execute(
+                            "INSERT INTO meta VALUES(?1,'invalid')",
+                            [format!("{}{suffix}", prefix(path))],
+                        )
+                        .unwrap();
+                }
+            }
+            let (current, index) = cleanup_proof(count, 9);
+            timing::reset_records();
+            let disabled = cleanup_publish(&mut ordinary, path, &current, &index, false).unwrap();
+            timing::assert_disabled(&disabled);
+            assert_eq!(timing::status_reads(), 0);
+            assert!(timing::records().is_empty());
+            timing::reset_records();
+            let sample = cleanup_publish(&mut measured, path, &current, &index, true).unwrap();
+            timing::assert_sample(&sample, &CHUNKS_CLEANUP, changed);
+            assert_eq!(timing::status_reads(), 2);
+            assert_eq!(timing::records().len(), 1);
+            assert_eq!(
+                timing::snapshot(&ordinary.connection),
+                timing::snapshot(&measured.connection)
+            );
+            for store in [&ordinary, &measured] {
+                assert_eq!(
+                    read(&store.connection, path, &current).unwrap(),
+                    index.source_chunks
+                );
+                assert_eq!(
+                    read(&store.connection, other, &ledger).unwrap(),
+                    cleanup_proof(PAGE + 1, 1).1.source_chunks
+                );
+                assert_eq!(
+                    ledger_row(&store.connection, path).unwrap().unwrap().1,
+                    current
+                );
+                assert!(digest(&store.connection, path).unwrap().is_some());
+            }
+        }
+        drop((ordinary, measured));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn cleanup_diagnostic_errors_roll_back_parent_pages_and_never_emit() {
+        use crate::native_timing::cleanup_tests as timing;
+        let _recording = timing::recording();
+        let root = cleanup_root();
+        let path = "/fixture/chunk-rollback.jsonl";
+        let p = prefix(path);
+        let (old, old_index) = cleanup_proof(PAGE + 1, 1);
+        let (new, new_index) = cleanup_proof(1, 9);
+        for (label, event, key) in [
+            (
+                "chunk-cleanup-after-page",
+                "DELETE",
+                format!("{p}0000000001"),
+            ),
+            ("chunk-header-after-page", "INSERT", format!("{p}header")),
+        ] {
+            for enabled in [false, true] {
+                let mut store = cleanup_store(&root, &format!("{label}-{enabled}.sqlite3"));
+                cleanup_publish(&mut store, path, &old, &old_index, false).unwrap();
+                store.connection.execute_batch(&format!(
+                    "CREATE TEMP TABLE audit(value TEXT); CREATE TEMP TRIGGER prior_page AFTER UPDATE ON meta WHEN NEW.key='{p}0000000000' BEGIN INSERT INTO audit VALUES('page-written'); END; CREATE TEMP TRIGGER cleanup_failure BEFORE {event} ON meta WHEN {}.key='{key}' AND EXISTS(SELECT 1 FROM audit) BEGIN SELECT RAISE(ABORT,'{label}'); END;",
+                    if event == "DELETE" { "OLD" } else { "NEW" }
+                )).unwrap();
+                let before = timing::snapshot(&store.connection);
+                timing::reset_records();
+                let error = match cleanup_publish(&mut store, path, &new, &new_index, enabled) {
+                    Err(error) => error,
+                    Ok(_) => panic!("named failure was not reached"),
+                };
+                assert!(error.to_string().contains(label), "{error}");
+                assert_eq!(timing::snapshot(&store.connection), before);
+                assert!(timing::records().is_empty());
+                assert_eq!(timing::status_reads(), if enabled { 2 } else { 0 });
+                assert_eq!(
+                    read(&store.connection, path, &old).unwrap(),
+                    old_index.source_chunks
+                );
+            }
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn paged_proofs_round_trip_and_refuse_corruption_or_a_different_ledger() {
