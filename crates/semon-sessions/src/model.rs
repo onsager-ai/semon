@@ -6748,11 +6748,26 @@ fn build_sources_inner(
     selection: BuildSelection<'_>,
     target: BuildTarget,
 ) -> io::Result<BuildOutput> {
+    let native_timing = matches!(target, BuildTarget::Catalog | BuildTarget::Sources)
+        && crate::native_timing::enabled();
+    let mut measurements = crate::native_timing::Measurements::new(native_timing);
+    let total_started = measurements.start();
+    macro_rules! measured {
+        ($name:literal, $units:expr, $body:expr) => {{
+            let started = measurements.start();
+            let value = $body;
+            measurements.record($name, started, $units);
+            value
+        }};
+    }
+    let started = measurements.start();
     let _facts_lock = options
         .facts
         .as_ref()
         .map(|_| crate::source_change::SourceLock::acquire(options, "facts", false))
         .transpose()?;
+    measurements.record("facts_lock", started, 1);
+    let started = measurements.start();
     let _source_locks = match &selection {
         BuildSelection::Current(Some(inputs)) => inputs
             .iter()
@@ -6766,9 +6781,18 @@ fn build_sources_inner(
             .collect::<io::Result<Vec<_>>>()?,
         _ => Vec::new(),
     };
-    let query_runtime = crate::native_evidence::query_runtime_generation(options)?;
-    let runtime_observations = crate::native_evidence::RuntimeObservations::new(options);
-    let catalog_base = cache.session_catalog_generation();
+    measurements.record("source_locks", started, _source_locks.len());
+    let query_runtime = measured!(
+        "runtime_fingerprint",
+        1,
+        crate::native_evidence::query_runtime_generation(options)?
+    );
+    let runtime_observations = measured!(
+        "runtime_observations",
+        1,
+        crate::native_evidence::RuntimeObservations::new(options)
+    );
+    let catalog_base = measured!("catalog_base", 1, cache.session_catalog_generation());
     let mut timings = Vec::with_capacity(18);
     macro_rules! timed {
         ($name:literal, $body:expr) => {{
@@ -6778,11 +6802,12 @@ fn build_sources_inner(
                 $name,
                 u32::try_from(started.elapsed().as_millis()).unwrap_or(u32::MAX),
             ));
+            measurements.record($name, native_timing.then_some(started), 1);
             value
         }};
     }
 
-    let facts = MachineFacts::of(options);
+    let facts = measured!("machine_facts", 1, MachineFacts::of(options));
     let window_start = scan_cutoff(options, now);
     let (selected, history_records, mut files, skipped, index_clone) = match selection {
         BuildSelection::Current(selected) => {
@@ -6817,8 +6842,9 @@ fn build_sources_inner(
         }
     }
     if !target.reference_model() && history_records.is_none() {
-        verify_sidecars(&files)?;
+        measured!("sidecars_before", files.len(), verify_sidecars(&files)?);
     }
+    let started = measurements.start();
     let claims = if target == BuildTarget::Sources && history_records.is_none() {
         cache.catalog_claims(
             &selected
@@ -6838,6 +6864,7 @@ fn build_sources_inner(
     } else {
         Vec::new()
     };
+    measurements.record("catalog_claims", started, claims.len());
     let pids;
     let lock_pids;
     let held;
@@ -6862,30 +6889,41 @@ fn build_sources_inner(
         groups = lineages(&files);
     });
     if cache.is_scoped() && matches!(&facts, MachineFacts::Local) {
-        let ids = files
+        let ids: BTreeSet<_> = files
             .iter()
             .flat_map(|file| {
                 std::iter::once(file.id.clone())
                     .chain(file.summary.links.session_ids.iter().cloned())
             })
             .collect();
-        cache.select_reported_runs(&ids)?;
+        measured!(
+            "reported_runs_select",
+            ids.len(),
+            cache.select_reported_runs(&ids)?
+        );
     }
+    let started = measurements.start();
     let reported_runs: Vec<ReportedRunSnapshot> = match &facts {
         MachineFacts::Local => cache.reported_runs().cloned().collect(),
         MachineFacts::Recorded(facts) => facts.reported_runs.clone(),
     };
+    measurements.record("reported_runs_collect", started, reported_runs.len());
     let sources = files
         .iter()
         .map(|file| (summary::source(file), file.summary.source_chunks.clone()));
-    let source_proofs = if target.reference_model() {
-        crate::query_source::Sources::capture_native(options, sources)?
-    } else {
-        crate::query_source::Sources::capture(options, sources)?
-    };
+    let source_proofs = measured!(
+        "source_capture",
+        files.len(),
+        if target.reference_model() {
+            crate::query_source::Sources::capture_native(options, sources)?
+        } else {
+            crate::query_source::Sources::capture(options, sources)?
+        }
+    );
     let source_records = source_proofs.reader();
     if history_records.is_none() {
-        source_records.verify_all()?;
+        measured!("source_verify", files.len(), source_records.verify_all()?);
+        let started = measurements.start();
         for file in &mut files {
             if file.summary.handoff_index.is_none() {
                 return Err(io::Error::other("native launch calls were not indexed"));
@@ -6899,7 +6937,9 @@ fn build_sources_inner(
                 file.marker = source_records.marker(&file.path, index)?;
             }
         }
+        measurements.record("source_markers", started, files.len());
     }
+    let started = measurements.start();
     let mut builder = Builder::new(
         (&files, &source_records),
         texts,
@@ -6909,8 +6949,10 @@ fn build_sources_inner(
         &reported_runs,
         cache,
     );
+    measurements.record("builder_setup", started, files.len());
     builder.history_records = history_records;
     timed!("sessions", builder.sessions(groups, &pids, &held));
+    let started = measurements.start();
     for name in facts.native_names(options) {
         if name.valid()
             && let Some(&index) = builder.by_native.get(&("codex", name.native_id.clone()))
@@ -6920,6 +6962,7 @@ fn build_sources_inner(
             session.names.insert(plain_name(&name.name));
         }
     }
+    measurements.record("native_names", started, 1);
     timed!("index_tools", builder.index_tools());
     timed!("background_commands", builder.background_commands());
     timed!("claude_spawns", builder.claude_spawns());
@@ -6954,6 +6997,7 @@ fn build_sources_inner(
         }
     });
     let post_started = std::time::Instant::now();
+    let started = measurements.start();
     let mut handoffs: Vec<Handoff> = builder
         .handoffs
         .iter()
@@ -6964,6 +7008,11 @@ fn build_sources_inner(
     let mut catalog = ((!options.scan_window && selected.is_none())
         || matches!(target, BuildTarget::Catalog | BuildTarget::Sources))
     .then(|| summary::catalog(&builder, &handoffs));
+    measurements.record(
+        "projection_catalog",
+        started,
+        catalog.as_ref().map_or(0, Vec::len),
+    );
     let derive_query_facts = || {
         builder.session_facts(
             &skipped,
@@ -6983,7 +7032,12 @@ fn build_sources_inner(
             |pid, start| facts.run(options, pid, start),
         )
     };
-    let mut published_facts = catalog.as_ref().map(|_| derive_query_facts());
+    let mut published_facts = measured!(
+        "projection_facts",
+        1,
+        catalog.as_ref().map(|_| derive_query_facts())
+    );
+    let started = measurements.start();
     let query_summaries = published_facts.as_ref().map(|facts| {
         crate::query::catalog_summaries(
             builder
@@ -6996,6 +7050,8 @@ fn build_sources_inner(
             now,
         )
     });
+    measurements.record("projection_query_summaries", started, 1);
+    let started = measurements.start();
     let slot_projections = catalog.as_ref().map(|rows| {
         crate::slot_projection::capture(
             &tx,
@@ -7006,7 +7062,13 @@ fn build_sources_inner(
                 .then_some((&*builder.cache, catalog_base.as_deref())),
         )
     });
+    measurements.record(
+        "projection_slots",
+        started,
+        slot_projections.as_ref().map_or(0, Vec::len),
+    );
     if let Some(rows) = &mut catalog {
+        let started = measurements.start();
         // Preserve producer order while looking up only this owner's native
         // turns and edges. Repeated workspace scans made publication quadratic.
         let mut turns_by_session: BTreeMap<&str, Vec<&Turn>> = BTreeMap::new();
@@ -7052,6 +7114,7 @@ fn build_sources_inner(
             };
             (h.out.id.clone(),serde_json::json!({"brief_session":owner("brief"),"result_session":owner("result")}))
         }).collect();
+        measurements.record("projection_context", started, rows.len());
         for row in rows {
             let selected_turns = turns_by_session
                 .get(row.key.as_str())
@@ -7075,6 +7138,7 @@ fn build_sources_inner(
                 .get(&row.key)
                 .map(|at| &builder.sessions[*at])
             {
+                let started = measurements.start();
                 row.trace = Some(
                     crate::causal_trace::Projection::capture(
                         &row.key,
@@ -7091,6 +7155,8 @@ fn build_sources_inner(
                     )
                     .with_family_cost(family_costs[&row.key.as_str()]),
                 );
+                measurements.record("projection_trace", started, 1);
+                let started = measurements.start();
                 let summaries = query_summaries.as_ref().expect("Catalog summaries");
                 let mut query_rows =
                     BTreeMap::from([(row.key.clone(), summaries[&row.key].clone())]);
@@ -7108,9 +7174,15 @@ fn build_sources_inner(
                     serde_json::json!({"version":1,"runtime":query_runtime,"source_generation":crate::retention::source_generation(&row.sources)?,"rows":query_rows,"last":summaries[&row.key]["last"],"state":summaries[&row.key]["state"],
                         "transcript_observation":tx.get(&row.key).map(|transcript|crate::slot_projection::QueryObservation::capture(transcript))}),
                 );
-                let runtime = runtime_observations.scope(row)?;
+                measurements.record("projection_query_rows", started, 1);
+                let runtime = measured!(
+                    "projection_runtime_scope",
+                    1,
+                    runtime_observations.scope(row)?
+                );
                 row.query.as_mut().expect("query captured")["runtime"] =
                     serde_json::Value::String(runtime);
+                let started = measurements.start();
                 row.overview = Some(
                     crate::overview::Summary::capture(
                         &row.key,
@@ -7132,24 +7204,33 @@ fn build_sources_inner(
                     )
                     .with_sources(&row.sources)?,
                 );
+                measurements.record("projection_overview", started, 1);
             }
         }
     }
     if catalog.is_some()
-        && crate::native_evidence::query_runtime_generation(options)? != query_runtime
+        && measured!(
+            "runtime_recheck",
+            1,
+            crate::native_evidence::query_runtime_generation(options)?
+        ) != query_runtime
     {
         return Err(io::Error::other(
             "Native Query runtime observations changed",
         ));
     }
     if !target.reference_model() && history_records.is_none() {
-        verify_sidecars(&files)?;
+        measured!("sidecars_after", files.len(), verify_sidecars(&files)?);
     }
     if matches!(target, BuildTarget::Catalog | BuildTarget::Sources) && history_records.is_none() {
-        source_records.finish()?;
+        measured!("source_finish", files.len(), source_records.finish()?);
     }
-    let native_timing = matches!(target, BuildTarget::Catalog | BuildTarget::Sources)
-        && crate::native_timing::enabled();
+    measurements.record(
+        "projection_total_inclusive",
+        native_timing.then_some(post_started),
+        1,
+    );
+    measurements.record("model_total_inclusive", total_started, 1);
     if native_timing {
         let id = crate::native_timing::id(&EventCache::path(&options.cache));
         let (parse, index_write) = builder.cache.scan_durations();
@@ -7161,6 +7242,7 @@ fn build_sources_inner(
             index_write.as_micros()
         );
         builder.cache.emit_scan_measurements(&id);
+        measurements.emit(&id, "model_preparation");
     }
     match target {
         BuildTarget::Sources => {

@@ -506,8 +506,21 @@ impl NativeEvidence {
         recovering: bool,
         now: i64,
     ) -> io::Result<Option<model::PreparedSources>> {
+        let timing = crate::native_timing::enabled();
+        let mut measurements = crate::native_timing::Measurements::new(timing);
+        let total_started = measurements.start();
         if inputs.is_empty() && recovering {
-            return model::prepare_sources(&self.options, cache, &[], now).map(Some);
+            let started = measurements.start();
+            let prepared = model::prepare_sources(&self.options, cache, &[], now)?;
+            measurements.record("model_prepare_inclusive", started, 0);
+            measurements.record("component_total_inclusive", total_started, 1);
+            if timing {
+                measurements.emit(
+                    &crate::native_timing::id(&EventCache::path(&self.options.cache)),
+                    "component_resolution",
+                );
+            }
+            return Ok(Some(prepared));
         }
         let mut inputs: BTreeSet<_> = inputs.into_iter().collect();
         let options = Options {
@@ -521,9 +534,11 @@ impl NativeEvidence {
         let mut native_parents = Vec::new();
         let prepared = loop {
             let selected: Vec<_> = inputs.iter().cloned().collect();
-            let Some(component) =
-                cache.catalog_component_paths(&selected, &keys, &native_parents, &self.options)?
-            else {
+            let started = measurements.start();
+            let component =
+                cache.catalog_component_paths(&selected, &keys, &native_parents, &self.options)?;
+            measurements.record("lookup_before", started, selected.len());
+            let Some(component) = component else {
                 break None;
             };
             inputs.extend(component);
@@ -531,7 +546,9 @@ impl NativeEvidence {
                 break None;
             }
             let selected: Vec<_> = inputs.iter().cloned().collect();
+            let started = measurements.start();
             let prepared = model::prepare_sources(&options, cache, &selected, now)?;
+            measurements.record("model_prepare_inclusive", started, selected.len());
             let dependencies: BTreeSet<_> = prepared
                 .rows
                 .iter()
@@ -555,10 +572,12 @@ impl NativeEvidence {
                 })
                 .chain(prepared.lineage_dependencies.iter().cloned())
                 .collect::<Vec<_>>();
+            let started = measurements.start();
             inputs.extend(crate::events::store::catalog_dependents(
                 &self.options,
                 &selectors,
             )?);
+            measurements.record("dependents", started, selectors.len());
             if inputs.len() > 64 {
                 break None;
             }
@@ -575,9 +594,11 @@ impl NativeEvidence {
                     .filter(|(harness, _)| !harness.starts_with("bridge:"))
                     .cloned(),
             );
-            let Some(component) =
-                cache.catalog_component_paths(&selected, &keys, &native_parents, &self.options)?
-            else {
+            let started = measurements.start();
+            let component =
+                cache.catalog_component_paths(&selected, &keys, &native_parents, &self.options)?;
+            measurements.record("lookup_after", started, selected.len());
+            let Some(component) = component else {
                 break None;
             };
             if inputs.len() == selected.len()
@@ -590,6 +611,13 @@ impl NativeEvidence {
                 break None;
             }
         };
+        measurements.record("component_total_inclusive", total_started, 1);
+        if timing {
+            measurements.emit(
+                &crate::native_timing::id(&EventCache::path(&self.options.cache)),
+                "component_resolution",
+            );
+        }
         Ok(prepared)
     }
 
