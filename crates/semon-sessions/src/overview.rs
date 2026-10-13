@@ -192,8 +192,12 @@ pub(crate) fn publish_current_measured(
     }
     if let Some(trace) = &row.trace {
         let started = measurements.start();
-        crate::causal_trace::publish(tx, row, trace)?;
-        measurements.record("trace_publish", started, 1);
+        if started.is_some() {
+            crate::causal_trace::publish_measured(tx, row, trace, measurements)?;
+        } else {
+            crate::causal_trace::publish(tx, row, trace)?;
+        }
+        measurements.record("trace_publish_inclusive", started, 1);
     }
     if let Some(summary) = &row.overview {
         publish_measured(tx, &row.key, row.last.unwrap_or(0), summary, measurements)?;
