@@ -51,6 +51,7 @@
     {
       "id": "conflicting_exact_spawn_edge",
       "rollout_parent_thread_id": "synthetic-parent-a",
+      "rollout_thread_id": "synthetic-child",
       "sqlite_edge": {
         "parent_thread_id": "synthetic-parent-b",
         "child_thread_id": "synthetic-child",
@@ -81,8 +82,8 @@
         "version": 1,
         "ownerThreadId": "synthetic-thread"
       },
-      "proves": ["worktree_owner_thread_id"],
-      "does_not_prove": ["native_session_id", "rollout_cwd", "historical_commit"]
+      "proves": ["recorded_native_owner_thread_id"],
+      "does_not_prove": ["active_execution", "verified_rollout_association", "rollout_cwd", "historical_commit"]
     },
     {
       "id": "missing_owner",
