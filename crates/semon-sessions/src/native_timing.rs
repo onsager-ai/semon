@@ -446,6 +446,69 @@ pub(crate) struct Measurements {
     values: BTreeMap<&'static str, (u128, usize)>,
 }
 
+/// Static nested leaves of the existing inclusive cleanup measurement. Counts
+/// use the workload half of us_units; children must not be added to parents.
+pub(crate) struct CleanupLabels {
+    args: &'static str,
+    prepare: &'static str,
+    bind_execute: &'static str,
+    dispose: &'static str,
+    status: &'static str,
+    collector: &'static str,
+    vm_valid: &'static str,
+    vm_unavailable: &'static str,
+    vm_steps: &'static str,
+    changed_rows: &'static str,
+    status_observations: &'static str,
+    clock_observations: &'static str,
+}
+
+pub(crate) const CHUNKS_CLEANUP: CleanupLabels = CleanupLabels {
+    args: "chunks_cleanup_args",
+    prepare: "chunks_cleanup_uncached_prepare",
+    bind_execute: "chunks_cleanup_bind_execute",
+    dispose: "chunks_cleanup_dispose",
+    status: "chunks_cleanup_status",
+    collector: "chunks_cleanup_collector",
+    vm_valid: "chunks_cleanup_vm_valid_samples",
+    vm_unavailable: "chunks_cleanup_vm_unavailable_samples",
+    vm_steps: "chunks_cleanup_vm_steps",
+    changed_rows: "chunks_cleanup_changed_rows",
+    status_observations: "chunks_cleanup_status_observations",
+    clock_observations: "chunks_cleanup_clock_observations",
+};
+
+pub(crate) const LAUNCH_CLEANUP: CleanupLabels = CleanupLabels {
+    args: "launch_cleanup_args",
+    prepare: "launch_cleanup_uncached_prepare",
+    bind_execute: "launch_cleanup_bind_execute",
+    dispose: "launch_cleanup_dispose",
+    status: "launch_cleanup_status",
+    collector: "launch_cleanup_collector",
+    vm_valid: "launch_cleanup_vm_valid_samples",
+    vm_unavailable: "launch_cleanup_vm_unavailable_samples",
+    vm_steps: "launch_cleanup_vm_steps",
+    changed_rows: "launch_cleanup_changed_rows",
+    status_observations: "launch_cleanup_status_observations",
+    clock_observations: "launch_cleanup_clock_observations",
+};
+
+#[cfg(test)]
+type CleanupRecords = Vec<(&'static str, BTreeMap<&'static str, (u128, usize)>)>;
+
+#[cfg(test)]
+std::thread_local! {
+    static CLEANUP_RECORDS: std::cell::RefCell<Option<CleanupRecords>> = const { std::cell::RefCell::new(None) };
+    static CLEANUP_STATUS_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+fn vm_steps(before: i32, after: i32) -> Option<usize> {
+    usize::try_from(before)
+        .ok()
+        .zip(usize::try_from(after).ok())
+        .and_then(|(before, after)| after.checked_sub(before))
+}
+
 impl Measurements {
     pub(crate) fn new(enabled: bool) -> Self {
         Self {
@@ -456,6 +519,98 @@ impl Measurements {
 
     pub(crate) fn start(&self) -> Option<Instant> {
         self.enabled.then(Instant::now)
+    }
+
+    pub(crate) fn is_enabled(&self) -> bool {
+        self.enabled
+    }
+
+    fn record_elapsed(&mut self, name: &'static str, us: u128, units: usize) {
+        let entry = self.values.entry(name).or_default();
+        entry.0 = entry.0.saturating_add(us);
+        entry.1 = entry.1.saturating_add(units);
+    }
+
+    /// Called only by enabled writers. Ordinary parameter binding and the
+    /// original uncached DELETE remain intact. Every leaf ends before insertion.
+    pub(crate) fn cleanup(
+        &mut self,
+        transaction: &rusqlite::Transaction<'_>,
+        prefix: &str,
+        pages: impl FnOnce() -> usize,
+        labels: &CleanupLabels,
+    ) -> rusqlite::Result<usize> {
+        let started = Instant::now();
+        let pages = pages();
+        let end = format!("{prefix}~");
+        let header = format!("{prefix}header");
+        let obsolete = format!("{prefix}{pages:010}");
+        let width = (prefix.len() + 10) as i64;
+        let suffix = (prefix.len() + 1) as i64;
+        let args_us = started.elapsed().as_micros();
+        let started = Instant::now();
+        let prepared = transaction.prepare("DELETE FROM meta WHERE key>=?1 AND key<?2 AND key!=?3 AND (key>=?4 OR length(key)!=?5 OR substr(key,?6) GLOB '*[^0-9]*')");
+        let prepare_us = started.elapsed().as_micros();
+        let mut statement = match prepared {
+            Ok(statement) => statement,
+            Err(error) => {
+                let started = Instant::now();
+                self.record_elapsed(labels.args, args_us, 1);
+                self.record_elapsed(labels.prepare, prepare_us, 1);
+                self.count(labels.vm_valid, 0);
+                self.count(labels.vm_unavailable, 1);
+                self.count(labels.status_observations, 0);
+                self.count(labels.clock_observations, 6);
+                let collector_us = started.elapsed().as_micros();
+                self.record_elapsed(labels.collector, collector_us, 1);
+                return Err(error);
+            }
+        };
+        let started = Instant::now();
+        let before = statement.get_status(rusqlite::StatementStatus::VmStep);
+        #[cfg(test)]
+        CLEANUP_STATUS_READS.with(|reads| reads.set(reads.get() + 1));
+        let before_us = started.elapsed().as_micros();
+        let started = Instant::now();
+        let result = statement.execute(rusqlite::params![
+            prefix, end, header, obsolete, width, suffix
+        ]);
+        let execute_us = started.elapsed().as_micros();
+        let started = Instant::now();
+        let after = statement.get_status(rusqlite::StatementStatus::VmStep);
+        #[cfg(test)]
+        CLEANUP_STATUS_READS.with(|reads| reads.set(reads.get() + 1));
+        let after_us = started.elapsed().as_micros();
+        let started = Instant::now();
+        drop(statement);
+        let dispose_us = started.elapsed().as_micros();
+        let started = Instant::now();
+        self.record_elapsed(labels.args, args_us, 1);
+        self.record_elapsed(labels.prepare, prepare_us, 1);
+        self.record_elapsed(labels.bind_execute, execute_us, 1);
+        self.record_elapsed(labels.dispose, dispose_us, 1);
+        self.record_elapsed(labels.status, before_us + after_us, 2);
+        self.count(labels.status_observations, 2);
+        self.count(labels.clock_observations, 14);
+        match vm_steps(before, after) {
+            Some(steps) => {
+                self.count(labels.vm_valid, 1);
+                self.count(labels.vm_unavailable, 0);
+                self.count(labels.vm_steps, steps);
+            }
+            None => {
+                self.count(labels.vm_valid, 0);
+                self.count(labels.vm_unavailable, 1);
+            }
+        }
+        if let Ok(changed) = &result {
+            self.count(labels.changed_rows, *changed);
+        }
+        let collector_us = started.elapsed().as_micros();
+        // This excludes its own final insertion and cannot subtract residual
+        // clock/scheduling perturbation from the original inclusive cleanup.
+        self.record_elapsed(labels.collector, collector_us, 1);
+        result
     }
 
     pub(crate) fn record(&mut self, name: &'static str, started: Option<Instant>, units: usize) {
@@ -475,11 +630,127 @@ impl Measurements {
 
     pub(crate) fn emit(&self, producer: &str, group: &'static str) {
         if self.enabled {
+            #[cfg(test)]
+            CLEANUP_RECORDS.with(|records| {
+                if let Some(records) = &mut *records.borrow_mut() {
+                    records.push((group, self.values.clone()));
+                }
+            });
             eprintln!(
                 "semon sessions native: producer={producer} breakdown={group} us_units={:?}",
                 self.values
             );
         }
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod cleanup_tests {
+    use super::*;
+    use rusqlite::{Connection, Transaction, TransactionBehavior, types::Value};
+
+    pub(crate) struct Recording;
+
+    impl Drop for Recording {
+        fn drop(&mut self) {
+            CLEANUP_RECORDS.with(|records| *records.borrow_mut() = None);
+            CLEANUP_STATUS_READS.with(|reads| reads.set(0));
+        }
+    }
+
+    pub(crate) fn recording() -> Recording {
+        reset_records();
+        Recording
+    }
+
+    pub(crate) fn reset_records() {
+        CLEANUP_RECORDS.with(|records| *records.borrow_mut() = Some(Vec::new()));
+        CLEANUP_STATUS_READS.with(|reads| reads.set(0));
+    }
+
+    pub(crate) fn records() -> CleanupRecords {
+        CLEANUP_RECORDS.with(|records| records.borrow().as_ref().unwrap().clone())
+    }
+
+    pub(crate) fn status_reads() -> usize {
+        CLEANUP_STATUS_READS.with(std::cell::Cell::get)
+    }
+
+    pub(crate) fn snapshot(connection: &Connection) -> BTreeMap<String, Vec<Vec<Value>>> {
+        let mut state = BTreeMap::new();
+        for schema in ["main", "temp"] {
+            let names = connection
+                .prepare(&format!(
+                    "SELECT name FROM {schema}.sqlite_schema WHERE type='table' ORDER BY name"
+                ))
+                .unwrap()
+                .query_map([], |row| row.get::<_, String>(0))
+                .unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap();
+            for name in names {
+                let mut statement = connection
+                    .prepare(&format!(
+                        "SELECT * FROM {schema}.\"{}\"",
+                        name.replace('"', "\"\"")
+                    ))
+                    .unwrap();
+                let width = statement.column_count();
+                let mut rows = statement
+                    .query_map([], |row| {
+                        (0..width)
+                            .map(|column| row.get::<_, Value>(column))
+                            .collect::<rusqlite::Result<Vec<Value>>>()
+                    })
+                    .unwrap()
+                    .collect::<rusqlite::Result<Vec<Vec<Value>>>>()
+                    .unwrap();
+                rows.sort_by_key(|row| format!("{row:?}"));
+                state.insert(format!("{schema}.{name}"), rows);
+            }
+        }
+        state
+    }
+
+    // Use the same real Immediate parent transaction/commit boundary as the
+    // Index publisher; failed writer or commit never emits collected children.
+    pub(crate) fn publish(
+        connection: &mut Connection,
+        enabled: bool,
+        write: impl FnOnce(&Transaction<'_>, &mut Measurements) -> rusqlite::Result<()>,
+    ) -> rusqlite::Result<Measurements> {
+        let mut measurements = Measurements::new(enabled);
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        write(&transaction, &mut measurements)?;
+        transaction.commit()?;
+        measurements.emit("synthetic-cleanup", "index_rows");
+        Ok(measurements)
+    }
+
+    pub(crate) fn assert_sample(
+        measurements: &Measurements,
+        labels: &CleanupLabels,
+        changed: usize,
+    ) {
+        assert_eq!(measurements.values[labels.vm_valid].1, 1);
+        assert_eq!(measurements.values[labels.vm_unavailable].1, 0);
+        assert!(measurements.values[labels.vm_steps].1 > 0);
+        assert_eq!(measurements.values[labels.changed_rows].1, changed);
+        assert_eq!(measurements.values[labels.status_observations].1, 2);
+        for name in [
+            labels.args,
+            labels.prepare,
+            labels.bind_execute,
+            labels.dispose,
+            labels.collector,
+        ] {
+            assert_eq!(measurements.values[name].1, 1);
+        }
+    }
+
+    pub(crate) fn assert_disabled(measurements: &Measurements) {
+        assert!(measurements.start().is_none());
+        assert!(measurements.values.is_empty());
     }
 }
 
@@ -511,6 +782,39 @@ impl Drop for Phase {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cleanup_vm_work_distinguishes_unavailable_from_valid_zero() {
+        assert_eq!(vm_steps(0, 0), Some(0));
+        assert_eq!(vm_steps(7, 19), Some(12));
+        for (before, after) in [(-1, 0), (0, -1), (19, 7), (i32::MAX, i32::MIN)] {
+            assert_eq!(vm_steps(before, after), None);
+        }
+    }
+
+    #[test]
+    fn cleanup_prepare_failure_preserves_error_without_zero_vm_work_or_record() {
+        let mut connection = rusqlite::Connection::open_in_memory().unwrap();
+        let _recording = cleanup_tests::recording();
+        let transaction = connection.transaction().unwrap();
+        let ordinary = transaction.execute("DELETE FROM meta WHERE key>=?1 AND key<?2 AND key!=?3 AND (key>=?4 OR length(key)!=?5 OR substr(key,?6) GLOB '*[^0-9]*')", rusqlite::params!["p:", "p:~", "p:header", "p:0000000000", 12i64, 3i64]).unwrap_err();
+        let mut measurements = Measurements::new(true);
+        let measured = measurements
+            .cleanup(&transaction, "p:", || 0, &CHUNKS_CLEANUP)
+            .unwrap_err();
+        assert_eq!(measured.to_string(), ordinary.to_string());
+        assert_eq!(measurements.values[CHUNKS_CLEANUP.vm_valid].1, 0);
+        assert_eq!(measurements.values[CHUNKS_CLEANUP.vm_unavailable].1, 1);
+        assert!(!measurements.values.contains_key(CHUNKS_CLEANUP.vm_steps));
+        assert!(
+            !measurements
+                .values
+                .contains_key(CHUNKS_CLEANUP.changed_rows)
+        );
+        assert_eq!(cleanup_tests::status_reads(), 0);
+        assert!(cleanup_tests::records().is_empty());
+        drop(transaction);
+    }
 
     fn timing_root(name: &str) -> std::path::PathBuf {
         let root = std::env::temp_dir().join(format!(
