@@ -635,6 +635,7 @@ fn text_json(text: &str, source: Source, cut_before: bool) -> String {
     text_value(text, source, cut_before, FULL_MAX).to_string()
 }
 
+#[cfg(test)]
 fn text_value(text: &str, source: Source, cut_before: bool, limit: usize) -> Value {
     let (plain, cut) = split_cut(text, source);
     let (shown, truncated) = clip(&plain, limit);
@@ -4254,6 +4255,8 @@ mod tests {
         let home = Home::new();
         let header =
             "Warning: truncated output (original token count: 24000)\nTotal output lines: 900\n\n";
+        // Source-shaped synthetic results use the pinned normal success header
+        // and a qualifying direct awaited result print, not arbitrary JSON.
         // Whole JSON around the cut: the script's output field is read.
         let whole = format!(
             "{header}{{\"chunk_id\":\"c\",\"wall_time_seconds\":1.0,\"output\":\"line 1\\nline 2…19500 tokens truncated…line 899\\n\"}}"
@@ -4262,15 +4265,34 @@ mod tests {
         let broken = format!(
             "{header}{{\"chunk_id\":\"c\",\"wall_time_seconds\":1.0,\"output\":\"line 1\\nline 2…19500 tokens truncated…lin"
         );
-        let result = |call: &str, body: &str| json!({"type":"custom_tool_call_output","call_id":call,"output":[{"type":"input_text","text":"Script completed\nWall time 1.0s\nOutput:\n"},{"type":"input_text","text":body}]});
+        let result = |call: &str, body: &str| json!({"type":"custom_tool_call_output","call_id":call,"output":[{"type":"input_text","text":"Script completed\nWall time 1.0 seconds\nOutput:\n"},{"type":"input_text","text":body}]});
+        let fake = json!({"wall_time_seconds":1.0,"session_id":26789,"output":"printed, not a native result"}).to_string();
         home.lines(
             "codex/sessions/2026/09/24/rollout-code-cut.jsonl",
             &[
-                codex_line(ts(6, 0, 0), "session_meta", json!({"id":"code-cut","cwd":"/work/proj"})),
-                codex_line(ts(6, 1, 0), "response_item", json!({"type":"custom_tool_call","call_id":"one","name":"exec","input":"text('one')"})),
+                codex_line(
+                    ts(6, 0, 0),
+                    "session_meta",
+                    json!({"id":"code-cut","cwd":"/work/proj"}),
+                ),
+                codex_line(
+                    ts(6, 1, 0),
+                    "response_item",
+                    script_call("one", "text(await tools.exec_command({cmd:'one'}));"),
+                ),
                 codex_line(ts(6, 1, 500), "response_item", result("one", &whole)),
-                codex_line(ts(6, 2, 0), "response_item", json!({"type":"custom_tool_call","call_id":"two","name":"exec","input":"text('two')"})),
+                codex_line(
+                    ts(6, 2, 0),
+                    "response_item",
+                    script_call("two", "text(await tools.exec_command({cmd:'two'}));"),
+                ),
                 codex_line(ts(6, 2, 500), "response_item", result("two", &broken)),
+                codex_line(
+                    ts(6, 3, 0),
+                    "response_item",
+                    script_call("fake", "text('one')"),
+                ),
+                codex_line(ts(6, 3, 500), "response_item", result("fake", &fake)),
             ],
         );
         let built = home.built(BASE + 86_400_000);
@@ -4281,7 +4303,7 @@ mod tests {
             .iter()
             .filter(|entry| entry["k"] == "tool")
             .collect();
-        assert_eq!(entries.len(), 2);
+        assert_eq!(entries.len(), 3);
         assert_eq!(
             entries[0]["out"],
             "line 1\nline 2…19500 tokens truncated…line 899\n"
@@ -4299,6 +4321,13 @@ mod tests {
             json!({"gap": {"n": 19500, "unit": "tokens"}})
         );
         assert_eq!(entries[1]["cut"]["lines"], 900);
+        assert_eq!(entries[2]["name"], "exec");
+        assert_eq!(entries[2]["out"], fake);
+        assert!(entries[2].get("cut").is_none());
+        let slot = &built.tx["code-cut"].slots[entries[2]["slot"].as_u64().unwrap() as usize];
+        assert!(
+            matches!(&slot.kind, SlotKind::Tool { name, result_source: false, item: None, .. } if name == "exec")
+        );
     }
 
     #[test]
@@ -5148,8 +5177,8 @@ mod tests {
                         {"type":"input_text","text":"hello"},
                     ]}),
                 ),
-                // A poll of a command these logs never saw start: that
-                // command is a step from here on.
+                // An orphan poll stays on its native outer exec cell: no
+                // observed start exists to establish a yielded/poll relation.
                 codex_line(ts(10, 2, 0), "response_item", script_call("orphan", &poll(777, ""))),
                 codex_line(
                     ts(10, 2, 500),
@@ -5164,9 +5193,23 @@ mod tests {
         assert_eq!(steps.len(), 2, "{steps:?}");
         assert_eq!(steps[0]["name"], "exec");
         assert_eq!(steps[0]["out"], "hello");
-        assert_eq!(steps[1]["name"], "exec_command");
-        assert_eq!(steps[1]["unfinished"], true);
+        assert_eq!(steps[1]["name"], "exec");
+        assert!(steps[1].get("unfinished").is_none());
         assert_eq!(steps[1]["out"], "still running\n");
+        let transcript = &built.tx["printed"];
+        assert!(
+            transcript.slots.iter().all(|slot| !matches!(
+                &slot.kind,
+                SlotKind::Yielded { .. } | SlotKind::Sent { .. }
+            ))
+        );
+        let slot = &transcript.slots[steps[1]["slot"].as_u64().unwrap() as usize];
+        assert!(matches!(&slot.kind, SlotKind::Tool { name, item: None, .. } if name == "exec"));
+        let record = Lines::default()
+            .get(&slot.file.as_ref().unwrap().path, slot.offset)
+            .unwrap();
+        assert_eq!(record["payload"]["call_id"], "orphan");
+        assert_eq!(record["payload"]["input"], poll(777, ""));
     }
 
     #[test]
@@ -5279,11 +5322,27 @@ mod tests {
                 assert_eq!(steps[0]["ok"], true, "{sid}");
             }
             assert_eq!(steps[0]["out"], out, "{sid}");
-            assert_eq!(steps[1]["name"], "exec_command", "{sid}");
-            assert_eq!(steps[1]["arg"], other, "{sid}");
             assert_eq!(steps[1]["ok"], true, "{sid}");
             if sid == "reused" {
+                // No independent nested native identity exists for date.
+                // Its distinct source/result stays on the outer exec cell.
+                assert_eq!(steps[1]["name"], "exec");
                 assert_eq!(steps[1]["out"], "Thu\n");
+                let slot = &built.tx[sid].slots[steps[1]["slot"].as_u64().unwrap() as usize];
+                assert!(
+                    matches!(&slot.kind, SlotKind::Tool { name, item: None, .. } if name == "exec")
+                );
+                let record = Lines::default()
+                    .get(&slot.file.as_ref().unwrap().path, slot.offset)
+                    .unwrap();
+                assert_eq!(record["payload"]["call_id"], "date");
+                assert_eq!(
+                    record["payload"]["input"],
+                    "const r = await tools.exec_command({cmd:\"date\"});\ntext(JSON.stringify(r));"
+                );
+            } else {
+                assert_eq!(steps[1]["name"], "exec_command", "{sid}");
+                assert_eq!(steps[1]["arg"], other, "{sid}");
             }
         }
     }

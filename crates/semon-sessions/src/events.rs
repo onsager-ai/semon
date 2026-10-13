@@ -3274,7 +3274,7 @@ fn script_value(text: &str, start: usize) -> ScriptArg {
         let boundary = rest[digits..]
             .chars()
             .next()
-            .map_or(true, |c| c.is_whitespace() || matches!(c, ',' | '}' | ']'));
+            .is_none_or(|c| c.is_whitespace() || matches!(c, ',' | '}' | ']'));
         if digits > 0
             && boundary
             && let Ok(number) = rest[..digits].parse::<u64>()
@@ -3873,6 +3873,7 @@ fn exec_session(value: Option<&Value>) -> Option<String> {
 
 /// The exec session a code-mode script's output leaves running: the
 /// command outlived its yield, so there is a session id and no exit code.
+#[cfg(test)]
 fn yielded_session(output: Option<&Value>) -> Option<String> {
     let value = yield_json(output)?;
     if value.get("exit_code").is_some_and(|code| !code.is_null()) {
@@ -4660,18 +4661,17 @@ pub(crate) fn codex(summary: &mut FileIndex, record: &Value, offset: u64) {
             } else {
                 None
             };
-            if let Some(start) = yielded {
-                if let Some(found) = summary.event_mut(start)
-                    && let Some(started) = found.y.as_mut()
-                {
-                    started.done = Some(Reply {
-                        o: offset,
-                        t: time,
-                        e: failed,
-                        f: if known { 0 } else { UNKNOWN },
-                        ..Reply::default()
-                    });
-                }
+            if let Some(start) = yielded
+                && let Some(found) = summary.event_mut(start)
+                && let Some(started) = found.y.as_mut()
+            {
+                started.done = Some(Reply {
+                    o: offset,
+                    t: time,
+                    e: failed,
+                    f: if known { 0 } else { UNKNOWN },
+                    ..Reply::default()
+                });
             }
             // An item is a step of its own only when exactly one code-mode
             // call is open to own it. Otherwise it is a plain call's item, or
@@ -6667,7 +6667,7 @@ mod tests {
             .append(true)
             .open(&log)
             .unwrap()
-            .write_all(FIXTURE[boundary..].as_bytes())
+            .write_all(&FIXTURE.as_bytes()[boundary..])
             .unwrap();
         let appended = scan_file(&log, "codex", &mut cache, &mut false).unwrap();
         let cold = scan_file(&log, "codex", &mut EventCache::default(), &mut false).unwrap();
