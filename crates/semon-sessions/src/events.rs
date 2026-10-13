@@ -827,6 +827,7 @@ const WINDOW: u64 = 4096;
 #[cfg(test)]
 thread_local! {
     pub(crate) static BEFORE_CATALOG_PUBLICATION: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+    pub(crate) static AFTER_CATALOG_PUBLICATION: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
     pub(crate) static CATALOG_DERIVED_SOURCES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
     pub(crate) static CATALOG_PUBLISHED_ROWS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
     pub(crate) static SOURCE_READ_BYTES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
@@ -980,11 +981,11 @@ pub(crate) trait IndexStore: Send {
     ) -> Result<Option<Vec<crate::slot_projection::SavedSlot>>, StoreError>;
 
     /// Replaces one complete source-validated metadata catalog atomically.
-    fn publish_session_catalog(
+    fn publish_session_catalog_fenced(
         &mut self,
         publication: &crate::slot_projection::Publication<'_>,
         expected_generation: Option<&str>,
-    ) -> Result<Outcome, StoreError>;
+    ) -> Result<(Outcome, Option<String>), StoreError>;
 
     fn publish_partial_catalog(
         &mut self,
@@ -992,12 +993,12 @@ pub(crate) trait IndexStore: Send {
         expected_generation: Option<&str>,
         claims: &[(String, Option<i64>)],
     ) -> Result<(Outcome, Option<String>), StoreError>;
-    fn publish_closed_catalog(
+    fn publish_closed_catalog_fenced(
         &mut self,
         publication: &crate::slot_projection::Publication<'_>,
         expected_generation: Option<&str>,
         claims: &[(String, Option<i64>)],
-    ) -> Result<Option<Outcome>, StoreError>;
+    ) -> Result<Option<(Outcome, Option<String>)>, StoreError>;
     fn backfill_state(&self) -> Result<Option<String>, StoreError>;
     fn discover_catalog_sources(
         &mut self,
@@ -1594,6 +1595,15 @@ impl EventCache {
         &mut self,
         prepared: &crate::model::PreparedSources,
     ) -> io::Result<Option<Outcome>> {
+        self.publish_closed_catalog_fenced(prepared)
+            .map(|result| result.map(|(outcome, _)| outcome))
+    }
+
+    /// Carry the committed generation through the source-closure check.
+    pub(crate) fn publish_closed_catalog_fenced(
+        &mut self,
+        prepared: &crate::model::PreparedSources,
+    ) -> io::Result<Option<(Outcome, Option<String>)>> {
         if self.busy || !self.unpersisted.is_empty() {
             return Err(io::Error::new(
                 io::ErrorKind::WouldBlock,
@@ -1608,7 +1618,7 @@ impl EventCache {
             .store
             .as_mut()
             .ok_or_else(|| io::Error::other("scoped producer store unavailable"))?
-            .publish_closed_catalog(
+            .publish_closed_catalog_fenced(
                 &crate::slot_projection::Publication {
                     rows: &prepared.rows,
                     transcripts: Some(&prepared.transcripts),
@@ -1618,9 +1628,12 @@ impl EventCache {
             )
             .map_err(|error| io::Error::other(error.to_string()))?;
         #[cfg(test)]
-        if outcome == Some(Outcome::Written) {
+        if matches!(outcome, Some((Outcome::Written, _))) {
             CATALOG_PUBLISHED_ROWS
                 .with(|count| count.set(count.get() + prepared.rows.len() as u64));
+            if let Some(hook) = AFTER_CATALOG_PUBLICATION.with(|hook| hook.borrow_mut().take()) {
+                hook();
+            }
         }
         Ok(outcome)
     }
@@ -1775,20 +1788,36 @@ impl EventCache {
         publication: &crate::slot_projection::Publication<'_>,
         expected_generation: Option<&str>,
     ) -> io::Result<()> {
+        self.publish_catalog_projection_fenced(publication, expected_generation)
+            .map(|_| ())
+    }
+
+    pub(crate) fn publish_catalog_projection_fenced(
+        &mut self,
+        publication: &crate::slot_projection::Publication<'_>,
+        expected_generation: Option<&str>,
+    ) -> io::Result<Option<String>> {
         if self.busy || !self.unpersisted.is_empty() {
             return Err(io::Error::new(
                 io::ErrorKind::WouldBlock,
                 "native producer sources not durably observed",
             ));
         }
-        let outcome = self
+        let (outcome, generation) = self
             .store
             .as_mut()
             .ok_or_else(|| io::Error::other("scoped producer store unavailable"))?
-            .publish_session_catalog(publication, expected_generation)
+            .publish_session_catalog_fenced(publication, expected_generation)
             .map_err(|error| io::Error::other(error.to_string()))?;
         match outcome {
-            Outcome::Written => Ok(()),
+            Outcome::Written => {
+                #[cfg(test)]
+                if let Some(hook) = AFTER_CATALOG_PUBLICATION.with(|hook| hook.borrow_mut().take())
+                {
+                    hook();
+                }
+                Ok(generation)
+            }
             Outcome::Conflict | Outcome::Stale => Err(io::Error::new(
                 io::ErrorKind::WouldBlock,
                 "native Catalog publication generation changed",

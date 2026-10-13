@@ -261,18 +261,41 @@ impl NativeEvidence {
         );
     }
 
-    fn finish_audit(&self, work: &mut Work, now: i64) -> io::Result<bool> {
-        if work.audit.is_none() {
-            return Ok(false);
-        }
+    fn finish_audit(
+        &self,
+        work: &mut Work,
+        now: i64,
+        before_build: &mut impl FnMut() -> io::Result<()>,
+    ) -> io::Result<bool> {
         let generation = work
             .events
             .as_ref()
             .and_then(|cache| cache.session_catalog_generation());
-        if !crate::events::store::note_catalog_audit(&self.options, generation.as_deref(), now)? {
+        if work.audit.is_some()
+            && !crate::events::store::note_catalog_audit(&self.options, generation.as_deref(), now)?
+        {
             return Ok(true);
         }
-        let audit = work.audit.take().expect("audit exists");
+        // A peer can publish and consume the journal before this owner audits
+        // its source stamps. That is a new observation for this owner without
+        // another derivation or publication. Successful own publications already
+        // acknowledge their generation; a later peer advance remains observable.
+        if let Some(generation) = generation {
+            if work
+                .observed_catalog_generation
+                .as_ref()
+                .is_some_and(|observed| observed != &generation)
+            {
+                before_build()?;
+                work.built_at = Some(Instant::now());
+            }
+            if work.observed_catalog_generation.as_ref() != Some(&generation) {
+                work.observed_catalog_generation = Some(generation);
+            }
+        }
+        let Some(audit) = work.audit.take() else {
+            return Ok(false);
+        };
         work.audit_revision = audit.revision;
         self.audit_completed
             .store(audit.revision, Ordering::Release);
@@ -718,7 +741,7 @@ impl NativeEvidence {
             let pending = cache.pending_catalog_sources(1)?;
             if pending.is_empty() {
                 if !audit_pending {
-                    audit_pending = self.finish_audit(work, now)?;
+                    audit_pending = self.finish_audit(work, now, &mut before_build)?;
                 }
                 work.pending_sources = audit_pending;
                 return Ok(!audit_pending);
@@ -745,14 +768,15 @@ impl NativeEvidence {
                 }
             }
             if let Some(prepared) = self.prepare_catalog_component(cache, inputs, now)? {
-                match cache.publish_closed_catalog(&prepared)? {
-                    Some(crate::events::Outcome::Written) => {
+                match cache.publish_closed_catalog_fenced(&prepared)? {
+                    Some((crate::events::Outcome::Written, generation)) => {
                         crate::events::store::requeue_concurrent_sources(&self.options, &prepared)?;
                         cache.publish_session_descriptions();
                         cache.end_scan();
                         if controlled {
                             work.catalog_snapshot = Some(snapshot);
                         }
+                        work.observed_catalog_generation = generation;
                         cache.release_published_indexes();
                         let sources_pending = !cache.pending_catalog_sources(1)?.is_empty();
                         if controlled && !sources_pending {
@@ -767,7 +791,7 @@ impl NativeEvidence {
                         }
                         work.texts.release_published_derivations();
                         if !controlled && !audit_pending && !sources_pending {
-                            audit_pending = self.finish_audit(work, now)?;
+                            audit_pending = self.finish_audit(work, now, &mut before_build)?;
                         }
                         work.pending_sources = audit_pending || sources_pending;
                         return Ok(!work.pending_sources);
@@ -826,8 +850,8 @@ impl NativeEvidence {
                 started = true;
                 let prepared = self.prepare_catalog_component(cache, inputs, now)?;
                 if let Some(prepared) = prepared {
-                    match cache.publish_closed_catalog(&prepared)? {
-                        Some(crate::events::Outcome::Written) => {
+                    match cache.publish_closed_catalog_fenced(&prepared)? {
+                        Some((crate::events::Outcome::Written, generation)) => {
                             crate::events::store::requeue_concurrent_sources(
                                 &self.options,
                                 &prepared,
@@ -835,6 +859,7 @@ impl NativeEvidence {
                             cache.publish_session_descriptions();
                             cache.end_scan();
                             work.catalog_snapshot = Some(snapshot);
+                            work.observed_catalog_generation = generation;
                             cache.release_published_indexes();
                             work.texts.release_published_derivations();
                             work.pending_sources = !cache.pending_catalog_sources(1)?.is_empty();
@@ -902,6 +927,7 @@ impl NativeEvidence {
                     );
                 }
                 work.catalog_snapshot = Some(snapshot);
+                work.observed_catalog_generation = Some(generation);
                 return Ok(true);
             }
             CatalogPreparation::Reconcile => {}
@@ -914,8 +940,13 @@ impl NativeEvidence {
             scan_window: false,
             ..self.options.clone()
         };
-        let pids =
-            model::observe_catalog(&catalog_options, cache, &mut false, &mut work.texts, now)?;
+        let (pids, generation) = model::observe_catalog_fenced(
+            &catalog_options,
+            cache,
+            &mut false,
+            &mut work.texts,
+            now,
+        )?;
         if self.options.facts.is_none() {
             snapshot.pids = pids
                 .iter()
@@ -923,6 +954,7 @@ impl NativeEvidence {
                 .collect();
         }
         work.catalog_snapshot = Some(snapshot);
+        work.observed_catalog_generation = generation;
         cache.release_published_indexes();
         work.texts.release_published_derivations();
         Ok(true)
@@ -1014,6 +1046,8 @@ pub(crate) struct Work {
     pub(crate) events: Option<EventCache>,
     pub(crate) texts: Texts,
     pub(crate) catalog_snapshot: Option<Snapshot>,
+    /// This owner's acknowledged shared publication, never a completeness proof.
+    observed_catalog_generation: Option<String>,
     cold_catalog: Option<ColdCatalog>,
     pending_sources: bool,
     audit: Option<CatalogAudit>,
@@ -1663,6 +1697,240 @@ mod catalog_owner_tests {
         fs::create_dir_all(hostname.parent().unwrap()).unwrap();
         fs::write(hostname, "initial-host\n").unwrap();
         (root, options, input)
+    }
+
+    fn drain_catalog(evidence: &NativeEvidence, builds: &std::cell::Cell<u64>) {
+        let mut work = lock(&evidence.work);
+        for _ in 0..16 {
+            if evidence
+                .refresh_catalog_with(&mut work, model::now_ms(), || {
+                    builds.set(builds.get() + 1);
+                    Ok(())
+                })
+                .unwrap()
+            {
+                return;
+            }
+        }
+        panic!("bounded fixture observation did not finish");
+    }
+
+    fn append_audit_record(options: &Options, input: &crate::Input) {
+        use std::io::Write;
+
+        let mut file = fs::OpenOptions::new()
+            .append(true)
+            .open(input.full_path(options))
+            .unwrap();
+        writeln!(file, "{{\"type\":\"event_msg\",\"timestamp\":\"2026-10-01T00:01:00Z\",\"payload\":{{\"type\":\"user_message\",\"message\":\"shared publication\"}}}}").unwrap();
+    }
+
+    #[test]
+    fn a_shared_publication_notifies_a_peer_without_rebuilding_history() {
+        let (root, options, input) = audit_fixture();
+        let first = NativeEvidence::new(options.clone());
+        let second = NativeEvidence::new(options.clone());
+        let builds = std::cell::Cell::new(0);
+        drain_catalog(&first, &builds);
+        drain_catalog(&second, &builds);
+        let initial = lock(&second.work).observed_catalog_generation.clone();
+
+        append_audit_record(&options, &input);
+        first.request_metadata_audit();
+        second.request_metadata_audit();
+        drain_catalog(&first, &builds);
+        let published = lock(&first.work).observed_catalog_generation.clone();
+        assert!(initial != published, "append did not advance publication");
+        builds.set(0);
+        let counts = || {
+            (
+                crate::events::FILE_READS.with(std::cell::Cell::get),
+                crate::events::PARSED.with(std::cell::Cell::get),
+                crate::events::CATALOG_DERIVED_SOURCES.with(std::cell::Cell::get),
+                crate::events::CATALOG_PUBLISHED_ROWS.with(std::cell::Cell::get),
+            )
+        };
+        let before = counts();
+        {
+            let mut work = lock(&second.work);
+            let mut failed = false;
+            for _ in 0..16 {
+                match second.refresh_catalog_with(&mut work, model::now_ms(), || {
+                    Err(io::Error::new(
+                        io::ErrorKind::Interrupted,
+                        "notification retry",
+                    ))
+                }) {
+                    Err(error) => {
+                        assert_eq!(error.kind(), io::ErrorKind::Interrupted);
+                        failed = true;
+                        break;
+                    }
+                    Ok(complete) => assert!(!complete, "peer notification was skipped"),
+                }
+            }
+            assert!(failed, "peer notification did not reach its callback");
+            assert!(work.audit.is_some(), "failed callback consumed the audit");
+            assert_eq!(work.observed_catalog_generation, initial);
+        }
+        drain_catalog(&second, &builds);
+        assert_eq!(builds.get(), 1, "peer publication lost its observation");
+        assert_eq!(counts(), before, "peer observation rebuilt shared history");
+        let log = input.full_path(&options);
+        {
+            let work = lock(&second.work);
+            assert_eq!(work.observed_catalog_generation, published);
+            assert!(!second.catalog_pending(&work));
+            assert!(
+                work.catalog_snapshot
+                    .as_ref()
+                    .is_some_and(|snapshot| snapshot.watched.get(&log) == Some(&stamp(&log)))
+            );
+        }
+        second.request_metadata_audit();
+        drain_catalog(&second, &builds);
+        assert_eq!(builds.get(), 1, "idle audit repeated peer notification");
+        assert_eq!(counts(), before, "idle peer observation rebuilt history");
+        drop(first);
+        drop(second);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn peer_advance_after_own_publication_is_observed_in_the_same_audit() {
+        let (root, options, input) = audit_fixture();
+        let first = NativeEvidence::new(options.clone());
+        let second = NativeEvidence::new(options.clone());
+        let builds = std::cell::Cell::new(0);
+        drain_catalog(&first, &builds);
+        drain_catalog(&second, &builds);
+        builds.set(0);
+        second.request_metadata_audit();
+        {
+            let mut work = lock(&second.work);
+            assert!(
+                !second
+                    .refresh_catalog_with(&mut work, model::now_ms(), || {
+                        builds.set(builds.get() + 1);
+                        Ok(())
+                    })
+                    .unwrap()
+            );
+            work.audit.as_mut().unwrap().after.clear();
+        }
+        append_audit_record(&options, &input);
+        {
+            let mut work = lock(&second.work);
+            assert!(
+                !second
+                    .refresh_catalog_with(&mut work, model::now_ms(), || {
+                        builds.set(builds.get() + 1);
+                        Ok(())
+                    })
+                    .unwrap()
+            );
+            assert!(work.audit.as_ref().is_some_and(|audit| audit.started));
+        }
+        assert_eq!(builds.get(), 1);
+        append_audit_record(&options, &input);
+        first.request_metadata_audit();
+        drain_catalog(&first, &std::cell::Cell::new(0));
+        let parsed = crate::events::PARSED.with(std::cell::Cell::get);
+        drain_catalog(&second, &builds);
+        assert_eq!(
+            builds.get(),
+            2,
+            "own work suppressed a later peer generation"
+        );
+        assert_eq!(crate::events::PARSED.with(std::cell::Cell::get), parsed);
+        second.request_metadata_audit();
+        drain_catalog(&second, &builds);
+        assert_eq!(builds.get(), 2, "peer generation notified twice");
+        drop(first);
+        drop(second);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn peer_commit_before_own_acknowledgement_does_not_get_acknowledged_silently() {
+        let (root, options, input) = audit_fixture();
+        let peer_input = crate::Input {
+            root: crate::InputRoot::Codex,
+            path: "sessions/2026/10/01/rollout-peer.jsonl".into(),
+        };
+        fs::write(peer_input.full_path(&options), "{\"type\":\"session_meta\",\"timestamp\":\"2026-10-01T00:00:00Z\",\"payload\":{\"id\":\"peer\"}}\n").unwrap();
+        let first = NativeEvidence::new(options.clone());
+        let second = NativeEvidence::new(options.clone());
+        let builds = std::cell::Cell::new(0);
+        drain_catalog(&first, &builds);
+        drain_catalog(&second, &builds);
+        builds.set(0);
+        second.request_metadata_audit();
+        {
+            let mut work = lock(&second.work);
+            assert!(
+                !second
+                    .refresh_catalog_with(&mut work, model::now_ms(), || {
+                        builds.set(builds.get() + 1);
+                        Ok(())
+                    })
+                    .unwrap()
+            );
+            work.audit.as_mut().unwrap().after.clear();
+        }
+        append_audit_record(&options, &input);
+        let peer_generation = std::rc::Rc::new(std::cell::RefCell::new(None));
+        let published = std::rc::Rc::clone(&peer_generation);
+        let peer = Arc::clone(&first);
+        let peer_options = options.clone();
+        crate::events::AFTER_CATALOG_PUBLICATION.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                // The first transaction has committed, but its caller has not
+                // yet acknowledged that generation. Publish through a peer in
+                // exactly the gap where a free-standing getter loses notice.
+                append_audit_record(&peer_options, &peer_input);
+                peer.request_metadata_audit();
+                drain_catalog(&peer, &std::cell::Cell::new(0));
+                *published.borrow_mut() = lock(&peer.work).observed_catalog_generation.clone();
+            }));
+        });
+        {
+            let mut work = lock(&second.work);
+            assert!(
+                !second
+                    .refresh_catalog_with(&mut work, model::now_ms(), || {
+                        builds.set(builds.get() + 1);
+                        Ok(())
+                    })
+                    .unwrap()
+            );
+            let foreign = peer_generation.borrow();
+            assert!(foreign.is_some(), "commit-gap hook did not publish");
+            assert_ne!(
+                &work.observed_catalog_generation, &*foreign,
+                "own transaction acknowledged the intervening peer generation"
+            );
+            assert_eq!(
+                work.events.as_ref().unwrap().session_catalog_generation(),
+                *foreign,
+                "fixture did not advance the shared Catalog inside the gap"
+            );
+        }
+        assert_eq!(builds.get(), 1);
+        let parsed = crate::events::PARSED.with(std::cell::Cell::get);
+        drain_catalog(&second, &builds);
+        assert_eq!(builds.get(), 2, "intervening peer commit lost its notice");
+        assert_eq!(crate::events::PARSED.with(std::cell::Cell::get), parsed);
+        assert_eq!(
+            lock(&second.work).observed_catalog_generation,
+            *peer_generation.borrow()
+        );
+        second.request_metadata_audit();
+        drain_catalog(&second, &builds);
+        assert_eq!(builds.get(), 2, "intervening peer commit notified twice");
+        drop(first);
+        drop(second);
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

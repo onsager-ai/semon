@@ -2027,12 +2027,12 @@ impl IndexStore for SqliteStore {
             .map_err(failure)
     }
 
-    fn publish_session_catalog(
+    fn publish_session_catalog_fenced(
         &mut self,
         publication: &crate::slot_projection::Publication<'_>,
         expected_generation: Option<&str>,
-    ) -> Result<Outcome, StoreError> {
-        self.publish_catalog(publication, expected_generation, None, false)
+    ) -> Result<(Outcome, Option<String>), StoreError> {
+        self.publish_catalog_with_generation(publication, expected_generation, None, false)
     }
 
     fn session_slots(
@@ -2124,16 +2124,16 @@ impl IndexStore for SqliteStore {
         self.publish_catalog_with_generation(publication, expected_generation, Some(claims), false)
     }
 
-    fn publish_closed_catalog(
+    fn publish_closed_catalog_fenced(
         &mut self,
         publication: &crate::slot_projection::Publication<'_>,
         expected_generation: Option<&str>,
         claims: &[(String, Option<i64>)],
-    ) -> Result<Option<Outcome>, StoreError> {
+    ) -> Result<Option<(Outcome, Option<String>)>, StoreError> {
         if !closed_catalog(&self.connection, publication, claims).map_err(failure)? {
             return Ok(None);
         }
-        self.publish_catalog(publication, expected_generation, Some(claims), true)
+        self.publish_catalog_with_generation(publication, expected_generation, Some(claims), true)
             .map(Some)
     }
 
@@ -2767,22 +2767,6 @@ fn closed_catalog(
 }
 
 impl SqliteStore {
-    fn publish_catalog(
-        &mut self,
-        publication: &crate::slot_projection::Publication<'_>,
-        expected_generation: Option<&str>,
-        claims: Option<&[(String, Option<i64>)]>,
-        preserve_complete: bool,
-    ) -> Result<Outcome, StoreError> {
-        self.publish_catalog_with_generation(
-            publication,
-            expected_generation,
-            claims,
-            preserve_complete,
-        )
-        .map(|(outcome, _)| outcome)
-    }
-
     fn publish_catalog_with_generation(
         &mut self,
         publication: &crate::slot_projection::Publication<'_>,
