@@ -339,6 +339,19 @@ export default async function (browser) {
             rect.right <= innerWidth
           );
         };
+        const buttonRect = (node) => {
+          const rect = node?.querySelector(':scope > button')?.getBoundingClientRect();
+          return rect
+            ? {
+                top: rect.top,
+                bottom: rect.bottom,
+                left: rect.left,
+                right: rect.right,
+                width: rect.width,
+                height: rect.height,
+              }
+            : null;
+        };
         return {
           title: label?.textContent ?? null,
           finished: !!step && !step.classList.contains('live'),
@@ -347,6 +360,10 @@ export default async function (browser) {
           neighbor: neighbor?.querySelector('.sa')?.textContent ?? null,
           neighborVerb: neighbor?.querySelector('.sv')?.textContent ?? null,
           bothVisible: onScreen(step) && onScreen(neighbor),
+          selectedButtonRect: buttonRect(step),
+          neighborButtonRect: buttonRect(neighbor),
+          viewport: { width: innerWidth, height: innerHeight },
+          scrollY,
         };
       }, shotTitle);
       r.expect(
