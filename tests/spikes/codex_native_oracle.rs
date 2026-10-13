@@ -8,9 +8,10 @@ use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, bail, ensure};
+use codex_protocol::items::TurnItem;
 use codex_rollout_trace::{
-    RawPayloadKind, RawTraceEventContext, RawTraceEventPayload, ToolCallKind, ToolCallSummary,
-    TraceWriter, replay_bundle,
+    ConversationItemKind, RawPayloadKind, RawTraceEventContext, RawTraceEventPayload, ToolCallKind,
+    ToolCallRequester, ToolCallSummary, TraceWriter, replay_bundle,
 };
 use serde_json::{Value, json};
 
@@ -73,6 +74,7 @@ fn main() -> anyhow::Result<()> {
     drop(writer);
 
     let rollout = replay_bundle(&bundle_dir).context("replay synthetic trace bundle")?;
+    validate_reduced_associations(&rollout)?;
     let actual = normalize_reducer_graph(&rollout)?;
     let expected = manifest["expected_upstream_reducer"].clone();
     ensure!(
@@ -222,7 +224,7 @@ fn validate_fixture_pairing(
         "outer output must print the new 95583 result followed by a completed poll without a session id"
     );
 
-    let paginated_command = paginated_rows
+    let paginated_command_item = paginated_rows
         .iter()
         .find(|row| {
             row["type"].as_str() == Some("event_msg")
@@ -230,16 +232,34 @@ fn validate_fixture_pairing(
                 && row["payload"]["item"]["type"].as_str() == Some("CommandExecution")
         })
         .context("Paginated fixture has no completed CommandExecution")?;
+    let paginated_item: TurnItem =
+        serde_json::from_value(paginated_command_item["payload"]["item"].clone())
+            .context("deserialize Paginated item through pinned public TurnItem")?;
+    let TurnItem::CommandExecution(paginated_command) = paginated_item else {
+        bail!("Paginated fixture item did not deserialize as CommandExecution")
+    };
     ensure!(
-        paginated_command["payload"]["item"]["process_id"].as_str() == Some("95583"),
-        "Paginated CommandExecution must carry only the qualified new-process evidence"
+        serde_json::to_value(&paginated_command.source)? == json!("unified_exec_startup"),
+        "Paginated CommandExecution source must deserialize as the pinned public unified-exec startup variant"
     );
 
     let scenario = &manifest["paired_default_and_trace_scenario"];
     ensure!(
         required_string(scenario, "direct_start_call_id")? == DIRECT_CALL_ID
             && required_string(scenario, "outer_cell_call_id")? == OUTER_CALL_ID
-            && required_string(scenario, "outer_cell_source")? == OUTER_SOURCE,
+            && required_string(scenario, "outer_cell_source")? == OUTER_SOURCE
+            && scenario["synthetic_shell_environment"]["shell"].as_str() == Some("/bin/sh")
+            && scenario["synthetic_shell_environment"]["login"].as_bool() == Some(false)
+            && scenario["synthetic_shell_environment"]["direct_process_source"]
+                == json!("unified_exec_startup")
+            && scenario["synthetic_shell_environment"]["nested_process_source"]
+                == json!("unified_exec_startup")
+            && scenario["synthetic_shell_environment"]["poll_process_source"]
+                == json!("unified_exec_interaction")
+            && scenario["synthetic_shell_environment"]["direct_process_command"]
+                == json!(["/bin/sh", "-c", "printf old"])
+            && scenario["synthetic_shell_environment"]["nested_process_command"]
+                == json!(["/bin/sh", "-c", "printf new"]),
         "manifest scenario does not match the paired default rollout fixture"
     );
 
@@ -287,7 +307,9 @@ fn validate_fixture_pairing(
     let direct_runtime = payload_data_value(direct_end, "runtime_payload")?;
     ensure!(
         direct_runtime["process_id"].as_str() == Some("26789")
-            && direct_runtime["command"] == json!(["printf", "old"]),
+            && direct_runtime["source"].as_str() == Some("unified_exec_startup")
+            && direct_runtime["command"] == json!(["/bin/sh", "-c", "printf old"])
+            && direct_runtime["exit_code"].as_i64() == Some(0),
         "direct trace operation must start process 26789 with the paired command"
     );
 
@@ -329,8 +351,30 @@ fn validate_fixture_pairing(
     let new_runtime = payload_data_value(new_end, "runtime_payload")?;
     ensure!(
         new_runtime["process_id"].as_str() == Some("95583")
-            && new_runtime["command"] == json!(["printf", "new"]),
+            && new_runtime["source"].as_str() == Some("unified_exec_startup")
+            && new_runtime["command"] == json!(["/bin/sh", "-c", "printf new"])
+            && new_runtime["aggregated_output"].as_str() == Some("new")
+            && new_runtime["exit_code"].as_i64() == Some(0),
         "the outer-cell exec operation must create process 95583"
+    );
+    let new_process_id = new_result["session_id"]
+        .as_u64()
+        .context("printed new-process result has no process ID")?
+        .to_string();
+    ensure!(
+        new_result["output"].as_str() == Some("new")
+            && paginated_command.process_id.as_deref() == Some(new_process_id.as_str())
+            && paginated_command.command
+                == vec![
+                    "/bin/sh".to_owned(),
+                    "-c".to_owned(),
+                    "printf new".to_owned()
+                ]
+            && paginated_command.aggregated_output.as_deref() == new_result["output"].as_str()
+            && new_runtime["command"] == json!(paginated_command.command)
+            && new_runtime["aggregated_output"].as_str()
+                == paginated_command.aggregated_output.as_deref(),
+        "Paginated CommandExecution process, command, and output must match the paired runtime and printed result"
     );
     let poll_end = trace_event(
         trace_events,
@@ -341,6 +385,8 @@ fn validate_fixture_pairing(
     let poll_runtime = payload_data_value(poll_end, "runtime_payload")?;
     ensure!(
         poll_runtime["process_id"].as_str() == Some("26789")
+            && poll_runtime["source"].as_str() == Some("unified_exec_interaction")
+            && poll_runtime["command"] == json!(["/bin/sh", "-c", "printf old"])
             && poll_runtime["interaction_input"].as_str() == Some("")
             && poll_runtime.get("exit_code").and_then(Value::as_i64) == Some(0),
         "the outer-cell poll must complete old process 26789"
@@ -371,6 +417,113 @@ fn response_item<'a>(
         })
         .map(|row| &row["payload"])
         .with_context(|| format!("missing {item_type} call_id {call_id}"))
+}
+
+fn validate_reduced_associations(
+    rollout: &codex_rollout_trace::RolloutTrace,
+) -> anyhow::Result<()> {
+    let cell = rollout
+        .code_cells
+        .values()
+        .find(|cell| cell.model_visible_call_id == OUTER_CALL_ID)
+        .context("reduced code cell does not reference the outer model-visible call")?;
+    ensure!(
+        cell.source_js == OUTER_SOURCE,
+        "reduced code-cell source differs from the paired outer call"
+    );
+
+    let source_item = rollout
+        .conversation_items
+        .get(&cell.source_item_id)
+        .context("reduced code-cell source_item_id does not resolve")?;
+    ensure!(
+        source_item.item_id == cell.source_item_id
+            && matches!(&source_item.kind, ConversationItemKind::CustomToolCall)
+            && source_item.call_id.as_deref() == Some(OUTER_CALL_ID),
+        "reduced source_item_id must resolve to the exact outer custom_tool_call"
+    );
+
+    ensure!(
+        cell.output_item_ids.len() == 1,
+        "reduced code cell must link exactly one outer output item"
+    );
+    let output_item_id = &cell.output_item_ids[0];
+    let output_item = rollout
+        .conversation_items
+        .get(output_item_id)
+        .context("reduced code-cell output_item_id does not resolve")?;
+    ensure!(
+        output_item.item_id == *output_item_id
+            && matches!(
+                &output_item.kind,
+                ConversationItemKind::CustomToolCallOutput
+            )
+            && output_item.call_id.as_deref() == Some(OUTER_CALL_ID),
+        "reduced output_item_id must resolve to the exact outer custom_tool_call_output"
+    );
+
+    ensure!(
+        cell.nested_tool_call_ids == vec!["tool-new".to_owned(), "tool-poll".to_owned()],
+        "reduced code cell does not contain the expected nested calls"
+    );
+    for nested_tool_id in &cell.nested_tool_call_ids {
+        let nested_tool = rollout.tool_calls.get(nested_tool_id).with_context(|| {
+            format!("reduced nested tool call {nested_tool_id} does not resolve")
+        })?;
+        ensure!(
+            matches!(
+                &nested_tool.requester,
+                ToolCallRequester::CodeCell { code_cell_id }
+                    if code_cell_id == &cell.code_cell_id
+            ),
+            "nested tool call {nested_tool_id} requester does not reference the reduced code-cell ID"
+        );
+    }
+
+    let direct_tool = rollout
+        .tool_calls
+        .values()
+        .find(|tool| tool.model_visible_call_id.as_deref() == Some(DIRECT_CALL_ID))
+        .context("reduced rollout has no direct tool for start-26789")?;
+    ensure!(
+        matches!(&direct_tool.requester, ToolCallRequester::Model),
+        "start-26789 must remain a direct model-requested tool"
+    );
+    ensure!(
+        direct_tool.model_visible_call_item_ids.len() == 1,
+        "direct tool must link exactly one model-visible call item"
+    );
+    let direct_call_item_id = &direct_tool.model_visible_call_item_ids[0];
+    let direct_call_item = rollout
+        .conversation_items
+        .get(direct_call_item_id)
+        .context("direct tool call-item association does not resolve")?;
+    ensure!(
+        direct_call_item.item_id == *direct_call_item_id
+            && matches!(&direct_call_item.kind, ConversationItemKind::FunctionCall)
+            && direct_call_item.call_id.as_deref() == Some(DIRECT_CALL_ID),
+        "direct tool call-item association must resolve to start-26789"
+    );
+
+    ensure!(
+        direct_tool.model_visible_output_item_ids.len() == 1,
+        "direct tool must link exactly one model-visible output item"
+    );
+    let direct_output_item_id = &direct_tool.model_visible_output_item_ids[0];
+    let direct_output_item = rollout
+        .conversation_items
+        .get(direct_output_item_id)
+        .context("direct tool output-item association does not resolve")?;
+    ensure!(
+        direct_output_item.item_id == *direct_output_item_id
+            && matches!(
+                &direct_output_item.kind,
+                ConversationItemKind::FunctionCallOutput
+            )
+            && direct_output_item.call_id.as_deref() == Some(DIRECT_CALL_ID),
+        "direct tool output-item association must resolve to start-26789"
+    );
+    Ok(())
 }
 
 fn text_parts(output: &Value) -> anyhow::Result<Vec<&str>> {

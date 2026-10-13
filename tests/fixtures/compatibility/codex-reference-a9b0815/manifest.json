@@ -18,6 +18,15 @@
     "direct_start_process_id": "26789",
     "outer_cell_call_id": "multi-output",
     "outer_cell_source": "text(await tools.exec_command({cmd:\"printf new\"})); text(await tools.write_stdin({session_id:26789,chars:\"\"}));",
+    "synthetic_shell_environment": {
+      "shell": "/bin/sh",
+      "login": false,
+      "direct_process_source": "unified_exec_startup",
+      "nested_process_source": "unified_exec_startup",
+      "poll_process_source": "unified_exec_interaction",
+      "direct_process_command": ["/bin/sh", "-c", "printf old"],
+      "nested_process_command": ["/bin/sh", "-c", "printf new"]
+    },
     "outer_output_entries": ["success_header", "new_95583_json", "completed_poll_json_without_session_id"],
     "runtime_nested_tool_ids": ["tool-new", "tool-poll"]
   },
