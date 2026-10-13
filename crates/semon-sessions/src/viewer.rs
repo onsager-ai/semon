@@ -6613,16 +6613,17 @@ mod tests {
             assert_eq!(pool.running(), 1);
             drop(release);
             // Full observation deliberately scales with discovered history;
-            // it is not the foreground response deadline. Keep the existing
-            // ten-second hang guard against lack of durable indexing or final
-            // publication progress, then require the actual worker to drain.
+            // it is not the foreground response deadline. Final publication is
+            // atomic, so its intermediate work is not durable progress visible
+            // to this reader. Require completion and actual worker cleanup
+            // before the existing production stalled-worker boundary instead.
             let background = Instant::now();
             let connection =
                 rusqlite::Connection::open(EventCache::path(&fixture.options.cache)).unwrap();
             let mut observed: i64 = connection
                 .query_row("SELECT COUNT(*) FROM files", [], |row| row.get(0))
                 .unwrap();
-            let mut progress_deadline = Instant::now() + Duration::from_secs(10);
+            let deadline = background + STALLED_AFTER;
             loop {
                 assert!(pool.threads() <= 1);
                 assert!(pool.entries_for(&view) <= 1);
@@ -6635,7 +6636,6 @@ mod tests {
                 );
                 if indexed > observed {
                     observed = indexed;
-                    progress_deadline = Instant::now() + Duration::from_secs(10);
                 }
                 let page = crate::session_catalog_page(&fixture.options, "fixture", "limit=60");
                 let body: Value = serde_json::from_slice(&page.body).unwrap();
@@ -6646,8 +6646,8 @@ mod tests {
                     break;
                 }
                 assert!(
-                    Instant::now() < progress_deadline,
-                    "cold Catalog made no durable or publication progress within 10 s: indexed={observed}, running={}",
+                    Instant::now() < deadline,
+                    "cold Catalog did not complete before the production stall boundary {STALLED_AFTER:?}: indexed={observed}, running={}",
                     pool.running()
                 );
                 thread::sleep(Duration::from_millis(20));

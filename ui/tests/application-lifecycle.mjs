@@ -263,6 +263,17 @@ for (const width of [390, 1280])
                   machinesPath: '/manage/machines',
                   nativePage:
                     mode === 'native' ? { title: 'Workspace', nav: 'machines' } : undefined,
+                  navigation: {
+                    leading: [
+                      {
+                        key: 'new-session',
+                        label: 'New Session',
+                        icon: 'plus',
+                        href: '/sessions/new?return_to=%2Fsessions',
+                        current: false,
+                      },
+                    ],
+                  },
                   initialMachines: {
                     element: document.createElement('div'),
                     destroy() {
@@ -298,6 +309,11 @@ for (const width of [390, 1280])
                   document.querySelector('#nav [data-go="machines"]')?.getAttribute('href') ===
                     '/manage/machines',
                   'native host Machines path was lost',
+                );
+                assert(
+                  document.querySelector('#nav [data-go="new-session"]')?.getAttribute('href') ===
+                    '/sessions/new?return_to=%2Fsessions',
+                  'shared chrome overwrote the native host return destination',
                 );
                 assert(
                   document.querySelector('#lanes .srow') && requests === before + 1,
