@@ -185,16 +185,17 @@ Parser-version rebuilding
 clears this rebuildable work together with derived views, preserving observed
 reports. Additive schema migration preserves the committed catalog.
 
-This is a durable observation foundation, not yet a bounded partial-refresh
-scheduler. Stat/source-access checks remain required for reads: unobserved
+The journal is now consumed by the
+[bounded native Catalog producer](scoped-catalog-producer.md). Stat/source-access checks remain required for reads: unobserved
 external changes and native metadata changes cannot be inferred from an empty
 journal. Parent/child and native ownership indexes identify immediate context,
 but shared Claude usage records, resume bridges, spawn/relay peers and repository
 metadata can affect distant sessions. Partial publication must prove the entire
 affected dependency closure, including new links and removed sources, before
-acknowledging a claimed revision. Until that contract is implemented, coherent
-refresh still uses the full rebuild oracle; global discovery, joins and catalog
-generation work remain explicit scaling limitations. The journal does not grant
+acknowledging a claimed revision. Ordinary supported revisions now use scoped
+publication and generation CAS; initial ingestion and repair use checkpointed
+discovery and source batches. Connected semantic components exceeding 64 sources
+remain an unresolved resumability limit. The journal does not grant
 source authority or make cached runtime state current.
 
 ### Indexed copied-usage dependencies
@@ -217,9 +218,10 @@ An affected worker can join exact identities to peer file IDs, then resolve
 paths/native owners through the existing source-path index. A recursive closure
 must enforce an explicit result/work limit and surface overflow before partial
 publication; it cannot select an arbitrary owner or silently truncate shared
-usage context. The storage index removes one global join, but it does not yet
-schedule dirty recomputation or prove native bridge/spawn/relay/repository
-closure. Those remaining dependencies still require full-rebuild fallback.
+usage context. The storage index removes one global join. The current producer
+also consumes indexed native bridge/spawn/relay and repository dependencies;
+its scoped publication and remaining closure limits are documented in
+[the producer contract](scoped-catalog-producer.md).
 
 A helper-only SQLite 3.53.1 microbenchmark held three matching owners constant
 while adding 1,000 then 20,000 unrelated UUIDs under the same message ID. Each

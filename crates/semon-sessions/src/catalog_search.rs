@@ -129,9 +129,13 @@ pub(crate) fn publish_current_rows(
             transaction
                 .prepare_cached("INSERT INTO catalog_search_members VALUES(?1)")?
                 .execute([&row.key])?;
+        }
+        for scope in ["current", "retained_history"] {
+            remove_members(transaction, scope)?;
+        }
+        for row in rows {
             let (encoded, grams, complete) = prepared_fields(row)?;
             for scope in ["current", "retained_history"] {
-                remove_row(transaction, scope, &row.key)?;
                 insert_fields(transaction, scope, row, &encoded, &grams, complete, false)?;
             }
         }
@@ -141,6 +145,20 @@ pub(crate) fn publish_current_rows(
             transaction.prepare_cached("INSERT INTO session_search_counts(read_scope,gram,members) SELECT ?1,p.gram,COUNT(*) FROM catalog_search_members m CROSS JOIN session_search_postings p WHERE p.read_scope=?1 AND p.session_key=m.session_key GROUP BY p.gram ON CONFLICT(read_scope,gram) DO UPDATE SET members=members+excluded.members")?.execute([scope])?;
         }
     }
+    Ok(())
+}
+
+/// Remove only this cohort's old documents and postings. Aggregate shared gram
+/// decrements once, using source-key lookups rather than scanning all members of
+/// each gram. The temporary tables and count changes roll back with publication.
+fn remove_members(transaction: &Transaction<'_>, scope: &str) -> rusqlite::Result<()> {
+    transaction.execute_batch("CREATE TEMP TABLE IF NOT EXISTS catalog_search_removals(gram TEXT PRIMARY KEY,members INTEGER NOT NULL) WITHOUT ROWID; DELETE FROM catalog_search_removals;")?;
+    transaction.prepare_cached("INSERT INTO catalog_search_removals SELECT p.gram,COUNT(*) FROM catalog_search_members m CROSS JOIN session_search_postings p WHERE p.read_scope=?1 AND p.session_key=m.session_key GROUP BY p.gram")?.execute([scope])?;
+    transaction.prepare_cached("UPDATE session_search_counts SET members=members-(SELECT r.members FROM catalog_search_removals r WHERE r.gram=session_search_counts.gram) WHERE read_scope=?1 AND gram IN (SELECT gram FROM catalog_search_removals)")?.execute([scope])?;
+    transaction.prepare_cached("DELETE FROM session_search_counts WHERE read_scope=?1 AND members=0 AND gram IN (SELECT gram FROM catalog_search_removals)")?.execute([scope])?;
+    transaction.prepare_cached("UPDATE session_search_coverage SET incomplete=incomplete-(SELECT COUNT(*) FROM catalog_search_members m CROSS JOIN session_search_documents d WHERE d.read_scope=?1 AND d.session_key=m.session_key AND d.complete=0) WHERE read_scope=?1")?.execute([scope])?;
+    transaction.prepare_cached("DELETE FROM session_search_postings WHERE read_scope=?1 AND session_key IN (SELECT session_key FROM catalog_search_members)")?.execute([scope])?;
+    transaction.prepare_cached("DELETE FROM session_search_documents WHERE read_scope=?1 AND session_key IN (SELECT session_key FROM catalog_search_members)")?.execute([scope])?;
     Ok(())
 }
 
@@ -698,6 +716,64 @@ mod sqlite_tests {
             },
         )
         .unwrap()
+    }
+
+    #[test]
+    fn cohort_replacement_preserves_shared_counts_coverage_and_rollback() {
+        let mut reference = database();
+        let mut batched = database();
+        let rows = (0..130)
+            .map(|id| {
+                row(
+                    &format!("member-{id:03}"),
+                    if id % 3 == 0 {
+                        "shared rare"
+                    } else {
+                        "shared common"
+                    },
+                )
+            })
+            .chain([row("large", &"x".repeat(MAX_DOCUMENT_BYTES + 1))])
+            .collect::<Vec<_>>();
+        let replacements = rows
+            .iter()
+            .take(65)
+            .map(|old| row(&old.key, "replacement shared"))
+            .chain([
+                row("large", "now complete"),
+                row("member-129", &"x".repeat(MAX_DOCUMENT_BYTES + 1)),
+            ])
+            .collect::<Vec<_>>();
+        let snapshot = |connection: &Connection| {
+            [
+                "SELECT json_array(read_scope,session_key,gram,last_ms) FROM session_search_postings ORDER BY read_scope,session_key,gram",
+                "SELECT json_array(read_scope,gram,members) FROM session_search_counts ORDER BY read_scope,gram",
+                "SELECT json_array(read_scope,session_key,fields,complete) FROM session_search_documents ORDER BY read_scope,session_key",
+                "SELECT json_array(read_scope,incomplete) FROM session_search_coverage ORDER BY read_scope",
+            ]
+            .map(|sql| {
+                connection.prepare(sql).unwrap().query_map([], |row| row.get::<_, String>(0)).unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap()
+            })
+        };
+        for cohort in [&rows, &replacements] {
+            let before = snapshot(&batched);
+            {
+                let transaction = batched.transaction().unwrap();
+                publish_current_rows(&transaction, &cohort.iter().collect::<Vec<_>>()).unwrap();
+            }
+            assert_eq!(snapshot(&batched), before, "failed publication rolls back");
+            let transaction = reference.transaction().unwrap();
+            for row in cohort {
+                for scope in [CatalogReadScope::Current, CatalogReadScope::RetainedHistory] {
+                    publish_row(&transaction, scope, row).unwrap();
+                }
+            }
+            transaction.commit().unwrap();
+            let transaction = batched.transaction().unwrap();
+            publish_current_rows(&transaction, &cohort.iter().collect::<Vec<_>>()).unwrap();
+            transaction.commit().unwrap();
+            assert_eq!(snapshot(&batched), snapshot(&reference));
+        }
     }
 
     #[test]
