@@ -52,6 +52,9 @@ jobs:
       - name: Run source-generation selected-output expansion on the exact head
         run: cargo test --locked -p semon-sessions catalog::tests::selected_output_expansion_keeps_native_blocks_under_source_generation
 
+      - name: Run formatter cache-upgrade publication on the exact head
+        run: cargo test --locked -p semon-sessions model::tests::parser_cache_reset_rederives_direct_formatter_catalog_outcome
+
   upstream-reference:
     name: Pinned Codex reducer reference
     runs-on: ubuntu-latest
