@@ -75,7 +75,7 @@
     "reply_offsets": [25977, 26401],
     "expected_outcomes": ["ok", "unknown"],
     "native_direct_call": true,
-    "qualification": "The first call qualifies while its ID is unique. After that call closes, a second direct call reuses the same source ID; its otherwise valid formatter exit stays unknown because the ID no longer identifies exactly one source call."
+    "qualification": "Each output is qualified against source calls known at that point. The first call qualifies while its ID is unique. After a second direct call reuses that ID, later outputs stay unknown because the ID no longer identifies exactly one source call; this check does not retroactively change the earlier result."
   },
   "expected_blocks": [
     {
@@ -159,7 +159,7 @@
   "direct_formatter_contract": {
     "source": "codex-rs/core/src/tools/context.rs ExecCommandToolOutput::response_header at the pinned revision",
     "qualification": "byte-zero ordered optional Chunk ID, required finite nonnegative four-decimal Wall time, optional Process exited i32, optional Process running i32, optional Original token count usize, then Output",
-    "outcome": "Only function_call_output paired with one unique unnamespaced function_call named exactly exec_command or write_stdin may use a qualified formatter exit code; explicit or reused IDs and no exit stay unknown",
+    "outcome": "Only function_call_output paired with one unique unnamespaced function_call named exactly exec_command or write_stdin may use a qualified formatter exit code. Explicit namespaces and IDs reused by another source call at output qualification time stay unknown; the check is per output and does not retroactively change an earlier result qualified while unique. No exit stays unknown",
     "session_id": "retain its exact borrowed spelling as source evidence; it establishes neither outcome nor liveness or grouping",
     "header_limits": {"bytes":2048,"lines":8},
     "remaining_gaps": ["native terminal ID correlation/grouping", "unowned Paginated projection"]
