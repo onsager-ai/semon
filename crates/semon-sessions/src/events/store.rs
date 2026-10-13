@@ -23,6 +23,7 @@
 mod chunk_proofs;
 mod launch_calls;
 mod relocation;
+mod semantic_stage;
 
 use std::{
     collections::BTreeMap,
@@ -56,7 +57,7 @@ std::thread_local! {
 
 /// `PRAGMA user_version`: the shape of the tables. The parser's version is
 /// [`CACHE_VERSION`], kept in `meta`.
-const SCHEMA_VERSION: i64 = 24;
+const SCHEMA_VERSION: i64 = 25;
 
 /// How long a write waits for another process's transaction. Tests wait
 /// less, so the busy paths they drive stay quick.
@@ -305,7 +306,19 @@ DELETE FROM session_source_mutations;
 DELETE FROM catalog_backfill_sources;
 DELETE FROM catalog_relocation_candidates;
 DELETE FROM catalog_native_dependencies;
-DELETE FROM meta WHERE key IN ('catalog_backfill_state','catalog_recovery_reason','catalog_recovery_after','catalog_legacy_runtime_anchor','catalog_legacy_runtime_semantics');
+DELETE FROM catalog_semantic_stage;
+DELETE FROM catalog_semantic_frontier;
+DELETE FROM catalog_semantic_sources;
+DELETE FROM catalog_semantic_inputs;
+DELETE FROM catalog_semantic_keys;
+DELETE FROM catalog_semantic_endpoints;
+DELETE FROM catalog_semantic_native;
+DELETE FROM catalog_semantic_owner_sources;
+DELETE FROM catalog_semantic_paths;
+DELETE FROM catalog_semantic_relations;
+DELETE FROM catalog_semantic_events;
+DELETE FROM catalog_semantic_names;
+DELETE FROM meta WHERE key IN ('catalog_semantic_gc','catalog_backfill_state','catalog_recovery_reason','catalog_recovery_after','catalog_legacy_runtime_anchor','catalog_legacy_runtime_semantics');
 UPDATE session_catalog SET lifecycle='retained',metadata=CASE WHEN json_valid(metadata) THEN json_set(metadata,'$.lifecycle','retained') ELSE metadata END;
 UPDATE session_catalog_sources SET lifecycle='retained';
 DELETE FROM meta WHERE key IN ('catalog_version', 'catalog_generation', 'catalog_observed_at', 'catalog_completeness', 'catalog_publication_epoch');
@@ -448,7 +461,9 @@ pub(crate) fn catalog_work_pending(options: &crate::Options) -> io::Result<bool>
     connection
         .busy_timeout(Duration::from_millis(100))
         .map_err(io::Error::other)?;
-    connection.query_row("SELECT EXISTS(SELECT 1 FROM session_catalog_invalidations) OR EXISTS(SELECT 1 FROM meta WHERE key='catalog_backfill_state' AND value IN ('discovering','draining'))",[],|row|row.get(0)).map_err(io::Error::other)
+    let stages: bool = connection.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='catalog_semantic_stage')", [], |row| row.get(0)).map_err(io::Error::other)?;
+    let pending: bool = connection.query_row("SELECT EXISTS(SELECT 1 FROM session_catalog_invalidations) OR EXISTS(SELECT 1 FROM meta WHERE key='catalog_backfill_state' AND value IN ('discovering','draining')) OR EXISTS(SELECT 1 FROM meta WHERE key='catalog_semantic_gc' AND value='1')",[],|row|row.get(0)).map_err(io::Error::other)?;
+    Ok(pending || (stages && semantic_stage::active(&connection).map_err(io::Error::other)?))
 }
 
 /// Qualify a former Catalog source as a verified relocation of a current one.
@@ -474,7 +489,7 @@ pub(crate) fn note_catalog_audit(
             .map_err(|error| io::Error::other(error.to_string()))?;
     let tx = Transaction::new_unchecked(&store.connection, TransactionBehavior::Immediate)
         .map_err(io::Error::other)?;
-    let ready: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM meta WHERE key='catalog_generation' AND value=?1) AND NOT EXISTS(SELECT 1 FROM session_catalog_invalidations)", [expected], |r| r.get(0)).map_err(io::Error::other)?;
+    let ready: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM meta WHERE key='catalog_generation' AND value=?1) AND NOT EXISTS(SELECT 1 FROM session_catalog_invalidations) AND NOT EXISTS(SELECT 1 FROM catalog_semantic_stage)", [expected], |r| r.get(0)).map_err(io::Error::other)?;
     if ready {
         tx.execute(
             "INSERT OR REPLACE INTO meta(key,value) VALUES('catalog_observed_at',?1)",
@@ -2032,7 +2047,7 @@ impl IndexStore for SqliteStore {
         publication: &crate::slot_projection::Publication<'_>,
         expected_generation: Option<&str>,
     ) -> Result<(Outcome, Option<String>), StoreError> {
-        self.publish_catalog_with_generation(publication, expected_generation, None, false)
+        self.publish_catalog_with_generation(publication, expected_generation, None, false, None)
     }
 
     fn session_slots(
@@ -2115,13 +2130,71 @@ impl IndexStore for SqliteStore {
         result
     }
 
+    fn begin_semantic_stage(
+        &mut self,
+        paths: &[String],
+        runtime: &str,
+    ) -> Result<Outcome, StoreError> {
+        self.semantic_begin(paths, runtime)
+    }
+    fn semantic_batch(
+        &mut self,
+        limit: usize,
+    ) -> Result<Option<crate::model::relation_stage::Batch>, StoreError> {
+        self.semantic_next(limit)
+    }
+    fn record_semantic_batch(
+        &mut self,
+        batch: &crate::model::relation_stage::Batch,
+        prepared: &crate::model::PreparedSources,
+    ) -> Result<Outcome, StoreError> {
+        self.semantic_record(batch, prepared)
+    }
+    fn finish_semantic_stage(&mut self, epoch: i64) -> Result<Outcome, StoreError> {
+        self.semantic_finish(epoch)
+    }
+    fn semantic_select(
+        &mut self,
+        epoch: i64,
+        selector: &crate::model::relation_stage::Selector,
+    ) -> Result<crate::model::relation_stage::Selection, StoreError> {
+        self.semantic_selection(epoch, selector)
+    }
+    fn publish_semantic_catalog(
+        &mut self,
+        batch: &crate::model::relation_stage::Batch,
+        prepared: &crate::model::PreparedSources,
+    ) -> Result<(Outcome, Option<String>), StoreError> {
+        if batch.phase != crate::model::relation_stage::Phase::Publication
+            || batch.base_generation != prepared.base_generation
+        {
+            return Ok((Outcome::Conflict, None));
+        }
+        self.publish_catalog_with_generation(
+            &crate::slot_projection::Publication {
+                rows: &prepared.rows,
+                transcripts: Some(&prepared.transcripts),
+            },
+            batch.base_generation.as_deref(),
+            Some(&prepared.claims),
+            false,
+            Some(batch),
+        )
+    }
+
     fn publish_partial_catalog(
         &mut self,
         publication: &crate::slot_projection::Publication<'_>,
         expected_generation: Option<&str>,
         claims: &[(String, Option<i64>)],
     ) -> Result<(Outcome, Option<String>), StoreError> {
-        self.publish_catalog_with_generation(publication, expected_generation, Some(claims), false)
+        self.publish_catalog_with_generation(
+            publication,
+            expected_generation,
+            Some(claims),
+            false,
+            None,
+        )
     }
 
     fn publish_closed_catalog_fenced(
@@ -2133,8 +2206,14 @@ impl IndexStore for SqliteStore {
         if !closed_catalog(&self.connection, publication, claims).map_err(failure)? {
             return Ok(None);
         }
-        self.publish_catalog_with_generation(publication, expected_generation, Some(claims), true)
-            .map(Some)
+        self.publish_catalog_with_generation(
+            publication,
+            expected_generation,
+            Some(claims),
+            true,
+            None,
+        )
+        .map(Some)
     }
 
     fn catalog_component_paths(
@@ -2299,7 +2378,7 @@ impl IndexStore for SqliteStore {
             .map_err(failure)?;
         let pending: bool = tx
             .query_row(
-                "SELECT EXISTS(SELECT 1 FROM session_catalog_invalidations)",
+                "SELECT EXISTS(SELECT 1 FROM session_catalog_invalidations) OR EXISTS(SELECT 1 FROM catalog_semantic_stage)",
                 [],
                 |row| row.get(0),
             )
@@ -2323,6 +2402,9 @@ impl IndexStore for SqliteStore {
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(failure)?;
+        if semantic_stage::active(&tx).map_err(failure)? {
+            return Ok(Outcome::Conflict);
+        }
         let actual: Option<i64> = tx
             .query_row(
                 "SELECT revision FROM session_catalog_invalidations WHERE source_path=?1",
@@ -2399,7 +2481,7 @@ impl IndexStore for SqliteStore {
         }
         tx.commit().map_err(failure)?;
 
-        self.connection.query_row("SELECT (SELECT value FROM meta WHERE key='catalog_version')=?1 AND (SELECT value FROM meta WHERE key='catalog_completeness')='complete' AND (SELECT value FROM meta WHERE key='catalog_generation')=(SELECT value FROM meta WHERE key='slot_projection_catalog_generation')", [crate::model::summary::CATALOG_VERSION.to_string()], |row| row.get::<_,Option<bool>>(0)).map(|value| value.unwrap_or(false)).map_err(failure)
+        self.connection.query_row("SELECT (SELECT value FROM meta WHERE key='catalog_version')=?1 AND (SELECT value FROM meta WHERE key='catalog_completeness')='complete' AND NOT EXISTS(SELECT 1 FROM catalog_semantic_stage) AND (SELECT value FROM meta WHERE key='catalog_generation')=(SELECT value FROM meta WHERE key='slot_projection_catalog_generation')", [crate::model::summary::CATALOG_VERSION.to_string()], |row| row.get::<_,Option<bool>>(0)).map(|value| value.unwrap_or(false)).map_err(failure)
     }
 
     fn catalog_claims(&self, paths: &[String]) -> Result<Vec<(String, Option<i64>)>, StoreError> {
@@ -2790,6 +2872,7 @@ impl SqliteStore {
         expected_generation: Option<&str>,
         claims: Option<&[(String, Option<i64>)]>,
         preserve_complete: bool,
+        semantic: Option<&crate::model::relation_stage::Batch>,
     ) -> Result<(Outcome, Option<String>), StoreError> {
         let rows = publication.rows;
         let producer =
@@ -2845,6 +2928,13 @@ impl SqliteStore {
                 && !closed_catalog(&transaction, publication, claims.unwrap_or_default())
                     .map_err(failure)?
             {
+                return Ok(Outcome::Conflict);
+            }
+            if let Some(batch) = semantic {
+                if !semantic_stage::valid_batch(&transaction, batch).map_err(failure)? {
+                    return Ok(Outcome::Conflict);
+                }
+            } else if semantic_stage::active(&transaction).map_err(failure)? {
                 return Ok(Outcome::Conflict);
             }
             // Do not let a slow builder overwrite a newer complete catalog.
@@ -3278,21 +3368,27 @@ impl SqliteStore {
             // A complete publication validated every committed ledger and
             // source membership while holding the write transaction. Only now
             // can outstanding source observations be acknowledged atomically.
-            if let Some(claims) = claims {
-                for (path, revision) in claims {
-                    if let Some(revision) = revision {
-                        transaction.execute("DELETE FROM session_catalog_invalidations WHERE source_path=?1 AND revision=?2",params![path,revision]).map_err(failure)?;
+            if semantic.is_none() {
+                if let Some(claims) = claims {
+                    for (path, revision) in claims {
+                        if let Some(revision) = revision {
+                            transaction.execute("DELETE FROM session_catalog_invalidations WHERE source_path=?1 AND revision=?2",params![path,revision]).map_err(failure)?;
+                        }
+                    }
+                } else {
+                    transaction
+                        .execute("DELETE FROM session_catalog_invalidations", [])
+                        .map_err(failure)?;
+                }
+                if let Some(claims) = claims {
+                    for (path, _) in claims {
+                        relocation::acknowledge(&transaction, path).map_err(failure)?;
                     }
                 }
-            } else {
-                transaction
-                    .execute("DELETE FROM session_catalog_invalidations", [])
-                    .map_err(failure)?;
             }
-            if let Some(claims) = claims {
-                for (path, _) in claims {
-                    relocation::acknowledge(&transaction, path).map_err(failure)?;
-                }
+            if let Some(batch) = semantic {
+                semantic_stage::published(&transaction, batch, rows, &generation)
+                    .map_err(failure)?;
             }
             transaction
                 .execute(
@@ -3579,6 +3675,7 @@ impl SqliteStore {
                 )?;
             }
             transaction.execute("DELETE FROM files WHERE path = ?1", [path])?;
+            transaction.execute("DELETE FROM catalog_native_dependencies WHERE source_path=?1 AND harness IN ('semantic-native:codex','semantic-parent:codex')", [path])?;
             transaction.execute("DELETE FROM meta WHERE key=?1", [archive_index_key(path)])?;
             transaction.execute("DELETE FROM meta WHERE key=?1", [codex_header_key(path)])?;
             transaction.execute("DELETE FROM meta WHERE key=?1", [claude_sidecar_key(path)])?;
@@ -3832,6 +3929,7 @@ fn init(connection: &mut Connection) -> rusqlite::Result<Init> {
             )?;
         }
         transaction.execute_batch(SCHEMA)?;
+        transaction.execute_batch(semantic_stage::SCHEMA)?;
         transaction.execute_batch(crate::overview::SCHEMA)?;
         transaction.execute_batch(crate::causal_trace::SCHEMA)?;
         transaction.execute_batch(crate::history_projection::SCHEMA)?;
@@ -4978,6 +5076,19 @@ fn write_index_changes(
         )?;
     }
 
+    transaction.execute("DELETE FROM catalog_native_dependencies WHERE source_path=?1 AND harness IN ('semantic-native:codex','semantic-parent:codex')", [path])?;
+    if let Some(header) = &index.codex_header {
+        if let Some(id) = header.native_id(Path::new(path)) {
+            transaction.execute("INSERT OR IGNORE INTO catalog_native_dependencies VALUES(?1,'semantic-native:codex',?2)", params![path,id])?;
+        }
+        let metadata =
+            serde_json::to_value(&header.metadata).map_err(|_| rusqlite::Error::InvalidQuery)?;
+        if metadata.get("guardian_review").and_then(Value::as_bool) != Some(true) {
+            if let Some(parent) = metadata.get("parent_thread").and_then(Value::as_str) {
+                transaction.execute("INSERT OR IGNORE INTO catalog_native_dependencies VALUES(?1,'semantic-parent:codex',?2)", params![path,parent])?;
+            }
+        }
+    }
     transaction.execute("DELETE FROM meta WHERE key=?1", [archive_index_key(path)])?;
     invalidate_catalog_source(transaction, path, "changed")?;
     transaction.execute(

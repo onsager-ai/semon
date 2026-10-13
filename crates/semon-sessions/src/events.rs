@@ -1035,6 +1035,51 @@ pub(crate) trait IndexStore: Send {
         native_parents: &[(String, String)],
     ) -> Result<Option<Vec<String>>, StoreError>;
 
+    fn begin_semantic_stage(
+        &mut self,
+        paths: &[String],
+        runtime: &str,
+    ) -> Result<Outcome, StoreError> {
+        let _ = (paths, runtime);
+        Err(StoreError::Data("semantic staging unavailable".into()))
+    }
+    fn semantic_batch(
+        &mut self,
+        limit: usize,
+    ) -> Result<Option<crate::model::relation_stage::Batch>, StoreError> {
+        let _ = limit;
+        Err(StoreError::Data("semantic staging unavailable".into()))
+    }
+    fn record_semantic_batch(
+        &mut self,
+        batch: &crate::model::relation_stage::Batch,
+        prepared: &crate::model::PreparedSources,
+    ) -> Result<Outcome, StoreError> {
+        let _ = (batch, prepared);
+        Err(StoreError::Data("semantic staging unavailable".into()))
+    }
+    fn publish_semantic_catalog(
+        &mut self,
+        batch: &crate::model::relation_stage::Batch,
+        prepared: &crate::model::PreparedSources,
+    ) -> Result<(Outcome, Option<String>), StoreError> {
+        let _ = (batch, prepared);
+        Err(StoreError::Data("semantic staging unavailable".into()))
+    }
+    fn finish_semantic_stage(&mut self, epoch: i64) -> Result<Outcome, StoreError> {
+        let _ = epoch;
+        Err(StoreError::Data("semantic staging unavailable".into()))
+    }
+
+    fn semantic_select(
+        &mut self,
+        epoch: i64,
+        selector: &crate::model::relation_stage::Selector,
+    ) -> Result<crate::model::relation_stage::Selection, StoreError> {
+        let _ = (epoch, selector);
+        Err(StoreError::Data("semantic staging unavailable".into()))
+    }
+
     /// `path`'s ledger as committed now.
     fn ledger(&self, path: &str) -> Result<Option<Ledger>, StoreError>;
 
@@ -1552,6 +1597,91 @@ impl EventCache {
                     .collect()
             })
             .transpose()
+    }
+
+    pub(crate) fn semantic_select(
+        &mut self,
+        epoch: i64,
+        selector: &crate::model::relation_stage::Selector,
+    ) -> io::Result<crate::model::relation_stage::Selection> {
+        self.store
+            .as_mut()
+            .ok_or_else(|| io::Error::other("scoped producer store unavailable"))?
+            .semantic_select(epoch, selector)
+            .map_err(|error| io::Error::other(error.to_string()))
+    }
+
+    pub(crate) fn begin_semantic_stage(
+        &mut self,
+        paths: &[String],
+        runtime: &str,
+    ) -> io::Result<Outcome> {
+        self.store
+            .as_mut()
+            .ok_or_else(|| io::Error::other("scoped producer store unavailable"))?
+            .begin_semantic_stage(paths, runtime)
+            .map_err(|error| io::Error::other(error.to_string()))
+    }
+
+    pub(crate) fn semantic_batch(
+        &mut self,
+        limit: usize,
+    ) -> io::Result<Option<crate::model::relation_stage::Batch>> {
+        self.store
+            .as_mut()
+            .ok_or_else(|| io::Error::other("scoped producer store unavailable"))?
+            .semantic_batch(limit)
+            .map_err(|error| io::Error::other(error.to_string()))
+    }
+
+    pub(crate) fn record_semantic_batch(
+        &mut self,
+        batch: &crate::model::relation_stage::Batch,
+        prepared: &crate::model::PreparedSources,
+    ) -> io::Result<Outcome> {
+        if self.busy || !self.unpersisted.is_empty() {
+            return Err(io::Error::other(
+                "native producer sources not durably observed",
+            ));
+        }
+        self.store
+            .as_mut()
+            .ok_or_else(|| io::Error::other("scoped producer store unavailable"))?
+            .record_semantic_batch(batch, prepared)
+            .map_err(|error| io::Error::other(error.to_string()))
+    }
+
+    pub(crate) fn publish_semantic_catalog(
+        &mut self,
+        batch: &crate::model::relation_stage::Batch,
+        prepared: &crate::model::PreparedSources,
+    ) -> io::Result<(Outcome, Option<String>)> {
+        if self.busy || !self.unpersisted.is_empty() {
+            return Err(io::Error::other(
+                "native producer sources not durably observed",
+            ));
+        }
+        let result = self
+            .store
+            .as_mut()
+            .ok_or_else(|| io::Error::other("scoped producer store unavailable"))?
+            .publish_semantic_catalog(batch, prepared)
+            .map_err(|error| io::Error::other(error.to_string()))?;
+        #[cfg(test)]
+        if result.0 == Outcome::Written {
+            if let Some(hook) = AFTER_CATALOG_PUBLICATION.with(|hook| hook.borrow_mut().take()) {
+                hook();
+            }
+        }
+        Ok(result)
+    }
+
+    pub(crate) fn finish_semantic_stage(&mut self, epoch: i64) -> io::Result<Outcome> {
+        self.store
+            .as_mut()
+            .ok_or_else(|| io::Error::other("scoped producer store unavailable"))?
+            .finish_semantic_stage(epoch)
+            .map_err(|error| io::Error::other(error.to_string()))
     }
 
     #[cfg(test)]

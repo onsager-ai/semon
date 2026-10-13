@@ -178,9 +178,9 @@ selected Index at all three unrelated-history sizes, parsing zero records on a
 move and one on move-plus-append. Local metadata audit work still scales with
 inventory size; local runtime tests changed one Index at each history size.
 
-The existing semantic component limit remains 64 sources. Oversized connected
-components are not yet qualified for resumable semantic publication; they can
-exhaust the bounded recovery path. Initial source discovery requires total
+Oversized semantic components use durable source indexing, complete owner identity, relationship and owner publication queues in the existing Event Index. Physical preparation remains bounded to 64 source files, with smaller relationship seed batches reserving space for selected native companions. Indexing retains primitive source identity and lineage links until the selected owner's complete physical closure can be derived; it does not accept partial copied or continued owner observations. Native keys use the shared harness collision contract before authoritative capture. Indexed ambiguity selectors and bounded parent, root and family-cost reductions retain graph semantics across batches. Owner publication replays complete incident native placements before the shared turn and slot derivation; it never combines independently derived partial slots. Native locations bind the exact source generation, offset and block. Candidate metadata comes from normalized Event Index records in bounded row and byte pages, using the existing continuation-only copy policy. Relation metadata contains no prompt, message or tool-result bodies. A replacement owner resumes these queues with the same source claims, runtime and publication fences. The collection stays globally partial until all queued work and final witnesses qualify, preserving strict archive readiness. Retired stage records are reclaimed in bounded metadata pages; retained source and archive records are preserved. These changes are unqualified until the exact final Source/Hub CI pair passes. An individual owner whose physical source closure exceeds 64 remains explicitly unavailable under the existing physical preparation budget.
+
+Initial source discovery requires total
 inventory metadata work. One selected Index load can grow with that session's
 history, and one complete native record may exceed the cold byte budget.
 Resident payload counts are not a process RSS guarantee. Worker lifetime, actual
