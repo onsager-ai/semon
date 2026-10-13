@@ -133,37 +133,85 @@ pub(super) fn write(
     ledger: &Ledger,
     chunks: Option<&Chunks>,
 ) -> rusqlite::Result<()> {
-    let Some(chunks) = chunks.filter(|chunks| chunks.valid(ledger.offset)) else {
-        return clear(transaction, path);
+    write_measured(
+        transaction,
+        path,
+        ledger,
+        chunks,
+        &mut crate::native_timing::Measurements::default(),
+    )
+}
+
+pub(super) fn write_measured(
+    transaction: &Transaction<'_>,
+    path: &str,
+    ledger: &Ledger,
+    chunks: Option<&Chunks>,
+    measurements: &mut crate::native_timing::Measurements,
+) -> rusqlite::Result<()> {
+    let started = measurements.start();
+    let chunks = chunks.filter(|chunks| chunks.valid(ledger.offset));
+    measurements.record("chunks_validation", started, 1);
+    let Some(chunks) = chunks else {
+        let started = measurements.start();
+        let result = clear(transaction, path);
+        measurements.record("chunks_clear", started, 1);
+        return result;
     };
+    let started = measurements.start();
     let prefix = prefix(path);
+    measurements.record("chunks_prefix", started, 1);
+    let started = measurements.start();
     let mut put = transaction.prepare_cached("INSERT INTO meta(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value WHERE value!=excluded.value")?;
+    measurements.record("chunks_prepare", started, 1);
     for (index, hashes) in chunks.hashes.chunks(PAGE).enumerate() {
-        put.execute(params![
-            format!("{prefix}{index:010}"),
-            json(&Page {
-                version: 1,
-                index,
-                hashes: hashes.to_vec()
-            })?
-        ])?;
+        let started = measurements.start();
+        let key = format!("{prefix}{index:010}");
+        let encoded = json(&Page {
+            version: 1,
+            index,
+            hashes: hashes.to_vec(),
+        })?;
+        measurements.record("chunks_page_serialization", started, 1);
+        measurements.count("chunks_page_bytes", encoded.len());
+        measurements.count("chunks_hashes", hashes.len());
+        let started = measurements.start();
+        put.execute(params![key, encoded])?;
+        measurements.record("chunks_page_sql", started, 1);
     }
+    let started = measurements.start();
     let pages = chunks.hashes.len().div_ceil(PAGE);
     transaction.execute(
         "DELETE FROM meta WHERE key>=?1 AND key<?2 AND key!=?3 AND (key>=?4 OR length(key)!=?5 OR substr(key,?6) GLOB '*[^0-9]*')",
         params![&prefix, format!("{prefix}~"), format!("{prefix}header"), format!("{prefix}{pages:010}"), (prefix.len()+10) as i64, (prefix.len()+1) as i64],
     )?;
-    put.execute(params![
-        format!("{prefix}header"),
-        json(&Header {
-            version: 1,
-            parser_version: CACHE_VERSION,
-            ledger: header_ledger(ledger),
-            count: chunks.hashes.len(),
-            fingerprint: chunks.fingerprint(),
-            resume: chunks.resume.clone()
-        })?
-    ])?;
+    measurements.record("chunks_cleanup_sql", started, 1);
+    let key = format!("{prefix}header");
+    let header = Header {
+        version: 1,
+        parser_version: CACHE_VERSION,
+        ledger: {
+            let started = measurements.start();
+            let value = header_ledger(ledger);
+            measurements.record("chunks_header_ledger", started, 1);
+            value
+        },
+        count: chunks.hashes.len(),
+        fingerprint: {
+            let started = measurements.start();
+            let value = chunks.fingerprint();
+            measurements.record("chunks_header_fingerprint", started, 1);
+            value
+        },
+        resume: chunks.resume.clone(),
+    };
+    let started = measurements.start();
+    let encoded = json(&header)?;
+    measurements.record("chunks_header_serialization", started, 1);
+    measurements.count("chunks_header_bytes", encoded.len());
+    let started = measurements.start();
+    put.execute(params![key, encoded])?;
+    measurements.record("chunks_header_sql", started, 1);
     Ok(())
 }
 
