@@ -1,2 +1,2 @@
 {"type":"session_meta","payload":{"id":"paginated-reference","cwd":"/fixture/project"}}
-{"type":"event_msg","payload":{"type":"item_completed","item":{"type":"CommandExecution","id":"command-fresh","process_id":"95583","command":["printf","fresh"],"cwd":"/fixture/project","parsed_cmd":[],"status":"completed","aggregated_output":"fresh","exit_code":0}}}
+{"type":"event_msg","payload":{"type":"item_completed","item":{"type":"CommandExecution","id":"command-new","process_id":"95583","command":["/bin/sh","-c","printf new"],"cwd":"file:///fixture/project","parsed_cmd":[],"source":"unified_exec_startup","status":"completed","aggregated_output":"new","exit_code":0}}}

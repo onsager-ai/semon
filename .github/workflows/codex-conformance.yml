@@ -1,15 +1,8 @@
 name: Pinned Codex reducer conformance
 
 on:
+  workflow_call:
   workflow_dispatch:
-  pull_request:
-    paths:
-      - ".github/workflows/codex-conformance.yml"
-      - "crates/semon-sessions/**"
-      - "tests/fixtures/compatibility/codex-native-a9b0815/**"
-      - "tests/fixtures/compatibility/codex-reference-a9b0815/**"
-      - "tests/spikes/codex_native_oracle.rs"
-      - "docs/design/codex-native-conformance.md"
 
 permissions:
   contents: read
@@ -48,10 +41,10 @@ jobs:
             ${{ runner.os }}-codex-conformance-semon-${{ steps.rust-toolchain.outputs.cachekey }}-
 
       - name: Run parser event fixture tests on the exact head
-        run: cargo test --locked -p semon-sessions events::tests::
+        run: cargo test --locked -p semon-sessions 'events::tests::'
 
       - name: Run parser transaction and selected-output tests on the exact head
-        run: cargo test --locked -p semon-sessions tx::tests::
+        run: cargo test --locked -p semon-sessions 'tx::tests::'
 
   upstream-reference:
     name: Pinned Codex reducer reference
