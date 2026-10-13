@@ -433,6 +433,15 @@ pub fn session_query_sources(
 }
 
 fn local_query_selection(db: &Connection, key: &str) -> io::Result<Option<(String, Selection)>> {
+    // A provisional discovery cannot prove a global native identity. In
+    // particular, an unobserved harness may introduce a canonical-ID collision.
+    if !db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM meta WHERE key='catalog_completeness' AND value='complete')",
+        [],
+        |row| row.get::<_, bool>(0),
+    ).map_err(failure)? {
+        return Ok(None);
+    }
     let (key, selected) = match query_selection(db, key) {
         Ok(selected) => (key.to_owned(), selected),
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
@@ -466,6 +475,44 @@ fn local_query_selection(db: &Connection, key: &str) -> io::Result<Option<(Strin
         ));
     }
     Ok(Some((key, selected)))
+}
+
+/// Whether the existing bounded identity/relationship closure survives a
+/// physical file window unchanged. A provisional Catalog cannot prove this.
+pub(crate) fn query_window_context_current(
+    db: &Connection,
+    options: &Options,
+    key: &str,
+    now: i64,
+) -> io::Result<bool> {
+    if !db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM meta WHERE key='catalog_completeness' AND value='complete')",
+        [],
+        |row| row.get::<_, bool>(0),
+    ).map_err(failure)? {
+        return Ok(false);
+    }
+    let selected = query_selection(db, key)?;
+    if selected.incomplete {
+        return Ok(false);
+    }
+    let mut sources = BTreeMap::new();
+    for source in selected.rows.iter().flat_map(|row| &row.sources) {
+        if let Some(prior) = sources.insert(source.path.clone(), source.clone())
+            && prior != *source
+        {
+            return Err(failure("Conflicting native query source"));
+        }
+    }
+    let cutoff = crate::model::scan_cutoff(options, now);
+    let sources: Vec<_> = sources.into_values().collect();
+    if sources.iter().any(|source| {
+        !crate::model::catalog_source_in_window(source, cutoff)
+            || crate::catalog::source_state(source) != "cached"
+    }) {
+        return Ok(false);
+    }
+    Ok(EventCache::selected_roles_current(db, &sources).unwrap_or(false))
 }
 
 /// Existing current paths for a bounded selected-source producer refresh.

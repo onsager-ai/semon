@@ -6565,6 +6565,9 @@ mod tests {
             let view = pooled(&fixture, Refresh::OnInvalidate, &pool);
             let options = fixture.options.clone();
             let start = Instant::now();
+            let (published, first_page) = mpsc::channel();
+            let (release, released) = mpsc::channel::<()>();
+            let released = Mutex::new(released);
             *lock(&view.hooks.building) = Some(Arc::new(move || {
                 let page = crate::session_catalog_page(&options, "fixture", "limit=60");
                 assert_eq!(page.status, 200);
@@ -6583,23 +6586,77 @@ mod tests {
                     .query_row("SELECT COUNT(*) FROM files", [], |row| row.get(0))
                     .unwrap();
                 assert_eq!(observed, if unrelated == 0 { 60 } else { 64 });
+                assert!(
+                    start.elapsed() <= AT_ONCE,
+                    "bounded initial page took {:?}",
+                    start.elapsed()
+                );
                 eprintln!(
                     "production-first-page unrelated={unrelated} latency_us={} response_bytes={} native_sources={observed}",
                     start.elapsed().as_micros(),
                     page.body.len()
                 );
+                published.send(()).unwrap();
+                let _ = lock(&released).recv();
             }));
             view.note_catalog_read().unwrap();
-            eventually(
-                "queued bounded discovery reaches complete observation",
-                || {
-                    assert!(pool.threads() <= 1);
-                    assert!(pool.entries_for(&view) <= 1);
-                    let page = crate::session_catalog_page(&fixture.options, "fixture", "limit=60");
-                    let body: Value = serde_json::from_slice(&page.body).ok()?;
-                    (page.status == 200 && body["completeness"]["state"] == "complete")
-                        .then_some(())
-                },
+            first_page
+                .recv_timeout(HUNG_AFTER)
+                .expect("bounded cold page was not published");
+            let reading = view.clone();
+            let page = at_once(
+                "foreground Catalog while global observation is held",
+                move || native_api(&reading, "/api/sessions", "limit=60"),
+            );
+            assert_eq!(page.status, 200);
+            assert_eq!(body_of(&page)["completeness"]["state"], "partial");
+            assert_eq!(pool.running(), 1);
+            drop(release);
+            // Full observation deliberately scales with discovered history;
+            // it is not the foreground response deadline. Keep the existing
+            // ten-second hang guard against lack of durable indexing or final
+            // publication progress, then require the actual worker to drain.
+            let background = Instant::now();
+            let connection =
+                rusqlite::Connection::open(EventCache::path(&fixture.options.cache)).unwrap();
+            let mut observed: i64 = connection
+                .query_row("SELECT COUNT(*) FROM files", [], |row| row.get(0))
+                .unwrap();
+            let mut progress_deadline = Instant::now() + Duration::from_secs(10);
+            loop {
+                assert!(pool.threads() <= 1);
+                assert!(pool.entries_for(&view) <= 1);
+                let indexed: i64 = connection
+                    .query_row("SELECT COUNT(*) FROM files", [], |row| row.get(0))
+                    .unwrap();
+                assert!(
+                    indexed >= observed,
+                    "cold observation lost committed source evidence"
+                );
+                if indexed > observed {
+                    observed = indexed;
+                    progress_deadline = Instant::now() + Duration::from_secs(10);
+                }
+                let page = crate::session_catalog_page(&fixture.options, "fixture", "limit=60");
+                let body: Value = serde_json::from_slice(&page.body).unwrap();
+                if page.status == 200
+                    && body["completeness"]["state"] == "complete"
+                    && pool.running() == 0
+                {
+                    break;
+                }
+                assert!(
+                    Instant::now() < progress_deadline,
+                    "cold Catalog made no durable or publication progress within 10 s: indexed={observed}, running={}",
+                    pool.running()
+                );
+                thread::sleep(Duration::from_millis(20));
+            }
+            assert_eq!(observed, 60 + unrelated);
+            eprintln!(
+                "production-background-observation unrelated={unrelated} elapsed_us={} native_sources={observed} running={}",
+                background.elapsed().as_micros(),
+                pool.running()
             );
             let page = crate::session_catalog_page(&fixture.options, "fixture", "limit=60");
             let body: Value = serde_json::from_slice(&page.body).unwrap();

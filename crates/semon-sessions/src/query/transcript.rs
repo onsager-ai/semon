@@ -69,16 +69,14 @@ pub(super) fn read(
 ) -> Result<Option<Value>, QueryError> {
     #[cfg(test)]
     SLOTS.with(|slots| slots.set(0));
-    // A finite physical scan-window namespace can omit parent/resume files and their
-    // contextual slots. The ordinary Catalog projection belongs to the complete
-    // native source selection, so it cannot qualify that distinct namespace.
-    // With --all no physical cutoff applies, including for local CLI/MCP.
+    // Raw aliases can change under a physical file window. Only exact native
+    // Catalog identities enter this pager; their context is qualified below.
     let requested = args["id"].as_str().expect("validated focused id");
     let suffixed = requested != key
         && requested
             .rsplit_once('@')
             .is_some_and(|(owner, _)| owner == key);
-    if (requested != key && !suffixed) || (options.scan_window && !options.all) {
+    if requested != key && !suffixed {
         return Ok(None);
     }
     let mut db = Connection::open_with_flags(
@@ -124,6 +122,17 @@ pub(super) fn read(
     // Reject this known mismatch before loading a complete selected cohort.
     if suffixed {
         return Err(QueryError::unknown_session(requested));
+    }
+    // A finite file window can omit an identity collision, parent or handoff
+    // source. Reuse the existing bounded native closure, in this publication
+    // snapshot, before admitting its complete Catalog recipes. Omitted, stale
+    // or provisional context keeps the native window resolver.
+    if options.scan_window
+        && !options.all
+        && !crate::overview_repair::query_window_context_current(&tx, options, key, now)
+            .map_err(unavailable)?
+    {
+        return Ok(None);
     }
     // A recent recorded owner necessarily survives the output window. Older
     // owners can survive through clipped relationship context; let that native

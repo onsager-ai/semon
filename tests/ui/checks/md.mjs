@@ -390,6 +390,10 @@ async function runPass(page, D, tag, scheme) {
         };
       });
       await goto(page, { v: 'session', id: 'ledger' }, D);
+      // The native question context can finish after the transcript is ready.
+      // Require the answer itself within the normal browser deadline before
+      // inspecting its exact content; a persistently missing card still fails.
+      await page.locator('.event .answer').waitFor({ state: 'visible' });
       T.synthetic.answerCard = await page.evaluate(() => {
         const a = document.querySelector('.event .answer');
         return a
