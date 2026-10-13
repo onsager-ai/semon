@@ -1050,7 +1050,9 @@ pub(crate) trait IndexStore: Send {
 /// One file's index in memory, and the ledger it was read at.
 struct CachedFile {
     ledger: Ledger,
-    index: Arc<FileIndex>,
+    // A published scoped producer keeps source identity, not every transcript
+    // payload. The existing durable index reloads a selected generation lazily.
+    index: Option<Arc<FileIndex>>,
 }
 
 /// The event index: every file's [`FileIndex`] in memory, written through
@@ -1163,7 +1165,7 @@ impl EventCache {
     pub(crate) fn selected_index(&self, path: &Path) -> Option<Arc<FileIndex>> {
         self.files
             .get(path.to_str()?)
-            .map(|file| Arc::clone(&file.index))
+            .and_then(|file| file.index.as_ref().map(Arc::clone))
     }
 
     /// Current ownership needs ledger and independent role evidence only.
@@ -1375,6 +1377,19 @@ impl EventCache {
         self.busy = false;
     }
 
+    /// Drop only durably committed producer payloads after Catalog publication.
+    /// Ledgers and membership remain available to incremental change detection
+    /// and disappearance reconciliation. In-memory-only/busy evidence stays.
+    pub(crate) fn release_published_indexes(&mut self) {
+        if self.scoped && self.store.is_some() && !self.busy {
+            for (path, file) in &mut self.files {
+                if !self.unpersisted.contains(path) {
+                    file.index = None;
+                }
+            }
+        }
+    }
+
     /// Time spent cloning cached file indexes in the current scan.
     pub(crate) fn index_clone_duration(&self) -> Duration {
         self.index_clone
@@ -1564,7 +1579,7 @@ impl EventCache {
                         path,
                         CachedFile {
                             ledger,
-                            index: Arc::new(index),
+                            index: Some(Arc::new(index)),
                         },
                     )
                 })
@@ -1646,7 +1661,8 @@ impl EventCache {
         if !self.unpersisted.contains(key.as_ref()) {
             if let Some(file) = self.files.get(key.as_ref())
                 && file.ledger.stat == stat
-                && let Some(metadata) = crate::native_tree::Metadata::from_index(&file.index)
+                && let Some(index) = &file.index
+                && let Some(metadata) = crate::native_tree::Metadata::from_index(index)
             {
                 return Ok((file.ledger.source(path, native_id), metadata));
             }
@@ -1675,7 +1691,7 @@ impl EventCache {
     pub(crate) fn file_index(&self, path: &Path) -> Option<&FileIndex> {
         self.files
             .get(path.to_string_lossy().as_ref())
-            .map(|file| file.index.as_ref())
+            .and_then(|file| file.index.as_deref())
     }
 
     pub(crate) fn reported_runs(&self) -> impl Iterator<Item = &crate::facts::ReportedRunSnapshot> {
@@ -1844,8 +1860,9 @@ impl EventCache {
     fn base(&mut self, path: &str, ledger: &Ledger) -> Base {
         if let Some(entry) = self.files.get(path)
             && entry.ledger == *ledger
+            && let Some(index) = &entry.index
         {
-            return Base::Found(Arc::clone(&entry.index));
+            return Base::Found(Arc::clone(index));
         }
         let loaded = self.store.as_ref().map(|store| store.load_file(path));
         match loaded {
@@ -1930,22 +1947,22 @@ pub(crate) fn scan_file(
     let key = path.to_string_lossy().into_owned();
     let agent = harness == "claude" && crate::native_sidecar::agent_path(path);
     if let Some(entry) = cache.files.get(&key)
+        && let Some(index) = &entry.index
         && !cache.unpersisted.contains(&key)
-        && (harness == "copilot" || entry.index.tree_summary.is_some())
-        && entry.index.source_chunks.is_some()
-        && (harness == "copilot" || entry.index.marker_index.is_some())
-        && entry.index.handoff_index.is_some()
-        && (harness != "codex" || entry.index.codex_header.is_some())
+        && (harness == "copilot" || index.tree_summary.is_some())
+        && index.source_chunks.is_some()
+        && (harness == "copilot" || index.marker_index.is_some())
+        && index.handoff_index.is_some()
+        && (harness != "codex" || index.codex_header.is_some())
         && (!agent
-            || entry
-                .index
+            || index
                 .claude_sidecar
                 .as_ref()
                 .is_some_and(|sidecar| sidecar.current(path)))
         && entry.ledger.stat == Stat::of(path)?
     {
         trace("unchanged");
-        return Ok(Arc::clone(&entry.index));
+        return Ok(Arc::clone(index));
     }
     *dirty = true;
     let mut attempt = 0;
@@ -2009,7 +2026,7 @@ pub(crate) fn scan_file(
                 key,
                 CachedFile {
                     ledger: ledger.clone(),
-                    index: Arc::clone(index),
+                    index: Some(Arc::clone(index)),
                 },
             );
             return Ok(Arc::clone(index));
@@ -2197,7 +2214,7 @@ pub(crate) fn scan_file(
             key,
             CachedFile {
                 ledger,
-                index: Arc::clone(&index),
+                index: Some(Arc::clone(&index)),
             },
         );
         return Ok(index);
@@ -5530,7 +5547,10 @@ mod tests {
             .files
             .get(key.as_ref())
             .expect("the rollout is stored");
-        assert_eq!(format!("{:?}", entry.index), format!("{fresh_index:?}"));
+        assert_eq!(
+            format!("{:?}", entry.index.as_ref().unwrap()),
+            format!("{fresh_index:?}")
+        );
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -6086,7 +6106,7 @@ mod tests {
         assert!(cache.store.is_some(), "the store opens");
         let key = path.to_string_lossy();
         let entry = cache.files.get(key.as_ref()).expect("the file is stored");
-        format!("{:?}", entry.index)
+        format!("{:?}", entry.index.as_ref().unwrap())
     }
 
     /// The store's bytes and its WAL's, as text: a value stored in any row
@@ -6138,6 +6158,69 @@ mod tests {
         assert_eq!(format!("{grown:?}"), format!("{loaded:?}"));
         drop(cache);
         drop(restarted);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn published_scoped_payloads_release_without_losing_ledgers_or_reparsing_history() {
+        let root = scratch("released-published-index");
+        let path = root.join("log.jsonl");
+        let cache_path = root.join("index.json");
+        write_lines(&path, &[claude_tool("call")]);
+        let mut cache = EventCache::open_scoped(&cache_path).unwrap();
+        let first = scan_file(&path, "claude", &mut cache, &mut false).unwrap();
+        let weak = Arc::downgrade(&first);
+        let expected = format!("{first:?}");
+        let revision = cache.revision(&path);
+        let source = cache.source(&path, "selected").unwrap();
+        drop(first);
+        cache.release_published_indexes();
+        assert!(
+            weak.upgrade().is_none(),
+            "published payload remains resident"
+        );
+        assert!(cache.selected_index(&path).is_none());
+        assert_eq!(cache.revision(&path), revision);
+        assert_eq!(cache.source(&path, "selected").unwrap(), source);
+        assert_eq!(cache.paths().collect::<Vec<_>>(), [path.to_str().unwrap()]);
+        let before = parsed();
+        ledger_trace();
+        let unchanged = scan_file(&path, "claude", &mut cache, &mut false).unwrap();
+        assert_eq!(format!("{unchanged:?}"), expected);
+        assert_eq!(parsed(), before, "released history was reparsed");
+        assert_eq!(ledger_trace(), ["unchanged"]);
+        drop(unchanged);
+        cache.release_published_indexes();
+        append_lines(&path, &[claude_result("call"), claude_tool("next")]);
+        touch(&path, 1);
+        let appended = scan_file(&path, "claude", &mut cache, &mut false).unwrap();
+        assert_eq!(ledger_trace(), ["append"]);
+        assert_eq!(parsed() - before, 2, "append reread the old generation");
+        assert!(appended.events[0].r.is_some());
+        assert_eq!(format!("{appended:?}"), stored(&cache_path, &path));
+        drop(appended);
+        let key = path.to_string_lossy().into_owned();
+        cache.unpersisted.insert(key.clone());
+        cache.release_published_indexes();
+        assert!(
+            cache.selected_index(&path).is_some(),
+            "uncommitted evidence was evicted"
+        );
+        cache.unpersisted.remove(&key);
+        cache.busy = true;
+        cache.release_published_indexes();
+        assert!(
+            cache.selected_index(&path).is_some(),
+            "busy evidence was evicted"
+        );
+        cache.busy = false;
+        cache.store = None;
+        cache.release_published_indexes();
+        assert!(
+            cache.selected_index(&path).is_some(),
+            "memory-only evidence was evicted"
+        );
+        drop(cache);
         fs::remove_dir_all(root).unwrap();
     }
 

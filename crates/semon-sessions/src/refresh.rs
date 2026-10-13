@@ -146,6 +146,12 @@ impl RefreshPool {
         lock(&self.state).queue.len()
     }
 
+    /// Actual checks still executing, including publication and payload cleanup.
+    /// Queue/worker counts alone do not establish that native work has drained.
+    pub fn running(&self) -> usize {
+        lock(&self.state).running.len()
+    }
+
     /// Queues `view`'s check at `at`, in place of its entry `replacing` if
     /// it has one (so a view is never queued twice). With no worker
     /// waiting, a thread starts if the pool has room, unless the caller is

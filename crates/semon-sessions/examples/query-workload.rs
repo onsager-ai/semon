@@ -2,7 +2,7 @@
 //! Run each size in a fresh process: cargo run --release --locked -p
 //! semon-sessions --example query-workload -- 1000 4
 use semon_sessions::{
-    Options, Query, SessionCatalogObserver, SessionSourceReadMode, SessionSources,
+    Options, Query, RefreshPool, SessionCatalogObserver, SessionSourceReadMode, SessionSources,
 };
 use serde_json::json;
 use std::{
@@ -107,9 +107,10 @@ fn main() -> io::Result<()> {
         ));
     }
     let started = Instant::now();
+    let pool = RefreshPool::new(2);
     let observers: Vec<_> = inputs
         .iter()
-        .map(|(_, options)| SessionCatalogObserver::new(options.clone()))
+        .map(|(_, options)| SessionCatalogObserver::with_pool(options.clone(), pool.clone()))
         .collect();
     for observer in &observers {
         observer.demand()?;
@@ -129,6 +130,17 @@ fn main() -> io::Result<()> {
         }
     }
     let cold_ms = started.elapsed().as_secs_f64() * 1000.;
+    // A committed Catalog is visible before its worker releases temporary
+    // publication payloads. Qualify resident heap after the actual work drains;
+    // retain cold publication latency as its separate observed measurement.
+    let drain = Instant::now();
+    while pool.running() != 0 {
+        if drain.elapsed() > Duration::from_secs(30) {
+            return Err(io::Error::other("native workload workers did not drain"));
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    let cold_drain_ms = drain.elapsed().as_secs_f64() * 1000.;
     let cold_rss = rss_kib();
     let cold_heap = heap_bytes();
     let sources = Arc::new(SessionSources::from_catalog_observers(
@@ -174,10 +186,10 @@ fn main() -> io::Result<()> {
     println!(
         "{}",
         json!({"history_per_machine":history,"machines":machines,
-        "cold_catalog_complete_ms":cold_ms,"catalog_page_bytes":catalog_bytes,"cold_rss_kib":cold_rss,"cold_heap_bytes":cold_heap,
+        "cold_catalog_complete_ms":cold_ms,"cold_worker_drain_ms":cold_drain_ms,"catalog_page_bytes":catalog_bytes,"cold_rss_kib":cold_rss,"cold_heap_bytes":cold_heap,
         "first_tx_ms":first_tx_ms,"warm_tx_p50_ms":samples[50],"warm_tx_p95_ms":samples[95],
         "tx_bytes":bytes,"warm_rss_kib":rss_kib(),"warm_heap_bytes":heap_bytes(),"selected_records":120,"warm_samples":100,
-        "warm_read_counters":reads})
+        "warm_read_counters":reads,"active_workers":pool.running(),"queued_checks":pool.queued()})
     );
     sources.close();
     drop(query);

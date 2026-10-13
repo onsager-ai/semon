@@ -580,6 +580,17 @@ async function nav(page, route, D, mockup) {
   await page.waitForTimeout(80);
 }
 
+async function settledCatalog(page) {
+  // Push publishes native bytes before their paired runtime facts. Compare
+  // settled observations rather than an intermediate unavailable status. A
+  // reader that never recovers still fails the normal bounded browser deadline.
+  await page.waitForFunction(
+    () =>
+      document.querySelector('#page .ph .sub')?.textContent.endsWith(' · Cached history') &&
+      !document.querySelector('[data-session-row="list"] [aria-label="Status unavailable"]'),
+  );
+}
+
 // Masked in every comparison: the jump-to-latest button, a transient control that floats at a scroll position (its place shifts a pixel or two
 // with how far each page was scrolled), not part of a screen's design.
 const MASK_CSS = '.jump-wrap { visibility: hidden !important; }';
@@ -765,9 +776,11 @@ function saveMismatch(row, name, scheme, p) {
         ref = other ? 'served' : enforced ? mapped : 'overhaul';
       const port = other ?? (await portFor(ref));
       await nav(page, s.served, D, false);
+      if (other && s.served.v === 'sessions') await settledCatalog(page);
       const a = await shot(page, size);
       if (other) await nav(port, s.served, referenceData, false);
       else await nav(port, s.port, D, true);
+      if (other && s.served.v === 'sessions') await settledCatalog(port);
       const b = await shot(port, size);
       const p = compare(a, b);
       const row = {

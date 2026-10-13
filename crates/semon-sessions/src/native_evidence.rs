@@ -488,6 +488,8 @@ impl NativeEvidence {
                             cache.publish_session_descriptions();
                             cache.end_scan();
                             work.catalog_snapshot = Some(snapshot);
+                            cache.release_published_indexes();
+                            work.texts.release_published_derivations();
                             return Ok(true);
                         }
                         Some(_) => {
@@ -524,6 +526,8 @@ impl NativeEvidence {
                         .collect();
                 }
                 work.catalog_snapshot = Some(snapshot);
+                cache.release_published_indexes();
+                work.texts.release_published_derivations();
                 return Ok(true);
             }
             CatalogPreparation::Reconcile => {}
@@ -545,6 +549,8 @@ impl NativeEvidence {
                 .collect();
         }
         work.catalog_snapshot = Some(snapshot);
+        cache.release_published_indexes();
+        work.texts.release_published_derivations();
         Ok(true)
     }
 
