@@ -17,7 +17,10 @@ provider or source changes. The first page is reported separately, followed by
 100 warm p50/p95 samples. Every response must contain exactly entries 60–119.
 
 Latencies include in-process native rendering and JSON encoding, not HTTP,
-compression or browser rendering. Linux VmRSS and `/proc/self/io` counters are
+compression or browser rendering. GNU libc hosts additionally report live and
+reserved allocator bytes before and after focused reads. Those counters help
+distinguish live allocations from retained allocator pages; they do not measure
+product cache occupancy. Linux VmRSS and `/proc/self/io` counters are
 process-wide and include their own small measurement reads. Retained archives,
 authorization, concurrency, cancellation and deletion require their separate
 repository fixtures; this workload does not qualify them.

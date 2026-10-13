@@ -36,6 +36,7 @@ const source = (key) => ({
   tail_sha256: Array(32).fill(2),
 });
 const meta = (key) => ({
+  lifecycle: 'current',
   key,
   name: 'Session ' + key,
   harness: 'claude',

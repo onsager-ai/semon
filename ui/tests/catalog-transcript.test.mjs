@@ -35,6 +35,7 @@ const page = () => ({
     freshness: { state: 'cached' },
   },
   session: {
+    lifecycle: 'current',
     key: 'session',
     name: 'Saved native session',
     harness: 'claude',
