@@ -4,7 +4,8 @@ use crate::model::{Background, BgEnd, Shown, SignalData, Slot, SlotFile, SlotKin
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, path::PathBuf, sync::Arc};
 
-pub(crate) const VERSION: u32 = 5;
+/// v6 retains whether a code-mode tool or poll prints its exact native result.
+pub(crate) const VERSION: u32 = 6;
 
 /// Exact transcript observations share the Catalog's source/runtime fence.
 /// Recipes retain no live authority; a reader may apply these fields only
@@ -215,6 +216,7 @@ pub(crate) enum Recipe {
     Tool {
         outcome: Outcome,
         name: String,
+        result_source: bool,
         reply: Option<crate::events::Reply>,
         item: Option<u64>,
         background: Option<BackgroundRecipe>,
@@ -241,6 +243,7 @@ pub(crate) enum Recipe {
     },
     Sent {
         outcome: Outcome,
+        result_source: bool,
         reply: Option<crate::events::Reply>,
         start: u64,
         done: Option<u64>,
@@ -335,12 +338,14 @@ impl SavedSlot {
             SlotKind::Tool {
                 shown,
                 name,
+                result_source,
                 reply,
                 item,
                 bg,
             } => Recipe::Tool {
                 outcome: Outcome::capture(*shown),
                 name: name.clone(),
+                result_source: *result_source,
                 reply: reply.clone(),
                 item: *item,
                 background: bg.as_ref().map(|background| BackgroundRecipe {
@@ -391,11 +396,13 @@ impl SavedSlot {
             },
             SlotKind::Sent {
                 shown,
+                result_source,
                 reply,
                 start,
                 done,
             } => Recipe::Sent {
                 outcome: Outcome::capture(*shown),
+                result_source: *result_source,
                 reply: reply.clone(),
                 start: *start,
                 done: *done,
@@ -521,12 +528,14 @@ impl SavedSlot {
             Recipe::Tool {
                 outcome,
                 name,
+                result_source,
                 reply,
                 item,
                 background,
             } => SlotKind::Tool {
                 shown: outcome.restore(),
                 name: name.clone(),
+                result_source: *result_source,
                 reply: reply.clone(),
                 item: *item,
                 bg: background.as_ref().map(|background| Background {
@@ -578,11 +587,13 @@ impl SavedSlot {
             },
             Recipe::Sent {
                 outcome,
+                result_source,
                 reply,
                 start,
                 done,
             } => SlotKind::Sent {
                 shown: outcome.restore(),
+                result_source: *result_source,
                 reply: reply.clone(),
                 start: *start,
                 done: *done,
