@@ -5816,6 +5816,112 @@ mod tests {
     }
 
     #[test]
+    fn codex_reference_conformance_selected_output_keeps_native_coordinates() {
+        const FIXTURE: &str = include_str!(
+            "../../../tests/fixtures/compatibility/codex-reference-a9b0815/rollout-legacy.jsonl"
+        );
+        let manifest: Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/compatibility/codex-reference-a9b0815/manifest.json"
+        ))
+        .unwrap();
+        let home = Home::new();
+        let path = home.write("codex/sessions/2026/09/24/rollout-reference.jsonl", FIXTURE);
+        let built = home.built(BASE + 86_400_000);
+        let transcript = built.tx.get("legacy-reference").unwrap();
+        let mut lines = Lines::default();
+        let mut offset = 0_u64;
+        let mut tested = 0;
+        for native_line in FIXTURE.split_inclusive('\n') {
+            let record = read_record(&path, offset).unwrap();
+            let kind = record["payload"]["type"].as_str();
+            if matches!(kind, Some("function_call" | "custom_tool_call")) {
+                let call_id = record["payload"]["call_id"].as_str().unwrap();
+                assert_eq!(
+                    manifest["semon_adapter_contract"]["model_call_ids"][tested],
+                    call_id
+                );
+                let slot = transcript
+                    .slots
+                    .iter()
+                    .find(|slot| slot.offset == offset)
+                    .unwrap();
+                assert_eq!(slot.file.as_ref().unwrap().path, path);
+                assert_eq!(slot.block, 0);
+                let SlotKind::Tool {
+                    reply: Some(reply),
+                    result_source,
+                    item,
+                    ..
+                } = &slot.kind
+                else {
+                    panic!("{call_id} must remain a visible tool wrapper");
+                };
+                assert!(!result_source);
+                assert!(item.is_none());
+                assert_eq!(reply.o, offset + native_line.len() as u64);
+                assert_eq!(reply.b, 0);
+                assert!(reply.o < FIXTURE.len() as u64);
+                let native_output = read_record(&path, reply.o).unwrap();
+                assert_eq!(native_output["payload"]["call_id"], call_id);
+                let selected = selected_output(&mut lines, slot).unwrap();
+                if call_id == "start-26789" {
+                    assert_eq!(selected["text"], native_output["payload"]["output"]);
+                    assert!(selected.get("blocks").is_none());
+                } else {
+                    let blocks = selected["blocks"].as_array().unwrap();
+                    let parts = native_output["payload"]["output"].as_array().unwrap();
+                    assert_eq!(blocks.len(), 3);
+                    for (ordinal, (block, part)) in blocks.iter().zip(parts).enumerate() {
+                        assert_eq!(block["ordinal"], ordinal);
+                        assert_eq!(block["type"], part["type"]);
+                        assert_eq!(block["text"], part["text"]);
+                        assert_eq!(block["role"], if ordinal == 0 { "header" } else { "body" });
+                    }
+                    assert_eq!(
+                        blocks[0]["text"],
+                        "Script completed\nWall time 0.1 seconds\nOutput:\n"
+                    );
+                    let new: Value =
+                        serde_json::from_str(blocks[1]["text"].as_str().unwrap()).unwrap();
+                    let poll: Value =
+                        serde_json::from_str(blocks[2]["text"].as_str().unwrap()).unwrap();
+                    assert_eq!(new["session_id"], 95583);
+                    assert!(poll.get("session_id").is_none());
+                    assert_eq!(poll["output"], "old poll");
+                    assert_eq!(
+                        selected["text"],
+                        format!(
+                            "{}\n{}",
+                            parts[1]["text"].as_str().unwrap(),
+                            parts[2]["text"].as_str().unwrap()
+                        )
+                    );
+                    assert!(selected.get("blocks_truncated").is_none());
+                    assert!(selected.get("blocks_omitted").is_none());
+                }
+                assert!(string_value_bytes(&selected) <= 64 * 1024);
+                tested += 1;
+            }
+            offset += native_line.len() as u64;
+        }
+        assert_eq!(tested, 2);
+        assert_eq!(offset, FIXTURE.len() as u64);
+        assert_eq!(
+            transcript
+                .slots
+                .iter()
+                .filter(|slot| matches!(&slot.kind, SlotKind::Tool { .. }))
+                .count(),
+            2
+        );
+        assert!(!transcript.slots.iter().any(|slot| matches!(
+            &slot.kind,
+            SlotKind::Yielded { .. } | SlotKind::Sent { .. } | SlotKind::Operation { .. }
+        )));
+        assert!(lines.bytes <= FIXTURE.len() as u64);
+    }
+
+    #[test]
     fn selected_output_blocks_obey_count_and_text_budgets() {
         let output = Value::Array(
             (0..OUTPUT_BLOCKS_MAX + 2)

@@ -37,9 +37,10 @@ fn main() -> anyhow::Result<()> {
         args.next()
             .context("usage: semon_native_oracle <fixture-dir> <new-bundle-dir>")?,
     );
+    let parser_cases = args.next().map(PathBuf::from);
     ensure!(
         args.next().is_none(),
-        "usage: semon_native_oracle <fixture-dir> <new-bundle-dir>"
+        "usage: semon_native_oracle <fixture-dir> <new-bundle-dir> [parser-cases.jsonl]"
     );
     ensure!(
         !bundle_dir.exists(),
@@ -65,6 +66,21 @@ fn main() -> anyhow::Result<()> {
     let paginated_rows = validate_rollout(&fixture_dir.join("rollout-paginated.jsonl"), true)?;
     let trace_events = read_jsonl(&fixture_dir.join("trace-events.jsonl"))?;
     validate_fixture_pairing(&legacy_rows, &paginated_rows, &trace_events, &manifest)?;
+    if let Some(path) = parser_cases {
+        let mut commands = 0;
+        for row in read_jsonl(&path)? {
+            if row["type"] == "event_msg"
+                && row["payload"]["type"] == "item_completed"
+                && row["payload"]["item"]["type"] == "CommandExecution"
+            {
+                let _: TurnItem = serde_json::from_value(row["payload"]["item"].clone()).context(
+                    "deserialize parser-case CommandExecution through pinned public TurnItem",
+                )?;
+                commands += 1;
+            }
+        }
+        ensure!(commands > 0, "parser cases contain no completed commands");
+    }
 
     let bundle = &manifest["trace_bundle"];
     let trace_id = required_string(bundle, "trace_id")?;
