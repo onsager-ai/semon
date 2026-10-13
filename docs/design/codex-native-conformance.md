@@ -1,0 +1,54 @@
+# Pinned Codex native conformance oracle
+
+This fixture checks Semon's source-shaped rollout expectations against the actual public reducer from openai/codex commit a9b0815167c27ab13719dd12d13b63e02b70d221. CI copies the original runner from tests/spikes/codex_native_oracle.rs into a disposable upstream checkout, constructs a bundle with the upstream TraceWriter, and calls the upstream replay_bundle reducer. It does not modify upstream source files, start the Codex runtime, call a provider, or use a paid Codex session.
+
+The fixture at tests/fixtures/compatibility/codex-reference-a9b0815 has separate Legacy and Paginated rollout JSONL, a synthetic trace-events.jsonl, and a manifest with the normalized reducer graph and edge classes. Both the default rollout and trace fixtures describe the same sequence: a direct model `exec_command` starts process `26789`, then one outer code cell starts `95583` and polls `26789`. Its printed output is a three-part array containing the success header, the new-process JSON, and a completed-poll JSON without a `session_id`. The oracle checks the exact call/output pairing in inference input and output, the code-cell source string, and the corresponding two nested runtime events. It does not pair printed blocks with runtime operations by position. The default rollout inputs contain no generated timestamps. The trace writer adds wall-clock fields only to the disposable temporary bundle; the comparison excludes them. Its origin is explicitly source-shaped synthetic, not a runtime capture, and the pin does not qualify any installed Codex CLI version.
+
+## Field and relation map
+
+| Carrier | Field | Meaning for Semon |
+| --- | --- | --- |
+| ResponseItem FunctionCall or CustomToolCall | call_id | Model-visible invocation identity; match its output by the same call_id. |
+| ResponseItem FunctionCallOutput or CustomToolCallOutput | call_id, output | Completion belongs to the matching invocation. Output may be text or structured content. |
+| ResponseItem Message | content[] | Ordered content parts. Preserve stored order and keep text, image, audio, and encrypted parts distinct. |
+| CodeCellStarted | model_visible_call_id | Links a code cell to its outer model-visible exec call in the trace reducer. |
+| ToolCallStarted | tool_call_id, requester, code_mode_runtime_tool_id | Runtime-local nested tool identity and requester. These IDs are absent from the default rollout fixture. |
+| ToolCallRuntimeStarted/Ended | runtime payload call_id, process_id | Runtime evidence for tool execution and terminal identity. The process_id is not a model-visible call_id. |
+| TerminalOperation | tool_call_id, terminal_id | Trace reducer's operation-to-tool and operation-to-session links. This fixture marks them trace_only for Semon's default parser. |
+| CommandExecution | id, process_id, command, parsed_cmd, aggregated_output | A completed paginated item can carry an exact terminal process_id. Preserve parsed_cmd for existing consumers. |
+| FileChange | item fields | A separate completed item; retain the source fields when present in the selected history mode. |
+
+Code-mode callback IDs such as tool-1 are runtime-local. The upstream reducer joins them to the outer code cell from typed requester events and joins terminal operations to sessions from runtime payloads. Semon's default rollout reader does not ingest that trace bundle, so those reducer edges must not become expected parser edges or be reconstructed from neighboring text. The fixture separately marks exact call_id or session_id joins as recoverable, output-order-only joins as ambiguous, missing default-carrier fields as absent, and reducer-only runtime links as trace_only.
+
+## Persistence by history mode
+
+The pinned rollout policy is mode-sensitive. ResponseItem FunctionCall, FunctionCallOutput, CustomToolCall, and CustomToolCallOutput records persist in both modes. In Legacy mode, completed ItemCompleted records persist only for FunctionCallOutput, Plan, Extension(Sleep), and completed SubAgentActivity; CommandExecution and FileChange are not durable there. In Paginated mode, completed items persist, including CommandExecution and FileChange. Paginated CommandExecution aggregated_output is middle-truncated when it exceeds 65,536 bytes, with a persistence marker.
+
+TokenCount, ThreadGoalUpdated, ThreadRolledBack, TurnAborted, TurnStarted, TurnComplete, and ThreadSettingsApplied events persist in either history mode. ContextCompacted event messages are Legacy-only, while ContextCompaction response items and the Compacted, TurnContext, TokenUsageRecord, WorldState, RetainedContext, SecurityRiskScore, and SessionMeta rollout markers persist. ExecCommandBegin/End, TerminalInteraction, ExecCommandOutputDelta, Error, ItemStarted, and similar in-progress events are transient. RealtimeItem records persist only in Paginated mode.
+
+The output truncation helper can render a warning header with original token and line counts before a middle-truncated excerpt. When Semon presents content, it should preserve the source's ordered content parts and treat that header as truncation metadata in text, not as a process ID or structured completion status.
+
+## Running and updating the oracle
+
+The conformance workflow checks out the exact pull request head SHA and the pinned Codex commit and installs the upstream-pinned Rust 1.95.0 toolchain with clippy, rustfmt, and rust-src. Independent jobs run the focused locked Semon event and transaction tests and copy/run the oracle example in the upstream checkout with its existing lockfile. This keeps Semon test results from suppressing the upstream reducer comparison. The example reads the checked-in fixture directory and writes only to a new temporary bundle directory.
+
+To replay the fixtures from a disposable checkout already at the pin, copy the runner into codex-rs/rollout-trace/examples/semon_native_oracle.rs and run this from codex-rs:
+
+~~~sh
+cargo run --locked -p codex-rollout-trace --example semon_native_oracle -- \
+  /path/to/semon/tests/fixtures/compatibility/codex-reference-a9b0815 \
+  /tmp/codex-native-reference-bundle
+~~~
+
+The example derives the reduced graph from TraceWriter and replay_bundle, then compares it to expected_upstream_reducer in manifest.json. The Paginated fixture's completed `CommandExecution` is a separate source-compatible carrier for process `95583`; it is not treated as Legacy data or as a call-ID link. Update the expected graph only from the pinned reducer's actual output. Keep the carrier modes and edge classes explicit when changing a fixture. A real native runtime capture has not been run; this oracle establishes only the checked synthetic contract at the pinned source revision.
+
+## Pinned source map
+
+- codex-rs/rollout-trace/src/raw_event.rs defines the raw trace envelope, code-cell events, and runtime requester records.
+- codex-rs/rollout-trace/src/reducer/code_cell_tests.rs and reducer/tool/terminal_tests.rs show the upstream reducer joins for code cells, nested tool calls, terminal operations, and sessions.
+- codex-rs/core/src/tools/events.rs emits CommandExecution items and retains fields such as process_id and parsed_cmd.
+- codex-rs/rollout/src/policy.rs defines Legacy and Paginated persistence and the 65,536-byte command-output limit.
+- codex-rs/protocol/src/models.rs defines ordered content vectors and function-output payload shapes.
+- codex-rs/utils/output-truncation/src/lib.rs defines formatted truncation headers and content-item handling.
+- codex-rs/code-mode-runtime/src/runtime/callbacks.rs assigns runtime-local tool IDs.
+- The [upstream LICENSE at the pinned commit](https://github.com/openai/codex/blob/a9b0815167c27ab13719dd12d13b63e02b70d221/LICENSE) is Apache-2.0 (blob 4606e72e042564097e8780d66c1d4dcb611869bd). The runner is original Semon code and does not vendor or copy upstream reducer implementation.
