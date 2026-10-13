@@ -1124,6 +1124,7 @@ pub(crate) struct EventCache {
     scan_timing: bool,
     parse_duration: Duration,
     index_write_duration: Duration,
+    scan_measurements: crate::native_timing::Measurements,
     /// Files reread from byte zero this scan: offsets in cached text may
     /// now refer to different records, even if their new size is larger.
     replaced: BTreeSet<String>,
@@ -1659,6 +1660,10 @@ impl EventCache {
         (self.parse_duration, self.index_write_duration)
     }
 
+    pub(crate) fn emit_scan_measurements(&self, producer: &str) {
+        self.scan_measurements.emit(producer, "scan");
+    }
+
     /// Starts a scan: an index kept in memory tries its store again, at most
     /// every [`REOPEN_EVERY`]. Once it opens, the store's rows replace this
     /// process's: a file the store lacks or holds at another ledger is read
@@ -1801,6 +1806,7 @@ impl EventCache {
         self.scan_timing = crate::native_timing::enabled();
         self.parse_duration = Duration::ZERO;
         self.index_write_duration = Duration::ZERO;
+        self.scan_measurements = crate::native_timing::Measurements::new(self.scan_timing);
         self.replaced.clear();
         if self.store.is_some() || self.reopen_at.is_none_or(|at| Instant::now() < at) {
             return;
@@ -2247,6 +2253,7 @@ pub(crate) fn scan_file(
     dirty: &mut bool,
 ) -> io::Result<Arc<FileIndex>> {
     let key = path.to_string_lossy().into_owned();
+    let started = cache.scan_measurements.start();
     let _source_lock = cache
         .lock_cache
         .as_ref()
@@ -2263,6 +2270,7 @@ pub(crate) fn scan_file(
             )
         })
         .transpose()?;
+    cache.scan_measurements.record("source_lock", started, 1);
     let agent = harness == "claude" && crate::native_sidecar::agent_path(path);
     if let Some(entry) = cache.files.get(&key)
         && let Some(index) = &entry.index
@@ -2291,8 +2299,11 @@ pub(crate) fn scan_file(
         let last = attempt >= COMMIT_ATTEMPTS;
         // Stat'ed before reading: a line that lands during the read makes
         // the next check see a change.
+        let started = cache.scan_measurements.start();
         let mut file = LogFile::open(path)?;
         let stat = Stat::from_metadata(&file.metadata()?)?;
+        cache.scan_measurements.record("open_stat", started, 1);
+        let started = cache.scan_measurements.start();
         if harness == "codex"
             && cache.recorded(&key).is_none()
             && let Some(id) = crate::codex_native_id_prefix(path, stat.size)?
@@ -2303,6 +2314,10 @@ pub(crate) fn scan_file(
         {
             cache.files.remove(&old);
         }
+        cache
+            .scan_measurements
+            .record("relocation_lookup", started, 1);
+        let started = cache.scan_measurements.start();
         let recorded = cache.recorded(&key);
         let mut base = None;
         let mut trusted_append = false;
@@ -2336,6 +2351,8 @@ pub(crate) fn scan_file(
                 }
             }
         }
+        cache.scan_measurements.record("ledger_base", started, 1);
+        let started = agent.then(|| cache.scan_measurements.start()).flatten();
         let sidecar = if agent {
             match crate::native_sidecar::ClaudeSidecar::observe(
                 path,
@@ -2355,6 +2372,7 @@ pub(crate) fn scan_file(
         } else {
             None
         };
+        cache.scan_measurements.record("sidecar", started, 1);
         // Another process already read it as it is now.
         if let Some(ledger) = &recorded
             && ledger.stat == stat
@@ -2401,6 +2419,9 @@ pub(crate) fn scan_file(
         if shared {
             cache.index_clone += clone_started.elapsed();
         }
+        let started = (harness == "codex")
+            .then(|| cache.scan_measurements.start())
+            .flatten();
         let header_bytes = if harness == "codex" {
             // Preserve first-physical-line and unfinished-header semantics.
             // The same open native handle supplies the event ledger and header.
@@ -2424,14 +2445,17 @@ pub(crate) fn scan_file(
         } else {
             None
         };
+        cache.scan_measurements.record("native_header", started, 1);
         writable.claude_sidecar = sidecar;
         #[cfg(test)]
         if agent && let Some(hook) = AFTER_CLAUDE_SIDECAR.with(|hook| hook.borrow_mut().take()) {
             hook();
         }
         if harness != "copilot" && writable.tree_summary.is_none() {
+            let started = cache.scan_measurements.start();
             let (summary, observed) =
                 crate::native_tree::Summary::repair(&mut file, from, harness)?;
+            cache.scan_measurements.record("tree_repair", started, 1);
             if append
                 && recorded
                     .as_ref()
@@ -2450,13 +2474,17 @@ pub(crate) fn scan_file(
         }
         writable.dirty_rows = Some(DirtyRows::begin(writable));
         if harness != "copilot" && writable.marker_index.is_none() {
+            let started = cache.scan_measurements.start();
             writable.marker_index = Some(crate::native_marker::Index::repair(&mut file, from)?);
+            cache.scan_measurements.record("marker_repair", started, 1);
         }
         if let Some(markers) = &mut writable.marker_index {
             markers.begin_append();
         }
         if writable.handoff_index.is_none() {
+            let started = cache.scan_measurements.start();
             writable.handoff_index = Some(crate::native_handoff::Index::repair(&mut file, from)?);
+            cache.scan_measurements.record("handoff_repair", started, 1);
         }
         if let Some(handoffs) = &mut writable.handoff_index {
             handoffs.begin_append();
@@ -2472,6 +2500,7 @@ pub(crate) fn scan_file(
             .dirty_rows
             .take()
             .expect("parser tracks dirty rows");
+        let started = cache.scan_measurements.start();
         let captured = if trusted_append {
             let previous = writable
                 .source_chunks
@@ -2494,6 +2523,7 @@ pub(crate) fn scan_file(
         } else {
             crate::source_chunks::capture(&mut file, offset, from)?
         };
+        cache.scan_measurements.record("chunk_capture", started, 1);
         if captured.parsed != parsed
             || (append
                 && recorded
@@ -2512,11 +2542,13 @@ pub(crate) fn scan_file(
         let (prefix, tail) = (captured.prefix, captured.tail);
         writable.source_chunks = Some(Arc::new(captured.chunks));
         if let Some(header) = header_bytes {
+            let started = cache.scan_measurements.start();
             file.seek(SeekFrom::Start(0))?;
             let mut verified = Vec::new();
             BufReader::new(&mut file).read_until(b'\n', &mut verified)?;
             #[cfg(test)]
             CODEX_HEADER_READS.with(|reads| reads.set(reads.get() + 1));
+            cache.scan_measurements.record("native_header", started, 1);
             if verified != header {
                 if last {
                     return Err(io::Error::new(
@@ -2564,9 +2596,16 @@ pub(crate) fn scan_file(
             }
             continue;
         }
-        if let Some(markers) = &writable.marker_index
-            && (!markers.valid(&ledger) || markers.verify(&mut file).is_err())
-        {
+        let started = writable
+            .marker_index
+            .as_ref()
+            .and_then(|_| cache.scan_measurements.start());
+        let invalid_markers = writable
+            .marker_index
+            .as_ref()
+            .is_some_and(|markers| !markers.valid(&ledger) || markers.verify(&mut file).is_err());
+        cache.scan_measurements.record("marker_verify", started, 1);
+        if invalid_markers {
             if last {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
@@ -2576,9 +2615,15 @@ pub(crate) fn scan_file(
             force_replace = true;
             continue;
         }
-        if let Some(handoffs) = &writable.handoff_index
-            && (!handoffs.valid(&ledger) || handoffs.verify(&mut file).is_err())
-        {
+        let started = writable
+            .handoff_index
+            .as_ref()
+            .and_then(|_| cache.scan_measurements.start());
+        let invalid_handoffs = writable.handoff_index.as_ref().is_some_and(|handoffs| {
+            !handoffs.valid(&ledger) || handoffs.verify(&mut file).is_err()
+        });
+        cache.scan_measurements.record("handoff_verify", started, 1);
+        if invalid_handoffs {
             if last {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,

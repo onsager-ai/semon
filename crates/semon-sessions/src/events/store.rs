@@ -2942,6 +2942,9 @@ impl SqliteStore {
             stage("fences");
             crate::history_projection::publish(&transaction, publication).map_err(failure)?;
             stage("history");
+            let mut metadata_measurements =
+                crate::native_timing::Measurements::new(producer.is_some());
+            let setup_started = metadata_measurements.start();
             let search_version: Option<String> = transaction
                 .query_row(
                     "SELECT value FROM meta WHERE key='search_version'",
@@ -2974,8 +2977,10 @@ impl SqliteStore {
                 )
                 .optional()
                 .map_err(failure)?;
+            metadata_measurements.record("setup", setup_started, 1);
             let mut search_rows = Vec::new();
             {
+                let statements_started = metadata_measurements.start();
                 // A temporary membership table bounds deletion SQL parameters and
                 // never escapes the transaction or becomes part of the read model.
                 transaction.execute_batch("CREATE TEMP TABLE IF NOT EXISTS catalog_members (session_key TEXT PRIMARY KEY) WITHOUT ROWID; DELETE FROM catalog_members;").map_err(failure)?;
@@ -2988,8 +2993,12 @@ impl SqliteStore {
                         .prepare("UPDATE session_catalog_sources SET lifecycle='retained' WHERE session_key=?1")
                         .map_err(failure)?;
                     let mut put_source = transaction.prepare("INSERT INTO session_catalog_sources(session_key,harness,native_id,source_path) VALUES (?1,?2,?3,?4) ON CONFLICT(session_key,source_path) DO UPDATE SET lifecycle='current',harness=excluded.harness,native_id=excluded.native_id").map_err(failure)?;
+                    metadata_measurements.record("statements", statements_started, 1);
                     for (row, metadata) in rows.iter().zip(&metadata) {
+                        let started = metadata_measurements.start();
                         crate::overview::publish_current(&transaction, row).map_err(failure)?;
+                        metadata_measurements.record("overview", started, 1);
+                        let started = metadata_measurements.start();
                         member.execute([&row.key]).map_err(failure)?;
                         let changed = put
                             .execute(params![
@@ -3009,9 +3018,13 @@ impl SqliteStore {
                         {
                             search_rows.push(row);
                         }
+                        metadata_measurements.record("catalog_rows", started, 1);
                         if changed > 0 || previous_version.as_deref() != Some(&version) {
+                            let started = metadata_measurements.start();
                             remove_sources.execute([&row.key]).map_err(failure)?;
+                            metadata_measurements.record("source_retirement", started, 1);
                             for source in &row.sources {
+                                let started = metadata_measurements.start();
                                 let path = source.path.to_string_lossy();
                                 transaction.execute("DELETE FROM catalog_native_dependencies WHERE source_path=?1 AND harness NOT LIKE 'lineage:%' AND harness NOT LIKE 'bridge:%'",[path.as_ref()]).map_err(failure)?;
                                 let parent = source.native_role.as_ref().and_then(|role| {
@@ -3043,7 +3056,8 @@ impl SqliteStore {
                                 if let Some(parent) = parent {
                                     transaction.execute("INSERT OR IGNORE INTO catalog_native_dependencies VALUES(?1,?2,?3)",params![path.as_ref(),row.harness,parent]).map_err(failure)?;
                                 }
-
+                                metadata_measurements.record("native_dependencies", started, 1);
+                                let started = metadata_measurements.start();
                                 put_source
                                     .execute(params![
                                         row.key,
@@ -3052,10 +3066,12 @@ impl SqliteStore {
                                         source.path.to_string_lossy()
                                     ])
                                     .map_err(failure)?;
+                                metadata_measurements.record("catalog_sources", started, 1);
                             }
                         }
                     }
                 }
+                let started = metadata_measurements.start();
                 if claims.is_none() {
                     transaction.execute("UPDATE session_catalog SET lifecycle='retained', metadata=CASE WHEN json_valid(metadata) THEN json_set(metadata,'$.lifecycle','retained') ELSE metadata END WHERE lifecycle='current' AND session_key NOT IN (SELECT session_key FROM catalog_members)", []).map_err(failure)?;
                     transaction.execute("UPDATE session_catalog_sources SET lifecycle='retained' WHERE lifecycle='current' AND session_key NOT IN (SELECT session_key FROM catalog_members)", []).map_err(failure)?;
@@ -3065,13 +3081,19 @@ impl SqliteStore {
                         transaction.execute("UPDATE session_catalog_sources SET lifecycle='retained' WHERE session_key=?1 AND session_key NOT IN (SELECT session_key FROM catalog_members)",[key]).map_err(failure)?;
                     }
                 }
+                metadata_measurements.record("lifecycle_retirement", started, 1);
             }
+            let started = metadata_measurements.start();
             if claims.is_none() {
                 transaction.execute("UPDATE session_history_catalog SET metadata=json_set(metadata,'$.lifecycle','retained') WHERE session_key NOT IN (SELECT session_key FROM catalog_members)",[]).map_err(failure)?;
             } else {
                 for key in &affected {
                     transaction.execute("UPDATE session_history_catalog SET metadata=json_set(metadata,'$.lifecycle','retained') WHERE session_key=?1 AND session_key NOT IN (SELECT session_key FROM catalog_members)",[key]).map_err(failure)?;
                 }
+            }
+            metadata_measurements.record("history_retirement", started, 1);
+            if let Some(producer) = &producer {
+                metadata_measurements.emit(producer, "catalog_metadata");
             }
             stage("catalog_metadata");
             crate::catalog_search::publish_current_rows(&transaction, &search_rows)
