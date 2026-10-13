@@ -7548,12 +7548,8 @@ mod tests {
                     .transaction_with_behavior(TransactionBehavior::Immediate)
                     .unwrap();
                 for source in rows.iter().flat_map(|row| &row.sources) {
-                    invalidate_catalog_source(
-                        &tx,
-                        &source.path.to_string_lossy(),
-                        "traversal rollback fixture",
-                    )
-                    .unwrap();
+                    invalidate_catalog_source(&tx, &source.path.to_string_lossy(), "changed")
+                        .unwrap();
                 }
                 tx.commit().unwrap();
                 let before = catalog_state(&store.connection);
