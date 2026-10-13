@@ -3075,7 +3075,7 @@ impl SqliteStore {
             stage("catalog_metadata");
             crate::catalog_search::publish_current_rows(&transaction, &search_rows)
                 .map_err(failure)?;
-            stage("catalog_rows");
+            stage("search_rows");
             if rebuild_search {
                 crate::catalog_search::begin_backfill(&transaction).map_err(failure)?;
                 let mut statement = transaction

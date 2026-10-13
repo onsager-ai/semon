@@ -680,9 +680,7 @@ impl NativeEvidence {
                     && !audit.started
                     && let (Some(previous), Some(observed)) =
                         (&work.catalog_snapshot, &audit.snapshot)
-                    && (previous.watched != observed.watched
-                        || previous.locks != observed.locks
-                        || previous.pids != observed.pids)
+                    && previous.runtime_inputs_changed(observed, &self.options)
                 {
                     before_build()?;
                     work.built_at = Some(Instant::now());
@@ -1309,6 +1307,33 @@ pub(crate) fn catalog_input(path: &Path, options: &Options) -> Option<crate::inp
 }
 
 impl Snapshot {
+    /// An audit may have sampled a transcript before its pending revision was
+    /// published. Source stamps are checked against the durable ledger by the
+    /// audit, so that older stamp must not also request an empty runtime build.
+    /// Missing sources, type changes, directories and sidecars still differ;
+    /// naming files outside the native log allowlist remain runtime inputs.
+    fn runtime_inputs_changed(&self, observed: &Self, options: &Options) -> bool {
+        self.locks != observed.locks
+            || self.pids != observed.pids
+            || self.watched.iter().any(|(path, original)| {
+                match (original, observed.watched.get(path)) {
+                    (Some(original), Some(Some(current)))
+                        if original.kind.is_file()
+                            && current.kind.is_file()
+                            && catalog_input(path, options).is_some() =>
+                    {
+                        false
+                    }
+                    (_, Some(current)) => current != original,
+                    (_, None) => true,
+                }
+            })
+            || observed
+                .watched
+                .keys()
+                .any(|path| !self.watched.contains_key(path))
+    }
+
     /// Assemble observation stamps along bounded source batches. Never enumerate
     /// native transcript trees again after progressive discovery.
     fn sources(options: &Options, inputs: &[crate::Input]) -> Self {
@@ -1588,6 +1613,144 @@ impl Snapshot {
 #[cfg(test)]
 mod catalog_owner_tests {
     use super::*;
+
+    fn audit_fixture() -> (PathBuf, Options, crate::Input) {
+        let root = std::env::temp_dir().join(format!(
+            "semon-catalog-audit-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let options = Options {
+            claude_home: root.join("claude"),
+            claude_json: root.join("claude.json"),
+            codex_home: root.join("codex"),
+            copilot_home: root.join("copilot"),
+            proc_root: root.join("proc"),
+            cache: root.join("index.json"),
+            ..Options::default()
+        };
+        let input = crate::Input {
+            root: crate::InputRoot::Codex,
+            path: "sessions/2026/10/01/rollout-audit.jsonl".into(),
+        };
+        let log = input.full_path(&options);
+        fs::create_dir_all(log.parent().unwrap()).unwrap();
+        fs::write(log, "{\"type\":\"session_meta\",\"timestamp\":\"2026-10-01T00:00:00Z\",\"payload\":{\"id\":\"audit\"}}\n").unwrap();
+        let hostname = options.proc_root.join("sys/kernel/hostname");
+        fs::create_dir_all(hostname.parent().unwrap()).unwrap();
+        fs::write(hostname, "initial-host\n").unwrap();
+        (root, options, input)
+    }
+
+    #[test]
+    fn append_after_audit_snapshot_does_not_request_an_empty_runtime_rebuild() {
+        use std::io::Write;
+
+        let (root, options, input) = audit_fixture();
+        let evidence = NativeEvidence::new(options.clone());
+        let mut work = lock(&evidence.work);
+        let mut complete = false;
+        for _ in 0..16 {
+            if evidence
+                .refresh_catalog(&mut work, model::now_ms())
+                .unwrap()
+            {
+                complete = true;
+                break;
+            }
+        }
+        assert!(complete, "cold fixture did not finish");
+        let builds = std::cell::Cell::new(0);
+        let before_build = || {
+            builds.set(builds.get() + 1);
+            Ok(())
+        };
+        evidence.request_metadata_audit();
+        assert!(
+            !evidence
+                .refresh_catalog_with(&mut work, model::now_ms(), before_build)
+                .unwrap(),
+            "the keyset audit must finish after its discovery snapshot"
+        );
+        assert_eq!(builds.get(), 0);
+        let log = input.full_path(&options);
+        assert!(
+            work.audit
+                .as_ref()
+                .and_then(|audit| audit.snapshot.as_ref())
+                .is_some_and(|snapshot| snapshot.watched.get(&log) == Some(&stamp(&log)))
+        );
+        // Replay the selected keyset row after discovery, placing the append
+        // between snapshot sampling and its ledger audit without timing sleeps.
+        work.audit.as_mut().unwrap().after.clear();
+        let parsed = crate::events::PARSED.with(std::cell::Cell::get);
+        let mut file = fs::OpenOptions::new().append(true).open(&log).unwrap();
+        writeln!(file, "{{\"type\":\"event_msg\",\"timestamp\":\"2026-10-01T00:01:00Z\",\"payload\":{{\"type\":\"user_message\",\"message\":\"published during audit\"}}}}").unwrap();
+        drop(file);
+        evidence.request_metadata_audit();
+        for _ in 0..16 {
+            complete = evidence
+                .refresh_catalog_with(&mut work, model::now_ms(), before_build)
+                .unwrap();
+            if complete {
+                break;
+            }
+        }
+        assert!(complete, "append audits did not finish");
+        assert_eq!(
+            builds.get(),
+            1,
+            "append gained a second runtime notification"
+        );
+        assert_eq!(crate::events::PARSED.with(std::cell::Cell::get) - parsed, 1);
+        assert!(!evidence.catalog_pending(&work));
+        assert!(
+            work.catalog_snapshot
+                .as_ref()
+                .is_some_and(|snapshot| snapshot.watched.get(&log) == Some(&stamp(&log)))
+        );
+
+        fs::write(
+            options.proc_root.join("sys/kernel/hostname"),
+            "changed-hostname\n",
+        )
+        .unwrap();
+        evidence.request_metadata_audit();
+        for _ in 0..16 {
+            complete = evidence
+                .refresh_catalog_with(&mut work, model::now_ms(), before_build)
+                .unwrap();
+            if complete {
+                break;
+            }
+        }
+        assert!(complete, "runtime audit did not finish");
+        assert_eq!(builds.get(), 2, "hostname change lost its observation");
+        drop(work);
+        drop(evidence);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn runtime_comparison_preserves_missing_sources_and_type_changes() {
+        let (root, options, input) = audit_fixture();
+        let before = Snapshot::sources(&options, std::slice::from_ref(&input));
+        let log = input.full_path(&options);
+        fs::remove_file(&log).unwrap();
+        let mut missing = Snapshot::sources(&options, std::slice::from_ref(&input));
+        missing.watched = before.watched.clone();
+        missing.watched.insert(log.clone(), None);
+        assert!(before.runtime_inputs_changed(&missing, &options));
+        fs::create_dir(&log).unwrap();
+        let mut directory = Snapshot::sources(&options, std::slice::from_ref(&input));
+        directory.watched = before.watched.clone();
+        directory.watched.insert(log.clone(), stamp(&log));
+        assert!(before.runtime_inputs_changed(&directory, &options));
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn native_catalog_production_has_no_viewer_or_query_cohort_owner() {
