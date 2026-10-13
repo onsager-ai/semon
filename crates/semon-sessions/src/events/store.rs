@@ -3161,6 +3161,7 @@ impl SqliteStore {
                 .map_err(failure)?;
             metadata_measurements.record("setup", setup_started, 1);
             let mut search_rows = Vec::new();
+            let mut metadata_sample = None;
             {
                 let statements_started = metadata_measurements.start();
                 // A temporary membership table bounds deletion SQL parameters and
@@ -3176,7 +3177,22 @@ impl SqliteStore {
                         .map_err(failure)?;
                     let mut put_source = transaction.prepare("INSERT INTO session_catalog_sources(session_key,harness,native_id,source_path) VALUES (?1,?2,?3,?4) ON CONFLICT(session_key,source_path) DO UPDATE SET lifecycle='current',harness=excluded.harness,native_id=excluded.native_id").map_err(failure)?;
                     metadata_measurements.record("statements", statements_started, 1);
-                    for (row, metadata) in rows.iter().zip(&metadata) {
+                    for (position, (row, metadata)) in rows.iter().zip(&metadata).enumerate() {
+                        // The first selected row may be unchanged. These
+                        // intervals are nested in catalog_metadata, not
+                        // additive publication totals.
+                        let mut sample = if position == 0 && producer.is_some() {
+                            Some(
+                                metadata_sample.insert(crate::native_timing::WriteActivity::new(
+                                    true,
+                                    &self.path,
+                                    "catalog_metadata_sample",
+                                    &transaction,
+                                )),
+                            )
+                        } else {
+                            None
+                        };
                         let started = metadata_measurements.start();
                         if producer.is_some() {
                             crate::overview::publish_current_measured(
@@ -3189,6 +3205,9 @@ impl SqliteStore {
                             crate::overview::publish_current(&transaction, row).map_err(failure)?;
                         }
                         metadata_measurements.record("overview", started, 1);
+                        if let Some(sample) = sample.as_mut() {
+                            sample.stage("overview", &transaction);
+                        }
                         let started = metadata_measurements.start();
                         member.execute([&row.key]).map_err(failure)?;
                         let changed = put
@@ -3210,10 +3229,23 @@ impl SqliteStore {
                             search_rows.push(row);
                         }
                         metadata_measurements.record("catalog_rows", started, 1);
+                        if let Some(sample) = sample.as_mut() {
+                            sample.stage(
+                                if changed > 0 {
+                                    "catalog_rows_changed"
+                                } else {
+                                    "catalog_rows_unchanged"
+                                },
+                                &transaction,
+                            );
+                        }
                         if changed > 0 || previous_version.as_deref() != Some(&version) {
                             let started = metadata_measurements.start();
                             remove_sources.execute([&row.key]).map_err(failure)?;
                             metadata_measurements.record("source_retirement", started, 1);
+                            if let Some(sample) = sample.as_mut() {
+                                sample.stage("source_retirement", &transaction);
+                            }
                             for source in &row.sources {
                                 let started = metadata_measurements.start();
                                 let path = source.path.to_string_lossy();
@@ -3259,6 +3291,13 @@ impl SqliteStore {
                                     .map_err(failure)?;
                                 metadata_measurements.record("catalog_sources", started, 1);
                             }
+                        } else if let Some(sample) = sample.as_mut() {
+                            sample.stage("source_retirement", &transaction);
+                        }
+                        // Native dependency and source DML are interleaved.
+                        // All this owner's sources share one final boundary.
+                        if let Some(sample) = sample.as_mut() {
+                            sample.stage("sources_and_dependencies", &transaction);
                         }
                     }
                 }
@@ -3491,6 +3530,9 @@ impl SqliteStore {
                 .map_err(failure)?;
             transaction.commit().map_err(failure)?;
             stage("commit", &self.connection);
+            if let Some(sample) = metadata_sample {
+                sample.committed();
+            }
             published = Some(generation);
             Ok(Outcome::Written)
         })();
