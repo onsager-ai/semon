@@ -3127,6 +3127,109 @@ fn selected_transcript_pages_match_native_anchors_thinking_and_tool_observations
 }
 
 #[test]
+fn focused_recorded_id_suffixes_preserve_native_global_identity() {
+    let home = fixture();
+    let peer = Home::new("testbox");
+    peer.top("other", &[human("other", ts(6, 0), "Other machine")]);
+    home.top(
+        "literal@peer",
+        &[human("literal@peer", ts(1, 0), "Literal at sign")],
+    );
+    for options in [&home.options, &peer.options] {
+        let mut cache = crate::events::EventCache::open_scoped(&options.cache).unwrap();
+        crate::model::observe_catalog(
+            options,
+            &mut cache,
+            &mut false,
+            &mut crate::model::Texts::default(),
+            NOW,
+        )
+        .unwrap();
+    }
+    let machines = vec![
+        ("a".into(), home.options.clone()),
+        ("b".into(), peer.options.clone()),
+    ];
+    let mut oracle = Query::from_sources(Arc::new(SessionSources::with_machines(machines.clone())));
+    let label = oracle.source_labels()[0].1.clone();
+    for key in ["done", "literal@peer"] {
+        let args = json!({"id":key,"after":0,"limit":1});
+        let expected = oracle.call_at("read_transcript", &args, NOW).unwrap();
+        let mut query =
+            Query::from_sources(Arc::new(SessionSources::with_machines(machines.clone())));
+        assert_eq!(
+            query
+                .call_selected_at(
+                    "a",
+                    key,
+                    "read_transcript",
+                    &args,
+                    None,
+                    crate::SessionSourceReadMode::LocalThenProvider,
+                    NOW
+                )
+                .unwrap(),
+            expected
+        );
+        assert!(
+            query.native.is_none(),
+            "a literal native ID lost bounded paging"
+        );
+        let id = format!("{key}@{label}");
+        for args in [
+            json!({"id":id,"limit":1}),
+            json!({"id":id,"before":1,"limit":1}),
+            json!({"id":id,"after":0,"limit":1}),
+            json!({"id":id,"after":100,"limit":1}),
+        ] {
+            let expected = oracle.call_at("read_transcript", &args, NOW);
+            assert_eq!(expected.as_ref().unwrap_err().code, "unknown_session");
+            let mut query =
+                Query::from_sources(Arc::new(SessionSources::with_machines(machines.clone())));
+            let loaded = crate::events::CACHE_READS.with(std::cell::Cell::get);
+            let actual = query.call_selected_at(
+                "a",
+                key,
+                "read_transcript",
+                &args,
+                None,
+                crate::SessionSourceReadMode::LocalThenProvider,
+                NOW,
+            );
+            assert_eq!(
+                actual, expected,
+                "recorded-ID qualification changed the native contract: {args}"
+            );
+            assert!(
+                query.native.is_none(),
+                "rejected recorded-ID suffix derived a selected cohort: {args}"
+            );
+            assert_eq!(
+                crate::events::CACHE_READS.with(std::cell::Cell::get),
+                loaded
+            );
+        }
+    }
+    let mut query = Query::from_sources(Arc::new(SessionSources::with_machines(machines)));
+    assert_eq!(
+        query
+            .call_selected_at(
+                "a",
+                "done",
+                "read_transcript",
+                &json!({"id":"done@unadmitted-machine"}),
+                None,
+                crate::SessionSourceReadMode::LocalThenProvider,
+                NOW
+            )
+            .unwrap_err()
+            .code,
+        "unknown_session",
+        "an unadmitted machine suffix gained selected-source authority"
+    );
+}
+
+#[test]
 fn selected_transcript_refuses_invalid_observation_and_missing_proofs_before_source_reads() {
     for damaged in ["observation", "proofs"] {
         let home = Home::new("invalid-transcript-observation");
