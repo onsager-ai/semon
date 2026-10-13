@@ -319,44 +319,12 @@ pub(crate) enum Source {
     Collected,
 }
 
-/// Unified exec's frame around an output: `Chunk ID: …`, `Wall time: N
-/// seconds`, then `Process exited with code N` or `Process running with
-/// session ID N`, `Original token count: N`, and `Output:` on a line of its
-/// own (codex-rs `core/src/tools/context.rs`, `ExecCommandToolOutput`). Codex's
-/// warning header and cut come after it. Returns the text after the frame,
-/// whether there was one, and the frame's `Original token count` if it has
-/// one. A frame needs its `Wall time:` line.
+/// Display/cut handling uses the shared borrowed response-header decoder.
 fn strip_frame(text: &str) -> (&str, bool, Option<u64>) {
-    let mut rest = text;
-    let mut timed = false;
-    let mut count = None;
-    while let Some((line, after)) = rest.split_once('\n') {
-        if line == "Output:" {
-            return if timed {
-                (after, true, count)
-            } else {
-                (text, false, None)
-            };
-        }
-        if let Some(number) = line.strip_prefix("Original token count: ") {
-            count = digits(number)
-                .filter(|(_, rest)| rest.is_empty())
-                .map(|(n, _)| n);
-        } else if line.starts_with("Wall time: ") && line.ends_with(" seconds") {
-            timed = true;
-        } else if ![
-            "Chunk ID: ",
-            "Process exited with code ",
-            "Process running with session ID ",
-        ]
-        .iter()
-        .any(|prefix| line.starts_with(prefix))
-        {
-            break;
-        }
-        rest = after;
+    match crate::exec_response::decode_exec_response(text) {
+        Some(frame) => (frame.body, true, frame.original_token_count),
+        None => (text, false, None),
     }
-    (text, false, None)
 }
 
 /// The gaps Codex left in `body`, in order, by the forms it writes them in:

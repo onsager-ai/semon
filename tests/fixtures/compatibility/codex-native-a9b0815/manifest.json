@@ -5,7 +5,7 @@
     "real_runtime_capture": false,
     "version": null,
     "build": null,
-    "notes": "Sanitized rollout-shaped records. Printed outputs and lifecycle interleavings are controlled cases, not recorded runtime evidence. direct-81001 is an unwrapped scalar compatibility case, not the pinned CodeMode producer carrier; future_text is a deliberately unsupported synthetic block kind."
+    "notes": "Sanitized rollout-shaped records. Printed outputs and lifecycle interleavings are controlled cases, not recorded runtime evidence. direct-81001 is an unwrapped scalar compatibility case, not the pinned CodeMode producer carrier; direct-* records are synthetic unified-exec formatter cases, not runtime captures; future_text is a deliberately unsupported synthetic block kind."
   },
   "upstream": {
     "repository": "openai/codex",
@@ -51,8 +51,32 @@
     {"id":"fake-exec-json","line":53,"offset":15861,"relation":"visible"},
     {"id":"fake-poll-json","line":55,"offset":16522,"relation":"visible"},
     {"id":"start-7777","line":57,"offset":17209,"relation":"yielded","terminal_offset":18041,"poll_offsets":[]},
-    {"id":"duplicate-session-target","line":59,"offset":17800,"relation":"visible"}
+    {"id":"duplicate-session-target","line":59,"offset":17800,"relation":"visible"},
+    {"id":"direct-zero","line":62,"offset":18739,"reply_offset":18927,"relation":"visible","outcome":"ok","native_direct_call":true},
+    {"id":"direct-nonzero","line":64,"offset":19183,"reply_offset":19374,"relation":"visible","outcome":"err","native_direct_call":true},
+    {"id":"direct-negative","line":66,"offset":19589,"reply_offset":19788,"relation":"visible","outcome":"err","native_direct_call":true},
+    {"id":"direct-session-only","line":68,"offset":20088,"reply_offset":20291,"relation":"visible","outcome":"unknown","native_direct_call":true},
+    {"id":"direct-both-fields","line":70,"offset":20522,"reply_offset":20717,"relation":"visible","outcome":"ok","native_direct_call":true},
+    {"id":"direct-body-fake","line":72,"offset":20976,"reply_offset":21169,"relation":"visible","outcome":"ok","native_direct_call":true},
+    {"id":"direct-reordered","line":74,"offset":21511,"reply_offset":21704,"relation":"visible","outcome":"unknown","native_direct_call":true},
+    {"id":"direct-duplicate","line":76,"offset":21947,"reply_offset":22140,"relation":"visible","outcome":"unknown","native_direct_call":true},
+    {"id":"direct-nonnumeric","line":78,"offset":22386,"reply_offset":22580,"relation":"visible","outcome":"unknown","native_direct_call":true},
+    {"id":"direct-nonfinite","line":80,"offset":22802,"reply_offset":22995,"relation":"visible","outcome":"unknown","native_direct_call":true},
+    {"id":"direct-no-output","line":82,"offset":23210,"reply_offset":23403,"relation":"visible","outcome":"unknown","native_direct_call":true},
+    {"id":"direct-unrelated","line":84,"offset":23621,"reply_offset":23807,"relation":"visible","outcome":"unknown","native_direct_call":false},
+    {"id":"direct-overflow","line":86,"offset":24025,"reply_offset":24217,"relation":"visible","outcome":"unknown","native_direct_call":true},
+    {"id":"direct-missing-wall","line":88,"offset":24443,"reply_offset":24639,"relation":"visible","outcome":"unknown","native_direct_call":true},
+    {"id":"direct-code-mode","line":90,"offset":24833,"reply_offset":25009,"relation":"visible","outcome":"unknown","native_direct_call":false},
+    {"id":"direct-namespaced","line":92,"offset":25340,"reply_offset":25567,"relation":"visible","outcome":"unknown","native_direct_call":false}
   ],
+  "reused_id_contract": {
+    "id": "direct-reused-id",
+    "call_offsets": [25786, 26209],
+    "reply_offsets": [25977, 26401],
+    "expected_outcomes": ["ok", "unknown"],
+    "native_direct_call": true,
+    "qualification": "The first call qualifies while its ID is unique. After that call closes, a second direct call reuses the same source ID; its otherwise valid formatter exit stays unknown because the ID no longer identifies exactly one source call."
+  },
   "expected_blocks": [
     {
       "call_id":"multi-output",
@@ -129,8 +153,16 @@
     }
   ],
   "replay_extension": {
-    "kind": "synthetic exact-target poll appended by the Rust fixture oracle",
-    "expected": "incremental append and reopened cache index equal a cold index of the same final bytes"
+    "kind": "synthetic exact-target poll, direct formatter result, and same-name namespaced negative appended by the Rust fixture oracle",
+    "expected": "the appended direct outcome and namespaced refusal have exact call and result offsets; incremental append and reopened cache index equal a cold index of the same final bytes, including persisted carrier qualification"
+  },
+  "direct_formatter_contract": {
+    "source": "codex-rs/core/src/tools/context.rs ExecCommandToolOutput::response_header at the pinned revision",
+    "qualification": "byte-zero ordered optional Chunk ID, required finite nonnegative four-decimal Wall time, optional Process exited i32, optional Process running i32, optional Original token count usize, then Output",
+    "outcome": "Only function_call_output paired with one unique unnamespaced function_call named exactly exec_command or write_stdin may use a qualified formatter exit code; explicit or reused IDs and no exit stay unknown",
+    "session_id": "retain its exact borrowed spelling as source evidence; it establishes neither outcome nor liveness or grouping",
+    "header_limits": {"bytes":2048,"lines":8},
+    "remaining_gaps": ["native terminal ID correlation/grouping", "unowned Paginated projection"]
   },
   "delayed_startup": {
     "fixture": "delayed-startup.jsonl",
