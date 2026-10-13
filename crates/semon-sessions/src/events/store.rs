@@ -4451,6 +4451,7 @@ mod tests {
                     n: Some("Bash".to_owned()),
                     code_mode: true,
                     code_mode_open: true,
+                    native_direct_call: true,
                     parent: Some(7),
                     script: STDIN | SENDS,
                     poll_target: Some("26789".to_owned()),
