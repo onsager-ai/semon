@@ -6630,7 +6630,10 @@ mod tests {
             ["202"],
             "source dependency writes retain caller order"
         );
-        assert!(crate::catalog_search::row_present(&batch.connection, &rows[3].key).unwrap());
+        {
+            let transaction = batch.connection.transaction().unwrap();
+            assert!(crate::catalog_search::row_present(&transaction, &rows[3].key).unwrap());
+        }
         for store in [&batch, &legacy] {
             store
                 .connection
