@@ -1393,6 +1393,7 @@ fn copilot_redacted_mirror_survives_lost_ack_restart_partial_and_replacement() {
         let mut home = Home::new();
         home.options.all = true;
         let receiver = receiver();
+        let options = home.push_options(&receiver.url);
         let mirrored = Home::new();
         let expected = Home::new();
         let read = |name: &str| {
@@ -1421,27 +1422,32 @@ fn copilot_redacted_mirror_survives_lost_ack_restart_partial_and_replacement() {
         );
         receiver.state.lock().unwrap().drop_ack_once = true;
         assert!(
-            semon_push::push(&home.push_options(&receiver.url), false).is_err(),
+            semon_push::push(&options, false).is_err(),
             "lost ACK is not acknowledged state"
         );
         assert_eq!(copy(&receiver, &path), redacted(&initial));
-        semon_push::push(&home.push_options(&receiver.url), false).unwrap();
+        assert_lock_freed(&options);
+        semon_push::push(&options, false).unwrap();
         assert!(
             receiver.state.lock().unwrap().conflicts > 0,
             "restart reconciles the committed unacknowledged prefix"
         );
+        assert_lock_freed(&options);
         let partial = resumed.len() - resumed.lines().last().unwrap().len() / 2;
         home.write(&path, &resumed[..partial]);
-        semon_push::push(&home.push_options(&receiver.url), false).unwrap();
+        semon_push::push(&options, false).unwrap();
         assert!(copy(&receiver, &path).ends_with(b"\n"));
+        assert_lock_freed(&options);
         for source in [
             &resumed,
             &resumed.replace("SEMON_SYNTHETIC_resumed", "SEMON_SYNTHETIC_changed"),
         ] {
             home.write(&path, source);
-            semon_push::push(&home.push_options(&receiver.url), false).unwrap();
+            semon_push::push(&options, false).unwrap();
+            assert_lock_freed(&options);
             // A fresh Client/cursor-state load tests restart and duplicate replay.
-            semon_push::push(&home.push_options(&receiver.url), false).unwrap();
+            semon_push::push(&options, false).unwrap();
+            assert_lock_freed(&options);
             let (received, facts) = {
                 let state = receiver.state.lock().unwrap();
                 (state.files.clone(), state.facts.clone().unwrap())
@@ -1495,7 +1501,8 @@ fn copilot_redacted_mirror_survives_lost_ack_restart_partial_and_replacement() {
         }
         let retained = copy(&receiver, &path);
         fs::remove_file(home.root.join(&path)).unwrap();
-        semon_push::push(&home.push_options(&receiver.url), false).unwrap();
+        semon_push::push(&options, false).unwrap();
+        assert_lock_freed(&options);
         assert_eq!(
             copy(&receiver, &path),
             retained,
