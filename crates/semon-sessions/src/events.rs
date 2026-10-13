@@ -1121,6 +1121,9 @@ pub(crate) struct EventCache {
     gone: Vec<(String, Option<Ledger>)>,
     /// Time spent cloning a cached index during the current scan.
     index_clone: Duration,
+    scan_timing: bool,
+    parse_duration: Duration,
+    index_write_duration: Duration,
     /// Files reread from byte zero this scan: offsets in cached text may
     /// now refer to different records, even if their new size is larger.
     replaced: BTreeSet<String>,
@@ -1652,6 +1655,10 @@ impl EventCache {
         self.index_clone
     }
 
+    pub(crate) fn scan_durations(&self) -> (Duration, Duration) {
+        (self.parse_duration, self.index_write_duration)
+    }
+
     /// Starts a scan: an index kept in memory tries its store again, at most
     /// every [`REOPEN_EVERY`]. Once it opens, the store's rows replace this
     /// process's: a file the store lacks or holds at another ledger is read
@@ -1791,6 +1798,9 @@ impl EventCache {
     pub(crate) fn begin_scan(&mut self) {
         self.cold_writes.clear();
         self.index_clone = Duration::ZERO;
+        self.scan_timing = crate::native_timing::enabled();
+        self.parse_duration = Duration::ZERO;
+        self.index_write_duration = Duration::ZERO;
         self.replaced.clear();
         if self.store.is_some() || self.reopen_at.is_none_or(|at| Instant::now() < at) {
             return;
@@ -2135,12 +2145,16 @@ impl EventCache {
         if files.is_empty() {
             return Ok(());
         }
+        let started = self.scan_timing.then(Instant::now);
         let outcome = self
             .store
             .as_mut()
             .ok_or_else(|| io::Error::other("cold batch store unavailable"))?
             .commit_initial_files(&files)
             .map_err(|error| io::Error::other(error.to_string()))?;
+        if let Some(started) = started {
+            self.index_write_duration += started.elapsed();
+        }
         if outcome != Outcome::Written {
             return Err(io::Error::new(
                 io::ErrorKind::WouldBlock,
@@ -2171,10 +2185,14 @@ impl EventCache {
         if self.busy {
             return false;
         }
+        let started = self.scan_timing.then(Instant::now);
         let committed = self
             .store
             .as_mut()
             .map(|store| store.commit_file(path, expected, changes, ledger, index));
+        if let Some(started) = started {
+            self.index_write_duration += started.elapsed();
+        }
         match committed {
             Some(Ok(Outcome::Written)) => {
                 self.unpersisted.remove(path);
@@ -2443,8 +2461,12 @@ pub(crate) fn scan_file(
         if let Some(handoffs) = &mut writable.handoff_index {
             handoffs.begin_append();
         }
+        let parse_started = cache.scan_timing.then(Instant::now);
         let (offset, parsed, bounded) =
             parse(&mut file, from, harness, writable, cache.scan_byte_budget)?;
+        if let Some(started) = parse_started {
+            cache.parse_duration += started.elapsed();
+        }
         let bounded = bounded && offset < stat.size;
         let changes = writable
             .dirty_rows

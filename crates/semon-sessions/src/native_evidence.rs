@@ -300,6 +300,7 @@ impl NativeEvidence {
             work.events = None;
         }
         if work.events.is_none() {
+            let _timing = crate::native_timing::Phase::new(&self.options.cache, "index_open");
             work.events = Some(match EventCache::open_scoped(&self.options.cache) {
                 Ok(cache) => cache,
                 Err(error) if self.catalog_demand.load(Ordering::Relaxed) => {
@@ -328,6 +329,7 @@ impl NativeEvidence {
         work: &mut Work,
         now: i64,
     ) -> io::Result<CatalogPreparation> {
+        let _timing = crate::native_timing::Phase::new(&self.options.cache, "cold_total");
         self.prepare_events(work, now)?;
         let cache = work.events.as_mut().expect("event cache initialized");
         let state = cache.backfill_state()?;
@@ -350,14 +352,26 @@ impl NativeEvidence {
             ..Default::default()
         });
         if state.as_deref() != Some("draining") {
-            let recovery_complete = crate::events::store::discover_recovery_sources(&self.options)?;
-            let page = discovery.cursor.next(&self.options, 64, 512)?;
+            let recovery_complete = {
+                let _timing =
+                    crate::native_timing::Phase::new(&self.options.cache, "recovery_discovery");
+                crate::events::store::discover_recovery_sources(&self.options)?
+            };
+            let page = {
+                let _timing =
+                    crate::native_timing::Phase::new(&self.options.cache, "path_discovery");
+                discovery.cursor.next(&self.options, 64, 512)?
+            };
             debug_assert!(page.examined <= 512);
-            cache.discover_catalog_sources(
-                &self.options,
-                &page.inputs,
-                page.complete && recovery_complete,
-            )?;
+            {
+                let _timing =
+                    crate::native_timing::Phase::new(&self.options.cache, "discovery_publication");
+                cache.discover_catalog_sources(
+                    &self.options,
+                    &page.inputs,
+                    page.complete && recovery_complete,
+                )?;
+            }
             for input in page.inputs {
                 if !input.path.ends_with(".jsonl") {
                     continue;
@@ -403,20 +417,25 @@ impl NativeEvidence {
                 .get_or_insert_with(|| Snapshot::sources(&self.options, &[]));
             snapshot.extend_sources(&self.options, &inputs);
             let mut seeds = inputs;
-            let prepared = loop {
-                cache.scan_byte_budget = Some(4 * 1024 * 1024);
-                let prepared = self.prepare_catalog_component_mode(cache, seeds.clone(), true, now);
-                cache.scan_byte_budget = None;
-                if let Some(prepared) = prepared? {
-                    break prepared;
+            let prepared = {
+                let _timing =
+                    crate::native_timing::Phase::new(&self.options.cache, "cold_component");
+                loop {
+                    cache.scan_byte_budget = Some(4 * 1024 * 1024);
+                    let prepared =
+                        self.prepare_catalog_component_mode(cache, seeds.clone(), true, now);
+                    cache.scan_byte_budget = None;
+                    if let Some(prepared) = prepared? {
+                        break prepared;
+                    }
+                    if seeds.len() <= 1 {
+                        return Err(io::Error::new(
+                            io::ErrorKind::WouldBlock,
+                            "backfill dependency budget exceeded",
+                        ));
+                    }
+                    seeds.truncate(seeds.len() / 2);
                 }
-                if seeds.len() <= 1 {
-                    return Err(io::Error::new(
-                        io::ErrorKind::WouldBlock,
-                        "backfill dependency budget exceeded",
-                    ));
-                }
-                seeds.truncate(seeds.len() / 2);
             };
             discovery.pids.extend(prepared.pids.iter().copied());
             let (outcome, _) = cache.publish_partial_catalog_fenced(&prepared)?;
@@ -426,6 +445,7 @@ impl NativeEvidence {
                     "backfill publication changed",
                 ));
             }
+            let _timing = crate::native_timing::Phase::new(&self.options.cache, "cold_cleanup");
             crate::events::store::requeue_concurrent_sources(&self.options, &prepared)?;
             cache.publish_session_descriptions();
             cache.end_scan();

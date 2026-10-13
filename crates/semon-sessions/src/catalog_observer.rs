@@ -29,6 +29,14 @@ impl SessionCatalogObserver {
         self.view.clone()
     }
 
+    /// Opaque producer correlation token for opt-in timing diagnostics. This
+    /// identifies the configured cache within a process, never source authority.
+    pub fn diagnostic_id(&self) -> String {
+        crate::native_timing::id(&crate::events::EventCache::path(
+            &self.view.evidence.options.cache,
+        ))
+    }
+
     /// Queue initial or recovery observation without waiting for a build.
     /// Errors describe a stalled/failing producer; retained reads remain usable.
     pub fn demand(&self) -> io::Result<()> {

@@ -7136,12 +7136,16 @@ fn build_sources_inner(
         source_records.finish()?;
     }
     let native_timing = matches!(target, BuildTarget::Catalog | BuildTarget::Sources)
-        && std::env::var("SEMON_BUILD_TIMING").is_ok_and(|value| value == "1");
+        && crate::native_timing::enabled();
     if native_timing {
+        let id = crate::native_timing::id(&EventCache::path(&options.cache));
+        let (parse, index_write) = cache.scan_durations();
         eprintln!(
-            "semon sessions native: sources={} preparation={timings:?} projections={}",
+            "semon sessions native: producer={id} sources={} preparation={timings:?} projections={} parse_us={} index_write_us={}",
             files.len(),
-            post_started.elapsed().as_millis()
+            post_started.elapsed().as_millis(),
+            parse.as_micros(),
+            index_write.as_micros()
         );
     }
     match target {
@@ -7183,7 +7187,8 @@ fn build_sources_inner(
             )?;
             if native_timing {
                 eprintln!(
-                    "semon sessions native: publish_catalog={}",
+                    "semon sessions native: producer={} publish_catalog={}",
+                    crate::native_timing::id(&EventCache::path(&options.cache)),
                     publication_started.elapsed().as_millis()
                 );
             }

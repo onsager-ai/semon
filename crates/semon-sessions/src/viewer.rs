@@ -1164,7 +1164,7 @@ impl MachineView {
             }
         }
         let checking = Checking(self);
-        self.tick();
+        self.tick(key.0);
         drop(checking);
     }
 
@@ -1172,9 +1172,21 @@ impl MachineView {
     /// never sooner than [`REBUILD_SPACING`] after the last rebuild, and
     /// queues the next. The model and the tree are refreshed, and fail,
     /// each on its own.
-    fn tick(&self) {
+    fn tick(&self, due: Instant) {
+        let _timing = crate::native_timing::Phase::new(&self.evidence.options.cache, "worker_tick");
+        let entered = crate::native_timing::enabled().then(Instant::now);
         let mut work = lock(&self.evidence.work);
         let started = Instant::now();
+        if let Some(entered) = entered {
+            let producer = crate::native_timing::id(&crate::events::EventCache::path(
+                &self.evidence.options.cache,
+            ));
+            eprintln!(
+                "semon sessions native: producer={producer} queue_late_us={} work_lock_wait_us={}",
+                entered.saturating_duration_since(due).as_micros(),
+                started.duration_since(entered).as_micros()
+            );
+        }
         // A stall counts from here, with `work` taken: a warm or a page's
         // fresh check holding it meanwhile isn't this view's build hanging.
         lock(&self.live.state).running_since = Some(started);
