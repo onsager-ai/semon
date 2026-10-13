@@ -19,7 +19,7 @@ fn record_steps(statement: &rusqlite::Statement<'_>) {
     let _ = statement;
 }
 
-pub(crate) const VERSION: &str = "1";
+pub(crate) const VERSION: &str = "2";
 pub(crate) const MAX_CANDIDATES: usize = 512;
 pub(crate) const MAX_SCAN_BYTES: usize = 2 * 1024 * 1024;
 const MAX_DOCUMENT_BYTES: usize = 8192;
@@ -46,6 +46,16 @@ CREATE TABLE IF NOT EXISTS session_search_postings (
     PRIMARY KEY(read_scope,session_key,gram)
 ) STRICT, WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS session_search_order ON session_search_postings(read_scope,gram,last_ms DESC,session_key ASC);
+CREATE TABLE IF NOT EXISTS session_search_memberships (
+    session_key TEXT NOT NULL,
+    gram TEXT NOT NULL,
+    current_last_ms INTEGER,
+    history_last_ms INTEGER,
+    PRIMARY KEY(session_key,gram),
+    CHECK(current_last_ms IS NOT NULL OR history_last_ms IS NOT NULL)
+) STRICT, WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS session_search_current_order ON session_search_memberships(gram,current_last_ms DESC,session_key ASC) WHERE current_last_ms IS NOT NULL;
+CREATE INDEX IF NOT EXISTS session_search_history_order ON session_search_memberships(gram,history_last_ms DESC,session_key ASC) WHERE history_last_ms IS NOT NULL;
 CREATE TABLE IF NOT EXISTS session_search_counts (
     read_scope TEXT NOT NULL CHECK(read_scope IN ('current','retained_history')),
     gram TEXT NOT NULL,
@@ -59,6 +69,99 @@ pub(crate) fn scope_key(scope: crate::CatalogReadScope) -> &'static str {
         crate::CatalogReadScope::Current => "current",
         crate::CatalogReadScope::RetainedHistory => "retained_history",
     }
+}
+
+fn membership(scope: &str) -> rusqlite::Result<(&'static str, &'static str)> {
+    match scope {
+        "current" => Ok(("current_last_ms", "history_last_ms")),
+        "retained_history" => Ok(("history_last_ms", "current_last_ms")),
+        _ => Err(rusqlite::Error::InvalidQuery),
+    }
+}
+
+/// A key belongs entirely to one physical representation, across both scopes.
+/// Both probes use selected-key ranges; neither traverses other owners.
+fn representation(connection: &Connection, key: &str) -> rusqlite::Result<(bool, bool)> {
+    let mut statement = connection.prepare_cached("SELECT EXISTS(SELECT 1 FROM session_search_postings WHERE read_scope IN ('current','retained_history') AND session_key=?1),EXISTS(SELECT 1 FROM session_search_memberships WHERE session_key=?1)")?;
+    let found = statement.query_row([key], |row| Ok((row.get(0)?, row.get(1)?)))?;
+    record_steps(&statement);
+    if found == (true, true) {
+        return Err(rusqlite::Error::InvalidQuery);
+    }
+    Ok(found)
+}
+
+type LegacyPosting = (String, String, i64);
+
+/// Qualify every old scope before changing either. Corrupt large scalar values
+/// are rejected by SQLite before allocation; 1,025 is an excess sentinel.
+fn old_positions(connection: &Connection, key: &str) -> rusqlite::Result<Vec<LegacyPosting>> {
+    let (legacy, compact) = representation(connection, key)?;
+    if compact {
+        // Bound the union before applying either scope predicate: otherwise a
+        // corrupt owner with arbitrarily many other-scope rows could make an
+        // absent-scope check traverse the complete owner first.
+        let (physical, valid): (i64, i64) = connection.prepare_cached("SELECT COUNT(*),COUNT(valid) FROM (SELECT CASE WHEN octet_length(gram)<=12 THEN 1 ELSE NULL END AS valid FROM session_search_memberships WHERE session_key=?1 LIMIT ?2)")?.query_row(params![key,(MAX_GRAMS*2+1) as i64], |row|Ok((row.get(0)?,row.get(1)?)))?;
+        if physical > (MAX_GRAMS * 2) as i64 || physical != valid {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+    }
+    let mut found = Vec::new();
+    for scope in ["current", "retained_history"] {
+        if legacy {
+            let mut statement = connection.prepare_cached("SELECT CASE WHEN octet_length(gram)<=12 THEN gram ELSE NULL END,last_ms FROM session_search_postings WHERE read_scope=?1 AND session_key=?2 ORDER BY gram LIMIT ?3")?;
+            let rows = statement
+                .query_map(params![scope, key, (MAX_GRAMS + 1) as i64], |row| {
+                    Ok((row.get::<_, Option<String>>(0)?, row.get::<_, i64>(1)?))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            if rows.len() > MAX_GRAMS {
+                return Err(rusqlite::Error::InvalidQuery);
+            }
+            for (gram, last) in rows {
+                found.push((
+                    scope.to_owned(),
+                    gram.ok_or(rusqlite::Error::InvalidQuery)?,
+                    last,
+                ));
+            }
+        }
+        if compact {
+            let (column, _) = membership(scope)?;
+            let sql = format!(
+                "SELECT COUNT(*) FROM (SELECT 1 FROM session_search_memberships WHERE session_key=?1 AND {column} IS NOT NULL LIMIT ?2)"
+            );
+            let count: i64 = connection
+                .prepare_cached(&sql)?
+                .query_row(params![key, (MAX_GRAMS + 1) as i64], |row| row.get(0))?;
+            if count > MAX_GRAMS as i64 {
+                return Err(rusqlite::Error::InvalidQuery);
+            }
+        }
+    }
+    Ok(found)
+}
+
+fn convert_key(transaction: &Transaction<'_>, key: &str) -> rusqlite::Result<()> {
+    let positions = old_positions(transaction, key)?;
+    if positions.is_empty() {
+        return Ok(());
+    }
+    for (scope, gram, last) in positions {
+        let (column, _) = membership(&scope)?;
+        let sql = format!(
+            "INSERT INTO session_search_memberships(session_key,gram,{column}) VALUES(?1,?2,?3) ON CONFLICT(session_key,gram) DO UPDATE SET {column}=excluded.{column}"
+        );
+        transaction
+            .prepare_cached(&sql)?
+            .execute(params![key, gram, last])?;
+    }
+    transaction.prepare_cached("DELETE FROM session_search_postings WHERE read_scope IN ('current','retained_history') AND session_key=?1")?.execute([key])?;
+    Ok(())
+}
+
+pub(crate) fn clear(transaction: &Transaction<'_>) -> rusqlite::Result<()> {
+    transaction.execute_batch("DELETE FROM session_search_postings; DELETE FROM session_search_memberships; DELETE FROM session_search_counts; DELETE FROM session_search_documents; UPDATE session_search_coverage SET incomplete=0;")
 }
 
 pub(crate) fn normalize_query(value: &str) -> Option<String> {
@@ -113,7 +216,8 @@ pub(crate) fn publish_row(
     // Reuse the existing bounded posting inserts, then advance counts with one
     // source-key range scan. Per-gram SQL programs dominated cold batches.
     insert_row(transaction, scope, row, false)?;
-    transaction.prepare_cached("INSERT INTO session_search_counts(read_scope,gram,members) SELECT read_scope,gram,1 FROM session_search_postings WHERE read_scope=?1 AND session_key=?2 ON CONFLICT(read_scope,gram) DO UPDATE SET members=members+excluded.members")?.execute(params![scope,row.key])?;
+    let (column, _) = membership(scope)?;
+    transaction.prepare_cached(&format!("INSERT INTO session_search_counts(read_scope,gram,members) SELECT ?1,gram,1 FROM session_search_memberships WHERE session_key=?2 AND {column} IS NOT NULL ON CONFLICT(read_scope,gram) DO UPDATE SET members=members+excluded.members"))?.execute(params![scope,row.key])?;
     Ok(())
 }
 
@@ -142,6 +246,9 @@ pub(crate) fn publish_current_rows(
         }
         measurements.record("members", started, rows.len());
         let started = measurements.start();
+        for row in rows {
+            old_positions(transaction, &row.key)?;
+        }
         for scope in ["current", "retained_history"] {
             remove_members(transaction, scope)?;
         }
@@ -180,18 +287,18 @@ pub(crate) fn publish_current_rows(
         });
         measurements.record("posting_preparation", started, postings.len());
         let started = measurements.start();
-        let mut posting = transaction.prepare_cached("INSERT INTO session_search_postings(read_scope,session_key,gram,last_ms) VALUES(?1,?2,?3,?4)")?;
-        for scope in ["current", "retained_history"] {
-            for (gram, row) in &postings {
-                posting.execute(params![scope, row.key, gram, row.last.unwrap_or(0)])?;
-            }
+        let mut posting = transaction.prepare_cached("INSERT INTO session_search_memberships(session_key,gram,current_last_ms,history_last_ms) VALUES(?1,?2,?3,?3)")?;
+        for (gram, row) in &postings {
+            posting.execute(params![row.key, gram, row.last.unwrap_or(0)])?;
         }
         measurements.record("postings", started, postings.len() * 2);
+        measurements.count("posting_rows", postings.len());
         let started = measurements.start();
         for scope in ["current", "retained_history"] {
             // CROSS JOIN keeps at most 64 members as the outer loop; each inner
             // lookup uses the existing (scope,source key,gram) primary key.
-            transaction.prepare_cached("INSERT INTO session_search_counts(read_scope,gram,members) SELECT ?1,p.gram,COUNT(*) FROM catalog_search_members m CROSS JOIN session_search_postings p WHERE p.read_scope=?1 AND p.session_key=m.session_key GROUP BY p.gram ON CONFLICT(read_scope,gram) DO UPDATE SET members=members+excluded.members")?.execute([scope])?;
+            let (column, _) = membership(scope)?;
+            transaction.prepare_cached(&format!("INSERT INTO session_search_counts(read_scope,gram,members) SELECT ?1,p.gram,COUNT(*) FROM catalog_search_members m CROSS JOIN session_search_memberships p WHERE p.session_key=m.session_key AND p.{column} IS NOT NULL GROUP BY p.gram ON CONFLICT(read_scope,gram) DO UPDATE SET members=members+excluded.members"))?.execute([scope])?;
         }
         measurements.record("counts", started, 2);
     }
@@ -207,10 +314,14 @@ pub(crate) fn publish_current_rows(
 fn remove_members(transaction: &Transaction<'_>, scope: &str) -> rusqlite::Result<()> {
     transaction.execute_batch("CREATE TEMP TABLE IF NOT EXISTS catalog_search_removals(gram TEXT PRIMARY KEY,members INTEGER NOT NULL) WITHOUT ROWID; DELETE FROM catalog_search_removals;")?;
     transaction.prepare_cached("INSERT INTO catalog_search_removals SELECT p.gram,COUNT(*) FROM catalog_search_members m CROSS JOIN session_search_postings p WHERE p.read_scope=?1 AND p.session_key=m.session_key GROUP BY p.gram")?.execute([scope])?;
+    let (column, other) = membership(scope)?;
+    transaction.prepare_cached(&format!("INSERT INTO catalog_search_removals SELECT p.gram,COUNT(*) FROM catalog_search_members m CROSS JOIN session_search_memberships p WHERE p.session_key=m.session_key AND p.{column} IS NOT NULL GROUP BY p.gram ON CONFLICT(gram) DO UPDATE SET members=members+excluded.members"))?.execute([])?;
     transaction.prepare_cached("UPDATE session_search_counts SET members=members-(SELECT r.members FROM catalog_search_removals r WHERE r.gram=session_search_counts.gram) WHERE read_scope=?1 AND gram IN (SELECT gram FROM catalog_search_removals)")?.execute([scope])?;
     transaction.prepare_cached("DELETE FROM session_search_counts WHERE read_scope=?1 AND members=0 AND gram IN (SELECT gram FROM catalog_search_removals)")?.execute([scope])?;
     transaction.prepare_cached("UPDATE session_search_coverage SET incomplete=incomplete-(SELECT COUNT(*) FROM catalog_search_members m CROSS JOIN session_search_documents d WHERE d.read_scope=?1 AND d.session_key=m.session_key AND d.complete=0) WHERE read_scope=?1")?.execute([scope])?;
     transaction.prepare_cached("DELETE FROM session_search_postings WHERE read_scope=?1 AND session_key IN (SELECT session_key FROM catalog_search_members)")?.execute([scope])?;
+    transaction.prepare_cached(&format!("DELETE FROM session_search_memberships WHERE {other} IS NULL AND session_key IN (SELECT session_key FROM catalog_search_members)"))?.execute([])?;
+    transaction.prepare_cached(&format!("UPDATE session_search_memberships SET {column}=NULL WHERE {column} IS NOT NULL AND session_key IN (SELECT session_key FROM catalog_search_members)"))?.execute([])?;
     transaction.prepare_cached("DELETE FROM session_search_documents WHERE read_scope=?1 AND session_key IN (SELECT session_key FROM catalog_search_members)")?.execute([scope])?;
     Ok(())
 }
@@ -234,9 +345,18 @@ pub(crate) fn backfill_catalog_row(
     if row.lifecycle != crate::model::summary::CatalogLifecycle::Current {
         return backfill_row(transaction, crate::CatalogReadScope::RetainedHistory, row);
     }
+    if representation(transaction, &row.key)? != (false, false) {
+        return Err(rusqlite::Error::InvalidQuery);
+    }
     let (encoded, grams, complete) = prepared_fields(row)?;
     for scope in ["current", "retained_history"] {
-        insert_fields(transaction, scope, row, &encoded, &grams, complete, false)?;
+        insert_document(transaction, scope, row, &encoded, complete)?;
+    }
+    if complete {
+        let mut posting = transaction.prepare_cached("INSERT INTO session_search_memberships(session_key,gram,current_last_ms,history_last_ms) VALUES(?1,?2,?3,?3)")?;
+        for gram in grams {
+            posting.execute(params![row.key, gram, row.last.unwrap_or(0)])?;
+        }
     }
     Ok(())
 }
@@ -245,15 +365,20 @@ pub(crate) fn backfill_catalog_row(
 /// Catalog publication transaction: readers retain the previous complete index,
 /// and rollback restores both its contents and schema.
 pub(crate) fn begin_backfill(transaction: &Transaction<'_>) -> rusqlite::Result<()> {
-    transaction.execute_batch("DELETE FROM session_search_postings; DELETE FROM session_search_counts; DELETE FROM session_search_documents; UPDATE session_search_coverage SET incomplete=0; DROP INDEX IF EXISTS session_search_order;")
+    clear(transaction)?;
+    transaction.execute_batch("DROP INDEX IF EXISTS session_search_order; DROP INDEX IF EXISTS session_search_current_order; DROP INDEX IF EXISTS session_search_history_order;")
 }
 
 pub(crate) fn finish_backfill(transaction: &Transaction<'_>) -> rusqlite::Result<()> {
-    transaction.execute_batch("CREATE INDEX IF NOT EXISTS session_search_order ON session_search_postings(read_scope,gram,last_ms DESC,session_key ASC);")?;
+    transaction.execute_batch("CREATE INDEX IF NOT EXISTS session_search_order ON session_search_postings(read_scope,gram,last_ms DESC,session_key ASC); CREATE INDEX IF NOT EXISTS session_search_current_order ON session_search_memberships(gram,current_last_ms DESC,session_key ASC) WHERE current_last_ms IS NOT NULL; CREATE INDEX IF NOT EXISTS session_search_history_order ON session_search_memberships(gram,history_last_ms DESC,session_key ASC) WHERE history_last_ms IS NOT NULL;")?;
     transaction.execute(
         "INSERT INTO session_search_counts(read_scope,gram,members) SELECT read_scope,gram,COUNT(*) FROM session_search_postings GROUP BY read_scope,gram",
         [],
     )?;
+    for scope in ["current", "retained_history"] {
+        let (column, _) = membership(scope)?;
+        transaction.execute(&format!("INSERT INTO session_search_counts(read_scope,gram,members) SELECT ?1,gram,COUNT(*) FROM session_search_memberships WHERE {column} IS NOT NULL GROUP BY gram ON CONFLICT(read_scope,gram) DO UPDATE SET members=members+excluded.members"), [scope])?;
+    }
     Ok(())
 }
 
@@ -263,6 +388,7 @@ fn insert_row(
     row: &CatalogRow,
     maintain_counts: bool,
 ) -> rusqlite::Result<()> {
+    convert_key(transaction, &row.key)?;
     let (encoded, grams, complete) = prepared_fields(row)?;
     insert_fields(
         transaction,
@@ -303,10 +429,14 @@ fn insert_fields(
         // Single posting statements avoid multi-row rollback work over many
         // nonadjacent ordering-index pages. Exact counts still advance once
         // per producer cohort inside this same publication transaction.
-        let mut posting = transaction.prepare_cached("INSERT INTO session_search_postings(read_scope,session_key,gram,last_ms) VALUES(?1,?2,?3,?4)")?;
+        let (column, _) = membership(scope)?;
+        let sql = format!(
+            "INSERT INTO session_search_memberships(session_key,gram,{column}) VALUES(?1,?2,?3) ON CONFLICT(session_key,gram) DO UPDATE SET {column}=excluded.{column}"
+        );
+        let mut posting = transaction.prepare_cached(&sql)?;
         let mut count = maintain_counts.then(|| transaction.prepare_cached("INSERT INTO session_search_counts(read_scope,gram,members) VALUES(?1,?2,1) ON CONFLICT(read_scope,gram) DO UPDATE SET members=members+1")).transpose()?;
         for gram in grams {
-            posting.execute(params![scope, row.key, gram, row.last.unwrap_or(0)])?;
+            posting.execute(params![row.key, gram, row.last.unwrap_or(0)])?;
             if let Some(count) = &mut count {
                 count.execute(params![scope, gram])?;
             }
@@ -334,17 +464,22 @@ fn insert_document(
 }
 
 fn remove_row(transaction: &Transaction<'_>, scope: &str, key: &str) -> rusqlite::Result<()> {
-    transaction.execute("UPDATE session_search_coverage SET incomplete=incomplete-1 WHERE read_scope=?1 AND EXISTS(SELECT 1 FROM session_search_documents WHERE read_scope=?1 AND session_key=?2 AND complete=0)",params![scope,key])?;
-    transaction.execute("UPDATE session_search_counts SET members=members-1 WHERE read_scope=?1 AND gram IN (SELECT gram FROM session_search_postings WHERE read_scope=?1 AND session_key=?2)",params![scope,key])?;
-    transaction.execute("DELETE FROM session_search_counts WHERE read_scope=?1 AND members=0 AND gram IN (SELECT gram FROM session_search_postings WHERE read_scope=?1 AND session_key=?2)",params![scope,key])?;
-    transaction.execute(
-        "DELETE FROM session_search_postings WHERE read_scope=?1 AND session_key=?2",
-        params![scope, key],
-    )?;
-    transaction.execute(
-        "DELETE FROM session_search_documents WHERE read_scope=?1 AND session_key=?2",
-        params![scope, key],
-    )?;
+    convert_key(transaction, key)?;
+    let (column, other) = membership(scope)?;
+    transaction.prepare_cached("UPDATE session_search_coverage SET incomplete=incomplete-1 WHERE read_scope=?1 AND EXISTS(SELECT 1 FROM session_search_documents WHERE read_scope=?1 AND session_key=?2 AND complete=0)")?.execute(params![scope,key])?;
+    transaction.prepare_cached(&format!("UPDATE session_search_counts SET members=members-1 WHERE read_scope=?1 AND gram IN (SELECT gram FROM session_search_memberships WHERE session_key=?2 AND {column} IS NOT NULL)"))?.execute(params![scope,key])?;
+    transaction.prepare_cached(&format!("DELETE FROM session_search_counts WHERE read_scope=?1 AND members=0 AND gram IN (SELECT gram FROM session_search_memberships WHERE session_key=?2 AND {column} IS NOT NULL)"))?.execute(params![scope,key])?;
+    transaction
+        .prepare_cached(&format!(
+            "DELETE FROM session_search_memberships WHERE session_key=?1 AND {other} IS NULL"
+        ))?
+        .execute([key])?;
+    transaction.prepare_cached(&format!("UPDATE session_search_memberships SET {column}=NULL WHERE session_key=?1 AND {column} IS NOT NULL"))?.execute([key])?;
+    transaction
+        .prepare_cached(
+            "DELETE FROM session_search_documents WHERE read_scope=?1 AND session_key=?2",
+        )?
+        .execute(params![scope, key])?;
     Ok(())
 }
 
@@ -605,6 +740,19 @@ pub(crate) fn read(connection: &Connection, request: Query<'_>) -> rusqlite::Res
     })
 }
 
+fn posting_sql(scope: crate::CatalogReadScope, range: &str, limit: usize) -> String {
+    let (column, index) = match scope {
+        crate::CatalogReadScope::Current => ("current_last_ms", "session_search_current_order"),
+        crate::CatalogReadScope::RetainedHistory => {
+            ("history_last_ms", "session_search_history_order")
+        }
+    };
+    let compact_range = range.replace("last_ms", column);
+    format!(
+        "SELECT last_ms,session_key FROM session_search_postings INDEXED BY session_search_order WHERE read_scope=?1 AND gram=?2 AND {range} UNION ALL SELECT {column} AS last_ms,session_key FROM session_search_memberships INDEXED BY {index} WHERE gram=?2 AND {column} IS NOT NULL AND {compact_range} ORDER BY last_ms DESC,session_key ASC LIMIT ?{limit}"
+    )
+}
+
 fn posting_page(
     connection: &Connection,
     scope: crate::CatalogReadScope,
@@ -614,13 +762,10 @@ fn posting_page(
 ) -> rusqlite::Result<Vec<Position>> {
     let mut found = Vec::with_capacity(limit);
     let mut read = |range: &str,
-                    args: Vec<rusqlite::types::Value>,
+                    mut args: Vec<rusqlite::types::Value>,
                     limit: usize|
      -> rusqlite::Result<()> {
-        let sql = format!(
-            "SELECT last_ms,session_key FROM session_search_postings INDEXED BY session_search_order WHERE read_scope=? AND gram=? AND {range} ORDER BY last_ms DESC,session_key ASC LIMIT ?"
-        );
-        let mut args = args;
+        let sql = posting_sql(scope, range, args.len() + 1);
         args.push(rusqlite::types::Value::Integer(limit as i64));
         let mut statement = connection.prepare(&sql)?;
         found.extend(
@@ -644,14 +789,14 @@ fn posting_page(
         let mut args = base.clone();
         args.push(rusqlite::types::Value::Integer(after.last));
         args.push(rusqlite::types::Value::Text(after.key.clone()));
-        read("last_ms=? AND session_key>?", args, limit)?;
+        read("last_ms=?3 AND session_key>?4", args, limit)?;
         let remaining = limit - found.len();
         if remaining > 0 {
             let mut args = base;
             args.push(rusqlite::types::Value::Integer(after.last));
-            let sql = "SELECT last_ms,session_key FROM session_search_postings INDEXED BY session_search_order WHERE read_scope=? AND gram=? AND last_ms<? ORDER BY last_ms DESC,session_key ASC LIMIT ?";
+            let sql = posting_sql(scope, "last_ms<?3", 4);
             args.push(rusqlite::types::Value::Integer(remaining as i64));
-            let mut statement = connection.prepare(sql)?;
+            let mut statement = connection.prepare(&sql)?;
             found.extend(
                 statement
                     .query_map(rusqlite::params_from_iter(args), |row| {
@@ -667,6 +812,9 @@ fn posting_page(
     } else {
         read("1", base, limit)?;
     }
+    for position in &found {
+        representation(connection, &position.key)?;
+    }
     Ok(found)
 }
 
@@ -674,6 +822,34 @@ fn posting_page(
 mod sqlite_tests {
     use super::*;
     use crate::{CatalogReadScope, model::summary::CatalogLifecycle};
+
+    const LOGICAL_POSITIONS: &str = "SELECT json_array(read_scope,session_key,gram,last_ms) FROM (SELECT read_scope,session_key,gram,last_ms FROM session_search_postings UNION ALL SELECT 'current',session_key,gram,current_last_ms FROM session_search_memberships WHERE current_last_ms IS NOT NULL UNION ALL SELECT 'retained_history',session_key,gram,history_last_ms FROM session_search_memberships WHERE history_last_ms IS NOT NULL) ORDER BY read_scope,session_key,gram";
+    const PHYSICAL_COMPACT: &str = "SELECT json_array(session_key,gram,current_last_ms,history_last_ms) FROM session_search_memberships ORDER BY session_key,gram";
+
+    fn strings(connection: &Connection, sql: &str) -> Vec<String> {
+        connection
+            .prepare(sql)
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap()
+    }
+
+    fn legacy_key(connection: &Connection, key: &str) {
+        for (scope, column) in [
+            ("current", "current_last_ms"),
+            ("retained_history", "history_last_ms"),
+        ] {
+            connection.execute(&format!("INSERT INTO session_search_postings SELECT ?1,session_key,gram,{column} FROM session_search_memberships WHERE session_key=?2 AND {column} IS NOT NULL"), params![scope,key]).unwrap();
+        }
+        connection
+            .execute(
+                "DELETE FROM session_search_memberships WHERE session_key=?1",
+                [key],
+            )
+            .unwrap();
+    }
 
     fn row(key: &str, name: &str) -> CatalogRow {
         CatalogRow {
@@ -786,6 +962,8 @@ mod sqlite_tests {
             .collect::<Vec<_>>();
         let snapshot = |connection: &Connection| {
             [
+                LOGICAL_POSITIONS,
+                PHYSICAL_COMPACT,
                 "SELECT json_array(read_scope,session_key,gram,last_ms) FROM session_search_postings ORDER BY read_scope,session_key,gram",
                 "SELECT json_array(read_scope,gram,members) FROM session_search_counts ORDER BY read_scope,gram",
                 "SELECT json_array(read_scope,session_key,fields,complete) FROM session_search_documents ORDER BY read_scope,session_key",
@@ -858,6 +1036,8 @@ mod sqlite_tests {
         publish_row(&transaction, CatalogReadScope::RetainedHistory, &retained).unwrap();
         transaction.commit().unwrap();
         for sql in [
+            LOGICAL_POSITIONS,
+            PHYSICAL_COMPACT,
             "SELECT json_array(read_scope,session_key,gram,last_ms) FROM session_search_postings ORDER BY read_scope,session_key,gram",
             "SELECT json_array(read_scope,gram,members) FROM session_search_counts ORDER BY read_scope,gram",
             "SELECT json_array(read_scope,session_key,fields,complete) FROM session_search_documents ORDER BY read_scope,session_key",
@@ -889,7 +1069,7 @@ mod sqlite_tests {
         assert_eq!(count(&connection, "retained_history", "sha"), 4);
         let postings = |connection: &Connection| {
             connection
-                .prepare("SELECT session_key FROM session_search_postings WHERE read_scope='current' AND gram='sha' ORDER BY last_ms DESC,session_key ASC")
+                .prepare("SELECT session_key FROM (SELECT last_ms,session_key FROM session_search_postings WHERE read_scope='current' AND gram='sha' UNION ALL SELECT current_last_ms,session_key FROM session_search_memberships WHERE gram='sha' AND current_last_ms IS NOT NULL) ORDER BY last_ms DESC,session_key ASC")
                 .unwrap()
                 .query_map([], |row| row.get::<_, String>(0))
                 .unwrap()
@@ -956,6 +1136,279 @@ mod sqlite_tests {
                 .unwrap(),
             1
         );
+    }
+
+    #[test]
+    fn mixed_storage_scoped_changes_preserve_independent_history_and_counts() {
+        let mut connection = database();
+        let mut current = row("shared-key", "current needle");
+        current.last = Some(0);
+        let mut history = row("shared-key", "historical token");
+        history.last = Some(-7);
+        let transaction = connection.transaction().unwrap();
+        publish_row(&transaction, CatalogReadScope::Current, &current).unwrap();
+        publish_row(&transaction, CatalogReadScope::RetainedHistory, &history).unwrap();
+        transaction.commit().unwrap();
+        let original = strings(&connection, LOGICAL_POSITIONS);
+        assert!(
+            original
+                .iter()
+                .any(|value| value.contains("current") && value.ends_with(",0]"))
+        );
+        assert!(original.iter().any(|value| value.ends_with(",-7]")));
+        legacy_key(&connection, "shared-key");
+        assert_eq!(strings(&connection, LOGICAL_POSITIONS), original);
+        let history_before = strings(
+            &connection,
+            "SELECT json_array(gram,last_ms) FROM session_search_postings WHERE read_scope='retained_history' ORDER BY gram",
+        );
+        let counts_before = strings(
+            &connection,
+            "SELECT json_array(gram,members) FROM session_search_counts WHERE read_scope='retained_history' ORDER BY gram",
+        );
+        let document_before = strings(
+            &connection,
+            "SELECT fields FROM session_search_documents WHERE read_scope='retained_history'",
+        );
+        let changed = row("shared-key", "replacement current");
+        {
+            let transaction = connection.transaction().unwrap();
+            publish_row(&transaction, CatalogReadScope::Current, &changed).unwrap();
+        }
+        assert_eq!(strings(&connection, LOGICAL_POSITIONS), original);
+        assert_eq!(
+            representation(&connection, "shared-key").unwrap(),
+            (true, false)
+        );
+        let transaction = connection.transaction().unwrap();
+        publish_row(&transaction, CatalogReadScope::Current, &changed).unwrap();
+        transaction.commit().unwrap();
+        assert_eq!(
+            representation(&connection, "shared-key").unwrap(),
+            (false, true)
+        );
+        assert_eq!(
+            strings(
+                &connection,
+                "SELECT json_array(gram,history_last_ms) FROM session_search_memberships WHERE history_last_ms IS NOT NULL ORDER BY gram"
+            ),
+            history_before
+        );
+        assert_eq!(
+            strings(
+                &connection,
+                "SELECT json_array(gram,members) FROM session_search_counts WHERE read_scope='retained_history' ORDER BY gram"
+            ),
+            counts_before
+        );
+        assert_eq!(
+            strings(
+                &connection,
+                "SELECT fields FROM session_search_documents WHERE read_scope='retained_history'"
+            ),
+            document_before
+        );
+        let transaction = connection.transaction().unwrap();
+        remove_row(&transaction, "current", "shared-key").unwrap();
+        transaction.commit().unwrap();
+        assert_eq!(
+            strings(
+                &connection,
+                "SELECT json_array(gram,history_last_ms) FROM session_search_memberships ORDER BY gram"
+            ),
+            history_before
+        );
+        assert_eq!(connection.query_row("SELECT COUNT(*) FROM session_search_memberships WHERE current_last_ms IS NOT NULL", [], |row| row.get::<_,i64>(0)).unwrap(), 0);
+        assert_eq!(
+            strings(
+                &connection,
+                "SELECT json_array(gram,members) FROM session_search_counts WHERE read_scope='retained_history' ORDER BY gram"
+            ),
+            counts_before
+        );
+        let transaction = connection.transaction().unwrap();
+        publish_current_rows(&transaction, &[&current]).unwrap();
+        transaction.commit().unwrap();
+        assert_eq!(
+            strings(
+                &connection,
+                "SELECT json_array(gram,members) FROM session_search_counts WHERE read_scope='current' ORDER BY gram"
+            ),
+            strings(
+                &connection,
+                "SELECT json_array(gram,members) FROM session_search_counts WHERE read_scope='retained_history' ORDER BY gram"
+            )
+        );
+        assert_eq!(connection.query_row("SELECT COUNT(*) FROM session_search_memberships WHERE current_last_ms IS NULL OR history_last_ms IS NULL OR current_last_ms!=history_last_ms", [], |row| row.get::<_,i64>(0)).unwrap(), 0);
+    }
+
+    #[test]
+    fn overlap_and_oversized_old_scopes_refuse_without_deleting_history() {
+        let mut connection = database();
+        let selected = row("selected", "needle");
+        let transaction = connection.transaction().unwrap();
+        publish_current_rows(&transaction, &[&selected]).unwrap();
+        transaction.commit().unwrap();
+        connection
+            .execute(
+                "INSERT INTO session_search_postings VALUES('retained_history','selected','old',0)",
+                [],
+            )
+            .unwrap();
+        let before = strings(&connection, LOGICAL_POSITIONS);
+        assert!(
+            posting_page(
+                &connection,
+                CatalogReadScope::Current,
+                "nee",
+                None,
+                MAX_CANDIDATES + 1
+            )
+            .is_err()
+        );
+        {
+            let transaction = connection.transaction().unwrap();
+            assert!(publish_current_rows(&transaction, &[&selected]).is_err());
+        }
+        assert_eq!(strings(&connection, LOGICAL_POSITIONS), before);
+        connection
+            .execute("DELETE FROM session_search_postings", [])
+            .unwrap();
+        legacy_key(&connection, "selected");
+        connection
+            .execute(
+                "DELETE FROM session_search_postings WHERE read_scope='retained_history'",
+                [],
+            )
+            .unwrap();
+        for n in 0..=MAX_GRAMS {
+            connection.execute("INSERT INTO session_search_postings VALUES('retained_history','selected',?1,0)", [format!("{n:04}")]).unwrap();
+        }
+        let before = strings(&connection, LOGICAL_POSITIONS);
+        {
+            let transaction = connection.transaction().unwrap();
+            assert!(publish_current_rows(&transaction, &[&selected]).is_err());
+            assert!(remove_row(&transaction, "current", "selected").is_err());
+        }
+        assert_eq!(strings(&connection, LOGICAL_POSITIONS), before);
+        assert_eq!(
+            representation(&connection, "selected").unwrap(),
+            (true, false)
+        );
+    }
+
+    #[test]
+    fn oversized_compact_history_refuses_before_an_absent_current_scope_scan() {
+        let mut connection = database();
+        connection.execute("WITH RECURSIVE n(x) AS (SELECT 0 UNION ALL SELECT x+1 FROM n WHERE x<?1) INSERT INTO session_search_memberships VALUES('selected',printf('%05d',x),NULL,0)",[(MAX_GRAMS*2) as i64]).unwrap();
+        let before = strings(&connection, PHYSICAL_COMPACT);
+        let selected = row("selected", "replacement");
+        {
+            let transaction = connection.transaction().unwrap();
+            assert!(publish_current_rows(&transaction, &[&selected]).is_err());
+            assert!(remove_row(&transaction, "current", "selected").is_err());
+        }
+        assert_eq!(
+            strings(&connection, PHYSICAL_COMPACT),
+            before,
+            "absent Current must not permit an unbounded History scan or deletion"
+        );
+    }
+
+    #[test]
+    fn mixed_index_pages_share_one_candidate_budget_and_tie_cursor() {
+        let mut connection = database();
+        let transaction = connection.transaction().unwrap();
+        for n in 0..520 {
+            let mut selected = row(&format!("member-{n:04}"), "needle");
+            selected.last = Some(if n < 510 { 10 } else { 9 });
+            publish_current_rows(&transaction, &[&selected]).unwrap();
+        }
+        transaction.commit().unwrap();
+        for n in (0..520).step_by(2) {
+            legacy_key(&connection, &format!("member-{n:04}"));
+        }
+        for scope in [CatalogReadScope::Current, CatalogReadScope::RetainedHistory] {
+            let first = posting_page(&connection, scope, "nee", None, MAX_CANDIDATES + 1).unwrap();
+            assert_eq!(first.len(), MAX_CANDIDATES + 1);
+            assert_eq!(
+                first.iter().map(|p| p.key.clone()).collect::<Vec<_>>(),
+                (0..513)
+                    .map(|n| format!("member-{n:04}"))
+                    .collect::<Vec<_>>()
+            );
+            let last = posting_page(
+                &connection,
+                scope,
+                "nee",
+                Some(&first[MAX_CANDIDATES - 1]),
+                MAX_CANDIDATES + 1,
+            )
+            .unwrap();
+            assert_eq!(
+                last.iter().map(|p| p.key.clone()).collect::<Vec<_>>(),
+                (512..520)
+                    .map(|n| format!("member-{n:04}"))
+                    .collect::<Vec<_>>()
+            );
+            let plan = strings_plan(&connection, scope);
+            assert!(
+                plan.iter().any(|v| v.contains("MERGE (UNION ALL)")),
+                "{plan:?}"
+            );
+            assert!(
+                plan.iter()
+                    .any(|v| v.contains("COVERING INDEX session_search_order")),
+                "{plan:?}"
+            );
+            assert!(
+                plan.iter()
+                    .any(|v| v.contains(if scope == CatalogReadScope::Current {
+                        "COVERING INDEX session_search_current_order"
+                    } else {
+                        "COVERING INDEX session_search_history_order"
+                    })),
+                "{plan:?}"
+            );
+            assert!(
+                !plan
+                    .iter()
+                    .any(|v| v.contains("SCAN ") || v.contains("TEMP B-TREE")),
+                "{plan:?}"
+            );
+        }
+        let selected_work = |connection: &Connection, scope| {
+            SQL_STEPS.with(|value| value.set(0));
+            let page = posting_page(connection, scope, "nee", None, 2).unwrap();
+            (
+                page.iter().map(|p| p.key.clone()).collect::<Vec<_>>(),
+                SQL_STEPS.with(|value| value.get()),
+            )
+        };
+        let before_current = selected_work(&connection, CatalogReadScope::Current);
+        let before_history = selected_work(&connection, CatalogReadScope::RetainedHistory);
+        connection.execute_batch("WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM n WHERE x<20000) INSERT INTO session_search_postings SELECT 'retained_history','unrelated-'||printf('%05d',x),'irr',1 FROM n;").unwrap();
+        assert_eq!(
+            selected_work(&connection, CatalogReadScope::Current),
+            before_current
+        );
+        assert_eq!(
+            selected_work(&connection, CatalogReadScope::RetainedHistory),
+            before_history
+        );
+    }
+
+    fn strings_plan(connection: &Connection, scope: CatalogReadScope) -> Vec<String> {
+        connection
+            .prepare(&format!(
+                "EXPLAIN QUERY PLAN {}",
+                posting_sql(scope, "1", 3)
+            ))
+            .unwrap()
+            .query_map(params![scope_key(scope), "nee", 2], |row| row.get(3))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap()
     }
 
     #[test]

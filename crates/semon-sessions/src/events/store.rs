@@ -57,7 +57,7 @@ std::thread_local! {
 
 /// `PRAGMA user_version`: the shape of the tables. The parser's version is
 /// [`CACHE_VERSION`], kept in `meta`.
-const SCHEMA_VERSION: i64 = 25;
+const SCHEMA_VERSION: i64 = 26;
 
 /// How long a write waits for another process's transaction. Tests wait
 /// less, so the busy paths they drive stay quick.
@@ -3148,7 +3148,7 @@ impl SqliteStore {
             let rebuild_search =
                 claims.is_none() && (initialize_search || search_backfill.as_deref() != Some("1"));
             if initialize_search {
-                transaction.execute_batch("DELETE FROM session_search_postings; DELETE FROM session_search_counts; DELETE FROM session_search_documents; UPDATE session_search_coverage SET incomplete=0;").map_err(failure)?;
+                crate::catalog_search::clear(&transaction).map_err(failure)?;
                 transaction.execute("INSERT OR REPLACE INTO meta(key,value) VALUES('search_backfill_complete','0')",[]).map_err(failure)?;
             }
             let previous_version: Option<String> = transaction
@@ -4030,6 +4030,13 @@ fn init(connection: &mut Connection) -> rusqlite::Result<Init> {
         transaction.execute_batch(crate::causal_trace::SCHEMA)?;
         transaction.execute_batch(crate::history_projection::SCHEMA)?;
         transaction.execute_batch(crate::catalog_search::SCHEMA)?;
+        // Format 2 also reads the existing format-1 postings. Promote only its
+        // metadata in this additive transaction, before the publication path
+        // could interpret a supported upgrade as a missing search projection.
+        transaction.execute(
+            "UPDATE meta SET value=?1 WHERE key='search_version' AND value='1'",
+            [crate::catalog_search::VERSION],
+        )?;
         transaction.execute_batch(crate::catalog_changes::SCHEMA)?;
         if schema < 18 {
             // One-time metadata bootstrap; requests only read this durable

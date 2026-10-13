@@ -2824,9 +2824,112 @@ mod tests {
                 connection
                     .query_row("PRAGMA user_version", [], |row| row.get::<_, u32>(0))
                     .unwrap(),
-                25
+                26
             );
         }
+    }
+
+    #[test]
+    fn schema_twenty_five_search_upgrade_preserves_qualified_native_custody() {
+        let fixture = Fixture::new();
+        fixture.publish(1);
+        let relative = "projects/project/session-00000.jsonl";
+        let path = fixture.options.claude_home.join(relative);
+        let proof = session_source_proof(&fixture.options, "claude", relative)
+            .unwrap()
+            .unwrap();
+        let ready = crate::source_projection_ready(&fixture.options, "claude", relative)
+            .unwrap()
+            .unwrap();
+        crate::retain_source_event_index(&fixture.options, &proof, &ready).unwrap();
+        let body_before = fixture.body("q=claude");
+        assert_eq!(body_before.0, 200);
+        assert_eq!(body_before.1["items"].as_array().unwrap().len(), 1);
+        let connection = Connection::open(EventCache::path(&fixture.options.cache)).unwrap();
+        let native_before = indexed_rows(&connection, path.to_str().unwrap());
+        let archive_before: String = connection
+            .query_row(
+                "SELECT value FROM meta WHERE key GLOB 'archive_event_index:*'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        connection.execute_batch("INSERT INTO session_search_postings SELECT 'current',session_key,gram,current_last_ms FROM session_search_memberships WHERE current_last_ms IS NOT NULL; INSERT INTO session_search_postings SELECT 'retained_history',session_key,gram,history_last_ms FROM session_search_memberships WHERE history_last_ms IS NOT NULL; DROP TABLE session_search_memberships; UPDATE meta SET value='1' WHERE key='search_version'; PRAGMA user_version=25;").unwrap();
+        let search_state = |connection: &Connection| {
+            ["SELECT json_array(read_scope,session_key,gram,last_ms) FROM session_search_postings ORDER BY read_scope,session_key,gram", "SELECT json_array(read_scope,gram,members) FROM session_search_counts ORDER BY read_scope,gram", "SELECT json_array(read_scope,session_key,fields,complete) FROM session_search_documents ORDER BY read_scope,session_key", "SELECT json_array(read_scope,incomplete) FROM session_search_coverage ORDER BY read_scope", "SELECT json_array(key,value) FROM meta WHERE key IN ('search_backfill_complete','catalog_generation','catalog_completeness','cache_version') ORDER BY key"]
+                .map(|sql|connection.prepare(sql).unwrap().query_map([],|row|row.get::<_,String>(0)).unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap())
+        };
+        let legacy_before = search_state(&connection);
+        assert_eq!(
+            fixture.body("q=claude").0,
+            503,
+            "unsupported search format cannot silently omit compact rows"
+        );
+        drop(EventCache::open(&fixture.options.cache));
+        assert_eq!(
+            connection
+                .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            26
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT value FROM meta WHERE key='search_version'",
+                    [],
+                    |row| row.get::<_, String>(0)
+                )
+                .unwrap(),
+            crate::catalog_search::VERSION
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM session_search_memberships",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )
+                .unwrap(),
+            0,
+            "additive upgrade must not copy unrelated posting history"
+        );
+        assert_eq!(search_state(&connection), legacy_before);
+        assert_eq!(
+            indexed_rows(&connection, path.to_str().unwrap()),
+            native_before
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT value FROM meta WHERE key GLOB 'archive_event_index:*'",
+                    [],
+                    |row| row.get::<_, String>(0)
+                )
+                .unwrap(),
+            archive_before
+        );
+        assert_eq!(
+            crate::source_projection_ready(&fixture.options, "claude", relative)
+                .unwrap()
+                .unwrap(),
+            ready
+        );
+        assert!(crate::source_event_index_retained(&fixture.options, &proof, &ready).unwrap());
+        assert_eq!(fixture.body("q=claude"), body_before);
+        drop(EventCache::open(&fixture.options.cache));
+        assert_eq!(
+            search_state(&connection),
+            legacy_before,
+            "restart must not rebuild either search or native history"
+        );
+        connection
+            .execute("UPDATE meta SET value='1' WHERE key='search_version'", [])
+            .unwrap();
+        assert_eq!(
+            fixture.body("q=claude").0,
+            503,
+            "a stale format marker remains unavailable"
+        );
     }
 
     #[test]
