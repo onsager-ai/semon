@@ -664,8 +664,24 @@ fn clip_within(text: &str, limit: usize) -> (String, bool) {
     (format!("{}{}", text[..end].trim_end(), marker), true)
 }
 
-fn selected_cut(cut: &Cut, limit: usize) -> Value {
-    let mut remaining = limit;
+fn selected_cut(cut: &Cut, limit: usize) -> (Value, bool) {
+    let mut value = json!({"by": "codex"});
+    if let Some(tokens) = cut.original_tokens {
+        value["original_tokens"] = json!(tokens);
+    }
+    if let Some(lines) = cut.lines {
+        value["lines"] = json!(lines);
+    }
+    let gap_bytes = cut
+        .parts
+        .iter()
+        .map(|part| match part {
+            Part::Gap(gap) => gap.unit.len(),
+            Part::Text(_) => 0,
+        })
+        .sum::<usize>();
+    let mut remaining = limit.saturating_sub(string_value_bytes(&value) + gap_bytes);
+    let mut truncated = false;
     let mut texts_left = cut
         .parts
         .iter()
@@ -676,7 +692,8 @@ fn selected_cut(cut: &Cut, limit: usize) -> Value {
         match part {
             Part::Text(text) => {
                 let share = remaining / texts_left.max(1);
-                let (text, _) = clip_within(text, share);
+                let (text, clipped) = clip_within(text, share);
+                truncated |= clipped;
                 remaining = remaining.saturating_sub(text.len());
                 texts_left = texts_left.saturating_sub(1);
                 parts.push(json!({"text": text}));
@@ -690,26 +707,21 @@ fn selected_cut(cut: &Cut, limit: usize) -> Value {
             }
         }
     }
-    let mut value = json!({"by": "codex"});
-    if let Some(tokens) = cut.original_tokens {
-        value["original_tokens"] = json!(tokens);
-    }
-    if let Some(lines) = cut.lines {
-        value["lines"] = json!(lines);
-    }
     if !parts.is_empty() {
         value["parts"] = Value::Array(parts);
     }
-    value
+    (value, truncated)
 }
 
 fn selected_text_value(text: &str, source: Source, cut_before: bool, limit: usize) -> Value {
     let (plain, cut) = split_cut(text, source);
-    let (shown, truncated) = clip_within(&plain, limit);
+    let (shown, mut truncated) = clip_within(&plain, limit);
     let mut fields = json!({"text": shown});
     if let Some(cut) = cut {
         let remaining = limit.saturating_sub(string_value_bytes(&fields));
-        fields["cut"] = selected_cut(&cut, remaining);
+        let (cut, clipped) = selected_cut(&cut, remaining);
+        fields["cut"] = cut;
+        truncated |= clipped;
     }
     fields["truncated"] = json!(truncated || cut_before);
     fields
@@ -5197,10 +5209,11 @@ mod tests {
     }
 
     #[test]
-    fn a_completion_that_matches_no_poll_is_not_the_yielded_step() {
+    fn exact_completion_without_a_poll_is_preserved_without_inferred_reuse() {
         let home = Home::new();
-        // Session id 4242 again, for a command the next script starts and
-        // finishes itself: the id was used again, the old process is gone.
+        // An open exec wrapper cannot prove reuse of 4242. The old startup
+        // can finish during it. Preserve distinct old/new commands and outputs;
+        // independent native invocation identity would be needed to prove reuse.
         let mut records = yielded("reused");
         records.extend([
             codex_line(
@@ -5211,7 +5224,7 @@ mod tests {
             codex_line(
                 ts(10, 6, 500),
                 "event_msg",
-                json!({"type":"item_completed","item":{"type":"CommandExecution","id":"exec-date","process_id":"4242","command":["/bin/zsh","-lc","date"],"exit_code":0,"aggregated_output":"Thu\n"}}),
+                json!({"type":"item_completed","item":{"type":"CommandExecution","id":"exec-old","process_id":"4242","command":["/bin/zsh","-lc","make watch"],"exit_code":0,"aggregated_output":"one\ntwo\nthree\n"}}),
             ),
             codex_line(
                 ts(10, 6, 1000),
@@ -5240,19 +5253,31 @@ mod tests {
         home.lines("codex/sessions/2026/09/24/rollout-stray.jsonl", &stray);
         let built = home.built(BASE + 86_400_000);
         // The stray poll's own chunk is still the command's output.
-        for (sid, other, out) in [
-            ("reused", "date", "one\ntwo\nthree\n"),
-            ("stray", "echo other", "one\ntwo\nthree\nfive\n"),
+        for (sid, arg, other, out, unfinished) in [
+            ("reused", "make watch", "date", "one\ntwo\nthree\n", false),
+            (
+                "stray",
+                "make watch",
+                "echo other",
+                "one\ntwo\nthree\nfive\n",
+                true,
+            ),
         ] {
             let page = page_of(&built, sid, &Anchor::Last);
             let steps = tools(&page);
             assert_eq!(steps.len(), 2, "{sid}: {steps:?}");
-            assert_eq!(steps[0]["arg"], "make watch", "{sid}");
-            assert_eq!(steps[0]["unfinished"], true, "{sid}");
+            assert_eq!(steps[0]["arg"], arg, "{sid}");
+            assert_eq!(steps[0]["unfinished"] == true, unfinished, "{sid}");
+            if !unfinished {
+                assert_eq!(steps[0]["ok"], true, "{sid}");
+            }
             assert_eq!(steps[0]["out"], out, "{sid}");
             assert_eq!(steps[1]["name"], "exec_command", "{sid}");
             assert_eq!(steps[1]["arg"], other, "{sid}");
             assert_eq!(steps[1]["ok"], true, "{sid}");
+            if sid == "reused" {
+                assert_eq!(steps[1]["out"], "Thu\n");
+            }
         }
     }
 
@@ -5733,6 +5758,57 @@ mod tests {
             .sum::<usize>();
         assert!(truncated);
         assert!(selected["text"].as_str().unwrap().len() + block_text_bytes <= SELECTED_OUTPUT_MAX);
+    }
+
+    #[test]
+    fn selected_native_cut_parts_report_local_ascii_and_utf8_clipping() {
+        for unit in ["a", "é"] {
+            let side = unit.repeat(20 * 1024 / unit.len());
+            let body = format!("{side}…9 tokens truncated…{side}");
+            let native = format!(
+                "Warning: truncated output (original token count: 24000)\nTotal output lines: 900\n\n{body}"
+            );
+            // The flat native text fits. Its duplicated structured parts need
+            // Semon clipping under the shared selected-output budget.
+            assert!(body.len() < SELECTED_OUTPUT_MAX);
+            let selected = selected_text_value(&native, Source::Model, false, SELECTED_OUTPUT_MAX);
+            assert_eq!(selected["text"], body);
+            assert_eq!(selected["truncated"], true);
+            assert_eq!(selected["cut"]["by"], "codex");
+            assert_eq!(selected["cut"]["original_tokens"], 24000);
+            assert_eq!(selected["cut"]["lines"], 900);
+            assert_eq!(
+                selected["cut"]["parts"][1],
+                json!({"gap":{"n":9,"unit":"tokens"}})
+            );
+            let parts = selected["cut"]["parts"].as_array().unwrap();
+            let part_bytes = parts
+                .iter()
+                .filter_map(|part| part["text"].as_str())
+                .map(str::len)
+                .sum::<usize>();
+            assert!(selected["text"].as_str().unwrap().len() + part_bytes <= SELECTED_OUTPUT_MAX);
+            assert!(string_value_bytes(&selected) <= SELECTED_OUTPUT_MAX);
+            for part in parts.iter().filter_map(|part| part["text"].as_str()) {
+                assert!(part.ends_with('…'));
+                assert!(part.len() < side.len());
+            }
+        }
+    }
+
+    #[test]
+    fn selected_native_gap_without_local_clipping_is_not_truncated() {
+        let native = "Warning: truncated output (original token count: 24)\nTotal output lines: 9\n\nhead…9 tokens truncated…tail";
+        let selected = selected_text_value(native, Source::Model, false, SELECTED_OUTPUT_MAX);
+        assert_eq!(selected["text"], "head…9 tokens truncated…tail");
+        assert_eq!(selected["truncated"], false);
+        assert_eq!(selected["cut"]["by"], "codex");
+        assert_eq!(
+            selected["cut"]["parts"],
+            json!([
+                {"text":"head"}, {"gap":{"n":9,"unit":"tokens"}}, {"text":"tail"}
+            ])
+        );
     }
 
     /// Prints every session's last page of a fixture home written by
