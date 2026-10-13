@@ -13,6 +13,7 @@ export interface CausalTrace {
   root: Turn;
   generation: string;
   sessions: Record<string, Session>;
+  participants: Record<string, string>;
   turns: Record<string, Turn[]>;
   starts: Map<string, Turn>;
   handoffs: Map<string, Handoff>;
@@ -120,7 +121,16 @@ export function parseCausalTrace(
       result: relationship.resultOwner,
     });
   }
-  const turns: Record<string, Turn[]> = {},
+  const participants = dictionary(data.participants, text),
+    related = new Set([...handoffs.values()].flatMap((edge) => [edge.from, edge.to]));
+  if (
+    Object.keys(participants).length > 128 ||
+    Object.keys(participants).some(
+      (id) => id === 'you' || Object.hasOwn(sessions, id) || !related.has(id),
+    )
+  )
+    throw Error('Invalid causal participant scope');
+  const turns: Record<string, Turn[]> = Object.create(null),
     starts = new Map<string, Turn>(),
     byId = new Map<string, Turn>();
   for (const value of array(data.turns, object)) {
@@ -128,7 +138,7 @@ export function parseCausalTrace(
       sid = text(value.sid),
       id = text(value.id),
       start = optionalText(value.start);
-    if (!sessions[sid] || byId.has(id)) throw Error('Invalid causal turn identity');
+    if (!Object.hasOwn(sessions, sid) || byId.has(id)) throw Error('Invalid causal turn identity');
     const sent = array(value.sent, text).map((id) => {
       const edge = handoffs.get(id);
       if (!edge) throw Error('Missing causal handoff');
@@ -169,6 +179,7 @@ export function parseCausalTrace(
     key,
     root: selected,
     sessions,
+    participants,
     turns,
     starts,
     handoffs,
@@ -181,22 +192,28 @@ export function parseCausalTrace(
   };
 }
 
-/** Related names come from the selected, bounded family observation, never a workspace lookup. */
+/** Names come from this branch's bounded participants or the selected family observation. */
 export function causalSessionPart(
   data: CausalTrace,
   id: string,
   turn?: string,
 ): Hop['parts'][number] {
-  const own = data.sessions[id],
+  const own = Object.hasOwn(data.sessions, id) ? data.sessions[id] : undefined,
     family = data.metadata?.details?.family,
     relatives = [...(family?.ancestors ?? []), ...(family?.runs ?? [])].filter(
       (relative) => relative.key === id,
     ),
-    related = relatives.length === 1 ? relatives[0] : undefined;
+    related = relatives.length === 1 ? relatives[0] : undefined,
+    participant =
+      data.participants && Object.hasOwn(data.participants, id) ? data.participants[id] : undefined;
   return {
     className: 'who',
-    text: id === 'you' ? 'You' : (own?.name ?? related?.name ?? 'Unrecorded session'),
-    action: id !== 'you' && (own || related) ? { kind: 'session', id, turn } : undefined,
+    text:
+      id === 'you' ? 'You' : (own?.name ?? participant ?? related?.name ?? 'Unrecorded session'),
+    action:
+      id !== 'you' && (own || participant !== undefined || related)
+        ? { kind: 'session', id, turn }
+        : undefined,
   };
 }
 

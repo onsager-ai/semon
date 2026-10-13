@@ -634,6 +634,59 @@ pub fn session_causal_trace(options: &Options, source_key: &str, query: &str) ->
         if turns.is_empty() {
             return Err(404);
         }
+        // A recorded peer can have a known name without a recorded turn that
+        // joins this branch. Admit only exact edge participants from this source
+        // publication; names never fabricate turns, activity or control scope.
+        let related: BTreeSet<_> = edges
+            .values()
+            .flat_map(|edge| {
+                ["from", "to"]
+                    .into_iter()
+                    .filter_map(move |field| edge[field].as_str().map(str::to_owned))
+            })
+            .filter(|sid| sid != "you" && !sessions.contains_key(sid))
+            .collect();
+        let mut participants = BTreeMap::new();
+        missing |= related.len() > 128;
+        for sid in related.into_iter().take(128) {
+            let header: Option<(String, String)> = tx
+                .query_row(
+                    "SELECT generation,source_generation FROM session_trace_headers WHERE session_key=?1",
+                    [&sid],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()
+                .map_err(|_| 503u16)?;
+            let Some((version, source)) = header else {
+                missing = true;
+                continue;
+            };
+            let metadata = crate::history_projection::catalog(&tx, &sid)
+                .map_err(|_| 503u16)?
+                .or(tx
+                    .query_row(
+                        "SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata ELSE NULL END FROM session_catalog WHERE session_key=?1",
+                        [&sid],
+                        |row| row.get::<_, Option<String>>(0),
+                    )
+                    .optional()
+                    .map_err(|_| 503u16)?
+                    .flatten());
+            let Some(metadata) = metadata else {
+                missing = true;
+                continue;
+            };
+            let row: crate::model::summary::CatalogRow =
+                serde_json::from_value(decode(metadata)?).map_err(|_| 503u16)?;
+            if row.key != sid
+                || crate::retention::source_generation(&row.sources).map_err(|_| 503u16)? != source
+            {
+                missing = true;
+                continue;
+            }
+            versions.push(json!([sid, version]));
+            participants.insert(sid, row.name);
+        }
         let mut owners: BTreeSet<_> = edges
             .values()
             .flat_map(|edge| {
@@ -683,7 +736,7 @@ pub fn session_causal_trace(options: &Options, source_key: &str, query: &str) ->
         );
         tx.commit().map_err(|_| 503u16)?;
         Ok(
-            json!({"api":1,"source_key":source_key,"catalog_key":key,"root":root,"generation":version,"identity":identity,"sessions":sessions,"turns":turns,"handoffs":edges.into_values().collect::<Vec<_>>(),"previews":previews,"frontier":frontier,"incomplete":missing,"previews_incomplete":previews_incomplete}),
+            json!({"api":1,"source_key":source_key,"catalog_key":key,"root":root,"generation":version,"identity":identity,"sessions":sessions,"participants":participants,"turns":turns,"handoffs":edges.into_values().collect::<Vec<_>>(),"previews":previews,"frontier":frontier,"incomplete":missing,"previews_incomplete":previews_incomplete}),
         )
     };
     match read() {

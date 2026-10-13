@@ -3498,20 +3498,36 @@ fn focused_far_end_and_unsent_handoffs_use_native_owner_evidence_and_union_alias
             assert_eq!(labels[1], ("b".into(), "same-host~b".into()));
         }
         for tool in ["get_session", "read_transcript"] {
-            let args = json!({"id":id});
-            assert_eq!(
-                focused.call_selected_at(
-                    "a",
-                    raw,
-                    tool,
-                    &args,
-                    None,
-                    crate::SessionSourceReadMode::LocalThenProvider,
-                    NOW
-                ),
-                legacy.call_at(tool, &args, NOW),
-                "{multiple}: {tool} {args}"
-            );
+            let mut cases = vec![json!({"id":id})];
+            if tool == "read_transcript" {
+                for position in [0, 1, 2, 100] {
+                    for limit in [1, 2, 100] {
+                        cases.push(json!({"id":id,"before":position,"limit":limit}));
+                        cases.push(json!({"id":id,"after":position,"limit":limit}));
+                    }
+                }
+                let page = legacy.call_at(tool, &cases[0], NOW).unwrap();
+                for entry in page["entries"].as_array().unwrap() {
+                    if let Some(turn) = entry["turn"].as_str() {
+                        cases.push(json!({"id":id,"turn":turn,"limit":1}));
+                    }
+                }
+            }
+            for args in cases {
+                assert_eq!(
+                    focused.call_selected_at(
+                        "a",
+                        raw,
+                        tool,
+                        &args,
+                        None,
+                        crate::SessionSourceReadMode::LocalThenProvider,
+                        NOW
+                    ),
+                    legacy.call_at(tool, &args, NOW),
+                    "{multiple}: {tool} {args}"
+                );
+            }
         }
         for (_, source) in &sources.machines {
             assert!(source.work.lock().unwrap().events.is_none());
@@ -3754,23 +3770,39 @@ fn focused_query_keeps_cross_harness_and_literal_native_identity_collision_conte
     let mut focused = Query::from_sources(admitted(home.options.clone()));
     for key in [":claude:same-id", "claude:same-id", "codex:same-id"] {
         for tool in ["get_session", "read_transcript"] {
-            let args = json!({"id":key});
-            let expected = baseline.call_at(tool, &args, NOW).unwrap();
-            let actual = focused
-                .call_selected_at(
-                    "local",
-                    key,
-                    tool,
-                    &args,
-                    None,
-                    crate::SessionSourceReadMode::LocalThenProvider,
-                    NOW,
-                )
-                .unwrap();
-            assert_eq!(
-                actual, expected,
-                "{key} {tool}: focused derivation changed canonical identity"
-            );
+            let mut cases = vec![json!({"id":key})];
+            if tool == "read_transcript" {
+                for position in [0, 1, 2, 100] {
+                    for limit in [1, 2, 100] {
+                        cases.push(json!({"id":key,"before":position,"limit":limit}));
+                        cases.push(json!({"id":key,"after":position,"limit":limit}));
+                    }
+                }
+                let page = baseline.call_at(tool, &cases[0], NOW).unwrap();
+                for entry in page["entries"].as_array().unwrap() {
+                    if let Some(turn) = entry["turn"].as_str() {
+                        cases.push(json!({"id":key,"turn":turn,"limit":1}));
+                    }
+                }
+            }
+            for args in cases {
+                let expected = baseline.call_at(tool, &args, NOW).unwrap();
+                let actual = focused
+                    .call_selected_at(
+                        "local",
+                        key,
+                        tool,
+                        &args,
+                        None,
+                        crate::SessionSourceReadMode::LocalThenProvider,
+                        NOW,
+                    )
+                    .unwrap();
+                assert_eq!(
+                    actual, expected,
+                    "{key} {tool} {args}: focused derivation changed canonical identity"
+                );
+            }
         }
     }
 }
