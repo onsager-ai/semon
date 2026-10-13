@@ -73,7 +73,12 @@ pub(super) fn read(
     // contextual slots. The ordinary Catalog projection belongs to the complete
     // native source selection, so it cannot qualify that distinct namespace.
     // With --all no physical cutoff applies, including for local CLI/MCP.
-    if args["id"] != key || (options.scan_window && !options.all) {
+    let requested = args["id"].as_str().expect("validated focused id");
+    let suffixed = requested != key
+        && requested
+            .rsplit_once('@')
+            .is_some_and(|(owner, _)| owner == key);
+    if (requested != key && !suffixed) || (options.scan_window && !options.all) {
         return Ok(None);
     }
     let mut db = Connection::open_with_flags(
@@ -114,6 +119,12 @@ pub(super) fn read(
     let Some(saved) = &row.query else {
         return Ok(None);
     };
+    // Recorded native IDs are global. Machine suffixes belong only to virtual
+    // owners, which have no Catalog row and retain their indexed owner resolver.
+    // Reject this known mismatch before loading a complete selected cohort.
+    if suffixed {
+        return Err(QueryError::unknown_session(requested));
+    }
     // A recent recorded owner necessarily survives the output window. Older
     // owners can survive through clipped relationship context; let that native
     // selection resolve membership until its focused publication is available.
