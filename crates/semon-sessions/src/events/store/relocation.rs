@@ -2,12 +2,21 @@
 //! consumed-prefix verification. It never infers identity from a filename.
 use super::*;
 
-// Keep the production statement unchanged until pinned-CI planner and VM-step
-// measurements establish which operation grows with unrelated catalog width.
-const CANDIDATE_SQL: &str = "SELECT DISTINCT source_path FROM session_catalog_sources WHERE lifecycle='current' AND harness='codex' AND native_id=?1 AND source_path<>?2 LIMIT 2";
-const SELECTIVE_CANDIDATE_SQL: &str = "SELECT DISTINCT source_path FROM session_catalog_sources INDEXED BY session_catalog_current_native WHERE lifecycle='current' AND harness='codex' AND native_id=?1 AND source_path<>?2 LIMIT 2";
+// Pinned SQLite otherwise scans unrelated current sources to obtain DISTINCT
+// path order. Constrain the lookup to native identity using the existing index.
+const ORIGINAL_CANDIDATE_SQL: &str = "SELECT DISTINCT source_path FROM session_catalog_sources WHERE lifecycle='current' AND harness='codex' AND native_id=?1 AND source_path<>?2 LIMIT 2";
+const CANDIDATE_SQL: &str = "SELECT DISTINCT source_path FROM session_catalog_sources INDEXED BY session_catalog_current_native WHERE lifecycle='current' AND harness='codex' AND native_id=?1 AND source_path<>?2 LIMIT 2";
 
 fn candidate_paths(
+    connection: &Connection,
+    native_id: &str,
+    path: &str,
+    measure_vm: bool,
+) -> rusqlite::Result<(Vec<String>, Option<i32>)> {
+    query_candidates(connection, CANDIDATE_SQL, native_id, path, measure_vm)
+}
+
+fn query_candidates(
     connection: &Connection,
     sql: &str,
     native_id: &str,
@@ -40,7 +49,7 @@ fn report_candidate_plan(
     store: &SqliteStore,
     native_id: &str,
     path: &str,
-    original_steps: i32,
+    selective_steps: i32,
 ) -> bool {
     use std::sync::atomic::{AtomicBool, Ordering};
     static REPORTED: AtomicBool = AtomicBool::new(false);
@@ -48,21 +57,20 @@ fn report_candidate_plan(
         return false;
     }
     let result = (|| {
-        let original = candidate_plan(&store.connection, CANDIDATE_SQL, native_id, path)?;
-        let selective =
-            candidate_plan(&store.connection, SELECTIVE_CANDIDATE_SQL, native_id, path)?;
-        let (_, selective_steps) = candidate_paths(
+        let original = candidate_plan(&store.connection, ORIGINAL_CANDIDATE_SQL, native_id, path)?;
+        let selective = candidate_plan(&store.connection, CANDIDATE_SQL, native_id, path)?;
+        let (_, original_steps) = query_candidates(
             &store.connection,
-            SELECTIVE_CANDIDATE_SQL,
+            ORIGINAL_CANDIDATE_SQL,
             native_id,
             path,
             true,
         )?;
-        Ok::<_, rusqlite::Error>((original, selective, selective_steps))
+        Ok::<_, rusqlite::Error>((original, selective, original_steps.unwrap_or_default()))
     })();
     let producer = crate::native_timing::id(&store.path);
     match result {
-        Ok((original, selective, selective_steps)) => eprintln!(
+        Ok((original, selective, original_steps)) => eprintln!(
             "semon sessions native: producer={producer} relocation_planner sqlite={} original={original:?} selective={selective:?} original_vm_steps={original_steps} selective_vm_steps={selective_steps:?}",
             rusqlite::version()
         ),
@@ -182,14 +190,8 @@ pub(super) fn reuse(
     measurements: &mut crate::native_timing::Measurements,
 ) -> Result<Option<String>, StoreError> {
     let started = measurements.start();
-    let (candidates, steps) = candidate_paths(
-        &store.connection,
-        CANDIDATE_SQL,
-        native_id,
-        path,
-        started.is_some(),
-    )
-    .map_err(failure)?;
+    let (candidates, steps) =
+        candidate_paths(&store.connection, native_id, path, started.is_some()).map_err(failure)?;
     measurements.record("relocation_candidate", started, 1);
     if let Some(steps) = steps {
         measurements.count("relocation_candidate_vm_steps", steps.max(0) as usize);
@@ -390,22 +392,16 @@ mod tests {
     }
 
     fn compare_candidates(connection: &Connection) -> (Vec<String>, Vec<String>, i32, i32) {
-        let (original, original_steps) = candidate_paths(
+        let (original, original_steps) = query_candidates(
             connection,
-            CANDIDATE_SQL,
+            ORIGINAL_CANDIDATE_SQL,
             "target",
             "/fixture/sessions/self.jsonl",
             true,
         )
         .unwrap();
-        let (selective, selective_steps) = candidate_paths(
-            connection,
-            SELECTIVE_CANDIDATE_SQL,
-            "target",
-            "/fixture/sessions/self.jsonl",
-            true,
-        )
-        .unwrap();
+        let (selective, selective_steps) =
+            candidate_paths(connection, "target", "/fixture/sessions/self.jsonl", true).unwrap();
         assert_eq!(
             original.len(),
             selective.len(),
@@ -423,7 +419,7 @@ mod tests {
     }
 
     #[test]
-    fn relocation_candidate_plans_and_native_index_work() {
+    fn relocation_candidates_preserve_identity_and_bound_work_by_native_matches() {
         let mut baseline = None;
         for unrelated in [0, 256, 2048] {
             let mut connection = Connection::open_in_memory().unwrap();
@@ -444,14 +440,14 @@ mod tests {
             }
             let original_plan = candidate_plan(
                 &connection,
-                CANDIDATE_SQL,
+                ORIGINAL_CANDIDATE_SQL,
                 "target",
                 "/fixture/sessions/self.jsonl",
             )
             .unwrap();
             let selective_plan = candidate_plan(
                 &connection,
-                SELECTIVE_CANDIDATE_SQL,
+                CANDIDATE_SQL,
                 "target",
                 "/fixture/sessions/self.jsonl",
             )
