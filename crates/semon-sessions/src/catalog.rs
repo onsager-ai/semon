@@ -3278,6 +3278,104 @@ mod tests {
     }
 
     #[test]
+    fn selected_output_expansion_keeps_native_blocks_under_source_generation() {
+        const FIXTURE: &str = include_str!(
+            "../../../tests/fixtures/compatibility/codex-native-a9b0815/parser-cases.jsonl"
+        );
+        const MANIFEST: &str = include_str!(
+            "../../../tests/fixtures/compatibility/codex-native-a9b0815/manifest.json"
+        );
+        let manifest: Value = serde_json::from_str(MANIFEST).unwrap();
+        let expected = manifest["expected_calls"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|case| case["id"] == "image-unknown")
+            .unwrap();
+        let fixture = Fixture::new();
+        let relative = "sessions/2026/09/24/rollout-parser-cases.jsonl";
+        let path = fixture.options.codex_home.join(relative);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, FIXTURE).unwrap();
+        let facts_path = fixture.options.facts.as_ref().unwrap();
+        let mut facts = crate::read_facts(facts_path).unwrap();
+        facts.codex_rollouts = Some(std::collections::BTreeSet::from([relative.to_owned()]));
+        crate::write_facts(facts_path, &facts).unwrap();
+        fixture.publish(0);
+
+        let page = crate::session_transcript_range(
+            &fixture.options,
+            "source",
+            "sid=parser-cases&scope=retained_history&after=0&limit=100",
+            None,
+        );
+        assert_eq!(page.status, 200);
+        let page: Value = serde_json::from_slice(&page.body).unwrap();
+        let generation = page["projection"]["generation"].as_str().unwrap();
+        let call_offset = expected["offset"].as_u64().unwrap();
+        let original = page["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["provenance"]["offset"] == call_offset)
+            .unwrap()
+            .clone();
+        let slot = original["slot"].as_u64().unwrap();
+        let db = rusqlite::Connection::open(EventCache::path(&fixture.options.cache)).unwrap();
+        let saved: String = db
+            .query_row(
+                "SELECT metadata FROM session_history_slots WHERE session_key='parser-cases' AND slot=?1",
+                [slot as i64],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let saved: crate::slot_projection::SavedSlot = serde_json::from_str(&saved).unwrap();
+        assert!(matches!(
+            &saved.recipe,
+            crate::slot_projection::Recipe::Tool {
+                result_source: true,
+                ..
+            }
+        ));
+        let query = format!(
+            "sid=parser-cases&scope=retained_history&after={slot}&limit=1&generation={generation}&part=output"
+        );
+        let read =
+            |query: &str| crate::session_entry_field(&fixture.options, "source", query, None);
+        assert_eq!(
+            read(&query.replace(&format!("&generation={generation}"), "")).status,
+            400
+        );
+        assert_eq!(
+            read(&query.replace(generation, &"0".repeat(64))).status,
+            409
+        );
+        let expanded = read(&query);
+        assert_eq!(expanded.status, 200);
+        let expanded: Value = serde_json::from_slice(&expanded.body).unwrap();
+        assert_eq!(expanded["projection"]["generation"], generation);
+        assert_eq!(expanded["identity"], page["identity"]);
+        assert_eq!(expanded["freshness"], page["freshness"]);
+        assert_eq!(
+            expanded["content_observation"]["sources"][0]["source"],
+            page["content_observation"]["sources"][0]["source"]
+        );
+        let entry = &expanded["entries"][0];
+        assert_eq!(entry["entry_id"], original["entry_id"]);
+        assert_eq!(entry["provenance"], original["provenance"]);
+        assert_eq!(entry["outputBlocks"].as_array().unwrap().len(), 4);
+        assert_eq!(entry["outputBlocks"][0]["role"], "header");
+        assert_eq!(entry["outputBlocks"][1]["fallback"], "[image]");
+        assert_eq!(
+            entry["outputBlocks"][2]["fallback"],
+            "[unsupported output block]"
+        );
+        assert_eq!(entry["outputBlocks"][3]["role"], "body");
+        assert!(entry["out"].as_str().unwrap().contains("after image"));
+        assert!(expanded["observation"]["source_bytes"].as_u64().unwrap() <= 1024 * 1024);
+    }
+
+    #[test]
     fn native_turn_context_signals_have_distinct_stable_current_and_history_entries() {
         let fixture = Fixture::new();
         let relative = "sessions/2026/10/01/rollout-signal-session.jsonl";

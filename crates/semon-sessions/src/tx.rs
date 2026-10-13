@@ -649,6 +649,72 @@ fn text_value(text: &str, source: Source, cut_before: bool, limit: usize) -> Val
     fields
 }
 
+fn clip_within(text: &str, limit: usize) -> (String, bool) {
+    if text.len() <= limit {
+        return (text.to_owned(), false);
+    }
+    let marker = "…";
+    if limit < marker.len() {
+        return (String::new(), true);
+    }
+    let mut end = limit - marker.len();
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    (format!("{}{}", text[..end].trim_end(), marker), true)
+}
+
+fn selected_cut(cut: &Cut, limit: usize) -> Value {
+    let mut remaining = limit;
+    let mut texts_left = cut
+        .parts
+        .iter()
+        .filter(|part| matches!(part, Part::Text(_)))
+        .count();
+    let mut parts = Vec::new();
+    for part in &cut.parts {
+        match part {
+            Part::Text(text) => {
+                let share = remaining / texts_left.max(1);
+                let (text, _) = clip_within(text, share);
+                remaining = remaining.saturating_sub(text.len());
+                texts_left = texts_left.saturating_sub(1);
+                parts.push(json!({"text": text}));
+            }
+            Part::Gap(gap) => {
+                let mut fields = json!({"n": gap.n, "unit": gap.unit});
+                if let Some(of) = gap.of {
+                    fields["of"] = json!(of);
+                }
+                parts.push(json!({"gap": fields}));
+            }
+        }
+    }
+    let mut value = json!({"by": "codex"});
+    if let Some(tokens) = cut.original_tokens {
+        value["original_tokens"] = json!(tokens);
+    }
+    if let Some(lines) = cut.lines {
+        value["lines"] = json!(lines);
+    }
+    if !parts.is_empty() {
+        value["parts"] = Value::Array(parts);
+    }
+    value
+}
+
+fn selected_text_value(text: &str, source: Source, cut_before: bool, limit: usize) -> Value {
+    let (plain, cut) = split_cut(text, source);
+    let (shown, truncated) = clip_within(&plain, limit);
+    let mut fields = json!({"text": shown});
+    if let Some(cut) = cut {
+        let remaining = limit.saturating_sub(string_value_bytes(&fields));
+        fields["cut"] = selected_cut(&cut, remaining);
+    }
+    fields["truncated"] = json!(truncated || cut_before);
+    fields
+}
+
 /// A step's duration: tenths of a second under a minute, then minutes.
 fn secs(ms: i64) -> String {
     let ms = ms.max(0);
@@ -817,7 +883,11 @@ pub(crate) fn diff_rows(name: &str, input: &Value, budget: usize) -> Option<(Val
 
 /// A tool result's text: a Claude `tool_result` block, or a Codex call's
 /// output (its `output` field when the output is structured).
-pub(crate) fn result_text(record: &Value, block: usize) -> Option<String> {
+pub(crate) fn result_text(
+    record: &Value,
+    block: usize,
+    code_result_source: bool,
+) -> Option<String> {
     if field(record, "type") == Some("tool.execution_complete") {
         let data = record.get("data")?;
         return data
@@ -865,23 +935,27 @@ pub(crate) fn result_text(record: &Value, block: usize) -> Option<String> {
         if field(payload, "type") == Some("tool_search_output") {
             return serde_json::to_string_pretty(output).ok();
         }
-        let structured = match output {
-            Value::String(text) => serde_json::from_str::<Value>(text).ok(),
-            other => Some(other.clone()),
-        };
-        if let Some(text) = structured.as_ref().and_then(|value| field(value, "output")) {
-            return Some(text.to_owned());
+        let custom_output = field(payload, "type") == Some("custom_tool_call_output");
+        if !custom_output || code_result_source {
+            let structured = match output {
+                Value::String(text) => serde_json::from_str::<Value>(text).ok(),
+                other => Some(other.clone()),
+            };
+            if let Some(text) = structured.as_ref().and_then(|value| field(value, "output")) {
+                return Some(text.to_owned());
+            }
         }
         return Some(match output {
             Value::String(text) => text.clone(),
-            Value::Array(parts) => {
+            Value::Array(_) => {
                 // One exec result a script printed: its command's output.
-                if let Some(value) = events::yield_json(Some(output))
+                if code_result_source
+                    && let Some(value) = events::yield_json(Some(output))
                     && let Some(text) = field(&value, "output")
                 {
                     return Some(text.to_owned());
                 }
-                script_text(parts)
+                script_text(output)
             }
             other => serde_json::to_string_pretty(other).unwrap_or_default(),
         });
@@ -892,24 +966,26 @@ pub(crate) fn result_text(record: &Value, block: usize) -> Option<String> {
 /// A code-mode script's output parts as text: what the script printed,
 /// after the harness's "Script completed" header. A failure's header stays,
 /// as it says what failed.
-fn script_text(parts: &[Value]) -> String {
-    let mut texts: Vec<String> = parts
-        .iter()
-        .filter_map(|part| match field(part, "type") {
-            None | Some("text" | "input_text" | "output_text") => {
-                field(part, "text").map(str::to_owned)
-            }
-            Some("image" | "input_image") => Some("[image]".to_owned()),
-            _ => None,
-        })
-        .collect();
-    if texts
-        .first()
-        .is_some_and(|header| header.trim_start().starts_with("Script completed"))
-    {
-        texts.remove(0);
+fn script_text(output: &Value) -> String {
+    match events::output_content_view(output) {
+        Some(events::OutputContentView::Text(text)) => text.to_owned(),
+        Some(events::OutputContentView::Blocks(blocks)) => blocks
+            .iter()
+            .filter_map(|block| match block.content {
+                events::OutputBlockContent::Text { header: true, .. } => None,
+                events::OutputBlockContent::Text {
+                    text,
+                    header: false,
+                } => Some(text.to_owned()),
+                events::OutputBlockContent::Image => Some("[image]".to_owned()),
+                events::OutputBlockContent::Unknown => {
+                    Some("[unsupported output block]".to_owned())
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+        None => serde_json::to_string_pretty(output).unwrap_or_default(),
     }
-    texts.join("\n")
 }
 
 /// The output chunk a yielded command's script or poll printed.
@@ -1019,9 +1095,12 @@ pub(crate) fn selected_script(lines: &mut Lines, slot: &Slot) -> Option<(String,
 pub(crate) fn selected_output(lines: &mut Lines, slot: &Slot) -> Option<Value> {
     let file = slot.file.as_ref()?;
     let (text, source) = match &slot.kind {
-        SlotKind::Tool { reply, item, .. } => {
-            tool_output(lines, &file.path, reply.as_ref(), *item)?
-        }
+        SlotKind::Tool {
+            reply,
+            item,
+            result_source,
+            ..
+        } => tool_output(lines, &file.path, reply.as_ref(), *item, *result_source)?,
         SlotKind::Operation { kind, .. } if kind == "CommandExecution" => {
             let record = lines.get(&file.path, slot.offset)?;
             let output = record
@@ -1031,7 +1110,100 @@ pub(crate) fn selected_output(lines: &mut Lines, slot: &Slot) -> Option<Value> {
         }
         _ => return None,
     };
-    Some(text_value(&text, source, false, 64 * 1024))
+    let mut selected = selected_text_value(&text, source, false, SELECTED_OUTPUT_MAX);
+    if let SlotKind::Tool {
+        reply: Some(reply), ..
+    } = &slot.kind
+        && let Some(record) = lines.get(&file.path, reply.o)
+        && field(record.get("payload")?, "type") == Some("custom_tool_call_output")
+        && let Some(output) = record.pointer("/payload/output")
+        && let Some((blocks, truncated, omitted)) = selected_output_blocks(
+            output,
+            SELECTED_OUTPUT_MAX.saturating_sub(string_value_bytes(&selected)),
+        )
+    {
+        selected["blocks"] = blocks;
+        if truncated {
+            selected["blocks_truncated"] = json!(true);
+        }
+        if omitted > 0 {
+            selected["blocks_omitted"] = json!(omitted);
+        }
+    }
+    Some(selected)
+}
+
+const SELECTED_OUTPUT_MAX: usize = 64 * 1024;
+const OUTPUT_BLOCKS_MAX: usize = 128;
+const OUTPUT_BLOCK_TYPE_MAX: usize = 128;
+
+fn string_value_bytes(value: &Value) -> usize {
+    match value {
+        Value::String(text) => text.len(),
+        Value::Array(values) => values.iter().map(string_value_bytes).sum(),
+        Value::Object(values) => values.values().map(string_value_bytes).sum(),
+        _ => 0,
+    }
+}
+
+fn selected_output_blocks(output: &Value, budget: usize) -> Option<(Value, bool, usize)> {
+    let events::OutputContentView::Blocks(parts) = events::output_content_view(output)? else {
+        return None;
+    };
+    let omitted = parts.len().saturating_sub(OUTPUT_BLOCKS_MAX);
+    let mut remaining = budget;
+    let mut truncated = omitted > 0;
+    let blocks = parts
+        .iter()
+        .take(OUTPUT_BLOCKS_MAX)
+        .map(|part| {
+            let (kind, kind_truncated) = part
+                .kind
+                .map(|kind| clip(kind, OUTPUT_BLOCK_TYPE_MAX))
+                .unwrap_or_default();
+            let mut block = json!({
+                "ordinal": part.ordinal,
+                "type": if part.kind.is_some() { json!(kind) } else { Value::Null },
+            });
+            if kind_truncated {
+                block["type_truncated"] = json!(true);
+                truncated = true;
+            }
+            match part.content {
+                events::OutputBlockContent::Text { text, header } => {
+                    block["role"] = json!(if header { "header" } else { "body" });
+                    let (shown, cut) = if remaining == 0 {
+                        (String::new(), !text.is_empty())
+                    } else if text.len() > remaining {
+                        let marker = "…";
+                        if remaining < marker.len() {
+                            (String::new(), true)
+                        } else {
+                            clip(text, remaining - marker.len())
+                        }
+                    } else {
+                        clip(text, remaining)
+                    };
+                    remaining = remaining.saturating_sub(shown.len());
+                    block["text"] = json!(shown);
+                    if cut {
+                        block["truncated"] = json!(true);
+                        truncated = true;
+                    }
+                }
+                events::OutputBlockContent::Image => {
+                    block["role"] = json!("nontext");
+                    block["fallback"] = json!("[image]");
+                }
+                events::OutputBlockContent::Unknown => {
+                    block["role"] = json!("unknown");
+                    block["fallback"] = json!("[unsupported output block]");
+                }
+            }
+            block
+        })
+        .collect();
+    Some((Value::Array(blocks), truncated, omitted))
 }
 
 /// A yielded command's line: from the item that completed it, else from
@@ -1284,7 +1456,17 @@ fn sent_entry(
     state_fields(&mut entry, shown, took, slot.t, now);
     if let Some(output) = reply
         .and_then(|reply| lines.get(&file.path, reply.o))
-        .and_then(|record| chunk_of(&record).or_else(|| result_text(&record, 0)))
+        .and_then(|record| {
+            let result_source = matches!(
+                &slot.kind,
+                SlotKind::Sent {
+                    result_source: true,
+                    ..
+                }
+            );
+            (result_source.then(|| chunk_of(&record)).flatten())
+                .or_else(|| result_text(&record, 0, result_source))
+        })
         .filter(|output| !output.trim().is_empty())
     {
         put_out(&mut entry, &mut more, &output, Source::Model);
@@ -1305,6 +1487,7 @@ fn tool_output(
     path: &Path,
     reply: Option<&Reply>,
     item: Option<u64>,
+    code_result_source: bool,
 ) -> Option<(String, Source)> {
     if let Some(output) = item
         .and_then(|item| lines.get(path, item))
@@ -1329,7 +1512,10 @@ fn tool_output(
     } else {
         Source::Plain
     };
-    Some((result_text(&record, reply.b as usize)?, source))
+    Some((
+        result_text(&record, reply.b as usize, code_result_source)?,
+        source,
+    ))
 }
 
 fn think_text(record: &Value, block: usize) -> Option<String> {
@@ -1441,8 +1627,20 @@ fn tool_entry(
                 if cut {
                     more.push("diff");
                 }
-            } else if let Some((text, source)) = tool_output(lines, &file.path, reply, item)
-                .filter(|(text, _)| !text.trim().is_empty())
+            } else if let Some((text, source)) = tool_output(
+                lines,
+                &file.path,
+                reply,
+                item,
+                matches!(
+                    &slot.kind,
+                    SlotKind::Tool {
+                        result_source: true,
+                        ..
+                    }
+                ),
+            )
+            .filter(|(text, _)| !text.trim().is_empty())
             {
                 put_out(&mut entry, &mut more, &text, source);
             }
@@ -1760,6 +1958,7 @@ pub(crate) fn render_at(
             reply,
             item,
             bg,
+            ..
         } => {
             let mut entry = tool_entry(
                 lines,
@@ -1807,6 +2006,7 @@ pub(crate) fn render_at(
             reply,
             start,
             done,
+            ..
         } => sent_entry(
             lines,
             file?,
@@ -1941,6 +2141,13 @@ pub(crate) fn slot_texts(lines: &mut Lines, slot: &Slot) -> Vec<(&'static str, S
             .get(&file.path, slot.offset)
             .and_then(|record| think_text(&record, block)),
         SlotKind::Tool { reply, item, .. } => {
+            let code_result_source = matches!(
+                &slot.kind,
+                SlotKind::Tool {
+                    result_source: true,
+                    ..
+                }
+            );
             if let Some(input) = lines
                 .get(&file.path, slot.offset)
                 .and_then(|record| tool_input(&record, block))
@@ -1949,7 +2156,9 @@ pub(crate) fn slot_texts(lines: &mut Lines, slot: &Slot) -> Vec<(&'static str, S
                 strings(&input, &mut text);
                 texts.push(("in", text));
             }
-            if let Some((text, _)) = tool_output(lines, &file.path, reply.as_ref(), *item) {
+            if let Some((text, _)) =
+                tool_output(lines, &file.path, reply.as_ref(), *item, code_result_source)
+            {
                 texts.push(("out", text));
             }
             None
@@ -2334,7 +2543,13 @@ pub(crate) fn full_slot(built: &Built, sid: &str, index: usize, part: &str) -> i
         return full_yielded(file, slot, part);
     }
     let invalid = || io::Error::new(io::ErrorKind::InvalidInput, "not a tool call");
-    let SlotKind::Tool { reply, item, .. } = &slot.kind else {
+    let SlotKind::Tool {
+        reply,
+        item,
+        result_source,
+        ..
+    } = &slot.kind
+    else {
         if part == "out"
             && let SlotKind::Operation { kind, .. } = &slot.kind
             && kind == "CommandExecution"
@@ -2379,9 +2594,14 @@ pub(crate) fn full_slot(built: &Built, sid: &str, index: usize, part: &str) -> i
     };
     match part {
         "out" => {
-            let (text, source) =
-                tool_output(&mut Lines::default(), &file.path, reply.as_ref(), *item)
-                    .ok_or_else(invalid)?;
+            let (text, source) = tool_output(
+                &mut Lines::default(),
+                &file.path,
+                reply.as_ref(),
+                *item,
+                *result_source,
+            )
+            .ok_or_else(invalid)?;
             Ok(text_json(&text, source, false))
         }
         "in" | "diff" => full(&file.path, slot.offset, slot.block as usize, part),
@@ -2432,10 +2652,22 @@ fn full_yielded(file: &SlotFile, slot: &Slot, part: &str) -> io::Result<String> 
             whole
         }
         (SlotKind::Sent { .. }, "in") => sent_chars(&mut lines, path, slot.offset),
-        (SlotKind::Sent { reply, .. }, "out") => reply
+        (
+            SlotKind::Sent {
+                reply,
+                result_source,
+                ..
+            },
+            "out",
+        ) => reply
             .as_ref()
             .and_then(|reply| lines.get(path, reply.o))
-            .and_then(|record| chunk_of(&record).or_else(|| result_text(&record, 0))),
+            .and_then(|record| {
+                result_source
+                    .then(|| chunk_of(&record))
+                    .flatten()
+                    .or_else(|| result_text(&record, 0, *result_source))
+            }),
         _ => None,
     }
     .ok_or_else(invalid)?;
@@ -2469,7 +2701,7 @@ fn full(path: &Path, offset: u64, block: usize, part: &str) -> io::Result<String
             Ok(json!({"text": text, "truncated": truncated}).to_string())
         }
         "out" => {
-            let text = result_text(&record, block).ok_or_else(invalid)?;
+            let text = result_text(&record, block, false).ok_or_else(invalid)?;
             Ok(text_json(
                 &text,
                 if record.get("payload").is_some() {
@@ -3159,6 +3391,7 @@ mod tests {
             kind: SlotKind::Tool {
                 shown,
                 name: "Bash".to_owned(),
+                result_source: false,
                 reply: None,
                 item: None,
                 bg: None,
@@ -5024,10 +5257,11 @@ mod tests {
     }
 
     #[test]
-    fn a_script_that_starts_and_polls_its_command_is_its_start() {
+    fn a_script_with_looped_operations_keeps_its_outer_cells_visible() {
         let home = Home::new();
-        // It starts the command and polls it in a loop, and the command
-        // still outlives the script. A comment names another call.
+        // It starts and polls in a loop with reassignment. The printed result
+        // cannot be assigned to one nested operation, so the wrapper stays
+        // visible with its native output. A comment names another call.
         let script = "let r = await tools.exec_command({cmd:\"make watch\",yield_time_ms:1000});\n// then tools.write_stdin({session_id, chars:\"q\"}) to quit\nwhile (r.session_id && Date.now() < end) {\n  r = await tools.write_stdin({session_id: r.session_id, chars: \"\"});\n}\ntext(JSON.stringify(r));\n";
         let mut records = vec![
             codex_line(
@@ -5057,11 +5291,24 @@ mod tests {
         let built = home.built(BASE + 86_400_000);
         let page = page_of(&built, "looped", &Anchor::Last);
         let steps = tools(&page);
-        assert_eq!(steps.len(), 1, "{steps:?}");
-        assert_eq!(steps[0]["name"], "exec_command");
-        assert_eq!(steps[0]["arg"], "make watch");
-        assert_eq!(steps[0]["exit"], 0);
-        assert_eq!(steps[0]["out"], "one\ntwo\nfour\n");
+        let transcript = built.tx.get("looped").unwrap();
+        assert!(steps.len() > 1, "{steps:?}");
+        assert!(transcript.slots.iter().any(|slot| matches!(
+            &slot.kind,
+            SlotKind::Tool { name, .. } if name == "exec"
+        )));
+        assert!(steps.iter().any(|step| {
+            step["name"] == "exec"
+                && step["out"].as_str().is_some_and(|out| {
+                    out.contains("\"session_id\":4242") && out.contains("\"output\":\"one\\n\"")
+                })
+        }));
+        assert!(
+            transcript
+                .slots
+                .iter()
+                .all(|slot| !matches!(&slot.kind, SlotKind::Yielded { .. }))
+        );
     }
 
     #[test]
@@ -5339,6 +5586,153 @@ mod tests {
         );
         let short = json!({"command": "ls -la"});
         assert_eq!(tool_in("Bash", &short, "ls -la"), None);
+    }
+
+    #[test]
+    fn codex_native_fixture_selected_output_keeps_bounded_native_blocks() {
+        const FIXTURE: &str = include_str!(
+            "../../../tests/fixtures/compatibility/codex-native-a9b0815/parser-cases.jsonl"
+        );
+        const MANIFEST: &str = include_str!(
+            "../../../tests/fixtures/compatibility/codex-native-a9b0815/manifest.json"
+        );
+        let manifest: Value = serde_json::from_str(MANIFEST).unwrap();
+        let expected = manifest["expected_blocks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|case| case["call_id"] == "image-unknown")
+            .unwrap();
+        let home = Home::new();
+        home.write(
+            "codex/sessions/2026/09/24/rollout-parser-cases.jsonl",
+            FIXTURE,
+        );
+        let built = home.built(BASE + 86_400_000);
+        let transcript = built.tx.get("parser-cases").unwrap();
+        let call_id = expected["call_id"].as_str().unwrap();
+        let call_offset = manifest["expected_calls"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|case| case["id"] == call_id)
+            .unwrap()["offset"]
+            .as_u64()
+            .unwrap();
+        let slot = transcript
+            .slots
+            .iter()
+            .find(|slot| slot.offset == call_offset)
+            .unwrap_or_else(|| panic!("visible image-unknown wrapper at {call_offset}"));
+        assert!(matches!(&slot.kind, SlotKind::Tool { .. }));
+        let output = selected_output(&mut Lines::default(), slot).unwrap();
+        let blocks = output["blocks"].as_array().unwrap();
+        let expected_blocks = expected["blocks"].as_array().unwrap();
+        assert_eq!(blocks.len(), expected_blocks.len());
+        for (actual, expected) in blocks.iter().zip(expected_blocks) {
+            assert_eq!(actual["ordinal"], expected["ordinal"]);
+            assert_eq!(actual["type"], expected["type"]);
+            assert_eq!(actual["role"], expected["role"]);
+            if let Some(fallback) = expected.get("fallback") {
+                assert_eq!(actual["fallback"], *fallback);
+            }
+        }
+        assert_eq!(blocks[1]["fallback"], "[image]");
+        assert_eq!(blocks[2]["fallback"], "[unsupported output block]");
+        let text_bytes = output["text"].as_str().unwrap().len()
+            + blocks
+                .iter()
+                .filter_map(|block| block.get("text").and_then(Value::as_str))
+                .map(str::len)
+                .sum::<usize>();
+        assert!(text_bytes <= 64 * 1024);
+        let serialized = output.to_string();
+        assert!(!serialized.contains("synthetic-base64-secret"));
+        assert!(!serialized.contains("synthetic private payload"));
+        assert!(output.get("blocks_truncated").is_none());
+        assert!(output.get("blocks_omitted").is_none());
+
+        for (call_id, printed_text, printed_session) in [
+            ("fake-exec-json", "printed object, not result", 7171),
+            ("fake-poll-json", "printed object, not poll result", 95583),
+        ] {
+            let call_offset = manifest["expected_calls"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|case| case["id"] == call_id)
+                .unwrap()["offset"]
+                .as_u64()
+                .unwrap();
+            let slot = transcript
+                .slots
+                .iter()
+                .find(|slot| slot.offset == call_offset)
+                .unwrap();
+            assert!(matches!(
+                &slot.kind,
+                SlotKind::Tool {
+                    result_source: false,
+                    ..
+                }
+            ));
+            let printed = selected_output(&mut Lines::default(), slot).unwrap();
+            let text = printed["text"].as_str().unwrap();
+            assert!(text.contains(printed_text));
+            assert!(text.contains(&format!("\"session_id\":{printed_session}")));
+            assert_ne!(text, printed_text);
+        }
+    }
+
+    #[test]
+    fn selected_output_blocks_obey_count_and_text_budgets() {
+        let output = Value::Array(
+            (0..OUTPUT_BLOCKS_MAX + 2)
+                .map(|ordinal| json!({"type":"input_text","text":format!("block-{ordinal}")}))
+                .collect(),
+        );
+        let (blocks, truncated, omitted) = selected_output_blocks(&output, 5).unwrap();
+        let blocks = blocks.as_array().unwrap();
+        assert_eq!(blocks.len(), OUTPUT_BLOCKS_MAX);
+        assert!(truncated);
+        assert_eq!(omitted, 2);
+        let text_bytes = blocks
+            .iter()
+            .filter_map(|block| block.get("text").and_then(Value::as_str))
+            .map(str::len)
+            .sum::<usize>();
+        assert!(text_bytes <= 5);
+    }
+
+    #[test]
+    fn selected_output_text_stays_within_shared_utf8_budget() {
+        let ascii = "a".repeat(SELECTED_OUTPUT_MAX + 1);
+        let selected = selected_text_value(&ascii, Source::Plain, false, SELECTED_OUTPUT_MAX);
+        let flat = selected["text"].as_str().unwrap();
+        assert_eq!(flat.len(), SELECTED_OUTPUT_MAX);
+        assert!(flat.ends_with('…'));
+        assert_eq!(selected["truncated"], true);
+
+        let multibyte = "é".repeat(SELECTED_OUTPUT_MAX / 2 + 1);
+        let selected = selected_text_value(&multibyte, Source::Plain, false, SELECTED_OUTPUT_MAX);
+        let flat = selected["text"].as_str().unwrap();
+        assert!(flat.len() <= SELECTED_OUTPUT_MAX);
+        assert!(flat.is_char_boundary(flat.len()));
+        assert!(flat.ends_with('…'));
+
+        let selected = selected_text_value("flat", Source::Plain, false, SELECTED_OUTPUT_MAX);
+        let remaining = SELECTED_OUTPUT_MAX.saturating_sub(string_value_bytes(&selected));
+        let output = json!([{"type":"input_text","text":"block".repeat(SELECTED_OUTPUT_MAX)}]);
+        let (blocks, truncated, _) = selected_output_blocks(&output, remaining).unwrap();
+        let block_text_bytes = blocks
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|block| block.get("text").and_then(Value::as_str))
+            .map(str::len)
+            .sum::<usize>();
+        assert!(truncated);
+        assert!(selected["text"].as_str().unwrap().len() + block_text_bytes <= SELECTED_OUTPUT_MAX);
     }
 
     /// Prints every session's last page of a fixture home written by
