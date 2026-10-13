@@ -151,6 +151,16 @@ pub(crate) fn publish(
     )
 }
 
+fn generation_bytes(session: &Value, projection: &Projection) -> Vec<u8> {
+    serde_json::to_vec(&(
+        session,
+        &projection.turns,
+        &projection.edges,
+        &projection.bookmarks,
+    ))
+    .expect("owned trace projection")
+}
+
 pub(crate) fn publish_measured(
     tx: &Transaction<'_>,
     row: &crate::model::summary::CatalogRow,
@@ -169,16 +179,7 @@ pub(crate) fn publish_measured(
     let started = measurements.start();
     let digest = format!(
         "{:x}",
-        Sha256::digest(
-            json!([
-                session,
-                projection.turns,
-                projection.edges,
-                projection.bookmarks
-            ])
-            .to_string()
-            .as_bytes()
-        )
+        Sha256::digest(generation_bytes(&session, projection))
     );
     measurements.record("trace_digest", started, 1);
     let started = measurements.start();
@@ -814,6 +815,135 @@ pub fn session_causal_trace(options: &Options, source_key: &str, query: &str) ->
             },
             matches!(status, 409 | 503),
         ),
+    }
+}
+
+#[cfg(test)]
+mod generation_tests {
+    use super::*;
+
+    fn legacy_bytes(session: &Value, projection: &Projection) -> Vec<u8> {
+        json!([
+            session,
+            projection.turns,
+            projection.edges,
+            projection.bookmarks
+        ])
+        .to_string()
+        .into_bytes()
+    }
+
+    fn ordered_session() -> Value {
+        let mut nested = serde_json::Map::new();
+        nested.insert("z".into(), json!([null, true, -0.0, u64::MAX]));
+        nested.insert("a".into(), json!("你好 🦀\n\"\\\t\u{0000}"));
+        let mut session = serde_json::Map::new();
+        session.insert("z".into(), Value::Object(nested));
+        session.insert("a".into(), json!({}));
+        Value::Object(session)
+    }
+
+    fn populated_projection() -> Projection {
+        Projection {
+            session: ordered_session(),
+            turns: vec![json!({"id":"turn","start":null,"at":1,"last":1})],
+            edges: vec![
+                json!({"id":"edge","to":null,"from":"owner","at":2,"done":null,"status":"wait"}),
+            ],
+            bookmarks: vec![
+                ("z目标".into(), "edge".into()),
+                ("a目标".into(), "edge".into()),
+            ],
+        }
+    }
+
+    #[test]
+    fn borrowed_trace_generation_keeps_legacy_bytes_and_order() {
+        let populated = populated_projection();
+        let empty = Projection {
+            session: json!({}),
+            turns: Vec::new(),
+            edges: Vec::new(),
+            bookmarks: Vec::new(),
+        };
+        let null = Projection {
+            session: Value::Null,
+            turns: vec![Value::Null, json!([]), json!({})],
+            edges: vec![json!([i64::MIN, 1.25, false])],
+            bookmarks: vec![(String::new(), String::new())],
+        };
+        assert_eq!(
+            populated
+                .session
+                .as_object()
+                .unwrap()
+                .keys()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            ["z", "a"]
+        );
+        for projection in [&populated, &empty, &null] {
+            assert_eq!(
+                generation_bytes(&projection.session, projection),
+                legacy_bytes(&projection.session, projection)
+            );
+        }
+    }
+
+    #[test]
+    fn publication_keeps_legacy_digest_and_unchanged_relationship_rows() {
+        let projection = populated_projection();
+        let mut row: crate::model::summary::CatalogRow = serde_json::from_value(json!({
+            "key":"owner", "name":"fixture", "harness":"codex", "kind":"session",
+            "native_ids":["owner"], "parent":null, "parent_source":null, "repo":null,
+            "branch":null, "model":"fixture", "effort":null, "start":0, "last":2,
+            "tokens":[0,0,0], "cost":crate::pricing::Cost::default(), "sources":[]
+        }))
+        .unwrap();
+        row.overview = Some(
+            serde_json::from_value(json!({
+                "activity":null, "home":ordered_session(), "source_generation":"fixture"
+            }))
+            .unwrap(),
+        );
+        let mut session = projection.session.clone();
+        session["content_generation"] = json!(
+            row.overview
+                .as_ref()
+                .map(crate::overview::content_generation)
+        );
+        let expected = format!("{:x}", Sha256::digest(legacy_bytes(&session, &projection)));
+        // This publisher uses only its trace schema, without Event Index/WAL initialization.
+        let mut connection = Connection::open_in_memory().unwrap();
+        connection.execute_batch(SCHEMA).unwrap();
+        let tx = connection.transaction().unwrap();
+        publish(&tx, &row, &projection).unwrap();
+        tx.commit().unwrap();
+        let saved: (String, String) = connection
+            .query_row(
+                "SELECT generation,metadata FROM session_trace_headers WHERE session_key='owner'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(saved, (expected, session.to_string()));
+        let rows: (i64, i64, i64) = connection.query_row(
+            "SELECT (SELECT COUNT(*) FROM session_trace_turns),(SELECT COUNT(*) FROM session_trace_edges),(SELECT COUNT(*) FROM session_trace_bookmarks)",
+            [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        ).unwrap();
+        assert_eq!(rows, (1, 1, 2));
+        let changes: i64 = connection
+            .query_row("SELECT total_changes()", [], |row| row.get(0))
+            .unwrap();
+        let tx = connection.transaction().unwrap();
+        publish(&tx, &row, &projection).unwrap();
+        tx.commit().unwrap();
+        assert_eq!(
+            connection
+                .query_row("SELECT total_changes()", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            changes
+        );
     }
 }
 
