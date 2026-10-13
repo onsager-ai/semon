@@ -8454,7 +8454,7 @@ fn schema_four_upgrade_preserves_event_indices_and_observed_runs() {
     let version: i64 = connection
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 25);
+    assert_eq!(version, 26);
 }
 
 #[test]
