@@ -2593,8 +2593,12 @@ impl IndexStore for SqliteStore {
         let timing = crate::native_timing::enabled();
         let mut measurements = crate::native_timing::Measurements::new(timing);
         let mut row_measurements = crate::native_timing::Measurements::new(timing);
-        let mut write_activity =
-            crate::native_timing::WriteActivity::new(timing, &self.path, "index_initial");
+        let mut write_activity = crate::native_timing::WriteActivity::new(
+            timing,
+            &self.path,
+            "index_initial",
+            &self.connection,
+        );
         let started = measurements.start();
         let transaction = self
             .connection
@@ -2614,7 +2618,7 @@ impl IndexStore for SqliteStore {
             }
         }
         measurements.record("fences", started, files.len());
-        write_activity.stage("fences");
+        write_activity.stage("fences", &transaction);
         let started = measurements.start();
         for (path, ledger, index) in files {
             write_index_changes_measured(
@@ -2629,11 +2633,11 @@ impl IndexStore for SqliteStore {
             .map_err(failure)?;
         }
         measurements.record("write_index_changes", started, files.len());
-        write_activity.stage("rows");
+        write_activity.stage("rows", &transaction);
         let started = measurements.start();
         transaction.commit().map_err(failure)?;
         measurements.record("commit", started, 1);
-        write_activity.stage("commit");
+        write_activity.stage("commit", &self.connection);
         if timing {
             measurements.emit(
                 &crate::native_timing::id(&self.path),
@@ -2953,10 +2957,14 @@ impl SqliteStore {
         let rows = publication.rows;
         let producer =
             crate::native_timing::enabled().then(|| crate::native_timing::id(&self.path));
-        let mut write_activity =
-            crate::native_timing::WriteActivity::new(producer.is_some(), &self.path, "catalog");
+        let mut write_activity = crate::native_timing::WriteActivity::new(
+            producer.is_some(),
+            &self.path,
+            "catalog",
+            &self.connection,
+        );
         let mut stage_started = std::time::Instant::now();
-        let mut stage = |name: &'static str| {
+        let mut stage = |name: &'static str, connection: &Connection| {
             if let Some(producer) = &producer {
                 let now = std::time::Instant::now();
                 eprintln!(
@@ -2964,7 +2972,7 @@ impl SqliteStore {
                     rows.len(),
                     now.duration_since(stage_started).as_millis()
                 );
-                write_activity.stage(name);
+                write_activity.stage(name, connection);
                 stage_started = std::time::Instant::now();
             }
         };
@@ -3109,9 +3117,9 @@ impl SqliteStore {
                     return Ok(Outcome::Conflict);
                 }
             }
-            stage("fences");
+            stage("fences", &transaction);
             crate::history_projection::publish(&transaction, publication).map_err(failure)?;
-            stage("history");
+            stage("history", &transaction);
             let mut metadata_measurements =
                 crate::native_timing::Measurements::new(producer.is_some());
             let mut overview_measurements =
@@ -3277,10 +3285,10 @@ impl SqliteStore {
                 metadata_measurements.emit(producer, "catalog_metadata");
                 overview_measurements.emit(producer, "overview_publish");
             }
-            stage("catalog_metadata");
+            stage("catalog_metadata", &transaction);
             crate::catalog_search::publish_current_rows(&transaction, &search_rows)
                 .map_err(failure)?;
-            stage("search_rows");
+            stage("search_rows", &transaction);
             if rebuild_search {
                 crate::catalog_search::begin_backfill(&transaction).map_err(failure)?;
                 let mut statement = transaction
@@ -3306,7 +3314,7 @@ impl SqliteStore {
                     crate::catalog_search::retire_key(&transaction, key).map_err(failure)?;
                 }
             }
-            stage("search");
+            stage("search", &transaction);
             let generation = {
                 let mut digest = Sha256::new();
                 digest.update(version.as_bytes());
@@ -3359,7 +3367,7 @@ impl SqliteStore {
                     )
                     .map_err(failure)?;
             }
-            stage("generation");
+            stage("generation", &transaction);
             if let Some(projections) = publication.transcripts {
                 let rows_by_key: BTreeMap<_, _> =
                     rows.iter().map(|row| (row.key.as_str(), row)).collect();
@@ -3416,7 +3424,7 @@ impl SqliteStore {
                     )
                     .map_err(failure)?;
             }
-            stage("slots");
+            stage("slots", &transaction);
             for scope in ["current", "retained_history"] {
                 let incomplete: i64 = transaction
                     .query_row(
@@ -3480,7 +3488,7 @@ impl SqliteStore {
                 )
                 .map_err(failure)?;
             transaction.commit().map_err(failure)?;
-            stage("commit");
+            stage("commit", &self.connection);
             published = Some(generation);
             Ok(Outcome::Written)
         })();

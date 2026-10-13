@@ -3,6 +3,65 @@
 use sha2::{Digest, Sha256};
 use std::{collections::BTreeMap, path::Path, time::Instant};
 
+/// Connection-local pager events, separate from kernel byte accounting. In WAL
+/// mode writes count WAL pages; spills count overflow writes during a transaction.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct SqliteCache {
+    spill: u64,
+    write: u64,
+    hit: u64,
+    miss: u64,
+}
+
+impl SqliteCache {
+    fn read(connection: &rusqlite::Connection) -> Option<Self> {
+        fn counter(connection: &rusqlite::Connection, operation: i32) -> Option<u64> {
+            let mut current: rusqlite::ffi::sqlite3_int64 = 0;
+            let mut highwater: rusqlite::ffi::sqlite3_int64 = 0;
+            // SAFETY: the borrowed live Connection owns this handle throughout
+            // the call. Store samples its writer on its owning thread, through
+            // the Transaction while active. SQLite only reads fixed status
+            // counters and writes these initialized, correctly typed outputs;
+            // reset=0 changes no counters. No handle or pointer escapes.
+            let result = unsafe {
+                rusqlite::ffi::sqlite3_db_status64(
+                    connection.handle(),
+                    operation,
+                    &mut current,
+                    &mut highwater,
+                    0,
+                )
+            };
+            (result == rusqlite::ffi::SQLITE_OK)
+                .then(|| u64::try_from(current).ok())
+                .flatten()
+        }
+        Some(Self {
+            spill: counter(connection, rusqlite::ffi::SQLITE_DBSTATUS_CACHE_SPILL)?,
+            write: counter(connection, rusqlite::ffi::SQLITE_DBSTATUS_CACHE_WRITE)?,
+            hit: counter(connection, rusqlite::ffi::SQLITE_DBSTATUS_CACHE_HIT)?,
+            miss: counter(connection, rusqlite::ffi::SQLITE_DBSTATUS_CACHE_MISS)?,
+        })
+    }
+
+    fn delta(self, before: Self) -> Option<Self> {
+        Some(Self {
+            spill: self.spill.checked_sub(before.spill)?,
+            write: self.write.checked_sub(before.write)?,
+            hit: self.hit.checked_sub(before.hit)?,
+            miss: self.miss.checked_sub(before.miss)?,
+        })
+    }
+}
+
+#[derive(Clone, Copy)]
+struct CacheStage {
+    phase: &'static str,
+    before: Option<SqliteCache>,
+    after: Option<SqliteCache>,
+    delta: Option<SqliteCache>,
+}
+
 /// Calling-thread kernel accounting, not physical-device I/O. Counter resets
 /// remain unavailable deltas; WAL lengths alone do not prove checkpoints.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -72,17 +131,20 @@ fn thread_writes() -> Option<ThreadWrites> {
 
 struct WriteSample {
     thread: Option<ThreadWrites>,
+    cache: Option<SqliteCache>,
     wal: Option<u64>,
     sample_us: u128,
 }
 
 impl WriteSample {
-    fn read(wal: &Path) -> Self {
+    fn read(wal: &Path, connection: &rusqlite::Connection) -> Self {
         let started = Instant::now();
         let thread = thread_writes();
+        let cache = SqliteCache::read(connection);
         let wal = std::fs::metadata(wal).ok().map(|value| value.len());
         Self {
             thread,
+            cache,
             wal,
             sample_us: started.elapsed().as_micros(),
         }
@@ -95,6 +157,10 @@ struct WriteState {
     wal: std::path::PathBuf,
     before: WriteSample,
     initial_sample_us: u128,
+    // Catalog has eight fixed intervals; Index has three. Discard these on a
+    // failed publication: CACHE_WRITE is undefined after a write I/O error.
+    cache_stages: [Option<CacheStage>; 8],
+    cache_stage_count: usize,
 }
 
 fn wal_change(after: Option<u64>, before: Option<u64>) -> Option<i128> {
@@ -108,12 +174,17 @@ fn wal_change(after: Option<u64>, before: Option<u64>) -> Option<i128> {
 pub(crate) struct WriteActivity(Option<WriteState>);
 
 impl WriteActivity {
-    pub(crate) fn new(enabled: bool, index: &Path, group: &'static str) -> Self {
+    pub(crate) fn new(
+        enabled: bool,
+        index: &Path,
+        group: &'static str,
+        connection: &rusqlite::Connection,
+    ) -> Self {
         Self(enabled.then(|| {
             let mut wal = index.as_os_str().to_os_string();
             wal.push("-wal");
             let wal = std::path::PathBuf::from(wal);
-            let before = WriteSample::read(&wal);
+            let before = WriteSample::read(&wal, connection);
             let initial_sample_us = before.sample_us;
             WriteState {
                 producer: id(index),
@@ -121,21 +192,36 @@ impl WriteActivity {
                 wal,
                 before,
                 initial_sample_us,
+                cache_stages: [None; 8],
+                cache_stage_count: 0,
             }
         }))
     }
 
-    pub(crate) fn stage(&mut self, phase: &'static str) {
+    pub(crate) fn stage(&mut self, phase: &'static str, connection: &rusqlite::Connection) {
         let Some(state) = &mut self.0 else {
             return;
         };
-        let after = WriteSample::read(&state.wal);
+        let after = WriteSample::read(&state.wal, connection);
         let delta = after
             .thread
             .zip(state.before.thread)
             .and_then(|(after, before)| after.delta(before));
         let wal_change = wal_change(after.wal, state.before.wal);
         let sampling_us = state.initial_sample_us.saturating_add(after.sample_us);
+        let cache_delta = after
+            .cache
+            .zip(state.before.cache)
+            .and_then(|(after, before)| after.delta(before));
+        if let Some(stage) = state.cache_stages.get_mut(state.cache_stage_count) {
+            *stage = Some(CacheStage {
+                phase,
+                before: state.before.cache,
+                after: after.cache,
+                delta: cache_delta,
+            });
+        }
+        state.cache_stage_count = state.cache_stage_count.saturating_add(1);
         // The previous interval's diagnostic stderr is part of kernel counters.
         // Sampling cost is reported once per sample, outside production leaves.
         eprintln!(
@@ -149,6 +235,19 @@ impl WriteActivity {
         );
         state.initial_sample_us = 0;
         state.before = after;
+        if phase == "commit" && state.cache_stage_count <= state.cache_stages.len() {
+            for stage in state.cache_stages.iter_mut().filter_map(Option::take) {
+                eprintln!(
+                    "semon sessions native: producer={} sqlite_activity={} stage={} publication=committed counter_bits=64 cache_before={:?} cache_after={:?} cache_delta={:?}",
+                    state.producer,
+                    state.group,
+                    stage.phase,
+                    stage.before,
+                    stage.after,
+                    stage.delta
+                );
+            }
+        }
     }
 }
 
@@ -236,6 +335,22 @@ mod tests {
     use super::*;
 
     #[test]
+    fn sqlite_cache_snapshots_preserve_counters_and_connection_scope() {
+        let left = rusqlite::Connection::open_in_memory().unwrap();
+        let right = rusqlite::Connection::open_in_memory().unwrap();
+        let left_before = SqliteCache::read(&left).unwrap();
+        let right_before = SqliteCache::read(&right).unwrap();
+        left.execute_batch(
+            "CREATE TABLE activity(value TEXT); INSERT INTO activity VALUES('first'),('second');",
+        )
+        .unwrap();
+        let left_after = SqliteCache::read(&left).unwrap();
+        assert!(left_after.hit > left_before.hit);
+        assert_eq!(SqliteCache::read(&left), Some(left_after));
+        assert_eq!(SqliteCache::read(&right), Some(right_before));
+    }
+
+    #[test]
     fn thread_write_parser_requires_a_complete_bounded_counter_set() {
         let sample = b"rchar: 5\nwchar: 8\nsyscr: 2\nsyscw: 3\nread_bytes: 0\nwrite_bytes: 4096\ncancelled_write_bytes: 0\n";
         let writes = parse_thread_writes(sample).unwrap();
@@ -296,8 +411,10 @@ mod tests {
 
     #[test]
     fn disabled_diagnostics_retain_no_observation_or_measurements() {
-        let mut activity = WriteActivity::new(false, Path::new("/unused"), "index_initial");
-        activity.stage("rows");
+        let connection = rusqlite::Connection::open_in_memory().unwrap();
+        let mut activity =
+            WriteActivity::new(false, Path::new("/unused"), "index_initial", &connection);
+        activity.stage("rows", &connection);
         assert!(activity.0.is_none());
         let mut measurements = Measurements::default();
         assert!(measurements.start().is_none());
