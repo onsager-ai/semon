@@ -1111,7 +1111,8 @@ export function createCatalogViewer(
               ? 'sessions'
               : route,
         {
-          ...(viewerHost?.navigation?.leading?.find((item) => item.key === 'new-session')
+          ...(!viewerHost?.nativePage &&
+          viewerHost?.navigation?.leading?.find((item) => item.key === 'new-session')
             ? {
                 'new-session': withReturnPath(
                   viewerHost.navigation.leading.find((item) => item.key === 'new-session')!.href,
