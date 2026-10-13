@@ -227,6 +227,109 @@ pub(crate) fn publish_current_rows(
     transaction: &Transaction<'_>,
     rows: &[&CatalogRow],
 ) -> rusqlite::Result<()> {
+    publish_current_rows_order(
+        transaction,
+        rows,
+        64,
+        #[cfg(test)]
+        None,
+    )
+}
+
+#[cfg(test)]
+pub(crate) fn publish_current_rows_probe(
+    transaction: &Transaction<'_>,
+    rows: &[&CatalogRow],
+    owners: usize,
+    probe: Option<&mut Option<crate::native_timing::SearchTraversalProbe>>,
+) -> rusqlite::Result<()> {
+    assert!(matches!(owners, 64 | 16 | 8));
+    assert!(rows.len() <= 64);
+    publish_current_rows_order(transaction, rows, owners, probe)
+}
+
+fn posting_order<'a>(
+    rows: &[&'a CatalogRow],
+    prepared: &'a [(String, BTreeSet<String>, bool)],
+    owners: usize,
+) -> Vec<(&'a String, &'a CatalogRow)> {
+    let mut postings = rows
+        .iter()
+        .zip(prepared)
+        .flat_map(|(row, (_, grams, complete))| {
+            grams
+                .iter()
+                .filter(move |_| *complete)
+                .map(move |gram| (gram, *row))
+        })
+        .collect::<Vec<_>>();
+    if owners == 64 {
+        // The release path retains the original gram/key comparator exactly.
+        postings.sort_unstable_by(|(left, a), (right, b)| {
+            left.cmp(right).then_with(|| a.key.cmp(&b.key))
+        });
+    } else {
+        let mut keys = rows.iter().map(|row| row.key.as_str()).collect::<Vec<_>>();
+        keys.sort_unstable();
+        let groups = keys
+            .into_iter()
+            .enumerate()
+            .map(|(position, key)| (key, position / owners))
+            .collect::<std::collections::BTreeMap<_, _>>();
+        postings.sort_unstable_by(|(left, a), (right, b)| {
+            groups[a.key.as_str()]
+                .cmp(&groups[b.key.as_str()])
+                .then_with(|| left.cmp(right))
+                .then_with(|| a.key.cmp(&b.key))
+        });
+    }
+    postings
+}
+
+/// Run on the same immutable fixture cohorts before opening measured stores.
+/// These validation sorts must never enter preparation or full-search timing.
+#[cfg(test)]
+pub(crate) fn assert_posting_multiset(rows: &[CatalogRow]) -> rusqlite::Result<()> {
+    assert!(rows.len() <= 64);
+    let rows = rows.iter().collect::<Vec<_>>();
+    let prepared = rows
+        .iter()
+        .map(|row| prepared_fields(row))
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut original = rows
+        .iter()
+        .zip(&prepared)
+        .flat_map(|(row, (_, grams, complete))| {
+            grams
+                .iter()
+                .filter(move |_| *complete)
+                .map(move |gram| (gram, *row))
+        })
+        .collect::<Vec<_>>();
+    original
+        .sort_unstable_by(|(left, a), (right, b)| left.cmp(right).then_with(|| a.key.cmp(&b.key)));
+    for owners in [64, 16, 8] {
+        let mut actual = posting_order(&rows, &prepared, owners);
+        actual.sort_unstable_by(|(left, a), (right, b)| {
+            left.cmp(right).then_with(|| a.key.cmp(&b.key))
+        });
+        assert_eq!(original.len(), actual.len());
+        assert!(
+            original
+                .iter()
+                .zip(&actual)
+                .all(|((left, a), (right, b))| left == right && std::ptr::eq(*a, *b))
+        );
+    }
+    Ok(())
+}
+
+fn publish_current_rows_order(
+    transaction: &Transaction<'_>,
+    rows: &[&CatalogRow],
+    owners: usize,
+    #[cfg(test)] mut probe: Option<&mut Option<crate::native_timing::SearchTraversalProbe>>,
+) -> rusqlite::Result<()> {
     let producer = crate::native_timing::enabled()
         .then(|| {
             transaction
@@ -237,6 +340,10 @@ pub(crate) fn publish_current_rows(
         .flatten();
     let mut measurements = crate::native_timing::Measurements::new(producer.is_some());
     for rows in rows.chunks(64) {
+        #[cfg(test)]
+        let search_before = probe
+            .as_ref()
+            .map(|_| crate::native_timing::ProbeSample::read(transaction));
         let started = measurements.start();
         transaction.execute_batch("CREATE TEMP TABLE IF NOT EXISTS catalog_search_members(session_key TEXT PRIMARY KEY) WITHOUT ROWID; DELETE FROM catalog_search_members;")?;
         for row in rows {
@@ -272,25 +379,33 @@ pub(crate) fn publish_current_rows(
         // index's current leaf hot, instead of cycling through all gram leaves
         // for each source and repeatedly spilling dirty pages into the WAL.
         let started = measurements.start();
-        let mut postings = rows
-            .iter()
-            .zip(&prepared)
-            .flat_map(|(row, (_, grams, complete))| {
-                grams
-                    .iter()
-                    .filter(move |_| *complete)
-                    .map(move |gram| (gram, *row))
-            })
-            .collect::<Vec<_>>();
-        postings.sort_unstable_by(|(left, a), (right, b)| {
-            left.cmp(right).then_with(|| a.key.cmp(&b.key))
-        });
+        #[cfg(test)]
+        let preparation_started = probe.as_ref().map(|_| std::time::Instant::now());
+        let postings = posting_order(rows, &prepared, owners);
+        #[cfg(test)]
+        let preparation_us = preparation_started
+            .map(|started| started.elapsed().as_micros())
+            .unwrap_or(0);
         measurements.record("posting_preparation", started, postings.len());
+        #[cfg(test)]
+        let postings_before = probe
+            .as_ref()
+            .map(|_| crate::native_timing::ProbeSample::read(transaction));
         let started = measurements.start();
         let mut posting = transaction.prepare_cached("INSERT INTO session_search_memberships(session_key,gram,current_last_ms,history_last_ms) VALUES(?1,?2,?3,?3)")?;
         for (gram, row) in &postings {
             posting.execute(params![row.key, gram, row.last.unwrap_or(0)])?;
         }
+        // Only the numerical probe releases before its after-posting sample;
+        // the ordinary release/Auto path retains the original lexical lifetime.
+        #[cfg(test)]
+        if probe.is_some() {
+            drop(posting);
+        }
+        #[cfg(test)]
+        let postings_after = probe
+            .as_ref()
+            .map(|_| crate::native_timing::ProbeSample::read(transaction));
         measurements.record("postings", started, postings.len() * 2);
         measurements.count("posting_rows", postings.len());
         let started = measurements.start();
@@ -301,6 +416,26 @@ pub(crate) fn publish_current_rows(
             transaction.prepare_cached(&format!("INSERT INTO session_search_counts(read_scope,gram,members) SELECT ?1,p.gram,COUNT(*) FROM catalog_search_members m CROSS JOIN session_search_memberships p WHERE p.session_key=m.session_key AND p.{column} IS NOT NULL GROUP BY p.gram ON CONFLICT(read_scope,gram) DO UPDATE SET members=members+excluded.members"))?.execute([scope])?;
         }
         measurements.record("counts", started, 2);
+        #[cfg(test)]
+        if let Some(probe) = probe.as_deref_mut() {
+            let counts_after = crate::native_timing::ProbeSample::read(transaction);
+            *probe = Some(crate::native_timing::SearchTraversalProbe {
+                search: search_before.as_ref().unwrap().interval(&counts_after),
+                postings: postings_before
+                    .as_ref()
+                    .unwrap()
+                    .interval(postings_after.as_ref().unwrap()),
+                counts: postings_after.as_ref().unwrap().interval(&counts_after),
+                preparation_us,
+                sampling_us: search_before.as_ref().unwrap().sampling_us()
+                    + postings_before.as_ref().unwrap().sampling_us()
+                    + postings_after.as_ref().unwrap().sampling_us()
+                    + counts_after.sampling_us(),
+                owners: rows.len(),
+                physical_rows: postings.len(),
+                logical_positions: postings.len() * 2,
+            });
+        }
     }
     if let Some(producer) = producer {
         measurements.emit(&producer, "search_rows");

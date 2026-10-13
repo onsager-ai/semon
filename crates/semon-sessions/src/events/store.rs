@@ -410,6 +410,8 @@ struct SqliteStore {
     connection: Connection,
     path: PathBuf,
     selected_runs: Option<std::collections::BTreeSet<String>>,
+    #[cfg(test)]
+    traversal_observation: Option<crate::native_timing::CatalogTraversalProbe>,
 }
 
 /// Opens (creating when missing) the store at `path` and reads all of it,
@@ -2955,6 +2957,11 @@ enum CatalogWriter {
     Auto,
     #[cfg(test)]
     Legacy,
+    #[cfg(test)]
+    Traversal {
+        owners: usize,
+        measured: bool,
+    },
 }
 
 /// This is optimization eligibility, not a new publication acceptance limit.
@@ -2966,6 +2973,8 @@ fn catalog_batch_bytes(
 ) -> Option<usize> {
     match writer {
         CatalogWriter::Auto => {}
+        #[cfg(test)]
+        CatalogWriter::Traversal { .. } => {}
         #[cfg(test)]
         CatalogWriter::Legacy => return None,
     }
@@ -3073,6 +3082,12 @@ impl SqliteStore {
         writer: CatalogWriter,
     ) -> Result<(Outcome, Option<String>), StoreError> {
         let rows = publication.rows;
+        #[cfg(test)]
+        {
+            self.traversal_observation = None;
+        }
+        #[cfg(test)]
+        let mut search_observation = None;
         let producer =
             crate::native_timing::enabled().then(|| crate::native_timing::id(&self.path));
         let mut write_activity = crate::native_timing::WriteActivity::new(
@@ -3525,6 +3540,20 @@ impl SqliteStore {
                 overview_measurements.emit(producer, "overview_publish");
             }
             stage("catalog_metadata", &transaction);
+            #[cfg(test)]
+            if let CatalogWriter::Traversal { owners, measured } = writer {
+                crate::catalog_search::publish_current_rows_probe(
+                    &transaction,
+                    &search_rows,
+                    owners,
+                    measured.then_some(&mut search_observation),
+                )
+                .map_err(failure)?;
+            } else {
+                crate::catalog_search::publish_current_rows(&transaction, &search_rows)
+                    .map_err(failure)?;
+            }
+            #[cfg(not(test))]
             crate::catalog_search::publish_current_rows(&transaction, &search_rows)
                 .map_err(failure)?;
             stage("search_rows", &transaction);
@@ -3726,7 +3755,21 @@ impl SqliteStore {
                     }],
                 )
                 .map_err(failure)?;
+            #[cfg(test)]
+            let commit_before = search_observation
+                .as_ref()
+                .map(|_| crate::native_timing::ProbeSample::read(&transaction));
             transaction.commit().map_err(failure)?;
+            #[cfg(test)]
+            if let Some(before) = commit_before {
+                let after = crate::native_timing::ProbeSample::read(&self.connection);
+                self.traversal_observation = Some(crate::native_timing::CatalogTraversalProbe {
+                    search: search_observation.take().unwrap(),
+                    commit: before.interval(&after),
+                    changed_rows: cohort_changed
+                        .expect("measured 64-owner cohort uses the real batched writer"),
+                });
+            }
             stage("commit", &self.connection);
             if let Some(sample) = metadata_sample {
                 sample.committed();
@@ -3800,6 +3843,8 @@ impl SqliteStore {
             connection,
             path: path.to_owned(),
             selected_runs: scoped.then(std::collections::BTreeSet::new),
+            #[cfg(test)]
+            traversal_observation: None,
         };
         let loaded = if scoped {
             Loaded {
@@ -7060,6 +7105,643 @@ mod tests {
         drop(batch);
         drop(legacy);
         fs::remove_dir_all(root).unwrap();
+    }
+
+    fn traversal_stores(options: &crate::Options, count: usize) -> Vec<SqliteStore> {
+        let seed = crate::events::EventCache::path(&options.cache);
+        (0..count)
+            .map(|arm| {
+                let path = seed.with_file_name(format!("traversal-{arm}.sqlite3"));
+                // Every EventCache/NativeEvidence owner has already been dropped.
+                fs::copy(&seed, &path).unwrap();
+                match SqliteStore::attempt_scoped(&path, None, true) {
+                    Ok((store, loaded)) => {
+                        assert!(loaded.files.is_empty());
+                        assert!(loaded.reported_runs.is_empty());
+                        store
+                    }
+                    Err(error) => panic!("real scoped producer opens: {error}"),
+                }
+            })
+            .collect()
+    }
+
+    fn traversal_header_fixture(
+        root: &Path,
+    ) -> (
+        crate::Options,
+        Vec<crate::model::summary::CatalogRow>,
+        Vec<crate::slot_projection::Projection>,
+    ) {
+        let options = crate::Options {
+            claude_home: root.join("absent-claude"),
+            claude_json: root.join("absent-claude.json"),
+            codex_home: root.join("codex"),
+            copilot_home: root.join("absent-copilot"),
+            proc_root: root.join("proc"),
+            cache: root.join("seed.json"),
+            all: true,
+            since: Duration::from_secs(86400),
+            session: None,
+            facts: Some(root.join("facts.json")),
+            scan_window: false,
+        };
+        fs::create_dir_all(&options.proc_root).unwrap();
+        let mut paths = BTreeSet::new();
+        for position in 0..2049 {
+            let (relative, id) = if position == 2048 {
+                (
+                    "sessions/2026/10/09/selected.jsonl".to_owned(),
+                    "selected".to_owned(),
+                )
+            } else {
+                (
+                    format!("sessions/history/{position:05}.jsonl"),
+                    format!("unrelated-{position:05}"),
+                )
+            };
+            let path = options.codex_home.join(&relative);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            // Ordinary sanitized native headers, independent of private host code.
+            fs::write(
+                path,
+                serde_json::json!({"type":"session_meta","payload":{"id":id}}).to_string() + "\n",
+            )
+            .unwrap();
+            paths.insert(relative);
+        }
+        crate::write_facts(
+            options.facts.as_ref().unwrap(),
+            &crate::Facts {
+                version: crate::FACTS_VERSION,
+                hostname: "synthetic-traversal".into(),
+                codex_rollouts: Some(paths),
+                mirror_observation_id: Some("00000000000000000000000000000001".into()),
+                mirror_sequence: Some(1),
+                ..crate::Facts::default()
+            },
+        )
+        .unwrap();
+        let inputs = crate::inputs::inputs(&options)
+            .unwrap()
+            .into_iter()
+            .filter(|input| input.path.ends_with(".jsonl"))
+            .collect::<Vec<_>>();
+        assert_eq!(inputs.len(), 2049);
+        let mut cache = crate::events::EventCache::open_scoped(&options.cache).unwrap();
+        let mut rows = Vec::new();
+        let mut projections = Vec::new();
+        for sources in inputs.chunks(64) {
+            let prepared =
+                crate::model::prepare_sources(&options, &mut cache, sources, CATALOG_FIXTURE_NOW)
+                    .unwrap();
+            assert!(prepared.claims.len() <= 64);
+            rows.extend(prepared.rows);
+            projections.extend(prepared.transcripts);
+        }
+        drop(cache); // close the WAL owner before main-file cloning
+        rows.sort_by(|left, right| left.key.cmp(&right.key));
+        projections.sort_by(|left, right| left.key.cmp(&right.key));
+        assert_eq!(rows.len(), 2049);
+        assert_eq!(projections.len(), rows.len());
+        assert_eq!(rows.iter().filter(|row| row.key == "selected").count(), 1);
+        assert!(
+            rows.iter()
+                .zip(&projections)
+                .all(|(row, projection)| row.key == projection.key && row.sources.len() == 1)
+        );
+        // Header-only logs legitimately have no transcript slots. The existing
+        // rich native fixture's nonempty-slot assertion is unchanged.
+        assert!(
+            projections
+                .iter()
+                .all(|projection| projection.slots.is_empty())
+        );
+        for cohort in rows.chunks(64) {
+            crate::catalog_search::assert_posting_multiset(cohort).unwrap();
+        }
+        (options, rows, projections)
+    }
+
+    fn traversal_temp_state(connection: &Connection) -> CatalogState {
+        let names = connection
+            .prepare("SELECT name FROM sqlite_temp_schema WHERE type='table' ORDER BY name")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        names
+            .into_iter()
+            .map(|name| {
+                let mut statement = connection
+                    .prepare(&format!(
+                        "SELECT * FROM temp.\"{}\"",
+                        name.replace('"', "\"\"")
+                    ))
+                    .unwrap();
+                let width = statement.column_count();
+                let mut rows = statement
+                    .query_map([], |row| {
+                        (0..width)
+                            .map(|column| row.get::<_, rusqlite::types::Value>(column))
+                            .collect::<rusqlite::Result<Vec<_>>>()
+                    })
+                    .unwrap()
+                    .collect::<rusqlite::Result<Vec<_>>>()
+                    .unwrap();
+                rows.sort_by_key(|row| format!("{row:?}"));
+                (name, rows)
+            })
+            .collect()
+    }
+
+    fn traversal_reader_oracle(connection: &Connection, queries: &[&str]) -> Value {
+        use crate::CatalogReadScope;
+        let mut evidence = Vec::new();
+        for scope in [CatalogReadScope::Current, CatalogReadScope::RetainedHistory] {
+            let scope_key = crate::catalog_search::scope_key(scope);
+            let sql = if scope == CatalogReadScope::Current {
+                "SELECT metadata FROM session_catalog WHERE lifecycle='current'"
+            } else {
+                "SELECT COALESCE(h.metadata,c.metadata) FROM session_catalog c LEFT JOIN session_history_catalog h USING(session_key) WHERE h.metadata IS NOT NULL OR c.lifecycle='current'"
+            };
+            let rows = connection
+                .prepare(sql)
+                .unwrap()
+                .query_map([], |row| row.get::<_, String>(0))
+                .unwrap()
+                .map(|row| {
+                    serde_json::from_str::<crate::model::summary::CatalogRow>(&row.unwrap())
+                        .unwrap()
+                })
+                .collect::<Vec<_>>();
+            let mut grams_by_key = BTreeMap::new();
+            let mut expected_counts = BTreeMap::<String, i64>::new();
+            let mut complete_rows = Vec::new();
+            let mut incomplete = 0;
+            for row in rows {
+                let fields = [
+                    Some(row.name.as_str()),
+                    Some(row.key.as_str()),
+                    row.repo.as_deref(),
+                    row.branch.as_deref(),
+                    Some(row.model.as_str()),
+                    Some(row.harness.as_str()),
+                ]
+                .into_iter()
+                .flatten()
+                .map(str::to_lowercase)
+                .collect::<Vec<_>>();
+                let mut grams = BTreeSet::new();
+                for field in &fields {
+                    let chars = field.chars().collect::<Vec<_>>();
+                    for width in 1..=3 {
+                        for slice in chars.windows(width) {
+                            grams.insert(slice.iter().collect::<String>());
+                        }
+                    }
+                }
+                if fields.iter().map(String::len).sum::<usize>() > 8192 || grams.len() > 1024 {
+                    incomplete += 1;
+                    continue;
+                }
+                for gram in &grams {
+                    *expected_counts.entry(gram.clone()).or_default() += 1;
+                }
+                grams_by_key.insert(row.key.clone(), grams);
+                complete_rows.push((row, fields));
+            }
+            complete_rows.sort_by(|(a, _), (b, _)| {
+                b.last
+                    .unwrap_or(0)
+                    .cmp(&a.last.unwrap_or(0))
+                    .then_with(|| a.key.cmp(&b.key))
+            });
+            let actual_counts = connection.prepare("SELECT gram,members FROM session_search_counts WHERE read_scope=?1 ORDER BY gram").unwrap()
+                .query_map([scope_key], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))).unwrap().collect::<rusqlite::Result<BTreeMap<_, _>>>().unwrap();
+            assert_eq!(
+                actual_counts, expected_counts,
+                "independent fields/grams count oracle"
+            );
+            let column = if scope == CatalogReadScope::Current {
+                "current_last_ms"
+            } else {
+                "history_last_ms"
+            };
+            let physical = connection.prepare(&format!("SELECT session_key,gram,{column} FROM session_search_memberships WHERE {column} IS NOT NULL UNION ALL SELECT session_key,gram,last_ms FROM session_search_postings WHERE read_scope=?1")).unwrap()
+                .query_map([scope_key], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, i64>(2)?))).unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
+            let expected_positions = complete_rows
+                .iter()
+                .flat_map(|(row, _)| {
+                    grams_by_key[&row.key]
+                        .iter()
+                        .map(move |gram| (row.key.clone(), gram.clone(), row.last.unwrap_or(0)))
+                })
+                .collect::<BTreeSet<_>>();
+            assert_eq!(
+                physical.len(),
+                expected_positions.len(),
+                "no duplicate logical positions"
+            );
+            assert_eq!(
+                physical.into_iter().collect::<BTreeSet<_>>(),
+                expected_positions
+            );
+            assert_eq!(
+                connection
+                    .query_row(
+                        "SELECT incomplete FROM session_search_coverage WHERE read_scope=?1",
+                        [scope_key],
+                        |row| row.get::<_, i64>(0)
+                    )
+                    .unwrap(),
+                incomplete
+            );
+            for query in queries {
+                let normalized = crate::catalog_search::normalize_query(query).unwrap();
+                let expected = complete_rows
+                    .iter()
+                    .filter(|(_, fields)| fields.iter().any(|field| field.contains(&normalized)))
+                    .map(|(row, _)| row.key.clone())
+                    .collect::<Vec<_>>();
+                let mut found = Vec::new();
+                let mut pages = Vec::new();
+                let mut after: Option<crate::catalog_search::Position> = None;
+                for _ in 0..4096 {
+                    let selection = crate::catalog_search::read(
+                        connection,
+                        crate::catalog_search::Query {
+                            scope,
+                            query: &normalized,
+                            harness: None,
+                            repo: None,
+                            model: None,
+                            after: after.clone(),
+                            limit: 17,
+                            index_complete: incomplete == 0,
+                        },
+                    )
+                    .unwrap();
+                    assert_eq!(selection.report.index_complete, incomplete == 0);
+                    assert!(selection.report.candidates <= crate::catalog_search::MAX_CANDIDATES);
+                    assert!(selection.report.candidates >= selection.rows.len());
+                    found.extend(selection.rows.iter().map(|row| row.key.clone()));
+                    let next = selection
+                        .next
+                        .as_ref()
+                        .map(|position| (position.last, position.key.clone()));
+                    if let (Some(before), Some(next)) = (&after, &selection.next) {
+                        assert!(
+                            next.last < before.last
+                                || (next.last == before.last && next.key > before.key),
+                            "checked-candidate cursor progresses"
+                        );
+                    }
+                    pages.push(serde_json::json!({"keys":selection.rows.iter().map(|row| &row.key).collect::<Vec<_>>(),"next":next,"candidates":selection.report.candidates,"partial":selection.report.partial}));
+                    after = selection.next;
+                    if after.is_none() {
+                        break;
+                    }
+                }
+                assert!(after.is_none(), "bounded fixture search exhausted");
+                assert_eq!(
+                    found, expected,
+                    "independent substring/time/key oracle for {scope_key}/{query}"
+                );
+                evidence.push(serde_json::json!({"scope":scope_key,"query":query,"pages":pages}));
+            }
+        }
+        Value::Array(evidence)
+    }
+
+    fn traversal_semantic_and_rollback_oracles() {
+        let root = scratch("traversal-semantics");
+        let (options, mut rows, projections) = catalog_native_fixture(&root, 64, false);
+        crate::catalog_search::assert_posting_multiset(&rows).unwrap();
+        let mut stores = traversal_stores(&options, 4);
+        let writers = [
+            CatalogWriter::Auto,
+            CatalogWriter::Traversal {
+                owners: 64,
+                measured: false,
+            },
+            CatalogWriter::Traversal {
+                owners: 16,
+                measured: false,
+            },
+            CatalogWriter::Traversal {
+                owners: 8,
+                measured: false,
+            },
+        ];
+        let mut outcomes = Vec::new();
+        for (store, writer) in stores.iter_mut().zip(writers) {
+            outcomes.push(catalog_write(store, &rows, &projections, true, writer).unwrap());
+        }
+        assert!(outcomes.windows(2).all(|pair| pair[0] == pair[1]));
+        // Seed the same real-schema legacy representation and history-only owner
+        // before all arms. Replacements must remove old grams and convert only
+        // reached legacy owners without changing the retained owner.
+        let retained = rows[63].key.clone();
+        for store in &mut stores {
+            let tx = store
+                .connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .unwrap();
+            tx.execute("INSERT INTO session_history_catalog SELECT session_key,json_set(metadata,'$.lifecycle','retained') FROM session_catalog WHERE session_key=?1", [&retained]).unwrap();
+            tx.execute("UPDATE session_catalog SET lifecycle='retained',metadata=json_set(metadata,'$.lifecycle','retained') WHERE session_key=?1", [&retained]).unwrap();
+            crate::catalog_search::retire_key(&tx, &retained).unwrap();
+            for (scope, column) in [
+                ("current", "current_last_ms"),
+                ("retained_history", "history_last_ms"),
+            ] {
+                tx.execute(&format!("INSERT INTO session_search_postings SELECT ?1,session_key,gram,{column} FROM session_search_memberships WHERE session_key=?2 AND {column} IS NOT NULL"), params![scope,rows[0].key]).unwrap();
+            }
+            tx.execute(
+                "DELETE FROM session_search_memberships WHERE session_key=?1",
+                [&rows[0].key],
+            )
+            .unwrap();
+            tx.commit().unwrap();
+        }
+        for row in &mut rows[..63] {
+            row.name = "shared original grams".into();
+            row.last = Some(700);
+        }
+        rows[1].last = None;
+        rows[2].repo = None;
+        rows[3].name = "x".repeat(8193); // explicit incomplete document, never truncated
+        crate::catalog_search::assert_posting_multiset(&rows[..63]).unwrap();
+        for (store, writer) in stores.iter_mut().zip(writers) {
+            catalog_write(store, &rows[..63], &projections, true, writer).unwrap();
+        }
+        rows[0].name = "shared replacement selective".into();
+        rows[1].name = "shared replacement".into();
+        rows[..63].reverse(); // grouping must not depend on caller permutation
+        crate::catalog_search::assert_posting_multiset(&rows[..63]).unwrap();
+        for (store, writer) in stores.iter_mut().zip(writers) {
+            catalog_write(store, &rows[..63], &projections, true, writer).unwrap();
+        }
+        let state = catalog_comparable_state(&stores[0].connection);
+        let reader = traversal_reader_oracle(
+            &stores[0].connection,
+            &["shared", "selective", "original", "absent-xyz", &retained],
+        );
+        for store in &stores[1..] {
+            assert_eq!(catalog_comparable_state(&store.connection), state);
+            assert_eq!(
+                traversal_reader_oracle(
+                    &store.connection,
+                    &["shared", "selective", "original", "absent-xyz", &retained]
+                ),
+                reader
+            );
+        }
+        for store in &stores {
+            assert_eq!(
+                store
+                    .connection
+                    .query_row(
+                        "SELECT COUNT(*) FROM session_search_postings WHERE session_key=?1",
+                        [&rows[62].key],
+                        |row| row.get::<_, i64>(0)
+                    )
+                    .unwrap(),
+                0,
+                "selected legacy owner converted"
+            );
+            assert!(store.connection.query_row("SELECT COUNT(*) FROM session_search_memberships WHERE session_key=?1 AND current_last_ms IS NULL AND history_last_ms IS NOT NULL", [&retained], |row| row.get::<_, i64>(0)).unwrap() > 0, "retained-history-only positions survive Current replacement");
+        }
+        drop(stores);
+
+        crate::catalog_search::assert_posting_multiset(&rows).unwrap();
+
+        // Cold roster: every arm begins with zero selected memberships. The
+        // trigger predicate proves three earlier INSERTs succeeded in the same
+        // transaction, irrespective of physical traversal order.
+        let mut rollback = traversal_stores(&options, 3);
+        for (store, owners) in rollback.iter_mut().zip([64, 16, 8]) {
+            assert_eq!(
+                store
+                    .connection
+                    .query_row(
+                        "SELECT COUNT(*) FROM session_search_memberships",
+                        [],
+                        |row| row.get::<_, i64>(0)
+                    )
+                    .unwrap(),
+                0
+            );
+            for (message, trigger) in [
+                (
+                    "traversal-after-three-valid",
+                    "CREATE TEMP TRIGGER traversal_failure BEFORE INSERT ON session_search_memberships WHEN (SELECT COUNT(*) FROM session_search_memberships)=3 BEGIN SELECT RAISE(ABORT,'traversal-after-three-valid'); END;",
+                ),
+                (
+                    "traversal-ack-after-search",
+                    "CREATE TEMP TRIGGER traversal_failure BEFORE DELETE ON session_catalog_invalidations WHEN (SELECT COUNT(*) FROM session_search_memberships)>3 BEGIN SELECT RAISE(ABORT,'traversal-ack-after-search'); END;",
+                ),
+            ] {
+                let tx = store
+                    .connection
+                    .transaction_with_behavior(TransactionBehavior::Immediate)
+                    .unwrap();
+                for source in rows.iter().flat_map(|row| &row.sources) {
+                    invalidate_catalog_source(
+                        &tx,
+                        &source.path.to_string_lossy(),
+                        "traversal rollback fixture",
+                    )
+                    .unwrap();
+                }
+                tx.commit().unwrap();
+                let before = catalog_state(&store.connection);
+                let temp_before = traversal_temp_state(&store.connection);
+                store.connection.execute_batch(trigger).unwrap();
+                let error = catalog_write(
+                    store,
+                    &rows,
+                    &projections,
+                    true,
+                    CatalogWriter::Traversal {
+                        owners,
+                        measured: true,
+                    },
+                )
+                .unwrap_err();
+                assert!(
+                    error.to_string().contains(message),
+                    "actual injected failure: {error}"
+                );
+                assert!(
+                    store.traversal_observation.is_none(),
+                    "rollback cannot emit a committed sample"
+                );
+                assert_eq!(
+                    catalog_state(&store.connection),
+                    before,
+                    "FULL durable rollback including observation clock"
+                );
+                assert_eq!(
+                    traversal_temp_state(&store.connection),
+                    temp_before,
+                    "TEMP roster/removal creation and contents roll back"
+                );
+                store
+                    .connection
+                    .execute_batch("DROP TRIGGER traversal_failure")
+                    .unwrap();
+            }
+        }
+        drop(rollback);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn catalog_search_traversal_conditional_growing_prefix_probe() {
+        use std::io::Write;
+        let root = scratch("traversal-growing-prefix");
+        let (options, rows, projections) = traversal_header_fixture(&root);
+        let mut stores = traversal_stores(&options, 3);
+        let arms = [64, 16, 8];
+        let mut observations = (0..3).map(|_| Vec::with_capacity(32)).collect::<Vec<_>>();
+        for cohort in 0..32 {
+            let range = cohort * 64..(cohort + 1) * 64;
+            let mut paired = Vec::new();
+            for offset in 0..3 {
+                let arm = (cohort + offset) % 3;
+                let store = &mut stores[arm];
+                let outcome = catalog_write(
+                    store,
+                    &rows[range.clone()],
+                    &projections[range.clone()],
+                    true,
+                    CatalogWriter::Traversal {
+                        owners: arms[arm],
+                        measured: true,
+                    },
+                )
+                .unwrap();
+                assert_eq!(outcome.0, Outcome::Written);
+                paired.push(outcome);
+                let observation = store.traversal_observation.take().unwrap();
+                assert_eq!(observation.changed_rows, 64);
+                assert_eq!(observation.search.owners, 64);
+                assert_eq!(
+                    observation.search.logical_positions,
+                    observation.search.physical_rows * 2
+                );
+                observations[arm].push(observation);
+            }
+            assert!(
+                paired.windows(2).all(|pair| pair[0] == pair[1]),
+                "exact cohort outcome/generation parity"
+            );
+            let cardinalities = observations
+                .iter()
+                .map(|arm| arm.last().unwrap().search.physical_rows)
+                .collect::<Vec<_>>();
+            assert!(cardinalities[0] > 0);
+            assert!(cardinalities.windows(2).all(|pair| pair[0] == pair[1]));
+            // No snapshot/query oracle/cache reset between growing cohorts.
+        }
+        let final_outcomes = stores
+            .iter_mut()
+            .zip(arms)
+            .map(|(store, owners)| {
+                catalog_write(
+                    store,
+                    &rows[2048..],
+                    &projections[2048..],
+                    true,
+                    CatalogWriter::Traversal {
+                        owners,
+                        measured: false,
+                    },
+                )
+                .unwrap()
+            })
+            .collect::<Vec<_>>();
+        assert!(final_outcomes.windows(2).all(|pair| pair[0] == pair[1]));
+        assert!(
+            final_outcomes
+                .iter()
+                .all(|outcome| outcome.0 == Outcome::Written && outcome.1.is_some())
+        );
+        assert!(
+            stores
+                .iter()
+                .all(|store| store.traversal_observation.is_none())
+        );
+        let state = catalog_comparable_state(&stores[0].connection);
+        let published_keys = stores[0].connection.prepare("SELECT session_key FROM session_catalog WHERE lifecycle='current' ORDER BY session_key").unwrap()
+            .query_map([], |row| row.get::<_, String>(0)).unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
+        assert_eq!(
+            published_keys,
+            rows.iter().map(|row| row.key.clone()).collect::<Vec<_>>(),
+            "every independent fixture owner including the final singleton is published"
+        );
+        let reader = traversal_reader_oracle(
+            &stores[0].connection,
+            &["unrelated", "unrelated-012", "selected", "absent-xyz"],
+        );
+        for store in &stores[1..] {
+            assert_eq!(
+                catalog_comparable_state(&store.connection),
+                state,
+                "all durable tables/ordered feed/claims/authority/recipes match"
+            );
+            assert_eq!(
+                traversal_reader_oracle(
+                    &store.connection,
+                    &["unrelated", "unrelated-012", "selected", "absent-xyz"]
+                ),
+                reader
+            );
+        }
+        drop(stores);
+        fs::remove_dir_all(root).unwrap();
+        traversal_semantic_and_rollback_oracles();
+        // Five fixed windows × three arms, after every span and integrity oracle.
+        // Raw kernel counters can include existing SEMON_BUILD_TIMING stderr;
+        // neither those counters nor WAL extents establish device writes.
+        let timing_diagnostics = crate::native_timing::enabled();
+        for (window, cohorts) in [
+            ("prefix_0", 0..1),
+            ("prefix_256", 4..5),
+            ("prefix_1280", 20..21),
+            ("prefix_1728", 27..28),
+            ("all_32", 0..32),
+        ] {
+            for (arm, owners) in arms.into_iter().enumerate() {
+                let mut total = observations[arm][cohorts.start].clone();
+                for sample in &observations[arm][cohorts.start + 1..cohorts.end] {
+                    total.search.search.add(&sample.search.search);
+                    total.search.postings.add(&sample.search.postings);
+                    total.search.counts.add(&sample.search.counts);
+                    total.commit.add(&sample.commit);
+                    total.search.preparation_us += sample.search.preparation_us;
+                    total.search.sampling_us += sample.search.sampling_us;
+                    total.search.owners += sample.search.owners;
+                    total.search.physical_rows += sample.search.physical_rows;
+                    total.search.logical_positions += sample.search.logical_positions;
+                    total.changed_rows += sample.changed_rows;
+                }
+                let mut search_plus_commit = total.search.search.clone();
+                search_plus_commit.add(&total.commit);
+                let mut posting_and_counts = total.search.postings.clone();
+                posting_and_counts.add(&total.search.counts);
+                let remaining_search = total.search.search.excluding(&posting_and_counts);
+                let unique_sampling_us = total.search.sampling_us + total.commit.sampling_us;
+                let record = serde_json::json!({"publication":"committed","driver":"conditional_fully_prepared_index","window":window,"traversal_owners":owners,"cohorts":cohorts.len(),"timing_diagnostics":timing_diagnostics,"io_scope":"calling_thread","nested_intervals_not_additive":true,"sample":total,"remaining_search":remaining_search,"search_plus_actual_commit":search_plus_commit,"unique_sampling_us":unique_sampling_us});
+                writeln!(
+                    std::io::stderr().lock(),
+                    "catalog-search-traversal-probe {record}"
+                )
+                .unwrap();
+            }
+        }
     }
 
     fn ledger(n: u8) -> Ledger {
