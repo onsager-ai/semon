@@ -524,13 +524,14 @@ mod tests {
             assert_eq!(timing::records().len(), 1);
             // Every operation deletes the two injected malformed/obsolete keys;
             // page shrink can add deletes witnessed by the real trigger.
-            let audit_rows: usize = measured
+            let audit_rows: i64 = measured
                 .connection
                 .query_row("SELECT count(*) FROM temp.audit", [], |row| row.get(0))
                 .unwrap();
+            let audit_rows = usize::try_from(audit_rows).unwrap();
             assert!(audit_rows >= (step + 1) * 2);
             if step >= 3 {
-                let recompiled_rows: usize = measured
+                let recompiled_rows: i64 = measured
                     .connection
                     .query_row(
                         "SELECT count(*) FROM temp.audit WHERE value LIKE 'reprepared:%'",
@@ -538,6 +539,7 @@ mod tests {
                         |row| row.get(0),
                     )
                     .unwrap();
+                let recompiled_rows = usize::try_from(recompiled_rows).unwrap();
                 assert!(recompiled_rows >= (step - 2) * 2);
             }
             timing::assert_sample(&sample, &LAUNCH_CLEANUP, audit_rows - audit_before);
