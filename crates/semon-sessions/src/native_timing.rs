@@ -368,7 +368,7 @@ impl Drop for Phase {
 mod tests {
     use super::*;
 
-    fn wal_connection(name: &str) -> (std::path::PathBuf, rusqlite::Connection) {
+    fn timing_root(name: &str) -> std::path::PathBuf {
         let root = std::env::temp_dir().join(format!(
             "semon-native-timing-{name}-{}-{}",
             std::process::id(),
@@ -378,12 +378,286 @@ mod tests {
                 .as_nanos()
         ));
         std::fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    fn wal_connection(name: &str) -> (std::path::PathBuf, rusqlite::Connection) {
+        let root = timing_root(name);
         let connection = rusqlite::Connection::open(root.join("index.sqlite3")).unwrap();
         let journal: String = connection
             .query_row("PRAGMA journal_mode=WAL", [], |row| row.get(0))
             .unwrap();
         assert_eq!(journal, "wal");
         (root, connection)
+    }
+
+    const PROBE_CATALOG_INSERT: &str = "INSERT INTO session_catalog (session_key, lifecycle, last_ms, harness, repo, parent_key, metadata) VALUES";
+    const PROBE_CATALOG_CONFLICT: &str = "ON CONFLICT(session_key) DO UPDATE SET lifecycle='current', last_ms=excluded.last_ms, harness=excluded.harness, repo=excluded.repo, parent_key=excluded.parent_key, metadata=excluded.metadata WHERE session_catalog.lifecycle != 'current' OR session_catalog.metadata != excluded.metadata OR session_catalog.parent_key IS NOT excluded.parent_key";
+
+    #[derive(Debug, PartialEq, Eq)]
+    struct ProbeCatalogRecord {
+        key: String,
+        lifecycle: String,
+        last: i64,
+        harness: String,
+        repo: Option<String>,
+        parent: Option<String>,
+        metadata: String,
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    struct ProbeState {
+        catalog: Vec<ProbeCatalogRecord>,
+        feed: Vec<(i64, String, String)>,
+    }
+
+    fn catalog_probe_connection(root: &Path, name: &str) -> rusqlite::Connection {
+        let stem = root.join(name);
+        drop(crate::events::EventCache::open_scoped(&stem).unwrap());
+        // Reuse the actual initializer: synchronous and statement-cache
+        // settings are connection-local, unlike the persisted WAL mode.
+        let connection =
+            crate::events::store::catalog_probe_connection(&crate::events::EventCache::path(&stem))
+                .unwrap();
+        let schema: i64 = connection
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(schema, 26);
+        let mode: String = connection
+            .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(mode, "wal");
+        for trigger in [
+            "catalog_changes_insert",
+            "catalog_changes_update",
+            "catalog_changes_delete",
+            "catalog_history_changes_insert",
+            "catalog_history_changes_update",
+            "catalog_history_changes_delete",
+        ] {
+            assert!(connection.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='trigger' AND name=?1)",[trigger],|row|row.get::<_,bool>(0)).unwrap());
+        }
+        assert_eq!(connection.query_row("SELECT COUNT(*) FROM sqlite_schema WHERE type='index' AND tbl_name='session_catalog' AND name NOT LIKE 'sqlite_autoindex_%'",[],|row|row.get::<_,i64>(0)).unwrap(),21);
+        connection
+    }
+
+    fn catalog_probe_rows(version: i64) -> Vec<crate::model::summary::CatalogRow> {
+        (0..64)
+            .map(|position| {
+                let key = format!("probe-{position:02}");
+                crate::model::summary::CatalogRow {
+                    overview: None,
+                    trace: None,
+                    query: Some(serde_json::json!({"version":1,"state":"off","last":version})),
+                    lifecycle: crate::model::summary::CatalogLifecycle::Current,
+                    key: key.clone(),
+                    name: format!("Probe {position}"),
+                    harness: "claude".into(),
+                    kind: "session".into(),
+                    presentation_kind: None,
+                    native_ids: vec![key],
+                    parent: None,
+                    parent_source: None,
+                    repo: Some(format!("probe-repo-{}", position % 3)),
+                    branch: None,
+                    model: "probe-model".into(),
+                    effort: None,
+                    start: Some(1),
+                    last: Some(version),
+                    tokens: [0.0; 3],
+                    cost: crate::pricing::Cost {
+                        usd: Some(0.0),
+                        unpriced_models: Vec::new(),
+                        split_unknown_messages: 0,
+                        by_model: BTreeMap::new(),
+                        by_day: BTreeMap::new(),
+                    },
+                    sources: Vec::new(),
+                }
+            })
+            .collect()
+    }
+
+    fn catalog_probe_state(connection: &rusqlite::Connection) -> ProbeState {
+        let catalog = connection.prepare("SELECT session_key,lifecycle,last_ms,harness,repo,parent_key,metadata FROM session_catalog ORDER BY session_key LIMIT 65").unwrap().query_map([],|row|Ok(ProbeCatalogRecord {key:row.get(0)?,lifecycle:row.get(1)?,last:row.get(2)?,harness:row.get(3)?,repo:row.get(4)?,parent:row.get(5)?,metadata:row.get(6)?})).unwrap().collect::<Result<Vec<_>,_>>().unwrap();
+        assert!(catalog.len() <= 64);
+        // Insert, update, retained seed and promotion each emit at most128
+        // feed rows. The unchanged phase and failed transaction emit none.
+        let feed = connection.prepare("SELECT revision,session_key,read_scope FROM session_catalog_changes ORDER BY revision LIMIT 513").unwrap().query_map([],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?))).unwrap().collect::<Result<Vec<_>,_>>().unwrap();
+        assert!(feed.len() <= 512);
+        ProbeState { catalog, feed }
+    }
+
+    fn catalog_probe_values(
+        row: &crate::model::summary::CatalogRow,
+    ) -> Vec<rusqlite::types::Value> {
+        use rusqlite::types::Value;
+        vec![
+            Value::Text(row.key.clone()),
+            Value::Integer(row.last.unwrap_or(0)),
+            Value::Text(row.harness.clone()),
+            row.repo.clone().map_or(Value::Null, Value::Text),
+            row.parent.clone().map_or(Value::Null, Value::Text),
+            Value::Text(serde_json::to_string(row).unwrap()),
+        ]
+    }
+
+    fn catalog_probe_dml(
+        connection: &mut rusqlite::Connection,
+        rows: &[crate::model::summary::CatalogRow],
+        batched: bool,
+        phase: &str,
+        fail: bool,
+    ) -> rusqlite::Result<std::collections::BTreeSet<String>> {
+        assert_eq!(rows.len(), 64);
+        let single_sql = format!(
+            "{PROBE_CATALOG_INSERT} (?1,'current',?2,?3,?4,?5,?6) {PROBE_CATALOG_CONFLICT}"
+        );
+        let mut parameters: Vec<_> = rows.iter().map(catalog_probe_values).collect();
+        if fail {
+            // Duplicate keys are handled by UPSERT. Use the actual NOT NULL
+            // harness constraint in the middle of this64-key batch instead.
+            parameters[32][2] = rusqlite::types::Value::Null;
+        }
+        let mut sql = single_sql.clone();
+        if batched {
+            let values: Vec<_> = (0..rows.len())
+                .map(|position| {
+                    let first = position * 6 + 1;
+                    format!(
+                        "(?{first},'current',?{},?{},?{},?{},?{})",
+                        first + 1,
+                        first + 2,
+                        first + 3,
+                        first + 4,
+                        first + 5
+                    )
+                })
+                .collect();
+            sql = format!(
+                "{PROBE_CATALOG_INSERT} {} {PROBE_CATALOG_CONFLICT} RETURNING session_key",
+                values.join(",")
+            );
+        }
+        let tx = connection.transaction()?;
+        if fail {
+            // A valid earlier statement must roll back too, not only the
+            // partially executed statement that hits the constraint.
+            tx.execute(&single_sql, rusqlite::params_from_iter(&parameters[63]))?;
+        }
+        // Prepare and bind every statement before sampling. The single-row
+        // oracle retains64 bounded prepared statements, not a timed rebind.
+        let mut statements = Vec::new();
+        if batched {
+            let mut statement = tx.prepare(&sql)?;
+            for (index, value) in parameters.iter().flatten().enumerate() {
+                statement.raw_bind_parameter(index + 1, value)?;
+            }
+            statements.push((String::new(), statement));
+        } else {
+            for (row, values) in rows.iter().zip(&parameters) {
+                let mut statement = tx.prepare(&sql)?;
+                for (index, value) in values.iter().enumerate() {
+                    statement.raw_bind_parameter(index + 1, value)?;
+                }
+                statements.push((row.key.clone(), statement));
+            }
+        }
+        let before_io = thread_writes();
+        let before_cache = SqliteCache::read(&tx);
+        let started = Instant::now();
+        let mut changed = std::collections::BTreeSet::new();
+        for (key, mut statement) in statements {
+            if batched {
+                let mut returned = statement.raw_query();
+                while let Some(row) = returned.next()? {
+                    assert!(changed.insert(row.get::<_, String>(0)?));
+                }
+            } else if statement.raw_execute()? > 0 {
+                assert!(changed.insert(key));
+            }
+        } // Finalize all statements before after-DML and commit observations.
+        let dml_us = started.elapsed().as_micros();
+        let after_io = thread_writes();
+        let after_cache = SqliteCache::read(&tx);
+        let commit_before_io = thread_writes();
+        let commit_before_cache = SqliteCache::read(&tx);
+        let commit_started = Instant::now();
+        tx.commit()?;
+        let commit_us = commit_started.elapsed().as_micros();
+        let commit_after_io = thread_writes();
+        let commit_after_cache = SqliteCache::read(connection);
+        // Counter interpretation is qualified by the real commit above. No
+        // formatting or stderr is inside either observed DML/commit span.
+        let io_delta = after_io
+            .zip(before_io)
+            .and_then(|(after, before)| after.delta(before));
+        let cache_delta = after_cache
+            .zip(before_cache)
+            .and_then(|(after, before)| after.delta(before));
+        let commit_io = commit_after_io
+            .zip(commit_before_io)
+            .and_then(|(after, before)| after.delta(before));
+        let commit_cache = commit_after_cache
+            .zip(commit_before_cache)
+            .and_then(|(after, before)| after.delta(before));
+        let dml_wchar_mod_4100 = io_delta.map(|value| value.wchar % 4100);
+        // Test-only direct diagnostic output keeps successful observations in
+        // the ordinary CI log without a new invocation or harness setting.
+        use std::io::Write;
+        writeln!(std::io::stderr().lock(), "catalog-journal-probe phase={phase} batched={batched} rows=64 publication=committed io_scope=calling_thread dml_us={dml_us} dml_io={io_delta:?} dml_wchar_mod_4100={dml_wchar_mod_4100:?} dml_cache={cache_delta:?} commit_us={commit_us} commit_io={commit_io:?} commit_cache={commit_cache:?}").unwrap();
+        Ok(changed)
+    }
+
+    #[test]
+    fn catalog_statement_journal_batch_probe_preserves_catalog_feed_and_transaction_rollback() {
+        let root = timing_root("catalog-batch-probe");
+        let mut single = catalog_probe_connection(&root, "single");
+        let mut batch = catalog_probe_connection(&root, "batch");
+        let keys: std::collections::BTreeSet<_> = catalog_probe_rows(1)
+            .into_iter()
+            .map(|row| row.key)
+            .collect();
+        for (phase, version, expected_changes, expected_feed) in [
+            ("insert", 1, 64, 128),
+            ("update", 2, 64, 128),
+            ("unchanged", 2, 0, 0),
+            ("retained_promotion", 2, 64, 128),
+        ] {
+            if phase == "retained_promotion" {
+                for connection in [&single, &batch] {
+                    assert_eq!(connection.execute("UPDATE session_catalog SET lifecycle='retained',metadata=json_set(metadata,'$.lifecycle','retained')",[]) .unwrap(),64);
+                }
+                assert_eq!(catalog_probe_state(&single), catalog_probe_state(&batch));
+            }
+            let before = catalog_probe_state(&single);
+            let rows = catalog_probe_rows(version);
+            let single_changed =
+                catalog_probe_dml(&mut single, &rows, false, phase, false).unwrap();
+            let batch_changed = catalog_probe_dml(&mut batch, &rows, true, phase, false).unwrap();
+            assert_eq!(single_changed, batch_changed);
+            assert_eq!(single_changed.len(), expected_changes);
+            if expected_changes != 0 {
+                assert_eq!(single_changed, keys);
+            }
+            let after = catalog_probe_state(&single);
+            assert_eq!(after.catalog.len(), 64);
+            assert_eq!(after.feed.len() - before.feed.len(), expected_feed);
+            assert_eq!(after, catalog_probe_state(&batch));
+        }
+        let prior = catalog_probe_state(&single);
+        let replacement = catalog_probe_rows(3);
+        for (connection, batched) in [(&mut single, false), (&mut batch, true)] {
+            let error =
+                catalog_probe_dml(connection, &replacement, batched, "failed", true).unwrap_err();
+            assert!(
+                matches!(error, rusqlite::Error::SqliteFailure(ref code, _) if code.extended_code==rusqlite::ffi::SQLITE_CONSTRAINT_NOTNULL)
+            );
+            assert_eq!(catalog_probe_state(connection), prior);
+        }
+        drop(single);
+        drop(batch);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
