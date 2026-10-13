@@ -90,6 +90,17 @@ jobs:
         # on the actual runner without changing deadlines or successful output.
         run: SEMON_BUILD_TIMING=1 cargo test --locked
 
+      - name: Source clock/account strict Clippy
+        run: cargo clippy -p semon-sessions --all-targets --features test-clock,test-ui-account-server --locked -- --no-deps -D warnings
+
+      - name: Source feature Query
+        run: |
+          SEMON_BUILD_TIMING=1 cargo test -p semon-sessions --lib --features test-clock,test-ui-account-server --locked query::
+
+      - name: Source feature Viewer
+        run: |
+          SEMON_BUILD_TIMING=1 cargo test -p semon-sessions --lib --features test-clock,test-ui-account-server --locked viewer::
+
       - name: Verify product CLI and workspace exclude retired subsystems
         run: |
           cargo tree --locked -p semon-cli --edges normal,build --prefix none --format '{p}' > "$RUNNER_TEMP/product-cli-dependencies.txt"
