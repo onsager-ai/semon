@@ -871,8 +871,9 @@ fn with_records<T>(
         let mut field_bytes = 0;
         for row in rows {
             let source = crate::retention::source_generation(&row.sources).map_err(failure)?;
-            let history = tx.query_row("SELECT EXISTS(SELECT 1 FROM session_history_projections WHERE session_key=?1 AND source_generation=?2 AND version=5)",rusqlite::params![row.key,source],|r|r.get::<_,bool>(0)).map_err(failure)?;
-            let current = tx.query_row("SELECT EXISTS(SELECT 1 FROM session_slot_projections WHERE session_key=?1 AND source_generation=?2 AND version=5)",rusqlite::params![row.key,source],|r|r.get::<_,bool>(0)).map_err(failure)?;
+            let projection_version = crate::slot_projection::VERSION;
+            let history = tx.query_row("SELECT EXISTS(SELECT 1 FROM session_history_projections WHERE session_key=?1 AND source_generation=?2 AND version=?3)",rusqlite::params![row.key,source,projection_version],|r|r.get::<_,bool>(0)).map_err(failure)?;
+            let current = tx.query_row("SELECT EXISTS(SELECT 1 FROM session_slot_projections WHERE session_key=?1 AND source_generation=?2 AND version=?3)",rusqlite::params![row.key,source,projection_version],|r|r.get::<_,bool>(0)).map_err(failure)?;
             if !history && !current {
                 continue;
             }

@@ -1,0 +1,149 @@
+{
+  "fixture": "codex-native-a9b0815/parser-cases.jsonl",
+  "origin": {
+    "kind": "source-shaped synthetic",
+    "real_runtime_capture": false,
+    "version": null,
+    "build": null,
+    "notes": "Sanitized rollout-shaped records. Printed outputs and lifecycle interleavings are controlled cases, not recorded runtime evidence. direct-81001 is an unwrapped scalar compatibility case, not the pinned CodeMode producer carrier; future_text is a deliberately unsupported synthetic block kind."
+  },
+  "upstream": {
+    "repository": "openai/codex",
+    "revision": "a9b0815167c27ab13719dd12d13b63e02b70d221"
+  },
+  "carriers": {
+    "legacy": {
+      "dropped_completed_items": ["CommandExecution", "FileChange"],
+      "qualification": "pinned-source behavior only; the source-shaped item_completed records below are Paginated-shaped and are not evidence of durable Legacy records"
+    },
+    "paginated": {
+      "persists_completed_items": ["CommandExecution", "FileChange"],
+      "aggregated_output_limit_bytes": 65536,
+      "aggregated_output_truncation": "middle",
+      "qualification": "pinned-source behavior; this synthetic fixture does not claim a runtime capture"
+    },
+    "transient_examples": ["ExecCommandBegin", "ExecCommandEnd", "TerminalInteraction", "TerminalOutputDelta", "errors", "ItemStarted"]
+  },
+  "expected_calls": [
+    {"id":"direct-81001","line":2,"offset":117,"relation":"yielded","terminal_offset":597,"qualification":"unwrapped scalar compatibility case; not the pinned CodeMode producer carrier"},
+    {"id":"wrapped-82002","line":5,"offset":984,"relation":"yielded","terminal_offset":1582},
+    {"id":"start-26789","line":8,"offset":1971,"relation":"yielded","terminal_offset":4138},
+    {"id":"multi-output","line":10,"offset":2553,"relation":"visible"},
+    {"id":"mismatch-95583","line":12,"offset":3354,"relation":"visible"},
+    {"id":"unrelated-wrapper","line":14,"offset":3967,"relation":"visible"},
+    {"id":"start-95583","line":17,"offset":4711,"relation":"yielded","poll_offsets":[6147]},
+    {"id":"restart-26789","line":19,"offset":5293,"relation":"yielded","poll_offsets":[6752,7364]},
+    {"id":"poll-95583","line":21,"offset":5897,"relation":"poll","start_id":"start-95583"},
+    {"id":"poll-26789","line":23,"offset":6502,"relation":"poll","start_id":"restart-26789"},
+    {"id":"send-input-26789","line":25,"offset":7107,"relation":"poll","start_id":"restart-26789","input_remains_visible":true},
+    {"id":"mixed-one","line":27,"offset":7717,"relation":"visible"},
+    {"id":"multiple-stdin","line":29,"offset":8380,"relation":"visible"},
+    {"id":"variable-target","line":31,"offset":9011,"relation":"visible"},
+    {"id":"arbitrary-json","line":33,"offset":9589,"relation":"visible"},
+    {"id":"image-unknown","line":35,"offset":10075,"relation":"visible"},
+    {"id":"reordered-output","line":37,"offset":10759,"relation":"visible"},
+    {"id":"merged-output","line":39,"offset":11515,"relation":"visible"},
+    {"id":"truncated-output","line":41,"offset":12060,"relation":"visible"},
+    {"id":"start-multibody-terminal","line":43,"offset":12639,"relation":"yielded","terminal_offset":13495,"poll_offsets":[]},
+    {"id":"poll-multibody-terminal","line":45,"offset":13231,"relation":"visible"},
+    {"id":"start-mismatched-terminal","line":48,"offset":14298,"relation":"yielded","terminal_offset":15156,"poll_offsets":[]},
+    {"id":"poll-mismatched-terminal","line":50,"offset":14893,"relation":"visible"},
+    {"id":"fake-exec-json","line":53,"offset":15861,"relation":"visible"},
+    {"id":"fake-poll-json","line":55,"offset":16522,"relation":"visible"},
+    {"id":"start-7777","line":57,"offset":17209,"relation":"yielded","terminal_offset":18041,"poll_offsets":[]},
+    {"id":"duplicate-session-target","line":59,"offset":17800,"relation":"visible"}
+  ],
+  "expected_blocks": [
+    {
+      "call_id":"multi-output",
+      "result_line":11,
+      "result_offset":2883,
+      "visible_wrapper":true,
+      "blocks":[
+        {"ordinal":0,"type":"input_text","role":"header"},
+        {"ordinal":1,"type":"input_text","role":"body"},
+        {"ordinal":2,"type":"input_text","role":"body"}
+      ]
+    },
+    {
+      "call_id":"image-unknown",
+      "result_line":36,
+      "result_offset":10315,
+      "visible_wrapper":true,
+      "blocks":[
+        {"ordinal":0,"type":"input_text","role":"header"},
+        {"ordinal":1,"type":"image","role":"nontext","fallback":"[image]"},
+        {"ordinal":2,"type":"future_text","role":"unknown","fallback":"[unsupported output block]"},
+        {"ordinal":3,"type":"input_text","role":"body"}
+      ],
+      "omitted_source_fields":["data","private payload"]
+    },
+    {
+      "call_id":"reordered-output",
+      "result_line":38,
+      "result_offset":11086,
+      "visible_wrapper":true,
+      "blocks":[
+        {"ordinal":0,"type":"input_text","role":"header"},
+        {"ordinal":1,"type":"input_text","role":"body"},
+        {"ordinal":2,"type":"input_text","role":"body"}
+      ],
+      "ownership_by_order":false
+    },
+    {
+      "call_id":"merged-output",
+      "result_line":40,
+      "result_offset":11759,
+      "visible_wrapper":true,
+      "blocks":[
+        {"ordinal":0,"type":"input_text","role":"header"},
+        {"ordinal":1,"type":"input_text","role":"body"},
+        {"ordinal":2,"type":"input_text","role":"body"}
+      ]
+    },
+    {
+      "call_id":"truncated-output",
+      "result_line":42,
+      "result_offset":12307,
+      "visible_wrapper":true,
+      "blocks":[
+        {"ordinal":0,"type":"input_text","role":"header"},
+        {"ordinal":1,"type":"input_text","role":"body"}
+      ]
+    },
+    {
+      "call_id":"poll-multibody-terminal",
+      "result_line":47,
+      "result_offset":13855,
+      "visible_wrapper":true,
+      "folded_poll":false,
+      "reason":"terminal item joins by process_id, but rejected multiple text bodies cannot claim the wrapper output"
+    },
+    {
+      "call_id":"poll-mismatched-terminal",
+      "result_line":52,
+      "result_offset":15515,
+      "visible_wrapper":true,
+      "folded_poll":false,
+      "reason":"literal target 5151 differs from the single decoded result's session_id 6161"
+    }
+  ],
+  "replay_extension": {
+    "kind": "synthetic exact-target poll appended by the Rust fixture oracle",
+    "expected": "incremental append and reopened cache index equal a cold index of the same final bytes"
+  },
+  "delayed_startup": {
+    "fixture": "delayed-startup.jsonl",
+    "origin": "source-shaped synthetic Paginated records at the same upstream pin; not a runtime capture",
+    "source_contract": "process_manager.rs store_process spawns an exit watcher; async_watcher.rs:174 captures the original call_id and :327-376 emits UnifiedExecStartup with its original process_id; an open single-exec wrapper does not establish reuse",
+    "source_reference": "https://github.com/openai/codex/blob/a9b0815167c27ab13719dd12d13b63e02b70d221/codex-rs/core/src/unified_exec/async_watcher.rs#L174",
+    "start_id": "start-26789",
+    "start_offset": 0,
+    "result_offset": 197,
+    "terminal_offset": 690,
+    "later_id": "start-95583",
+    "later_offset": 491,
+    "later_result_offset": 1009,
+    "expected": "old26789 completes with its exact failure outcome; later95583 remains yielded and does not own the old terminal item; cold, append and reopened caches agree"
+  }
+}

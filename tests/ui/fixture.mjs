@@ -804,7 +804,7 @@ export function write(out, { extras = false } = {}) {
           type: 'custom_tool_call_output',
           call_id: callId,
           output: [
-            { type: 'input_text', text: 'Script completed\nWall time 1.0s\nOutput:\n' },
+            { type: 'input_text', text: 'Script completed\nWall time 1.0 seconds\nOutput:\n' },
             {
               type: 'input_text',
               text: JSON.stringify({

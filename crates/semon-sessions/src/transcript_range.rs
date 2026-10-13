@@ -1339,11 +1339,7 @@ fn render(
                     false,
                 );
             };
-            entry["out"] = output["text"].clone();
-            if let Some(cut) = output.get("cut") {
-                entry["cut"] = cut.clone();
-            }
-            entry["outputTruncated"] = output["truncated"].clone();
+            copy_selected_output_fields(&mut entry, &output);
         }
         if let Some(preview) = tool_preview {
             entry["field"] = preview["field"].clone();
@@ -1639,5 +1635,55 @@ fn render_field(
             "The selected immutable field range is unavailable. Resynchronize the session before retrying.",
             true,
         ),
+    }
+}
+
+fn copy_selected_output_fields(entry: &mut Value, output: &Value) {
+    entry["out"] = output["text"].clone();
+    if let Some(cut) = output.get("cut") {
+        entry["cut"] = cut.clone();
+    }
+    entry["outputTruncated"] = output["truncated"].clone();
+    if let Some(blocks) = output.get("blocks") {
+        entry["outputBlocks"] = blocks.clone();
+    }
+    if let Some(truncated) = output.get("blocks_truncated") {
+        entry["outputBlocksTruncated"] = truncated.clone();
+    }
+    if let Some(omitted) = output.get("blocks_omitted") {
+        entry["outputBlocksOmitted"] = omitted.clone();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::copy_selected_output_fields;
+
+    #[test]
+    fn selected_output_blocks_reach_the_expansion_shape() {
+        let blocks = json!([{"ordinal":0,"type":"input_text","role":"body","text":"hello"}]);
+        let mut entry = json!({});
+        copy_selected_output_fields(
+            &mut entry,
+            &json!({
+                "text":"hello",
+                "truncated":false,
+                "blocks":blocks,
+                "blocks_truncated":true,
+                "blocks_omitted":3
+            }),
+        );
+        assert_eq!(entry["out"], "hello");
+        assert_eq!(entry["outputTruncated"], false);
+        assert_eq!(entry["outputBlocks"], blocks);
+        assert_eq!(entry["outputBlocksTruncated"], true);
+        assert_eq!(entry["outputBlocksOmitted"], 3);
+
+        let mut scalar = json!({});
+        copy_selected_output_fields(&mut scalar, &json!({"text":"scalar","truncated":false}));
+        assert_eq!(scalar["out"], "scalar");
+        assert!(scalar.get("outputBlocks").is_none());
     }
 }

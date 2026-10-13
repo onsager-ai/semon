@@ -55,7 +55,7 @@ const page = () => ({
     freshness: { state: 'unavailable' },
   },
   projection: {
-    version: 5,
+    version: 6,
     generation: 'b'.repeat(64),
     errors_generation: 'b'.repeat(64),
     total: 3,
@@ -80,6 +80,16 @@ const page = () => ({
   ],
   freshness: { state: 'incomplete' },
   relationship_context: { state: 'incomplete', turn_ids: ['native-turn'], handoffs: [] },
+});
+test('ranged native content accepts recipe 6 and rejects retired and future versions', () => {
+  const parsed = parseCatalogTranscriptPage(page());
+  assert.equal(parsed.api, 1);
+  assert.equal(parsed.projection.version, 6);
+  for (const version of [5, 7, 0, null, '6']) {
+    const raw = page();
+    raw.projection.version = version;
+    assert.throws(() => parseCatalogTranscriptPage(raw), /Invalid catalog transcript page/);
+  }
 });
 test('ranged native content preserves identity/provenance and incomplete action context', () => {
   const raw = page(),
