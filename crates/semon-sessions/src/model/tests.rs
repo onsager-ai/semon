@@ -7126,6 +7126,8 @@ fn read_catalog(home: &Home) -> (String, Vec<summary::CatalogRow>) {
 
 #[test]
 fn parser_cache_reset_rederives_direct_formatter_catalog_outcome() {
+    use crate::slot_projection::{Outcome, Recipe, SavedSlot};
+
     let home = Home::new();
     let call = json!({
         "timestamp": ts(0, 1),
@@ -7185,17 +7187,24 @@ fn parser_cache_reset_rederives_direct_formatter_catalog_outcome() {
     let tool_at = slots
         .iter()
         .position(|(_, metadata)| {
-            serde_json::from_str::<Value>(metadata).is_ok_and(|slot| slot["recipe"] == "Tool")
+            let slot: SavedSlot = serde_json::from_str(metadata).unwrap();
+            matches!(slot.recipe, Recipe::Tool { .. })
         })
         .expect("direct call has a saved tool slot");
-    let mut stale_slot: Value = serde_json::from_str(&slots[tool_at].1).unwrap();
-    assert_eq!(stale_slot["outcome"], "Ok");
-    stale_slot["outcome"] = json!("Unknown");
-    let reply: crate::events::Reply = serde_json::from_value(stale_slot["reply"].clone()).unwrap();
+    let mut stale_slot: SavedSlot = serde_json::from_str(&slots[tool_at].1).unwrap();
+    let Recipe::Tool {
+        outcome,
+        reply: Some(reply),
+        ..
+    } = &mut stale_slot.recipe
+    else {
+        panic!("direct call has a saved tool reply");
+    };
+    assert!(matches!(*outcome, Outcome::Ok));
     assert_eq!(reply.f & UNKNOWN, 0);
-    let stale_reply_flags = reply.f | UNKNOWN;
-    stale_slot["reply"]["f"] = json!(stale_reply_flags);
-    slots[tool_at].1 = stale_slot.to_string();
+    *outcome = Outcome::Unknown;
+    reply.f |= UNKNOWN;
+    slots[tool_at].1 = serde_json::to_string(&stale_slot).unwrap();
     let stale_slot_generation = crate::slot_projection::generation(
         &slots
             .iter()
@@ -7313,10 +7322,17 @@ fn parser_cache_reset_rederives_direct_formatter_catalog_outcome() {
         .unwrap();
     let saved_tool = saved
         .iter()
-        .map(|(_, metadata)| serde_json::from_str::<Value>(metadata).unwrap())
-        .find(|slot| slot["recipe"] == "Tool")
+        .map(|(_, metadata)| serde_json::from_str::<SavedSlot>(metadata).unwrap())
+        .find(|slot| matches!(&slot.recipe, Recipe::Tool { .. }))
         .expect("fresh publication keeps its tool slot");
-    assert_eq!(saved_tool["outcome"], "Ok");
+    assert!(matches!(
+        &saved_tool.recipe,
+        Recipe::Tool {
+            outcome: Outcome::Ok,
+            reply: Some(reply),
+            ..
+        } if reply.f & UNKNOWN == 0
+    ));
     let metadata: Vec<_> = saved.iter().map(|(_, text)| text.clone()).collect();
     let projection_generation =
         crate::slot_projection::generation(&metadata, &rows[0].sources).unwrap();
