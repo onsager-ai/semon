@@ -53,6 +53,7 @@ pub use claude_usage::ClaudeUsageEvidence;
 mod attachments;
 pub mod comparison;
 mod events;
+mod exec_response;
 mod facts;
 mod handoff;
 pub mod harness;
