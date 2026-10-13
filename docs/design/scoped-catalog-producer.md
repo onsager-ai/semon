@@ -77,7 +77,11 @@ writes cannot miss an about-to-be-published new owner. Only claimed revisions ar
 remain pending and do not block a closed component. Slot recipes, history
 extensions and Catalog metadata share that transaction. Search publication reuses
 bounded posting inserts and updates gram counts through a selected source-key range;
-it does not execute a separate insertion program for every gram. A concurrent Raw change
+old posting removal aggregates shared gram decrements for the same bounded cohort
+before replacing its current and retained-history documents. Both aggregates use
+the cohort keys as the outer loop and indexed source-key lookups; unrelated gram
+members are not scanned. Counts, incomplete coverage and documents roll back with
+publication. It does not execute a separate insertion program for every gram. A concurrent Raw change
 or competing publication cannot satisfy a stale claim. An untrusted append that
 lands after scanning requeues only its affected paths.
 
@@ -141,15 +145,23 @@ lifecycle. The wire contract is in [the mirror protocol](../mirror-protocol.md).
 
 Synthetic tests hold one selected append constant with 0, 256 and 2,048 unrelated
 single-record sessions. Baseline f8b49cf loaded 1, 257 and 2,049 Event Indexes on
-append and again on fresh-owner restart. Append publication took 6.725, 337.024
-and 2,717.895 ms; restart took 5.024, 332.998 and 2,709.485 ms.
+append and again on fresh-owner restart. A fresh-process rerun measured append
+publication at 21.359, 474.664 and 3,750.150 ms; restart took 17.701, 477.791 and
+3,733.778 ms.
 
 The source-journal implementation loaded one Index and parsed one 194-byte record
 in all three cases. It discovered zero paths, derived one source and published
 one row. Logical source reads were 2,512 bytes and source SHA work 2,702 bytes in
-all cases. Publication took 11.599, 9.440 and 15.579 ms. Fresh-owner restart loaded
+all cases. Publication took 12.437, 10.022 and 19.302 ms. Fresh-owner restart loaded
 zero Indexes; zero indexed payloads remained resident after publication. These
 are individual debug-build fixture measurements, not production latency budgets.
+Whole-fixture peak RSS, including historical ingestion, was 152,996 KiB for the
+baseline and 38,068 KiB for that rerun. Filesystem output accounting was higher
+for the new implementation, so these results do not establish improved cold-write
+amplification. A subsequent Hub cold run with cohort posting removal completed
+0, 256 and 2,048 unrelated sessions in 24, 826 and 6,894 ms, respectively. The
+existing 10-second completion assertion remains unchanged; these individual
+samples do not establish a production or contention latency guarantee.
 
 Five trusted appends to 4 MiB and 16 MiB sources parsed five records and performed
 no full-prefix rehash. Logical reads were 133,754 and 128,312 bytes; source SHA
