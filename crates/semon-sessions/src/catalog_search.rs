@@ -1300,7 +1300,7 @@ mod sqlite_tests {
     #[test]
     fn oversized_compact_history_refuses_before_an_absent_current_scope_scan() {
         let mut connection = database();
-        connection.execute("WITH RECURSIVE n(x) AS (SELECT 0 UNION ALL SELECT x+1 FROM n WHERE x<?1) INSERT INTO session_search_memberships VALUES('selected',printf('%05d',x),NULL,0)",[(MAX_GRAMS*2) as i64]).unwrap();
+        connection.execute("WITH RECURSIVE n(x) AS (SELECT 0 UNION ALL SELECT x+1 FROM n WHERE x<?1) INSERT INTO session_search_memberships SELECT 'selected',printf('%05d',x),NULL,0 FROM n",[(MAX_GRAMS*2) as i64]).unwrap();
         let before = strings(&connection, PHYSICAL_COMPACT);
         let selected = row("selected", "replacement");
         {
