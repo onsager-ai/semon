@@ -48,7 +48,8 @@ The answer is 200 when it is stored. A receiver that hasn't had facts for a whil
 ## How the client uses it
 
 - **Complete lines only.** A `.jsonl` file is sent up to the end of its last complete line, so a line being written is held back until its newline arrives. No redaction pattern spans a newline, so redacting line by line and redacting the whole file give the same bytes.
-  - A line longer than 4 MiB is redacted whole and then sent in 4 MiB pieces.
+  - The sender defaults to 256 KiB per append, below the protocol's 4 MiB maximum, so slow links can finish requests within the timeout.
+  - A line longer than the sender's chunk size is redacted whole and then sent in pieces of that size.
   - A line longer than 64 MiB is cut there.
 - **Other inputs** (`*.json`) are small. Each is sent whole, with `replace`, whenever its content changes.
 - **Resuming.** The client keeps, per file, how many bytes the receiver has acknowledged and the SHA-256 of the original's first 4 KiB. The state file is `$XDG_STATE_HOME/semon/push/<url hash>.json`, mode 0600, in a 0700 directory. A new pass appends from there.
