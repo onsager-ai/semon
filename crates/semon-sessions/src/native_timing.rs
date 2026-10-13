@@ -444,7 +444,11 @@ pub(crate) fn id(index: &Path) -> String {
 pub(crate) struct Measurements {
     enabled: bool,
     values: BTreeMap<&'static str, (u128, usize)>,
+    #[cfg(test)]
+    uncached_cleanup_reference: bool,
 }
+
+const CLEANUP_SQL: &str = "DELETE FROM meta WHERE key>=?1 AND key<?2 AND key!=?3 AND (key>=?4 OR length(key)!=?5 OR substr(key,?6) GLOB '*[^0-9]*')";
 
 /// Static nested leaves of the existing inclusive cleanup measurement. Counts
 /// use the workload half of us_units; children must not be added to parents.
@@ -465,7 +469,7 @@ pub(crate) struct CleanupLabels {
 
 pub(crate) const CHUNKS_CLEANUP: CleanupLabels = CleanupLabels {
     args: "chunks_cleanup_args",
-    prepare: "chunks_cleanup_uncached_prepare",
+    prepare: "chunks_cleanup_acquire_cached",
     bind_execute: "chunks_cleanup_bind_execute",
     dispose: "chunks_cleanup_dispose",
     status: "chunks_cleanup_status",
@@ -480,7 +484,7 @@ pub(crate) const CHUNKS_CLEANUP: CleanupLabels = CleanupLabels {
 
 pub(crate) const LAUNCH_CLEANUP: CleanupLabels = CleanupLabels {
     args: "launch_cleanup_args",
-    prepare: "launch_cleanup_uncached_prepare",
+    prepare: "launch_cleanup_acquire_cached",
     bind_execute: "launch_cleanup_bind_execute",
     dispose: "launch_cleanup_dispose",
     status: "launch_cleanup_status",
@@ -531,8 +535,9 @@ impl Measurements {
         entry.1 = entry.1.saturating_add(units);
     }
 
-    /// Called only by enabled writers. Ordinary parameter binding and the
-    /// original uncached DELETE remain intact. Every leaf ends before insertion.
+    /// Reuses the fixed DELETE in the existing connection-local cache. A cache
+    /// miss can compile SQL, and SQLite can reprepare after schema changes.
+    /// Disabled writers collect nothing; every timed leaf ends before insertion.
     pub(crate) fn cleanup(
         &mut self,
         transaction: &rusqlite::Transaction<'_>,
@@ -540,6 +545,35 @@ impl Measurements {
         pages: impl FnOnce() -> usize,
         labels: &CleanupLabels,
     ) -> rusqlite::Result<usize> {
+        #[cfg(test)]
+        if self.uncached_cleanup_reference {
+            let pages = pages();
+            // Exact pre-cache acquisition and six ordered bindings, available
+            // only through an explicitly scoped real-parent test publication.
+            return transaction.execute(
+                CLEANUP_SQL,
+                rusqlite::params![
+                    prefix,
+                    format!("{prefix}~"),
+                    format!("{prefix}header"),
+                    format!("{prefix}{pages:010}"),
+                    (prefix.len() + 10) as i64,
+                    (prefix.len() + 1) as i64
+                ],
+            );
+        }
+        if !self.is_enabled() {
+            let pages = pages();
+            let mut statement = transaction.prepare_cached(CLEANUP_SQL)?;
+            return statement.execute(rusqlite::params![
+                prefix,
+                format!("{prefix}~"),
+                format!("{prefix}header"),
+                format!("{prefix}{pages:010}"),
+                (prefix.len() + 10) as i64,
+                (prefix.len() + 1) as i64
+            ]);
+        }
         let started = Instant::now();
         let pages = pages();
         let end = format!("{prefix}~");
@@ -549,7 +583,7 @@ impl Measurements {
         let suffix = (prefix.len() + 1) as i64;
         let args_us = started.elapsed().as_micros();
         let started = Instant::now();
-        let prepared = transaction.prepare("DELETE FROM meta WHERE key>=?1 AND key<?2 AND key!=?3 AND (key>=?4 OR length(key)!=?5 OR substr(key,?6) GLOB '*[^0-9]*')");
+        let prepared = transaction.prepare_cached(CLEANUP_SQL);
         let prepare_us = started.elapsed().as_micros();
         let mut statement = match prepared {
             Ok(statement) => statement,
@@ -688,7 +722,12 @@ pub(crate) mod cleanup_tests {
                 .unwrap()
                 .collect::<rusqlite::Result<Vec<_>>>()
                 .unwrap();
-            for name in names {
+            // Include schema definitions as well as every main/TEMP table, so
+            // trigger/index changes and rollback cannot escape state parity.
+            for name in names
+                .into_iter()
+                .chain(std::iter::once("sqlite_schema".to_owned()))
+            {
                 let mut statement = connection
                     .prepare(&format!(
                         "SELECT * FROM {schema}.\"{}\"",
@@ -719,11 +758,38 @@ pub(crate) mod cleanup_tests {
         enabled: bool,
         write: impl FnOnce(&Transaction<'_>, &mut Measurements) -> rusqlite::Result<()>,
     ) -> rusqlite::Result<Measurements> {
-        let mut measurements = Measurements::new(enabled);
+        publish_with(connection, Measurements::new(enabled), write)
+    }
+
+    pub(crate) fn publish_uncached_reference(
+        connection: &mut Connection,
+        write: impl FnOnce(&Transaction<'_>, &mut Measurements) -> rusqlite::Result<()>,
+    ) -> rusqlite::Result<Measurements> {
+        publish_with(
+            connection,
+            Measurements {
+                // The real parent chooses write_measured via start(). Keep
+                // this test-local context through that branch so cleanup can
+                // execute the old uninstrumented Connection::execute path.
+                enabled: true,
+                uncached_cleanup_reference: true,
+                ..Measurements::default()
+            },
+            write,
+        )
+    }
+
+    fn publish_with(
+        connection: &mut Connection,
+        mut measurements: Measurements,
+        write: impl FnOnce(&Transaction<'_>, &mut Measurements) -> rusqlite::Result<()>,
+    ) -> rusqlite::Result<Measurements> {
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         write(&transaction, &mut measurements)?;
         transaction.commit()?;
-        measurements.emit("synthetic-cleanup", "index_rows");
+        if !measurements.uncached_cleanup_reference {
+            measurements.emit("synthetic-cleanup", "index_rows");
+        }
         Ok(measurements)
     }
 
@@ -751,6 +817,14 @@ pub(crate) mod cleanup_tests {
     pub(crate) fn assert_disabled(measurements: &Measurements) {
         assert!(measurements.start().is_none());
         assert!(measurements.values.is_empty());
+    }
+
+    pub(crate) fn assert_uncached_reference(measurements: &Measurements) {
+        assert!(measurements.uncached_cleanup_reference);
+        for labels in [&CHUNKS_CLEANUP, &LAUNCH_CLEANUP] {
+            assert!(!measurements.values.contains_key(labels.prepare));
+            assert!(!measurements.values.contains_key(labels.status));
+        }
     }
 }
 
