@@ -3210,6 +3210,9 @@ impl SqliteStore {
                         }
                         let started = metadata_measurements.start();
                         member.execute([&row.key]).map_err(failure)?;
+                        if let Some(sample) = sample.as_mut() {
+                            sample.stage("member_insert", &transaction);
+                        }
                         let changed = put
                             .execute(params![
                                 row.key,
@@ -3995,6 +3998,17 @@ fn set_aside(path: &Path) -> io::Result<()> {
         }
     }
     fs::rename(path, sibling(path, ".corrupt"))
+}
+
+/// CI-only paired measurements reuse the producer's connection-local policy.
+#[cfg(test)]
+pub(crate) fn catalog_probe_connection(path: &Path) -> rusqlite::Result<Connection> {
+    let mut connection = Connection::open(path)?;
+    if matches!(init(&mut connection)?, Init::Ready) {
+        Ok(connection)
+    } else {
+        Err(rusqlite::Error::InvalidQuery)
+    }
 }
 
 /// Readies a connection. The versions are read without a lock, so a store
