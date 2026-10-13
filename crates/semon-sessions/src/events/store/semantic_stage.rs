@@ -92,6 +92,25 @@ pub(super) fn active(c: &Connection) -> rusqlite::Result<bool> {
         |r| r.get(0),
     )
 }
+/// An unsupported Current header stays visible until its replacement publishes.
+/// Admit its repair once, preserving an existing observation or the exact live
+/// stage observation even after ACK. Unreachable GC records own no work.
+pub(super) fn owns_header_repair(c: &Connection, path: &str) -> rusqlite::Result<bool> {
+    c.query_row(
+        "SELECT EXISTS(SELECT 1 FROM session_catalog_invalidations WHERE source_path=?1)
+         OR EXISTS(SELECT 1 FROM catalog_semantic_sources s
+         JOIN catalog_semantic_stage stage ON stage.singleton=1 AND stage.resetting=0
+         LEFT JOIN session_catalog_invalidations i USING(source_path)
+         LEFT JOIN files f ON f.path=s.source_path
+         WHERE s.source_path=?1 AND s.index_done=1 AND i.revision IS s.claim
+         AND f.dev IS s.dev AND f.ino IS s.ino AND f.size IS s.size
+         AND f.mtime_ns IS s.mtime_ns AND f.ctime_ns IS s.ctime_ns
+         AND f.resume_at IS s.resume_at AND f.head_sha256 IS s.head_sha256
+         AND f.tail_sha256 IS s.tail_sha256)",
+        [path],
+        |row| row.get(0),
+    )
+}
 fn phase(p: Phase) -> &'static str {
     match p {
         Phase::Indexing => "indexing",
@@ -2291,6 +2310,204 @@ pub(super) fn published(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn header_repair_store(name: &str) -> (PathBuf, SqliteStore, String) {
+        let root = std::env::temp_dir().join(format!(
+            "semon-header-repair-{name}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let source = root.join("source.jsonl");
+        fs::write(&source, b"").unwrap();
+        let path = source.to_string_lossy().into_owned();
+        let captured = Ledger {
+            stat: Stat::of(&source).unwrap(),
+            offset: 0,
+            prefix: sha2::Sha256::digest(b"").into(),
+            tail: sha2::Sha256::digest(b"").into(),
+        };
+        let (mut store, _) = SqliteStore::attempt(&root.join("index.sqlite3"), None)
+            .unwrap_or_else(|error| panic!("{error}"));
+        assert_eq!(
+            store
+                .write_one(&path, None, None, &captured, &FileIndex::default())
+                .unwrap(),
+            Outcome::Written
+        );
+        // This fixture isolates repair admission, not native publication or
+        // readiness. It never manufactures a complete Catalog observation.
+        store.connection.execute("INSERT INTO session_catalog(session_key,last_ms,harness,metadata) VALUES('old',0,'codex','{}')",[]).unwrap();
+        store.connection.execute("INSERT INTO session_catalog_sources(session_key,harness,native_id,source_path) VALUES('old','codex','old',?1)",[&path]).unwrap();
+        store.connection.execute("INSERT INTO session_slot_projections(session_key,generation,source_generation,version,total) VALUES('old','original',NULL,?1,0)",[crate::slot_projection::VERSION-1]).unwrap();
+        let tx = store.connection.unchecked_transaction().unwrap();
+        invalidate_catalog_source(&tx, &path, "removed").unwrap();
+        tx.commit().unwrap();
+        let pending = claim(&store.connection, &path).unwrap();
+        assert!(!store.qualified_catalog().unwrap());
+        assert_eq!(claim(&store.connection, &path).unwrap(), pending);
+        assert_eq!(
+            store
+                .semantic_begin(std::slice::from_ref(&path), "runtime")
+                .unwrap(),
+            Outcome::Written
+        );
+        // Install the same normalized indexed observation that semantic_record
+        // captures. ACK below uses the actual source/ledger/physical fences.
+        store.connection.execute("UPDATE catalog_semantic_sources SET index_done=1,claim=?2,ledger=?3,(dev,ino,size,mtime_ns,ctime_ns,resume_at,head_sha256,tail_sha256)=(SELECT dev,ino,size,mtime_ns,ctime_ns,resume_at,head_sha256,tail_sha256 FROM files WHERE path=?1) WHERE source_path=?1",params![path,claim(&store.connection,&path).unwrap(),ledger(&store.connection,&path).unwrap()]).unwrap();
+        (root, store, path)
+    }
+
+    fn acknowledge_repair_source(store: &SqliteStore, path: &str) {
+        let tx = store.connection.unchecked_transaction().unwrap();
+        acknowledge_source(&tx, path).unwrap();
+        tx.commit().unwrap();
+        let observed: (Option<i64>, bool) = store
+            .connection
+            .query_row(
+                "SELECT claim,ack_done FROM catalog_semantic_sources WHERE source_path=?1",
+                [path],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(observed, (None, true));
+        assert_eq!(claim(&store.connection, path).unwrap(), None);
+    }
+
+    #[test]
+    fn unsupported_header_repair_preserves_pending_and_live_ack_observations() {
+        let (root, mut store, path) = header_repair_store("ack");
+        let observed = revision(&store.connection).unwrap();
+        for _ in 0..3 {
+            assert!(!store.qualified_catalog().unwrap());
+            assert_eq!(revision(&store.connection).unwrap(), observed);
+            assert_eq!(claim(&store.connection, &path).unwrap(), Some(observed));
+            assert_eq!(
+                store
+                    .connection
+                    .query_row(
+                        "SELECT reason FROM session_catalog_invalidations WHERE source_path=?1",
+                        [&path],
+                        |row| row.get::<_, String>(0)
+                    )
+                    .unwrap(),
+                "removed"
+            );
+        }
+        acknowledge_repair_source(&store, &path);
+        for _ in 0..3 {
+            assert!(!store.qualified_catalog().unwrap());
+            assert_eq!(revision(&store.connection).unwrap(), observed);
+            assert_eq!(claim(&store.connection, &path).unwrap(), None);
+        }
+        let old_epoch: i64 = store
+            .connection
+            .query_row("SELECT epoch FROM catalog_semantic_stage", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        // Ordinary source observations remain independent of migration repair.
+        let tx = store.connection.unchecked_transaction().unwrap();
+        invalidate_catalog_source(&tx, &path, "changed").unwrap();
+        tx.commit().unwrap();
+        assert_eq!(claim(&store.connection, &path).unwrap(), Some(observed + 1));
+        assert!(!store.qualified_catalog().unwrap());
+        assert_eq!(revision(&store.connection).unwrap(), observed + 1);
+        let replay = store.semantic_next(64).unwrap().unwrap();
+        assert!(
+            replay.epoch > old_epoch,
+            "fresh observation did not reset the stage"
+        );
+        let header: (String, Option<String>, i64) = store.connection.query_row("SELECT generation,source_generation,version FROM session_slot_projections WHERE session_key='old'",[],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?))).unwrap();
+        assert_eq!(
+            header,
+            (
+                "original".into(),
+                None,
+                i64::from(crate::slot_projection::VERSION - 1)
+            )
+        );
+        drop(store);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn unsupported_header_repair_rejects_each_changed_normalized_file_witness() {
+        for assignment in [
+            "dev=dev+1",
+            "ino=ino+1",
+            "size=size+1",
+            "mtime_ns=zeroblob(16)",
+            "ctime_ns=NULL",
+            "resume_at=resume_at+1",
+            "head_sha256=zeroblob(32)",
+            "tail_sha256=zeroblob(32)",
+        ] {
+            let (root, store, path) = header_repair_store("witness");
+            acknowledge_repair_source(&store, &path);
+            let observed = revision(&store.connection).unwrap();
+            store
+                .connection
+                .execute(
+                    &format!("UPDATE files SET {assignment} WHERE path=?1"),
+                    [&path],
+                )
+                .unwrap();
+            assert!(
+                !owns_header_repair(&store.connection, &path).unwrap(),
+                "{assignment} was ignored"
+            );
+            assert!(!store.qualified_catalog().unwrap());
+            assert_eq!(claim(&store.connection, &path).unwrap(), Some(observed + 1));
+            assert!(!store.qualified_catalog().unwrap());
+            assert_eq!(revision(&store.connection).unwrap(), observed + 1);
+            drop(store);
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn unsupported_header_repair_requires_live_indexed_stage_ownership() {
+        for (transition, remaining) in [
+            ("UPDATE catalog_semantic_sources SET index_done=0", 1),
+            ("UPDATE catalog_semantic_sources SET claim=123456", 1),
+            ("UPDATE catalog_semantic_stage SET resetting=1", 1),
+            ("DELETE FROM catalog_semantic_sources", 0),
+            (
+                "DELETE FROM catalog_semantic_stage; INSERT INTO meta(key,value) VALUES('catalog_semantic_gc','1')",
+                1,
+            ),
+        ] {
+            let (root, store, path) = header_repair_store("ownership");
+            acknowledge_repair_source(&store, &path);
+            let observed = revision(&store.connection).unwrap();
+            store.connection.execute_batch(transition).unwrap();
+            assert_eq!(
+                store
+                    .connection
+                    .query_row(
+                        "SELECT COUNT(*) FROM catalog_semantic_sources WHERE source_path=?1",
+                        [&path],
+                        |row| row.get::<_, i64>(0)
+                    )
+                    .unwrap(),
+                remaining
+            );
+            assert!(
+                !owns_header_repair(&store.connection, &path).unwrap(),
+                "{transition} lent repair ownership"
+            );
+            assert!(!store.qualified_catalog().unwrap());
+            assert_eq!(claim(&store.connection, &path).unwrap(), Some(observed + 1));
+            assert!(!store.qualified_catalog().unwrap());
+            assert_eq!(revision(&store.connection).unwrap(), observed + 1);
+            drop(store);
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
 
     #[test]
     fn reserved_native_key_cursor_bounds_probes_and_selectors_reuse_qualified_result() {

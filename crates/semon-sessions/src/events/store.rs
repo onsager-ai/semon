@@ -2537,7 +2537,9 @@ impl IndexStore for SqliteStore {
                 .map_err(failure)?
         };
         for path in repairs {
-            invalidate_catalog_source(&tx, &path, "changed").map_err(failure)?;
+            if !semantic_stage::owns_header_repair(&tx, &path).map_err(failure)? {
+                invalidate_catalog_source(&tx, &path, "changed").map_err(failure)?;
+            }
         }
         tx.commit().map_err(failure)?;
 
