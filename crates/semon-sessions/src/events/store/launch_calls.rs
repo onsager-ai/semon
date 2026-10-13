@@ -139,37 +139,92 @@ pub(super) fn write(
     ledger: &Ledger,
     index: Option<&Index>,
 ) -> rusqlite::Result<()> {
-    let Some(index) = index.filter(|index| index.valid(ledger)) else {
-        return clear(transaction, path);
+    write_measured(
+        transaction,
+        path,
+        ledger,
+        index,
+        &mut crate::native_timing::Measurements::default(),
+    )
+}
+
+pub(super) fn write_measured(
+    transaction: &Transaction<'_>,
+    path: &str,
+    ledger: &Ledger,
+    index: Option<&Index>,
+    measurements: &mut crate::native_timing::Measurements,
+) -> rusqlite::Result<()> {
+    let started = measurements.start();
+    let index = index.filter(|index| index.valid(ledger));
+    measurements.record("launch_validation", started, 1);
+    let Some(index) = index else {
+        let started = measurements.start();
+        let result = clear(transaction, path);
+        measurements.record("launch_clear", started, 1);
+        return result;
     };
+    let started = measurements.start();
     let prefix = prefix(path);
+    measurements.record("launch_prefix", started, 1);
+    let started = measurements.start();
     let mut put = transaction.prepare_cached("INSERT INTO meta(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value WHERE value!=excluded.value")?;
+    measurements.record("launch_prepare", started, 1);
+    let started = measurements.start();
     let calls: Vec<_> = index.complete.iter().chain(&index.eof).cloned().collect();
+    measurements.record("launch_call_clone", started, 1);
+    measurements.count("launch_calls", calls.len());
     for (page, calls) in calls.chunks(PAGE).enumerate() {
+        let started = measurements.start();
         let encoded = json(&Page {
             version: 1,
             index: page,
             calls: calls.to_vec(),
         })?;
+        measurements.record("launch_page_serialization", started, 1);
+        measurements.count("launch_page_bytes", encoded.len());
         if encoded.len() > NATIVE_METADATA_MAX {
-            return clear(transaction, path);
+            let started = measurements.start();
+            let result = clear(transaction, path);
+            measurements.record("launch_clear", started, 1);
+            return result;
         }
+        let started = measurements.start();
         put.execute(params![format!("{prefix}{page:010}"), encoded])?;
+        measurements.record("launch_page_sql", started, 1);
     }
+    let started = measurements.start();
     let pages = calls.len().div_ceil(PAGE);
     transaction.execute("DELETE FROM meta WHERE key>=?1 AND key<?2 AND key!=?3 AND (key>=?4 OR length(key)!=?5 OR substr(key,?6) GLOB '*[^0-9]*')", params![&prefix, format!("{prefix}~"), format!("{prefix}header"), format!("{prefix}{pages:010}"), (prefix.len()+10) as i64, (prefix.len()+1) as i64])?;
-    let encoded = json(&Header {
+    measurements.record("launch_cleanup_sql", started, 1);
+    let header = Header {
         version: 1,
         parser_version: CACHE_VERSION,
-        ledger: header_ledger(ledger),
+        ledger: {
+            let started = measurements.start();
+            let value = header_ledger(ledger);
+            measurements.record("launch_header_ledger", started, 1);
+            value
+        },
         complete: index.complete.len(),
         count: calls.len(),
         eof_record: index.eof_record.clone(),
         complete_bytes: index.complete_bytes,
         eof_bytes: index.eof_bytes,
-        fingerprint: fingerprint(index)?,
-    })?;
+        fingerprint: {
+            let started = measurements.start();
+            let value = fingerprint(index)?;
+            measurements.record("launch_header_fingerprint", started, 1);
+            value
+        },
+    };
+    let started = measurements.start();
+    let encoded = json(&header)?;
+    measurements.record("launch_header_serialization", started, 1);
+    measurements.count("launch_header_bytes", encoded.len());
+    let started = measurements.start();
     put.execute(params![format!("{prefix}header"), encoded])?;
+    measurements.record("launch_header_sql", started, 1);
     Ok(())
 }
 

@@ -2593,6 +2593,8 @@ impl IndexStore for SqliteStore {
         let timing = crate::native_timing::enabled();
         let mut measurements = crate::native_timing::Measurements::new(timing);
         let mut row_measurements = crate::native_timing::Measurements::new(timing);
+        let mut write_activity =
+            crate::native_timing::WriteActivity::new(timing, &self.path, "index_initial");
         let started = measurements.start();
         let transaction = self
             .connection
@@ -2612,6 +2614,7 @@ impl IndexStore for SqliteStore {
             }
         }
         measurements.record("fences", started, files.len());
+        write_activity.stage("fences");
         let started = measurements.start();
         for (path, ledger, index) in files {
             write_index_changes_measured(
@@ -2626,9 +2629,11 @@ impl IndexStore for SqliteStore {
             .map_err(failure)?;
         }
         measurements.record("write_index_changes", started, files.len());
+        write_activity.stage("rows");
         let started = measurements.start();
         transaction.commit().map_err(failure)?;
         measurements.record("commit", started, 1);
+        write_activity.stage("commit");
         if timing {
             measurements.emit(
                 &crate::native_timing::id(&self.path),
@@ -2948,8 +2953,10 @@ impl SqliteStore {
         let rows = publication.rows;
         let producer =
             crate::native_timing::enabled().then(|| crate::native_timing::id(&self.path));
+        let mut write_activity =
+            crate::native_timing::WriteActivity::new(producer.is_some(), &self.path, "catalog");
         let mut stage_started = std::time::Instant::now();
-        let mut stage = |name: &str| {
+        let mut stage = |name: &'static str| {
             if let Some(producer) = &producer {
                 let now = std::time::Instant::now();
                 eprintln!(
@@ -2957,7 +2964,8 @@ impl SqliteStore {
                     rows.len(),
                     now.duration_since(stage_started).as_millis()
                 );
-                stage_started = now;
+                write_activity.stage(name);
+                stage_started = std::time::Instant::now();
             }
         };
         if claims.is_some_and(|claims| claims.len() > 64) || (claims.is_some() && rows.len() > 64) {
@@ -5283,13 +5291,33 @@ fn write_file(
     write_claude_sidecar(transaction, path, ledger, claude_sidecar.as_ref())?;
     measurements.record("proof_sidecar", started, 1);
     let started = measurements.start();
-    chunk_proofs::write(transaction, path, ledger, source_chunks.as_deref())?;
+    if started.is_some() {
+        chunk_proofs::write_measured(
+            transaction,
+            path,
+            ledger,
+            source_chunks.as_deref(),
+            measurements,
+        )?;
+    } else {
+        chunk_proofs::write(transaction, path, ledger, source_chunks.as_deref())?;
+    }
     measurements.record("proof_chunks", started, 1);
     let started = measurements.start();
     write_parent_marker(transaction, path, ledger, marker_index.as_ref())?;
     measurements.record("proof_parent", started, 1);
     let started = measurements.start();
-    launch_calls::write(transaction, path, ledger, handoff_index.as_ref())?;
+    if started.is_some() {
+        launch_calls::write_measured(
+            transaction,
+            path,
+            ledger,
+            handoff_index.as_ref(),
+            measurements,
+        )?;
+    } else {
+        launch_calls::write(transaction, path, ledger, handoff_index.as_ref())?;
+    }
     measurements.record("proof_launch", started, 1);
     let started = measurements.start();
     let rate_limits = rate_limits.as_ref().map(json).transpose()?;
