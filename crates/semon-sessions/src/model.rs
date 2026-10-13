@@ -7201,7 +7201,7 @@ fn build_sources_inner(
     let runtime_observations = measured!(
         "runtime_observations",
         1,
-        crate::native_evidence::RuntimeObservations::new(options)
+        crate::native_evidence::RuntimeObservations::new_measured(options, &mut measurements)
     );
     let catalog_base = measured!("catalog_base", 1, cache.session_catalog_generation());
     let mut timings = Vec::with_capacity(18);

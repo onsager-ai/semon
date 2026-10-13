@@ -18,6 +18,13 @@ pub(crate) struct RuntimeObservations {
 }
 impl RuntimeObservations {
     pub(crate) fn new(options: &Options) -> Self {
+        Self::new_measured(options, &mut crate::native_timing::Measurements::default())
+    }
+    pub(crate) fn new_measured(
+        options: &Options,
+        measurements: &mut crate::native_timing::Measurements,
+    ) -> Self {
+        let started = measurements.start();
         let local = options.facts.is_none();
         let facts = options
             .facts
@@ -39,6 +46,8 @@ impl RuntimeObservations {
                 }
                 Some(facts)
             });
+        measurements.record("runtime_ctor_facts", started, 1);
+        let started = measurements.start();
         let mut pids = BTreeMap::<String, Vec<_>>::new();
         let mut names = BTreeMap::new();
         let mut runs = BTreeMap::<String, Vec<_>>::new();
@@ -58,12 +67,23 @@ impl RuntimeObservations {
                     .push(index);
             }
         }
+        measurements.record("runtime_ctor_indices", started, 1);
+        let started = measurements.start();
         let connection = Connection::open_with_flags(
             EventCache::path(&options.cache),
             OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
         )
         .ok();
+        measurements.record("runtime_ctor_connection", started, 1);
+        let started = measurements.start();
         let preserved = connection.as_ref().and_then(|db| db.query_row("SELECT (SELECT value FROM meta WHERE key='catalog_legacy_runtime_anchor'),(SELECT value FROM meta WHERE key='catalog_legacy_runtime_semantics')",[],|row|Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?))).ok());
+        measurements.record("runtime_ctor_preserved", started, 1);
+        let started = measurements.start();
+        let fallback = query_runtime_generation(options).ok();
+        measurements.record("runtime_ctor_fallback", started, 1);
+        let started = measurements.start();
+        let legacy = legacy_runtime_generation(options).ok();
+        measurements.record("runtime_ctor_legacy", started, 1);
         Self {
             facts,
             local,
@@ -71,8 +91,8 @@ impl RuntimeObservations {
             names,
             runs,
             connection,
-            fallback: query_runtime_generation(options).ok(),
-            legacy: legacy_runtime_generation(options).ok(),
+            fallback,
+            legacy,
             preserved,
         }
     }
