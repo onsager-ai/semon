@@ -56,7 +56,7 @@ The answer is 200 when it is stored. A receiver that hasn't had facts for a whil
 - **Rewrites.** If the file is now shorter than what was sent, or its first 4 KiB changed, the client sends it again from 0 with `replace`.
 - **409.** When the receiver's copy is the client's redacted file up to a line boundary (same length prefix, same head hash), the client resumes from the receiver's length. Otherwise it sends the file again with `replace`.
 - **Deleted files** are not deleted on the receiver.
-- **Cadence.** One pass and one facts post, then exit. With `--watch`, a pass every 2 s and facts every 10 s.
+- **Cadence.** One complete pass and one facts post, then exit. With `--watch`, each sweep sends at most four complete redaction batches before waiting 2 s and discovering fresh targets. Recent/live batches and history retain the scheduler's three-to-one preference; a long line remains one indivisible redaction batch. Full facts are posted at most every 10 s, after a complete sweep only; a bounded partial sweep never commits a complete source inventory. Optional status heartbeats continue during backfill.
 - **Token.** It is read from `--token-file`, which must be mode 0600; the client refuses anything else. The token is sent only in the `Authorization` header.
 
 ## Sealed copies on the receiver

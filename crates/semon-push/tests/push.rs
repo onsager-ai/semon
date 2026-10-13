@@ -1311,16 +1311,58 @@ fn default_watch_syncs_live_logs_before_archived_backfill_and_resumes_both() {
     assert!(!archived_bytes.is_empty());
     assert!(archived_bytes.len() < history.len());
     assert_eq!(archived_bytes, redacted(&history)[..archived_bytes.len()]);
-    assert_eq!(
-        saved["files"][archive]["sent"].as_u64().unwrap(),
-        archived_bytes.len() as u64
-    );
+    assert!(saved["files"][archive]["sent"].as_u64().unwrap_or(0) <= archived_bytes.len() as u64);
     {
         let received = receiver.state.lock().unwrap();
         assert_eq!(received.data_batch_order[0], active);
         assert!(received.largest_append <= 256 * 1024);
     }
     assert_resumes(&home, &receiver, &[(archive, history), (active, live)]);
+}
+
+#[test]
+fn watch_revisits_growing_logs_before_archives_finish_without_committing_partial_inventory() {
+    let home = Home::new();
+    let receiver = receiver();
+    let archive = "codex/archived_sessions/old.jsonl";
+    let active = "codex/sessions/current.jsonl";
+    let history = line(&"old".repeat(4096)).repeat(400);
+    let archived = home.write(archive, &history);
+    fs::File::open(archived)
+        .unwrap()
+        .set_times(fs::FileTimes::new().set_modified(std::time::UNIX_EPOCH))
+        .unwrap();
+    let live = line("current turn");
+    let source = home.write(active, &live);
+    let options = home.push_options(&receiver.url);
+    let stop = Stop::new();
+    {
+        let mut received = receiver.state.lock().unwrap();
+        // Grow the live file after every accepted request while history
+        // remains far larger than a bounded watch sweep.
+        received.grow_source = Some(source.clone());
+        received.stop_after = Some((5, stop.clone()));
+    }
+    let push = watch_in_background(&options, &stop);
+    wait_for("a second live upload during backfill", || {
+        receiver.state.lock().unwrap().appends >= 5
+    });
+    stop_and_join(&stop, push).unwrap();
+    assert_stopped_cleanly(&options);
+    assert!(copy(&receiver, active).len() > live.len());
+    assert!(copy(&receiver, archive).len() < history.len());
+    {
+        let mut received = receiver.state.lock().unwrap();
+        assert_eq!(received.data_batch_order[0], active);
+        assert_eq!(received.data_batch_order[4], active);
+        assert!(
+            received.facts.is_none(),
+            "partial inventory is not committed"
+        );
+        received.grow_source = None;
+    }
+    let latest = fs::read_to_string(source).unwrap();
+    assert_resumes(&home, &receiver, &[(archive, history), (active, latest)]);
 }
 
 #[test]
