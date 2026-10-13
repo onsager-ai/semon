@@ -198,8 +198,7 @@ fn scoped_publication_rejects_runtime_change_after_initial_observation() {
             .expect("Sources must reject the changed runtime")
         } else {
             observe_catalog(&options, &mut cache, &mut false, &mut Texts::default(), NOW)
-                .err()
-                .expect("Catalog must reject the changed runtime")
+                .expect_err("Catalog must reject the changed runtime")
         };
         assert_eq!(
             error.to_string(),
