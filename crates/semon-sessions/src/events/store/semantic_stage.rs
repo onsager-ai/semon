@@ -633,12 +633,14 @@ fn event_page(c: &Connection) -> rusqlite::Result<bool> {
             "SELECT {EVENT_COLUMNS} FROM events WHERE file_id=?1 AND extra=0 AND seq>?2 AND (k IN ('xsm','agm','tn') OR k='tool' AND n IN ('SendMessage','Task','Agent')) ORDER BY seq LIMIT ?3"
         );
         let mut q = c.prepare(&sql)?;
-        let mut rows = q.query(params![file, after, budget])?;
+        let mut rows = q.query(params![file, after, budget as i64])?;
         let mut end = after;
         let mut stopped = false;
         while let Some(row) = rows.next()? {
             let (_, seq, event) = read_event(row)?;
-            let occurrence:usize=c.query_row("SELECT COUNT(*) FROM events WHERE file_id=?1 AND extra=0 AND o=?2 AND b=?3 AND k=?4 AND seq<?5",params![file,event.o,event.b,tag(&event.k)?,i64::try_from(seq).map_err(|_|rusqlite::Error::InvalidQuery)?],|r|r.get(0))?;
+            let occurrence:i64=c.query_row("SELECT COUNT(*) FROM events WHERE file_id=?1 AND extra=0 AND o=?2 AND b=?3 AND k=?4 AND seq<?5",params![file,int(event.o),event.b,tag(&event.k)?,i64::try_from(seq).map_err(|_|rusqlite::Error::InvalidQuery)?],|r|r.get(0))?;
+            let occurrence =
+                usize::try_from(occurrence).map_err(|_| rusqlite::Error::InvalidQuery)?;
             let native = crate::model::relation_stage::NativeEvent {
                 owner: path.clone(),
                 at: crate::model::relation_stage::Location {
@@ -738,7 +740,7 @@ fn gc_page(c: &Connection) -> rusqlite::Result<Option<usize>> {
         if budget == 0 {
             return Ok(None);
         }
-        let count=c.execute(&format!("DELETE FROM {table} WHERE ({key}) IN (SELECT {key} FROM {table} ORDER BY {key} LIMIT ?1)"),[budget])?;
+        let count=c.execute(&format!("DELETE FROM {table} WHERE ({key}) IN (SELECT {key} FROM {table} ORDER BY {key} LIMIT ?1)"),[budget as i64])?;
         budget -= count;
     }
     Ok(Some(budget))
@@ -760,7 +762,7 @@ fn reset_page(c: &Connection) -> rusqlite::Result<bool> {
     let after: String = c.query_row("SELECT reset_after FROM catalog_semantic_stage", [], |r| {
         r.get(0)
     })?;
-    let paths=c.prepare("SELECT source_path FROM catalog_semantic_sources WHERE source_path>?1 ORDER BY source_path LIMIT ?2")?.query_map(params![after,budget],|r|r.get::<_,String>(0))?.collect::<Result<Vec<_>,_>>()?;
+    let paths=c.prepare("SELECT source_path FROM catalog_semantic_sources WHERE source_path>?1 ORDER BY source_path LIMIT ?2")?.query_map(params![after,budget as i64],|r|r.get::<_,String>(0))?.collect::<Result<Vec<_>,_>>()?;
     for path in &paths {
         c.execute("UPDATE catalog_semantic_sources SET claim=NULL,ledger=NULL,withdrawal=NULL,index_done=0,event_after=-1,events_done=0,identity_done=0,relation_done=0,publication_done=0,ack_done=0,relation_after='' WHERE source_path=?1",[path])?;
     }
@@ -835,7 +837,7 @@ fn bounded<T: DeserializeOwned>(text: Option<String>, used: &mut usize) -> rusql
 fn reduce(c: &Connection) -> rusqlite::Result<bool> {
     let mut budget = 64usize;
     while budget > 0 {
-        let parents=c.prepare("SELECT session_key FROM catalog_semantic_endpoints WHERE parent_resolved=0 ORDER BY parent_native,session_key LIMIT ?1")?.query_map([budget],|r|r.get::<_,String>(0))?.collect::<Result<Vec<_>,_>>()?;
+        let parents=c.prepare("SELECT session_key FROM catalog_semantic_endpoints WHERE parent_resolved=0 ORDER BY parent_native,session_key LIMIT ?1")?.query_map([budget as i64],|r|r.get::<_,String>(0))?.collect::<Result<Vec<_>,_>>()?;
         if !parents.is_empty() {
             budget -= parents.len();
             for key in parents {
@@ -850,7 +852,7 @@ fn reduce(c: &Connection) -> rusqlite::Result<bool> {
             }
             continue;
         }
-        let roots=c.prepare("SELECT e.session_key FROM catalog_semantic_endpoints e WHERE e.root_key IS NULL AND EXISTS(SELECT 1 FROM catalog_semantic_endpoints p WHERE p.session_key=e.parent_key AND p.root_key IS NOT NULL) ORDER BY e.session_key LIMIT ?1")?.query_map([budget],|r|r.get::<_,String>(0))?.collect::<Result<Vec<_>,_>>()?;
+        let roots=c.prepare("SELECT e.session_key FROM catalog_semantic_endpoints e WHERE e.root_key IS NULL AND EXISTS(SELECT 1 FROM catalog_semantic_endpoints p WHERE p.session_key=e.parent_key AND p.root_key IS NOT NULL) ORDER BY e.session_key LIMIT ?1")?.query_map([budget as i64],|r|r.get::<_,String>(0))?.collect::<Result<Vec<_>,_>>()?;
         if !roots.is_empty() {
             budget -= roots.len();
             for key in roots {
@@ -866,7 +868,7 @@ fn reduce(c: &Connection) -> rusqlite::Result<bool> {
         )? {
             return Err(rusqlite::Error::InvalidQuery);
         }
-        let costs=c.prepare("SELECT session_key FROM catalog_semantic_endpoints WHERE cost_done=0 AND children_pending=0 ORDER BY session_key LIMIT ?1")?.query_map([budget],|r|r.get::<_,String>(0))?.collect::<Result<Vec<_>,_>>()?;
+        let costs=c.prepare("SELECT session_key FROM catalog_semantic_endpoints WHERE cost_done=0 AND children_pending=0 ORDER BY session_key LIMIT ?1")?.query_map([budget as i64],|r|r.get::<_,String>(0))?.collect::<Result<Vec<_>,_>>()?;
         if costs.is_empty() {
             return if c.query_row(
                 "SELECT EXISTS(SELECT 1 FROM catalog_semantic_endpoints WHERE cost_done=0)",
@@ -1114,7 +1116,7 @@ impl SqliteStore {
         }
         if !active(&tx).map_err(failure)? && gc_pending(&tx).map_err(failure)? {
             if let Some(budget) = gc_page(&tx).map_err(failure)? {
-                let removed=tx.execute("DELETE FROM catalog_semantic_sources WHERE source_path IN (SELECT source_path FROM catalog_semantic_sources ORDER BY source_path LIMIT ?1)",[budget]).map_err(failure)?;
+                let removed=tx.execute("DELETE FROM catalog_semantic_sources WHERE source_path IN (SELECT source_path FROM catalog_semantic_sources ORDER BY source_path LIMIT ?1)",[budget as i64]).map_err(failure)?;
                 let remains: bool = tx
                     .query_row(
                         "SELECT EXISTS(SELECT 1 FROM catalog_semantic_sources)",
@@ -1173,7 +1175,7 @@ impl SqliteStore {
         if !active(&tx).map_err(failure)? {
             if gc_pending(&tx).map_err(failure)? {
                 if let Some(budget) = gc_page(&tx).map_err(failure)? {
-                    tx.execute("DELETE FROM catalog_semantic_sources WHERE source_path IN (SELECT source_path FROM catalog_semantic_sources ORDER BY source_path LIMIT ?1)",[budget]).map_err(failure)?;
+                    tx.execute("DELETE FROM catalog_semantic_sources WHERE source_path IN (SELECT source_path FROM catalog_semantic_sources ORDER BY source_path LIMIT ?1)",[budget as i64]).map_err(failure)?;
                     let remains: bool = tx
                         .query_row(
                             "SELECT EXISTS(SELECT 1 FROM catalog_semantic_sources)",
@@ -2203,7 +2205,7 @@ mod tests {
             store
                 .connection
                 .query_row("SELECT count(*) FROM catalog_semantic_keys", [], |r| r
-                    .get::<_, usize>(0))
+                    .get::<_, i64>(0))
                 .unwrap(),
             2
         );
