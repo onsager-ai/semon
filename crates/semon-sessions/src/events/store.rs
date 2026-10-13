@@ -340,6 +340,8 @@ struct EventState {
     poll_target: Option<String>,
     #[serde(default)]
     result_source: bool,
+    #[serde(default, skip_serializing_if = "super::is_false")]
+    native_direct_call: bool,
 }
 
 const SIGNAL_COLUMNS: &str = "seq, k, o, t, at, n, v";
@@ -3520,9 +3522,14 @@ fn read_event(row: &Row<'_>) -> rusqlite::Result<(bool, usize, Event)> {
         .get::<_, Option<String>>(12)?
         .map(|text| event_state(12, &text))
         .transpose()?;
-    let (y, poll_target, result_source) = match state {
-        Some(state) => (state.yielded, state.poll_target, state.result_source),
-        None => (None, None, false),
+    let (y, poll_target, result_source, native_direct_call) = match state {
+        Some(state) => (
+            state.yielded,
+            state.poll_target,
+            state.result_source,
+            state.native_direct_call,
+        ),
+        None => (None, None, false, false),
     };
     let r = if row.get::<_, bool>(14)? {
         Some(Reply {
@@ -3553,6 +3560,7 @@ fn read_event(row: &Row<'_>) -> rusqlite::Result<(bool, usize, Event)> {
         id: row.get(6)?,
         n: row.get(7)?,
         code_mode: row.get(8)?,
+        native_direct_call,
         code_mode_open: row.get(9)?,
         parent: row.get::<_, Option<i64>>(10)?.map(seq_of),
         script: row.get(11)?,
@@ -3910,6 +3918,7 @@ fn put_event(
         id,
         n,
         code_mode,
+        native_direct_call,
         code_mode_open,
         parent,
         script,
@@ -3922,12 +3931,13 @@ fn put_event(
         peer,
         u,
     } = event;
-    let y = if y.is_some() || poll_target.is_some() || *result_source {
+    let y = if y.is_some() || poll_target.is_some() || *result_source || *native_direct_call {
         Some(json(&EventState {
             version: 1,
             yielded: y.as_ref().map(|yielded| Box::new((**yielded).clone())),
             poll_target: poll_target.as_ref().cloned(),
             result_source: *result_source,
+            native_direct_call: *native_direct_call,
         })?)
     } else {
         None
@@ -4441,6 +4451,7 @@ mod tests {
                     n: Some("Bash".to_owned()),
                     code_mode: true,
                     code_mode_open: true,
+                    native_direct_call: true,
                     parent: Some(7),
                     script: STDIN | SENDS,
                     poll_target: Some("26789".to_owned()),
