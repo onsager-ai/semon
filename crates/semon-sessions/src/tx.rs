@@ -664,6 +664,18 @@ fn clip_within(text: &str, limit: usize) -> (String, bool) {
     (format!("{}{}", text[..end].trim_end(), marker), true)
 }
 
+fn selected_cut_metadata_bytes(cut: &Cut) -> usize {
+    "codex".len()
+        + cut
+            .parts
+            .iter()
+            .map(|part| match part {
+                Part::Gap(gap) => gap.unit.len(),
+                Part::Text(_) => 0,
+            })
+            .sum::<usize>()
+}
+
 fn selected_cut(cut: &Cut, limit: usize) -> (Value, bool) {
     let mut value = json!({"by": "codex"});
     if let Some(tokens) = cut.original_tokens {
@@ -672,15 +684,7 @@ fn selected_cut(cut: &Cut, limit: usize) -> (Value, bool) {
     if let Some(lines) = cut.lines {
         value["lines"] = json!(lines);
     }
-    let gap_bytes = cut
-        .parts
-        .iter()
-        .map(|part| match part {
-            Part::Gap(gap) => gap.unit.len(),
-            Part::Text(_) => 0,
-        })
-        .sum::<usize>();
-    let mut remaining = limit.saturating_sub(string_value_bytes(&value) + gap_bytes);
+    let mut remaining = limit.saturating_sub(selected_cut_metadata_bytes(cut));
     let mut truncated = false;
     let mut texts_left = cut
         .parts
@@ -715,7 +719,10 @@ fn selected_cut(cut: &Cut, limit: usize) -> (Value, bool) {
 
 fn selected_text_value(text: &str, source: Source, cut_before: bool, limit: usize) -> Value {
     let (plain, cut) = split_cut(text, source);
-    let (shown, mut truncated) = clip_within(&plain, limit);
+    // Preserve native gap evidence while reserving its string metadata inside
+    // the same budget as flat text and duplicated structured text parts.
+    let flat_limit = limit.saturating_sub(cut.as_ref().map_or(0, selected_cut_metadata_bytes));
+    let (shown, mut truncated) = clip_within(&plain, flat_limit);
     let mut fields = json!({"text": shown});
     if let Some(cut) = cut {
         let remaining = limit.saturating_sub(string_value_bytes(&fields));
@@ -5809,6 +5816,35 @@ mod tests {
                 {"text":"head"}, {"gap":{"n":9,"unit":"tokens"}}, {"text":"tail"}
             ])
         );
+    }
+
+    #[test]
+    fn selected_large_native_cut_reserves_metadata_in_ascii_and_utf8_budget() {
+        for unit in ["a", "é"] {
+            let side = unit.repeat(SELECTED_OUTPUT_MAX / unit.len());
+            let native = format!(
+                "Warning: truncated output (original token count: 50000)\nTotal output lines: 900\n\n{side}…9 tokens truncated…{side}"
+            );
+            let selected = selected_text_value(&native, Source::Model, false, SELECTED_OUTPUT_MAX);
+            let flat = selected["text"].as_str().unwrap();
+            assert!(flat.ends_with('…'));
+            assert!(flat.len() < SELECTED_OUTPUT_MAX);
+            assert!(string_value_bytes(&selected) <= SELECTED_OUTPUT_MAX);
+            assert_eq!(selected["truncated"], true);
+            assert_eq!(selected["cut"]["by"], "codex");
+            assert_eq!(selected["cut"]["original_tokens"], 50000);
+            assert_eq!(
+                selected["cut"]["parts"][1],
+                json!({"gap":{"n":9,"unit":"tokens"}})
+            );
+            let parts = selected["cut"]["parts"].as_array().unwrap();
+            let part_bytes = parts
+                .iter()
+                .filter_map(|part| part["text"].as_str())
+                .map(str::len)
+                .sum::<usize>();
+            assert!(flat.len() + part_bytes <= SELECTED_OUTPUT_MAX);
+        }
     }
 
     /// Prints every session's last page of a fixture home written by
