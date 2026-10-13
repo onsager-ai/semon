@@ -3322,14 +3322,22 @@ mod tests {
             .clone();
         let slot = original["slot"].as_u64().unwrap();
         let db = rusqlite::Connection::open(EventCache::path(&fixture.options.cache)).unwrap();
+        // This publication has a current projection. Retained-history reads
+        // may select its qualified fallback without a separate history row.
+        assert_eq!(
+            page["projection"]["version"],
+            crate::slot_projection::VERSION
+        );
         let saved: String = db
             .query_row(
-                "SELECT metadata FROM session_history_slots WHERE session_key='parser-cases' AND slot=?1",
-                [slot as i64],
+                "SELECT s.metadata FROM session_slots s JOIN session_slot_projections p USING(session_key) WHERE s.session_key='parser-cases' AND s.slot=?1 AND p.version=?2 AND p.source_generation IS NOT NULL",
+                rusqlite::params![slot as i64, crate::slot_projection::VERSION],
                 |row| row.get(0),
             )
             .unwrap();
         let saved: crate::slot_projection::SavedSlot = serde_json::from_str(&saved).unwrap();
+        assert_eq!(saved.offset, call_offset);
+        assert_eq!(saved.source_paths(), vec![path.as_path()]);
         assert!(matches!(
             &saved.recipe,
             crate::slot_projection::Recipe::Tool {

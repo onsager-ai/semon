@@ -1135,7 +1135,8 @@ pub(crate) fn selected_output(lines: &mut Lines, slot: &Slot) -> Option<Value> {
         reply: Some(reply), ..
     } = &slot.kind
         && let Some(record) = lines.get(&file.path, reply.o)
-        && field(record.get("payload")?, "type") == Some("custom_tool_call_output")
+        && let Some(payload) = record.get("payload")
+        && field(payload, "type") == Some("custom_tool_call_output")
         && let Some(output) = record.pointer("/payload/output")
         && let Some((blocks, truncated, omitted)) = selected_output_blocks(
             output,
@@ -5322,11 +5323,11 @@ mod tests {
                 assert_eq!(steps[0]["ok"], true, "{sid}");
             }
             assert_eq!(steps[0]["out"], out, "{sid}");
-            assert_eq!(steps[1]["ok"], true, "{sid}");
             if sid == "reused" {
                 // No independent nested native identity exists for date.
                 // Its distinct source/result stays on the outer exec cell.
                 assert_eq!(steps[1]["name"], "exec");
+                assert!(steps[1]["ok"].is_null());
                 assert_eq!(steps[1]["out"], "Thu\n");
                 let slot = &built.tx[sid].slots[steps[1]["slot"].as_u64().unwrap() as usize];
                 assert!(
@@ -5341,6 +5342,7 @@ mod tests {
                     "const r = await tools.exec_command({cmd:\"date\"});\ntext(JSON.stringify(r));"
                 );
             } else {
+                assert_eq!(steps[1]["ok"], true, "{sid}");
                 assert_eq!(steps[1]["name"], "exec_command", "{sid}");
                 assert_eq!(steps[1]["arg"], other, "{sid}");
             }
@@ -5677,6 +5679,44 @@ mod tests {
         );
         let short = json!({"command": "ls -la"});
         assert_eq!(tool_in("Bash", &short, "ls -la"), None);
+    }
+
+    #[test]
+    fn selected_output_preserves_claude_and_codex_results_without_optional_blocks() {
+        let home = Home::new();
+        let text = "selected native result".repeat(100);
+        home.lines(
+            "claude/projects/-work-proj/selected-claude.jsonl",
+            &[
+                said("selected-claude", ts(1, 0, 0), json!([{
+                    "type":"tool_use","id":"plain-call","name":"Bash","input":{"command":"plain"}
+                }])),
+                result("selected-claude", ts(1, 0, 500), "plain-call", &text, false),
+            ],
+        );
+        home.lines(
+            "codex/sessions/2026/09/24/rollout-selected-codex.jsonl",
+            &[
+                codex_line(ts(1, 0, 0), "session_meta", json!({"id":"selected-codex","cwd":"/work/proj"})),
+                codex_line(ts(1, 1, 0), "response_item", json!({"type":"function_call","call_id":"plain-call","name":"exec_command","arguments":"{\"cmd\":\"plain\"}"})),
+                codex_line(ts(1, 1, 500), "response_item", json!({"type":"function_call_output","call_id":"plain-call","output":text})),
+            ],
+        );
+        let built = home.built(BASE + 86_400_000);
+        for sid in ["selected-claude", "selected-codex"] {
+            let transcript = &built.tx[sid];
+            let slot = transcript
+                .slots
+                .iter()
+                .find(|slot| matches!(&slot.kind, SlotKind::Tool { .. }))
+                .unwrap();
+            let output = selected_output(&mut Lines::default(), slot).unwrap();
+            assert_eq!(output["text"], text, "{sid}");
+            assert_eq!(output["truncated"], false, "{sid}");
+            assert!(output.get("blocks").is_none(), "{sid}");
+            assert!(output.get("blocks_truncated").is_none(), "{sid}");
+            assert!(output.get("blocks_omitted").is_none(), "{sid}");
+        }
     }
 
     #[test]
