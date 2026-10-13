@@ -53,14 +53,15 @@ The answer is 200 when it is stored. A receiver that hasn't had facts for a whil
 ## How the client uses it
 
 - **Complete lines only.** A `.jsonl` file is sent up to the end of its last complete line, so a line being written is held back until its newline arrives. No redaction pattern spans a newline, so redacting line by line and redacting the whole file give the same bytes.
-  - A line longer than 4 MiB is redacted whole and then sent in 4 MiB pieces.
+  - The sender defaults to 256 KiB per append, below the protocol's 4 MiB maximum, so slow links can finish requests within the timeout.
+  - A line longer than the sender's chunk size is redacted whole and then sent in pieces of that size.
   - A line longer than 64 MiB is cut there.
 - **Other inputs** (`*.json`) are small. Each is sent whole, with `replace`, whenever its content changes.
 - **Resuming.** The client keeps, per file, how many bytes the receiver has acknowledged and the SHA-256 of the original's first 4 KiB. The state file is `$XDG_STATE_HOME/semon/push/<url hash>.json`, mode 0600, in a 0700 directory. A new pass appends from there.
 - **Rewrites.** If the file is now shorter than what was sent, or its first 4 KiB changed, the client sends it again from 0 with `replace`.
 - **409.** When the receiver's copy is the client's redacted file up to a line boundary (same length prefix, same head hash), the client resumes from the receiver's length. Otherwise it sends the file again with `replace`.
 - **Deleted files** are not deleted on the receiver.
-- **Cadence.** One pass and one facts post, then exit. With `--watch`, a pass every 2 s and facts every 10 s.
+- **Cadence.** One complete pass and one facts post, then exit. With `--watch`, each sweep sends at most four complete redaction batches before waiting 2 s and discovering fresh targets. Recent/live batches and history retain the scheduler's three-to-one preference; a long line remains one indivisible redaction batch. Full facts are posted at most every 10 s, after a complete sweep only; a bounded partial sweep never commits a complete source inventory. Optional status heartbeats continue during backfill.
 - **Token.** It is read from `--token-file`, which must be mode 0600; the client refuses anything else. The token is sent only in the `Authorization` header.
 
 ## Sealed copies on the receiver
@@ -102,6 +103,37 @@ Append requests and 200/409 `Length` responses add optional `generation` fields.
 Status `acked_bytes` is an acknowledged complete redaction-batch boundary, never an intermediate piece of a long line. A receiver independently verifies matching generation, stored length at least that boundary, stored prefix head hash at `min(4096, acked_bytes)`, current file identity and a complete JSONL line boundary. A malformed, ambiguous, stale or missing proof is unavailable. The reference receiver returns 200 with `{"confirmed":[<verified targets>]}`; 409 rejects stale observations. Even a receiver-confirmed prefix must be rechecked under the same write/generation lock when used later. A receiver may use `semon_sessions::codex_native_id_prefix(path, accepted_bytes)` to read the exact first complete `session_meta` record through sealed copies within 64 KiB; duplicate fields, malformed records and incomplete prefixes provide no identity. Filename, cwd and timing never prove an active/archive move.
 
 A receiver may overlay verified, deduplicated provisional Codex paths in the optional `Facts.codex_provisional_rollouts` field **only in its served view**. Stored authoritative full facts retain the original `codex_rollouts`, including unknown (`None`) versus explicitly empty. A provisional overlay never makes full inventory known. Model source reads select the union of committed and provisional paths; bootstrap without a committed inventory selects only the explicit provisional subset. A native ID already selected by a committed source keeps that source until the next complete inventory commit. A sender's local/full facts never populate the provisional field, and the reference receiver refuses that field on `/facts`.
+
+## Optional native Codex relocation
+
+An append may include `relocation` with `from_path`, `native_id` and
+`prefix_sha256`. It applies only between allowlisted `sessions/` and
+`archived_sessions/` paths in the same Codex home, with a previously confirmed
+32-character custody generation and a complete acknowledged prefix at `offset`.
+The SHA-256 covers every byte of that **redacted** prefix, not only the head.
+The sender proposes a move only for a unique previously acknowledged local inode
+whose former path disappeared and whose explicit first native header still matches.
+
+A supporting receiver verifies the old custody generation, native header,
+confirmed prefix digest and destination head under its existing Raw write fence.
+It copies exactly that logical prefix into a new independent Raw file, then
+applies any intervening append. Sealed source bytes use the existing logical
+reader. Local copy bytes count against quota; stale copies remain independent and
+unchanged. An old Raw path longer than the sender's confirmed boundary can supply
+only that verified prefix, including recovery from a lost acknowledgement.
+
+SQLite relocation intents precede Raw writes; Index reuse follows validated
+native identity and content evidence. Facts retain sole authoritative rollout
+selection. A partially synced candidate sharing an already selected native ID
+cannot become a duplicate provisional current source. Index discovery hints
+identify candidate paths but grant no authority; the receiver revalidates the
+selected Raw native header and current inventory.
+
+An existing destination uses ordinary offset/head/generation admission, including
+idempotent retries and Unarchive. Unsupported or rejected relocation falls back
+to the existing 409 reconciliation and normal transfer. Failed or interrupted
+proof commits permit conservative repair, never trusted reuse of ambiguous bytes.
+Native Codex Archive is unrelated to Semon retained-history or Hub S3/R2 archival.
 
 ## Bounded sender scheduling and checkpoints
 

@@ -3782,7 +3782,7 @@ fn handoff_endpoint_indexes_upgrade_without_losing_native_evidence() {
     assert_eq!(
         db.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
             .unwrap(),
-        23
+        24
     );
     assert_eq!(db.query_row("SELECT count(*) FROM sqlite_schema WHERE name IN ('session_trace_from','session_trace_to')", [], |row|row.get::<_,i64>(0)).unwrap(), 2);
     assert!(

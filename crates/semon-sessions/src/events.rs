@@ -27,7 +27,7 @@ use sha2::{Digest, Sha256};
 
 use crate::{Tokens, attachments, field, sealed::LogFile};
 
-mod store;
+pub(crate) mod store;
 pub(crate) use store::open_regular;
 pub(crate) use store::{archive_index_retained, retain_archive_index};
 
@@ -762,7 +762,7 @@ pub(crate) struct Stat {
 }
 
 impl Stat {
-    fn of(path: &Path) -> io::Result<Self> {
+    pub(crate) fn of(path: &Path) -> io::Result<Self> {
         Self::from_metadata(&fs::metadata(path)?)
     }
 
@@ -826,13 +826,18 @@ const WINDOW: u64 = 4096;
 
 #[cfg(test)]
 thread_local! {
+    pub(crate) static BEFORE_CATALOG_PUBLICATION: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+    pub(crate) static CATALOG_DERIVED_SOURCES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    pub(crate) static CATALOG_PUBLISHED_ROWS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    pub(crate) static SOURCE_READ_BYTES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    pub(crate) static SOURCE_HASHED_BYTES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
     pub(crate) static HASHED_BYTES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
 /// What the index records about a file it has read: the stat it was read
 /// at, the offset its complete lines end at, and SHA-256 hashes of the
 /// complete consumed prefix and of the tail window before that offset.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Ledger {
     pub(crate) stat: Stat,
     pub(crate) offset: u64,
@@ -878,7 +883,10 @@ fn consumed_hashes(file: &mut LogFile, offset: u64) -> io::Result<([u8; 32], [u8
     let mut prefix = Sha256::new();
     let bytes = io::copy(&mut (&mut *file).take(offset), &mut prefix)?;
     #[cfg(test)]
-    HASHED_BYTES.with(|count| count.set(count.get() + bytes));
+    {
+        HASHED_BYTES.with(|count| count.set(count.get() + bytes + offset.min(WINDOW)));
+        SOURCE_HASHED_BYTES.with(|count| count.set(count.get() + bytes + offset.min(WINDOW)));
+    }
     if bytes != offset {
         return Err(io::Error::new(
             io::ErrorKind::UnexpectedEof,
@@ -990,6 +998,33 @@ pub(crate) trait IndexStore: Send {
         expected_generation: Option<&str>,
         claims: &[(String, Option<i64>)],
     ) -> Result<Option<Outcome>, StoreError>;
+    fn backfill_state(&self) -> Result<Option<String>, StoreError>;
+    fn discover_catalog_sources(
+        &mut self,
+        paths: &[String],
+        complete: bool,
+    ) -> Result<(), StoreError>;
+    fn finish_catalog_backfill(&mut self, expected: Option<&str>) -> Result<Outcome, StoreError>;
+    fn resolve_catalog_input(
+        &mut self,
+        path: &str,
+        revision: i64,
+        native: Option<(&str, &str)>,
+        log: Option<&str>,
+    ) -> Result<Outcome, StoreError>;
+    fn relocate_codex(
+        &mut self,
+        path: &str,
+        stat: &Stat,
+        id: &str,
+        file: &mut LogFile,
+    ) -> Result<Option<String>, StoreError>;
+    fn append_evidence(
+        &self,
+        path: &str,
+    ) -> Result<Option<crate::source_change::AppendEvidence>, StoreError>;
+    fn pending_catalog_sources(&self, limit: usize) -> Result<Vec<String>, StoreError>;
+    fn qualified_catalog(&self) -> Result<bool, StoreError>;
     fn catalog_claims(&self, paths: &[String]) -> Result<Vec<(String, Option<i64>)>, StoreError>;
     fn catalog_component_paths(
         &self,
@@ -1014,6 +1049,11 @@ pub(crate) trait IndexStore: Send {
     /// Commits `path`'s new ledger and index if its ledger is still
     /// `expected`. `changes` names rows the append parser touched. Without
     /// it the file's rows are replaced; no previous index is needed.
+    fn commit_initial_files(
+        &mut self,
+        files: &[(String, Ledger, Arc<FileIndex>)],
+    ) -> Result<Outcome, StoreError>;
+
     fn commit_file(
         &mut self,
         path: &str,
@@ -1065,6 +1105,11 @@ pub(crate) struct EventCache {
     store: Option<Box<dyn IndexStore>>,
     scoped: bool,
     retention_base: Vec<(String, Option<Ledger>)>,
+    /// Source fences for the lazy producer, independently of legacy reopen state.
+    lock_cache: Option<PathBuf>,
+    /// Cold ingestion advances complete records by a bounded byte slice.
+    pub(crate) scan_byte_budget: Option<u64>,
+    cold_writes: Vec<(String, Ledger, Arc<FileIndex>)>,
     /// The V1 cache the store sits beside, when this index has one.
     v1_cache: Option<PathBuf>,
     /// Without a store: when opening it is tried again.
@@ -1119,6 +1164,38 @@ struct LastProjectRun {
     last_lines_added: Option<u64>,
     last_lines_removed: Option<u64>,
     last_model_usage: Option<BTreeMap<String, crate::facts::ReportedModelUsage>>,
+}
+
+impl LastProjectRun {
+    fn snapshot(self, capture_at: i64) -> Option<crate::facts::ReportedRunSnapshot> {
+        Some(crate::facts::ReportedRunSnapshot {
+            last_session_id: self.last_session_id?,
+            last_start_time: self.last_start_time?,
+            last_cost: self.last_cost,
+            last_duration: self.last_duration,
+            last_api_duration: self.last_api_duration,
+            last_tool_duration: self.last_tool_duration,
+            last_lines_added: self.last_lines_added,
+            last_lines_removed: self.last_lines_removed,
+            last_model_usage: self.last_model_usage.unwrap_or_default(),
+            capture_at,
+        })
+    }
+}
+
+// Reuse the existing allowlisted parser for a content-free runtime observation.
+// Account/configuration fields never enter this value or persisted fingerprints.
+pub(crate) fn current_reported_runs(path: &Path) -> Vec<crate::facts::ReportedRunSnapshot> {
+    crate::read_regular_at_most(path, 64 * 1024 * 1024)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<ClaudeJson>(&bytes).ok())
+        .map(|root| {
+            root.projects
+                .into_values()
+                .filter_map(|project| project.snapshot(0))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// Says once per process that the index runs in memory, and why.
@@ -1235,6 +1312,7 @@ impl EventCache {
         let mut cache = Self::from_loaded(loaded);
         cache.store = Some(store);
         cache.scoped = true;
+        cache.lock_cache = Some(v1_cache.to_owned());
         Ok(cache)
     }
 
@@ -1253,6 +1331,10 @@ impl EventCache {
         Ok(())
     }
 
+    pub(crate) fn scoped_store_lost(&self) -> bool {
+        self.scoped && self.store.is_none()
+    }
+
     pub(crate) fn is_scoped(&self) -> bool {
         self.scoped
     }
@@ -1266,6 +1348,158 @@ impl EventCache {
             .map_err(|error| io::Error::other(error.to_string()))?;
         self.set_reported_runs(runs);
         Ok(())
+    }
+
+    pub(crate) fn resolve_catalog_input(
+        &mut self,
+        options: &crate::Options,
+        path: &str,
+    ) -> io::Result<()> {
+        let input = crate::native_evidence::source_input(Path::new(path), options)
+            .ok_or_else(|| io::Error::other("input journal outside allowlist"))?;
+        let _lock = crate::source_change::SourceLock::acquire(
+            options,
+            &crate::source_change::lock_key(options, &input),
+            false,
+        )?;
+        store::resume_runtime_input(options, path)?;
+        let revision = self.catalog_claims(&[path.to_owned()])?[0]
+            .1
+            .ok_or_else(|| io::Error::new(io::ErrorKind::WouldBlock, "input intent changed"))?;
+        let log = input.path.ends_with(".meta.json").then(|| {
+            input
+                .full_path(options)
+                .with_extension("")
+                .with_extension("jsonl")
+                .to_string_lossy()
+                .into_owned()
+        });
+        let native =
+            if input.root == crate::InputRoot::Claude && input.path.starts_with("sessions/") {
+                let value = crate::open_input(&input.full_path(options))
+                    .ok()
+                    .and_then(|file| {
+                        let mut bytes = Vec::new();
+                        file.take(65537).read_to_end(&mut bytes).ok()?;
+                        (bytes.len() <= 65536)
+                            .then(|| serde_json::from_slice::<Value>(&bytes).ok())
+                            .flatten()
+                    });
+                value.and_then(|value| value["sessionId"].as_str().map(str::to_owned))
+            } else {
+                None
+            };
+        match self
+            .store
+            .as_mut()
+            .ok_or_else(|| io::Error::other("native producer unavailable"))?
+            .resolve_catalog_input(
+                path,
+                revision,
+                native.as_deref().map(|id| ("claude", id)),
+                log.as_deref(),
+            ) {
+            Ok(Outcome::Written) => Ok(()),
+            Ok(_) => Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "input publication changed",
+            )),
+            Err(error) => Err(io::Error::other(error.to_string())),
+        }
+    }
+
+    pub(crate) fn backfill_state(&self) -> io::Result<Option<String>> {
+        self.store
+            .as_ref()
+            .ok_or_else(|| io::Error::other("native producer unavailable"))?
+            .backfill_state()
+            .map_err(|error| io::Error::other(error.to_string()))
+    }
+    pub(crate) fn discover_catalog_sources(
+        &mut self,
+        options: &crate::Options,
+        inputs: &[crate::Input],
+        complete: bool,
+    ) -> io::Result<()> {
+        let paths = inputs
+            .iter()
+            .filter(|input| input.path.ends_with(".jsonl"))
+            .map(|input| input.full_path(options).to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        self.store
+            .as_mut()
+            .ok_or_else(|| io::Error::other("native producer unavailable"))?
+            .discover_catalog_sources(&paths, complete)
+            .map_err(|error| io::Error::other(error.to_string()))
+    }
+    pub(crate) fn finish_catalog_backfill(&mut self, generation: &str) -> io::Result<Outcome> {
+        self.store
+            .as_mut()
+            .ok_or_else(|| io::Error::other("native producer unavailable"))?
+            .finish_catalog_backfill(Some(generation))
+            .map_err(|error| io::Error::other(error.to_string()))
+    }
+
+    pub(crate) fn retire_scoped_sources(
+        &mut self,
+        options: &crate::Options,
+        inputs: &[crate::Input],
+        seen: &BTreeSet<String>,
+        machine: &crate::facts::MachineFacts,
+    ) -> io::Result<()> {
+        for input in inputs {
+            let path = input.full_path(options);
+            let key = path.to_string_lossy().into_owned();
+            if seen.contains(&key) {
+                continue;
+            }
+            let absent = fs::symlink_metadata(&path)
+                .is_err_and(|error| error.kind() == io::ErrorKind::NotFound);
+            let deselected = input.root == crate::InputRoot::Codex
+                && !machine.codex_rollout_is_current(options, &path);
+            if !absent && !deselected {
+                return Err(io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    "selected source cannot be qualified",
+                ));
+            }
+            let recorded = self.recorded(&key);
+            if recorded.is_some() {
+                match self
+                    .store
+                    .as_mut()
+                    .ok_or_else(|| io::Error::other("native producer unavailable"))?
+                    .remove_files(&[(key.clone(), recorded)])
+                {
+                    Ok(Outcome::Written) => {
+                        self.files.remove(&key);
+                    }
+                    Ok(_) => {
+                        return Err(io::Error::new(
+                            io::ErrorKind::WouldBlock,
+                            "source disappearance changed",
+                        ));
+                    }
+                    Err(error) => return Err(io::Error::other(error.to_string())),
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn pending_catalog_sources(&self, limit: usize) -> io::Result<Vec<String>> {
+        self.store
+            .as_ref()
+            .ok_or_else(|| io::Error::other("native producer unavailable"))?
+            .pending_catalog_sources(limit)
+            .map_err(|error| io::Error::other(error.to_string()))
+    }
+    pub(crate) fn qualified_catalog(&self) -> io::Result<bool> {
+        self.store
+            .as_ref()
+            .ok_or_else(|| io::Error::other("native producer unavailable"))?
+            .qualified_catalog()
+            .map_err(|error| io::Error::other(error.to_string()))
     }
 
     pub(crate) fn catalog_claims(
@@ -1334,6 +1568,10 @@ impl EventCache {
                 "native producer sources not durably observed",
             ));
         }
+        #[cfg(test)]
+        if let Some(hook) = BEFORE_CATALOG_PUBLICATION.with(|hook| hook.borrow_mut().take()) {
+            hook();
+        }
         self.store
             .as_mut()
             .ok_or_else(|| io::Error::other("scoped producer store unavailable"))?
@@ -1358,7 +1596,12 @@ impl EventCache {
                 "native producer sources not durably observed",
             ));
         }
-        self.store
+        #[cfg(test)]
+        if let Some(hook) = BEFORE_CATALOG_PUBLICATION.with(|hook| hook.borrow_mut().take()) {
+            hook();
+        }
+        let outcome = self
+            .store
             .as_mut()
             .ok_or_else(|| io::Error::other("scoped producer store unavailable"))?
             .publish_closed_catalog(
@@ -1369,7 +1612,13 @@ impl EventCache {
                 prepared.base_generation.as_deref(),
                 &prepared.claims,
             )
-            .map_err(|error| io::Error::other(error.to_string()))
+            .map_err(|error| io::Error::other(error.to_string()))?;
+        #[cfg(test)]
+        if outcome == Some(Outcome::Written) {
+            CATALOG_PUBLISHED_ROWS
+                .with(|count| count.set(count.get() + prepared.rows.len() as u64));
+        }
+        Ok(outcome)
     }
 
     /// Ends a scan, and with it the refresh: the store gets its writes again.
@@ -1380,6 +1629,14 @@ impl EventCache {
     /// Drop only durably committed producer payloads after Catalog publication.
     /// Ledgers and membership remain available to incremental change detection
     /// and disappearance reconciliation. In-memory-only/busy evidence stays.
+    #[cfg(test)]
+    pub(crate) fn resident_index_payloads(&self) -> usize {
+        self.files
+            .values()
+            .filter(|file| file.index.is_some())
+            .count()
+    }
+
     pub(crate) fn release_published_indexes(&mut self) {
         if self.scoped && self.store.is_some() && !self.busy {
             for (path, file) in &mut self.files {
@@ -1532,6 +1789,7 @@ impl EventCache {
     }
 
     pub(crate) fn begin_scan(&mut self) {
+        self.cold_writes.clear();
         self.index_clone = Duration::ZERO;
         self.replaced.clear();
         if self.store.is_some() || self.reopen_at.is_none_or(|at| Instant::now() < at) {
@@ -1632,6 +1890,12 @@ impl EventCache {
 
     pub(crate) fn paths(&self) -> impl Iterator<Item = &str> {
         self.files.keys().map(String::as_str)
+    }
+
+    pub(crate) fn indexed_stat(&self, path: &Path) -> Option<Stat> {
+        self.files
+            .get(path.to_string_lossy().as_ref())
+            .map(|file| file.ledger.stat)
     }
 
     pub(crate) fn source(
@@ -1737,23 +2001,11 @@ impl EventCache {
         *dirty = true;
         let mut read = Vec::new();
         for project in root.projects.into_values() {
-            let (Some(session_id), Some(start)) =
-                (project.last_session_id, project.last_start_time)
-            else {
+            let Some(snapshot) = project.snapshot(capture_at) else {
                 continue;
             };
-            let snapshot = crate::facts::ReportedRunSnapshot {
-                last_session_id: session_id.clone(),
-                last_start_time: start,
-                last_cost: project.last_cost,
-                last_duration: project.last_duration,
-                last_api_duration: project.last_api_duration,
-                last_tool_duration: project.last_tool_duration,
-                last_lines_added: project.last_lines_added,
-                last_lines_removed: project.last_lines_removed,
-                last_model_usage: project.last_model_usage.unwrap_or_default(),
-                capture_at,
-            };
+            let session_id = snapshot.last_session_id.clone();
+            let start = snapshot.last_start_time;
             read.push(snapshot.clone());
             self.reported_runs
                 .entry(session_id)
@@ -1876,6 +2128,31 @@ impl EventCache {
         }
     }
 
+    /// Parsing happens before the write reservation. Cold complete new files
+    /// share one bounded commit; no offset or dirty revision can escape alone.
+    pub(crate) fn flush_cold_writes(&mut self) -> io::Result<()> {
+        let files = std::mem::take(&mut self.cold_writes);
+        if files.is_empty() {
+            return Ok(());
+        }
+        let outcome = self
+            .store
+            .as_mut()
+            .ok_or_else(|| io::Error::other("cold batch store unavailable"))?
+            .commit_initial_files(&files)
+            .map_err(|error| io::Error::other(error.to_string()))?;
+        if outcome != Outcome::Written {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "cold index batch generation changed",
+            ));
+        }
+        for (path, _, _) in files {
+            self.unpersisted.remove(&path);
+        }
+        Ok(())
+    }
+
     /// Writes a file's change through to the store. `true` when another
     /// process moved the file on first, so the change must be redone. A
     /// change that isn't written is noted, and read again next scan.
@@ -1914,6 +2191,7 @@ impl EventCache {
 #[cfg(test)]
 thread_local! {
     /// Lines parsed by [`scan_file`] on this thread: a warm build parses none.
+    pub(crate) static PARSED_BYTES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
     pub(crate) static PARSED: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
     /// What [`scan_file`] did with each file on this thread: `unchanged`,
     /// `append`, `replace` or `conflict`.
@@ -1938,6 +2216,12 @@ const COMMIT_ATTEMPTS: usize = 3;
 /// touched), and reads it from the start otherwise. The change commits to
 /// the store only if no other process recorded the file meanwhile; if one
 /// did, it is redone from what that process recorded.
+pub(crate) fn crate_id_for_relocation(path: &Path) -> Option<String> {
+    crate::codex_native_id_prefix(path, Stat::of(path).ok()?.size)
+        .ok()
+        .flatten()
+}
+
 pub(crate) fn scan_file(
     path: &Path,
     harness: &str,
@@ -1945,6 +2229,22 @@ pub(crate) fn scan_file(
     dirty: &mut bool,
 ) -> io::Result<Arc<FileIndex>> {
     let key = path.to_string_lossy().into_owned();
+    let _source_lock = cache
+        .lock_cache
+        .as_ref()
+        .or(cache.v1_cache.as_ref())
+        .filter(|_| cache.store.is_some())
+        .map(|v1| {
+            crate::source_change::SourceLock::acquire(
+                &crate::Options {
+                    cache: v1.clone(),
+                    ..crate::Options::default()
+                },
+                &key,
+                false,
+            )
+        })
+        .transpose()?;
     let agent = harness == "claude" && crate::native_sidecar::agent_path(path);
     if let Some(entry) = cache.files.get(&key)
         && let Some(index) = &entry.index
@@ -1967,6 +2267,7 @@ pub(crate) fn scan_file(
     *dirty = true;
     let mut attempt = 0;
     let mut force_replace = false;
+    let mut conservative_append = false;
     loop {
         attempt += 1;
         let last = attempt >= COMMIT_ATTEMPTS;
@@ -1974,16 +2275,47 @@ pub(crate) fn scan_file(
         // the next check see a change.
         let mut file = LogFile::open(path)?;
         let stat = Stat::from_metadata(&file.metadata()?)?;
+        if harness == "codex"
+            && cache.recorded(&key).is_none()
+            && let Some(id) = crate::codex_native_id_prefix(path, stat.size)?
+            && let Some(store) = cache.store.as_mut()
+            && let Some(old) = store
+                .relocate_codex(&key, &stat, &id, &mut file)
+                .map_err(|error| io::Error::other(error.to_string()))?
+        {
+            cache.files.remove(&old);
+        }
         let recorded = cache.recorded(&key);
         let mut base = None;
+        let mut trusted_append = false;
         if let Some(ledger) = &recorded
             && !force_replace
-            && (ledger.stat == stat || ledger.resumes(&stat, &mut file))
         {
-            match cache.base(&key, ledger) {
-                Base::Found(index) => base = Some(index),
-                Base::Moved if !last => continue,
-                Base::Moved | Base::Unreadable => {}
+            let evidence = !conservative_append
+                && cache
+                    .store
+                    .as_ref()
+                    .and_then(|store| store.append_evidence(&key).ok().flatten())
+                    .is_some_and(|evidence| evidence.qualifies(&ledger.stat, &stat));
+            if ledger.stat == stat || evidence || ledger.resumes(&stat, &mut file) {
+                match cache.base(&key, ledger) {
+                    Base::Found(index) => {
+                        trusted_append = evidence
+                            && index
+                                .source_chunks
+                                .as_ref()
+                                .is_some_and(|chunks| chunks.resume.is_some());
+                        if ledger.stat == stat
+                            || trusted_append
+                            || !evidence
+                            || ledger.resumes(&stat, &mut file)
+                        {
+                            base = Some(index);
+                        }
+                    }
+                    Base::Moved if !last => continue,
+                    Base::Moved | Base::Unreadable => {}
+                }
             }
         }
         let sidecar = if agent {
@@ -2111,12 +2443,35 @@ pub(crate) fn scan_file(
         if let Some(handoffs) = &mut writable.handoff_index {
             handoffs.begin_append();
         }
-        let (offset, parsed) = parse(&mut file, from, harness, writable)?;
+        let (offset, parsed, bounded) =
+            parse(&mut file, from, harness, writable, cache.scan_byte_budget)?;
+        let bounded = bounded && offset < stat.size;
         let changes = writable
             .dirty_rows
             .take()
             .expect("parser tracks dirty rows");
-        let captured = crate::source_chunks::capture(&mut file, offset, from)?;
+        let captured = if trusted_append {
+            let previous = writable
+                .source_chunks
+                .as_ref()
+                .expect("trusted chunks exist");
+            match crate::source_chunks::capture_append(
+                &mut file,
+                offset,
+                from,
+                previous,
+                recorded.as_ref().expect("trusted ledger exists").prefix,
+            ) {
+                Ok(captured) => captured,
+                Err(_) if !last => {
+                    conservative_append = true;
+                    continue;
+                }
+                Err(error) => return Err(error),
+            }
+        } else {
+            crate::source_chunks::capture(&mut file, offset, from)?
+        };
         if captured.parsed != parsed
             || (append
                 && recorded
@@ -2164,11 +2519,29 @@ pub(crate) fn scan_file(
             }
         }
         let ledger = Ledger {
-            stat,
+            stat: if bounded {
+                Stat {
+                    size: offset,
+                    ..stat
+                }
+            } else {
+                stat
+            },
             offset,
             prefix,
             tail,
         };
+        // A byte slice must retain one exact physical generation across its
+        // checkpoint. Untrusted changes never qualify the continuation proof.
+        if bounded && Stat::of(path).ok().as_ref() != Some(&stat) {
+            if last {
+                return Err(io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    "cold source changed during checkpoint",
+                ));
+            }
+            continue;
+        }
         if let Some(markers) = &writable.marker_index
             && (!markers.valid(&ledger) || markers.verify(&mut file).is_err())
         {
@@ -2199,7 +2572,21 @@ pub(crate) fn scan_file(
                 hook();
             }
         }
-        if cache.commit(
+        if cache.scan_byte_budget.is_some()
+            && recorded.is_none()
+            && !bounded
+            && ledger.offset == ledger.stat.size
+            && cache.scoped
+            && cache.store.is_some()
+        {
+            if cache.cold_writes.len() >= 64 {
+                return Err(io::Error::other("cold index batch exceeds source budget"));
+            }
+            cache.unpersisted.insert(key.clone());
+            cache
+                .cold_writes
+                .push((key.clone(), ledger.clone(), Arc::clone(&index)));
+        } else if cache.commit(
             &key,
             recorded.as_ref(),
             append.then_some(&changes),
@@ -2209,6 +2596,14 @@ pub(crate) fn scan_file(
         {
             trace("conflict");
             continue;
+        }
+        if bounded && !cache.unpersisted.contains(&key) {
+            let stem = cache
+                .lock_cache
+                .as_ref()
+                .or(cache.v1_cache.as_ref())
+                .ok_or_else(|| io::Error::other("bounded source requires a durable store"))?;
+            super::events::store::checkpoint_source_scan(stem, &key, &ledger, &stat)?;
         }
         cache.files.insert(
             key,
@@ -2229,13 +2624,19 @@ fn parse(
     from: u64,
     harness: &str,
     index: &mut FileIndex,
-) -> io::Result<(u64, [u8; 32])> {
+    budget: Option<u64>,
+) -> io::Result<(u64, [u8; 32], bool)> {
     let mut reader = BufReader::new(file);
     reader.seek(SeekFrom::Start(from))?;
     let mut offset = from;
     let mut line = Vec::new();
     let mut parsed = Sha256::new();
+    let mut bounded = false;
     loop {
+        if budget.is_some_and(|budget| offset.saturating_sub(from) >= budget) {
+            bounded = true;
+            break;
+        }
         line.clear();
         let length = reader.read_until(b'\n', &mut line)?;
         if length == 0 {
@@ -2258,7 +2659,11 @@ fn parse(
         offset += length as u64;
         parsed.update(&line);
         #[cfg(test)]
-        PARSED.with(|parsed| parsed.set(parsed.get() + 1));
+        {
+            PARSED.with(|parsed| parsed.set(parsed.get() + 1));
+            PARSED_BYTES.with(|bytes| bytes.set(bytes.get() + length as u64));
+            SOURCE_HASHED_BYTES.with(|bytes| bytes.set(bytes.get() + length as u64));
+        }
         let record = serde_json::from_slice::<Value>(&line);
         if let Some(summary) = &mut index.tree_summary {
             summary.observe(record.as_ref().ok(), harness);
@@ -2282,7 +2687,7 @@ fn parse(
             _ => gap(index, line_offset),
         }
     }
-    Ok((offset, parsed.finalize().into()))
+    Ok((offset, parsed.finalize().into(), bounded))
 }
 
 /// Busy clustering: consecutive line timestamps no more than this far apart
@@ -6128,6 +6533,104 @@ mod tests {
 
     fn parsed() -> u64 {
         PARSED.with(std::cell::Cell::get)
+    }
+
+    #[test]
+    fn receiver_append_chain_reads_only_boundary_and_recovers_interrupted_or_corrupt_proofs() {
+        use std::io::Write;
+        for history_bytes in [4 * 1024 * 1024, 16 * 1024 * 1024] {
+            let root = scratch("receiver-append-chain");
+            let options = crate::Options {
+                cache: root.join("index.json"),
+                claude_home: root.join("claude"),
+                ..crate::Options::default()
+            };
+            let input = crate::Input {
+                root: crate::InputRoot::Claude,
+                path: "projects/project/session.jsonl".into(),
+            };
+            let path = input.full_path(&options);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            let line = format!(
+                "{}\n",
+                serde_json::json!({"type":"system","subtype":"turn_duration","sessionId":"session","padding":"x".repeat(8192)})
+            );
+            fs::write(&path, line.repeat(history_bytes / line.len())).unwrap();
+            let mut cache = EventCache::open_scoped(&options.cache).unwrap();
+            scan_file(&path, "claude", &mut cache, &mut false).unwrap();
+            let append = "{\"type\":\"system\",\"sessionId\":\"session\"}\n";
+            let generation = "0123456789abcdef0123456789abcdef";
+            // Receiver intents survive replay as one generation-bound chain.
+            let before = SOURCE_READ_BYTES.with(std::cell::Cell::get);
+            let hashed = SOURCE_HASHED_BYTES.with(std::cell::Cell::get);
+            let full = HASHED_BYTES.with(std::cell::Cell::get);
+            let parsed = PARSED.with(std::cell::Cell::get);
+            for _ in 0..5 {
+                let from = fs::metadata(&path).unwrap().len();
+                let intent =
+                    crate::SessionSourceWrite::begin(&options, &input, Some(generation), from)
+                        .unwrap();
+                assert_eq!(
+                    scan_file(&path, "claude", &mut cache, &mut false)
+                        .unwrap_err()
+                        .kind(),
+                    io::ErrorKind::WouldBlock,
+                    "producer admitted an active Raw write"
+                );
+                let mut writer = fs::OpenOptions::new().append(true).open(&path).unwrap();
+                writer.write_all(append.as_bytes()).unwrap();
+                writer.sync_all().unwrap();
+                intent.complete(from + append.len() as u64).unwrap();
+            }
+            scan_file(&path, "claude", &mut cache, &mut false).unwrap();
+            let reads = SOURCE_READ_BYTES.with(std::cell::Cell::get) - before;
+            let hashes = SOURCE_HASHED_BYTES.with(std::cell::Cell::get) - hashed;
+            assert_eq!(PARSED.with(std::cell::Cell::get) - parsed, 5);
+            assert_eq!(
+                HASHED_BYTES.with(std::cell::Cell::get),
+                full,
+                "trusted append rehashed full history"
+            );
+            assert!(reads < 512 * 1024, "trusted append read {reads} bytes");
+            assert!(hashes < 512 * 1024, "trusted append hashed {hashes} bytes");
+            eprintln!(
+                "trusted-chain history_bytes={history_bytes} records=5 source_read_bytes={reads} source_hashed_bytes={hashes} full_prefix_hashed_bytes=0"
+            );
+            // A crash between Raw fsync and evidence commit withdraws trust.
+            let from = fs::metadata(&path).unwrap().len();
+            let intent =
+                crate::SessionSourceWrite::begin(&options, &input, Some(generation), from).unwrap();
+            let mut writer = fs::OpenOptions::new().append(true).open(&path).unwrap();
+            writer.write_all(append.as_bytes()).unwrap();
+            writer.sync_all().unwrap();
+            drop(intent);
+            let full = HASHED_BYTES.with(std::cell::Cell::get);
+            scan_file(&path, "claude", &mut cache, &mut false).unwrap();
+            assert!(
+                HASHED_BYTES.with(std::cell::Cell::get) - full >= from,
+                "interrupted proof bypassed conservative verification"
+            );
+            // Corrupt continuation words cannot bless the previous prefix.
+            let from = fs::metadata(&path).unwrap().len();
+            let intent =
+                crate::SessionSourceWrite::begin(&options, &input, Some(generation), from).unwrap();
+            writer.write_all(append.as_bytes()).unwrap();
+            writer.sync_all().unwrap();
+            intent.complete(from + append.len() as u64).unwrap();
+            drop(cache);
+            let db = rusqlite::Connection::open(EventCache::path(&options.cache)).unwrap();
+            db.execute("UPDATE meta SET value=json_set(value,'$.resume.words[0]',0) WHERE key LIKE 'native_source_chunks:%:header'",[]).unwrap();
+            let mut cache = EventCache::open_scoped(&options.cache).unwrap();
+            let full = HASHED_BYTES.with(std::cell::Cell::get);
+            scan_file(&path, "claude", &mut cache, &mut false).unwrap();
+            assert!(
+                HASHED_BYTES.with(std::cell::Cell::get) - full >= from,
+                "corrupt chaining state bypassed prefix repair"
+            );
+            drop(cache);
+            drop(db);
+            fs::remove_dir_all(root).unwrap();
+        }
     }
 
     #[test]

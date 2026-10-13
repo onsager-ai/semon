@@ -3,6 +3,9 @@
 use sha2::{Digest, Sha256};
 use std::io::{self, Read, Seek, SeekFrom};
 
+mod prefix_state;
+pub(crate) use prefix_state::PrefixState;
+
 pub(crate) const SIZE: usize = 64 * 1024;
 
 #[cfg(test)]
@@ -14,6 +17,7 @@ thread_local! {
 pub(crate) struct Chunks {
     pub(crate) offset: u64,
     pub(crate) hashes: Vec<[u8; 32]>,
+    pub(crate) resume: Option<PrefixState>,
 }
 
 impl Chunks {
@@ -57,6 +61,9 @@ impl Chunks {
             .ok_or_else(unavailable)?;
         let len = (self.offset - start).min(SIZE as u64) as usize;
         let actual: [u8; 32] = Sha256::digest(bytes).into();
+        #[cfg(test)]
+        crate::events::SOURCE_HASHED_BYTES
+            .with(|count| count.set(count.get() + bytes.len() as u64));
         if bytes.len() != len || actual != *expected {
             return Err(unavailable());
         }
@@ -98,7 +105,9 @@ pub(crate) fn capture(
     let mut chunks = Chunks {
         offset,
         hashes: Vec::new(),
+        resume: None,
     };
+    let mut state = PrefixState::default();
     let mut tail = Vec::new();
     let mut position = 0;
     let mut buffer = vec![0; SIZE];
@@ -106,6 +115,16 @@ pub(crate) fn capture(
         let len = (offset - position).min(SIZE as u64) as usize;
         let bytes = &mut buffer[..len];
         file.read_exact(bytes)?;
+        #[cfg(test)]
+        {
+            READ_BYTES.with(|count| count.set(count.get() + len as u64));
+            crate::events::SOURCE_HASHED_BYTES.with(|count| {
+                count.set(count.get() + len as u64 * if len == SIZE { 4 } else { 3 })
+            });
+        }
+        if len == SIZE {
+            state.advance(bytes);
+        }
         prefix.update(&*bytes);
         chunks.hashes.push(Sha256::digest(&*bytes).into());
         let split = from.saturating_sub(position).min(len as u64) as usize;
@@ -122,10 +141,101 @@ pub(crate) fn capture(
         }
         position += len as u64;
     }
+    chunks.resume = Some(state);
+    #[cfg(test)]
+    crate::events::SOURCE_HASHED_BYTES.with(|count| count.set(count.get() + tail.len() as u64));
     Ok(Captured {
         prefix: prefix.finalize().into(),
         tail: Sha256::digest(tail).into(),
         before: before.finalize().into(),
+        parsed: parsed.finalize().into(),
+        chunks,
+    })
+}
+
+/// Resume only after receiver-owned append evidence has bound the old and new
+/// physical revisions. Validate continuation against the old full-prefix SHA
+/// and its boundary proof before deriving the appended generation.
+pub(crate) fn capture_append(
+    file: &mut (impl Read + Seek),
+    offset: u64,
+    from: u64,
+    old: &Chunks,
+    expected: [u8; 32],
+) -> io::Result<Captured> {
+    if from > offset || !old.valid(from) {
+        return Err(unavailable());
+    }
+    let mut state = old.resume.clone().ok_or_else(unavailable)?;
+    let boundary = from / SIZE as u64 * SIZE as u64;
+    if state.at != boundary {
+        return Err(unavailable());
+    }
+    let remainder = if boundary < from {
+        old.read(file, (boundary / SIZE as u64) as usize)?
+    } else {
+        Vec::new()
+    };
+    if state.finish(&remainder) != expected {
+        return Err(unavailable());
+    }
+    let mut chunks = Chunks {
+        offset,
+        hashes: old.hashes[..(boundary / SIZE as u64) as usize].to_vec(),
+        resume: None,
+    };
+    file.seek(SeekFrom::Start(boundary))?;
+    let mut position = boundary;
+    let mut parsed = Sha256::new();
+    let mut last = Vec::new();
+    let mut buffer = vec![0; SIZE];
+    while position < offset {
+        let len = (offset - position).min(SIZE as u64) as usize;
+        let bytes = &mut buffer[..len];
+        file.read_exact(bytes)?;
+        let split = from.saturating_sub(position).min(len as u64) as usize;
+        // Re-read old boundary bytes, including after parser I/O.
+        if position == boundary && bytes[..split] != remainder {
+            return Err(unavailable());
+        }
+        parsed.update(&bytes[split..]);
+        chunks.hashes.push(Sha256::digest(&*bytes).into());
+        if len == SIZE {
+            state.advance(bytes);
+            last.clear();
+        } else {
+            last = bytes.to_vec();
+        }
+        #[cfg(test)]
+        {
+            READ_BYTES.with(|count| count.set(count.get() + len as u64));
+            crate::events::SOURCE_HASHED_BYTES.with(|count| {
+                count.set(
+                    count.get()
+                        + len as u64 * if len == SIZE { 2 } else { 1 }
+                        + (len - split) as u64,
+                )
+            });
+        }
+        position += len as u64;
+    }
+    let prefix = state.finish(&last);
+    chunks.resume = Some(state);
+    let width = offset.min(4096) as usize;
+    let mut tail = vec![0; width];
+    file.seek(SeekFrom::Start(offset - width as u64))?;
+    file.read_exact(&mut tail)?;
+    #[cfg(test)]
+    {
+        READ_BYTES.with(|count| count.set(count.get() + width as u64));
+        crate::events::SOURCE_HASHED_BYTES.with(|count| {
+            count.set(count.get() + remainder.len() as u64 + last.len() as u64 + width as u64)
+        });
+    }
+    Ok(Captured {
+        prefix,
+        tail: Sha256::digest(&tail).into(),
+        before: expected,
         parsed: parsed.finalize().into(),
         chunks,
     })
@@ -173,6 +283,55 @@ mod tests {
         }
         assert!(capture(&mut Cursor::new(&bytes), 1, 2).is_err());
         assert!(capture(&mut Cursor::new(&bytes), bytes.len() as u64 + 1, 0).is_err());
+    }
+
+    #[test]
+    fn continuation_matches_full_sha_across_boundaries_and_refuses_corruption() {
+        let bytes: Vec<u8> = (0..SIZE * 5 + 137).map(|n| (n % 251) as u8).collect();
+        for from in [
+            0,
+            1,
+            55,
+            56,
+            63,
+            64,
+            SIZE - 1,
+            SIZE,
+            SIZE + 19,
+            SIZE * 4 + 3,
+        ] {
+            let old = capture(&mut Cursor::new(&bytes), from as u64, 0).unwrap();
+            for to in [from, from + 1, from + 63, from + SIZE] {
+                if to > bytes.len() {
+                    continue;
+                }
+                let full = capture(&mut Cursor::new(&bytes), to as u64, from as u64).unwrap();
+                let resumed = capture_append(
+                    &mut Cursor::new(&bytes),
+                    to as u64,
+                    from as u64,
+                    &old.chunks,
+                    old.prefix,
+                )
+                .unwrap();
+                assert_eq!(resumed.prefix, full.prefix);
+                assert_eq!(resumed.tail, full.tail);
+                assert_eq!(resumed.parsed, full.parsed);
+                assert_eq!(resumed.chunks, full.chunks);
+            }
+            let mut corrupted = old.chunks.clone();
+            corrupted.resume.as_mut().unwrap().at += 64;
+            assert!(
+                capture_append(
+                    &mut Cursor::new(&bytes),
+                    from as u64 + 1,
+                    from as u64,
+                    &corrupted,
+                    old.prefix
+                )
+                .is_err()
+            );
+        }
     }
 
     #[test]

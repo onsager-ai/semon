@@ -12,10 +12,13 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex, MutexGuard, OnceLock, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::Instant,
 };
+
+mod runtime;
+pub(crate) use runtime::RuntimeObservations;
 
 pub(crate) struct NativeEvidence {
     pub(crate) options: Options,
@@ -23,18 +26,15 @@ pub(crate) struct NativeEvidence {
     pub(crate) catalog_demand: AtomicBool,
     query: RwLock<Option<Arc<QueryCache>>>,
     closed: AtomicBool,
+    audit_request: AtomicU64,
+    audit_completed: AtomicU64,
 }
 
 pub(crate) enum CatalogPreparation {
     Pending,
+    PublishedPending,
     Reconcile,
-    Complete(Box<CompleteCatalog>),
-}
-
-pub(crate) struct CompleteCatalog {
-    pub(crate) prepared: model::PreparedSources,
-    pub(crate) snapshot: Snapshot,
-    pub(crate) generation: String,
+    Ready(String),
 }
 
 /// Native source ownership for an admitted machine set. This constructs no
@@ -179,6 +179,15 @@ impl SessionSources {
     /// This never constructs a producer or starts compatibility warming.
     /// True means the source is configured and open, even before demand.
     pub fn invalidate(&self, machine: &str) -> bool {
+        self.invalidate_inner(machine, false)
+    }
+
+    /// Notify after exact changes were durably recorded by the source writer.
+    pub fn invalidate_journaled(&self, machine: &str) -> bool {
+        self.invalidate_inner(machine, true)
+    }
+
+    fn invalidate_inner(&self, machine: &str, journaled: bool) -> bool {
         if self.is_retired() {
             return false;
         }
@@ -189,9 +198,16 @@ impl SessionSources {
             return false;
         }
         let Some(view) = self.views[index].get() else {
+            if !journaled {
+                self.machines[index].1.request_metadata_audit();
+            }
             return true;
         };
-        view.invalidate();
+        if journaled {
+            view.invalidate_journaled();
+        } else {
+            view.invalidate();
+        }
         true
     }
 
@@ -230,7 +246,42 @@ impl NativeEvidence {
             catalog_demand: AtomicBool::new(false),
             query: RwLock::default(),
             closed: AtomicBool::new(false),
+            audit_request: AtomicU64::new(0),
+            audit_completed: AtomicU64::new(0),
         })
+    }
+
+    pub(crate) fn request_metadata_audit_if_idle(&self) {
+        let completed = self.audit_completed.load(Ordering::Acquire);
+        let _ = self.audit_request.compare_exchange(
+            completed,
+            completed.wrapping_add(1),
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
+    }
+
+    fn finish_audit(&self, work: &mut Work, now: i64) -> io::Result<bool> {
+        if work.audit.is_none() {
+            return Ok(false);
+        }
+        let generation = work
+            .events
+            .as_ref()
+            .and_then(|cache| cache.session_catalog_generation());
+        if !crate::events::store::note_catalog_audit(&self.options, generation.as_deref(), now)? {
+            return Ok(true);
+        }
+        let audit = work.audit.take().expect("audit exists");
+        work.audit_revision = audit.revision;
+        self.audit_completed
+            .store(audit.revision, Ordering::Release);
+        work.catalog_snapshot = audit.snapshot;
+        Ok(self.audit_request.load(Ordering::Acquire) != work.audit_revision)
+    }
+
+    pub(crate) fn request_metadata_audit(&self) {
+        self.audit_request.fetch_add(1, Ordering::AcqRel);
     }
 
     /// Retired sources can only answer from their last verified cohort.
@@ -241,6 +292,13 @@ impl NativeEvidence {
 
     /// Initialize the source index and publish a bounded cold catalog page.
     pub(crate) fn prepare_events(&self, work: &mut Work, now: i64) -> io::Result<()> {
+        if work
+            .events
+            .as_ref()
+            .is_some_and(|cache| cache.scoped_store_lost())
+        {
+            work.events = None;
+        }
         if work.events.is_none() {
             work.events = Some(match EventCache::open_scoped(&self.options.cache) {
                 Ok(cache) => cache,
@@ -272,63 +330,120 @@ impl NativeEvidence {
     ) -> io::Result<CatalogPreparation> {
         self.prepare_events(work, now)?;
         let cache = work.events.as_mut().expect("event cache initialized");
-        if !cache.is_scoped() || cache.session_catalog_generation().is_some() {
+        let state = cache.backfill_state()?;
+        if !cache.is_scoped() {
             work.cold_catalog = None;
             return Ok(CatalogPreparation::Reconcile);
         }
-        let discovery = work.cold_catalog.get_or_insert_with(ColdCatalog::default);
-        let page = discovery.cursor.next(&self.options, 64, 512)?;
-        debug_assert!(page.examined <= 512);
-        for input in page.inputs {
-            discovery.count += 1;
-            let modified = fs::metadata(input.full_path(&self.options))
-                .and_then(|metadata| metadata.modified())
-                .ok();
-            discovery
-                .newest
-                .insert((std::cmp::Reverse(modified), input));
-            if discovery.newest.len() > 64 {
-                discovery.newest.pop_last();
-            }
-        }
-        if !page.complete {
+        if (cache.session_catalog_generation().is_some() && state.is_none())
+            || state.as_deref() == Some("complete")
+        {
+            crate::events::store::begin_catalog_recovery(
+                &self.options,
+                "unsupported-publication-or-dependency-gap",
+            )?;
+            work.cold_catalog = None;
             return Ok(CatalogPreparation::Pending);
         }
-        let discovery = work.cold_catalog.take().expect("discovery initialized");
-        let inputs: Vec<_> = discovery
-            .newest
-            .into_iter()
-            .map(|(_, input)| input)
-            .collect();
-        let snapshot = (discovery.count <= 64)
-            .then(|| Snapshot::capture_pids(&self.options, BTreeSet::new(), cache.paths()))
-            .filter(|snapshot| {
-                snapshot.catalog_inputs(&self.options) == inputs.iter().cloned().collect()
-            });
-        if !inputs.is_empty() {
-            // Catalog owns physical membership independently of a Query scan
-            // window; each consumer still applies its configured output window.
-            let options = Options {
-                scan_window: false,
-                ..self.options.clone()
-            };
-            let prepared = model::prepare_sources(&options, cache, &inputs, now)?;
-            let (outcome, generation) = cache.publish_partial_catalog_fenced(&prepared)?;
-            if outcome != crate::events::Outcome::Written {
-                return Err(io::Error::other(
-                    "Initial native catalog publication changed; retry observation",
-                ));
+        let discovery = work.cold_catalog.get_or_insert_with(|| ColdCatalog {
+            revision: self.audit_request.load(Ordering::Acquire),
+            ..Default::default()
+        });
+        if state.as_deref() != Some("draining") {
+            let recovery_complete = crate::events::store::discover_recovery_sources(&self.options)?;
+            let page = discovery.cursor.next(&self.options, 64, 512)?;
+            debug_assert!(page.examined <= 512);
+            cache.discover_catalog_sources(
+                &self.options,
+                &page.inputs,
+                page.complete && recovery_complete,
+            )?;
+            for input in page.inputs {
+                if !input.path.ends_with(".jsonl") {
+                    continue;
+                }
+                let modified = fs::metadata(input.full_path(&self.options))
+                    .and_then(|metadata| metadata.modified())
+                    .ok();
+                discovery
+                    .newest
+                    .insert((std::cmp::Reverse(modified), input));
+                if discovery.newest.len() > 64 {
+                    discovery.newest.pop_last();
+                }
             }
-            cache.end_scan();
-            if let (Some(snapshot), Some(generation)) = (snapshot, generation) {
-                return Ok(CatalogPreparation::Complete(Box::new(CompleteCatalog {
-                    prepared,
-                    snapshot,
-                    generation,
-                })));
+            if !page.complete || !recovery_complete {
+                return Ok(CatalogPreparation::Pending);
             }
         }
-        Ok(CatalogPreparation::Reconcile)
+        let pending_inputs = cache.pending_catalog_sources(64)?;
+        if let Some(path) = pending_inputs.iter().find(|path| path.ends_with(".json")) {
+            cache.resolve_catalog_input(&self.options, path)?;
+            return Ok(CatalogPreparation::Pending);
+        }
+        let inputs = if cache.session_catalog_generation().is_none() && !discovery.newest.is_empty()
+        {
+            std::mem::take(&mut discovery.newest)
+                .into_iter()
+                .map(|(_, input)| input)
+                .collect::<Vec<_>>()
+        } else {
+            cache
+                .pending_catalog_sources(64)?
+                .into_iter()
+                .map(|path| {
+                    catalog_input(Path::new(&path), &self.options)
+                        .ok_or_else(|| io::Error::other("backfill source outside allowlist"))
+                })
+                .collect::<io::Result<Vec<_>>>()?
+        };
+        if !inputs.is_empty() || cache.session_catalog_generation().is_none() {
+            let snapshot = discovery
+                .snapshot
+                .get_or_insert_with(|| Snapshot::sources(&self.options, &[]));
+            snapshot.extend_sources(&self.options, &inputs);
+            let mut seeds = inputs;
+            let prepared = loop {
+                cache.scan_byte_budget = Some(4 * 1024 * 1024);
+                let prepared = self.prepare_catalog_component_mode(cache, seeds.clone(), true, now);
+                cache.scan_byte_budget = None;
+                if let Some(prepared) = prepared? {
+                    break prepared;
+                }
+                if seeds.len() <= 1 {
+                    return Err(io::Error::new(
+                        io::ErrorKind::WouldBlock,
+                        "backfill dependency budget exceeded",
+                    ));
+                }
+                seeds.truncate(seeds.len() / 2);
+            };
+            discovery.pids.extend(prepared.pids.iter().copied());
+            let (outcome, _) = cache.publish_partial_catalog_fenced(&prepared)?;
+            if outcome != crate::events::Outcome::Written {
+                return Err(io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    "backfill publication changed",
+                ));
+            }
+            crate::events::store::requeue_concurrent_sources(&self.options, &prepared)?;
+            cache.publish_session_descriptions();
+            cache.end_scan();
+            cache.release_published_indexes();
+            work.texts.release_published_derivations();
+        }
+        if !cache.pending_catalog_sources(1)?.is_empty() {
+            if !discovery.started {
+                discovery.started = true;
+                return Ok(CatalogPreparation::PublishedPending);
+            }
+            return Ok(CatalogPreparation::Pending);
+        }
+        Ok(CatalogPreparation::Ready(
+            cache
+                .session_catalog_generation()
+                .ok_or_else(|| io::Error::other("backfill generation missing"))?,
+        ))
     }
 
     /// Expand and derive the same bounded component for Catalog refresh and
@@ -339,6 +454,18 @@ impl NativeEvidence {
         inputs: Vec<crate::inputs::Input>,
         now: i64,
     ) -> io::Result<Option<model::PreparedSources>> {
+        self.prepare_catalog_component_mode(cache, inputs, false, now)
+    }
+    fn prepare_catalog_component_mode(
+        &self,
+        cache: &mut EventCache,
+        inputs: Vec<crate::Input>,
+        recovering: bool,
+        now: i64,
+    ) -> io::Result<Option<model::PreparedSources>> {
+        if inputs.is_empty() && recovering {
+            return model::prepare_sources(&self.options, cache, &[], now).map(Some);
+        }
         let mut inputs: BTreeSet<_> = inputs.into_iter().collect();
         let options = Options {
             scan_window: false,
@@ -375,14 +502,44 @@ impl NativeEvidence {
             if dependencies.len() > 64 {
                 break None;
             }
+            let selectors = prepared
+                .rows
+                .iter()
+                .flat_map(|row| {
+                    row.native_ids
+                        .iter()
+                        .map(|id| (row.harness.clone(), id.clone()))
+                })
+                .chain(prepared.lineage_dependencies.iter().cloned())
+                .collect::<Vec<_>>();
+            inputs.extend(crate::events::store::catalog_dependents(
+                &self.options,
+                &selectors,
+            )?);
+            if inputs.len() > 64 {
+                break None;
+            }
             keys = dependencies.into_iter().collect();
-            native_parents = prepared.native_parents();
+            native_parents = if recovering {
+                Vec::new()
+            } else {
+                prepared.native_parents()
+            };
+            native_parents.extend(
+                prepared
+                    .lineage_dependencies
+                    .iter()
+                    .filter(|(harness, _)| !harness.starts_with("bridge:"))
+                    .cloned(),
+            );
             let Some(component) =
                 cache.catalog_component_paths(&selected, &keys, &native_parents, &self.options)?
             else {
                 break None;
             };
-            if component.iter().all(|input| inputs.contains(input)) {
+            if inputs.len() == selected.len()
+                && component.iter().all(|input| inputs.contains(input))
+            {
                 break Some(prepared);
             }
             inputs.extend(component);
@@ -450,13 +607,180 @@ impl NativeEvidence {
         now: i64,
         mut before_build: impl FnMut() -> io::Result<()>,
     ) -> io::Result<bool> {
-        if let Some(snapshot) = &work.catalog_snapshot
+        // Keep the existing receiver facts fence through derivation and the
+        // Catalog commit. A newly indexed source has no published owner yet;
+        // otherwise a facts writer could miss that dependency in the gap after
+        // preparation releases its own read fence and before publication.
+        let _facts_publication = self
+            .options
+            .facts
+            .as_ref()
+            .map(|_| crate::source_change::SourceLock::acquire(&self.options, "facts", false))
+            .transpose()?;
+        // Hosted Raw writers journal exact intents durably. The persisted
+        // qualification is independent of this process's in-memory snapshot.
+        self.prepare_events(work, now)?;
+        let requested = self.audit_request.load(Ordering::Acquire);
+        if requested != work.audit_revision
+            && work.audit.is_none()
+            && work
+                .events
+                .as_ref()
+                .expect("event cache initialized")
+                .qualified_catalog()?
+        {
+            work.audit = Some(CatalogAudit {
+                revision: requested,
+                ..Default::default()
+            });
+            work.pending_sources = true;
+        }
+        let cache = work.events.as_mut().expect("event cache initialized");
+        let controlled = work.audit.is_none()
+            && self.options.facts.is_some()
+            && cache.is_scoped()
+            && crate::events::store::push_driven(&self.options)?;
+        if cache.is_scoped()
+            && matches!(cache.backfill_state()?.as_deref(), None | Some("complete"))
+            && cache.qualified_catalog()?
+            && (controlled
+                || work.catalog_snapshot.is_none()
+                || work.audit.is_some()
+                || work.pending_sources)
+        {
+            let mut audit_pending = false;
+            let mut notified = false;
+            if !controlled && (work.audit.is_some() || !work.pending_sources) {
+                let audit = work.audit.get_or_insert_with(CatalogAudit::default);
+                let page = if audit.discovered {
+                    None
+                } else {
+                    Some(audit.cursor.next(&self.options, 64, 512)?)
+                };
+                if let Some(page) = &page {
+                    audit.discovered = page.complete;
+                    audit
+                        .snapshot
+                        .get_or_insert_with(|| Snapshot::sources(&self.options, &[]))
+                        .extend_sources(&self.options, &page.inputs);
+                }
+                let last = crate::events::store::audit_catalog_sources(
+                    &self.options,
+                    page.as_ref().map_or(&[], |page| page.inputs.as_slice()),
+                    (!audit.checked).then_some(audit.after.as_str()),
+                    &query_runtime_generation(&self.options)?,
+                )?;
+                if let Some(last) = last {
+                    audit.after = last;
+                } else {
+                    audit.checked = true;
+                }
+                audit_pending = !audit.discovered || !audit.checked;
+                if !audit_pending
+                    && !audit.started
+                    && let (Some(previous), Some(observed)) =
+                        (&work.catalog_snapshot, &audit.snapshot)
+                    && (previous.watched != observed.watched
+                        || previous.locks != observed.locks
+                        || previous.pids != observed.pids)
+                {
+                    before_build()?;
+                    work.built_at = Some(Instant::now());
+                    audit.started = true;
+                    notified = true;
+                    if cache.pending_catalog_sources(1)?.is_empty() {
+                        // Observe changed runtime inputs coherently even when
+                        // no session depends on them. This native preparation
+                        // has no sources, history loads or Catalog row writes.
+                        model::prepare_sources(&self.options, cache, &[], now)?;
+                        cache.end_scan();
+                    }
+                }
+            }
+            let pending = cache.pending_catalog_sources(1)?;
+            if pending.is_empty() {
+                if !audit_pending {
+                    audit_pending = self.finish_audit(work, now)?;
+                }
+                work.pending_sources = audit_pending;
+                return Ok(!audit_pending);
+            }
+            if pending[0].ends_with(".json") {
+                cache.resolve_catalog_input(&self.options, &pending[0])?;
+                work.pending_sources =
+                    audit_pending || !cache.pending_catalog_sources(1)?.is_empty();
+                return Ok(!work.pending_sources);
+            }
+            let inputs = pending
+                .into_iter()
+                .map(|path| {
+                    catalog_input(Path::new(&path), &self.options)
+                        .ok_or_else(|| io::Error::other("journal source outside native allowlist"))
+                })
+                .collect::<io::Result<Vec<_>>>()?;
+            let snapshot = Snapshot::sources(&self.options, &inputs);
+            if !notified && !work.audit.as_ref().is_some_and(|audit| audit.started) {
+                before_build()?;
+                work.built_at = Some(Instant::now());
+                if let Some(audit) = &mut work.audit {
+                    audit.started = true;
+                }
+            }
+            if let Some(prepared) = self.prepare_catalog_component(cache, inputs, now)? {
+                match cache.publish_closed_catalog(&prepared)? {
+                    Some(crate::events::Outcome::Written) => {
+                        crate::events::store::requeue_concurrent_sources(&self.options, &prepared)?;
+                        cache.publish_session_descriptions();
+                        cache.end_scan();
+                        if controlled {
+                            work.catalog_snapshot = Some(snapshot);
+                        }
+                        cache.release_published_indexes();
+                        let sources_pending = !cache.pending_catalog_sources(1)?.is_empty();
+                        if controlled && !sources_pending {
+                            let generation = cache.session_catalog_generation();
+                            if !crate::events::store::note_catalog_audit(
+                                &self.options,
+                                generation.as_deref(),
+                                now,
+                            )? {
+                                audit_pending = true;
+                            }
+                        }
+                        work.texts.release_published_derivations();
+                        if !controlled && !audit_pending && !sources_pending {
+                            audit_pending = self.finish_audit(work, now)?;
+                        }
+                        work.pending_sources = audit_pending || sources_pending;
+                        return Ok(!work.pending_sources);
+                    }
+                    Some(_) => {
+                        return Err(io::Error::new(
+                            io::ErrorKind::WouldBlock,
+                            "Catalog source publication changed",
+                        ));
+                    }
+                    None => {}
+                }
+            }
+            eprintln!("semon sessions native: recovery reason=incomplete-source-closure");
+            crate::events::store::begin_catalog_recovery(
+                &self.options,
+                "incomplete-source-closure",
+            )?;
+            work.catalog_snapshot = None;
+            work.pending_sources = true;
+            return Ok(false);
+        }
+        if work.cold_catalog.is_none()
+            && let Some(snapshot) = &work.catalog_snapshot
             && !snapshot.changed(&self.options)
         {
             return Ok(true);
         }
         work.built_at = Some(Instant::now());
-        if work.catalog_snapshot.is_some() {
+        let mut started = false;
+        if work.cold_catalog.is_none() && work.catalog_snapshot.is_some() {
             self.prepare_events(work, now)?;
             let cache = work.events.as_mut().expect("event cache initialized");
             // The old snapshot proves discovery/runtime inputs did not change;
@@ -481,16 +805,22 @@ impl NativeEvidence {
                 // Incremental semantic work shares the same lifecycle boundary
                 // as reconciliation, including worker failure instrumentation.
                 before_build()?;
+                started = true;
                 let prepared = self.prepare_catalog_component(cache, inputs, now)?;
                 if let Some(prepared) = prepared {
                     match cache.publish_closed_catalog(&prepared)? {
                         Some(crate::events::Outcome::Written) => {
+                            crate::events::store::requeue_concurrent_sources(
+                                &self.options,
+                                &prepared,
+                            )?;
                             cache.publish_session_descriptions();
                             cache.end_scan();
                             work.catalog_snapshot = Some(snapshot);
                             cache.release_published_indexes();
                             work.texts.release_published_derivations();
-                            return Ok(true);
+                            work.pending_sources = !cache.pending_catalog_sources(1)?.is_empty();
+                            return Ok(!work.pending_sources);
                         }
                         Some(_) => {
                             return Err(io::Error::new(
@@ -503,31 +833,57 @@ impl NativeEvidence {
                 }
             }
         }
+        // Untrusted runtime or inventory changes use the bounded metadata audit;
+        // their persisted dirty sources still take the same publication path.
+        if work.cold_catalog.is_none()
+            && work.catalog_snapshot.is_some()
+            && work.events.as_ref().is_some_and(|cache| cache.is_scoped())
+        {
+            work.audit = Some(CatalogAudit {
+                started,
+                revision: requested,
+                ..Default::default()
+            });
+            work.pending_sources = true;
+            return Ok(false);
+        }
         match self.prepare_catalog(work, now)? {
             CatalogPreparation::Pending => return Ok(false),
-            CatalogPreparation::Complete(complete) => {
+            CatalogPreparation::PublishedPending => {
                 before_build()?;
+                return Ok(false);
+            }
+            CatalogPreparation::Ready(generation) => {
+                if !work
+                    .cold_catalog
+                    .as_ref()
+                    .is_some_and(|discovery| discovery.started)
+                {
+                    before_build()?;
+                }
                 let cache = work.events.as_mut().expect("event cache initialized");
-                cache.publish_catalog_projection(
-                    &crate::slot_projection::Publication {
-                        rows: &complete.prepared.rows,
-                        transcripts: Some(&complete.prepared.transcripts),
-                    },
-                    Some(&complete.generation),
-                )?;
-                cache.publish_session_descriptions();
-                let mut snapshot = complete.snapshot;
+                if cache.finish_catalog_backfill(&generation)? != crate::events::Outcome::Written {
+                    return Err(io::Error::new(
+                        io::ErrorKind::WouldBlock,
+                        "backfill completion changed",
+                    ));
+                }
+                let discovery = work.cold_catalog.take().expect("backfill state exists");
+                work.audit_revision = discovery.revision;
+                self.audit_completed
+                    .store(discovery.revision, Ordering::Release);
+                let mut snapshot = discovery
+                    .snapshot
+                    .unwrap_or_else(|| Snapshot::sources(&self.options, &[]));
                 if self.options.facts.is_none() {
-                    snapshot.pids = complete
-                        .prepared
-                        .pids
-                        .iter()
-                        .map(|pid| (*pid, proc_start(&self.options.proc_root, *pid)))
-                        .collect();
+                    snapshot.pids.extend(
+                        discovery
+                            .pids
+                            .into_iter()
+                            .map(|pid| (pid, proc_start(&self.options.proc_root, pid))),
+                    );
                 }
                 work.catalog_snapshot = Some(snapshot);
-                cache.release_published_indexes();
-                work.texts.release_published_derivations();
                 return Ok(true);
             }
             CatalogPreparation::Reconcile => {}
@@ -556,8 +912,18 @@ impl NativeEvidence {
 
     /// Native queries refresh this owner's source cache and coherent cohort.
     /// This owner has no compatibility transport or background refresh workers.
+    pub(crate) fn catalog_continuation(&self, work: &Work) -> bool {
+        work.cold_catalog.is_some()
+            || work.audit.is_some()
+            || (work.pending_sources
+                && self.audit_request.load(Ordering::Acquire) == work.audit_revision)
+    }
+
     pub(crate) fn catalog_pending(&self, work: &Work) -> bool {
         work.cold_catalog.is_some()
+            || work.pending_sources
+            || work.audit.is_some()
+            || self.audit_request.load(Ordering::Acquire) != work.audit_revision
     }
 
     pub(crate) fn query_at(&self, now: i64) -> io::Result<Arc<model::QueryData>> {
@@ -631,14 +997,31 @@ pub(crate) struct Work {
     pub(crate) texts: Texts,
     pub(crate) catalog_snapshot: Option<Snapshot>,
     cold_catalog: Option<ColdCatalog>,
+    pending_sources: bool,
+    audit: Option<CatalogAudit>,
+    audit_revision: u64,
     /// When the last native preparation started.
     pub(crate) built_at: Option<Instant>,
 }
 
 #[derive(Default)]
-struct ColdCatalog {
+struct CatalogAudit {
+    revision: u64,
     cursor: crate::inputs::Discovery,
-    count: usize,
+    discovered: bool,
+    after: String,
+    checked: bool,
+    started: bool,
+    snapshot: Option<Snapshot>,
+}
+
+#[derive(Default)]
+struct ColdCatalog {
+    revision: u64,
+    cursor: crate::inputs::Discovery,
+    pids: BTreeSet<u32>,
+    snapshot: Option<Snapshot>,
+    started: bool,
     newest: BTreeSet<(
         std::cmp::Reverse<Option<std::time::SystemTime>>,
         crate::inputs::Input,
@@ -662,6 +1045,63 @@ fn stamp(path: &Path) -> Option<Stamp> {
 /// Runtime observations fence published Query summaries independently of native
 /// history. This visits process records and naming inputs, never transcript trees.
 pub(crate) fn query_runtime_generation(options: &Options) -> io::Result<String> {
+    if let Some(path) = &options.facts {
+        let facts = crate::read_regular_at_most(path, 64 * 1024 * 1024)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<crate::Facts>(&bytes).ok())
+            .unwrap_or_default();
+        return recorded_runtime_fingerprint(options, &facts);
+    }
+    legacy_runtime_generation(options)
+}
+
+/// Semantic hosted runtime fence. Source selection has its independent authority
+/// and revision fences; transfer sequence alone cannot stale runtime summaries.
+pub(crate) fn recorded_runtime_fingerprint(
+    options: &Options,
+    facts: &crate::Facts,
+) -> io::Result<String> {
+    recorded_runtime_fingerprint_excluding(options, facts, None)
+}
+
+pub(crate) fn recorded_runtime_fingerprint_excluding(
+    options: &Options,
+    facts: &crate::Facts,
+    excluded: Option<&Path>,
+) -> io::Result<String> {
+    use sha2::{Digest, Sha256};
+    let mut facts = facts.clone();
+    facts.mirror_observation_id = None;
+    facts.mirror_sequence = None;
+    facts.codex_rollouts = None;
+    facts.codex_provisional_rollouts = None;
+    for name in &mut facts.native_names {
+        name.observed_at = 0;
+    }
+    let mut active = BTreeMap::new();
+    watch_tree(
+        &options.claude_home.join("sessions"),
+        &[".json"],
+        &mut active,
+    );
+    let active = active
+        .into_iter()
+        // Directory clocks describe enumeration, not PID runtime semantics.
+        .filter(|(path, _)| {
+            path.extension()
+                .is_some_and(|extension| extension == "json")
+        })
+        .filter(|(path, _)| excluded != Some(path.as_path()))
+        .map(|(path, stamp)| (path, stamp.map(|stamp| stamp.generation)))
+        .collect::<Vec<_>>();
+    Ok(format!(
+        "{:x}",
+        Sha256::digest(serde_json::to_vec(&(facts, active)).map_err(io::Error::other)?)
+    ))
+}
+
+/// Qualification of pre-scoped Catalog recipes during an additive upgrade.
+pub(crate) fn legacy_runtime_generation(options: &Options) -> io::Result<String> {
     use sha2::{Digest, Sha256};
     let mut watched = BTreeMap::new();
     watch_tree(
@@ -822,6 +1262,26 @@ fn node_pids(nodes: &[Node], output: &mut BTreeSet<u32>) {
     }
 }
 
+pub(crate) fn source_input(path: &Path, options: &Options) -> Option<crate::Input> {
+    [
+        crate::InputRoot::Claude,
+        crate::InputRoot::Codex,
+        crate::InputRoot::Copilot,
+    ]
+    .into_iter()
+    .find_map(|root| {
+        let relative = path
+            .strip_prefix(root.home(options))
+            .ok()?
+            .to_str()?
+            .replace(std::path::MAIN_SEPARATOR, "/");
+        crate::is_input_path(root.as_str(), &relative).then_some(crate::Input {
+            root,
+            path: relative,
+        })
+    })
+}
+
 pub(crate) fn catalog_input(path: &Path, options: &Options) -> Option<crate::inputs::Input> {
     if path
         .extension()
@@ -849,15 +1309,87 @@ pub(crate) fn catalog_input(path: &Path, options: &Options) -> Option<crate::inp
 }
 
 impl Snapshot {
-    fn catalog_inputs(&self, options: &Options) -> BTreeSet<crate::inputs::Input> {
-        self.watched
-            .iter()
-            .filter_map(|(path, stamp)| {
-                stamp.filter(|stamp| stamp.kind.is_file())?;
-                catalog_input(path, options)
-            })
-            .collect()
+    /// Assemble observation stamps along bounded source batches. Never enumerate
+    /// native transcript trees again after progressive discovery.
+    fn sources(options: &Options, inputs: &[crate::Input]) -> Self {
+        let mut watched = BTreeMap::new();
+        watch_tree(
+            &options.claude_home.join("sessions"),
+            &[".json"],
+            &mut watched,
+        );
+        for path in [&options.claude_json]
+            .into_iter()
+            .chain(options.facts.iter())
+        {
+            watched.insert(path.clone(), stamp(path));
+        }
+        let mut pids = BTreeMap::new();
+        let mut ids = BTreeSet::new();
+        let locks = if options.facts.is_none() {
+            watch_tree(
+                &options.codex_home.join("thread-writer-locks"),
+                &[".lock"],
+                &mut watched,
+            );
+            for name in [
+                "session_index.jsonl",
+                "state_5.sqlite",
+                "state_5.sqlite-wal",
+            ] {
+                let path = options.codex_home.join(name);
+                watched.insert(path.clone(), stamp(&path));
+            }
+            let path = options.proc_root.join("sys/kernel/hostname");
+            watched.insert(path.clone(), stamp(&path));
+            ids = lock_ids(options);
+            for pid in model::pid_files(options, &crate::facts::MachineFacts::Local) {
+                pids.insert(pid.pid, proc_start(&options.proc_root, pid.pid));
+            }
+            writer_locks(options, &ids)
+        } else {
+            None
+        };
+        let mut snapshot = Self {
+            watched,
+            pids,
+            lock_ids: ids,
+            locks,
+        };
+        for path in [
+            options.claude_home.join("projects"),
+            options.codex_home.join("sessions"),
+            options.codex_home.join("archived_sessions"),
+            options.copilot_home.join("session-state"),
+        ] {
+            snapshot.watched.insert(path.clone(), stamp(&path));
+        }
+        snapshot.extend_sources(options, inputs);
+        snapshot
     }
+    fn extend_sources(&mut self, options: &Options, inputs: &[crate::Input]) {
+        for input in inputs {
+            let path = input.full_path(options);
+            self.watched.insert(path.clone(), stamp(&path));
+            if input.path.ends_with(".jsonl")
+                && input.root == crate::InputRoot::Claude
+                && crate::native_sidecar::agent_path(&path)
+            {
+                let sidecar = path.with_extension("meta.json");
+                self.watched.insert(sidecar.clone(), stamp(&sidecar));
+            }
+            let mut directory = path.parent();
+            while let Some(path) =
+                directory.filter(|path| path.starts_with(input.root.home(options)))
+            {
+                self.watched
+                    .entry(path.to_owned())
+                    .or_insert_with(|| stamp(path));
+                directory = path.parent();
+            }
+        }
+    }
+
     /// A bounded rewrite/append/addition set with unchanged process inputs.
     /// Directory changes qualify only when an admitted new source explains them;
     /// disappearance, sidecars and runtime changes still need reconciliation.

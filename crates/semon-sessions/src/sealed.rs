@@ -617,6 +617,9 @@ impl Read for LogFile {
                 let count = buf.len().min(bytes.len() - from);
                 buf[..count].copy_from_slice(&bytes[from..from + count]);
                 self.pos += count as u64;
+                #[cfg(test)]
+                crate::events::SOURCE_READ_BYTES
+                    .with(|bytes| bytes.set(bytes.get() + count as u64));
                 return Ok(count);
             }
             let count = read_at(&self.file, buf, self.pos)?;
@@ -634,6 +637,8 @@ impl Read for LogFile {
                 let _ = self.fill_unbound(&mut buf[..count]);
             }
             self.pos += count as u64;
+            #[cfg(test)]
+            crate::events::SOURCE_READ_BYTES.with(|bytes| bytes.set(bytes.get() + count as u64));
             return Ok(count);
         }
     }

@@ -1122,9 +1122,10 @@ impl SourceFile {
     }
 }
 
+#[derive(Serialize)]
 pub(crate) struct PidFile {
     pub(crate) pid: u32,
-    session: String,
+    pub(crate) session: String,
     pub(crate) alive: bool,
     /// The process start time the file records.
     pub(crate) start: Option<u64>,
@@ -1149,6 +1150,27 @@ struct Stamp {
     size: u64,
     modified_ns: u128,
     changed_ns: Option<i128>,
+}
+
+fn indexed_stamp(cache: &EventCache, path: &Path, before: Stamp) -> Stamp {
+    if cache.is_scoped()
+        && let Some(stat) = cache.indexed_stat(path)
+        && (stat.dev, stat.ino, stat.modified_ns, stat.changed_ns)
+            == (
+                before.dev,
+                before.ino,
+                before.modified_ns,
+                before.changed_ns,
+            )
+        && stat.size <= before.size
+    {
+        Stamp {
+            size: stat.size,
+            ..before
+        }
+    } else {
+        before
+    }
 }
 
 fn stamp_of(path: &Path) -> Stamp {
@@ -1367,6 +1389,7 @@ fn scan(
         let Ok(summary) = events::scan_file(&path, "claude", cache, dirty) else {
             continue;
         };
+        let stamp = indexed_stamp(cache, &path, stamp);
         if let Role::Agent(agent) = &mut role {
             let metadata = summary
                 .claude_sidecar
@@ -1421,6 +1444,7 @@ fn scan(
         let Ok(summary) = events::scan_file(&path, "codex", cache, dirty) else {
             continue;
         };
+        let stamp = indexed_stamp(cache, &path, stamp);
         let Some(header) = summary.codex_header.as_ref() else {
             return Err(io::Error::other("native Codex header was not observed"));
         };
@@ -1469,6 +1493,7 @@ fn scan(
         };
         let stamp = stamp_of(&path);
         let summary = events::scan_file(&path, "copilot", cache, dirty)?;
+        let stamp = indexed_stamp(cache, &path, stamp);
         if cache.replaced(&path) {
             texts.invalidate(&path);
         }
@@ -1486,7 +1511,10 @@ fn scan(
             summary,
         });
     }
-    if selected.is_none() {
+    cache.flush_cold_writes()?;
+    if let Some(selected) = selected {
+        cache.retire_scoped_sources(options, selected, &seen, machine)?;
+    } else {
         cache.retain(&seen, dirty);
     }
     cache.end_scan();
@@ -6416,6 +6444,7 @@ pub(crate) struct PreparedSources {
     pub(crate) rows: Vec<summary::CatalogRow>,
     pub(crate) transcripts: Vec<crate::slot_projection::Projection>,
     pub(crate) pids: BTreeSet<u32>,
+    pub(crate) lineage_dependencies: Vec<(String, String)>,
 }
 
 impl PreparedSources {
@@ -6458,6 +6487,9 @@ pub(crate) fn prepare_sources(
             "native producer source batch must contain at most 64 distinct sources",
         ));
     }
+    #[cfg(test)]
+    crate::events::CATALOG_DERIVED_SOURCES
+        .with(|count| count.set(count.get() + inputs.len() as u64));
     match build_sources_inner(
         options,
         cache,
@@ -6703,7 +6735,26 @@ fn build_sources_inner(
     selection: BuildSelection<'_>,
     target: BuildTarget,
 ) -> io::Result<BuildOutput> {
+    let _facts_lock = options
+        .facts
+        .as_ref()
+        .map(|_| crate::source_change::SourceLock::acquire(options, "facts", false))
+        .transpose()?;
+    let _source_locks = match &selection {
+        BuildSelection::Current(Some(inputs)) => inputs
+            .iter()
+            .map(|input| {
+                crate::source_change::SourceLock::acquire(
+                    options,
+                    input.full_path(options).to_string_lossy().as_ref(),
+                    false,
+                )
+            })
+            .collect::<io::Result<Vec<_>>>()?,
+        _ => Vec::new(),
+    };
     let query_runtime = crate::native_evidence::query_runtime_generation(options)?;
+    let runtime_observations = crate::native_evidence::RuntimeObservations::new(options);
     let catalog_base = cache.session_catalog_generation();
     let mut timings = Vec::with_capacity(18);
     macro_rules! timed {
@@ -6757,10 +6808,19 @@ fn build_sources_inner(
     }
     let claims = if target == BuildTarget::Sources && history_records.is_none() {
         cache.catalog_claims(
-            &files
-                .iter()
-                .map(|file| file.path.to_string_lossy().into_owned())
-                .collect::<Vec<_>>(),
+            &selected
+                .map(|inputs| {
+                    inputs
+                        .iter()
+                        .map(|input| input.full_path(options).to_string_lossy().into_owned())
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_else(|| {
+                    files
+                        .iter()
+                        .map(|file| file.path.to_string_lossy().into_owned())
+                        .collect()
+                }),
         )?
     } else {
         Vec::new()
@@ -7035,6 +7095,9 @@ fn build_sources_inner(
                     serde_json::json!({"version":1,"runtime":query_runtime,"source_generation":crate::retention::source_generation(&row.sources)?,"rows":query_rows,"last":summaries[&row.key]["last"],"state":summaries[&row.key]["state"],
                         "transcript_observation":tx.get(&row.key).map(|transcript|crate::slot_projection::QueryObservation::capture(transcript))}),
                 );
+                let runtime = runtime_observations.scope(row)?;
+                row.query.as_mut().expect("query captured")["runtime"] =
+                    serde_json::Value::String(runtime);
                 row.overview = Some(
                     crate::overview::Summary::capture(
                         &row.key,
@@ -7089,6 +7152,24 @@ fn build_sources_inner(
                 rows: catalog.unwrap_or_default(),
                 transcripts: slot_projections.unwrap_or_default(),
                 pids: pids.iter().map(|pid| pid.pid).collect(),
+                lineage_dependencies: files
+                    .iter()
+                    .flat_map(|file| {
+                        file.summary
+                            .links
+                            .session_ids
+                            .iter()
+                            .chain(&file.summary.links.continued_in)
+                            .map(|id| (file.harness().to_owned(), id.clone()))
+                            .chain(
+                                file.summary
+                                    .links
+                                    .bridges
+                                    .iter()
+                                    .map(|id| (format!("bridge:{}", file.harness()), id.clone())),
+                            )
+                    })
+                    .collect(),
             }));
         }
         BuildTarget::Catalog => {
