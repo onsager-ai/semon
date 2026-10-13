@@ -55,6 +55,9 @@ const WHOLE_CAP: u64 = 4 * 1024 * 1024;
 /// Keep upload requests short on slow links. This is the sender's default,
 /// independent of the protocol's larger [`wire::CHUNK_BYTES`] maximum.
 const UPLOAD_CHUNK_BYTES: usize = 256 * 1024;
+/// End a watch sweep after one foreground/history scheduling cycle so
+/// growing logs get fresh targets while old history continues backfilling.
+const WATCH_BATCHES: usize = 4;
 /// How often `--watch` looks for new lines, and sends facts.
 const PASS_EVERY: Duration = Duration::from_secs(2);
 const FACTS_EVERY: Duration = Duration::from_secs(10);
@@ -568,6 +571,14 @@ impl Client {
     /// with what was sent before it: a file it caught midway keeps its last
     /// recorded place, and the rest wait for the next push.
     pub fn pass(&mut self, sessions: &Options) -> Result<Report> {
+        self.pass_limited(sessions, None)
+    }
+
+    fn watch_pass(&mut self, sessions: &Options) -> Result<Report> {
+        self.pass_limited(sessions, Some(WATCH_BATCHES))
+    }
+
+    fn pass_limited(&mut self, sessions: &Options, batch_limit: Option<usize>) -> Result<Report> {
         self.completed_inventory = None;
         {
             let mut progress = self.progress.lock().unwrap_or_else(|e| e.into_inner());
@@ -582,6 +593,8 @@ impl Client {
         let mut history = VecDeque::new();
         let mut foreground_turns = 0;
         let mut local_failure = false;
+        let mut batches = 0;
+        let mut complete = false;
         self.discover(sessions, &mut selected, &mut foreground, &mut history)?;
         let mut discovered = Instant::now();
         loop {
@@ -595,6 +608,7 @@ impl Client {
             if foreground.is_empty() && history.is_empty() {
                 self.discover(sessions, &mut selected, &mut foreground, &mut history)?;
                 if foreground.is_empty() && history.is_empty() {
+                    complete = true;
                     break;
                 }
                 discovered = Instant::now();
@@ -619,6 +633,7 @@ impl Client {
             match outcome {
                 Ok((bytes, replaced)) => {
                     if bytes > 0 || replaced {
+                        batches += 1;
                         touched.insert(key.clone());
                         report.bytes += bytes;
                         report.replaced += usize::from(replaced);
@@ -655,10 +670,13 @@ impl Client {
                 }
                 Err(Failure::Stopped) => break,
             }
+            if batch_limit.is_some_and(|limit| batches >= limit) {
+                break;
+            }
         }
         report.files = touched.len();
         self.save()?;
-        if !local_failure && !self.stop.is_stopped() {
+        if complete && !local_failure && !self.stop.is_stopped() {
             self.completed_inventory = Some(
                 selected
                     .values()
@@ -1334,7 +1352,11 @@ fn push_running(
     hold: &Hold,
     client: &mut Client,
 ) -> Result<()> {
-    let initial_pass = client.pass(&options.sessions);
+    let initial_pass = if watch {
+        client.watch_pass(&options.sessions)
+    } else {
+        client.pass(&options.sessions)
+    };
     if let Err(error) = &initial_pass
         && error.contains("refused the token")
     {
@@ -1474,7 +1496,7 @@ fn push_running(
                 return Ok(());
             }
         }
-        pass = client.pass(&options.sessions);
+        pass = client.watch_pass(&options.sessions);
     }
 }
 
