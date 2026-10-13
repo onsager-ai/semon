@@ -11,6 +11,9 @@ struct SqliteCache {
     write: u64,
     hit: u64,
     miss: u64,
+    // Bytes, not pages. This overlaps TEMP pager CACHE_WRITE and includes
+    // finalized external sorts, but does not count statement journals.
+    temp_spill_bytes: Option<u64>,
 }
 
 impl SqliteCache {
@@ -41,6 +44,7 @@ impl SqliteCache {
             write: counter(connection, rusqlite::ffi::SQLITE_DBSTATUS_CACHE_WRITE)?,
             hit: counter(connection, rusqlite::ffi::SQLITE_DBSTATUS_CACHE_HIT)?,
             miss: counter(connection, rusqlite::ffi::SQLITE_DBSTATUS_CACHE_MISS)?,
+            temp_spill_bytes: counter(connection, rusqlite::ffi::SQLITE_DBSTATUS_TEMPBUF_SPILL),
         })
     }
 
@@ -50,6 +54,10 @@ impl SqliteCache {
             write: self.write.checked_sub(before.write)?,
             hit: self.hit.checked_sub(before.hit)?,
             miss: self.miss.checked_sub(before.miss)?,
+            temp_spill_bytes: self
+                .temp_spill_bytes
+                .zip(before.temp_spill_bytes)
+                .and_then(|(after, before)| after.checked_sub(before)),
         })
     }
 }
@@ -163,6 +171,34 @@ struct WriteState {
     cache_stage_count: usize,
 }
 
+#[cfg(test)]
+type ObservedCacheStages = Vec<(&'static str, CacheStage)>;
+
+#[cfg(test)]
+std::thread_local! {
+    static OBSERVED_CACHE_STAGES: std::cell::RefCell<Option<ObservedCacheStages>> = const { std::cell::RefCell::new(None) };
+}
+
+impl WriteState {
+    fn emit_committed(&mut self) {
+        if self.cache_stage_count > self.cache_stages.len() {
+            return;
+        }
+        for stage in self.cache_stages.iter_mut().filter_map(Option::take) {
+            #[cfg(test)]
+            OBSERVED_CACHE_STAGES.with(|observations| {
+                if let Some(observations) = &mut *observations.borrow_mut() {
+                    observations.push((self.group, stage));
+                }
+            });
+            eprintln!(
+                "semon sessions native: producer={} sqlite_activity={} stage={} publication=committed counter_bits=64 cache_before={:?} cache_after={:?} cache_delta={:?}",
+                self.producer, self.group, stage.phase, stage.before, stage.after, stage.delta
+            );
+        }
+    }
+}
+
 fn wal_change(after: Option<u64>, before: Option<u64>) -> Option<i128> {
     after
         .zip(before)
@@ -235,18 +271,16 @@ impl WriteActivity {
         );
         state.initial_sample_us = 0;
         state.before = after;
-        if phase == "commit" && state.cache_stage_count <= state.cache_stages.len() {
-            for stage in state.cache_stages.iter_mut().filter_map(Option::take) {
-                eprintln!(
-                    "semon sessions native: producer={} sqlite_activity={} stage={} publication=committed counter_bits=64 cache_before={:?} cache_after={:?} cache_delta={:?}",
-                    state.producer,
-                    state.group,
-                    stage.phase,
-                    stage.before,
-                    stage.after,
-                    stage.delta
-                );
-            }
+        if phase == "commit" {
+            state.emit_committed();
+        }
+    }
+
+    /// Flush a nested sample only after its owning transaction commits. Consume
+    /// the observer without sampling the unrelated tail of that transaction.
+    pub(crate) fn committed(mut self) {
+        if let Some(mut state) = self.0.take() {
+            state.emit_committed();
         }
     }
 }
@@ -333,6 +367,128 @@ impl Drop for Phase {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn wal_connection(name: &str) -> (std::path::PathBuf, rusqlite::Connection) {
+        let root = std::env::temp_dir().join(format!(
+            "semon-native-timing-{name}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let connection = rusqlite::Connection::open(root.join("index.sqlite3")).unwrap();
+        let journal: String = connection
+            .query_row("PRAGMA journal_mode=WAL", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(journal, "wal");
+        (root, connection)
+    }
+
+    #[test]
+    fn finalized_external_sort_reports_temp_bytes_without_resetting_or_crossing_connections() {
+        let (root, left) = wal_connection("temp-sort");
+        let right = rusqlite::Connection::open(root.join("index.sqlite3")).unwrap();
+        let before = SqliteCache::read(&left).unwrap();
+        let idle = SqliteCache::read(&right).unwrap();
+        // About 8MiB of unindexed sort keys exceed the pinned bundled default
+        // sorter memory threshold. Do not change cache, TEMP or thread policy.
+        {
+            let mut statement = left.prepare("WITH RECURSIVE seq(n) AS (VALUES(1) UNION ALL SELECT n+1 FROM seq WHERE n<8192) SELECT printf('%08d',8192-n)||hex(zeroblob(512)) AS value FROM seq ORDER BY value").unwrap();
+            let mut rows = statement.query([]).unwrap();
+            let mut count = 0;
+            while let Some(row) = rows.next().unwrap() {
+                let text: String = row.get(0).unwrap();
+                assert_eq!(text.len(), 1032);
+                assert!(text.starts_with(&format!("{count:08}")));
+                assert!(text[8..].bytes().all(|byte| byte == b'0'));
+                count += 1;
+            }
+            assert_eq!(count, 8192);
+        } // SorterClose transfers task spill bytes to the connection counter.
+        let after = SqliteCache::read(&left).unwrap();
+        assert!(after.delta(before).unwrap().temp_spill_bytes.unwrap() > 0);
+        assert_eq!(SqliteCache::read(&left), Some(after));
+        assert_eq!(SqliteCache::read(&right), Some(idle));
+        drop(right);
+        drop(left);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn nested_wal_observation_emits_only_committed_sample_without_transaction_tail() {
+        let (root, mut connection) = wal_connection("nested-commit");
+        connection
+            .execute_batch("CREATE TABLE activity(value INTEGER PRIMARY KEY)")
+            .unwrap();
+        for fail in [true, false] {
+            OBSERVED_CACHE_STAGES.with(|observations| {
+                *observations.borrow_mut() = Some(Vec::new());
+            });
+            let mut sampled_end = None;
+            let result = (|| -> rusqlite::Result<()> {
+                let tx = connection.transaction()?;
+                let mut sample = WriteActivity::new(
+                    true,
+                    &root.join("index.sqlite3"),
+                    "catalog_metadata_sample",
+                    &tx,
+                );
+                for (value, phase) in [
+                    (1, "overview"),
+                    (2, "catalog_rows_changed"),
+                    (3, "source_retirement"),
+                    (4, "sources_and_dependencies"),
+                ] {
+                    tx.execute("INSERT INTO activity VALUES(?1)", [value])?;
+                    sample.stage(phase, &tx);
+                }
+                sampled_end = SqliteCache::read(&tx);
+                assert!(
+                    OBSERVED_CACHE_STAGES.with(|stages| stages
+                        .borrow()
+                        .as_ref()
+                        .unwrap()
+                        .is_empty())
+                );
+                // Later rows and search work must not be mislabeled as part of
+                // the first-row sample when its buffered reports are flushed.
+                for value in 5..=64 {
+                    tx.execute("INSERT INTO activity VALUES(?1)", [value])?;
+                }
+                if fail {
+                    tx.execute("INSERT INTO activity VALUES(1)", [])?;
+                }
+                tx.commit()?;
+                sample.committed();
+                Ok(())
+            })();
+            let observations = OBSERVED_CACHE_STAGES
+                .with(|observations| observations.borrow_mut().take().unwrap());
+            let count: i64 = connection
+                .query_row("SELECT COUNT(*) FROM activity", [], |row| row.get(0))
+                .unwrap();
+            if fail {
+                assert!(result.is_err());
+                assert_eq!(count, 0, "failed transaction did not roll back");
+                assert!(observations.is_empty(), "rollback reported committed cache");
+            } else {
+                result.unwrap();
+                assert_eq!(count, 64);
+                assert_eq!(observations.len(), 4);
+                assert!(
+                    observations
+                        .iter()
+                        .all(|(group, _)| *group == "catalog_metadata_sample")
+                );
+                assert_eq!(observations.last().unwrap().1.after, sampled_end);
+                assert_ne!(sampled_end, SqliteCache::read(&connection));
+            }
+        }
+        drop(connection);
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn sqlite_cache_snapshots_preserve_counters_and_connection_scope() {
