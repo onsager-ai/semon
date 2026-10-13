@@ -205,6 +205,150 @@ fn wal_change(after: Option<u64>, before: Option<u64>) -> Option<i128> {
         .map(|(after, before)| i128::from(after) - i128::from(before))
 }
 
+/// Numerical-only fixed boundaries for the conditional Catalog traversal test.
+/// The test saves these before diagnostics and emits only committed aggregates.
+#[cfg(test)]
+pub(crate) struct ProbeSample {
+    sample: WriteSample,
+    at: Instant,
+}
+
+#[cfg(test)]
+#[derive(Clone, Debug, serde::Serialize)]
+pub(crate) struct ProbeInterval {
+    pub(crate) elapsed_us: u128,
+    pub(crate) sampling_us: u128,
+    cache: Option<[u64; 4]>, // hit, miss, write, spill
+    temp_bytes: Option<u64>,
+    thread: Option<[u64; 4]>, // wchar, syscw, write_bytes, cancelled_write_bytes
+    wal_extent_change: Option<i128>,
+}
+
+#[cfg(test)]
+impl ProbeSample {
+    pub(crate) fn sampling_us(&self) -> u128 {
+        self.sample.sample_us
+    }
+
+    pub(crate) fn read(connection: &rusqlite::Connection) -> Self {
+        let mut wal = connection
+            .path()
+            .expect("probe uses a file-backed producer")
+            .to_owned();
+        wal.push_str("-wal");
+        Self {
+            sample: WriteSample::read(Path::new(&wal), connection),
+            at: Instant::now(),
+        }
+    }
+
+    pub(crate) fn interval(&self, after: &Self) -> ProbeInterval {
+        let cache = after
+            .sample
+            .cache
+            .zip(self.sample.cache)
+            .and_then(|(after, before)| after.delta(before));
+        let thread = after
+            .sample
+            .thread
+            .zip(self.sample.thread)
+            .and_then(|(after, before)| after.delta(before));
+        ProbeInterval {
+            elapsed_us: after.at.duration_since(self.at).as_micros(),
+            sampling_us: self.sample.sample_us + after.sample.sample_us,
+            cache: cache.map(|value| [value.hit, value.miss, value.write, value.spill]),
+            temp_bytes: cache.and_then(|value| value.temp_spill_bytes),
+            thread: thread.map(|value| {
+                [
+                    value.wchar,
+                    value.syscw,
+                    value.write_bytes,
+                    value.cancelled_write_bytes,
+                ]
+            }),
+            wal_extent_change: wal_change(after.sample.wal, self.sample.wal),
+        }
+    }
+}
+
+#[cfg(test)]
+impl ProbeInterval {
+    pub(crate) fn add(&mut self, other: &Self) {
+        self.elapsed_us += other.elapsed_us;
+        self.sampling_us += other.sampling_us;
+        for (left, right) in [
+            (&mut self.cache, other.cache),
+            (&mut self.thread, other.thread),
+        ] {
+            *left = (*left)
+                .zip(right)
+                .map(|(left, right)| std::array::from_fn(|i| left[i] + right[i]));
+        }
+        self.temp_bytes = self
+            .temp_bytes
+            .zip(other.temp_bytes)
+            .map(|(left, right)| left + right);
+        self.wal_extent_change = self
+            .wal_extent_change
+            .zip(other.wal_extent_change)
+            .map(|(left, right)| left + right);
+    }
+
+    pub(crate) fn excluding(&self, nested: &Self) -> Self {
+        Self {
+            elapsed_us: self.elapsed_us.checked_sub(nested.elapsed_us).unwrap(),
+            // Sampling is reported as unique boundary costs separately, since
+            // adjacent nested windows share the same sample.
+            sampling_us: self.sampling_us,
+            cache: self.cache.zip(nested.cache).and_then(|(whole, part)| {
+                Some([
+                    whole[0].checked_sub(part[0])?,
+                    whole[1].checked_sub(part[1])?,
+                    whole[2].checked_sub(part[2])?,
+                    whole[3].checked_sub(part[3])?,
+                ])
+            }),
+            temp_bytes: self
+                .temp_bytes
+                .zip(nested.temp_bytes)
+                .and_then(|(whole, part)| whole.checked_sub(part)),
+            thread: self.thread.zip(nested.thread).and_then(|(whole, part)| {
+                Some([
+                    whole[0].checked_sub(part[0])?,
+                    whole[1].checked_sub(part[1])?,
+                    whole[2].checked_sub(part[2])?,
+                    whole[3].checked_sub(part[3])?,
+                ])
+            }),
+            wal_extent_change: self
+                .wal_extent_change
+                .zip(nested.wal_extent_change)
+                .and_then(|(whole, part)| whole.checked_sub(part)),
+        }
+    }
+}
+
+#[cfg(test)]
+#[derive(Clone, Debug, serde::Serialize)]
+pub(crate) struct SearchTraversalProbe {
+    pub(crate) search: ProbeInterval,
+    pub(crate) postings: ProbeInterval,
+    pub(crate) counts: ProbeInterval,
+    pub(crate) preparation_us: u128,
+    pub(crate) sampling_us: u128,
+    pub(crate) owners: usize,
+    pub(crate) physical_rows: usize,
+    pub(crate) logical_positions: usize,
+}
+
+#[cfg(test)]
+#[derive(Clone, Debug, serde::Serialize)]
+pub(crate) struct CatalogTraversalProbe {
+    pub(crate) search: SearchTraversalProbe,
+    pub(crate) commit: ProbeInterval,
+    pub(crate) changed_rows: usize,
+}
+
 /// Fixed boundary snapshots only. Disabled observation creates no paths,
 /// identifiers, snapshots or clocks, and never switches to process I/O scope.
 pub(crate) struct WriteActivity(Option<WriteState>);
