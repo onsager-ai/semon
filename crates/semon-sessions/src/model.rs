@@ -7201,7 +7201,16 @@ fn build_sources_inner(
     let runtime_observations = measured!(
         "runtime_observations",
         1,
-        crate::native_evidence::RuntimeObservations::new_measured(options, &mut measurements)
+        if matches!(target, BuildTarget::Catalog | BuildTarget::Sources) {
+            crate::native_evidence::RuntimeObservations::for_publication_measured(
+                options,
+                &query_runtime,
+                &mut measurements,
+            )
+        } else {
+            crate::native_evidence::RuntimeObservations::new_measured(options, &mut measurements)
+                .into_scoped()
+        }
     );
     let catalog_base = measured!("catalog_base", 1, cache.session_catalog_generation());
     let mut timings = Vec::with_capacity(18);

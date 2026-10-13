@@ -13,6 +13,207 @@ use serde_json::{Value, json};
 use super::*;
 use crate::events::EventCache;
 
+fn scoped_runtime_reader_oracle(options: &Options, rows: &[summary::CatalogRow]) -> Vec<String> {
+    let initial = crate::native_evidence::query_runtime_generation(options).unwrap();
+    let publication = crate::native_evidence::RuntimeObservations::for_publication_measured(
+        options,
+        &initial,
+        &mut crate::native_timing::Measurements::default(),
+    );
+    let reader = crate::native_evidence::RuntimeObservations::new(options);
+    let scopes = rows
+        .iter()
+        .map(|row| {
+            let expected = reader.scope(row).unwrap();
+            assert_eq!(publication.scope(row).unwrap(), expected);
+            expected
+        })
+        .collect();
+    assert_eq!(
+        crate::native_evidence::query_runtime_generation(options).unwrap(),
+        initial
+    );
+    scopes
+}
+
+#[test]
+fn publication_runtime_scopes_match_fresh_reader_observations() {
+    let home = Home::new();
+    let native = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
+    home.top("root", &[human("root", ts(0, 0), "native root")]);
+    home.live(42, "root", "working", json!({}));
+    home.codex(native, json!({}), &[codex_user(ts(0, 1), "native Codex")]);
+    home.lines(
+        "codex/session_index.jsonl",
+        &[json!({"id":native,"thread_name":"native name","updated_at":"2026-09-24T00:02:00Z"})],
+    );
+    home.build();
+    let (_, rows) = read_catalog(&home);
+    assert_eq!(rows.len(), 2);
+    let local = scoped_runtime_reader_oracle(&home.options, &rows);
+    assert!(local.iter().all(|scope| scope.starts_with("scoped-v1:")));
+    for (row, scope) in rows.iter().zip(&local) {
+        assert_eq!(
+            row.query.as_ref().unwrap()["runtime"].as_str(),
+            Some(scope.as_str())
+        );
+    }
+
+    let mut facts = crate::local_runtime_facts(&home.options).unwrap();
+    facts.native_names = crate::facts::MachineFacts::Local.native_names(&home.options);
+    assert_eq!(facts.native_names.len(), 1);
+    facts
+        .repos
+        .insert("/work/proj".into(), Some("recorded-repo".into()));
+    let facts_path = home.root.join("scope-facts.json");
+    crate::write_facts(&facts_path, &facts).unwrap();
+    let options = Options {
+        facts: Some(facts_path.clone()),
+        ..home.options.clone()
+    };
+    let recorded = scoped_runtime_reader_oracle(&options, &rows);
+    for change in ["process-start", "name", "repository", "lock"] {
+        let mut changed = facts.clone();
+        match change {
+            "process-start" => {
+                changed.proc_starts.insert(42, 778);
+            }
+            "name" => changed.native_names[0].name = "updated native name".into(),
+            "repository" => {
+                changed
+                    .repos
+                    .insert("/work/proj".into(), Some("other-repo".into()));
+            }
+            "lock" => {
+                changed.codex_locks.insert(native.into(), 42);
+            }
+            _ => unreachable!(),
+        }
+        crate::write_facts(&facts_path, &changed).unwrap();
+        assert_ne!(
+            scoped_runtime_reader_oracle(&options, &rows),
+            recorded,
+            "{change}"
+        );
+    }
+    crate::write_facts(&facts_path, &facts).unwrap();
+    home.live(42, "root", "waiting", json!({"waitingFor":"approval"}));
+    assert_ne!(scoped_runtime_reader_oracle(&options, &rows), recorded);
+
+    // Ordinary readers still recognize all preexisting compatibility forms.
+    let initial = crate::native_evidence::query_runtime_generation(&options).unwrap();
+    let legacy = crate::native_evidence::legacy_runtime_generation(&options).unwrap();
+    let db = rusqlite::Connection::open(EventCache::path(&options.cache)).unwrap();
+    db.execute("INSERT OR REPLACE INTO meta(key,value) VALUES('catalog_legacy_runtime_anchor','original-anchor')", []).unwrap();
+    db.execute(
+        "INSERT OR REPLACE INTO meta(key,value) VALUES('catalog_legacy_runtime_semantics',?1)",
+        [&initial],
+    )
+    .unwrap();
+    let reader = crate::native_evidence::RuntimeObservations::new(&options);
+    for saved in [&initial, &legacy, "original-anchor"] {
+        let mut row = rows[0].clone();
+        row.query = Some(json!({"runtime":saved}));
+        assert_eq!(reader.expected(&row).as_deref(), Some(saved));
+    }
+}
+
+#[test]
+fn publication_runtime_unavailable_inputs_keep_reader_scope_fallbacks() {
+    let home = Home::new();
+    home.top("root", &[human("root", ts(0, 0), "fallback root")]);
+    home.build();
+    let (_, rows) = read_catalog(&home);
+    let absent_index = Options {
+        cache: home.root.join("absent/index.json"),
+        ..home.options.clone()
+    };
+    let initial = crate::native_evidence::query_runtime_generation(&absent_index).unwrap();
+    assert_eq!(
+        scoped_runtime_reader_oracle(&absent_index, &rows),
+        vec![initial]
+    );
+
+    let unreadable = home.root.join("unreadable-facts");
+    fs::create_dir(&unreadable).unwrap();
+    let oversized = home.root.join("oversized-facts.json");
+    fs::File::create(&oversized)
+        .unwrap()
+        .set_len(64 * 1024 * 1024 + 1)
+        .unwrap();
+    for facts in [unreadable, oversized] {
+        for cache in [&home.options.cache, &absent_index.cache] {
+            let options = Options {
+                facts: Some(facts.clone()),
+                cache: cache.clone(),
+                ..home.options.clone()
+            };
+            let scope = scoped_runtime_reader_oracle(&options, &rows);
+            if cache == &home.options.cache {
+                assert!(scope[0].starts_with("scoped-v1:"));
+            } else {
+                assert_eq!(
+                    scope[0],
+                    crate::native_evidence::query_runtime_generation(&options).unwrap()
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn scoped_publication_rejects_runtime_change_after_initial_observation() {
+    for selected in [false, true] {
+        let home = Home::new();
+        home.top("root", &[human("root", ts(0, 0), "runtime fenced root")]);
+        let facts_path = home.root.join("changing-facts.json");
+        let facts = crate::local_runtime_facts(&home.options).unwrap();
+        crate::write_facts(&facts_path, &facts).unwrap();
+        let options = Options {
+            facts: Some(facts_path.clone()),
+            ..home.options.clone()
+        };
+        home.build_at(&options, NOW);
+        let mut cache = EventCache::open_scoped(&options.cache).unwrap();
+        let generation = cache.session_catalog_generation();
+        let initial = crate::native_evidence::query_runtime_generation(&options).unwrap();
+        AFTER_SCAN.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                let mut changed = facts;
+                changed.hostname = "new runtime observation".into();
+                crate::write_facts(&facts_path, &changed).unwrap();
+            }));
+        });
+        let error = if selected {
+            prepare_sources(
+                &options,
+                &mut cache,
+                &[crate::inputs::Input {
+                    root: crate::inputs::InputRoot::Claude,
+                    path: "projects/-work-proj/root.jsonl".into(),
+                }],
+                NOW,
+            )
+            .err()
+            .expect("Sources must reject the changed runtime")
+        } else {
+            observe_catalog(&options, &mut cache, &mut false, &mut Texts::default(), NOW)
+                .err()
+                .expect("Catalog must reject the changed runtime")
+        };
+        assert_eq!(
+            error.to_string(),
+            "Native Query runtime observations changed"
+        );
+        assert_ne!(
+            crate::native_evidence::query_runtime_generation(&options).unwrap(),
+            initial
+        );
+        assert_eq!(cache.session_catalog_generation(), generation);
+        assert_eq!(read_catalog(&home).0, generation.unwrap());
+    }
+}
+
 static NEXT: AtomicU64 = AtomicU64::new(0);
 
 /// 2026-09-24T00:00:00Z.
