@@ -115,6 +115,14 @@
         "semon_supported": false,
         "kind": "standalone_completed_command",
         "process_id": "95583"
+      },
+      {
+        "edge": "Paginated completed CommandExecution tool-new to runtime tool tool-new",
+        "basis": "pinned core/src/tools/events.rs emits CommandExecution.id from ctx.call_id; protocol_event.rs uses the same event.call_id for the runtime ToolCallID; current Semon adapter has no standalone unowned command projection",
+        "kind": "completed_runtime_identity",
+        "item_id": "tool-new",
+        "runtime_tool_call_id": "tool-new",
+        "semon_supported": false
       }
     ],
     "ambiguous": [
@@ -127,8 +135,8 @@
         "basis": "the completion JSON has no session_id or independently recorded operation ID"
       },
       {
-        "edge": "Paginated CommandExecution to a specific model-visible or nested tool call",
-        "basis": "process_id identifies the terminal session but the completed item has no matching call_id"
+        "edge": "Paginated CommandExecution to a model-visible invocation or outer CodeCell",
+        "basis": "native id identifies runtime tool-new exactly, but the completed carrier supplies no model_visible_call_id or CodeCell requester"
       }
     ],
     "absent": [

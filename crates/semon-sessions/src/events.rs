@@ -7208,6 +7208,7 @@ mod tests {
                     assert!(direct.y.is_none());
                 }
                 "standalone_completed_command" => assert_eq!(edge["semon_supported"], false),
+                "completed_runtime_identity" => assert_eq!(edge["semon_supported"], false),
                 other => panic!("unhandled recoverable edge {other}"),
             }
         }
@@ -7232,7 +7233,25 @@ mod tests {
         let record = crate::tx::read_record(&paginated, offset).unwrap();
         assert_eq!(record["payload"]["item"]["process_id"], "95583");
         assert_eq!(record["payload"]["item"]["type"], "CommandExecution");
+        let runtime_identity = classes["recoverable"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|edge| edge["kind"] == "completed_runtime_identity")
+            .unwrap();
+        assert_eq!(record["payload"]["item"]["id"], runtime_identity["item_id"]);
+        assert_eq!(
+            record["payload"]["item"]["id"],
+            runtime_identity["runtime_tool_call_id"]
+        );
+        assert_eq!(record["payload"]["item"]["id"], "tool-new");
         assert!(record["payload"]["item"].get("call_id").is_none());
+        assert!(
+            record["payload"]["item"]
+                .get("model_visible_call_id")
+                .is_none()
+        );
+        assert!(record["payload"]["item"].get("requester").is_none());
         let separate =
             scan_file(&paginated, "codex", &mut EventCache::default(), &mut false).unwrap();
         assert!(separate.events.is_empty());
