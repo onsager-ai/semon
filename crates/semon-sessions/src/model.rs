@@ -1623,14 +1623,13 @@ fn lineages(files: &[SourceFile]) -> Vec<Vec<usize>> {
         let Role::Top { .. } = file.role else {
             continue;
         };
-        for other in &file.summary.links.session_ids {
-            unions.union(&file.id, other);
-        }
-        for other in &file.summary.links.continued_in {
-            unions.union(&file.id, other);
-        }
-        for bridge in &file.summary.links.bridges {
-            unions.union(&file.id, &format!("bridge:{bridge}"));
+        for atom in identity_stage::star_atoms(
+            &file.id,
+            file.summary.links.session_ids.iter(),
+            file.summary.links.continued_in.iter(),
+            file.summary.links.bridges.iter(),
+        ) {
+            unions.union(&file.id, &atom);
         }
     }
     let mut groups = BTreeMap::<String, Vec<usize>>::new();
