@@ -13,6 +13,32 @@ pub(crate) fn source_order(
     (first.unwrap_or(i64::MAX), continued_empty, id)
 }
 
+/// Claude lineage atoms occupy one raw string namespace. A literal native
+/// `bridge:x` therefore intersects the bridge record `x`; phantom atoms with
+/// no physical source still connect eligible stars.
+pub(crate) fn link_atom<'a>(
+    kind: &str,
+    native: &'a str,
+) -> Result<std::borrow::Cow<'a, str>, &'static str> {
+    match kind {
+        "session" | "continued" => Ok(std::borrow::Cow::Borrowed(native)),
+        "bridge" => Ok(std::borrow::Cow::Owned(format!("bridge:{native}"))),
+        _ => Err("unsupported native identity link kind"),
+    }
+}
+
+pub(crate) fn star_atoms<'a>(
+    id: &'a str,
+    session_ids: impl Iterator<Item = &'a String> + 'a,
+    continued_in: impl Iterator<Item = &'a String> + 'a,
+    bridges: impl Iterator<Item = &'a String> + 'a,
+) -> impl Iterator<Item = std::borrow::Cow<'a, str>> + 'a {
+    std::iter::once(std::borrow::Cow::Borrowed(id))
+        .chain(session_ids.map(|id| std::borrow::Cow::Borrowed(id.as_str())))
+        .chain(continued_in.map(|id| std::borrow::Cow::Borrowed(id.as_str())))
+        .chain(bridges.map(|id| link_atom("bridge", id).expect("native bridge atom kind")))
+}
+
 pub(crate) trait UnionParents {
     type Error;
     fn parent(&mut self, key: &str) -> Result<Option<String>, Self::Error>;
@@ -119,6 +145,38 @@ impl KeyCursor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_star_atoms_share_literal_and_phantom_namespace() {
+        let session = vec!["phantom".to_owned(), "bridge:literal".to_owned()];
+        let continued = vec!["phantom".to_owned()];
+        let bridges = vec!["literal".to_owned(), "bridge:nested".to_owned()];
+        let atoms = star_atoms("owner", session.iter(), continued.iter(), bridges.iter())
+            .map(std::borrow::Cow::into_owned)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            atoms,
+            [
+                "owner",
+                "phantom",
+                "bridge:literal",
+                "phantom",
+                "bridge:literal",
+                "bridge:bridge:nested"
+            ]
+        );
+        assert_eq!(
+            link_atom("session", "bridge:literal").unwrap(),
+            link_atom("bridge", "literal").unwrap()
+        );
+        assert_eq!(link_atom("continued", "phantom").unwrap(), "phantom");
+        assert!(link_atom("invented", "x").is_err());
+        let other = vec!["phantom".to_owned()];
+        assert!(
+            star_atoms("other", other.iter(), [].iter(), [].iter())
+                .any(|atom| atoms.iter().any(|value| value == atom.as_ref()))
+        );
+    }
 
     #[test]
     fn native_union_cursor_resumes_without_retaining_ancestry() {
