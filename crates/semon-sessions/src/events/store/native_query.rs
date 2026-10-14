@@ -16,6 +16,9 @@ pub(crate) mod source_roots;
 pub(in crate::events::store) mod vm_meter;
 pub(crate) type CandidateChange = candidate_delta::CandidateChange;
 pub(crate) type CandidateInterest = candidate_delta::CandidateInterest;
+pub(crate) type CandidateInterestHeader = candidate_delta::InterestHeader;
+pub(crate) type CandidateHeaderPage = candidate_delta::HeaderPage;
+pub(crate) type CandidateHeaderReceipt = candidate_delta::HeaderReceipt;
 
 pub(crate) const ROWS: usize = 64;
 pub(crate) const BYTES: usize = 1024 * 1024;
@@ -7009,6 +7012,81 @@ mod tests {
                     .is_err()
             );
         }
+    }
+
+    #[test]
+    fn native_candidate_header_pages_skip_giant_facts_and_refuse_post_release_changes() {
+        let fixture = Fixture::new(0);
+        let mut old = fixture.index.clone();
+        old.events[0].u = Some("x".repeat(2 * BYTES));
+        fixture.write_full_index(&old);
+        let before: i64 = fixture
+            .store
+            .connection
+            .query_row(
+                "SELECT max(change_id) FROM native_candidate_changes",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let mut new = old.clone();
+        new.events[0].u = Some("new".into());
+        let source = fixture.source();
+        let ledger = source.ledger.as_ref().unwrap();
+        let dirty = super::super::super::DirtyRows::between(&old, &new);
+        let tx = fixture.store.connection.unchecked_transaction().unwrap();
+        write_index_changes(
+            &tx,
+            source.source.path.to_str().unwrap(),
+            ledger,
+            &new,
+            Some(&dirty),
+            Some(ledger),
+        )
+        .unwrap();
+        tx.commit().unwrap();
+        let change = fixture
+            .store
+            .candidate_changes_page(&source, Some(before))
+            .unwrap()
+            .rows[0]
+            .id;
+        let (page, _, bytes) = crate::test_allocations::measure(|| {
+            fixture
+                .store
+                .candidate_interest_headers_page(&source, change, None, 1)
+                .unwrap()
+        });
+        assert!(page.complete);
+        assert_eq!(page.rows.len(), 1);
+        assert_eq!(page.after, Some((0, 0)));
+        assert_eq!(
+            (page.rows[0].channel, page.rows[0].first, page.rows[0].last),
+            (0, 0, Some(0))
+        );
+        assert!(page.rows[0].before_bytes.unwrap() > (2 * BYTES) as u64);
+        assert!(page.rows[0].after_bytes.unwrap() < BYTES as u64);
+        assert_eq!(page.receipt.source_checks, 2);
+        assert_eq!(page.receipt.payload.decoded_rows, 1);
+        assert_eq!(page.receipt.payload.metadata_bytes, 40);
+        assert!(page.receipt.sqlite_vm_steps >= page.receipt.payload.vm_steps as u64);
+        assert!(bytes < BYTES && crate::test_allocations::peak_bytes() < BYTES);
+        let path = source.source.path.to_string_lossy().into_owned();
+        let cache = EventCache::path(&fixture.options.cache);
+        candidate_delta::HEADER_AFTER_RELEASE.with(|hook| *hook.borrow_mut()=Some(Box::new(move || {
+            Connection::open(cache).unwrap().execute(
+                "INSERT INTO meta(key,value) VALUES(?1,'changed') ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                [archive_index_key(&path)],
+            ).unwrap();
+        })));
+        let error = fixture
+            .store
+            .candidate_interest_headers_page(&source, change, None, 1)
+            .unwrap_err();
+        let receipt = CandidateHeaderReceipt::from_error(&error).unwrap();
+        assert_eq!(receipt.source_checks, 2);
+        assert_eq!(receipt.payload.decoded_rows, 1);
+        assert!(receipt.sqlite_vm_steps > 0);
     }
 
     #[test]

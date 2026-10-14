@@ -42,6 +42,61 @@ pub(crate) struct CandidateInterest {
     pub(crate) after: Option<Value>,
 }
 
+/// A writer interval/range address, not a qualified native Event or text
+/// reference. Before/after payload lengths let consumers route giant facts to
+/// their retained native Original owner without materializing either cell.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct InterestHeader {
+    pub(crate) channel: u8,
+    pub(crate) first: usize,
+    pub(crate) last: Option<usize>,
+    pub(crate) before_bytes: Option<u64>,
+    pub(crate) after_bytes: Option<u64>,
+}
+
+#[derive(Default, Debug)]
+pub(crate) struct HeaderReceipt {
+    /// Header rows only. Source/publication controller observations are a
+    /// separate scope; source_checks counts actual check attempts, not rows.
+    pub(crate) payload: Work,
+    pub(crate) source_checks: usize,
+    /// All SQL on this connection, including both source checks, admission,
+    /// range/end probes and snapshot release. Payload VM is a subset.
+    pub(crate) sqlite_vm_steps: u64,
+}
+
+#[derive(Debug)]
+pub(crate) struct HeaderPage {
+    pub(crate) rows: Vec<InterestHeader>,
+    pub(crate) after: Option<(u8, usize)>,
+    pub(crate) complete: bool,
+    pub(crate) receipt: HeaderReceipt,
+}
+
+#[derive(Debug)]
+struct HeaderFailure {
+    error: io::Error,
+    receipt: HeaderReceipt,
+}
+impl std::fmt::Display for HeaderFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.error)
+    }
+}
+impl std::error::Error for HeaderFailure {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.error)
+    }
+}
+impl HeaderReceipt {
+    pub(crate) fn from_error(error: &io::Error) -> Option<&Self> {
+        error
+            .get_ref()?
+            .downcast_ref::<HeaderFailure>()
+            .map(|failure| &failure.receipt)
+    }
+}
+
 fn insert_interest(
     tx: &Connection,
     change: i64,
@@ -370,5 +425,118 @@ impl NativeStore {
             complete: !remains,
             work,
         })
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    pub(super) static HEADER_AFTER_RELEASE: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const {std::cell::RefCell::new(None)};
+}
+
+impl NativeStore {
+    /// One bounded metadata page for the actual event/relationship producers.
+    /// Raw before/after JSON is never selected, even for a giant overwritten
+    /// field. The caller obtains qualified NativeEvent text refs from the
+    /// Current/Original source owner and fences the complete relation closure.
+    /// limit is an operation budget (1..=16), never a semantic source cap.
+    pub(crate) fn candidate_interest_headers_page(
+        &self,
+        witness: &SourceWitness,
+        change: i64,
+        after: Option<(u8, usize)>,
+        limit: usize,
+    ) -> io::Result<HeaderPage> {
+        if !(1..=16).contains(&limit) {
+            return Err(io::Error::other("invalid candidate header page budget"));
+        }
+        let measurement = super::vm_meter::begin(&self.connection);
+        let mut receipt = HeaderReceipt::default();
+        let result = (|| {
+            let tx = self
+                .connection
+                .unchecked_transaction()
+                .map_err(io::Error::other)?;
+            receipt.source_checks += 1;
+            if !check_source(&tx, witness).map_err(io::Error::other)? {
+                return Err(io::Error::other("native candidate source changed"));
+            }
+            let admitted:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM native_candidate_changes WHERE change_id=?1 AND path=?2)",params![change,witness.source.path.to_string_lossy()],|row|row.get(0)).map_err(io::Error::other)?;
+            if !admitted {
+                return Err(io::Error::other(
+                    "native candidate change does not belong to source",
+                ));
+            }
+            let start = after.map_or((-1, -1), |(channel, seq)| {
+                (i64::from(channel), seq_int(seq))
+            });
+            let mut query=tx.prepare("SELECT channel,first,last,octet_length(before_fact),octet_length(after_fact) FROM native_candidate_interests WHERE change_id=?1 AND (channel,first)>(?2,?3) ORDER BY channel,first LIMIT ?4").map_err(io::Error::other)?;
+            let mut selected = query
+                .query(params![
+                    change,
+                    start.0,
+                    start.1,
+                    sequence_sql(limit).map_err(io::Error::other)?
+                ])
+                .map_err(io::Error::other)?;
+            let mut rows = Vec::new();
+            let mut end = after;
+            while let Some(row) = selected.next().map_err(io::Error::other)? {
+                let channel: u8 = row.get(0).map_err(io::Error::other)?;
+                let first = seq_of(row.get(1).map_err(io::Error::other)?);
+                rows.push(InterestHeader {
+                    channel,
+                    first,
+                    last: row
+                        .get::<_, Option<i64>>(2)
+                        .map_err(io::Error::other)?
+                        .map(seq_of),
+                    before_bytes: row
+                        .get::<_, Option<i64>>(3)
+                        .map_err(io::Error::other)?
+                        .map(uint),
+                    after_bytes: row
+                        .get::<_, Option<i64>>(4)
+                        .map_err(io::Error::other)?
+                        .map(uint),
+                });
+                end = Some((channel, first));
+                receipt.payload.decoded_rows += 1;
+                receipt.payload.metadata_bytes += 40;
+            }
+            drop(selected);
+            receipt.payload.vm_steps += query.get_status(rusqlite::StatementStatus::VmStep);
+            drop(query);
+            let start = end.map_or((-1, -1), |(channel, seq)| {
+                (i64::from(channel), seq_int(seq))
+            });
+            let remains:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM native_candidate_interests WHERE change_id=?1 AND (channel,first)>(?2,?3))",params![change,start.0,start.1],|row|row.get(0)).map_err(io::Error::other)?;
+            tx.commit().map_err(io::Error::other)?;
+            #[cfg(test)]
+            HEADER_AFTER_RELEASE.with(|hook| {
+                if let Some(hook) = hook.borrow_mut().take() {
+                    hook();
+                }
+            });
+            receipt.source_checks += 1;
+            if !self.source_witness_current(witness)? {
+                return Err(io::Error::other(
+                    "native candidate source changed after header snapshot",
+                ));
+            }
+            Ok((rows, end, !remains))
+        })();
+        receipt.sqlite_vm_steps = measurement.finish(&self.connection);
+        match result {
+            Ok((rows, after, complete)) => Ok(HeaderPage {
+                rows,
+                after,
+                complete,
+                receipt,
+            }),
+            Err(error) => Err(io::Error::new(
+                error.kind(),
+                HeaderFailure { error, receipt },
+            )),
+        }
     }
 }
