@@ -1052,6 +1052,16 @@ impl Query {
         if self.sources.is_retired() {
             return Err(QueryError::new("io", "native query source is closed"));
         }
+        let mut focused_args = args.clone();
+        if self.sources.machines.len() > 1 {
+            let labels = self.source_labels();
+            if let Some((_, label)) = labels
+                .iter()
+                .find(|(key, _)| key == source_key || (key.is_empty() && source_key == "local"))
+            {
+                focused_args["_machine_alias"] = json!(label);
+            }
+        }
         // One bounded request budget spans semantic derivation, transcript or
         // search bytes, and the final authorization/generation recheck.
         let bounded =
@@ -1061,8 +1071,14 @@ impl Query {
             .map(|reader| reader as &dyn crate::SessionSourceReader);
         let rendering = provider.map(|reader| (reader, mode));
         if tool == "get_session"
-            && let Some(mut answer) =
-                transcript::session(&evidence.options, catalog_key, args, provider, mode, now)?
+            && let Some(mut answer) = transcript::session(
+                &evidence.options,
+                catalog_key,
+                &focused_args,
+                provider,
+                mode,
+                now,
+            )?
         {
             if self.sources.is_retired() {
                 return Err(QueryError::new("io", "native query source is closed"));
@@ -1088,8 +1104,14 @@ impl Query {
             return Ok(answer);
         }
         if tool == "read_transcript"
-            && let Some(mut answer) =
-                transcript::read(&evidence.options, catalog_key, args, provider, mode, now)?
+            && let Some(mut answer) = transcript::read(
+                &evidence.options,
+                catalog_key,
+                &focused_args,
+                provider,
+                mode,
+                now,
+            )?
         {
             self.start = self
                 .sources

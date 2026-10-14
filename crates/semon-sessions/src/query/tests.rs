@@ -3675,6 +3675,14 @@ fn focused_far_end_and_unsent_handoffs_use_native_owner_evidence_and_union_alias
                     legacy.call_at(tool, &args, NOW),
                     "{multiple}: {tool} {args}"
                 );
+                assert!(
+                    focused.native.is_none(),
+                    "virtual focused read prepared a complete Index"
+                );
+                assert!(
+                    transcript::SLOTS.with(std::cell::Cell::get) <= 3,
+                    "virtual page prepared unrelated recipes"
+                );
             }
         }
         for (_, source) in &sources.machines {
@@ -3782,7 +3790,7 @@ fn handoff_endpoint_indexes_upgrade_without_losing_native_evidence() {
     assert_eq!(
         db.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
             .unwrap(),
-        27
+        28
     );
     assert_eq!(db.query_row("SELECT count(*) FROM sqlite_schema WHERE name IN ('session_trace_from','session_trace_to')", [], |row|row.get::<_,i64>(0)).unwrap(), 2);
     assert!(
@@ -5432,6 +5440,190 @@ fn focused_tail_summary_and_stopped_search_do_not_prepare_growing_selected_histo
             assert!(
                 bytes <= 8 * crate::source_chunks::SIZE as u64,
                 "provider byte bound: {bytes}"
+            );
+        }
+    }
+}
+
+#[test]
+fn virtual_pages_do_not_prepare_growing_physical_owner_history() {
+    for prefix in [0, 128, 1024] {
+        let home = Home::new("virtual-focused-history");
+        let mut lines = vec![human("lead", ts(1, 0), "physical history")];
+        lines.extend(
+            (0..prefix)
+                .map(|_| assistant("lead", ts(1, 1), vec![text(&"old history ".repeat(64))])),
+        );
+        lines.extend([assistant("lead",ts(23,58),vec![tool("send","SendMessage",json!({"to":"remote","message":"fixed virtual context"}))]),json!({"type":"user","sessionId":"lead","timestamp":ts(23,59),"message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"send","content":"sent"}]},"toolUseResult":{"success":true,"message":"sent"}})]);
+        home.top("lead", &lines);
+        let mut cache = crate::events::EventCache::open_scoped(&home.options.cache).unwrap();
+        crate::model::observe_catalog(
+            &home.options,
+            &mut cache,
+            &mut false,
+            &mut crate::model::Texts::default(),
+            NOW,
+        )
+        .unwrap();
+        drop(cache);
+        let mut oracle = Query::from_sources(admitted(home.options.clone()));
+        let listing = oracle.call_at("list_sessions", &json!({}), NOW).unwrap();
+        let key = listing["sessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["kind"] == "stub")
+            .unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let tools = [
+            ("read_transcript", json!({"id":key,"limit":1})),
+            ("get_session", json!({"id":key})),
+        ];
+        let expected: Vec<_> = tools
+            .iter()
+            .map(|(tool, args)| oracle.call_at(tool, args, NOW).unwrap())
+            .collect();
+        let archive = selected_archive(&home, 0);
+        fs::remove_file(home.options.claude_home.join(&archive.source.path)).unwrap();
+        for ((tool, args), expected) in tools.iter().zip(expected) {
+            let indexes = crate::events::FILE_READS.with(std::cell::Cell::get);
+            let calls = archive.calls.load(Ordering::Relaxed);
+            let bytes = archive.read_bytes.load(Ordering::Relaxed);
+            let mut query = Query::from_sources(admitted(home.options.clone()));
+            let actual = query
+                .call_selected_at(
+                    "local",
+                    &key,
+                    tool,
+                    args,
+                    Some(&archive),
+                    crate::SessionSourceReadMode::ProviderOnly,
+                    NOW,
+                )
+                .unwrap();
+            assert_eq!(actual, expected);
+            assert!(query.native.is_none());
+            assert_eq!(
+                crate::events::FILE_READS.with(std::cell::Cell::get),
+                indexes
+            );
+            assert!(transcript::SLOTS.with(std::cell::Cell::get) <= 3);
+            assert!(archive.calls.load(Ordering::Relaxed) - calls <= 8);
+            assert!(
+                archive.read_bytes.load(Ordering::Relaxed) - bytes
+                    <= 6 * crate::source_chunks::SIZE as u64
+            );
+            eprintln!(
+                "virtual_focused prefix={prefix} tool={tool} full_indexes=0 recipes={} provider_calls={} provider_bytes={}",
+                transcript::SLOTS.with(std::cell::Cell::get),
+                archive.calls.load(Ordering::Relaxed) - calls,
+                archive.read_bytes.load(Ordering::Relaxed) - bytes
+            );
+        }
+    }
+}
+
+#[test]
+fn clipped_relationship_pages_and_details_use_only_returned_recipes() {
+    for prefix in [0, 128, 1024] {
+        let mut home = Home::new("clipped-focused-history");
+        home.options.all = false;
+        home.options.scan_window = false;
+        home.options.since = Duration::from_secs(6 * 3600);
+        let mut lines = vec![
+            human("lead", ts(1, 0), "old prompt"),
+            assistant(
+                "lead",
+                ts(1, 1),
+                vec![tool(
+                    "old-send",
+                    "SendMessage",
+                    json!({"to":"remote","message":"old excluded context"}),
+                )],
+            ),
+            json!({"type":"user","sessionId":"lead","timestamp":ts(1,2),"message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"old-send","content":"sent"}]},"toolUseResult":{"success":true,"message":"sent"}}),
+        ];
+        lines.extend(
+            (0..prefix)
+                .map(|_| assistant("lead", ts(1, 3), vec![text(&"old history ".repeat(64))])),
+        );
+        lines.extend([
+            human("lead", ts(23, 58), "fixed recent prompt"),
+            assistant("lead", ts(23, 59), vec![text("fixed recent tail")]),
+        ]);
+        home.top("lead", &lines);
+        let mut cache = crate::events::EventCache::open_scoped(&home.options.cache).unwrap();
+        crate::model::observe_catalog(
+            &home.options,
+            &mut cache,
+            &mut false,
+            &mut crate::model::Texts::default(),
+            NOW,
+        )
+        .unwrap();
+        drop(cache);
+        let tools = [
+            ("read_transcript", json!({"id":"lead","limit":1})),
+            ("get_session", json!({"id":"lead"})),
+        ];
+        let expected: Vec<_> = tools
+            .iter()
+            .map(|(tool, args)| {
+                Query::from_sources(admitted(home.options.clone()))
+                    .call_at(tool, args, NOW)
+                    .unwrap()
+            })
+            .collect();
+        let archive = selected_archive(&home, 0);
+        fs::remove_file(home.options.claude_home.join(&archive.source.path)).unwrap();
+        for ((tool, args), expected) in tools.iter().zip(expected) {
+            let indexes = crate::events::FILE_READS.with(std::cell::Cell::get);
+            let calls = archive.calls.load(Ordering::Relaxed);
+            let bytes = archive.read_bytes.load(Ordering::Relaxed);
+            crate::events::store::chunk_proofs::FOCUSED_HASHES.with(|n| n.set(0));
+            crate::events::store::chunk_proofs::FOCUSED_METADATA_BYTES.with(|n| n.set(0));
+            let mut query = Query::from_sources(admitted(home.options.clone()));
+            let actual = query
+                .call_selected_at(
+                    "local",
+                    "lead",
+                    tool,
+                    args,
+                    Some(&archive),
+                    crate::SessionSourceReadMode::ProviderOnly,
+                    NOW,
+                )
+                .unwrap();
+            assert_eq!(actual, expected, "{tool} prefix={prefix}");
+            assert!(query.native.is_none());
+            assert_eq!(
+                crate::events::FILE_READS.with(std::cell::Cell::get),
+                indexes
+            );
+            assert!(transcript::SLOTS.with(std::cell::Cell::get) <= 3);
+            assert!(archive.calls.load(Ordering::Relaxed) - calls <= 8);
+            assert!(
+                archive.read_bytes.load(Ordering::Relaxed) - bytes
+                    <= 6 * crate::source_chunks::SIZE as u64
+            );
+            if *tool == "get_session" {
+                assert_eq!(actual["session"]["handoffs"].as_array().unwrap().len(), 1);
+                assert_eq!(
+                    actual["session"]["handoffs"][0]["brief"],
+                    "fixed recent prompt"
+                );
+                assert_eq!(actual["session"]["turns"].as_array().unwrap().len(), 1);
+            }
+            eprintln!(
+                "clipped_focused prefix={prefix} tool={tool} full_indexes=0 recipes={} provider_calls={} provider_bytes={} decoded_proof_hashes={} proof_metadata_bytes={}",
+                transcript::SLOTS.with(std::cell::Cell::get),
+                archive.calls.load(Ordering::Relaxed) - calls,
+                archive.read_bytes.load(Ordering::Relaxed) - bytes,
+                crate::events::store::chunk_proofs::FOCUSED_HASHES.with(std::cell::Cell::get),
+                crate::events::store::chunk_proofs::FOCUSED_METADATA_BYTES
+                    .with(std::cell::Cell::get)
             );
         }
     }

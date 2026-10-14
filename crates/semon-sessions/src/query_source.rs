@@ -18,7 +18,26 @@ struct Proof {
     source: Option<SessionSourceRef>,
     ledger: Ledger,
     generation: String,
-    chunks: Arc<crate::source_chunks::Chunks>,
+    chunks: ProofChunks,
+}
+
+enum ProofChunks {
+    Complete(Arc<crate::source_chunks::Chunks>),
+    Focused(Box<crate::events::store::chunk_proofs::Focused>),
+}
+impl ProofChunks {
+    fn read(&self, file: &mut (impl Read + Seek), index: usize) -> io::Result<Vec<u8>> {
+        match self {
+            Self::Complete(chunks) => chunks.read(file, index),
+            Self::Focused(chunks) => chunks.read(file, index),
+        }
+    }
+    fn verify(&self, index: usize, bytes: &[u8]) -> io::Result<()> {
+        match self {
+            Self::Complete(chunks) => chunks.verify(index, bytes),
+            Self::Focused(chunks) => chunks.verify(index, bytes),
+        }
+    }
 }
 
 #[derive(Default)]
@@ -53,7 +72,11 @@ impl Sources {
         options: &Options,
         sources: impl Iterator<Item = (CatalogSource, Option<Arc<crate::source_chunks::Chunks>>)>,
     ) -> io::Result<Self> {
-        Self::capture_inner(options, sources, true)
+        Self::capture_inner(
+            options,
+            sources.map(|(source, chunks)| (source, chunks.map(ProofChunks::Complete))),
+            true,
+        )
     }
 
     /// Local native paths can have no lossless public source-reference encoding.
@@ -62,18 +85,25 @@ impl Sources {
         options: &Options,
         sources: impl Iterator<Item = (CatalogSource, Option<Arc<crate::source_chunks::Chunks>>)>,
     ) -> io::Result<Self> {
-        Self::capture_inner(options, sources, false)
+        Self::capture_inner(
+            options,
+            sources.map(|(source, chunks)| (source, chunks.map(ProofChunks::Complete))),
+            false,
+        )
     }
 
     fn capture_inner(
         options: &Options,
-        sources: impl Iterator<Item = (CatalogSource, Option<Arc<crate::source_chunks::Chunks>>)>,
+        sources: impl Iterator<Item = (CatalogSource, Option<ProofChunks>)>,
         require_references: bool,
     ) -> io::Result<Self> {
         let mut captured = Self::default();
         for (source, chunks) in sources {
             let chunks = chunks
-                .filter(|chunks| chunks.valid(source.offset))
+                .filter(|chunks| match chunks {
+                    ProofChunks::Complete(chunks) => chunks.valid(source.offset),
+                    ProofChunks::Focused(_) => true,
+                })
                 .ok_or_else(unavailable)?;
             if ![InputRoot::Claude, InputRoot::Codex, InputRoot::Copilot]
                 .into_iter()
@@ -135,6 +165,45 @@ impl Sources {
             captured.proofs.insert(source.path, proof);
         }
         Ok(captured)
+    }
+
+    pub(crate) fn capture_focused(
+        options: &Options,
+        sources: &[CatalogSource],
+    ) -> io::Result<Self> {
+        if sources.len() > 64 {
+            return Err(unavailable());
+        }
+        let cache_path = crate::events::EventCache::path(&options.cache);
+        let db = crate::events::store::focused_connection(&cache_path)?;
+        db.busy_timeout(std::time::Duration::from_millis(100))
+            .map_err(io::Error::other)?;
+        let db = Arc::new(Mutex::new(db));
+        let proofs = sources
+            .iter()
+            .map(|source| {
+                let ledger = Ledger {
+                    stat: Stat {
+                        dev: source.dev,
+                        ino: source.ino,
+                        size: source.size,
+                        modified_ns: source.modified_ns,
+                        changed_ns: source.changed_ns,
+                    },
+                    offset: source.offset,
+                    prefix: source.prefix_sha256,
+                    tail: source.tail_sha256,
+                };
+                let proof = crate::events::store::chunk_proofs::Focused::with_db(
+                    db.clone(),
+                    &cache_path,
+                    source.path.to_str().ok_or_else(unavailable)?,
+                    &ledger,
+                )?;
+                Ok((source.clone(), Some(ProofChunks::Focused(Box::new(proof)))))
+            })
+            .collect::<io::Result<Vec<_>>>()?;
+        Self::capture_inner(options, proofs.into_iter(), false)
     }
 
     pub(crate) fn reader(&self) -> Records<'_> {
@@ -445,6 +514,11 @@ impl Records<'_> {
     pub(crate) fn finish(&self) -> io::Result<()> {
         if *self.failed.lock().map_err(|_| unavailable())? {
             return Err(unavailable());
+        }
+        for proof in self.sources.proofs.values() {
+            if let ProofChunks::Focused(chunks) = &proof.chunks {
+                chunks.clear_cache()?;
+            }
         }
         let paths: Vec<_> = self
             .checked
@@ -888,7 +962,7 @@ mod tests {
                         tail: captured.tail,
                     },
                     generation: generation.clone(),
-                    chunks: Arc::new(captured.chunks),
+                    chunks: ProofChunks::Complete(Arc::new(captured.chunks)),
                 },
             );
             (sources, reference, generation)
@@ -952,7 +1026,15 @@ mod tests {
             facts: None,
             scan_window: false,
         };
-        let inputs = || std::iter::once((source.clone(), Some(proof.chunks.clone())));
+        let inputs = || {
+            std::iter::once((
+                source.clone(),
+                Some(match &proof.chunks {
+                    ProofChunks::Complete(chunks) => chunks.clone(),
+                    ProofChunks::Focused(_) => panic!("fixture requires complete proofs"),
+                }),
+            ))
+        };
         assert!(Sources::capture(&options, inputs()).is_err());
         let sources = Sources::capture_native(&options, inputs()).unwrap();
         assert!(sources.paths.is_empty());

@@ -13,6 +13,8 @@ struct Header {
     ledger: String,
     count: usize,
     fingerprint: [u8; 32],
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pages_root: Option<[u8; 32]>,
     #[serde(default)]
     resume: Option<crate::source_chunks::PrefixState>,
 }
@@ -23,6 +25,8 @@ struct Page {
     version: u32,
     index: usize,
     hashes: Vec<[u8; 32]>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    sha256: Option<String>,
 }
 
 fn prefix(path: &str) -> String {
@@ -118,12 +122,406 @@ pub(super) fn read(
     Ok(Some(Arc::new(chunks)))
 }
 
+#[derive(Serialize, Deserialize)]
+struct Repair {
+    header: String,
+    page: usize,
+    state: crate::source_chunks::PrefixState,
+    tail: Vec<u8>,
+    complete: bool,
+}
+fn repair_key(prefix: &str) -> String {
+    format!("native_proof_repair:{prefix}")
+}
+
+/// One bounded metadata-only producer step qualifies old hash pages against
+/// their original complete fingerprint. A restart resumes the committed hash
+/// continuation; replacement discards its private cursor. Original proof pages,
+/// ledgers and archive markers are never rewritten by this preparation.
+fn repair_step(cache: &Path, prefix: &str, expected: &str, offset: u64) -> io::Result<bool> {
+    let mut db = Connection::open(cache).map_err(io::Error::other)?;
+    db.busy_timeout(Duration::from_millis(100))
+        .map_err(io::Error::other)?;
+    let tx = db
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(io::Error::other)?;
+    if !super::current(&tx).map_err(io::Error::other)? {
+        return Err(io::Error::other("Native proof producer changed"));
+    }
+    let encoded: String = tx
+        .query_row(NATIVE_METADATA_VALUE, [format!("{prefix}header")], |r| {
+            r.get(0)
+        })
+        .map_err(io::Error::other)?;
+    if encoded != expected {
+        return Err(io::Error::other("Native proof header changed"));
+    }
+    let header: Header = serde_json::from_str(&encoded).map_err(io::Error::other)?;
+    let key = repair_key(prefix);
+    let prior: Option<String> = tx
+        .query_row(NATIVE_METADATA_VALUE, [&key], |r| r.get(0))
+        .optional()
+        .map_err(io::Error::other)?
+        .flatten();
+    let mut repair: Repair = match prior
+        .and_then(|text| serde_json::from_str::<Repair>(&text).ok())
+        .filter(|r| r.header == encoded)
+    {
+        Some(repair) => repair,
+        None => Repair {
+            header: encoded,
+            page: 0,
+            state: Default::default(),
+            tail: offset.to_be_bytes().to_vec(),
+            complete: false,
+        },
+    };
+    if repair.page > header.count.div_ceil(PAGE) || repair.tail.len() >= 64 {
+        return Err(io::Error::other("Native proof repair cursor is invalid"));
+    }
+    if repair.complete {
+        return Ok(true);
+    }
+    if repair.page < header.count.div_ceil(PAGE) {
+        let page: String = tx
+            .query_row(
+                NATIVE_METADATA_VALUE,
+                [format!("{prefix}{:010}", repair.page)],
+                |r| r.get(0),
+            )
+            .map_err(io::Error::other)?;
+        let page: Page = serde_json::from_str(&page).map_err(io::Error::other)?;
+        if page.version != 1
+            || page.index != repair.page
+            || page.hashes.len() != (header.count - repair.page * PAGE).min(PAGE)
+        {
+            return Err(io::Error::other("Native proof page is incomplete"));
+        }
+        let mut bytes = std::mem::take(&mut repair.tail);
+        for hash in &page.hashes {
+            bytes.extend_from_slice(hash);
+        }
+        let full = bytes.len() / 64 * 64;
+        repair.state.advance_blocks(&bytes[..full]);
+        repair.tail = bytes[full..].to_vec();
+        repair.page += 1;
+        // The checksum is private staged preparation until the complete
+        // fingerprint qualifies this exact header.
+        let canonical = json(&Page {
+            sha256: None,
+            ..page
+        })
+        .map_err(io::Error::other)?;
+        tx.execute(
+            "INSERT OR REPLACE INTO meta(key,value) VALUES(?1,?2)",
+            params![
+                format!("{key}:{:010}", repair.page - 1),
+                page_witness(&canonical)
+            ],
+        )
+        .map_err(io::Error::other)?;
+    }
+    if repair.page == header.count.div_ceil(PAGE) {
+        if repair.state.finish(&repair.tail) != header.fingerprint {
+            return Err(io::Error::other("Native proof fingerprint changed"));
+        }
+        repair.complete = true;
+    }
+    tx.execute(
+        "INSERT OR REPLACE INTO meta(key,value) VALUES(?1,?2)",
+        params![key, json(&repair).map_err(io::Error::other)?],
+    )
+    .map_err(io::Error::other)?;
+    tx.commit().map_err(io::Error::other)?;
+    Ok(repair.complete)
+}
+/// Request-owned proof pager. The producer binds each page to the exact header
+/// and page digest in its ledger transaction. No source bytes or reader survive
+/// the request, and completion reads the same witnesses again.
+pub(crate) struct Focused {
+    db: Arc<std::sync::Mutex<Connection>>,
+    cache_path: PathBuf,
+    prefix: String,
+    header: String,
+    ledger: Ledger,
+    count: usize,
+    pages_root: Option<[u8; 32]>,
+    cached: std::sync::Mutex<Option<(usize, Page)>>,
+}
+
+#[cfg(test)]
+thread_local! {
+    pub(crate) static FOCUSED_HASHES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    pub(crate) static FOCUSED_METADATA_BYTES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+impl Focused {
+    #[cfg(test)]
+    pub(crate) fn open(cache: &Path, path: &str, ledger: &Ledger) -> io::Result<Self> {
+        let db = Connection::open_with_flags(cache, OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .map_err(io::Error::other)?;
+        db.busy_timeout(Duration::from_millis(100))
+            .map_err(io::Error::other)?;
+        Self::with_db(Arc::new(std::sync::Mutex::new(db)), cache, path, ledger)
+    }
+
+    pub(crate) fn with_db(
+        db: Arc<std::sync::Mutex<Connection>>,
+        cache: &Path,
+        path: &str,
+        ledger: &Ledger,
+    ) -> io::Result<Self> {
+        let connection = db
+            .lock()
+            .map_err(|_| io::Error::other("Native proof reader unavailable"))?;
+        if !super::current(&connection).map_err(io::Error::other)? {
+            return Err(io::Error::other("Native proof store changed"));
+        }
+        let prefix = prefix(path);
+        let encoded: String = connection
+            .query_row(NATIVE_METADATA_VALUE, [format!("{prefix}header")], |row| {
+                row.get(0)
+            })
+            .map_err(io::Error::other)?;
+        let header: Header = serde_json::from_str(&encoded).map_err(io::Error::other)?;
+        if header.version != 1
+            || header.parser_version != CACHE_VERSION
+            || header.ledger != header_ledger(ledger)
+            || usize::try_from(ledger.offset.div_ceil(crate::source_chunks::SIZE as u64))
+                != Ok(header.count)
+        {
+            return Err(io::Error::other("Native proof header changed"));
+        }
+        #[cfg(test)]
+        FOCUSED_METADATA_BYTES.with(|n| n.set(n.get() + encoded.len()));
+        drop(connection);
+        Ok(Self {
+            db,
+            cache_path: cache.to_owned(),
+            prefix,
+            header: encoded,
+            ledger: ledger.clone(),
+            count: header.count,
+            pages_root: header.pages_root,
+            cached: std::sync::Mutex::new(None),
+        })
+    }
+
+    fn hash(&self, index: usize) -> io::Result<[u8; 32]> {
+        if index >= self.count {
+            return Err(io::Error::other("Native proof block unavailable"));
+        }
+        let mut db = self
+            .db
+            .lock()
+            .map_err(|_| io::Error::other("Native proof reader unavailable"))?;
+        let tx = db.transaction().map_err(io::Error::other)?;
+        let header: String = tx
+            .query_row(
+                NATIVE_METADATA_VALUE,
+                [format!("{}header", self.prefix)],
+                |row| row.get(0),
+            )
+            .map_err(io::Error::other)?;
+        if header != self.header {
+            return Err(io::Error::other("Native proof publication changed"));
+        }
+        let page = index / PAGE;
+        let mut cache = self
+            .cached
+            .lock()
+            .map_err(|_| io::Error::other("Native proof cache unavailable"))?;
+        if let Some((cached_page, part)) = cache.as_ref()
+            && *cached_page == page
+        {
+            let witness: Option<String> = tx
+                .query_row(
+                    "SELECT json_extract(value,'$.sha256') FROM meta WHERE key=?1",
+                    [format!("{}{page:010}", self.prefix)],
+                    |r| r.get(0),
+                )
+                .map_err(io::Error::other)?;
+            if part.sha256 != witness {
+                return Err(io::Error::other("Native proof page changed"));
+            }
+            #[cfg(test)]
+            FOCUSED_METADATA_BYTES
+                .with(|n| n.set(n.get() + header.len() + witness.as_ref().map_or(0, String::len)));
+            return Ok(part.hashes[index % PAGE]);
+        }
+        let encoded: String = tx
+            .query_row(
+                NATIVE_METADATA_VALUE,
+                [format!("{}{page:010}", self.prefix)],
+                |row| row.get(0),
+            )
+            .map_err(io::Error::other)?;
+        let part: Page = serde_json::from_str(&encoded).map_err(io::Error::other)?;
+        let original = Page {
+            version: part.version,
+            index: part.index,
+            hashes: part.hashes.clone(),
+            sha256: None,
+        };
+        let canonical = json(&original).map_err(io::Error::other)?;
+        if part.sha256.is_none() {
+            let marker = repair_key(&self.prefix);
+            let repair: Option<String> = tx
+                .query_row(NATIVE_METADATA_VALUE, [&marker], |r| r.get(0))
+                .optional()
+                .map_err(io::Error::other)?
+                .flatten();
+            let qualified = repair
+                .and_then(|text| serde_json::from_str::<Repair>(&text).ok())
+                .is_some_and(|r| r.header == self.header && r.complete);
+            if !qualified {
+                drop(cache);
+                drop(tx);
+                drop(db);
+                // Steps commit independently and retain bounded scratch work.
+                // Provider I/O never occurs while this producer holds SQLite.
+                while !repair_step(
+                    &self.cache_path,
+                    &self.prefix,
+                    &self.header,
+                    self.ledger.offset,
+                )? {}
+                return self.hash(index);
+            }
+            let witness: String = tx
+                .query_row(
+                    NATIVE_METADATA_VALUE,
+                    [format!("{marker}:{page:010}")],
+                    |r| r.get(0),
+                )
+                .map_err(io::Error::other)?;
+            if witness != page_witness(&canonical) {
+                return Err(io::Error::other("Native proof page changed"));
+            }
+        } else if part.sha256.as_deref() != Some(&page_witness(&canonical)) {
+            return Err(io::Error::other("Native proof page changed"));
+        }
+        if let Some(root) = self.pages_root {
+            let mut node: [u8; 32] = Sha256::digest(canonical.as_bytes()).into();
+            let mut at = page;
+            let mut width = self.count.div_ceil(PAGE);
+            let mut level = 0;
+            while width > 1 {
+                let sibling_at = at ^ 1;
+                let sibling = if sibling_at >= width {
+                    node
+                } else {
+                    let encoded: String = tx
+                        .query_row(
+                            NATIVE_METADATA_VALUE,
+                            [format!(
+                                "native_proof_tree:{}:{level:03}:{sibling_at:010}",
+                                self.prefix
+                            )],
+                            |r| r.get(0),
+                        )
+                        .map_err(io::Error::other)?;
+                    #[cfg(test)]
+                    FOCUSED_METADATA_BYTES.with(|n| n.set(n.get() + encoded.len()));
+                    serde_json::from_str::<[u8; 32]>(&encoded).map_err(io::Error::other)?
+                };
+                node = if at.is_multiple_of(2) {
+                    tree_parent(&node, &sibling)
+                } else {
+                    tree_parent(&sibling, &node)
+                };
+                at /= 2;
+                width = width.div_ceil(2);
+                level += 1;
+            }
+            if node != root {
+                return Err(io::Error::other("Native proof root changed"));
+            }
+        }
+        if part.version != 1
+            || part.index != page
+            || part.hashes.len() != (self.count - page * PAGE).min(PAGE)
+        {
+            return Err(io::Error::other("Native proof page is incomplete"));
+        }
+        #[cfg(test)]
+        {
+            FOCUSED_HASHES.with(|n| n.set(n.get() + part.hashes.len()));
+            FOCUSED_METADATA_BYTES.with(|n| n.set(n.get() + header.len() + encoded.len()));
+        }
+        let hash = part.hashes[index % PAGE];
+        *cache = Some((page, part));
+        Ok(hash)
+    }
+
+    pub(crate) fn clear_cache(&self) -> io::Result<()> {
+        *self
+            .cached
+            .lock()
+            .map_err(|_| io::Error::other("Native proof cache unavailable"))? = None;
+        Ok(())
+    }
+
+    pub(crate) fn verify(&self, index: usize, bytes: &[u8]) -> io::Result<()> {
+        let hash = self.hash(index)?;
+        let start = (index as u64)
+            .checked_mul(crate::source_chunks::SIZE as u64)
+            .filter(|start| *start < self.ledger.offset)
+            .ok_or_else(|| io::Error::other("Native proof block unavailable"))?;
+        let length = (self.ledger.offset - start).min(crate::source_chunks::SIZE as u64) as usize;
+        #[cfg(test)]
+        crate::events::SOURCE_HASHED_BYTES.with(|n| n.set(n.get() + bytes.len() as u64));
+        if bytes.len() != length || <[u8; 32]>::from(Sha256::digest(bytes)) != hash {
+            return Err(io::Error::other(
+                "Native source block generation unavailable",
+            ));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn read(
+        &self,
+        file: &mut (impl io::Read + io::Seek),
+        index: usize,
+    ) -> io::Result<Vec<u8>> {
+        use std::io::SeekFrom;
+        let start = (index as u64)
+            .checked_mul(crate::source_chunks::SIZE as u64)
+            .filter(|start| *start < self.ledger.offset)
+            .ok_or_else(|| io::Error::other("Native proof block unavailable"))?;
+        let mut bytes =
+            vec![0; (self.ledger.offset - start).min(crate::source_chunks::SIZE as u64) as usize];
+        file.seek(SeekFrom::Start(start))?;
+        file.read_exact(&mut bytes)?;
+        #[cfg(test)]
+        crate::source_chunks::READ_BYTES.with(|n| n.set(n.get() + bytes.len() as u64));
+        self.verify(index, &bytes)?;
+        Ok(bytes)
+    }
+}
+
+fn tree_parent(left: &[u8; 32], right: &[u8; 32]) -> [u8; 32] {
+    let mut hash = Sha256::new();
+    hash.update(left);
+    hash.update(right);
+    hash.finalize().into()
+}
+fn page_witness(page: &str) -> String {
+    format!("{:x}", Sha256::digest(page.as_bytes()))
+}
+
 pub(super) fn clear(transaction: &Transaction<'_>, path: &str) -> rusqlite::Result<()> {
     let prefix = prefix(path);
     transaction.execute(
         "DELETE FROM meta WHERE key>=?1 AND key<?2",
         params![&prefix, format!("{prefix}~")],
     )?;
+    for namespace in [format!("native_proof_tree:{prefix}:"), repair_key(&prefix)] {
+        transaction.execute(
+            "DELETE FROM meta WHERE key>=?1 AND key<?2",
+            params![&namespace, format!("{namespace}~")],
+        )?;
+    }
     Ok(())
 }
 
@@ -164,6 +562,7 @@ pub(super) fn write_measured(
     let started = measurements.start();
     let mut put = transaction.prepare_cached("INSERT INTO meta(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value WHERE value!=excluded.value")?;
     measurements.record("chunks_prepare", started, 1);
+    let mut leaves = Vec::new();
     for (index, hashes) in chunks.hashes.chunks(PAGE).enumerate() {
         let started = measurements.start();
         let key = format!("{prefix}{index:010}");
@@ -171,14 +570,56 @@ pub(super) fn write_measured(
             version: 1,
             index,
             hashes: hashes.to_vec(),
+            sha256: None,
         })?;
         measurements.record("chunks_page_serialization", started, 1);
         measurements.count("chunks_page_bytes", encoded.len());
         measurements.count("chunks_hashes", hashes.len());
         let started = measurements.start();
+        leaves.push(<[u8; 32]>::from(Sha256::digest(encoded.as_bytes())));
+        let mut value: Page = serde_json::from_str(&encoded)
+            .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+        value.sha256 = Some(page_witness(&encoded));
+        let encoded = json(&value)?;
         put.execute(params![key, encoded])?;
         measurements.record("chunks_page_sql", started, 1);
     }
+    let mut nodes = leaves;
+    let mut level = 0;
+    let pages_root = loop {
+        for (at, node) in nodes.iter().enumerate() {
+            put.execute(params![
+                format!("native_proof_tree:{prefix}:{level:03}:{at:010}"),
+                json(node)?
+            ])?;
+        }
+        let namespace = format!("native_proof_tree:{prefix}:{level:03}:");
+        transaction.execute(
+            "DELETE FROM meta WHERE key>=?1 AND key<?2",
+            params![
+                format!("{namespace}{:010}", nodes.len()),
+                format!("{namespace}~")
+            ],
+        )?;
+        if nodes.len() <= 1 {
+            break nodes
+                .first()
+                .copied()
+                .unwrap_or_else(|| Sha256::digest([]).into());
+        }
+        nodes = nodes
+            .chunks(2)
+            .map(|pair| tree_parent(&pair[0], pair.get(1).unwrap_or(&pair[0])))
+            .collect();
+        level += 1;
+    };
+    transaction.execute(
+        "DELETE FROM meta WHERE key>=?1 AND key<?2",
+        params![
+            format!("native_proof_tree:{prefix}:{:03}:", level + 1),
+            format!("native_proof_tree:{prefix}:~")
+        ],
+    )?;
     let started = measurements.start();
     measurements.cleanup(
         transaction,
@@ -204,6 +645,7 @@ pub(super) fn write_measured(
             measurements.record("chunks_header_fingerprint", started, 1);
             value
         },
+        pages_root: Some(pages_root),
         resume: chunks.resume.clone(),
     };
     let started = measurements.start();
@@ -211,7 +653,7 @@ pub(super) fn write_measured(
     measurements.record("chunks_header_serialization", started, 1);
     measurements.count("chunks_header_bytes", encoded.len());
     let started = measurements.start();
-    put.execute(params![key, encoded])?;
+    put.execute(params![key, &encoded])?;
     measurements.record("chunks_header_sql", started, 1);
     Ok(())
 }
@@ -219,6 +661,145 @@ pub(super) fn write_measured(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn focused_proof_work_is_independent_of_the_complete_vector_and_rechecks_pages() {
+        let bytes = vec![b'x'; crate::source_chunks::SIZE];
+        let hash: [u8; 32] = Sha256::digest(&bytes).into();
+        for count in [1, 1024, 1025, 8192, 8193] {
+            let root = cleanup_root();
+            let path = root.join("index.sqlite3");
+            let mut store = cleanup_store(&root, "index.sqlite3");
+            let (ledger, mut index) = cleanup_proof(count, 0);
+            index.source_chunks = Some(Arc::new(Chunks {
+                offset: ledger.offset,
+                hashes: vec![hash; count],
+                resume: None,
+            }));
+            let tx = store.connection.transaction().unwrap();
+            write(&tx, "original", &ledger, index.source_chunks.as_deref()).unwrap();
+            tx.commit().unwrap();
+            FOCUSED_HASHES.with(|n| n.set(0));
+            FOCUSED_METADATA_BYTES.with(|n| n.set(0));
+            let index_loads = crate::events::FILE_READS.with(std::cell::Cell::get);
+            let focused = Focused::open(&path, "original", &ledger).unwrap();
+            focused.verify(count - 1, &bytes).unwrap();
+            focused.verify(count - 1, &bytes).unwrap();
+            focused.clear_cache().unwrap();
+            focused.verify(count - 1, &bytes).unwrap();
+            let hashes = FOCUSED_HASHES.with(std::cell::Cell::get);
+            let metadata = FOCUSED_METADATA_BYTES.with(std::cell::Cell::get);
+            assert_eq!(
+                crate::events::FILE_READS.with(std::cell::Cell::get),
+                index_loads
+            );
+            assert!(hashes <= 2 * PAGE, "decoded full proof vector: {hashes}");
+            assert!(metadata < 300000, "decoded proof metadata: {metadata}");
+            eprintln!(
+                "focused_proofs total_hashes={count} decoded_hashes={hashes} metadata_bytes={metadata} complete_index_loads=0"
+            );
+            let key = format!("{}{:010}", prefix("original"), (count - 1) / PAGE);
+            store
+                .connection
+                .execute(
+                    "UPDATE meta SET value=json_set(value,'$.hashes[0][0]',0) WHERE key=?1",
+                    [&key],
+                )
+                .unwrap();
+            // Even a self-consistent page checksum cannot change the proof
+            // bound by the independently captured header root.
+            let encoded: String = store
+                .connection
+                .query_row(NATIVE_METADATA_VALUE, [&key], |r| r.get(0))
+                .unwrap();
+            let mut part: Page = serde_json::from_str(&encoded).unwrap();
+            part.sha256 = None;
+            let canonical = json(&part).unwrap();
+            part.sha256 = Some(page_witness(&canonical));
+            store
+                .connection
+                .execute(
+                    "UPDATE meta SET value=?2 WHERE key=?1",
+                    params![key, json(&part).unwrap()],
+                )
+                .unwrap();
+            focused.clear_cache().unwrap();
+            assert!(focused.verify(count - 1, &bytes).is_err());
+            drop(focused);
+            drop(store);
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn legacy_proof_preparation_resumes_bounded_metadata_steps_without_rebinding_originals() {
+        let root = cleanup_root();
+        let path = root.join("index.sqlite3");
+        let mut store = cleanup_store(&root, "index.sqlite3");
+        let bytes = vec![b'x'; crate::source_chunks::SIZE];
+        let hash: [u8; 32] = Sha256::digest(&bytes).into();
+        let (ledger, mut index) = cleanup_proof(PAGE + 1, 0);
+        index.source_chunks = Some(Arc::new(Chunks {
+            offset: ledger.offset,
+            hashes: vec![hash; PAGE + 1],
+            resume: None,
+        }));
+        let tx = store.connection.transaction().unwrap();
+        write(&tx, "original", &ledger, index.source_chunks.as_deref()).unwrap();
+        tx.commit().unwrap();
+        let prefix = prefix("original");
+        store.connection.execute("UPDATE meta SET value=json_remove(value,'$.sha256') WHERE key>=?1 AND key<?2 AND key!=?3",params![&prefix,format!("{prefix}~"),format!("{prefix}header")]).unwrap();
+        store
+            .connection
+            .execute(
+                "UPDATE meta SET value=json_remove(value,'$.pages_root') WHERE key=?1",
+                [format!("{prefix}header")],
+            )
+            .unwrap();
+        let header: String = store
+            .connection
+            .query_row(NATIVE_METADATA_VALUE, [format!("{prefix}header")], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        let before = read(&store.connection, "original", &ledger)
+            .unwrap()
+            .unwrap();
+        assert!(!repair_step(&path, &prefix, &header, ledger.offset).unwrap());
+        let state: String = store
+            .connection
+            .query_row(NATIVE_METADATA_VALUE, [repair_key(&prefix)], |r| r.get(0))
+            .unwrap();
+        let state: Repair = serde_json::from_str(&state).unwrap();
+        assert_eq!(state.page, 1);
+        assert!(!state.complete);
+        assert!(state.tail.len() < 64);
+        drop(store);
+        assert!(repair_step(&path, &prefix, &header, ledger.offset).unwrap());
+        let focused = Focused::open(&path, "original", &ledger).unwrap();
+        focused.verify(PAGE, &bytes).unwrap();
+        focused.clear_cache().unwrap();
+        focused.verify(PAGE, &bytes).unwrap();
+        let store = cleanup_store(&root, "index.sqlite3");
+        assert_eq!(
+            read(&store.connection, "original", &ledger)
+                .unwrap()
+                .unwrap(),
+            before
+        );
+        store
+            .connection
+            .execute(
+                "UPDATE meta SET value=json_set(value,'$.hashes[0][0]',0) WHERE key=?1",
+                [format!("{prefix}{:010}", 1)],
+            )
+            .unwrap();
+        focused.clear_cache().unwrap();
+        assert!(focused.verify(PAGE, &bytes).is_err());
+        drop(focused);
+        drop(store);
+        fs::remove_dir_all(root).unwrap();
+    }
 
     fn cleanup_root() -> PathBuf {
         let root = std::env::temp_dir().join(format!(
@@ -500,7 +1081,7 @@ mod tests {
             // page shrink can add deletes witnessed by the real trigger.
             let audit_rows: i64 = measured
                 .connection
-                .query_row("SELECT count(*) FROM temp.audit", [], |row| row.get(0))
+                .query_row("SELECT count(*) FROM temp.audit WHERE value GLOB 'native_source_chunks:*' OR value GLOB 'reprepared:native_source_chunks:*'", [], |row| row.get(0))
                 .unwrap();
             let audit_rows = usize::try_from(audit_rows).unwrap();
             assert!(audit_rows >= (step + 1) * 2);
@@ -789,8 +1370,8 @@ mod tests {
             .query_row("SELECT count(*) FROM meta", [], |row| row.get(0))
             .unwrap();
         assert_eq!(
-            count, 4,
-            "the other proof's two pages/header and observed runs survive"
+            count, 7,
+            "the other proof's two pages/header, three proof-tree nodes and observed runs survive"
         );
     }
 }

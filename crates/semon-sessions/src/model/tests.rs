@@ -8654,7 +8654,7 @@ fn schema_four_upgrade_preserves_event_indices_and_observed_runs() {
     let version: i64 = connection
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 27);
+    assert_eq!(version, 28);
 }
 
 #[test]
@@ -10104,9 +10104,11 @@ fn semantic_unannounced_mutation_after_ack_rejects_original_native_generation() 
         .unwrap()
         .to_owned();
     let db = rusqlite::Connection::open(EventCache::path(&home.options.cache)).unwrap();
-    let original =
-        EventCache::selected_source_proofs(&db, &home.options, std::slice::from_ref(&old_source))
-            .unwrap();
+    let original = crate::query_source::Sources::capture_focused(
+        &home.options,
+        std::slice::from_ref(&old_source),
+    )
+    .unwrap();
     original.reader().verify_all().unwrap();
     assert!(
         crate::session_source_proof(&home.options, "codex", &relative)

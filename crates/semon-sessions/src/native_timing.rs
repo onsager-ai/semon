@@ -1131,7 +1131,7 @@ mod tests {
         let schema: i64 = connection
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(schema, 27);
+        assert_eq!(schema, 28);
         let mode: String = connection
             .query_row("PRAGMA journal_mode", [], |row| row.get(0))
             .unwrap();

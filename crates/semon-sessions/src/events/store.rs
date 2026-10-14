@@ -20,7 +20,7 @@
 //! let Row { kept } = row;
 //! ```
 
-mod chunk_proofs;
+pub(crate) mod chunk_proofs;
 mod launch_calls;
 mod relocation;
 mod semantic_stage;
@@ -57,7 +57,7 @@ std::thread_local! {
 
 /// `PRAGMA user_version`: the shape of the tables. The parser's version is
 /// [`CACHE_VERSION`], kept in `meta`.
-const SCHEMA_VERSION: i64 = 27;
+const SCHEMA_VERSION: i64 = 28;
 
 /// How long a write waits for another process's transaction. Tests wait
 /// less, so the busy paths they drive stay quick.
@@ -333,6 +333,8 @@ DELETE FROM meta WHERE key GLOB 'archive_event_index:*';
 DELETE FROM meta WHERE key GLOB 'native_codex_header:*';
 DELETE FROM meta WHERE key GLOB 'native_claude_sidecar:*';
 DELETE FROM meta WHERE key GLOB 'native_source_chunks:*';
+DELETE FROM meta WHERE key GLOB 'native_proof_tree:*';
+DELETE FROM meta WHERE key GLOB 'native_proof_repair:*';
 DELETE FROM meta WHERE key GLOB 'native_parent_marker:*';
 DELETE FROM meta WHERE key GLOB 'native_tree_summary:*';
 DELETE FROM meta WHERE key GLOB 'native_launch_calls:*';
@@ -1552,40 +1554,25 @@ pub(super) fn selected_roles_current(
     Ok(true)
 }
 
-pub(super) fn selected_source_proofs(
-    connection: &Connection,
-    sources: &[crate::model::summary::CatalogSource],
-) -> rusqlite::Result<
-    Vec<(
-        crate::model::summary::CatalogSource,
-        Option<std::sync::Arc<crate::source_chunks::Chunks>>,
-    )>,
-> {
-    if sources.len() > 64 || !current(connection)? {
-        return Err(rusqlite::Error::InvalidQuery);
+/// Additive storage preparation for already-published focused recipes. This is
+/// the existing schema owner with lazy loading and no legacy-file import. A
+/// parser change is left to its producer instead of resetting evidence in a read.
+pub(crate) fn focused_connection(path: &Path) -> io::Result<Connection> {
+    let db = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .map_err(io::Error::other)?;
+    let (schema, parser) = versions(&db).map_err(io::Error::other)?;
+    if schema == SCHEMA_VERSION && parser == Some(CACHE_VERSION) {
+        return Ok(db);
     }
-    sources
-        .iter()
-        .map(|source| {
-            let ledger = Ledger {
-                stat: Stat {
-                    dev: source.dev,
-                    ino: source.ino,
-                    size: source.size,
-                    modified_ns: source.modified_ns,
-                    changed_ns: source.changed_ns,
-                },
-                offset: source.offset,
-                prefix: source.prefix_sha256,
-                tail: source.tail_sha256,
-            };
-            let path = source.path.to_str().ok_or(rusqlite::Error::InvalidQuery)?;
-            Ok((
-                source.clone(),
-                chunk_proofs::read(connection, path, &ledger)?,
-            ))
-        })
-        .collect()
+    if schema > SCHEMA_VERSION || parser != Some(CACHE_VERSION) {
+        return Err(io::Error::other(
+            "Native focused schema requires its producer",
+        ));
+    }
+    drop(db);
+    let _owner = SqliteStore::attempt_scoped(path, None, true)
+        .map_err(|_| io::Error::other("Native focused schema preparation unavailable"))?;
+    Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(io::Error::other)
 }
 
 /// The `meta` key recording when a retired JSON event cache that couldn't
@@ -7344,6 +7331,44 @@ mod tests {
     }
 
     #[test]
+    fn schema_twenty_seven_preserves_original_rows_and_adds_focused_identity_index() {
+        let root = scratch("focused-proof-migration");
+        let (options, _, _) = catalog_native_fixture(&root, 2, true);
+        let path = crate::events::EventCache::path(&options.cache);
+        let (store, _) = opened(&path);
+        store
+            .connection
+            .execute_batch("DROP INDEX session_trace_edge_identity; PRAGMA user_version=27;")
+            .unwrap();
+        let before = crate::native_timing::cleanup_tests::snapshot(&store.connection);
+        drop(store);
+        let (store, _) = opened(&path);
+        assert_eq!(
+            versions(&store.connection).unwrap(),
+            (SCHEMA_VERSION, Some(CACHE_VERSION))
+        );
+        let mut after = crate::native_timing::cleanup_tests::snapshot(&store.connection);
+        let schema = after.get_mut("main.sqlite_schema").unwrap();
+        let added = schema
+            .iter()
+            .filter(|row| {
+                row[1] == rusqlite::types::Value::Text("session_trace_edge_identity".into())
+            })
+            .count();
+        assert_eq!(added, 1);
+        schema.retain(|row| {
+            row[1] != rusqlite::types::Value::Text("session_trace_edge_identity".into())
+        });
+        assert_eq!(
+            after, before,
+            "migration must preserve every existing MAIN/TEMP row and schema object"
+        );
+        assert!(store.connection.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='session_trace_edge_identity')",[],|r|r.get::<_,bool>(0)).unwrap());
+        drop(store);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn schema_twenty_six_adds_custody_parts_without_rebinding_existing_rows() {
         let root = scratch("custody-parts-migration");
         let (options, _, _) = catalog_native_fixture(&root, 2, true);
@@ -7375,7 +7400,7 @@ mod tests {
         let (store, _) = opened(&path);
         assert_eq!(
             versions(&store.connection).unwrap(),
-            (27, Some(CACHE_VERSION))
+            (SCHEMA_VERSION, Some(CACHE_VERSION))
         );
         let mut after = crate::native_timing::cleanup_tests::snapshot(&store.connection);
         assert_eq!(

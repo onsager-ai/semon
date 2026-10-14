@@ -5849,7 +5849,7 @@ pub(crate) struct Slot {
 }
 
 impl Slot {
-    fn new(
+    pub(crate) fn new(
         kind: SlotKind,
         file: Option<Arc<SlotFile>>,
         offset: u64,
@@ -7678,6 +7678,14 @@ fn build_sources_inner(
                         && summary["summary"]["kind"] == "stub"
                     {
                         query_rows.insert(endpoint.clone(), summary.clone());
+                    }
+                }
+                for (key, summary) in &query_rows {
+                    if summary["summary"]["kind"] == "stub"
+                        && let Some(transcript) = tx.get(key)
+                        && let Some(trace) = &mut row.trace
+                    {
+                        trace.query_virtual(key, transcript);
                     }
                 }
                 row.query = Some(
