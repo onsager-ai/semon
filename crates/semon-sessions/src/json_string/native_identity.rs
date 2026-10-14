@@ -8,6 +8,30 @@ use crate::source_chunks::PrefixState;
 use serde::{Deserialize, Serialize};
 use std::io;
 
+/// The common decoded UTF-8 decision used for equality and native key order.
+/// Different lengths establish order only after the shared prefix is exhausted.
+pub(crate) fn decoded_order(
+    left: &[u8],
+    left_complete: bool,
+    right: &[u8],
+    right_complete: bool,
+) -> Option<std::cmp::Ordering> {
+    use std::cmp::Ordering;
+    let common = left.len().min(right.len());
+    let order = left[..common].cmp(&right[..common]);
+    if order != Ordering::Equal {
+        Some(order)
+    } else if left_complete && left.len() < right.len() {
+        Some(Ordering::Less)
+    } else if right_complete && right.len() < left.len() {
+        Some(Ordering::Greater)
+    } else if left_complete && right_complete {
+        Some(Ordering::Equal)
+    } else {
+        None
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Stream {
@@ -112,6 +136,49 @@ pub(crate) struct Receipt {
     pub(crate) decoded_bytes: u64,
     pub(crate) sha256: [u8; 32],
 }
+
+/// Fingerprint state for any qualified decoded-text cursor. Like the native
+/// field wrapper it retains complete SHA blocks only, never a decoded tail.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct DecodedFingerprint {
+    hash: PrefixState,
+    receipt: Option<Receipt>,
+}
+impl DecodedFingerprint {
+    pub(crate) fn receipt(&self) -> Option<Receipt> {
+        self.receipt
+    }
+    pub(crate) fn observe(&mut self, bytes: &[u8], complete: bool) -> io::Result<()> {
+        observe_decoded(&mut self.hash, &mut self.receipt, bytes, complete)
+    }
+}
+
+fn observe_decoded(
+    hash: &mut PrefixState,
+    receipt: &mut Option<Receipt>,
+    bytes: &[u8],
+    complete: bool,
+) -> io::Result<()> {
+    if receipt.is_some()
+        || (!complete && bytes.len() % 64 != 0)
+        || bytes.len() > JSON_STRING_CHUNK_DECODED_MAX
+    {
+        return Err(invalid());
+    }
+    if complete {
+        *receipt = Some(Receipt {
+            decoded_bytes: hash
+                .at
+                .checked_add(bytes.len() as u64)
+                .ok_or_else(invalid)?,
+            sha256: hash.finish(bytes),
+        });
+    } else {
+        hash.advance_blocks(bytes);
+    }
+    Ok(())
+}
 impl Fingerprint {
     pub(crate) fn new(start: u64, end: u64) -> io::Result<Self> {
         Ok(Self {
@@ -149,18 +216,12 @@ impl Fingerprint {
             }
             decoded = self.stream.step(bytes, full)?;
         }
-        if decoded.complete {
-            self.receipt = Some(Receipt {
-                decoded_bytes: self
-                    .hash
-                    .at
-                    .checked_add(decoded.bytes.len() as u64)
-                    .ok_or_else(invalid)?,
-                sha256: self.hash.finish(&decoded.bytes),
-            });
-        } else {
-            self.hash.advance_blocks(&decoded.bytes);
-        }
+        observe_decoded(
+            &mut self.hash,
+            &mut self.receipt,
+            &decoded.bytes,
+            decoded.complete,
+        )?;
         Ok(decoded.consumed)
     }
 }
@@ -208,12 +269,8 @@ impl Compare {
         let mut l = self.left.step(left, max)?;
         let mut r = self.right.step(right, max)?;
         let common = l.bytes.len().min(r.bytes.len());
-        if l.bytes[..common] != r.bytes[..common] {
-            self.result = Some(Comparison::Different);
-            return Ok((l.consumed, r.consumed));
-        }
-        if (l.complete && l.bytes.len() < r.bytes.len())
-            || (r.complete && r.bytes.len() < l.bytes.len())
+        if decoded_order(&l.bytes, l.complete, &r.bytes, r.complete)
+            .is_some_and(|order| order != std::cmp::Ordering::Equal)
         {
             self.result = Some(Comparison::Different);
             return Ok((l.consumed, r.consumed));
@@ -253,6 +310,40 @@ mod tests {
     fn encoded(text: &str) -> Vec<u8> {
         let bytes = serde_json::to_vec(text).unwrap();
         bytes[1..bytes.len() - 1].to_vec()
+    }
+    #[test]
+    fn common_decoded_order_matches_string_order_without_length_shortcuts() {
+        for left in ["", "a", "z", "aa", "é", "中", "\0", "😀"] {
+            for right in ["", "a", "z", "aa", "é", "中", "\0", "😀"] {
+                assert_eq!(
+                    decoded_order(left.as_bytes(), true, right.as_bytes(), true),
+                    Some(left.cmp(right))
+                );
+            }
+        }
+        assert_eq!(decoded_order(b"a", false, b"aa", false), None);
+        assert_eq!(
+            decoded_order(b"z", true, b"aa", true),
+            Some(std::cmp::Ordering::Greater)
+        );
+    }
+    #[test]
+    fn decoded_fingerprint_shares_native_receipt_and_retains_only_blocks() {
+        let bytes = b"native\0decoded\nUTF8\xe4\xb8\xad";
+        let mut state = DecodedFingerprint::default();
+        state.observe(bytes, true).unwrap();
+        let mut native = Fingerprint::new(0, 3).unwrap();
+        native.step(b"abc", 64).unwrap();
+        let mut other = DecodedFingerprint::default();
+        other.observe(b"abc", true).unwrap();
+        assert_eq!(other.receipt(), native.receipt());
+        assert!(state.receipt().is_some());
+        assert!(state.observe(&[], true).is_err());
+        assert!(
+            DecodedFingerprint::default()
+                .observe(b"tail", false)
+                .is_err()
+        );
     }
     #[test]
     fn cached_stream_bounds_refuse_truncated_descriptors_and_invalid_skip() {
