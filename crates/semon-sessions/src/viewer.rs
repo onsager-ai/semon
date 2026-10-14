@@ -6909,6 +6909,12 @@ mod tests {
         starts
             .recv_timeout(Duration::from_secs(10))
             .expect("the only worker rebuilds the blocker");
+        // A slow suite can cross OVERFLOW_AFTER while this loop reads SQLite.
+        // Overdue reads then admit an overflow worker, so the warm-up/build
+        // channel alone cannot prove the other views are still queued. Hold
+        // dispatch, while retaining real admission, replacement and nudges.
+        let dispatch = pool.hold_dispatch();
+        assert_eq!(pool.running(), 1);
         for _ in 0..100 {
             pushed.invalidate();
             for view in [&pushed, &watched] {
@@ -6919,10 +6925,49 @@ mod tests {
         assert_eq!(pool.entries_for(&watched), 1);
         assert_eq!(pool.entries_for(&busy), 0, "running, not queued");
         assert_eq!(pool.queued(), 2);
+        drop(dispatch);
         drop(release);
         for view in [&busy, &pushed, &watched] {
             view.close();
         }
+    }
+
+    /// Reproduce the old observation's missing lifecycle condition without a
+    /// wall-clock wait: recovery legitimately takes a queued view while the
+    /// nominal sole worker is held. Its queue count is then zero, not one.
+    #[test]
+    fn overflow_dispatch_changes_queue_counts_without_duplicate_admission() {
+        let (blocker, lane) = (lane_fixture(), lane_fixture());
+        let pool = RefreshPool::with_overflow_after(1, Duration::ZERO);
+        let busy = pooled(&blocker, Refresh::Background, &pool);
+        let pushed = pooled(&lane, Refresh::OnInvalidate, &pool);
+        warm(&busy);
+        warm(&pushed);
+        let (busy_starts, busy_release) = busy.hooks.hold();
+        say(&blocker, "lane", 1, "held ordinary worker");
+        busy.invalidate();
+        busy_starts.recv_timeout(HUNG_AFTER).unwrap();
+        let (pushed_starts, pushed_release) = pushed.hooks.hold();
+        say(&lane, "lane", 1, "held overflow worker");
+        pushed.invalidate();
+        assert_eq!(pool.entries_for(&pushed), 1);
+        pool.nudge();
+        pushed_starts.recv_timeout(HUNG_AFTER).unwrap();
+        assert_eq!(pool.running(), 2);
+        assert_eq!(pool.entries_for(&pushed), 0);
+        assert_eq!(lock(&pushed.live.state).slot, Slot::Running);
+        for _ in 0..100 {
+            pushed.invalidate();
+            native_api(&pushed, "/api/sessions", "");
+            assert_eq!(pool.entries_for(&pushed), 0);
+        }
+        eprintln!(
+            "queue lifecycle: ordinary worker held, overflow running=2, selected queued=0; no duplicate admission"
+        );
+        drop(pushed_release);
+        drop(busy_release);
+        busy.close();
+        pushed.close();
     }
 
     /// Invalidated twenty times in half a second, a view rebuilds at most

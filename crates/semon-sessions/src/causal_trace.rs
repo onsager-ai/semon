@@ -16,6 +16,7 @@ CREATE TABLE IF NOT EXISTS session_trace_headers(session_key TEXT PRIMARY KEY, g
 CREATE TABLE IF NOT EXISTS session_trace_turns(session_key TEXT NOT NULL,turn_id TEXT NOT NULL,start_id TEXT,metadata TEXT NOT NULL,PRIMARY KEY(session_key,turn_id)) STRICT, WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS session_trace_starts ON session_trace_turns(session_key,start_id,turn_id);
 CREATE TABLE IF NOT EXISTS session_trace_edges(session_key TEXT NOT NULL,edge_id TEXT NOT NULL,metadata TEXT NOT NULL,PRIMARY KEY(session_key,edge_id)) STRICT, WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS session_trace_edge_identity ON session_trace_edges(edge_id,session_key);
 CREATE INDEX IF NOT EXISTS session_trace_from ON session_trace_edges(CASE WHEN json_valid(metadata) THEN json_extract(metadata,'$.from') END,session_key);
 CREATE INDEX IF NOT EXISTS session_trace_to ON session_trace_edges(CASE WHEN json_valid(metadata) THEN json_extract(metadata,'$.to') END,session_key);
 CREATE INDEX IF NOT EXISTS session_trace_query_at ON session_trace_edges(json_extract(metadata,'$.at'),session_key,edge_id);
@@ -98,6 +99,11 @@ impl Projection {
             turns: turns.iter().filter(|turn|turn.sid==key).map(|turn|json!({"id":turn.id,"sid":turn.sid,"start":turn.start,"u":turn.u,"at":turn.at,"end":turn.end,"sent":turn.sent,"last":turn.last})).collect(),
             edges: edges.iter().filter(|edge|edge.from==key || edge.to.as_deref()==Some(key)).map(|edge|json!({"id":edge.id,"kind":edge.kind,"ask":edge.ask,"from":edge.from,"to":edge.to,"at":edge.at,"done":edge.done,"status":edge.status,"declined":edge.declined,"unmatched":edge.unmatched,"ambiguous":edge.ambiguous,"brief_session":owners[&edge.id]["brief_session"],"result_session":owners[&edge.id]["result_session"]})).collect(),
             bookmarks: edges.iter().filter(|edge| edge.from == key && edge.to.is_none()).filter_map(|edge| edge.target.as_ref().map(|target| (target.clone(), edge.id.clone()))).collect(),
+        }
+    }
+    pub(crate) fn query_virtual(&mut self, key: &str, transcript: &crate::model::Transcript) {
+        if let Some(query) = &mut self.query {
+            query.virtual_transcript(key, transcript);
         }
     }
     pub(crate) fn with_family_cost(mut self, usd: Option<f64>) -> Self {

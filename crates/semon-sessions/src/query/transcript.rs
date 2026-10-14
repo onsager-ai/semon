@@ -184,6 +184,50 @@ fn edge(
     Ok(query)
 }
 
+// The native producer's output-window closure: timed or live edges keep their
+// endpoints; retained turns keep their incoming/outgoing links even when old.
+fn edge_timed(db: &Connection, id: &str, cutoff: i64) -> Result<bool, QueryError> {
+    db.query_row("SELECT EXISTS(SELECT 1 FROM session_trace_edges WHERE edge_id=?1 AND (json_extract(metadata,'$.at')>=?2 OR json_extract(metadata,'$.done')>=?2 OR json_extract(metadata,'$.status') IN ('work','wait','new')))", params![id,cutoff], |r|r.get(0)).map_err(unavailable)
+}
+fn turn_kept(db: &Connection, turn: &Value, cutoff: i64) -> Result<bool, QueryError> {
+    Ok(turn["last"] == true
+        || turn["at"].as_i64().is_some_and(|at| at >= cutoff)
+        || match turn["start"].as_str() {
+            Some(id) => edge_timed(db, id, cutoff)?,
+            None => false,
+        })
+}
+fn edge_kept(db: &Connection, id: &str, cutoff: i64) -> Result<bool, QueryError> {
+    if edge_timed(db, id, cutoff)? {
+        return Ok(true);
+    }
+    db.query_row("SELECT EXISTS(SELECT 1 FROM session_trace_turns t JOIN session_catalog c ON c.session_key=t.session_key WHERE t.session_key IN (SELECT session_key FROM session_trace_edges WHERE edge_id=?1) AND (json_extract(c.metadata,'$.query.last')>=?2 OR json_extract(c.metadata,'$.query.state') IN ('work','wait') OR EXISTS(SELECT 1 FROM session_trace_edges live WHERE live.session_key=t.session_key AND (json_extract(live.metadata,'$.at')>=?2 OR json_extract(live.metadata,'$.done')>=?2 OR json_extract(live.metadata,'$.status') IN ('work','wait','new')))) AND (json_extract(t.metadata,'$.start')=?1 OR EXISTS(SELECT 1 FROM json_each(t.metadata,'$.sent') WHERE value=?1)) AND (json_extract(t.metadata,'$.last')=1 OR json_extract(t.metadata,'$.at')>=?2 OR EXISTS(SELECT 1 FROM session_trace_edges e WHERE e.edge_id=json_extract(t.metadata,'$.start') AND (json_extract(e.metadata,'$.at')>=?2 OR json_extract(e.metadata,'$.done')>=?2 OR json_extract(e.metadata,'$.status') IN ('work','wait','new')))))", params![id,cutoff], |r|r.get(0)).map_err(unavailable)
+}
+fn window_member(
+    db: &Connection,
+    key: &str,
+    saved: &Value,
+    cutoff: i64,
+) -> Result<bool, QueryError> {
+    if saved["last"].as_i64().is_some_and(|last| last >= cutoff)
+        || matches!(saved["state"].as_str(), Some("work" | "wait"))
+    {
+        return Ok(true);
+    }
+    let mut statement = db
+        .prepare("SELECT edge_id FROM session_trace_edges WHERE session_key=?1 ORDER BY edge_id")
+        .map_err(unavailable)?;
+    for id in statement
+        .query_map([key], |r| r.get::<_, String>(0))
+        .map_err(unavailable)?
+    {
+        if edge_kept(db, &id.map_err(unavailable)?, cutoff)? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 fn generation(db: &Connection) -> Result<String, QueryError> {
     db.query_row(
         "SELECT value FROM meta WHERE key='catalog_generation'",
@@ -193,8 +237,325 @@ fn generation(db: &Connection) -> Result<String, QueryError> {
     .map_err(unavailable)
 }
 
-/// None identifies evidence not yet owned by this projection (window namespace,
-/// virtual handoff or an observation awaiting its native producer). Once admitted,
+fn qualify_virtual_aliases(summary: &mut Value, context: &[CatalogRow], alias: Option<&str>) {
+    let Some(alias) = alias else {
+        return;
+    };
+    let stubs: std::collections::BTreeSet<_> = context
+        .iter()
+        .filter_map(|row| row.query.as_ref())
+        .flat_map(|query| query["rows"].as_object().into_iter().flatten())
+        .filter(|(_, value)| value["summary"]["kind"] == "stub")
+        .map(|(key, _)| key.as_str())
+        .collect();
+    let qualify = |value: &mut Value| {
+        if let Some(key) = value.as_str().filter(|key| stubs.contains(key)) {
+            *value = json!(format!("{key}@{alias}"));
+        }
+    };
+    qualify(&mut summary["id"]);
+    qualify(&mut summary["parent"]);
+    for child in summary["children"].as_array_mut().into_iter().flatten() {
+        qualify(child);
+    }
+    for handoff in summary["handoffs"].as_array_mut().into_iter().flatten() {
+        qualify(&mut handoff["from"]);
+        qualify(&mut handoff["to"]);
+    }
+}
+
+/// Virtual transcripts use recipes published by their existing physical owner.
+/// Their slot addresses include the NoActivity entry and never imply custody
+/// or runtime authority of the far end.
+fn virtual_read(
+    options: &Options,
+    key: &str,
+    args: &Value,
+    provider: Option<&dyn crate::SessionSourceReader>,
+    mode: crate::SessionSourceReadMode,
+    now: i64,
+) -> Result<Option<Value>, QueryError> {
+    let requested = args["id"].as_str().expect("validated focused id");
+    if requested != key
+        && args["_machine_alias"]
+            .as_str()
+            .is_none_or(|alias| requested != format!("{key}@{alias}"))
+    {
+        return Err(QueryError::unknown_session(requested));
+    }
+    let mut db = Connection::open_with_flags(
+        EventCache::path(&options.cache),
+        OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .map_err(unavailable)?;
+    db.busy_timeout(Duration::from_millis(100))
+        .map_err(unavailable)?;
+    let tx = db.transaction().map_err(unavailable)?;
+    let context = match crate::overview_repair::query_context(&tx, key) {
+        Ok(context) => context,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(unavailable(error)),
+    };
+    let runtime = crate::native_evidence::query_runtime_generation(options).map_err(unavailable)?;
+    let catalog_generation = generation(&tx)?;
+    let cutoff = (!options.all && !options.scan_window)
+        .then(|| now.saturating_sub(i64::try_from(options.since.as_millis()).unwrap_or(i64::MAX)));
+    let mut owner = None;
+    let mut headers = Vec::new();
+    let mut summary = None;
+    for row in &context {
+        let Some(query) = &row.query else {
+            return Ok(None);
+        };
+        let row_runtime = crate::native_evidence::RuntimeObservations::new(options).expected(row);
+        if !crate::model::summary::query_observation_matches(
+            query,
+            &row.sources,
+            true,
+            row_runtime.as_deref(),
+        )
+        .map_err(unavailable)?
+        {
+            return Ok(None);
+        }
+        if row.sources.iter().any(|source| {
+            !crate::model::catalog_source_in_window(source, crate::model::scan_cutoff(options, now))
+        }) {
+            return Ok(None);
+        }
+        let identity = crate::query_projection::identity(row);
+        let Some(header) = crate::query_projection::header(&tx, &identity).map_err(unavailable)?
+        else {
+            return Ok(None);
+        };
+        let saved: Value = serde_json::from_str(&header).map_err(unavailable)?;
+        if saved["version"] != 1
+            || saved["complete"] != true
+            || saved["query_generation"]
+                != format!(
+                    "{:x}",
+                    sha2::Sha256::digest(serde_json::to_vec(&row.query).map_err(unavailable)?)
+                )
+            || saved["source_generation"]
+                != crate::retention::source_generation(&row.sources).map_err(unavailable)?
+        {
+            return Ok(None);
+        }
+        headers.push((identity.clone(), header));
+        let encoded: Option<String> = tx.query_row("SELECT CASE WHEN octet_length(value)<=65536 THEN value ELSE NULL END FROM meta WHERE key=?1",[format!("{}{}",crate::query_projection::prefix("virtual",&identity),key)],|r|r.get(0)).optional().map_err(unavailable)?.flatten();
+        if let Some(encoded) = encoded {
+            let header: Value = serde_json::from_str(&encoded).map_err(unavailable)?;
+            if owner.is_none() {
+                owner = Some((
+                    identity,
+                    header["total"]
+                        .as_u64()
+                        .ok_or_else(|| unavailable("Virtual transcript total unavailable"))?
+                        as usize,
+                ));
+            }
+        }
+        if let Some(value) = query["rows"].get(key) {
+            summary = Some(value["summary"].clone());
+        }
+    }
+    let Some((identity, total)) = owner else {
+        return Ok(None);
+    };
+    if cutoff.is_some() {
+        // A clipped virtual transcript needs the producer's filtered slot ranks.
+        // Preserve its existing resolver until that indexed publication exists.
+        return Ok(None);
+    }
+    let session = args["_session"] == true;
+    let mut sources = std::collections::BTreeMap::new();
+    for source in context.iter().flat_map(|row| &row.sources) {
+        if sources
+            .insert(source.path.clone(), source.clone())
+            .is_some_and(|prior| prior != *source)
+        {
+            return Err(unavailable("Virtual source generations disagree"));
+        }
+    }
+    let sources = crate::query_source::Sources::capture_focused(
+        options,
+        &sources.into_values().collect::<Vec<_>>(),
+    )
+    .map_err(|_| unavailable("Original native transcript proofs are unavailable"))?;
+    tx.commit().map_err(unavailable)?;
+    let records = sources.reader_with(provider.map(|reader| (reader, mode)));
+    let prefix = format!(
+        "{}{}:{key}:",
+        crate::query_projection::prefix("virtual-slot", &identity),
+        key.len()
+    );
+    let load = |db: &Connection,
+                low: usize,
+                high: usize|
+     -> Result<Vec<crate::model::Slot>, QueryError> {
+        let mut slots = Vec::new();
+        if low == 0 && high > 0 {
+            slots.push(crate::model::Slot::new(
+                crate::model::SlotKind::NoActivity,
+                None,
+                0,
+                0,
+                None,
+            ));
+        }
+        let mut statement = db
+                .prepare("SELECT CASE WHEN octet_length(value)<=65536 THEN value ELSE NULL END FROM meta WHERE key>=?1 AND key<?2 ORDER BY key")
+                .map_err(unavailable)?;
+        let mut metadata_bytes = 0usize;
+        for encoded in statement
+            .query_map(
+                params![
+                    format!("{prefix}{:020}", low.max(1)),
+                    format!("{prefix}{high:020}")
+                ],
+                |r| r.get::<_, String>(0),
+            )
+            .map_err(unavailable)?
+        {
+            let encoded = encoded.map_err(unavailable)?;
+            metadata_bytes += encoded.len();
+            if metadata_bytes > METADATA_BYTES {
+                return Err(unavailable(
+                    "Virtual transcript metadata exceeds its read budget",
+                ));
+            }
+            let value: Value = serde_json::from_str(&encoded).map_err(unavailable)?;
+            slots.push(crate::model::Slot::new(
+                crate::model::SlotKind::H(
+                    value["id"]
+                        .as_str()
+                        .ok_or_else(|| unavailable("Virtual handoff unavailable"))?
+                        .into(),
+                ),
+                None,
+                0,
+                0,
+                value["at"].as_i64(),
+            ));
+        }
+        if slots.len() != high - low {
+            return Err(unavailable("Virtual slots are incomplete"));
+        }
+        #[cfg(test)]
+        SLOTS.with(|n| n.set(n.get() + slots.len()));
+        Ok(slots)
+    };
+    let answer = if session {
+        let Some(mut summary) = summary else {
+            return Err(QueryError::unknown_session(key));
+        };
+        summary["id"] = args["id"].clone();
+        summary["busy"] = json!([]);
+        summary["turns"] = json!([]);
+        let mut handoffs = Vec::new();
+        let bytes_left = std::cell::RefCell::new(64 * 1024 * 1024);
+        let mut metadata_bytes = summary.to_string().len();
+        for low in (1..total).step_by(64) {
+            for slot in load(&db, low, (low + 64).min(total))? {
+                let crate::model::SlotKind::H(id) = slot.kind else {
+                    unreachable!()
+                };
+                let mut value = edge(&db, &id, &context, &records, &bytes_left)?;
+                for endpoint in ["from", "to"] {
+                    if value[endpoint] == key {
+                        value[endpoint] = args["id"].clone();
+                    }
+                }
+                metadata_bytes += value.to_string().len();
+                if metadata_bytes > 8 * 1024 * 1024 {
+                    return Err(unavailable(
+                        "Session result metadata exceeds its request budget",
+                    ));
+                }
+                handoffs.push(value);
+            }
+        }
+        summary["handoffs"] = json!(handoffs);
+        qualify_virtual_aliases(&mut summary, &context, args["_machine_alias"].as_str());
+        json!({"now":now,"session":summary})
+    } else {
+        let position = |name: &str| integer(args, name).map(|value| value.max(0) as usize);
+        let anchor = tx::Anchor::of(position("before"), position("after"), string(args, "turn"))
+            .ok_or_else(|| QueryError::invalid("before, after and turn are exclusive"))?;
+        let (forward, from) = match anchor {
+            tx::Anchor::Last => (false, total),
+            tx::Anchor::Before(before) => (false, before.min(total)),
+            tx::Anchor::After(after) => (true, after.min(total)),
+            tx::Anchor::Turn(turn) => {
+                return Err(QueryError::new(
+                    "unknown_turn",
+                    format!("session {key:?} has no turn {turn:?}"),
+                ));
+            }
+        };
+        let limit = integer(args, "limit").map_or(tx::PAGE_ENTRIES, |value| value as usize);
+        let count = limit.saturating_add(1).clamp(2, MAX_SLOTS);
+        let (low, high) = if forward {
+            (
+                from.saturating_sub(1),
+                from.saturating_add(count).min(total),
+            )
+        } else {
+            (from.saturating_sub(count).saturating_sub(1), from)
+        };
+        let slots = load(&db, low, high)?;
+        let mut read = |path: &std::path::Path, offset| records.read(path, offset);
+        tx::page_from_window(
+            &tx::RenderContext {
+                home: None,
+                harness: None,
+                bounded: false,
+            },
+            tx::PageWindow {
+                sid: key,
+                slots: &slots,
+                start: low,
+                total,
+                from,
+                forward,
+                calls: 0,
+                errors: 0,
+                bg_running: &[],
+            },
+            now,
+            limit,
+            &mut tx::Lines::provider(&mut read),
+        )
+        .map_err(unavailable)?
+    };
+    records.finish().map_err(unavailable)?;
+    let snapshot = db.transaction().map_err(unavailable)?;
+    if generation(&snapshot)? != catalog_generation
+        || serde_json::to_value(
+            crate::overview_repair::query_context(&snapshot, key).map_err(unavailable)?,
+        )
+        .map_err(unavailable)?
+            != serde_json::to_value(&context).map_err(unavailable)?
+    {
+        return Err(unavailable("Virtual publication changed"));
+    }
+    for (identity, header) in headers {
+        if crate::query_projection::header(&snapshot, &identity)
+            .map_err(unavailable)?
+            .as_deref()
+            != Some(&header)
+        {
+            return Err(unavailable("Virtual query recipes changed"));
+        }
+    }
+    if crate::native_evidence::query_runtime_generation(options).map_err(unavailable)? != runtime {
+        return Err(unavailable("Virtual observation changed"));
+    }
+    Ok(Some(answer))
+}
+
+/// None identifies evidence not yet owned by this projection (an omitted-source
+/// window, composite history or an observation awaiting its native producer). Once admitted,
 /// corrupted or changed evidence is an explicit error, never a body fallback.
 pub(super) fn read(
     options: &Options,
@@ -290,7 +651,8 @@ fn read_inner(
             .optional().map_err(unavailable)?.flatten(),
     };
     let Some(text) = text else {
-        return Ok(None);
+        tx.commit().map_err(unavailable)?;
+        return virtual_read(options, key, args, provider, mode, now);
     };
     let row: CatalogRow = serde_json::from_str(&text).map_err(unavailable)?;
     if row.sources.iter().any(|source| {
@@ -318,16 +680,12 @@ fn read_inner(
     {
         return Ok(None);
     }
-    // A recent recorded owner necessarily survives the output window. Older
-    // owners can survive through clipped relationship context; let that native
-    // selection resolve membership until its focused publication is available.
-    if !options.all
-        && !saved["last"].as_i64().is_some_and(|last| {
-            last >= now.saturating_sub(i64::try_from(options.since.as_millis()).unwrap_or(i64::MAX))
-        })
-        && !matches!(saved["state"].as_str(), Some("work" | "wait"))
+    let cutoff = (!options.all && !options.scan_window)
+        .then(|| now.saturating_sub(i64::try_from(options.since.as_millis()).unwrap_or(i64::MAX)));
+    if let Some(cutoff) = cutoff
+        && !window_member(&tx, key, saved, cutoff)?
     {
-        return Ok(None);
+        return Err(QueryError::unknown_session(key));
     }
     if saved["transcript_observation"].is_null() {
         return Ok(None);
@@ -398,28 +756,14 @@ fn read_inner(
         }
     };
     let limit = integer(args, "limit").map_or(tx::PAGE_ENTRIES, |value| value as usize);
-    // The existing proof format qualifies its complete content-free hash list.
-    // Bound that request-owned allocation independently of transcript paging.
+    // Read proof pages and root witnesses only for touched byte ranges. Each
+    // request-owned source retains at most one decoded hash page.
     let session = args["_session"] == true;
     let context = if search.is_some() || session {
         crate::overview_repair::query_context(&tx, key).map_err(unavailable)?
     } else {
         vec![row.clone()]
     };
-    if (search.is_some() || session) && !options.all && !options.scan_window {
-        let cutoff =
-            now.saturating_sub(i64::try_from(options.since.as_millis()).unwrap_or(i64::MAX));
-        // Output clipping can remove handoff text while keeping a real owner's
-        // physical transcript. Until its window recipes are published, retain
-        // the existing native resolver rather than lending full-history facts.
-        for owner in &context {
-            let clipped:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM session_trace_edges WHERE session_key=?1 AND json_extract(metadata,'$.at')<?2 AND (json_extract(metadata,'$.done') IS NULL OR json_extract(metadata,'$.done')<?2) AND json_extract(metadata,'$.status') NOT IN ('work','wait','new'))",params![owner.key,cutoff],|r|r.get(0)).map_err(unavailable)?;
-            let clipped_turns:bool=session && tx.query_row("SELECT EXISTS(SELECT 1 FROM session_trace_turns WHERE session_key=?1 AND COALESCE(json_extract(metadata,'$.last'),0)=0 AND (json_extract(metadata,'$.at') IS NULL OR json_extract(metadata,'$.at')<?2))",params![owner.key,cutoff],|r|r.get(0)).map_err(unavailable)?;
-            if clipped || clipped_turns {
-                return Ok(None);
-            }
-        }
-    }
     let mut query_headers = Vec::new();
     if search.is_some() || session {
         for owner in &context {
@@ -456,20 +800,7 @@ fn read_inner(
         }
     }
     let selected_sources: Vec<_> = selected_sources.into_values().collect();
-    let proof_bytes = selected_sources.iter().try_fold(0_u64, |bytes, source| {
-        bytes.checked_add(
-            source
-                .offset
-                .div_ceil(crate::source_chunks::SIZE as u64)
-                .checked_mul(32)?,
-        )
-    });
-    if proof_bytes.is_none_or(|bytes| bytes > METADATA_BYTES as u64) {
-        return Err(unavailable(
-            "Native transcript proofs exceed their read budget",
-        ));
-    }
-    let sources = EventCache::selected_source_proofs(&tx, options, &selected_sources)
+    let sources = crate::query_source::Sources::capture_focused(options, &selected_sources)
         .map_err(|_| unavailable("Original native transcript proofs are unavailable"))?;
     let incomplete: bool = if history.is_some() {
         tx.query_row(
@@ -571,6 +902,11 @@ fn read_inner(
                 after = turn["query_order"]
                     .as_i64()
                     .ok_or_else(|| unavailable("Query turn order unavailable"))?;
+                if let Some(cutoff) = cutoff
+                    && !turn_kept(&snapshot, &turn["query"], cutoff)?
+                {
+                    continue;
+                }
                 let recipe = if turn["query_text"] == true {
                     let encoded:String=snapshot.query_row(&format!("SELECT CASE WHEN octet_length(metadata)<=65536 THEN metadata ELSE NULL END FROM {table} WHERE session_key=?1 AND json_extract(metadata,'$.turn')=?2 AND json_extract(metadata,'$.first')=1 ORDER BY slot LIMIT 1"),params![key,turn["id"].as_str()],|row|row.get(0)).map_err(unavailable)?;
                     Some(serde_json::from_str::<SavedSlot>(&encoded).map_err(unavailable)?)
@@ -610,7 +946,7 @@ fn read_inner(
                 break;
             }
         }
-        if own_header["turns"].as_u64() != Some(turns.len() as u64) {
+        if cutoff.is_none() && own_header["turns"].as_u64() != Some(turns.len() as u64) {
             return Err(unavailable("Selected query turns are incomplete"));
         }
         summary["turns"] = json!(turns);
@@ -637,6 +973,12 @@ fn read_inner(
                 .map_err(unavailable)?;
             drop(statement);
             for id in &ids {
+                after = id.clone();
+                if let Some(cutoff) = cutoff
+                    && !edge_kept(&db, id, cutoff)?
+                {
+                    continue;
+                }
                 let handoff = edge(&db, id, &context, &records, &bytes_left)?;
                 metadata_bytes += handoff.to_string().len();
                 if metadata_bytes > 8 * 1024 * 1024 {
@@ -654,7 +996,7 @@ fn read_inner(
                 break;
             }
         }
-        if own_header["edges"].as_u64() != Some(handoffs.len() as u64) {
+        if cutoff.is_none() && own_header["edges"].as_u64() != Some(handoffs.len() as u64) {
             return Err(unavailable("Selected query handoffs are incomplete"));
         }
         handoffs.sort_by(|a, b| {
@@ -664,7 +1006,23 @@ fn read_inner(
                 .then_with(|| a["id"].as_str().cmp(&b["id"].as_str()))
         });
         summary["handoffs"] = json!(handoffs);
-        records.verify_all().map_err(unavailable)?;
+        if let Some(cutoff) = cutoff
+            && let Some(children) = summary["children"].as_array_mut()
+        {
+            let mut kept = Vec::new();
+            for child in children.iter() {
+                let id = child
+                    .as_str()
+                    .ok_or_else(|| unavailable("Child identity unavailable"))?;
+                if let Some(owner) = context.iter().find(|row| row.key == id)
+                    && let Some(saved) = &owner.query
+                    && window_member(&db, id, saved, cutoff)?
+                {
+                    kept.push(child.clone());
+                }
+            }
+            *children = kept;
+        }
         records.finish().map_err(unavailable)?;
         let snapshot = db.transaction().map_err(unavailable)?;
         unchanged(
@@ -697,10 +1055,10 @@ fn read_inner(
         {
             return Err(unavailable("Native query relationship publication changed"));
         }
+        qualify_virtual_aliases(&mut summary, &context, args["_machine_alias"].as_str());
         return Ok(Some(json!({"now":now,"session":summary})));
     }
     if let Some((served, search)) = search {
-        records.verify_all().map_err(unavailable)?;
         let data = crate::model::QueryData::identity(options, now);
         let mut high = total;
         while high > 0 && !search.stopped() {
@@ -760,7 +1118,13 @@ fn read_inner(
                     break;
                 }
                 let handoffs = if let crate::model::SlotKind::H(id) = &slot.kind {
-                    vec![edge(&db, id, &context, &records, &bytes_left)?]
+                    if let Some(cutoff) = cutoff
+                        && !edge_kept(&db, id, cutoff)?
+                    {
+                        vec![]
+                    } else {
+                        vec![edge(&db, id, &context, &records, &bytes_left)?]
+                    }
                 } else {
                     vec![]
                 };

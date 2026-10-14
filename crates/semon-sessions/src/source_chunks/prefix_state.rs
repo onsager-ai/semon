@@ -30,6 +30,10 @@ fn compress(words: &mut [u32; 8], bytes: &[u8]) {
 impl PrefixState {
     pub(crate) fn advance(&mut self, bytes: &[u8]) {
         assert_eq!(bytes.len() % super::SIZE, 0);
+        self.advance_blocks(bytes);
+    }
+    pub(crate) fn advance_blocks(&mut self, bytes: &[u8]) {
+        assert_eq!(bytes.len() % 64, 0);
         compress(&mut self.words, bytes);
         self.at += bytes.len() as u64;
     }

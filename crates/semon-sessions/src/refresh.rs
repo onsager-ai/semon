@@ -73,6 +73,8 @@ struct PoolState {
     queue: BTreeMap<Key, Weak<MachineView>>,
     /// The last key's count.
     count: u64,
+    #[cfg(test)]
+    dispatch_held: bool,
     /// Worker threads alive.
     threads: usize,
     /// Of those, the ones waiting for an entry to come due.
@@ -94,7 +96,28 @@ impl PoolState {
     }
 }
 
+/// A deterministic queue-observation witness. Admission and nudges still run,
+/// including overflow admission; workers cannot remove another entry until the
+/// witness is released. Production scheduling has no such switch.
+#[cfg(test)]
+pub(crate) struct DispatchHeld(Arc<RefreshPool>);
+#[cfg(test)]
+impl Drop for DispatchHeld {
+    fn drop(&mut self) {
+        lock(&self.0.state).dispatch_held = false;
+        self.0.wake.notify_all();
+    }
+}
+
 impl RefreshPool {
+    #[cfg(test)]
+    pub(crate) fn hold_dispatch(self: &Arc<Self>) -> DispatchHeld {
+        let mut state = lock(&self.state);
+        assert!(!state.dispatch_held);
+        state.dispatch_held = true;
+        DispatchHeld(self.clone())
+    }
+
     /// A pool of at most `size` threads (at least one).
     pub fn new(size: usize) -> Arc<Self> {
         Arc::new(Self {
@@ -327,6 +350,16 @@ fn worker(pool: Arc<RefreshPool>) {
         let (key, view, start) = {
             let mut state = lock(&pool.state);
             loop {
+                #[cfg(test)]
+                if state.dispatch_held {
+                    state.waiting += 1;
+                    state = pool
+                        .wake
+                        .wait(state)
+                        .unwrap_or_else(PoisonError::into_inner);
+                    state.waiting -= 1;
+                    continue;
+                }
                 let now = Instant::now();
                 if let Some(entry) = state.queue.first_entry()
                     && entry.key().0 <= now

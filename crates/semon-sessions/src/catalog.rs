@@ -2824,7 +2824,7 @@ mod tests {
                 connection
                     .query_row("PRAGMA user_version", [], |row| row.get::<_, u32>(0))
                     .unwrap(),
-                27
+                28
             );
         }
     }
@@ -2870,7 +2870,7 @@ mod tests {
             connection
                 .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
                 .unwrap(),
-            27
+            28
         );
         assert_eq!(
             connection

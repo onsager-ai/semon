@@ -13,6 +13,7 @@ pub(crate) struct Projection {
     session: Value,
     turns: Vec<Value>,
     edges: Vec<Value>,
+    virtuals: std::collections::BTreeMap<String, Vec<Value>>,
 }
 fn data(error: impl std::error::Error + Send + Sync + 'static) -> rusqlite::Error {
     rusqlite::Error::ToSqlConversionFailure(Box::new(error))
@@ -31,7 +32,28 @@ pub(crate) fn header(db: &Connection, key: &str) -> rusqlite::Result<Option<Stri
 }
 impl Projection {
     pub(crate) fn capture(session: &Session, turns: &[&Turn], edges: &[&Handoff]) -> Self {
+        let mut virtuals = std::collections::BTreeMap::new();
+        for edge in edges {
+            if edge.to.is_none()
+                && let Some(target) = &edge.target
+            {
+                let name = format!("unsent:{target}");
+                virtuals
+                    .entry(name)
+                    .or_insert_with(Vec::new)
+                    .push(json!({"id":edge.id,"at":edge.at}));
+            }
+        }
+        for slots in virtuals.values_mut() {
+            slots.sort_by_key(|slot| {
+                (
+                    slot["at"].as_i64(),
+                    slot["id"].as_str().unwrap_or("").to_owned(),
+                )
+            });
+        }
         Self {
+            virtuals,
             session: json!({"busy":session.busy}),
             turns: turns.iter().enumerate().map(|(order,turn)| {
                 let mut query=json!(turn);
@@ -48,6 +70,23 @@ impl Projection {
             }).collect(),
         }
     }
+    pub(crate) fn virtual_transcript(&mut self, key: &str, transcript: &crate::model::Transcript) {
+        self.virtuals.insert(
+            key.into(),
+            transcript
+                .slots
+                .iter()
+                .filter_map(|slot| {
+                    if let crate::model::SlotKind::H(id) = &slot.kind {
+                        Some(json!({"id":id,"at":slot.t}))
+                    } else {
+                        None
+                    }
+                })
+                .collect(),
+        );
+    }
+
     pub(crate) fn publish(
         &self,
         tx: &Transaction<'_>,
@@ -85,6 +124,7 @@ impl Projection {
             hash.update((text.len() as u64).to_le_bytes());
             hash.update(text.as_bytes());
         }
+        hash.update(serde_json::to_vec(&self.virtuals).map_err(data)?);
         let generation = format!("{:x}", hash.finalize());
         let complete =
             session.len() <= 1048576 && turns.iter().chain(&edges).all(|text| text.len() <= 65536);
@@ -92,7 +132,7 @@ impl Projection {
         if super::query_projection::header(tx, &identity)?.as_deref() == Some(&header) {
             return Ok(());
         }
-        for kind in ["turn", "edge"] {
+        for kind in ["turn", "edge", "virtual", "virtual-slot"] {
             let prefix = prefix(kind, &identity);
             tx.execute("DELETE FROM meta WHERE key>=?1 AND key<?1||'~'", [prefix])?;
         }
@@ -104,6 +144,23 @@ impl Projection {
                     format!("{}{:020}", prefix("turn", &identity), order),
                     text
                 ])?;
+            }
+            for (key, slots) in &self.virtuals {
+                put.execute(params![
+                    format!("{}{}", prefix("virtual", &identity), key),
+                    json!({"total":slots.len()+1}).to_string()
+                ])?;
+                for (position, slot) in slots.iter().enumerate() {
+                    put.execute(params![
+                        format!(
+                            "{}{}:{key}:{:020}",
+                            prefix("virtual-slot", &identity),
+                            key.len(),
+                            position + 1
+                        ),
+                        slot.to_string()
+                    ])?;
+                }
             }
             for (edge, text) in self.edges.iter().zip(&edges) {
                 put.execute(params![

@@ -376,17 +376,46 @@ are retained. A late match legitimately scans earlier content; it does not first
 prepare the complete selected Event Index or transcript. Bodies, providers,
 verification state and the single preparation block belong to one request.
 
-Existing bounds remain: 64 sources in a relationship closure, 1 MiB per Catalog or private session
-metadata value, 64 KiB per Query/slot recipe, 4 MiB for the complete content-free
-source-proof hash vectors, 8 MiB for the requested session result metadata, 64 MiB
-for native Query detail input, and 1,024 provider requests shared with final
-verification. Source proof vectors are still decoded in full within that cap;
-this is a bounded metadata support limit, not a completed lazy-proof migration.
-Over-budget or changed inputs return an explicit error.
+Physical output windows now select retained turns and handoffs from indexed
+metadata, preserving links needed by retained turns. Membership is resolved before
+turn anchors, so an excluded session still reports `unknown_session`. Detail reads
+resolve only returned prompt/handoff fields and finish only touched byte sources.
+The private physical owner also publishes ordered virtual/unsent handoff recipes.
+Full-window virtual pages retain the NoActivity slot, absolute positions and union
+aliases without preparing the physical transcript. Virtual details keep the 8 MiB
+response metadata bound.
 
-This does not complete all selected-window paths. A physical scan that omits a
-source can change canonical aliases and skipped-parent semantics. Those paths,
-virtual owners, unqualified composite retained histories and older publications
-without the new private recipes still use the existing selected native producer
-under its source/byte caps. The focused-read implementation gap therefore
-remains open; the caps do not establish history-independent small reads there.
+The focused pager loads only reached 1,024-hash proof pages and logarithmic root
+witnesses. The ledger transaction publishes their Merkle root beside the existing
+complete fingerprint. Each request shares one read-only proof connection and keeps
+at most one decoded page per source, below the existing 4 MiB logical-hash residency
+bound for the 64-source closure. Native byte blocks still verify independently;
+completion discards proof caches and verifies touched bytes and publication again.
+Older proof headers qualify through metadata-only producer steps of one page,
+with a durable SHA continuation and completion marker checked against the original
+fingerprint. Original pages, source ledgers and archive provenance stay unchanged.
+Schema 28 adds the edge-identity index and fences older writers from the extended
+proof encoding; its additive migration preserves existing rows.
+
+The remaining bounds are 64 sources per relationship closure, 1 MiB per Catalog
+or private session value, 64 KiB per Query/slot recipe, 4 MiB per transcript recipe
+window, 8 MiB per session result metadata, 64 MiB of native Query detail input and
+1,024 provider calls including completion verification. Limits return explicit
+errors, never silent truncation. The focused proof cache is bounded by requested
+pages rather than the complete selected vector.
+
+**The implementation blocker remains open.** Physical scan windows that omit
+sources can change canonical aliases, inherited spawn turns, skipped-parent
+semantics and transcript ranks. They still use selected native preparation.
+Clipped virtual histories, unqualified composite retained histories and older
+publications without private Query recipes also retain that resolver. These are
+remaining migrations, not supported performance limitations. No complete
+selected-preparation fallback has been relabeled as focused behavior.
+
+The refresh-pool queue regression now holds a dispatch witness while asserting
+exact queue counts. Its former build-start witness did not prevent legitimate
+hung-worker overflow from dequeuing another view after five seconds under load.
+A separate deterministic lifecycle test admits overflow, holds both workers and
+proves the selected queue count is zero while its slot is Running; repeated reads
+and invalidations still admit no duplicate. Production scheduling, deadlines and
+queue assertions are unchanged.
