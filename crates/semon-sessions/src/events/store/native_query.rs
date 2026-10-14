@@ -46,6 +46,7 @@ pub(super) fn initialize(db: &Connection) -> rusqlite::Result<()> {
     db.execute_batch(super::native_rank::SCHEMA)?;
     db.execute_batch(super::native_rank::CANDIDATE_TREE_SCHEMA)?;
     db.execute_batch(native_repair::SCHEMA)?;
+    db.execute_batch(native_repair::COMPARE_SCHEMA)?;
     db.execute(
         "INSERT INTO meta VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
         params![SCHEMA_KEY, SCHEMA_VERSION.to_string()],
@@ -5346,6 +5347,7 @@ mod tests {
             "native_original_positions",
             "native_original_literal",
             "native_original_timestamp",
+            "native_original_comparisons",
             "native_rank_candidate_nodes",
             "native_rank_candidate_bindings",
             "native_rank_candidate_roots",
@@ -5523,6 +5525,8 @@ mod tests {
                 ("native_original_positions", "table"),
                 ("native_original_literal", "table"),
                 ("native_original_timestamp", "table"),
+                ("native_original_comparisons", "table"),
+                ("native_original_comparison_right", "index"),
                 ("native_rank_candidate_nodes", "table"),
                 ("native_rank_candidate_bindings", "table"),
                 ("native_rank_candidate_roots", "table"),
