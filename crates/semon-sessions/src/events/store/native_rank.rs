@@ -8,6 +8,16 @@
 use super::{native_query, *};
 use native_query::{Job, NativeStore};
 
+mod candidate_tree;
+pub(crate) use candidate_tree::{
+    CandidateBounds, CandidateDirection, CandidateLeaf, CandidatePoint, CandidateRead,
+    CandidateReadOutcome, CandidateRoot, CandidateStep, CandidateWork,
+};
+/// The candidate-tree schema is exported separately so the private schema
+/// owner can register it with its version bump. Public Trace schema is not
+/// involved.
+pub(super) const CANDIDATE_TREE_SCHEMA: &str = candidate_tree::SCHEMA;
+
 const NODE_BYTES: usize = 64 * 1024;
 const STEP_BYTES: usize = native_query::BYTES;
 const STEP_ROWS: usize = native_query::ROWS;
@@ -39,7 +49,13 @@ pub(super) fn cleanup(
     budget: usize,
     bytes: &mut usize,
 ) -> rusqlite::Result<(usize, bool)> {
-    let mut used = 0;
+    let (mut used, tree_complete) = candidate_tree::cleanup(db, job, budget, bytes)?;
+    if !tree_complete {
+        return Ok((used, false));
+    }
+    if used >= budget {
+        return Ok((used, false));
+    }
     let mut q = db.prepare("SELECT identity,octet_length(metadata)+octet_length(identity) FROM native_rank_memos WHERE job=?1 ORDER BY identity LIMIT ?2")?;
     let records = q
         .query_map(params![job, budget as i64], |r| {
@@ -799,6 +815,16 @@ impl Graph<'_> {
         state: &mut Apply,
         combine: &dyn Fn(&str, &str) -> io::Result<String>,
     ) -> io::Result<()> {
+        self.advance_limited(state, combine, STEP_ROWS, STEP_BYTES)
+    }
+
+    fn advance_limited(
+        &mut self,
+        state: &mut Apply,
+        combine: &dyn Fn(&str, &str) -> io::Result<String>,
+        row_limit: usize,
+        byte_limit: usize,
+    ) -> io::Result<()> {
         if !state.valid() {
             return Err(failure("invalid native rank Apply state"));
         }
@@ -806,8 +832,8 @@ impl Graph<'_> {
         // memo plus the final scalar cursor row. Work counts attempted writes
         // too; existing immutable nodes do not make those statements free.
         while !state.frames.is_empty()
-            && self.work.rows() + 12 <= STEP_ROWS
-            && self.work.metadata_bytes + 12 * NODE_BYTES <= STEP_BYTES
+            && self.work.rows() + 12 <= row_limit
+            && self.work.metadata_bytes + 12 * NODE_BYTES <= byte_limit
         {
             self.work.max_stack = self.work.max_stack.max(state.frames.len());
             let index = state.frames.len() - 1;
