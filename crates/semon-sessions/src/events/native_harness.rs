@@ -79,6 +79,56 @@ pub(crate) fn copilot_completion_reply<T>(
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RecordIdentity {
+    Progress(usize),
+    Complete,
+}
+
+/// Claude applies the record UUID after every regular event action. The
+/// complete producer's reverse suffix walk and Original's durable cursor use
+/// the same offset stop rule. Extras retain their original UUID behavior.
+pub(crate) fn claude_record_identity_step<S: ToolStore>(
+    store: &mut S,
+    offset: u64,
+    identity: &S::Text,
+    before: Option<usize>,
+) -> Result<RecordIdentity, S::Error> {
+    let before = match before {
+        Some(before) => before,
+        None => store.event_count()?,
+    };
+    let Some(sequence) = before.checked_sub(1) else {
+        return Ok(RecordIdentity::Complete);
+    };
+    let Some(mut event) = store.event(sequence)? else {
+        return Ok(RecordIdentity::Complete);
+    };
+    if event.o != offset {
+        return Ok(RecordIdentity::Complete);
+    }
+    event.u = Some(identity.clone());
+    store.replace_event(sequence, event)?;
+    Ok(RecordIdentity::Progress(sequence))
+}
+
+/// A turn boundary's existing logical page still contains at most 64 pending
+/// addresses. Original commits only a small subpage: event reads and two row
+/// writes per call leave room for indexed address selection and cursor seals
+/// inside the durable adapter's unchanged 64-row step budget.
+pub(crate) const CLOSE_STEP: usize = 12;
+pub(crate) fn codex_boundary_step<S: ToolStore>(
+    store: &mut S,
+    pending: &[usize],
+    after: usize,
+) -> Result<usize, S::Error> {
+    assert!(pending.len() <= super::native_producer::CLOSE_PAGE);
+    assert!(after <= pending.len());
+    let end = after.saturating_add(CLOSE_STEP).min(pending.len());
+    super::native_producer::close_code_mode_page(store, &pending[after..end])?;
+    Ok(end)
+}
+
 impl CopilotStore for FileIndex {
     fn tool_occurrence_after(
         &self,
@@ -97,6 +147,83 @@ mod tests {
     use super::*;
     use crate::events::native_producer::{complete, tool_event};
     use crate::events::{Event, Kind, Reply};
+
+    #[test]
+    fn claude_uuid_suffix_matches_independent_reverse_record_reference() {
+        for count in [0usize, 1, 128, 1024, 8192] {
+            let mut source = FileIndex::default();
+            source.events.push(Event {
+                k: Kind::U,
+                o: 5,
+                u: Some("old".into()),
+                ..Default::default()
+            });
+            for _ in 0..count {
+                source.events.push(Event {
+                    k: Kind::A,
+                    o: 7,
+                    ..Default::default()
+                });
+            }
+            let mut expected = source.events.clone();
+            for event in expected.iter_mut().rev().take_while(|event| event.o == 7) {
+                event.u = Some("record".into());
+            }
+            let mut before = None;
+            let mut visits = 0;
+            loop {
+                match complete(claude_record_identity_step(
+                    &mut source,
+                    7,
+                    &"record".into(),
+                    before,
+                )) {
+                    RecordIdentity::Complete => break,
+                    RecordIdentity::Progress(sequence) => {
+                        before = Some(sequence);
+                        visits += 1;
+                    }
+                }
+            }
+            assert_eq!(visits, count);
+            assert_eq!(source.events, expected);
+        }
+    }
+
+    #[test]
+    fn codex_boundary_substeps_preserve_logical_page_and_native_pending_map() {
+        let mut source = FileIndex::default();
+        for sequence in 0..super::super::native_producer::CLOSE_PAGE {
+            complete(tool_event(
+                &mut source,
+                Event {
+                    k: Kind::Tool,
+                    id: Some(sequence.to_string()),
+                    code_mode: true,
+                    code_mode_open: true,
+                    ..Default::default()
+                },
+            ));
+        }
+        let pending: Vec<_> = source.pending.values().copied().collect();
+        let original_pending = source.pending.clone();
+        let mut after = 0;
+        let mut steps = 0;
+        while after < pending.len() {
+            let next = complete(codex_boundary_step(&mut source, &pending, after));
+            assert_eq!(next - after, (pending.len() - after).min(CLOSE_STEP));
+            after = next;
+            steps += 1;
+        }
+        assert!(steps > 1);
+        assert_eq!(source.pending, original_pending);
+        assert!(
+            source
+                .events
+                .iter()
+                .all(|event| !event.code_mode_open && event.r.is_none())
+        );
+    }
 
     #[test]
     fn copilot_repeated_id_reset_advances_all_absolute_occurrences() {
