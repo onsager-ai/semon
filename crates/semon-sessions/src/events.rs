@@ -4878,30 +4878,31 @@ pub(crate) fn codex(summary: &mut FileIndex, record: &Value, offset: u64) {
 
 /// Native Copilot records preserve exact physical event and call identities.
 pub(crate) fn copilot(summary: &mut FileIndex, record: &Value, offset: u64) {
-    let Some(identity) = field(record, "id").filter(|id| !id.is_empty()) else {
-        gap(summary, offset);
-        return;
-    };
+    let identity = field(record, "id")
+        .filter(|id| !id.is_empty())
+        .map(str::to_owned);
     let data = &record["data"];
-    if summary.copilot.is_none() {
-        if field(record, "type") != Some("session.start") {
+    match native_producer::complete(native_harness::copilot_admit(
+        summary,
+        identity.as_ref(),
+        field(record, "type") == Some("session.start"),
+        |summary| {
+            summary.copilot = Some(crate::copilot::Index {
+                version: field(data, "copilotVersion").unwrap_or("").to_owned(),
+                session_id: field(data, "sessionId").unwrap_or("").to_owned(),
+                ..Default::default()
+            });
+            Ok(())
+        },
+    )) {
+        native_harness::Admission::Gap => {
+            gap(summary, offset);
             return;
         }
-        summary.copilot = Some(crate::copilot::Index {
-            version: field(data, "copilotVersion").unwrap_or("").to_owned(),
-            session_id: field(data, "sessionId").unwrap_or("").to_owned(),
-            ..Default::default()
-        });
+        native_harness::Admission::BeforeStart | native_harness::Admission::Duplicate => return,
+        native_harness::Admission::Accepted => {}
     }
-    if !summary
-        .copilot
-        .as_mut()
-        .expect("initialized")
-        .seen
-        .insert(identity.to_owned())
-    {
-        return;
-    }
+    let identity = identity.as_deref().expect("admitted native identity");
     let time = record_time(record);
     if let Some(timestamp) = field(record, "timestamp")
         && time.is_some()
@@ -4953,101 +4954,15 @@ pub(crate) fn copilot(summary: &mut FileIndex, record: &Value, offset: u64) {
                 summary.last_model = Some(model.to_owned());
             }
         }
-        "user.message" => {
-            if field(data, "content").is_some() {
-                summary.events.push(Event {
-                    k: Kind::U,
-                    id: field(data, "messageId").map(str::to_owned),
-                    ..event
-                });
-            }
-        }
         "assistant.message" => {
             if let Some(model) = field(data, "model") {
                 summary.last_model = Some(model.into());
                 setting(summary, SignalKind::Model, offset, time, Some(model));
             }
-            if field(data, "content").is_some_and(|text| !text.is_empty()) {
-                summary.events.push(Event {
-                    k: Kind::A,
-                    id: field(data, "messageId").map(str::to_owned),
-                    ..event.clone()
-                });
-            }
-            for (block, request) in data
-                .get("toolRequests")
-                .and_then(Value::as_array)
-                .into_iter()
-                .flatten()
-                .enumerate()
-            {
-                let id = field(request, "toolCallId").filter(|id| !id.is_empty());
-                if let Some(id) = id {
-                    let mut after = None;
-                    loop {
-                        match native_producer::complete(native_harness::copilot_reset_reply_step(
-                            summary, id, after,
-                        )) {
-                            native_harness::Reset::Progress(sequence) => after = Some(sequence),
-                            native_harness::Reset::Complete => break,
-                        }
-                    }
-                }
-                // Repeated native call ids are ambiguous, never resolved by proximity.
-                tool_event(
-                    summary,
-                    Event {
-                        k: Kind::Tool,
-                        b: block as u32,
-                        id: id.map(str::to_owned),
-                        n: field(request, "name").map(str::to_owned),
-                        ..event.clone()
-                    },
-                );
-            }
         }
         "tool.execution_start" => {
             // A start is metadata for the assistant's exact request; no fabricated
             // call from an orphan start or name/timing attribution.
-        }
-        "tool.execution_complete" => {
-            let Some(id) = field(data, "toolCallId") else {
-                return;
-            };
-            let Some(target) =
-                native_producer::complete(native_harness::copilot_completion_target(summary, id))
-            else {
-                return;
-            };
-            let success = data.get("success").and_then(Value::as_bool);
-            let exit = data
-                .get("shellExecution")
-                .and_then(|s| s.get("exitCode"))
-                .and_then(Value::as_i64);
-            let denied = data.get("error").and_then(|e| field(e, "code")) == Some("denied");
-            let reply = native_harness::copilot_completion_reply::<String>(
-                offset,
-                time,
-                success,
-                exit,
-                denied,
-                summary
-                    .events
-                    .get(target)
-                    .and_then(|event| event.n.as_deref())
-                    == Some("bash"),
-            );
-            if denied {
-                note(
-                    summary,
-                    SignalKind::Denial,
-                    offset,
-                    time,
-                    "permission_denied".into(),
-                    call_index(summary, id),
-                );
-            }
-            resolve(summary, id, |_| reply.into());
         }
         "abort" => {
             // No toolCallId: retain cancellation; pending calls remain unknown.
@@ -5068,14 +4983,6 @@ pub(crate) fn copilot(summary: &mut FileIndex, record: &Value, offset: u64) {
                 "manual".into(),
                 None,
             );
-        }
-        "subagent.started" | "subagent.completed" => {
-            summary.extras.push(Event {
-                k: Kind::Harness,
-                n: field(record, "type").map(str::to_owned),
-                id: field(data, "toolCallId").map(str::to_owned),
-                ..event
-            });
         }
         "session.shutdown" => {
             let index = summary.copilot.as_mut().expect("initialized");
@@ -5105,6 +5012,15 @@ pub(crate) fn copilot(summary: &mut FileIndex, record: &Value, offset: u64) {
                 .unwrap_or_default();
         }
         _ => {}
+    }
+    let mut record = native_harness::record::ValueRecord { record };
+    let mut cursor = native_harness::copilot::Cursor::new(event.into());
+    while !cursor.complete() {
+        native_producer::complete(native_harness::copilot::step(
+            &mut record,
+            summary,
+            &mut cursor,
+        ));
     }
 }
 
