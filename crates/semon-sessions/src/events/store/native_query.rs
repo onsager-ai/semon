@@ -11,6 +11,7 @@ mod native_repair;
 pub(crate) mod physical_profile;
 pub(crate) mod point_publication;
 pub(crate) mod source_candidate;
+pub(crate) mod source_points;
 pub(crate) mod source_roots;
 pub(in crate::events::store) mod vm_meter;
 pub(crate) type CandidateChange = candidate_delta::CandidateChange;
@@ -61,6 +62,7 @@ pub(super) fn initialize(db: &Connection) -> rusqlite::Result<()> {
     db.execute_batch(physical_profile::SCHEMA)?;
     db.execute_batch(candidate_delta::SCHEMA)?;
     db.execute_batch(point_publication::SCHEMA)?;
+    db.execute_batch(source_points::SCHEMA)?;
     db.execute(
         "INSERT INTO meta VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
         params![SCHEMA_KEY, SCHEMA_VERSION.to_string()],
@@ -6398,6 +6400,9 @@ mod tests {
             "native_point_relations",
             "native_point_postings",
             "native_point_heads",
+            "native_source_point_heads",
+            "native_source_point_manifests",
+            "native_source_point_stage",
             "native_candidate_changes",
             "native_candidate_interests",
             "native_original_copilot_started",
@@ -6641,6 +6646,10 @@ mod tests {
                 ("native_point_relations", "table"),
                 ("native_point_postings", "table"),
                 ("native_point_heads", "table"),
+                ("native_source_point_heads", "table"),
+                ("native_source_point_manifests", "table"),
+                ("native_source_point_stage", "table"),
+                ("catalog_semantic_point_pending", "index"),
                 ("native_point_owner_publication", "index"),
                 ("native_candidate_changes", "table"),
                 ("native_candidate_interests", "table"),
@@ -7399,6 +7408,7 @@ mod tests {
             runtime: fixture.spec().runtime,
         };
         fixture.store.connection.execute("INSERT INTO catalog_semantic_stage(singleton,epoch,phase,generation,runtime,revision) VALUES(1,?1,'publication',?2,?3,?4)",params![epoch.epoch,epoch.base_generation,epoch.runtime,epoch.source_revision]).unwrap();
+        fixture.store.connection.execute("INSERT INTO meta VALUES('catalog_source_revision',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value",[epoch.source_revision.to_string()]).unwrap();
         let source = fixture.source();
         let mut stage = fixture
             .store
@@ -7748,5 +7758,252 @@ mod tests {
         assert_eq!(read.work.decoded_rows, 1);
         assert_eq!(read.work.metadata_bytes, 8);
         assert!(read.work.vm_steps > 0);
+    }
+
+    fn source_points_epoch(fixture: &mut Fixture, epoch_id: i64) -> source_roots::Epoch {
+        fixture.store.connection.execute("INSERT INTO meta VALUES('catalog_source_revision','0') ON CONFLICT(key) DO NOTHING",[]).unwrap();
+        let revision:i64=fixture.store.connection.query_row("SELECT COALESCE((SELECT CAST(value AS INTEGER) FROM meta WHERE key='catalog_source_revision'),0)",[],|row|row.get(0)).unwrap();
+        let epoch = source_roots::Epoch {
+            epoch: epoch_id,
+            base_generation: Some("catalog-one".into()),
+            source_revision: revision,
+            runtime: fixture.spec().runtime,
+        };
+        fixture.store.connection.execute("INSERT INTO catalog_semantic_stage(singleton,epoch,phase,generation,runtime,revision) VALUES(1,?1,'publication',?2,?3,?4) ON CONFLICT(singleton) DO UPDATE SET epoch=excluded.epoch,phase=excluded.phase,generation=excluded.generation,runtime=excluded.runtime,revision=excluded.revision,resetting=0",params![epoch.epoch,epoch.base_generation,epoch.runtime,epoch.source_revision]).unwrap();
+        epoch
+    }
+
+    fn point_test_closure(db: &Connection, _job: i64) -> rusqlite::Result<ClosureRead> {
+        let mut query=db.prepare("SELECT EXISTS(SELECT 1 FROM catalog_semantic_stage WHERE phase='publication' AND resetting=0)")?;
+        let current = query.query_row([], |row| row.get(0))?;
+        Ok(ClosureRead {
+            current,
+            work: Work {
+                decoded_rows: 1,
+                metadata_bytes: 1,
+                vm_steps: query.get_status(rusqlite::StatementStatus::VmStep),
+            },
+        })
+    }
+
+    fn complete_source_points(
+        fixture: &mut Fixture,
+        epoch: &source_roots::Epoch,
+        reopen: bool,
+    ) -> (usize, usize, u64) {
+        let witness = fixture.source();
+        let mut prepared = 0;
+        let mut imported = 0;
+        let mut vm = 0;
+        for attempt in 0..(fixture.index.events.len() + fixture.index.extras.len() + 10) * 256 {
+            let (progress, receipt) = fixture
+                .store
+                .source_points_step(epoch, &witness, &point_test_closure, &|| false)
+                .unwrap();
+            prepared += receipt.prepared_candidates;
+            imported += receipt.imported_roots;
+            vm += receipt.sqlite_vm_steps;
+            assert!(receipt.sqlite_vm_steps >= receipt.tree.sqlite_vm_steps);
+            assert!(receipt.sqlite_vm_steps >= receipt.checkpoint.sqlite_vm_steps);
+            assert!(receipt.tree.sql_reads + receipt.tree.sql_writes <= 64);
+            assert!(receipt.tree.metadata_bytes <= BYTES);
+            assert!(receipt.point_evidence.metadata_bytes <= BYTES);
+            assert!(
+                receipt.closure_all.metadata_bytes >= receipt.checkpoint.closure.metadata_bytes
+            );
+            match progress {
+                source_points::Progress::Complete => return (prepared, imported, vm),
+                source_points::Progress::Pending => {}
+                other => panic!("unexpected native point progress {other:?} at {attempt}"),
+            }
+            if reopen && attempt % 31 == 17 {
+                fixture.store = NativeStore::open(&fixture.options).unwrap();
+            }
+        }
+        panic!("native point producer made no durable completion");
+    }
+
+    #[test]
+    fn source_point_driver_imports_append_prefix_without_event_repreparation() {
+        for history in [0, 128, 1024, 8192] {
+            let mut fixture = Fixture::new(history);
+            let epoch = source_points_epoch(&mut fixture, 101);
+            let file_reads = super::super::super::FILE_READS.with(Cell::get);
+            let (prepared, imported, vm) = complete_source_points(&mut fixture, &epoch, true);
+            assert_eq!(prepared, history + 1);
+            assert_eq!(imported, 0);
+            assert!(vm > 0);
+            let old_source = fixture.source();
+            let (previous, _) = fixture.store.source_point_predecessor(&old_source).unwrap();
+            let previous = previous.unwrap();
+            assert_eq!(previous.source, old_source.source);
+            let old_index = fixture.index.clone();
+            fixture.index.events.push(Event {
+                k: Kind::A,
+                o: ((history + 1) * 8) as u64,
+                t: Some(-17),
+                ..Event::default()
+            });
+            let new_ledger =
+                write_generation(&old_source.source.path, &b"fixture\n".repeat(history + 2));
+            let dirty = super::super::super::DirtyRows::between(&old_index, &fixture.index);
+            let tx = fixture.store.connection.unchecked_transaction().unwrap();
+            write_index_changes(
+                &tx,
+                old_source.source.path.to_str().unwrap(),
+                &new_ledger,
+                &fixture.index,
+                Some(&dirty),
+                old_source.ledger.as_ref(),
+            )
+            .unwrap();
+            tx.commit().unwrap();
+            fixture.row.sources[0] =
+                new_ledger.source(&old_source.source.path, &old_source.source.native_id);
+            let next = source_points_epoch(&mut fixture, 102);
+            let (prepared, imported, vm) = complete_source_points(&mut fixture, &next, true);
+            assert_eq!(prepared, 1, "reprepared an unchanged prefix of {history}");
+            assert_eq!(imported, 1);
+            assert!(vm > 0);
+            assert_eq!(super::super::super::FILE_READS.with(Cell::get), file_reads);
+            assert_eq!(
+                fixture
+                    .store
+                    .connection
+                    .query_row("SELECT count(*) FROM native_query_ready", [], |row| row
+                        .get::<_, i64>(0))
+                    .unwrap(),
+                0,
+                "pure source points granted Query readiness"
+            );
+            let (current, _) = fixture
+                .store
+                .source_point_predecessor(&fixture.source())
+                .unwrap();
+            assert_ne!(current.as_ref().unwrap().root, previous.root);
+            let (retained, _) = fixture
+                .store
+                .source_point_predecessor_for_generation(
+                    &fixture.source(),
+                    &source_fact_generation(old_source.ledger.as_ref().unwrap()).unwrap(),
+                )
+                .unwrap();
+            assert_eq!(retained.as_ref().unwrap().root, previous.root);
+            assert_eq!(retained.as_ref().unwrap().source, old_source.source);
+            let retained: usize = fixture
+                .store
+                .connection
+                .query_row(
+                    "SELECT count(*) FROM native_source_point_manifests WHERE path=?1",
+                    [old_source.source.path.to_string_lossy()],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(retained, 2);
+        }
+    }
+
+    #[test]
+    fn source_point_withdrawal_latches_cancellation_and_retains_full_vm() {
+        let mut fixture = Fixture::new(1);
+        let epoch = source_points_epoch(&mut fixture, 120);
+        let path = fixture.row.sources[0].path.to_string_lossy().into_owned();
+        fixture.store.connection.execute(
+            "INSERT INTO catalog_semantic_sources(source_path,withdrawal) VALUES(?1,'fixture-withdrawal')",
+            [&path],
+        ).unwrap();
+        let calls = Cell::new(0usize);
+        let (progress, receipt) = fixture
+            .store
+            .source_point_withdrawal_step(&epoch, &path, &|| {
+                calls.set(calls.get() + 1);
+                calls.get() == 2
+            })
+            .unwrap();
+        assert_eq!(progress, source_points::Progress::Deferred);
+        assert!(receipt.sqlite_vm_steps > 0);
+        assert_eq!(receipt.control.decoded_rows, 1);
+        assert_eq!(
+            fixture
+                .store
+                .connection
+                .query_row(
+                    "SELECT count(*) FROM native_source_point_stage",
+                    [],
+                    |row| row.get::<_, usize>(0)
+                )
+                .unwrap(),
+            0
+        );
+        let (progress, receipt) = fixture
+            .store
+            .source_point_withdrawal_step(&epoch, &path, &|| false)
+            .unwrap();
+        assert_eq!(progress, source_points::Progress::Pending);
+        assert!(receipt.sqlite_vm_steps > 0);
+        assert_eq!(
+            fixture
+                .store
+                .connection
+                .query_row(
+                    "SELECT after_path FROM native_source_point_stage WHERE scope=?1",
+                    [source_points::epoch_scope(&epoch).unwrap()],
+                    |row| row.get::<_, String>(0)
+                )
+                .unwrap(),
+            path
+        );
+    }
+
+    #[test]
+    fn source_point_driver_cancellation_corruption_and_epoch_refusal_retain_work() {
+        let mut fixture = Fixture::new(1);
+        let epoch = source_points_epoch(&mut fixture, 121);
+        let witness = fixture.source();
+        let (progress, receipt) = fixture
+            .store
+            .source_points_step(&epoch, &witness, &point_test_closure, &|| true)
+            .unwrap();
+        assert_eq!(progress, source_points::Progress::Deferred);
+        assert_eq!(receipt.prepared_candidates, 0);
+        assert_eq!(receipt.sqlite_vm_steps, 0);
+        fixture
+            .store
+            .source_points_step(&epoch, &witness, &point_test_closure, &|| false)
+            .unwrap();
+        fixture
+            .store
+            .connection
+            .execute(
+                "UPDATE native_query_jobs SET state='{\"source_points\":{\"format\":999}}'",
+                [],
+            )
+            .unwrap();
+        let error = fixture
+            .store
+            .source_points_step(&epoch, &witness, &point_test_closure, &|| false)
+            .unwrap_err();
+        let receipt = source_points::Receipt::from_error(&error)
+            .expect("attempt work lost on malformed cursor");
+        assert!(receipt.sqlite_vm_steps > 0);
+        fixture.store.connection.execute("UPDATE meta SET value=CAST(CAST(value AS INTEGER)+1 AS TEXT) WHERE key='catalog_source_revision'",[]).unwrap();
+        let (progress, receipt) = fixture
+            .store
+            .source_points_step(&epoch, &witness, &point_test_closure, &|| false)
+            .unwrap();
+        assert_eq!(progress, source_points::Progress::Conflict);
+        assert!(receipt.sqlite_vm_steps > 0);
+        assert_eq!(
+            fixture
+                .store
+                .connection
+                .query_row(
+                    "SELECT count(*) FROM native_source_point_heads",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )
+                .unwrap(),
+            0
+        );
     }
 }

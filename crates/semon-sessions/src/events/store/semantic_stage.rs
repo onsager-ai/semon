@@ -840,7 +840,9 @@ pub(super) fn valid_batch(c: &Connection, b: &Batch) -> rusqlite::Result<bool> {
             b.runtime.clone(),
         ))
         && generation(c)? == b.base_generation
-        && witnesses(c)?)
+        && witnesses(c)?
+        && (b.phase != Phase::Publication
+            || native_query::source_points::publication_current(c, b)?))
 }
 fn bounded<T: DeserializeOwned>(text: Option<String>, used: &mut usize) -> rusqlite::Result<T> {
     let text = text.ok_or(rusqlite::Error::InvalidQuery)?;
