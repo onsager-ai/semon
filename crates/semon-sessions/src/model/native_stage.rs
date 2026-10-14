@@ -32,6 +32,78 @@ pub(crate) struct Entry {
     pub(crate) at: Option<Ref>,
 }
 
+/// Events before the first timestamp inherit that first timestamp; later
+/// untimed events inherit the preceding timestamp. Producers first locate the
+/// first timed event, then replay source order with this scalar cursor.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct EventTimeCursor {
+    time: i64,
+}
+impl EventTimeCursor {
+    pub(crate) fn new(first: Option<i64>) -> Self {
+        Self {
+            time: first.unwrap_or(i64::MIN),
+        }
+    }
+    pub(crate) fn push(&mut self, time: Option<i64>) -> i64 {
+        self.time = time.unwrap_or(self.time);
+        self.time
+    }
+}
+
+pub(crate) fn event_entry(
+    kind: EntryKind,
+    file: usize,
+    seq: usize,
+    found: &Event,
+    last_operation: Option<(i64, (u64, u32))>,
+    effective_time: i64,
+    reply_time: impl FnOnce(u64) -> i64,
+) -> (i64, u8, Entry) {
+    let (time, pos, phase) = position(kind, found, last_operation, effective_time, reply_time);
+    (
+        time,
+        phase,
+        Entry {
+            kind,
+            file,
+            offset: found.o,
+            pos,
+            t: found.t,
+            at: Some((file, seq)),
+        },
+    )
+}
+
+pub(crate) fn after_entry(handoff: usize, file: usize, found: &Event) -> Entry {
+    Entry {
+        kind: EntryKind::H(handoff),
+        file,
+        offset: found.o,
+        pos: (found.o, found.b),
+        t: found.t,
+        at: None,
+    }
+}
+
+pub(crate) fn operation_entry(file: usize, found: &Event) -> Entry {
+    let state = match found.r.as_ref() {
+        Some(reply) if reply.e => ToolState::Err,
+        Some(reply) if reply.f & events::UNKNOWN != 0 => ToolState::Unknown,
+        Some(_) => ToolState::Ok,
+        None => ToolState::Pending,
+    };
+    Entry {
+        kind: EntryKind::Operation(state),
+        file,
+        offset: found.o,
+        pos: (found.o, found.b),
+        t: found.t,
+        at: None,
+    }
+}
+
 pub(crate) fn event_kind(
     found: &Event,
     background_end: bool,
@@ -222,6 +294,19 @@ pub(crate) fn signal_kind(signal: &events::Signal, tool: Option<String>) -> Sign
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_event_time_cursor_preserves_untimed_prefix_across_restart() {
+        let times = [None, None, Some(40), None, Some(10), None];
+        let mut cursor = EventTimeCursor::new(times.iter().copied().flatten().next());
+        let mut actual = Vec::new();
+        for time in times {
+            actual.push(cursor.push(time));
+            cursor = serde_json::from_value(serde_json::to_value(cursor).unwrap()).unwrap();
+        }
+        assert_eq!(actual, [40, 40, 40, 40, 10, 10]);
+        assert_eq!(EventTimeCursor::new(None).push(None), i64::MIN);
+    }
 
     #[test]
     fn native_entry_keys_preserve_single_file_order_and_merge_ties() {
