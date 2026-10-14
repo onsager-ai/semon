@@ -64,7 +64,7 @@ std::thread_local! {
 
 /// `PRAGMA user_version`: the shape of the tables. The parser's version is
 /// [`CACHE_VERSION`], kept in `meta`.
-const SCHEMA_VERSION: i64 = 33;
+const SCHEMA_VERSION: i64 = 28;
 
 /// How long a write waits for another process's transaction. Tests wait
 /// less, so the busy paths they drive stay quick.
@@ -170,46 +170,6 @@ CREATE TABLE IF NOT EXISTS meta (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
 ) STRICT;
-CREATE TABLE IF NOT EXISTS native_source_busy (
-    file_id INTEGER NOT NULL,
-    seq INTEGER NOT NULL,
-    start INTEGER NOT NULL,
-    end INTEGER NOT NULL,
-    PRIMARY KEY(file_id,seq)
-) STRICT, WITHOUT ROWID;
-CREATE TABLE IF NOT EXISTS native_source_busy_intervals (
-    file_id INTEGER NOT NULL,
-    start INTEGER NOT NULL,
-    end INTEGER NOT NULL,
-    PRIMARY KEY(file_id,start)
-) STRICT, WITHOUT ROWID;
-CREATE TABLE IF NOT EXISTS native_source_links (
-    file_id INTEGER NOT NULL,
-    kind TEXT NOT NULL CHECK(kind IN ('session','continued','bridge')),
-    native_id TEXT NOT NULL,
-    PRIMARY KEY(file_id,kind,native_id)
-) STRICT, WITHOUT ROWID;
-CREATE TABLE IF NOT EXISTS native_source_facts (
-    file_id INTEGER PRIMARY KEY,
-    generation TEXT NOT NULL,
-    events INTEGER NOT NULL,
-    extras INTEGER NOT NULL,
-    signals INTEGER NOT NULL
-) STRICT;
-CREATE TABLE IF NOT EXISTS native_source_event_times (
-    file_id INTEGER NOT NULL, seq INTEGER NOT NULL, t INTEGER NOT NULL,
-    PRIMARY KEY(file_id,seq)
-) STRICT, WITHOUT ROWID;
-CREATE TABLE IF NOT EXISTS native_source_copy_events (
-    file_id INTEGER NOT NULL, seq INTEGER NOT NULL, identity TEXT NOT NULL,
-    PRIMARY KEY(file_id,seq)
-) STRICT, WITHOUT ROWID;
-CREATE INDEX IF NOT EXISTS native_source_copy_identity ON native_source_copy_events(file_id,identity,seq);
-CREATE TABLE IF NOT EXISTS native_source_order_facts (
-    file_id INTEGER PRIMARY KEY, generation TEXT NOT NULL,
-    first_seq INTEGER, first_ms INTEGER,
-    CHECK((first_seq IS NULL)=(first_ms IS NULL))
-) STRICT;
 CREATE TABLE IF NOT EXISTS files (
     file_id INTEGER PRIMARY KEY,
     path TEXT NOT NULL UNIQUE,
@@ -272,7 +232,6 @@ CREATE TABLE IF NOT EXISTS events (
     u TEXT,
     PRIMARY KEY (file_id, extra, seq)
 ) STRICT, WITHOUT ROWID;
-CREATE INDEX IF NOT EXISTS native_event_offset ON events(file_id,extra,o,seq);
 CREATE TABLE IF NOT EXISTS signals (
     file_id INTEGER NOT NULL,
     seq INTEGER NOT NULL,
@@ -383,6 +342,7 @@ DELETE FROM native_source_facts;
 DELETE FROM native_source_event_times;
 DELETE FROM native_source_copy_events;
 DELETE FROM native_source_order_facts;
+DELETE FROM native_source_event_positions;
 DELETE FROM files;
 DELETE FROM meta WHERE key GLOB 'archive_event_index:*';
 DELETE FROM meta WHERE key GLOB 'native_codex_header:*';
@@ -4125,6 +4085,7 @@ impl SqliteStore {
                 "native_source_event_times",
                 "native_source_copy_events",
                 "native_source_order_facts",
+                "native_source_event_positions",
             ] {
                 transaction.execute(
                     &format!(
@@ -4352,17 +4313,33 @@ fn init(connection: &mut Connection) -> rusqlite::Result<Init> {
     // One read transaction, so the two versions are read together.
     let read = connection.transaction()?;
     let found = versions(&read)?;
+    let private = if found.0 >= 1 {
+        native_query::schema_version(&read)?
+    } else {
+        None
+    };
     read.commit()?;
     match found {
         (schema, _) if schema > SCHEMA_VERSION => return Ok(Init::Newer),
         (_, Some(parser)) if parser > CACHE_VERSION => return Ok(Init::Newer),
-        (SCHEMA_VERSION, Some(CACHE_VERSION)) => return Ok(Init::Ready),
+        _ if private.is_some_and(|version| version > native_query::SCHEMA_VERSION) => {
+            return Ok(Init::Newer);
+        }
+        (SCHEMA_VERSION, Some(CACHE_VERSION)) if private == Some(native_query::SCHEMA_VERSION) => {
+            return Ok(Init::Ready);
+        }
         _ => {}
     }
     let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
     // Read again under the lock: another process may have migrated it.
     let (schema, parser) = versions(&transaction)?;
     if schema > SCHEMA_VERSION || parser.is_some_and(|parser| parser > CACHE_VERSION) {
+        return Ok(Init::Newer);
+    }
+    if schema >= 1
+        && native_query::schema_version(&transaction)?
+            .is_some_and(|version| version > native_query::SCHEMA_VERSION)
+    {
         return Ok(Init::Newer);
     }
     if schema < SCHEMA_VERSION {
@@ -4404,9 +4381,6 @@ fn init(connection: &mut Connection) -> rusqlite::Result<Init> {
         transaction.execute_batch(crate::overview::SCHEMA)?;
         transaction.execute_batch(crate::causal_trace::SCHEMA)?;
         transaction.execute_batch(crate::history_projection::SCHEMA)?;
-        // Private owner epoch triggers require both Current and History tables.
-        transaction.execute_batch(native_query::SCHEMA)?;
-        transaction.execute_batch(native_rank::SCHEMA)?;
         transaction.execute_batch(crate::catalog_search::SCHEMA)?;
         // Format 2 also reads the existing format-1 postings. Promote only its
         // metadata in this additive transaction, before the publication path
@@ -4474,6 +4448,9 @@ fn init(connection: &mut Connection) -> rusqlite::Result<Init> {
         }
         transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     }
+    if native_query::schema_version(&transaction)? != Some(native_query::SCHEMA_VERSION) {
+        native_query::initialize(&transaction)?;
+    }
     let wiped = parser_version(&transaction)? != Some(CACHE_VERSION);
     if wiped {
         transaction.execute_batch(DERIVED)?;
@@ -4522,7 +4499,10 @@ fn current(connection: &Connection) -> rusqlite::Result<bool> {
     let schema: i64 = connection
         .prepare_cached("PRAGMA user_version")?
         .query_row([], |row| row.get(0))?;
-    Ok(schema == SCHEMA_VERSION && parser_version(connection)? == Some(CACHE_VERSION))
+    Ok(schema == SCHEMA_VERSION
+        && parser_version(connection)? == Some(CACHE_VERSION)
+        && native_query::schema_version(connection)?
+            .is_none_or(|version| version == native_query::SCHEMA_VERSION))
 }
 
 /// A versioned retention marker in the existing metadata region. Event rows
@@ -5500,6 +5480,7 @@ fn clear(transaction: &Transaction<'_>, file_id: i64) -> rusqlite::Result<()> {
         "native_source_event_times",
         "native_source_copy_events",
         "native_source_order_facts",
+        "native_source_event_positions",
     ] {
         transaction.execute(
             &format!("DELETE FROM {table} WHERE file_id = ?1"),
