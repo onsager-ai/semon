@@ -50,6 +50,7 @@ const TABLES: &[(&str, &str, bool)] = &[
         "view_id,decoded_at",
         true,
     ),
+    ("native_original_class_literals", "class,literal", true),
     ("native_original_class_values", "class", true),
     ("native_original_view_identities", "view_id", true),
     ("native_original_text_parts", "view_id,page", true),

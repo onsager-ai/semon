@@ -1,6 +1,7 @@
 //! Durable exact native-byte equality for two independently qualified Originals.
 //! This owns no copy/alias/relationship semantics. Compare remains the decoder;
 //! the caller supplies the complete current relationship-membership fence.
+use super::native_values::{NativeTextOrder, Pair as TextPair, Value as TextValue, ValueMeter};
 use super::*;
 
 pub(in super::super) const SCHEMA: &str = "
@@ -29,12 +30,13 @@ pub(crate) struct TextComparisonStep {
     pub(crate) outcome: Outcome,
     pub(crate) work: RepairWork,
     pub(crate) comparison: Option<Comparison>,
+    pub(crate) order: Option<NativeTextOrder>,
     /// Explicit pair/representative SQLite statements, excluding caller fences.
     pub(crate) comparison_sql_vm_steps: i32,
     pub(crate) serialized_cursor_bytes: usize,
     pub(crate) fence_checks: usize,
     pub(crate) records_finish_calls: usize,
-    /// Owned fragment payloads returned by Records, including any anchors.
+    /// Peak simultaneously owned Records fragment payloads, including anchors.
     /// Records' independently measured proof/provider I/O is a separate cost.
     pub(crate) native_fragment_bytes: usize,
     /// Compare may hold two decoded chunks plus one bounded replay chunk.
@@ -48,6 +50,7 @@ struct Meter {
     fences: usize,
     finishes: usize,
     fragments: usize,
+    order: Option<NativeTextOrder>,
 }
 impl Meter {
     fn statement(&mut self, query: &rusqlite::Statement<'_>) {
@@ -63,6 +66,7 @@ impl Meter {
             outcome,
             work,
             comparison,
+            order: self.order,
             comparison_sql_vm_steps: self.vm,
             serialized_cursor_bytes: self.cursor,
             fence_checks: self.fences,
@@ -79,7 +83,9 @@ struct Binding {
     original: [u8; 32],
     class: u64,
     record: u64,
-    field: OriginalField,
+    field: Option<OriginalField>,
+    #[serde(default)]
+    view: Option<QualifiedTextView>,
     receipt: Receipt,
 }
 impl Binding {
@@ -88,20 +94,46 @@ impl Binding {
             original: representative.original,
             class: representative.class,
             record: representative.record,
-            field: representative.field.clone(),
+            field: match &representative.value {
+                TextValue::Whole { field, .. } => Some(field.clone()),
+                _ => None,
+            },
+            view: match &representative.value {
+                TextValue::View(view) => Some(view.clone()),
+                _ => None,
+            },
             receipt: representative.receipt,
         }
     }
-    fn bounds(&self) -> io::Result<(u64, u64)> {
-        let start = self
-            .record
-            .checked_add(self.field.span.start)
-            .ok_or_else(|| io::Error::other("native pair descriptor offset overflow"))?;
-        let end = self
-            .record
-            .checked_add(self.field.span.end)
-            .ok_or_else(|| io::Error::other("native pair descriptor offset overflow"))?;
-        Ok((start, end))
+    fn value(&self) -> io::Result<TextValue> {
+        match (&self.field, &self.view) {
+            (Some(field), None) => Ok(TextValue::Whole {
+                record: self.record,
+                field: field.clone(),
+                receipt: self.receipt,
+            }),
+            (None, Some(view))
+                if view.original() == self.original
+                    && view.record() == self.record
+                    && view.receipt() == self.receipt =>
+            {
+                Ok(TextValue::View(view.clone()))
+            }
+            _ => Err(io::Error::other("native comparison binding changed kind")),
+        }
+    }
+    fn bounds(&self) -> io::Result<Option<(u64, u64)>> {
+        let Some(field) = self.field.as_ref() else {
+            return Ok(None);
+        };
+        Ok(Some((
+            self.record
+                .checked_add(field.span.start)
+                .ok_or_else(|| io::Error::other("native pair descriptor offset overflow"))?,
+            self.record
+                .checked_add(field.span.end)
+                .ok_or_else(|| io::Error::other("native pair descriptor offset overflow"))?,
+        )))
     }
     fn same(&self, other: &Self) -> io::Result<bool> {
         Ok(serde_json::to_vec(self).map_err(io::Error::other)?
@@ -122,7 +154,13 @@ struct Cursor {
     left: Binding,
     right: Binding,
     mode: Mode,
-    compare: Compare,
+    compare: Option<Compare>,
+    #[serde(default)]
+    generic: Option<TextPair>,
+    #[serde(default)]
+    result: Option<Comparison>,
+    #[serde(default)]
+    ordered: bool,
 }
 impl Cursor {
     fn mode(left: &Binding, right: &Binding) -> Mode {
@@ -136,11 +174,21 @@ impl Cursor {
     }
     fn new(left: Binding, right: Binding) -> io::Result<Self> {
         let mode = Self::mode(&left, &right);
-        let mut compare = Compare::new(left.bounds()?, right.bounds()?)?;
-        compare.result = match mode {
+        let result = match mode {
             Mode::Native => None,
             Mode::SameClass => Some(Comparison::Equal),
             Mode::UnequalLength => Some(Comparison::Different),
+        };
+        let (compare, generic) = match (left.bounds()?, right.bounds()?) {
+            (Some(l), Some(r)) => {
+                let mut compare = Compare::new(l, r)?;
+                compare.result = result;
+                (Some(compare), None)
+            }
+            _ if mode == Mode::Native => {
+                (None, Some(TextPair::new(&left.value()?, &right.value()?)?))
+            }
+            _ => (None, None),
         };
         Ok(Self {
             version: VERSION,
@@ -148,27 +196,96 @@ impl Cursor {
             right,
             mode,
             compare,
+            generic,
+            result,
+            ordered: false,
         })
     }
+    fn for_order(left: Binding, right: Binding) -> io::Result<Self> {
+        let same = Self::mode(&left, &right) == Mode::SameClass;
+        let generic = if same {
+            None
+        } else {
+            Some(TextPair::new(&left.value()?, &right.value()?)?)
+        };
+        Ok(Self {
+            version: VERSION,
+            left,
+            right,
+            mode: if same { Mode::SameClass } else { Mode::Native },
+            compare: None,
+            generic,
+            result: if same { Some(Comparison::Equal) } else { None },
+            ordered: true,
+        })
+    }
+    fn order(&self) -> Option<NativeTextOrder> {
+        if self.mode == Mode::SameClass || self.comparison() == Some(Comparison::Equal) {
+            Some(NativeTextOrder::Equal)
+        } else if self.ordered {
+            self.generic.as_ref().and_then(|pair| pair.result)
+        } else {
+            None
+        }
+    }
+    fn comparison(&self) -> Option<Comparison> {
+        self.result
+            .or_else(|| self.compare.as_ref().and_then(|compare| compare.result))
+            .or_else(|| {
+                self.generic.as_ref().and_then(|compare| {
+                    compare.result.map(|order| {
+                        if order == NativeTextOrder::Equal {
+                            Comparison::Equal
+                        } else {
+                            Comparison::Different
+                        }
+                    })
+                })
+            })
+    }
     fn valid(&self, left: &Binding, right: &Binding) -> io::Result<bool> {
-        let (ls, le) = left.bounds()?;
-        let (rs, re) = right.bounds()?;
-        Ok(self.version == VERSION
-            && self.left.same(left)?
-            && self.right.same(right)?
-            && self.mode == Self::mode(left, right)
-            && self.compare.left.matches_bounds(ls, le)
-            && self.compare.right.matches_bounds(rs, re)
-            && self.compare.compared <= left.receipt.decoded_bytes.min(right.receipt.decoded_bytes)
-            && match self.mode {
-                Mode::SameClass => self.compare.result == Some(Comparison::Equal),
-                Mode::UnequalLength => self.compare.result == Some(Comparison::Different),
-                Mode::Native => {
-                    self.compare.result != Some(Comparison::Equal)
-                        || (self.compare.left.complete()
-                            && self.compare.right.complete()
-                            && self.compare.compared == left.receipt.decoded_bytes)
+        if self.version != VERSION
+            || !self.left.same(left)?
+            || !self.right.same(right)?
+            || self.mode
+                != if self.ordered && Self::mode(left, right) != Mode::SameClass {
+                    Mode::Native
+                } else {
+                    Self::mode(left, right)
                 }
+        {
+            return Ok(false);
+        }
+        let value_left = left.value()?;
+        let value_right = right.value()?;
+        let readers = match (
+            &self.compare,
+            &self.generic,
+            left.bounds()?,
+            right.bounds()?,
+        ) {
+            (Some(compare), None, Some((ls, le)), Some((rs, re))) => {
+                compare.left.matches_bounds(ls, le)
+                    && compare.right.matches_bounds(rs, re)
+                    && compare.compared
+                        <= left.receipt.decoded_bytes.min(right.receipt.decoded_bytes)
+                    && (compare.result != Some(Comparison::Equal)
+                        || self.mode == Mode::SameClass
+                        || compare.left.complete()
+                            && compare.right.complete()
+                            && compare.compared == left.receipt.decoded_bytes)
+            }
+            (None, Some(compare), _, _) => {
+                self.mode == Mode::Native && compare.matches(&value_left, &value_right)?
+            }
+            (None, None, _, _) => self.mode != Mode::Native,
+            _ => false,
+        };
+        Ok(readers
+            && match self.mode {
+                Mode::SameClass => self.comparison() == Some(Comparison::Equal),
+                Mode::UnequalLength => self.comparison() == Some(Comparison::Different),
+                Mode::Native => self.result.is_none(),
             })
     }
 }
@@ -285,9 +402,80 @@ impl NativeStore {
         closure: &dyn Fn(&Connection, i64) -> rusqlite::Result<bool>,
         cancelled: &dyn Fn() -> bool,
     ) -> io::Result<TextComparisonStep> {
+        self.original_text_pair_step(
+            job,
+            left,
+            right,
+            closure,
+            cancelled,
+            false,
+            crate::SESSION_SOURCE_CHUNK_MAX,
+            ROWS,
+        )
+    }
+    pub(crate) fn original_text_order_step(
+        &mut self,
+        job: &Job,
+        left: ComparisonSource<'_, '_>,
+        right: ComparisonSource<'_, '_>,
+        closure: &dyn Fn(&Connection, i64) -> rusqlite::Result<bool>,
+        cancelled: &dyn Fn() -> bool,
+    ) -> io::Result<TextComparisonStep> {
+        self.original_text_order_step_with_budget(
+            job,
+            left,
+            right,
+            closure,
+            cancelled,
+            crate::SESSION_SOURCE_CHUNK_MAX,
+            ROWS,
+        )
+    }
+    /// One comparison transition consumes only the caller's remaining budget.
+    /// At least 292 native bytes and 40 metadata rows support every native
+    /// scalar/decoder mode. Smaller allowances defer before I/O; a fresh step
+    /// with these allowances advances even through zero-output literal gaps.
+    pub(crate) fn original_text_order_step_with_budget(
+        &mut self,
+        job: &Job,
+        left: ComparisonSource<'_, '_>,
+        right: ComparisonSource<'_, '_>,
+        closure: &dyn Fn(&Connection, i64) -> rusqlite::Result<bool>,
+        cancelled: &dyn Fn() -> bool,
+        native_allowance: usize,
+        metadata_rows_allowance: usize,
+    ) -> io::Result<TextComparisonStep> {
+        self.original_text_pair_step(
+            job,
+            left,
+            right,
+            closure,
+            cancelled,
+            true,
+            native_allowance,
+            metadata_rows_allowance,
+        )
+    }
+    fn original_text_pair_step(
+        &mut self,
+        job: &Job,
+        left: ComparisonSource<'_, '_>,
+        right: ComparisonSource<'_, '_>,
+        closure: &dyn Fn(&Connection, i64) -> rusqlite::Result<bool>,
+        cancelled: &dyn Fn() -> bool,
+        ordered: bool,
+        native_allowance: usize,
+        metadata_rows_allowance: usize,
+    ) -> io::Result<TextComparisonStep> {
         let mut work = RepairWork::default();
         let mut meter = Meter::default();
-        if cancelled() {
+        if native_allowance > crate::SESSION_SOURCE_CHUNK_MAX || metadata_rows_allowance > ROWS {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "native ordering allowance exceeds its owner",
+            ));
+        }
+        if cancelled() || native_allowance < 292 || metadata_rows_allowance < 40 {
             return Ok(meter.result(Outcome::Deferred, work, None));
         }
         // Admission binds one CatalogSource per absolute (job, path). Two
@@ -347,60 +535,114 @@ impl NativeStore {
                 if !cursor.valid(&l, &r)? {
                     return Err(io::Error::other("native pair cursor descriptor changed"));
                 }
+                let cursor = if ordered && cursor.order().is_none() && !cursor.ordered {
+                    Cursor::for_order(l.clone(), r.clone())?
+                } else {
+                    cursor
+                };
                 (Some(revision), cursor)
             } else {
-                (None, Cursor::new(l.clone(), r.clone())?)
+                (
+                    None,
+                    if ordered {
+                        Cursor::for_order(l.clone(), r.clone())?
+                    } else {
+                        Cursor::new(l.clone(), r.clone())?
+                    },
+                )
             };
             (l, r, revision, cursor)
         };
-        let cached = cursor.compare.result.is_some();
-        let mut l_part = None;
-        let mut r_part = None;
-        if !cached {
-            l_part = fragment(
-                left,
-                cursor.compare.left.at,
-                left_binding.bounds()?.1,
-                64 * 1024,
-                &mut work,
-            )?;
-            r_part = fragment(
-                right,
-                cursor.compare.right.at,
-                right_binding.bounds()?.1,
-                64 * 1024,
-                &mut work,
-            )?;
-            cursor.compare.step(
-                l_part.as_ref().map_or(&[][..], |p| p.bytes.as_ref()),
-                r_part.as_ref().map_or(&[][..], |p| p.bytes.as_ref()),
-                DECODED,
-            )?;
-        }
-        // A side that actually read bytes is already independently touched.
-        // Only cached/empty sides need an anchor; never add two extra bytes to
-        // two full fragments merely because decoding reached their ends.
-        meter.fragments = l_part.as_ref().map_or(0, |p| p.bytes.len())
-            + r_part.as_ref().map_or(0, |p| p.bytes.len());
-        if l_part.is_none() {
+        let cached = cursor.comparison().is_some();
+        if cursor.generic.is_some() {
+            // Both endpoint anchors are included before the four generic
+            // fragments are reserved, including empty/zero-output views.
             anchor(left, &left_binding, &mut work)?;
-            meter.fragments = meter
-                .fragments
-                .max(r_part.as_ref().map_or(0, |p| p.bytes.len()) + 1);
-        }
-        if r_part.is_none() {
             anchor(right, &right_binding, &mut work)?;
-            meter.fragments = meter
-                .fragments
-                .max(l_part.as_ref().map_or(0, |p| p.bytes.len()) + 1);
+            if !cached {
+                let compare = cursor
+                    .generic
+                    .as_mut()
+                    .ok_or_else(|| io::Error::other("generic pair disappeared"))?;
+                let mut value_meter = ValueMeter::default();
+                let remaining = native_allowance.saturating_sub(work.native_bytes);
+                compare.step(
+                    &self.connection,
+                    left.repair,
+                    &left_binding.value()?,
+                    right.repair,
+                    &right_binding.value()?,
+                    left.records,
+                    right.records,
+                    remaining,
+                    metadata_rows_allowance.saturating_sub(work.metadata_rows + 24),
+                    &mut work,
+                    &mut value_meter,
+                )?;
+                meter.vm += value_meter.vm;
+                meter.fragments = value_meter.peak_native.max(1);
+            } else {
+                meter.fragments = 1;
+            }
+        } else {
+            let mut l_part = None;
+            let mut r_part = None;
+            if !cached {
+                let compare = cursor
+                    .compare
+                    .as_mut()
+                    .ok_or_else(|| io::Error::other("native pair lacks comparison reader"))?;
+                let left_end = left_binding
+                    .bounds()?
+                    .ok_or_else(|| io::Error::other("whole pair lacks left endpoint"))?
+                    .1;
+                let right_end = right_binding
+                    .bounds()?
+                    .ok_or_else(|| io::Error::other("whole pair lacks right endpoint"))?
+                    .1;
+                let half = native_allowance / 2;
+                l_part = fragment(
+                    left,
+                    compare.left.at,
+                    left_end,
+                    half.min(64 * 1024),
+                    &mut work,
+                )?;
+                r_part = fragment(
+                    right,
+                    compare.right.at,
+                    right_end,
+                    native_allowance
+                        .saturating_sub(work.native_bytes)
+                        .min(64 * 1024),
+                    &mut work,
+                )?;
+                compare.step(
+                    l_part.as_ref().map_or(&[][..], |p| p.bytes.as_ref()),
+                    r_part.as_ref().map_or(&[][..], |p| p.bytes.as_ref()),
+                    DECODED,
+                )?;
+            }
+            meter.fragments = l_part.as_ref().map_or(0, |p| p.bytes.len())
+                + r_part.as_ref().map_or(0, |p| p.bytes.len());
+            if l_part.is_none() {
+                anchor(left, &left_binding, &mut work)?;
+                meter.fragments = meter
+                    .fragments
+                    .max(r_part.as_ref().map_or(0, |p| p.bytes.len()) + 1);
+            }
+            if r_part.is_none() {
+                anchor(right, &right_binding, &mut work)?;
+                meter.fragments = meter
+                    .fragments
+                    .max(l_part.as_ref().map_or(0, |p| p.bytes.len()) + 1);
+            }
         }
-        if work.native_bytes > crate::SESSION_SOURCE_CHUNK_MAX {
+        if work.native_bytes > native_allowance {
             return Err(io::Error::other(
                 "native pair exceeds total native fragment budget",
             ));
         }
-        drop(l_part);
-        drop(r_part);
         meter.finishes += 1;
         left.records.finish()?;
         meter.finishes += 1;
@@ -464,21 +706,22 @@ impl NativeStore {
         if !closure(&tx, job.id).map_err(io::Error::other)? {
             return Ok(meter.result(Outcome::Conflict, work, None));
         }
-        if work.metadata_rows > ROWS || work.metadata_bytes > BYTES {
+        if work.metadata_rows > metadata_rows_allowance || work.metadata_bytes > BYTES {
             return Err(io::Error::other("native pair exceeds metadata work"));
         }
         if cancelled() {
             return Ok(meter.result(Outcome::Deferred, work, None));
         }
         tx.commit().map_err(io::Error::other)?;
+        meter.order = cursor.order();
         Ok(meter.result(
-            if cursor.compare.result.is_some() {
+            if cursor.comparison().is_some() {
                 Outcome::Written
             } else {
                 Outcome::Deferred
             },
             work,
-            cursor.compare.result,
+            cursor.comparison(),
         ))
     }
 }
@@ -698,6 +941,7 @@ pub(super) mod tests {
                 connection: writer.connection,
                 options: options.clone(),
             };
+            store.connection.execute_batch(TEXT_VIEW_SCHEMA).unwrap();
             let witnesses: Vec<_> = rows
                 .iter()
                 .map(|row| store.source_witness(&row.sources[0]).unwrap())

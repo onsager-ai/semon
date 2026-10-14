@@ -276,7 +276,8 @@ impl Pair {
         left: &Value,
         right_repair: &Repair,
         right: &Value,
-        records: &crate::query_source::Records<'_>,
+        left_records: &crate::query_source::Records<'_>,
+        right_records: &crate::query_source::Records<'_>,
         native_allowance: usize,
         row_allowance: usize,
         work: &mut RepairWork,
@@ -297,7 +298,7 @@ impl Pair {
             left_repair,
             left,
             &self.left,
-            records,
+            left_records,
             fragment,
             rows,
             32 * 1024,
@@ -309,7 +310,7 @@ impl Pair {
             right_repair,
             right,
             &self.right,
-            records,
+            right_records,
             fragment,
             rows,
             32 * 1024,
@@ -317,6 +318,17 @@ impl Pair {
             meter,
         )?;
         meter.peak_decoded = meter.peak_decoded.max(l.bytes.len() + r.bytes.len());
+        for (value, decoded) in [(left, &l), (right, &r)] {
+            if !decoded.position.valid(value)?
+                || decoded.complete
+                    && self.compared.checked_add(decoded.bytes.len() as u64)
+                        != Some(value.receipt().decoded_bytes)
+            {
+                return Err(io::Error::other(
+                    "native comparison completed with a different qualified length",
+                ));
+            }
+        }
         if let Some(result) = decoded_order(&l.bytes, l.complete, &r.bytes, r.complete) {
             self.compared = self
                 .compared
@@ -339,7 +351,7 @@ impl Pair {
                 left_repair,
                 left,
                 &self.left,
-                records,
+                left_records,
                 fragment,
                 rows,
                 common,
@@ -359,7 +371,7 @@ impl Pair {
                 right_repair,
                 right,
                 &self.right,
-                records,
+                right_records,
                 fragment,
                 rows,
                 common,
@@ -376,5 +388,85 @@ impl Pair {
             .checked_add(common as u64)
             .ok_or_else(|| io::Error::other("native text comparison address overflow"))?;
         Ok(true)
+    }
+}
+
+/// A bounded native producer literal shares the same decoded ordering kernel.
+/// The literal is a call-site constant and never a source-text continuation.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct Literal {
+    position: Position,
+    compared: usize,
+    pub(super) result: Option<bool>,
+}
+impl Literal {
+    pub(super) fn new(value: &Value, literal: &str) -> io::Result<Self> {
+        Ok(Self {
+            position: Position::begin(value)?,
+            compared: 0,
+            result: (value.receipt().decoded_bytes != literal.len() as u64).then_some(false),
+        })
+    }
+    pub(super) fn valid(&self, value: &Value, literal: &str) -> io::Result<bool> {
+        Ok(self.position.valid(value)?
+            && self.compared <= literal.len()
+            && (self.result != Some(true)
+                || self.position.complete(value)
+                    && self.compared == literal.len()
+                    && value.receipt().decoded_bytes == literal.len() as u64))
+    }
+    pub(super) fn step(
+        &mut self,
+        db: &Connection,
+        repair: &Repair,
+        value: &Value,
+        literal: &str,
+        records: &crate::query_source::Records<'_>,
+        native_allowance: usize,
+        row_allowance: usize,
+        work: &mut RepairWork,
+        meter: &mut ValueMeter,
+    ) -> io::Result<()> {
+        if self.result.is_some() || !self.valid(value, literal)? {
+            return Err(io::Error::other("native producer literal cursor changed"));
+        }
+        let decoded = chunk(
+            db,
+            repair,
+            value,
+            &self.position,
+            records,
+            native_allowance,
+            row_allowance,
+            (literal.len() - self.compared + 1).min(32 * 1024),
+            work,
+            meter,
+        )?;
+        if !decoded.position.valid(value)?
+            || decoded.complete
+                && self.compared as u64 + decoded.bytes.len() as u64
+                    != value.receipt().decoded_bytes
+        {
+            return Err(io::Error::other(
+                "native literal completed with a different qualified length",
+            ));
+        }
+        if let Some(order) = decoded_order(
+            &decoded.bytes,
+            decoded.complete,
+            &literal.as_bytes()[self.compared..],
+            true,
+        ) {
+            self.result = Some(order == std::cmp::Ordering::Equal);
+        }
+        self.compared = self
+            .compared
+            .checked_add(decoded.bytes.len())
+            .ok_or_else(|| io::Error::other("native literal decoded address overflow"))?;
+        // A decisive longer/mismatching chunk does not need a resumable tail.
+        self.compared = self.compared.min(literal.len());
+        self.position = decoded.position;
+        Ok(())
     }
 }
