@@ -245,14 +245,18 @@ pub(crate) fn resolve(
             .is_some_and(|harnesses| harnesses.iter().any(|harness| *harness != row.harness));
         let mut spelling =
             crate::model::identity_stage::KeyCursor::new(&native, &row.harness, collision);
+        // This independent-owner admission needs no invented allocation order:
+        // qualify against all native literal occupants, then require distinct
+        // final candidates. A dependency on another allocated spelling stays
+        // with the native component adapter that preserves allocation order.
         let canonical = loop {
-            if let Some(key) = spelling
-                .step(|candidate| names.contains_key(candidate) || allocated.contains(candidate))
-            {
+            if let Some(key) = spelling.step(|candidate| names.contains_key(candidate)) {
                 break key;
             }
         };
-        allocated.insert(canonical.clone());
+        if !allocated.insert(canonical.clone()) {
+            return Ok(None);
+        }
         if canonical == requested {
             if owner.is_some() {
                 return Ok(None);
