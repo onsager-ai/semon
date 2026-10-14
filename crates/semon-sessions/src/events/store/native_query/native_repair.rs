@@ -6,7 +6,9 @@
 use super::*;
 use crate::SessionSourceReader;
 use crate::json_string::native_identity::{Fingerprint, Receipt};
-use crate::json_string::native_record::{Cursor as RecordCursor, Location, Span, Token};
+use crate::json_string::native_record::{
+    Container, Cursor as RecordCursor, Literal, Location, Span, Token,
+};
 
 pub(super) const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS native_original_repairs (
@@ -23,6 +25,18 @@ CREATE TABLE IF NOT EXISTS native_original_records (
  status TEXT NOT NULL CHECK(status IN ('lexed','gap','folded')),
  PRIMARY KEY(original,record_offset)
 ) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS native_original_nodes (
+ original BLOB NOT NULL, record_offset INTEGER NOT NULL, address INTEGER NOT NULL,
+ parent_offset INTEGER, key_start INTEGER, element_index INTEGER,
+ metadata TEXT NOT NULL, end_offset INTEGER,
+ PRIMARY KEY(original,record_offset,address)
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS native_original_node_parent
+ ON native_original_nodes(original,record_offset,parent_offset,address);
+CREATE UNIQUE INDEX IF NOT EXISTS native_original_node_key
+ ON native_original_nodes(original,record_offset,parent_offset,key_start) WHERE key_start IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS native_original_node_element
+ ON native_original_nodes(original,record_offset,parent_offset,element_index) WHERE element_index IS NOT NULL;
 CREATE TABLE IF NOT EXISTS native_original_fields (
  original BLOB NOT NULL, record_offset INTEGER NOT NULL, ordinal INTEGER NOT NULL,
  start_offset INTEGER NOT NULL, end_offset INTEGER NOT NULL, parent_offset INTEGER, is_key INTEGER NOT NULL, metadata TEXT NOT NULL,
@@ -60,6 +74,7 @@ struct Cursor {
     phase: Phase,
     fields_after: Option<u64>,
     fields_registered: bool,
+    node_stack: Vec<(u64, Container)>,
 }
 impl Cursor {
     fn new() -> Self {
@@ -72,6 +87,7 @@ impl Cursor {
             phase: Phase::Lexing,
             fields_after: None,
             fields_registered: false,
+            node_stack: Vec::new(),
         }
     }
 }
@@ -104,6 +120,23 @@ pub(crate) struct OriginalField {
     pub(crate) span: Span,
     pub(crate) key: bool,
     pub(crate) location: Location,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct OriginalNode {
+    pub(crate) ordinal: u64,
+    pub(crate) address: u64,
+    pub(crate) location: Location,
+    pub(crate) value: OriginalValue,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub(crate) enum OriginalValue {
+    Object,
+    Array,
+    String(Span),
+    Number(Span),
+    Literal { span: Span, kind: Literal },
 }
 
 fn reference(
@@ -147,7 +180,25 @@ fn fields_ready(db: &Connection, repair: &Repair) -> rusqlite::Result<bool> {
     if !repair.cursor.fields_registered {
         return Ok(false);
     }
-    db.query_row("SELECT NOT EXISTS(SELECT 1 FROM native_original_fields WHERE original=?1 AND record_offset=?2 AND digest IS NULL)",params![repair.original.as_slice(),repair.cursor.record_at as i64],|row|row.get(0))
+    db.query_row("SELECT NOT EXISTS(SELECT 1 FROM native_original_fields WHERE original=?1 AND record_offset=?2 AND digest IS NULL)",params![repair.original.as_slice(),i64::try_from(repair.cursor.record_at).map_err(|_|rusqlite::Error::InvalidQuery)?],|row|row.get(0))
+}
+
+fn check_record_view(
+    db: &Connection,
+    job: &Job,
+    witness: &SourceWitness,
+    repair: &Repair,
+) -> rusqlite::Result<()> {
+    if !job_current(db, job)?
+        || !check_source(db, witness)?
+        || !repair_current(db, repair)?
+        || !admitted_original(db, job, witness)?
+        || repair.cursor.phase != Phase::FoldRecord
+        || !fields_ready(db, repair)?
+    {
+        return Err(rusqlite::Error::InvalidQuery);
+    }
+    Ok(())
 }
 
 fn admitted_original(
@@ -166,6 +217,154 @@ fn admitted_original(
 }
 
 impl NativeStore {
+    /// Point access by physical field address. Selecting a logical object key
+    /// first requires the native last-key exact-comparison protocol; this API
+    /// does not convert candidate hashes into semantic ownership.
+    pub(crate) fn original_node(
+        &self,
+        job: &Job,
+        witness: &SourceWitness,
+        repair: &Repair,
+        address: u64,
+    ) -> io::Result<Option<OriginalNode>> {
+        if !self.runtime_current(&job.spec)? {
+            return Err(io::Error::other("original node runtime changed"));
+        }
+        let tx = self
+            .connection
+            .unchecked_transaction()
+            .map_err(io::Error::other)?;
+        check_record_view(&tx, job, witness, repair).map_err(io::Error::other)?;
+        let value:Option<(Option<String>,Option<i64>)>=tx.query_row("SELECT CASE WHEN octet_length(metadata)<=65536 THEN metadata END,end_offset FROM native_original_nodes WHERE original=?1 AND record_offset=?2 AND address=?3",params![repair.original.as_slice(),seq_u64(repair.cursor.record_at)?,seq_u64(address)?],|row|Ok((row.get(0)?,row.get(1)?))).optional().map_err(io::Error::other)?;
+        let length = record_length(repair)?;
+        value
+            .map(|(text, end)| {
+                let node: OriginalNode =
+                    serde_json::from_str(text.as_deref().ok_or_else(|| {
+                        io::Error::other("original node exceeds metadata budget")
+                    })?)
+                    .map_err(io::Error::other)?;
+                if node.address != address
+                    || end.is_none()
+                    || end.is_some_and(|end| end < 0 || end as u64 > length)
+                {
+                    return Err(io::Error::other(
+                        "original node is not a complete descriptor",
+                    ));
+                }
+                Ok(node)
+            })
+            .transpose()
+    }
+
+    /// A value selected by one already-compared physical key descriptor.
+    pub(crate) fn original_value_by_key(
+        &self,
+        job: &Job,
+        witness: &SourceWitness,
+        repair: &Repair,
+        key: &OriginalField,
+    ) -> io::Result<Option<OriginalNode>> {
+        if !key.key {
+            return Err(io::Error::other(
+                "original value key is not a key descriptor",
+            ));
+        }
+        if !self.runtime_current(&job.spec)? {
+            return Err(io::Error::other("original node runtime changed"));
+        }
+        let tx = self
+            .connection
+            .unchecked_transaction()
+            .map_err(io::Error::other)?;
+        check_record_view(&tx, job, witness, repair).map_err(io::Error::other)?;
+        let address:Option<i64>=tx.query_row("SELECT address FROM native_original_nodes WHERE original=?1 AND record_offset=?2 AND parent_offset IS ?3 AND key_start=?4",params![repair.original.as_slice(),seq_u64(repair.cursor.record_at)?,key.location.parent.map(seq_u64).transpose()?,seq_u64(key.span.start)?],|row|row.get(0)).optional().map_err(io::Error::other)?;
+        drop(tx);
+        address
+            .map(|address| {
+                self.original_node(
+                    job,
+                    witness,
+                    repair,
+                    u64::try_from(address).map_err(io::Error::other)?,
+                )
+            })
+            .transpose()
+            .map(Option::flatten)
+    }
+
+    /// Indexed array traversal; this never collects a complete native array.
+    pub(crate) fn original_array_page(
+        &self,
+        job: &Job,
+        witness: &SourceWitness,
+        repair: &Repair,
+        parent: u64,
+        after: Option<u64>,
+    ) -> io::Result<Page<OriginalNode, u64>> {
+        if !self.runtime_current(&job.spec)? {
+            return Err(io::Error::other("original array runtime changed"));
+        }
+        let tx = self
+            .connection
+            .unchecked_transaction()
+            .map_err(io::Error::other)?;
+        check_record_view(&tx, job, witness, repair).map_err(io::Error::other)?;
+        let mut query=tx.prepare("SELECT element_index,octet_length(metadata),CASE WHEN octet_length(metadata)<=65536 THEN metadata END,end_offset FROM native_original_nodes WHERE original=?1 AND record_offset=?2 AND parent_offset=?3 AND element_index IS NOT NULL AND element_index>?4 ORDER BY element_index LIMIT 64").map_err(io::Error::other)?;
+        let mut values = query
+            .query(params![
+                repair.original.as_slice(),
+                seq_u64(repair.cursor.record_at)?,
+                seq_u64(parent)?,
+                after.map(seq_u64).transpose()?.unwrap_or(-1)
+            ])
+            .map_err(io::Error::other)?;
+        let length = record_length(repair)?;
+        let mut rows = Vec::new();
+        let mut cursor = after;
+        let mut work = Work::default();
+        let mut budget_stopped = false;
+        while let Some(row) = values.next().map_err(io::Error::other)? {
+            let index = u64::try_from(row.get::<_, i64>(0).map_err(io::Error::other)?)
+                .map_err(io::Error::other)?;
+            let bytes = usize::try_from(row.get::<_, i64>(1).map_err(io::Error::other)?)
+                .map_err(io::Error::other)?;
+            if bytes > STATE_BYTES {
+                return Err(io::Error::other(
+                    "original array node exceeds metadata budget",
+                ));
+            }
+            if work.metadata_bytes + bytes > BYTES {
+                budget_stopped = true;
+                break;
+            }
+            let node: OriginalNode =
+                serde_json::from_str(&row.get::<_, String>(2).map_err(io::Error::other)?)
+                    .map_err(io::Error::other)?;
+            let end: Option<i64> = row.get(3).map_err(io::Error::other)?;
+            if node.location.parent != Some(parent)
+                || node.location.index != Some(index)
+                || end.is_none()
+                || end.is_some_and(|end| end < 0 || end as u64 > length)
+            {
+                return Err(io::Error::other("original array node descriptor disagrees"));
+            }
+            rows.push(node);
+            cursor = Some(index);
+            work.decoded_rows += 1;
+            work.metadata_bytes += bytes;
+        }
+        drop(values);
+        work.vm_steps = query.get_status(rusqlite::StatementStatus::VmStep);
+        let complete = !budget_stopped && rows.len() < ROWS;
+        Ok(Page {
+            rows,
+            after: cursor,
+            complete,
+            work,
+        })
+    }
+
     /// Candidate key descriptors, newest first to preserve the complete native
     /// Value's duplicate-key ownership. Receipt matches require exact decoded
     /// Compare before any key or identifier is selected. Both cursor and rows
@@ -290,12 +489,76 @@ impl NativeStore {
                 witness,
                 repair,
                 repair.cursor.fields_after,
-                (ROWS - 1) / 2,
+                (ROWS - 1) / 3,
             )?;
             work.metadata_rows = page.work.decoded_rows;
             work.metadata_bytes = page.work.metadata_bytes;
             let mut fields = Vec::new();
+            let mut nodes = Vec::new();
+            let mut closes = Vec::new();
+            let mut cursor = repair.cursor.clone();
             for (ordinal, token) in page.rows {
+                let node = match token {
+                    Token::Begin { at, kind, location } => {
+                        cursor.node_stack.push((at, kind));
+                        Some(OriginalNode {
+                            ordinal,
+                            address: at,
+                            location,
+                            value: match kind {
+                                Container::Object => OriginalValue::Object,
+                                Container::Array => OriginalValue::Array,
+                            },
+                        })
+                    }
+                    Token::End { at, kind } => {
+                        let (address, opened) = cursor.node_stack.pop().ok_or_else(|| {
+                            io::Error::other("original descriptor container close has no owner")
+                        })?;
+                        if opened != kind {
+                            return Err(io::Error::other(
+                                "original descriptor container kind changed",
+                            ));
+                        }
+                        work.metadata_rows += 1;
+                        work.metadata_bytes += 64;
+                        closes.push((address, at));
+                        None
+                    }
+                    Token::String {
+                        span,
+                        location,
+                        key: false,
+                    } => Some(OriginalNode {
+                        ordinal,
+                        address: span.start,
+                        location,
+                        value: OriginalValue::String(span),
+                    }),
+                    Token::Number { span, location } => Some(OriginalNode {
+                        ordinal,
+                        address: span.start,
+                        location,
+                        value: OriginalValue::Number(span),
+                    }),
+                    Token::Literal {
+                        span,
+                        location,
+                        kind,
+                    } => Some(OriginalNode {
+                        ordinal,
+                        address: span.start,
+                        location,
+                        value: OriginalValue::Literal { span, kind },
+                    }),
+                    _ => None,
+                };
+                if let Some(node) = node {
+                    let text = bounded_json(&node, STATE_BYTES).map_err(io::Error::other)?;
+                    work.metadata_rows += 1;
+                    work.metadata_bytes += text.len() + 64;
+                    nodes.push((node, text));
+                }
                 if let Token::String {
                     span,
                     location,
@@ -317,7 +580,11 @@ impl NativeStore {
                     fields.push((field, text, state));
                 }
             }
-            let mut cursor = repair.cursor.clone();
+            if page.complete && !cursor.node_stack.is_empty() {
+                return Err(io::Error::other(
+                    "original descriptor record has open containers",
+                ));
+            }
             cursor.fields_after = page.after;
             cursor.fields_registered = page.complete;
             let state = bounded_json(&cursor, STATE_BYTES).map_err(io::Error::other)?;
@@ -354,6 +621,44 @@ impl NativeStore {
                     work,
                 });
             }
+            for (node, text) in nodes {
+                let end = match &node.value {
+                    OriginalValue::Object | OriginalValue::Array => None,
+                    OriginalValue::String(span) => {
+                        Some(span.end.checked_add(1).ok_or_else(|| {
+                            io::Error::other("original native string offset overflow")
+                        })?)
+                    }
+                    OriginalValue::Number(span) | OriginalValue::Literal { span, .. } => {
+                        Some(span.end)
+                    }
+                };
+                tx.execute(
+                    "INSERT INTO native_original_nodes VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",
+                    params![
+                        repair.original.as_slice(),
+                        seq_u64(repair.cursor.record_at)?,
+                        seq_u64(node.address)?,
+                        node.location.parent.map(seq_u64).transpose()?,
+                        node.location
+                            .key
+                            .map(|span| seq_u64(span.start))
+                            .transpose()?,
+                        node.location.index.map(seq_u64).transpose()?,
+                        text,
+                        end.map(seq_u64).transpose()?
+                    ],
+                )
+                .map_err(io::Error::other)?;
+            }
+            for (address, end) in closes {
+                let changed=tx.execute("UPDATE native_original_nodes SET end_offset=?4 WHERE original=?1 AND record_offset=?2 AND address=?3 AND end_offset IS NULL",params![repair.original.as_slice(),seq_u64(repair.cursor.record_at)?,seq_u64(address)?,seq_u64(end)?]).map_err(io::Error::other)?;
+                if changed != 1 {
+                    return Err(io::Error::other(
+                        "original descriptor container close disagrees",
+                    ));
+                }
+            }
             for (field, text, state) in fields {
                 tx.execute("INSERT INTO native_original_fields VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,NULL,NULL)",params![repair.original.as_slice(),seq_u64(repair.cursor.record_at)?,seq_u64(field.ordinal)?,seq_u64(field.span.start)?,seq_u64(field.span.end)?,field.location.parent.map(seq_u64).transpose()?,field.key,text,state]).map_err(io::Error::other)?;
             }
@@ -389,7 +694,7 @@ impl NativeStore {
         if start > end
             || fingerprint.stream.at < start
             || fingerprint.stream.at > end
-            || end > repair.cursor.source_at - repair.cursor.record_at
+            || end > record_length(repair)?
         {
             return Err(io::Error::other(
                 "original field descriptor is outside its qualified record",
@@ -719,6 +1024,7 @@ impl NativeStore {
         cursor.record = RecordCursor::new();
         cursor.fields_after = None;
         cursor.fields_registered = false;
+        cursor.node_stack.clear();
         cursor.phase = if cursor.source_at == repair.source.offset {
             Phase::Complete
         } else {
@@ -1081,6 +1387,14 @@ impl NativeStore {
         })
     }
 }
+fn record_length(repair: &Repair) -> io::Result<u64> {
+    repair
+        .cursor
+        .source_at
+        .checked_sub(repair.cursor.record_at)
+        .ok_or_else(|| io::Error::other("original descriptor record offsets disagree"))
+}
+
 fn seq_u64(value: u64) -> io::Result<i64> {
     i64::try_from(value).map_err(io::Error::other)
 }
@@ -1413,6 +1727,157 @@ mod tests {
             .unwrap();
         assert_eq!(resumed.revision, repair.revision);
         assert_eq!(resumed.cursor.fields_after, None);
+    }
+
+    #[test]
+    fn original_record_view_keeps_duplicate_keys_and_pages_array_nodes() {
+        for count in [0, 128, 1024, 8192] {
+            let mut bytes = Vec::new();
+            bytes.extend_from_slice(b"{\"type\":\"user\",\"text\":\"first\",\"text\":\"last\",\"message\":{\"content\":[");
+            for index in 0..count {
+                if index > 0 {
+                    bytes.push(b',')
+                }
+                bytes.extend_from_slice(b"{\"type\":\"text\",\"text\":\"body\"}");
+            }
+            bytes.extend_from_slice(b"]}}\n");
+            let oracle: Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(oracle["text"], "last");
+            let mut fixture = Fixture::new(&bytes);
+            let reads = super::super::super::super::FILE_READS.with(Cell::get);
+            let mut repair = fixture
+                .store
+                .begin_original_repair(
+                    &fixture.job,
+                    &fixture.source,
+                    &fixture.sources.reader(),
+                    &|| false,
+                )
+                .unwrap()
+                .unwrap();
+            while repair.cursor.phase != Phase::FoldRecord {
+                let step = fixture
+                    .store
+                    .original_lex_step(
+                        &fixture.job,
+                        &fixture.source,
+                        &repair,
+                        &fixture.sources.reader(),
+                        &|| false,
+                    )
+                    .unwrap();
+                assert!(step.work.metadata_rows <= ROWS);
+                assert!(step.work.metadata_bytes <= BYTES);
+                repair = fixture
+                    .store
+                    .reload_original_repair(
+                        &fixture.job,
+                        &fixture.source,
+                        &fixture.sources.reader(),
+                    )
+                    .unwrap()
+                    .unwrap();
+            }
+            loop {
+                let step = fixture
+                    .store
+                    .original_fields_step(
+                        &fixture.job,
+                        &fixture.source,
+                        &repair,
+                        &fixture.sources.reader(),
+                        &|| false,
+                    )
+                    .unwrap();
+                assert!(step.work.metadata_rows <= ROWS);
+                assert!(step.work.metadata_bytes <= BYTES);
+                if step.outcome == Outcome::Written {
+                    break;
+                }
+                fixture.store = NativeStore::open(&fixture.options).unwrap();
+                repair = fixture
+                    .store
+                    .reload_original_repair(
+                        &fixture.job,
+                        &fixture.source,
+                        &fixture.sources.reader(),
+                    )
+                    .unwrap()
+                    .unwrap();
+            }
+            let receipt = Receipt {
+                decoded_bytes: 4,
+                sha256: Sha256::digest(b"text").into(),
+            };
+            let candidates = fixture
+                .store
+                .original_field_candidates(
+                    &fixture.job,
+                    &fixture.source,
+                    &repair,
+                    Some(0),
+                    true,
+                    receipt,
+                    None,
+                )
+                .unwrap();
+            assert!(candidates.complete);
+            assert_eq!(candidates.rows.len(), 2);
+            assert!(candidates.rows[0].span.start > candidates.rows[1].span.start);
+            for key in &candidates.rows {
+                let raw = &bytes[key.span.start as usize..key.span.end as usize];
+                let mut compare = crate::json_string::native_identity::Compare::new(
+                    (0, raw.len() as u64),
+                    (0, 4),
+                )
+                .unwrap();
+                compare.step(raw, b"text", 64).unwrap();
+                assert_eq!(
+                    compare.result,
+                    Some(crate::json_string::native_identity::Comparison::Equal)
+                );
+            }
+            let node = fixture
+                .store
+                .original_value_by_key(&fixture.job, &fixture.source, &repair, &candidates.rows[0])
+                .unwrap()
+                .unwrap();
+            let OriginalValue::String(span) = node.value else {
+                panic!("native last text field must be a string")
+            };
+            assert_eq!(&bytes[span.start as usize..span.end as usize], b"last");
+            let array:i64=fixture.store.connection.query_row("SELECT address FROM native_original_nodes WHERE json_extract(metadata,'$.value')='Array'",[],|row|row.get(0)).unwrap();
+            let mut after = None;
+            let mut observed = 0;
+            loop {
+                let page = fixture
+                    .store
+                    .original_array_page(
+                        &fixture.job,
+                        &fixture.source,
+                        &repair,
+                        array as u64,
+                        after,
+                    )
+                    .unwrap();
+                assert!(page.rows.len() <= ROWS);
+                assert!(page.work.decoded_rows <= ROWS);
+                assert!(page.work.metadata_bytes <= BYTES);
+                for node in &page.rows {
+                    assert!(matches!(node.value, OriginalValue::Object));
+                }
+                observed += page.rows.len();
+                if page.complete {
+                    break;
+                }
+                after = page.after;
+            }
+            assert_eq!(observed, count);
+            assert_eq!(
+                super::super::super::super::FILE_READS.with(Cell::get),
+                reads
+            );
+        }
     }
 
     #[test]
