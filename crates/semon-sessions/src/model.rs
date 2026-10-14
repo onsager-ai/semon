@@ -24,6 +24,7 @@ use std::os::unix::fs::MetadataExt;
 
 use serde::{Deserialize, Serialize};
 
+pub(crate) mod description_stage;
 pub(crate) mod identity_stage;
 pub(crate) mod native_stage;
 pub(crate) mod relation_stage;
@@ -2511,7 +2512,7 @@ impl<'a> Builder<'a> {
         let harness = last_file.harness();
         let mut tokens = crate::Tokens::default();
         let mut busy = Vec::new();
-        let mut model = None;
+        let mut description = description_stage::DescriptionFacts::default();
         let effort = files.iter().rev().find_map(|file| {
             file.summary
                 .signals
@@ -2524,10 +2525,7 @@ impl<'a> Builder<'a> {
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .map(str::to_ascii_lowercase);
-        let mut start = i64::MAX;
-        let mut last = 0;
         let mut names = BTreeSet::new();
-        let mut title = None;
         let mut tokens_by_model = BTreeMap::new();
         let mut rate_limits: Option<events::RateLimits> = None;
         // Claude usage is merged by message id across the lineage's files, so
@@ -2567,21 +2565,18 @@ impl<'a> Builder<'a> {
                 }
             }
             busy.extend(file.summary.busy.iter().copied());
-            if let Some(found) = &file.summary.last_model {
-                model = Some(found.clone());
-            }
-            start = start.min(file.first.unwrap_or(i64::MAX));
-            last = last.max(file.last.unwrap_or(0));
+            description.push(description_stage::SourceDescription {
+                first: file.first,
+                last: file.last,
+                model: file.summary.last_model.as_deref(),
+                title: file.summary.title.as_deref(),
+                agent_name: file.summary.agent_name.as_deref(),
+            });
             for name in [&file.summary.title, &file.summary.agent_name]
                 .into_iter()
                 .flatten()
             {
                 names.insert(plain_name(name));
-            }
-            if file.summary.title.is_some() {
-                title.clone_from(&file.summary.title);
-            } else if title.is_none() && file.summary.agent_name.is_some() {
-                title.clone_from(&file.summary.agent_name);
             }
         }
         let shared = self
@@ -2675,8 +2670,12 @@ impl<'a> Builder<'a> {
         if harness == "copilot" {
             cost.unpriced_models = tokens_by_model.keys().cloned().collect();
             if cost.unpriced_models.is_empty() {
-                cost.unpriced_models
-                    .push(model.clone().unwrap_or_else(|| "unknown".into()));
+                cost.unpriced_models.push(
+                    description
+                        .model
+                        .clone()
+                        .unwrap_or_else(|| "unknown".into()),
+                );
             }
         }
         let mut reports: Vec<&ReportedRunSnapshot> = if harness == "claude" {
@@ -2728,7 +2727,8 @@ impl<'a> Builder<'a> {
             Role::Codex(meta)
                 if (meta.subagent || meta.parent_thread.is_some()) && !meta.guardian_review =>
             {
-                title
+                description
+                    .title
                     .clone()
                     .or_else(|| {
                         meta.path
@@ -2764,8 +2764,8 @@ impl<'a> Builder<'a> {
         let session = &mut self.sessions[index];
         session.names.extend(names);
         session.tokens = tokens.clone();
-        session.first = (start != i64::MAX).then_some(start);
-        session.last = (last != 0).then_some(last);
+        session.first = (description.first != i64::MAX).then_some(description.first);
+        session.last = (description.last != 0).then_some(description.last);
         let out = &mut session.out;
         out.codex_history = match &last_file.role {
             Role::Codex(meta) => meta.history.clone(),
@@ -2789,27 +2789,31 @@ impl<'a> Builder<'a> {
             million(tokens.cached_input),
             million(tokens.output),
         ];
-        out.model = model
-            .as_deref()
-            .and_then(pretty_model)
-            .or_else(|| fallback_model.as_deref().and_then(pretty_model))
-            .unwrap_or_else(|| "—".into());
+        out.model = description.model(fallback_model.as_deref());
         out.effort = effort;
-        out.start = if start == i64::MAX { self.now } else { start };
-        out.last = if last == 0 { out.start } else { last };
+        out.start = if description.first == i64::MAX {
+            self.now
+        } else {
+            description.first
+        };
+        out.last = if description.last == 0 {
+            out.start
+        } else {
+            description.last
+        };
         out.busy = events::busy_merge(busy);
         out.role = repo.is_none();
         out.branch = repo.as_ref().and(branch);
         out.repo = repo;
         if out.name.is_empty() {
-            out.name = codex_task_title.unwrap_or_else(|| match session.kind {
-                SessKind::Lineage | SessKind::Copilot => title.unwrap_or(fallback_name),
-                _ => out
-                    .branch
-                    .clone()
-                    .or_else(|| out.repo.clone())
-                    .unwrap_or_else(|| "Codex run".into()),
-            });
+            out.name = description_stage::name(
+                codex_task_title,
+                matches!(session.kind, SessKind::Lineage | SessKind::Copilot),
+                description.title,
+                fallback_name,
+                out.branch.as_deref(),
+                out.repo.as_deref(),
+            );
         }
     }
 
