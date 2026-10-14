@@ -290,3 +290,14 @@ files. Only validated name observations are carried in machine facts, with nativ
 harness/ID, metadata source, observation time and explicit current/stale freshness.
 Received sources use their own facts and never the viewer host's native database.
 Metadata changes invalidate the model snapshot but preserve transcript marks.
+
+## Empty local native launch
+
+Before the first rollout exists, Home can render the existing local input
+component from the isolated launcher's empty-thread witness. This is creation
+authority, not a provisional Catalog identity. The same local control owner holds
+its source-qualified draft and exact operation receipt; the existing Home refresh
+and EffectScope own observation and teardown. Only initial input is exposed.
+Recorded native turns/intents retire that witness. Subsequent session control
+selection still requires qualified native Catalog ownership, and archive
+readiness is unchanged. The host never constructs a transcript or synthetic row.

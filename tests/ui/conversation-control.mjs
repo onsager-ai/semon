@@ -3,7 +3,7 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import { chromium } from 'playwright';
-const [base, token, out, sessionId] = process.argv.slice(2);
+const [base, token, out, sessionId, mode] = process.argv.slice(2);
 assert.ok(sessionId, 'Native control qualification requires the launched session id');
 fs.mkdirSync(out, { recursive: true });
 const browser = await chromium.launch();
@@ -15,55 +15,96 @@ try {
   ]);
   const page = await context.newPage();
   page.on('pageerror', (e) => errors.push(String(e)));
-  await page.goto(base + '/s/codex/' + encodeURIComponent(sessionId) + '?machine=local');
-  await page.locator('section[aria-label="Transcript"]').waitFor();
-  const panel = page.getByRole('region', { name: 'Conversation controls' });
-  await panel
-    .getByRole('button', { name: 'Deny', exact: true })
-    .filter({ visible: true })
-    .last()
-    .waitFor();
-  await page.screenshot({ path: out + '/desktop-light.png', fullPage: true });
-  await page.setViewportSize({ width: 390, height: 844 });
-  await page.emulateMedia({ colorScheme: 'dark' });
-  await page.getByRole('button', { name: 'Close menu', exact: true }).waitFor({ state: 'hidden' });
-  await page.screenshot({ path: out + '/phone-dark.png', fullPage: true });
-  assert.equal(
-    await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth),
-    true,
-  );
-  await page
-    .locator('a[href^="/s/codex/"][href*="' + encodeURIComponent(sessionId) + '"]')
-    .filter({ visible: true })
-    .first()
-    .click();
-  await page.locator('section[aria-label="Transcript"]').waitFor();
-  await panel
-    .getByRole('button', { name: 'Deny', exact: true })
-    .filter({ visible: true })
-    .last()
-    .waitFor();
-  await panel.scrollIntoViewIfNeeded();
-  await page.screenshot({ path: out + '/session-phone-dark.png' });
-  // Find the current open request; earlier resolved cards remain history only.
-  await panel
-    .locator('button:not([disabled])')
-    .filter({ hasText: /^Deny$/ })
-    .last()
-    .click();
-  await panel.getByRole('status').filter({ hasText: 'Response sent' }).waitFor();
-  await page.waitForFunction(
-    () =>
-      !Array.from(document.querySelectorAll('.local-control article button')).some(
-        (b) => !b.disabled,
-      ),
-  );
-  await page.reload();
-  await panel.getByRole('textbox', { name: 'Message to Codex', exact: true }).waitFor();
-  assert.deepEqual(errors, []);
-  console.log(
-    'Native patch denial through typed viewer; responsive screenshots; cookie refresh; resolved cards cannot answer',
-  );
+  if (mode === 'bootstrap') {
+    await page.goto(base);
+    const panel = page.getByRole('region', { name: 'Conversation controls' });
+    const input = panel.getByRole('textbox', { name: 'Message to Codex', exact: true });
+    await input.waitFor();
+    await page.screenshot({ path: out + '/launch-desktop-light.png', fullPage: true });
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.emulateMedia({ colorScheme: 'dark' });
+    await page.screenshot({ path: out + '/launch-phone-dark.png', fullPage: true });
+    assert.equal(
+      await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth),
+      true,
+    );
+    await input.fill('LOCAL_INPUT');
+    const response = page.waitForResponse(
+      (response) =>
+        new URL(response.url()).pathname === '/api/control' &&
+        response.request().method() === 'POST',
+    );
+    await panel.getByRole('button', { name: 'Send', exact: true }).click();
+    const reply = await response;
+    assert.equal(reply.status(), 200);
+    const command = reply.request().postDataJSON();
+    const receipt = await reply.json();
+    assert.equal(command.launch, true);
+    assert.equal(command.thread, sessionId);
+    assert.equal(receipt.snapshot.actions[command.id].delivery, 'accepted');
+    await page.waitForFunction(
+      () =>
+        !Array.from(document.querySelectorAll('textarea')).some(
+          (input) => input.value === 'LOCAL_INPUT',
+        ),
+    );
+    assert.deepEqual(errors, []);
+    console.log(
+      'Native first input through isolated launch authority; no Catalog identity or seeded transcript',
+    );
+  } else {
+    await page.goto(base + '/s/codex/' + encodeURIComponent(sessionId) + '?machine=local');
+    await page.locator('section[aria-label="Transcript"]').waitFor();
+    const panel = page.getByRole('region', { name: 'Conversation controls' });
+    await panel
+      .getByRole('button', { name: 'Deny', exact: true })
+      .filter({ visible: true })
+      .last()
+      .waitFor();
+    await page.screenshot({ path: out + '/desktop-light.png', fullPage: true });
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.emulateMedia({ colorScheme: 'dark' });
+    await page
+      .getByRole('button', { name: 'Close menu', exact: true })
+      .waitFor({ state: 'hidden' });
+    await page.screenshot({ path: out + '/phone-dark.png', fullPage: true });
+    assert.equal(
+      await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth),
+      true,
+    );
+    await page
+      .locator('a[href^="/s/codex/"][href*="' + encodeURIComponent(sessionId) + '"]')
+      .filter({ visible: true })
+      .first()
+      .click();
+    await page.locator('section[aria-label="Transcript"]').waitFor();
+    await panel
+      .getByRole('button', { name: 'Deny', exact: true })
+      .filter({ visible: true })
+      .last()
+      .waitFor();
+    await panel.scrollIntoViewIfNeeded();
+    await page.screenshot({ path: out + '/session-phone-dark.png' });
+    // Find the current open request; earlier resolved cards remain history only.
+    await panel
+      .locator('button:not([disabled])')
+      .filter({ hasText: /^Deny$/ })
+      .last()
+      .click();
+    await panel.getByRole('status').filter({ hasText: 'Response sent' }).waitFor();
+    await page.waitForFunction(
+      () =>
+        !Array.from(document.querySelectorAll('.local-control article button')).some(
+          (b) => !b.disabled,
+        ),
+    );
+    await page.reload();
+    await panel.getByRole('textbox', { name: 'Message to Codex', exact: true }).waitFor();
+    assert.deepEqual(errors, []);
+    console.log(
+      'Native patch denial through typed viewer; responsive screenshots; cookie refresh; resolved cards cannot answer',
+    );
+  }
 } finally {
   await browser.close();
 }
