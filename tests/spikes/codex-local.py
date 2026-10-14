@@ -5,6 +5,7 @@ Linux bwrap required. No mocks substitute for native outcomes; no personal auth 
 
 import argparse, importlib.util, json, os, signal, subprocess, tempfile, threading, time, http.server, http.client, re, socket, uuid, shutil
 from pathlib import Path
+from urllib.parse import urlencode
 
 spec = importlib.util.spec_from_file_location(
     "probe", Path(__file__).with_name("codex-control.py")
@@ -145,16 +146,48 @@ def main():
             assert cookie != "semon_session=" + token
             assert request("GET", "/?t=" + token, headers={})[0] == 403
             assert request("GET", "/?t=" + token)[0] == 200
-            snap = lambda: request("GET", "/api/model")[1]["control"]
-            target = lambda op, **extra: dict(
-                id=uuid.uuid4().hex,
-                op=op,
-                thread=snap()["thread"],
-                generation=snap()["generation"],
-                activeTurn=snap()["activeTurn"],
-                expires=int(time.time() * 1000) + 25000,
-                **extra,
-            )
+            assert request("GET", "/api/model")[0] == 404
+            # The disposable launch manifest identifies the native owner; only
+            # a qualified Catalog identity may expose its control snapshot.
+            tid = json.loads((state / "session.json").read_text())["thread"]
+            selection = urlencode({"machine": "local", "sid": tid})
+
+            def snap():
+                def selected_control():
+                    status, result = request("GET", "/api/session-control?" + selection)
+                    assert status == 200, (status, result)
+                    snapshot = result.get("control")
+                    if snapshot is not None:
+                        assert snapshot["thread"] == tid, snapshot
+                    return snapshot
+
+                return until(selected_control)
+
+            snap()
+            status, identity = request("GET", "/api/session-identity?" + selection)
+            assert status == 200, (status, identity)
+            identity = identity["identity"]
+            assert identity["source_key"] == "local", identity
+            assert identity["harness"] == "codex", identity
+            assert identity["native_id"] == tid, identity
+            assert identity["owner_qualification"] == "qualified", identity
+            report["cases"]["native_read_contract"] = {
+                "retired_model_status": 404,
+                "qualified_selected_identity": identity,
+                "session_control_thread": tid,
+            }
+
+            def target(op, **extra):
+                snapshot = snap()
+                return dict(
+                    id=uuid.uuid4().hex,
+                    op=op,
+                    thread=snapshot["thread"],
+                    generation=snapshot["generation"],
+                    activeTurn=snapshot["activeTurn"],
+                    expires=int(time.time() * 1000) + 25000,
+                    **extra,
+                )
             send = lambda text: request(
                 "POST", "/api/control", target("send", text=text)
             )
@@ -412,6 +445,7 @@ def main():
                         f"http://127.0.0.1:{port}",
                         cookie.split("=", 1)[1],
                         str(a.output.parent / "local-control-browser"),
+                        tid,
                     ],
                     capture_output=True,
                     text=True,

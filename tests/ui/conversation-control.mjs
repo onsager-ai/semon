@@ -3,7 +3,8 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import { chromium } from 'playwright';
-const [base, token, out] = process.argv.slice(2);
+const [base, token, out, sessionId] = process.argv.slice(2);
+assert.ok(sessionId, 'Native control qualification requires the launched session id');
 fs.mkdirSync(out, { recursive: true });
 const browser = await chromium.launch();
 const errors = [];
@@ -14,7 +15,8 @@ try {
   ]);
   const page = await context.newPage();
   page.on('pageerror', (e) => errors.push(String(e)));
-  await page.goto(base);
+  await page.goto(base + '/s/codex/' + encodeURIComponent(sessionId) + '?machine=local');
+  await page.locator('section[aria-label="Transcript"]').waitFor();
   const panel = page.getByRole('region', { name: 'Conversation controls' });
   await panel
     .getByRole('button', { name: 'Deny', exact: true })
@@ -31,7 +33,7 @@ try {
     true,
   );
   await page
-    .getByRole('link', { name: /Codex run/ })
+    .locator('a[href^="/s/codex/"][href*="' + encodeURIComponent(sessionId) + '"]')
     .filter({ visible: true })
     .first()
     .click();
