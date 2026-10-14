@@ -298,6 +298,55 @@ impl RecordSource for DescriptorRecord<'_, '_, '_> {
             })
             .transpose()
     }
+    fn timestamp(&mut self, node: &OriginalNode) -> Result<Option<i64>, Error> {
+        self.node_current(node)?;
+        if !matches!(node.value, OriginalValue::String(_)) {
+            return Ok(None);
+        }
+        let (native, rows) = self.remaining(4, 2 * STATE_BYTES)?;
+        let step = self
+            .store
+            .borrow_mut()
+            .original_timestamp_step_with_budget(
+                self.job,
+                self.witness,
+                self.repair,
+                node.ordinal,
+                self.records,
+                self.cancelled,
+                native,
+                rows,
+            )?;
+        self.account(step.work)?;
+        self.outcome(step.outcome)?;
+        if !step.complete {
+            return Err(Error::Deferred);
+        }
+        Ok(step.millis)
+    }
+    fn tag(&mut self, node: &OriginalNode) -> Result<Option<String>, Error> {
+        self.node_current(node)?;
+        if !matches!(node.value, OriginalValue::String(_)) {
+            return Ok(None);
+        }
+        let (native, rows) = self.remaining(4, 2 * STATE_BYTES)?;
+        let step = self.store.borrow_mut().original_tag_step_with_budget(
+            self.job,
+            self.witness,
+            self.repair,
+            node.ordinal,
+            self.records,
+            self.cancelled,
+            native,
+            rows,
+        )?;
+        self.account(step.work)?;
+        self.outcome(step.outcome)?;
+        if !step.complete {
+            return Err(Error::Deferred);
+        }
+        Ok(step.tag)
+    }
 }
 
 /// Observation adapter: it borrows the connection only for one indexed native

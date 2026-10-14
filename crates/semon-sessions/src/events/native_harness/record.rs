@@ -27,6 +27,8 @@ pub(crate) trait RecordSource {
     fn literal(&mut self, node: &Self::Node, literal: &'static str) -> Result<bool, Self::Error>;
     fn boolean(&mut self, node: &Self::Node) -> Result<Option<bool>, Self::Error>;
     fn integer(&mut self, node: &Self::Node) -> Result<Option<i64>, Self::Error>;
+    fn timestamp(&mut self, node: &Self::Node) -> Result<Option<i64>, Self::Error>;
+    fn tag(&mut self, node: &Self::Node) -> Result<Option<String>, Self::Error>;
     fn array_next(
         &mut self,
         node: &Self::Node,
@@ -74,6 +76,12 @@ impl<'a> RecordSource for ValueRecord<'a> {
     }
     fn integer(&mut self, node: &Self::Node) -> Result<Option<i64>, Infallible> {
         Ok(node.as_i64())
+    }
+    fn timestamp(&mut self, node: &Self::Node) -> Result<Option<i64>, Infallible> {
+        Ok(node.as_str().and_then(crate::events::parse_ms))
+    }
+    fn tag(&mut self, node: &Self::Node) -> Result<Option<String>, Infallible> {
+        Ok(node.as_str().and_then(crate::events::bounded))
     }
     fn array_next(
         &mut self,
