@@ -2239,6 +2239,7 @@ impl IndexStore for SqliteStore {
         }
         self.publish_catalog_with_generation(
             &crate::slot_projection::Publication {
+                points: Some(&prepared.native_points),
                 rows: &prepared.rows,
                 transcripts: Some(&prepared.transcripts),
             },
@@ -3703,6 +3704,10 @@ impl SqliteStore {
                         "DELETE FROM meta WHERE key='slot_projection_catalog_generation'",
                         [],
                     )
+                    .map_err(failure)?;
+            }
+            if let Some(points) = publication.points {
+                native_query::point_publication::publish(&transaction, &generation, rows, points)
                     .map_err(failure)?;
             }
             stage("slots", &transaction);
@@ -6672,6 +6677,7 @@ mod tests {
             .collect::<Vec<_>>();
         store.publish_catalog_with_writer(
             &crate::slot_projection::Publication {
+                points: None,
                 rows,
                 transcripts: Some(projections),
             },
@@ -7119,6 +7125,7 @@ mod tests {
                 (Outcome::Conflict, None)
             );
             let publication = crate::slot_projection::Publication {
+                points: None,
                 rows: &rows,
                 transcripts: Some(&projections),
             };
@@ -7240,6 +7247,7 @@ mod tests {
         let (mut disabled, mut enabled) = catalog_pair(&options);
         for (store, timing) in [(&mut disabled, false), (&mut enabled, true)] {
             let publication = crate::slot_projection::Publication {
+                points: None,
                 rows: &rows,
                 transcripts: Some(&projections),
             };
@@ -7618,6 +7626,7 @@ mod tests {
                 let outcome = store
                     .publish_catalog_with_writer(
                         &crate::slot_projection::Publication {
+                            points: None,
                             rows: &rows,
                             transcripts: Some(&projections),
                         },

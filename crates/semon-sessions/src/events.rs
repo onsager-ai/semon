@@ -1708,6 +1708,7 @@ impl EventCache {
             .ok_or_else(|| io::Error::other("scoped producer store unavailable"))?
             .publish_partial_catalog(
                 &crate::slot_projection::Publication {
+                    points: Some(&prepared.native_points),
                     rows: &prepared.rows,
                     transcripts: Some(&prepared.transcripts),
                 },
@@ -1746,6 +1747,7 @@ impl EventCache {
             .ok_or_else(|| io::Error::other("scoped producer store unavailable"))?
             .publish_closed_catalog_fenced(
                 &crate::slot_projection::Publication {
+                    points: Some(&prepared.native_points),
                     rows: &prepared.rows,
                     transcripts: Some(&prepared.transcripts),
                 },
@@ -1892,6 +1894,7 @@ impl EventCache {
     ) {
         self.publish_session_projection(
             &crate::slot_projection::Publication {
+                points: None,
                 rows,
                 transcripts: None,
             },

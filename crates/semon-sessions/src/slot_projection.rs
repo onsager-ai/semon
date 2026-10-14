@@ -665,6 +665,7 @@ pub(crate) fn capture(
 
 /// Complete observation published under the catalog ledger/generation CAS.
 pub(crate) struct Publication<'a> {
+    pub(crate) points: Option<&'a crate::model::relation_stage::PointPublication>,
     pub(crate) rows: &'a [crate::model::summary::CatalogRow],
     pub(crate) transcripts: Option<&'a [Projection]>,
 }
